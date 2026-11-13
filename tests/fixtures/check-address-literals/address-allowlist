@@ -1,0 +1,2 @@
+# Literals declared safe to publish, one per line, each with its reason.
+240.1.2.4  # reserved class E, used by no network

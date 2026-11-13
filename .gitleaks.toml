@@ -1,0 +1,6 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Test fixtures hold deliberate bad examples."
+paths = ['''^tests/fixtures/''']

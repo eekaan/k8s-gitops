@@ -1,0 +1,14 @@
+---
+extends: default
+
+rules:
+  line-length:
+    max: 240
+    level: warning
+  document-start:
+    present: true
+    level: error
+  indentation:
+    spaces: consistent
+  comments:
+    min-spaces-from-content: 1

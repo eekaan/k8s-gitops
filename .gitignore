@@ -1,0 +1,35 @@
+# OpenTofu state and variables hold real addresses and secrets; .terraform.lock.hcl stays tracked.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+crash.log
+.terraform.tfstate.lock.info
+
+# talman's per-cluster config and generated machine configs carry cluster secrets.
+talos/*/talman.yaml
+clusterconfig/
+
+# Keys and credentials only ever live on the operator's machine.
+*.agekey
+age.txt
+*.key
+*.pem
+kubeconfig
+talosconfig
+.env
+.env.*
+clouds.yaml
+secure.yaml
+
+# The operator's own source addresses.
+operator-cidrs.json
+
+# Planning notes stay local.
+.devflow/
+
+.DS_Store
+*.swp
+.idea/
+.vscode/

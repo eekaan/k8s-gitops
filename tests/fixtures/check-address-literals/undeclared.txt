@@ -1,0 +1,2 @@
+# Reserved class E, which no network uses: not a documentation range, so the check must flag it.
+resolver: 240.1.2.3

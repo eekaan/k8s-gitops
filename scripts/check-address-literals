@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Fails when a file tracked by git holds an IPv4 literal that is not known to be safe to publish.
+# IPv6 literals are out of scope: nothing here matches them.
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+declare -A declared=()
+if [[ -f .address-allowlist ]]; then
+  while IFS= read -r entry || [[ -n $entry ]]; do
+    entry=${entry%%#*}
+    entry=${entry//[[:space:]]/}
+    if [[ -n $entry ]]; then
+      declared[$entry]=1
+    fi
+  done < .address-allowlist
+fi
+
+# Cheap filter so only lines with four dotted numbers get the full check.
+candidate='[0-9]\.[0-9]+\.[0-9]+\.[0-9]'
+# A letter, digit or dot in front means the numbers belong to a version such as v1.2.3.4 or 1.2.3.4.5.
+# The letter of a \n, \t or \r escape does not: what follows the escape starts afresh.
+literal_re='([^A-Za-z0-9.]|\\[nrt])([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})(/[0-9]{1,2})?'
+
+is_address() {
+  local octet octets
+  IFS=. read -r -a octets <<< "$1"
+  for octet in "${octets[@]}"; do
+    (( 10#$octet <= 255 )) || return 1
+  done
+}
+
+publishable() {
+  local literal=$1 address=${1%%/*}
+  [[ -n ${declared[$literal]:-} ]] && return 0
+  case $address in
+    127.* | 255.* | 169.254.169.254 | 192.0.2.* | 198.51.100.* | 203.0.113.*) return 0 ;;
+  esac
+  [[ $literal == 0.0.0.0 || $literal == 0.0.0.0/0 ]]
+}
+
+findings=0
+
+scan() {
+  local path=$1 hits status=0 hit number rest address literal after
+  # In a UTF-8 locale grep -I takes a line with an invalid byte for binary and drops it.
+  hits=$(LC_ALL=C grep -nIE -- "$candidate" "$path") || status=$?
+  (( status <= 1 )) || exit "$status"
+  [[ -n $hits ]] || return 0
+  while IFS= read -r hit; do
+    number=${hit%%:*}
+    # Every match needs a character in front; the space gives one to a literal that opens the line.
+    rest=" ${hit#*:}"
+    while [[ $rest =~ $literal_re ]]; do
+      address=${BASH_REMATCH[2]}
+      literal=$address${BASH_REMATCH[3]}
+      after=${rest#*"${BASH_REMATCH[0]}"}
+      # The last matched character, a digit, stays in front, so no match can start inside this one.
+      rest=${BASH_REMATCH[0]: -1}$after
+      if [[ -z ${BASH_REMATCH[3]} && $after =~ ^\.?[0-9] ]]; then
+        continue
+      fi
+      is_address "$address" || continue
+      publishable "$literal" && continue
+      printf '%s:%s: %s\n' "$path" "$number" "$literal" >&2
+      findings=$((findings + 1))
+    done
+  done <<< "$hits"
+}
+
+while IFS= read -r -d '' path; do
+  case $path in
+    tests/fixtures/* | LICENSE) continue ;;
+  esac
+  # A symlink's target can lie outside the repository; only the link itself is tracked.
+  [[ -f $path && ! -L $path ]] || continue
+  scan "$path"
+done < <(git ls-files -z)
+
+if (( findings > 0 )); then
+  echo "Use a documentation range (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24), read the value at run time, or declare it in .address-allowlist with the reason it is safe to publish." >&2
+  exit 1
+fi
+echo "No undeclared address literals in tracked files."
