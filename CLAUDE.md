@@ -19,8 +19,13 @@ titles, bodies and review comments, CI logs. Never put in any of them:
   this repository. A pull request says what the change does and ends its title with the issue
   key, e.g. `add cluster stack (INF-6)`.
 
-Values that depend on the deployment (addresses, IDs, the allowlist) are read from gitignored
-files, CI secrets or tofu outputs at run time. They are never committed.
+Values that depend on the deployment (public addresses, IDs, the allowlist) are read from
+gitignored files, CI secrets or tofu outputs at run time. They are never committed.
+
+Private ranges the code itself defines (the node subnet, the pod and service ranges) are part of
+the design. Each is declared in `.address-allowlist` with the reason it is safe to publish;
+`just check-literals` fails on any other address. Test fixtures that must be flagged use the
+reserved class E range, and examples use the documentation ranges.
 
 ## Agents
 
