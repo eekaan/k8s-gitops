@@ -2,6 +2,11 @@ set quiet
 set shell := ['bash', '-euo', 'pipefail', '-c']
 set script-interpreter := ['bash', '-eu']
 
+# Each area keeps its recipes in its own file, so changes to one do not touch the others.
+import? 'just/infra.just'
+import? 'just/cluster.just'
+import? 'just/flux.just'
+
 # The pinned installs go first on PATH. `mise exec` is not enough: in a shell where mise is
 # activated it appends them behind entries already on PATH, so another install could answer.
 # Without mise, PATH stays as it is and tools-check says what is missing; a mise error stops here.
