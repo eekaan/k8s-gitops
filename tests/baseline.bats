@@ -28,7 +28,7 @@ setup() {
   CLUSTER="$REPO/kubernetes/clusters/lab-sto2"
   KUBE="$(yq -e '.kubernetes' "$REPO/versions.yaml")"
   # The applications whose charts make up the baseline, the resource definitions' included.
-  CHARTS=(prometheus-operator-crds kubelet-csr-approver metrics-server spegel reloader descheduler cert-manager)
+  CHARTS=(prometheus-operator-crds kubelet-csr-approver metrics-server spegel reloader descheduler cert-manager envoy-gateway)
   # Nothing to connect to: a step that needed a cluster fails instead of finding one.
   export KUBECONFIG="$BATS_TEST_TMPDIR/no-kubeconfig"
   unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
@@ -189,6 +189,30 @@ gateway_api() {
     --kustomization-file "$inner" --dry-run) >"$GATEWAY_API"
 }
 
+# stable_served FILE: "Kind version" for each version that a Gateway API definition in FILE serves
+# and that is not an alpha version, sorted. The standard channel serves no alpha version.
+stable_served() {
+  # shellcheck disable=SC2016 # $kind is a yq variable.
+  yq -N 'select(.kind == "CustomResourceDefinition" and .spec.group == "gateway.networking.k8s.io")
+    | .spec.names.kind as $kind | .spec.versions[] | select(.served and (.name | test("alpha") | not))
+    | $kind + " " + .name' "$1" | sort -u
+}
+
+# selects SELECTOR LABELS: succeeds when the label map SELECTOR is not empty and every label in it
+# is in the label map LABELS with the same value, so it selects pods with those labels.
+selects() {
+  local selector=$1 labels=$2 key
+  [ "$(yq 'length' <<<"$selector")" -gt 0 ] || return 1
+  while IFS= read -r key; do
+    [ "$(KEY="$key" yq '.[strenv(KEY)]' <<<"$selector")" = "$(KEY="$key" yq '.[strenv(KEY)]' <<<"$labels")" ] || return 1
+  done < <(yq 'keys | .[]' <<<"$selector")
+}
+
+# envoy_gateway_config: the configuration the rendered Envoy Gateway chart gives its controller.
+envoy_gateway_config() {
+  yq -N 'select(.kind == "ConfigMap" and .metadata.name == "envoy-gateway-config") | .data["envoy-gateway.yaml"]' "$RENDERED"
+}
+
 @test "The monitoring resource definitions are installed without a controller" {
   local objects
   render prometheus-operator-crds
@@ -323,8 +347,8 @@ gateway_api() {
 
 @test "Resource definitions are never pruned" {
   local app kept inner
-  # Neither application applies a definition itself, so pruning what it applies deletes none.
-  for app in prometheus-operator-crds gateway-api-crds; do
+  # No such application applies a definition itself, so pruning what it applies deletes none.
+  for app in prometheus-operator-crds gateway-api-crds envoy-gateway-crds; do
     built "$app"
     echo "$app applies: $(yq -N 'select(. != null) | .kind' "$BUILT" | sort | paste -sd' ' -)"
     [ -z "$(yq -N 'select(.kind == "CustomResourceDefinition") | .metadata.name' "$BUILT")" ]
@@ -336,12 +360,14 @@ gateway_api() {
   echo "$kept"
   [ -n "$kept" ]
   [ "$(grep -vc ' keep$' <<<"$kept")" -eq 0 ]
-  # Removing the Gateway API application deletes its inner Kustomization, which then leaves what it
-  # applied in place, and never prunes a definition a newer release drops.
-  built gateway-api-crds
-  inner="$(yq -N 'select(.kind == "Kustomization") | (.spec.prune | tostring) + " " + (.spec.deletionPolicy // "MirrorPrune")' "$BUILT")"
-  echo "inner Kustomization prune and deletion policy: $inner"
-  [[ $inner =~ ^false\ (MirrorPrune|Orphan)$ ]]
+  # Removing the Gateway API application, or Envoy Gateway's, deletes its inner Kustomization, which
+  # then leaves what it applied in place, and never prunes a definition a newer release drops.
+  for app in gateway-api-crds envoy-gateway-crds; do
+    built "$app"
+    inner="$(yq -N 'select(.kind == "Kustomization") | (.spec.prune | tostring) + " " + (.spec.deletionPolicy // "MirrorPrune")' "$BUILT")"
+    echo "$app: inner Kustomization prune and deletion policy: $inner"
+    [[ $inner =~ ^false\ (MirrorPrune|Orphan)$ ]]
+  done
 }
 
 @test "Each container runtime the image adds has a RuntimeClass with its handler" {
@@ -465,6 +491,177 @@ gateway_api() {
   [ -z "$failed" ]
 }
 
+@test "Envoy Gateway's chart installs no resource definitions" {
+  local objects
+  # render includes the definitions of the chart's crds/ directories, its enabled subcharts' too,
+  # which helm-controller installs with the release.
+  render envoy-gateway
+  objects="$(yq -N 'select(. != null) | .kind + "/" + .metadata.name' "$RENDERED")"
+  echo "$objects"
+  grep -qx 'Deployment/envoy-gateway' <<<"$objects"
+  [ "$(grep -cE '^(CustomResourceDefinition|ValidatingAdmissionPolicy|ValidatingAdmissionPolicyBinding)/' <<<"$objects")" -eq 0 ]
+}
+
+@test "Envoy Gateway's resource definitions come from its chart at the controller's version" {
+  local controller source layer reference src inner name namespace path applied objects shipped
+  render envoy-gateway
+  controller="$(yq -N 'select(.kind == "OCIRepository") | .spec.url + ":" + .spec.ref.tag' "$BUILT")"
+  built envoy-gateway-crds
+  source="$(yq -N 'select(.kind == "OCIRepository") | .spec.url + ":" + .spec.ref.tag' "$BUILT")"
+  echo "the controller's chart: $controller; the definitions' chart: $source"
+  [ -n "$controller" ]
+  [ "$source" = "$controller" ]
+  # source-controller unpacks the chart's packaged layer, and the inner Kustomization applies a
+  # directory of it.
+  layer="$(yq -N 'select(.kind == "OCIRepository") | .spec.layerSelector.mediaType + " " + .spec.layerSelector.operation' "$BUILT")"
+  echo "layer: $layer"
+  [ "$layer" = "application/vnd.cncf.helm.chart.content.v1.tar+gzip extract" ]
+  reference="$(yq -N 'select(.kind == "Kustomization") | .spec.sourceRef.kind + "/" + .spec.sourceRef.name' "$BUILT")"
+  echo "inner Kustomization source: $reference"
+  [ "$reference" = "OCIRepository/$(yq -N 'select(.kind == "OCIRepository") | .metadata.name' "$BUILT")" ]
+  # The same chart at the same tag is the one render pulled for the controller.
+  src="$BATS_TEST_TMPDIR/unpacked"
+  mkdir -p "$src"
+  tar -xzf "$CHART" -C "$src"
+  inner="$BATS_TEST_TMPDIR/inner.yaml"
+  yq -N 'select(.kind == "Kustomization")' "$BUILT" >"$inner"
+  name="$(yq '.metadata.name' "$inner")"
+  namespace="$(yq '.metadata.namespace' "$inner")"
+  path="$(yq '.spec.path' "$inner")"
+  applied="$BATS_TEST_TMPDIR/envoy-gateway-definitions.yaml"
+  (cd "$src" && flux build kustomization "$name" --namespace "$namespace" --path "$path" \
+    --kustomization-file "$inner" --dry-run --in-memory-build) >"$applied"
+  objects="$(yq -N 'select(. != null) | .kind + " " + (.spec.group // "none") + " " + .metadata.name' "$applied" | sort)"
+  echo "$objects"
+  # Exactly the definitions of Envoy Gateway's own group that the chart ships, not the Gateway
+  # API's copy beside them.
+  shipped="$(helm show crds "$CHART" | yq -N 'select(.spec.group == "gateway.envoyproxy.io")
+    | .kind + " " + .spec.group + " " + .metadata.name' | sort)"
+  [ -n "$shipped" ]
+  [ "$objects" = "$shipped" ]
+}
+
+@test "The Gateway API definitions are a release Envoy Gateway supports" {
+  local copy bundled installed missing
+  render envoy-gateway
+  # The chart's own copy of the Gateway API, which it installs only with its definitions on, is of
+  # the release Envoy Gateway is built against.
+  copy="$BATS_TEST_TMPDIR/chart-gateway-api.yaml"
+  # Without -N, so the definitions stay separate documents.
+  helm show crds "$CHART" | yq 'select(.kind == "CustomResourceDefinition" and .spec.group == "gateway.networking.k8s.io")' >"$copy"
+  bundled="$(yq -N '.metadata.annotations["gateway.networking.k8s.io/bundle-version"]' "$copy" | sort -u)"
+  gateway_api
+  installed="$(yq -N 'select(. != null) | .metadata.annotations["gateway.networking.k8s.io/bundle-version"]' "$GATEWAY_API" | sort -u)"
+  echo "the chart is built against $bundled; the repository installs $installed"
+  [[ $bundled =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+  [[ $installed =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+  [ "${bundled%%.*}" = "${installed%%.*}" ]
+  [ "$(printf '%s\n' "$bundled" "$installed" | sort -V | head -n 1)" = "$bundled" ]
+  # A newer release still serves every stable version of the kinds Envoy Gateway reads.
+  missing="$(comm -23 <(stable_served "$copy") <(stable_served "$GATEWAY_API"))"
+  echo "stable kinds and versions of the chart's copy that the repository's do not serve: ${missing:-none}"
+  [ -n "$(stable_served "$copy")" ]
+  [ -z "$missing" ]
+}
+
+@test "Envoy Gateway's controller keeps running through a node drain" {
+  local deployment replicas labels spread budget minimum config
+  render envoy-gateway
+  deployment='select(.kind == "Deployment" and .metadata.name == "envoy-gateway")'
+  replicas="$(yq -N "$deployment | .spec.replicas" "$RENDERED")"
+  labels="$(yq -N -o json -I0 "$deployment | .spec.template.metadata.labels" "$RENDERED")"
+  echo "replicas: $replicas; pod labels: $labels"
+  [ "$replicas" -ge 2 ]
+  # Never two of the controller's pods on one node.
+  spread="$(yq -N -o json -I0 "$deployment | .spec.template.spec.topologySpreadConstraints // [] | .[]
+    | select(.topologyKey == \"kubernetes.io/hostname\" and .whenUnsatisfiable == \"DoNotSchedule\" and .maxSkew == 1)
+    | .labelSelector.matchLabels" "$RENDERED")"
+  echo "spread over nodes by: ${spread:-nothing}"
+  [ -n "$spread" ]
+  selects "$spread" "$labels"
+  # A drain evicts the controller's pods only while another keeps running.
+  budget="$(yq -N -o json -I0 'select(.kind == "PodDisruptionBudget") | .spec' "$RENDERED")"
+  echo "disruption budget: ${budget:-none}"
+  [ -n "$budget" ]
+  selects "$(yq -o json -I0 '.selector.matchLabels' <<<"$budget")" "$labels"
+  minimum="$(yq '.minAvailable' <<<"$budget")"
+  [ "$minimum" -ge 1 ]
+  [ "$minimum" -lt "$replicas" ]
+  # Leader election, on unless the configuration turns it off, lets one replica act at a time.
+  config="$(envoy_gateway_config)"
+  [ -n "$config" ]
+  [ "$(yq '.provider.kubernetes.leaderElection.disable // false' <<<"$config")" = false ]
+}
+
+@test "Everything Envoy Gateway runs meets its namespace's Pod Security level" {
+  local level workloads violations
+  app_dir envoy-gateway
+  level="$(yq '.metadata.labels["pod-security.kubernetes.io/enforce"]' "$REPO/${APP_DIR%/*}/namespace.yaml")"
+  echo "enforced level: $level"
+  [ "$level" = restricted ]
+  render envoy-gateway
+  workloads='select(.kind == "Deployment" or .kind == "DaemonSet" or .kind == "StatefulSet" or .kind == "Job")'
+  echo "pod templates: $(yq -N "$workloads | .kind + \"/\" + .metadata.name" "$RENDERED" | paste -sd' ' -)"
+  [ -n "$(yq -N "$workloads | .metadata.name" "$RENDERED")" ]
+  # The restricted level's rules, for each pod template and each of its containers: the pod's
+  # securityContext supplies runAsNonRoot, runAsUser and the seccomp profile where a container
+  # sets none. Each rule is a {bad, why} pair, as yq yields an expression without a path even
+  # after a select that matched nothing.
+  # shellcheck disable=SC2016 # $workload, $pod, $c, $where and $profile are yq variables.
+  violations="$(yq -N "$workloads"' | (.kind + "/" + .metadata.name) as $workload | .spec.template.spec as $pod
+    | [
+        {"bad": (($pod | .hostNetwork) == true or ($pod | .hostPID) == true or ($pod | .hostIPC) == true),
+         "why": $workload + " shares a host namespace"},
+        {"bad": (($pod | .volumes // []) | any_c(has("hostPath"))), "why": $workload + " mounts a host path"}
+      ] + [
+        (($pod | .containers // []) + ($pod | .initContainers // [])) | .[]
+          | (.securityContext // {}) as $c | ($workload + " container " + .name) as $where
+          | (($c | .seccompProfile.type) // ($pod | .securityContext.seccompProfile.type) // "none") as $profile
+          | (
+              {"bad": (($c | .privileged) == true), "why": $where + " is privileged"},
+              {"bad": (($c | .allowPrivilegeEscalation) != false), "why": $where + " allows privilege escalation"},
+              {"bad": (($c | .capabilities.drop // []) | any_c(. == "ALL") | not), "why": $where + " keeps its capabilities"},
+              {"bad": (($c | .capabilities.add // []) - ["NET_BIND_SERVICE"] | length > 0), "why": $where + " adds capabilities"},
+              {"bad": (($c | .runAsNonRoot) == false or (($c | .runAsNonRoot) // ($pod | .securityContext.runAsNonRoot)) != true),
+               "why": $where + " may run as root"},
+              {"bad": ((($c | .runAsUser) // ($pod | .securityContext.runAsUser)) == 0), "why": $where + " runs as user 0"},
+              {"bad": ($profile != "RuntimeDefault" and $profile != "Localhost"), "why": $where + " has no seccomp profile"}
+            )
+      ]
+    | .[] | select(.bad) | .why' "$RENDERED")"
+  echo "violations: ${violations:-none}"
+  [ -z "$violations" ]
+}
+
+@test "Envoy Gateway has a GatewayClass and no Gateway" {
+  local app overlay enabled dependencies controller classes
+  # Both applications run in the cluster: its overlay applies their Kustomizations.
+  overlay="$BATS_TEST_TMPDIR/overlay.yaml"
+  kustomize build --load-restrictor LoadRestrictionsNone "$REPO/kubernetes/apps/overlays/lab-sto2" >"$overlay"
+  for app in envoy-gateway-crds envoy-gateway; do
+    enabled="$(yq -N "select(.kind == \"Kustomization\" and .metadata.name == \"$app\") | .spec.path" "$overlay")"
+    echo "$app in the overlay: ${enabled:-none}"
+    app_dir "$app"
+    [ "$enabled" = "./${APP_DIR#kubernetes/}/app" ]
+  done
+  # The controller starts, and the GatewayClass is applied, once both sets of definitions are
+  # established.
+  dependencies="$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "envoy-gateway") | .spec.dependsOn // [] | .[].name' "$overlay" | sort | paste -sd' ' -)"
+  echo "envoy-gateway depends on: ${dependencies:-nothing}"
+  [[ " $dependencies " == *" envoy-gateway-crds "* ]]
+  [[ " $dependencies " == *" gateway-api-crds "* ]]
+  render envoy-gateway
+  controller="$(envoy_gateway_config | yq '.gateway.controllerName')"
+  classes="$(yq -N 'select(.kind == "GatewayClass") | .metadata.name + " " + .spec.controllerName' "$BUILT" "$RENDERED")"
+  echo "the controller's name: $controller; GatewayClasses: ${classes:-none}"
+  [[ $controller =~ ^[a-z0-9.-]+/[A-Za-z0-9._/-]+$ ]]
+  [ -n "$classes" ]
+  [ "$(wc -l <<<"$classes")" -eq 1 ]
+  [ "${classes#* }" = "$controller" ]
+  # No Gateway yet: each needs a load balancer and a certificate.
+  [ -z "$(yq -N 'select(.kind == "Gateway") | .metadata.name' "$BUILT" "$RENDERED")" ]
+}
+
 @test "every values key of prometheus-operator-crds is one its pinned chart defines" {
   defined_keys prometheus-operator-crds
 }
@@ -491,4 +688,8 @@ gateway_api() {
 
 @test "every values key of cert-manager is one its pinned chart defines" {
   defined_keys cert-manager
+}
+
+@test "every values key of envoy-gateway is one its pinned chart defines" {
+  defined_keys envoy-gateway
 }
