@@ -486,6 +486,10 @@ shell_accepts() {
       [ "$(tofu_env "$subcommand" AWS_SECRET_ACCESS_KEY)" = marker-secret-access-key ]
       [ -n "$(tofu_env "$subcommand" TF_ENCRYPTION)" ]
       [ "$(tofu_env "$subcommand" OS_APPLICATION_CREDENTIAL_SECRET)" = marker-application-credential-secret ]
+      # The destroy ends with the plumbing stack, which takes no allowlist.
+      if [[ $run == *sto2/cluster ]]; then
+        [ "$(tofu_env "$subcommand" TF_VAR_api_allowed_cidrs | jq -c .)" = '["203.0.113.77/32"]' ]
+      fi
       # What it does not: the cluster's key, the age keys, the passphrase's own variable, the allowlist.
       for name in CLUSTER_S3_ACCESS_KEY_ID CLUSTER_S3_SECRET_ACCESS_KEY SOPS_AGE_KEY_FILE SOPS_AGE_KEY \
         FLUX_AGE_KEY_FILE FLUX_AGE_KEY TF_STATE_PASSPHRASE OPERATOR_CIDRS; do
