@@ -20,7 +20,9 @@ and the kubeconfig.
 5. `just cluster-bootstrap`: every node configured, Cilium installed, what Flux needs before it
    starts applied, the kubelet serving-certificate approver installed, every node Ready.
 6. `just cluster-flux`: what Flux needs before it starts applied, and Flux installed
-   ([kubernetes.md](kubernetes.md#installing-flux)).
+   ([kubernetes.md](kubernetes.md#installing-flux)). To see Flux take over Cilium without a node
+   leaving Ready, start `just app-adoption kubernetes/apps/base/kube-system/cilium` in a second
+   terminal first ([kubernetes.md](kubernetes.md#applications-installed-before-flux)).
 
 Later changes to a patch or to `talman.yaml`, and nodes OpenTofu adds, reach the nodes with
 `just cluster-talos`.
@@ -169,6 +171,9 @@ out of the artifact, which is built from `kubernetes/`.
   listed. A second run changes nothing.
 - `just cluster-flux [cluster] [--reapply]` installs Flux on a cluster that runs none
   ([kubernetes.md](kubernetes.md#installing-flux)). It needs what `cluster-config` needs.
+- `just app-adoption <application directory> [cluster]` watches Flux adopt an application that
+  was installed before it and prints pass or FAIL per check; it only reads
+  ([kubernetes.md](kubernetes.md#applications-installed-before-flux)).
 
 A failing recipe ends with a line naming the step it failed in.
 
@@ -214,6 +219,8 @@ age-keygen on standard input.
 - `CLUSTER_DOMAIN`: the domain the cluster's applications are published under, a lower-case DNS
   name, which becomes `CLUSTER_DOMAIN` in `cluster-config`; `cluster-bootstrap`, `cluster-config`
   and `cluster-flux` need it.
+- `ADOPTION_INTERVAL` and `ADOPTION_WAIT`: how many seconds `app-adoption` waits between two
+  polls, 10 when unset, and in all, 900 when unset.
 - `CI`: when set, talman's output goes to a file instead of the output; see
   [What the recipes print](#what-the-recipes-print).
 
