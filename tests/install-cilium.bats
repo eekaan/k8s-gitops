@@ -425,7 +425,7 @@ bgp_tree() {
       mkdir -p "$COPY/$(dirname "$path")"
       cp "$REPO/$path" "$COPY/$path"
     fi
-  done < <(git -C "$REPO" ls-files -z --cached --others --exclude-standard -- kubernetes scripts talos versions.yaml tests/fixtures/talos)
+  done < <(git -C "$REPO" ls-files -z --cached --others --exclude-standard -- kubernetes scripts talos versions.yaml tests/fixtures/talos infra/openstack/backend.hcl)
 }
 
 # bgp_inputs: in the copy, TALMAN, talos/talman.yaml.tftpl rendered from tests/fixtures/talos as the
@@ -440,7 +440,7 @@ bgp_inputs() {
   base64 -d <<< "${encoded//\"/}" > "$TALMAN"
   CONFIG="$BATS_TEST_TMPDIR/cluster-config.json"
   # shellcheck disable=SC2016 # $1 and $2 are the inner shell's.
-  env -i PATH="$PATH" HOME="$BATS_TEST_TMPDIR" CLUSTER_DOMAIN=example.com bash -c \
+  env -i PATH="$PATH" HOME="$BATS_TEST_TMPDIR" CLUSTER_DOMAIN=example.com BACKUP_BUCKET_PREFIX=marker-backups bash -c \
     '. "$1/scripts/lib/cluster.sh" && fill_cluster_config lab-sto2 "$2" && cluster_config_manifest' _ "$COPY" "$TALMAN" |
     jq '.data' > "$CONFIG"
   [ "$(jq length "$CONFIG")" -gt 0 ]
