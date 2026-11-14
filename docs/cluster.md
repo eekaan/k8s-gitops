@@ -170,9 +170,10 @@ out of the artifact, which is built from `kubernetes/`.
   needs no private key; the plaintext is removed; and only the encrypted file is uploaded, with the
   state key, as `<cluster>/<UTC time>.snapshot.age`, the time as `yyyymmddThhmmssZ`. The upload
   passes rclone's `--s3-no-check-bucket`, so it never creates a bucket: without the etcd bucket it
-  fails. Once the bucket lists the object at the size uploaded, the recipe prints one line, the
-  cluster, the object's name and its size. The directory is removed whenever the recipe exits, a
-  failed run and one interrupted by Ctrl-C or SIGTERM included. It needs the cluster's
+  fails. An object of the same name, from a snapshot taken in the same second, is not overwritten:
+  the recipe fails, naming it. Once the bucket lists the object at the size uploaded, it prints one
+  line, the cluster, the object's name and its size. The directory is removed whenever the recipe
+  exits, a failed run and one interrupted by Ctrl-C or SIGTERM included. It needs the cluster's
   `talman.yaml` and `secrets.sops.yaml`, the age key's location and its recipient, the bucket
   prefix and the state key.
 - `just cluster-snapshots [cluster]` lists the cluster's snapshots in the etcd bucket, reading only:
@@ -184,15 +185,15 @@ out of the artifact, which is built from `kubernetes/`.
   changes anything it checks what it needs, finds the snapshot, downloads it into a private
   temporary directory as `cluster-snapshot` makes one, decrypts it there with the Talos age key, and
   waits for every node as `cluster-bootstrap` does; a snapshot that is not there, is not an age file
-  or that the key cannot decrypt stops it. It says that every node is reset and the cluster's state
-  replaced by the snapshot's, losing what was written since, and goes on once the cluster's name is
-  typed back; `--yes` does not ask. `talman reset` then wipes every node's EPHEMERAL partition
-  without leaving etcd and reboots it, and once every node answers again,
-  `talman apply --bootstrap --recover-from` restores etcd from the snapshot on the first control
-  plane, which the others join. It fetches the kubeconfig as `cluster-kubeconfig` does, and asks
-  every ten seconds, ninety times at most, until every node in `talman.yaml` reports Ready after the
-  reset. What `cluster-bootstrap` applies before Flux is not applied again, as the restored etcd
-  holds it. The decrypted snapshot is removed once etcd is restored and whenever the recipe exits.
+  or that the key cannot decrypt stops it. It says that the control planes are reset, the workers
+  not, and the cluster's state replaced by the snapshot's, losing what was written since, and goes
+  on once the cluster's name is typed back; `--yes` does not ask. `talman reset --group
+  controlplane` then wipes each control plane's EPHEMERAL partition without leaving etcd and reboots
+  it, and once every node answers again, `talman apply --bootstrap --recover-from` restores etcd
+  from the snapshot on the first control plane, which the others join. It fetches the kubeconfig as
+  `cluster-kubeconfig` does, and asks every ten seconds, ninety times at most, until every node in
+  `talman.yaml`, workers included, reports Ready after the reset. What `cluster-bootstrap` applies
+  before Flux is not applied again, as the restored etcd holds it. The decrypted snapshot is removed once etcd is restored and whenever the recipe exits.
   It needs what `cluster-talos` needs, the API address, the bucket prefix and the state key.
 - `just cluster-config [cluster]` applies what Flux needs before it starts: the namespace
   `flux-system`, the ConfigMap `cluster-config`, the Secret `cluster-secrets` and the Secret

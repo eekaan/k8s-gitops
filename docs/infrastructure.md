@@ -90,9 +90,10 @@ keys belong to the same project and reach every bucket in it, the state bucket i
 why state and snapshots are encrypted before they are uploaded
 ([ADR 0008](adr/0008-state-and-backups-are-encrypted-before-they-leave.md)).
 
-These recipes and `just infra-state-bucket` reach the object storage with rclone, pinned in
-`mise.toml`, at the endpoint, region and addressing that `infra/openstack/backend.hcl` gives
-OpenTofu's state. rclone is configured through its environment only and reads no config file; the
+These recipes, `just infra-state-bucket` and the etcd snapshot recipes `just cluster-snapshot`,
+`cluster-snapshots` and `cluster-restore` ([cluster.md](cluster.md#recipes)) reach the object
+storage with rclone, pinned in `mise.toml`, at the endpoint, region and addressing that
+`infra/openstack/backend.hcl` gives OpenTofu's state. rclone is configured through its environment only and reads no config file; the
 operator's own rclone configuration, its `RCLONE_` and `AWS_` variables and every other variable
 but `PATH`, `HOME`, `TMPDIR` and the proxy variables stay out of its environment. What rclone
 prints names the buckets and the endpoint, so it is not shown.

@@ -7,7 +7,8 @@
 #   2. age encrypts it to the Talos age key's recipient in talos/.sops.yaml, which needs no private
 #      key, and the plaintext is removed;
 #   3. the encrypted file alone is uploaded with the state key as <cluster>/<UTC time>.snapshot.age,
-#      without rclone checking for the bucket, which would create a bucket that is not there;
+#      without rclone checking for the bucket, which would create a bucket that is not there; an
+#      object of that name, from a snapshot taken in the same second, is refused, not overwritten;
 #   4. once the bucket lists the object at the size uploaded, prints one line: the cluster, the
 #      object's name and its size.
 # Nothing is left on disk, whether the run succeeds, fails or is interrupted. Neither talman's nor
@@ -50,6 +51,22 @@ fi
 step="encrypting the snapshot to the Talos age key's recipient"
 age --encrypt --recipient "$recipient" --output "$encrypted" "$snapshot"
 rm -f -- "$snapshot"
+
+step="checking that the etcd bucket holds no $name of $cluster yet"
+# Two snapshots taken in the same second share a name, and an upload replaces an object. Without
+# the bucket there is nothing to replace, and the upload below fails without making one.
+list_status=0
+listing=$(s3_etcd_snapshots "$cluster") || list_status=$?
+if ((list_status != 0 && list_status != 3)); then
+  infra_error "rclone cannot list the etcd bucket with the state key"
+  exit 1
+fi
+while read -r taken _; do
+  if [[ $taken == "$name" ]]; then
+    infra_error "the etcd bucket holds $cluster/$name already; it is not overwritten"
+    exit 1
+  fi
+done <<< "$listing"
 
 step="uploading the encrypted snapshot to the etcd bucket"
 if ! s3_rclone state copyto --s3-no-check-bucket "$encrypted" \

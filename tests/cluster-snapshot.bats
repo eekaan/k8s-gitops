@@ -122,6 +122,9 @@ recipe() {
 #                   bootstraps; talman dies of it when the file says dies, and when it says handles,
 #                   handles it itself, finishes and exits 0
 #   reset-fails     talman reset fails
+# talman reset records in reset-nodes the hostnames it resets, selected as talman selects them: those
+# -n/--node names by hostname or address and those -g/--group names by role or group, or, with
+# neither, every node.
 #   apply-fails     talman apply --bootstrap fails
 #   stale           hostnames whose kubelet has not reported since the reset: their Ready condition
 #                   is the one etcd held, from before
@@ -170,7 +173,29 @@ case "$1" in
       echo "error: talosctl reset exited with status 1 at $addresses" >&2
       exit 1
     fi
-    echo "== resetting every node at $addresses"
+    selected=() selecting=0
+    for ((i = 0; i < ${#args[@]}; i++)); do
+      case ${args[i]} in
+        -g | --group | -n | --node) by=${args[i]} values=${args[i + 1]-} && i=$((i + 1)) ;;
+        --group=* | --node=*) by=${args[i]%%=*} values=${args[i]#*=} ;;
+        *) continue ;;
+      esac
+      selecting=1
+      IFS=, read -ra values <<< "$values"
+      for value in "${values[@]}"; do
+        if [[ $by == -g || $by == --group ]]; then
+          query='.nodes[] | select(.role == strenv(VALUE) or ((.groups // []) | contains([strenv(VALUE)]))) | .hostname'
+        else
+          query='.nodes[] | select(.hostname == strenv(VALUE) or .ipAddress == strenv(VALUE)) | .hostname'
+        fi
+        mapfile -t -O "${#selected[@]}" selected < <(VALUE=$value "$YQ" "$query" "$TALMAN_CONFIG/talman.yaml")
+      done
+    done
+    if ((!selecting)); then
+      mapfile -t selected < <("$YQ" '.nodes[].hostname' "$TALMAN_CONFIG/talman.yaml")
+    fi
+    printf '%s\n' "${selected[@]}" | sort -u > "$STATE/reset-nodes"
+    echo "== resetting $(paste -sd, "$STATE/reset-nodes") at $addresses"
     ;;
   apply)
     if ! given --bootstrap; then
@@ -266,6 +291,16 @@ put_snapshot() {
   age -r "$RECIPIENT" -o "$STORE/$BUCKET/lab-sto2/$1" "${2:-$STATE/content}"
 }
 
+# next_second: waits until the UTC second changes, so that the next snapshot takes a name of its own;
+# one taken in the same second as another is refused.
+next_second() {
+  local now
+  now=$(date -u +%s)
+  while [[ $(date -u +%s) == "$now" ]]; do
+    sleep 0.1
+  done
+}
+
 # calls PATTERN: the recorded calls matching the extended regex, one per line.
 calls() {
   grep -E -- "$1" "$RECORD/argv" 2> /dev/null || true
@@ -350,7 +385,10 @@ resets_or_bootstraps() {
   # Uploaded with the state key, through the S3 client, and listed back.
   [ "$(calls '^rclone copyto ' | wc -l)" -eq 1 ]
   [[ $(calls '^rclone copyto ') == *" store:$BUCKET/lab-sto2/$name" ]]
-  [ "$(call_line '^rclone copyto ')" -lt "$(call_line '^rclone lsjson ')" ]
+  # Listed before the upload, for an object of the same name, and after it, for the new one.
+  [ "$(calls '^rclone lsjson ' | wc -l)" -eq 2 ]
+  [ "$(call_line '^rclone lsjson ')" -lt "$(call_line '^rclone copyto ')" ]
+  [ "$(call_line '^rclone copyto ')" -lt "$(last_call_line '^rclone lsjson ')" ]
   for file in "$RECORD"/env.rclone.*; do
     grep -qz '^RCLONE_CONFIG_STORE_ACCESS_KEY_ID=marker-state-access-key-id$' "$file"
   done
@@ -363,6 +401,7 @@ resets_or_bootstraps() {
   [ "$status" -eq 0 ]
 
   : > "$FAILS/upload"
+  next_second
 
   recipe cluster-snapshot
 
@@ -370,6 +409,7 @@ resets_or_bootstraps() {
 
   rm "$FAILS/upload"
   with CI=true
+  next_second
 
   recipe cluster-snapshot
 
@@ -469,6 +509,7 @@ resets_or_bootstraps() {
     run_and_keep failed cluster-restore latest <<< no
     run_and_keep failed cluster-restore 20200101T000000Z.snapshot.age --yes < /dev/null
     : > "$FAILS/upload"
+    next_second
     run_and_keep failed cluster-snapshot
     : > "$FAILS/download"
     run_and_keep failed cluster-restore latest --yes < /dev/null
@@ -545,7 +586,8 @@ resets_or_bootstraps() {
   recipe cluster-restore 20261101T000000Z.snapshot.age <<< no
 
   [ "$status" -ne 0 ]
-  [[ $output == *"every node of lab-sto2 is reset, and the cluster's state is replaced by the one in 20261101T000000Z.snapshot.age: everything written to the cluster after the snapshot was taken is lost"* ]]
+  [[ $output == *"the control planes of lab-sto2 are reset, and the cluster's state is replaced by the one in 20261101T000000Z.snapshot.age: everything written to the cluster after the snapshot was taken is lost"* ]]
+  [[ $output == *"the workers are not reset"* ]]
   [[ $output == *"Type lab-sto2 to reset and restore it: "* ]]
   [[ $output == *"lab-sto2 was not confirmed and is not restored"* ]]
   [ -z "$(resets_or_bootstraps)" ]
@@ -566,7 +608,7 @@ resets_or_bootstraps() {
   recipe cluster-restore 20261101T000000Z.snapshot.age --yes < /dev/null
 
   [ "$status" -eq 0 ]
-  [[ $output == *"every node of lab-sto2 is reset"* ]]
+  [[ $output == *"the control planes of lab-sto2 are reset"* ]]
   [[ $output != *"Type lab-sto2"* ]]
   [ "$(calls '^talman reset ' | wc -l)" -eq 1 ]
   [ "$(calls '^talman apply ' | wc -l)" -eq 1 ]
@@ -587,14 +629,17 @@ resets_or_bootstraps() {
   for flag in --wipe-labels=EPHEMERAL --graceful=false --yes; do
     [[ " $reset " == *" $flag "* ]]
   done
-  [[ " $reset " != *" --wipe-disk "* && " $reset " != *" -n "* && " $reset " != *" -g "* ]]
+  [[ " $reset " != *" --wipe-disk "* ]]
+  # Every control plane, and no worker.
+  [ "$(paste -sd' ' "$STATE/reset-nodes")" = "cp-1 cp-2 cp-3" ]
   apply=$(calls '^talman apply( |$)')
   [ "$(wc -l <<< "$apply")" -eq 1 ]
   [[ " $apply " == *" --bootstrap "* ]]
   [[ " $apply " == *" --recover-from $(cat "$STATE/recovered-from") "* ]]
   [[ " $apply " != *" --onboard-new-nodes "* && " $apply " != *" --recover-skip-hash-check "* ]]
-  # In order: the nodes answer, they are reset, they answer again, etcd is bootstrapped from the
-  # snapshot, the kubeconfig is fetched and the nodes are asked whether they are Ready.
+  # In order: the nodes answer, the control planes are reset, the nodes answer again, etcd is
+  # bootstrapped from the snapshot, the kubeconfig is fetched and the nodes are asked whether they
+  # are Ready.
   downloaded=$(call_line '^rclone copyto store:')
   decrypted=$(call_line '^age (-d|--decrypt) ')
   probed=$(call_line '^timeout .*/dev/tcp/')
@@ -702,7 +747,7 @@ resets_or_bootstraps() {
         ;;
       reset-fails)
         [ "$status" -ne 0 ]
-        [[ $output == *"cluster-restore: failed while resetting every node of lab-sto2"* ]]
+        [[ $output == *"cluster-restore: failed while resetting the control planes of lab-sto2"* ]]
         [ -z "$(calls '^talman apply ')" ]
         ;;
       *)
@@ -742,6 +787,7 @@ resets_or_bootstraps() {
   with SOPS_AGE_KEY="$SECRET"
   clear_record
   rm "$STATE/recovered"
+  next_second
 
   recipe cluster-snapshot
 
@@ -874,6 +920,44 @@ resets_or_bootstraps() {
   [ -z "$(find "$REPO/talos" -mindepth 1 -maxdepth 1 -name 'cluster-*')" ]
 }
 
+@test "cluster-snapshot refuses to overwrite a snapshot taken in the same second" {
+  # A date that gives the recipe the second of a snapshot already in the bucket.
+  real=$(command -v date)
+  fake date <<EOF
+if [[ \$* == '-u +%Y%m%dT%H%M%SZ' ]]; then
+  echo 20261114T101500Z
+  exit 0
+fi
+exec "$real" "\$@"
+EOF
+  printf 'marker-earlier-snapshot\n' > "$BATS_TEST_TMPDIR/earlier"
+  put_snapshot 20261114T101500Z.snapshot.age "$BATS_TEST_TMPDIR/earlier"
+  object="$STORE/$BUCKET/lab-sto2/20261114T101500Z.snapshot.age"
+  cp "$object" "$BATS_TEST_TMPDIR/object.before"
+
+  recipe cluster-snapshot
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"cluster-snapshot: the etcd bucket holds lab-sto2/20261114T101500Z.snapshot.age already; it is not overwritten"* ]]
+  [ -n "$(calls '^talman etcd snapshot ')" ]
+  [ -z "$(calls '^rclone copyto ')" ]
+  cmp "$object" "$BATS_TEST_TMPDIR/object.before"
+  [ "$(find "$STORE" -type f | wc -l)" -eq 1 ]
+  nothing_left
+
+  # A bucket that cannot be listed is not written to either.
+  : > "$FAILS/list"
+  clear_record
+
+  recipe cluster-snapshot
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"rclone cannot list the etcd bucket with the state key"* ]]
+  [ -z "$(calls '^rclone copyto ')" ]
+  cmp "$object" "$BATS_TEST_TMPDIR/object.before"
+  nothing_left
+}
+
 @test "with CI set, the etcd recipes keep talman's output in their logs" {
   put_snapshot 20261101T000000Z.snapshot.age
   with CI=true
@@ -887,7 +971,7 @@ resets_or_bootstraps() {
 
   [ "$status" -eq 0 ]
   [[ $output == *"cluster-restore: talman reset succeeded; its output is in talos/lab-sto2/clusterconfig/cluster-restore.log"* ]]
-  grep -q 'resetting every node' "$CLUSTER/clusterconfig/cluster-restore.log"
+  grep -q '== resetting cp-1' "$CLUSTER/clusterconfig/cluster-restore.log"
   grep -q 'bootstrapping etcd' "$CLUSTER/clusterconfig/cluster-restore.log"
   [[ $output != *"reaching the nodes"* ]]
 }

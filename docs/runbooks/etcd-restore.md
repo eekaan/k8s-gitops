@@ -45,16 +45,23 @@ cloud's volume, not in etcd.
    recovery
    ([Talos 1.14](https://docs.siderolabs.com/talos/v1.14/build-and-extend-talos/cluster-operations-and-maintenance/disaster-recovery))
    and talman's `--recover-from` have it:
-   1. `talman reset --graceful=false --wipe-labels=EPHEMERAL --yes` wipes every node's EPHEMERAL
-      partition, which holds etcd's data and the kubelet's and containerd's, and reboots the node,
-      workers first. No member leaves etcd first, as every member goes. STATE, with the node's
-      machine configuration, stays: each node comes back as itself, and the control planes wait
-      for etcd to be bootstrapped.
+   1. `talman reset --group controlplane --graceful=false --wipe-labels=EPHEMERAL --yes` wipes the
+      EPHEMERAL partition of each control plane, the nodes whose role is `controlplane`, one at a
+      time, and reboots it. EPHEMERAL holds etcd's data. No member leaves etcd first, as every
+      member goes. STATE, with the node's machine configuration, stays: each control plane comes
+      back as itself and waits for etcd to be bootstrapped. The workers are not reset. While etcd
+      is down, the pods already scheduled on them might continue to run, but no new pods can be
+      scheduled
+      ([Kubernetes](https://kubernetes.io/docs/tasks/administer-cluster/configure-upgrade-etcd/#restoring-an-etcd-cluster)).
    2. Once every node answers again, `talman apply --bootstrap --recover-from` bootstraps etcd on
       the first control plane from the snapshot. The other control planes join it.
    3. The kubeconfig is fetched, as `just cluster-kubeconfig` does, and the recipe waits until every
-      node in `talman.yaml` reports Ready after the reset. The restored etcd holds each node's Ready
-      condition as it was at the snapshot, so a report from before does not count.
+      node in `talman.yaml`, workers included, reports Ready after the reset. The restored etcd
+      holds each node's Ready condition as it was at the snapshot, so a report from before does
+      not count. A kubelet reports a node's status when it changes, and otherwise every five
+      minutes by default
+      ([Kubernetes](https://kubernetes.io/docs/reference/node/node-status/#heartbeats)), which
+      the wait allows for.
 
    The decrypted snapshot is removed once etcd is restored, and whenever the recipe exits.
 
@@ -67,8 +74,8 @@ cloud's volume, not in etcd.
 
 - Everything written to the Kubernetes API after the snapshot was taken: objects made since are
   gone, objects deleted since are back, and every other object, Secrets included, is as it was.
-- On every node, what EPHEMERAL held: container images, logs, `emptyDir` volumes and the kubelet's
-  local state. Every pod starts again.
+- On every control plane, what EPHEMERAL held: container images, logs, `emptyDir` volumes and the
+  kubelet's local state; its pods start again. The workers keep theirs.
 - The cloud's load balancers and volumes are not in the snapshot. One the cluster made after the
   snapshot has no object in the restored cluster and stays in the cloud until it is removed by
   hand; for one it removed after the snapshot, the restored object names something that is gone.
@@ -88,6 +95,6 @@ cloud's volume, not in etcd.
 
 The failure line names the step. Up to the question, nothing has changed. After the reset and
 before etcd is restored, the cluster runs no etcd: `just cluster-restore` with the same snapshot
-resets every node again and restores from the start. Once etcd is restored, while the kubeconfig is
+resets the control planes again and restores from the start. Once etcd is restored, while the kubeconfig is
 fetched or the nodes are waited for, the restore is done and is not run again: `just
 cluster-kubeconfig` fetches the kubeconfig, and the nodes that are not Ready are looked at.

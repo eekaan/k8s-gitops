@@ -63,7 +63,7 @@ cluster-snapshot cluster='lab-sto2':
 cluster-snapshots cluster='lab-sto2':
     scripts/cluster-snapshots {{ quote(cluster) }}
 
-# Restore a cluster's etcd from a snapshot cluster-snapshots lists, or latest: download and decrypt it, then once the cluster's name is typed back reset every node's EPHEMERAL partition, bootstrap etcd from the snapshot and wait until every node is Ready (--yes: without asking)
+# Restore a cluster's etcd from a snapshot cluster-snapshots lists, or latest: download and decrypt it, then once the cluster's name is typed back reset the control planes' EPHEMERAL partitions, bootstrap etcd from the snapshot and wait until every node is Ready (--yes: without asking)
 [positional-arguments]
 cluster-restore snapshot *args:
     scripts/cluster-restore "$@"

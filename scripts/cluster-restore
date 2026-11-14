@@ -6,16 +6,16 @@
 # directory and decrypts it there with the Talos age key, which reaches age by its file's path or on
 # its standard input, never as an argument; and waits until every node answers on the Talos API
 # port. Then it says what happens and asks for the cluster's name to be typed back, unless --yes:
-#   1. talman reset wipes every node's EPHEMERAL partition, where etcd keeps its data and the
-#      kubelet and containerd theirs, and reboots it, without leaving etcd first, as every member
-#      goes. STATE, which holds the node's machine configuration, stays, so each node comes back as
-#      itself, and the control planes wait for etcd to be bootstrapped. Workers are reset too, so
-#      no node runs on what the cluster held after the snapshot.
+#   1. talman reset, selecting the nodes whose role is controlplane, wipes each control plane's
+#      EPHEMERAL partition, where etcd keeps its data, and reboots it, without leaving etcd first,
+#      as every member goes; this is the reset Talos' disaster recovery prescribes. STATE, which
+#      holds the node's machine configuration, stays, so each comes back as itself and waits for
+#      etcd to be bootstrapped. The workers are not reset, and keep what their EPHEMERAL holds.
 #   2. Once every node answers again, talman apply --bootstrap --recover-from restores etcd from
 #      the snapshot on the first control plane; the other control planes join it.
-#   3. The kubeconfig is fetched as cluster-kubeconfig does, and every node in talman.yaml must
-#      report Ready after the reset: the restored etcd holds each node's Ready condition as it was
-#      at the snapshot, so only a report since counts.
+#   3. The kubeconfig is fetched as cluster-kubeconfig does, and every node in talman.yaml, workers
+#      included, must report Ready after the reset: the restored etcd holds each node's Ready
+#      condition as it was at the snapshot, so only a report since counts.
 # What cluster-bootstrap applies before Flux starts (Cilium, cluster-config, cluster-secrets,
 # sops-age, the kubelet serving-certificate approver) is a set of Kubernetes objects, which the
 # restored etcd holds as they were at the snapshot, with Flux, which reconciles the rest from its
@@ -136,14 +136,14 @@ fi
 step="waiting for every node to answer on the Talos API port"
 wait_for_talos_api "$talman_file"
 
-echo "cluster-restore: every node of $cluster is reset, and the cluster's state is replaced by the one in $name: everything written to the cluster after the snapshot was taken is lost."
-echo "cluster-restore: talman reset wipes each node's EPHEMERAL partition, with etcd's data, and reboots it; then talman apply --bootstrap restores etcd from the snapshot."
+echo "cluster-restore: the control planes of $cluster are reset, and the cluster's state is replaced by the one in $name: everything written to the cluster after the snapshot was taken is lost."
+echo "cluster-restore: talman reset wipes each control plane's EPHEMERAL partition, with etcd's data, and reboots it; the workers are not reset. Then talman apply --bootstrap restores etcd from the snapshot."
 step="waiting for $cluster to be typed back"
 ((confirmed)) || confirm "$cluster" "reset and restore" restored
 
-step="resetting every node of $cluster"
+step="resetting the control planes of $cluster"
 since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-cluster_talman reset --graceful=false --wipe-labels=EPHEMERAL --yes
+cluster_talman reset --group controlplane --graceful=false --wipe-labels=EPHEMERAL --yes
 
 step="waiting for every node to answer on the Talos API port after the reset"
 wait_for_talos_api "$talman_file"

@@ -39,12 +39,12 @@ Feature: etcd snapshots
   Scenario: A restore asks first, and nothing is reset without the cluster's name
     Given a snapshot of the cluster in the etcd bucket
     When cluster-restore runs for it and the cluster's name is not typed back
-    Then it has said that every node is reset and the cluster's state replaced by the snapshot's, everything written after the snapshot lost, exits non-zero and resets nothing; with the name typed back, or with --yes, the restore goes ahead
+    Then it has said that the control planes are reset, the workers not, and the cluster's state replaced by the snapshot's, everything written after the snapshot lost, exits non-zero and resets nothing; with the name typed back, or with --yes, the restore goes ahead
 
   Scenario: A restore resets the nodes and recovers from the decrypted snapshot
     Given snapshots of the cluster in the etcd bucket, encrypted to the Talos age key
     When cluster-restore runs for one of them by name, and for latest, and the cluster's name is typed back
-    Then talman resets every node's EPHEMERAL partition without a graceful leave, then bootstraps etcd from a file holding that snapshot's content, then the kubeconfig is fetched and every node is waited for until it reports Ready after the reset, in that order, and nothing applied before Flux starts is applied again
+    Then talman resets the EPHEMERAL partition of every control plane and of no worker, without a graceful leave, then bootstraps etcd from a file holding that snapshot's content, then the kubeconfig is fetched and every node, workers included, is waited for until it reports Ready after the reset, in that order, and nothing applied before Flux starts is applied again
 
   Scenario: A snapshot this key cannot decrypt stops the restore before anything is reset
     Given an object encrypted to another age key, and one that is not an age file

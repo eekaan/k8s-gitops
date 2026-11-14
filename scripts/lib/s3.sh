@@ -129,11 +129,11 @@ s3_owned_buckets() {
 # s3_etcd_snapshots CLUSTER: CLUSTER's etcd snapshots in the etcd bucket,
 # <BACKUP_BUCKET_PREFIX>-etcd, as the state key lists them: the objects directly under CLUSTER/ named
 # as a snapshot is, each as its name and size in bytes, one per line, newest first; nothing when
-# there is none. Returns 1, printing nothing of rclone's, when the bucket cannot be listed, as when it
-# does not exist: rclone then exits 3, while a prefix without objects lists as empty.
+# there is none. When the bucket cannot be listed, returns rclone's status and prints nothing of
+# rclone's: 3 when the bucket does not exist, while a prefix without objects lists as empty.
 s3_etcd_snapshots() {
   local listing
-  listing=$(s3_rclone state lsjson --files-only "store:$BACKUP_BUCKET_PREFIX-etcd/$1/" 2> /dev/null) || return 1
+  listing=$(s3_rclone state lsjson --files-only "store:$BACKUP_BUCKET_PREFIX-etcd/$1/" 2> /dev/null) || return
   jq -r --arg name "$s3_snapshot_name_re" \
     '[.[] | select(.Name | test($name))] | sort_by(.Name) | reverse[] | "\(.Name) \(.Size)"' <<< "$listing"
 }
