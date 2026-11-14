@@ -1034,7 +1034,8 @@ that can write:
   the Dagger module (ADR 0007): it renders the base, the first parent of the commit under test, and
   the commit itself, both with the base's `scripts/render` and `scripts/render-diff`, so that a pull
   request that changes only the tree is shown by the reviewed render code. A base without the render
-  code is rendered with the commit's. The job uploads the comment as the artifact `render-diff`.
+  code, or one its own render code does not render, is rendered with the commit's, and the job's
+  log says so. The job uploads the comment as the artifact `render-diff`.
 - `.github/workflows/render-comment.yaml` runs when the CI workflow completes for a pull request,
   unless that run was cancelled. GitHub runs it from the default branch, with this repository's
   token, whatever the run it follows had, so it checks out only the default branch and runs

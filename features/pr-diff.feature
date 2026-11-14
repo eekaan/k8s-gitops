@@ -46,3 +46,8 @@ Feature: The render diff of a pull request
     Given renders of a tree before and after a change whose diff is larger than a pull request comment holds
     When just render-diff compares them
     Then the comment stays within GitHub's limit, keeps the whole summary and the footer, closes every block it opens, and says the diff is truncated
+
+  Scenario: A base its own render code does not render is rendered with this checkout's
+    Given a pull request whose base commit holds render code that fails on the base's own tree, and a checkout whose render code renders both
+    When the CI render job's script renders the base and the checkout
+    Then it says the base's render code does not render the base, renders both with the checkout's, and writes the comment; a base neither renders fails the run and writes none

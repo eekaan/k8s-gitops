@@ -363,6 +363,48 @@ EOF
   [ "$(rows)" = "$(row demo/greeter 0 0 3)" ]
 }
 
+@test "A base its own render code does not render is rendered with this checkout's" {
+  repository stuck
+  render_code
+  # The base's render refuses every tree, the base's own included.
+  cat >"$WORK/scripts/render" <<'EOF2'
+#!/usr/bin/env bash
+echo "render: the base's render refuses this tree" >&2
+exit 1
+EOF2
+  chmod +x "$WORK/scripts/render"
+  commit "a base whose render code does not render it"
+  render_code
+  yq -i '.replicas = 2' "$WORK/kubernetes/apps/base/web/greeter/app/values.yaml"
+  commit "render it, and change a value"
+
+  run bash -c 'cd "$1" && scripts/render-pr "" "$2"' bash "$WORK" "$BATS_TEST_TMPDIR/stuck.md"
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"the base's render refuses this tree"* ]]
+  [[ $output == *"the base's render code does not render the base; this checkout's renders both"* ]]
+  BODY="$BATS_TEST_TMPDIR/stuck.md"
+  [ "$(rows)" = "$(row demo/greeter 0 0 3)" ]
+
+  # A base this checkout's render code does not render either fails the run.
+  repository stuck-for-good
+  render_code
+  cat >"$WORK/scripts/render" <<'EOF2'
+#!/usr/bin/env bash
+echo "render: no render code renders this tree" >&2
+exit 1
+EOF2
+  chmod +x "$WORK/scripts/render"
+  commit "a base whose render code does not render it"
+  yq -i '.replicas = 2' "$WORK/kubernetes/apps/base/web/greeter/app/values.yaml"
+  commit "change a value, with the same render code"
+
+  run bash -c 'cd "$1" && scripts/render-pr "" "$2"' bash "$WORK" "$BATS_TEST_TMPDIR/stuck-for-good.md"
+
+  [ "$status" -ne 0 ]
+  [ ! -e "$BATS_TEST_TMPDIR/stuck-for-good.md" ]
+}
+
 # ledger NAME: a copy of the fixture tree in $BATS_TEST_TMPDIR/NAME that enables the ledger, whose
 # chart comes from a Helm repository; sets LEDGER to its application directory.
 ledger() {
