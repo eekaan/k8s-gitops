@@ -22,6 +22,9 @@ values:
     clusterASN: ${bgp.cluster_asn}
     edgeASN: ${bgp.edge_asn}
     edgeAddresses: ${jsonencode(bgp.edge_addresses)}
+    # The public Gateway's address, a host of the service range, which the edge routers forward
+    # public traffic to.
+    gatewayAddress: ${bgp.gateway_address}
 
 # Installer images are the Image Factory's openstack installer for this schematic; talman computes
 # the schematic's ID offline.

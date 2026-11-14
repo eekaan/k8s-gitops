@@ -31,6 +31,7 @@ bgp:
   edge_addresses:
     - 192.0.2.7
     - 192.0.2.8
+  gateway_address: 192.0.2.129
 nodes:
   - hostname: cp-1
     role: controlplane

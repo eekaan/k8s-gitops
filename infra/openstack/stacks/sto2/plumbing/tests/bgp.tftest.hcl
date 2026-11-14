@@ -126,3 +126,58 @@ run "_an_as_outside_the_private_16_bit_range_is_rejected" {
 
   expect_failures = [var.cluster_asn]
 }
+
+# The Gateway's address, which the edge routers translate public traffic to and which the cluster
+# later gives the public Gateway: one host of the service range.
+run "_the_gateway_address_is_a_host_of_the_service_range" {
+  command = plan
+
+  assert {
+    condition     = output.bgp.gateway_address == cidrhost(output.bgp.service_range, 1) && cidrcontains(output.bgp.service_range, output.bgp.gateway_address)
+    error_message = "The Gateway's address must be host number 1 of the service range by default."
+  }
+}
+
+run "_a_gateway_address_given_by_host_number_is_that_host_of_the_range" {
+  command = plan
+
+  variables {
+    gateway_host = 9
+  }
+
+  assert {
+    condition     = output.bgp.gateway_address == cidrhost(output.bgp.service_range, 9) && output.bgp.gateway_address != cidrhost(output.bgp.service_range, 1)
+    error_message = "The Gateway's address must be the given host of the service range."
+  }
+}
+
+run "_the_network_address_of_the_service_range_is_not_a_gateway_host" {
+  command = plan
+
+  variables {
+    gateway_host = 0
+  }
+
+  expect_failures = [var.gateway_host]
+}
+
+run "_the_last_address_of_the_service_range_is_not_a_gateway_host" {
+  command = plan
+
+  variables {
+    service_range = "10.20.0.0/28"
+    gateway_host  = 15
+  }
+
+  expect_failures = [var.gateway_host]
+}
+
+run "_a_host_number_beyond_the_service_range_is_not_a_gateway_host" {
+  command = plan
+
+  variables {
+    gateway_host = 40
+  }
+
+  expect_failures = [var.gateway_host]
+}

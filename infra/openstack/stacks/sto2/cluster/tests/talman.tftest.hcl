@@ -35,10 +35,11 @@ override_data {
         schematic_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
       }
       bgp = {
-        cluster_asn    = 64496
-        edge_asn       = 64497
-        edge_addresses = ["192.0.2.7", "192.0.2.8"]
-        service_range  = "203.0.113.16/28"
+        cluster_asn     = 64496
+        edge_asn        = 64497
+        edge_addresses  = ["192.0.2.7", "192.0.2.8"]
+        service_range   = "203.0.113.16/28"
+        gateway_address = "203.0.113.17"
       }
     }
   }
@@ -314,10 +315,11 @@ run "_a_pod_subnet_holding_the_node_subnet_is_rejected" {
           schematic_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         }
         bgp = {
-          cluster_asn    = 64496
-          edge_asn       = 64497
-          edge_addresses = ["192.0.2.135", "192.0.2.136"]
-          service_range  = "203.0.113.16/28"
+          cluster_asn     = 64496
+          edge_asn        = 64497
+          edge_addresses  = ["192.0.2.135", "192.0.2.136"]
+          service_range   = "203.0.113.16/28"
+          gateway_address = "203.0.113.17"
         }
       }
     }
@@ -362,10 +364,11 @@ run "_a_service_subnet_holding_the_node_subnet_is_rejected" {
           schematic_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         }
         bgp = {
-          cluster_asn    = 64496
-          edge_asn       = 64497
-          edge_addresses = ["192.0.2.135", "192.0.2.136"]
-          service_range  = "203.0.113.16/28"
+          cluster_asn     = 64496
+          edge_asn        = 64497
+          edge_addresses  = ["192.0.2.135", "192.0.2.136"]
+          service_range   = "203.0.113.16/28"
+          gateway_address = "203.0.113.17"
         }
       }
     }
