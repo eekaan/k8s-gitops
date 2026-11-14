@@ -339,7 +339,8 @@ repository.
   leader, so its second replica is a standby that shortens a failover. The second metrics server is
   there for availability too, so one keeps answering through a drain or a pod's failure: the API
   server reaches them through their Service's address without aggregator routing, so requests are
-  not spread over the two, and KEDA's documentation supports one. Requests and limits are the ones KEDA's documentation gives for each component.
+  not spread over the two, and KEDA's documentation supports one. Requests and limits are the ones
+  KEDA's documentation gives for each component.
 - KEDA's metrics server registers the `external.metrics.k8s.io` API. metrics-server registers
   `metrics.k8s.io`; the two groups differ, so the registrations do not collide. Only one provider
   can serve `external.metrics.k8s.io`: no other application may register it.
