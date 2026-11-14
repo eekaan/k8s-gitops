@@ -1,0 +1,20 @@
+---
+# The cluster's Prometheus, through the Service the monitoring chart puts in front of it, as the
+# Grafana's default datasource. Grafana's server queries it, so a browser needs no way to it.
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDatasource
+metadata:
+  name: prometheus
+spec:
+  instanceSelector:
+    matchLabels:
+      app.kubernetes.io/instance: grafana
+  # A restarted Grafana starts without it. The operator applies it again every minute, and retries
+  # a failed attempt after 10 seconds, doubling the wait up to two minutes while Grafana starts.
+  resyncPeriod: 1m
+  datasource:
+    name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+    isDefault: true

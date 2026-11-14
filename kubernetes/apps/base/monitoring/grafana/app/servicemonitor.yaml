@@ -1,0 +1,15 @@
+---
+# Grafana's own metrics, which it serves at /metrics on its HTTP port. The operator names that port
+# grafana on the Service it makes for the Grafana and gives the Service the Grafana's labels; the
+# headless Service it makes for alerting carries them too, but has no port of that name.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: grafana
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: grafana
+  endpoints:
+    - port: grafana
+      path: /metrics

@@ -927,3 +927,42 @@ EOF
   check
   fails_naming kubernetes/apps/base/demo/namespace.yaml NAMESPACE_OWNER
 }
+
+@test "An application that backs up its volume under another application's name fails the check" {
+  valid_tree
+  # A stand-in for components/volsync, which names the backup repository after APP.
+  put kubernetes/components/volsync/kustomization.yaml <<'EOF2'
+---
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - configmap.yaml
+EOF2
+  put kubernetes/components/volsync/configmap.yaml <<'EOF2'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: volsync-fixture
+EOF2
+  local components='  components:
+    - ../../../../../components/volsync'
+
+  hello_ks <<<"$components
+  postBuild:
+    substitute:
+      APP: greeting"
+  check
+  fails_naming kubernetes/apps/base/demo/hello/ks.yaml "postBuild.substitute.APP must be hello"
+
+  hello_ks <<<"$components"
+  check
+  fails_naming kubernetes/apps/base/demo/hello/ks.yaml "postBuild.substitute.APP must be hello"
+
+  hello_ks <<<"$components
+  postBuild:
+    substitute:
+      APP: hello"
+  check
+  [ "$status" -eq 0 ]
+}

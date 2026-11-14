@@ -69,6 +69,17 @@ while IFS= read -r ks; do
       app_path="${ks_path#./}"
       [[ ${app_path%/} == "apps/base/$app_ns/$app/app" ]] ||
         fail "$ks: spec.path must be ./apps/base/$app_ns/$app/app, the application's own app/ directory, found ${ks_path:-none}"
+      # components/volsync names the backup repository after APP: two applications with one APP
+      # would share a repository, which VolSync does not support, and could restore each other's
+      # data. The application's name is unique, so APP is that name.
+      backups="$(yq "select(document_index == $doc) | [(.spec.components // [])[]
+        | select(test(\"(^|/)components/volsync/?\$\"))] | length" "$ks" 2>/dev/null)" || backups=0
+      if [[ $backups =~ ^[1-9] ]]; then
+        backup_app="$(yq "select(document_index == $doc) | .spec.postBuild.substitute.APP // \"\"" "$ks" 2>/dev/null)" ||
+          backup_app=""
+        [[ $backup_app == "$name" ]] ||
+          fail "$ks: postBuild.substitute.APP must be $name, the Kustomization's own name, as components/volsync names the backup repository after APP; found ${backup_app:-none}"
+      fi
       # The root's defaults replace these fields on every child that has not opted out, so a value
       # set here would be lost without a word.
       if [[ $defaults != disabled && -n $overridden ]]; then
