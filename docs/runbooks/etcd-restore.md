@@ -47,7 +47,9 @@ cloud's volume, not in etcd.
    and talman's `--recover-from` have it:
    1. `talman reset --group controlplane --graceful=false --wipe-labels=EPHEMERAL --reboot=true --yes` wipes the
       EPHEMERAL partition of each control plane, the nodes whose role is `controlplane`, one at a
-      time, and reboots it. EPHEMERAL holds etcd's data. No member leaves etcd first, as every
+      time, and reboots it. The reboot is asked for, not left to the flag's default: a reset that
+      shut the nodes down would leave etcd wiped with nothing running to restore it into, and the
+      wait for the nodes to answer would fail. EPHEMERAL holds etcd's data. No member leaves etcd first, as every
       member goes. STATE, with the node's machine configuration, stays: each control plane comes
       back as itself and waits for etcd to be bootstrapped. The workers are not reset. While etcd
       is down, the pods already scheduled on them might continue to run, but no new pods can be
