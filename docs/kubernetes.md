@@ -965,9 +965,10 @@ Every workflow installs its tools with the same pinned `mise-action` at an exact
 workflow whose token can write, `publish` and `render-comment`, also gives the action the checksum
 of that release's linux-x64 binary, so the tools that run beside the token are the pinned ones; the
 action fails the job when the binary differs. A bump of the mise version changes the checksum with it,
-in every workflow that has one, and the checksum is the `linux-x64` line of the release's
-`SHASUMS256.txt`. Renovate does not track either input: it can raise a version but cannot carry the
-checksum with it, so a version alone would fail the signing job's check, and the bump is by hand.
+in every workflow that has one, and the checksum is the one for `./mise-v<version>-linux-x64` in the
+release's `SHASUMS256.txt`. Renovate does not track either input: it can raise a version but cannot
+carry the checksum with it, so a version alone would fail the signing job's check, and the bump is
+by hand.
 The publish job also turns the action's cache off, so nothing runs from an entry another job saved.
 
 The tag moves last and by digest: `main` only ever names an artifact that is signed and verified,
@@ -975,12 +976,15 @@ and signing, verifying and tagging all name it by its digest, so the tag ends on
 that were signed and verified; a tag can change between two steps, a digest cannot. It moves only on
 a run on `refs/heads/main` for which no newer commit on `main` changes `kubernetes/` or the
 workflow, so an older run, a re-run of one included, never moves it back; the newest such commit's
-own run decides, and a run does not judge a newer commit's tree. That leaves one case in which the
-tag stays on an older artifact than the last commit that passed: a commit passes, a newer one that
-changes `kubernetes/` arrives before the passing commit's run reaches the tag, and the newer one
-fails its check. The passing commit's run then leaves the tag alone and the failing one publishes
-nothing, and the same happens when GitHub replaces the passing commit's waiting run with the
-failing one's. The tag stays where it was until the next commit that passes, which publishes. Runs
+own run decides, and a run does not judge a newer commit's tree. That leaves two cases in which the
+tag stays on an older artifact than the newest passing commit's. In the first, a newer commit
+that changes `kubernetes/` arrives before the passing commit's run reaches the tag, and fails its
+check: the passing commit's run leaves the tag alone and the failing one publishes nothing, and the
+same happens when GitHub replaces the passing commit's waiting run with the failing one's. In the
+second, a re-run of an older run starts while the passing commit's run is waiting, and GitHub
+replaces the waiting run with the re-run, which leaves the tag alone, as the passing commit is newer
+than its own. In both, the tag stays where it was until a later run publishes a tree that passes:
+the run of the next commit that passes, or, in the second case, a manual run as well. Runs
 share one concurrency group that never cancels a run in progress, so they never overlap: a run that
 starts while another is in progress waits for it, and GitHub replaces a waiting run with a newer one.
 A run on another branch, or one a newer commit overtook, such as a re-run of an
