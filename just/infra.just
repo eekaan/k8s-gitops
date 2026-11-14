@@ -98,7 +98,7 @@ edge-check *args:
 edge-routes edge='1':
     scripts/edge-routes {{ quote(edge) }}
 
-# Replace the edge routers one at a time after a change to their configuration, once the stack's name is typed back (--yes: without asking): replace one, wait until edge-check passes for it, then the other; stops at the first edge that does not pass
+# Replace the edge routers one at a time after a change to their configuration, once the stack's name is typed back (--yes: without asking): replace one, wait until edge-check passes for it, then the other; stops at the first edge that does not pass. --replace replaces each edge's instance and boot volume even when the configuration is unchanged, which is how a new image reaches them
 [positional-arguments]
 edge-rollout *flags:
     scripts/edge-rollout "$@"

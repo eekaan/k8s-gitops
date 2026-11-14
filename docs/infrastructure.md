@@ -58,9 +58,9 @@ them is a `just` recipe.
   `EDGE_IMAGE` and `CI_HOST_IMAGE` can be chosen without a console.
 - `just edge-ssh-key` creates the edge routers' SSH key pair at `EDGE_SSH_KEY_FILE`, mode 0600 and
   without a passphrase, unless a key is there, and says only whether it did.
-  `just edge-check [--edge 1|2]`, `just edge-routes [1|2]` and `just edge-rollout [--yes]` check,
-  show and roll out the edge routers ([The edge routers](#the-edge-routers),
-  [runbooks/edge.md](runbooks/edge.md)).
+  `just edge-check [--edge 1|2]`, `just edge-routes [1|2]` and
+  `just edge-rollout [--replace] [--yes]` check, show and roll out the edge routers
+  ([The edge routers](#the-edge-routers), [runbooks/edge.md](runbooks/edge.md)).
 - `just edge-policy-check` proves the edge routers' routing policy against real BGP speakers, with
   docker; `just ci` does the same inside its Dagger module ([Routing](#routing)).
 
@@ -414,29 +414,45 @@ the image's release, puts the files under `/etc/edge` in place, checks the rules
 as far as the image's repositories do: a rebuild installs whatever the release holds then, so a new
 edge may have newer packages than the one it replaces, and nothing pins them further.
 
-Changing anything the user data renders replaces that edge: an edge is rebuilt, not patched. Both
-edges render from one template, so a change to it replaces both.
+Changing anything the user data renders replaces that edge, as the OpenStack provider creates a
+new instance when its `user_data` changes: an edge is rebuilt, not patched. Both edges render from
+one template, so a change to it replaces both. The image is another matter: the `vm` module ignores
+a change to an instance's boot device, as the Talos nodes need it to, so a new `EDGE_IMAGE`, or a
+newer image under the same name, which the stack's `most_recent` lookup picks, plans no change by
+itself. An edge takes it up only when its instance is replaced: whatever replaces an instance, the
+new one is planned from the configuration alone and boots a new volume made from the image the name
+resolves to then. A changed template replaces the edges anyway; for a new image alone,
+`just edge-rollout --replace` replaces them ([Rolling out a change](#rolling-out-a-change)).
 
 ### Rolling out a change
 
 `just infra-apply sto2/edge` refuses a plan that replaces or deletes both edges' instances, saying
-so, as both would be down until the new ones answered. `just edge-rollout` rolls such a change out. It plans and
-summarises the stack, and once the stack's name is typed back (`--yes`: without asking) it checks
-that edge 2 passes `just edge-check`, replaces edge 1 and its floating IP association alone
-(`-target`), records the new instance's SSH host keys, and waits until `just edge-check --edge 1`
-passes, trying every `EDGE_ROLLOUT_INTERVAL`
-seconds, 15 by default, for `EDGE_ROLLOUT_WAIT`, 900 by default. Then it does the same for edge 2
-and plans the whole stack once more. An edge whose check does not pass in time stops the rollout
-there, and the edge after it is not touched; an edge is never replaced while the other fails its
-check.
+so, as both would be down until the new ones answered. `just edge-rollout` rolls such a change out.
+It plans and summarises the stack, and once the stack's name is typed back (`--yes`: without
+asking) it checks that edge 2 passes `just edge-check`, plans and applies edge 1 and its floating IP
+association alone (`-target`), records the new instance's SSH host keys, and waits until
+`just edge-check --edge 1` passes, trying every `EDGE_ROLLOUT_INTERVAL` seconds, 15 by default, for
+`EDGE_ROLLOUT_WAIT`, 900 by default. Then it does the same for edge 2 and plans the whole stack once
+more. An edge whose check does not pass in time stops the rollout there, and the edge after it is
+not touched; an edge is never replaced while the other fails its check.
+
+`just edge-rollout --replace` does the same, and each edge's plan also replaces that edge's
+instance, `-replace=module.edge["N"].openstack_compute_instance_v2.this`, whether the configuration
+changed or not: the way a new image reaches the edges. Replacing the instance replaces its boot volume, which
+Nova makes from the image and deletes with the instance (`delete_on_termination`). The port is not
+replaced: it holds the fixed address and the floating IP's association, and the new instance is
+attached to it, so the edge comes back at the same addresses, behind the same security group, and
+the workers' sessions and the published address need nothing. A first boot on a new volume is a
+clean one: cloud-init runs the user data again for the new instance.
 
 A replacement has SSH host keys of its own at the floating address the old instance had, and the
 connection checks them strictly against the recorded ones. The recorded keys of an edge that is
 about to be replaced are therefore dropped, by the rollout and by `just infra-apply sto2/edge` alike
 (`ssh-keygen -R` on the edges' `known_hosts` file), and the new ones are recorded the way the first
 build's were: their fingerprints are shown and `yes` is typed. The rollout does it once the new
-instance answers on SSH, before the edge's check; after `just infra-apply sto2/edge` the next
-`just edge-check` does.
+instance answers on SSH, before the edge's check, and stops at once when the keys are not accepted;
+after `just infra-apply sto2/edge` the next `just edge-check` does. An edge whose part of the plan
+does not replace its instance keeps its recorded keys.
 
 ### Checking and reading
 

@@ -77,7 +77,8 @@ that publish the cluster's Services have recipes of their own, each described in
 - `just edge-ssh-key` creates the edge routers' SSH key pair at `EDGE_SSH_KEY_FILE`.
 - `just edge-check` checks, reading only, that both edge routers serve.
 - `just edge-routes` shows an edge router's BGP sessions and routes, in a terminal only.
-- `just edge-rollout` replaces the edge routers one at a time, checking each before the next.
+- `just edge-rollout [--replace]` replaces the edge routers one at a time, checking each before
+  the next; `--replace` replaces them when only the image is new.
 - `just edge-policy-check` proves the edge routers' routing policy with real BGP speakers.
 
 `docs/kubernetes.md`
