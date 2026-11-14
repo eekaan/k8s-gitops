@@ -5,7 +5,7 @@
 # to OUT. Both trees are only ever input to that code, so a change to the tree alone is shown by the
 # reviewed render code. This script, the recipe, the module and the workflow that run it are the
 # checkout's own, so a pull request that changes them decides what the comment says. A base without
-# the render code is rendered with this checkout's.
+# the render code, or one its own render code does not render, is rendered with this checkout's.
 #
 # Usage: scripts/render-pr BASE OUT   (BASE is a commit; the first parent of HEAD when empty)
 set -euo pipefail
@@ -31,9 +31,19 @@ if [[ ! -x $code/render || ! -x $code/render-diff ]]; then
   code="$root/scripts"
 fi
 echo "render-pr: rendering the base, $commit"
-"$code/render" "$tmp/base.out" "$tmp/base"
+if ! "$code/render" "$tmp/base.out" "$tmp/base"; then
+  # A base its own render code refuses has no reviewed render to compare with: no pull request
+  # could then be rendered at all, the one that makes the base renderable included.
+  [[ $code != "$root/scripts" ]] || die "this checkout's render code does not render the base"
+  echo "render-pr: the base's render code does not render the base; this checkout's renders both" >&2
+  code="$root/scripts"
+  mkdir "$tmp/again"
+  "$code/render" "$tmp/again/base.out" "$tmp/base"
+  mv "$tmp/again/base.out" "$tmp/base.fresh"
+fi
+[[ ! -d $tmp/base.fresh ]] || base_out="$tmp/base.fresh"
 echo "render-pr: rendering $root"
 "$code/render" "$tmp/head.out" "$root"
 mkdir -p "$(dirname "$out")"
-"$code/render-diff" "$tmp/base.out" "$tmp/head.out" >"$out"
+"$code/render-diff" "${base_out:-$tmp/base.out}" "$tmp/head.out" >"$out"
 echo "render-pr: wrote the comment to $out"

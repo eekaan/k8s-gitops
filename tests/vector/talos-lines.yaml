@@ -1,0 +1,154 @@
+---
+# Vector's unit tests of the log collector's configuration (kubernetes/apps/base/monitoring/vector),
+# which `just vector-check` runs with `vector test` beside the rendered configuration, in the image
+# the collector runs, with VECTOR_SELF_NODE_NAME set to node-1. Each input is a line of a format
+# Talos v1.14 writes to /var/log/<service>.log, as the file source hands it on: the line in message,
+# the file it came from in file, the pod's name in host and the time it was read in timestamp. The
+# formats are the kernel's messages, the prefix Go's log package gives machined's, apid's and
+# trustd's lines, etcd's JSON, containerd's logfmt and the kubelet's klog. Each line stays whole,
+# takes its own time and level where it has them, and gets the node's name and its service's.
+tests:
+  - name: a kernel message keeps the kernel's time and priority
+    inputs:
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/kernel.log"
+          .host = "vector-x1y2z"
+          .message = "kern:    warn: [2026-11-14T12:00:01.123456789Z]: drbd: module verification failed"
+          .timestamp = t'2026-11-14T13:00:00Z'
+    outputs:
+      - extract_from: talos_files
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.talos_service, "kernel")
+              assert_eq!(.node, "node-1")
+              assert_eq!(.facility, "kern")
+              assert_eq!(.level, "warn")
+              assert_eq!(.timestamp, t'2026-11-14T12:00:01.123456789Z')
+              assert_eq!(.message, "kern:    warn: [2026-11-14T12:00:01.123456789Z]: drbd: module verification failed")
+              assert!(!exists(.host))
+
+  - name: a machined line keeps the time Go's log package wrote, also from the rotated file
+    inputs:
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/machined.log.1"
+          .host = "vector-x1y2z"
+          .message = "2026/11/14 12:00:02.234567 [talos] task startAllServices (1/1): done"
+          .timestamp = t'2026-11-14T13:00:00Z'
+    outputs:
+      - extract_from: talos_files
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.talos_service, "machined")
+              assert_eq!(.node, "node-1")
+              assert_eq!(.timestamp, t'2026-11-14T12:00:02.234567Z')
+              assert!(!exists(.level))
+
+  - name: an etcd line keeps the time and level of its JSON
+    inputs:
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/etcd.log"
+          .message = s'{"level":"warn","ts":"2026-11-14T12:00:03.345678Z","caller":"etcdserver/util.go:170","msg":"apply request took too long"}'
+          .timestamp = t'2026-11-14T13:00:00Z'
+    outputs:
+      - extract_from: talos_files
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.talos_service, "etcd")
+              assert_eq!(.level, "warn")
+              assert_eq!(.timestamp, t'2026-11-14T12:00:03.345678Z')
+
+  - name: a containerd line keeps the time and level of its logfmt
+    inputs:
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/containerd.log"
+          .message = s'time="2026-11-14T12:00:04.456789012Z" level=error msg="failed to pull image"'
+          .timestamp = t'2026-11-14T13:00:00Z'
+    outputs:
+      - extract_from: talos_files
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.talos_service, "containerd")
+              assert_eq!(.level, "error")
+              assert_eq!(.timestamp, t'2026-11-14T12:00:04.456789012Z')
+
+  - name: a kubelet line keeps the time and level of its klog header
+    inputs:
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/kubelet.log"
+          .message = s'E1114 12:00:05.567890    1234 pod_workers.go:1301] "Error syncing pod, skipping"'
+          .timestamp = t'2026-11-14T13:00:00Z'
+    outputs:
+      - extract_from: talos_files
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.talos_service, "kubelet")
+              assert_eq!(.level, "error")
+              # klog writes no year.
+              assert_eq!(format_timestamp!(.timestamp, "%m-%d %H:%M:%S%.6f"), "11-14 12:00:05.567890")
+
+  # klog writes no year, and Vector takes the current one, the year the tests run in. Each of the
+  # next two reads its line on 1 January, so a line from 31 December would be dated a year ahead.
+  - name: a kubelet line from 31 December read on 1 January is dated in the year before
+    inputs:
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/kubelet.log"
+          .message = s'I1231 23:59:58.123456    1234 kubelet.go:2511] "SyncLoop (housekeeping)"'
+          .timestamp = parse_timestamp!(format_timestamp!(now(), "%Y") + "-01-01T00:00:05Z", "%+")
+    outputs:
+      - extract_from: talos_files
+        conditions:
+          - type: vrl
+            source: |
+              year = to_int!(format_timestamp!(now(), "%Y"))
+              assert_eq!(.timestamp, parse_timestamp!(to_string(year - 1) + "-12-31T23:59:58.123456Z", "%+"))
+
+  - name: a kubelet line dated ahead even in the year before keeps the time it was read
+    inputs:
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/kubelet.log"
+          .message = s'I1231 23:59:58.123456    1234 kubelet.go:2511] "SyncLoop (housekeeping)"'
+          .timestamp = parse_timestamp!(to_string(to_int!(format_timestamp!(now(), "%Y")) - 2) + "-01-01T00:00:05Z", "%+")
+    outputs:
+      - extract_from: talos_files
+        conditions:
+          - type: vrl
+            source: |
+              year = to_int!(format_timestamp!(now(), "%Y"))
+              assert_eq!(.timestamp, parse_timestamp!(to_string(year - 2) + "-01-01T00:00:05Z", "%+"))
+
+  - name: a line without a time of its own keeps the time it was read
+    inputs:
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/udevd.log"
+          .message = "Starting systemd-udevd version 257"
+          .timestamp = t'2026-11-14T13:00:00Z'
+    outputs:
+      - extract_from: talos_files
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.talos_service, "udevd")
+              assert_eq!(.message, "Starting systemd-udevd version 257")
+              assert_eq!(.timestamp, t'2026-11-14T13:00:00Z')
+              assert!(!exists(.level))

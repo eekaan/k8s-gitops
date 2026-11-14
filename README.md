@@ -32,7 +32,10 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
   (`just talos-check`: every node's machine configuration rendered from the template, the patches
   and fixture node data, and validated, offline), the offline build of `kubernetes/`, its render
   with every chart expanded (`just render-check`, which pulls the charts from their public
-  registries), and gitleaks over the committable files and the git history. The groups `tests-1` to `tests-3` each run a
+  registries), the log collector's configuration (`just vector-check`: Vector itself validates it
+  and runs its unit tests, in the image the collector runs, pinned by digest, so it needs Docker
+  too), and gitleaks over the committable files and the git history. The groups `tests-1` to
+  `tests-3` each run a
   third of the bats tests.
 - The groups are the dependencies of the `checks` recipe, and a group's checks are its own
   dependencies; a new check goes into exactly one group, and then runs in `just checks`, in
@@ -41,10 +44,11 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
   whose tests share state runs them one at a time, and says why); `just test 2/3` runs the second
   of three parts of the test files, which are split by their number of tests.
 - `just ci` runs the same groups through the Dagger module in `.dagger/modules/ci`, side by side,
-  each in containers of its own: Renovate's validator in its own image, every other check in a
-  container with the pinned tools, the tools image `versions.yaml` records when it was built for
-  these pins and one built from them otherwise ([The tools image](#the-tools-image)); the run's
-  first line says which. `just ci tests-2` runs one group, as each CI job does. It needs
+  each in containers of its own: Renovate's validator in its own image, Vector in the log
+  collector's image, every other check in a container with the pinned tools, the tools image
+  `versions.yaml` records when it was built for these pins and one built from them otherwise
+  ([The tools image](#the-tools-image)); the run's first line says which. `just ci tests-2` runs
+  one group, as each CI job does. It needs
   only `just`, the pinned `dagger` and a container runtime such as Docker. Every group runs to its
   end, and the run ends with each group's output under a heading `== <group>: passed` or
   `failed`, followed by its checks, and a line naming the groups that failed. Dagger shows every
