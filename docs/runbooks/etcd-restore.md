@@ -29,7 +29,7 @@ new machines, or with a new secrets bundle, is a different procedure and is not 
 A restore does not roll back the contents of volumes: a PersistentVolume's data is on the workers'
 data volumes, in LINSTOR's storage pool, not in etcd. LINSTOR's own records are in etcd, though: the
 controller keeps its database in the Kubernetes API, as Kubernetes objects ([Piraeus operator,
-components](https://github.com/piraeusdatastore/piraeus-operator/blob/v2/docs/explanation/components.md);
+components](https://github.com/piraeusdatastore/piraeus-operator/blob/v2.12.1/docs/explanation/components.md);
 the `LinstorCluster` here sets no other database). A restore to an older snapshot rolls those
 records back together with the PersistentVolumes and PersistentVolumeClaims, while the data and the
 DRBD metadata on the workers stay as they are now. So:

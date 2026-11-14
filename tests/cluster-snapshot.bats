@@ -905,7 +905,8 @@ resets_or_bootstraps() {
 
   [ "$status" -ne 0 ]
   asked=${output%%"Type lab-sto2 to reset and restore it"*}
-  [[ $asked == *"cannot be counted"* ]]
+  [[ $asked == *"cannot be counted, as it has no kubeconfig"* ]]
+  [[ $asked != *"does not answer"* ]]
   [ -z "$(calls '^kubectl ')" ]
 }
 

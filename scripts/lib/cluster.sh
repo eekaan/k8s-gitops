@@ -139,7 +139,7 @@ require_cluster_owns_nothing() {
   require_commands kubectl jq yq || return 1
   local asked=0
   if [[ -z $cluster ]]; then
-    why="$stack names no cluster, so there is no kubeconfig to ask"
+    why="$stack names no cluster, which leaves no kubeconfig to ask"
     cluster="the cluster of $stack"
   else
     kubeconfig=$infra_root/talos/$cluster/clusterconfig/kubeconfig

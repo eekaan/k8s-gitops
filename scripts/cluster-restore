@@ -129,7 +129,7 @@ step="waiting for every node to answer on the Talos API port"
 wait_for_talos_api "$talman_file"
 
 # LINSTOR keeps its database in the Kubernetes API (the Piraeus operator's LinstorCluster sets no
-# other: https://github.com/piraeusdatastore/piraeus-operator/blob/v2/docs/explanation/components.md
+# other: https://github.com/piraeusdatastore/piraeus-operator/blob/v2.12.1/docs/explanation/components.md
 # says the controller's database is stored as Kubernetes objects). A restore rolls it back with the
 # PersistentVolumes and claims, while the data and DRBD metadata on the workers stay as they are.
 step="counting the PersistentVolumes of LINSTOR the cluster has now"
@@ -137,6 +137,7 @@ linstor_driver=linstor.csi.linbit.com
 why="its API does not answer through its kubeconfig"
 if [[ ! -f $KUBECONFIG ]]; then
   volumes=
+  why="it has no kubeconfig"
 elif ! run_keeping_errors kubectl get persistentvolumes --output json --request-timeout=30s; then
   volumes=
   # An API that answers and refuses is told from one that does not answer; nothing else of
