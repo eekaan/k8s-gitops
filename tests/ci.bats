@@ -85,7 +85,7 @@ run_ci() {
   [[ $output == *"commit $flagged"*":1: $literal"* ]]
 }
 
-@test "just ci leaves Dagger's progress on" {
+@test "just ci shows every step where there is no terminal" {
   checkout
   bin="$BATS_TEST_TMPDIR/shown"
   mkdir -p "$bin"
@@ -98,7 +98,9 @@ run_ci() {
 
   [ "$status" -eq 0 ]
   grep -qx 'checks' "$BATS_TEST_TMPDIR/dagger.args"
-  run grep -xE -- '--silent|-s|--quiet|-q+|--progress=.*' "$BATS_TEST_TMPDIR/dagger.args"
+  # This run has no terminal, like a CI job, where only plain progress prints each step as it happens.
+  grep -qx -- '--progress=plain' "$BATS_TEST_TMPDIR/dagger.args"
+  run grep -xE -- '--silent|-s|--quiet|-q+' "$BATS_TEST_TMPDIR/dagger.args"
   [ "$status" -ne 0 ]
 }
 

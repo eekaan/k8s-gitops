@@ -34,9 +34,10 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
 - `just ci` runs the same checks through the Dagger module in `.dagger/modules/ci`: Renovate's
   validator in its own image, every other check in a container built from the pins. It needs only
   `just`, the pinned `dagger` and a container runtime such as Docker, and it is what CI runs on
-  every pull request. Dagger shows its progress and each check's output while it runs; that
-  progress names the checkout's path on the machine, so paste the checks' own lines into a pull
-  request, not the whole of it.
+  every pull request. Dagger shows every step and each check's output while it runs: its live
+  view in a terminal, and line by line where there is none, as in CI. The live view can name the
+  checkout's path on the machine, so paste the checks' own lines into a pull request, not the
+  whole of it.
 - `just test-hermetic` runs the bats tests that drive `just ci` itself.
 
 `docs/infrastructure.md` covers the recipes that plan, apply and destroy the OpenTofu stacks: what
