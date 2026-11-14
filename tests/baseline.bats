@@ -417,7 +417,7 @@ envoy_gateway_config() {
 
 @test "Spegel serves no debug page" {
   local flags
-  # The page, on the metrics port every pod reaches, lists the node's images and peers and pulls
+  # The page, on the metrics port, lists the node's images and peers and pulls
   # an image on request. Spegel serves it when the flag is absent.
   render spegel
   flags="$(yq -N 'select(.kind == "DaemonSet" and .metadata.name == "spegel") | .spec.template.spec.containers[]

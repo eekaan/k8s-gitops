@@ -186,22 +186,16 @@ does not define itself.
   the nodes is rolled out while it runs. It writes containerd's registry mirror configuration to
   `/etc/cri/conf.d/hosts`, where Talos' containerd reads it.
 
-  It serves any image a node holds, one pulled with credentials included, to anything that reaches
-  its registry, on every node's port 30020 or on its pod: a pull through a mirror carries no
-  credentials, and Spegel has none to check
+  Its registry, on every node's port 30020 and on its pod, takes no credentials, by Spegel's design:
+  containerd sends a mirror none, and Spegel could not check them
   ([Spegel](https://spegel.dev/docs/faq/#why-am-i-able-to-pull-private-images-without-image-pull-secrets)).
-  What keeps the port from everything outside the node network is the nodes' security group
-  (`infra/openstack/modules/talos-nodes`), which admits from elsewhere only the Talos and Kubernetes
-  APIs ([cluster.md](cluster.md#the-control-planes-metrics)); every pod reaches it, as the tree has
-  no network policy. The chart can have the registry require basic authentication
-  (`basicAuthSecretName`); it is not set.
+  An image a node pulled with credentials is therefore served within the cluster; the nodes'
+  security group (`infra/openstack/modules/talos-nodes`) admits nothing from outside the node
+  network but the Talos and Kubernetes APIs ([cluster.md](cluster.md#the-control-planes-metrics)).
 
-  Its metrics port, which every pod reaches too, serves Go's profiler, pprof, whatever the values
-  say
+  Prometheus scrapes its metrics port, where Spegel 0.8.1 also serves Go's profiler
   ([Spegel](https://github.com/spegel-org/spegel/blob/v0.8.1/main.go#L278-L305)); the values turn
-  off the debug page beside it, which lists the node's images and peers and pulls an image on
-  request. Keeping pprof from other pods would take a network policy admitting only Prometheus to
-  that port, or a Spegel release that can turn it off.
+  off the debug page beside it.
 - `reloader` restarts a workload annotated for it when a ConfigMap or Secret it uses changes, and
   nothing else.
 - `descheduler` runs the chart's default policy every five minutes, with two changes: a pod is
