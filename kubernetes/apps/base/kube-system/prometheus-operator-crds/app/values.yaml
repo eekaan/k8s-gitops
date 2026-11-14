@@ -1,0 +1,10 @@
+---
+# Values for the prometheus-operator-crds chart, read by the HelmRelease through a ConfigMap
+# generated without substitution. Keys not set here keep the chart's defaults, which install every
+# definition of the monitoring.coreos.com group.
+
+crds:
+  # Deleting a definition deletes every object of its kind, so Helm leaves the definitions in
+  # place when the release is uninstalled, as it is when this application leaves the tree.
+  annotations:
+    helm.sh/resource-policy: keep

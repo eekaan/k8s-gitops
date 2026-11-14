@@ -108,6 +108,35 @@ the application, together with `components/`, at the same paths as in the tree, 
 reconciles only the applications it touches (ADR 0004). Falling back to one shared source is a
 `sourceRef` change in each `ks.yaml`, to `kind: OCIRepository` and `name: flux-system`.
 
+## Resource definitions
+
+Resource definitions that several applications use are applications of their own in
+`apps/base/kube-system/`, so their version does not depend on whichever chart also bundles them:
+
+- `prometheus-operator-crds`: every definition of the Prometheus Operator's `monitoring.coreos.com`
+  group (ServiceMonitor, PodMonitor, PrometheusRule and the rest), from the upstream
+  `prometheus-operator-crds` chart, which ships them and nothing else.
+- `gateway-api-crds`: the Gateway API's standard channel (`gateway.networking.k8s.io`). Its `app/`
+  holds a `GitRepository` for the upstream repository at the release tag, checking out only
+  `config/crd`, and an inner `Kustomization` that applies upstream's kustomization there, the one
+  the release's `standard-install.yaml` is built from. Its patches leave out the release's
+  `safe-upgrades` admission policy and binding, so it applies resource definitions only. Both
+  objects live in `kube-system`, where the application's `targetNamespace` puts them; the inner
+  `Kustomization` is not a child of the root, gets none of its defaults and substitutes nothing.
+
+Both `ks.yaml` files set `wait`, so each is Ready only once its definitions are established. An
+application that creates objects of these groups, or whose chart does, names the matching one in
+`dependsOn` and turns off any copy of the same definitions its own chart would install. No
+application does yet: no ServiceMonitor, PodMonitor, dashboard or route is enabled anywhere.
+
+Deleting a definition deletes every object of its kind, so neither application ever deletes one,
+also not when it leaves the tree. Neither applies a definition itself. The monitoring chart's
+values give each definition `helm.sh/resource-policy: keep`, so Helm leaves them when Flux
+uninstalls the release. The inner Gateway API `Kustomization` sets `prune: false` and
+`deletionPolicy: Orphan`, so it leaves what it applied when it is deleted, and keeps a definition
+a newer release drops. `tests/baseline.bats` renders the chart and builds the pinned Gateway API
+source offline to check both, and that they yield definitions only.
+
 ## Flux itself
 
 The Flux Operator and the `FluxInstance` it runs Flux from are the cluster directory's two

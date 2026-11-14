@@ -11,3 +11,5 @@ resources:
   - ../../base/kube-system
   - ../../base/demo/hello/ks.yaml
   - ../../base/kube-system/cilium/ks.yaml
+  - ../../base/kube-system/gateway-api-crds/ks.yaml
+  - ../../base/kube-system/prometheus-operator-crds/ks.yaml

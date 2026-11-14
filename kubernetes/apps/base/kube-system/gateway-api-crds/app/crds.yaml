@@ -1,0 +1,47 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+# Applies the Gateway API's standard channel from the GitRepository beside it. It lives in
+# kube-system with its source, where the application's targetNamespace puts both. It is not a
+# child of the root, so it gets none of the root's defaults and sets what it needs itself; it
+# substitutes nothing.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: gateway-api
+spec:
+  interval: 30m
+  retryInterval: 1m
+  timeout: 3m
+  sourceRef:
+    kind: GitRepository
+    name: gateway-api
+  path: ./config/crd
+  # Deleting a definition deletes every object of its kind, so nothing this Kustomization applied
+  # is ever deleted: not a definition a newer release drops, and none when the Kustomization itself
+  # is deleted, as it is when the application leaves the tree.
+  prune: false
+  deletionPolicy: Orphan
+  # Ready once every definition is established; the application's own wait waits for that.
+  wait: true
+  patches:
+    # The release also installs its safe-upgrades admission policy and binding, which refuse
+    # Gateway API definitions of an older release or of the experimental channel. This application
+    # installs resource definitions only.
+    - patch: |
+        $patch: delete
+        apiVersion: admissionregistration.k8s.io/v1
+        kind: ValidatingAdmissionPolicy
+        metadata:
+          name: _
+      target:
+        group: admissionregistration.k8s.io
+        kind: ValidatingAdmissionPolicy
+    - patch: |
+        $patch: delete
+        apiVersion: admissionregistration.k8s.io/v1
+        kind: ValidatingAdmissionPolicyBinding
+        metadata:
+          name: _
+      target:
+        group: admissionregistration.k8s.io
+        kind: ValidatingAdmissionPolicyBinding
