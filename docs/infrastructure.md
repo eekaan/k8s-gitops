@@ -309,7 +309,10 @@ other routing daemon is off in its daemon list. Its configuration, `frr.conf`, i
   cluster stack leaves room for ([The node subnet](#the-node-subnet)); FRR's default is 100.
 - Inbound, `neighbor workers route-map SERVICES-IN in` applies a route map that permits what the
   prefix list `SERVICES` matches: `permit <service range> ge 32 le 32`, a /32 inside the range and
-  nothing shorter, then `deny any`. A route map in each direction is what `bgp ebgp-requires-policy`,
+  nothing shorter, then `deny any`. It also sets each accepted path's next hop to the worker that
+  announced it (`set ip next-hop peer-address`), whatever next hop the announcement carries, so a
+  worker can send the edge's traffic for a Service nowhere but to itself. Cilium announces its own
+  address as next hop anyway, so this changes nothing while the workers behave. A route map in each direction is what `bgp ebgp-requires-policy`,
   on by default, asks of an eBGP session. `neighbor workers maximum-prefix` is the number of
   addresses of the range. FRR counts the prefixes it accepts (without `force`), and the list lets
   in no more than the range holds, so the limit is reached only if the list is loosened: it guards
@@ -330,6 +333,17 @@ other routing daemon is off in its daemon list. Its configuration, `frr.conf`, i
   `bgp graceful-restart restart-time <seconds>`. They are written in the manifest alone, so a change
   there changes the edges' rendered configuration, which replaces both edges
   ([Rolling out a change](#rolling-out-a-change)); a stack test compares them with the manifest.
+- `no bgp graceful-restart notification` turns off the notification bit of RFC 8538, which FRR 10.3
+  sets by default. With it negotiated, graceful restart would also start when a session ends on a
+  NOTIFICATION or an expired hold timer, and FRR would keep a dead worker's paths, as stale, for the
+  restart time after its hold time: Cilium's operation guide says a peer "may need hold time +
+  restart time to withdraw routes received from the node", about 129 seconds here, while new
+  connections hashed to it go nowhere. Without the bit, a dead worker's paths go once its hold time,
+  9 seconds, has passed, and so do a worker's that Cilium takes out of BGP with a NOTIFICATION, as
+  when a node is shut down. Graceful restart still keeps a worker's paths for the restart time when
+  its session ends without a NOTIFICATION
+  ([RFC 4724](https://www.rfc-editor.org/rfc/rfc4724), [RFC 8538](https://www.rfc-editor.org/rfc/rfc8538),
+  [Cilium's BGP operation guide](https://docs.cilium.io/en/stable/network/bgp-control-plane/bgp-control-plane-operation/)).
 - `maximum-paths` is `max_workers`: as many equal-cost paths to one address as there can be workers.
   The most FRR takes is what its build allows: 128 by its manual, 256 in Debian's package. The
   kernel setting `net.ipv4.fib_multipath_hash_policy = 1` hashes a flow's layer 4 fields, so every
@@ -352,11 +366,21 @@ listen range is accepted and only its /32 inside the range is in the edge's tabl
 in another AS and the one outside the listen range have no session, that the edge advertised
 nothing back, that the speaker holds no path learned from the edge (which a `default-originate`
 would add and no count of advertised routes shows), and that both ends' session was established
-once and never dropped, so the readings are not of a session that is reset over and over. The
+once and never dropped, so the readings are not of a session that is reset over and over. Each
+speaker announces its prefixes with a next hop that is not its own address, and the check asserts
+that the accepted /32's path has the speaker's address as next hop instead; and that the edge offers
+graceful restart without the notification bit, as the speaker sees its capabilities. Before any of
+that, FRR's dry run (`vtysh -C -f`) reads the edge's file as rendered, whole, and must accept it,
+and must refuse a copy with a command FRR does not have, so the check is known to catch one. The
 static route is taken out of the file the proof's BGP daemon reads, which has no `zebra` or
-`staticd` beside it; the stack's tests check it. The proof does not show the routes reaching the kernel, equal-cost paths across
-several workers, graceful restart across a restart or the nftables rules, which the stack's tests
-compare as text and `nft --check` reads for syntax at first boot. The container's FRR takes 64
+`staticd` beside it; the stack's tests check it. The speakers sit on loopback addresses, which FRR
+refuses as next hops (martian next hops), so the proof's copy of the file also has
+`bgp allow-martian-nexthop`, and the routing policy alone decides what is accepted; the workers'
+addresses on the node subnet are no martians. The proof does not show the routes reaching the
+kernel, equal-cost paths across several workers, graceful restart across a restart or the nftables
+rules, which the stack's tests compare as text and `nft --check` reads for syntax at first boot:
+`nft` is in neither of the proof's containers, and `unshare` is not permitted in either, so no
+network namespace of its own could hold the rules. The container's FRR takes 64
 equal-cost paths where Debian's takes 256, so the proof renders with 64.
 
 ### The data path
@@ -410,7 +434,8 @@ carry none (ADR 0013).
 
 The first boot checks the release, installs `frr` and `nftables` with `apt` from the repositories of
 the image's release, puts the files under `/etc/edge` in place, checks the rules with
-`nft --check`, starts both and checks that FRR answers. The release pins the packages' versions only
+`nft --check` and loads them, checks FRR's file with FRR's dry run (`vtysh -C -f`), starts FRR and
+checks that it answers. A file either check refuses fails the first boot, saying which. The release pins the packages' versions only
 as far as the image's repositories do: a rebuild installs whatever the release holds then, so a new
 edge may have newer packages than the one it replaces, and nothing pins them further.
 

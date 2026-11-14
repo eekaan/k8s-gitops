@@ -5,12 +5,16 @@ service integrated-vtysh-config
 !
 ! The workers open the sessions and never listen, so the edge takes dynamic neighbours: any host of
 ! the node subnet that opens a session in the cluster's AS joins the one peer group. The peer group
-! is declared before the listen range that names it.
+! is declared before the listen range that names it. Graceful restart is on without the notification
+! bit (RFC 8538), which FRR sets by default: a session that ends on a NOTIFICATION or an expired hold
+! timer, as a dead worker's does, then withdraws the worker's paths at once instead of keeping them
+! for the restart time.
 router bgp ${edge_asn}
  bgp router-id ${router_id}
  no bgp default ipv4-unicast
  bgp graceful-restart
  bgp graceful-restart restart-time ${restart_time}
+ no bgp graceful-restart notification
  neighbor workers peer-group
  neighbor workers remote-as ${cluster_asn}
  bgp listen limit ${max_workers}
@@ -27,12 +31,14 @@ router bgp ${edge_asn}
  exit-address-family
 exit
 !
-! Only a host route inside the service range is accepted; everything else is denied.
+! Only a host route inside the service range is accepted; everything else is denied. Its next hop
+! is the worker that announced it, whatever next hop the announcement carries.
 ip prefix-list SERVICES seq 10 permit ${service_range} ge 32 le 32
 ip prefix-list SERVICES seq 20 deny any
 !
 route-map SERVICES-IN permit 10
  match ip address prefix-list SERVICES
+ set ip next-hop peer-address
 exit
 !
 ! Nothing is announced to the workers.

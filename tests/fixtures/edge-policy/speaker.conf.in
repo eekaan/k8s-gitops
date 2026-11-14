@@ -19,6 +19,7 @@ router bgp @AS@
   neighbor 127.0.0.1 route-map NEXTHOP out
  exit-address-family
 exit
+! A next hop that is not the speaker's own address: the edge takes the speaker's address instead.
 route-map NEXTHOP permit 10
  set ip next-hop 192.0.2.99
 exit

@@ -8,8 +8,10 @@
 #   a  the cluster's AS, from an address inside the edge's listen range: accepted
 #   b  another AS, from an address inside the range: refused by the peer group's remote AS
 #   c  the cluster's AS, from an address outside the range: not a dynamic neighbour
-# Prints what the edge and the first speaker report, as FRR's JSON, the first speaker's table
-# included, in sections for scripts/edge-policy-assert.
+# Each speaker announces its prefixes with a next hop that is not its own address, which the edge
+# must replace with the speaker's. Prints what FRR's dry run says of the edge's file, then what the
+# edge and the first speaker report, as FRR's JSON, the first speaker's table and its view of the
+# edge's capabilities included, in sections for scripts/edge-policy-assert.
 # Usage: sh proof.sh DIR, the directory scripts/edge-policy-render wrote
 set -eu
 dir=$1
@@ -18,10 +20,33 @@ vty=/run/frr-proof
 mkdir -p "$vty/edge" "$vty/a" "$vty/b" "$vty/c" /etc/frr
 : > /etc/frr/vtysh.conf
 
+# FRR's own check of the edge's file as the edge holds it, the dry run of vtysh, which reads it as
+# FRR does when it starts; and of a copy with a command FRR does not have, which it must refuse, or
+# the check would prove nothing.
+echo "== syntax"
+if vtysh -C -f "$dir/edge.conf" > "$vty/syntax.out" 2>&1; then
+  echo "the edge's file is accepted"
+else
+  echo "the edge's file is refused:"
+  cat "$vty/syntax.out"
+fi
+{
+  cat "$dir/edge.conf"
+  echo "no-such-command"
+} > "$vty/unknown.conf"
+if vtysh -C -f "$vty/unknown.conf" > /dev/null 2>&1; then
+  echo "a file with an unknown command is accepted"
+else
+  echo "a file with an unknown command is refused"
+fi
+
 # The edge's own file, unchanged but for what the BGP daemon started on its own does not know: the
 # one line only vtysh reads, and the static route, which staticd installs (here there is no zebra).
-grep -v -e '^service integrated-vtysh-config$' -e '^ip route ' "$dir/edge.conf" > "$vty/edge.conf"
-/usr/lib/frr/bgpd -C -Z -S -f "$vty/edge.conf" 2> /dev/null
+# The speakers sit on loopback addresses, which FRR refuses as next hops (martians), so the copy also
+# lets the daemon take them: the routing policy alone then decides what the table holds. A worker's
+# address on the node subnet is no martian.
+grep -v -e '^service integrated-vtysh-config$' -e '^ip route ' "$dir/edge.conf" |
+  awk '{ print } /^router bgp / { print " bgp allow-martian-nexthop" }' > "$vty/edge.conf"
 /usr/lib/frr/bgpd -d -S -Z -f "$vty/edge.conf" -i "$vty/edge.pid" --vty_socket "$vty/edge" -A 127.0.0.1 -l 127.0.0.1 2> /dev/null
 
 # speaker NAME AS ADDRESS INSIDE PORT: a speaker that does not listen (-p 0), with its own vty socket.
@@ -52,3 +77,4 @@ section table edge 'show bgp ipv4 unicast json'
 section advertised edge 'show bgp ipv4 unicast neighbors 127.0.0.2 advertised-routes json'
 section offered a 'show bgp ipv4 unicast summary json'
 section learned a 'show bgp ipv4 unicast json'
+section capability a 'show bgp neighbors 127.0.0.1 json'

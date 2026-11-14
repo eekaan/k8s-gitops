@@ -48,8 +48,9 @@ To learn what the edge sees, `just edge-routes` (or `just edge-routes 2`) prints
 table, with addresses, in a terminal only: it refuses in CI and when its output is piped. In the
 table, a route has one path per announcing worker, each with that worker's address as next hop; the
 paths marked as multipath are the equal-cost ones the kernel spreads connections over. In the
-sessions, a `*` before an address marks a dynamic neighbour, and the last column is the number of
-prefixes it sent.
+sessions, a `*` before an address marks a dynamic neighbour; the column `State/PfxRcd` holds, once
+a session is established, the number of prefixes the edge accepted from that worker, and `PfxSnt`
+the number it sent, which is 0.
 
 ## Replacing one edge
 
@@ -84,20 +85,21 @@ until the replacement answers, as they do while an edge is lost.
 
 ## A dead edge
 
-- **From the cluster's side**: the workers' sessions to it go down once the hold time, 9 seconds,
-  has passed, and then, as graceful restart is on, once the restart time, 120 seconds, has too;
-  Cilium reports the sessions as not established and keeps retrying. Nothing in the cluster changes
-  and no Service is affected, as the other edge keeps its sessions.
+- **From the cluster's side**: the workers' sessions to it end once the hold time, 9 seconds, has
+  passed; Cilium reports them as not established and keeps retrying. The edge advertises nothing,
+  so the workers have no route of its to keep or withdraw. Nothing in the cluster changes and no
+  Service is affected, as the other edge keeps its sessions.
 - **From a client's**: a hostname that publishes both floating IPs answers half of the connections
   with a timeout while one edge is down, until its address is taken out of DNS; a client that
   retries reaches the other. The connections that were on the dead edge are lost.
 - A worker that dies is withdrawn from the table of both edges once its sessions' hold time, 9
-  seconds, has passed, or, if the edge and Cilium negotiated graceful restart for a session that
-  ends on a hold timer (RFC 8538's notification bit), once the restart time, 120 seconds, has passed
-  too: about 130 seconds at most. The edge's configuration does not turn that bit on, so which
-  applies is read at the live build's failover test, by timing how long a stopped worker's /32 paths
-  stay in `just edge-routes`. Connections hashed to the dead worker are reset in the meantime; the
-  next ones are spread over the others.
+  seconds, has passed. FRR 10.3 offers graceful restart's notification bit (RFC 8538) by default,
+  and with it negotiated, a session that ends on an expired hold timer would keep the dead worker's
+  paths for the restart time, 120 seconds, more; the edge's configuration turns the bit off
+  (`no bgp graceful-restart notification`), so it is not negotiated and the paths go at the hold
+  time ([infrastructure.md](../infrastructure.md#routing)). The live build's failover test times
+  how long a stopped worker's /32 paths stay in `just edge-routes`. New connections hashed to the
+  dead worker fail until then; the next ones are spread over the others.
 
 Take a dead edge's address out of DNS while it is down, and put it back when `just edge-check` passes.
 An instance that is gone from the cloud is created again by `just infra-apply sto2/edge`, which

@@ -162,6 +162,21 @@ run "an_edge_accepts_sessions_from_the_node_subnet_in_the_clusters_as_and_from_n
     condition     = strcontains(output.config["1"].frr_conf, "\n bgp router-id 192.0.2.7\n") && strcontains(output.config["2"].frr_conf, "\n bgp router-id 192.0.2.8\n")
     error_message = "Each edge's router ID must be its own address."
   }
+
+  # Exactly these neighbour and listen statements, and one router: a static neighbour, one added to
+  # the peer group, another listen range or a second instance of BGP fails here. The timers are the
+  # scenario on the workers' settings.
+  assert {
+    condition = length(regexall("(?m)^router bgp ", output.config["1"].frr_conf)) == 1 && [
+      for line in regexall("(?m)^ (?:neighbor|bgp listen) .*$", output.config["1"].frr_conf) : line if !startswith(line, " neighbor workers timers ")
+      ] == [
+      " neighbor workers peer-group",
+      " neighbor workers remote-as 64496",
+      " bgp listen limit 80",
+      " bgp listen range 192.0.2.0/24 peer-group workers",
+    ]
+    error_message = "The router must declare exactly the one peer group, its remote AS, the listen limit and the one listen range, and no other neighbour."
+  }
 }
 
 run "an_edge_installs_a_32_inside_the_service_range_and_refuses_anything_else" {
@@ -172,9 +187,25 @@ run "an_edge_installs_a_32_inside_the_service_range_and_refuses_anything_else" {
     error_message = "The prefix list must permit only /32s inside the service range and deny everything else."
   }
 
+  # Every prefix list entry and every entry of the inbound route map, exactly: an entry added before,
+  # between or after them, such as a permit of any prefix or of the range's shorter prefixes, or a
+  # route map entry with no match, fails here.
   assert {
-    condition     = strcontains(output.config["1"].frr_conf, "\nroute-map SERVICES-IN permit 10\n match ip address prefix-list SERVICES\n") && !strcontains(output.config["1"].frr_conf, "route-map SERVICES-IN permit 20")
-    error_message = "The inbound route map must permit what the prefix list matches and nothing else."
+    condition = regexall("(?m)^ip prefix-list .*$", output.config["1"].frr_conf) == tolist([
+      "ip prefix-list SERVICES seq 10 permit 203.0.113.16/28 ge 32 le 32",
+      "ip prefix-list SERVICES seq 20 deny any",
+    ])
+    error_message = "The prefix lists must be exactly the one that permits /32s inside the service range and denies everything else."
+  }
+
+  assert {
+    condition = regexall("(?ms)^route-map SERVICES-IN .*?^exit$", output.config["1"].frr_conf) == tolist([join("\n", [
+      "route-map SERVICES-IN permit 10",
+      " match ip address prefix-list SERVICES",
+      " set ip next-hop peer-address",
+      "exit",
+    ])])
+    error_message = "The inbound route map must be one entry that permits what the prefix list matches, with the announcing worker as next hop, and nothing else."
   }
 
   assert {
@@ -240,12 +271,14 @@ run "the_edges_timers_and_graceful_restart_agree_with_what_the_workers_are_confi
     error_message = "The edge's keepalive, hold and connect retry times must be those of the workers' CiliumBGPPeerConfig."
   }
 
+  # Without the notification bit, which FRR sets by default: a dead worker's paths go when its hold
+  # timer expires, not a restart time later.
   assert {
     condition = yamldecode(file("../../../../../kubernetes/apps/base/kube-system/cilium-bgp/app/bgp-peer.yaml")).spec.gracefulRestart.enabled && strcontains(output.config["1"].frr_conf, format(
-      "\n bgp graceful-restart\n bgp graceful-restart restart-time %d\n",
+      "\n bgp graceful-restart\n bgp graceful-restart restart-time %d\n no bgp graceful-restart notification\n",
       yamldecode(file("../../../../../kubernetes/apps/base/kube-system/cilium-bgp/app/bgp-peer.yaml")).spec.gracefulRestart.restartTimeSeconds,
-    ))
-    error_message = "The edge must have graceful restart on with the restart time of the workers' CiliumBGPPeerConfig."
+    )) && length(regexall("(?m)^ (?:no )?bgp graceful-restart", output.config["1"].frr_conf)) == 3
+    error_message = "The edge must have graceful restart on with the restart time of the workers' CiliumBGPPeerConfig, without the notification bit, and no other graceful restart setting."
   }
 
   assert {

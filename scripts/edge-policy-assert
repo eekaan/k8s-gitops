@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Checks what the real-speaker proof of the edge routers' routing policy printed (tests/fixtures/
 # edge-policy/proof.sh, run in FRR by edge-policy-check): of the five prefixes a speaker in the
-# cluster's AS offered, only the /32 inside the service range is in the edge's table; the speakers
-# in another AS and outside the listen range have no session; and the edge advertised nothing back,
-# the speaker holds no path learned from it, and the sessions never dropped.
+# cluster's AS offered, only the /32 inside the service range is in the edge's table, with the
+# speaker's own address as next hop; the speakers in another AS and outside the listen range have no
+# session; the edge advertised nothing back, the speaker holds no path learned from it, and the
+# sessions never dropped; the edge offers graceful restart without the notification bit; and FRR's
+# dry run accepts the edge's file and refuses one with an unknown command.
 # Prints pass or FAIL per item and exits non-zero on any FAIL.
 # Usage: scripts/edge-policy-assert FILE, FILE being the proof's output
 set -euo pipefail
@@ -15,9 +17,18 @@ fi
 out=$1
 failed=0
 
-# section NAME: the JSON the proof printed under NAME.
+# section NAME: what the proof printed under NAME.
 section() {
   sed -n "/^== $1\$/,/^== /{/^== /d;p}" "$out"
+}
+# says DESCRIPTION SECTION LINE: passes when the section holds LINE.
+says() {
+  if section "$2" | grep -qxF -- "$3"; then
+    printf 'pass  %s\n' "$1"
+  else
+    printf 'FAIL  %s\n' "$1"
+    failed=1
+  fi
 }
 # expect DESCRIPTION SECTION JQ_FILTER: passes when the filter is true of the section's JSON.
 expect() {
@@ -29,6 +40,8 @@ expect() {
   fi
 }
 
+says "FRR's dry run accepts the edge's file as rendered" syntax "the edge's file is accepted"
+says "FRR's dry run refuses a file with a command FRR does not have" syntax "a file with an unknown command is refused"
 expect "the speaker offered all five prefixes" offered '.peers["127.0.0.1"].pfxSnt == 5'
 expect "exactly one session is established, the speaker in the cluster's AS inside the listen range" sessions \
   '[.peers | to_entries[] | select(.value.state == "Established") | .key] == ["127.0.0.2"]'
@@ -37,6 +50,14 @@ expect "the speaker outside the listen range has no session" sessions '.peers | 
 expect "the table holds the /32 inside the service range and nothing else" table \
   '(.routes | keys) == ["203.0.113.17/32"]'
 expect "the edge accepted one prefix of the five" sessions '.peers["127.0.0.2"].pfxRcd == 1'
+# The speaker announced its /32 with another address as next hop; the edge's path goes to the
+# speaker that announced it.
+expect "the accepted /32's one path has the announcing speaker's address as next hop" table \
+  '[.routes["203.0.113.17/32"][].nexthops[].ip] == ["127.0.0.2"]'
+# Graceful restart is on, without the notification bit (RFC 8538), so a hold timer expiry ends
+# graceful restart's retention instead of starting it.
+expect "the edge offers graceful restart without the notification bit" capability \
+  '.["127.0.0.1"] | .neighborCapabilities.gracefulRestart == "advertisedAndReceived" and .gracefulRestartInfo.nBit == false'
 expect "the edge advertised nothing" advertised '(.advertisedRoutes | length) == 0'
 expect "the speaker received nothing from the edge" offered '.peers["127.0.0.1"].pfxRcd == 0'
 # A statement that bypasses the outbound route map, default-originate, sends a default route that no
