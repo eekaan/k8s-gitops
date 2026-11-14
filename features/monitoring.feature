@@ -12,7 +12,7 @@ Feature: Monitoring
     When the chart is rendered offline with its resource definitions included
     Then it yields no CustomResourceDefinition, and it runs the Prometheus Operator version whose definitions the pinned prometheus-operator-crds chart installs
 
-  Scenario: Grafana is not installed
+  Scenario: The monitoring chart installs no Grafana
     Given the kube-prometheus-stack application's pinned chart and values
     When the chart is rendered offline
     Then it yields no Grafana workload, no Grafana datasource and no dashboard object
