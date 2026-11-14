@@ -630,3 +630,65 @@ EOF
   cluster=$(yq -p hcl -o json "$ROOT/infra/openstack/stacks/sto2/cluster/variables.tf" | jq -c '.variable.service_ports.default')
   [ "$edge" = "$cluster" ]
 }
+
+# first_boot: the edge stack's first-boot script, run here with the edge's file system under
+# EDGE_ROOT, a directory of the test's, and fakes of the system's commands first on PATH. The fake
+# vtysh's dry run refuses a file with a command FRR does not have, as FRR's does
+# (tests/fixtures/edge-policy/proof.sh checks that of FRR's own).
+first_boot() {
+  local root="$BATS_TEST_TMPDIR/edge-root" bin="$BATS_TEST_TMPDIR/edge-bin" tool
+  mkdir -p "$root/etc/edge" "$root/dev" "$root/var/log" "$bin"
+  printf 'PRETTY_NAME="Debian GNU/Linux 13 (trixie)"\nVERSION_CODENAME=trixie\n' > "$root/etc/os-release"
+  : > "$root/dev/console"
+  for tool in apt-get sysctl nft systemctl sleep; do
+    cat > "$bin/$tool" << EOF
+#!/usr/bin/env bash
+printf '%s\n' "$tool \$*" >> "$RECORD/argv"
+EOF
+  done
+  cat > "$bin/install" << EOF
+#!/usr/bin/env bash
+printf '%s\n' "install \$*" >> "$RECORD/argv"
+mkdir -p "\$(dirname "\${*: -1}")"
+cp "\${@: -2:1}" "\${*: -1}"
+EOF
+  cat > "$bin/vtysh" << EOF
+#!/usr/bin/env bash
+printf '%s\n' "vtysh \$*" >> "$RECORD/argv"
+if [[ \$1 == -C ]] && grep -qx 'no-such-command' "\$3"; then
+  echo "line 2: % Unknown command: no-such-command"
+  exit 2
+fi
+EOF
+  chmod +x "$bin"/*
+  run env EDGE_ROOT="$root" PATH="$bin:$PATH" bash "$ROOT/infra/openstack/stacks/sto2/edge/first-boot.sh"
+}
+
+@test "the first boot starts FRR only once FRR's dry run accepts its file, and fails saying why otherwise" {
+  local root="$BATS_TEST_TMPDIR/edge-root" steps
+  mkdir -p "$root/etc/edge"
+  for file in daemons nftables.conf sysctl.conf; do
+    echo "fixture $file" > "$root/etc/edge/$file"
+  done
+  printf 'router bgp 64497\nexit\n' > "$root/etc/edge/frr.conf"
+  first_boot
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *"edge-first-boot: done"* ]]
+  # The check of FRR's file, as it was put in place, comes before FRR is started.
+  steps=$(grep -nE "^vtysh -C -f $root/etc/frr/frr.conf\$|^systemctl restart frr\$" "$RECORD/argv" | cut -d: -f2-)
+  [ "$steps" = "$(printf '%s\n' "vtysh -C -f $root/etc/frr/frr.conf" 'systemctl restart frr')" ]
+
+  # A file FRR refuses: the first boot fails, says why on the console and in the log, and FRR is
+  # neither enabled nor restarted with it.
+  printf 'router bgp 64497\nno-such-command\nexit\n' > "$root/etc/edge/frr.conf"
+  : > "$RECORD/argv"
+  first_boot
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"edge-first-boot: FRR's dry run refuses /etc/frr/frr.conf"* ]]
+  [[ $output == *"Unknown command: no-such-command"* ]]
+  grep -q "FRR's dry run refuses /etc/frr/frr.conf" "$root/dev/console"
+  grep -q "FRR's dry run refuses /etc/frr/frr.conf" "$root/var/log/edge-first-boot.log"
+  absent -E '^systemctl (enable|restart) frr' "$RECORD/argv"
+}
