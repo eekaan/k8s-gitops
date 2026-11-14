@@ -1,5 +1,5 @@
 Feature: Cluster baseline
-  Resource definitions and small services that later applications assume.
+  Resource definitions, runtime classes and small services that later applications assume.
 
   Scenario: The monitoring resource definitions are installed without a controller
     Given the pinned chart and its values
@@ -30,3 +30,8 @@ Feature: Cluster baseline
     Given the two resource-definition applications
     When their Kustomizations and objects are read
     Then removing either application from the tree would not delete its definitions
+
+  Scenario: Each container runtime the image adds has a RuntimeClass with its handler
+    Given the runtime-classes application, enabled in the cluster's overlay
+    When it is built offline as Flux applies it
+    Then it yields exactly two RuntimeClasses, without a namespace: gvisor with gVisor's handler runsc, and kata with Kata Containers' handler kata

@@ -29,6 +29,41 @@ and the kubeconfig.
 [runbooks/rebuild.md](runbooks/rebuild.md) takes a running cluster down to nothing with
 `just cluster-destroy` and builds it again.
 
+## The node image
+
+The nodes boot the image the Image Factory builds from `talos/schematic.yaml`, and install and
+upgrade from its installer for the same schematic. Talos activates system extensions only when it
+installs or upgrades
+([Talos](https://docs.siderolabs.com/talos/v1.14/build-and-extend-talos/custom-images-and-development/system-extensions)),
+so a running node gets a new one through `just cluster-upgrade`, and configuration that depends on
+it follows with `just cluster-talos`
+([runbooks/image-replacement.md](runbooks/image-replacement.md)). The image carries three official
+extensions:
+
+- `siderolabs/drbd`: the DRBD kernel modules, for the storage layer, LINSTOR through the Piraeus
+  operator on DRBD, with LVM-thin storage pools and snapshots. Nothing in this repository installs
+  that layer. An extension's modules load only when the machine configuration lists them, and on
+  Talos the LINSTOR satellite cannot load a module itself
+  ([Piraeus](https://github.com/piraeusdatastore/piraeus-operator/blob/v2/docs/how-to/talos.md)),
+  so `talos/patches/all/kernel-modules.yaml` has every node load `drbd`, with its user-mode helper
+  scripts disabled, its TCP transport `drbd_transport_tcp`, `dm-thin-pool` for LVM-thin pools and
+  `dm-snapshot` for snapshots, which the Talos kernel has built in.
+- `siderolabs/gvisor`: gVisor, which registers the containerd runtime handler `runsc`; the
+  RuntimeClass `gvisor` selects it ([kubernetes.md](kubernetes.md#runtime-classes)). The
+  extension's README says gVisor requires unprivileged user namespace creation
+  ([gVisor extension](https://github.com/siderolabs/extensions/blob/main/container-runtime/gvisor/README.md)),
+  which Talos turns off as the KSPP recommends (`user.max_user_namespaces` is 0), and no patch here
+  turns it on.
+- `siderolabs/kata-containers`: Kata Containers, which registers the containerd runtime handlers
+  `kata`, on Cloud Hypervisor, and `kata-qemu`; the RuntimeClass `kata` selects the first. Kata
+  runs each pod in a virtual machine of its own and needs hardware virtualisation on the node, which
+  on a cloud instance means nested virtualisation
+  ([Kata Containers](https://github.com/kata-containers/kata-containers/blob/main/docs/install/README.md)).
+  On a node without it, a pod that selects `kata` does not start.
+
+No workload selects either runtime class. `infra-check` refuses the QEMU guest agent extension
+([runbooks/image-replacement.md](runbooks/image-replacement.md)).
+
 ## Upgrades
 
 The Talos and Kubernetes versions are set in `versions.yaml` only, and reach the recipes through

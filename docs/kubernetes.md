@@ -173,6 +173,18 @@ Kubernetes does not define itself.
 values key is one the pinned chart defines, and reads the approver's and metrics-server's
 rendered configuration.
 
+## Runtime classes
+
+`apps/base/kube-system/runtime-classes/` holds a RuntimeClass for each container runtime the node
+image adds ([cluster.md](cluster.md#the-node-image)), with the handler the extension's README
+gives: `gvisor`, handler `runsc`, and `kata`, handler `kata`, which also carries the overhead of
+Kata's virtual machine from that README, counted on top of a pod's requests. A RuntimeClass is
+cluster-scoped, so the application's `targetNamespace`, `kube-system` as for the resource
+definitions, gives it none. A pod selects one with `runtimeClassName`; none does. Flux applies them
+whatever image the nodes run, and a pod that selects one on a node whose image lacks its handler
+does not start. `tests/baseline.bats` builds the application as Flux applies it and checks the two
+classes and their handlers.
+
 ## Flux itself
 
 The Flux Operator and the `FluxInstance` it runs Flux from are the cluster directory's two
