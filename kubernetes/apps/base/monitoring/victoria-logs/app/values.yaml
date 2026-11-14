@@ -1,0 +1,34 @@
+---
+# Values for the victoria-logs-single chart, read by the HelmRelease through a ConfigMap generated
+# without substitution. Keys not set here keep the chart's defaults: one VictoriaLogs StatefulSet,
+# reached through a headless Service on port 9428, running as a non-root user with every capability
+# dropped and a read-only root filesystem, and no Vector, dashboard, ingress or route.
+#
+# One replica: single-node VictoriaLogs keeps one copy of its data, and its documentation makes a
+# highly available store out of whole copies, each fed by the collectors, which this cluster does
+# not need. The volume is replicated by LINSTOR instead, so losing a worker loses no logs. No
+# disruption budget: one that kept the only replica available would stop every drain of its node;
+# while it starts again on another worker, the collectors hold what they gather in their buffers.
+
+server:
+  # The Service, the StatefulSet and the ServiceMonitor are all named victoria-logs, which is what
+  # the collector sends to and an operator forwards a port to.
+  fullnameOverride: victoria-logs
+  # Two weeks covers looking back over a working week and the one before it, as Prometheus keeps its
+  # metrics. Whole days older than that are dropped.
+  retentionPeriod: 14d
+  # The oldest days are also dropped once the data takes 15 GiB, three quarters of the volume.
+  # VictoriaLogs checks its disk use only now and then, and stops taking logs when the volume is
+  # full, so its documentation asks for at least a fifth of the volume to stay free.
+  retentionDiskSpaceUsage: 15GiB
+  # A claim on the cluster's default storage class.
+  persistentVolume:
+    size: 20Gi
+  # The documentation gives no figures, only half the memory and CPU spare; these fit the lab's
+  # volume of logs. No limit is set, as for Prometheus.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+  serviceMonitor:
+    enabled: true

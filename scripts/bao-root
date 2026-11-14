@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# Runs one command with a fifteen-minute token that has OpenBao's root policy, made from the recovery
+# keys in the operator's custody file: the way back to privileged access when a role, a policy or a
+# mount has to change after the first start, as the initial configuration never runs again
+# (docs/runbooks/openbao.md). As the role operator, through the session of scripts/lib/openbao.sh,
+# it starts OpenBao's authenticated root token generation, gives it a threshold of the shares,
+# decrypted from FILE with the Talos age key into memory only, and has OpenBao decode the result.
+# A root token made so never expires, so it serves only to read its own accessor and to mint an
+# orphan token with the root policy, which expires after fifteen minutes and cannot be renewed, and
+# is revoked at once; no command runs while it lives. The command runs with the orphan token in
+# BAO_TOKEN, and OpenBao's address through the port-forward, its CA and its certificate's name in
+# BAO_ADDR, BAO_CACERT and BAO_TLS_SERVER_NAME, as OpenBao's CLI reads them; it prints what it
+# prints, and nothing here prints a share or a token. The token is revoked however the command and
+# this script end, and expires by itself if neither can revoke it; a generation started and not
+# finished is cancelled. A token OpenBao does not revoke is named by its accessor, with the step
+# that revokes it, and the script fails even when the command succeeded. Every field it reads from
+# OpenBao's generate-root, decode and lookup answers is under data, as OpenBao's logical backend
+# returns it.
+# Usage: scripts/bao-root <file> <command> [argument...]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/openbao.sh
+. "$here/lib/openbao.sh"
+
+if (($# < 2)); then
+  echo "bao-root: give the custody file bao-recovery wrote and the command to run: just bao-root <file> <command> [argument...]" >&2
+  exit 1
+fi
+file=$1
+shift
+
+# An empty argument, so cluster-env takes lab-sto2 and not this script's own arguments.
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" ""
+complete=1
+require_commands kubectl curl jq base64 age || complete=0
+require_kubeconfig || complete=0
+require_age_key || complete=0
+if [[ ! -f $file ]]; then
+  infra_error "$file is not a file; give the custody file bao-recovery wrote"
+  complete=0
+fi
+((complete))
+
+# How long the command's token lives, at most, renewal or not.
+lifetime=15m
+
+# generating is 1 from the request that starts a generation until OpenBao has the last share.
+# unrevoked is 1 once a token was not revoked; the script then fails however the command ended.
+generating=0 unrevoked=0
+root_token="" root_accessor="" command_token="" command_accessor=""
+
+# bao_revoke_with TOKEN ACCESSOR NAME: revokes TOKEN, using it to revoke itself. When OpenBao does
+# not confirm it, says so, naming the token by its accessor with the step that revokes it by that
+# accessor, and fails. An accessor is no credential: it serves only to look a token up, without its
+# ID, to renew it or to revoke it, and only for a caller whose own token may do so; it cannot act as
+# the token (https://openbao.org/docs/concepts/tokens/#token-accessors).
+bao_revoke_with() {
+  local operator=${bao_token-} status=0
+  bao_token=$1
+  bao_request POST auth/token/revoke-self < /dev/null > /dev/null || status=$?
+  bao_token=$operator
+  if ((status != 0)); then
+    unrevoked=1
+    if [[ -n $2 ]]; then
+      infra_error "$3 is not revoked; its accessor is $2. As soon as OpenBao answers, revoke it by that accessor: just bao-root $file bao token revoke -accessor $2"
+    else
+      infra_error "$3 is not revoked, and OpenBao gave no accessor for it. As soon as OpenBao answers, find it with just bao-root $file bao list auth/token/accessors and bao token lookup -accessor, and revoke it with bao token revoke -accessor"
+    fi
+  fi
+  return "$status"
+}
+
+# bao_abort: revokes the root token and the command's token while they exist, and cancels a
+# generation this run started and did not finish, so OpenBao takes a new one later.
+bao_abort() {
+  if [[ -n $root_token ]]; then
+    bao_revoke_with "$root_token" "$root_accessor" "the root token, which never expires," || true
+    root_token=""
+  fi
+  if [[ -n $command_token ]]; then
+    bao_revoke_with "$command_token" "$command_accessor" "the command's token, which expires $lifetime after it was made," || true
+    command_token=""
+  fi
+  if ((generating)); then
+    bao_request DELETE sys/generate-root-token/attempt > /dev/null 2>&1 || true
+  fi
+}
+
+step="opening $file with the Talos age key"
+custody=$(bao_decrypt "$file")
+if ! printf '%s' "$custody" | jq -e '.recovery.keys_base64 | length > 0' > /dev/null; then
+  infra_error "$file holds no recovery keys"
+  exit 1
+fi
+
+bao_open
+bao_login
+
+# One generation runs at a time; one left by a run that was cut short is cancelled.
+step="cancelling a root token generation left in progress"
+if bao_request GET sys/generate-root-token/attempt | jq -e '.data.started == true' > /dev/null; then
+  bao_request DELETE sys/generate-root-token/attempt > /dev/null
+fi
+
+step="starting a root token generation"
+generating=1
+# Without an otp, OpenBao makes the one-time password the token is encoded with and returns it.
+attempt=$(printf '{}' | bao_request PUT sys/generate-root-token/attempt)
+required=$(printf '%s' "$attempt" | jq -r '.data.required')
+if [[ ! $required =~ ^[1-9][0-9]*$ ]]; then
+  infra_error "OpenBao did not say how many recovery key shares the generation takes"
+  exit 1
+fi
+step="giving OpenBao $required recovery key shares"
+for ((share = 0; share < required; share++)); do
+  progress=$({
+    printf '%s\n' "$attempt"
+    printf '%s\n' "$custody"
+  } | jq -sc --argjson share "$share" '{key: .[1].recovery.keys_base64[$share], nonce: .[0].data.nonce}' |
+    bao_request PUT sys/generate-root-token/update)
+done
+custody=
+if ! printf '%s' "$progress" | jq -e '.data.complete == true' > /dev/null; then
+  infra_error "OpenBao did not complete the root token generation"
+  exit 1
+fi
+generating=0
+
+step="decoding the root token"
+root_token=$({
+  printf '%s\n' "$attempt"
+  printf '%s\n' "$progress"
+} | jq -sc '{encoded_token: .[1].data.encoded_token, otp: .[0].data.otp}' | bao_request POST sys/decode-token |
+  jq -r '.data.token // empty')
+attempt="" progress=""
+if [[ -z $root_token ]]; then
+  infra_error "OpenBao decoded no root token"
+  exit 1
+fi
+
+# Before the root token serves for anything else, its accessor, so a failed revocation can name it.
+# The lookup answers under data, the token's own ID among the fields, so only the accessor is kept.
+step="reading the root token's accessor"
+root_accessor=$({ bao_token=$root_token bao_request GET auth/token/lookup-self < /dev/null; } | jq -r '.data.accessor // empty')
+if [[ -z $root_accessor ]]; then
+  infra_error "OpenBao gave no accessor for the root token"
+  exit 1
+fi
+
+# The root token mints the command's token and is revoked at once; if minting fails, the root token
+# is revoked on the way out and nothing runs.
+step="making the command's token"
+minted=$(jq -nc --arg lifetime "$lifetime" \
+  '{policies: ["root"], ttl: $lifetime, explicit_max_ttl: $lifetime, renewable: false}' |
+  { bao_token=$root_token bao_request POST auth/token/create-orphan; })
+command_token=$(printf '%s' "$minted" | jq -r '.auth.client_token // empty')
+command_accessor=$(printf '%s' "$minted" | jq -r '.auth.accessor // empty')
+minted=""
+if [[ -z $command_token || -z $command_accessor ]]; then
+  infra_error "OpenBao made no token for the command"
+  exit 1
+fi
+# No command runs while the root token lives.
+step="revoking the root token"
+if ! bao_revoke_with "$root_token" "$root_accessor" "the root token, which never expires,"; then
+  root_token=""
+  exit 1
+fi
+root_token=""
+
+step="running $1"
+ran=0
+BAO_TOKEN=$command_token BAO_ADDR="https://localhost:$bao_local_port" BAO_CACERT="$work_dir/ca.crt" \
+  BAO_TLS_SERVER_NAME=$bao_host "$@" || ran=$?
+step="revoking the command's token"
+bao_revoke_with "$command_token" "$command_accessor" "the command's token, which expires $lifetime after it was made," || true
+command_token=""
+if ((ran != 0)); then
+  step="running $1"
+  infra_error "$1 exited $ran"
+  exit "$ran"
+fi
+if ((unrevoked)); then
+  exit 1
+fi
+echo "bao-root: $1 ran with a $lifetime token of the root policy, which is revoked"

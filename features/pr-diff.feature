@@ -7,6 +7,11 @@ Feature: The render diff of a pull request
     When just render runs
     Then each application the cluster applies, its root and its sync included, has a render of its own and the disabled one has none, with the example values substituted and the root's defaults applied, and the HelmRelease is expanded to the objects its chart renders with the repository's values, its definitions and its monitor included, post-rendered and labelled as helm-controller does, with the values the chart makes up anew on every render masked
 
+  Scenario: The render runs flux, helm and kustomize with none of the secrets
+    Given every secret variable the recipes read set to a marker, and a recording flux, helm and kustomize
+    When scripts/render renders a tree
+    Then each tool's recorded environment holds none of the secrets, and holds the render's own settings
+
   Scenario: A release whose chart comes from a Helm repository is rendered to the objects its chart renders at the pinned version
     Given a tree whose cluster overlay enables an application whose HelmRelease takes its chart from a HelmRepository at an exact version
     When just render runs

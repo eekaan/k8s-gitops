@@ -286,10 +286,10 @@ applies it to check each of these.
 namespace, `external-secrets`. It is how runtime secrets reach workloads (ADR 0005): an
 `ExternalSecret` names a key in a secret store, and the operator writes it into a Secret. The
 exception is a credential a controller generates in the cluster for its own workload, which stays
-in the Secret that controller writes, such as Grafana's admin password ([Grafana](#grafana)). No
-secret store is configured yet. The `volsync` component makes an `ExternalSecret` of the
-ClusterSecretStore `openbao` ([Volume backups](#volume-backups)), and no enabled application
-includes it.
+in the Secret that controller writes, such as Grafana's admin password ([Grafana](#grafana)). The
+one store is the ClusterSecretStore `openbao`, in its own application beside the operator
+([OpenBao](#openbao)). The `volsync` component makes an `ExternalSecret` of it
+([Volume backups](#volume-backups)), and no enabled application includes that component.
 
 - The chart comes from its publisher's OCI registry and installs and upgrades the operator's
   resource definitions itself, as the publisher documents. No other chart in the tree ships them,
@@ -303,9 +303,15 @@ includes it.
   change when no webhook answers.
 - The namespace enforces the restricted Pod Security level, which the chart's pods meet. No
   ServiceMonitor or dashboard is enabled.
+- The controller creates a service account's token, for a store that names one, only where a Role
+  allows it for that account by name: the chart's own grant to create every account's token is off
+  (`rbac.serviceAccountTokenCreate`), and `openbao-store`'s application holds the one Role, for its
+  own account ([OpenBao](#openbao)).
+- The chart adds creating and changing `ExternalSecret`s and secret stores to Kubernetes' `edit` and
+  `admin` roles, so whoever may edit a namespace may make an `ExternalSecret` there.
 
 `tests/external-secrets.bats` builds the application as Flux applies it and renders the chart to
-check each of these.
+check the first three of these, and `tests/openbao.bats` the token grant.
 
 ## Monitoring
 
@@ -313,7 +319,8 @@ check each of these.
 Alertmanager, kube-state-metrics and node-exporter in the namespace `monitoring`, from the
 prometheus-community `kube-prometheus-stack` chart. The namespace's Pod Security level is
 privileged, as node-exporter reads each node through the host's network and process namespaces and
-through host paths. The chart installs no resource definitions: `prometheus-operator-crds` does
+through host paths, and the log collector ([Logs](#logs)) reads the nodes' log files through a
+host path. The chart installs no resource definitions: `prometheus-operator-crds` does
 ([Resource definitions](#resource-definitions)), and the application names it in `dependsOn`. The
 two charts run the same operator version: Renovate moves them in one pull request, and
 `tests/monitoring.bats` fails when the pinned charts name different ones. The application installs
@@ -330,7 +337,9 @@ every namespace, and evaluates the chart's default alerting and recording rules.
   `talos/patches/controlplane/metrics.yaml` ([cluster.md](cluster.md#the-control-planes-metrics)).
   Talos runs etcd outside Kubernetes, so etcd's Service selects the API server's pods, which run on
   the control planes' host network, for their addresses, and Prometheus sends etcd no credential;
-- the monitors of the baseline applications ([The kube-system baseline](#the-kube-system-baseline)).
+- the monitors of the baseline applications ([The kube-system baseline](#the-kube-system-baseline))
+  and of the log store and collector ([Logs](#logs));
+- OpenBao's active member, through its chart's ServiceMonitor ([OpenBao](#openbao)).
 
 It does not scrape:
 
@@ -415,11 +424,102 @@ Service, that the dashboards are exactly those the monitoring chart renders for 
 monitoring values, and each setting that keeps Grafana off the internet against the defaults of the
 Grafana release it pins. It runs `just grafana` against a recording kubectl.
 
+## Logs
+
+Two applications in `apps/base/monitoring/` keep the cluster's logs (ADR 0014): `victoria-logs`
+runs VictoriaLogs, the store, from
+`oci://ghcr.io/victoriametrics/helm-charts/victoria-logs-single`, and `vector` runs Vector, the
+collector, from `oci://ghcr.io/vectordotdev/helm-charts/vector`, each its publisher's chart.
+Neither installs resource definitions. The store's ServiceMonitor and the collector's PodMonitor
+are on, and both applications name `prometheus-operator-crds` in `dependsOn`.
+
+What is collected, by a collector on every node, control planes included, from files only:
+
+- every pod's log lines, from the files under `/var/log/pods`, with the pod's namespace, name,
+  labels and node; the collector's own are left out;
+- the log of each of the node's Talos services, machined, the kubelet, etcd, containerd, apid and
+  the rest, and the kernel's, which Talos keeps as the service `kernel`: Talos writes each to
+  `/var/log/<service>.log` and renames it to `<service>.log.1` at 5 MiB, and the collector reads
+  both. Each line stays whole, with the node's name in `node` and its service's in
+  `talos_service`, and keeps its own time and level where its format has them: the kernel's
+  messages, the prefix Go's log package gives machined's, apid's and trustd's lines, JSON such as
+  etcd's, logfmt such as containerd's and the kubelet's klog. Any other line keeps the time it was
+  read.
+
+Talos flushes its files every 15 seconds, so its lines reach the store within about that. While the
+collector is not reading, such as during its own restart, lines wait in the files, and it goes on
+from its place in each file: a pod's lines as long as the kubelet has not rotated them away, and a
+Talos service's as long as the service has not written more than its two files hold, 5 MiB at
+least. From a node's boot, Talos keeps each service's lines and the kernel's in a ring of about 1
+MiB until `/var/log` is mounted, then writes the ring to the file from its oldest line, so early
+boot is collected as far as the ring held it; `talosctl logs` and `talosctl dmesg` read the rings on
+the node.
+
+The collector mounts all of `/var/log` read-only, as Talos renames the files it rotates, so it can
+read every file there. On a control plane that includes the API server's audit log in
+`/var/log/audit/kube`, which Talos's default audit policy, the one this cluster runs, writes at the
+`Metadata` level: who did what to which object, and when, without request or response bodies, so
+without Secret values. The collector does not ship it: its file source's patterns,
+`/var/log/*.log` and `/var/log/*.log.1`, match files at the top of `/var/log` only, and its pod-log
+source reads only `/var/log/pods`. It does ship the kernel's audit records, which Talos's `auditd`
+service writes on every node to its own log at the top, `/var/log/auditd.log`. What keeps the audit
+log out of the store is this reviewed configuration, which `tests/logs.bats` matches against
+Talos's layout of `/var/log`; who can read it through the collector is whoever may run commands in
+the pods of `monitoring`.
+
+The collector also mounts `/var/lib/vector`, where it keeps its place in each file and a disk buffer
+of 256 MiB. It runs as root, as Talos and the container runtime write their log files as root with
+mode 0640, with no capability and no privilege escalation, on the pod network; the namespace's Pod
+Security level, privileged, admits its host paths. Nothing on the node sends to it, and the machine
+configuration needs no change for it.
+
+The store runs one replica, without a disruption budget, as one would block every drain of its
+node. While it starts again on another worker, each collector keeps what it reads in its buffer;
+once the buffer is full, the collector stops reading on that node, pods' files and Talos's alike,
+until the store takes lines again, and lines whose file is rotated away meanwhile are lost. The
+store keeps logs 14 days and drops the oldest days before that once they take 15 GiB, but always
+keeps the last two days, on a 20 GiB claim on the cluster's default storage class, which LINSTOR
+replicates. Should the volume still fill, to less than 10 MB free, VictoriaLogs' default
+`-storage.minFreeDiskSpaceBytes`, the store turns read-only: it answers every insert with HTTP 429
+Too Many Requests, and its metric `vl_storage_is_read_only` is 1, while the collectors keep the
+lines in their buffers and retry.
+
+What listens, and where:
+
+- the store: port 9428 of its pod's address, plain HTTP, behind the headless Service
+  `victoria-logs`, for the collectors' inserts, queries and its web interface, and `/metrics`,
+  which Prometheus scrapes through the ServiceMonitor;
+- the collector: port 9598 of its pod's address, plain HTTP, its own metrics only, which Prometheus
+  scrapes through the PodMonitor. It uses neither the node's network nor a host port, so it reserves
+  no port on the nodes.
+
+Cilium carries pod addresses between the nodes in its VXLAN tunnel, so both ports answer the
+cluster's pods and nodes, and no host outside the cluster has a route to them. Neither application
+has an ingress, a route or a Service of type LoadBalancer or NodePort, and the nodes' security group
+admits from outside the cluster only the Talos and Kubernetes APIs.
+
+Grafana has no datasource for the logs. To query, forward the Service's port with
+`kubectl -n monitoring port-forward svc/victoria-logs 9428`, then open VictoriaLogs' web interface
+at `http://localhost:9428/select/vmui/`, or send LogsQL to
+`http://localhost:9428/select/logsql/query`, such as `query=_time:1h talos_service:kubelet` for the
+last hour of every node's kubelet, or `query=_time:1h kubernetes.pod_namespace:monitoring`.
+
+`tests/logs.bats` builds both applications as Flux applies them, renders their pinned charts and
+checks each of these. `just vector-check` renders the collector's configuration with
+`scripts/vector-config` and has Vector itself, in the image the collector runs, validate it and run
+its unit tests, `tests/vector/talos-lines.yaml`, which hold a line of each format above. The image
+is `vector_image` in the justfile, pinned by the digest of its image index under a
+`# renovate: datasource=docker depName=…` comment: Renovate's custom manager for the justfile moves
+its tag and digest, in the same pull request as the chart, and `tests/logs.bats` fails, saying what
+to set, while it is not the image the chart runs.
+
 ## cert-manager
 
 `apps/base/cert-manager/cert-manager/` installs cert-manager, which issues and renews the TLS
-certificates applications and gateways ask for, from the issuers they name (ADR 0006). No issuer is
-configured yet, so it issues nothing.
+certificates applications and gateways ask for, from the issuers they name (ADR 0006). Its only
+issuers are OpenBao's own, which are namespaced and sign OpenBao's listener certificate alone
+([OpenBao](#openbao)); no ClusterIssuer exists yet, so it issues nothing for an application or a
+gateway.
 
 It runs in its own namespace, `cert-manager`, at the restricted Pod Security level, from the
 publisher's chart in `oci://quay.io/jetstack/charts`; its leader election leases are there too, so
@@ -693,10 +793,10 @@ succeeds with an empty volume, without an error.
 
 A claim stays Pending, with the pods that use it, until a pod uses it, as LINSTOR's classes make a
 volume once its first pod is scheduled, and until the ReplicationDestination's first restore has
-completed and recorded its snapshot in `status.latestImage`; that needs the Secret, so without the
-secret store it never completes. A claim whose ReplicationDestination is gone, or whose recorded
-snapshot is gone, stays Pending until the ReplicationDestination is created again. The claim's
-events say which: `VolSyncPopulatorReplicationDestinationMissing`,
+completed and recorded its snapshot in `status.latestImage`; that needs the Secret, so until the
+secret store holds the key `volsync` it never completes. A claim whose ReplicationDestination is
+gone, or whose recorded snapshot is gone, stays Pending until the ReplicationDestination is created
+again. The claim's events say which: `VolSyncPopulatorReplicationDestinationMissing`,
 `VolSyncPopulatorReplicationDestinationNoLatestImage`, or `VolSyncPopulatorPVCCreated` once the
 volume is being made; a missing snapshot shows in the VolSync controller's log. An application whose
 Kustomization sets `wait` is not Ready while its claim is Pending, so it holds up every application
@@ -728,9 +828,11 @@ them (ADR 0015).
 
 ### What is still needed
 
-No ClusterSecretStore exists yet, so the Secret is never written and VolSync starts no mover. The
-test application `apps/base/demo/volsync-demo/`, a pod that holds a 1 GiB volume and writes the
-time it first found it empty, is disabled in the overlay. Before the first backup runs:
+The ClusterSecretStore `openbao` exists, but nothing in the tree writes the key `volsync` into it:
+OpenBao starts with its key-value mount empty, and only an operator fills it, with `just bao-put`.
+Until then the Secret is never written and VolSync starts no mover. The test application
+`apps/base/demo/volsync-demo/`, a pod that holds a 1 GiB volume and writes the time it first found
+it empty, is disabled in the overlay. Before the first backup runs:
 
 1. the ClusterSecretStore `openbao` holds the key `volsync` with `RESTIC_MASTER_PASSWORD`, also
    kept outside the cluster, and the cluster's S3 key as `AWS_ACCESS_KEY_ID` and
@@ -775,9 +877,10 @@ Gateway API therefore waits for `gateway-api-crds` to move first. The tests also
 and build both applications offline to check the rest of this section.
 
 No Gateway exists yet. A Gateway's proxies are reached through a Service of type LoadBalancer,
-which needs the cloud controller, and its HTTPS listener needs a certificate from an issuer, which
-cert-manager has none of yet. Until both are in place the controller accepts the GatewayClass and
-runs no proxy.
+which needs the cloud controller, and its HTTPS listener needs a certificate from an issuer that
+serves its namespace, which no issuer does yet: cert-manager's only issuers are OpenBao's, in the
+`openbao` namespace. Until both are in place the controller accepts the GatewayClass and runs no
+proxy.
 
 ## PostgreSQL
 
@@ -850,7 +953,7 @@ are deleted, which removes the instance, and the operator clones a new one from 
 three workers, the new one waits for a worker without an instance.
 
 No backup is configured: WAL archiving and base backups to object storage need the object store's
-credentials from the secret store, which does not run yet, and take their place in the component's
+credentials from the secret store, which holds none yet, and take their place in the component's
 `Cluster` then. Until then a cluster's data lives only on the workers' data volumes
 ([Where the data lives](#where-the-data-lives)).
 
@@ -859,6 +962,257 @@ replicas, budget, monitor and pods; builds applications that take a cluster from
 that does not name it and two that patch it, by kind and by name, as Flux applies them; and checks
 each field of the `Cluster` against the pinned chart's definition and its StorageClass against
 LINSTOR's.
+
+## OpenBao
+
+Runtime secrets live in OpenBao (ADR 0005), which unseals itself with a key the cluster holds while
+the operator keeps its recovery keys (ADR 0016). Three applications hold it:
+
+- `openbao/openbao` runs OpenBao in the namespace `openbao`. It names `external-secrets`,
+  `cert-manager`, `linstor-cluster` and `prometheus-operator-crds` in `dependsOn`, for the seal key's
+  generator, its certificates, its volumes and its monitor; sets `wait`, so it is Ready once every
+  member is unsealed; and has the long timeout, as the first install starts three members one after
+  another.
+- `external-secrets/openbao-store` holds the ClusterSecretStore `openbao`, its service account and
+  the Role that lets External Secrets mint that account's tokens. It names `external-secrets` and
+  `openbao` in `dependsOn`, and is Ready once the store reports Ready, which a health check
+  expression reads, as kstatus does not.
+- `demo/hello-secret` holds one ExternalSecret that reads `demo/hello` through the store. It names
+  `openbao-store` in `dependsOn` and does not wait, as the key exists once an operator writes it.
+
+`tests/openbao.bats` builds the three as Flux applies them and renders the chart with its values;
+`tests/openbao-recipes.bats` runs the recipes below against fakes of the cluster and of OpenBao.
+
+### What runs
+
+The chart comes from its publisher's OCI registry, `oci://ghcr.io/openbao/charts/openbao`, with the
+servers only: no agent injector, no CSI provider, and no UI, which is off in the server
+configuration and has no Service. Every Service is internal to the cluster.
+
+Three members run as a StatefulSet with OpenBao's integrated raft storage; each lists all three
+in `retry_join`, so a member that starts joins whichever leads. A member runs only on a worker, a
+node without the role label Talos gives every control plane, and never beside another member. A
+member is Ready only while it is unsealed. A new release replaces one member at a time, each once
+the one before is Ready again.
+
+Each member's raft data is on a 2 GiB claim of the default StorageClass, which the claim does not
+name: a few hundred small secrets, their versions, raft's log and the snapshots raft keeps beside it
+stay far below 100 MiB, and a thin volume uses only what is written. The class keeps two copies of
+the volume on two workers, beside the three copies raft keeps itself, where the
+[Storage](#storageclasses) advice for an application that keeps its own copies is the node-local
+class. OpenBao takes the replicated one on purpose: a member whose worker loses its data volume
+comes back as itself, from LINSTOR's other copy, and rejoins as the same raft member, so a member
+starting empty, which takes the steps in [the runbook](runbooks/openbao.md#a-member-that-does-not-rejoin),
+stays an exception rather than what every lost disk causes.
+
+A drain evicts one member at a time: the disruption budget lets one of the three be unavailable,
+which leaves two, a majority. The evicted member keeps its claim, starts again once a node without
+another member takes it, which on three workers is its own node once it is back, joins the others
+and unseals itself. Autopilot never removes a member for being away (`cleanup_dead_servers` is
+false), so it comes back as the same raft member.
+
+The namespace enforces the restricted Pod Security level, which the servers, their init container
+and the chart's test pod meet: they run as a non-root user with every capability dropped, no
+privilege escalation and the runtime's seccomp profile.
+
+The listener serves TLS from a CA of OpenBao's own: in the `openbao` namespace a self-signed Issuer
+signs the CA `openbao-ca`, whose Issuer signs `openbao-tls`, the certificate for the Services, every
+member under `openbao-internal` and the loopback address. cert-manager renews it before it expires
+and the listener reloads it within 30 seconds. The store, the members joining each other, the
+servers' own CLI and the monitor verify it against the CA. The chart's readiness probe does not: it
+asks the server in its own pod, over the loopback address, whether it is unsealed, where no other
+party can answer, and a certificate problem there would mark every member unready at once, which
+the clients that do verify report instead.
+
+The chart's ServiceMonitor scrapes the active member's `/v1/sys/metrics` without a token, which the
+listener allows for that path alone. Anything that reaches the listener on the cluster's network
+can read it: request counts and timings by operation, the names of mounts, auth methods and
+policies, token counts, and raft's and the runtime's statistics; never a secret value, a token or
+a key. No Service exposes it outside the cluster.
+
+Every server logs at its default level, info, and audits every request and response to its log,
+with each value in them, every token and every share among them, hashed: no audit device writes
+anything in the clear. Self-initialisation logs its requests and responses, the root token among
+them, only at trace level, which nothing sets.
+
+No snapshot of the raft storage is taken yet. The role `snapshot` exists for the job that will take
+them, which needs the object storage's key, a secret this store will hold.
+
+### How it unseals
+
+OpenBao's static seal unseals each member at every start with a 32-byte key from a file, without a
+person. The key is in the Secret `openbao-seal-1` in `openbao`, mounted into the servers alone, not
+into the chart's test pod. External Secrets makes it, once: its `Password` generator gives 32
+characters of letters, digits and symbols, about 190 bits, hex-encoded into the 64 hexadecimal
+digits the seal reads, and the ExternalSecret `openbao-seal-1` writes them into the Secret when it is
+first synced and never again (`refreshPolicy: CreatedOnce`). The Secret has no owner, so deleting the
+ExternalSecret or the application leaves it, and it is immutable, so nothing changes the key; an
+ExternalSecret made again later finds it and keeps its key. Nothing in the repository holds it,
+encrypted or not.
+
+The key protects OpenBao's storage and every copy of it, such as a volume or its snapshot, read
+outside the cluster: without the key it is ciphertext. It does not protect against whoever can read
+Secrets in `openbao` or the cluster's etcd, as they hold the key and reach the storage. That is a
+cluster administrator, the controllers that read Secrets in every namespace (Flux's, External
+Secrets', cert-manager's and the Prometheus Operator's), all installed from pinned charts under
+review, and whoever holds the Talos age key, which opens the etcd snapshots
+([etcd-restore.md](runbooks/etcd-restore.md)).
+
+### How it initialises
+
+OpenBao initialises once, on a first install, from the initialize stanzas in
+`app/initialize/initialize.json`, OpenBao's self-initialisation: it enables the Kubernetes auth
+method, which checks a token with the API server's TokenReview as the servers' own service account;
+mounts the key-value store, version 2, at `secrets/`; writes the three policies and roles below; and
+turns autopilot's dead-server cleanup off. OpenBao runs them with the root token it initialised
+with, then revokes it, and never returns it; no root token exists after the first start.
+
+Before every start of every member, the init container `initialize-guard` decides whether that
+server reads the stanzas (`app/initialize/initialize-guard.sh`). Only `openbao-0` may, and only on
+positive evidence of a first install: its own data directory is empty, and the Kubernetes API answers
+that neither `data-openbao-1` nor `data-openbao-2` exists. The StatefulSet makes those claims when it
+first starts the other members and keeps them for the cluster's life, so either one means the store
+exists. The guard reads them with kubectl as the servers' own account, which the Role
+`openbao-initialize-guard` lets get those two claims and nothing else. kubectl finds the API through
+the pod's in-cluster configuration, which client-go drops for `http://localhost:8080` once a flag
+such as `--request-timeout` changes its configuration, so the call carries no such flag and
+`timeout` ends it after 10 seconds instead. When the API gives no answer in that time, or the data
+directory cannot be listed, whatever the reason, the guard fails, and the pod does not start; it
+never initialises on missing evidence. The server takes the decision through
+`app/initialize/initialize-args.sh`, which passes the `-config` flag only as the guard wrote it.
+
+The guard holds the servers' account token, as every container of the pod does, so it may do all
+that account may: create TokenReviews and SubjectAccessReviews, through `system:auth-delegator`, for
+the Kubernetes auth method; get, list, watch, update and patch the pods in `openbao`, through the
+chart's discovery Role; and get those two claims. It mounts the member's data volume read-only,
+ciphertext without the seal key, the ConfigMap `openbao-initialize` and the directory of its
+decision, and not the seal Secret or the listener's certificate. Its image is the Flux CLI's,
+`ghcr.io/fluxcd/flux-cli`, which has the shell and kubectl the guard needs and comes from the
+registry Flux's controllers already run from, so it adds no publisher to trust. It is pinned by
+digest, at the version of the `flux2` pin in `mise.toml`; Renovate moves the two in one pull
+request, and `tests/openbao.bats` fails when they differ.
+
+An `openbao-0` whose volume is new while the other members' claims exist therefore never starts a
+second, empty store: it waits to join them. When they run, it joins and copies the store. When they
+do not, as after a full restart, the StatefulSet starts `openbao-0` first and the others only once it
+is Ready, which an empty `openbao-0` never becomes alone, so the store stays down until the
+[runbook](runbooks/openbao.md#a-member-that-does-not-rejoin) brings the others up first. That is the
+price of never running two stores behind the active Service.
+
+Self-initialisation marks storage as started before it runs and clears the mark when it completes;
+a server that finds the mark refuses to unseal. A first install whose initialisation failed or was
+cut short is therefore started again from nothing, as the
+[runbook](runbooks/openbao.md#a-first-initialisation-that-failed) says. The stanzas never run again on
+initialised storage, so a role, policy or mount changes afterwards with a root token from the
+recovery keys (`just bao-root`).
+
+### Who may do what
+
+| Role | Logs in as | May |
+|------|------------|-----|
+| `external-secrets` | `openbao-store` in `external-secrets` | read and list every key of `secrets/`; look up and revoke its own token |
+| `operator` | `openbao-operator` in `openbao` | create keys of `secrets/` and change them, never read them; make the recovery keys while none exist, and rotate them with three of the current shares; start a root token generation, which completes only with three shares; revoke its own token |
+| `snapshot` | `openbao-snapshot` in `openbao` | take a snapshot of the raft storage; no job logs in as it yet |
+
+Each role checks the audience `openbao`, carries one policy and not OpenBao's `default` policy, and
+gives ten-minute tokens, which `external-secrets` may renew for up to an hour. No pod mounts a token
+of the three accounts; a token for one is minted through the Kubernetes API by a subject allowed to
+create `serviceaccounts/token` for it:
+
+- `openbao-store`: External Secrets' controller, through the Role `openbao-store-token`, for this
+  account alone; its chart's grant to create every account's token is off.
+- `openbao-operator` and `openbao-snapshot`: cluster administrators, as the operator's kubeconfig
+  is, and the Flux Operator and Flux's controllers, which hold cluster-admin to apply the tree.
+
+No other chart the tree installs grants creating service account tokens; the Piraeus operator's
+one wildcard rule is confined to LINSTOR's own API group.
+
+The `operator` role reaches the recovery keys and, through them, a root token. Recovery keys are
+made once, by the first authenticated rotation, which `just bao-recovery` performs right after the
+first reconcile. From then on a root token takes three of the shares, which only the operator's file
+holds. If `bao-recovery`'s first run finds recovery keys already, someone else holds them, and the
+store is rebuilt ([runbook](runbooks/openbao.md#first-initialisation)). Who may mint an `operator`
+token holds cluster-admin, and with it the seal Secret and every Secret the store fills.
+
+### What the operator keeps
+
+Self-initialisation makes no recovery keys. Right after the first reconcile, `just bao-recovery <file>`
+makes them, through OpenBao's authenticated rotation as the role `operator`: five shares, any three
+of which make a short-lived root token when the roles no longer reach what has to be fixed. It writes
+them, with the seal key, to `<file>`, a new file outside the repository, encrypted with age to the
+Talos age key's recipient in `talos/.sops.yaml`, a key the cluster does not hold; opens it again with
+the operator's Talos age key and compares it with what it wrote; and has OpenBao commit the shares
+only then. A rotation it starts and does not complete is cancelled and its file removed; one left in
+progress by an earlier run is cancelled first; a file made at the path meanwhile is never replaced.
+Nothing of the shares or the key is printed or passed as an argument. OpenBao makes recovery keys
+only while none exist, so the recipe refuses once they do: the file holds the only copy. The operator
+keeps it outside the cluster, with the Talos age key.
+
+### The recipes
+
+Each recipe opens a port-forward to `openbao-active` and closes it on every exit; verifies OpenBao's
+certificate against the CA; mints a ten-minute token for `openbao-operator` with the audience
+`openbao`, logs in as `operator`, and revokes OpenBao's token when it is done. Through the cluster's
+kubeconfig it needs to create `serviceaccounts/token` for `openbao-operator`, to port-forward to the
+pods of `openbao-active`, and to read the Secret `openbao-ca`. A file it reads, the operator's, opens
+with the Talos age key from `SOPS_AGE_KEY_FILE`, or `SOPS_AGE_KEY`, into memory only.
+
+- `just bao-put <path> <key>` writes one value, read from standard input, typed without echo at a
+  terminal or piped in without the newlines that end it, as the key `<key>` of the secret at
+  `secrets/<path>` in `lab-sto2`. The secret keeps its other keys, or is created. It takes exactly
+  the two arguments, and a refusal repeats none of them, so a value typed where an argument goes is
+  not printed. The value travels only in the body of the write; the recipe prints the path and the
+  key.
+- `just bao-recovery <file> [cluster]` makes the recovery keys once, as above; it also reads the
+  Secret `openbao-seal-1`.
+- `just bao-root <file> <command> [argument...]` makes a root token from three shares of the file,
+  mints with it an orphan token of the root policy that lasts fifteen minutes at most, and revokes
+  the root token before the command runs; if minting fails, it revokes the root token and runs
+  nothing. It runs the command with that token in `BAO_TOKEN`, and OpenBao's address through the
+  port-forward, its CA and its certificate's name in `BAO_ADDR`, `BAO_CACERT` and
+  `BAO_TLS_SERVER_NAME`, as OpenBao's CLI reads them, then revokes the token, however the command
+  ends; a recipe killed outright leaves it to expire. It prints no share and no token; a generation
+  it started and did not finish is cancelled. It reads the root token's accessor before anything
+  else; when OpenBao does not revoke a token, it names the token by its accessor, which serves to
+  look up, renew or revoke a token but not to act as it, prints the step that revokes it by that
+  accessor, and fails even when the command succeeded. No command runs while the root token lives.
+- `just bao-seal-restore <file> [--replace]` writes the seal key from the file back into the Secret
+  `openbao-seal-1`, immutable; a Secret that holds the same key is left alone, and one that holds
+  another key is replaced only with `--replace`. Before deleting it, `--replace` keeps its key in a
+  new file `<file>.replaced-<time>.age` beside the file, encrypted to the same recipient and opened
+  again with the operator's key, and deletes nothing when it cannot. It needs no port-forward, only
+  to read, create and, with `--replace`, delete that Secret.
+
+### How an application gets a secret out
+
+An application reads a key with an ExternalSecret that names the ClusterSecretStore `openbao`, the
+path as `remoteRef.key` and the key as `remoteRef.property`. The store logs in as `external-secrets`
+and reads the key-value mount and nothing else. `demo/hello-secret` is the example: after
+`just bao-put demo/hello greeting`, the Secret `hello` in `demo` holds the key `greeting`.
+
+The store serves every namespace. Creating an ExternalSecret is reserved to cluster administrators
+and Flux, which applies those in Git after review; no RoleBinding grants `edit` or `admin`. A
+namespace delegated to anyone else first gets its own store restricted with `conditions`.
+
+### When something is lost
+
+- **The seal Secret, with the volumes intact**: the members that run keep serving, unsealed; one that
+  restarts cannot start, as the Secret it mounts is missing, and the data stays sealed on its volume.
+  `just bao-seal-restore` writes the key back from the operator's file; an etcd snapshot also holds
+  it ([runbook](runbooks/openbao.md#bringing-the-seal-key-back)).
+- **The seal Secret and every copy of it**: every runtime secret is lost. OpenBao starts again empty
+  only once its three claims, the Secret and the ExternalSecret `openbao-seal-1` are deleted: the
+  ExternalSecret has synced once and never makes a missing Secret again, so Flux makes it anew, it
+  makes a new key, and every secret is written again.
+- **The operator's file**: nothing is lost while the roles work. If a role or policy breaks, the way
+  back to privileged access is gone, and new recovery keys need a threshold of the old ones; what is
+  left is a new OpenBao with every secret written again.
+- **One member's volume**: the member starts empty, does not initialise, and joins the others, which
+  hold every secret; [the runbook](runbooks/openbao.md#a-member-that-does-not-rejoin) says what to do
+  when it does not rejoin.
+
+A restore of a snapshot of the raft storage, once they are taken, will need the seal key it was
+taken under, which the operator's file holds.
 
 ## Flux itself
 
@@ -946,24 +1300,56 @@ write access to packages nor an identity token. Its one command is `just publish
 identity token (ADR 0007). The script refuses to run anywhere else: without GitHub Actions and the
 job's identity token it stops before calling anything, so nobody signs from a laptop. In order, it:
 
-1. logs in to ghcr.io with the job's token on standard input, into a Docker configuration of the
+1. runs `just kubernetes-check` on the commit it publishes, with the pinned tools the workflow
+   installs; a failure stops the run, with the check's own message, before the registry is touched;
+2. logs in to ghcr.io with the job's token on standard input, into a Docker configuration of the
    run's own, which flux and cosign both read and which is removed when the run ends;
-2. pushes `kubernetes/`, without any cluster's `secrets/`, with `flux push artifact`, tagged with the
+3. pushes `kubernetes/`, without any cluster's `secrets/`, with `flux push artifact`, tagged with the
    full commit SHA, with the repository as its source and `<branch>@sha1:<commit>` as its revision,
    reproducibly; a reported digest that is not `sha256:` and 64 hexadecimal digits stops the run;
-3. signs that digest keyless with cosign: a short-lived certificate for the job's identity, recorded
+4. signs that digest keyless with cosign: a short-lived certificate for the job's identity, recorded
    in Sigstore's public transparency log;
-4. verifies the signature against the identity of this workflow at the run's ref, which on `main`
+5. verifies the signature against the identity of this workflow at the run's ref, which on `main`
    is the identity the instance accepts; a failure stops the run;
-5. tags that digest `main`.
+6. tags that digest `main`.
+
+A pull request's checks run against its branch as it was pushed; the publish run judges the tree
+that is on `main`, and only its own: the check runs on the commit the run publishes and on no other.
+When that tree does not build, the run fails, nothing is pushed, signed or tagged, and the cluster
+stays on the last tagged artifact until a run for a later commit that changes `kubernetes/` or the
+workflow, or a manual run, publishes a tree that does. The gate is `just kubernetes-check`, the
+offline build, and no more: `just render-check` pulls charts from the network and needs helm in the
+job that signs, so it stays out of that job.
+
+Every workflow installs its tools with the same pinned `mise-action` at an exact mise release. A
+workflow whose token can write, `publish`, `tools-image` and `render-comment`, also gives the action the
+checksum
+of that release's linux-x64 binary, so the tools that run beside the token are the pinned ones; the
+action fails the job when the binary differs. A bump of the mise version changes the checksum with it,
+in every workflow that has one, and the checksum is the one for `./mise-v<version>-linux-x64` in the
+release's `SHASUMS256.txt`. Renovate does not track either input: it can raise a version but cannot
+carry the checksum with it, so a version alone would fail the signing job's check, and the bump is
+by hand.
+The two jobs that sign, `publish` and `tools-image`, also turn the action's cache off, so nothing
+runs from an entry another job saved.
 
 The tag moves last and by digest: `main` only ever names an artifact that is signed and verified,
 and signing, verifying and tagging all name it by its digest, so the tag ends on exactly the bytes
 that were signed and verified; a tag can change between two steps, a digest cannot. It moves only on
-a run on `refs/heads/main`, and only when no newer commit on `main` changes `kubernetes/` or the
-workflow. Runs share one concurrency group that never cancels a run in progress, so they never
-overlap: a run that starts while another is in progress waits for it, and GitHub replaces a waiting
-run with a newer one. A run on another branch, or one a newer commit overtook, such as a re-run of an
+a run on `refs/heads/main` for which no newer commit on `main` changes `kubernetes/` or the
+workflow, so an older run, a re-run of one included, never moves it back; the newest such commit's
+own run decides, and a run does not judge a newer commit's tree. That leaves two cases in which the
+tag stays on an older artifact than the newest passing commit's. In the first, a newer commit
+that changes `kubernetes/` arrives before the passing commit's run reaches the tag, and fails its
+check: the passing commit's run leaves the tag alone and the failing one publishes nothing, and the
+same happens when GitHub replaces the passing commit's waiting run with the failing one's. In the
+second, a re-run of an older run starts while the passing commit's run is waiting, and GitHub
+replaces the waiting run with the re-run, which leaves the tag alone, as the passing commit is newer
+than its own. In both, the tag stays where it was until a later run publishes a tree that passes:
+the run of the next commit that passes, or, in the second case, a manual run as well. Runs
+share one concurrency group that never cancels a run in progress, so they never overlap: a run that
+starts while another is in progress waits for it, and GitHub replaces a waiting run with a newer one.
+A run on another branch, or one a newer commit overtook, such as a re-run of an
 old one, still pushes, signs and verifies, says why the tag stayed where it is, and succeeds. An
 artifact signed by a run on another branch carries that branch's identity, which the instance
 refuses. The run prints
@@ -1037,8 +1423,12 @@ that can write:
   pull request and push to `main` on a hosted runner, with the workflow's `contents: read` token and
   no secrets. For a pull request GitHub runs the pull request's own copy of the workflow, a fork's
   included, so the job is given nothing worth taking. `just ci-render` runs `scripts/render-pr` in
-  the Dagger module (ADR 0007): it renders the base, the first parent of the commit under test, and
-  the commit itself, both with the base's `scripts/render` and `scripts/render-diff`, so that a pull
+  the Dagger module (ADR 0007), in the tools container `just ci` uses, chosen the same way (README,
+  The tools image). That image is public and pulled without credentials, and a record of any other
+  image stops the recipe, so a pull request that runs the job in another one has changed the files
+  the job runs, as it could change the module itself. The render covers the base, the first parent
+  of the commit under test, and the commit itself, both with the base's `scripts/render` and
+  `scripts/render-diff`, so that a pull
   request that changes only the tree is shown by the reviewed render code. A base without the render
   code, or one its own render code does not render, is rendered with the commit's, and the job's
   log says so. The job uploads the comment as the artifact `render-diff`.

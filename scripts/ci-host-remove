@@ -14,7 +14,7 @@ here=$(dirname "$0")
 . "$here/stack-env" sto2/ci
 require_env CI_HOST_SSH_USER
 for tool in ssh ssh-keyscan ssh-keygen gh; do
-  if ! command -v "$tool" > /dev/null; then
+  if ! type -P "$tool" > /dev/null; then
     infra_error "$tool is not on PATH; ci-host-remove needs OpenSSH's client and the pinned gh (just tools)"
     exit 1
   fi

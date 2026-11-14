@@ -63,7 +63,8 @@ trap 'exit 143' TERM
 step="starting kubectl port-forward"
 forward_out=$(mktemp -t grafana.XXXXXXXXXX)
 # Run in the background, kubectl ignores the Ctrl-C the terminal sends; the trap above ends it.
-kubectl port-forward --address 127.0.0.1 --namespace monitoring service/grafana-service "$port:3000" \
+# kubectl is the process whose id forward_pid holds, which a function would put one process below.
+(exec_tool kubectl port-forward --address 127.0.0.1 --namespace monitoring service/grafana-service "$port:3000") \
   > "$forward_out" 2> /dev/null &
 forward_pid=$!
 

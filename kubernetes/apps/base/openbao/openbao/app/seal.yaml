@@ -1,0 +1,40 @@
+---
+# OpenBao's static seal key (ADR 0016): 32 characters, hex-encoded into the 64 hexadecimal digits
+# the static seal reads as its 32-byte AES-256 key. The generator makes a new password each time it
+# is asked; the ExternalSecret below asks once.
+apiVersion: generators.external-secrets.io/v1alpha1
+kind: Password
+metadata:
+  name: openbao-seal-1
+spec:
+  length: 32
+  # Letters of both cases, digits and symbols, any of them repeated: about 190 bits of entropy.
+  allowRepeat: true
+  noUpper: false
+  encoding: hex
+  secretKeys:
+    - key
+---
+# Writes the generated key into the Secret openbao-seal-1 once, when the ExternalSecret is first
+# synced, and never again: with refreshPolicy CreatedOnce the operator does not sync it after that,
+# whatever happens to the Secret, so deleting the Secret does not make a new key. Orphan leaves the
+# Secret without an owner, so deleting this ExternalSecret, or the application, leaves it in place.
+# Immutable: nothing can change the key in place, and an ExternalSecret made again later, which
+# syncs once more, finds the Secret and keeps its key.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: openbao-seal-1
+spec:
+  refreshPolicy: CreatedOnce
+  target:
+    name: openbao-seal-1
+    creationPolicy: Orphan
+    deletionPolicy: Retain
+    immutable: true
+  dataFrom:
+    - sourceRef:
+        generatorRef:
+          apiVersion: generators.external-secrets.io/v1alpha1
+          kind: Password
+          name: openbao-seal-1

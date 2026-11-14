@@ -59,7 +59,7 @@ if [[ ! ${ADOPTION_WAIT:-900} =~ ^[0-9]+$ ]]; then
   complete=0
 fi
 for tool in yq jq helm kubectl; do
-  if ! command -v "$tool" > /dev/null; then
+  if ! type -P "$tool" > /dev/null; then
     infra_error "$tool not found on PATH"
     complete=0
   fi
