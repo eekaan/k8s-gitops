@@ -98,7 +98,7 @@ variable "api_allowed_cidrs" {
 }
 
 variable "security_group_rules" {
-  description = "Which rules the nodes' security group holds: full, the default, admits from outside the nodes only the Talos and Kubernetes APIs, from the allowlist, the nodes' floating IPs and the CI host, and the Kubernetes API from the node subnet; reduced keeps those and opens every other port to all, but the Talos API, which a node without machine configuration cannot protect, and the NodePort range, which Cilium serves before Talos' firewall sees it."
+  description = "What the nodes' security groups hold: full, the default, admits from outside the nodes only the Talos and Kubernetes APIs, from the allowlist, the nodes' floating IPs and the CI host, the Kubernetes API from the node subnet, and to the workers the service ports from the edge routers; reduced keeps those and gives the control planes a group of their own that opens every other port to all, but the Talos API, which a node without machine configuration cannot protect, and the NodePort range, which Cilium serves before Talos' firewall sees it. The workers, which carry the service range, get nothing more."
   type        = string
   default     = "full"
 

@@ -53,7 +53,7 @@ run "_todays_rules_keep_their_resource_addresses" {
   }
 
   assert {
-    condition     = length(openstack_networking_secgroup_rule_v2.open) == 0
-    error_message = "By default there must be no rule open to all."
+    condition     = length(openstack_networking_secgroup_rule_v2.open) == 0 && length(openstack_networking_secgroup_v2.controlplanes) == 0
+    error_message = "By default there must be no rule open to all, and no group of the control planes' own."
   }
 }

@@ -191,9 +191,11 @@ run "_the_cluster_is_named_lab_sto2_on_the_plumbing_stacks_node_subnet" {
 }
 
 # The firewall's rules in talman.yaml take their networks from this stack: the allowlist from
-# api_allowed_cidrs, the nodes' floating addresses, the plumbing stack's node subnet, the pod subnet,
-# and the fixed addresses of the control planes and of every node. tests/node-firewall.bats renders
-# them into the nodes' machine configuration from the fixture.
+# api_allowed_cidrs, the nodes' floating and fixed addresses, the pod subnet, the API load balancer's
+# address with the networks of the plumbing stack's DHCP pool, from which its own ports take theirs,
+# and the CI host's address once ci_host_number is given. No rule takes the node subnet as a whole,
+# which also holds the edge routers. tests/node-firewall.bats renders them into the nodes' machine
+# configuration from the fixture.
 run "_talman_yaml_carries_the_firewall_rules_with_the_stacks_networks" {
   command = plan
 
@@ -205,14 +207,21 @@ run "_talman_yaml_carries_the_firewall_rules_with_the_stacks_networks" {
       } == {
       controlplane = {
         apid = toset([
-          "198.51.100.0/24", "192.0.2.0/24",
+          "198.51.100.0/24",
+          "192.0.2.10/32", "192.0.2.11/32", "192.0.2.12/32",
+          "192.0.2.20/32", "192.0.2.21/32", "192.0.2.22/32",
           "203.0.113.101/32", "203.0.113.102/32", "203.0.113.103/32",
           "203.0.113.111/32", "203.0.113.112/32", "203.0.113.113/32",
         ])
         kube-apiserver = toset([
-          "198.51.100.0/24", "192.0.2.0/24", "10.244.0.0/16",
+          "198.51.100.0/24", "10.244.0.0/16",
+          "192.0.2.10/32", "192.0.2.11/32", "192.0.2.12/32",
+          "192.0.2.20/32", "192.0.2.21/32", "192.0.2.22/32",
           "203.0.113.101/32", "203.0.113.102/32", "203.0.113.103/32",
           "203.0.113.111/32", "203.0.113.112/32", "203.0.113.113/32",
+          # The load balancer's address, and its pool, 100 to 200, in the fewest networks.
+          "192.0.2.5/32",
+          "192.0.2.100/30", "192.0.2.104/29", "192.0.2.112/28", "192.0.2.128/26", "192.0.2.192/29", "192.0.2.200/32",
         ])
         etcd = toset(["192.0.2.10/32", "192.0.2.11/32", "192.0.2.12/32"])
         cilium-vxlan = toset([
@@ -222,7 +231,9 @@ run "_talman_yaml_carries_the_firewall_rules_with_the_stacks_networks" {
       }
       worker = {
         apid = toset([
-          "198.51.100.0/24", "192.0.2.0/24",
+          "198.51.100.0/24",
+          "192.0.2.10/32", "192.0.2.11/32", "192.0.2.12/32",
+          "192.0.2.20/32", "192.0.2.21/32", "192.0.2.22/32",
           "203.0.113.101/32", "203.0.113.102/32", "203.0.113.103/32",
           "203.0.113.111/32", "203.0.113.112/32", "203.0.113.113/32",
         ])
@@ -232,7 +243,73 @@ run "_talman_yaml_carries_the_firewall_rules_with_the_stacks_networks" {
         ])
       }
     }
-    error_message = "talman.yaml's firewall rules must accept the Talos API from the allowlist, the node subnet and the nodes' floating addresses on every node, the Kubernetes API from those and the pod subnet and etcd from the control planes' fixed addresses on the control planes only, and the overlay from every node's fixed address on every node."
+    error_message = "talman.yaml's firewall rules must accept the Talos API from the allowlist and the nodes' fixed and floating addresses on every node, the Kubernetes API from those, the pod subnet and the load balancer's address and pool on the control planes, etcd from the control planes' fixed addresses on the control planes only, and the overlay from every node's fixed address on every node."
+  }
+}
+
+run "_the_ci_host_reaches_the_nodes_apis_through_their_firewall_once_the_stack_is_given_its_number" {
+  command = plan
+
+  variables {
+    ci_host_number = 6
+  }
+
+  assert {
+    condition = {
+      for role, rules in yamldecode(output.talman_yaml).values.firewall : role => toset([
+        for rule in rules : rule.name if contains(rule.subnets, "192.0.2.6/32")
+      ])
+    } == { controlplane = toset(["apid", "kube-apiserver"]), worker = toset(["apid"]) }
+    error_message = "The CI host's address must reach the Talos API on every node and the Kubernetes API on the control planes, and no other rule."
+  }
+}
+
+# A pool whose ends lie on no boundary, on another node subnet: the fewest networks that hold it
+# exactly, none reaching outside it.
+run "_the_load_balancers_pool_is_covered_exactly" {
+  command = plan
+
+  variables {
+    controlplane_count = 1
+    worker_count       = 0
+  }
+
+  override_data {
+    target = data.terraform_remote_state.plumbing
+    values = {
+      outputs = {
+        network = {
+          network_id = "node-network-fixture"
+          subnet_id  = "node-subnet-fixture"
+          cidr       = "192.0.2.128/25"
+          dhcp_pool  = { start = "192.0.2.228", end = "192.0.2.250" }
+        }
+        router = {
+          external_network    = "external-network-fixture"
+          attached_subnet_ids = { nodes = "node-subnet-fixture" }
+        }
+        image = {
+          id           = "talos-image-fixture"
+          schematic_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        }
+        bgp = {
+          cluster_asn    = 64496
+          edge_asn       = 64497
+          edge_addresses = ["192.0.2.135", "192.0.2.136"]
+          service_range  = "203.0.113.16/28"
+        }
+      }
+    }
+  }
+
+  assert {
+    condition = toset(one([
+      for rule in yamldecode(output.talman_yaml).values.firewall.controlplane : rule.subnets if rule.name == "kube-apiserver"
+      ])) == toset([
+      "198.51.100.0/24", "10.244.0.0/16", "192.0.2.138/32", "203.0.113.101/32",
+      "192.0.2.133/32", "192.0.2.228/30", "192.0.2.232/29", "192.0.2.240/29", "192.0.2.248/31", "192.0.2.250/32",
+    ])
+    error_message = "The Kubernetes API must accept the load balancer's address and its pool, 228 to 250, in the fewest networks, beside the allowlist, the pod subnet and the node."
   }
 }
 

@@ -75,7 +75,8 @@ inventory() {
 resolve() {
   case $1 in
     operators) yq '.operator_cidrs[]' "$FIXTURE" ;;
-    nodes) yq '.node_subnet' "$FIXTURE" ;;
+    loadbalancer) yq '.api_load_balancer_addresses[]' "$FIXTURE" ;;
+    cihost) yq '.ci_host_address + "/32"' "$FIXTURE" ;;
     floating) yq '.nodes[].floating_ip + "/32"' "$FIXTURE" ;;
     pods) yq '.pod_subnet' "$FIXTURE" ;;
     controlplanes) yq '.nodes[] | select(.role == "controlplane") | .private_address + "/32"' "$FIXTURE" ;;
@@ -159,20 +160,28 @@ overlapping() {
   diff <(inventory) <(table)
 }
 
-@test "The Talos API and the Kubernetes API accept the operator allowlist, the node network and the load balancer, and nobody else" {
+@test "The Talos API and the Kubernetes API accept the operator allowlist, the nodes, the load balancer and the CI host, and nobody else" {
   operators=$(yq '.operator_cidrs[]' "$FIXTURE")
   [ "$(wc -l <<< "$operators")" -eq 2 ]
   node_subnet=$(yq '.node_subnet' "$FIXTURE")
   pod_subnet=$(yq '.pod_subnet' "$FIXTURE")
   floating=$(yq '.nodes[].floating_ip + "/32"' "$FIXTURE")
   [ "$(wc -l <<< "$floating")" -eq 6 ]
-  talos_api=$(printf '%s\n' "$operators" "$node_subnet" "$floating" | sort -u)
-  kubernetes_api=$(printf '%s\n' "$talos_api" "$pod_subnet" | sort -u)
-  # The load balancer connects to the API servers from its own addresses on the node network.
+  members=$(yq '.nodes[].private_address + "/32"' "$FIXTURE")
+  [ "$(wc -l <<< "$members")" -eq 6 ]
+  ci_host="$(yq '.ci_host_address' "$FIXTURE")/32"
+  load_balancer=$(yq '.api_load_balancer_addresses[]' "$FIXTURE")
+  talos_api=$(printf '%s\n' "$operators" "$members" "$floating" "$ci_host" | sort -u)
+  kubernetes_api=$(printf '%s\n' "$talos_api" "$pod_subnet" "$load_balancer" | sort -u)
+  # The load balancer's networks hold its address on the node network, where the nodes reach the
+  # API, and lie on the node network.
   endpoint=$(yq '.endpoint' "$FIXTURE")
   [[ $endpoint =~ ^https://([0-9.]+):6443$ ]]
-  in_subnet "${BASH_REMATCH[1]}" "$node_subnet"
-  outside=$(printf '%s\n' "$operators" "$floating")
+  awk -v vip="${BASH_REMATCH[1]}/32" '$0 == vip { found = 1 } END { exit !found }' <<< "$load_balancer"
+  for network in $load_balancer; do
+    in_subnet "${network%/*}" "$node_subnet"
+  done
+  outside=$(printf '%s\n' "$operators" "$floating" "$ci_host" "$load_balancer")
 
   for hostname in $(nodes); do
     diff <(echo "$talos_api") <(subnets "$hostname" apid)
@@ -180,11 +189,42 @@ overlapping() {
     for rule in $(rules "$hostname" | cut -d' ' -f1 | grep -vx -e apid -e kube-apiserver); do
       [ -z "$(comm -12 <(sort <<< "$outside") <(subnets "$hostname" "$rule"))" ]
     done
+    # No rule accepts the node network as a whole, which also holds addresses no rule names.
+    accepted=$(yq -N 'select(.kind == "NetworkRuleConfig") | .ingress[].subnet' "$RENDERED/$hostname.yaml")
+    [ -z "$(awk -v net="$node_subnet" '$0 == net' <<< "$accepted")" ]
   done
   for hostname in $(nodes controlplane); do
     diff <(echo "$kubernetes_api") <(subnets "$hostname" kube-apiserver)
     [ "$(rules "$hostname" | grep -c '^kube-apiserver tcp 6443$')" -eq 1 ]
   done
+}
+
+@test "An edge router's address reaches no listener on any node" {
+  # The edge routers, which the workers peer with over BGP and which face the internet, hold
+  # addresses on the node network, beside the nodes, the load balancer and the CI host.
+  node_subnet=$(yq '.node_subnet' "$FIXTURE")
+  edges=$(yq '.bgp.edge_addresses[]' "$FIXTURE")
+  [ "$(wc -l <<< "$edges")" -eq 2 ]
+  for edge in $edges; do
+    in_subnet "$edge" "$node_subnet"
+  done
+
+  checked=0
+  for hostname in $(nodes); do
+    for rule in $(rules "$hostname" | cut -d' ' -f1); do
+      for network in $(subnets "$hostname" "$rule"); do
+        for edge in $edges; do
+          if in_subnet "$edge" "$network"; then
+            echo "$hostname: $rule accepts $edge, an edge router's address, through $network"
+            return 1
+          fi
+        done
+      done
+      checked=$((checked + 1))
+    done
+  done
+  # Twelve rules on each control plane, six on each worker.
+  [ "$checked" -eq 54 ]
 }
 
 @test "etcd accepts control planes only" {

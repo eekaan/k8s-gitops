@@ -47,10 +47,26 @@ override_data {
 }
 
 # A mocked attribute has the same value in every instance of a resource. Each node's port and
-# floating IP get their own, so a node wired to another node's port or address cannot pass.
+# floating IP get their own, so a node wired to another node's port or address cannot pass, and so
+# does each security group, so a port in the wrong group cannot pass either.
 override_resource {
   target = module.nodes.module.node["lab-cp-1"].openstack_networking_port_v2.this
   values = { id = "port-cp-1" }
+}
+
+override_resource {
+  target = module.nodes.openstack_networking_secgroup_v2.this
+  values = { id = "nodes-group" }
+}
+
+override_resource {
+  target = module.nodes.openstack_networking_secgroup_v2.workers
+  values = { id = "workers-group" }
+}
+
+override_resource {
+  target = module.nodes.openstack_networking_secgroup_v2.controlplanes
+  values = { id = "controlplanes-group" }
 }
 
 override_resource {
@@ -438,14 +454,21 @@ run "with_todays_security_groups_selected_the_stack_plans_no_change" {
   }
 
   assert {
+    condition     = output.controlplane_security_group == null
+    error_message = "By default the control planes must have no group of their own."
+  }
+
+  assert {
     condition     = alltrue([for rule in output.security_group.ingress_rules : rule.remote_ip_prefix != "0.0.0.0/0"])
     error_message = "By default no rule may be open to all: the reduced set's rules must have no instance."
   }
 }
 
-# The reduced set keeps today's rules and opens every other port to all, but the Talos API, which a
-# node in maintenance mode cannot protect, and the NodePort range, which Cilium serves before Talos'
-# firewall sees it. The CI host's number is given, so its rules are among those checked.
+# The reduced set keeps the nodes' group as it is and gives the control planes a group of their own
+# that opens every other port to all, but the Talos API, which a node in maintenance mode cannot
+# protect, and the NodePort range, which Cilium serves before Talos' firewall sees it. The workers
+# carry the service range, whose ports Cilium also serves before the firewall, so they get none of
+# it. The CI host's number is given, so its rules are among those checked.
 run "with_the_reduced_security_groups_selected_an_unconfigured_nodes_talos_api_is_still_limited_to_the_operator_allowlist" {
   command = plan
 
@@ -454,9 +477,10 @@ run "with_the_reduced_security_groups_selected_an_unconfigured_nodes_talos_api_i
     ci_host_number       = 6
   }
 
+  # Every rule a control plane's port carries, from either of its groups.
   assert {
     condition = toset([
-      for rule in output.security_group.ingress_rules : rule.remote_ip_prefix
+      for rule in concat(output.security_group.ingress_rules, output.controlplane_security_group.ingress_rules) : rule.remote_ip_prefix
       if !(rule.remote_group_id != null && rule.remote_group_id == output.security_group.id) &&
       contains([null, "tcp"], rule.protocol) &&
       coalesce(rule.port_range_min, 0) <= 50000 && coalesce(rule.port_range_max, 65535) >= 50000
@@ -471,39 +495,52 @@ run "with_the_reduced_security_groups_selected_an_unconfigured_nodes_talos_api_i
       "203.0.113.113/32",
       "192.0.2.6/32",
     ])
-    error_message = "With the reduced set, TCP 50000 must be admitted from outside the group only from each allowlisted network, each node's floating address and the CI host."
+    error_message = "With the reduced set, TCP 50000 must be admitted to a control plane from outside the nodes' group only from each allowlisted network, each node's floating address and the CI host."
   }
 
   assert {
     condition = toset([
-      for rule in output.security_group.ingress_rules : {
+      for rule in output.controlplane_security_group.ingress_rules : {
         ethertype = rule.ethertype
         protocol  = rule.protocol
         ports     = rule.port_range_min == null && rule.port_range_max == null ? "all" : "${rule.port_range_min}-${rule.port_range_max}"
-      } if rule.remote_ip_prefix == "0.0.0.0/0"
+        source    = rule.remote_ip_prefix
+      }
       ]) == toset([
-      { ethertype = "IPv4", protocol = "tcp", ports = "1-29999" },
-      { ethertype = "IPv4", protocol = "tcp", ports = "32768-49999" },
-      { ethertype = "IPv4", protocol = "tcp", ports = "50001-65535" },
-      { ethertype = "IPv4", protocol = "udp", ports = "1-29999" },
-      { ethertype = "IPv4", protocol = "udp", ports = "32768-65535" },
-      { ethertype = "IPv4", protocol = "icmp", ports = "all" },
-    ])
-    error_message = "With the reduced set, every TCP and UDP port but the Talos API's and the NodePort range, 30000-32767, and ICMP must be open to all, each range once."
+      { ethertype = "IPv4", protocol = "tcp", ports = "1-29999", source = "0.0.0.0/0" },
+      { ethertype = "IPv4", protocol = "tcp", ports = "32768-49999", source = "0.0.0.0/0" },
+      { ethertype = "IPv4", protocol = "tcp", ports = "50001-65535", source = "0.0.0.0/0" },
+      { ethertype = "IPv4", protocol = "udp", ports = "1-29999", source = "0.0.0.0/0" },
+      { ethertype = "IPv4", protocol = "udp", ports = "32768-65535", source = "0.0.0.0/0" },
+      { ethertype = "IPv4", protocol = "icmp", ports = "all", source = "0.0.0.0/0" },
+    ]) && length(output.controlplane_security_group.ingress_rules) == 6
+    error_message = "With the reduced set, the control planes' own group must open every TCP and UDP port but the Talos API's and the NodePort range, 30000-32767, and ICMP to all, each range once, and nothing else."
   }
 
   assert {
     condition = alltrue([
-      for rule in output.security_group.ingress_rules :
+      for rule in output.controlplane_security_group.ingress_rules :
       rule.protocol == "icmp" || coalesce(rule.port_range_max, 65535) < 30000 || coalesce(rule.port_range_min, 0) > 32767
-      if rule.remote_ip_prefix == "0.0.0.0/0"
     ])
     error_message = "With the reduced set, no rule open to all may cover a port of the NodePort range."
   }
 
   assert {
-    condition     = length(output.security_group.ingress_rules) == 27
-    error_message = "The reduced set must keep the 21 rules the nodes have with the CI host and add the six open to all."
+    condition = (
+      length(output.security_group.ingress_rules) == 21 &&
+      alltrue([for rule in output.security_group.ingress_rules : rule.remote_ip_prefix != "0.0.0.0/0"])
+    )
+    error_message = "The reduced set must leave the nodes' group with the 21 rules the nodes have with the CI host, none open to all."
+  }
+
+  assert {
+    condition = { for name, instance in output.instances : name => sort(instance.port.security_group_ids) } == {
+      for name, node in output.nodes : name => sort(concat(
+        [output.security_group.id],
+        node.role == "controlplane" ? [output.controlplane_security_group.id] : [output.worker_security_group.id],
+      ))
+    }
+    error_message = "With the reduced set, every control plane's port must carry the nodes' group and the control planes' own, and every worker's the nodes' group and the workers' own, never the control planes'."
   }
 }
 

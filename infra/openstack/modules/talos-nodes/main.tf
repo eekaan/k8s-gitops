@@ -1,11 +1,11 @@
 # The machines of a Talos cluster. Every node boots the Talos image without machine configuration
 # and waits in maintenance mode, with a fixed private address and a floating IP whose Talos API
 # answers only the operator allowlist; machine configuration is applied over the Talos API, and with
-# it the node's own firewall (talos/firewall.yaml). With the full rules, the default, the nodes'
-# security group also admits the Kubernetes API only from the allowlist and nothing else from outside
-# the nodes; with the reduced rules it leaves every other port to the nodes' firewall but the NodePort
-# range. Workers can be given more: allowed address pairs, and a security group of their own for
-# traffic to Services, which security_group_rules leaves as it is.
+# it the node's own firewall (talos/firewall.yaml). The nodes' security group also admits the
+# Kubernetes API only from the allowlist and nothing else from outside the nodes. With the reduced
+# rules, the control planes get a group of their own that leaves every other port to their firewall
+# but the NodePort range. Workers can be given more: allowed address pairs, and a security group of
+# their own for traffic to Services; security_group_rules changes neither.
 
 locals {
   # Fixed addresses below the node subnet's DHCP pool: control planes from host number 10,
@@ -41,10 +41,8 @@ locals {
 }
 
 resource "openstack_networking_secgroup_v2" "this" {
-  name = var.name
-  description = var.security_group_rules == "reduced" ? (
-    "Talos nodes of ${var.name}: everything between them, the Talos API only from the operator allowlist and the nodes' floating IPs, every other port from all but the NodePort range; the nodes' own firewall filters the rest."
-  ) : "Talos nodes of ${var.name}: everything between them, the Talos and Kubernetes APIs from the operator allowlist and the nodes' floating IPs, the Kubernetes API from the node subnet."
+  name        = var.name
+  description = "Talos nodes of ${var.name}: everything between them, the Talos and Kubernetes APIs from the operator allowlist and the nodes' floating IPs, the Kubernetes API from the node subnet."
   # Neutron's default rules allow all egress, and stay.
   delete_default_rules = false
   tags                 = var.tags
@@ -105,10 +103,24 @@ resource "openstack_networking_secgroup_rule_v2" "api_from_subnet" {
   remote_ip_prefix  = var.network.cidr
 }
 
+# The control planes' own group, with the reduced rules only: what those open to all. Not the nodes'
+# group, which the workers carry too: a rule matches a packet's protocol, port and source, never its
+# destination, so on a worker it would open every port of the service range as well, which Cilium
+# serves before the worker's firewall sees the packet.
+resource "openstack_networking_secgroup_v2" "controlplanes" {
+  count = var.security_group_rules == "reduced" ? 1 : 0
+
+  name        = "${var.name}-controlplanes"
+  description = "Control planes of ${var.name}: every port but the Talos API and the NodePort range, from all; their own firewall filters it."
+  # Ingress rules only; the nodes' group keeps Neutron's default egress rules for the control planes.
+  delete_default_rules = true
+  tags                 = var.tags
+}
+
 resource "openstack_networking_secgroup_rule_v2" "open" {
   for_each = local.open
 
-  security_group_id = openstack_networking_secgroup_v2.this.id
+  security_group_id = openstack_networking_secgroup_v2.controlplanes[0].id
   direction         = "ingress"
   ethertype         = "IPv4"
   protocol          = each.value.protocol
@@ -168,6 +180,7 @@ module "node" {
   security_group_ids = concat(
     [openstack_networking_secgroup_v2.this.id],
     each.value.role == "worker" ? [openstack_networking_secgroup_v2.workers.id] : [],
+    each.value.role == "controlplane" ? openstack_networking_secgroup_v2.controlplanes[*].id : [],
   )
   allowed_address_pairs = concat(
     var.allowed_address_pairs,

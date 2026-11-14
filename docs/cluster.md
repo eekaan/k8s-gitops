@@ -270,8 +270,6 @@ networks than its sources stand for, and when the table below and the file disag
 
 - `operators`: the operator allowlist, `OPERATOR_CIDRS` or `operator-cidrs.json`
   ([infrastructure.md](infrastructure.md#environment)).
-- `nodes`: the node network, which holds every node, the API load balancer, which connects to the
-  API servers and health-checks them from its own addresses there, and the CI host.
 - `floating`: each node's floating address. A node that reaches another node's floating address goes
   out through the router and arrives from its own.
 - `members`: each node's own address on the node network. A node's own connections come from it,
@@ -282,17 +280,28 @@ networks than its sources stand for, and when the table below and the file disag
   [masquerading](https://github.com/cilium/cilium/blob/v1.20.4/bpf/lib/nat.h#L751-L785)).
 - `pods`: the pod range, from which a pod arrives at the node it runs on.
 - `controlplanes`: each control plane's address on the node network.
+- `loadbalancer`: the API load balancer's address on the node network, and the networks of the
+  node subnet's DHCP pool, from which the cloud gives the load balancer's own ports their
+  addresses: a load balancer that proxies, as Octavia's amphora provider does, connects to the API
+  servers and health-checks them from those, not from the client's address. The cluster stack
+  renders the pool as the fewest networks that hold it exactly.
+- `cihost`: the CI host's address on the node network, once the cluster stack's `ci_host_number`
+  gives it ([infrastructure.md](infrastructure.md#the-ci-host)); nothing without it.
 
-A port that pods reach therefore accepts both `members` and `pods`, or `nodes`, which holds every
-member.
+A port that pods reach therefore accepts both `members` and `pods`. No source is the node network as
+a whole, which also holds the two edge routers the workers announce Services to
+([infrastructure.md](infrastructure.md#services-announced-over-bgp)), at host numbers outside every
+source above. An edge router's address therefore reaches no listener on any node: at the firewall it
+gets only what Talos admits to everyone, replies to connections the node opened, such as a worker's
+BGP sessions to it, and ICMP at up to five packets a second.
 
 ### What each node admits
 
 | Rule | Protocol and ports | Nodes | Accepted from | Who connects, and why |
 | --- | --- | --- | --- | --- |
-| `apid` | TCP 50000 | all | `operators`, `nodes`, `floating` | The Talos API: talman and talosctl on the operator's machine and the CI host, and a node's Talos API passing a request on to another node. |
+| `apid` | TCP 50000 | all | `operators`, `members`, `floating`, `cihost` | The Talos API: talman and talosctl on the operator's machine and the CI host, and a node's Talos API passing a request on to another node. |
 | `trustd` | TCP 50001 | control planes | `members` | Talos' trust daemon, from which a worker gets its certificates. |
-| `kube-apiserver` | TCP 6443 | control planes | `operators`, `nodes`, `floating`, `pods` | The Kubernetes API: the operator and the CI host, the load balancer, every node's KubePrism and kubelet, and every pod that reaches the `kubernetes` Service, which Cilium sends to a control plane's address. |
+| `kube-apiserver` | TCP 6443 | control planes | `operators`, `members`, `floating`, `pods`, `loadbalancer`, `cihost` | The Kubernetes API: the operator and the CI host, the load balancer, every node's KubePrism and kubelet, and every pod that reaches the `kubernetes` Service, which Cilium sends to a control plane's address. |
 | `etcd` | TCP 2379-2380 | control planes | `controlplanes` | etcd's client and peer ports: the other members, and a control plane that joins. |
 | `etcd-metrics` | TCP 2381 | control planes | `members`, `pods` | etcd's metrics, which Prometheus scrapes ([above](#the-control-planes-metrics)). |
 | `kube-controller-manager` | TCP 10257 | control planes | `members`, `pods` | The controller manager's secure port, which Prometheus scrapes. |
@@ -317,14 +326,16 @@ member.
 - The Cilium operator and Cilium's Envoy can serve metrics on the host network. Nothing scrapes
   them, as their monitors are off ([kubernetes.md](kubernetes.md#monitoring)), so nothing off the
   node reaches them.
-- Spegel, off in the cluster's overlay, runs on the pod network; its registry is a NodePort that
-  each node's own containerd reaches at the node's own address
+- Spegel runs on the pod network: its peers reach each other, and Prometheus its metrics, at pod
+  addresses, and its registry is a NodePort that each node's own containerd reaches at the node's
+  own address
   ([Spegel](https://github.com/spegel-org/spegel/blob/v0.8.1/charts/spegel/templates/daemonset.yaml)),
   which Cilium serves on the node.
-- Cilium's BGP control plane, off in its values: when on, it opens the sessions to its peers from the
-  nodes and listens on no port unless a node's BGP instance sets `localPort`
-  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/bgp/manager/manager.go#L961-L966)),
-  so replies to its own connections are all that reach the node.
+- Cilium's BGP control plane runs on the workers ([kubernetes.md](kubernetes.md#service-addresses)):
+  each opens its sessions to the two edge routers, and listens on no port, as no BGP instance of
+  `cilium-bgp` sets `localPort`
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/bgp/manager/manager.go#L961-L966)).
+  What an edge router sends on a session is a reply to the worker's connection, which Talos admits.
 - LINSTOR's satellites, which the controller reaches on TCP 3366-3367, and DRBD's replication, on a
   TCP port per volume that LINSTOR takes from its `TcpPortAutoRange`, 7000-7999 unless the controller
   is told otherwise ([LINBIT](https://kb.linbit.com/linstor/linstor-change-tcp-port-range-for-drbd-resources/)),
@@ -356,11 +367,18 @@ reaches them, and neither does a node without machine configuration. Each, with 
   admission plugin (`talos/patches/controlplane/deny-service-external-ips.yaml`), which refuses a
   Service that names an external address it did not have before
   ([Kubernetes](https://kubernetes.io/docs/reference/access-authn-authz/admission-controllers/#denyserviceexternalips)),
-  and no Service names one.
-- Services' load-balancer addresses, which Cilium would serve the same way. None reaches a node:
-  there is no cloud controller to assign one, and Cilium's own address management, L2
-  announcements and BGP control plane are off in its values, so it neither assigns nor announces
-  any.
+  and no Service names one. The plugin reads `spec.externalIPs` alone and passes every
+  subresource
+  ([Kubernetes](https://github.com/kubernetes/kubernetes/blob/v1.37.1/plugin/pkg/admission/network/denyserviceexternalips/admission.go#L60-L98)),
+  so Cilium writing a Service's load-balancer address into its status, and Services labelled for
+  BGP, are not affected.
+- Services' load-balancer addresses, which Cilium assigns from the service range and serves the same
+  way, and which the workers announce to the edge routers
+  ([kubernetes.md](kubernetes.md#service-addresses)). They are reachable only through the edge
+  routers: no route outside the node network leads to the service range but theirs, and the
+  workers' own security group admits traffic to the service ports, and nothing else, from the two
+  edge addresses only ([infrastructure.md](infrastructure.md#services-announced-over-bgp)). That
+  group is part of the outer ring in both sets of the nodes' rules, which leave it as it is.
 - A node in maintenance mode, which has no machine configuration and so no firewall, and whose
   Talos API takes a configuration from anyone who reaches it. The security group admits that port
   only from the allowlist, the nodes' floating addresses and the CI host, in both of its sets.
@@ -425,15 +443,17 @@ change of the allowlist reaches them only from an address they admit before it. 
    old allowlist.
 3. Remove the old network, and apply and roll out the same way, now from the new one.
 
-When the old address is gone already, the nodes still admit their Talos API from the node network
-and from the nodes' floating addresses, and from nothing else outside the allowlist. The way back
-then runs from a host on the node network, such as the CI host or a machine started there for it:
-with the cluster's talosconfig, each node's rendered configuration, which `talman render` writes,
-is applied through the node's Talos API at the node's own address on the node network, with
-talosctl's `apply-config`. No recipe does this: `talman.yaml` names the nodes by their floating
-addresses, which a host on the node network reaches through the router, arriving from an address the
-nodes do not admit. Neither the cloud's console nor the Kubernetes API is a way back: the console
-shows Talos' dashboard only, and the Kubernetes API does not change a machine configuration.
+When the old address is gone already, the nodes admit their Talos API, outside the allowlist, only
+from the nodes themselves and, when the configuration they hold was rendered with `ci_host_number`
+set, from the CI host's address. The way back then runs from that address: from the CI host, or a
+machine started at its address on the node network for the purpose. With the cluster's talosconfig,
+each node's rendered configuration, which `talman render` writes, is applied through the node's
+Talos API at the node's own address on the node network, with talosctl's `apply-config`. No recipe
+does this: `talman.yaml` names the nodes by their floating addresses, which a host on the node
+network reaches through the router, arriving from an address the nodes do not admit. Without
+`ci_host_number` there is no such address, which is why the order above matters. Neither the
+cloud's console nor the Kubernetes API is a way back: the console shows Talos' dashboard only, and
+the Kubernetes API does not change a machine configuration.
 
 ## The Talos age key
 

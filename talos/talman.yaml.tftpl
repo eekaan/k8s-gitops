@@ -33,11 +33,12 @@ values:
         ports    = [for port in listener.ports : strcontains(tostring(port), "-") ? tostring(port) : "${port}-${port}"]
         subnets = sort(distinct(flatten([for source in listener.from : {
           operators     = operator_cidrs
-          nodes         = [node_subnet]
           floating      = [for node in nodes : "${node.floating_ip}/32"]
           pods          = [pod_subnet]
           controlplanes = [for node in nodes : "${node.private_address}/32" if node.role == "controlplane"]
           members       = [for node in nodes : "${node.private_address}/32"]
+          loadbalancer  = api_load_balancer_addresses
+          cihost        = ci_host_address == null ? [] : ["${ci_host_address}/32"]
         }[source]])))
       } if contains(["all", role], listener.nodes)
     ]

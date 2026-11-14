@@ -23,10 +23,15 @@ Feature: Nodes firewall themselves
     When every node's configuration is rendered
     Then every node's rules for UDP 8472 and TCP 4240 accept exactly the six nodes' own addresses, each as a single address, and not the node network
 
-  Scenario: The Talos API and the Kubernetes API accept the operator allowlist, the node network and the load balancer, and nobody else
-    Given fixture node data with an operator allowlist of two networks and the load balancer's address on the node network
+  Scenario: The Talos API and the Kubernetes API accept the operator allowlist, the nodes, the load balancer and the CI host, and nobody else
+    Given fixture node data with an operator allowlist of two networks, the load balancer's address and pool on the node network, and the CI host's address there
     When every node's configuration is rendered
-    Then every node's Talos API rule accepts exactly the allowlist, the node network and each node's floating address, every control plane's Kubernetes API rule accepts exactly those and the pod range, the load balancer's address lies in the node network, and no other rule accepts an allowlisted network or a floating address
+    Then every node's Talos API rule accepts exactly the allowlist, each node's own and floating address and the CI host, every control plane's Kubernetes API rule accepts exactly those, the pod range and the load balancer's networks, no other rule accepts any of the outside ones, and no rule accepts the node network as a whole
+
+  Scenario: An edge router's address reaches no listener on any node
+    Given fixture node data with the two edge routers' addresses on the node network
+    When every node's configuration is rendered
+    Then no rule of any node accepts a network that holds an edge router's address
 
   Scenario: etcd accepts control planes only
     Given fixture node data with three control planes and three workers, each with its address on the node network
@@ -66,7 +71,12 @@ Feature: Nodes firewall themselves
   Scenario: With the reduced security groups selected, an unconfigured node's Talos API is still limited to the operator allowlist
     Given the cluster stack with the reduced security group rules and a CI host
     When it is planned against mocked providers
-    Then TCP 50000 is admitted from outside the group only from each allowlisted network, each node's floating address and the CI host, no rule open to all covers the NodePort range, every other TCP and UDP port and ICMP are admitted from all, and today's rules stay
+    Then TCP 50000 is admitted to a control plane from outside the nodes' group only from each allowlisted network, each node's floating address and the CI host, the control planes' own group admits every other TCP and UDP port and ICMP from all but no port of the NodePort range, the nodes' group keeps today's rules, and only control planes carry the new group
+
+  Scenario: The workers' security group is the same with either set of the nodes' rules
+    Given the cluster stack with the reduced security group rules and the edge routers of the plumbing stack
+    When it is planned against mocked providers
+    Then the workers' own group admits TCP 80 and 443 from each edge address and nothing else, holds no egress rule, every worker carries the nodes' group and its own and no other, and an edge router reaches a worker on those ports and TCP 6443 only, as with today's rules
 
   Scenario: With today's security groups selected, the stack plans no change
     Given the cluster stack with its default security group rules

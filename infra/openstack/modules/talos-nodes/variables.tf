@@ -34,7 +34,7 @@ variable "api_allowed_cidrs" {
 }
 
 variable "security_group_rules" {
-  description = "full: the security group admits from outside the nodes only the Talos API (TCP 50000) and the Kubernetes API (TCP 6443), from api_allowed_cidrs and the nodes' floating IPs, and the Kubernetes API from the node subnet. reduced: those rules, and every other TCP and UDP port and ICMP from all, but TCP 50000 and the NodePort range, 30000-32767."
+  description = "full: the nodes' security group admits from outside the nodes only the Talos API (TCP 50000) and the Kubernetes API (TCP 6443), from api_allowed_cidrs and the nodes' floating IPs, and the Kubernetes API from the node subnet. reduced: the same, and a group of the control planes' own admits every other TCP and UDP port and ICMP from all, but TCP 50000 and the NodePort range, 30000-32767. Neither changes the workers' group."
   type        = string
   default     = "full"
 

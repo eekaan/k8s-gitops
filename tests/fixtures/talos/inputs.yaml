@@ -25,6 +25,12 @@ service_subnet: 203.0.113.0/24
 operator_cidrs:
   - 198.51.100.0/26
   - 198.51.100.64/26
+# The API load balancer's own addresses on the node network: its address, and the networks of the
+# node network's DHCP pool, from which its ports take theirs. And the CI host's address there.
+api_load_balancer_addresses:
+  - 192.0.2.10/32
+  - 192.0.2.96/28
+ci_host_address: 192.0.2.6
 # The plumbing stack's numbers for Services announced over BGP: the range LoadBalancer addresses come
 # from, outside the node subnet, and the documentation AS numbers and two edge addresses on the node
 # subnet.

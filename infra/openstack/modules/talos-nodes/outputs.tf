@@ -35,7 +35,6 @@ output "security_group" {
         values(openstack_networking_secgroup_rule_v2.api),
         values(openstack_networking_secgroup_rule_v2.hairpin),
         [openstack_networking_secgroup_rule_v2.api_from_subnet],
-        values(openstack_networking_secgroup_rule_v2.open),
         ) : {
         security_group_id = rule.security_group_id
         direction         = rule.direction
@@ -69,6 +68,26 @@ output "worker_security_group" {
       }
     ]
   }
+}
+
+output "controlplane_security_group" {
+  description = "With the reduced rules, the control planes' own security group: its ID, whether Neutron's default egress rules were removed from it, and every ingress rule in it, each open to all; null with the full rules."
+  value = var.security_group_rules == "reduced" ? {
+    id                   = openstack_networking_secgroup_v2.controlplanes[0].id
+    delete_default_rules = openstack_networking_secgroup_v2.controlplanes[0].delete_default_rules
+    ingress_rules = [
+      for rule in values(openstack_networking_secgroup_rule_v2.open) : {
+        security_group_id = rule.security_group_id
+        direction         = rule.direction
+        ethertype         = rule.ethertype
+        protocol          = rule.protocol
+        port_range_min    = rule.port_range_min
+        port_range_max    = rule.port_range_max
+        remote_ip_prefix  = rule.remote_ip_prefix
+        remote_group_id   = rule.remote_group_id
+      }
+    ]
+  } : null
 }
 
 output "server_group" {
