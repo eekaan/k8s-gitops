@@ -25,3 +25,8 @@ cluster-bootstrap cluster='lab-sto2':
 # Fetch a cluster's admin kubeconfig into talos/<cluster>/clusterconfig/kubeconfig, mode 0600, served at KUBE_API_ADDRESS; prints its path
 cluster-kubeconfig cluster='lab-sto2':
     scripts/cluster-kubeconfig {{ quote(cluster) }}
+
+# Roll a cluster's configuration out: show what would change, then apply once its name is typed back (--yes: without asking; --onboard: configure new nodes too)
+[positional-arguments]
+cluster-talos *args:
+    scripts/cluster-talos "$@"

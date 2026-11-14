@@ -41,6 +41,16 @@ Feature: Cluster recipes
     When cluster-kubeconfig runs
     Then talos/lab-sto2/clusterconfig/kubeconfig has mode 0600, every cluster in it is served at https://KUBE_API_ADDRESS:6443, and the recipe prints the file's path and neither its content nor the address
 
+  Scenario: A configuration rollout shows the change and asks before applying
+    Given a configuration change talman reports for the cluster's nodes
+    When cluster-talos runs and the cluster's name is not typed back
+    Then it shows talman's dry run with the cluster's secrets redacted and applies nothing; with the name typed back, or with --yes, talman applies the change in one run with no health check; and with nothing to change it exits zero without asking or applying
+
+  Scenario: New nodes are onboarded only when asked
+    Given a node in maintenance mode beside a configuration change
+    When cluster-talos runs, and then runs with --onboard
+    Then without --onboard no talman call onboards new nodes and the node stays new, and with --onboard both the dry run and the apply onboard it
+
   Scenario: No cluster secret reaches a command line or the output
     Given an age key, a secrets bundle and a kubeconfig whose secrets are known
     When every cluster recipe runs against recording tools, and in the ways each one stops

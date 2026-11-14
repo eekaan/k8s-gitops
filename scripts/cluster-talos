@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Rolls the cluster's configuration out: its talman.yaml and the patches it lists, as they are now.
+# Waits until every node answers on the Talos API port, then shows what talman apply would change on
+# each node, with the cluster's secrets redacted, and once the cluster's name is typed back, or with
+# --yes, applies it. talman applies one node at a time, control planes always alone, and waits for
+# each to come back before the next. A node in maintenance mode, such as one OpenTofu has just
+# added, is configured only with --onboard: the maintenance service authenticates nothing, and a
+# node's configuration carries the cluster's keys. With nothing to change, nothing is asked or
+# applied. No health check runs, for the reason scripts/cluster-bootstrap gives.
+# Usage: scripts/cluster-talos [cluster] [--onboard] [--yes]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/cluster.sh
+. "$here/lib/cluster.sh"
+
+cluster='' confirmed=0 onboard=()
+for arg; do
+  case $arg in
+    --yes) confirmed=1 ;;
+    --onboard) onboard=(--onboard-new-nodes) ;;
+    *)
+      if [[ $arg == -* || -n $cluster ]]; then
+        infra_error "usage: cluster-talos [cluster] [--onboard] [--yes]"
+        exit 2
+      fi
+      cluster=$arg
+      ;;
+  esac
+done
+
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "$cluster"
+require_cluster talman secrets age-key wait
+
+step="waiting for every node to answer on the Talos API port"
+wait_for_talos_api "$talman_file"
+
+step="asking each node what the configuration would change"
+changes=0
+talman apply --dry-run --detailed-exit-code --redact-secrets "${onboard[@]}" || changes=$?
+case $changes in
+  0)
+    echo "cluster-talos: nothing to change on $cluster"
+    exit 0
+    ;;
+  2) ;;
+  *) exit "$changes" ;;
+esac
+
+step="waiting for $cluster to be typed back"
+((confirmed)) || confirm "$cluster" "apply this configuration to" changed
+
+step="applying the configuration"
+talman apply "${onboard[@]}"
+echo "cluster-talos: the configuration of $cluster is applied"

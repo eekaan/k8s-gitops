@@ -139,21 +139,69 @@ cluster_files() {
 #   bootstrapped       etcd runs, so talman refuses to bootstrap again
 #   answers-on.ADDRESS the node at ADDRESS answers the probe at that try (the first by default)
 #   silent.ADDRESS     the node at ADDRESS never answers
+#   changes            applying the configuration would change cp-1
+#   new-nodes          the hostnames of nodes in maintenance mode, which talman apply refuses to
+#                      configure, and which a dry run does not count as a change, unless onboarding
+#   unreachable        talman apply's dry run cannot reach cp-2 and fails
 fake_cluster() {
   cluster_files
   fake_tool talman <<'EOF'
 printf '%s\n' "talman $*" >> "$RECORD/argv"
 dir=$TALMAN_CONFIG
+given() {
+  [[ " ${args[*]} " == *" $1 "* ]]
+}
+args=("$@")
 case "$1" in
   apply)
-    if [[ " $* " == *" --bootstrap "* ]]; then
+    if given --bootstrap; then
       if [[ -e $STATE/bootstrapped ]]; then
         echo "error: cp-1 runs etcd: a cluster is here already, and bootstrapping it again would split it" >&2
         exit 1
       fi
       : > "$STATE/bootstrapped"
       echo "== bootstrapping etcd on cp-1"
+      exit 0
     fi
+    new=$(cat "$STATE/new-nodes" 2> /dev/null || true)
+    if given --dry-run; then
+      if [[ -e $STATE/unreachable ]]; then
+        echo "error: cp-2 answers neither the Talos API nor the maintenance service" >&2
+        exit 1
+      fi
+      changed=0
+      if [[ -e $STATE/changes ]]; then
+        echo "== cp-1"
+        echo "     Config diff:"
+        if given --redact-secrets=false; then
+          echo "     +    token: marker-machine-token"
+        else
+          echo "     +    token: [redacted]"
+        fi
+        changed=1
+      fi
+      for node in $new; do
+        echo "== $node · new, in maintenance mode"
+        if given --onboard-new-nodes; then
+          changed=1
+        else
+          echo "     a real run would need --onboard-new-nodes"
+        fi
+      done
+      if given --detailed-exit-code && ((changed)); then
+        exit 2
+      fi
+      exit 0
+    fi
+    if [[ -n $new ]] && ! given --onboard-new-nodes; then
+      echo "error: new node(s), in maintenance mode: $new" >&2
+      exit 1
+    fi
+    if given --onboard-new-nodes; then
+      : > "$STATE/new-nodes"
+    fi
+    rm -f "$STATE/changes"
+    echo "     Applied configuration without a reboot"
     ;;
   kubeconfig)
     mkdir -p "$dir/clusterconfig"
@@ -213,6 +261,16 @@ node_address() {
 # call_line PATTERN: the line number in the record of the first call matching the extended regex.
 call_line() {
   grep -n -m1 -E -- "$1" "$RECORD/argv" | cut -d: -f1
+}
+
+# calls PATTERN: the recorded calls matching the extended regex, one per line.
+calls() {
+  grep -E -- "$1" "$RECORD/argv" || true
+}
+
+# applies: the recorded talman apply calls that are not dry runs, one per line.
+applies() {
+  calls '^talman apply( |$)' | grep -v -- ' --dry-run' || true
 }
 
 @test "The age key is created once and never printed" {
@@ -387,7 +445,7 @@ call_line() {
   record age-keygen
   with GODEBUG=x509sha1=1,http2debug=2
 
-  for name in cluster-age-key cluster-secrets cluster-bootstrap cluster-kubeconfig; do
+  for name in cluster-age-key cluster-secrets cluster-bootstrap cluster-kubeconfig cluster-talos; do
     recipe "$name"
 
     [ "$status" -ne 0 ]
@@ -493,12 +551,14 @@ call_line() {
   fetched=$(call_line '^talman kubeconfig')
   installed=$(call_line '^install-cilium ')
   ready=$(call_line '^kubectl wait ')
-  [ -n "$probed" ] && [ -n "$applied" ] && [ -n "$fetched" ] && [ -n "$installed" ] && [ -n "$ready" ]
+  for call in "$probed" "$applied" "$fetched" "$installed" "$ready"; do
+    [ -n "$call" ]
+  done
   [ "$probed" -lt "$applied" ]
   [ "$applied" -lt "$fetched" ]
   [ "$fetched" -lt "$installed" ]
   [ "$installed" -lt "$ready" ]
-  apply=$(grep '^talman apply ' "$RECORD/argv")
+  apply=$(calls '^talman apply( |$)')
   [ "$(wc -l <<< "$apply")" -eq 1 ]
   [[ " $apply " == *" --bootstrap "* && " $apply " == *" --onboard-new-nodes "* ]]
   [ "$(grep -c health "$RECORD/argv")" -eq 0 ]
@@ -558,6 +618,91 @@ call_line() {
   [ ! -e "$RECORD/argv" ]
 }
 
+@test "A configuration rollout shows the change and asks before applying" {
+  fake_cluster
+  : > "$STATE/changes"
+
+  recipe cluster-talos <<< "no"
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"Config diff:"* && $output == *"[redacted]"* ]]
+  [[ $output != *marker-machine-token* ]]
+  [[ $output == *"lab-sto2 was not confirmed"* ]]
+  [ "$(calls '^talman apply( |$)' | wc -l)" -eq 1 ]
+  [ -n "$(call_line '^talman apply .*--dry-run')" ]
+  [ -e "$STATE/changes" ]
+  probed=$(grep -n '^timeout .*/dev/tcp/' "$RECORD/argv" | tail -1 | cut -d: -f1)
+  [ -n "$probed" ]
+  [ "$probed" -lt "$(call_line '^talman ')" ]
+
+  : > "$RECORD/argv"
+  recipe cluster-talos lab-sto2 <<< "lab-sto2"
+
+  [ "$status" -eq 0 ]
+  [ "$(applies | wc -l)" -eq 1 ]
+  [[ " $(applies) " != *" --health "* ]]
+  [ "$(call_line '^talman apply .*--dry-run')" -lt "$(call_line "^$(applies)\$")" ]
+  [ ! -e "$STATE/changes" ]
+
+  : > "$STATE/changes"
+  : > "$RECORD/argv"
+  recipe cluster-talos --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output != *"Type lab-sto2"* ]]
+  [ "$(applies | wc -l)" -eq 1 ]
+
+  # Nothing changes: nothing is asked or applied.
+  : > "$RECORD/argv"
+  recipe cluster-talos < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output != *"Type lab-sto2"* ]]
+  [ "$(applies | wc -l)" -eq 0 ]
+}
+
+@test "New nodes are onboarded only when asked" {
+  fake_cluster
+  echo worker-3 > "$STATE/new-nodes"
+  : > "$STATE/changes"
+
+  recipe cluster-talos --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [ "$(grep -c -- '--onboard-new-nodes' "$RECORD/argv")" -eq 0 ]
+  [ "$(cat "$STATE/new-nodes")" = worker-3 ]
+
+  : > "$RECORD/argv"
+  recipe cluster-talos --onboard --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ "$(calls '^talman apply( |$)' | wc -l)" -eq 2 ]
+  [ "$(calls '^talman apply( |$)' | grep -vc -- ' --onboard-new-nodes')" -eq 0 ]
+  [ ! -s "$STATE/new-nodes" ]
+}
+
+@test "a rollout whose dry run fails applies nothing and names the step" {
+  fake_cluster
+  : > "$STATE/changes"
+  : > "$STATE/unreachable"
+
+  recipe cluster-talos --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"cluster-talos: failed while asking each node what the configuration would change"* ]]
+  [ "$(applies | wc -l)" -eq 0 ]
+}
+
+@test "cluster-talos refuses an argument it does not know before it runs anything" {
+  fake_cluster
+
+  recipe cluster-talos --force < /dev/null
+
+  [ "$status" -eq 2 ]
+  [[ $output == *"usage: cluster-talos [cluster] [--onboard] [--yes]"* ]]
+  [ ! -e "$RECORD/argv" ]
+}
+
 @test "No cluster secret reaches a command line or the output" {
   git_repository
   record talman talosctl sops age-keygen yq jq git
@@ -606,7 +751,15 @@ call_line() {
   : > "$STATE/silent.$(node_address worker-3)"
   with TALOS_WAIT=0
   run_and_keep failed cluster-bootstrap
+  run_and_keep failed cluster-talos --yes < /dev/null
   reset_environment
+  rm "$STATE/silent.$(node_address worker-3)"
+  : > "$STATE/changes"
+  echo worker-3 > "$STATE/new-nodes"
+  run_and_keep failed cluster-talos <<< no
+  run_and_keep failed cluster-talos --yes < /dev/null
+  run_and_keep ok cluster-talos --onboard --yes < /dev/null
+  run_and_keep ok cluster-talos < /dev/null
 
   markers+=(
     AGE-SECRET-KEY-MARKER-AGE-KEY-FILE

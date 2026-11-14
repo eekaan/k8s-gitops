@@ -17,6 +17,9 @@ except through talman, and the cluster except through the kubeconfig.
 4. `just cluster-secrets`, once per cluster: the secrets bundle. Commit it.
 5. `just cluster-bootstrap`: every node configured, Cilium installed, every node Ready.
 
+Later changes to a patch or to `talman.yaml`, and nodes OpenTofu adds, reach the nodes with
+`just cluster-talos`.
+
 ## The Talos age key
 
 The secrets bundle holds the cluster's certificate authorities and keys. It is encrypted with sops
@@ -63,13 +66,25 @@ the bundle's path itself, so the rule applies wherever talman runs from.
   5. It waits until every node in `talman.yaml` is a Ready Kubernetes node.
 
   A second run is refused by talman, which bootstraps only when every control plane answers and
-  none runs etcd. No health check runs: `talosctl health`, reaching the nodes through their
-  floating addresses, compares those with the addresses the nodes hold on the node network, which
-  differ by design, so it never passes.
+  none runs etcd. A bootstrap that stopped once etcd was running is therefore not run again: the
+  nodes it did not reach are configured with `just cluster-talos --onboard`, and the steps after
+  it are run by their own recipes. No health check runs: `talosctl health`, reaching the nodes
+  through their floating addresses, compares those with the addresses the nodes hold on the node
+  network, which differ by design, so it never passes.
 - `just cluster-kubeconfig [cluster]` fetches the admin kubeconfig with `talman kubeconfig` into
   `clusterconfig/kubeconfig`, with mode 0600, and points it at `https://KUBE_API_ADDRESS:6443`:
   talman writes the cluster endpoint, the load balancer's address on the node network, which only
   the nodes reach. It prints the file's path. The recipes that use the cluster read it from there.
+- `just cluster-talos [cluster] [--onboard] [--yes]` rolls the configuration out: the cluster's
+  `talman.yaml` and the patches it lists, as they are now. It waits for every node as
+  `cluster-bootstrap` does, then shows what `talman apply --dry-run` says would change on each
+  node, with the cluster's secrets redacted, and applies once the cluster's name is typed back;
+  `--yes` does not ask. talman applies one node at a time, control planes always alone, rebooting
+  a node only when the change needs it and waiting for each to come back before the next. A node
+  in maintenance mode, such as one OpenTofu has just added, is configured only with `--onboard`:
+  the maintenance service authenticates nothing, and a node's configuration carries the cluster's
+  keys. Without it, talman refuses a rollout while such a node is there. With nothing to change,
+  nothing is asked or applied. It needs what `cluster-bootstrap` needs but `KUBE_API_ADDRESS`.
 
 A failing recipe ends with a line naming the step it failed in.
 
@@ -98,7 +113,8 @@ their environment.
   them, as talman decrypts the bundle.
 - `KUBE_API_ADDRESS`: the Kubernetes API load balancer's floating address, an IPv4 address or host
   name; `cluster-bootstrap` and `cluster-kubeconfig` need it.
-- `TALOS_WAIT`: how many seconds `cluster-bootstrap` waits for the nodes, 600 when unset.
+- `TALOS_WAIT`: how many seconds `cluster-bootstrap` and `cluster-talos` wait for the nodes, 600
+  when unset.
 
 The recipes, the check aside, refuse to run while `GODEBUG` sets `http2debug`: Go's HTTP/2 debug
 log prints the frames talosctl and kubectl send and receive, which carry machine configurations
