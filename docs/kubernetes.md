@@ -434,6 +434,97 @@ PodMonitor is enabled. `tests/baseline.bats` renders the chart with these values
 namespace, the definitions and their policy, the Gateway API configuration and dependency, and the
 replicas, spreads and budgets.
 
+## Autoscaling and reflection
+
+Three small add-ons that the applications this cluster runs assume, each enabled in the cluster's
+overlay. `tests/autoscaling.bats` builds each as Flux applies it and renders its chart to check
+what follows.
+
+### KEDA
+
+`apps/base/keda/keda/` runs KEDA in its own namespace, `keda`, at the restricted Pod Security level
+its pods meet. An application scales on events by creating a `ScaledObject` (or `ScaledJob`) that
+names its workload and a trigger; KEDA creates and owns the HorizontalPodAutoscaler that follows it.
+The chart is the publisher's, from a public OCI mirror, as it releases only to a classic Helm
+repository.
+
+- The release installs and upgrades the `keda.sh` and `eventing.keda.sh` definitions, as the
+  publisher's chart does; each carries `helm.sh/resource-policy: keep`, so uninstalling the release
+  leaves them, and every `ScaledObject`, in place. The application's `ks.yaml` sets `wait`, so an
+  application that names `keda` in `dependsOn` starts once they exist.
+- The operator, the metrics server and the admission webhooks each run two replicas, preferably on
+  different nodes, under a disruption budget that keeps one running. Only one operator is the
+  leader, so its second replica is a standby that shortens a failover. The second metrics server is
+  there for availability too, so one keeps answering through a drain or a pod's failure: the API
+  server reaches them through their Service's address without aggregator routing, so requests are
+  not spread over the two, and KEDA's documentation supports one. Requests and limits are the ones
+  KEDA's documentation gives for each component.
+- KEDA's metrics server registers the `external.metrics.k8s.io` API. metrics-server registers
+  `metrics.k8s.io`; the two groups differ, so the registrations do not collide. Only one provider
+  can serve `external.metrics.k8s.io`: no other application may register it.
+- The admission webhooks' failure policy is `Ignore`: while no webhook answers, a `ScaledObject` is
+  admitted without being checked. A missing operator is worse for what it owns: HorizontalPodAutoscalers
+  that follow a `ScaledObject` stay, but the metrics server gets the values they read from the
+  operator, and the operator does the scaling from and to zero itself, so without it they cannot
+  compute, their workload stays at its current size, and nothing scales it from or to zero.
+- KEDA 2.21's documentation tests Kubernetes 1.34 to 1.36; the cluster runs a newer release, so KEDA
+  runs outside the versions its publisher has tested.
+- One ServiceMonitor for each of the three components.
+
+### Vertical Pod Autoscaler
+
+`apps/base/kube-system/vpa/` runs the recommender only, in `kube-system` with the other small
+services the cluster assumes, from the Fairwinds chart.
+The project's own `vertical-pod-autoscaler` chart (in the autoscaler repository's Helm index) says
+it is under development and not ready for production, so the cluster uses Fairwinds', which tracks
+an older release of the recommender (1.7.1, where the project's is 1.8.1). Fairwinds' chart is
+published only to a classic Helm repository and no public OCI mirror carries it, so the application
+has a `HelmRepository` beside its `HelmRelease`, which Renovate follows as it does the others. The
+recommender reads container usage from metrics-server and writes a recommendation
+to the status of each `VerticalPodAutoscaler` an application creates; it does not act on it. The
+chart's updater and admission controller are off, so nothing evicts a pod and no webhook or
+certificate generator is rendered, and no role bound in the release lets a service account change a
+pod.
+
+- The definitions (`VerticalPodAutoscaler` and its checkpoint) are in the chart's `crds/`
+  directory, which Helm installs once and never removes with a release, so they stay when the
+  application leaves the tree. Flux creates and replaces them on upgrade through the release
+  defaults. `ks.yaml` sets `wait` and names `metrics-server`, whose API the chart's Helm test reads;
+  metrics-server's own `ks.yaml` does not set `wait`, so on a new cluster the test can run before
+  that API answers, fail, and use up an install retry.
+- The chart's three `vpa-test-*` pods run after each install and upgrade, because the cluster's
+  Helm releases run their tests. They set no requests, and the chart has no value to set them; they
+  are the one exception to every container having requests, and they are left out of the check.
+- One replica, with the chart's requests and no limits. The project's FAQ says only one recommender
+  is active; a second would need `--leader-elect=true` and would add a second 500Mi request for a
+  faster failover only, as the recommender keeps its history in checkpoint objects. There is
+  therefore no disruption budget.
+- The recommender keeps what it has seen as long as it runs, plus checkpoints. It could read
+  history from the monitoring stack's Prometheus instead (`--storage=prometheus`), which gives it
+  recommendations at once after a restart; that needs kubelet container metrics to be scraped under
+  the names it expects, and nothing here configures it.
+- A PodMonitor for the recommender.
+
+### Reflector
+
+`apps/base/kube-system/reflector/` runs Reflector in `kube-system`, from its publisher's chart on
+its OCI registry. It copies a Secret or ConfigMap into other namespaces, which is how one wildcard
+certificate serves several of them: the source carries
+`reflector.v1.k8s.emberstack.com/reflection-allowed: "true"` and
+`reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces`, and a copy is made in each
+namespace the second names (`reflection-auto-enabled` and `reflection-auto-namespaces` make the
+copies without the destination asking).
+
+Reflector can read and write every Secret and ConfigMap in every namespace, and list and watch
+namespaces: that is what it is for, and its ClusterRole grants exactly that and nothing else. The
+control is the annotations: only an object carrying `reflection-allowed` is copied, and only into
+the namespaces its annotation names. An empty `reflection-allowed-namespaces` allows every
+namespace, so every source lists them. Nothing in this repository carries a reflection annotation
+yet; `tests/autoscaling.bats` fails when a file under `kubernetes/` does.
+
+One replica: Reflector has no leader election, so a second would copy what the first does, and
+the chart makes no disruption budget. Its chart serves no metrics and has no monitor.
+
 ## Storage
 
 Persistent volumes come from LINSTOR, run by the Piraeus operator, on the workers' data volumes

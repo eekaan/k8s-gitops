@@ -1,0 +1,14 @@
+---
+# Values for the Reflector chart, read by the HelmRelease through a ConfigMap generated without
+# substitution. Keys not set here keep the chart's defaults, which watch every namespace.
+
+# One replica: Reflector has no leader election, so a second would copy the same objects as the
+# first, and the chart makes no disruption budget. A restart delays a copy by the pod's start.
+replicaCount: 1
+
+# The chart sets no resources; Reflector caches every Secret and ConfigMap it may copy. No limit is
+# set, as memory grows with the number of those objects.
+resources:
+  requests:
+    cpu: 10m
+    memory: 128Mi
