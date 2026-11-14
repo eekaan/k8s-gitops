@@ -103,8 +103,9 @@ quotes, tabs, comment or indented line under it, as the script that reads them h
 - `just tools-image-key` prints the key of those inputs. It names the image: its tag, the
   annotation its signature carries, and `ci_tools_inputs` in `versions.yaml`, recorded beside the
   image's digest in `ci_tools_image`.
-- `just ci` hands the module the recorded image, by digest, when the recorded key is the key of the
-  checkout's inputs; the module uses it when the engine runs the image's platform, `linux/amd64`.
+- `just ci`, and `just ci-render` for the render job, hand the module the recorded image, by digest,
+  when the recorded key is the key of the checkout's inputs; the module uses it, for the checks and
+  the render alike, when the engine runs the image's platform, `linux/amd64`.
   Otherwise the module builds the tools from the pins, as before, so a pull request that changes an
   input works before any image exists for it, on another platform too. Either way the same checks
   run and give the same result. A record of any image but `ghcr.io/eekaan/k8s-gitops/ci-tools`

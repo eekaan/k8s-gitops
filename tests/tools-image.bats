@@ -325,6 +325,20 @@ fake_ci() {
   printf '%s\n' "$output" "$stderr"
 }
 
+# fake_render: runs the checkout's just ci-render, the CI render job's recipe, as fake_ci runs just ci.
+fake_render() {
+  rm -f "$RECORD/dagger.args"
+  bats_require_minimum_version 1.5.0
+  run --separate-stderr env PATH="$BIN:/usr/bin:/bin" "$JUST" --justfile "$WORK/justfile" --working-directory "$WORK" \
+    ci-render "$BATS_TEST_TMPDIR/render-diff/comment.md"
+  printf '%s\n' "$output" "$stderr"
+}
+
+# tools_handed: the --tools-* arguments dagger was given, in order.
+tools_handed() {
+  grep -E '^--tools-' "$RECORD/dagger.args"
+}
+
 # handed NAME: the value of the one --NAME=VALUE argument dagger was given; fails unless there is
 # exactly one.
 handed() {
@@ -503,11 +517,17 @@ verdicts() {
   sed -i -E 's/^talos: .*/talos: v0.0.1/' "$WORK/versions.yaml"
   record "$(printf 'other inputs' | sha256sum | cut -d' ' -f1)" "$IMAGE@$DIGEST"
   sed -i '1a # a comment that is not an input' "$WORK/versions.yaml"
+  # The rest of the module: another function, the render's among them, the choice between the image and
+  # the layer, which decides where the layer is used and not what it holds, the layer's docstring above
+  # it and the type below it.
   printf '\n# a comment\n' >> "$WORK/.dagger/modules/ci/main.dang"
   sed -i 's/Run the justfile.s groups of checks side by side/Run the groups of checks side by side/' "$WORK/.dagger/modules/ci/main.dang"
   sed -i 's/^  The tools pinned in mise.toml/  The tools mise.toml pins/' "$WORK/.dagger/modules/ci/main.dang"
+  sed -i 's|"/tmp/render-diff/comment.md"\])$|"/tmp/render-diff/comment.md"]).withEnvVariable("RENDER", "1")|' "$WORK/.dagger/modules/ci/main.dang"
+  sed -i 's/as no tools image is given")/as none is given")/' "$WORK/.dagger/modules/ci/main.dang"
+  sed -i 's/^The tools container, and where it came from\.$/The tools container and its origin./' "$WORK/.dagger/modules/ci/main.dang"
   run diff "$pristine/.dagger/modules/ci/main.dang" "$WORK/.dagger/modules/ci/main.dang"
-  [ "$(grep -c '^>' <<< "$output")" -eq 4 ]
+  [ "$(grep -c '^>' <<< "$output")" -eq 7 ] || { echo "$output"; return 1; }
   printf '\n# a comment\n' >> "$WORK/justfile"
   printf '\nmore words\n' >> "$WORK/README.md"
   printf 'new\n' > "$WORK/new-file"
@@ -594,6 +614,43 @@ verdicts() {
     [ "$status" -ne 0 ] || { echo "accepted the record $bad"; return 1; }
     [ ! -e "$RECORD/dagger.args" ] || { echo "called dagger with the record $bad"; return 1; }
     [[ $stderr == *versions.yaml* ]]
+
+    # The render job's recipe stops on it the same way.
+    fake_render
+
+    [ "$status" -ne 0 ] || { echo "ci-render accepted the record $bad"; return 1; }
+    [ ! -e "$RECORD/dagger.args" ] || { echo "ci-render called dagger with the record $bad"; return 1; }
+    [[ $stderr == *versions.yaml* ]]
+  done
+}
+
+@test "just ci-render hands the module the tools just ci hands it" {
+  local input from_ci
+  checkout
+  record "$(key_of "$WORK")" "$IMAGE@$DIGEST"
+  commit "record an image for these inputs"
+  local pristine="$BATS_TEST_TMPDIR/pristine"
+  cp -R "$WORK" "$pristine"
+  # The recorded image for these inputs, then for each changed input the inputs alone.
+  for input in none pin base packages layer; do
+    rm -rf "$WORK"
+    cp -R "$pristine" "$WORK"
+    [[ $input == none ]] || change "$input"
+
+    fake_ci
+    [ "$status" -eq 0 ]
+    from_ci=$(tools_handed)
+    fake_render
+    [ "$status" -eq 0 ]
+
+    [ -n "$from_ci" ]
+    [ "$(tools_handed)" = "$from_ci" ] || { echo "with $input: ci handed $from_ci, ci-render $(tools_handed)"; return 1; }
+    grep -qx render-diff "$RECORD/dagger.args"
+    if [[ $input == none ]]; then
+      [ "$(handed tools-image)" = "$IMAGE@$DIGEST" ]
+    else
+      [ "$(grep -c '^--tools-image' <<< "$from_ci")" -eq 0 ]
+    fi
   done
 }
 
