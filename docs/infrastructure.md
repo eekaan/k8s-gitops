@@ -108,8 +108,9 @@ volume: `<node>-data`, such as `lab-w-1-data`, of `worker_data_volume_size` GiB,
 and at least 2, and of the volume type `worker_data_volume_type`, `cbs` by default. Each is
 attached to its worker by an attachment resource of its own, never as a block device of the
 instance, so adding the volumes to running workers creates a volume and an attachment per worker
-and changes no server. The volume stays empty: Talos hands it to the storage layer under one
-device name ([cluster.md](cluster.md#the-workers-data-device), ADR 0011). The sensitive output
+and changes no server. OpenTofu puts nothing on the volume: Talos hands it to the storage layer
+under one device name ([cluster.md](cluster.md#the-workers-data-device), ADR 0011), and LINSTOR
+keeps its storage pool on it ([kubernetes.md](kubernetes.md#storage)). The sensitive output
 `worker_data_volumes` gives each volume's ID, name, size and type, and the instance and volume its
 attachment joins.
 
