@@ -4,7 +4,7 @@
 # firewall for the nodes it names, which talos/patches/all/firewall.yaml writes into their machine
 # configuration; everything else that reaches a node is dropped. docs/cluster.md lists the same
 # listeners, with who connects to each and why, and tests/node-firewall.bats fails when the two, or a
-# node's rules, disagree.
+# node's rules, disagree. A new listener is one entry here and one row in that table.
 #
 #   name      the rule's name, unique
 #   protocol  tcp or udp
@@ -14,7 +14,9 @@
 #     operators      the operator allowlist, the cluster stack's api_allowed_cidrs
 #     nodes          the node network: every node, the API load balancer's addresses and the CI host
 #     floating       each node's floating address, the source of a node that reaches another's
-#     pods           the pod range, the source of a pod that reaches a port on a node
+#     members        each node's own address on the node network: a node, and a pod on another
+#                    node, whose traffic Cilium masquerades to its node's address
+#     pods           the pod range, the source of a pod that reaches a port on its own node
 #     controlplanes  each control plane's address on the node network
 listeners:
   - name: apid
@@ -26,7 +28,7 @@ listeners:
     protocol: tcp
     ports: [50001]
     nodes: controlplane
-    from: [nodes]
+    from: [members]
   - name: kube-apiserver
     protocol: tcp
     ports: [6443]
@@ -41,39 +43,39 @@ listeners:
     protocol: tcp
     ports: [2381]
     nodes: controlplane
-    from: [pods]
+    from: [members, pods]
   - name: kube-controller-manager
     protocol: tcp
     ports: [10257]
     nodes: controlplane
-    from: [pods]
+    from: [members, pods]
   - name: kube-scheduler
     protocol: tcp
     ports: [10259]
     nodes: controlplane
-    from: [pods]
+    from: [members, pods]
   - name: kubelet
     protocol: tcp
     ports: [10250]
     nodes: all
-    from: [controlplanes, pods]
+    from: [members, pods]
   - name: cilium-vxlan
     protocol: udp
     ports: [8472]
     nodes: all
-    from: [nodes]
+    from: [members]
   - name: cilium-health
     protocol: tcp
     ports: [4240]
     nodes: all
-    from: [nodes]
+    from: [members]
   - name: hubble
     protocol: tcp
     ports: [4244]
     nodes: all
-    from: [pods]
+    from: [members, pods]
   - name: node-exporter
     protocol: tcp
     ports: [9100]
     nodes: all
-    from: [pods]
+    from: [members, pods]

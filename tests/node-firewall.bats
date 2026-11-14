@@ -70,6 +70,31 @@ inventory() {
     + " " + (.from | sort | join(","))' "$INVENTORY" | sort
 }
 
+# resolve SOURCE: the networks a source of talos/firewall.yaml stands for, from the fixture, one per
+# line. Fails on a source it does not know.
+resolve() {
+  case $1 in
+    operators) yq '.operator_cidrs[]' "$FIXTURE" ;;
+    nodes) yq '.node_subnet' "$FIXTURE" ;;
+    floating) yq '.nodes[].floating_ip + "/32"' "$FIXTURE" ;;
+    pods) yq '.pod_subnet' "$FIXTURE" ;;
+    controlplanes) yq '.nodes[] | select(.role == "controlplane") | .private_address + "/32"' "$FIXTURE" ;;
+    members) yq '.nodes[].private_address + "/32"' "$FIXTURE" ;;
+    *)
+      echo "talos/firewall.yaml names a source the test does not know: $1" >&2
+      return 1
+      ;;
+  esac
+}
+
+# expected LISTENER: the networks the inventory's sources of LISTENER resolve to, one per line, sorted.
+expected() {
+  local source
+  for source in $(yq ".listeners[] | select(.name == \"$1\") | .from[]" "$INVENTORY"); do
+    resolve "$source" || return 1
+  done | sort -u
+}
+
 # ipv4 ADDRESS: the IPv4 address as a number.
 ipv4() {
   local -a octets
@@ -110,14 +135,23 @@ overlapping() {
 }
 
 @test "Every listener in the inventory has a rule, and every rule has a line in the inventory" {
+  checked=0
   for role in controlplane worker; do
     wanted=$(listeners "$role")
     [ -n "$wanted" ]
     for hostname in $(nodes "$role"); do
       echo "$hostname has: $(rules "$hostname" | paste -sd';' -)"
       diff <(echo "$wanted") <(rules "$hostname")
+      # Each rule accepts exactly the networks its listener's sources stand for.
+      while read -r rule _; do
+        networks=$(expected "$rule")
+        [ -n "$networks" ]
+        diff <(echo "$networks") <(subnets "$hostname" "$rule")
+        checked=$((checked + 1))
+      done <<< "$wanted"
     done
   done
+  [ "$checked" -eq $((3 * $(listeners controlplane | wc -l) + 3 * $(listeners worker | wc -l))) ]
   [ "$(listeners controlplane)" != "$(listeners worker)" ]
   # Names are what Talos tells rules apart by, so none may be given twice.
   [ -z "$(yq '.listeners[].name' "$INVENTORY" | sort | uniq -d)" ]
@@ -171,6 +205,55 @@ overlapping() {
   done
 }
 
+@test "Every listener pods reach admits every node's own address" {
+  # Cilium sends a pod's traffic to another node's address out of the pod's node, masqueraded to that
+  # node's address on the node network; only a pod on the node itself arrives from its own address.
+  members=$(yq '.nodes[].private_address' "$FIXTURE")
+  [ "$(wc -l <<< "$members")" -eq 6 ]
+  reached=$(yq '.listeners[] | select(.from[] == "pods") | .name' "$INVENTORY" | sort -u)
+  for listener in etcd-metrics kube-controller-manager kube-scheduler kubelet hubble node-exporter; do
+    grep -qxF "$listener" <<< "$reached"
+  done
+
+  checked=0
+  for hostname in $(nodes); do
+    for rule in $(rules "$hostname" | cut -d' ' -f1 | grep -xF -f <(echo "$reached")); do
+      accepted=$(subnets "$hostname" "$rule")
+      for address in $members; do
+        admitted=0
+        for network in $accepted; do
+          if in_subnet "$address" "$network"; then
+            admitted=1
+          fi
+        done
+        if ((!admitted)); then
+          echo "$hostname: $rule does not admit $address, a node's own address"
+          return 1
+        fi
+      done
+      checked=$((checked + 1))
+    done
+  done
+  # Seven on each control plane, three on each worker.
+  [ "$checked" -eq 30 ]
+}
+
+@test "Cilium's overlay and health checks accept the nodes' own addresses only" {
+  members=$(yq '.nodes[].private_address + "/32"' "$FIXTURE" | sort)
+  [ "$(wc -l <<< "$members")" -eq 6 ]
+  # The load balancer's address on the node network, which is no node's.
+  endpoint=$(yq '.endpoint' "$FIXTURE")
+  [[ $endpoint =~ ^https://([0-9.]+):6443$ ]]
+  [ -z "$(awk -v lb="${BASH_REMATCH[1]}/32" '$0 == lb' <<< "$members")" ]
+
+  for hostname in $(nodes); do
+    [ "$(rules "$hostname" | grep -c -e '^cilium-vxlan udp 8472$' -e '^cilium-health tcp 4240$')" -eq 2 ]
+    for rule in cilium-vxlan cilium-health; do
+      diff <(echo "$members") <(subnets "$hostname" "$rule")
+    done
+  done
+}
+
 @test "Workers carry no rule for a control-plane-only listener" {
   only=$(yq -N '.listeners[] | select(.nodes == "controlplane") | .name + " " + .protocol + " " + (.ports | map(tostring) | join(","))' "$INVENTORY")
   grep -q '^etcd ' <<< "$only"
@@ -198,7 +281,13 @@ overlapping() {
     for rule in $(rules "$hostname" | cut -d' ' -f1); do
       accepted=$(subnets "$hostname" "$rule")
       [ -n "$accepted" ]
-      if grep -E '/0$' <<< "$accepted"; then
+      # Networks that together hold as many addresses as there are, such as two /1s, are everyone
+      # too, prefix 0 or not.
+      addresses=0
+      for network in $accepted; do
+        addresses=$((addresses + (1 << (32 - ${network#*/}))))
+      done
+      if ((addresses >= 1 << 32)); then
         echo "$hostname: $rule accepts everyone"
         return 1
       fi
@@ -209,9 +298,13 @@ overlapping() {
 }
 
 @test "No operator address is in any committed file, and the allowlist reaches the configuration through the generated file" {
-  # The files git would commit that the check reads, copied so the fixture's allowlist can change.
+  # The files git would commit that the check reads, copied so the fixture's allowlist can change; a
+  # cluster's own directory under talos/, with its secrets bundle, is not among them.
   copy="$BATS_TEST_TMPDIR/repository"
   while IFS= read -r -d '' path; do
+    if [[ $path == talos/*/* && $path != talos/patches/* ]]; then
+      continue
+    fi
     if [[ -f $ROOT/$path ]]; then
       mkdir -p "$copy/$(dirname "$path")"
       cp "$ROOT/$path" "$copy/$path"

@@ -11,7 +11,17 @@ Feature: Nodes firewall themselves
   Scenario: Every listener in the inventory has a rule, and every rule has a line in the inventory
     Given the inventory in talos/firewall.yaml and its table in docs/cluster.md
     When every node's configuration is rendered
-    Then each node carries one rule per listener of its role, with the inventory's name, protocol and ports, and no other rule, and the table in docs/cluster.md lists exactly the inventory's listeners, each with its protocol, ports, nodes and sources
+    Then each node carries one rule per listener of its role, with the inventory's name, protocol and ports, and no other rule, each rule accepts exactly the networks the listener's sources stand for in the fixture, and the table in docs/cluster.md lists exactly the inventory's listeners, each with its protocol, ports, nodes and sources
+
+  Scenario: Every listener pods reach admits every node's own address
+    Given the inventory's listeners that pods reach, and fixture node data with each node's address on the node network
+    When every node's configuration is rendered
+    Then each of those rules, on every node that has it, admits every node's own address, from which a pod on another node arrives once Cilium has masqueraded it
+
+  Scenario: Cilium's overlay and health checks accept the nodes' own addresses only
+    Given fixture node data whose node network also holds the load balancer's address
+    When every node's configuration is rendered
+    Then every node's rules for UDP 8472 and TCP 4240 accept exactly the six nodes' own addresses, each as a single address, and not the node network
 
   Scenario: The Talos API and the Kubernetes API accept the operator allowlist, the node network and the load balancer, and nobody else
     Given fixture node data with an operator allowlist of two networks and the load balancer's address on the node network
@@ -31,7 +41,7 @@ Feature: Nodes firewall themselves
   Scenario: No rule accepts traffic from everywhere
     Given the rendered configuration of every node
     When its rules are read
-    Then every rule accepts at least one network, and no rule accepts a network with prefix length 0
+    Then every rule accepts at least one network, and no rule's networks hold together as many addresses as IPv4 has
 
   Scenario: No operator address is in any committed file, and the allowlist reaches the configuration through the generated file
     Given a copy of the repository whose fixture allowlist is another network

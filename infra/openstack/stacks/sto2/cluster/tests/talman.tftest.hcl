@@ -185,16 +185,16 @@ run "_the_cluster_is_named_lab_sto2_on_the_plumbing_stacks_node_subnet" {
 }
 
 # The firewall's rules in talman.yaml take their networks from this stack: the allowlist from
-# api_allowed_cidrs, the nodes' floating addresses, the plumbing stack's node subnet, the pod subnet
-# and the control planes' fixed addresses. tests/node-firewall.bats renders them into the nodes'
-# machine configuration from the fixture.
+# api_allowed_cidrs, the nodes' floating addresses, the plumbing stack's node subnet, the pod subnet,
+# and the fixed addresses of the control planes and of every node. tests/node-firewall.bats renders
+# them into the nodes' machine configuration from the fixture.
 run "_talman_yaml_carries_the_firewall_rules_with_the_stacks_networks" {
   command = plan
 
   assert {
     condition = {
       for role, rules in yamldecode(output.talman_yaml).values.firewall : role => {
-        for rule in rules : rule.name => toset(rule.subnets) if contains(["apid", "kube-apiserver", "etcd"], rule.name)
+        for rule in rules : rule.name => toset(rule.subnets) if contains(["apid", "kube-apiserver", "etcd", "cilium-vxlan"], rule.name)
       }
       } == {
       controlplane = {
@@ -209,6 +209,10 @@ run "_talman_yaml_carries_the_firewall_rules_with_the_stacks_networks" {
           "203.0.113.111/32", "203.0.113.112/32", "203.0.113.113/32",
         ])
         etcd = toset(["192.0.2.10/32", "192.0.2.11/32", "192.0.2.12/32"])
+        cilium-vxlan = toset([
+          "192.0.2.10/32", "192.0.2.11/32", "192.0.2.12/32",
+          "192.0.2.20/32", "192.0.2.21/32", "192.0.2.22/32",
+        ])
       }
       worker = {
         apid = toset([
@@ -216,9 +220,13 @@ run "_talman_yaml_carries_the_firewall_rules_with_the_stacks_networks" {
           "203.0.113.101/32", "203.0.113.102/32", "203.0.113.103/32",
           "203.0.113.111/32", "203.0.113.112/32", "203.0.113.113/32",
         ])
+        cilium-vxlan = toset([
+          "192.0.2.10/32", "192.0.2.11/32", "192.0.2.12/32",
+          "192.0.2.20/32", "192.0.2.21/32", "192.0.2.22/32",
+        ])
       }
     }
-    error_message = "talman.yaml's firewall rules must accept the Talos API from the allowlist, the node subnet and the nodes' floating addresses on every node, the Kubernetes API from those and the pod subnet and etcd from the control planes' fixed addresses on the control planes only."
+    error_message = "talman.yaml's firewall rules must accept the Talos API from the allowlist, the node subnet and the nodes' floating addresses on every node, the Kubernetes API from those and the pod subnet and etcd from the control planes' fixed addresses on the control planes only, and the overlay from every node's fixed address on every node."
   }
 }
 

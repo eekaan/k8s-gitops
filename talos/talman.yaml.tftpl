@@ -29,6 +29,7 @@ values:
           floating      = [for node in nodes : "${node.floating_ip}/32"]
           pods          = [pod_subnet]
           controlplanes = [for node in nodes : "${node.private_address}/32" if node.role == "controlplane"]
+          members       = [for node in nodes : "${node.private_address}/32"]
         }[source]])))
       } if contains(["all", role], listener.nodes)
     ]

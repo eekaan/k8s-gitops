@@ -2,8 +2,9 @@
 # cluster. Talos binds the controller manager and the scheduler to 127.0.0.1, and etcd serves its
 # metrics only on its client port, which takes client certificates. A node's own address on the
 # node network differs from node to node and talman.yaml gives no node its own, so each listens on
-# all of the node's addresses, its floating address included. The node's firewall admits these ports from the
-# pod range only (talos/firewall.yaml).
+# all of the node's addresses, its floating address included. The node's firewall admits these
+# ports from the nodes' own addresses, from which Prometheus arrives when its pod runs on another
+# node, and from the pod range, when it runs on this one (talos/firewall.yaml).
 ---
 # The controller manager's secure port, 10257: HTTPS, with every request but its health checks
 # authorized by the API server.

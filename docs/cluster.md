@@ -121,10 +121,12 @@ node its own address on the node network:
 - etcd's metrics and health on 2381: plain HTTP, without authentication. It serves etcd's own
   counters and latencies, not the keys or values it stores.
 
-Each control plane's firewall admits the three ports from the pod range only
-([The node firewall](#the-node-firewall)), so Prometheus reaches them from its pod and nothing
-outside the cluster does, also not on a node's floating address. `just cluster-talos` rolls the
-patch out; until it has, the three targets are down in Prometheus and their alerts fire.
+Each control plane's firewall admits the three ports from the nodes' own addresses and the pod
+range only ([The node firewall](#the-node-firewall)): Prometheus's scrapes arrive from the address
+of the node its pod runs on, or from the pod's own address when that node is the control plane
+itself. Nothing outside the cluster reaches them, also not on a node's floating address.
+`just cluster-talos` rolls the patch out; until it has, the three targets are down in Prometheus and
+their alerts fire.
 
 ## The node firewall
 
@@ -143,11 +145,11 @@ renders them into the cluster's `talman.yaml` as `values.firewall`, a list of ru
 whose sources are networks, and the patch writes each into the node's machine configuration as a
 `NetworkRuleConfig`. The operator allowlist reaches the rules that way only: from the same
 `api_allowed_cidrs` the security group takes, through the generated `talman.yaml`, which git
-ignores; no committed file holds it. A new listener, or a listener that moves, needs its line in
-`talos/firewall.yaml` and in the table below, or the firewall drops what reaches it.
-`tests/node-firewall.bats` renders every node's configuration offline and fails when a node has a
-rule `talos/firewall.yaml` does not list or lacks one it lists, and when the table below and the file
-disagree.
+ignores; no committed file holds it. A new listener, or a listener that moves, needs its entry in
+`talos/firewall.yaml` and its row in the table below, and nothing else, or the firewall drops what
+reaches it. `tests/node-firewall.bats` renders every node's configuration offline and fails when a
+node has a rule `talos/firewall.yaml` does not list or lacks one it lists, when a rule accepts other
+networks than its sources stand for, and when the table below and the file disagree.
 
 ### Sources
 
@@ -157,35 +159,57 @@ disagree.
   API servers and health-checks them from its own addresses there, and the CI host.
 - `floating`: each node's floating address. A node that reaches another node's floating address goes
   out through the router and arrives from its own.
-- `pods`: the pod range. A pod that reaches a port on a node arrives from its own address, through
-  Cilium's overlay or from its own node.
+- `members`: each node's own address on the node network. A node's own connections come from it,
+  and so does a pod's connection to another node's address: Cilium does not carry it through the
+  overlay, as a node's address has no tunnel endpoint unless the host firewall or node encryption is
+  on, and masquerades it to its node's address as it leaves the node
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/node/manager/manager.go#L577-L584),
+  [masquerading](https://github.com/cilium/cilium/blob/v1.20.4/bpf/lib/nat.h#L751-L785)).
+- `pods`: the pod range, from which a pod arrives at the node it runs on.
 - `controlplanes`: each control plane's address on the node network.
+
+A port that pods reach therefore accepts both `members` and `pods`, or `nodes`, which holds every
+member.
 
 ### What each node admits
 
 | Rule | Protocol and ports | Nodes | Accepted from | Who connects, and why |
 | --- | --- | --- | --- | --- |
 | `apid` | TCP 50000 | all | `operators`, `nodes`, `floating` | The Talos API: talman and talosctl on the operator's machine and the CI host, and a node's Talos API passing a request on to another node. |
-| `trustd` | TCP 50001 | control planes | `nodes` | Talos' trust daemon, from which a worker gets its certificates. |
+| `trustd` | TCP 50001 | control planes | `members` | Talos' trust daemon, from which a worker gets its certificates. |
 | `kube-apiserver` | TCP 6443 | control planes | `operators`, `nodes`, `floating`, `pods` | The Kubernetes API: the operator and the CI host, the load balancer, every node's KubePrism and kubelet, and every pod that reaches the `kubernetes` Service, which Cilium sends to a control plane's address. |
 | `etcd` | TCP 2379-2380 | control planes | `controlplanes` | etcd's client and peer ports: the other members, and a control plane that joins. |
-| `etcd-metrics` | TCP 2381 | control planes | `pods` | etcd's metrics, which Prometheus scrapes ([above](#the-control-planes-metrics)). |
-| `kube-controller-manager` | TCP 10257 | control planes | `pods` | The controller manager's secure port, which Prometheus scrapes. |
-| `kube-scheduler` | TCP 10259 | control planes | `pods` | The scheduler's secure port, which Prometheus scrapes. |
-| `kubelet` | TCP 10250 | all | `controlplanes`, `pods` | The kubelet: the API server, for logs, exec and port forwarding, and metrics-server and Prometheus, for metrics. |
-| `cilium-vxlan` | UDP 8472 | all | `nodes` | Cilium's overlay, which carries pod traffic between nodes in VXLAN on Linux's default port ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/operations/system_requirements.rst#firewall-rules)). |
-| `cilium-health` | TCP 4240 | all | `nodes` | Cilium's health checks between nodes; the ICMP echo they send as well is admitted by Talos itself. |
-| `hubble` | TCP 4244 | all | `pods` | The Hubble server in each node's Cilium agent, from which Hubble Relay reads the node's flows. |
-| `node-exporter` | TCP 9100 | all | `pods` | node-exporter, on the host network, which Prometheus scrapes. |
+| `etcd-metrics` | TCP 2381 | control planes | `members`, `pods` | etcd's metrics, which Prometheus scrapes ([above](#the-control-planes-metrics)). |
+| `kube-controller-manager` | TCP 10257 | control planes | `members`, `pods` | The controller manager's secure port, which Prometheus scrapes. |
+| `kube-scheduler` | TCP 10259 | control planes | `members`, `pods` | The scheduler's secure port, which Prometheus scrapes. |
+| `kubelet` | TCP 10250 | all | `members`, `pods` | The kubelet: the API server, for logs, exec and port forwarding, and metrics-server and Prometheus, for metrics. metrics-server serves the API's metrics, so a node it cannot reach makes that API unavailable, which breaks API discovery and the deletion of namespaces. |
+| `cilium-vxlan` | UDP 8472 | all | `members` | Cilium's overlay, which carries pod traffic between nodes in VXLAN on Linux's default port ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/operations/system_requirements.rst#firewall-rules)). Cilium trusts the identity a VXLAN packet carries, so only the nodes may send it. |
+| `cilium-health` | TCP 4240 | all | `members` | Cilium's health checks between nodes; the ICMP echo they send as well is admitted by Talos itself. |
+| `hubble` | TCP 4244 | all | `members`, `pods` | The Hubble server in each node's Cilium agent, from which Hubble Relay reads the node's flows. |
+| `node-exporter` | TCP 9100 | all | `members`, `pods` | node-exporter, on the host network, which Prometheus scrapes. |
 
 ### What gets no rule
 
 - KubePrism and Talos' own DNS listen for the node itself; the loopback interface is always
   admitted, and Talos admits the cluster's DNS traffic to its host DNS from the pod and service
   ranges itself, as the machine configuration forwards the cluster's DNS to it.
+- The Cilium agent's health API, TCP 9879, listens on the loopback address only
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/operations/system_requirements.rst#firewall-rules)).
+- LINSTOR's CSI node plugin runs on the host network with health ports, TCP 9808 and 9809, that
+  only its own kubelet probes; a connection to the node's own address goes over the loopback
+  interface
+  ([Piraeus](https://github.com/piraeusdatastore/piraeus-operator/blob/v2.12.1/pkg/resources/cluster/csi-node/csi-node-daemon-set.yaml)).
 - The Cilium operator and Cilium's Envoy can serve metrics on the host network. Nothing scrapes
   them, as their monitors are off ([kubernetes.md](kubernetes.md#monitoring)), so nothing off the
   node reaches them.
+- Spegel, off in the cluster's overlay, runs on the pod network; its registry is a NodePort that
+  each node's own containerd reaches at the node's own address
+  ([Spegel](https://github.com/spegel-org/spegel/blob/v0.8.1/charts/spegel/templates/daemonset.yaml)),
+  which Cilium serves on the node.
+- Cilium's BGP control plane, off in its values: when on, it opens the sessions to its peers from the
+  nodes and listens on no port unless a node's BGP instance sets `localPort`
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/bgp/manager/manager.go#L961-L966)),
+  so replies to its own connections are all that reach the node.
 - LINSTOR's satellites, which the controller reaches on TCP 3366-3367, and DRBD's replication, on a
   TCP port per volume that LINSTOR takes from its `TcpPortAutoRange`, 7000-7999 unless the controller
   is told otherwise ([LINBIT](https://kb.linbit.com/linstor/linstor-change-tcp-port-range-for-drbd-resources/)),
