@@ -38,7 +38,7 @@ Feature: Edge routers
   Scenario: The public ports admit only the operator allowlist by default, and SSH admits only the operator allowlist
     Given an operator allowlist and no public source networks set
     When the edge stack is planned against mocked providers
-    Then the public ports admit the allowlist, SSH admits the allowlist only, and no rule admits every address
+    Then the public ports admit the allowlist, SSH admits the allowlist only, and no inbound rule admits every address but the one for the ICMP that path MTU discovery needs
 
   Scenario: The public ports admit the source networks they are given instead of the allowlist
     Given an operator allowlist and a deliberately different set of public source networks

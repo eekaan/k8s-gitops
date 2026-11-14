@@ -384,9 +384,14 @@ run "the_public_ports_admit_only_the_operator_allowlist_by_default_and_ssh_admit
     error_message = "SSH must admit the operator allowlist, each network once."
   }
 
+  # A rule without a remote prefix, protocol or ports admits every address, protocol or port as much
+  # as one that names them all does, so each is compared as given, null included.
   assert {
-    condition     = length([for rule in output.security_group.rules : rule if rule.direction == "ingress" && rule.protocol == "tcp" && rule.remote_ip_prefix == "0.0.0.0/0"]) == 0
-    error_message = "No TCP rule may admit every address by default."
+    condition = [
+      for rule in output.security_group.rules : jsonencode([rule.protocol, rule.port_range_min, rule.port_range_max])
+      if rule.direction == "ingress" && contains(["0.0.0.0/0", "::/0", "none"], rule.remote_ip_prefix == null ? "none" : rule.remote_ip_prefix)
+    ] == [jsonencode(["icmp", 3, 4])]
+    error_message = "No inbound rule may admit every address by default but the one for the ICMP that path MTU discovery needs."
   }
 
   assert {
