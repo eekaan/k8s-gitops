@@ -12,7 +12,7 @@ setup() {
   mkdir -p "$BIN" "$RECORD" "$REPO/infra/openstack" "$REPO/talos"
   cp -R "$ROOT/scripts" "$REPO/scripts"
   cp "$ROOT/infra/openstack/backend.hcl" "$REPO/infra/openstack/backend.hcl"
-  for tool in tofu openstack talman talosctl kubectl helm flux sops age age-keygen gh ssh ssh-keyscan ssh-keygen; do
+  for tool in tofu openstack talman talosctl kubectl helm flux kustomize sops age age-keygen gh ssh ssh-keyscan ssh-keygen; do
     cat > "$BIN/$tool" <<EOF
 #!/usr/bin/env bash
 env | cut -d= -f1 | sort > "$RECORD/names.$tool"
@@ -32,7 +32,8 @@ EOF
   chmod +x "$BIN/rclone"
   # Every secret variable the recipes may be given, as a marker, and variables that are no secret.
   SECRET_NAMES=(
-    AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN TF_STATE_PASSPHRASE TF_ENCRYPTION
+    AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_BACKUP_SECRET TF_STATE_PASSPHRASE
+    TF_ENCRYPTION
     CLUSTER_S3_ACCESS_KEY_ID CLUSTER_S3_SECRET_ACCESS_KEY SOPS_AGE_KEY SOPS_AGE_KEY_FILE
     SOPS_AGE_KEY_CMD FLUX_AGE_KEY FLUX_AGE_KEY_FILE OPERATOR_CIDRS OS_CLOUD OS_AUTH_URL
     OS_APPLICATION_CREDENTIAL_ID OS_APPLICATION_CREDENTIAL_SECRET TF_VAR_api_allowed_cidrs
@@ -56,6 +57,11 @@ in_recipe() {
     bash -c '. "$1/scripts/lib/snapshot.sh" && shift && "$@"' _ "$REPO" "$@"
 }
 
+# with ENTRY...: adds the NAME=VALUE ENTRY... to the environment in_recipe gives.
+with() {
+  ENVIRONMENT+=("$@")
+}
+
 # seen TOOL: the secret variables the TOOL's last run had in its environment, sorted, one line.
 seen() {
   local name
@@ -76,7 +82,7 @@ sorted() {
 
 @test "Each tool gets only the secrets it uses" {
   cloud=(OS_CLOUD OS_AUTH_URL OS_APPLICATION_CREDENTIAL_ID OS_APPLICATION_CREDENTIAL_SECRET)
-  tofu=(AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN TF_ENCRYPTION "${cloud[@]}"
+  tofu=(AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_BACKUP_SECRET TF_ENCRYPTION "${cloud[@]}"
     TF_VAR_api_allowed_cidrs TF_VAR_image_name TF_VAR_ci_host_number)
   sops=(SOPS_AGE_KEY SOPS_AGE_KEY_FILE SOPS_AGE_KEY_CMD)
   declare -A expected=(
@@ -89,6 +95,7 @@ sorted() {
     [kubectl]=""
     [helm]=""
     [flux]=""
+    [kustomize]=""
     [age-keygen]=""
     [gh]=""
     [ssh]=""
@@ -122,24 +129,105 @@ sorted() {
   done
 }
 
+# wrapped_tools: the tools tools.sh wraps, one per line.
+wrapped_tools() {
+  sed -nE 's/^([a-z-]+)\(\) \{ run_tool .*/\1/p' "$ROOT/scripts/lib/tools.sh"
+}
+
+# bypasses: the lines on standard input that run a wrapped tool around its wrapper, as the binary
+# with the whole environment: a tool after a command that starts another, past whatever its options
+# and arguments are, in the same command; a tool a path is looked up for by command -v or which; a
+# tool named in the body of bash -c or sh -c. Asking whether a tool is installed is type -P with its
+# output discarded, and the one path a script keeps is flux's in substitute, which runs it with an
+# environment of its own.
+bypasses() {
+  local alternation runner shell found
+  alternation=$(wrapped_tools | paste -sd'|' -)
+  runner='(command|env|exec|timeout|xargs|sudo|nice|nohup|setsid|stdbuf|which|ionice|chroot|su|doas)'
+  shell='(bash|sh|dash|zsh)[[:space:]]+(-[A-Za-z-]+[[:space:]]+)*-[A-Za-z]*c'
+  # A variable that happens to share a tool's name, "$flux", is not the tool. A shell's body is one
+  # argument that may hold ; | and &, so it is read to its end.
+  tool='(^|[^[:alnum:]_.$-])('"$alternation"')([^[:alnum:]_.-]|$)'
+  found='(^|[^[:alnum:]_.-])'"$runner"'[[:space:]]+([^;|&]*[^[:alnum:]_.$-])?('"$alternation"')([^[:alnum:]_.-]|$)'
+  found+='|(^|[^[:alnum:]_.-])'"$shell"'[[:space:]].*'"$tool"
+  found+='|\$\(type -P ('"$alternation"')\)'
+  # shellcheck disable=SC2016 # flux=$(type -P flux) is text to leave out, not an expansion
+  grep -E "$found" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -vF 'flux=$(type -P flux)'
+}
+
+@test "A sops run for the Flux key sees only that key, as the one age key it is given" {
+  # This sops says which value its one age variable holds, as a word, and never the key.
+  cat > "$BIN/sops" <<EOF
+#!/usr/bin/env bash
+env | cut -d= -f1 | sort > "$RECORD/names.sops"
+case "\${SOPS_AGE_KEY-}:\${SOPS_AGE_KEY_FILE-}" in
+  marker-FLUX_AGE_KEY:) echo flux-key > "$RECORD/holds.sops" ;;
+  :marker-FLUX_AGE_KEY_FILE) echo flux-key-file > "$RECORD/holds.sops" ;;
+  *) echo other > "$RECORD/holds.sops" ;;
+esac
+EOF
+  chmod +x "$BIN/sops"
+
+  # In CI the key itself is set, and the Talos key's variables are set as well.
+  in_recipe flux_sops decrypt file
+
+  [ "$status" -eq 0 ]
+  [ "$(seen sops)" = SOPS_AGE_KEY ]
+  [ "$(cat "$RECORD/holds.sops")" = flux-key ]
+
+  # On a workstation the key is a file's path.
+  with FLUX_AGE_KEY=
+  in_recipe flux_sops decrypt file
+
+  [ "$status" -eq 0 ]
+  [ "$(seen sops)" = SOPS_AGE_KEY_FILE ]
+  [ "$(cat "$RECORD/holds.sops")" = flux-key-file ]
+}
+
+@test "The scan for a wrapped tool run around its wrapper flags every way of doing it" {
+  while IFS= read -r line; do
+    echo "flagged: $line"
+    run bash -c "$(declare -f wrapped_tools bypasses); ROOT=$ROOT; grep -n '' <<< \"\$1\" | bypasses" _ "$line"
+    [ "$status" -eq 0 ]
+  done <<'LINES'
+env -u KUBECTL_EXTERNAL_DIFF kubectl wait nodes
+SOPS_AGE_KEY=$key env -u SOPS_AGE_KEY_FILE -u SOPS_AGE_KEY_CMD sops "$@"
+timeout -s KILL 10m kubectl get nodes
+sudo -u someone kubectl get nodes
+nice -n 5 helm template
+xargs -n1 -I{} kubectl delete {}
+command kubectl get nodes
+exec talman apply
+"$(which kubectl)" uncordon "$node"
+"$(command -v kubectl)" uncordon "$node"
+helm=$(type -P helm)
+bash -c 'kubectl get nodes'
+sh -c "echo; sops decrypt f"
+bash -lc 'flux build'
+LINES
+  while IFS= read -r line; do
+    echo "not flagged: $line"
+    run bash -c "$(declare -f wrapped_tools bypasses); ROOT=$ROOT; grep -n '' <<< \"\$1\" | bypasses" _ "$line"
+    [ "$status" -ne 0 ]
+  done <<'LINES'
+kubectl get nodes
+kubectl wait nodes --all --for=condition=Ready
+SOPS_AGE_KEY=$key sops "$@"
+if ! type -P kubectl > /dev/null; then
+require_commands kubectl jq
+exec "$@"
+env -u HELM_DEBUG jq -n 1
+timeout 10 jq . file
+# env -u X kubectl
+LINES
+}
+
 @test "No script runs a wrapped tool around its wrapper" {
-  mapfile -t tools < <(sed -nE 's/^([a-z-]+)\(\) \{ run_tool .*/\1/p' "$ROOT/scripts/lib/tools.sh")
-  [ "${#tools[@]}" -ge 14 ]
-  alternation=$(IFS='|'; echo "${tools[*]}")
-  # A command that starts another: the tool after it, past its options, durations and assignments,
-  # is the binary with the whole environment, as is one run by a path from type -P. Asking
-  # whether a tool is installed is type -P with its output discarded, and the one path a script
-  # keeps is flux's in substitute, which runs it with an environment of its own.
-  runner='(^|[^[:alnum:]_.-])(command|env|exec|timeout|xargs|sudo|nice|nohup|setsid|stdbuf)'
-  around="$runner([[:space:]]+(-[^[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*|[0-9.]+[smhd]?))*"
-  around+="[[:space:]]+\"?($alternation)([[:space:]\"']|\$)"
-  path='\$\(type -P ('"$alternation"')\)'
   files=("$ROOT"/scripts/* "$ROOT"/scripts/lib/* "$ROOT"/justfile "$ROOT"/just/*.just)
   found=$(
     for file in "${files[@]}"; do
       [ -f "$file" ] && [ "${file##*/}" != tools.sh ] || continue
-      grep -nE "$around|$path" "$file" | grep -vE '^[0-9]+:[[:space:]]*#' |
-        grep -vF "flux=\$(type -P flux)" | sed "s|^|${file#"$ROOT"/}:|" || true
+      grep -n '' "$file" | bypasses | sed "s|^|${file#"$ROOT"/}:|" || true
     done
   )
   if [ -n "$found" ]; then
@@ -156,9 +244,13 @@ sorted() {
     run bash -c '. "$1/scripts/lib/infra.sh" && variable_assigned "$2"' _ "$REPO" "$name"
     [ "$status" -eq 0 ]
   done
-  # A name nothing assigns fails the same check.
-  run bash -c '. "$1/scripts/lib/infra.sh" && variable_assigned "$2"' _ "$REPO" NEW_SECRET_ACCESS_KEY
-  [ "$status" -ne 0 ]
+  # A name nothing assigns fails the same check, whatever its prefix: the ones the tools read
+  # by prefix are assigned one by one too.
+  for name in NEW_SECRET_ACCESS_KEY AWS_BACKUP_SECRET OS_NEW_SECRET TF_VAR_new_secret; do
+    echo "$name"
+    run bash -c '. "$1/scripts/lib/infra.sh" && variable_assigned "$2"' _ "$REPO" "$name"
+    [ "$status" -ne 0 ]
+  done
 }
 
 @test "the tools' table holds when the libraries are sourced inside a function, among odd variable names" {

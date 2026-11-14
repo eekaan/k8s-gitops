@@ -94,22 +94,32 @@ Feature: Infrastructure state and stack recipes
   Scenario: Each tool gets only the secrets it uses
     Given every secret variable set to a marker, and a recording fake of each tool the recipes run
     When each tool is run as the recipes run it
-    Then each fake records the names, never the values, of the secret variables in its environment: tofu the object storage key, the encryption settings, the cloud credential and the stacks' inputs, the openstack client the cloud credential, talman and sops the age key variables, age the age key file's path, and talosctl, kubectl, helm, flux, age-keygen, gh, ssh, ssh-keyscan and ssh-keygen none
+    Then each fake records the names, never the values, of the secret variables in its environment: tofu the object storage key, the encryption settings, the cloud credential and the stacks' inputs, the openstack client the cloud credential, talman and sops the age key variables, age the age key file's path, and talosctl, kubectl, helm, flux, kustomize, age-keygen, gh, ssh, ssh-keyscan and ssh-keygen none
 
   Scenario: The S3 client gets the one key pair it is called with and no other secret
     Given the state key pair and the cluster key pair, and a recording S3 client
     When the S3 client is called with each key set
     Then it gets that key pair, and no other secret variable
 
+  Scenario: A sops run for the Flux key sees only that key, as the one age key it is given
+    Given the Flux age key and the Talos age key's variables set to markers, and a sops that records which of its age variables holds the Flux key
+    When the Flux key's sops runs, with the key itself and with a key file
+    Then sops sees one age variable, SOPS_AGE_KEY holding the Flux key or SOPS_AGE_KEY_FILE holding its file, and no other secret
+
   Scenario: No script runs a wrapped tool around its wrapper
     Given the scripts and the justfiles of the repository
-    When each is searched for a wrapped tool run through command, env, exec, timeout, xargs or sudo, or by a path from type -P
+    When each is searched for a wrapped tool after command, env, exec, timeout, xargs, sudo and the like, whatever options and arguments come between, after which, in the body of bash -c or sh -c, or by a path from type -P
     Then none is found, as each would give the tool the whole environment
+
+  Scenario: The scan for a wrapped tool run around its wrapper flags every way of doing it
+    Given command lines that run a wrapped tool after a runner with options of their own, through which, command -v, a path from type -P or a shell's -c body, and command lines that do not
+    When the scan reads them
+    Then it flags each of the first and none of the second
 
   Scenario: A variable added to .env.example is assigned to the tools that may see it
     Given the variables of .env.example, commented ones included
     When each is looked up among the secrets and the variables that hold none
-    Then each is found, and a name that is in neither is not
+    Then each is found, and a name that is in neither is not, whatever its prefix
 
   Scenario: The infrastructure recipes run tofu with only the secrets it uses
     Given every secret variable set to a marker and a recording tofu
