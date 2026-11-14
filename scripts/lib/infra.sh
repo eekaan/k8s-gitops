@@ -6,6 +6,10 @@
 
 infra_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 
+# The tools the scripts run get only the secrets they use.
+# shellcheck source=scripts/lib/tools.sh
+. "$(dirname "${BASH_SOURCE[0]}")/tools.sh"
+
 # infra_error MESSAGE: MESSAGE on stderr, after the name of the script that failed.
 infra_error() {
   printf '%s: %s\n' "${0##*/}" "$1" >&2

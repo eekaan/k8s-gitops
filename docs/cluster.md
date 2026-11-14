@@ -390,7 +390,9 @@ pods' addresses; only `kubectl drain`'s passes through in `cluster-reboot`, as i
 
 The recipes read `.env` and the environment as the infrastructure recipes do
 ([infrastructure.md](infrastructure.md#environment)), and name each variable that is missing. No
-recipe prints a secret or passes one on a command line. sops and talman get the Talos age key's
+recipe prints a secret or passes one on a command line. Each tool gets only the secrets it uses
+([infrastructure.md](infrastructure.md#environment)): talman, talosctl, kubectl and helm get none of
+the S3, cloud or state secrets. sops and talman get the Talos age key's
 location from their environment; `cluster-restore` hands age the key file's path, or, when only
 `SOPS_AGE_KEY` holds the key, the key on standard input. `cluster-config` reads the Flux age key,
 to hand it to kubectl and age-keygen on standard input.

@@ -205,6 +205,26 @@ lock, out of its `.terraform/`; and while `GODEBUG` sets `http2debug`, as Go's H
 prints what tofu and its providers send and receive. No recipe prints a value or passes a secret
 on a command line; secrets reach tofu and rclone through their environment.
 
+Each tool a recipe runs gets only the secrets it uses. `scripts/lib/tools.sh` runs `tofu`,
+`openstack`, `talman`, `talosctl`, `kubectl`, `helm`, `flux`, `sops`, `age` and `age-keygen` with
+the secrets they may not see unexported, and `s3_rclone` hands rclone the one key pair it is called
+with. Every variable of `.env.example` is either a secret there, with the tools that may see it, or
+listed as holding none, and a test fails for one that is neither: a new variable is assigned
+before it passes.
+
+| Secret | Seen by |
+| --- | --- |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | `tofu`; rclone, as the state key set |
+| `TF_ENCRYPTION` | `tofu` |
+| `TF_STATE_PASSPHRASE` | none, as `TF_ENCRYPTION` carries the key derived from it |
+| `CLUSTER_S3_ACCESS_KEY_ID`, `CLUSTER_S3_SECRET_ACCESS_KEY` | rclone, as the cluster key set |
+| `OS_*`, the cloud credential | `tofu`, `openstack` |
+| `TF_VAR_*`, the stacks' inputs, among them the allowlist | `tofu` |
+| `SOPS_AGE_KEY`, `SOPS_AGE_KEY_CMD` | `talman`, `sops` |
+| `SOPS_AGE_KEY_FILE` | `talman`, `sops`, `age` |
+| `FLUX_AGE_KEY`, `FLUX_AGE_KEY_FILE` | none; `flux_sops` gives sops the one it uses |
+| `OPERATOR_CIDRS` | none; it reaches tofu as `TF_VAR_api_allowed_cidrs` and `TF_VAR_ssh_allowed_cidrs` |
+
 - `TF_STATE_BUCKET`: the bucket that holds state.
 - `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`: the state key, S3 credentials for that bucket,
   which also create the backup buckets.
@@ -212,8 +232,7 @@ on a command line; secrets reach tofu and rclone through their environment.
   hyphens.
 - `CLUSTER_S3_ACCESS_KEY_ID` and `CLUSTER_S3_SECRET_ACCESS_KEY`: the cluster's S3 key.
 - `TF_STATE_PASSPHRASE`: the passphrase state and plans are encrypted with, 16 characters or more.
-  tofu gets it inside `TF_ENCRYPTION` only, and the `openstack` client gets neither it nor the S3
-  credentials.
+  tofu gets it inside `TF_ENCRYPTION` only.
 - `OS_CLOUD`, naming a `clouds.yaml` entry outside the repository, or `OS_AUTH_URL` with the
   application-credential variables: OpenStack authentication, which tofu's provider and the
   `openstack` client read themselves. `os-smoke` and `infra-s3-key` need only this.

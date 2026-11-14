@@ -91,6 +91,26 @@ Feature: Infrastructure state and stack recipes
     When infra-plan, infra-apply and infra-destroy run against a recording tofu
     Then no marker appears in any recorded argument list or in anything the recipes print
 
+  Scenario: Each tool gets only the secrets it uses
+    Given every secret variable set to a marker, and a recording fake of each tool the recipes run
+    When each tool is run as the recipes run it
+    Then each fake records the names, never the values, of the secret variables in its environment: tofu the object storage key, the encryption settings, the cloud credential and the stacks' inputs, the openstack client the cloud credential, talman and sops the age key variables, age the age key file's path, and talosctl, kubectl, helm, flux and age-keygen none
+
+  Scenario: The S3 client gets the one key pair it is called with and no other secret
+    Given the state key pair and the cluster key pair, and a recording S3 client
+    When the S3 client is called with each key set
+    Then it gets that key pair, and no other secret variable
+
+  Scenario: A variable added to .env.example is assigned to the tools that may see it
+    Given the variables of .env.example, commented ones included
+    When each is looked up among the secrets and the variables that hold none
+    Then each is found, and a name that is in neither is not
+
+  Scenario: The infrastructure recipes run tofu with only the secrets it uses
+    Given every secret variable set to a marker and a recording tofu
+    When infra-plan, infra-apply and infra-destroy run for the cluster stack
+    Then tofu gets the state key, the encryption settings, the cloud credential and the stacks' inputs, and no age key, no cluster S3 key, no passphrase variable and no allowlist variable
+
   Scenario: The plan summary shows counts and types only
     Given a saved plan with resources to add, change and destroy
     When infra-plan prints its summary

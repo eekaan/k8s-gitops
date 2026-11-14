@@ -172,6 +172,7 @@ fake_cluster() {
   cluster_files
   fake_tool talman <<'EOF'
 printf '%s\n' "talman $*" >> "$RECORD/argv"
+env | cut -d= -f1 >> "$RECORD/names.talman"
 dir=$TALMAN_CONFIG
 echo "== reaching the nodes at $(sed -n 's/^ *ipAddress: //p' "$dir/talman.yaml" | paste -sd, -)"
 given() {
@@ -336,6 +337,7 @@ printf '%s\n' "talosctl $*" >> "$RECORD/argv"
 EOF
   fake_tool kubectl <<'EOF'
 printf '%s\n' "kubectl $*" >> "$RECORD/argv"
+env | cut -d= -f1 >> "$RECORD/names.kubectl"
 printf '%s\n' "${KUBECONFIG-}" > "$RECORD/kubeconfig"
 if [[ $* == *" /readyz"* && -e $STATE/api-down ]]; then
   echo "The connection to the server was refused" >&2
@@ -1150,6 +1152,44 @@ applies() {
   [ "$status" -ne 0 ]
   [[ $output == *"cp-2 did not report Ready after the upgrade"* ]]
   [ -z "$(calls '^kubectl uncordon ')" ]
+}
+
+@test "The cluster recipes run their tools with only the secrets they use" {
+  fake_cluster
+  real_age=$(command -v age)
+  fake_tool age <<EOF
+env | cut -d= -f1 >> "\$RECORD/names.age"
+exec "$real_age" "\$@"
+EOF
+  with SOPS_AGE_KEY=marker-talos-age-key CLUSTER_S3_ACCESS_KEY_ID=marker-cluster-key-id \
+    CLUSTER_S3_SECRET_ACCESS_KEY=marker-cluster-secret OS_CLOUD=marker-cloud \
+    OS_APPLICATION_CREDENTIAL_SECRET=marker-application-credential-secret \
+    TF_STATE_PASSPHRASE=marker-state-passphrase TF_ENCRYPTION=marker-encryption \
+    'OPERATOR_CIDRS=["203.0.113.77/32"]'
+  printf '%s\n' cp-2 > "$STATE/talos-behind"
+  # names_of TOOL: the names of the secret variables TOOL had in its environment, sorted and unique.
+  names_of() {
+    grep -E '^(AWS_|CLUSTER_S3_|OS_|TF_STATE_PASSPHRASE|TF_ENCRYPTION|TF_VAR_|FLUX_AGE_|OPERATOR_CIDRS|SOPS_AGE_)' \
+      "$RECORD/names.$1" | sort -u | paste -sd' ' -
+  }
+
+  recipe cluster-kubeconfig
+  [ "$status" -eq 0 ]
+  recipe cluster-upgrade --yes < /dev/null
+  [ "$status" -eq 0 ]
+
+  # talman runs sops, so it gets the Talos age key and none of the S3, cloud or state secrets.
+  [ "$(names_of talman)" = "SOPS_AGE_KEY SOPS_AGE_KEY_FILE" ]
+  [ -z "$(names_of kubectl)" ]
+  [ "$(names_of age)" = SOPS_AGE_KEY_FILE ]
+  # The S3 client gets the state key pair as its own variables and no secret of the environment.
+  for file in "$RECORD"/env.rclone.*; do
+    names=$(tr '\0' '\n' < "$file" | cut -d= -f1)
+    if grep -qE '^(AWS_|CLUSTER_S3_|OS_|TF_STATE_PASSPHRASE|TF_ENCRYPTION|FLUX_AGE_|OPERATOR_CIDRS|SOPS_AGE_)' <<< "$names"; then
+      return 1
+    fi
+    grep -qx RCLONE_CONFIG_STORE_ACCESS_KEY_ID <<< "$names"
+  done
 }
 
 @test "With CI set, talman's output stays out of the log" {

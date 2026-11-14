@@ -454,6 +454,33 @@ shell_accepts() {
   done
 }
 
+@test "The infrastructure recipes run tofu with only the secrets it uses" {
+  with CLUSTER_S3_ACCESS_KEY_ID=marker-cluster-key-id CLUSTER_S3_SECRET_ACCESS_KEY=marker-cluster-secret \
+    SOPS_AGE_KEY_FILE="$BATS_TEST_TMPDIR/talos.agekey" SOPS_AGE_KEY=marker-talos-age-key \
+    FLUX_AGE_KEY_FILE="$BATS_TEST_TMPDIR/flux.agekey" FLUX_AGE_KEY=marker-flux-age-key
+  for run in 'infra-plan sto2/cluster' 'infra-apply --yes sto2/cluster' 'infra-destroy --yes'; do
+    echo "$run"
+    rm -f "$RECORD"/env.*
+    # shellcheck disable=SC2086 # the recipe and its arguments as an operator types them
+    recipe $run < /dev/null
+
+    [ "$status" -eq 0 ]
+    for env in "$RECORD"/env.*; do
+      subcommand=${env##*/env.}
+      # What tofu reads: the state key, the encryption settings, the cloud credential and the inputs.
+      [ "$(tofu_env "$subcommand" AWS_ACCESS_KEY_ID)" = marker-access-key-id ]
+      [ "$(tofu_env "$subcommand" AWS_SECRET_ACCESS_KEY)" = marker-secret-access-key ]
+      [ -n "$(tofu_env "$subcommand" TF_ENCRYPTION)" ]
+      [ "$(tofu_env "$subcommand" OS_APPLICATION_CREDENTIAL_SECRET)" = marker-application-credential-secret ]
+      # What it does not: the cluster's key, the age keys, the passphrase's own variable, the allowlist.
+      for name in CLUSTER_S3_ACCESS_KEY_ID CLUSTER_S3_SECRET_ACCESS_KEY SOPS_AGE_KEY_FILE SOPS_AGE_KEY \
+        FLUX_AGE_KEY_FILE FLUX_AGE_KEY TF_STATE_PASSPHRASE OPERATOR_CIDRS; do
+        [ -z "$(tofu_env "$subcommand" "$name")" ]
+      done
+    done
+  done
+}
+
 @test "The backend is configured from the environment" {
   recipe infra-plan sto2/plumbing
 

@@ -81,6 +81,11 @@ Feature: Cluster recipes
     When cluster-upgrade-k8s runs, without the cluster's name typed back and then with it
     Then the first shows talman's dry run and upgrades nothing; the second takes an etcd snapshot to the bucket and then runs talman upgrade-k8s once, with the API reached at KUBE_API_ADDRESS, and then finds every node on the version; and with every node on it, it exits zero without asking or upgrading
 
+  Scenario: The cluster recipes run their tools with only the secrets they use
+    Given every secret variable set to a marker and recording fakes of talman, kubectl, age and the S3 client
+    When cluster-kubeconfig and cluster-upgrade run, the latter with the cluster's name typed back
+    Then talman gets the age key variables and none of the S3, cloud or state secrets, kubectl gets no secret, age gets the age key file's path only, and the S3 client gets the state key pair and no other secret
+
   Scenario: With CI set, talman's output stays out of the log
     Given a talman whose output names the nodes by address and shows configuration diffs
     When cluster-bootstrap, cluster-kubeconfig, cluster-talos, cluster-upgrade and cluster-upgrade-k8s run with CI set, and a talman call fails
