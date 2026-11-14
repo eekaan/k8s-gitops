@@ -1,0 +1,65 @@
+# shellcheck shell=bash
+# Sourced with a cluster's name, lab-sto2 when none is given, by the scripts that work on it:
+#   . scripts/cluster-env lab-sto2
+# Resolves the cluster's directory under talos/, reads .env when there is one, refuses Go's HTTP/2
+# debug log, and exports what talman and kubectl need: TALMAN_CONFIG, the cluster's directory, and
+# KUBECONFIG, the kubeconfig talman fetches into its output directory there. SOPS_AGE_KEY_FILE or
+# SOPS_AGE_KEY reach sops as they are. Sets cluster, cluster_dir, talman_file and secrets_file, and
+# from here on a failing script names the step it failed in. require_cluster then checks what a
+# script needs before it runs anything.
+
+# shellcheck source=scripts/lib/cluster.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/cluster.sh"
+
+# require_cluster NEED...: fails naming each NEED that is missing, all of them before returning:
+#   talman      the cluster's talman.yaml
+#   recipient   an age recipient in talos/.sops.yaml rather than its placeholder
+#   secrets     the cluster's secrets.sops.yaml
+#   age-key     the Talos age key's location
+require_cluster() {
+  local need complete=1
+  for need; do
+    case $need in
+      talman)
+        if [[ ! -f $talman_file ]]; then
+          infra_error "talos/$cluster/talman.yaml does not exist; just infra-talman writes it"
+          complete=0
+        fi
+        ;;
+      recipient)
+        if is_placeholder "$(sops_recipient)"; then
+          infra_error "talos/.sops.yaml holds no age recipient yet; just cluster-age-key writes it"
+          complete=0
+        fi
+        ;;
+      secrets)
+        if [[ ! -f $secrets_file ]]; then
+          infra_error "talos/$cluster/secrets.sops.yaml does not exist; just cluster-secrets writes it"
+          complete=0
+        fi
+        ;;
+      age-key) require_age_key || complete=0 ;;
+    esac
+  done
+  ((complete))
+}
+
+cluster_env() {
+  report_failed_step
+  cluster=${1:-lab-sto2}
+  if [[ ! $cluster =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
+    infra_error "$cluster is not a cluster: name a directory under talos/, such as lab-sto2"
+    return 1
+  fi
+  cluster_dir=$infra_root/talos/$cluster
+  talman_file=$cluster_dir/talman.yaml
+  secrets_file=$cluster_dir/secrets.sops.yaml
+
+  load_env || return 1
+  refuse_http2_debug || return 1
+  # Whatever the caller's TALMAN_CONFIG names, talman works on this cluster.
+  export TALMAN_CONFIG=$cluster_dir
+  export KUBECONFIG=$cluster_dir/clusterconfig/kubeconfig
+}
+
+cluster_env "$@"

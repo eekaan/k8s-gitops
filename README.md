@@ -20,9 +20,10 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
 [just](https://just.systems) installed:
 
 - `just tools` installs the pinned tools.
-- `just ci` runs every check that needs no credentials: tool versions, address literals,
-  shellcheck and yamllint, scenario proofs, the OpenTofu check (`just infra-check`: formatting,
-  that every stack enforces state encryption, validation without a state backend and the mocked
+- `just ci` runs every check that needs no credentials: tool versions, address literals, that
+  every Talos secrets bundle is encrypted, shellcheck and yamllint, scenario proofs, the OpenTofu
+  check (`just infra-check`: formatting, that every stack enforces state encryption, validation
+  without a state backend and the mocked
   `tofu test` runs), the Talos check
   (`just talos-check`: every node's machine configuration rendered from the template, the
   patches and fixture node data, and validated, offline), the offline build of `kubernetes/`,
@@ -30,6 +31,7 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
 
 `docs/infrastructure.md` covers the recipes that plan, apply and destroy the OpenTofu stacks: what
 they need in the environment, how state is stored and encrypted, and what they print.
+`docs/cluster.md` covers the recipes that create and change the Talos cluster.
 
 Behaviour is specified as Given/When/Then scenarios in `features/`, each proved by a bats
 `@test` with its title, an OpenTofu `run` named after its slug, or a `@by:<recipe>` tag naming
