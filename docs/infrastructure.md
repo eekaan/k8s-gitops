@@ -292,8 +292,9 @@ again around it; it is destroyed by name only ([Recipes](#recipes)).
 
 ### Routing
 
-Each edge runs FRR's `zebra`, which puts routes in the kernel, `mgmtd`, `staticd` and `bgpd`; every
-other routing daemon is off in its daemon list. Its configuration, `frr.conf`, is rendered from
+Each edge runs FRR's `bgpd`, which its daemon list turns on, and what FRR's start script starts
+whatever the list says: `watchfrr`, `zebra`, which puts routes in the kernel, `mgmtd` and
+`staticd`. Every other routing daemon is off in the list. Its configuration, `frr.conf`, is rendered from
 `frr.conf.tftpl`, and each statement below is documented for FRR 10.3
 ([BGP](https://docs.frrouting.org/en/stable-10.3/bgp.html),
 [prefix lists](https://docs.frrouting.org/en/stable-10.3/filter.html),
