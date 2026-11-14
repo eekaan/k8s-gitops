@@ -94,12 +94,17 @@ Feature: Infrastructure state and stack recipes
   Scenario: Each tool gets only the secrets it uses
     Given every secret variable set to a marker, and a recording fake of each tool the recipes run
     When each tool is run as the recipes run it
-    Then each fake records the names, never the values, of the secret variables in its environment: tofu the object storage key, the encryption settings, the cloud credential and the stacks' inputs, the openstack client the cloud credential, talman and sops the age key variables, age the age key file's path, and talosctl, kubectl, helm, flux and age-keygen none
+    Then each fake records the names, never the values, of the secret variables in its environment: tofu the object storage key, the encryption settings, the cloud credential and the stacks' inputs, the openstack client the cloud credential, talman and sops the age key variables, age the age key file's path, and talosctl, kubectl, helm, flux, age-keygen, gh, ssh, ssh-keyscan and ssh-keygen none
 
   Scenario: The S3 client gets the one key pair it is called with and no other secret
     Given the state key pair and the cluster key pair, and a recording S3 client
     When the S3 client is called with each key set
     Then it gets that key pair, and no other secret variable
+
+  Scenario: No script runs a wrapped tool around its wrapper
+    Given the scripts and the justfiles of the repository
+    When each is searched for a wrapped tool run through command, env, exec, timeout, xargs or sudo, or by a path from type -P
+    Then none is found, as each would give the tool the whole environment
 
   Scenario: A variable added to .env.example is assigned to the tools that may see it
     Given the variables of .env.example, commented ones included

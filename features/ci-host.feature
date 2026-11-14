@@ -38,6 +38,11 @@ Feature: CI host
     When just ci-host-setup registers the runner and just ci-host-remove deregisters it
     Then the runner's configuration gets each token in its environment, read from standard input, and neither token is in a command line, the output or a file on either side
 
+  Scenario: The CI host recipes run gh and ssh with none of the stack's secrets
+    Given the stack's secrets set to markers and a recording gh and ssh
+    When just ci-host-setup and just ci-host-remove run
+    Then neither tool's environment holds the state key, the cloud credential, the encryption settings, a stack input, the cluster's S3 key or an age key
+
   Scenario: A host whose key is not known is refused until its fingerprint has been accepted
     Given a CI host whose SSH host key is not recorded
     When just ci-host-setup runs and the fingerprint it shows is declined, and then accepted
