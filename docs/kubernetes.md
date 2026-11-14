@@ -1313,14 +1313,16 @@ offline build, and no more: `just render-check` pulls charts from the network an
 job that signs, so it stays out of that job.
 
 Every workflow installs its tools with the same pinned `mise-action` at an exact mise release. A
-workflow whose token can write, `publish` and `render-comment`, also gives the action the checksum
+workflow whose token can write, `publish`, `tools-image` and `render-comment`, also gives the action the
+checksum
 of that release's linux-x64 binary, so the tools that run beside the token are the pinned ones; the
 action fails the job when the binary differs. A bump of the mise version changes the checksum with it,
 in every workflow that has one, and the checksum is the one for `./mise-v<version>-linux-x64` in the
 release's `SHASUMS256.txt`. Renovate does not track either input: it can raise a version but cannot
 carry the checksum with it, so a version alone would fail the signing job's check, and the bump is
 by hand.
-The publish job also turns the action's cache off, so nothing runs from an entry another job saved.
+The two jobs that sign, `publish` and `tools-image`, also turn the action's cache off, so nothing
+runs from an entry another job saved.
 
 The tag moves last and by digest: `main` only ever names an artifact that is signed and verified,
 and signing, verifying and tagging all name it by its digest, so the tag ends on exactly the bytes
