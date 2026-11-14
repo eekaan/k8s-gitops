@@ -3,8 +3,8 @@
 # substitution. Keys not set here keep the chart's defaults, which mirror every registry.
 #
 # Spegel serves image layers from containerd's content store, which Talos empties of unpacked
-# layers unless its machine configuration sets containerd's discard_unpacked_layers to false;
-# until it does, the application stays disabled in the cluster overlays.
+# layers unless the machine configuration sets containerd's discard_unpacked_layers to false, as
+# talos/patches/all/spegel.yaml does on every node.
 
 spegel:
   # Talos keeps containerd's registry mirror configuration here, not in /etc/containerd/certs.d.

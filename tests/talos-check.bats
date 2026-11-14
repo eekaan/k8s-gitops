@@ -360,6 +360,28 @@ EOF
   [ "$checked" -eq 6 ]
 }
 
+@test "Every node's containerd keeps the image layers it unpacks, which Spegel serves" {
+  run "$SCRIPT" "$RENDERED"
+
+  [ "$status" -eq 0 ]
+  # Every value a CRI customization gives the setting: a CRICustomizationConfig document, or the
+  # deprecated machine file Talos merges under the name customization. Each holds a TOML fragment,
+  # read one at a time, as two fragments may name the same table.
+  checked=0
+  for hostname in $(nodes); do
+    values=$(yq -N -o json -I 0 '(select(.kind == "CRICustomizationConfig") | .content),
+      (select(.version == "v1alpha1") | .machine.files // [] | .[] | select(.path == "/etc/cri/conf.d/20-customization.part") | .content)' \
+      "$RENDERED/$hostname.yaml" | while IFS= read -r fragment; do
+        jq -r . <<< "$fragment" |
+          yq -p toml '.plugins["io.containerd.cri.v1.images"] // {} | select(has("discard_unpacked_layers")) | .discard_unpacked_layers'
+      done)
+    echo "$hostname sets discard_unpacked_layers to: $(paste -sd, <<< "$values")"
+    [ "$values" = false ]
+    checked=$((checked + 1))
+  done
+  [ "$checked" -eq 6 ]
+}
+
 @test "Every worker's machine configuration names the data device the same way, and no control plane's does" {
   run "$SCRIPT" "$RENDERED"
 

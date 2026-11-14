@@ -388,6 +388,33 @@ envoy_gateway_config() {
     'node.k8s.io/v1 RuntimeClass/kata handler=kata namespace=none')" ]
 }
 
+@test "Spegel runs in the cluster and configures containerd where Talos reads its mirrors" {
+  local enabled daemonset paths mounted
+  # The cluster runs the application: its overlay applies the application's Kustomization. Spegel
+  # serves image layers only because every node's machine configuration keeps them
+  # (tests/talos-check.bats).
+  enabled="$(kustomize build --load-restrictor LoadRestrictionsNone "$REPO/kubernetes/apps/overlays/lab-sto2" |
+    yq -N 'select(.kind == "Kustomization" and .metadata.name == "spegel") | .spec.path')"
+  echo "spegel in the overlay: ${enabled:-none}"
+  [ "$enabled" = ./apps/base/kube-system/spegel/app ]
+  # Talos's containerd reads registry mirror configuration from /etc/cri/conf.d/hosts, not from
+  # containerd's default /etc/containerd/certs.d.
+  render spegel
+  daemonset='select(.kind == "DaemonSet" and .metadata.name == "spegel") | .spec.template.spec'
+  paths="$(yq -N "$daemonset"' | (.containers + .initContainers)[]
+    | .name + " " + (.args[] | select(test("^--containerd-registry-config-path=")))' "$RENDERED" | sort)"
+  echo "$paths"
+  [ "$paths" = "$(printf '%s\n' 'configuration --containerd-registry-config-path=/etc/cri/conf.d/hosts' \
+    'registry --containerd-registry-config-path=/etc/cri/conf.d/hosts')" ]
+  # The container that writes it mounts the host's directory there.
+  # shellcheck disable=SC2016 # $pod and $volume are yq variables.
+  mounted="$(yq -N "$daemonset"' | . as $pod | .initContainers[] | select(.name == "configuration")
+    | .volumeMounts[] | select(.mountPath == "/etc/cri/conf.d/hosts") | .name as $volume
+    | $pod.volumes[] | select(.name == $volume) | .hostPath.path // "none"' "$RENDERED")"
+  echo "the configuration container's /etc/cri/conf.d/hosts is the host's: ${mounted:-none}"
+  [ "$mounted" = /etc/cri/conf.d/hosts ]
+}
+
 @test "The certificate controller runs in its own namespace with its resource definitions" {
   local overlay enabled namespace deployments elsewhere crds group
   # The cluster runs the application and its namespace directory: its overlay applies both.

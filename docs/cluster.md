@@ -106,6 +106,29 @@ On running workers, `just infra-apply sto2/cluster` attaches the volumes and wri
 `talman.yaml` that lists the patch, and `just cluster-talos` then creates the raw volume. Taking
 the patch out later leaves the partition and its data on the disk.
 
+## Image layers for Spegel
+
+Spegel shares images between the nodes ([kubernetes.md](kubernetes.md#the-kube-system-baseline)),
+serving the layers of each node's images from containerd's content store. Talos has containerd
+discard a layer from the content store once it is unpacked, to save disk space
+([Talos](https://docs.siderolabs.com/kubernetes-guides/advanced-guides/spegel)), so
+`talos/patches/all/spegel.yaml` has every node keep them: a `CRICustomizationConfig` named `spegel`
+sets `discard_unpacked_layers` to false in containerd's images plugin, as that guide gives it for
+Talos 1.14 and later.
+
+The cost is disk: the setting lets containerd's garbage collection remove a layer from the content
+store once it is unpacked into the snapshotter
+([containerd](https://github.com/containerd/containerd/blob/v2.3.4/docs/cri/config.md)), so with it
+off every image the node pulls is held twice on the node's disk, its layers as pulled in the
+content store and unpacked in the snapshotter, until the image is removed. Both are under
+`/var/lib/containerd`, which stays a directory of the system disk's EPHEMERAL volume unless a
+`VolumeConfig` gives it a partition of its own
+([Talos](https://github.com/siderolabs/talos/releases/tag/v1.14.0)), and none does.
+
+`just cluster-talos` applies the patch to running nodes. Applying, changing or removing a
+`CRICustomizationConfig` restarts containerd's CRI instance and needs no reboot
+([Talos](https://docs.siderolabs.com/talos/v1.14/configure-your-talos-cluster/images-container-runtime/containerd)).
+
 ## The control planes' metrics
 
 Every control plane's machine configuration adds `talos/patches/controlplane/metrics.yaml`, so
