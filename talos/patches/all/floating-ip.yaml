@@ -1,0 +1,10 @@
+# The node's floating address, held as a /32 on a dummy link. The cloud delivers traffic for a
+# floating address to the instance's private address, so without this the node does not own the
+# address, and the Talos API would proxy a request addressed to it instead of answering it.
+# Holding the address locally makes the node answer.
+---
+apiVersion: v1alpha1
+kind: DummyLinkConfig
+name: fip0
+addresses:
+  - address: "{{ .Node.Values.floatingIP }}/32"

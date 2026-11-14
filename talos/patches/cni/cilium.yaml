@@ -1,0 +1,10 @@
+# Cilium is the pod network and replaces kube-proxy, so Talos deploys neither its bundled CNI,
+# flannel, nor kube-proxy. Both are cluster-wide settings, which the control planes deploy.
+---
+apiVersion: v1alpha1
+kind: KubeFlannelCNIConfig
+$patch: delete
+---
+apiVersion: v1alpha1
+kind: KubeProxyConfig
+enabled: false

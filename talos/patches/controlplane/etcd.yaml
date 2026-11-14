@@ -1,0 +1,9 @@
+# etcd advertises, and listens on, the control plane's address on the node network, never its
+# floating address, so the members reach one another on the node network.
+---
+cluster:
+  etcd:
+    advertisedSubnets:
+      - "{{ .Values.nodeSubnet }}"
+    listenSubnets:
+      - "{{ .Values.nodeSubnet }}"

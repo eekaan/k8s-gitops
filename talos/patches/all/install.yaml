@@ -1,0 +1,12 @@
+# Talos installs, and later upgrades, from the Image Factory installer image talman computes from
+# talos/schematic.yaml and the cluster's Talos version. The install disk is the first virtio disk,
+# the instance's boot volume, which already holds Talos from the node image, so it is not wiped.
+---
+apiVersion: v1alpha1
+kind: UnattendedInstallConfig
+installer:
+  image: "{{ .Node.InstallerImage }}"
+provisioning:
+  diskSelector:
+    match: disk.dev_path == "/dev/vda"
+  wipe: false

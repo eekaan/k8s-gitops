@@ -1,0 +1,41 @@
+---
+# Inputs of talos/talman.yaml.tftpl for a cluster of three control planes and three workers, with
+# addresses from the documentation ranges. The Talos and Kubernetes versions come from the
+# repository's versions.yaml. Each node's address lies in the node network and its floating
+# address outside it, so a patch that reads the wrong one shows in the rendered configuration.
+cluster_name: example
+endpoint: https://192.0.2.10:6443
+node_subnet: 192.0.2.0/25
+# The API load balancer's floating address and the control planes' floating addresses.
+api_sans:
+  - 192.0.2.210
+  - 192.0.2.211
+  - 192.0.2.212
+  - 192.0.2.213
+pod_subnet: 198.51.100.0/24
+service_subnet: 203.0.113.0/24
+nodes:
+  - hostname: cp-1
+    role: controlplane
+    address: 192.0.2.11
+    floating_ip: 192.0.2.211
+  - hostname: cp-2
+    role: controlplane
+    address: 192.0.2.12
+    floating_ip: 192.0.2.212
+  - hostname: cp-3
+    role: controlplane
+    address: 192.0.2.13
+    floating_ip: 192.0.2.213
+  - hostname: worker-1
+    role: worker
+    address: 192.0.2.21
+    floating_ip: 192.0.2.221
+  - hostname: worker-2
+    role: worker
+    address: 192.0.2.22
+    floating_ip: 192.0.2.222
+  - hostname: worker-3
+    role: worker
+    address: 192.0.2.23
+    floating_ip: 192.0.2.223

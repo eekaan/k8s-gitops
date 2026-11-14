@@ -84,3 +84,31 @@ EOF
   [[ $output == *"yamllint got kept.yaml"* ]]
   [[ $output != *excluded.yaml* ]]
 }
+
+@test "The Talos and OpenTofu checks refuse a tool that differs from its pin" {
+  mkdir scripts
+  cp "$BATS_TEST_DIRNAME/../scripts/tools-check" scripts/
+  for check in talos-check infra-check; do
+    printf '#!/usr/bin/env bash\necho "%s started"\n' "$check" > "scripts/$check"
+    chmod +x "scripts/$check"
+  done
+  cat > mise.toml <<'EOF'
+[tools]
+opentofu = "1.13.9"
+"github:ludwighansson/talman" = "1.0.0-beta.10"
+EOF
+  fake tofu <<'EOF'
+echo "OpenTofu v1.13.9"
+EOF
+  fake talman <<'EOF'
+echo "talman version v1.0.0-beta.7"
+EOF
+
+  for check in talos-check infra-check; do
+    recipe "$check"
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"talman: pinned 1.0.0-beta.10, found 1.0.0-beta.7"* ]]
+    [[ $output != *"$check started"* ]]
+  done
+}

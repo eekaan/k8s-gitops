@@ -1,3 +1,3 @@
 # Format-check, validate and tofu test every OpenTofu stack, without credentials or a state backend
-infra-check:
+infra-check: tools-check
     scripts/infra-check

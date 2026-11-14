@@ -1,0 +1,44 @@
+# talman's configuration of one cluster, rendered by OpenTofu's templatefile from the cluster's
+# node list, so node names and addresses have one source. The rendered file belongs in
+# talos/<cluster>/, where the relative paths below resolve; it is generated and never committed.
+apiVersion: talman.dev/v1
+clusterName: ${cluster_name}
+endpoint: ${endpoint}
+talosVersion: ${talos_version}
+kubernetesVersion: ${kubernetes_version}
+
+values:
+  nodeSubnet: ${node_subnet}
+  podSubnet: ${pod_subnet}
+  serviceSubnet: ${service_subnet}
+  apiSANs: ${jsonencode(api_sans)}
+
+# Installer images are the Image Factory's openstack installer for this schematic; talman computes
+# the schematic's ID offline.
+imageFactory:
+  platform: openstack
+
+schematic: ../schematic.yaml
+
+# Only the reserved groups, each with a member: talman refuses a patch group no node is in.
+patches:
+  all:
+    - ../patches/all/hostname.yaml
+    - ../patches/all/install.yaml
+    - ../patches/all/cluster-network.yaml
+    - ../patches/all/floating-ip.yaml
+    - ../patches/all/kubelet.yaml
+    - ../patches/all/node-ip.yaml
+  controlplane:
+    - ../patches/controlplane/api-sans.yaml
+    - ../patches/controlplane/etcd.yaml
+    - ../patches/cni/cilium.yaml
+
+nodes:
+%{ for node in nodes ~}
+  - hostname: ${node.hostname}
+    role: ${node.role}
+    ipAddress: ${node.address}
+    values:
+      floatingIP: ${node.floating_ip}
+%{ endfor ~}

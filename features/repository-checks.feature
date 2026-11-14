@@ -66,6 +66,11 @@ Feature: Repository checks
     When a recipe runs
     Then it fails and shows mise's error
 
+  Scenario: The Talos and OpenTofu checks refuse a tool that differs from its pin
+    Given a pinned tool whose binary on PATH reports another version
+    When just talos-check or just infra-check runs on its own
+    Then it exits non-zero naming the tool, and the check itself does not start
+
   Scenario: A tool that differs from its pin fails the tools check
     Given a pinned tool whose binary on PATH reports another version
     When the tools check runs

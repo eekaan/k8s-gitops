@@ -1,0 +1,11 @@
+# The pod and service ranges are template inputs rather than Talos's defaults, so they are chosen
+# in the same place as the node addresses. The DNS domain is the Kubernetes default, stated so that
+# a change of Talos's default cannot move it.
+---
+apiVersion: v1alpha1
+kind: KubeNetworkConfig
+dnsDomain: cluster.local
+podSubnets:
+  - "{{ .Values.podSubnet }}"
+serviceSubnets:
+  - "{{ .Values.serviceSubnet }}"
