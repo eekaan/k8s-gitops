@@ -1,0 +1,20 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/ocirepository-source-v1.json
+# The Envoy Gateway chart, at the tag the envoy-gateway application installs the controller from,
+# unpacked: its crds subchart holds Envoy Gateway's resource definitions as plain manifests, which
+# crds.yaml applies. Renovate moves both tags in one pull request, as they name one package.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: envoy-gateway-crds
+spec:
+  # The tag is pinned: a new chart arrives by a change to this file, which Flux applies at once.
+  interval: 12h
+  # The chart's packaged layer, unpacked.
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: extract
+  url: oci://docker.io/envoyproxy/gateway-helm
+  ref:
+    # renovate: datasource=docker depName=docker.io/envoyproxy/gateway-helm
+    tag: v1.10.0

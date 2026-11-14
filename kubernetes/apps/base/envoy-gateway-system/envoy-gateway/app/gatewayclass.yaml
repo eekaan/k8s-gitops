@@ -1,0 +1,11 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/gateway.networking.k8s.io/gatewayclass_v1.json
+# The class a Gateway names to be run by this Envoy Gateway: its controller name is the one the
+# chart configures the controller with. A GatewayClass is cluster-scoped; the API server drops the
+# namespace the application's targetNamespace gives it.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: envoy-gateway
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
