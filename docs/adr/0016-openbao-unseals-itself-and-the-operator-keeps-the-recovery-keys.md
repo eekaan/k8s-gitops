@@ -40,10 +40,12 @@ seal for.
   operator's to keep outside the cluster. An encrypted file rather than the terminal: nothing lands
   in scrollback or a terminal log, and the file goes where the operator keeps the Talos age key's
   other material. `just bao-root` turns three of the shares into a short-lived root token for one
-  command. The root token they generate only mints the command's token, an orphan token of the root
-  policy that lasts fifteen minutes at most, and is revoked at once, before the command runs; the
-  command's token is revoked however the command ends. `just bao-seal-restore` writes the seal key back from the file,
-  and first keeps a key it replaces in a new encrypted file beside it.
+  command. The root token they generate only reads its own accessor and mints the command's token,
+  an orphan token of the root policy that lasts fifteen minutes at most, and is revoked at once,
+  before the command runs; the command's token is revoked however the command ends. A token OpenBao
+  does not revoke is reported by its accessor, which cannot act as the token, and the recipe fails.
+  `just bao-seal-restore` writes the seal key back from the file, and first keeps a key it replaces
+  in a new encrypted file beside it.
 - **Who may do what**: each role binds one service account, checks the audience `openbao`, carries
   one policy and not OpenBao's `default` policy, and gives ten-minute tokens.
   - `external-secrets`, for `openbao-store` in `external-secrets`: reads and lists every key of the
@@ -89,10 +91,9 @@ seal for.
 - The `operator` role reaches a root token through the recovery keys. Recovery keys are made once,
   by the first authenticated rotation, which `just bao-recovery` performs right after the first
   reconcile. Afterwards a root token takes a threshold of the shares the operator's file holds. Only
-  a subject with cluster-admin may mint an `operator`
-  token, and such a subject reads the seal Secret and every Secret the store fills anyway. If
-  `bao-recovery`'s first run finds recovery keys already, someone else holds them, and the store is
-  rebuilt before it holds a secret.
+  a subject with cluster-admin may mint an `operator` token, and such a subject reads the seal
+  Secret and every Secret the store fills anyway. If `bao-recovery`'s first run finds recovery keys
+  already, someone else holds them, and the store is rebuilt before it holds a secret.
 - Changing a role, policy or mount after the first start takes a root token from the recovery keys,
   as the initial configuration never runs again on initialised storage. A first initialisation
   that fails part way leaves a mark on storage after which OpenBao refuses to unseal, and is started
