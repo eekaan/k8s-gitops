@@ -41,8 +41,9 @@ it follows with `just cluster-talos`
 extensions:
 
 - `siderolabs/drbd`: the DRBD kernel modules, for the storage layer, LINSTOR through the Piraeus
-  operator on DRBD, with LVM-thin storage pools and snapshots. Nothing in this repository installs
-  that layer. An extension's modules load only when the machine configuration lists them, and on
+  operator on DRBD, with LVM-thin storage pools and snapshots, which `apps/base/piraeus-datastore/`
+  installs ([kubernetes.md](kubernetes.md#storage)). An extension's modules load only when the
+  machine configuration lists them, and on
   Talos the LINSTOR satellite cannot load a module itself
   ([Piraeus](https://github.com/piraeusdatastore/piraeus-operator/blob/v2/docs/how-to/talos.md)),
   so `talos/patches/all/kernel-modules.yaml` has every node load `drbd`, with its user-mode helper
@@ -97,12 +98,34 @@ volume named `data`, on the disk that is not the system disk: the worker's data 
 ([infrastructure.md](infrastructure.md#the-workers-data-volumes)). Talos makes it one partition
 over that disk, labelled `r-data`, with no filesystem and nothing mounted, and links it as
 `/dev/disk/by-partlabel/r-data`. That path is the same on every worker, whatever the kernel calls
-the disk and whatever the cloud assigns the volume, and it is the name the storage layer is given
-(ADR 0011). A disk with less than 1 GiB free is not taken.
+the disk and whatever the cloud assigns the volume, and it is the device LINSTOR's storage pool is
+made from ([kubernetes.md](kubernetes.md#the-storage-pool), ADR 0011). A disk with less than 1 GiB
+free is not taken.
 
 On running workers, `just infra-apply sto2/cluster` attaches the volumes and writes the
 `talman.yaml` that lists the patch, and `just cluster-talos` then creates the raw volume. Taking
 the patch out later leaves the partition and its data on the disk.
+
+## The control planes' metrics
+
+Every control plane's machine configuration adds `talos/patches/controlplane/metrics.yaml`, so
+Prometheus, from its pod, can scrape the controller manager, the scheduler and etcd
+([kubernetes.md](kubernetes.md#monitoring)). Talos binds the controller manager and the scheduler
+to 127.0.0.1, and etcd serves its metrics only on its client port, which takes client
+certificates. The patch makes each listen on all of the node's addresses, as `talman.yaml` holds
+no node's own address on the node network:
+
+- the controller manager's secure port, 10257, and the scheduler's, 10259: HTTPS, with every
+  request but the health checks authorized by the API server, so only a token allowed to read
+  `/metrics`, such as Prometheus's, gets the metrics;
+- etcd's metrics and health on 2381: plain HTTP, without authentication. It serves etcd's own
+  counters and latencies, not the keys or values it stores.
+
+The nodes' security group (`infra/openstack/modules/talos-nodes`) admits everything between the
+nodes and, from anywhere else, only the Talos and Kubernetes APIs. Every node, and every pod
+through its node, therefore reaches these ports, and nothing outside the cluster does, also not on
+a node's floating address. `just cluster-talos` rolls the patch out; until it has, the three
+targets are down in Prometheus and their alerts fire.
 
 ## The Talos age key
 
@@ -324,9 +347,13 @@ out of the artifact, which is built from `kubernetes/`.
   it ([kubernetes.md](kubernetes.md#service-addresses)). A Service without an address yet, or with
   one outside the range, counts, as does every one when `talman.yaml` names no service range. While
   there are any, it names each, by namespace and name or by the volume's name, and destroys
-  nothing. A cluster whose
-  API does not answer, or that has no kubeconfig, cannot be asked and is not destroyed either,
-  unless `--unreachable` is given: the operator then takes on whatever it owned, which stays in the
+  nothing. Volumes of LINSTOR's driver, `linstor.csi.linbit.com`, are the other exception: their
+  data is on the workers' data volumes ([above](#the-workers-data-device)), which the stack holds
+  and deletes, so none of them stays in the cloud. They do not hold the destroy up; it says how
+  many there are, by number and not by name, before it shows the plan, and the one confirmation,
+  the stack's name typed back or `--yes`, destroys them with the stack. A cluster whose API does
+  not answer, or that has no kubeconfig, cannot be asked and is not destroyed either, unless
+  `--unreachable` is given: the operator then takes on whatever it owned, which stays in the
   cloud. Before it asks the cluster it checks what `infra-destroy` needs for the stack.
   [runbooks/rebuild.md](runbooks/rebuild.md) has it in the procedure around it.
 

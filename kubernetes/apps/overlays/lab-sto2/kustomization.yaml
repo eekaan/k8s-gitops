@@ -7,10 +7,17 @@ kind: Kustomization
 # enabled application. A disabled application stays listed, commented out with the reason.
 resources:
   - ../../base/flux-system/artifact-generator
+  - ../../base/cert-manager
   - ../../base/demo
+  - ../../base/envoy-gateway-system
   - ../../base/external-secrets
   - ../../base/kube-system
+  - ../../base/monitoring
+  - ../../base/piraeus-datastore
+  - ../../base/cert-manager/cert-manager/ks.yaml
   - ../../base/demo/hello/ks.yaml
+  - ../../base/envoy-gateway-system/envoy-gateway-crds/ks.yaml
+  - ../../base/envoy-gateway-system/envoy-gateway/ks.yaml
   - ../../base/external-secrets/external-secrets/ks.yaml
   - ../../base/kube-system/cilium/ks.yaml
   - ../../base/kube-system/cilium-bgp/ks.yaml
@@ -21,4 +28,8 @@ resources:
   - ../../base/kube-system/prometheus-operator-crds/ks.yaml
   - ../../base/kube-system/reloader/ks.yaml
   - ../../base/kube-system/runtime-classes/ks.yaml
+  - ../../base/kube-system/snapshot-controller/ks.yaml
   # - ../../base/kube-system/spegel/ks.yaml  # Disabled: Talos discards unpacked image layers, which Spegel serves, until its machine configuration sets containerd's discard_unpacked_layers to false
+  - ../../base/monitoring/kube-prometheus-stack/ks.yaml
+  - ../../base/piraeus-datastore/linstor-cluster/ks.yaml
+  - ../../base/piraeus-datastore/piraeus-operator/ks.yaml

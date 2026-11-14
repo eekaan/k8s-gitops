@@ -26,6 +26,8 @@ step it failed in ([cluster.md](../cluster.md#recipes)).
   the cluster stack, and the rebuilt cluster gets new ones. The generated files that held the old
   ones, the cluster's `talman.yaml`, talosconfig and kubeconfig, are removed with the stack and
   written again by the build.
+- The contents of LINSTOR's volumes: they are on the workers' data volumes, which go with the
+  cluster stack ([cluster.md](../cluster.md#the-workers-data-device)).
 - Everything in etcd: every object of the Kubernetes API, the Secrets made in the cluster among
   them. Flux applies again what Git holds. A snapshot restores into the same nodes only
   ([etcd-restore.md](etcd-restore.md#when-to-restore)), so the steps there do not bring it into
@@ -40,8 +42,10 @@ step it failed in ([cluster.md](../cluster.md#recipes)).
    type LoadBalancer and every PersistentVolume of a CSI driver. A cloud load balancer or volume
    behind one is the cluster's own and not in the cluster stack's state: its destroy would leave it
    in the cloud, where it keeps the network from being deleted. A Service whose addresses all come
-   from the service range has none behind it and does not count. While there are any others, the
-   recipe names each and destroys nothing; remove them first. A cluster whose API does not
+   from the service range has none behind it and does not count. LINSTOR's volumes do not count
+   either: their data is on the workers' data volumes, which go with the stack, and the recipe says
+   how many of them the destroy takes before it asks. While there are any others, the recipe names
+   each and destroys nothing; remove them first. A cluster whose API does not
    answer, or that has no kubeconfig, may still own some and is not destroyed either.
    `just cluster-destroy --unreachable` destroys it anyway; whatever it owned stays in the cloud
    until it is removed by hand.

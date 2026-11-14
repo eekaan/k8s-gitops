@@ -97,6 +97,17 @@ variable "api_allowed_cidrs" {
   }
 }
 
+variable "ci_host_number" {
+  description = "Host number on the node subnet of the CI host the ci stack makes, its host_number, 6 by default: its fixed address then reaches the nodes' Talos API (TCP 50000) and Kubernetes API (TCP 6443). Null, the default, while there is no CI host: the nodes admit nothing for it, and the stack plans without the ci stack."
+  type        = number
+  default     = null
+
+  validation {
+    condition     = var.ci_host_number == null || try(floor(var.ci_host_number) == var.ci_host_number && var.ci_host_number >= 2 && var.ci_host_number <= 9 && var.ci_host_number != 5, false)
+    error_message = "ci_host_number must be null or a whole number from 2 to 9 other than 5, the ci stack's host_number: above the gateway, below the control planes' 10 and the DHCP pool, apart from the API load balancer's 5."
+  }
+}
+
 variable "controlplane_count" {
   description = "Number of control planes."
   type        = number

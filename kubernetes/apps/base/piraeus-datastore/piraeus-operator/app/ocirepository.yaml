@@ -1,0 +1,19 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/ocirepository-source-v1.json
+# The Piraeus operator's own chart, from its publisher's OCI registry. It installs the operator and
+# its resource definitions and nothing else; linstor-cluster creates the storage cluster.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: piraeus-operator
+spec:
+  # The tag is pinned: a new chart arrives by a change to this file, which Flux applies at once.
+  interval: 12h
+  # The chart's packaged layer, which helm-controller reads as it is.
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy
+  url: oci://ghcr.io/piraeusdatastore/piraeus-operator/piraeus
+  ref:
+    # renovate: datasource=docker depName=ghcr.io/piraeusdatastore/piraeus-operator/piraeus
+    tag: 2.12.1

@@ -52,6 +52,21 @@ module "nodes" {
   tags = [var.prefix]
 }
 
+# The CI host the ci stack makes, at its host number on the node subnet, reaches the Talos API and
+# the Kubernetes API on the nodes' fixed addresses. Without ci_host_number there is no rule, so this
+# stack plans whether the ci stack exists or not.
+resource "openstack_networking_secgroup_rule_v2" "ci_host" {
+  for_each = var.ci_host_number == null ? toset([]) : toset(["50000", "6443"])
+
+  security_group_id = module.nodes.security_group.id
+  direction         = "ingress"
+  ethertype         = "IPv4"
+  protocol          = "tcp"
+  port_range_min    = tonumber(each.key)
+  port_range_max    = tonumber(each.key)
+  remote_ip_prefix  = "${cidrhost(local.plumbing.network.cidr, var.ci_host_number)}/32"
+}
+
 # Every worker's data volume: one more disk, empty, that Talos hands to the storage layer
 # (talos/patches/worker/data-volume.yaml). It belongs to this stack, so destroying the stack
 # deletes it and what is on it.

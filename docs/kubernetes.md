@@ -128,28 +128,46 @@ Resource definitions that several applications use are applications of their own
   `safe-upgrades` admission policy and binding, so it applies resource definitions only. Both
   objects live in `kube-system`, where the application's `targetNamespace` puts them; the inner
   `Kustomization` is not a child of the root, gets none of its defaults and substitutes nothing.
+- `snapshot-controller`: the CSI snapshot definitions (`snapshot.storage.k8s.io`, and
+  `groupsnapshot.storage.k8s.io` beside them) and the snapshot controller that serves them, from
+  the upstream `external-snapshotter` repository at one release tag, the source the Piraeus
+  documentation points to, so both always come from the same release. Its `app/` has the Gateway
+  API application's shape: a `GitRepository` checking out only `client/config/crd` and
+  `deploy/kubernetes/snapshot-controller`, and an inner `Kustomization` for each that applies
+  upstream's kustomization there, the controller's once the definitions' is Ready. The controller
+  runs in `kube-system`, where upstream's manifests put it. The repository also tags releases of
+  its client module, `client/vX.Y.Z`; Renovate follows only the `vX.Y.Z` tags.
 
-Both `ks.yaml` files set `wait`, so each is Ready only once its definitions are established. An
-application that creates objects of these groups, or whose chart does, names the matching one in
-`dependsOn` and turns off any copy of the same definitions its own chart would install. No
-application does yet: no ServiceMonitor, PodMonitor, dashboard or route is enabled anywhere.
+The three `ks.yaml` files set `wait`, so each is Ready only once its definitions are established,
+and `snapshot-controller` once its controller runs as well. An application that creates objects of
+these groups, or whose chart does, names the matching one in `dependsOn` and turns off any copy of
+the same definitions its own chart would install. `linstor-cluster` names `snapshot-controller` for
+its VolumeSnapshotClass ([Storage](#storage)); the monitoring stack ([Monitoring](#monitoring)) and
+the baseline applications with a monitor name `prometheus-operator-crds`; cert-manager
+([cert-manager](#cert-manager)) and `envoy-gateway` ([Envoy Gateway](#envoy-gateway)) name
+`gateway-api-crds`, and `envoy-gateway` turns off its chart's copy of the Gateway API. No dashboard
+or route is enabled anywhere.
 
-Deleting a definition deletes every object of its kind, so neither application ever deletes one,
-also not when it leaves the tree. Neither applies a definition itself. The monitoring chart's
+Deleting a definition deletes every object of its kind, so none of these applications ever deletes
+one, also not when it leaves the tree. None applies a definition itself. The monitoring chart's
 values give each definition `helm.sh/resource-policy: keep`, so Helm leaves them when Flux
-uninstalls the release. The inner Gateway API `Kustomization` sets `prune: false` and
-`deletionPolicy: Orphan`, so it leaves what it applied when it is deleted, and keeps a definition
-a newer release drops. `tests/baseline.bats` renders the chart and builds the pinned Gateway API
-source offline to check both, and that they yield definitions only.
+uninstalls the release. The inner Gateway API `Kustomization` and the inner `Kustomization` of the
+snapshot definitions set `prune: false` and `deletionPolicy: Orphan`, so each leaves what it
+applied when it is deleted, and keeps a definition a newer release drops. `tests/baseline.bats`
+renders the chart and builds the pinned Gateway API source offline to check the first two, and
+that they yield definitions only; `tests/storage.bats` builds the pinned snapshot source the same
+way.
 
 ## The kube-system baseline
 
 The small services later applications assume are applications in `apps/base/kube-system/` with
 the Cilium application's shape. Their charts come from their publishers' OCI registries,
 except metrics-server's and the descheduler's, which their publisher releases only to a classic
-Helm repository; those come from a public OCI mirror that republishes each release unchanged. No
-ServiceMonitor, PodMonitor or dashboard is enabled in any of them, and none uses a priority class
-Kubernetes does not define itself.
+Helm repository; those come from a public OCI mirror that republishes each release unchanged. Each
+of them that serves metrics has its chart's monitor on, a ServiceMonitor or, for Reloader, whose
+chart makes no Service by default, a PodMonitor, and names `prometheus-operator-crds` in
+`dependsOn`. No dashboard is enabled in any of them, and none uses a priority class Kubernetes
+does not define itself.
 
 - `kubelet-csr-approver` approves a kubelet's serving certificate request (Talos has the kubelets
   make them) only when the name it asks for matches `NODE_NAME_REGEX` in full and every address it
@@ -160,7 +178,8 @@ Kubernetes does not define itself.
   DNS, so the approver does not look them up.
 - `metrics-server` serves resource metrics. It verifies each kubelet's serving certificate
   against the cluster CA, and starts only once `kubelet-csr-approver` is ready, which it names in
-  `dependsOn`.
+  `dependsOn`. Its own `/metrics` is served without authorization, as its chart's ServiceMonitor
+  carries no credential.
 - `spegel` shares images between nodes. Talos discards unpacked image layers, which Spegel
   serves, unless its machine configuration sets containerd's `discard_unpacked_layers` to false,
   so the application is disabled in the cluster overlay until the Talos patches do.
@@ -170,8 +189,12 @@ Kubernetes does not define itself.
   evicted only when another node can take it, and a cordoned node's taint is no reason to evict.
 
 `tests/baseline.bats` renders every baseline chart with the repository's values, checks that each
-values key is one the pinned chart defines, and reads the approver's and metrics-server's
-rendered configuration.
+values key is one the pinned chart defines and that each monitor selects a Service or pods the
+chart makes, and reads the approver's and metrics-server's rendered configuration.
+
+The approver's chart makes its ServiceMonitor only once the kind exists, so the release installed
+before Flux has none, and Flux's first upgrade, which waits for `prometheus-operator-crds`, adds
+it.
 
 ## Runtime classes
 
@@ -255,6 +278,196 @@ store is configured yet, and nothing in the tree creates an `ExternalSecret`.
 
 `tests/external-secrets.bats` builds the application as Flux applies it and renders the chart to
 check each of these.
+
+## Monitoring
+
+`apps/base/monitoring/kube-prometheus-stack/` installs the Prometheus Operator, one Prometheus, one
+Alertmanager, kube-state-metrics and node-exporter in the namespace `monitoring`, from the
+prometheus-community `kube-prometheus-stack` chart. The namespace's Pod Security level is
+privileged, as node-exporter reads each node through the host's network and process namespaces and
+through host paths. The chart installs no resource definitions: `prometheus-operator-crds` does
+([Resource definitions](#resource-definitions)), and the application names it in `dependsOn`. The
+two charts run the same operator version: Renovate moves them in one pull request, and
+`tests/monitoring.bats` fails when the pinned charts name different ones. Grafana and its
+dashboards are not installed.
+
+Prometheus picks up every ServiceMonitor, PodMonitor, Probe, ScrapeConfig and PrometheusRule in
+every namespace, and evaluates the chart's default alerting and recording rules. It scrapes:
+
+- the API server, every kubelet with its container metrics, CoreDNS, kube-state-metrics,
+  node-exporter on every node, and the stack's own components;
+- on every control plane, the controller manager and the scheduler on their secure ports, and
+  etcd's metrics over plain HTTP, which Talos serves once the node runs
+  `talos/patches/controlplane/metrics.yaml` ([cluster.md](cluster.md#the-control-planes-metrics)).
+  Talos runs etcd outside Kubernetes, so etcd's Service selects the API server's pods, which run on
+  the control planes' host network, for their addresses, and Prometheus sends etcd no credential;
+- the monitors of the baseline applications ([The kube-system baseline](#the-kube-system-baseline)).
+
+It does not scrape:
+
+- kube-proxy, which Cilium replaces: its target and its alert rule are off, so nothing fires for
+  its absence;
+- Cilium, whose ServiceMonitors stay off: `scripts/install-cilium` installs Cilium from the same
+  values before any monitoring definition exists, and its chart refuses a ServiceMonitor without
+  one;
+- Flux's controllers, for which nothing defines a monitor.
+
+Alertmanager routes every alert to its one receiver, `null`, which sends nothing: alerts show in
+Prometheus and Alertmanager and go nowhere else.
+
+Prometheus keeps 14 days of data, and at most 16 GiB, on a 20 GiB volume; Alertmanager keeps its
+silences and notification log on a 1 GiB volume. Both volumes are claims on the cluster's default
+storage class, which neither names; without one, the claims and the two pods stay Pending.
+
+`tests/monitoring.bats` builds the application as Flux applies it, renders the pinned chart with
+its values, and checks the namespace, the targets, the rules, the receivers, the claims and that
+each values key is one the chart or a subchart reads.
+
+## cert-manager
+
+`apps/base/cert-manager/cert-manager/` installs cert-manager, which issues and renews the TLS
+certificates applications and gateways ask for, from the issuers they name (ADR 0006). No issuer is
+configured yet, so it issues nothing.
+
+It runs in its own namespace, `cert-manager`, at the restricted Pod Security level, from the
+publisher's chart in `oci://quay.io/jetstack/charts`; its leader election leases are there too, so
+nothing it installs is in another namespace. The release installs and upgrades the `cert-manager.io`
+and `acme.cert-manager.io` definitions, as the publisher recommends under Flux: only this chart
+ships them, so they move with the controller that serves them rather than being an application of
+their own. Each carries `helm.sh/resource-policy: keep`, so removing the application leaves them,
+and every certificate and issuer, in place. Gateway API support is on; cert-manager looks for the
+Gateway API definitions only when it starts, so the application names `gateway-api-crds` in
+`dependsOn`. Its `ks.yaml` sets `wait`, so an application that names `cert-manager` in `dependsOn`
+starts once cert-manager runs.
+
+Following the publisher's production guidance, the controller and the CA injector run two replicas
+each, one leading, and the webhook three, one per worker, spread over the nodes where the scheduler
+can; each has a disruption budget that keeps one pod available, so a drain never takes the last
+one. They run at `system-cluster-critical` with small requests and no limits. No ServiceMonitor or
+PodMonitor is enabled. `tests/baseline.bats` renders the chart with these values and checks the
+namespace, the definitions and their policy, the Gateway API configuration and dependency, and the
+replicas, spreads and budgets.
+
+## Storage
+
+Persistent volumes come from LINSTOR, run by the Piraeus operator, on the workers' data volumes
+(ADR 0011). Two applications in `apps/base/piraeus-datastore/` hold it; their namespace admits
+privileged pods, as LINSTOR's satellites, the CSI node plugin and the HA controller run privileged
+with host paths.
+
+- `piraeus-operator` installs the operator from its publisher's chart,
+  `oci://ghcr.io/piraeusdatastore/piraeus-operator/piraeus`, with the baseline's shape. The chart
+  installs the operator's resource definitions (`piraeus.io`) as templates of the release, so each
+  chart upgrade upgrades them with the operator, and the HelmRelease's post-renderer gives each
+  `helm.sh/resource-policy: keep`, so Helm leaves them when the release is uninstalled. Its
+  `ks.yaml` sets `wait`: it is Ready once the operator is.
+- `linstor-cluster` holds the storage cluster: the `LinstorCluster`, the
+  `LinstorSatelliteConfiguration`s, the StorageClasses and the VolumeSnapshotClass. It names
+  `piraeus-operator` and `snapshot-controller` in `dependsOn`, as the operator's webhooks validate
+  its objects and every StorageClass of LINSTOR's driver, and the VolumeSnapshotClass needs the
+  snapshot definitions ([Resource definitions](#resource-definitions)).
+
+### What runs
+
+From the `LinstorCluster` the operator runs the LINSTOR controller, LINSTOR's CSI driver
+`linstor.csi.linbit.com`, the HA controller and a satellite on each node it selects: every node
+without the label `node-role.kubernetes.io/control-plane`, which Talos gives every control plane
+and no worker. That is every worker, by its role and never by its name, one OpenTofu adds later
+included. A pod that uses a LINSTOR volume runs only on such a node.
+
+The satellites run as the operator's Talos guide prescribes, in `talos.yaml`: without the module
+loader, as the machine configuration loads DRBD and the device-mapper targets
+([cluster.md](cluster.md#the-node-image)); without the shutdown guard and the host paths of
+systemd, of the kernel's modules and of its sources, which Talos does not have; and with LVM's
+configuration from the ConfigMap `talos-lvm-config`, which keeps the metadata backups and archives
+that Talos's own configuration turns off. The satellite writes them under `/var/etc/lvm`, as `/etc`
+is read-only on Talos.
+
+### The storage pool
+
+Every satellite has one LVM-thin pool, `data`, on the worker's data device,
+`/dev/disk/by-partlabel/r-data` ([cluster.md](cluster.md#the-workers-data-device)). The first time,
+LINSTOR makes the volume group `linstor_data` and the thin pool `data` from the device; afterwards
+the operator registers what is there. A node without the device gets no pool, and its
+`LinstorSatellite` says the device is missing. A device that already holds a file system or another
+signature is not wiped and gets no pool either.
+
+### StorageClasses
+
+- `linstor-replicated`, the default: two replicas on two workers, kept in sync by DRBD. With three
+  workers LINSTOR adds a diskless tiebreaker on the third, so the volume has quorum, and a replica
+  that loses quorum suspends its I/O instead of failing it: its file system is not remounted
+  read-only, and the HA controller evicts the pod, which starts again on a node with quorum. The
+  volume is made once its first pod is scheduled, with a replica on that pod's node where it can
+  be, and any node LINSTOR runs on reaches it, over the network where it holds no replica. It is
+  formatted XFS and can be expanded. Use it unless the application keeps copies of its data itself.
+- `linstor-node-local`: one replica, on the node the volume's first pod is scheduled to, reachable
+  from that node only, so the pod stays there. It is a thin volume of the node's pool without DRBD:
+  LINSTOR cannot give it a second replica or move it to another node, and losing the node's data
+  volume loses it. Use it for an application that keeps copies of its data on other nodes itself,
+  where DRBD would only add its metadata and a device in the path of every write.
+
+A StorageClass's parameters cannot change once it exists: a change of parameters is a new class,
+or the class deleted and made again, which leaves the volumes it made as they are.
+
+### Snapshots
+
+A VolumeSnapshot of a LINSTOR volume is the volume's content at that moment, kept as a thin snapshot
+in the pool of each node that holds a replica. `snapshot-controller` serves VolumeSnapshots and
+LINSTOR's CSI driver takes them, through `linstor`, the default VolumeSnapshotClass, which deletes
+the snapshot with its VolumeSnapshot. A PersistentVolumeClaim that names the snapshot as its
+`dataSource` gets a new volume with that content. A snapshot sits on the same workers as its volume,
+so it is not a backup.
+
+### Where the data lives
+
+Every LINSTOR volume and snapshot lives on the workers' data volumes, which belong to the cluster
+stack: `just cluster-destroy` destroys them with the stack, and every volume's data with them
+([cluster.md](cluster.md#recipes)).
+
+`tests/storage.bats` builds the three applications as Flux applies them; applies the satellite
+configuration to the operator's own satellite DaemonSet at the version the pinned chart runs; renders
+the nodes' machine configurations offline to check which nodes LINSTOR selects and which device the
+pool takes; reads the StorageClasses and the VolumeSnapshotClass; and renders the operator's chart
+to check that its definitions are kept.
+
+## Envoy Gateway
+
+Envoy Gateway implements the Gateway API: for each Gateway that names its GatewayClass it runs
+Envoy proxies, which route traffic as the routes attached to the Gateway say. Two applications in
+`apps/base/envoy-gateway-system/` install it:
+
+- `envoy-gateway` installs the controller from its publisher's chart,
+  `oci://docker.io/envoyproxy/gateway-helm`: two replicas, never on one node, with leader election,
+  the chart's default, so one acts at a time; a disruption budget that keeps one running through a
+  drain; the chart's resource requests. It also applies the GatewayClass `envoy-gateway` with the
+  controller name the chart configures. A GatewayClass is cluster-scoped; the API server drops the
+  namespace the application's `targetNamespace` gives it. The namespace enforces the restricted Pod
+  Security level, which the controller, its certificate job and the proxies it creates meet. The
+  chart makes no ServiceMonitor or PodMonitor, and the application adds none.
+- `envoy-gateway-crds` applies Envoy Gateway's own resource definitions (`gateway.envoyproxy.io`)
+  from the same chart at the same tag: an `OCIRepository` unpacks the chart, and an inner
+  `Kustomization` applies its `charts/crds/crds/generated` directory, never pruning, as the Gateway
+  API's inner `Kustomization` does. The publisher's chart of definitions alone keeps them in
+  templates, too large for a Helm release to store.
+
+The chart installs no definitions (`crds.enabled: false`): the Gateway API's come from
+`gateway-api-crds`, so there is one copy, and it leaves out the Gateway API's admission policy as
+that application does. The controller watches only the kinds whose definitions exist when it
+starts, so `envoy-gateway` names both definition applications in `dependsOn`.
+
+The two tags name one package, which Renovate updates in one pull request. Envoy Gateway is built
+against one Gateway API release, the one its chart's own copy is of, and works with a newer
+release's standard channel while that still serves the versions it reads. `tests/baseline.bats`
+fails unless the release `gateway-api-crds` pins has the same major version, is no older, and
+serves every stable kind and version of the chart's copy; an Envoy Gateway update that needs a newer
+Gateway API therefore waits for `gateway-api-crds` to move first. The tests also render the chart
+and build both applications offline to check the rest of this section.
+
+No Gateway exists yet. A Gateway's proxies are reached through a Service of type LoadBalancer,
+which needs the cloud controller, and its HTTPS listener needs a certificate from an issuer, which
+cert-manager has none of yet. Until both are in place the controller accepts the GatewayClass and
+runs no proxy.
 
 ## Flux itself
 
@@ -349,7 +562,8 @@ job's identity token it stops before calling anything, so nobody signs from a la
    reproducibly; a reported digest that is not `sha256:` and 64 hexadecimal digits stops the run;
 3. signs that digest keyless with cosign: a short-lived certificate for the job's identity, recorded
    in Sigstore's public transparency log;
-4. verifies the signature against the identity the instance accepts; a failure stops the run;
+4. verifies the signature against the identity of this workflow at the run's ref, which on `main`
+   is the identity the instance accepts; a failure stops the run;
 5. tags that digest `main`.
 
 The tag moves last and by digest: `main` only ever names an artifact that is signed and verified,
@@ -359,7 +573,9 @@ a run on `refs/heads/main`, and only when no newer commit on `main` changes `kub
 workflow. Runs share one concurrency group that never cancels a run in progress, so they never
 overlap: a run that starts while another is in progress waits for it, and GitHub replaces a waiting
 run with a newer one. A run on another branch, or one a newer commit overtook, such as a re-run of an
-old one, still pushes and signs, says why the tag stayed where it is, and succeeds. The run prints
+old one, still pushes, signs and verifies, says why the tag stayed where it is, and succeeds. An
+artifact signed by a run on another branch carries that branch's identity, which the instance
+refuses. The run prints
 its steps, the digest and whether the tag moved.
 
 The signing identity is this workflow file on that branch: the subject

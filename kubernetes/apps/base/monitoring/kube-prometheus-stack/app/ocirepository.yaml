@@ -1,0 +1,20 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/ocirepository-source-v1.json
+# The prometheus-community chart of the Prometheus Operator, Prometheus, Alertmanager and their
+# exporters. It runs the operator version whose definitions prometheus-operator-crds installs, and
+# Renovate moves the two charts in one pull request.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: kube-prometheus-stack
+spec:
+  # The tag is pinned: a new chart arrives by a change to this file, which Flux applies at once.
+  interval: 12h
+  # The chart's packaged layer, which helm-controller reads as it is.
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy
+  url: oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack
+  ref:
+    # renovate: datasource=docker depName=ghcr.io/prometheus-community/charts/kube-prometheus-stack
+    tag: 93.3.0

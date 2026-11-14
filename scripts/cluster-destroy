@@ -12,9 +12,12 @@
 # address lies in the service range of the cluster's talman.yaml is left out: Cilium gave it that
 # address from its pool, the workers announce it over BGP, and nothing in the cloud stands behind it
 # (ADR 0013). A Service with no address yet, or one outside the range, still counts, as does every
-# such Service when talman.yaml names no service range. A cluster whose API does not answer, or
-# that has no kubeconfig, cannot be asked and may still own some, so it is not destroyed either,
-# unless --unreachable is given, with which the operator takes on what may be left. Neither
+# such Service when talman.yaml names no service range. LINSTOR's volumes are the other exception:
+# their data is on the workers' data volumes, which the stack holds and destroys, so nothing of
+# them stays in the cloud. They do not hold the destroy up; it says how many there are before it
+# asks, and confirming the destroy confirms that they go with it. A cluster whose API does not
+# answer, or that has no kubeconfig, cannot be asked and may still own some, so it is not destroyed
+# either, unless --unreachable is given, with which the operator takes on what may be left. Neither
 # kubectl's errors nor anything of the objects but their names are printed, as they can hold
 # addresses.
 # Usage: scripts/cluster-destroy [cluster] [--yes] [--unreachable]
@@ -42,6 +45,8 @@ for arg; do
   esac
 done
 stack=sto2/cluster
+# LINSTOR's CSI driver, whose volumes are on the workers' data volumes in the stack.
+linstor_driver=linstor.csi.linbit.com
 
 # shellcheck source=scripts/cluster-env
 . "$here/cluster-env" "$cluster"
@@ -93,8 +98,10 @@ if ((asked)); then
     | (.status.loadBalancer.ingress // []) as $ingress
     | select(if $known and ($ingress | length) > 0 then ($ingress | all(from_pool)) | not else true end)
     | "\(.metadata.namespace)/\(.metadata.name)"' <<< "$services")
-  csi_volumes=$(jq -r '.items[] | select(.spec.csi != null)
+  csi_volumes=$(jq -r --arg linstor "$linstor_driver" '.items[]
+    | select(.spec.csi != null and .spec.csi.driver != $linstor)
     | "\(.metadata.name) \(.spec.csi.driver // "unnamed")"' <<< "$volumes")
+  linstor_volumes=$(jq --arg linstor "$linstor_driver" '[.items[] | select(.spec.csi.driver? == $linstor)] | length' <<< "$volumes")
   if [[ -n $balancers || -n $csi_volumes ]]; then
     while read -r name; do
       [[ -z $name ]] || infra_error "the Service $name is of type LoadBalancer, without an address from the service range"
@@ -105,7 +112,17 @@ if ((asked)); then
     infra_error "$cluster still owns load balancers or volumes that are not in the state of $stack, which a destroy would leave in the cloud, keeping the network from being deleted; remove them first. Nothing was destroyed"
     exit 1
   fi
-  say "$cluster owns no Service of type LoadBalancer outside its service range and no PersistentVolume of a CSI driver"
+  if ((linstor_volumes == 0)); then
+    say "$cluster owns no Service of type LoadBalancer outside its service range and no PersistentVolume of a CSI driver"
+  else
+    say "$cluster owns no Service of type LoadBalancer outside its service range and no PersistentVolume of a CSI driver other than LINSTOR's"
+    if ((linstor_volumes == 1)); then
+      counted="1 PersistentVolume of LINSTOR ($linstor_driver), whose data is on the workers' data volumes in $stack: it is"
+    else
+      counted="$linstor_volumes PersistentVolumes of LINSTOR ($linstor_driver), whose data is on the workers' data volumes in $stack: they are"
+    fi
+    say "$cluster has $counted destroyed with the stack, and confirming its destroy confirms that"
+  fi
 elif ((unreachable)); then
   say "$why; with --unreachable it is destroyed without being asked, and a load balancer or volume it owns stays in the cloud"
 else

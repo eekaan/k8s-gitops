@@ -637,6 +637,7 @@ kube-system/node-agent-cp-1' ]
       both) : > "$STATE/load-balancer" && : > "$STATE/csi-volume" ;;
       *) : > "$STATE/$owned" ;;
     esac
+    echo 2 > "$STATE/linstor-volumes"
 
     recipe cluster-destroy --yes < /dev/null
 
@@ -647,7 +648,7 @@ kube-system/node-agent-cp-1' ]
     if [[ $owned != load-balancer ]]; then
       [[ $output == *"PersistentVolume pvc-0a1b2c3d"* ]]
     fi
-    for other in default/kubernetes kube-system/hubble-relay local-volume-1 marker-volume-handle 198.51.100.62; do
+    for other in default/kubernetes kube-system/hubble-relay local-volume-1 pvc-linstor marker-volume-handle 198.51.100.62; do
       [[ $output != *"$other"* ]]
     done
     no_tofu
@@ -699,6 +700,51 @@ kube-system/node-agent-cp-1' ]
   [ "$status" -ne 0 ]
   no_tofu
   [[ $output == *"Service gateways/public"* ]]
+}
+
+@test "LINSTOR's volumes go with the cluster stack once the destroy is confirmed, and are counted first" {
+  for answer in '' no lab-sto2; do
+    echo "answer: $answer"
+    reset_cluster
+    echo 3 > "$STATE/linstor-volumes"
+
+    recipe cluster-destroy <<< "$answer"
+
+    [ "$status" -ne 0 ]
+    # What the recipe printed before it asked for the stack's name.
+    asked=${output%%"Type sto2/cluster to destroy it"*}
+    [ "$asked" != "$output" ]
+    [[ $asked == *"3 PersistentVolumes of LINSTOR"*"destroyed with the stack"* ]]
+    [ -z "$(calls '^tofu .* apply ')" ]
+    generated_kept
+  done
+
+  reset_cluster
+  echo 1 > "$STATE/linstor-volumes"
+
+  recipe cluster-destroy <<< sto2/cluster
+
+  [ "$status" -eq 0 ]
+  asked=${output%%"Type sto2/cluster to destroy it"*}
+  [ "$asked" != "$output" ]
+  [[ $asked == *"1 PersistentVolume of LINSTOR"*"destroyed with the stack"* ]]
+  [ "$(calls '^tofu .* apply ' | wc -l)" -eq 1 ]
+  [[ $output == *"sto2/cluster destroyed"* ]]
+
+  reset_cluster
+  restore_generated
+  echo 2 > "$STATE/linstor-volumes"
+
+  recipe cluster-destroy --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"2 PersistentVolumes of LINSTOR"*"destroyed with the stack"* ]]
+  [[ $output != *"Type sto2/cluster"* ]]
+  [ "$(calls '^tofu .* apply ' | wc -l)" -eq 1 ]
+  [[ $output == *"sto2/cluster destroyed"* ]]
+  for leaked in pvc-linstor marker-volume-handle 198.51.100.84; do
+    [[ $output != *"$leaked"* ]]
+  done
 }
 
 @test "A cluster whose API does not answer is not destroyed unless asked" {
@@ -827,7 +873,7 @@ kube-system/node-agent-cp-1' ]
     done
     recipe cluster-reboot 192.0.2.221 --yes < /dev/null
     keep
-    for condition in load-balancer api-down owns-nothing unreachable; do
+    for condition in load-balancer api-down owns-nothing unreachable linstor-volumes; do
       reset_cluster
       args=(--yes)
       case $condition in
@@ -836,6 +882,7 @@ kube-system/node-agent-cp-1' ]
           : > "$STATE/api-down"
           args+=(--unreachable)
           ;;
+        linstor-volumes) echo 2 > "$STATE/linstor-volumes" ;;
         *) : > "$STATE/$condition" ;;
       esac
       recipe cluster-destroy "${args[@]}" < /dev/null

@@ -1,0 +1,22 @@
+---
+# One LVM-thin storage pool on every satellite, on the worker's data volume: the partition Talos
+# makes of it and links under this name on every worker (talos/patches/worker/data-volume.yaml).
+# Thin pools are what LINSTOR takes snapshots of.
+#
+# The operator registers the pool as it is when the volume group linstor_data and its thin pool
+# data already exist on the node. When they do not, it checks that the device exists, reporting it
+# missing on the LinstorSatellite otherwise, and has LINSTOR make the volume group and the thin
+# pool from it. LINSTOR runs pvcreate without --yes or --force, with which alone pvcreate wipes a
+# signature it finds, so a device that holds a file system or another signature is left as it is
+# and the pool is not created.
+apiVersion: piraeus.io/v1
+kind: LinstorSatelliteConfiguration
+metadata:
+  name: storage-pool
+spec:
+  storagePools:
+    - name: data
+      lvmThinPool: {}
+      source:
+        hostDevices:
+          - /dev/disk/by-partlabel/r-data

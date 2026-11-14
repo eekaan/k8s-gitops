@@ -280,6 +280,32 @@ EOF
   done
 }
 
+@test "Control planes serve the controller manager's, the scheduler's and etcd's metrics beyond the node itself" {
+  run "$SCRIPT" "$RENDERED"
+
+  [ "$status" -eq 0 ]
+  mapfile -t controlplanes < <(nodes controlplane)
+  mapfile -t workers < <(nodes worker)
+  [ "${#controlplanes[@]}" -eq 3 ]
+  [ "${#workers[@]}" -eq 3 ]
+  # Talos binds both to 127.0.0.1 unless told otherwise, and has etcd serve metrics only on its
+  # client port, behind client certificates.
+  for hostname in "${controlplanes[@]}"; do
+    config="$RENDERED/$hostname.yaml"
+    listens=$(yq -N 'select(.kind == "KubeControllerManagerConfig" or .kind == "KubeSchedulerConfig")
+      | .kind + " " + (.extraArgs["bind-address"] // "none")' "$config" | sort)
+    metrics=$(yq 'select(.version == "v1alpha1") | .cluster.etcd.extraArgs["listen-metrics-urls"] // "none"' "$config")
+    echo "$hostname: $(paste -sd, <<< "$listens"); etcd metrics: $metrics"
+    [ "$listens" = "$(printf '%s\n' 'KubeControllerManagerConfig 0.0.0.0' 'KubeSchedulerConfig 0.0.0.0')" ]
+    [ "$metrics" = http://0.0.0.0:2381 ]
+  done
+  for hostname in "${workers[@]}"; do
+    config="$RENDERED/$hostname.yaml"
+    [ -z "$(yq 'select(.kind == "KubeControllerManagerConfig" or .kind == "KubeSchedulerConfig") | .kind' "$config")" ]
+    [ "$(yq 'select(.version == "v1alpha1") | .cluster.etcd // {} | length' "$config")" -eq 0 ]
+  done
+}
+
 @test "Cilium replaces the bundled CNI and kube-proxy" {
   run "$SCRIPT" "$RENDERED"
 

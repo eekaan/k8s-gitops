@@ -4,8 +4,10 @@
 # name is typed back, or with --yes (CI). The plumbing stack is left alone when the cluster stack
 # is not destroyed. State objects stay. Once the cluster stack is destroyed, the files generated for
 # its cluster that hold the nodes' and the API's addresses are removed, as the cloud may give those
-# addresses to someone else. Given one of the two stacks, it destroys that one only, the same way,
-# as cluster-destroy does with the cluster stack.
+# addresses to someone else. Given one of the two stacks, or the ci stack, it destroys that one
+# only, the same way, as cluster-destroy does with the cluster stack. The ci stack is destroyed by
+# name only: the CI host outlives the cluster, and is destroyed before the plumbing stack, whose
+# network it is on.
 # Usage: scripts/infra-destroy [stack] [--yes]
 set -euo pipefail
 
@@ -14,9 +16,10 @@ here=$(dirname "$0")
 . "$here/lib/infra.sh"
 
 stacks=(sto2/cluster sto2/plumbing)
+named=("${stacks[@]}" sto2/ci)
 
 usage() {
-  infra_error "usage: infra-destroy [stack] [--yes]; the stack is one of ${stacks[*]}"
+  infra_error "usage: infra-destroy [stack] [--yes]; the stack is one of ${named[*]}"
   exit 2
 }
 
@@ -26,7 +29,7 @@ for arg; do
     --yes) confirmed=1 ;;
     -*) usage ;;
     *)
-      [[ -z $only && " ${stacks[*]} " == *" $arg "* ]] || usage
+      [[ -z $only && " ${named[*]} " == *" $arg "* ]] || usage
       only=$arg
       ;;
   esac

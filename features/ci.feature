@@ -51,3 +51,18 @@ Feature: Continuous integration
     Given the CI workflow
     When its triggers, permissions, concurrency and steps are read
     Then it runs for every pull request and every push to main with no path filter, requests read-only permissions and no secrets, cancels a pull request's older run, checks out and installs with the same pinned actions in every job, and every command it runs is one just recipe
+
+  Scenario: A pull request from a fork never runs on the self-hosted runner
+    Given the CI workflow and a self-hosted runner label in CI_RUNNER_LABEL
+    When just ci-runner picks the check jobs' runner for a push to main, a pull request from a branch of the repository and one from a fork, and the CI host's job-started hook gets a job of each, the fork's workflow changed to ask for the host
+    Then only the push and the branch's pull request get the label, the fork's check jobs run on a hosted runner, and the hook fails the fork's job before any of its steps runs
+
+  Scenario: Without a self-hosted runner configured, every job runs on a hosted runner
+    Given the CI workflow and no CI_RUNNER_LABEL
+    When just ci-runner picks the check jobs' runner for a push to main, a pull request from a branch of the repository and one from a fork
+    Then it picks ubuntu-latest each time, and every other job of the workflow names ubuntu-latest itself
+
+  Scenario: The publish workflow never runs on the self-hosted runner
+    Given the publish workflow
+    When its jobs are read, and the CI host's job-started hook gets a job of it for a push to main
+    Then its one job names ubuntu-latest itself, and the hook fails the job

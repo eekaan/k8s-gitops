@@ -1,0 +1,26 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+# Applies Envoy Gateway's own resource definitions (gateway.envoyproxy.io) from the unpacked chart
+# beside it. The Gateway API's copy in the same crds/ directory is not applied: those come from the
+# gateway-api-crds application. It lives in envoy-gateway-system with its source, where the
+# application's targetNamespace puts both. It is not a child of the root, so it gets none of the
+# root's defaults and sets what it needs itself; it substitutes nothing.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: envoy-gateway-crds
+spec:
+  interval: 30m
+  retryInterval: 1m
+  timeout: 3m
+  sourceRef:
+    kind: OCIRepository
+    name: envoy-gateway-crds
+  path: ./gateway-helm/charts/crds/crds/generated
+  # Deleting a definition deletes every object of its kind, so nothing this Kustomization applied
+  # is ever deleted: not a definition a newer release drops, and none when the Kustomization itself
+  # is deleted, as it is when the application leaves the tree.
+  prune: false
+  deletionPolicy: Orphan
+  # Ready once every definition is established; the application's own wait waits for that.
+  wait: true

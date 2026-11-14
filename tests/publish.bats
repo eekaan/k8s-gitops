@@ -169,9 +169,15 @@ EOF
   fake cosign <<'EOF'
 printf '%s\n' "${DOCKER_CONFIG:-$HOME/.docker}" >> "$RECORD/docker-config.cosign"
 case ${1-} in
-  sign) ;;
+  # A keyless signature carries the identity of the run that made it: this workflow at its ref.
+  sign) printf '%s' "${GITHUB_REF-}" > "$STATE/signed-at" ;;
   verify)
-    if [[ -e $STATE/verify-fails ]]; then
+    identity=
+    while (($#)); do
+      [[ $1 == --certificate-identity ]] && identity=$2
+      shift
+    done
+    if [[ -e $STATE/verify-fails || $identity != *"/.github/workflows/publish.yaml@$(cat "$STATE/signed-at" 2> /dev/null)" ]]; then
       echo "Error: no matching signatures: none of the expected identities matched" >&2
       exit 1
     fi

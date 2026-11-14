@@ -2,7 +2,8 @@
 # Publishes kubernetes/ as the OCI artifact Flux follows (ADR 0003), and runs only in the publish
 # workflow. In order: logs in to the registry; pushes the artifact tagged with the commit; signs the
 # digest the push reports, keyless, with the job's identity token; verifies that signature against
-# the identity the FluxInstance accepts; and only then tags that digest main. The tag moves last and
+# the identity of this workflow at the run's ref, which on main is the one the FluxInstance accepts;
+# and only then tags that digest main. The tag moves last and
 # by digest, so main only ever names the bytes that were signed and verified, whatever becomes of the
 # commit's tag in between. It moves only on a run on refs/heads/main for which no newer commit on
 # main changes what is published, so a run that finishes late never moves it back; otherwise the run
@@ -22,7 +23,7 @@ set -euo pipefail
 repository=eekaan/k8s-gitops
 artifact=ghcr.io/$repository/manifests
 source_url=https://github.com/$repository
-identity=$source_url/.github/workflows/publish.yaml@refs/heads/main
+workflow=$source_url/.github/workflows/publish.yaml
 issuer=https://token.actions.githubusercontent.com
 
 say() {
@@ -80,7 +81,11 @@ begin "signing $digest"
 cosign sign --yes --oidc-provider github-actions "$artifact@$digest"
 
 begin "verifying $digest"
-# The verified signatures are printed as JSON; the run reports only that they verified.
+# A keyless signature names the workflow and the ref of the run that made it, so that is what a
+# run can verify. Only a run on main gets as far as tagging, so the digest tagged main was verified
+# against main's identity, the one the FluxInstance accepts. The verified signatures are printed as
+# JSON; the run reports only that they verified.
+identity=$workflow@$GITHUB_REF
 cosign verify --certificate-identity "$identity" --certificate-oidc-issuer "$issuer" "$artifact@$digest" > /dev/null
 
 if [[ $GITHUB_REF != refs/heads/main ]]; then

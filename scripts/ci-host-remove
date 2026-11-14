@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Deregisters the CI host's GitHub Actions runner: stops and disables its service, then removes the
+# runner from the repository with a remove token from gh, which reaches the runner's configuration
+# on standard input and is never an argument, printed or written to a file. The engine, its cache
+# and the host stay; just infra-destroy sto2/ci removes the host. A runner that is not registered is
+# left as it is, and GitHub is asked for nothing. Connects as ci-host-setup does.
+# Usage: scripts/ci-host-remove
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/ci-host.sh
+. "$here/lib/ci-host.sh"
+# shellcheck source=scripts/stack-env
+. "$here/stack-env" sto2/ci
+require_env CI_HOST_SSH_USER
+for tool in ssh ssh-keyscan ssh-keygen gh; do
+  if ! command -v "$tool" > /dev/null; then
+    infra_error "$tool is not on PATH; ci-host-remove needs OpenSSH's client and the pinned gh (just tools)"
+    exit 1
+  fi
+done
+
+lock_stack
+init_stack
+ci_host_connect
+
+# remote_stop: the script the host runs as root.
+remote_stop() {
+  printf '%s=%q\n' runner_user "$ci_host_runner_user"
+  cat << 'REMOTE'
+set -euo pipefail
+# The host's file system is under CI_HOST_ROOT, which sudo leaves unset on the host; the tests set
+# it to a directory that stands for the host's.
+root=${CI_HOST_ROOT-}
+unit=ci-runner.service
+if systemctl is-enabled --quiet "$unit" || systemctl is-active --quiet "$unit"; then
+  systemctl disable --now --quiet "$unit"
+  echo "ci-host: stopped and disabled the runner's service"
+fi
+if [[ -f $root/home/$runner_user/actions-runner/.runner ]]; then
+  echo "ci-host: state registered"
+else
+  echo "ci-host: state unregistered"
+fi
+REMOTE
+}
+
+report=$(remote_stop | ci_host_ssh 'sudo -n bash -s')
+state=
+while IFS= read -r line; do
+  if [[ $line == 'ci-host: state '* ]]; then
+    state=${line#ci-host: state }
+  else
+    printf '%s\n' "$line"
+  fi
+done <<< "$report"
+
+if [[ $state != registered ]]; then
+  echo "ci-host-remove: the runner is not registered; nothing to remove"
+  exit 0
+fi
+
+# Run on the host as the runner's user, the token read from standard input as ci-host-setup does.
+deregister='IFS= read -r ACTIONS_RUNNER_INPUT_TOKEN && export ACTIONS_RUNNER_INPUT_TOKEN && cd ~/actions-runner && exec ./config.sh remove'
+ci_host_repository
+token=$(ci_host_runner_token remove-token)
+printf '%s\n' "$token" | ci_host_as_runner "$deregister"
+unset token
+echo "ci-host-remove: deregistered the runner $ci_host_runner_name from $ci_host_repository; the engine and its cache stay on the CI host"

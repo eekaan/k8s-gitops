@@ -11,6 +11,10 @@ spec:
   # Ready only once the approver runs, so an application that names this one in dependsOn starts
   # when the kubelets' serving certificates can be approved.
   wait: true
+  # Its chart makes a ServiceMonitor once that kind exists. Installed before Flux, the release has
+  # none; Flux upgrades it only after the definitions are in place, so the upgrade adds it.
+  dependsOn:
+    - name: prometheus-operator-crds
   sourceRef:
     kind: ExternalArtifact
     name: kubelet-csr-approver
