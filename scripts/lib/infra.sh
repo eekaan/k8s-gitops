@@ -176,7 +176,7 @@ allowlist_shortest_prefix=16
 # and is never printed. jq's own errors would quote the list, so they are dropped; a list jq cannot
 # check is refused, never passed.
 export_api_allowed_cidrs() {
-  local variable=TF_VAR_${1:-api_allowed_cidrs} from cidrs position problem problems refused=0
+  local variable=TF_VAR_${1:-api_allowed_cidrs} from cidrs position problem problems
   local valid='select(type == "array" and length > 0 and all(.[]; type == "string"
     and test("^([0-9]{1,3}[.]){3}[0-9]{1,3}/[0-9]{1,2}\\z|^[0-9A-Fa-f:]+/[0-9]{1,3}\\z")))'
   if [[ -n ${OPERATOR_CIDRS:-} ]]; then
@@ -224,9 +224,8 @@ export_api_allowed_cidrs() {
       wide) infra_error "$from entry $position is wider than /$allowlist_shortest_prefix; the allowlist names the operator's own networks" ;;
       bits) infra_error "$from entry $position has bits set below its prefix; a network is written by its own address, as in 192.0.2.0/24" ;;
     esac
-    refused=1
   done <<< "$problems"
-  ((!refused)) || return 1
+  [[ -z $problems ]] || return 1
   export "$variable=$cidrs"
 }
 
