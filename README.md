@@ -21,7 +21,9 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
 
 - `just tools` installs the pinned tools.
 - `just ci` runs every check that needs no credentials: tool versions, address literals, that
-  every Talos secrets bundle is encrypted, shellcheck and yamllint, scenario proofs, the OpenTofu
+  every Talos secrets bundle is encrypted, shellcheck and yamllint, the Renovate configuration
+  (`just renovate-check`: Renovate's own validator, run from its pinned container image, so `just
+  ci` needs a container runtime, Docker), scenario proofs, the OpenTofu
   check (`just infra-check`: formatting, that every stack enforces state encryption, validation
   without a state backend and the mocked
   `tofu test` runs), the Talos check

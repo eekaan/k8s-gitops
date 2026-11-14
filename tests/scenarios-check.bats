@@ -30,6 +30,24 @@ has_line() {
   return 1
 }
 
+@test "Every recipe that proves a scenario runs in just ci" {
+  root=$(cd "$BATS_TEST_DIRNAME/.." && pwd)
+  mapfile -t proving < <(grep -rhoE '(^|[[:blank:]])@by:[^[:blank:]]+' "$root/features" | sed 's/.*@by://' | sort -u)
+  [ "${#proving[@]}" -gt 0 ]
+  # The recipes just ci runs: its dependencies and theirs, as just reads the justfile and its imports.
+  ran=$(just --justfile "$root/justfile" --dump --dump-format json | jq -r '
+    .recipes as $recipes
+    | def runs($name): $recipes[$name].dependencies[]?.recipe | (., runs(.));
+    [runs("ci")] | unique[]')
+  [ -n "$ran" ]
+  for recipe in "${proving[@]}"; do
+    if ! grep -qxF -- "$recipe" <<< "$ran"; then
+      echo "just ci does not run $recipe, which proves a scenario" >&2
+      return 1
+    fi
+  done
+}
+
 @test "A scenario with a proof of the same name passes" {
   cat > features/nodes.feature <<'EOF'
 Feature: Nodes
