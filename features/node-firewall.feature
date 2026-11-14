@@ -54,9 +54,9 @@ Feature: Nodes firewall themselves
     Then that network reaches the Talos and Kubernetes API rules from talman.yaml's values, no file of talos/ that git would commit holds an address but the wildcard and loopback ones, and git ignores the cluster's talman.yaml and operator-cidrs.json
 
   Scenario: The first rollout applies to one node in a self-reverting mode and stops unless the checks pass
-    Given a cluster whose configuration changes two nodes
-    When cluster-talos runs with --first naming one of them, and runs again with the cluster unhealthy before it starts, and with the named node's configuration reverted before the checks end
-    Then the cluster is checked first, the named node alone is applied in try mode with a timeout, and it is applied again to keep it only once its Talos API reports the configuration in effect, every node answers on the Talos API port and cluster-check passes, after which the other node goes the same way; the unhealthy cluster gets no apply, and the reverted node is not kept
+    Given a cluster whose configuration changes a worker and a control plane
+    When cluster-talos runs with --first naming the worker, again with each check failing in turn, with the cluster unhealthy before it starts, and with the worker's configuration reverted before the checks end
+    Then the cluster is checked first, and each node, the named one first and alone, is applied in try mode with a timeout and applied again to keep it only once, from the operator's machine: its Talos API reports the configuration in effect, every node answers on the Talos API port, another control plane's API server reaches its kubelet and its node-exporter, the Cilium agents on it and on another node reach each other through the overlay and on the health port, for a control plane its etcd member follows the same leader as another control plane's and is listed by it, it is Ready 65 seconds after the try, cluster-check passes, and the try window is not about to close; each failing check leaves the node unkept and the other node unapplied, the unhealthy cluster gets no apply, and the reverted node is not kept
 
   Scenario: A failed check after the first node leaves the other nodes untouched and says how the first reverts
     Given a cluster whose configuration changes two nodes, and a cluster-check that fails once the first has been applied

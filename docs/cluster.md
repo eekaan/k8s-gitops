@@ -252,25 +252,73 @@ reaches them, and neither does a node without machine configuration. Each, with 
 
 ### Rolling it out
 
-A configuration that changes what a node admits can cut the operator off from the node, the
-Talos API included. `just cluster-talos --first <node>` rolls it out so that it cannot: after the
-dry run and the confirmation, `just cluster-check` must pass, and then the named node, followed by
+A configuration that changes what a node admits can cut the node off from the operator and from
+the other nodes. `just cluster-talos --first <node>` rolls it out so that it cannot: after the dry
+run and the confirmation, `just cluster-check` must pass, and then the named node, followed by
 every other node the configuration changes in `talman.yaml`'s order, is applied alone in Talos' try
 mode ([Talos](https://docs.siderolabs.com/talos/v1.14/configure-your-talos-cluster/system-configuration/editing-machine-configuration)),
 which reverts the node by itself to the configuration it had five minutes after the apply, without
-a reboot, unless another configuration is applied first. From the operator's machine the node's
-Talos API must then report that the configuration is still in effect, every node must answer on the
-Talos API port and `just cluster-check` must pass: the Kubernetes API through the load balancer,
-every node Ready, the pods of `kube-system` running and a pod's logs fetched through its kubelet.
-Only then is the same configuration applied again, which keeps it. A failed check stops the
-rollout: the node reverts by itself, the nodes before it keep theirs and those after it are
-untouched, and the recipe says which are which.
+a reboot, unless another configuration is applied first. Within that window, from the operator's
+machine, each of these must pass, in this order:
 
-The nodes admit the Talos API from the allowlist their configuration holds. A change of the
-allowlist reaches them with `just infra-apply sto2/cluster`, which writes it into `talman.yaml`, and
-then `just cluster-talos --first <node>`, which must run from an address the nodes admit before the
-change. A network therefore leaves the allowlist only after the one that replaces it has reached the
-nodes this way.
+1. The node's Talos API reports that the configuration is in effect, which also says it answers.
+2. Every node answers on the Talos API port.
+3. The API server on another control plane, reached at that control plane's own address rather
+   than the load balancer, reaches the node's kubelet (`/api/v1/nodes/<node>/proxy/healthz`) and
+   its node-exporter (`/api/v1/nodes/http:<node>:9100/proxy/metrics`). Its requests arrive from that
+   control plane's address, as a pod's on that control plane would once Cilium has masqueraded them.
+4. The Cilium agent on the node and the one on another node, each running Cilium's own health probe
+   at once, reach each other's health endpoint through the overlay and each other's host on the
+   health port.
+5. For a control plane, its etcd member and another control plane's, each asked through its own
+   Talos API, follow the same leader in the same term, vote and report no error, such as having no
+   leader, and the other control plane lists the node's member.
+6. The node is still Ready 65 seconds after the apply: Kubernetes' node lifecycle controller marks a
+   node not Ready once its kubelet has not renewed its lease for `node-monitor-grace-period`,
+   50 seconds by default, and looks every 5 seconds, and the kubelet renews its lease every 10
+   seconds, a quarter of its 40 ([Kubernetes](https://github.com/kubernetes/kubernetes/blob/v1.37.1/pkg/controller/nodelifecycle/config/v1alpha1/defaults.go#L40-L53)).
+   Talos sets none of them.
+7. `just cluster-check` passes: the Kubernetes API through the load balancer, every node Ready, the
+   pods of `kube-system` running and a pod's logs fetched through its kubelet.
+8. The node's Talos API still reports the configuration in effect. Talos reverts a tried
+   configuration once and for all, so one still in effect was in effect throughout the checks.
+
+Only then, and only while more than a minute of the window is left, is the same configuration
+applied again, which keeps it. A failed check stops the rollout: the node reverts by itself, the
+nodes before it keep theirs and those after it are untouched, and the recipe says which are which,
+as it does when a later node cannot say what the configuration would change.
+
+The checks open new connections where they can, but a connection open before the try, such as
+etcd's between its members or the API server's to a kubelet, stays open through it, as the firewall
+admits what belongs to a connection it has seen. A rule that is wrong for such a connection shows
+when the connection is opened again; the offline checks of the rules (`tests/node-firewall.bats`)
+are what pin them.
+
+### The way back
+
+A node that fails its checks needs nothing: it reverts by itself. For a node that kept a
+configuration whose rule turns out wrong, the rule is fixed in `talos/firewall.yaml`, and the fix
+reaches the nodes the way every rule does: `just infra-apply sto2/cluster`, which renders it into
+`talman.yaml` (the stack's output is the only way the file reaches it), then
+`just cluster-talos --first <node>`.
+
+The nodes admit the Talos and Kubernetes APIs from the allowlist their configuration holds, so a
+change of the allowlist reaches them only from an address they admit before it. In order:
+
+1. Add the new network to the allowlist, leaving the old one in it.
+2. `just infra-apply sto2/cluster`, then `just cluster-talos --first <node>` from an address of the
+   old allowlist.
+3. Remove the old network, and apply and roll out the same way, now from the new one.
+
+When the old address is gone already, the nodes still admit their Talos API from the node network
+and from the nodes' floating addresses, and from nothing else outside the allowlist. The way back
+then runs from a host on the node network, such as the CI host or a machine started there for it:
+with the cluster's talosconfig, each node's rendered configuration, which `talman render` writes,
+is applied through the node's Talos API at the node's own address on the node network, with
+talosctl's `apply-config`. No recipe does this: `talman.yaml` names the nodes by their floating
+addresses, which a host on the node network reaches through the router, arriving from an address the
+nodes do not admit. Neither the cloud's console nor the Kubernetes API is a way back: the console
+shows Talos' dashboard only, and the Kubernetes API does not change a machine configuration.
 
 ## The Talos age key
 
@@ -372,12 +420,14 @@ out of the artifact, which is built from `kubernetes/`.
   `just cluster-talos [cluster] --first <node>` tries the configuration on each node before it keeps
   it, the named node first ([Rolling it out](#rolling-it-out)): it checks the cluster with
   `cluster-check` before anything is applied, and applies to a node in Talos' try mode, with talman
-  waiting up to two minutes for it to answer, checks it, the Talos API port of every node and the
-  cluster, and applies again to keep it, one node at a time, skipping the nodes the configuration
-  does not change. A failed check stops the rollout, saying that the node reverts by itself, which
-  nodes kept the configuration before it and which are untouched. It needs what `cluster-talos`
-  needs and the kubeconfig, refuses a node `talman.yaml` does not list before it runs anything, and
-  does not onboard.
+  waiting up to two minutes for it to answer, checks the paths into it from the other nodes, its
+  readiness and the cluster, and applies again to keep it, one node at a time, skipping the nodes
+  the configuration does not change. A failed check stops the rollout, saying that the node reverts
+  by itself, which nodes kept the configuration before it and which are untouched. It needs what
+  `cluster-talos` needs, the kubeconfig, at least two nodes of which one is another control plane,
+  and node-exporter and Cilium running; it refuses a node `talman.yaml` does not list before it runs
+  anything, and does not onboard. It prints node names only: what kubectl and talosctl print about
+  the checks names addresses and stays out of the output.
 - `just cluster-upgrade [cluster] [--yes]` upgrades Talos on every node that does not run the
   version and schematic `talman.yaml` gives it. It shows which nodes `talman upgrade --dry-run`
   says are behind, and once the cluster's name is typed back, or with `--yes`, fetches the

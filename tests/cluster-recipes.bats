@@ -159,8 +159,17 @@ cluster_files() {
 #                      apply -n NODE --mode try puts NODE's in effect, as tried, and apply -n NODE
 #                      without try mode keeps it, as kept
 #   reverts.NODE       NODE's configuration in try mode reverts before anything else can ask it
+#   unreachable.NODE   talman apply's dry run of NODE alone fails
 #   unhealthy          scripts/cluster-check fails
 #   unhealthy-tried    scripts/cluster-check fails once a node has been applied in try mode
+#   slow-check         scripts/cluster-check takes that many seconds
+#   kubelet-cut.NODE   the API server does not reach NODE's kubelet
+#   exporter-cut.NODE  the API server does not reach node-exporter on NODE
+#   overlay-cut.NODE   Cilium's health probes through the overlay to and from NODE fail
+#   health-cut.NODE    Cilium's health probes of NODE's host, on its health port, fail
+#   notready.NODE      NODE's Ready condition is Unknown
+#   etcd-cut.NODE      NODE's etcd member has no leader
+#   clock              the time date +%s gives, which sleep and a slow cluster-check move on
 #   talos-behind       the hostnames of nodes whose Talos is behind their configured version
 #   k8s-behind         the kubelets run a Kubernetes behind kubernetesVersion
 #   api-down           the Kubernetes API does not answer /readyz
@@ -172,11 +181,37 @@ fake_cluster() {
   fake_tool talman <<'EOF'
 printf '%s\n' "talman $*" >> "$RECORD/argv"
 dir=$TALMAN_CONFIG
-echo "== reaching the nodes at $(sed -n 's/^ *ipAddress: //p' "$dir/talman.yaml" | paste -sd, -)"
 given() {
   [[ " ${args[*]} " == *" $1 "* ]]
 }
 args=("$@")
+# talman talosctl runs talosctl with --nodes from -n, for each node one table row of what it asks.
+if [[ $1 == talosctl ]]; then
+  asked=()
+  for ((i = 1; i < ${#args[@]}; i++)); do
+    if [[ ${args[i]} == -n ]]; then
+      asked+=("${args[i + 1]}")
+    fi
+  done
+  if given status; then
+    printf 'NODE   MEMBER   DB SIZE   IN USE   LEADER   RAFT INDEX   RAFT TERM   RAFT APPLIED INDEX   LEARNER   PROTOCOL   STORAGE   ERRORS\n'
+    for node in "${asked[@]}"; do
+      leader=1a2b3c4d5e6f7a8b errors=
+      if [[ -e $STATE/etcd-cut.$node ]]; then
+        leader=0000000000000000 errors='etcdserver: no leader'
+      fi
+      printf '192.0.2.211   %s   41 MB   18 MB (43.90%%)   %s   1234   7   1234   false   3.6.0   3.6.0   %s\n' \
+        "member-$node" "$leader" "$errors"
+    done
+  elif given members; then
+    printf 'NODE   ID   HOSTNAME   PEER URLS   CLIENT URLS   LEARNER\n'
+    for node in $(yq '.nodes[] | select(.role == "controlplane") | .hostname' "$dir/talman.yaml"); do
+      printf '192.0.2.211   %s   %s   https://192.0.2.20:2380   https://192.0.2.20:2379   false\n' "id-$node" "$node"
+    done
+  fi
+  exit 0
+fi
+echo "== reaching the nodes at $(sed -n 's/^ *ipAddress: //p' "$dir/talman.yaml" | paste -sd, -)"
 # The node -n names and the mode --mode or -m names, if any.
 target= mode=auto
 for ((i = 0; i < ${#args[@]}; i++)); do
@@ -202,6 +237,10 @@ case "$1" in
     if given --dry-run; then
       if [[ -e $STATE/unreachable ]]; then
         echo "error: cp-2 answers neither the Talos API nor the maintenance service" >&2
+        exit 1
+      fi
+      if [[ -n $target && -e $STATE/unreachable.$target ]]; then
+        echo "error: $target answers neither the Talos API nor the maintenance service" >&2
         exit 1
       fi
       changed=0
@@ -349,6 +388,53 @@ if [[ $* == *" /readyz"* && -e $STATE/api-down ]]; then
   echo "The connection to the server was refused" >&2
   exit 1
 fi
+# What the try mode's checks ask: a node's kubelet and node-exporter through an API server, the
+# Cilium agent on a node and its health probes, and a node's Ready condition.
+line=" $* "
+case $line in
+  *" get --raw /api/v1/nodes/http:"*":9100/proxy/metrics "*)
+    node=${line#* /api/v1/nodes/http:}
+    node=${node%%:9100/*}
+    [[ ! -e $STATE/exporter-cut.$node ]] || exit 1
+    printf '%s\n' '# TYPE node_exporter_build_info gauge' 'node_exporter_build_info{version="1.9.1"} 1'
+    ;;
+  *" get --raw /api/v1/nodes/"*"/proxy/healthz "*)
+    node=${line#* /api/v1/nodes/}
+    node=${node%%/proxy/healthz *}
+    [[ ! -e $STATE/kubelet-cut.$node ]] || exit 1
+    echo ok
+    ;;
+  *" get pods --selector k8s-app=cilium --field-selector spec.nodeName="*)
+    node=${line#*spec.nodeName=}
+    printf 'cilium-%s' "${node%% *}"
+    ;;
+  *" exec cilium-"*" -- cilium-health status --probe --output json "*)
+    agent=${line#* exec cilium-}
+    agent=${agent%% *}
+    entries=()
+    failed='Get \"http://192.0.2.20:4240/hello\": context deadline exceeded'
+    for node in $(sed -n 's/^ *- hostname: //p' "$TALMAN_CONFIG/talman.yaml"); do
+      [[ $node != "$agent" ]] || continue
+      # The overlay fails both ways when either end drops it; the health port only into its node.
+      endpoint= host=
+      if [[ -e $STATE/overlay-cut.$node || -e $STATE/overlay-cut.$agent ]]; then
+        endpoint=$failed host=$failed
+      fi
+      if [[ -e $STATE/health-cut.$node ]]; then
+        host=$failed
+      fi
+      entries+=("{\"name\":\"default/$node\",\"host\":{\"primary-address\":{\"ip\":\"192.0.2.20\",\"http\":{\"status\":\"$host\"},\"icmp\":{}}},\"health-endpoint\":{\"primary-address\":{\"ip\":\"198.51.100.10\",\"http\":{\"status\":\"$endpoint\"},\"icmp\":{}}}}")
+    done
+    printf '{"nodes":[%s]}\n' "$(IFS=,; echo "${entries[*]}")"
+    ;;
+  *" get node "*" --output json "*)
+    node=${line#* get node }
+    node=${node%% *}
+    ready=True
+    [[ ! -e $STATE/notready.$node ]] || ready=Unknown
+    printf '{"status":{"conditions":[{"type":"Ready","status":"%s"}]}}\n' "$ready"
+    ;;
+esac
 EOF
   # The nodes answer a connection to the Talos API port only.
   fake_tool timeout <<'EOF'
@@ -360,7 +446,19 @@ echo "$tries" > "$STATE/tries.$address"
 [[ ! -e $STATE/silent.$address ]] && ! [[ -e $STATE/silent-tried.$address && -s $STATE/tried ]] &&
   ((tries >= $(cat "$STATE/answers-on.$address" 2> /dev/null || echo 1)))
 EOF
-  fake sleep < /dev/null
+  # A clock of its own: date +%s reads it, and sleep moves it on instead of waiting.
+  fake_tool date <<'EOF'
+if [[ $* == +%s ]]; then
+  cat "$STATE/clock" 2> /dev/null || echo 1800000000
+  exit 0
+fi
+exec "$(command -v -p date)" "$@"
+EOF
+  fake_tool sleep <<'EOF'
+printf '%s\n' "sleep $*" >> "$RECORD/argv"
+clock=$(cat "$STATE/clock" 2> /dev/null || echo 1800000000)
+echo $((clock + ${1%%[!0-9]*})) > "$STATE/clock"
+EOF
   fake_tool install-cilium <<'EOF'
 printf '%s\n' "install-cilium KUBECONFIG=${KUBECONFIG-}" >> "$RECORD/argv"
 EOF
@@ -375,6 +473,9 @@ EOF
   mv "$BIN/install-app" "$REPO/scripts/install-app"
   fake_tool cluster-check <<'EOF'
 printf '%s\n' "cluster-check $*" >> "$RECORD/argv"
+if [[ -e $STATE/slow-check ]]; then
+  echo $(($(cat "$STATE/clock" 2> /dev/null || echo 1800000000) + $(cat "$STATE/slow-check"))) > "$STATE/clock"
+fi
 if [[ -e $STATE/unhealthy ]] || [[ -e $STATE/unhealthy-tried && -s $STATE/tried ]]; then
   echo "FAIL  nodes Ready: not Ready: worker-2"
   echo "cluster-check: 1 of 7 checks failed" >&2
@@ -885,6 +986,17 @@ first_apply() {
   done < <(grep -n '^talman apply ' "$RECORD/argv")
 }
 
+# between AFTER BEFORE PATTERN: whether the record holds a call matching the extended regex after
+# line AFTER, and the first such comes before line BEFORE.
+between() {
+  local line
+  line=$(grep -n -E -- "$3" "$RECORD/argv" | cut -d: -f1 | awk -v after="$1" '$1 > after' | head -1)
+  if [[ -z $line ]] || ((line >= $2)); then
+    echo "no call matching $3 between lines $1 and $2" >&2
+    return 1
+  fi
+}
+
 # tries NODE: the recorded applies to NODE in try mode, one per line.
 tries() {
   applies | grep -E -- "(^| )-n $1( |$)" | grep -E -- ' (--mode try|-m try|--mode=try)( |$)' || true
@@ -936,9 +1048,62 @@ keeps() {
     [ -n "$probed" ]
     [ "$probed" -lt "$kept_at" ]
   done
-  checked=$(grep -n '^cluster-check' "$RECORD/argv" | cut -d: -f1 | awk -v after="$tried" '$1 > after' | head -1)
-  [ -n "$checked" ]
-  [ "$checked" -lt "$kept_at" ]
+  # The paths into the tried node from another: the API server on another control plane reaches its
+  # kubelet and its node-exporter, as a pod there would, and the Cilium agents on it and on another
+  # node probe each other through the overlay and on the health port.
+  via="https://$(node_address cp-1):6443"
+  between "$tried" "$kept_at" "^kubectl --server $via get --raw /api/v1/nodes/worker-2/proxy/healthz "
+  between "$tried" "$kept_at" "^kubectl --server $via get --raw /api/v1/nodes/http:worker-2:9100/proxy/metrics "
+  between "$tried" "$kept_at" '^kubectl .* exec cilium-worker-2 .*-- cilium-health status --probe --output json'
+  between "$tried" "$kept_at" '^kubectl .* exec cilium-cp-1 .*-- cilium-health status --probe --output json'
+  # Long enough after the try that a kubelet that cannot report has made the node not Ready, and only
+  # then the node's readiness and the cluster.
+  waited=$(grep -n -E '^sleep [0-9]+$' "$RECORD/argv" | awk -F: -v after="$tried" '$1 > after { print $1 ":" $2; exit }')
+  [ -n "$waited" ]
+  [ "${waited#*:sleep }" -ge 65 ]
+  between "${waited%%:*}" "$kept_at" '^kubectl get node worker-2 --output json'
+  between "${waited%%:*}" "$kept_at" '^cluster-check'
+  # A worker has no etcd member to ask.
+  [ -z "$(sed -n "${tried},${kept_at}p" "$RECORD/argv" | awk '/^talman talosctl/')" ]
+  # A control plane's etcd member, as it and another control plane see it.
+  tried_cp=$(call_line "^$(tries cp-1)\$")
+  kept_cp=$(call_line "^$(keeps cp-1)\$")
+  between "$tried_cp" "$kept_cp" '^talman talosctl -n cp-1 -n cp-2 etcd status$'
+  between "$tried_cp" "$kept_cp" '^talman talosctl -n cp-2 etcd members$'
+  between "$tried_cp" "$kept_cp" "^kubectl --server https://$(node_address cp-2):6443 get --raw /api/v1/nodes/cp-1/proxy/healthz "
+
+  # Each check stops the rollout when it fails: the tried node is not kept and nothing follows it.
+  for failing in kubelet-cut.worker-2 exporter-cut.worker-2 overlay-cut.worker-2 overlay-cut.cp-1 \
+    health-cut.worker-2 notready.worker-2 "silent-tried.$(node_address worker-3)" unhealthy-tried slow-check; do
+    rm -f "$STATE"/* "$RECORD/argv"
+    printf '%s\n' cp-1 worker-2 > "$STATE/pending"
+    if [[ $failing == slow-check ]]; then
+      # The checks run past the try timeout less the margin kept before Talos reverts the node.
+      echo 300 > "$STATE/slow-check"
+    else
+      : > "$STATE/$failing"
+    fi
+
+    recipe cluster-talos --first worker-2 --yes < /dev/null
+
+    echo "$failing: $status"
+    [ "$status" -ne 0 ]
+    [ "$(applies)" = "$(tries worker-2)" ]
+    [[ $output == *"worker-2 is not kept"* ]]
+  done
+  for failing in etcd-cut.cp-1 etcd-cut.cp-2; do
+    rm -f "$STATE"/* "$RECORD/argv"
+    printf '%s\n' cp-1 worker-2 > "$STATE/pending"
+    : > "$STATE/$failing"
+
+    recipe cluster-talos --first cp-1 --yes < /dev/null
+
+    echo "$failing: $status"
+    [ "$status" -ne 0 ]
+    [ "$(applies)" = "$(tries cp-1)" ]
+    [[ $output == *"cp-1's etcd member is not healthy"* ]]
+  done
+  rm -f "$STATE"/* "$RECORD/argv"
 
   # An unhealthy cluster gets no apply at all.
   printf '%s\n' cp-1 worker-2 > "$STATE/pending"
@@ -1019,6 +1184,26 @@ keeps() {
     [[ ${printed[1]} != *"$address"* ]]
     [[ ${printed[0]} != *"no answer on the Talos API port from $address"* ]]
   done
+}
+
+@test "cluster-talos --first says which nodes kept the configuration when a later node cannot say what would change" {
+  fake_cluster
+  mkdir -p "$CLUSTER/clusterconfig"
+  : > "$CLUSTER/clusterconfig/kubeconfig"
+  printf '%s\n' cp-1 worker-2 > "$STATE/pending"
+  : > "$STATE/unreachable.cp-1"
+
+  recipe cluster-talos --first worker-2 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [ "$(applies)" = "$(printf '%s\n' "$(tries worker-2)" "$(keeps worker-2)")" ]
+  [[ $output == *"cp-1 did not say what the configuration would change, so it is not applied"* ]]
+  [[ $output == *"kept before it: worker-2"* ]]
+  untouched=$(grep 'cluster-talos: untouched: ' <<< "$output")
+  for hostname in cp-1 cp-2 cp-3 worker-1 worker-3; do
+    [[ $untouched == *"$hostname"* ]]
+  done
+  [[ $untouched != *worker-2* ]]
 }
 
 @test "cluster-talos --first refuses a node talman.yaml does not list, and --onboard, before it runs anything" {
