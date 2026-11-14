@@ -54,7 +54,8 @@ set -euo pipefail
 root=${CI_HOST_ROOT-}
 runner_dir=/home/$runner_user/actions-runner
 unit=ci-runner.service
-hook_file=/usr/local/lib/ci-host/job-started
+# The runner runs a hook only by its file's extension: bash for .sh.
+hook_file=/usr/local/lib/ci-host/job-started.sh
 engine_config=/etc/ci-host/engine.json
 socket=/run/dagger/engine.sock
 changed=0 restart=0
@@ -92,9 +93,10 @@ command -v docker > /dev/null || fail "the host has no docker: its first boot ha
 [[ $(uname -m) == x86_64 ]] || fail "versions.yaml pins the runner's package for x86_64 only"
 mountpoint -q "$root$cache" || fail "$cache is not mounted: the engine keeps its state on the cache volume only"
 
-# jq for the job-started hook, curl for the runner's package.
+# jq for the job-started hook, curl for the runner's package, and git, without which the jobs'
+# checkout has no history to check.
 missing=()
-for tool in jq curl; do
+for tool in jq curl git; do
   command -v "$tool" > /dev/null || missing+=("$tool")
 done
 if ((${#missing[@]} > 0)); then
@@ -163,6 +165,8 @@ else
   mkdir -p "$root$runner_dir"
   tar -xzf "$download/runner.tar.gz" -C "$root$runner_dir"
   chown -R "$runner_user:" "$root$runner_dir"
+  # The libraries the runner's .NET runtime needs and a minimal image may lack, with apt.
+  "$root$runner_dir/bin/installdependencies.sh" > /dev/null
   printf '%s\n' "$pinned" > "$package_marker"
   say "installed the runner $runner_version, its checksum verified"
   changed=1 restart=1

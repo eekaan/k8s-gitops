@@ -425,12 +425,11 @@ pick() {
 }
 
 # hook KIND: runs the CI host's job-started hook, as scripts/lib/ci-host.sh writes it, for a job of
-# the event KIND.
+# the event KIND, the way the runner runs a .sh hook: bash -e with the file.
 hook() {
   event "$1"
-  (. "$REPO/scripts/lib/ci-host.sh" && ci_host_hook) > "$BATS_TEST_TMPDIR/job-started"
-  chmod +x "$BATS_TEST_TMPDIR/job-started"
-  run env -i PATH="$PATH" "${EVENT[@]}" "$BATS_TEST_TMPDIR/job-started"
+  (. "$REPO/scripts/lib/ci-host.sh" && ci_host_hook) > "$BATS_TEST_TMPDIR/job-started.sh"
+  run env -i PATH="$PATH" "${EVENT[@]}" bash -e "$BATS_TEST_TMPDIR/job-started.sh"
 }
 
 # the_jobs: sets chooser to the CI workflow's job that runs just ci-runner, and checker to the one

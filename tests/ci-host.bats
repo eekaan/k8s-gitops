@@ -291,7 +291,8 @@ echo "config.sh: the token came in its environment" >> "$RECORD/host"
 EOF
   printf '#!/usr/bin/env bash\n' > "$package/run.sh"
   printf '#!/usr/bin/env bash\n' > "$package/bin/Runner.Listener"
-  chmod +x "$package/config.sh" "$package/run.sh" "$package/bin/Runner.Listener"
+  printf '#!/usr/bin/env bash\necho "installdependencies.sh run" >> "%s"\n' "$RECORD/host" > "$package/bin/installdependencies.sh"
+  chmod +x "$package/config.sh" "$package/run.sh" "$package/bin/Runner.Listener" "$package/bin/installdependencies.sh"
   tar -czf "$BATS_TEST_TMPDIR/runner.tar.gz" -C "$package" .
   cp "$BATS_TEST_TMPDIR/runner.tar.gz" "$BATS_TEST_TMPDIR/served.tar.gz"
   cat > "$REPO/versions.yaml" <<EOF
@@ -320,7 +321,7 @@ snapshot() {
 
 # changes: the calls recorded on the host that change something there.
 changes() {
-  grep -E '^(docker (run|rm|start|stop)|systemctl (daemon-reload|enable|disable|start|stop|restart)|curl|apt-get|chown|config\.sh) ' "$RECORD/host" || true
+  grep -E '^(docker (run|rm|start|stop)|systemctl (daemon-reload|enable|disable|start|stop|restart)|curl|apt-get|chown|config\.sh|installdependencies\.sh) ' "$RECORD/host" || true
 }
 
 # absent TEXT FILE...: fails when any FILE, or any file under a directory FILE, holds TEXT.
@@ -364,14 +365,17 @@ absent() {
   for line in User=ci-runner WorkingDirectory=/home/ci-runner/actions-runner \
     ExecStart=/home/ci-runner/actions-runner/run.sh \
     Environment=DAGGER_ENGINE=unix:///run/dagger/engine.sock \
-    Environment=ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/lib/ci-host/job-started; do
+    Environment=ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/lib/ci-host/job-started.sh; do
     grep -qxF -- "$line" "$unit" || { echo "the unit has no line $line"; return 1; }
   done
   [ -f "$HOST/.fake/systemd/ci-runner.service.enabled" ]
   [ -f "$HOST/.fake/systemd/ci-runner.service.active" ]
-  # The hook is the one scripts/lib/ci-host.sh writes, root's and not the runner's to change.
-  diff <(. "$ROOT/scripts/lib/ci-host.sh" && ci_host_hook) "$HOST/usr/local/lib/ci-host/job-started"
-  [ "$(stat -c %a "$HOST/usr/local/lib/ci-host/job-started")" = 755 ]
+  # The runner's package installed the libraries it needs, once.
+  [ "$(grep -cx 'installdependencies.sh run' "$RECORD/host")" -eq 1 ]
+  # The hook is the one scripts/lib/ci-host.sh writes, root's and not the runner's to change. The
+  # runner runs a hook only by its file's extension, with bash for .sh.
+  diff <(. "$ROOT/scripts/lib/ci-host.sh" && ci_host_hook) "$HOST/usr/local/lib/ci-host/job-started.sh"
+  [ "$(stat -c %a "$HOST/usr/local/lib/ci-host/job-started.sh")" = 755 ]
   [[ $output == *"CI_RUNNER_LABEL"*"lab-ci"* ]]
 
   before=$(snapshot)
