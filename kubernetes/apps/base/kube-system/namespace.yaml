@@ -1,0 +1,14 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/namespace-v1.json
+# Kubernetes creates kube-system; this sets its labels and nothing else.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kube-system
+  annotations:
+    # Removing the namespace from the tree must never delete it.
+    kustomize.toolkit.fluxcd.io/prune: disabled
+  labels:
+    # Cilium's agents use the host's network, paths and added capabilities, which only the
+    # privileged level admits.
+    pod-security.kubernetes.io/enforce: privileged

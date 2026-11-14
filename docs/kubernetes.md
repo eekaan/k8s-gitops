@@ -105,3 +105,22 @@ The ArtifactGenerator publishes each application's `app/` as an ExternalArtifact
 the application, together with `components/`, at the same paths as in the tree, so a change
 reconciles only the applications it touches (ADR 0004). Falling back to one shared source is a
 `sourceRef` change in each `ks.yaml`, to `kind: OCIRepository` and `name: flux-system`.
+
+## Applications installed before Flux
+
+Flux cannot run before the cluster has a pod network, so the CNI, Cilium in
+`apps/base/kube-system/cilium/`, is installed by a script first and adopted by Flux afterwards.
+It is an application like any other, and the script reads it rather than a copy:
+
+- `just cilium-install` runs `scripts/install-cilium` against the cluster the `KUBECONFIG`
+  environment variable names. It takes the chart location and version from the application's
+  `ocirepository.yaml`, the release name and namespace from its `helmrelease.yaml`, and gives
+  `values.yaml` to helm as it is. It waits for the API server first and for every node to be
+  Ready after, and leaves a release that already runs that chart version with those values alone.
+- The HelmRelease sets `releaseName`, `targetNamespace` and `storageNamespace` to the release the
+  script installs, so Flux upgrades that release instead of installing a second one.
+- Substitution is disabled on the values ConfigMap, so the chart gets the same values on both
+  paths, and a version change in `ocirepository.yaml` moves both.
+
+`kube-system` exists before Flux does: its `namespace.yaml` only sets the namespace's labels, and
+like every namespace it is never pruned.

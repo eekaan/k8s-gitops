@@ -8,4 +8,6 @@ kind: Kustomization
 resources:
   - ../../base/flux-system/artifact-generator
   - ../../base/demo
+  - ../../base/kube-system
   - ../../base/demo/hello/ks.yaml
+  - ../../base/kube-system/cilium/ks.yaml

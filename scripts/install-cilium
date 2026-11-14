@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Installs Cilium on a cluster that has no pod network yet, before Flux can run, as the Helm release
+# that the HelmRelease in kubernetes/apps/base/kube-system/cilium/app adopts afterwards. Everything
+# comes from that application: the chart location and version from ocirepository.yaml, the release
+# name and namespace from helmrelease.yaml, and the values from values.yaml, passed to helm as they
+# are. Waits for the API server to answer first and for every node to be Ready after. A release that
+# already runs this chart version with these values is left alone, so a second run changes nothing.
+#
+# Usage: KUBECONFIG=<path> scripts/install-cilium
+# The kubeconfig reaches kubectl and helm through the environment; nothing here opens it.
+set -euo pipefail
+
+step="checking the environment"
+# Whatever fails, the last line names the step it failed in.
+trap 'rc=$?; if ((rc != 0)); then echo "install-cilium: failed while $step" >&2; fi' EXIT
+
+say() {
+  echo "install-cilium: $*"
+}
+
+fail() {
+  echo "install-cilium: $*" >&2
+  exit 1
+}
+
+[[ -n ${KUBECONFIG:-} ]] || fail "KUBECONFIG is not set: export the path of the cluster's kubeconfig"
+IFS=: read -ra kubeconfigs <<<"$KUBECONFIG"
+for kubeconfig in "${kubeconfigs[@]}"; do
+  [[ -z $kubeconfig || -f $kubeconfig ]] || fail "KUBECONFIG names $kubeconfig, which is not a file"
+done
+for tool in yq helm kubectl; do
+  command -v "$tool" >/dev/null || fail "$tool not found on PATH"
+done
+
+step="reading the application"
+app="$(cd "$(dirname "${BASH_SOURCE[0]}")/../kubernetes/apps/base/kube-system/cilium/app" && pwd)"
+
+# field FILE PATH: the value at PATH in the application's FILE, which must be set.
+field() {
+  yq -e "$2" "$app/$1" 2>/dev/null || fail "cannot read $2 from $app/$1"
+}
+
+url="$(field ocirepository.yaml .spec.url)"
+version="$(field ocirepository.yaml .spec.ref.tag)"
+release="$(field helmrelease.yaml .spec.releaseName)"
+namespace="$(field helmrelease.yaml .spec.targetNamespace)"
+storage="$(field helmrelease.yaml .spec.storageNamespace)"
+# helm keeps a release's history in the namespace it installs into; Flux finds the release this
+# script installs only if the HelmRelease looks for it there.
+[[ $storage == "$namespace" ]] ||
+  fail "helmrelease.yaml installs into $namespace but keeps the history in $storage; helm uses one namespace for both"
+values="$app/values.yaml"
+yq -e 'tag == "!!map"' "$values" >/dev/null 2>&1 || fail "$values is not a YAML map of values"
+# helm names an OCI chart after the last element of its location.
+chart="${url##*/}"
+
+step="waiting for the API server"
+say "waiting for the API server"
+# Ten minutes, as the control plane may still be starting.
+attempts=0
+until kubectl get --raw /readyz --request-timeout=10s >/dev/null 2>&1; do
+  attempts=$((attempts + 1))
+  ((attempts < 120)) || fail "no answer on /readyz after $attempts attempts, 5 seconds apart"
+  sleep 5
+done
+
+step="checking the installed release"
+installed="$(helm list --namespace "$namespace" --filter "^$release\$" --deployed --output json |
+  yq -p json '.[0].chart // ""')"
+if [[ $installed == "$chart-$version" ]] &&
+  [[ "$(helm get values "$release" --namespace "$namespace" --output json | yq -p json -o json -I0 'sort_keys(..)')" == \
+    "$(yq -o json -I0 'sort_keys(..)' "$values")" ]]; then
+  say "release $release already runs $chart $version with these values; nothing to install"
+else
+  step="installing the chart"
+  say "installing $chart $version from $url as release $release in $namespace"
+  # Helm's default of five minutes is short for a first install that pulls the images on every node.
+  helm upgrade --install "$release" "$url" --version "$version" --namespace "$namespace" \
+    --values "$values" --wait --timeout 15m
+fi
+
+step="waiting for the nodes to be Ready"
+say "waiting for every node to be Ready"
+kubectl wait nodes --all --for=condition=Ready --timeout=10m
+say "$chart $version runs as release $release in $namespace, and every node is Ready"
