@@ -213,7 +213,10 @@ classes and their handlers.
 A Service of type `LoadBalancer` gets its address from Cilium and is announced over BGP by the
 workers to two edge routers, which publish it (ADR 0013). `apps/base/kube-system/cilium-bgp/` holds
 what that takes, beside the Cilium application, whose values turn on Cilium's LoadBalancer IP
-management and its BGP control plane and keep Layer 2 announcements off:
+management and its BGP control plane and keep Layer 2 announcements off. These settings live in
+the ConfigMap `cilium-config`, and `rollOutCiliumPods` and `operator.rollOutPods` restart the agents
+and the operator whenever it changes: a change to any of them, as the one that turned them on,
+restarts every agent, node by node, and the operator.
 
 - **Opting in.** A Service gets an address, and has it advertised, only with the label
   `k8s-gitops/announce: bgp`. Any other `LoadBalancer` Service stays pending, so no address is handed
@@ -246,11 +249,14 @@ management and its BGP control plane and keep Layer 2 announcements off:
   endpoint goes away withdraws a `Local` address; a `Cluster` address stays announced while the
   Service has no endpoint at all.
 
-Every object there is of a kind that Cilium's operator defines when it starts, so the application
-names `cilium` in `dependsOn` and the Cilium application holds none of them: `scripts/install-cilium`
-installs Cilium before any of those definitions exists, and Flux applies the pool and the BGP
-objects once Cilium runs. Should Flux get to them before the operator has defined their kinds, the
-application fails and is tried again after its retry interval. The objects are cluster-scoped; the
+Every object there is of a kind that Cilium's operator defines once it leads, the BGP kinds only
+while the BGP control plane is on, so the Cilium application holds none of them:
+`scripts/install-cilium` installs Cilium before any of those definitions exists. `cilium-bgp` names
+`cilium` in `dependsOn`, and the Cilium application sets `wait` and carries
+`k8s-gitops/timeout: long`, as its release may take 10 minutes to roll the agents: it is Ready only
+once its release is, with every agent running, and an agent starts only once every kind it uses is
+defined. So Flux applies the pool and the BGP objects only after their definitions exist, also on
+the change that turns the BGP control plane on. The objects are cluster-scoped; the
 API server drops the namespace the application's `targetNamespace` gives them. Their numbers come
 from `cluster-config` ([Before Flux starts](#before-flux-starts)). `tests/install-cilium.bats`
 renders the chart and the nodes' machine configurations and builds every application as Flux

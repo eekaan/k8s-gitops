@@ -620,4 +620,10 @@ chart_config() {
     [ "$(yq '[.spec.dependsOn[].name] | contains(["cilium"])' "$COPY/kubernetes/apps/base/$app/ks.yaml")" = true ]
     grep -qxF "  - ../../base/$app/ks.yaml" "$COPY/kubernetes/apps/overlays/lab-sto2/kustomization.yaml"
   done <<< "$owners"
+  # The dependency orders them only if the Cilium application is Ready no sooner than its release:
+  # it waits, for as long as the release may take, which is longer than the root's default.
+  ks="$COPY/kubernetes/apps/base/kube-system/cilium/ks.yaml"
+  [ "$(yq '.spec.wait' "$ks")" = true ]
+  [ "$(yq '.metadata.labels["k8s-gitops/timeout"]' "$ks")" = long ]
+  [ "$(yq '.spec.timeout' "$APP/helmrelease.yaml")" = 10m ]
 }
