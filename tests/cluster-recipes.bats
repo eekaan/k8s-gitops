@@ -297,6 +297,14 @@ KUBECONFIG
       echo "error: draining $node: dial tcp 192.0.2.5:6443: i/o timeout" >&2
       exit 1
     fi
+    # The node's kubelet reports once more while the upgrade starts, after the drain and before the
+    # node goes away, and the next second begins before talman returns, as heartbeats are told to
+    # the second.
+    date -u +%Y-%m-%dT%H:%M:%SZ > "$STATE/drained.$node"
+    now=$(date -u +%s)
+    while [[ $(date -u +%s) == "$now" ]]; do
+      command sleep 0.1
+    done
     take_own_snapshot
     grep -vx -- "$node" "$STATE/talos-behind" > "$STATE/talos-behind.next" || true
     mv "$STATE/talos-behind.next" "$STATE/talos-behind"

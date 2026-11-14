@@ -344,12 +344,13 @@ out of the artifact, which is built from `kubernetes/`.
   kubeconfig as `cluster-kubeconfig` does, takes an etcd snapshot as `cluster-snapshot` does, and
   goes through the nodes in `talman.yaml`'s order, one at a time. A node that is behind is drained
   with `kubectl drain`, upgraded with `talman upgrade`, and uncordoned once its kubelet has
-  reported Ready since the upgrade began, within ten minutes, before the next is drained; a Ready
-  condition from before it does not count. A node on its version is left alone. Before each drain
-  the API must answer `/readyz` through the kubeconfig within five minutes, or nothing more is
-  drained. talosctl's own drain is turned off, as it reaches the API at the cluster endpoint,
-  which only the nodes reach. At the end every node must run its version. A run that stops after draining a node leaves that
-  node cordoned: uncordon it with kubectl once it is back; a second run skips it once it is on its
+  reported Ready since `talman upgrade` returned for it, within ten minutes, before the next is
+  drained; a Ready condition from before then, including one posted after the drain, does not
+  count. A node on its version is left alone. Before each drain the API must answer `/readyz`
+  through the kubeconfig within five minutes, or nothing more is drained. talosctl's own drain is
+  turned off, as it reaches the API at the cluster endpoint, which only the nodes reach. At the end
+  every node must run its version. A run that stops after draining a node leaves that node
+  cordoned: uncordon it with kubectl once it is back; a second run skips it once it is on its
   version.
 - `just cluster-upgrade-k8s [cluster] [--yes]` upgrades Kubernetes to the version `talman.yaml`
   gives. It shows what `talman upgrade-k8s --dry-run` says, and once the cluster's name is typed

@@ -120,10 +120,11 @@ for node in "${nodes[@]}"; do
   api_answers
   step="draining $node"
   drain_node "$node"
-  # A Ready condition from before the upgrade is the one etcd kept while the node is away.
-  since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   step="upgrading $node, which is drained"
   cluster_talman_drain_off upgrade -n "$node"
+  # A Ready condition from before talman returned is the one etcd kept while the node was away, or
+  # one the kubelet posted as the upgrade began; only a report after it shows the upgraded node.
+  since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   step="waiting for $node, which is drained, to report Ready after the upgrade"
   ready_after "$since" "$node"
   step="uncordoning $node"
