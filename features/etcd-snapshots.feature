@@ -14,7 +14,7 @@ Feature: etcd snapshots
   Scenario: A failed upload fails the recipe and leaves no snapshot on disk
     Given an S3 client whose upload fails
     When cluster-snapshot runs
-    Then it exits non-zero naming the upload as the step it failed in, without what the S3 client reported, and neither the snapshot nor its encrypted copy is left on disk
+    Then it exits non-zero naming the upload as the step it failed in and showing the reason the S3 client gave, without the endpoint, bucket or keys it names, and neither the snapshot nor its encrypted copy is left on disk
 
   Scenario: A failed S3 request says why, without an address, a bucket or a key
     Given an S3 client that fails a listing, a download or an upload as denied, a bucket that is not there, and an endpoint whose name does not resolve, each naming the endpoint, the bucket and an address
