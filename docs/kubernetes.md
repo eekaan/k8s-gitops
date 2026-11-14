@@ -515,7 +515,8 @@ job's identity token it stops before calling anything, so nobody signs from a la
    reproducibly; a reported digest that is not `sha256:` and 64 hexadecimal digits stops the run;
 3. signs that digest keyless with cosign: a short-lived certificate for the job's identity, recorded
    in Sigstore's public transparency log;
-4. verifies the signature against the identity the instance accepts; a failure stops the run;
+4. verifies the signature against the identity of this workflow at the run's ref, which on `main`
+   is the identity the instance accepts; a failure stops the run;
 5. tags that digest `main`.
 
 The tag moves last and by digest: `main` only ever names an artifact that is signed and verified,
@@ -525,7 +526,9 @@ a run on `refs/heads/main`, and only when no newer commit on `main` changes `kub
 workflow. Runs share one concurrency group that never cancels a run in progress, so they never
 overlap: a run that starts while another is in progress waits for it, and GitHub replaces a waiting
 run with a newer one. A run on another branch, or one a newer commit overtook, such as a re-run of an
-old one, still pushes and signs, says why the tag stayed where it is, and succeeds. The run prints
+old one, still pushes, signs and verifies, says why the tag stayed where it is, and succeeds. An
+artifact signed by a run on another branch carries that branch's identity, which the instance
+refuses. The run prints
 its steps, the digest and whether the tag moved.
 
 The signing identity is this workflow file on that branch: the subject
