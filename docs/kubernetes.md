@@ -144,9 +144,10 @@ these groups, or whose chart does, names the matching one in `dependsOn` and tur
 the same definitions its own chart would install. `linstor-cluster` names `snapshot-controller` for
 its VolumeSnapshotClass ([Storage](#storage)); the monitoring stack ([Monitoring](#monitoring)),
 the baseline applications with a monitor and both Grafana applications ([Grafana](#grafana)) name
-`prometheus-operator-crds`; and cert-manager names `gateway-api-crds`
-([cert-manager](#cert-manager)). No route is enabled anywhere, and no chart's dashboard outside the
-Grafana application.
+`prometheus-operator-crds`; cert-manager ([cert-manager](#cert-manager)) and `envoy-gateway`
+([Envoy Gateway](#envoy-gateway)) name `gateway-api-crds`, and `envoy-gateway` turns off its chart's
+copy of the Gateway API. No route is enabled anywhere, and no chart's dashboard outside the Grafana
+application.
 
 Deleting a definition deletes every object of its kind, so none of these applications ever deletes
 one, also not when it leaves the tree. None applies a definition itself. The monitoring chart's
@@ -428,6 +429,44 @@ the nodes' machine configurations offline to check which nodes LINSTOR selects a
 pool takes; reads the StorageClasses and the VolumeSnapshotClass; and renders the operator's chart
 to check that its definitions are kept.
 
+## Envoy Gateway
+
+Envoy Gateway implements the Gateway API: for each Gateway that names its GatewayClass it runs
+Envoy proxies, which route traffic as the routes attached to the Gateway say. Two applications in
+`apps/base/envoy-gateway-system/` install it:
+
+- `envoy-gateway` installs the controller from its publisher's chart,
+  `oci://docker.io/envoyproxy/gateway-helm`: two replicas, never on one node, with leader election,
+  the chart's default, so one acts at a time; a disruption budget that keeps one running through a
+  drain; the chart's resource requests. It also applies the GatewayClass `envoy-gateway` with the
+  controller name the chart configures. A GatewayClass is cluster-scoped; the API server drops the
+  namespace the application's `targetNamespace` gives it. The namespace enforces the restricted Pod
+  Security level, which the controller, its certificate job and the proxies it creates meet. The
+  chart makes no ServiceMonitor or PodMonitor, and the application adds none.
+- `envoy-gateway-crds` applies Envoy Gateway's own resource definitions (`gateway.envoyproxy.io`)
+  from the same chart at the same tag: an `OCIRepository` unpacks the chart, and an inner
+  `Kustomization` applies its `charts/crds/crds/generated` directory, never pruning, as the Gateway
+  API's inner `Kustomization` does. The publisher's chart of definitions alone keeps them in
+  templates, too large for a Helm release to store.
+
+The chart installs no definitions (`crds.enabled: false`): the Gateway API's come from
+`gateway-api-crds`, so there is one copy, and it leaves out the Gateway API's admission policy as
+that application does. The controller watches only the kinds whose definitions exist when it
+starts, so `envoy-gateway` names both definition applications in `dependsOn`.
+
+The two tags name one package, which Renovate updates in one pull request. Envoy Gateway is built
+against one Gateway API release, the one its chart's own copy is of, and works with a newer
+release's standard channel while that still serves the versions it reads. `tests/baseline.bats`
+fails unless the release `gateway-api-crds` pins has the same major version, is no older, and
+serves every stable kind and version of the chart's copy; an Envoy Gateway update that needs a newer
+Gateway API therefore waits for `gateway-api-crds` to move first. The tests also render the chart
+and build both applications offline to check the rest of this section.
+
+No Gateway exists yet. A Gateway's proxies are reached through a Service of type LoadBalancer,
+which needs the cloud controller, and its HTTPS listener needs a certificate from an issuer, which
+cert-manager has none of yet. Until both are in place the controller accepts the GatewayClass and
+runs no proxy.
+
 ## Flux itself
 
 The Flux Operator and the `FluxInstance` it runs Flux from are the cluster directory's two
@@ -521,7 +560,8 @@ job's identity token it stops before calling anything, so nobody signs from a la
    reproducibly; a reported digest that is not `sha256:` and 64 hexadecimal digits stops the run;
 3. signs that digest keyless with cosign: a short-lived certificate for the job's identity, recorded
    in Sigstore's public transparency log;
-4. verifies the signature against the identity the instance accepts; a failure stops the run;
+4. verifies the signature against the identity of this workflow at the run's ref, which on `main`
+   is the identity the instance accepts; a failure stops the run;
 5. tags that digest `main`.
 
 The tag moves last and by digest: `main` only ever names an artifact that is signed and verified,
@@ -531,7 +571,9 @@ a run on `refs/heads/main`, and only when no newer commit on `main` changes `kub
 workflow. Runs share one concurrency group that never cancels a run in progress, so they never
 overlap: a run that starts while another is in progress waits for it, and GitHub replaces a waiting
 run with a newer one. A run on another branch, or one a newer commit overtook, such as a re-run of an
-old one, still pushes and signs, says why the tag stayed where it is, and succeeds. The run prints
+old one, still pushes, signs and verifies, says why the tag stayed where it is, and succeeds. An
+artifact signed by a run on another branch carries that branch's identity, which the instance
+refuses. The run prints
 its steps, the digest and whether the tag moved.
 
 The signing identity is this workflow file on that branch: the subject
