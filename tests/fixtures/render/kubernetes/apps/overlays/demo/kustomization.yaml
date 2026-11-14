@@ -7,3 +7,4 @@ resources:
   - ../../base/web/site/ks.yaml
   - ../../base/web/greeter/ks.yaml
   # - ../../base/web/later/ks.yaml  # Disabled: tests enable it
+  # - ../../base/web/ledger/ks.yaml  # Disabled: tests enable it
