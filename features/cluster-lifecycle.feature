@@ -79,7 +79,7 @@ Feature: Cluster lifecycle
   Scenario: A cluster that still owns a load balancer or a volume is not destroyed, and they are named
     Given a Service of type LoadBalancer, a PersistentVolume of a CSI driver other than LINSTOR's, or both, beside Services and volumes of other kinds, LINSTOR's among them
     When cluster-destroy runs with --yes
-    Then it exits non-zero naming each as namespace/name or by the volume's name, and no volume of LINSTOR, without an address or a volume handle, no tofu runs, and the generated files stay
+    Then it exits non-zero naming each as namespace/name or by the volume's name, and no volume of LINSTOR, without an address or a volume handle, no tofu plan or apply runs, and the generated files stay
 
   Scenario: LINSTOR's volumes go with the cluster stack once the destroy is confirmed, and are counted first
     Given PersistentVolumes of LINSTOR's CSI driver, whose data is on the workers' data volumes in the cluster stack, and no other load balancer or volume the cluster made
@@ -89,12 +89,12 @@ Feature: Cluster lifecycle
   Scenario: A cluster whose API does not answer is not destroyed unless asked
     Given an API that does not answer through the kubeconfig, or no kubeconfig at all
     When cluster-destroy runs with --yes, and then with --unreachable
-    Then the first exits non-zero naming --unreachable and runs no tofu, the second destroys the cluster stack, and --unreachable does not let a cluster that answers and owns a load balancer be destroyed
+    Then the first exits non-zero naming --unreachable and runs no tofu plan or apply, the second destroys the cluster stack, and --unreachable does not let a cluster that answers and owns a load balancer be destroyed
 
   Scenario: Destroying the cluster leaves the plumbing stack, the secrets bundle and the buckets alone
     Given a cluster that owns no load balancer and no volume of a CSI driver
     When cluster-destroy runs with --yes
-    Then the cluster is asked before tofu runs, every tofu call is on the cluster stack, which is planned for destruction, summarised and destroyed, none is on the plumbing stack, the talman.yaml, talosconfig and kubeconfig git ignores are removed, the secrets bundle stays as it was, and no S3 or OpenStack client runs
+    Then the cluster is asked before anything is planned, every tofu call is on the cluster stack, which is planned for destruction, summarised and destroyed, none is on the plumbing stack, the talman.yaml, talosconfig and kubeconfig git ignores are removed, the secrets bundle stays as it was, and no S3 or OpenStack client runs
 
   Scenario: The cluster stack is asked the same way whichever recipe destroys it
     Given a cluster that owns a Service of type LoadBalancer or a PersistentVolume of another CSI driver, one whose API does not answer, and one that owns nothing
