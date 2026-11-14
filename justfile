@@ -58,3 +58,7 @@ test:
 
 # Run every check that needs no credentials, the cheapest and most basic first
 ci: tools-check check-literals lint secrets-scan test
+
+# Validate the Renovate configuration with Renovate's own validator, in its container image
+renovate-check:
+    docker run --rm --network none -v "$PWD":/usr/src/app:ro -w /usr/src/app ghcr.io/renovatebot/renovate:44.227.4@sha256:fe058db9710840a4821f20190b3769e3ce709a049b8640aa2bf5f044969fe702 renovate-config-validator --strict --no-global renovate.json5 .renovate/*.json5

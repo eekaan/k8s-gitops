@@ -1,0 +1,30 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  description: "Where this repository keeps versions beyond Renovate's default file patterns.",
+  // HelmRelease, OCIRepository, GitRepository and Flux Kustomization images. Helm values files,
+  // kustomization.yaml, mise.toml, GitHub Actions workflows and OpenTofu files are found by their
+  // managers' default patterns.
+  flux: {
+    managerFilePatterns: ["/^kubernetes/.+\\.ya?ml$/"],
+  },
+  // Images and API versions in plain manifests.
+  kubernetes: {
+    managerFilePatterns: ["/^kubernetes/.+\\.ya?ml$/"],
+  },
+  customManagers: [
+    {
+      customType: "regex",
+      description: "A version on the line under a '# renovate: datasource=… depName=…' comment",
+      managerFilePatterns: [
+        // The one source of the Talos and Kubernetes versions.
+        "/^versions\\.yaml$/",
+        "/^kubernetes/.+\\.ya?ml$/",
+        "/^infra/.+\\.(tf|tofu)$/",
+        "/^\\.github/workflows/.+\\.ya?ml$/",
+      ],
+      matchStrings: [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?\\n[^\\n]*?[:=][ \\t]*[\"']?(?<currentValue>[^\\s\"']+)[\"']?",
+      ],
+    },
+  ],
+}

@@ -1,0 +1,93 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  description: "What may merge itself: application patch and minor updates, behind one switch. Everything else waits for a person.",
+  packageRules: [
+    {
+      description: "Everything under kubernetes/: the release age gates the merge, not the pull request",
+      matchFileNames: ["kubernetes/**"],
+      // The pull request may open before the release is three days old, with the
+      // renovate/stability-days status pending until it is. Auto-merge waits for that status.
+      internalChecksFilter: "flexible",
+      // A release whose registry reports no publish date never counts as three days old, so it
+      // never merges itself.
+      minimumReleaseAgeBehaviour: "timestamp-required",
+    },
+    {
+      description: "The auto-merge switch: application patch and minor updates",
+      matchFileNames: ["kubernetes/**"],
+      matchUpdateTypes: ["minor", "patch"],
+      // Off until the rendered-manifest check is part of the required check on main (ADR 0009).
+      // Setting this to true is all it takes to turn auto-merge on.
+      automerge: false,
+      // Merged through the pull request once its checks pass, never pushed to the branch.
+      automergeType: "pr",
+      // Renovate merges, not GitHub's auto-merge, which waits only for the required check and
+      // not for renovate/stability-days.
+      platformAutomerge: false,
+    },
+    // Never merged automatically, whatever the update type. These rules come after the switch so
+    // that they win over it.
+    {
+      description: "Major updates",
+      matchUpdateTypes: ["major"],
+      automerge: false,
+    },
+    {
+      description: "Talos",
+      matchPackageNames: ["siderolabs/talos", "ghcr.io/siderolabs/**", "factory.talos.dev/**"],
+      automerge: false,
+    },
+    {
+      description: "Kubernetes: kubectl, kubelet and the control plane",
+      matchPackageNames: [
+        "kubernetes/kubernetes",
+        "ghcr.io/siderolabs/kubelet",
+        "registry.k8s.io/kube-apiserver",
+        "registry.k8s.io/kube-controller-manager",
+        "registry.k8s.io/kube-scheduler",
+        "registry.k8s.io/kube-proxy",
+      ],
+      automerge: false,
+    },
+    {
+      description: "Kubernetes API versions",
+      matchDatasources: ["kubernetes-api"],
+      automerge: false,
+    },
+    {
+      description: "The CNI",
+      matchPackageNames: ["cilium", "cilium/**", "quay.io/cilium/**"],
+      automerge: false,
+    },
+    {
+      description: "Flux and the Flux Operator",
+      matchPackageNames: [
+        "fluxcd/**",
+        "ghcr.io/fluxcd/**",
+        "controlplaneio-fluxcd/**",
+        "ghcr.io/controlplaneio-fluxcd/**",
+      ],
+      automerge: false,
+    },
+    {
+      description: "OpenTofu",
+      matchPackageNames: ["opentofu/opentofu"],
+      automerge: false,
+    },
+    {
+      description: "OpenTofu providers and modules",
+      matchManagers: ["terraform"],
+      automerge: false,
+    },
+    {
+      description: "talman",
+      matchPackageNames: ["ludwighansson/talman"],
+      automerge: false,
+    },
+    {
+      description: "Anything pinned in mise.toml or versions.yaml",
+      matchFileNames: ["mise.toml", "versions.yaml"],
+      automerge: false,
+    },
+  ],
+}
