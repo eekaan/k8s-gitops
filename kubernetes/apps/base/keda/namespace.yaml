@@ -1,0 +1,13 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/namespace-v1.json
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: keda
+  annotations:
+    # Removing the namespace from the tree must not delete everything in it.
+    kustomize.toolkit.fluxcd.io/prune: disabled
+  labels:
+    # KEDA's pods run as a non-root user with the runtime's default seccomp profile, no
+    # capabilities and no privilege escalation, which the restricted level requires.
+    pod-security.kubernetes.io/enforce: restricted

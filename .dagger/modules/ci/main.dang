@@ -98,6 +98,24 @@ type Ci {
   }
 
   """
+  The pull request comment of the CI render job: scripts/render-pr renders the commit base and the checkout, both with the base's render code, in the tools container, and compares them. It pulls the charts from their public registries and needs no credential.
+  """
+  pub renderDiff(
+    """
+    The commit the checkout is compared with; the first parent of HEAD when empty.
+    """
+    base: String! = "",
+  ): File! {
+    tools
+      .withDirectory("/src", source)
+      .withDirectory("/src/.git", git)
+      # The pinned installs first on PATH, as the justfile puts them: mise's shims resolve a version
+      # only below a mise.toml, and the render works in a directory of its own.
+      .withExec(["bash", "-c", `PATH="$(mise bin-paths | paste -sd: -):$PATH" exec scripts/render-pr "$@"`, "bash", base, "/tmp/render-diff/comment.md"])
+      .file("/tmp/render-diff/comment.md")
+  }
+
+  """
   The pinned tools, in a layer that depends on mise.toml alone, so changes to other files reuse it.
   """
   let tools: Container! {

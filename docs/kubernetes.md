@@ -220,6 +220,60 @@ whatever image the nodes run, and a pod that selects one on a node whose image l
 does not start. `tests/baseline.bats` builds the application as Flux applies it and checks the two
 classes and their handlers.
 
+## Service addresses
+
+A Service of type `LoadBalancer` gets its address from Cilium and is announced over BGP by the
+workers to two edge routers, which publish it (ADR 0013). `apps/base/kube-system/cilium-bgp/` holds
+what that takes, beside the Cilium application, whose values turn on Cilium's LoadBalancer IP
+management and its BGP control plane and keep Layer 2 announcements off. These settings live in
+the ConfigMap `cilium-config`, and `rollOutCiliumPods` and `operator.rollOutPods` restart the agents
+and the operator whenever it changes: a change to any of them, as the one that turned them on,
+restarts every agent, node by node, and the operator.
+
+- **Opting in.** A Service gets an address, and has it advertised, only with the label
+  `k8s-gitops/announce: bgp`. Any other `LoadBalancer` Service stays pending, so no address is handed
+  out that nothing announces.
+- **The pool.** One `CiliumLoadBalancerIPPool` holds exactly the service range
+  ([infrastructure.md](infrastructure.md#services-announced-over-bgp)), `10.20.0.0/28` by default:
+  sixteen addresses. Services can share one with Cilium's `lbipam.cilium.io/sharing-key`
+  annotation where their ports differ.
+- **Who announces.** One `CiliumBGPClusterConfig` gives every worker, and no control plane, a BGP
+  instance in the cluster's AS that peers with both edge routers in theirs, over eBGP. Talos labels
+  its control planes `node-role.kubernetes.io/control-plane`, which the node selector excludes, and
+  only the workers' ports may carry the service range. The edge routers are on the node subnet, one
+  hop away, so the sessions keep eBGP's TTL of 1. A worker opens its sessions and listens for none.
+- **The sessions.** The `CiliumBGPPeerConfig` sets a hold time of 9 seconds, keepalives every 3 and
+  a connect retry of 5, and turns on graceful restart with a restart time of 120 seconds, so an
+  edge router keeps forwarding to a worker while its Cilium agent restarts. IPv4 unicast only, and
+  no password (ADR 0013).
+- **What is advertised.** The `CiliumBGPAdvertisement` the peer configuration selects advertises
+  the `LoadBalancer` address of each labelled Service, as a /32, and nothing else: no pod range and
+  no cluster IP.
+- **Before the edge routers exist** the sessions stay down: a labelled Service gets an address, but
+  nothing outside the cluster reaches it.
+- **`externalTrafficPolicy`.** With `Cluster`, the default, every worker announces every labelled
+  address, the edge routers spread connections over all of them, and a worker forwards each to an
+  endpoint on any node, translating the source to its own address when the endpoint is elsewhere.
+  With `Local`, only workers with a ready endpoint of the Service announce its address, and a
+  connection reaches an endpoint on the worker it arrived at with its source unchanged. Either way
+  the source a Service sees is what reaches the worker, which is an edge router's address while
+  the edge routers translate the client's address to their own (ADR 0013). A worker whose last
+  endpoint goes away withdraws a `Local` address; a `Cluster` address stays announced while the
+  Service has no endpoint at all.
+
+Every object there is of a kind that Cilium's operator defines once it leads, the BGP kinds only
+while the BGP control plane is on, so the Cilium application holds none of them:
+`scripts/install-cilium` installs Cilium before any of those definitions exists. `cilium-bgp` names
+`cilium` in `dependsOn`, and the Cilium application sets `wait` and carries
+`k8s-gitops/timeout: long`, as its release may take 10 minutes to roll the agents: it is Ready only
+once its release is, with every agent running, and an agent starts only once every kind it uses is
+defined. So Flux applies the pool and the BGP objects only after their definitions exist, also on
+the change that turns the BGP control plane on. The objects are cluster-scoped; the
+API server drops the namespace the application's `targetNamespace` gives them. Their numbers come
+from `cluster-config` ([Before Flux starts](#before-flux-starts)). `tests/install-cilium.bats`
+renders the chart and the nodes' machine configurations and builds every application as Flux
+applies it to check each of these.
+
 ## External Secrets
 
 `apps/base/external-secrets/external-secrets/` runs the External Secrets operator in its own
@@ -470,6 +524,97 @@ one. They run at `system-cluster-critical` with small requests and no limits. No
 PodMonitor is enabled. `tests/baseline.bats` renders the chart with these values and checks the
 namespace, the definitions and their policy, the Gateway API configuration and dependency, and the
 replicas, spreads and budgets.
+
+## Autoscaling and reflection
+
+Three small add-ons that the applications this cluster runs assume, each enabled in the cluster's
+overlay. `tests/autoscaling.bats` builds each as Flux applies it and renders its chart to check
+what follows.
+
+### KEDA
+
+`apps/base/keda/keda/` runs KEDA in its own namespace, `keda`, at the restricted Pod Security level
+its pods meet. An application scales on events by creating a `ScaledObject` (or `ScaledJob`) that
+names its workload and a trigger; KEDA creates and owns the HorizontalPodAutoscaler that follows it.
+The chart is the publisher's, from a public OCI mirror, as it releases only to a classic Helm
+repository.
+
+- The release installs and upgrades the `keda.sh` and `eventing.keda.sh` definitions, as the
+  publisher's chart does; each carries `helm.sh/resource-policy: keep`, so uninstalling the release
+  leaves them, and every `ScaledObject`, in place. The application's `ks.yaml` sets `wait`, so an
+  application that names `keda` in `dependsOn` starts once they exist.
+- The operator, the metrics server and the admission webhooks each run two replicas, preferably on
+  different nodes, under a disruption budget that keeps one running. Only one operator is the
+  leader, so its second replica is a standby that shortens a failover. The second metrics server is
+  there for availability too, so one keeps answering through a drain or a pod's failure: the API
+  server reaches them through their Service's address without aggregator routing, so requests are
+  not spread over the two, and KEDA's documentation supports one. Requests and limits are the ones
+  KEDA's documentation gives for each component.
+- KEDA's metrics server registers the `external.metrics.k8s.io` API. metrics-server registers
+  `metrics.k8s.io`; the two groups differ, so the registrations do not collide. Only one provider
+  can serve `external.metrics.k8s.io`: no other application may register it.
+- The admission webhooks' failure policy is `Ignore`: while no webhook answers, a `ScaledObject` is
+  admitted without being checked. A missing operator is worse for what it owns: HorizontalPodAutoscalers
+  that follow a `ScaledObject` stay, but the metrics server gets the values they read from the
+  operator, and the operator does the scaling from and to zero itself, so without it they cannot
+  compute, their workload stays at its current size, and nothing scales it from or to zero.
+- KEDA 2.21's documentation tests Kubernetes 1.34 to 1.36; the cluster runs a newer release, so KEDA
+  runs outside the versions its publisher has tested.
+- One ServiceMonitor for each of the three components.
+
+### Vertical Pod Autoscaler
+
+`apps/base/kube-system/vpa/` runs the recommender only, in `kube-system` with the other small
+services the cluster assumes, from the Fairwinds chart.
+The project's own `vertical-pod-autoscaler` chart (in the autoscaler repository's Helm index) says
+it is under development and not ready for production, so the cluster uses Fairwinds', which tracks
+an older release of the recommender (1.7.1, where the project's is 1.8.1). Fairwinds' chart is
+published only to a classic Helm repository and no public OCI mirror carries it, so the application
+has a `HelmRepository` beside its `HelmRelease`, which Renovate follows as it does the others. The
+recommender reads container usage from metrics-server and writes a recommendation
+to the status of each `VerticalPodAutoscaler` an application creates; it does not act on it. The
+chart's updater and admission controller are off, so nothing evicts a pod and no webhook or
+certificate generator is rendered, and no role bound in the release lets a service account change a
+pod.
+
+- The definitions (`VerticalPodAutoscaler` and its checkpoint) are in the chart's `crds/`
+  directory, which Helm installs once and never removes with a release, so they stay when the
+  application leaves the tree. Flux creates and replaces them on upgrade through the release
+  defaults. `ks.yaml` sets `wait` and names `metrics-server`, whose API the chart's Helm test reads;
+  metrics-server's own `ks.yaml` does not set `wait`, so on a new cluster the test can run before
+  that API answers, fail, and use up an install retry.
+- The chart's three `vpa-test-*` pods run after each install and upgrade, because the cluster's
+  Helm releases run their tests. They set no requests, and the chart has no value to set them; they
+  are the one exception to every container having requests, and they are left out of the check.
+- One replica, with the chart's requests and no limits. The project's FAQ says only one recommender
+  is active; a second would need `--leader-elect=true` and would add a second 500Mi request for a
+  faster failover only, as the recommender keeps its history in checkpoint objects. There is
+  therefore no disruption budget.
+- The recommender keeps what it has seen as long as it runs, plus checkpoints. It could read
+  history from the monitoring stack's Prometheus instead (`--storage=prometheus`), which gives it
+  recommendations at once after a restart; that needs kubelet container metrics to be scraped under
+  the names it expects, and nothing here configures it.
+- A PodMonitor for the recommender.
+
+### Reflector
+
+`apps/base/kube-system/reflector/` runs Reflector in `kube-system`, from its publisher's chart on
+its OCI registry. It copies a Secret or ConfigMap into other namespaces, which is how one wildcard
+certificate serves several of them: the source carries
+`reflector.v1.k8s.emberstack.com/reflection-allowed: "true"` and
+`reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces`, and a copy is made in each
+namespace the second names (`reflection-auto-enabled` and `reflection-auto-namespaces` make the
+copies without the destination asking).
+
+Reflector can read and write every Secret and ConfigMap in every namespace, and list and watch
+namespaces: that is what it is for, and its ClusterRole grants exactly that and nothing else. The
+control is the annotations: only an object carrying `reflection-allowed` is copied, and only into
+the namespaces its annotation names. An empty `reflection-allowed-namespaces` allows every
+namespace, so every source lists them. Nothing in this repository carries a reflection annotation
+yet; `tests/autoscaling.bats` fails when a file under `kubernetes/` does.
+
+One replica: Reflector has no leader election, so a second would copy what the first does, and
+the chart makes no disruption budget. Its chart serves no metrics and has no monitor.
 
 ## Storage
 
@@ -922,6 +1067,81 @@ but not its visibility, so the package's visibility is set to public in its sett
 the first run; until then the cluster cannot pull it. A public package cannot be made private
 again.
 
+## The render diff
+
+A manifest change reaches the cluster only by merging (ADR 0003), so every pull request gets one
+comment, updated on each push, that shows what Flux would apply differently once it is merged: a
+table with the objects each application adds, removes and changes, then each changed application's
+diff, collapsed. A pull request that changes nothing Flux applies says so.
+
+`just render <out> [dir]` renders a tree as Flux applies it, offline, one file per object under
+`<out>/<cluster>/<application>/`: the cluster directory as the instance's sync Kustomization applies
+it (application `flux-system`), then every Kustomization that applies from the tree, the root
+(`cluster`), Flux's own applications and each application the overlay enables, built as
+`just kubernetes-check` builds them. Each HelmRelease is expanded to the objects its chart renders:
+the chart its OCIRepository names, pulled from its public registry, with the values of its
+ConfigMaps and its own values over them, the release name and namespace helm-controller gives it,
+the Kubernetes version in `versions.yaml`, every API version a definition in the render serves, its
+post-renderers and helm-controller's labels. A chart version bump therefore shows the objects that
+change. `RENDER_CHART_CACHE` names a directory to keep pulled charts in between renders. A tree that
+does not render fails, naming the application. `just render-diff <base> <head>` prints the comment
+comparing two renders.
+
+What it is rendered with, and what it never shows:
+
+- `cluster-config` and `cluster-secrets` are not in the repository: each cluster's
+  `cluster-config.example.yaml` and `cluster-secrets.example.yaml` stand in for them, and the
+  comment's footer says so.
+- No Secret's data: every value of a Secret's `data` and `stringData` is replaced by `(redacted)`,
+  keys kept, and sops' metadata is dropped, so a changed Secret value does not show. That includes
+  the Alertmanager configuration, which the monitoring chart renders into a Secret.
+- Values a chart makes up anew on every render, such as generated certificates and their CA
+  bundles: the chart is rendered twice and every value that differs reads
+  `(generated at render time)`, so they never show as a change.
+- Sources outside the tree are not fetched: the Gateway API, snapshot and Envoy Gateway definitions
+  show as the source and the inner Kustomization that apply them, not as the objects those apply.
+- A diff longer than a comment holds is cut, and the comment says so: the smallest applications'
+  diffs are shown whole, the next is cut, the rest are left out, and the table stays whole. The cut
+  leaves room under GitHub's 65536 characters for the comment job's own line.
+
+`just render-check`, one of the checks of `just ci`'s `static` group, renders the tree as the render
+job does and keeps nothing, so a tree that does not render fails `just ci` as it fails the required
+check. Pulling the charts and rendering take about half a minute.
+
+In CI two jobs make it, in two workflows, so that nothing from a pull request ever runs with a token
+that can write:
+
+- The `render` job of `.github/workflows/ci.yaml`, part of the required check `ci`, runs for every
+  pull request and push to `main` on a hosted runner, with the workflow's `contents: read` token and
+  no secrets. For a pull request GitHub runs the pull request's own copy of the workflow, a fork's
+  included, so the job is given nothing worth taking. `just ci-render` runs `scripts/render-pr` in
+  the Dagger module (ADR 0007): it renders the base, the first parent of the commit under test, and
+  the commit itself, both with the base's `scripts/render` and `scripts/render-diff`, so that a pull
+  request that changes only the tree is shown by the reviewed render code. A base without the render
+  code is rendered with the commit's. The job uploads the comment as the artifact `render-diff`.
+- `.github/workflows/render-comment.yaml` runs when the CI workflow completes for a pull request,
+  unless that run was cancelled. GitHub runs it from the default branch, with this repository's
+  token, whatever the run it follows had, so it checks out only the default branch and runs
+  `just ci-comment`, with `actions: read` to download the artifact and `pull-requests: write` to
+  comment; mise installs its tools without that token. `scripts/ci-comment` treats the artifact as
+  text: it refuses anything but one regular file, `comment.md`, that `scripts/lib/render-comment.sh`
+  accepts byte for byte, a comment `scripts/render-diff` could have written, never runs it or prints
+  it, and sends it as a JSON string. Outside the fenced diffs that grammar allows only the fixed text,
+  and application names and counts of a strict shape, so no mention, reference, link, image or HTML
+  renders in the bot's name. It finds the pull request by the head commit and repository the run was
+  for, and posts nothing when that head has moved on or two pull requests have it. It updates the one
+  comment of its own that starts with the marker, or creates it, and adds a line of its own naming
+  the commit the diff describes. A run that left no artifact did not render: the job updates its own
+  comment, if there is one, to say so in its own words. It is not a required check: a comment that
+  fails to post blocks no merge. An artifact that unpacks to far more than it holds fills only this
+  job's runner.
+
+The comment is the pull request's own account of its change. GitHub runs a pull request's copy of the
+CI workflow, so a pull request that changes the render code, the CI workflow, the justfile or the
+Dagger module can make the comment say anything the grammar allows, such as that nothing changes
+while its manifests do. Review of such a pull request reads the change itself and does not rely on
+the comment.
+
 ## Before Flux starts
 
 Flux needs four objects that nothing in the tree creates, all in `flux-system`: the namespace
@@ -954,6 +1174,15 @@ starts to use is listed in the example and given its source in `fill_cluster_con
 - `NODE_NAME_REGEX`: the hostnames in that `talman.yaml`, joined with `|`, with a trailing number
   standing for any number: `lab-cp-1` becomes `lab-cp-[0-9]+`, so a node OpenTofu adds later, which
   it numbers after the others, matches as well.
+- `SERVICE_RANGE`: `values.serviceRange` in that `talman.yaml`, the range `LoadBalancer` Services
+  take their addresses from ([Service addresses](#service-addresses)).
+- `BGP_CLUSTER_ASN` and `BGP_EDGE_ASN`: `values.bgp.clusterASN` and `values.bgp.edgeASN` there, the
+  workers' and the edge routers' AS numbers.
+- `BGP_EDGE_ADDRESS_1` and `BGP_EDGE_ADDRESS_2`: the two addresses of `values.bgp.edgeAddresses`
+  there, the edge routers'.
+
+The cluster stack renders the last five from the plumbing stack's numbers for BGP
+([infrastructure.md](infrastructure.md#services-announced-over-bgp)).
 
 `cluster-secrets` is decrypted from `clusters/<cluster>/secrets/cluster-secrets.sops.yaml` by sops,
 with the Flux age key, straight into kubectl, when that file exists. Its keys must be exactly those

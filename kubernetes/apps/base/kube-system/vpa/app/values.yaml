@@ -1,0 +1,23 @@
+---
+# Values for the Vertical Pod Autoscaler chart, read by the HelmRelease through a ConfigMap
+# generated without substitution. Keys not set here keep the chart's defaults. Only the
+# recommender runs: it computes recommendations and writes them to VerticalPodAutoscaler objects;
+# nothing evicts, resizes or mutates a pod.
+
+updater:
+  # The updater evicts pods whose requests differ from the recommendation.
+  enabled: false
+
+admissionController:
+  # The admission controller rewrites a pod's requests as it is created. Without it the chart
+  # renders no webhook configuration and no certificate generator Job either.
+  enabled: false
+
+recommender:
+  # One replica: the project's FAQ says only one recommender is active, and a second would need
+  # --leader-elect=true and a second 500Mi request to gain a faster failover. Recommendations are
+  # kept in VerticalPodAutoscalerCheckpoint objects, so a restart loses little. The chart's
+  # requests are the ones to keep; no limits are set.
+  replicaCount: 1
+  podMonitor:
+    enabled: true

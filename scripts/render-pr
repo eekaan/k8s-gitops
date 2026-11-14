@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# The CI render job's work, which the Dagger module runs for just ci-render: renders the base commit
+# and this checkout, both with the base's render code (scripts/render, scripts/render-diff and
+# scripts/lib/render-comment.sh as the base holds them), and writes the comment that compares them
+# to OUT. Both trees are only ever input to that code, so a change to the tree alone is shown by the
+# reviewed render code. This script, the recipe, the module and the workflow that run it are the
+# checkout's own, so a pull request that changes them decides what the comment says. A base without
+# the render code is rendered with this checkout's.
+#
+# Usage: scripts/render-pr BASE OUT   (BASE is a commit; the first parent of HEAD when empty)
+set -euo pipefail
+
+die() {
+  echo "render-pr: $*" >&2
+  exit 1
+}
+
+(($# == 2)) || die "usage: scripts/render-pr BASE OUT"
+base=${1:-HEAD^1}
+out=$2
+root=$(git rev-parse --show-toplevel)
+commit=$(git rev-parse --verify --quiet "$base^{commit}") || die "no commit $base in this checkout's history"
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+mkdir -p "$tmp/base"
+git archive "$commit" | tar -x -C "$tmp/base"
+code="$tmp/base/scripts"
+if [[ ! -x $code/render || ! -x $code/render-diff ]]; then
+  echo "render-pr: the base has no render code; this checkout's renders both" >&2
+  code="$root/scripts"
+fi
+echo "render-pr: rendering the base, $commit"
+"$code/render" "$tmp/base.out" "$tmp/base"
+echo "render-pr: rendering $root"
+"$code/render" "$tmp/head.out" "$root"
+mkdir -p "$(dirname "$out")"
+"$code/render-diff" "$tmp/base.out" "$tmp/head.out" >"$out"
+echo "render-pr: wrote the comment to $out"

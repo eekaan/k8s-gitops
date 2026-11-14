@@ -1,0 +1,18 @@
+---
+# What the workers advertise to the edge routers: the LoadBalancer address of each Service labelled
+# k8s-gitops/announce: bgp, one /32 per address, and nothing else; no pod range, no cluster IP.
+apiVersion: cilium.io/v2
+kind: CiliumBGPAdvertisement
+metadata:
+  name: services
+  labels:
+    k8s-gitops/bgp-advertisement: services
+spec:
+  advertisements:
+    - advertisementType: Service
+      service:
+        addresses:
+          - LoadBalancerIP
+      selector:
+        matchLabels:
+          k8s-gitops/announce: bgp

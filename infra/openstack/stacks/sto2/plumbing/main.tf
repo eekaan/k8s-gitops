@@ -1,5 +1,6 @@
-# What outlives a node rebuild: the node network, its router to the external network and the
-# Talos image. The cluster stack builds on this stack's outputs.
+# What outlives a node rebuild: the node network, its router to the external network, the Talos
+# image, and the numbers Services announced over BGP rest on (variables.tf). The cluster stack builds
+# on this stack's outputs.
 
 # The cloud and its credentials come from the environment: OS_CLOUD names the clouds.yaml entry.
 provider "openstack" {}
@@ -9,10 +10,13 @@ provider "talos" {}
 locals {
   versions = yamldecode(file("${path.module}/${var.versions_file}"))
   tags     = [var.prefix]
+
+  # Neutron draws every address it assigns itself, DHCP ports included, from the allocation pool, so
+  # fixed addresses below the pool, at host offsets under 100, can never collide with one: the
+  # nodes', the API load balancer's and the edge routers'.
+  dhcp_range = [100, 200]
 }
 
-# Neutron draws every address it assigns itself, DHCP ports included, from the allocation pool, so
-# fixed node addresses below the pool, at host offsets under 100, can never collide with one.
 module "network" {
   source = "../../../modules/network"
 
@@ -20,7 +24,7 @@ module "network" {
   cidr          = var.node_cidr
   gateway       = true
   port_security = true
-  dhcp_range    = [100, 200]
+  dhcp_range    = local.dhcp_range
   tags          = local.tags
 }
 
