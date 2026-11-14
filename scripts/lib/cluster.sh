@@ -1,13 +1,13 @@
 # shellcheck shell=bash
 # Shared by scripts/cluster-env, the cluster-* scripts, the install scripts, the adoption check and
 # the secrets bundle check: the Talos age key's location, talos/.sops.yaml's recipient, the check
-# that a secrets bundle is encrypted, a cluster's nodes and the wait for their Talos API, the nodes
-# that have not reported Ready since a given time, the line that names the step a recipe failed in,
-# the private directory an etcd snapshot is kept in while a
-# recipe works on it, the talman run that keeps its output out of a CI log, the Flux age key and the
-# other objects Flux needs before it starts, the release an application's HelmRelease makes, and
-# the install of an application before Flux. Builds on scripts/lib/infra.sh,
-# which reads the environment. Nothing here prints a secret or a deployment value, or passes one as
+# that a secrets bundle is encrypted, a cluster's nodes and the wait for their Talos API, the drain
+# of a node with talosctl's own drain off, the nodes that have not reported Ready since a given time,
+# the line that names the step a recipe failed in, the private directory an etcd snapshot is kept in
+# while a recipe works on it, the talman run that keeps its output out of a CI log, the Flux age key
+# and the other objects Flux needs before it starts, the release an application's HelmRelease makes,
+# and the install of an application before Flux. Builds on scripts/lib/infra.sh, which reads the
+# environment. Nothing here prints a secret or a deployment value, or passes one as
 # an argument: sops and talman get the Talos age key's location from their environment, and the Flux
 # age key and the values of the objects applied before Flux reach age-keygen, jq and kubectl on
 # standard input.
@@ -204,6 +204,21 @@ require_kubeconfig() {
     infra_error "${KUBECONFIG#"$infra_root"/} does not exist; just cluster-kubeconfig fetches it"
     return 1
   fi
+}
+
+# cluster_talman_drain_off ARG...: cluster_talman with ARG... and talosctl's own drain turned off.
+# talosctl drains through the cluster endpoint, the API load balancer's address on the node network,
+# which only the nodes reach, so the recipes drain with drain_node instead. talosctl upgrade drains
+# by default; talosctl reboot does not, and is told so all the same.
+cluster_talman_drain_off() {
+  cluster_talman "$@" --extra-flags=--drain=false
+}
+
+# drain_node NODE: cordons NODE and evicts its pods with kubectl through the kubeconfig, which points
+# at the API load balancer, leaving DaemonSets' pods and dropping emptyDir data, for up to ten
+# minutes. kubectl's output names the node and the pods it evicts.
+drain_node() {
+  kubectl drain "$1" --ignore-daemonsets --delete-emptydir-data --timeout=10m
 }
 
 # not_ready_since SINCE HOSTNAME...: the HOSTNAMEs that are not a Ready node whose kubelet has

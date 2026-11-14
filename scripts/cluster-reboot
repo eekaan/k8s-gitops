@@ -4,16 +4,27 @@
 # it. The node is named by its hostname in the cluster's talman.yaml; any other name is refused
 # before anything runs. Once the node's name is typed back, or with --yes, a probe asks /readyz
 # through the kubeconfig, which points at the load balancer, once a second, each time for up to two
-# seconds, while talman reboots the node and until the node is a Ready Kubernetes node with a
-# heartbeat from after the reboot, for which the recipe waits up to REBOOT_WAIT seconds (600). Then
-# it prints how many probes it made, how many failed and the longest run of failures, in seconds.
-# It exits 0 only when the node is Ready again and no probe failed; --tolerate <seconds> accepts runs
-# of failures up to that long, for the operator to say what counts as an interruption.
+# seconds, while the recipe:
+#   1. cordons the node and drains it with kubectl, as cluster-upgrade drains, so that nothing new
+#      is placed on it while it goes down: a kubelet that is shutting down rejects every pod it is
+#      given, and the scheduler would go on giving it the same replica. talosctl's own drain, which
+#      reaches the API where only the nodes reach it, stays off;
+#   2. reboots it with talman;
+#   3. waits until it is a Ready Kubernetes node with a heartbeat from after the reboot, for up to
+#      REBOOT_WAIT seconds (600).
+# Then it prints how many probes it made, how many failed and the longest run of failures, in
+# seconds; uncordons the node, unless it was unschedulable before the recipe ran, which it says;
+# and deletes the pods the shutdown left in phase Failed on it, rejected (NodeShutdown) or
+# terminated (Terminated) as the node went down, which nothing else removes, saying how many. It
+# exits 0 only when the node is Ready again and no probe failed; --tolerate <seconds> accepts runs of
+# failures up to that long, for the operator to say what counts as an interruption. A run that stops
+# once the node is cordoned leaves it cordoned and says so last.
 #
 # The probe runs in the background and keeps its counts in memory, so it writes no file. It is
 # stopped on every exit: at the end, when a step fails, and when SIGINT or SIGTERM ends the recipe;
-# it then stops the kubectl or sleep it is waiting for, so nothing of it keeps running. Neither
-# kubectl's output nor its errors are printed, as they can name the API server's address.
+# it then stops the kubectl or sleep it is waiting for, so nothing of it keeps running. Of kubectl's
+# output only the drain's passes through, as in cluster-upgrade: it names the pods it evicts and
+# those it cannot. The rest is not printed, as it can name the API server's or the nodes' addresses.
 # Usage: scripts/cluster-reboot <node> [cluster] [--yes] [--tolerate <seconds>]
 set -euo pipefail
 
@@ -157,27 +168,87 @@ stop_probe() {
   probe_pid=''
 }
 
+# remove_shutdown_pods: deletes, by namespace and name, the pods the node's shutdown left in phase
+# Failed on it: those its kubelet rejected while it was shutting down (reason NodeShutdown) and those
+# it terminated as it went down (Terminated). They stay until they are deleted, and cluster-check
+# fails on them. Every other pod stays, a Failed one among them. Says how many it deleted.
+remove_shutdown_pods() {
+  local pods left namespace rest count=0
+  local -a names
+  if ! pods=$(kubectl get pods --all-namespaces --output json --request-timeout=30s 2> /dev/null); then
+    infra_error "kubectl could not read the pods through the kubeconfig"
+    return 1
+  fi
+  # One line per namespace: the namespace, then the names of its pods to delete.
+  left=$(jq -r --arg node "$node" '[.items[] | select(.spec.nodeName == $node and .status.phase == "Failed"
+      and (.status.reason == "NodeShutdown" or .status.reason == "Terminated"))]
+    | group_by(.metadata.namespace)[] | [.[0].metadata.namespace] + map(.metadata.name) | join(" ")' <<< "$pods")
+  while read -r namespace rest; do
+    [[ -n $namespace ]] || continue
+    read -ra names <<< "$rest"
+    if ! kubectl delete pod --namespace "$namespace" "${names[@]}" --ignore-not-found --wait=false > /dev/null 2>&1; then
+      infra_error "kubectl could not delete the pods the shutdown left Failed on $node in $namespace"
+      return 1
+    fi
+    count=$((count + ${#names[@]}))
+  done <<< "$left"
+  if ((count == 0)); then
+    say "the shutdown left no pod Failed on $node"
+  else
+    say "removed $count pods the shutdown left Failed on $node"
+  fi
+}
+
 # On every exit the probe is stopped first; then a failing run names its step, as
-# report_failed_step has it do. Ctrl-C ends the recipe even when talman handles SIGINT itself and
-# exits 0, after which bash would otherwise go on.
+# report_failed_step has it do, and once the node is cordoned, says last that it stays so. Ctrl-C
+# ends the recipe even when talman handles SIGINT itself and exits 0, after which bash would
+# otherwise go on.
+cordoned=0 unschedulable=false
 on_exit() {
   local status=$1
   stop_probe
   failed_step "$status"
+  if ((status != 0 && cordoned)); then
+    if [[ $unschedulable == true ]]; then
+      infra_error "$node stays cordoned, as it was before"
+    else
+      infra_error "$node is left cordoned; once it is Ready, kubectl uncordon $node makes it schedulable again"
+    fi
+  fi
   exit "$status"
 }
 trap 'on_exit $?' EXIT
 trap 'exit 130' INT
 
+step="reading $node through the kubeconfig"
+if ! unschedulable=$(kubectl get node "$node" --output json --request-timeout=10s 2> /dev/null |
+  jq -r '.spec.unschedulable // false'); then
+  infra_error "kubectl could not read the node $node through the kubeconfig; nothing was changed"
+  exit 1
+fi
+if [[ $unschedulable == true ]]; then
+  say "$node is cordoned already, and stays cordoned after the reboot"
+fi
+
 step="waiting for $node to be typed back"
 ((confirmed)) || confirm "$node" reboot rebooted
 
-step="rebooting $node with talman"
-say "rebooting $node with talman; /readyz is asked through the kubeconfig once a second until it is Ready again"
-since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+say "draining and rebooting $node; /readyz is asked through the kubeconfig once a second until it is Ready again"
 start_probe
+
+step="cordoning $node"
+if ! kubectl cordon "$node" > /dev/null 2>&1; then
+  infra_error "kubectl could not cordon $node; nothing was changed"
+  exit 1
+fi
+cordoned=1
+step="draining $node"
+drain_node "$node"
+
+step="rebooting $node with talman"
+since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 rebooted=0
-cluster_talman reboot -n "$node" --yes || rebooted=$?
+cluster_talman_drain_off reboot -n "$node" --yes || rebooted=$?
 
 back=0
 if ((rebooted == 0)); then
@@ -208,6 +279,22 @@ if ((!back)); then
   infra_error "$node has not reported Ready since its reboot, after ${ready_wait}s; REBOOT_WAIT sets how long to wait"
   exit 1
 fi
+
+step="uncordoning $node"
+if [[ $unschedulable == true ]]; then
+  say "$node was cordoned before the reboot and stays cordoned"
+else
+  if ! kubectl uncordon "$node" > /dev/null 2>&1; then
+    infra_error "kubectl could not uncordon $node"
+    exit 1
+  fi
+  cordoned=0
+  say "$node is schedulable again"
+fi
+
+step="removing the pods the shutdown left Failed on $node"
+remove_shutdown_pods
+
 step="checking that /readyz answered"
 if ((failed > 0 && longest > tolerate)); then
   infra_error "$node is Ready again, but /readyz did not answer for up to ${longest}s while it rebooted; --tolerate $longest accepts a gap that long"

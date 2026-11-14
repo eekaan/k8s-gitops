@@ -8,8 +8,11 @@
 #   not-ready         hostnames whose Ready condition is False
 #   back.<hostname>   the node's kubelet has reported since it rebooted: its Ready condition's
 #                     heartbeat is the current time; without it, a heartbeat from long ago
+#   cordoned.<hostname>  the node is unschedulable: cordon and drain make it so, uncordon undoes it
+#   drain-fails       kubectl drain cordons the node, cannot evict a pod and fails
 #   kube-proxy        a kube-proxy pod runs in kube-system
-#   pods              more pods, one per line as <namespace> <name> <phase>
+#   pods              more pods, one per line as <namespace> <name> <phase> [<node> [<reason>]], on
+#                     cp-1 when no node is given; kubectl delete pod removes them
 #   no-flux           the namespace flux-system does not exist, and no pod runs in it
 #   pending-csr       a certificate signing request is Pending
 #   logs-fail         a pod's logs cannot be fetched, as before its kubelet's serving certificate is
@@ -18,7 +21,10 @@
 #   csi-volume        a PersistentVolume of a CSI driver exists
 # Every object it answers with holds addresses from the documentation ranges, as do its errors and the
 # log line, which the recipes must never print. It records "kubectl ARGS" in <tmp>/record/argv, and
-# a /readyz it refuses in <tmp>/record/readyz-refused.
+# "drain of <hostname> finished" there when a drain has evicted every pod, a
+# /readyz it refuses in <tmp>/record/readyz-refused, each pod it deletes as <namespace>/<name> in
+# <tmp>/record/deleted, and for each uncordon whether the node had come back, as "<hostname> back" or
+# "<hostname> away", in <tmp>/record/uncordoned.
 set -uo pipefail
 
 root=${0%/bin/*}
@@ -41,7 +47,7 @@ listed() {
 }
 
 nodes() {
-  local node ready beat now
+  local node ready beat now unschedulable
   now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   while IFS= read -r node; do
     [[ -n $node ]] || continue
@@ -53,8 +59,14 @@ nodes() {
     if listed "back.$node"; then
       beat=$now
     fi
-    jq -n --arg node "$node" --arg ready "$ready" --arg beat "$beat" --arg now "$now" '{
+    unschedulable=false
+    if listed "cordoned.$node"; then
+      unschedulable=true
+    fi
+    jq -n --arg node "$node" --arg ready "$ready" --arg beat "$beat" --arg now "$now" \
+      --argjson unschedulable "$unschedulable" '{
       metadata: {name: $node},
+      spec: (if $unschedulable then {unschedulable: true} else {} end),
       status: {
         addresses: [
           {type: "InternalIP", address: "198.51.100.31"},
@@ -67,16 +79,18 @@ nodes() {
   done < "$state/nodes"
 }
 
-# pod NAMESPACE NAME PHASE [K8S_APP]
+# pod NAMESPACE NAME PHASE [K8S_APP [NODE [REASON]]]
 pod() {
-  jq -n --arg namespace "$1" --arg name "$2" --arg phase "$3" --arg app "${4-}" '{
+  jq -n --arg namespace "$1" --arg name "$2" --arg phase "$3" --arg app "${4-}" --arg node "${5:-cp-1}" \
+    --arg reason "${6-}" '{
     metadata: ({namespace: $namespace, name: $name} + if $app == "" then {} else {labels: {"k8s-app": $app}} end),
-    spec: {nodeName: "cp-1", containers: [{name: "main"}]},
-    status: {phase: $phase, hostIP: "198.51.100.31", podIP: "198.51.100.51"}}'
+    spec: {nodeName: $node, containers: [{name: "main"}]},
+    status: ({phase: $phase, hostIP: "198.51.100.31", podIP: "198.51.100.51"}
+      + if $reason == "" then {} else {reason: $reason, message: "Pod was rejected: \($reason) on 198.51.100.31"} end)}'
 }
 
 pods() {
-  local namespace name phase
+  local namespace name phase node reason
   pod kube-system cilium-a1b2c Running cilium
   pod kube-system coredns-c3d4e Running kube-dns
   pod kube-system kubelet-csr-approver-e5f6g Running
@@ -90,10 +104,38 @@ pods() {
     pod kube-system kube-proxy-q3r4s Running kube-proxy
   fi
   if listed pods; then
-    while read -r namespace name phase; do
-      pod "$namespace" "$name" "$phase"
+    while read -r namespace name phase node reason; do
+      pod "$namespace" "$name" "$phase" '' "$node" "$reason"
     done < "$state/pods"
   fi
+}
+
+# delete_pods ARG...: kubectl delete pod's arguments: removes each named pod of the namespace
+# --namespace gives from the pods file, failing on one that is not there unless --ignore-not-found.
+delete_pods() {
+  local namespace=default ignore=0 name kept
+  local -a names=()
+  while (($#)); do
+    case $1 in
+      --namespace | -n) namespace=$2 && shift ;;
+      --namespace=*) namespace=${1#*=} ;;
+      --ignore-not-found | --ignore-not-found=true) ignore=1 ;;
+      -*) ;;
+      *) names+=("$1") ;;
+    esac
+    shift
+  done
+  for name in "${names[@]}"; do
+    if ! grep -q "^$namespace $name " "$state/pods" 2> /dev/null; then
+      ((ignore)) && continue
+      echo "Error from server (NotFound): pods \"$name\" not found" >&2
+      exit 1
+    fi
+    kept=$(grep -v "^$namespace $name " "$state/pods")
+    printf '%s\n' "$kept" | grep . > "$state/pods"
+    echo "$namespace/$name" >> "$record/deleted"
+    echo "pod \"$name\" deleted"
+  done
 }
 
 csrs() {
@@ -136,6 +178,46 @@ case $args in
     echo ok
     ;;
   *" get nodes "*) nodes | list ;;
+  " get node "*)
+    found=$(nodes | jq -c --arg node "$3" 'select(.metadata.name == $node)')
+    if [[ -z $found ]]; then
+      echo "Error from server (NotFound): nodes \"$3\" not found" >&2
+      exit 1
+    fi
+    printf '%s\n' "$found"
+    ;;
+  " cordon "*)
+    : > "$state/cordoned.$2"
+    echo "node/$2 cordoned"
+    ;;
+  " drain "*)
+    : > "$state/cordoned.$2"
+    echo "node/$2 cordoned"
+    # Evicting takes a while, as a drain does.
+    sleep 1.5
+    if listed drain-fails; then
+      echo 'error when evicting pods/"web-0" -n "apps" (will retry after 5s): Cannot evict pod as it would violate the pod'"'"'s disruption budget.' >&2
+      echo "error: unable to drain node \"$2\" due to error: global timeout reached: 10m0s" >&2
+      exit 1
+    fi
+    echo "evicting pod apps/web-0"
+    echo "pod/web-0 evicted"
+    echo "node/$2 drained"
+    echo "drain of $2 finished" >> "$record/argv"
+    ;;
+  " uncordon "*)
+    rm -f "$state/cordoned.$2"
+    if listed "back.$2"; then
+      echo "$2 back" >> "$record/uncordoned"
+    else
+      echo "$2 away" >> "$record/uncordoned"
+    fi
+    echo "node/$2 uncordoned"
+    ;;
+  " delete pod "*)
+    shift 2
+    delete_pods "$@"
+    ;;
   *" get pods "*) pods | list ;;
   *" get namespace flux-system "*) listed no-flux || echo namespace/flux-system ;;
   *" get certificatesigningrequests "*) csrs | list ;;
