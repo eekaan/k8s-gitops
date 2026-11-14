@@ -150,10 +150,17 @@ cluster_files() {
 #   bootstrapped       etcd runs, so talman refuses to bootstrap again
 #   answers-on.ADDRESS the node at ADDRESS answers the probe at that try (the first by default)
 #   silent.ADDRESS     the node at ADDRESS never answers
+#   silent-tried.ADDRESS  the node at ADDRESS stops answering once a node has been applied in try mode
 #   changes            applying the configuration would change cp-1
 #   new-nodes          the hostnames of nodes in maintenance mode, which talman apply refuses to
 #                      configure, and which a dry run does not count as a change, unless onboarding
 #   unreachable        talman apply's dry run cannot reach cp-2 and fails
+#   pending            the hostnames of running nodes the configuration would change, one per line;
+#                      apply -n NODE --mode try puts NODE's in effect, as tried, and apply -n NODE
+#                      without try mode keeps it, as kept
+#   reverts.NODE       NODE's configuration in try mode reverts before anything else can ask it
+#   unhealthy          scripts/cluster-check fails
+#   unhealthy-tried    scripts/cluster-check fails once a node has been applied in try mode
 #   talos-behind       the hostnames of nodes whose Talos is behind their configured version
 #   k8s-behind         the kubelets run a Kubernetes behind kubernetesVersion
 #   api-down           the Kubernetes API does not answer /readyz
@@ -170,6 +177,15 @@ given() {
   [[ " ${args[*]} " == *" $1 "* ]]
 }
 args=("$@")
+# The node -n names and the mode --mode or -m names, if any.
+target= mode=auto
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case ${args[i]} in
+    -n) target=${args[i + 1]-} ;;
+    -m | --mode) mode=${args[i + 1]-} ;;
+    --mode=*) mode=${args[i]#--mode=} ;;
+  esac
+done
 case "$1" in
   apply)
     if given --bootstrap; then
@@ -182,13 +198,14 @@ case "$1" in
       exit 0
     fi
     new=$(cat "$STATE/new-nodes" 2> /dev/null || true)
+    pending=$(cat "$STATE/pending" 2> /dev/null || true)
     if given --dry-run; then
       if [[ -e $STATE/unreachable ]]; then
         echo "error: cp-2 answers neither the Talos API nor the maintenance service" >&2
         exit 1
       fi
       changed=0
-      if [[ -e $STATE/changes ]]; then
+      if [[ -e $STATE/changes && -z $target ]]; then
         echo "== cp-1"
         echo "     Config diff:"
         if given --redact-secrets=false; then
@@ -198,6 +215,14 @@ case "$1" in
         fi
         changed=1
       fi
+      for node in $pending; do
+        if [[ -z $target || $node == "$target" ]]; then
+          echo "== $node"
+          echo "     Config diff:"
+          echo "     +    kind: NetworkRuleConfig"
+          changed=1
+        fi
+      done
       for node in $new; do
         echo "== $node · new, in maintenance mode"
         if given --onboard-new-nodes; then
@@ -211,6 +236,21 @@ case "$1" in
       fi
       exit 0
     fi
+    if [[ -n $target ]]; then
+      grep -vx -- "$target" "$STATE/pending" > "$STATE/pending.next" || true
+      mv "$STATE/pending.next" "$STATE/pending"
+      echo "     Applied configuration without a reboot"
+      if [[ $mode == try ]]; then
+        echo "$target" >> "$STATE/tried"
+        echo "     The config is applied in 'try' mode and will be automatically reverted back in 5m0s"
+        if [[ -e $STATE/reverts.$target ]]; then
+          echo "$target" >> "$STATE/pending"
+        fi
+      else
+        echo "$target" >> "$STATE/kept"
+      fi
+      exit 0
+    fi
     if [[ -n $new ]] && ! given --onboard-new-nodes; then
       echo "error: new node(s), in maintenance mode: $new" >&2
       exit 1
@@ -218,7 +258,7 @@ case "$1" in
     if given --onboard-new-nodes; then
       : > "$STATE/new-nodes"
     fi
-    rm -f "$STATE/changes"
+    rm -f "$STATE/changes" "$STATE/pending"
     echo "     Applied configuration without a reboot"
     ;;
   kubeconfig)
@@ -317,7 +357,8 @@ printf '%s\n' "timeout $*" >> "$RECORD/argv"
 address=${*: -1}
 tries=$(($(cat "$STATE/tries.$address" 2> /dev/null || echo 0) + 1))
 echo "$tries" > "$STATE/tries.$address"
-[[ ! -e $STATE/silent.$address ]] && ((tries >= $(cat "$STATE/answers-on.$address" 2> /dev/null || echo 1)))
+[[ ! -e $STATE/silent.$address ]] && ! [[ -e $STATE/silent-tried.$address && -s $STATE/tried ]] &&
+  ((tries >= $(cat "$STATE/answers-on.$address" 2> /dev/null || echo 1)))
 EOF
   fake sleep < /dev/null
   fake_tool install-cilium <<'EOF'
@@ -332,6 +373,16 @@ EOF
 printf '%s\n' "install-app $* KUBECONFIG=${KUBECONFIG-}" >> "$RECORD/argv"
 EOF
   mv "$BIN/install-app" "$REPO/scripts/install-app"
+  fake_tool cluster-check <<'EOF'
+printf '%s\n' "cluster-check $*" >> "$RECORD/argv"
+if [[ -e $STATE/unhealthy ]] || [[ -e $STATE/unhealthy-tried && -s $STATE/tried ]]; then
+  echo "FAIL  nodes Ready: not Ready: worker-2"
+  echo "cluster-check: 1 of 7 checks failed" >&2
+  exit 1
+fi
+echo "cluster-check: every check of lab-sto2 passes"
+EOF
+  mv "$BIN/cluster-check" "$REPO/scripts/cluster-check"
   # The Flux age key, with its recipient in .sops.yaml, which cluster-bootstrap checks first.
   age-keygen -o "$FLUX_KEY" 2> /dev/null
   RECIPIENT=$(age-keygen -y "$FLUX_KEY") yq -i '.creation_rules[].age = strenv(RECIPIENT)' "$REPO/.sops.yaml"
@@ -815,6 +866,181 @@ applies() {
 
   [ "$status" -eq 2 ]
   [[ $output == *"usage: cluster-talos [cluster] [--onboard] [--yes]"* ]]
+  [ ! -e "$RECORD/argv" ]
+}
+
+# first_apply WORD...: the line number in the record of the first talman apply call that has every
+# WORD among its arguments; nothing when there is none.
+first_apply() {
+  local n line word found
+  while IFS=: read -r n line; do
+    found=1
+    for word; do
+      [[ " $line " == *" $word "* ]] || found=0
+    done
+    if ((found)); then
+      echo "$n"
+      return
+    fi
+  done < <(grep -n '^talman apply ' "$RECORD/argv")
+}
+
+# tries NODE: the recorded applies to NODE in try mode, one per line.
+tries() {
+  applies | grep -E -- "(^| )-n $1( |$)" | grep -E -- ' (--mode try|-m try|--mode=try)( |$)' || true
+}
+
+# keeps NODE: the recorded applies to NODE that are not in try mode, one per line.
+keeps() {
+  applies | grep -E -- "(^| )-n $1( |$)" | grep -vE -- ' (--mode try|-m try|--mode=try)( |$)' || true
+}
+
+@test "The first rollout applies to one node in a self-reverting mode and stops unless the checks pass" {
+  fake_cluster
+  mkdir -p "$CLUSTER/clusterconfig"
+  : > "$CLUSTER/clusterconfig/kubeconfig"
+  printf '%s\n' cp-1 worker-2 > "$STATE/pending"
+
+  recipe cluster-talos --first worker-2 --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ ! -s "$STATE/pending" ]
+  [ "$(applies | wc -l)" -eq 4 ]
+  [ "$(tries worker-2 | wc -l)" -eq 1 ]
+  [ "$(keeps worker-2 | wc -l)" -eq 1 ]
+  [ "$(tries cp-1 | wc -l)" -eq 1 ]
+  [ "$(keeps cp-1 | wc -l)" -eq 1 ]
+  # Talos reverts a configuration applied in try mode once the timeout talosctl is given has passed.
+  [[ " $(tries worker-2) " == *" --extra-flags=--timeout="* ]]
+  checked=$(call_line '^cluster-check')
+  tried=$(first_apply -n worker-2 --mode try)
+  [ -z "$tried" ] && tried=$(first_apply -n worker-2 -m try)
+  kept_at=$(call_line "^$(keeps worker-2)\$")
+  next=$(call_line "^$(tries cp-1)\$")
+  for call in "$checked" "$tried" "$kept_at" "$next"; do
+    [ -n "$call" ]
+  done
+  # The cluster is checked before anything is applied, the named node goes first and alone, and it
+  # is kept only after its Talos API, every node's Talos API port and cluster-check have answered.
+  [ "$checked" -lt "$tried" ]
+  [ "$(applies | head -1)" = "$(tries worker-2)" ]
+  [ "$tried" -lt "$kept_at" ]
+  [ "$kept_at" -lt "$next" ]
+  asked=$(grep -n '^talman apply ' "$RECORD/argv" | grep -E -- ' --dry-run( |$)' | grep -E -- ' -n worker-2( |$)' |
+    cut -d: -f1 | awk -v after="$tried" '$1 > after' | head -1)
+  [ -n "$asked" ] && [ "$asked" -lt "$kept_at" ]
+  for hostname in $(yq '.nodes[].hostname' "$CLUSTER/talman.yaml"); do
+    probed=$(grep -n "^timeout .*/dev/tcp/.* $(node_address "$hostname")\$" "$RECORD/argv" | cut -d: -f1 |
+      awk -v after="$tried" '$1 > after' | head -1)
+    [ -n "$probed" ] && [ "$probed" -lt "$kept_at" ]
+  done
+  checked=$(grep -n '^cluster-check' "$RECORD/argv" | cut -d: -f1 | awk -v after="$tried" '$1 > after' | head -1)
+  [ -n "$checked" ] && [ "$checked" -lt "$kept_at" ]
+
+  # An unhealthy cluster gets no apply at all.
+  printf '%s\n' cp-1 worker-2 > "$STATE/pending"
+  : > "$STATE/unhealthy"
+  : > "$RECORD/argv"
+
+  recipe cluster-talos --first worker-2 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [ -n "$(call_line '^cluster-check')" ]
+  [ -z "$(applies)" ]
+  [ "$(cat "$STATE/pending")" = "$(printf '%s\n' cp-1 worker-2)" ]
+
+  # A configuration that reverted before the checks ended is not kept, as the checks did not see it.
+  rm "$STATE/unhealthy"
+  : > "$STATE/reverts.worker-2"
+  : > "$RECORD/argv"
+
+  recipe cluster-talos --first worker-2 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [ "$(applies)" = "$(tries worker-2)" ]
+  [ "$(tries worker-2 | wc -l)" -eq 1 ]
+  [[ $output == *"worker-2 runs the configuration it had"* ]]
+}
+
+@test "A failed check after the first node leaves the other nodes untouched and says how the first reverts" {
+  fake_cluster
+  mkdir -p "$CLUSTER/clusterconfig"
+  : > "$CLUSTER/clusterconfig/kubeconfig"
+  printf '%s\n' cp-1 worker-2 > "$STATE/pending"
+  : > "$STATE/unhealthy-tried"
+
+  recipe cluster-talos --first cp-1 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [ "$(applies)" = "$(tries cp-1)" ]
+  [ "$(tries cp-1 | wc -l)" -eq 1 ]
+  tried=$(call_line "^$(tries cp-1)\$")
+  [ -z "$(sed -n "$((tried + 1)),\$p" "$RECORD/argv" | awk '/^talman apply .*-n worker-2( |$)/')" ]
+  [ "$(cat "$STATE/pending")" = worker-2 ]
+  # The recipe's last lines, before just's own: how the node reverts, which nodes are untouched and
+  # the step the rollout stopped in.
+  last=$(grep -n -m1 'cluster-talos: failed while checking cp-1 and the cluster' <<< "$output" | cut -d: -f1)
+  [ -n "$last" ]
+  [ -z "$(sed -n "$((last + 1)),\$p" <<< "$output" | awk '!/^error: recipe .cluster-talos. failed/')" ]
+  [[ $(sed -n "$((last - 2))p" <<< "$output") == *"cp-1 reverts by itself to the configuration it had 5 minutes after it was applied"* ]]
+  untouched=$(sed -n "$((last - 1))p" <<< "$output")
+  [[ $untouched == "cluster-talos: untouched: "* ]]
+  for hostname in cp-2 cp-3 worker-1 worker-2 worker-3; do
+    [[ $untouched == *"$hostname"* ]]
+  done
+  [[ $untouched != *cp-1* ]]
+}
+
+@test "cluster-talos --first names nodes by hostname only, and with CI set keeps talman's output in its log" {
+  fake_cluster
+  mkdir -p "$CLUSTER/clusterconfig"
+  : > "$CLUSTER/clusterconfig/kubeconfig"
+  printed=()
+  for ci in '' true; do
+    reset_environment
+    [[ -z $ci ]] || with CI=true
+    printf '%s\n' cp-1 worker-2 > "$STATE/pending"
+    : > "$STATE/silent-tried.$(node_address worker-3)"
+    rm -f "$STATE/tried" "$RECORD/argv"
+
+    recipe cluster-talos --first worker-2 --yes < /dev/null
+
+    [ "$status" -ne 0 ]
+    printed+=("$output")
+    [[ $output == *"no answer on the Talos API port from worker-3 once worker-2 was applied in try mode"* ]]
+    [ "$(applies)" = "$(tries worker-2)" ]
+  done
+  [[ ${printed[1]} == *"its output is in talos/lab-sto2/clusterconfig/cluster-talos.log"* ]]
+  [[ ${printed[1]} != *"Config diff:"* ]]
+  for address in $(yq '.nodes[].ipAddress' "$CLUSTER/talman.yaml"); do
+    [[ ${printed[1]} != *"$address"* ]]
+    [[ ${printed[0]} != *"no answer on the Talos API port from $address"* ]]
+  done
+}
+
+@test "cluster-talos --first refuses a node talman.yaml does not list, and --onboard, before it runs anything" {
+  fake_cluster
+  mkdir -p "$CLUSTER/clusterconfig"
+  : > "$CLUSTER/clusterconfig/kubeconfig"
+
+  recipe cluster-talos --first cp-9 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"cp-9 is not a node of talos/lab-sto2/talman.yaml"* ]]
+  [ ! -e "$RECORD/argv" ]
+
+  recipe cluster-talos --first cp-1 --onboard --yes < /dev/null
+
+  [ "$status" -eq 2 ]
+  [[ $output == *"--first does not onboard"* ]]
+  [ ! -e "$RECORD/argv" ]
+
+  rm "$CLUSTER/clusterconfig/kubeconfig"
+
+  recipe cluster-talos --first cp-1 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"talos/lab-sto2/clusterconfig/kubeconfig does not exist"* ]]
   [ ! -e "$RECORD/argv" ]
 }
 

@@ -1,7 +1,10 @@
 # The machines of a Talos cluster. Every node boots the Talos image without machine configuration
-# and waits in maintenance mode, with a fixed private address and a floating IP whose Talos and
-# Kubernetes APIs answer only the operator allowlist; machine configuration is applied over the
-# Talos API.
+# and waits in maintenance mode, with a fixed private address and a floating IP whose Talos API
+# answers only the operator allowlist; machine configuration is applied over the Talos API, and with
+# it the node's own firewall (talos/firewall.yaml). With the full rules, the default, the security
+# group also admits the Kubernetes API only from the allowlist and nothing else from outside the
+# nodes; with the reduced rules it leaves every other port to the nodes' firewall but the NodePort
+# range.
 
 locals {
   # Fixed addresses below the node subnet's DHCP pool: control planes from host number 10,
@@ -18,11 +21,29 @@ locals {
   # Sorted, so the same networks given in another order change no rule, and without duplicates,
   # as Neutron refuses a rule that already exists.
   api_sources = sort(distinct(var.api_allowed_cidrs))
+
+  # What the reduced rules open to all, besides the full rules, which they keep, so switching between
+  # the two adds or removes these alone. A Neutron rule only admits, so the ports left closed lie
+  # between ranges: the Talos API, as a node in maintenance mode has no firewall and takes a
+  # configuration from anyone who reaches it, and the NodePort range, as Cilium serves a NodePort
+  # from its eBPF datapath before the node's firewall sees the packet.
+  open = {
+    for key, range in {
+      "tcp-1-29999"     = { protocol = "tcp", min = 1, max = 29999 }
+      "tcp-32768-49999" = { protocol = "tcp", min = 32768, max = 49999 }
+      "tcp-50001-65535" = { protocol = "tcp", min = 50001, max = 65535 }
+      "udp-1-29999"     = { protocol = "udp", min = 1, max = 29999 }
+      "udp-32768-65535" = { protocol = "udp", min = 32768, max = 65535 }
+      "icmp"            = { protocol = "icmp", min = null, max = null }
+    } : key => range if var.security_group_rules == "reduced"
+  }
 }
 
 resource "openstack_networking_secgroup_v2" "this" {
-  name        = var.name
-  description = "Talos nodes of ${var.name}: everything between them, the Talos and Kubernetes APIs from the operator allowlist and the nodes' floating IPs, the Kubernetes API from the node subnet."
+  name = var.name
+  description = var.security_group_rules == "reduced" ? (
+    "Talos nodes of ${var.name}: everything between them, the Talos API only from the operator allowlist and the nodes' floating IPs, every other port from all but the NodePort range; the nodes' own firewall filters the rest."
+  ) : "Talos nodes of ${var.name}: everything between them, the Talos and Kubernetes APIs from the operator allowlist and the nodes' floating IPs, the Kubernetes API from the node subnet."
   # Neutron's default rules allow all egress, and stay.
   delete_default_rules = false
   tags                 = var.tags
@@ -81,6 +102,18 @@ resource "openstack_networking_secgroup_rule_v2" "api_from_subnet" {
   port_range_min    = 6443
   port_range_max    = 6443
   remote_ip_prefix  = var.network.cidr
+}
+
+resource "openstack_networking_secgroup_rule_v2" "open" {
+  for_each = local.open
+
+  security_group_id = openstack_networking_secgroup_v2.this.id
+  direction         = "ingress"
+  ethertype         = "IPv4"
+  protocol          = each.value.protocol
+  port_range_min    = each.value.min
+  port_range_max    = each.value.max
+  remote_ip_prefix  = "0.0.0.0/0"
 }
 
 # Spreads the nodes over hypervisors where the cloud can, and still places them where it cannot.

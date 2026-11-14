@@ -1,0 +1,79 @@
+---
+# Every listener on a node that something off the node reaches, with the nodes that have it and the
+# sources it accepts. talos/talman.yaml.tftpl turns each listener into an ingress rule of Talos'
+# firewall for the nodes it names, which talos/patches/all/firewall.yaml writes into their machine
+# configuration; everything else that reaches a node is dropped. docs/cluster.md lists the same
+# listeners, with who connects to each and why, and tests/node-firewall.bats fails when the two, or a
+# node's rules, disagree.
+#
+#   name      the rule's name, unique
+#   protocol  tcp or udp
+#   ports     ports, or ranges written low-high
+#   nodes     all, or controlplane for a listener only control planes have
+#   from      the sources the rule accepts:
+#     operators      the operator allowlist, the cluster stack's api_allowed_cidrs
+#     nodes          the node network: every node, the API load balancer's addresses and the CI host
+#     floating       each node's floating address, the source of a node that reaches another's
+#     pods           the pod range, the source of a pod that reaches a port on a node
+#     controlplanes  each control plane's address on the node network
+listeners:
+  - name: apid
+    protocol: tcp
+    ports: [50000]
+    nodes: all
+    from: [operators, nodes, floating]
+  - name: trustd
+    protocol: tcp
+    ports: [50001]
+    nodes: controlplane
+    from: [nodes]
+  - name: kube-apiserver
+    protocol: tcp
+    ports: [6443]
+    nodes: controlplane
+    from: [operators, nodes, floating, pods]
+  - name: etcd
+    protocol: tcp
+    ports: [2379-2380]
+    nodes: controlplane
+    from: [controlplanes]
+  - name: etcd-metrics
+    protocol: tcp
+    ports: [2381]
+    nodes: controlplane
+    from: [pods]
+  - name: kube-controller-manager
+    protocol: tcp
+    ports: [10257]
+    nodes: controlplane
+    from: [pods]
+  - name: kube-scheduler
+    protocol: tcp
+    ports: [10259]
+    nodes: controlplane
+    from: [pods]
+  - name: kubelet
+    protocol: tcp
+    ports: [10250]
+    nodes: all
+    from: [controlplanes, pods]
+  - name: cilium-vxlan
+    protocol: udp
+    ports: [8472]
+    nodes: all
+    from: [nodes]
+  - name: cilium-health
+    protocol: tcp
+    ports: [4240]
+    nodes: all
+    from: [nodes]
+  - name: hubble
+    protocol: tcp
+    ports: [4244]
+    nodes: all
+    from: [pods]
+  - name: node-exporter
+    protocol: tcp
+    ports: [9100]
+    nodes: all
+    from: [pods]

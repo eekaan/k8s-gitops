@@ -14,6 +14,25 @@ values:
   apiSANs: ${jsonencode(api_sans)}
   # The load balancer's floating address, where the cluster recipes reach the Kubernetes API.
   apiAddress: ${api_address}
+  # The ingress firewall's rules for each role (talos/patches/all/firewall.yaml): every listener of
+  # talos/firewall.yaml the role has, accepting the networks of its sources. A port is written as a
+  # range, the one form in which a rule takes it quoted.
+  firewall: ${jsonencode({
+    for role in ["controlplane", "worker"] : role => [
+      for listener in firewall.listeners : {
+        name     = listener.name
+        protocol = listener.protocol
+        ports    = [for port in listener.ports : strcontains(tostring(port), "-") ? tostring(port) : "${port}-${port}"]
+        subnets = sort(distinct(flatten([for source in listener.from : {
+          operators     = operator_cidrs
+          nodes         = [node_subnet]
+          floating      = [for node in nodes : "${node.floating_ip}/32"]
+          pods          = [pod_subnet]
+          controlplanes = [for node in nodes : "${node.private_address}/32" if node.role == "controlplane"]
+        }[source]])))
+      } if contains(["all", role], listener.nodes)
+    ]
+  })}
 
 # Installer images are the Image Factory's openstack installer for this schematic; talman computes
 # the schematic's ID offline.
@@ -34,6 +53,7 @@ patches:
     - ../patches/all/node-ip.yaml
     - ../patches/all/kernel-modules.yaml
     - ../patches/all/user-namespaces.yaml
+    - ../patches/all/firewall.yaml
   controlplane:
     - ../patches/controlplane/api-sans.yaml
     - ../patches/controlplane/etcd.yaml

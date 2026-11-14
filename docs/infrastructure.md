@@ -123,6 +123,37 @@ The volumes belong to the cluster stack. `just infra-destroy` and `just cluster-
 them with it, and what is on them is gone; backups are what keeps data
 ([ADR 0008](adr/0008-state-and-backups-are-encrypted-before-they-leave.md)).
 
+## The nodes' security group
+
+The cluster stack's nodes share one security group (`infra/openstack/modules/talos-nodes`), an outer
+ring around the firewall every node keeps itself ([cluster.md](cluster.md#the-node-firewall), ADR
+0013). The variable `security_group_rules` selects its rules, through `TF_VAR_security_group_rules`
+in `.env` or the environment:
+
+- `full`, the default: everything between the nodes; TCP 50000 (Talos) and 6443 (Kubernetes) from
+  each network of the operator allowlist and from each node's floating address, as a node that
+  reaches another node's floating address arrives from its own; TCP 6443 from the node subnet,
+  where the API load balancer connects from; and TCP 50000 and 6443 from the CI host once
+  `ci_host_number` is set ([The CI host](#the-ci-host)). Nothing else is admitted from outside the
+  nodes.
+- `reduced`: those rules, and every other TCP and UDP port and ICMP from all addresses but two
+  ranges, which stay closed to everything outside the nodes and the rules above. The nodes' own
+  firewall filters the rest. What it keeps is what a node cannot do for itself:
+  - TCP 50000, the Talos API: a node that has no machine configuration yet, in maintenance mode, has
+    no firewall and takes a configuration from anyone who reaches its Talos API.
+  - TCP and UDP 30000-32767, Kubernetes' NodePort range: Cilium serves a NodePort from its eBPF
+    datapath before the node's firewall sees the packet.
+
+  The reduced rules keep the full ones, so a switch either way adds or removes the six rules open to
+  all and nothing else, and no apply leaves the Talos API open. Cilium serves a pod's host port the
+  same way as a NodePort, outside that range, so `reduced` suits a cluster where no pod declares a
+  host port: Pod Security forbids them at the baseline level, which Talos enforces wherever a
+  namespace sets no other, and only `kube-system`, `monitoring` and `piraeus-datastore` allow them,
+  where the one pod with a host port, node-exporter, runs on the host network, where its port is the
+  node's own and the firewall filters it.
+
+Planning with `full` changes no rule of a running cluster.
+
 ## The CI host
 
 The `ci` stack makes one Linux VM on the plumbing stack's node network, outside the cluster, that
@@ -170,7 +201,10 @@ address on the node network as the endpoint; the Talos and Kubernetes versions f
 `service_subnet`, Kubernetes' conventional private ranges by default; the load balancer's two
 addresses and each control plane's floating address as the API certificate names; the load
 balancer's floating address as `values.apiAddress`, where the cluster recipes reach the Kubernetes
-API ([cluster.md](cluster.md#environment)); and the nodes,
+API ([cluster.md](cluster.md#environment)); the rules of the nodes' firewall for each role as
+`values.firewall`, from the listeners in `talos/firewall.yaml` with the operator allowlist,
+`api_allowed_cidrs`, the subnets, the nodes' floating addresses and the control planes' fixed
+addresses ([cluster.md](cluster.md#the-node-firewall)); and the nodes,
 control planes first and then workers, each by name and at its floating address, where talman
 reaches it. Planning fails, naming the variable, when the pod or service subnet is not an IPv4
 network, overlaps the other or the node subnet, or when the pod subnet holds fewer /24s than there
@@ -229,6 +263,8 @@ on a command line; secrets reach tofu and rclone through their environment.
   `just ci-host-remove` log in as.
 - `TF_VAR_ci_host_number`: the cluster stack's `ci_host_number`, set once the CI host exists
   ([The CI host](#the-ci-host)).
+- `TF_VAR_security_group_rules`: the cluster stack's `security_group_rules`, `full` unless set to
+  `reduced` ([The nodes' security group](#the-nodes-security-group)).
 - `CI`: when set, tofu's errors go to a file instead of the output; see below.
 
 ## State

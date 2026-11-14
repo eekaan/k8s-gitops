@@ -184,6 +184,44 @@ run "_the_cluster_is_named_lab_sto2_on_the_plumbing_stacks_node_subnet" {
   }
 }
 
+# The firewall's rules in talman.yaml take their networks from this stack: the allowlist from
+# api_allowed_cidrs, the nodes' floating addresses, the plumbing stack's node subnet, the pod subnet
+# and the control planes' fixed addresses. tests/node-firewall.bats renders them into the nodes'
+# machine configuration from the fixture.
+run "_talman_yaml_carries_the_firewall_rules_with_the_stacks_networks" {
+  command = plan
+
+  assert {
+    condition = {
+      for role, rules in yamldecode(output.talman_yaml).values.firewall : role => {
+        for rule in rules : rule.name => toset(rule.subnets) if contains(["apid", "kube-apiserver", "etcd"], rule.name)
+      }
+      } == {
+      controlplane = {
+        apid = toset([
+          "198.51.100.0/24", "192.0.2.0/24",
+          "203.0.113.101/32", "203.0.113.102/32", "203.0.113.103/32",
+          "203.0.113.111/32", "203.0.113.112/32", "203.0.113.113/32",
+        ])
+        kube-apiserver = toset([
+          "198.51.100.0/24", "192.0.2.0/24", "10.244.0.0/16",
+          "203.0.113.101/32", "203.0.113.102/32", "203.0.113.103/32",
+          "203.0.113.111/32", "203.0.113.112/32", "203.0.113.113/32",
+        ])
+        etcd = toset(["192.0.2.10/32", "192.0.2.11/32", "192.0.2.12/32"])
+      }
+      worker = {
+        apid = toset([
+          "198.51.100.0/24", "192.0.2.0/24",
+          "203.0.113.101/32", "203.0.113.102/32", "203.0.113.103/32",
+          "203.0.113.111/32", "203.0.113.112/32", "203.0.113.113/32",
+        ])
+      }
+    }
+    error_message = "talman.yaml's firewall rules must accept the Talos API from the allowlist, the node subnet and the nodes' floating addresses on every node, the Kubernetes API from those and the pod subnet and etcd from the control planes' fixed addresses on the control planes only."
+  }
+}
+
 # The workers' patches, for the data volume, form a group of their own. talman refuses a patch group
 # no node is in, so a cluster without workers has none.
 run "_the_workers_have_a_patch_group_of_their_own" {

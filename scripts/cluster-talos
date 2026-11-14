@@ -7,31 +7,68 @@
 # added, is configured only with --onboard: the maintenance service authenticates nothing, and a
 # node's configuration carries the cluster's keys. With nothing to change, nothing is asked or
 # applied. No health check runs, for the reason scripts/cluster-bootstrap gives.
-# Usage: scripts/cluster-talos [cluster] [--onboard] [--yes]
+#
+# With --first <node>, a change that could cut the nodes off, such as their firewall, is tried before
+# it is kept: once scripts/cluster-check passes, the named node and then every other node the
+# configuration changes, in talman.yaml's order, is applied alone in Talos' try mode, which reverts
+# it by itself after try_minutes unless another configuration is applied first. The node's own Talos
+# API must then report the configuration still in effect, every node must answer on the Talos API
+# port and scripts/cluster-check must pass, all from this machine, before the same configuration is
+# applied again to keep it. A failed check stops the rollout there: the node reverts, the nodes
+# before it keep theirs and those after it are untouched.
+# Usage: scripts/cluster-talos [cluster] [--onboard] [--yes] [--first <node>]
 set -euo pipefail
 
 here=$(dirname "$0")
 # shellcheck source=scripts/lib/cluster.sh
 . "$here/lib/cluster.sh"
 
-cluster='' confirmed=0 onboard=()
-for arg; do
-  case $arg in
+# How long Talos keeps a configuration applied in try mode before it reverts it, and how long talman
+# waits for the node to answer again, less than that, so a node that no longer answers fails the
+# rollout before it reverts.
+try_minutes=5 answer_timeout=2m
+
+usage() {
+  infra_error "usage: cluster-talos [cluster] [--onboard] [--yes] [--first <node>]"
+  exit 2
+}
+
+cluster='' confirmed=0 onboard=() first=''
+while (($#)); do
+  case $1 in
     --yes) confirmed=1 ;;
     --onboard) onboard=(--onboard-new-nodes) ;;
+    --first)
+      (($# > 1)) && [[ $2 != -* ]] || usage
+      first=$2
+      shift
+      ;;
     *)
-      if [[ $arg == -* || -n $cluster ]]; then
-        infra_error "usage: cluster-talos [cluster] [--onboard] [--yes]"
-        exit 2
+      if [[ $1 == -* || -n $cluster ]]; then
+        usage
       fi
-      cluster=$arg
+      cluster=$1
       ;;
   esac
+  shift
 done
+if [[ -n $first && ${#onboard[@]} -gt 0 ]]; then
+  infra_error "--first does not onboard: a node in maintenance mode has nothing to revert to; onboard new nodes with --onboard first"
+  exit 2
+fi
 
 # shellcheck source=scripts/cluster-env
 . "$here/cluster-env" "$cluster"
-require_cluster talman secrets age-key wait
+complete=1
+require_cluster talman secrets age-key wait || complete=0
+if [[ -n $first ]]; then
+  require_kubeconfig || complete=0
+  if [[ -f $talman_file ]] && ! talman_nodes "$talman_file" | cut -d' ' -f1 | grep -qxF -- "$first"; then
+    infra_error "$first is not a node of talos/$cluster/talman.yaml; name one by its hostname"
+    complete=0
+  fi
+fi
+((complete))
 
 step="waiting for every node to answer on the Talos API port"
 wait_for_talos_api "$talman_file"
@@ -51,6 +88,103 @@ esac
 step="waiting for $cluster to be typed back"
 ((confirmed)) || confirm "$cluster" "apply this configuration to" changed
 
-step="applying the configuration"
-cluster_talman apply "${onboard[@]}"
-echo "cluster-talos: the configuration of $cluster is applied"
+if [[ -z $first ]]; then
+  step="applying the configuration"
+  cluster_talman apply "${onboard[@]}"
+  echo "cluster-talos: the configuration of $cluster is applied"
+  exit 0
+fi
+
+# changes_on NODE: whether the configuration would change NODE, asked of NODE through its Talos API:
+# 0 when it would not, 2 when it would, anything else when the node could not say.
+changes_on() {
+  local status=0
+  cluster_talman apply -n "$1" --dry-run --detailed-exit-code --redact-secrets > /dev/null || status=$?
+  return "$status"
+}
+
+# silent_nodes: the hostnames of the nodes that do not answer on the Talos API port, asked once each,
+# comma-separated; nothing when every one answers.
+silent_nodes() {
+  local hostname address
+  local -a silent=()
+  while read -r hostname address; do
+    talos_api_answers "$address" || silent+=("$hostname")
+  done < <(talman_nodes "$talman_file")
+  ((${#silent[@]} == 0)) || printf '%s\n' "${silent[@]}" | paste -sd, - | sed 's/,/, /g'
+}
+
+# stop NODE WHY: ends the rollout after NODE was applied in try mode and not kept, saying why, how
+# NODE reverts and which nodes it leaves as they were.
+stop() {
+  local node=$1 why=$2 rest
+  infra_error "$why"
+  infra_error "$node is not kept: Talos applied its configuration in try mode, so $node reverts by itself to the configuration it had $try_minutes minutes after it was applied, without a reboot; just cluster-talos $cluster then shows the change again"
+  rest=$(printf '%s\n' "${order[@]:position+1}" | paste -sd, - | sed 's/,/, /g')
+  if ((${#kept[@]} > 0)); then
+    infra_error "kept before it: $(printf '%s\n' "${kept[@]}" | paste -sd, - | sed 's/,/, /g')"
+  fi
+  infra_error "untouched: ${rest:-no other node}"
+  exit 1
+}
+
+step="checking $cluster before anything is applied"
+if ! "$here/cluster-check" "$cluster"; then
+  infra_error "$cluster is not healthy before the rollout, so a check after it could not tell what the configuration did; nothing is applied"
+  exit 1
+fi
+
+# The named node first, then the others in talman.yaml's order.
+mapfile -t order < <(printf '%s\n' "$first"; talman_nodes "$talman_file" | cut -d' ' -f1 | grep -vxF -- "$first")
+kept=()
+for position in "${!order[@]}"; do
+  node=${order[position]}
+
+  step="asking $node what the configuration would change"
+  status=0
+  changes_on "$node" || status=$?
+  case $status in
+    0)
+      echo "cluster-talos: nothing to change on $node"
+      continue
+      ;;
+    2) ;;
+    *) exit "$status" ;;
+  esac
+
+  step="applying the configuration to $node in try mode"
+  if ! cluster_talman apply -n "$node" --mode try --timeout "$answer_timeout" --extra-flags="--timeout=${try_minutes}m"; then
+    stop "$node" "$node did not take the configuration in try mode, or did not answer on the Talos API within $answer_timeout after it"
+  fi
+
+  step="checking $node and the cluster"
+  # Talos reverts a tried configuration once and for all, so a configuration still in effect after
+  # the checks was in effect while they ran.
+  status=0
+  changes_on "$node" || status=$?
+  if ((status == 2)); then
+    stop "$node" "$node runs the configuration it had: Talos reverted the one applied in try mode before the checks could end"
+  elif ((status != 0)); then
+    stop "$node" "$node's Talos API did not say whether it runs the configuration applied in try mode"
+  fi
+  unanswered=$(silent_nodes)
+  if [[ -n $unanswered ]]; then
+    stop "$node" "no answer on the Talos API port from $unanswered once $node was applied in try mode"
+  fi
+  if ! "$here/cluster-check" "$cluster"; then
+    stop "$node" "cluster-check failed once $node was applied in try mode"
+  fi
+  status=0
+  changes_on "$node" || status=$?
+  if ((status != 0)); then
+    stop "$node" "$node does not run the configuration applied in try mode any longer, so the checks did not see it throughout"
+  fi
+
+  step="keeping the configuration on $node"
+  if ! cluster_talman apply -n "$node"; then
+    stop "$node" "applying the configuration to $node again, to keep it, failed"
+  fi
+  kept+=("$node")
+  echo "cluster-talos: $node keeps the configuration"
+done
+echo "cluster-talos: the configuration of $cluster is applied, node by node, each checked before it was kept"

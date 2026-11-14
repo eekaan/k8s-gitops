@@ -26,14 +26,15 @@ module "nodes" {
     subnet_id = local.plumbing.router.attached_subnet_ids.nodes
     cidr      = local.plumbing.network.cidr
   }
-  image_id            = local.plumbing.image.id
-  external_network    = local.plumbing.router.external_network
-  api_allowed_cidrs   = var.api_allowed_cidrs
-  controlplane_count  = var.controlplane_count
-  worker_count        = var.worker_count
-  controlplane_flavor = var.controlplane_flavor
-  worker_flavor       = var.worker_flavor
-  tags                = [var.prefix]
+  image_id             = local.plumbing.image.id
+  external_network     = local.plumbing.router.external_network
+  api_allowed_cidrs    = var.api_allowed_cidrs
+  security_group_rules = var.security_group_rules
+  controlplane_count   = var.controlplane_count
+  worker_count         = var.worker_count
+  controlplane_flavor  = var.controlplane_flavor
+  worker_flavor        = var.worker_flavor
+  tags                 = [var.prefix]
 }
 
 # The CI host the ci stack makes, at its host number on the node subnet, reaches the Talos API and
@@ -105,10 +106,11 @@ locals {
   talman_nodes = flatten([
     for role in ["controlplane", "worker"] : [
       for name in sort(keys(module.nodes.nodes)) : {
-        hostname    = name
-        role        = role
-        address     = module.nodes.nodes[name].floating_address
-        floating_ip = module.nodes.nodes[name].floating_address
+        hostname        = name
+        role            = role
+        address         = module.nodes.nodes[name].floating_address
+        floating_ip     = module.nodes.nodes[name].floating_address
+        private_address = module.nodes.nodes[name].private_address
       } if module.nodes.nodes[name].role == role
     ]
   ])
@@ -130,5 +132,9 @@ locals {
     # Where the cluster recipes, which run outside the node network, reach the Kubernetes API.
     api_address = module.api_lb.floating_address
     nodes       = local.talman_nodes
+    # The nodes' own firewall: its listeners, and the allowlist that reaches the Talos and Kubernetes
+    # APIs, which the generated talman.yaml carries and nothing committed does.
+    firewall       = yamldecode(file("${path.module}/../../../../../talos/firewall.yaml"))
+    operator_cidrs = sort(distinct(var.api_allowed_cidrs))
   })
 }

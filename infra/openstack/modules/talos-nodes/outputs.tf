@@ -34,6 +34,7 @@ output "security_group" {
         values(openstack_networking_secgroup_rule_v2.api),
         values(openstack_networking_secgroup_rule_v2.hairpin),
         [openstack_networking_secgroup_rule_v2.api_from_subnet],
+        values(openstack_networking_secgroup_rule_v2.open),
         ) : {
         security_group_id = rule.security_group_id
         direction         = rule.direction

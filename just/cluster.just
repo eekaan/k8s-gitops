@@ -50,7 +50,7 @@ cluster-flux *args:
 cluster-kubeconfig cluster='lab-sto2':
     scripts/cluster-kubeconfig {{ quote(cluster) }}
 
-# Roll a cluster's configuration out: show what would change, then apply once its name is typed back (--yes: without asking; --onboard: configure new nodes too)
+# Roll a cluster's configuration out: show what would change, then apply once its name is typed back (--yes: without asking; --onboard: configure new nodes too; --first <node>: apply to that node and then each other one alone in Talos' try mode, which reverts by itself, and keep it only once the Talos API and cluster-check pass)
 [positional-arguments]
 cluster-talos *args:
     scripts/cluster-talos "$@"
