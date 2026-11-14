@@ -3,8 +3,9 @@
 # substitution, and scripts/install-cilium passes this file to helm as it is, so both install the
 # same thing. Keys not set here keep the chart's defaults.
 #
-# ServiceMonitors and Grafana dashboards are off wherever the chart has them, until the
-# prometheus-operator CRDs and a Grafana exist.
+# ServiceMonitors and Grafana dashboards are off wherever the chart has them. scripts/install-cilium
+# installs from this file before Flux runs, when no monitoring resource definition exists yet, and
+# the chart refuses a ServiceMonitor without its definition; dashboards wait for a Grafana.
 
 # Talos runs without kube-proxy, so Cilium serves Services itself.
 kubeProxyReplacement: true

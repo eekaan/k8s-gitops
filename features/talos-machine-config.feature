@@ -41,6 +41,11 @@ Feature: Talos machine configuration
     When the configuration is rendered
     Then every control plane's configuration lists them for both the Talos API and the Kubernetes API server, and no worker's does
 
+  Scenario: Control planes serve the controller manager's, the scheduler's and etcd's metrics beyond the node itself
+    Given the template, the patches and fixture node data
+    When the configuration is rendered
+    Then every control plane's controller manager and scheduler listen on all of the node's addresses and its etcd serves metrics over plain HTTP on port 2381 on all of them, and no worker's configuration sets any of these
+
   Scenario: Cilium replaces the bundled CNI and kube-proxy
     Given the rendered control plane configuration
     When it is read
@@ -55,6 +60,11 @@ Feature: Talos machine configuration
     Given the template, the patches, the schematic and fixture node data
     When the Talos check renders every node's configuration with talman and validates it with talosctl
     Then each of the six configurations loads drbd with usermode_helper=disabled, drbd_transport_tcp, dm-thin-pool and dm-snapshot, and no other kernel module
+
+  Scenario: Every node's machine configuration allows unprivileged user namespaces, which gVisor needs
+    Given the template, the patches, the schematic and fixture node data
+    When the Talos check renders every node's configuration with talman and validates it with talosctl
+    Then each of the six configurations sets user.max_user_namespaces once, to 11255, the value the gVisor extension's README gives, in place of the 0 of Talos' kernel hardening defaults
 
   Scenario: Every worker's machine configuration names the data device the same way, and no control plane's does
     Given fixture node data with three control planes and three workers

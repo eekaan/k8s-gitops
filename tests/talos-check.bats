@@ -280,6 +280,32 @@ EOF
   done
 }
 
+@test "Control planes serve the controller manager's, the scheduler's and etcd's metrics beyond the node itself" {
+  run "$SCRIPT" "$RENDERED"
+
+  [ "$status" -eq 0 ]
+  mapfile -t controlplanes < <(nodes controlplane)
+  mapfile -t workers < <(nodes worker)
+  [ "${#controlplanes[@]}" -eq 3 ]
+  [ "${#workers[@]}" -eq 3 ]
+  # Talos binds both to 127.0.0.1 unless told otherwise, and has etcd serve metrics only on its
+  # client port, behind client certificates.
+  for hostname in "${controlplanes[@]}"; do
+    config="$RENDERED/$hostname.yaml"
+    listens=$(yq -N 'select(.kind == "KubeControllerManagerConfig" or .kind == "KubeSchedulerConfig")
+      | .kind + " " + (.extraArgs["bind-address"] // "none")' "$config" | sort)
+    metrics=$(yq 'select(.version == "v1alpha1") | .cluster.etcd.extraArgs["listen-metrics-urls"] // "none"' "$config")
+    echo "$hostname: $(paste -sd, <<< "$listens"); etcd metrics: $metrics"
+    [ "$listens" = "$(printf '%s\n' 'KubeControllerManagerConfig 0.0.0.0' 'KubeSchedulerConfig 0.0.0.0')" ]
+    [ "$metrics" = http://0.0.0.0:2381 ]
+  done
+  for hostname in "${workers[@]}"; do
+    config="$RENDERED/$hostname.yaml"
+    [ -z "$(yq 'select(.kind == "KubeControllerManagerConfig" or .kind == "KubeSchedulerConfig") | .kind' "$config")" ]
+    [ "$(yq 'select(.version == "v1alpha1") | .cluster.etcd // {} | length' "$config")" -eq 0 ]
+  done
+}
+
 @test "Cilium replaces the bundled CNI and kube-proxy" {
   run "$SCRIPT" "$RENDERED"
 
@@ -313,6 +339,22 @@ EOF
     modules=$(yq -N 'select(.kind == "KernelModuleConfig") | [.name] + (.parameters // []) | join(" ")' "$RENDERED/$hostname.yaml" | sort)
     echo "$hostname loads: $(paste -sd, <<< "$modules")"
     [ "$modules" = "$expected" ]
+    checked=$((checked + 1))
+  done
+  [ "$checked" -eq 6 ]
+}
+
+@test "Every node's machine configuration allows unprivileged user namespaces, which gVisor needs" {
+  run "$SCRIPT" "$RENDERED"
+
+  [ "$status" -eq 0 ]
+  # Every value the configuration gives the limit: in a SysctlConfig document, or in the deprecated
+  # machine.sysctls, which SysctlConfig overrides. A key may be written with slashes for dots.
+  checked=0
+  for hostname in $(nodes); do
+    values=$(yq -N '((select(.kind == "SysctlConfig") | .params), (select(.version == "v1alpha1") | .machine.sysctls)) // {} | to_entries[] | select(.key | sub("/", ".") == "user.max_user_namespaces") | .value' "$RENDERED/$hostname.yaml")
+    echo "$hostname sets user.max_user_namespaces to: $(paste -sd, <<< "$values")"
+    [ "$values" = 11255 ]
     checked=$((checked + 1))
   done
   [ "$checked" -eq 6 ]

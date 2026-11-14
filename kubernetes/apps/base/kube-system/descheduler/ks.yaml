@@ -8,6 +8,9 @@ metadata:
 spec:
   path: ./apps/base/kube-system/descheduler/app
   targetNamespace: kube-system
+  # Its chart makes a ServiceMonitor, a kind that exists once prometheus-operator-crds is Ready.
+  dependsOn:
+    - name: prometheus-operator-crds
   sourceRef:
     kind: ExternalArtifact
     name: descheduler
