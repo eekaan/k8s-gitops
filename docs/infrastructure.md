@@ -101,6 +101,22 @@ operator's own rclone configuration, its `RCLONE_` and `AWS_` variables and ever
 but `PATH`, `HOME`, `TMPDIR` and the proxy variables stay out of its environment. What rclone
 prints names the buckets and the endpoint, so it is not shown.
 
+## The workers' data volumes
+
+The cluster stack gives every worker, and no control plane, one more volume besides its boot
+volume: `<node>-data`, such as `lab-w-1-data`, of `worker_data_volume_size` GiB, 100 by default
+and at least 2, and of the volume type `worker_data_volume_type`, `cbs` by default. Each is
+attached to its worker by an attachment resource of its own, never as a block device of the
+instance, so adding the volumes to running workers creates a volume and an attachment per worker
+and changes no server. The volume stays empty: Talos hands it to the storage layer under one
+device name ([cluster.md](cluster.md#the-workers-data-device), ADR 0011). The sensitive output
+`worker_data_volumes` gives each volume's ID, name, size and type, and the instance and volume its
+attachment joins.
+
+The volumes belong to the cluster stack. `just infra-destroy` and `just cluster-destroy` delete
+them with it, and what is on them is gone; backups are what keeps data
+([ADR 0008](adr/0008-state-and-backups-are-encrypted-before-they-leave.md)).
+
 ## The generated talman.yaml
 
 The cluster stack renders `talos/talman.yaml.tftpl` from its own values into the sensitive output

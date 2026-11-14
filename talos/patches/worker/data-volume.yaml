@@ -1,0 +1,13 @@
+# The data volume the cluster stack attaches to every worker, for the storage layer. Talos makes it
+# a raw volume: one partition over the disk that is not the system disk, labelled r-data, with no
+# filesystem, and links it as /dev/disk/by-partlabel/r-data. The name is the same on every worker
+# whatever the cloud calls the disk or the order it is attached in. A disk with less than 1 GiB
+# free is never taken; the cluster stack's data volumes are larger.
+---
+apiVersion: v1alpha1
+kind: RawVolumeConfig
+name: data
+provisioning:
+  diskSelector:
+    match: "!system_disk"
+  minSize: 1GiB

@@ -313,6 +313,56 @@ EOF
   [ "$checked" -eq 6 ]
 }
 
+@test "Every worker's machine configuration names the data device the same way, and no control plane's does" {
+  run "$SCRIPT" "$RENDERED"
+
+  [ "$status" -eq 0 ]
+  mapfile -t controlplanes < <(nodes controlplane)
+  mapfile -t workers < <(nodes worker)
+  [ "${#controlplanes[@]}" -eq 3 ]
+  [ "${#workers[@]}" -eq 3 ]
+  # Talos labels a raw volume's partition r-<name> and links it as /dev/disk/by-partlabel/r-<name>,
+  # so the volume's name is the device's name. The disk is chosen as the one Talos does not run
+  # from, by nothing the cloud assigns: no ID, serial or device path.
+  first=
+  for hostname in "${workers[@]}"; do
+    [ "$(yq 'select(.kind == "RawVolumeConfig") | .kind' "$RENDERED/$hostname.yaml" | wc -l)" -eq 1 ]
+    raw=$(yq -o json -I 0 'select(.kind == "RawVolumeConfig")' "$RENDERED/$hostname.yaml")
+    [ "$(yq -p json '.name' <<< "$raw")" = data ]
+    [ "$(yq -p json '.provisioning.diskSelector.match' <<< "$raw")" = '!system_disk' ]
+    [ "$raw" = "${first:=$raw}" ]
+  done
+  for hostname in "${controlplanes[@]}"; do
+    [ -z "$(yq 'select(.kind == "RawVolumeConfig") | .kind' "$RENDERED/$hostname.yaml")" ]
+  done
+}
+
+@test "The machine configuration puts no filesystem on the data device" {
+  run "$SCRIPT" "$RENDERED"
+
+  [ "$status" -eq 0 ]
+  mapfile -t workers < <(nodes worker)
+  [ "${#workers[@]}" -eq 3 ]
+  for hostname in "${workers[@]}"; do
+    [ "$(yq 'select(.kind == "RawVolumeConfig") | .name' "$RENDERED/$hostname.yaml")" = data ]
+  done
+  checked=0
+  for hostname in $(nodes); do
+    config="$RENDERED/$hostname.yaml"
+    # Volumes Talos formats or mounts, swap, and LVM, which claims a disk as a physical volume.
+    claims=$(yq 'select(.kind // "" | test("^(User|Existing|External|Swap)VolumeConfig$|^LVM")) | .kind' "$config")
+    [ -z "$claims" ]
+    # A system volume follows the system disk unless a disk selector places it elsewhere.
+    [ -z "$(yq 'select(.kind == "VolumeConfig" and .provisioning.diskSelector != null) | .name' "$config")" ]
+    # The machine configuration's own partitioning and mounting of extra disks.
+    [ "$(yq 'select(.version == "v1alpha1") | .machine.disks // [] | length' "$config")" -eq 0 ]
+    # Encryption would write a LUKS header onto the partition.
+    [ -z "$(yq 'select(.kind == "RawVolumeConfig" and .encryption != null) | .name' "$config")" ]
+    checked=$((checked + 1))
+  done
+  [ "$checked" -eq 6 ]
+}
+
 @test "An output directory inside the repository is refused" {
   copy_tree
   ln -s "$COPY/talos" "$BATS_TEST_TMPDIR/linked"

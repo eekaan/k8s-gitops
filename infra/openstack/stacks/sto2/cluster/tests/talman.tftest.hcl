@@ -184,6 +184,31 @@ run "_the_cluster_is_named_lab_sto2_on_the_plumbing_stacks_node_subnet" {
   }
 }
 
+# The workers' patches, for the data volume, form a group of their own. talman refuses a patch group
+# no node is in, so a cluster without workers has none.
+run "_the_workers_have_a_patch_group_of_their_own" {
+  command = plan
+
+  assert {
+    condition     = yamldecode(output.talman_yaml).patches.worker == ["../patches/worker/data-volume.yaml"]
+    error_message = "talman.yaml must give the workers the data volume's patch in their own group."
+  }
+}
+
+run "_a_cluster_without_workers_has_no_worker_patch_group" {
+  command = plan
+
+  variables {
+    controlplane_count = 1
+    worker_count       = 0
+  }
+
+  assert {
+    condition     = !contains(keys(yamldecode(output.talman_yaml).patches), "worker")
+    error_message = "talman.yaml must hold no worker patch group when there is no worker, as talman refuses a group no node is in."
+  }
+}
+
 # Kubernetes gives each node a /24 of the pod subnet. The subnets in these runs come from the
 # documentation ranges, so a run that needs a pod subnet to be accepted plans one control plane and
 # no workers: a /24 then holds the one node's range.

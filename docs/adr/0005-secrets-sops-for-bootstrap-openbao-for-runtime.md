@@ -2,6 +2,9 @@
 
 - Status: accepted
 - Date: 2026-11-14
+- Amended: 2026-11-14, the OpenStack credential is the cloud controller's only, as volumes come
+  from LINSTOR, which needs none
+  ([ADR 0011](0011-persistent-volumes-from-linstor-on-a-data-volume-per-worker.md))
 
 ## Context
 
@@ -11,8 +14,8 @@ application secrets that change over the cluster's life.
 ## Decision
 
 - **Bootstrap material** is SOPS-encrypted with age and committed: the Talos secrets bundle,
-  the OpenStack credential for the cloud controller and CSI driver, and the cluster's
-  substitution secrets. Flux decrypts with an age key applied at bootstrap.
+  the OpenStack credential for the cloud controller, and the cluster's substitution secrets.
+  Flux decrypts with an age key applied at bootstrap.
 - **Runtime secrets** live in OpenBao running in the cluster and reach workloads through
   External Secrets and a `ClusterSecretStore`. Application secrets are not committed, encrypted
   or otherwise.

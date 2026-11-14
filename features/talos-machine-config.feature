@@ -56,6 +56,16 @@ Feature: Talos machine configuration
     When the Talos check renders every node's configuration with talman and validates it with talosctl
     Then each of the six configurations loads drbd with usermode_helper=disabled, drbd_transport_tcp, dm-thin-pool and dm-snapshot, and no other kernel module
 
+  Scenario: Every worker's machine configuration names the data device the same way, and no control plane's does
+    Given fixture node data with three control planes and three workers
+    When the configuration is rendered and validated
+    Then every worker's configuration has the same one raw volume, named data, on the disk that is not the system disk, and no control plane's configuration has a raw volume
+
+  Scenario: The machine configuration puts no filesystem on the data device
+    Given the rendered configuration of every node, each worker's with its raw volume
+    When it is read
+    Then no document formats, encrypts, mounts or claims a disk: there is no user, existing, external or swap volume, no LVM, no machine.disks, no system volume placed by a disk selector, and the raw volume is not encrypted
+
   Scenario: An output directory inside the repository is refused
     Given an output directory inside the repository, named directly, relative to it or through a symlink
     When the Talos check runs
