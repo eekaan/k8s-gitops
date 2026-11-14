@@ -36,6 +36,11 @@ Feature: Repository checks
     When the secrets scan runs
     Then it exits non-zero naming the second file and not the first
 
+  Scenario: The secrets scan judges the history reachable from HEAD, not every ref of the clone
+    Given a repository with a commit holding a key in the shape of a cloud access key on a branch that HEAD does not reach
+    When the secrets scan runs on a branch without that commit, and then on the branch with it
+    Then the first run exits zero and the second exits non-zero naming the file
+
   Scenario: A version string is not an address
     Given a tracked file containing a dotted version such as v1.14.6 or 2.10.0
     When the address-literal check runs

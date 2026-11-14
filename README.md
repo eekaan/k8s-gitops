@@ -32,7 +32,9 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
   (`just talos-check`: every node's machine configuration rendered from the template, the patches
   and fixture node data, and validated, offline), the offline build of `kubernetes/`, its render
   with every chart expanded (`just render-check`, which pulls the charts from their public
-  registries), and gitleaks over the committable files and the git history. The groups `tests-1` to `tests-3` each run a
+  registries), and gitleaks over the committable files and the git history reachable from `HEAD`,
+  so a clone and a CI checkout are judged on the same commits. The groups `tests-1` to `tests-3`
+  each run a
   third of the bats tests.
 - The groups are the dependencies of the `checks` recipe, and a group's checks are its own
   dependencies; a new check goes into exactly one group, and then runs in `just checks`, in

@@ -46,7 +46,9 @@ secrets-scan:
       fi
     done
     (cd "$tree" && gitleaks dir --no-banner --redact --verbose --config "$repo/.gitleaks.toml" .)
-    gitleaks git --no-banner --redact --verbose --config .gitleaks.toml .
+    # The history reachable from HEAD, which is all a CI checkout holds; by default gitleaks reads
+    # every ref, so a commit on another branch of a clone would fail the scan only there.
+    gitleaks git --no-banner --redact --verbose --config .gitleaks.toml --log-opts=HEAD .
 
 # Fail on IPv4 literals a public repository must not hold, in the files git would commit
 check-literals:

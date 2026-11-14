@@ -165,3 +165,29 @@ EOF
     [[ $output != *"$check started"* ]]
   done
 }
+
+@test "The secrets scan judges the history reachable from HEAD, not every ref of the clone" {
+  local commit=(git -c user.name=fixture -c user.email=fixture@example.invalid commit -q)
+  cp "$BATS_TEST_DIRNAME/../.gitleaks.toml" .gitleaks.toml
+  git add .gitleaks.toml
+  "${commit[@]}" -m "clean history"
+  git switch -q -c clean
+  git switch -q -c flagged
+  # In the shape of an AWS access key ID, put together here so this file holds none.
+  echo "aws_access_key_id = AKIA$(printf '%s' QZ7XK2M4B6N3P5R7)" > key.txt
+  git add key.txt
+  "${commit[@]}" -m "a commit with a key, on another branch"
+  git switch -q clean
+  [ ! -e key.txt ]
+
+  recipe secrets-scan
+
+  [ "$status" -eq 0 ]
+
+  git switch -q flagged
+
+  recipe secrets-scan
+
+  [ "$status" -ne 0 ]
+  [[ $output == *key.txt* ]]
+}
