@@ -31,7 +31,7 @@ fi
 . "$here/stack-env" sto2/edge
 lock_stack
 init_stack
-edge_connect
+edge_connect "$((index + 1))"
 
 echo "${edge_names[index]}:"
 edge_ssh "$index" 'sudo -n vtysh -c "show bgp ipv4 unicast summary" -c "show bgp ipv4 unicast"'
