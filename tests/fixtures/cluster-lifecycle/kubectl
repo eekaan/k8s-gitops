@@ -21,6 +21,11 @@
 #   pool-load-balancer  a Service of type LoadBalancer exists at an address in the service range of
 #                     the fixture's talman.yaml
 #   pending-load-balancer  a Service of type LoadBalancer exists without an address yet
+#   mixed-load-balancer  a Service of type LoadBalancer exists with one address in the service range
+#                     and one outside it
+#   hostname-load-balancer  a Service of type LoadBalancer exists whose load balancer has a host
+#                     name and no address
+#   extra-services    more Services, one JSON object per line
 #   csi-volume        a PersistentVolume of a CSI driver exists
 #   linstor-volumes   as many PersistentVolumes of LINSTOR's CSI driver as the file's number
 # Every object it answers with holds addresses from the documentation ranges, as do its errors and the
@@ -166,6 +171,18 @@ services() {
   if listed pending-load-balancer; then
     jq -n '{metadata: {namespace: "apps", name: "queued"}, spec: {type: "LoadBalancer", clusterIP: "198.51.100.67"},
       status: {loadBalancer: {}}}'
+  fi
+  if listed mixed-load-balancer; then
+    jq -n '{metadata: {namespace: "apps", name: "mixed"}, spec: {type: "LoadBalancer", clusterIP: "198.51.100.68"},
+      status: {loadBalancer: {ingress: [{ip: "192.0.2.131"}, {ip: "198.51.100.69"}]}}}'
+  fi
+  if listed hostname-load-balancer; then
+    jq -n '{metadata: {namespace: "apps", name: "named"}, spec: {type: "LoadBalancer", clusterIP: "198.51.100.70"},
+      status: {loadBalancer: {ingress: [{hostname: "lb.example.invalid"}]}}}'
+  fi
+  # One object per line, for an ingress address no other state gives.
+  if listed extra-services; then
+    cat "$state/extra-services"
   fi
 }
 
