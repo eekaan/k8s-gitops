@@ -819,7 +819,7 @@ refused() {
     post
     [ "$status" -ne 0 ] || { echo "posted an artifact of: ${case:-nothing}"; return 1; }
     [ ! -e "$FAKE/writes" ] || { echo "wrote for an artifact of: ${case:-nothing}"; return 1; }
-    [[ $output == *"it must hold one file, comment.md"* || $output == *"not a regular file named comment.md"* ]]
+    [[ $output == *"it must hold one file, comment.md"* || $output == *"comment.md is not a comment render-diff writes: not a regular file"* ]]
   done
   [ ! -e "$BATS_TEST_TMPDIR/ran-from-artifact" ]
 }

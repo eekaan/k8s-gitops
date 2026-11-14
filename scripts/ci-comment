@@ -95,8 +95,8 @@ gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name render-diff --dir "
 entries=$(find "$tmp/artifact" -mindepth 1 | wc -l)
 file="$tmp/artifact/comment.md"
 ((entries == 1)) || die "the artifact holds $entries entries; it must hold one file, comment.md"
-[[ -f $file && ! -L $file ]] || die "the artifact's one entry is not a regular file named comment.md"
-# The reason it gives is the check's own, and names no byte of the artifact.
+# The check refuses anything but a regular file; the reason it gives is its own, and names no byte
+# of the artifact.
 render_comment_check "$file" 2>"$tmp/refused" || die "comment.md is not a comment render-diff writes: $(head -c 200 "$tmp/refused")"
 
 number=$(pull_request)
