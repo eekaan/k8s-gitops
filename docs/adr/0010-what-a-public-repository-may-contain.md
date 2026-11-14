@@ -22,8 +22,8 @@ Deployment-specific values are supplied at run time from gitignored files, CI se
 outputs. Work is tracked outside the repository; a pull request names its issue key and
 describes the change, nothing more.
 
-CI enforces what it can: secret scanning, a check for address literals outside test fixtures,
-and plan output that reports counts instead of resource attributes.
+CI enforces what it can: secret scanning, a check for address literals in files and commit
+messages, and plan output that reports counts instead of resource attributes.
 
 ## Alternatives considered
 

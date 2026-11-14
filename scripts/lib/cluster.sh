@@ -2,11 +2,12 @@
 # Shared by scripts/cluster-env, the cluster-* scripts, the install scripts and the secrets bundle
 # check: the Talos age key's location, talos/.sops.yaml's recipient, the check that a secrets bundle
 # is encrypted, a cluster's nodes and the wait for their Talos API, the line that names the step a
-# recipe failed in, the Flux age key and the other objects Flux needs before it starts, and the
-# install of an application before Flux. Builds on scripts/lib/infra.sh, which reads the
-# environment. Nothing here prints a secret or a deployment value, or passes one as an argument:
-# sops and talman get the Talos age key's location from their environment, and the Flux age key and
-# the values of the objects applied before Flux reach age-keygen, jq and kubectl on standard input.
+# recipe failed in, the talman run that keeps its output out of a CI log, the Flux age key and the
+# other objects Flux needs before it starts, and the install of an application before Flux. Builds
+# on scripts/lib/infra.sh, which reads the environment. Nothing here prints a secret or a deployment
+# value, or passes one as an argument: sops and talman get the Talos age key's location from their
+# environment, and the Flux age key and the values of the objects applied before Flux reach
+# age-keygen, jq and kubectl on standard input.
 
 # shellcheck source=scripts/lib/infra.sh
 . "$(dirname "${BASH_SOURCE[0]}")/infra.sh"
