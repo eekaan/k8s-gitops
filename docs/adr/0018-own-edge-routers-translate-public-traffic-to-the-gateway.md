@@ -23,9 +23,11 @@ balancer service, the same design runs on other infrastructure, and BGP is learn
   cluster's. It accepts a prefix only if it is a /32 inside the service range, denies everything
   else, sets the maximum of accepted prefixes to the size of the range (a guard only a loosened
   prefix list can reach, as FRR counts accepted prefixes and the list lets in no more than the range
-  holds), and advertises nothing. The
+  holds), takes the worker that announced a path as its next hop, and advertises nothing. The
   timers and the graceful restart time are read from the workers' `CiliumBGPPeerConfig` in the
-  manifests, so the two ends cannot disagree. Equal-cost multipath covers as many paths as there can
+  manifests, so the two ends cannot disagree. Graceful restart runs without the notification bit of
+  RFC 8538, which FRR sets by default, so a dead worker's paths go when its hold timer expires
+  rather than a restart time later. Equal-cost multipath covers as many paths as there can
   be workers, and the kernel hashes a flow's layer 4 fields, so a connection stays on one path.
 - **The data path.** nftables on each edge translates a connection to the edge's own address on a
   public port to the public Gateway's address, a host of the service range that the plumbing stack
