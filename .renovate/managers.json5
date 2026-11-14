@@ -14,6 +14,8 @@
   customManagers: [
     {
       customType: "regex",
+      // The version is the last value on that line after a ':' or '=', so the tag ending an image
+      // or OCI reference such as oci://host/path:v1.2.3 counts, not the whole reference.
       description: "A version on the line under a '# renovate: datasource=… depName=…' comment",
       managerFilePatterns: [
         // The one source of the Talos and Kubernetes versions.
@@ -23,7 +25,7 @@
         "/^\\.github/workflows/.+\\.ya?ml$/",
       ],
       matchStrings: [
-        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?\\n[^\\n]*?[:=][ \\t]*[\"']?(?<currentValue>[^\\s\"']+)[\"']?",
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?\\n[^\\n]*?[:=][ \\t]*[\"']?(?<currentValue>[^\\s\"'/]+)[\"']?(?:\\s|$)",
       ],
     },
   ],

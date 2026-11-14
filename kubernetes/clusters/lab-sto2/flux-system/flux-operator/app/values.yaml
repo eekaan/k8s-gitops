@@ -1,0 +1,5 @@
+---
+# Values of the flux-operator chart; every key here is one the chart's own values define.
+# The priority class the chart recommends: the operator keeps Flux running, so it is not among the
+# first pods evicted when a node runs short.
+priorityClassName: system-cluster-critical

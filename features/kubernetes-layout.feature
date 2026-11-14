@@ -66,10 +66,30 @@ Feature: Kubernetes tree layout
     When the kubernetes check runs
     Then it exits non-zero and names the directory
 
-  Scenario: A cluster directory that builds more than the root Kustomization fails the check
-    Given a cluster directory whose kustomization.yaml lists another manifest beside ks.yaml
+  Scenario: A cluster directory that builds anything but the root and Flux itself fails the check
+    Given a cluster directory whose kustomization.yaml lists another manifest beside the root's and Flux's own ks.yaml files, or leaves out the FluxInstance's
     When the kubernetes check runs
-    Then it exits non-zero and names the directory and the extra object
+    Then it exits non-zero and names the directory and the extra or missing object
+
+  Scenario: An application in a cluster directory whose names do not match its directory fails the check
+    Given Flux's own application in a cluster directory whose Kustomization name, sourceRef, targetNamespace or path does not match its directory
+    When the kubernetes check runs
+    Then it exits non-zero and names the file and the field
+
+  Scenario: An undeclared variable in a cluster directory's Kustomizations fails the check
+    Given a root ks.yaml, which the instance's sync Kustomization substitutes, using a variable that is not in the example key lists and has no default
+    When the kubernetes check runs
+    Then it exits non-zero and names the file and the variable
+
+  Scenario: Flux's own application without the root's decryption and substitution fails the check
+    Given Flux's own application in a cluster directory whose ks.yaml has no decryption, or no postBuild.substituteFrom
+    When the kubernetes check runs
+    Then it exits non-zero and names the file and the field
+
+  Scenario: An application with the name of a cluster's own application fails the check
+    Given an application under apps/base named like the Flux Operator application in a cluster directory
+    When the kubernetes check runs
+    Then it exits non-zero and names both directories
 
   Scenario: A ks.yaml that is not valid YAML fails the check
     Given an application that is not enabled in the overlay whose ks.yaml is not valid YAML

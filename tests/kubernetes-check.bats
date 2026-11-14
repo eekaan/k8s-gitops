@@ -17,8 +17,50 @@ put() {
   cat >"$TREE/$1"
 }
 
-# A small tree that passes the check: one cluster, one namespace, one application.
-# Each failure scenario breaks one rule in it.
+# cluster_app NAME: Flux's own application NAME in the fixture cluster, reconciled from the sync
+# source with the root's decryption and substitution, its app/ holding one ConfigMap.
+cluster_app() {
+  local dir="kubernetes/clusters/test/flux-system/$1"
+  put "$dir/ks.yaml" <<EOF
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: $1
+  namespace: flux-system
+spec:
+  interval: 30m
+  path: ./clusters/test/flux-system/$1/app
+  prune: true
+  targetNamespace: flux-system
+  sourceRef:
+    kind: OCIRepository
+    name: flux-system
+  decryption:
+    provider: sops
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: cluster-config
+EOF
+  put "$dir/app/kustomization.yaml" <<'EOF'
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - configmap.yaml
+EOF
+  put "$dir/app/configmap.yaml" <<EOF
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: $1
+EOF
+}
+
+# A small tree that passes the check: one cluster with Flux's own two applications, one
+# namespace, one application. Each failure scenario breaks one rule in it.
 valid_tree() {
   put kubernetes/clusters/test/kustomization.yaml <<'EOF'
 ---
@@ -26,7 +68,11 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - ks.yaml
+  - flux-system/flux-operator/ks.yaml
+  - flux-system/flux-instance/ks.yaml
 EOF
+  cluster_app flux-operator
+  cluster_app flux-instance
   put kubernetes/clusters/test/ks.yaml <<'EOF'
 ---
 apiVersion: kustomize.toolkit.fluxcd.io/v1
@@ -41,6 +87,8 @@ spec:
   sourceRef:
     kind: OCIRepository
     name: flux-system
+  decryption:
+    provider: sops
   postBuild:
     substituteFrom:
       - kind: ConfigMap
@@ -196,6 +244,14 @@ unchanged() {
     flux_built=$((flux_built + 1))
   done < <(cd "$REPO" && find kubernetes -name ks.yaml)
   [ "$flux_built" -gt 1 ]
+
+  # Each cluster directory as well, the way the instance's sync Kustomization builds it.
+  local cluster
+  for cluster in "$REPO"/kubernetes/clusters/*/; do
+    cluster="kubernetes/clusters/$(basename "$cluster")"
+    grep -qxF "built $cluster as the instance's sync Kustomization" <<<"$output" ||
+      { echo "not built as the sync Kustomization: $cluster"; return 1; }
+  done
 }
 
 @test "A Kustomization outside flux-system fails the check" {
@@ -476,8 +532,9 @@ EOF
   fails_naming "kubernetes/clusters/test:" "needs a kustomization.yaml"
 }
 
-@test "A cluster directory that builds more than the root Kustomization fails the check" {
+@test "A cluster directory that builds anything but the root and Flux itself fails the check" {
   valid_tree
+  local kustomization="$TREE/kubernetes/clusters/test/kustomization.yaml"
   put kubernetes/clusters/test/extra.yaml <<'EOF'
 ---
 apiVersion: v1
@@ -486,17 +543,67 @@ metadata:
   name: extra
   namespace: flux-system
 EOF
-  put kubernetes/clusters/test/kustomization.yaml <<'EOF'
----
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-resources:
-  - ks.yaml
-  - extra.yaml
-EOF
+  yq -i '.resources += ["extra.yaml"]' "$kustomization"
 
   check
   fails_naming "kubernetes/clusters/test:" "ConfigMap/extra"
+
+  yq -i '.resources -= ["extra.yaml", "flux-system/flux-instance/ks.yaml"]' "$kustomization"
+  check
+  fails_naming "kubernetes/clusters/test:" "does not build Kustomization/flux-instance"
+}
+
+@test "An application in a cluster directory whose names do not match its directory fails the check" {
+  valid_tree
+  local ks=kubernetes/clusters/test/flux-system/flux-operator/ks.yaml
+  yq -i '.metadata.name = "operator"' "$TREE/$ks"
+  check
+  fails_naming "$ks" "metadata.name must be flux-operator"
+
+  cluster_app flux-operator
+  yq -i '.spec.sourceRef = {"kind": "ExternalArtifact", "name": "flux-operator"}' "$TREE/$ks"
+  check
+  fails_naming "$ks" "sourceRef must be OCIRepository flux-system"
+
+  cluster_app flux-operator
+  yq -i '.spec.targetNamespace = "other"' "$TREE/$ks"
+  check
+  fails_naming "$ks" "targetNamespace must be flux-system"
+
+  cluster_app flux-operator
+  yq -i '.spec.path = "./clusters/test/flux-system/flux-instance/app"' "$TREE/$ks"
+  check
+  fails_naming "$ks" "spec.path must be ./clusters/test/flux-system/flux-operator/app"
+}
+
+@test "An undeclared variable in a cluster directory's Kustomizations fails the check" {
+  valid_tree
+  # shellcheck disable=SC2016 # The variable is for Flux, not the shell.
+  yq -i '.metadata.annotations.owner = "${ROOT_OWNER}"' "$TREE/kubernetes/clusters/test/ks.yaml"
+
+  check
+  fails_naming kubernetes/clusters/test/ks.yaml ROOT_OWNER
+}
+
+@test "Flux's own application without the root's decryption and substitution fails the check" {
+  valid_tree
+  local ks=kubernetes/clusters/test/flux-system/flux-operator/ks.yaml
+  yq -i 'del(.spec.decryption)' "$TREE/$ks"
+  check
+  fails_naming "$ks" "spec.decryption must be"
+
+  cluster_app flux-operator
+  yq -i 'del(.spec.postBuild)' "$TREE/$ks"
+  check
+  fails_naming "$ks" "spec.postBuild.substituteFrom must be"
+}
+
+@test "An application with the name of a cluster's own application fails the check" {
+  valid_tree
+  app kubernetes/apps/base/demo/flux-operator flux-operator demo flux-operator ./apps/base/demo/flux-operator/app
+
+  check
+  fails_naming "kubernetes/clusters/test/flux-system/flux-operator:" "also used by kubernetes/apps/base/demo/flux-operator"
 }
 
 @test "A ks.yaml that is not valid YAML fails the check" {

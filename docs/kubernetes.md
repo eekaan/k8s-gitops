@@ -7,8 +7,10 @@ the rules below.
 
 ## Layout
 
-- `clusters/<cluster>/`: the cluster's root Kustomization in `ks.yaml`, a `kustomization.yaml`
-  that lists only that, and the example key lists, which nothing lists.
+- `clusters/<cluster>/`: the cluster's root Kustomization in `ks.yaml`; Flux's own two
+  applications in `flux-system/flux-operator/` and `flux-system/flux-instance/` (see
+  [Flux itself](#flux-itself)); a `kustomization.yaml` that lists the root's and those two
+  `ks.yaml` files and nothing else; and the example key lists, which nothing lists.
 - `apps/overlays/<cluster>/kustomization.yaml`: what the cluster runs.
 - `apps/base/<namespace>/`: a namespace directory, with `namespace.yaml` and a
   `kustomization.yaml` that sets the namespace and includes `components/common`.
@@ -105,6 +107,81 @@ The ArtifactGenerator publishes each application's `app/` as an ExternalArtifact
 the application, together with `components/`, at the same paths as in the tree, so a change
 reconciles only the applications it touches (ADR 0004). Falling back to one shared source is a
 `sourceRef` change in each `ks.yaml`, to `kind: OCIRepository` and `name: flux-system`.
+
+## Flux itself
+
+The Flux Operator and the `FluxInstance` it runs Flux from are the cluster directory's two
+applications, `flux-system/flux-operator/` and `flux-system/flux-instance/`, the only ones outside
+`apps/`. Each has the application shape: `ks.yaml`, and in `app/` an `OCIRepository` for the
+chart, the `HelmRelease`, its `values.yaml` generated into a ConfigMap that substitution leaves
+alone, and `kustomizeconfig.yaml`, which points the release at that ConfigMap's hashed name. The
+application rules apply with two differences: `sourceRef` is `OCIRepository` `flux-system`, as the
+artifact generator publishes only `apps/base`, and `path` is
+`./clusters/<cluster>/flux-system/<app>/app`. No application in `apps/base` may take their names.
+
+- **Charts**: the operator's own `flux-operator` and `flux-instance` charts from
+  `oci://ghcr.io/controlplaneio-fluxcd/charts`, at one version that Renovate moves together. Each
+  `OCIRepository` refuses a chart without the keyless cosign signature of the publisher's release
+  workflow on a version tag.
+- **Instance**: upstream Flux 2.x, with source-watcher beside the four default controllers for
+  the per-application artifacts, and Flux's network policies on.
+- **Flux versions**: the operator installs the newest Flux 2.x release in its manifests artifact,
+  `oci://ghcr.io/controlplaneio-fluxcd/flux-operator-manifests`, which the instance pins to the
+  operator chart's version. Flux therefore moves only when that tag moves, in the same Renovate
+  pull request as the two charts, and a person merges it (ADR 0009); `tests/flux.bats` fails when
+  the tag and the operator chart's version differ.
+- **Sync**: the instance generates an `OCIRepository` and a `Kustomization`, both named
+  `flux-system` after its namespace, that read `oci://ghcr.io/eekaan/k8s-gitops/manifests` at the
+  tag `main` every minute and apply `./clusters/<cluster>`. Its patches make the source verify the
+  artifact's keyless signature: issued by GitHub Actions to this repository's
+  `.github/workflows/publish.yaml` on `refs/heads/main`. An artifact signed by a run on another
+  branch or tag, or by another workflow, is refused (ADR 0003).
+
+### One root
+
+The instance's `flux-system` Kustomization applies the cluster directory: the root `cluster` from
+`ks.yaml`, and `flux-operator` and `flux-instance`. The root applies `apps/overlays/<cluster>` and
+gives its children the defaults above; it is the one root of the applications. `flux-system` sits
+above it, and nothing in the tree defines a source or Kustomization of that name, so no two
+objects apply the same thing. The instance patches `flux-system` with the same SOPS `decryption`
+and `postBuild.substituteFrom` (`cluster-config`, `cluster-secrets`) that the root gives its
+children, so the cluster directory's `ks.yaml` files are substituted like everything else;
+`just kubernetes-check` builds each cluster directory as that Kustomization does, with strict
+substitution. `flux-operator` and `flux-instance` are not children of the root and get none of
+its defaults. They set the same `decryption` and `postBuild.substituteFrom` themselves, which the
+check requires, so what they apply is decrypted and substituted like the root's children; and
+they set their own interval, retry interval, timeout, `wait` and pruning. Their `HelmRelease`
+objects likewise get none of the release defaults and set their own upgrade remediation: a failed
+upgrade is retried three times, then rolled back. `flux-instance` waits for `flux-operator`, whose
+chart defines the `FluxInstance` kind.
+
+Both Kustomizations prune, but what manages Flux is kept from it. Their `HelmRelease` and chart
+`OCIRepository` objects carry `kustomize.toolkit.fluxcd.io/prune: disabled`: garbage-collecting
+the operator's release would uninstall the operator, and the instance's release would take the
+`FluxInstance` with it, on which the operator deletes Flux's controllers. The instance chart also
+gives the `FluxInstance` `helm.sh/resource-policy: keep`, so even an uninstalled release leaves it
+in place. The values ConfigMaps are still collected when a change of values replaces them.
+Removing either Kustomization from the cluster directory's `kustomization.yaml` fails
+`just kubernetes-check`, as the cluster directory must build exactly the root, `flux-operator` and
+`flux-instance`.
+
+### Controllers
+
+The instance's patches give kustomize-controller `--sops-age-secret=sops-age`. The controller
+reads the Secret `sops-age` from its own namespace, `flux-system`, and takes the age key from each
+of its data keys whose name ends in `.agekey`, such as `age.agekey`. It decrypts with that key
+every Kustomization that uses SOPS and names no Secret of its own in `decryption.secretRef`, which
+in this tree is every one. Like `cluster-config` and `cluster-secrets`, the Secret exists before
+Flux does and nothing in the tree creates it; until it exists, every Kustomization that decrypts
+fails, the root and Flux's own included.
+
+Flux 2.10 still gates `ExternalArtifact` sources, which source-watcher produces, behind a feature
+gate on kustomize-controller and helm-controller. The operator turns the gate on by itself
+whenever source-watcher is among the instance's components, so the instance does not patch it.
+
+`tests/flux.bats` renders both charts with these values, pulling each chart once, and applies the
+instance's patches to the pinned Flux manifests to check the sync source, its signature identity,
+the components and the age-key flag.
 
 ## Applications installed before Flux
 

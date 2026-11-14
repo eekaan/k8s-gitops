@@ -1,0 +1,32 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+# The Flux Operator. The instance's sync Kustomization applies this from the cluster directory, so
+# it is not a child of the root and none of the root's defaults reach it: it sets its own.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: flux-operator
+  namespace: flux-system
+spec:
+  interval: 30m
+  # A failed reconcile is retried after a minute instead of waiting out the interval.
+  retryInterval: 1m
+  # Ready only once the release is, which flux-instance waits for; a chart upgrade that rolls the
+  # operator's pod can take minutes.
+  wait: true
+  timeout: 10m
+  path: ./clusters/lab-sto2/flux-system/flux-operator/app
+  prune: true
+  targetNamespace: flux-system
+  sourceRef:
+    kind: OCIRepository
+    name: flux-system
+  # The decryption and substitution the root gives its children.
+  decryption:
+    provider: sops
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: cluster-config
+      - kind: Secret
+        name: cluster-secrets
