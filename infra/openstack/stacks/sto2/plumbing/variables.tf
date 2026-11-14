@@ -15,9 +15,9 @@ variable "node_cidr" {
 # with the subnet's plan, as the edge routers outlive a rebuild of the cluster.
 
 variable "edge_hosts" {
-  description = "Host numbers in node_cidr of the two edge routers' fixed addresses, which the workers peer with over BGP: below the DHCP pool, among the fixed addresses, where the cluster stack puts the API load balancer at 5 and the nodes from 10 up."
+  description = "Host numbers in node_cidr of the two edge routers' fixed addresses, which the workers peer with over BGP: below the DHCP pool, among the fixed addresses, where the cluster stack puts the API load balancer at 5 and the nodes from 10 up, and the ci stack the CI host at its host_number, 6 by default. The cluster and ci stacks refuse a CI host number that is one of these."
   type        = list(number)
-  default     = [6, 7]
+  default     = [7, 8]
 
   validation {
     condition     = length(var.edge_hosts) == 2 && length(distinct(var.edge_hosts)) == 2

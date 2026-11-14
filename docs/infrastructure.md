@@ -106,6 +106,27 @@ operator's own rclone configuration, its `RCLONE_` and `AWS_` variables and ever
 but `PATH`, `HOME`, `TMPDIR` and the proxy variables stay out of its environment. What rclone
 prints names the buckets and the endpoint, so it is not shown.
 
+## The node subnet
+
+The plumbing stack's node subnet, `node_cidr`, `10.10.0.0/24` by default, is shared by every
+stack. Neutron hands out addresses itself only from the DHCP pool; everything else holds a fixed
+address below it, by host number:
+
+| Host number | Holder | Set by |
+| --- | --- | --- |
+| 1 | the gateway, the router's port | Neutron |
+| 5 | the Kubernetes API's load balancer | the cluster stack |
+| 6 | the CI host ([The CI host](#the-ci-host)) | the ci stack's `host_number` |
+| 7 and 8 | the two edge routers ([Services announced over BGP](#services-announced-over-bgp)) | the plumbing stack's `edge_hosts` |
+| 10 and up | the control planes | the cluster stack |
+| 20 and up | the workers | the cluster stack |
+| 100 to 200 | the DHCP pool | the plumbing stack |
+
+Collisions fail the plan: the plumbing stack keeps the edge routers above the gateway and below
+the pool, the ci stack keeps the CI host between 2 and 9, off 5 and off the edge routers, the
+cluster stack refuses a `ci_host_number` that is an edge router's and a node or load balancer on an
+edge router's address.
+
 ## The workers' data volumes
 
 The cluster stack gives every worker, and no control plane, one more volume besides its boot
@@ -134,10 +155,11 @@ output `bgp`:
 - `service_range`, `10.20.0.0/28` by default: the range addresses come from. It lies in one of
   RFC 1918's private ranges and outside `node_cidr`, and the cluster stack refuses a `pod_subnet`
   or `service_subnet` that overlaps it. Only BGP makes it reachable, through the edge routers.
-- `edge_hosts`, 6 and 7 by default: the host numbers of the edge routers' two addresses on the node
-  subnet, below the DHCP pool and above the gateway. They are reserved for the edge routers; no
-  stack creates an instance at them yet, and until one does, the workers' BGP sessions stay down.
-  The cluster stack refuses a plan in which a node or the API load balancer takes one.
+- `edge_hosts`, 7 and 8 by default: the host numbers of the edge routers' two addresses on the node
+  subnet ([The node subnet](#the-node-subnet)), below the DHCP pool and above the gateway. They are
+  reserved for the edge routers; no stack creates an instance at them yet, and until one does, the
+  workers' BGP sessions stay down. The cluster stack refuses a plan in which a node, the API load
+  balancer or `ci_host_number` takes one, and the ci stack one in which its `host_number` does.
 - `cluster_asn` and `edge_asn`, 64513 and 64512 by default: the workers' and the edge routers'
   autonomous system numbers, two different private 16-bit numbers (64512 to 65534), for eBGP.
 
@@ -172,8 +194,10 @@ around it; it is destroyed by name only ([Recipes](#recipes)).
 - `<prefix>-ci`, `lab-ci` by default, of the flavor `flavor`, booting from a volume of
   `root_volume_size_gb` GB made from the image `CI_HOST_IMAGE` names, a Debian or Ubuntu cloud
   image. Its port is on the node subnet at host number `host_number`, 6 by default: below the DHCP
-  pool and the control planes' 10, apart from the API load balancer's 5. It has a floating IP from
-  the plumbing stack's external network.
+  pool and the control planes' 10, apart from the API load balancer's 5 and the edge routers' 7
+  and 8, which the stack reads from the plumbing stack's state and refuses
+  ([The node subnet](#the-node-subnet)). It has a floating IP from the plumbing stack's external
+  network.
 - Its security group admits TCP 22 from each network of the operator allowlist, the same
   `OPERATOR_CIDRS` or `operator-cidrs.json` the cluster stack takes, and nothing else inbound; it
   lets the host reach anything. The cloud's default rules are deleted, so the group holds only

@@ -42,7 +42,7 @@ override_data {
       bgp = {
         cluster_asn    = 64496
         edge_asn       = 64497
-        edge_addresses = ["192.0.2.6", "192.0.2.7"]
+        edge_addresses = ["192.0.2.7", "192.0.2.8"]
         service_range  = "203.0.113.16/28"
       }
     }
@@ -65,7 +65,7 @@ run "the_edge_addresses_and_the_service_range_overlap_nothing" {
   command = plan
 
   variables {
-    edges    = ["192.0.2.6", "192.0.2.7"]
+    edges    = ["192.0.2.7", "192.0.2.8"]
     range    = "203.0.113.16/28"
     node_net = "192.0.2.0/24"
   }
@@ -154,7 +154,7 @@ run "_an_edge_address_on_a_node_is_rejected" {
         bgp = {
           cluster_asn    = 64496
           edge_asn       = 64497
-          edge_addresses = ["192.0.2.6", "192.0.2.20"]
+          edge_addresses = ["192.0.2.7", "192.0.2.20"]
           service_range  = "203.0.113.16/28"
         }
       }
@@ -188,7 +188,7 @@ run "_an_edge_address_on_the_api_load_balancer_is_rejected" {
         bgp = {
           cluster_asn    = 64496
           edge_asn       = 64497
-          edge_addresses = ["192.0.2.5", "192.0.2.7"]
+          edge_addresses = ["192.0.2.5", "192.0.2.8"]
           service_range  = "203.0.113.16/28"
         }
       }
@@ -196,6 +196,31 @@ run "_an_edge_address_on_the_api_load_balancer_is_rejected" {
   }
 
   expect_failures = [output.nodes]
+}
+
+# The CI host takes a fixed address below the DHCP pool too, by host number: never an edge router's.
+run "_a_ci_host_number_on_an_edge_router_is_rejected" {
+  command = plan
+
+  variables {
+    ci_host_number = 7
+  }
+
+  expect_failures = [var.ci_host_number]
+}
+
+# The CI host's default host number, beside the edge routers' default ones, plans.
+run "_the_ci_hosts_default_number_lies_apart_from_the_edge_routers" {
+  command = plan
+
+  variables {
+    ci_host_number = 6
+  }
+
+  assert {
+    condition     = length(output.nodes) == 6
+    error_message = "The cluster stack must plan with the CI host at host number 6 beside the edge routers at 7 and 8."
+  }
 }
 
 run "workers_may_receive_and_answer_for_the_service_range_and_control_planes_may_not" {
@@ -229,7 +254,7 @@ run "the_edge_routers_can_reach_the_workers_for_bgp_and_for_service_traffic_and_
         source    = rule.remote_ip_prefix
       }
       ]) == toset([
-      for pair in setproduct([80, 443], ["192.0.2.6/32", "192.0.2.7/32"]) : {
+      for pair in setproduct([80, 443], ["192.0.2.7/32", "192.0.2.8/32"]) : {
         direction = "ingress"
         ethertype = "IPv4"
         protocol  = "tcp"
@@ -265,7 +290,7 @@ run "the_edge_routers_can_reach_the_workers_for_bgp_and_for_service_traffic_and_
   assert {
     condition = length([
       for rule in concat(output.security_group.ingress_rules, output.worker_security_group.ingress_rules) : rule
-      if contains(["192.0.2.6/32", "192.0.2.7/32"], coalesce(rule.remote_ip_prefix, "none")) && !contains([80, 443], rule.port_range_min)
+      if contains(["192.0.2.7/32", "192.0.2.8/32"], coalesce(rule.remote_ip_prefix, "none")) && !contains([80, 443], rule.port_range_min)
       ]) == 0 && length([
       for rule in concat(output.security_group.ingress_rules, output.worker_security_group.ingress_rules) : rule
       if rule.port_range_min == 179 || rule.port_range_max == 179
@@ -283,7 +308,7 @@ run "_the_edge_routers_reach_the_service_ports_the_variable_names" {
   }
 
   assert {
-    condition     = sort([for rule in output.worker_security_group.ingress_rules : "${rule.port_range_min}-${rule.port_range_max} ${rule.remote_ip_prefix}"]) == tolist(["8443-8443 192.0.2.6/32", "8443-8443 192.0.2.7/32"])
+    condition     = sort([for rule in output.worker_security_group.ingress_rules : "${rule.port_range_min}-${rule.port_range_max} ${rule.remote_ip_prefix}"]) == tolist(["8443-8443 192.0.2.7/32", "8443-8443 192.0.2.8/32"])
     error_message = "The workers' own group must admit the ports service_ports names, from each edge address, and no other."
   }
 }

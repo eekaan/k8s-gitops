@@ -18,8 +18,8 @@ run "_the_edge_addresses_lie_below_the_dhcp_pool_and_the_service_range_outside_t
   command = plan
 
   assert {
-    condition     = output.bgp.edge_addresses == [cidrhost(output.network.cidr, 6), cidrhost(output.network.cidr, 7)]
-    error_message = "The edge routers must sit at host numbers 6 and 7 of the node subnet."
+    condition     = output.bgp.edge_addresses == [cidrhost(output.network.cidr, 7), cidrhost(output.network.cidr, 8)]
+    error_message = "The edge routers must sit at host numbers 7 and 8 of the node subnet."
   }
 
   assert {
@@ -47,7 +47,7 @@ run "_an_edge_host_in_the_dhcp_pool_is_rejected" {
   command = plan
 
   variables {
-    edge_hosts = [6, 150]
+    edge_hosts = [7, 150]
   }
 
   expect_failures = [var.edge_hosts]
@@ -57,7 +57,7 @@ run "_an_edge_host_on_the_gateway_is_rejected" {
   command = plan
 
   variables {
-    edge_hosts = [1, 7]
+    edge_hosts = [1, 8]
   }
 
   expect_failures = [var.edge_hosts]
@@ -67,7 +67,7 @@ run "_one_address_for_both_edge_routers_is_rejected" {
   command = plan
 
   variables {
-    edge_hosts = [6, 6]
+    edge_hosts = [7, 7]
   }
 
   expect_failures = [var.edge_hosts]

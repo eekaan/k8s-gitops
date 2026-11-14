@@ -63,7 +63,7 @@ Feature: Cluster stack
   Scenario: The edge addresses and the service range overlap nothing
     Given the plumbing stack's two edge addresses on the node subnet and its service range outside it
     When the cluster stack is planned against mocked providers
-    Then neither edge address is in the DHCP pool, the gateway's, a node's, the API load balancer's or the other's, and the service range overlaps neither the node, pod nor service subnet; an edge address on a node or on the load balancer, and a service range overlapping the pod or the service subnet, fail the plan
+    Then neither edge address is in the DHCP pool, the gateway's, a node's, the API load balancer's or the other's, and the service range overlaps neither the node, pod nor service subnet; an edge address on a node or on the load balancer, a CI host number that is an edge router's, and a service range overlapping the pod or the service subnet, fail the plan
 
   Scenario: Workers may receive and answer for the service range, and control planes may not
     Given the plumbing stack's service range
