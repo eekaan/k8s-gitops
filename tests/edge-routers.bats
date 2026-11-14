@@ -33,7 +33,7 @@ ipv4_number() {
 @test "The Gateway's address is inside the service range and reaches cluster-config" {
   # The cluster stack's talman.yaml as the fixture renders it, and the ConfigMap the copy of
   # scripts/lib/cluster.sh makes of it.
-  local encoded talman config range gateway bits mask
+  local encoded talman config range gateway bits mask blocks
   encoded=$(tofu -chdir="$ROOT/tests/fixtures/talos" console -no-color <<< 'base64encode(local.talman_yaml)')
   talman="$BATS_TEST_TMPDIR/talman.yaml"
   base64 -d <<< "${encoded//\"/}" > "$talman"
@@ -59,11 +59,14 @@ ipv4_number() {
   [ "$(ipv4_number "$gateway")" -ne $(($(ipv4_number "${range%/*}") + 1)) ]
   [ "$(ipv4_number "$gateway")" -ne $(($(ipv4_number "${range%/*}") + (1 << (32 - bits)) - 1)) ]
 
-  # The example lists the key, and the pool is untouched: it still holds the whole range, so
-  # keeping the Gateway's address from another Service is the Gateway's own change, which asks the
-  # pool for it by annotation.
+  # The example lists the key, and the pool is untouched: it holds one block, the whole range, as
+  # the ConfigMap fills it in, so keeping the Gateway's address from another Service is the
+  # Gateway's own change, which asks the pool for it by annotation.
   yq -e 'has("GATEWAY_ADDRESS")' "$ROOT/kubernetes/clusters/lab-sto2/cluster-config.example.yaml"
-  [ "$(yq '.spec.blocks | length' "$ROOT/kubernetes/apps/base/kube-system/cilium-bgp/app/pool.yaml")" -eq 1 ]
+  [ "$(jq -r '.SERVICE_RANGE' "$config")" = "$range" ]
+  blocks=$(yq -o=json -I=0 '.spec.blocks' "$ROOT/kubernetes/apps/base/kube-system/cilium-bgp/app/pool.yaml")
+  # shellcheck disable=SC2016 # the pool names the variable Flux substitutes, which is text here
+  [ "${blocks//'${SERVICE_RANGE}'/$range}" = "[{\"cidr\":\"$range\"}]" ]
 }
 
 @test "os-images prints names only" {
