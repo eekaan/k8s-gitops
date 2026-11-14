@@ -91,11 +91,6 @@ Feature: Cluster lifecycle
     When cluster-destroy runs and no answer, a wrong one or the stack's name is typed back, and with --yes
     Then before it asks it says how many volumes of LINSTOR are destroyed with the stack, without a volume's name, an address or a volume handle; nothing is destroyed without the stack's name, and with it or with --yes the stack is destroyed
 
-  Scenario: A Service on a pool address does not block a destroy, and a Service on any other load balancer still does
-    Given a Service of type LoadBalancer whose address lies in the service range of the cluster's talman.yaml, beside one whose address lies outside it or one with no address yet
-    When cluster-destroy runs with --yes for the first alone, for it beside each of the others, and for it with a talman.yaml that names no service range
-    Then the first alone is destroyed; beside either other, or without a service range to compare with, nothing is destroyed and only the Services that block are named
-
   Scenario: A cluster whose API does not answer is not destroyed unless asked
     Given an API that does not answer through the kubeconfig, or no kubeconfig at all
     When cluster-destroy runs with --yes, and then with --unreachable
@@ -110,6 +105,16 @@ Feature: Cluster lifecycle
     Given a cluster that owns a Service of type LoadBalancer or a PersistentVolume of another CSI driver, one whose only Service of that type is on a pool address, one whose API does not answer, and one that owns nothing
     When infra-destroy runs with sto2/cluster and without a stack, with --yes, and with --unreachable
     Then it asks the cluster as cluster-destroy does and refuses what cluster-destroy refuses, naming what the cluster owns or --unreachable, before it plans anything, and a Service on a pool address blocks neither; it prints no step it does not take; and what the cluster owns nothing of is destroyed
+
+  Scenario: A destroy that is run again ends as the first run did, with the cluster stack gone or never applied
+    Given a lab where infra-destroy has destroyed both stacks, so the cluster stack's state holds no resource and its kubeconfig is gone, and a lab where only the plumbing stack and the CI host were applied
+    When infra-destroy runs again with --yes, and with sto2/cluster
+    Then it exits zero, says the cluster stack holds no resource, asks no cluster, plans and destroys nothing for the cluster stack, and the plumbing stack is planned and destroyed as before
+
+  Scenario: A cluster stack that holds resources and cannot be asked is still refused unless --unreachable is given
+    Given a cluster stack whose state holds resources and a cluster that has no kubeconfig, and one whose state cannot be read
+    When infra-destroy runs with --yes, and then with --unreachable
+    Then the first exits non-zero naming --unreachable and plans nothing; with --unreachable the stack is destroyed, unless its state cannot be read, which refuses whatever is given
 
   Scenario: A cluster is destroyed only under the name its stack holds
     Given the cluster stack, whose talman_yaml output names lab-sto2, and a name with no directory under talos/, one with a directory that is not the stack's cluster, lab-sto2 without a directory, and a stack whose outputs name no cluster

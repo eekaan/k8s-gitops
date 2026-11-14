@@ -45,8 +45,10 @@ them is a `just` recipe.
   deleted. So before it plans the cluster stack's destroy, whichever way it is asked for, the
   recipe asks the cluster, through its kubeconfig, for them, as `just cluster-destroy` does
   ([cluster.md](cluster.md#recipes) says what it lists and counts): while the cluster owns any, or
-  cannot be asked, nothing is destroyed, unless `--unreachable` is given. Once the cluster
-  stack is destroyed, the recipe removes the files generated for its cluster that hold the nodes'
+  cannot be asked, nothing is destroyed, unless `--unreachable` is given. A cluster stack whose
+  state holds no resource, destroyed already or never applied, is not asked and is skipped with a
+  line saying so, so a re-run ends as the first run did; a state that cannot be read refuses the
+  run. Once the cluster stack is destroyed, the recipe removes the files generated for its cluster that hold the nodes'
   and the API's addresses, which the cloud may give to someone else: `talos/<cluster>/talman.yaml`
   and the talosconfig and kubeconfig in its `clusterconfig/`. It names each file it removes and
   removes only files git ignores; the secrets bundle and etcd snapshots stay.

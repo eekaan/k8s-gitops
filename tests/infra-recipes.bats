@@ -87,16 +87,37 @@ EOF
 # recording_tofu [PLAN_JSON [FAILING_SUBCOMMAND]]: a tofu that records its arguments, one call per
 # line, and its environment per subcommand; prints a resource address on stdout as tofu's own
 # report; shows PLAN_JSON as every saved plan; and fails FAILING_SUBCOMMAND with an error naming a
-# resource.
+# resource. A stack's state and outputs are the fixture `holds` names, as state_tofu's are; without
+# one the cluster stack holds resources and the others none.
 recording_tofu() {
+  mkdir -p "$BATS_TEST_TMPDIR/state"
   fake tofu <<EOF
 printf '%s\n' "\$*" >> "$RECORD/tofu"
 printf '%s\n' "tofu \$*" >> "$RECORD/argv"
 env -0 > "$RECORD/env.\${2-}"
 case \${2-} in
   init | plan | apply) echo "$STDOUT_MARKER: tofu's own report" ;;
-  show) cat "${1:-$FIXTURES/no-changes.json}" ;;
-  output) cat "$FIXTURES/outputs.json" ;;
+  show)
+    if [[ \$# -eq 3 ]]; then
+      stack=\${1#-chdir=$REPO/infra/openstack/stacks/}
+      file="$BATS_TEST_TMPDIR/state/\${stack//\//_}"
+      if [[ -f \$file ]]; then
+        cat "$FIXTURES/\$(< "\$file")"
+      elif [[ \$stack == */cluster ]]; then
+        cat "$FIXTURES/state-with-resources.json"
+      else
+        cat "$FIXTURES/no-changes.json"
+      fi
+    else
+      cat "${1:-$FIXTURES/no-changes.json}"
+    fi
+    ;;
+  output)
+    stack=\${1#-chdir=$REPO/infra/openstack/stacks/}
+    file="$BATS_TEST_TMPDIR/state/\${stack//\//_}"
+    # A stack that holds nothing has no outputs.
+    if [[ -f \$file && \$(< "\$file") =~ ^state-(never-applied|data-only)\.json$ ]]; then echo '{}'; else cat "$FIXTURES/outputs.json"; fi
+    ;;
 esac
 if [[ \${2-} == "${2:-none}" ]]; then
   echo "Error: fixture failure in $ERROR_MARKER" >&2
@@ -612,7 +633,10 @@ EOF
   fake tofu <<EOF
 printf '%s\n' "\$*" >> "$RECORD/tofu"
 case \${2-} in
-  show) cat "$FIXTURES/no-changes.json" ;;
+  show)
+    # A state read: the cluster stack holds resources and the others none.
+    if [[ \$# -eq 3 && \$1 == *cluster ]]; then cat "$FIXTURES/state-with-resources.json"; else cat "$FIXTURES/no-changes.json"; fi
+    ;;
   output) cat "$FIXTURES/outputs.json" ;;
   apply) [[ ! -e "$BATS_TEST_TMPDIR/cluster-fails" || \$1 != *cluster ]] ;;
 esac
@@ -668,7 +692,10 @@ EOF
   fake tofu <<EOF
 printf '%s\n' "\$*" >> "$RECORD/tofu"
 case \${2-} in
-  show) cat "$FIXTURES/no-changes.json" ;;
+  show)
+    # A state read: the cluster stack holds resources and the others none.
+    if [[ \$# -eq 3 && \$1 == *cluster ]]; then cat "$FIXTURES/state-with-resources.json"; else cat "$FIXTURES/no-changes.json"; fi
+    ;;
   output) cat "$FIXTURES/outputs.json" ;;
   apply) [[ \$1 != *cluster ]] ;;
 esac
@@ -679,6 +706,73 @@ EOF
   [ "$status" -ne 0 ]
   [[ $(tofu_calls apply) == "-chdir=$CLUSTER apply "* ]]
   absent "-chdir=$PLUMBING " "$RECORD/tofu"
+}
+
+# The constitution's "A recipe that changes live state is idempotent" is proved here: what a first
+# run destroyed is not asked or destroyed again, so a re-run, or a run after only part of the lab
+# was applied, ends as the first did.
+@test "A destroy that is run again ends as the first run did, with the cluster stack gone or never applied" {
+  recipe infra-destroy --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ "$(tofu_calls apply | awk '{ print $1 }')" = "-chdir=$CLUSTER
+-chdir=$PLUMBING" ]
+
+  # The cluster stack now holds nothing and its kubeconfig is gone, as after a cluster destroy.
+  holds sto2/cluster state-never-applied.json
+  rm -f "$REPO/talos/fixture/clusterconfig/kubeconfig"
+  : > "$RECORD/argv"
+  rm -f "$RECORD/tofu"
+  recipe infra-destroy --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"sto2/cluster holds no resource, so there is nothing to destroy"* ]]
+  [[ $output != *"names no cluster"* && $output != *"--unreachable"* ]]
+  absent "-chdir=$CLUSTER plan" "$RECORD/tofu"
+  absent "-chdir=$CLUSTER apply" "$RECORD/tofu"
+  absent kubectl "$RECORD/argv"
+  [ "$(tofu_calls plan | awk '{ print $1 }')" = "-chdir=$PLUMBING" ]
+  [ "$(tofu_calls apply | awk '{ print $1 }')" = "-chdir=$PLUMBING" ]
+
+  # A lab where only the plumbing stack and the CI host were applied is destroyed the same way.
+  holds sto2/ci state-with-resources.json
+  rm -f "$RECORD/tofu"
+  recipe infra-destroy sto2/cluster --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"sto2/cluster holds no resource, so there is nothing to destroy"* ]]
+  absent "-chdir=$CLUSTER plan" "$RECORD/tofu"
+  absent "-chdir=$CLUSTER apply" "$RECORD/tofu"
+  absent kubectl "$RECORD/argv"
+}
+
+@test "A cluster stack that holds resources and cannot be asked is still refused unless --unreachable is given" {
+  rm -f "$REPO/talos/fixture/clusterconfig/kubeconfig"
+
+  recipe infra-destroy --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"--unreachable"* ]]
+  [ -z "$(tofu_calls plan)" ]
+  [ -z "$(tofu_calls apply)" ]
+  absent kubectl "$RECORD/argv"
+
+  recipe infra-destroy sto2/cluster --yes --unreachable < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ "$(tofu_calls apply | awk '{ print $1 }')" = "-chdir=$CLUSTER" ]
+
+  # A state that cannot be read is not taken for an empty one, whatever else is given.
+  fake tofu <<EOF
+printf '%s\n' "\$*" >> "$RECORD/tofu"
+[[ \${2-} != show || \$# -ne 3 ]] || exit 1
+EOF
+  rm -f "$RECORD/tofu"
+  recipe infra-destroy sto2/cluster --yes --unreachable < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"cannot read the state of sto2/cluster"* ]]
+  [ -z "$(tofu_calls apply)" ]
 }
 
 @test "infra-destroy given a stack destroys that stack only" {
@@ -696,6 +790,8 @@ EOF
   [ "$(tofu_calls apply | awk '{ print $1 }')" = "-chdir=$CLUSTER" ]
   absent "-chdir=$PLUMBING " "$RECORD/tofu"
 
+  # With the cluster stack destroyed, its state holds nothing.
+  holds sto2/cluster state-never-applied.json
   rm -f "$RECORD/tofu"
   recipe infra-destroy --yes sto2/plumbing < /dev/null
 
@@ -762,7 +858,12 @@ case \${2-} in
       cat "$FIXTURES/no-changes.json"
     fi
     ;;
-  output) cat "$FIXTURES/outputs.json" ;;
+  output)
+    stack=\${1#-chdir=$REPO/infra/openstack/stacks/}
+    file="$BATS_TEST_TMPDIR/state/\${stack//\//_}"
+    # A stack that holds nothing has no outputs.
+    if [[ -f \$file && \$(< "\$file") != state-never-applied.json && \$(< "\$file") != state-data-only.json ]]; then cat "$FIXTURES/outputs.json"; else echo '{}'; fi
+    ;;
 esac
 EOF
 }

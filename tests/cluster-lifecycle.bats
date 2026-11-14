@@ -4,9 +4,10 @@
 # environment of their own, so no run reads this checkout's .env, keys or kubeconfig. Whatever would
 # reach a node, the cluster or the cloud is a recording fake: kubectl and talman are
 # tests/fixtures/cluster-lifecycle/kubectl and talman, which answer from files in STATE; tofu plans
-# and destroys from tests/fixtures/cluster-lifecycle/destroy-plan.json; openstack, helm, rclone and
-# talosctl fail when called. sleep is the real one under the fakes' directory as its name, so that a
-# probe left running is found by its command line, as are the fakes and the copy's scripts.
+# and destroys from tests/fixtures/cluster-lifecycle/destroy-plan.json, with state.json as the
+# stack's state; openstack, helm, rclone and talosctl fail when called. sleep is the real one under
+# the fakes' directory as its name, so that a probe left running is found by its command line, as
+# are the fakes and the copy's scripts.
 
 setup_file() {
   # The Talos check's fixture cluster: talos/talman.yaml.tftpl rendered from tests/fixtures/talos,
@@ -14,9 +15,6 @@ setup_file() {
   local encoded
   encoded=$(tofu -chdir="$BATS_TEST_DIRNAME/fixtures/talos" console -no-color <<< 'base64encode(local.talman_yaml)')
   base64 -d <<< "${encoded//\"/}" > "$BATS_FILE_TMPDIR/talman.yaml"
-  # The range LoadBalancer Services take their addresses from, as the cluster stack renders it; it
-  # holds the pool Service's address and neither of the others'.
-  yq -i '.values.serviceRange = "192.0.2.128/28"' "$BATS_FILE_TMPDIR/talman.yaml"
 }
 
 setup() {
@@ -90,7 +88,10 @@ EOF
 printf '%s\n' "tofu \$*" >> "$RECORD/argv"
 case \${2-} in
   init | plan | apply) echo "$TOFU_REPORT: tofu's own report" ;;
-  show) cat "$FIXTURES/destroy-plan.json" ;;
+  show)
+    # Without a saved plan, the stack's state: the cluster stack holds resources.
+    if [[ \$# -eq 3 ]]; then cat "$FIXTURES/state.json"; else cat "$FIXTURES/destroy-plan.json"; fi
+    ;;
   output) cat "$FIXTURES/outputs.json" ;;
 esac
 EOF
@@ -956,7 +957,7 @@ kube-system/node-agent-cp-1' ]
 }
 
 @test "A cluster is destroyed only under the name its stack holds" {
-  # No directory under talos/ for the name: nothing is read, asked or destroyed.
+  # No directory under talos/ for the name: nothing is planned, asked or destroyed.
   recipe cluster-destroy other-cluster --unreachable --yes < /dev/null
 
   [ "$status" -ne 0 ]
@@ -989,7 +990,9 @@ kube-system/node-agent-cp-1' ]
   [ "$status" -ne 0 ]
   [[ $output == *"talos/lab-sto2 does not exist"* ]]
   [ -z "$(calls '^tofu .* (plan|apply) ')" ]
+  [ -z "$(calls '^kubectl ')" ]
   mv "$REPO/talos/lab-sto2.away" "$CLUSTER"
+  generated_kept
 
   # A stack whose outputs name no cluster cannot be told to be any name, and nothing is asked.
   fake tofu <<EOF

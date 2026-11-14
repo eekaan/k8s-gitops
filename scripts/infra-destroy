@@ -12,7 +12,8 @@
 # of a CSI driver are made by the cluster, not by OpenTofu, so the cluster stack's destroy would
 # leave them in the cloud. Before it plans that destroy, this recipe asks the cluster for them, as
 # cluster-destroy does, and refuses while there are any, or while the cluster cannot be asked,
-# unless --unreachable is given (require_cluster_owns_nothing in lib/cluster.sh).
+# unless --unreachable is given (require_cluster_owns_nothing in lib/cluster.sh). A cluster stack
+# whose state holds no resource, destroyed already or never applied, is skipped without asking.
 # The plumbing stack's subnet and router interface cannot be removed while a port or a floating IP
 # of another stack uses them, so before anything is changed, a run that would destroy the plumbing
 # stack reads the state of every other stack of its region that the run does not destroy first, and
@@ -130,6 +131,24 @@ require_nothing_on_plumbing() {
 require_nothing_on_plumbing
 
 for stack in "${stacks[@]}"; do
+  # A cluster stack whose state holds no resource, destroyed already or never applied, has no
+  # cluster to ask and nothing to destroy, so a re-run ends as the first run did. A state that
+  # cannot be read is not taken for an empty one.
+  if [[ $stack == */cluster ]]; then
+    status=0
+    holds_resources "$stack" || status=$?
+    case $status in
+      0) ;;
+      1)
+        echo "$stack holds no resource, so there is nothing to destroy"
+        continue
+        ;;
+      *)
+        infra_error "cannot read the state of $stack; nothing was destroyed"
+        exit 1
+        ;;
+    esac
+  fi
   # One subshell per stack, so neither its inputs nor its lock carry over to the next.
   (
     # shellcheck source=scripts/stack-env
