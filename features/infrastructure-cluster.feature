@@ -73,4 +73,4 @@ Feature: Cluster stack
   Scenario: The edge routers can reach the workers for BGP and for service traffic, and nothing else is opened
     Given the two edge addresses and the default service ports
     When the cluster stack is planned against mocked providers
-    Then the workers, and only they, carry a group of their own whose only rules admit TCP 80 and 443 from each edge address, with no egress rule of its own; no rule admits anything else from an edge address, TCP 179 included, as each worker opens its BGP sessions itself through the nodes' group, which keeps its open egress
+    Then the workers, and only they, carry a group of their own whose only rules admit TCP 80 and 443 from each edge address, with no egress rule of its own; in total an edge address reaches TCP 80 and 443 on the workers through that group and TCP 6443 on every node through the nodes' rule for the node subnet, which only control planes answer, and nothing else, TCP 179 included, as each worker opens its BGP sessions itself through the nodes' group, which keeps its open egress

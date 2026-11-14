@@ -122,10 +122,19 @@ address below it, by host number:
 | 20 and up | the workers | the cluster stack |
 | 100 to 200 | the DHCP pool | the plumbing stack |
 
-Collisions fail the plan: the plumbing stack keeps the edge routers above the gateway and below
-the pool, the ci stack keeps the CI host between 2 and 9, off 5 and off the edge routers, the
-cluster stack refuses a `ci_host_number` that is an edge router's and a node or load balancer on an
-edge router's address.
+These collisions are refused when a stack is planned:
+
+- the edge routers on each other, on the gateway or in the DHCP pool (the plumbing stack);
+- the CI host outside 2 to 9, on 5, or on an edge router (the ci stack, and the cluster stack for
+  `ci_host_number`);
+- a node or the API load balancer on an edge router (the cluster stack);
+- the default service range on the default node, pod or service subnet (`just infra-check`,
+  offline), and a configured one on the node subnet (the plumbing stack) or on the pod or service
+  subnet (the cluster stack).
+
+Nothing else is checked. The control planes and the workers keep apart from each other and below
+the DHCP pool by their numbering alone, as long as there are at most ten control planes and eighty
+workers.
 
 ## The workers' data volumes
 
@@ -176,12 +185,20 @@ the node network carry the range:
 - The workers have a security group of their own besides the nodes', `<prefix>-workers`, whose
   only rules admit TCP on each port of `service_ports`, 80 and 443 by default, from each edge
   address, and which has no egress rule of its own. A rule matches a packet's protocol, port and
-  source, never its destination, so it also admits those ports to the worker's own address. The
-  workers open their BGP sessions to the edge routers on TCP 179 themselves, through the nodes'
-  group, which keeps Neutron's default egress rules; security groups are stateful, so the edge
-  routers' side of a session passes, and no rule admits a connection to TCP 179. The nodes' group
-  is unchanged: the edge addresses are not nodes. The sensitive output `worker_security_group`
-  gives the group and its rules.
+  source, never its destination, so it also admits those ports to the worker's own address: only
+  TCP, only from the two edge addresses, and answered there only by a workload on the host's
+  network or with a host port on that port, as Cilium serves a `LoadBalancer` Service's port on
+  its address alone. No NodePort (30000 to 32767) is admitted from the edge routers unless
+  `service_ports` names one. The workers open their BGP sessions to the edge routers on TCP 179
+  themselves, through the nodes' group, which keeps Neutron's default egress rules; security
+  groups are stateful, so the edge routers' side of a session passes, and no rule admits a
+  connection to TCP 179. The sensitive output `worker_security_group` gives the group and its
+  rules.
+- The nodes' group is unchanged, and the edge addresses are not in it, but it already admits TCP
+  6443 from the whole node subnet, for the API load balancer's connections to the API servers, and
+  the edge addresses are on that subnet. In total, then, an edge router reaches the service ports
+  on the workers, through the workers' group, and TCP 6443 on every node, which only control
+  planes answer; nothing else.
 
 ## The CI host
 

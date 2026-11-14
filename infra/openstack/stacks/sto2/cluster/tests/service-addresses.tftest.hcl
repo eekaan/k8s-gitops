@@ -287,15 +287,29 @@ run "the_edge_routers_can_reach_the_workers_for_bgp_and_for_service_traffic_and_
     error_message = "Every worker's port must carry the nodes' group and the workers' own group, and every control plane's the nodes' group only."
   }
 
+  # Everything an edge router reaches, from whichever rule of either group: a rule whose prefix
+  # holds an edge address admits that edge router, the node subnet's included. The rule within the
+  # nodes' group names the group, not a prefix; a mocked prefix is not a network and holds nothing.
+  assert {
+    condition = toset(concat(
+      [
+        for rule in output.security_group.ingress_rules : "nodes ${coalesce(rule.protocol, "any")} ${coalesce(rule.port_range_min, 0)}-${coalesce(rule.port_range_max, 65535)}"
+        if anytrue([for edge in ["192.0.2.7", "192.0.2.8"] : try(cidrcontains(rule.remote_ip_prefix, edge), false)])
+      ],
+      [
+        for rule in output.worker_security_group.ingress_rules : "workers ${coalesce(rule.protocol, "any")} ${coalesce(rule.port_range_min, 0)}-${coalesce(rule.port_range_max, 65535)}"
+        if anytrue([for edge in ["192.0.2.7", "192.0.2.8"] : try(cidrcontains(rule.remote_ip_prefix, edge), false)])
+      ],
+    )) == toset(["nodes tcp 6443-6443", "workers tcp 80-80", "workers tcp 443-443"])
+    error_message = "An edge router may reach TCP 80 and 443 through the workers' own group and TCP 6443 through the nodes' rule for the node subnet, and nothing else: no other port, no other protocol, and not TCP 179."
+  }
+
   assert {
     condition = length([
       for rule in concat(output.security_group.ingress_rules, output.worker_security_group.ingress_rules) : rule
-      if contains(["192.0.2.7/32", "192.0.2.8/32"], coalesce(rule.remote_ip_prefix, "none")) && !contains([80, 443], rule.port_range_min)
-      ]) == 0 && length([
-      for rule in concat(output.security_group.ingress_rules, output.worker_security_group.ingress_rules) : rule
       if rule.port_range_min == 179 || rule.port_range_max == 179
     ]) == 0
-    error_message = "No rule may admit anything else from an edge address, and none may open TCP 179."
+    error_message = "No rule may open TCP 179, from any source: the workers open their BGP sessions themselves."
   }
 }
 
