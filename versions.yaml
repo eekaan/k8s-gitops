@@ -17,3 +17,19 @@ actions_runner_sha256: baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d555839
 # The Dagger engine the CI host runs, by digest: the version of the dagger CLI pinned in
 # mise.toml, which the jobs connect to it with. It moves with that pin, by hand.
 dagger_engine: registry.dagger.io/engine:v1.0.0-beta.27@sha256:ad121f720ed9bfb8e740f99dd783fa8472965a5e262fc64ff3ef2634cea1e6dd
+
+# The container just ci runs the checks in (.dagger/modules/ci): Dagger starts from ci_tools_base,
+# runs the package step ci_tools_packages in it, then the module's toolsLayer installs mise.toml's
+# pins. mise installs yamllint through its pypi backend, which needs pipx and Python. These two
+# values, the whole module and mise.toml are the inputs whose key just tools-image-key prints.
+# scripts/tools-image reads each value from its one line, without quotes, tabs, a comment or an
+# indented line under it, as just ci runs it where no YAML parser is installed.
+ci_tools_base: jdxcode/mise:2026.11.4-debian@sha256:7769fb680659f7730db5b9c0d245c00ba517dfec9c720f6679248cb32e124095
+ci_tools_packages: apt-get update && apt-get install -y --no-install-recommends pipx && rm -rf /var/lib/apt/lists/*
+# The tools image the tools image workflow published for the inputs whose key is ci_tools_inputs, by
+# digest, or "" for none; just ci refuses any other image. It runs the checks in it while the inputs
+# have that key, and builds the tools from them otherwise. just tools-image-pin writes both, once the
+# image's signature verifies (README, The tools image). gitleaks takes 64 hexadecimal digits under a
+# name with "key" in it for a credential, so the key goes under another name.
+ci_tools_inputs: ""
+ci_tools_image: ""

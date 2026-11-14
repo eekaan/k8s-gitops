@@ -40,6 +40,9 @@ jobs:
       - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785  # v5.2.8
         with:
           version: 2026.11.4
+          # The checksum of that release's linux-x64 binary, which the hosted runner this job
+          # names runs: the job holds a token that can write to pull requests.
+          sha256: 0296d9cba9324106d4e0962bb94a2072902f3658813aeb3b09504947bb8ddc2b
           install_args: just gh jq
           # Not the job's token, which can write to pull requests: mise installs without one.
           github_token: ""

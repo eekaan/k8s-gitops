@@ -1,0 +1,70 @@
+---
+# OpenBao's listener serves TLS from a CA of its own, made by cert-manager in this namespace: a
+# self-signed Issuer signs the CA, and the CA's Issuer signs the listener's certificate. The store
+# (caProvider), the monitor and the servers themselves verify against the CA.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: openbao-selfsigned
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: openbao-ca
+spec:
+  isCA: true
+  commonName: openbao-ca
+  secretName: openbao-ca
+  # Ten years: the CA is renewed long after any listener certificate it signs.
+  duration: 87600h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    kind: Issuer
+    name: openbao-selfsigned
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: openbao-ca
+spec:
+  ca:
+    secretName: openbao-ca
+---
+# The listener's certificate, for every name its clients use: the Services, every member as
+# retry_join reaches it, and the loopback address the servers' own CLI and probes use. cert-manager
+# renews it before it expires, with its default lifetime of 90 days, and the listener reloads it.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: openbao-tls
+spec:
+  secretName: openbao-tls
+  commonName: openbao.openbao.svc
+  dnsNames:
+    - openbao
+    - openbao.openbao.svc
+    - openbao-active
+    - openbao-active.openbao.svc
+    - openbao-standby
+    - openbao-standby.openbao.svc
+    - openbao-internal
+    - openbao-internal.openbao.svc
+    - "*.openbao-internal"
+    - "*.openbao-internal.openbao.svc"
+    - localhost
+  ipAddresses:
+    - 127.0.0.1
+    - "::1"
+  usages:
+    - digital signature
+    - server auth
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    kind: Issuer
+    name: openbao-ca

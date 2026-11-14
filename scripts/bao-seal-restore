@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Writes OpenBao's seal key back into the Secret openbao-seal-1 from the operator's custody file, for
+# when the Secret is lost (docs/runbooks/openbao.md): decrypted with the Talos age key into memory
+# only, and made immutable, as External Secrets makes it. A Secret that holds the same key is left
+# alone. One that holds another key, which External Secrets makes only when both the Secret and the
+# ExternalSecret's record of its sync are gone, is kept, and replaced only with --replace, once the
+# operator knows the storage was sealed with the file's key; its key is first kept in a new file
+# beside the custody file. Nothing of either key is printed or passed as an argument; each reaches
+# kubectl or age on standard input.
+# Usage: scripts/bao-seal-restore <file> [--replace]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/openbao.sh
+. "$here/lib/openbao.sh"
+
+replace=0
+if (($# == 2)) && [[ $2 == --replace ]]; then
+  replace=1
+elif (($# != 1)); then
+  echo "bao-seal-restore: give the custody file bao-recovery wrote: just bao-seal-restore <file> [--replace]" >&2
+  exit 1
+fi
+file=$1
+
+# An empty argument, so cluster-env takes lab-sto2 and not this script's own arguments.
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" ""
+complete=1
+require_commands kubectl jq age sha256sum || complete=0
+require_kubeconfig || complete=0
+require_age_key || complete=0
+if [[ ! -f $file ]]; then
+  infra_error "$file is not a file; give the custody file bao-recovery wrote"
+  complete=0
+fi
+((complete))
+
+step="opening $file with the Talos age key"
+custody=$(bao_decrypt "$file")
+if ! printf '%s' "$custody" | jq -e --arg secret "$bao_seal_secret" \
+  '.seal.secret == $secret and (.seal.key | test("^[0-9a-f]{64}$"))' > /dev/null; then
+  infra_error "$file holds no seal key for the Secret $bao_seal_secret"
+  exit 1
+fi
+
+step="reading the Secret $bao_seal_secret"
+existing=$(kubectl get secret "$bao_seal_secret" --namespace "$bao_namespace" --output json --ignore-not-found)
+if [[ -n $existing ]]; then
+  if [[ $(printf '%s' "$existing" | jq -r '.data.key // "" | @base64d' | sha256sum) == \
+    "$(printf '%s' "$custody" | jq -r '.seal.key' | sha256sum)" ]]; then
+    echo "bao-seal-restore: the Secret $bao_seal_secret holds the key in $file already; nothing to do"
+    exit 0
+  fi
+  if ((!replace)); then
+    infra_error "the Secret $bao_seal_secret holds another key than $file; once the members fail to unseal with it, run this again with --replace"
+    exit 1
+  fi
+  # The key being replaced may be the one the storage is sealed with, if FILE is the stale one, so
+  # it is kept first: in a new file beside FILE, encrypted to the Talos age key's recipient, opened
+  # again with the operator's key, and never over a file that exists. Nothing is deleted otherwise.
+  step="keeping the key the Secret $bao_seal_secret holds"
+  recipient=$(sops_recipient)
+  if is_placeholder "$recipient" || [[ ! $recipient =~ ^age1[0-9a-z]+$ ]]; then
+    infra_error "talos/.sops.yaml holds no age recipient to keep the replaced key with"
+    exit 1
+  fi
+  replaced=$(printf '%s' "$existing" | jq -c --arg cluster "$cluster" --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{cluster: $cluster, created: $created, replaced: true,
+      seal: {secret: .metadata.name, key_id: .metadata.name, key: (.data.key | @base64d)}}')
+  kept="$file.replaced-$(date -u +%Y%m%dT%H%M%S.%NZ).age"
+  partial=$(mktemp "$(dirname -- "$file")/.${kept##*/}.XXXXXXXXXX")
+  trap 'status=$?; rm -f -- "$partial"; failed_step "$status"' EXIT
+  printf '%s' "$replaced" | age --encrypt --recipient "$recipient" --output "$partial"
+  if [[ $(bao_decrypt "$partial" | sha256sum) != "$(printf '%s' "$replaced" | sha256sum)" ]]; then
+    infra_error "the replaced key does not open with the Talos age key; check the recipient in talos/.sops.yaml. Nothing is deleted"
+    exit 1
+  fi
+  replaced=
+  if ! ln -- "$partial" "$kept"; then
+    infra_error "$kept exists; nothing is deleted"
+    exit 1
+  fi
+  echo "bao-seal-restore: kept the key the Secret $bao_seal_secret held in $kept"
+  step="deleting the Secret $bao_seal_secret, which holds another key"
+  kubectl delete secret "$bao_seal_secret" --namespace "$bao_namespace" --wait=true > /dev/null
+fi
+
+step="writing the Secret $bao_seal_secret"
+printf '%s' "$custody" | jq --arg namespace "$bao_namespace" '{apiVersion: "v1", kind: "Secret", type: "Opaque",
+  metadata: {name: .seal.secret, namespace: $namespace}, immutable: true, data: {key: (.seal.key | @base64)}}' |
+  kubectl create --filename - > /dev/null
+custody=
+echo "bao-seal-restore: wrote the Secret $bao_seal_secret from $file; delete each member that does not start, and it starts and unseals"

@@ -15,15 +15,18 @@ resources:
   - ../../base/keda
   - ../../base/kube-system
   - ../../base/monitoring
+  - ../../base/openbao
   - ../../base/piraeus-datastore
   - ../../base/volsync-system
   - ../../base/cert-manager/cert-manager/ks.yaml
   - ../../base/cnpg-system/cloudnative-pg/ks.yaml
+  - ../../base/demo/hello-secret/ks.yaml
   - ../../base/demo/hello/ks.yaml
   # - ../../base/demo/volsync-demo/ks.yaml  # Disabled: no ClusterSecretStore openbao holds the repository's password and S3 key yet, so its movers have no Secret to read
   - ../../base/envoy-gateway-system/envoy-gateway-crds/ks.yaml
   - ../../base/envoy-gateway-system/envoy-gateway/ks.yaml
   - ../../base/external-secrets/external-secrets/ks.yaml
+  - ../../base/external-secrets/openbao-store/ks.yaml
   - ../../base/keda/keda/ks.yaml
   - ../../base/kube-system/cilium/ks.yaml
   - ../../base/kube-system/cilium-bgp/ks.yaml
@@ -41,6 +44,9 @@ resources:
   - ../../base/monitoring/grafana-operator/ks.yaml
   - ../../base/monitoring/grafana/ks.yaml
   - ../../base/monitoring/kube-prometheus-stack/ks.yaml
+  - ../../base/monitoring/vector/ks.yaml
+  - ../../base/monitoring/victoria-logs/ks.yaml
+  - ../../base/openbao/openbao/ks.yaml
   - ../../base/piraeus-datastore/linstor-cluster/ks.yaml
   - ../../base/piraeus-datastore/piraeus-operator/ks.yaml
   - ../../base/volsync-system/volsync/ks.yaml

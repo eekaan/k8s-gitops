@@ -1,0 +1,138 @@
+#!/usr/bin/env bats
+
+setup() {
+  SCRIPT="$BATS_TEST_DIRNAME/../scripts/check-conflict-markers"
+  export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+  git init -q "$BATS_TEST_TMPDIR/repo"
+  cd "$BATS_TEST_TMPDIR/repo" || return 1
+  # The markers are put together here, so no line of this file is one.
+  OURS=$(printf '%7s' '' | tr ' ' '<')
+  MID=$(printf '%7s' '' | tr ' ' '=')
+  THEIRS=$(printf '%7s' '' | tr ' ' '>')
+}
+
+# conflict FILE: a file as git writes it for a conflict: three lines of text, then the block.
+conflict() {
+  printf '%s\n' 'first line' "$OURS HEAD" 'ours' "$MID" 'theirs' "$THEIRS feature" 'last line' > "$1"
+}
+
+@test "A merge conflict marker in a file git would commit fails the check" {
+  mkdir docs config
+  conflict docs/guide.md
+  # A heading underlined with equals signs after the block: the closing marker ends the conflict,
+  # so the underline is not the middle of another.
+  printf '%s\n' 'Heading' "$MID" >> docs/guide.md
+  conflict config/values.yaml
+  conflict untracked.txt
+  git add docs config
+  conflict ignored.txt
+  echo ignored.txt > .gitignore
+
+  run "$SCRIPT"
+
+  [ "$status" -ne 0 ]
+  for file in docs/guide.md config/values.yaml untracked.txt; do
+    [[ $output == *"$file:2:"* ]] || { echo "opening line of $file not named"; return 1; }
+    [[ $output == *"$file:4:"* ]] || { echo "middle line of $file not named"; return 1; }
+    [[ $output == *"$file:6:"* ]] || { echo "closing line of $file not named"; return 1; }
+  done
+  [[ $output != *ignored.txt* ]]
+  [[ $output != *"docs/guide.md:9:"* ]]
+}
+
+@test "A marker in a file with CRLF line endings fails the check" {
+  printf '%s\r\n' 'first' "$OURS HEAD" 'ours' "$MID" 'theirs' "$THEIRS feature" > windows.md
+
+  run "$SCRIPT"
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"windows.md:2:"* ]]
+  [[ $output == *"windows.md:4:"* ]]
+  [[ $output == *"windows.md:6:"* ]]
+}
+
+@test "Each file of an unresolved merge is reported once" {
+  local git=(git -c user.name=test -c user.email=test@example.invalid) file
+  local files=(one.md two.md three.yaml four.txt)
+  for file in "${files[@]}"; do echo base > "$file"; done
+  git add .
+  "${git[@]}" commit -q -m base
+  git switch -q -c feature
+  for file in "${files[@]}"; do echo theirs > "$file"; done
+  "${git[@]}" commit -q -am theirs
+  git switch -q -
+  for file in "${files[@]}"; do echo ours > "$file"; done
+  "${git[@]}" commit -q -am ours
+  # With a common base, the index holds each conflicted file three times, once per stage.
+  run "${git[@]}" merge feature
+  [ "$status" -ne 0 ]
+  [ "$(git ls-files --unmerged | wc -l)" -eq 12 ]
+
+  run "$SCRIPT"
+
+  [ "$status" -ne 0 ]
+  for file in "${files[@]}"; do
+    [ "$(grep -cF "check-conflict-markers: $file:1:" <<< "$output")" -eq 1 ] || { echo "$file not named exactly once"; return 1; }
+  done
+  [[ $output == *"check-conflict-markers: 4 file(s) hold a merge conflict marker"* ]]
+}
+
+@test "Text that only looks like a conflict marker passes the check" {
+  # A Markdown heading underlined with equals signs, in the length of a marker and in others.
+  printf '%s\n' 'Title' "$MID" '' 'Other' '===' '' 'Third' "$MID=" > headings.md
+  # Runs of the wrong length, an indented run such as a code sample holds, and a run mid-line.
+  printf '%s\n' "${OURS%<} HEAD" "${OURS}< HEAD" "  $OURS HEAD" "text $OURS HEAD" "${THEIRS%>} feature" "  $THEIRS feature" > lookalikes.txt
+  # A YAML value that is only an equals run.
+  printf 'separator: %s\n' "$MID" > values.yaml
+  git add .
+
+  run "$SCRIPT"
+
+  [ "$status" -eq 0 ]
+}
+
+@test "A file named like an awk assignment does not hide the files after it" {
+  # Files are listed in name order, so the marker file comes after the clean one.
+  echo clean > 'a=b.md'
+  conflict 'z=1.md'
+  conflict zz.md
+  git add .
+
+  run "$SCRIPT"
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"z=1.md:2:"* ]]
+  [[ $output == *"zz.md:2:"* ]]
+}
+
+@test "A file's name is printed as it is, backslashes included" {
+  conflict 'back\tslash.md'
+  git add .
+
+  run "$SCRIPT"
+
+  [ "$status" -ne 0 ]
+  [[ $output == *'back\tslash.md:2:'* ]]
+}
+
+@test "A file the check cannot read, or cannot scan, fails it" {
+  local bin="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$bin"
+  echo clean > readable.md
+  git add .
+
+  # A scan that fails fails the check, whatever the file holds.
+  printf '#!/usr/bin/env bash\nexit 2\n' > "$bin/awk"
+  chmod +x "$bin/awk"
+  PATH="$bin:$PATH" run "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ $output == *readable.md* ]]
+
+  # So does a file nobody may read; root reads it anyway, and then there is nothing to prove.
+  echo clean > unreadable.md
+  chmod 000 unreadable.md
+  [ ! -r unreadable.md ] || skip "this user reads a file whatever its mode"
+  run "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ $output == *unreadable.md* ]]
+}

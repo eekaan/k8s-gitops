@@ -1,0 +1,15 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/namespace-v1.json
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openbao
+  annotations:
+    # Removing the namespace from the tree must not delete everything in it: deleting the namespace
+    # deletes the members' claims and the seal key's Secret, and with them every runtime secret.
+    kustomize.toolkit.fluxcd.io/prune: disabled
+  labels:
+    # OpenBao's servers and the chart's test pod run as a non-root user with every capability
+    # dropped, no privilege escalation and the runtime's seccomp profile, which the restricted level
+    # requires; tests/openbao.bats checks the rendered chart against it.
+    pod-security.kubernetes.io/enforce: restricted
