@@ -230,6 +230,8 @@ all_buckets() {
     printed+=("$output")
   }
 
+  run_and_keep ok infra-state-bucket
+  run_and_keep ok infra-state-bucket
   run_and_keep ok infra-backup-buckets
   run_and_keep ok infra-backup-buckets
   run_and_keep ok infra-backup-check
@@ -243,13 +245,16 @@ all_buckets() {
   run_and_keep failed infra-backup-check
   rm "$REPO/.env"
   : > "$STORE/ours"
-  echo marker-prefix-etcd > "$STORE/theirs"
+  printf '%s\n' marker-prefix-etcd marker-state-bucket > "$STORE/theirs"
+  run_and_keep failed infra-state-bucket
   run_and_keep failed infra-backup-buckets
   run_and_keep failed infra-backup-check
   : > "$STORE/mkdir-fails"
   : > "$STORE/ours"
+  run_and_keep failed infra-state-bucket
   run_and_keep failed infra-backup-buckets
   : > "$STORE/list-fails"
+  run_and_keep failed infra-state-bucket
   run_and_keep failed infra-backup-buckets
   without CLUSTER_S3_ACCESS_KEY_ID
   with CLUSTER_S3_ACCESS_KEY_ID=marker-state-access-key-id

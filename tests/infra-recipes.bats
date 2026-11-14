@@ -261,10 +261,8 @@ absent() {
 }
 
 @test "The infrastructure recipes refuse Go's HTTP/2 debug log" {
+  fake_openstack
   fake_object_storage
-  fake rclone <<EOF
-printf '%s\n' "rclone \$*" >> "$RECORD/argv"
-EOF
   for where in environment .env; do
     reset_environment
     with BACKUP_BUCKET_PREFIX=fixture-backup CLUSTER_S3_ACCESS_KEY_ID=marker-cluster-access-key-id \
@@ -924,49 +922,46 @@ no_figures_in() {
   done
 }
 
-# fake_object_storage [VERSION]: an openstack client, reporting VERSION (10.5.0 by default), whose
-# object storage holds the containers listed in the file CONTAINERS, one per line, and fails a list
-# while the file LIST_FAILS exists; records its arguments and its environment.
+# fake_object_storage: the S3 client, tests/fixtures/s3/rclone, against an object storage that holds
+# the buckets listed in the file BUCKETS, one per line, where another project owns those in the
+# file TAKEN, and listing fails while the file LIST_FAILS exists. The client records its arguments,
+# and its environment per call in env.rclone.<n>. An openstack client, which no recipe uses for the
+# object storage, records its arguments and fails.
 fake_object_storage() {
-  CONTAINERS="$BATS_TEST_TMPDIR/containers"
-  LIST_FAILS="$BATS_TEST_TMPDIR/list-fails"
-  touch "$CONTAINERS"
+  BUCKETS="$BATS_TEST_TMPDIR/store/ours"
+  TAKEN="$BATS_TEST_TMPDIR/store/theirs"
+  LIST_FAILS="$BATS_TEST_TMPDIR/store/list-fails"
+  mkdir -p "$BATS_TEST_TMPDIR/store"
+  touch "$BUCKETS" "$TAKEN"
+  cp "$BATS_TEST_DIRNAME/fixtures/s3/rclone" "$BIN/rclone"
   fake openstack <<EOF
 printf '%s\n' "openstack \$*" >> "$RECORD/argv"
-env -0 > "$RECORD/env.openstack"
-case "\$1 \${2-}" in
-  '--version ') echo 'openstack ${1:-10.5.0}' ;;
-  'container list')
-    if [[ -e "$LIST_FAILS" ]]; then
-      echo "Unauthorized: fixture-project-id at https://object-store.example.invalid" >&2
-      exit 1
-    fi
-    cat "$CONTAINERS"
-    ;;
-  'container create')
-    echo "| fixture-account-id | \$3 | fixture-transaction-id |"
-    echo "\$3" >> "$CONTAINERS"
-    ;;
-  *) echo "unexpected call: openstack \$*" >&2; exit 1 ;;
-esac
+echo "unexpected call: openstack \$*" >&2
+exit 1
 EOF
 }
 
-# creates: the recorded calls that create a container, one per line.
+# creates: the recorded calls that create a bucket, one per line.
 creates() {
-  grep '^openstack container create' "$RECORD/argv" 2> /dev/null || true
+  grep '^rclone mkdir' "$RECORD/argv" 2> /dev/null || true
+}
+
+# The object storage's endpoint, which rclone's own output names.
+backend_endpoint() {
+  yq -p hcl -o json '.endpoints.s3' "$REPO/infra/openstack/backend.hcl" | jq -r .
 }
 
 @test "The state bucket is created once and no credential is shown" {
   fake_object_storage
+  fake_openstack
   # A bucket whose name starts with the state bucket's is another bucket.
-  echo fixture-state-bucket-other > "$CONTAINERS"
+  echo fixture-state-bucket-other > "$BUCKETS"
 
   recipe infra-state-bucket
 
   [ "$status" -eq 0 ]
-  [ "$(creates)" = "openstack container create fixture-state-bucket" ]
-  [ "$(grep -cx fixture-state-bucket "$CONTAINERS")" -eq 1 ]
+  [ "$(creates)" = "rclone mkdir store:fixture-state-bucket" ]
+  [ "$(grep -cx fixture-state-bucket "$BUCKETS")" -eq 1 ]
   [[ $output == *"created the bucket TF_STATE_BUCKET names"* ]]
   printed=("$output")
 
@@ -974,45 +969,67 @@ creates() {
 
   [ "$status" -eq 0 ]
   [ "$(creates | wc -l)" -eq 1 ]
-  [ "$(grep -cx fixture-state-bucket "$CONTAINERS")" -eq 1 ]
+  [ "$(grep -cx fixture-state-bucket "$BUCKETS")" -eq 1 ]
   [[ $output == *"the bucket TF_STATE_BUCKET names exists; nothing to create"* ]]
   printed+=("$output")
 
-  for shown in fixture-state-bucket fixture-account-id fixture-transaction-id "${MARKERS[@]}"; do
+  for shown in fixture-state-bucket "$(backend_endpoint)" INFO "${MARKERS[@]}"; do
     [[ ${printed[*]} != *"$shown"* ]]
   done
   for marker in "${MARKERS[@]}"; do
     absent "$marker" "$RECORD/argv"
   done
-  for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY TF_STATE_PASSPHRASE; do
-    if tr '\0' '\n' < "$RECORD/env.openstack" | grep -q "^$name="; then
-      echo "the openstack client got $name" >&2
+  # The S3 client gets the state key, in its own settings, and no other secret; the openstack
+  # client is not used.
+  [ "$(grep -c '^openstack ' "$RECORD/argv")" -eq 0 ]
+  calls=$(grep -c '^rclone ' "$RECORD/argv")
+  [ "$calls" -ge 3 ]
+  for ((call = 1; call <= calls; call++)); do
+    environment=$(tr '\0' '\n' < "$RECORD/env.rclone.$call")
+    grep -qx 'RCLONE_CONFIG_STORE_ACCESS_KEY_ID=marker-access-key-id' <<< "$environment"
+    grep -qx 'RCLONE_CONFIG_STORE_SECRET_ACCESS_KEY=marker-secret-access-key' <<< "$environment"
+    if grep -qE '^(AWS_|OS_|TF_)' <<< "$environment"; then
+      echo "the S3 client got $(grep -oE '^(AWS_|OS_|TF_)[A-Z_]*' <<< "$environment" | head -1)" >&2
       return 1
     fi
   done
 }
 
-@test "infra-state-bucket names what it needs before it calls the openstack client" {
+@test "infra-state-bucket names what it needs before it calls the S3 client" {
   fake_object_storage
   only
 
   recipe infra-state-bucket
 
   [ "$status" -ne 0 ]
-  [[ $output == *"TF_STATE_BUCKET is not set"* ]]
-  [[ $output == *"OS_CLOUD or OS_AUTH_URL is not set"* ]]
+  for name in TF_STATE_BUCKET AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
+    [[ $output == *"$name is not set"* ]]
+  done
   [ ! -e "$RECORD/argv" ]
-}
 
-@test "infra-state-bucket needs the openstack client os-smoke needs" {
-  fake_object_storage 6.2.0
+  # The S3 API needs the state key only, not the OpenStack credentials.
+  only TF_STATE_BUCKET=fixture-state-bucket AWS_ACCESS_KEY_ID=marker-access-key-id \
+    AWS_SECRET_ACCESS_KEY=marker-secret-access-key
 
   recipe infra-state-bucket
 
+  [ "$status" -eq 0 ]
+  [ "$(creates)" = "rclone mkdir store:fixture-state-bucket" ]
+}
+
+@test "infra-state-bucket says the S3 client is required when it is missing" {
+  # A PATH with the tools the recipes use, but no rclone.
+  tools="$BATS_TEST_TMPDIR/tools"
+  mkdir -p "$tools"
+  for tool in bash env dirname mkdir cat paste sed awk tr sort; do
+    ln -s "$(command -v "$tool")" "$tools/$tool"
+  done
+
+  run env -i HOME="$BATS_TEST_TMPDIR" PATH="$BIN:$tools" "${ENVIRONMENT[@]}" \
+    "$JUST" --justfile "$ROOT/justfile" --working-directory "$REPO" infra-state-bucket
+
   [ "$status" -ne 0 ]
-  [[ $output == *"python-openstackclient 7.0.0 or newer is needed"* ]]
-  run grep -c '^openstack container' "$RECORD/argv"
-  [ "$output" -eq 0 ]
+  [[ $output == *"rclone is not on PATH; install the pinned tools with: just tools"* ]]
 }
 
 @test "infra-state-bucket creates nothing when it cannot list the buckets, and shows no error detail" {
@@ -1023,6 +1040,37 @@ creates() {
 
   [ "$status" -ne 0 ]
   [[ $output == *"cannot list"* ]]
-  [[ $output != *fixture-project-id* && $output != *object-store.example.invalid* ]]
+  [[ $output != *"$(backend_endpoint)"* && $output != *AccessDenied* ]]
   [ -z "$(creates)" ]
+}
+
+@test "infra-state-bucket fails without naming the bucket when its name is taken" {
+  fake_object_storage
+  echo fixture-state-bucket > "$TAKEN"
+
+  recipe infra-state-bucket
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"the name TF_STATE_BUCKET holds is taken; choose another"* ]]
+  [[ $output != *fixture-state-bucket* ]]
+  [ "$(grep -cx fixture-state-bucket "$BUCKETS")" -eq 0 ]
+}
+
+@test "infra-state-bucket refuses a name that is not a bucket name, without printing it" {
+  fake_object_storage
+  for name in fixture/state Fixture-State fixture_state q9 -fixture-state; do
+    echo "$name"
+    reset_environment
+    without TF_STATE_BUCKET
+    with "TF_STATE_BUCKET=$name"
+    rm -f "$RECORD/argv"
+
+    recipe infra-state-bucket
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"TF_STATE_BUCKET is not a bucket name"* ]]
+    [[ $output != *"$name"* ]]
+    run grep -q '^rclone ' "$RECORD/argv"
+    [ "$status" -ne 0 ]
+  done
 }

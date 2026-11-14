@@ -1,43 +1,39 @@
 #!/usr/bin/env bash
-# Creates the bucket TF_STATE_BUCKET names, which holds every stack's state, unless it exists. No
-# tool pinned in mise.toml speaks the S3 API, so the bucket is made as an object storage container
-# of that name with the openstack client os-smoke uses, on the OpenStack credentials; OpenTofu's s3
-# backend then reaches it through the S3 API with the S3 credentials. Prints neither the bucket's
-# name nor anything the client reports, which names the project, so its output can be shared. A
-# second run finds the bucket and creates nothing.
+# Creates the bucket TF_STATE_BUCKET names, which holds every stack's state, unless it exists,
+# through the object storage's S3 API with the state key, the key OpenTofu's s3 backend reaches it
+# with; no OpenStack credentials are needed. Prints neither the bucket's name nor anything rclone
+# reports, which names the bucket and the endpoint, so its output can be shared. A second run finds
+# the bucket and creates nothing.
 # Usage: scripts/infra-state-bucket
 set -euo pipefail
 
-# shellcheck source=scripts/lib/infra.sh
-. "$(dirname "$0")/lib/infra.sh"
+# shellcheck source=scripts/lib/s3.sh
+. "$(dirname "$0")/lib/s3.sh"
 load_env
-# The openstack client needs none of the state's secrets.
-export -n AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY TF_STATE_PASSPHRASE
 complete=1
 refuse_http2_debug || complete=0
-require_env TF_STATE_BUCKET || complete=0
-require_openstack_auth || complete=0
+require_env TF_STATE_BUCKET AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY || complete=0
 ((complete))
-if ! command -v openstack > /dev/null; then
-  infra_error "the openstack client is not on PATH; infra-state-bucket needs python-openstackclient 7.0.0 or newer"
-  exit 1
-fi
-if ! openstack_client_recent; then
-  infra_error "python-openstackclient 7.0.0 or newer is needed"
-  exit 1
-fi
+s3_bucket_name_ok TF_STATE_BUCKET
+s3_require_client
 
-# The client's errors can name the project and the object storage's endpoint.
-if ! containers=$(openstack container list --all --prefix "$TF_STATE_BUCKET" -f value -c Name 2> /dev/null); then
-  infra_error "the openstack client cannot list the object storage's buckets with these credentials"
+if ! s3_create_buckets state "$TF_STATE_BUCKET"; then
+  infra_error "rclone cannot list the object storage's buckets with the state key"
   exit 1
 fi
-if grep -qxF -- "$TF_STATE_BUCKET" <<< "$containers"; then
-  echo "infra-state-bucket: the bucket TF_STATE_BUCKET names exists; nothing to create"
-  exit 0
-fi
-if ! openstack container create "$TF_STATE_BUCKET" > /dev/null 2>&1; then
-  infra_error "the openstack client cannot create the bucket TF_STATE_BUCKET names"
-  exit 1
-fi
-echo "infra-state-bucket: created the bucket TF_STATE_BUCKET names"
+case ${s3_bucket_state[$TF_STATE_BUCKET]} in
+  exists) echo "infra-state-bucket: the bucket TF_STATE_BUCKET names exists; nothing to create" ;;
+  created) echo "infra-state-bucket: created the bucket TF_STATE_BUCKET names" ;;
+  taken)
+    infra_error "the name TF_STATE_BUCKET holds is taken; choose another"
+    exit 1
+    ;;
+  unconfirmed)
+    infra_error "the bucket TF_STATE_BUCKET names may have been created, but the buckets could not be listed to confirm it"
+    exit 1
+    ;;
+  *)
+    infra_error "rclone cannot create the bucket TF_STATE_BUCKET names"
+    exit 1
+    ;;
+esac

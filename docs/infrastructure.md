@@ -12,11 +12,12 @@ command that runs them is a `just` recipe.
   up; and that the flavors and the external network the stacks' variables name exist. Quota left
   is not compared with what the stacks need. It prints pass or FAIL per item and no figures. The
   client is not pinned in `mise.toml`; it is installed separately.
-- `just infra-state-bucket` creates the bucket `TF_STATE_BUCKET` names unless it exists, as an
-  object storage container of that name, with the `openstack` client on the OpenStack credentials:
-  no tool pinned in `mise.toml` speaks the S3 API. It needs the client version `os-smoke` needs,
-  prints neither the bucket's name nor what the client reports, which names the project, and
-  creates nothing on a second run.
+- `just infra-state-bucket` creates the bucket `TF_STATE_BUCKET` names unless it exists, through
+  the object storage's S3 API with the state key, as the backup buckets are created
+  ([S3 keys and backup buckets](#s3-keys-and-backup-buckets)); it needs no OpenStack credentials.
+  It prints neither the bucket's name nor what rclone reports, which names it and the endpoint, and
+  creates nothing on a second run. A name that is not a bucket name, or that another project owns,
+  fails without being printed.
 - `just infra-plan sto2/plumbing` plans a stack and prints the plan's summary.
 - `just infra-apply sto2/plumbing` plans a stack, prints the summary and, once the stack's name is
   typed back, applies that saved plan; `just infra-apply sto2/plumbing --yes`, or with `--yes`
@@ -89,12 +90,12 @@ keys belong to the same project and reach every bucket in it, the state bucket i
 why state and snapshots are encrypted before they are uploaded
 ([ADR 0008](adr/0008-state-and-backups-are-encrypted-before-they-leave.md)).
 
-These recipes reach the object storage with rclone, pinned in `mise.toml`, at the endpoint, region
-and addressing that `infra/openstack/backend.hcl` gives OpenTofu's state. rclone is configured
-through its environment only and reads no config file; the operator's own rclone configuration,
-its `RCLONE_` and `AWS_` variables and every other variable but `PATH`, `HOME`, `TMPDIR` and the
-proxy variables stay out of its environment. What rclone prints names the buckets and the
-endpoint, so it is not shown.
+These recipes and `just infra-state-bucket` reach the object storage with rclone, pinned in
+`mise.toml`, at the endpoint, region and addressing that `infra/openstack/backend.hcl` gives
+OpenTofu's state. rclone is configured through its environment only and reads no config file; the
+operator's own rclone configuration, its `RCLONE_` and `AWS_` variables and every other variable
+but `PATH`, `HOME`, `TMPDIR` and the proxy variables stay out of its environment. What rclone
+prints names the buckets and the endpoint, so it is not shown.
 
 ## The generated talman.yaml
 
@@ -151,8 +152,7 @@ on a command line; secrets reach tofu and rclone through their environment.
   credentials.
 - `OS_CLOUD`, naming a `clouds.yaml` entry outside the repository, or `OS_AUTH_URL` with the
   application-credential variables: OpenStack authentication, which tofu's provider and the
-  `openstack` client read themselves. `os-smoke` and `infra-s3-key` need only this, and
-  `infra-state-bucket` this and `TF_STATE_BUCKET`.
+  `openstack` client read themselves. `os-smoke` and `infra-s3-key` need only this.
 - `OPERATOR_CIDRS`, or else `operator-cidrs.json` at the repository root (gitignored): the
   operator allowlist of the cluster stack, a JSON list of IPv4 CIDRs. An entry that is IPv6, or
   whose prefix is 0 and so covers every address, is refused, named by its position in the list and

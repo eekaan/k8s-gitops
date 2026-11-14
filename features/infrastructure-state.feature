@@ -22,9 +22,9 @@ Feature: Infrastructure state and stack recipes
     Then it exits non-zero naming the stack
 
   Scenario: The state bucket is created once and no credential is shown
-    Given OpenStack credentials, S3 credentials and TF_STATE_BUCKET naming a bucket that does not exist
+    Given the state key and TF_STATE_BUCKET naming a bucket that does not exist
     When infra-state-bucket runs, and then runs again
-    Then the first run creates that bucket with the openstack client and the second creates nothing, and no credential and not the bucket's name is printed, and no credential reaches a command line or the openstack client's environment
+    Then the first run creates that bucket through the S3 client with the state key and the second creates nothing, neither starting the openstack client, and no credential, not the bucket's name and not the endpoint is printed, no credential reaches a command line, and the S3 client's environment holds the state key and no other secret
 
   Scenario: A missing required variable is named and nothing runs
     Given an environment without the state bucket

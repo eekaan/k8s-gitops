@@ -33,7 +33,7 @@ infra-destroy *flags:
 os-smoke:
     scripts/os-smoke
 
-# Create the state bucket TF_STATE_BUCKET names, as an object storage container, unless it exists; prints neither its name nor a credential
+# Create the state bucket TF_STATE_BUCKET names through the S3 API with the state key, unless it exists; prints neither its name nor a credential
 infra-state-bucket:
     scripts/infra-state-bucket
 

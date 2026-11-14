@@ -13,7 +13,7 @@ Feature: Backup buckets and the cluster's S3 key
 
   Scenario: No bucket name, key or endpoint reaches the output, and no key reaches a command line
     Given keys, a bucket prefix and an S3 endpoint that are marker strings
-    When infra-backup-buckets, infra-s3-key and infra-backup-check run, succeeding and failing
+    When infra-backup-buckets, infra-s3-key, infra-backup-check and infra-state-bucket run, succeeding and failing
     Then no marker appears in anything they print, no key or endpoint appears in any recorded argument list, and the openstack client gets no S3 key
 
   Scenario: The S3 client reads nothing but its environment
