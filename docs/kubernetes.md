@@ -1087,13 +1087,9 @@ path as `remoteRef.key` and the key as `remoteRef.property`. The store logs in a
 and reads the key-value mount and nothing else. `demo/hello-secret` is the example: after
 `just bao-put demo/hello greeting`, the Secret `hello` in `demo` holds the key `greeting`.
 
-The store's reach is the whole mount, for every namespace: it sets no conditions, so an
-ExternalSecret in any namespace may name it and read any key. Whoever may create an ExternalSecret
-in a namespace, which External Secrets adds to Kubernetes' `edit` and `admin` roles, may therefore
-read every key into a Secret there. The store serves every namespace. Creating an ExternalSecret is
-reserved to cluster administrators and Flux, which applies those in Git after review; no RoleBinding
-grants `edit` or `admin`. A namespace delegated to anyone else first gets its own store restricted
-with `conditions`.
+The store serves every namespace. Creating an ExternalSecret is reserved to cluster administrators
+and Flux, which applies those in Git after review; no RoleBinding grants `edit` or `admin`. A
+namespace delegated to anyone else first gets its own store restricted with `conditions`.
 
 ### When something is lost
 
