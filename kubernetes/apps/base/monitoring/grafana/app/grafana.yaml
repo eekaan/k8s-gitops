@@ -3,7 +3,7 @@
 # grafana-service, port 3000, inside the cluster only. The operator writes the admin user, admin,
 # and a random password into the Secret grafana-admin-credentials when it first creates it, and
 # keeps them while the Grafana exists. Grafana's data directory is an emptyDir: its datasource and
-# dashboards come from Git, and the operator applies them again after every restart.
+# dashboards come from Git, and the operator applies them again within a few minutes of a restart.
 apiVersion: grafana.integreatly.org/v1beta1
 kind: Grafana
 metadata:

@@ -9,7 +9,8 @@ spec:
   instanceSelector:
     matchLabels:
       app.kubernetes.io/instance: grafana
-  # A restarted Grafana starts without it; the operator applies it again within a minute.
+  # A restarted Grafana starts without it. The operator applies it again every minute, and retries
+  # a failed attempt after 10 seconds, doubling the wait up to two minutes while Grafana starts.
   resyncPeriod: 1m
   datasource:
     name: Prometheus

@@ -146,7 +146,7 @@ its VolumeSnapshotClass ([Storage](#storage)); the monitoring stack ([Monitoring
 the baseline applications with a monitor and both Grafana applications ([Grafana](#grafana)) name
 `prometheus-operator-crds`; cert-manager ([cert-manager](#cert-manager)) and `envoy-gateway`
 ([Envoy Gateway](#envoy-gateway)) name `gateway-api-crds`, and `envoy-gateway` turns off its chart's
-copy of the Gateway API. No route is enabled anywhere, and no chart's dashboard outside the Grafana
+copy of the Gateway API. No route is enabled anywhere, and no chart's dashboard outside the `grafana`
 application.
 
 Deleting a definition deletes every object of its kind, so none of these applications ever deletes
@@ -213,8 +213,10 @@ classes and their handlers.
 
 `apps/base/external-secrets/external-secrets/` runs the External Secrets operator in its own
 namespace, `external-secrets`. It is how runtime secrets reach workloads (ADR 0005): an
-`ExternalSecret` names a key in a secret store, and the operator writes it into a Secret. No secret
-store is configured yet, and nothing in the tree creates an `ExternalSecret`.
+`ExternalSecret` names a key in a secret store, and the operator writes it into a Secret. The
+exception is a credential a controller generates in the cluster for its own workload, which stays
+in the Secret that controller writes, such as Grafana's admin password ([Grafana](#grafana)). No
+secret store is configured yet, and nothing in the tree creates an `ExternalSecret`.
 
 - The chart comes from its publisher's OCI registry and installs and upgrades the operator's
   resource definitions itself, as the publisher documents. No other chart in the tree ships them,
@@ -304,8 +306,9 @@ them:
 The Grafana runs the version its `grafana.yaml` pins, which Renovate updates, as one replica
 without a disruption budget: a second replica would keep a database of its own. It keeps nothing
 that Git does not hold, so it claims no volume: its data directory is an emptyDir, and the operator
-applies the datasource and every dashboard again each minute, so a restarted Grafana has them back
-within one. The datasource is the Prometheus Service of the monitoring chart,
+applies the datasource and every dashboard again every minute. One it cannot apply, as while a
+restarted Grafana starts, it retries after 10 seconds, doubling the wait up to two minutes, so a
+restarted Grafana has them all back within a few minutes. The datasource is the Prometheus Service of the monitoring chart,
 `kube-prometheus-stack-prometheus`, port 9090. Grafana makes no call to the internet on its own: its
 configuration turns off usage reporting, the checks for Grafana and plugin updates, the news feed,
 the plugin catalogue, the plugins Grafana would install at every start, the download of plugin
@@ -324,8 +327,9 @@ Nothing routes to Grafana from outside the cluster. Reach it with `kubectl port-
 3000 of the Service `grafana-service` in `monitoring`, and sign in as `admin`. The password is under
 `GF_SECURITY_ADMIN_PASSWORD` in the Secret `grafana-admin-credentials` in `monitoring`, which the
 operator generates when it first creates the Secret and keeps while the `Grafana` exists; nothing in
-Git holds it. Deleting the `Grafana` deletes the Secret, and a new one gets a new password.
-Anonymous access is off.
+Git holds it. Deleting the `Grafana` deletes the Secret, and a new one gets a new password. It is
+the kind of credential ADR 0005 keeps out of OpenBao: one a controller generates in the cluster for
+its own workload, which stays in the Secret that controller writes. Anonymous access is off.
 
 `tests/grafana.bats` builds both applications as Flux applies them, renders the two charts and the
 monitoring application's, and checks the definitions, the monitors, the version and replicas, the

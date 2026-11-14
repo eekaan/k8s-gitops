@@ -34,8 +34,9 @@ grafana:
     matchLabels:
       app.kubernetes.io/instance: grafana
     folder: Kubernetes
-    # A restarted Grafana starts without its dashboards; the operator applies each again within a
-    # minute.
+    # A restarted Grafana starts without its dashboards. The operator applies each again every
+    # minute, and retries a failed attempt after 10 seconds, doubling the wait up to two minutes
+    # while Grafana starts.
     resyncPeriod: 1m
 alertmanager:
   enabled: false
