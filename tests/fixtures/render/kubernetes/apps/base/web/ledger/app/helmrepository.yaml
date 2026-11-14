@@ -1,0 +1,9 @@
+---
+# A repository that does not resolve: the tests stand in for helm's pull of the chart from it.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: ledger
+spec:
+  interval: 12h
+  url: https://charts.example.invalid/stable

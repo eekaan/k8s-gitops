@@ -1,0 +1,6 @@
+---
+# The chart the fixture's ledger HelmRelease installs from a Helm repository. The tests package it at
+# the version the HelmRelease pins, in place of the repository, which does not resolve.
+apiVersion: v2
+name: ledger
+version: 0.0.0

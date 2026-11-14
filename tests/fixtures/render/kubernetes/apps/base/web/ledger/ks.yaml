@@ -1,0 +1,12 @@
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: ledger
+  namespace: flux-system
+spec:
+  path: ./apps/base/web/ledger/app
+  targetNamespace: web
+  sourceRef:
+    kind: ExternalArtifact
+    name: ledger
