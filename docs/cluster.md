@@ -10,11 +10,11 @@ holds the machine configurations, the talosconfig and the kubeconfig.
 ## From nothing to a Ready cluster
 
 1. `just infra-apply sto2/plumbing`, then `just infra-apply sto2/cluster`
-   ([infrastructure.md](infrastructure.md)): the nodes boot and wait in maintenance mode.
-2. `just infra-talman`: the cluster's `talman.yaml`.
-3. `just cluster-age-key`, once: the Talos age key. Commit `talos/.sops.yaml`.
-4. `just cluster-secrets`, once per cluster: the secrets bundle. Commit it.
-5. `just cluster-bootstrap`: every node configured, Cilium installed, every node Ready.
+   ([infrastructure.md](infrastructure.md)): the nodes boot and wait in maintenance mode, and
+   the cluster's `talman.yaml` is written. `just infra-talman` writes it again without applying.
+2. `just cluster-age-key`, once: the Talos age key. Commit `talos/.sops.yaml`.
+3. `just cluster-secrets`, once per cluster: the secrets bundle. Commit it.
+4. `just cluster-bootstrap`: every node configured, Cilium installed, every node Ready.
 
 Later changes to a patch or to `talman.yaml`, and nodes OpenTofu adds, reach the nodes with
 `just cluster-talos`.
