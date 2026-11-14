@@ -272,19 +272,34 @@ networks than its sources stand for, and when the table below and the file disag
   ([infrastructure.md](infrastructure.md#environment)).
 - `floating`: each node's floating address. A node that reaches another node's floating address goes
   out through the router and arrives from its own.
-- `members`: each node's own address on the node network. A node's own connections come from it,
-  and so does a pod's connection to another node's address: Cilium does not carry it through the
-  overlay, as a node's address has no tunnel endpoint unless the host firewall or node encryption is
-  on, and masquerades it to its node's address as it leaves the node
-  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/node/manager/manager.go#L577-L584),
-  [masquerading](https://github.com/cilium/cilium/blob/v1.20.4/bpf/lib/nat.h#L751-L785)).
+- `members`: each node's own address on the node network, the one its kubelet registers it with
+  (`talos/patches/all/node-ip.yaml`), and so the one Kubernetes reports for it. A node's own
+  connections come from it, and so does a pod's connection to another node's address. Cilium routes
+  in tunnel mode, and a node's address has a tunnel endpoint only with Cilium's host firewall or
+  node encryption on
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/node/manager/manager.go#L577-L584)),
+  neither of which `kubernetes/apps/base/kube-system/cilium/app/values.yaml` turns on, so the packet
+  leaves through the node's own interface. There it is masqueraded to that interface's address:
+  with eBPF masquerading off, as by the chart's default
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/install/kubernetes/cilium/values.yaml#L704-L707)),
+  Cilium's iptables rule masquerades what leaves the node's pod range, for an address outside it,
+  on any device but Cilium's own
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/datapath/iptables/iptables.go#L2206-L2241)),
+  and exempts traffic to other nodes from it only without tunnelling
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/option/config.go#L2061-L2063)).
 - `pods`: the pod range, from which a pod arrives at the node it runs on.
 - `controlplanes`: each control plane's address on the node network.
 - `loadbalancer`: the API load balancer's address on the node network, and the networks of the
-  node subnet's DHCP pool, from which the cloud gives the load balancer's own ports their
-  addresses: a load balancer that proxies, as Octavia's amphora provider does, connects to the API
-  servers and health-checks them from those, not from the client's address. The cluster stack
-  renders the pool as the fewest networks that hold it exactly.
+  node subnet's DHCP pool. A load balancer that proxies, as Octavia's amphora provider does,
+  connects to the API servers and health-checks them from its own ports' addresses, not from the
+  client's. An amphora configures each of its ports with the address Neutron gave the port, or
+  takes it by DHCP
+  ([Octavia](https://github.com/openstack/octavia/blob/19.0.0/octavia/amphorae/backends/utils/interface_file.py#L109-L131),
+  [member ports](https://github.com/openstack/octavia/blob/19.0.0/octavia/amphorae/backends/utils/interface_file.py#L248-L278)),
+  and Neutron allocates a port that asks for no particular address an available one of its subnet
+  and returns it, when the port goes, to the subnet's allocation pools, here the DHCP pool
+  ([Neutron](https://docs.openstack.org/api-ref/network/v2/index.html#create-port)). The cluster
+  stack renders the pool as the fewest networks that hold it exactly.
 - `cihost`: the CI host's address on the node network, once the cluster stack's `ci_host_number`
   gives it ([infrastructure.md](infrastructure.md#the-ci-host)); nothing without it.
 
@@ -367,8 +382,8 @@ reaches them, and neither does a node without machine configuration. Each, with 
   admission plugin (`talos/patches/controlplane/deny-service-external-ips.yaml`), which refuses a
   Service that names an external address it did not have before
   ([Kubernetes](https://kubernetes.io/docs/reference/access-authn-authz/admission-controllers/#denyserviceexternalips)),
-  and no Service names one. The plugin reads `spec.externalIPs` alone and passes every
-  subresource
+  and no Service under `kubernetes/` names one. The plugin reads `spec.externalIPs` alone and passes
+  every subresource
   ([Kubernetes](https://github.com/kubernetes/kubernetes/blob/v1.37.1/plugin/pkg/admission/network/denyserviceexternalips/admission.go#L60-L98)),
   so Cilium writing a Service's load-balancer address into its status, and Services labelled for
   BGP, are not affected.
@@ -486,25 +501,6 @@ makes it do. Until each has been, watch:
 6. trustd and the CI host stay unproved until a worker joins and the CI host connects; the paths
    from pods on a node to the node itself, until a pod there, such as Prometheus on a control
    plane, uses one.
-
-### Checked on the running cluster
-
-What the rules and the checks rest on, read from the cluster before any node held a rule:
-
-- Every node's own address, as Kubernetes reports it, is the one its `members` entry holds, for all
-  six nodes.
-- Connections to TCP 6443 on the control planes come only from the nodes' own addresses, from the
-  load balancer's addresses, which lie in the DHCP pool, from the nodes' floating addresses and over
-  the loopback interface: each is a source of `kube-apiserver`.
-- Scrapes of the controller manager, the scheduler and node-exporter on a control plane, TCP 10257,
-  10259 and 9100, arrive from a worker's own address, masqueraded as `members` describes, not from
-  the pod range.
-- Each control plane's API server reports a `process_start_time_seconds` of its own, and fifteen
-  fresh requests through the load balancer reached all three, as check 7 needs.
-- No Service names an external address, so none is left that `DenyServiceExternalIPs`, which
-  refuses only a new one, would let stay.
-- Cilium routes in tunnel mode on its default port, VXLAN's UDP 8472, and its host firewall is off,
-  one of the two things that would give a node's address a tunnel endpoint.
 
 ### The way back
 
