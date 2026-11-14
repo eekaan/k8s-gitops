@@ -1,0 +1,19 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: grafana
+  namespace: flux-system
+spec:
+  path: ./apps/base/monitoring/grafana/app
+  targetNamespace: monitoring
+  dependsOn:
+    # The Grafana, its datasource and its dashboards are objects of the operator's kinds, which
+    # exist once grafana-operator is Ready.
+    - name: grafana-operator
+    # Its ServiceMonitor's kind exists once prometheus-operator-crds is Ready.
+    - name: prometheus-operator-crds
+  sourceRef:
+    kind: ExternalArtifact
+    name: grafana

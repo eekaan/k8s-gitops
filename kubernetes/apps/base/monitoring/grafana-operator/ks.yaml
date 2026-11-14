@@ -1,0 +1,19 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: grafana-operator
+  namespace: flux-system
+spec:
+  path: ./apps/base/monitoring/grafana-operator/app
+  targetNamespace: monitoring
+  # Its chart makes a ServiceMonitor, a kind that exists once prometheus-operator-crds is Ready.
+  dependsOn:
+    - name: prometheus-operator-crds
+  # Ready only once the release is installed and the operator is ready, so the grafana
+  # application, which names this one in dependsOn, finds the operator's definitions in place.
+  wait: true
+  sourceRef:
+    kind: ExternalArtifact
+    name: grafana-operator

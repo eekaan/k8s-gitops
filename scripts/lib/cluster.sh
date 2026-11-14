@@ -6,14 +6,15 @@
 # the line that names the step a recipe failed in, the private directory an etcd snapshot is kept in
 # while a recipe works on it, the talman run that keeps its output out of a CI log, the Flux age key
 # and the other objects Flux needs before it starts, the release an application's HelmRelease makes,
-# and the install of an application before Flux. Builds on scripts/lib/infra.sh, which reads the
+# and the install of an application before Flux. Builds on scripts/lib/s3.sh, for the backup
+# buckets' prefix and the object storage's endpoint, and so on scripts/lib/infra.sh, which reads the
 # environment. Nothing here prints a secret or a deployment value, or passes one as
 # an argument: sops and talman get the Talos age key's location from their environment, and the Flux
 # age key and the values of the objects applied before Flux reach age-keygen, jq and kubectl on
 # standard input.
 
-# shellcheck source=scripts/lib/infra.sh
-. "$(dirname "${BASH_SOURCE[0]}")/infra.sh"
+# shellcheck source=scripts/lib/s3.sh
+. "$(dirname "${BASH_SOURCE[0]}")/s3.sh"
 
 sops_config=$infra_root/talos/.sops.yaml
 # The rule for the SOPS files under kubernetes/, which Flux decrypts with the Flux age key.
@@ -341,17 +342,25 @@ declare -A cluster_config=()
 
 # fill_cluster_config CLUSTER TALMAN_FILE: fills cluster_config, and fails naming each key of the
 # cluster's cluster-config.example.yaml it cannot fill and each key it fills that the example does not
-# list. Every value depends on the deployment, so none is committed or printed:
-#   CLUSTER_DOMAIN   the domain the cluster's applications are published under, from the environment
-#   NODE_CIDR        the node subnet, values.nodeSubnet in the cluster's talman.yaml, which the
-#                    cluster stack renders and the kubelets take their node addresses from
-#   NODE_NAME_REGEX  a pattern of the hostnames in that talman.yaml (node_name_regex)
+# list. Every value depends on the deployment, and none is printed. The ConfigMap itself is never
+# committed; the object storage's endpoint and region are, in the backend settings OpenTofu's state
+# reads them from.
+#   CLUSTER_DOMAIN        the domain the cluster's applications are published under, from the
+#                         environment
+#   BACKUP_BUCKET_PREFIX  the start of the backup buckets' names, from the environment
+#                         (s3_bucket_name_ok)
+#   S3_ENDPOINT,          the object storage's S3 endpoint and region, from
+#   S3_REGION             infra/openstack/backend.hcl (s3_read_backend)
+#   NODE_CIDR             the node subnet, values.nodeSubnet in the cluster's talman.yaml, which the
+#                         cluster stack renders and the kubelets take their node addresses from
+#   NODE_NAME_REGEX       a pattern of the hostnames in that talman.yaml (node_name_regex)
 # A missing talman.yaml leaves its two keys to the caller's require_cluster, which names the file.
 fill_cluster_config() {
   local cluster=$1 talman=$2 example value keys key complete=1
   local dns_name='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
   local -a listed=()
-  local -A sources=([CLUSTER_DOMAIN]=1 [NODE_CIDR]=1 [NODE_NAME_REGEX]=1) wanted=()
+  local -A sources=([CLUSTER_DOMAIN]=1 [BACKUP_BUCKET_PREFIX]=1 [S3_ENDPOINT]=1 [S3_REGION]=1
+    [NODE_CIDR]=1 [NODE_NAME_REGEX]=1) wanted=()
   example=$infra_root/kubernetes/clusters/$cluster/cluster-config.example.yaml
   cluster_config=()
   if [[ ! -f $example ]]; then
@@ -367,6 +376,18 @@ fill_cluster_config() {
       complete=0
     fi
   else
+    complete=0
+  fi
+  if require_env BACKUP_BUCKET_PREFIX && s3_bucket_name_ok BACKUP_BUCKET_PREFIX prefix; then
+    cluster_config[BACKUP_BUCKET_PREFIX]=$BACKUP_BUCKET_PREFIX
+  else
+    complete=0
+  fi
+  if s3_read_backend; then
+    cluster_config[S3_ENDPOINT]=$s3_endpoint
+    cluster_config[S3_REGION]=$s3_region
+  else
+    infra_error "cannot fill S3_ENDPOINT and S3_REGION of cluster-config from infra/openstack/backend.hcl"
     complete=0
   fi
   if [[ -f $talman ]]; then

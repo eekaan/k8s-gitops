@@ -162,7 +162,7 @@ bytes() {
   [[ $image == *":$ours" ]]
 }
 
-@test "Grafana is not installed" {
+@test "The monitoring chart installs no Grafana" {
   local grafana
   render
   grafana="$(yq -N 'select(. != null) | select(
