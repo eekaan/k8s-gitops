@@ -820,22 +820,66 @@ takes the component holds the cluster's S3 key, which reaches every bucket of th
 can read Secrets there can read, replace or delete any application's backups, though not decrypt
 them (ADR 0015).
 
-### What is still needed
+### What an operator does once, and what then happens by itself
 
-The ClusterSecretStore `openbao` exists, but nothing in the tree writes the key `volsync` into it:
-OpenBao starts with its key-value mount empty, and only an operator fills it, with `just bao-put`.
-Until then the Secret is never written and VolSync starts no mover. The test application
-`apps/base/demo/volsync-demo/`, a pod that holds a 1 GiB volume and writes the time it first found
-it empty, is disabled in the overlay. Before the first backup runs:
+OpenBao starts with its key-value mount empty and nothing in the tree writes the key `volsync`, so
+the operator seeds it once, after `just bao-recovery`, with the cluster's S3 key in `.env`
+(`CLUSTER_S3_ACCESS_KEY_ID` and `CLUSTER_S3_SECRET_ACCESS_KEY`, which `just infra-s3-key cluster`
+makes) and `just cluster-config` applied, so the repository's prefix, endpoint and region are in
+`cluster-config`:
 
-1. the ClusterSecretStore `openbao` holds the key `volsync` with `RESTIC_MASTER_PASSWORD`, also
-   kept outside the cluster, and the cluster's S3 key as `AWS_ACCESS_KEY_ID` and
-   `AWS_SECRET_ACCESS_KEY`;
-2. `just cluster-config` has applied `BACKUP_BUCKET_PREFIX`, `S3_ENDPOINT` and `S3_REGION`;
-3. `volsync-demo` is enabled in the overlay, with the store's application in its `dependsOn`.
+```sh
+just bao-seed-volsync <file>
+```
+
+`<file>` is a new file outside the repository, beside the Talos age key. The recipe:
+
+- stops before it makes anything when either variable is empty, still a placeholder or the state
+  key's, naming the variable;
+- makes the master, 32 random bytes from the kernel written as 64 hexadecimal digits, which restic
+  and the template's digest take as they are, and writes it to `<file>` encrypted with age to the
+  Talos age key's recipient; opens the file again with the operator's Talos age key and compares it
+  with what it wrote; and only then creates the key, with the master and the cluster's S3 key, as
+  the operator role may create and patch keys and never read them. The key is created only while
+  none exists, so a store that holds one is refused, `<file>` it made is removed, and the master
+  in the store is never replaced: a master that changes orphans every repository, so no flag
+  replaces it. An existing `<file>` is never replaced either;
+- after a failure between writing `<file>` and the store holding the key, as when OpenBao refuses
+  the write or the run is interrupted, says which state it left; the next run with the same `<file>`
+  reads the master back from it, makes no other and goes on. A store that already holds the key
+  says so and changes nothing, and the file is kept;
+- prints what it did and where the file is, never the master or the key, which travel on pipes and
+  in the body of the write.
+
+`just bao-seed-volsync --rotate-s3` replaces the S3 key properties of the key with the current
+`.env` values and keeps the master, after the cluster's S3 key is replaced. The master's file is its
+own and not the recovery keys' file: the two open different things and are needed at different
+times, the recovery keys when OpenBao has to be reached with a root token and the master when a
+repository has to be opened, and `just bao-recovery` writes its file once and never again, so a
+second secret could not be added to it. `<file>` holds the only copy of the master that outlives the
+cluster: [the runbook](runbooks/volume-backups.md) says what losing it, or the store's key, means.
+
+`just bao-volsync-password <file> <app> <command> [argument...]` opens one application's repository
+by hand without computing a digest at a prompt: it derives the application's password from the master
+in `<file>` as above and runs the command with `RESTIC_REPOSITORY`, `RESTIC_PASSWORD` and the cluster's
+S3 key as `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_DEFAULT_REGION` in its environment
+and no other secret of the recipe's, so `just bao-volsync-password <file> volsync-demo restic snapshots`
+lists the demo's backups. It prints no password and reaches neither the cluster nor OpenBao. restic is
+not one of the pinned tools: no recipe or check runs it, and it is the operator's to install for the
+rare restore by hand.
+
+After that Flux does the rest. `volsync-demo`, in the overlay, is applied once `volsync`,
+`external-secrets`, `openbao-store` and `linstor-cluster` are Ready. The test application
+`apps/base/demo/volsync-demo/` is a pod that holds a 1 GiB volume and writes the time it first found
+it empty. Its ExternalSecret writes the Secret the movers read as soon as the store holds the key,
+the ReplicationDestination restores the repository's latest backup, which is empty on the first
+deployment, the claim is made from that snapshot and the pod starts, and the ReplicationSource
+backs the volume up at 03:17 each night. A claim and its restore therefore need no manual step once
+the recipe has run.
 
 `tests/volume-backups.bats` builds the applications as Flux applies them and renders the VolSync
-and External Secrets charts to check this section.
+and External Secrets charts to check this section, and `tests/openbao-recipes.bats` runs the
+recipes against fakes of the cluster and of OpenBao.
 
 ## Envoy Gateway
 
@@ -1176,6 +1220,12 @@ with the Talos age key from `SOPS_AGE_KEY_FILE`, or `SOPS_AGE_KEY`, into memory 
   new file `<file>.replaced-<time>.age` beside the file, encrypted to the same recipient and opened
   again with the operator's key, and deletes nothing when it cannot. It needs no port-forward, only
   to read, create and, with `--replace`, delete that Secret.
+- `just bao-seed-volsync <file> [cluster]` seeds the key `volsync` the volume backups read, once, and
+  keeps its master password in `<file>`; `just bao-seed-volsync --rotate-s3 [cluster]` replaces only
+  the S3 key in it. `just bao-volsync-password <file> <app> <command> [argument...]` runs a command
+  with one application's repository and password. Both are described under
+  [Volume backups](#what-an-operator-does-once-and-what-then-happens-by-itself). The first creates
+  the key and never reads one, as the `operator` role may only create and patch keys.
 
 ### How an application gets a secret out
 
@@ -1194,6 +1244,8 @@ namespace delegated to anyone else first gets its own store restricted with `con
   restarts cannot start, as the Secret it mounts is missing, and the data stays sealed on its volume.
   `just bao-seal-restore` writes the key back from the operator's file; an etcd snapshot also holds
   it ([runbook](runbooks/openbao.md#bringing-the-seal-key-back)).
+- **The volume backups' master, or its file**: [the runbook](runbooks/volume-backups.md) says what
+  each loss means.
 - **The seal Secret and every copy of it**: every runtime secret is lost. OpenBao starts again empty
   only once its three claims, the Secret and the ExternalSecret `openbao-seal-1` are deleted: the
   ExternalSecret has synced once and never makes a missing Secret again, so Flux makes it anew, it

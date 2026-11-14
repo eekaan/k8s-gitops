@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+# Seeds the key volsync of OpenBao's key-value mount (secrets/volsync), which every application's
+# ExternalSecret from components/volsync reads (ADR 0015): a master password, from which each
+# repository's password is derived, and the cluster's S3 key. It makes the master from 32 random bytes
+# of the kernel, written as 64 hexadecimal digits, which restic and the template's digest take as
+# they are, and keeps it outside the cluster before the cluster holds it: in FILE, a new file outside
+# the repository, encrypted with age to the Talos age key's recipient in talos/.sops.yaml, written,
+# opened again with the operator's Talos age key to what was written, and never put over a file that
+# exists, as bao-recovery orders its custody file before its commit. Only then does it create the key,
+# and only if no key exists: a master that changes orphans every repository, so nothing here
+# replaces one. The key is created with check-and-set 0, so a key that exists makes OpenBao refuse,
+# which the operator role needs, as it may create and patch keys and never read them.
+# The cluster's S3 key is read from CLUSTER_S3_ACCESS_KEY_ID and CLUSTER_S3_SECRET_ACCESS_KEY, the
+# in-cluster key and not the operator's state key; an empty one, a placeholder, or the state key's
+# stops the run before anything is made.
+# A run that fails after FILE is written and before OpenBao holds the key says so, and the next run
+# with the same FILE reads the master back from it, makes no other, and goes on. A run that finds
+# the key already there changes nothing: a file it made is removed, a file that was there is kept.
+# --rotate-s3 replaces the S3 key properties of the key and keeps the master, and takes no file.
+# Nothing of the master or the key is printed, passed as an argument or written unencrypted: they
+# stay in memory and on pipes between jq, age and curl. Works through the session of
+# scripts/lib/openbao.sh as the operator role.
+# Usage: scripts/bao-seed-volsync <file> [cluster]
+#        scripts/bao-seed-volsync --rotate-s3 [cluster]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/openbao.sh
+. "$here/lib/openbao.sh"
+
+# The key the component's ExternalSecret reads.
+volsync_key=volsync
+
+usage() {
+  echo "bao-seed-volsync: give the file to write, outside the repository: just bao-seed-volsync <file> [cluster], or just bao-seed-volsync --rotate-s3 [cluster]" >&2
+  exit 1
+}
+
+rotate=0 file=""
+if (($# >= 1)) && [[ $1 == --rotate-s3 ]]; then
+  rotate=1
+  shift
+  (($# <= 1)) || usage
+else
+  (($# >= 1 && $# <= 2)) || usage
+  # Nothing that reads as an option is a file.
+  [[ $1 != -* ]] || usage
+  file=$1
+  shift
+fi
+
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "${1-}"
+complete=1
+require_commands kubectl curl jq mktemp || complete=0
+require_env CLUSTER_S3_ACCESS_KEY_ID CLUSTER_S3_SECRET_ACCESS_KEY || complete=0
+# The cluster's key is its own, so that it can be revoked alone; the state key reaches every stack's
+# state.
+if [[ -n ${AWS_ACCESS_KEY_ID:-} && ${CLUSTER_S3_ACCESS_KEY_ID:-} == "$AWS_ACCESS_KEY_ID" ]]; then
+  infra_error "CLUSTER_S3_ACCESS_KEY_ID holds the state key's ID; the cluster's S3 key is another one: just infra-s3-key cluster"
+  complete=0
+fi
+require_kubeconfig || complete=0
+# The master of a run that goes on from FILE, and whether this run goes on from it.
+master="" resume=0 recipient="" dir=""
+if ((!rotate)); then
+  require_commands age od head tr sha256sum date || complete=0
+  # The operator's Talos age key, which FILE must open with before OpenBao holds the key.
+  require_age_key || complete=0
+  recipient=$(sops_recipient)
+  if is_placeholder "$recipient" || [[ ! $recipient =~ ^age1[0-9a-z]+$ ]]; then
+    infra_error "talos/.sops.yaml holds no age recipient yet; just cluster-age-key writes it"
+    complete=0
+  fi
+  dir=$(dirname -- "$file")
+  if inside_repository "$file"; then
+    infra_error "$file lies inside the repository; the master password is kept outside it"
+    complete=0
+  elif [[ -L $file ]] || [[ -e $file && ! -f $file ]]; then
+    infra_error "$file is not a file"
+    complete=0
+  elif [[ -f $file ]]; then
+    # An interrupted run left it: this run goes on from it, if it is this recipe's, for this cluster.
+    if ((complete)) && custody=$(bao_decrypt "$file" 2> /dev/null) &&
+      printf '%s' "$custody" | jq -e --arg cluster "$cluster" \
+        '.cluster == $cluster and (.volsync.master // "" | test("^[0-9a-f]{64}$"))' > /dev/null; then
+      master=$(printf '%s' "$custody" | jq -r '.volsync.master')
+      resume=1
+    else
+      infra_error "$file exists and is no custody file of a volsync master for $cluster that the Talos age key opens; it is never replaced"
+      complete=0
+    fi
+    custody=
+  elif [[ ! -d $dir || ! -w $dir ]]; then
+    infra_error "$dir is not a directory this user can write to"
+    complete=0
+  fi
+fi
+((complete))
+
+# have_file is 1 once FILE holds the master, made by this run (made) or read from FILE; stored is 1
+# once OpenBao holds the key; holds is 1 when OpenBao refused because it holds one already. partial
+# is the file being written.
+have_file=$resume made=0 stored=0 holds=0 partial=""
+
+# bao_abort: removes a partial file, and on a failure after FILE holds the master and before OpenBao
+# holds the key says which state that left and how the next run goes on. A run that found the key
+# already there has changed nothing: it removes the file it made, which holds a master the store
+# never had, and keeps one that was there.
+bao_abort() {
+  [[ -z $partial ]] || rm -f -- "$partial"
+  ((have_file && !stored)) || return 0
+  if ((holds && made)); then
+    rm -f -- "$file"
+    infra_error "OpenBao already holds the key $volsync_key, with a master this run did not make; the file it made, $file, is removed and nothing in OpenBao changed"
+  elif ((holds)); then
+    infra_error "OpenBao already holds the key $volsync_key; nothing in it changed, and $file is kept, as it may hold that key's master"
+  else
+    infra_error "OpenBao may not hold the key $volsync_key yet, and $file holds its master; run this again with the same file: it goes on from the file, with the same master, and says so if OpenBao holds the key by then"
+  fi
+}
+
+bao_open
+bao_login
+
+if ((rotate)); then
+  step="replacing the S3 key of the key $volsync_key"
+  # The master is not in the patch, so the merge keeps it. The key reaches jq through its environment.
+  written=0
+  jq -nc '{data: {AWS_ACCESS_KEY_ID: env.CLUSTER_S3_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY: env.CLUSTER_S3_SECRET_ACCESS_KEY}}' |
+    bao_request PATCH "$bao_mount/data/$volsync_key" application/merge-patch+json > /dev/null || written=$?
+  if ((written == 44)); then
+    infra_error "OpenBao holds no key $volsync_key to rotate the S3 key of; just bao-seed-volsync <file> seeds it"
+    exit 1
+  elif ((written != 0)); then
+    exit 1
+  fi
+  echo "bao-seed-volsync: replaced the S3 key of the key $volsync_key; its master is unchanged"
+  exit 0
+fi
+
+if ((!resume)); then
+  step="generating the master"
+  master=$(head -c 32 /dev/urandom | od -An -vtx1 | tr -d ' \n')
+  if [[ ! $master =~ ^[0-9a-f]{64}$ ]]; then
+    infra_error "the kernel gave no 32 random bytes"
+    exit 1
+  fi
+  step="writing $file"
+  custody=$(printf '%s' "$master" | jq -Rsc --arg cluster "$cluster" --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{cluster: $cluster, created: $created, volsync: {master: .}}')
+  partial=$(mktemp "$dir/.${file##*/}.XXXXXXXXXX")
+  printf '%s' "$custody" | age --encrypt --recipient "$recipient" --output "$partial"
+  # The file opens with the operator's age key, to what was written, or nothing is written to
+  # OpenBao: a recipient in talos/.sops.yaml that is not the operator's key would make a master
+  # nobody can read.
+  step="opening $file with the Talos age key"
+  if [[ $(bao_decrypt "$partial" | sha256sum) != "$(printf '%s' "$custody" | sha256sum)" ]]; then
+    infra_error "$file does not open with the Talos age key to what was written; check the recipient in talos/.sops.yaml"
+    exit 1
+  fi
+  custody=
+  # A hard link fails where a file exists, so one made after the check above is never replaced.
+  step="putting $file in place"
+  if ! ln -- "$partial" "$file"; then
+    infra_error "$file exists now; the master password goes into a new file"
+    exit 1
+  fi
+  have_file=1 made=1
+  rm -- "$partial"
+  partial=""
+fi
+
+step="creating the key $volsync_key"
+body=$(printf '%s' "$master" | jq -Rsc \
+  '{data: {RESTIC_MASTER_PASSWORD: ., AWS_ACCESS_KEY_ID: env.CLUSTER_S3_ACCESS_KEY_ID,
+    AWS_SECRET_ACCESS_KEY: env.CLUSTER_S3_SECRET_ACCESS_KEY}, options: {cas: 0}}')
+master=
+# Only while there is nothing at the key: OpenBao refuses the write when a key exists.
+written=0
+printf '%s' "$body" | bao_request POST "$bao_mount/data/$volsync_key" > /dev/null 2> "$work_dir/refusal" || written=$?
+body=
+if ((written != 0)); then
+  if grep -q 'check-and-set' "$work_dir/refusal"; then
+    holds=1
+  else
+    cat "$work_dir/refusal" >&2
+  fi
+  exit 1
+fi
+stored=1
+
+if ((resume)); then
+  echo "bao-seed-volsync: wrote the key $volsync_key of $bao_mount with the master in $file, which an earlier run left, and the cluster's S3 key"
+else
+  echo "bao-seed-volsync: wrote the key $volsync_key of $bao_mount with a new master and the cluster's S3 key; the master is also in $file, encrypted to the Talos age key's recipient $recipient"
+fi
+echo "bao-seed-volsync: keep $file outside the cluster; it holds the only copy of the master that outlives it (docs/runbooks/volume-backups.md)"

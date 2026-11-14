@@ -117,6 +117,8 @@ forwards_closed() {
 #   no-forward        the port-forward fails to start
 #   interrupt         curl sends SIGINT to the recipe's script at the request whose path it names,
 #   interrupt-at      at the Nth request to that path (the first when absent)
+#   interrupt-drops   the interrupted request is lost: curl fails before OpenBao gets it, where
+#                     without it the request goes through
 #   recovery-shares   how many recovery key shares exist; none when absent
 #   stale-rotation    a rotation of the recovery keys is in progress already
 #   clobber           curl writes that file, as someone else would, when the rotation starts
@@ -224,6 +226,8 @@ if [[ -e $STATE/interrupt && $(< "$STATE/interrupt") == "$path" ]]; then
       pid=$(awk '{print $4}' "/proc/$pid/stat")
     done
     kill -INT "$target"
+    # The request is lost on the way when the state says so, and never reaches OpenBao.
+    [[ ! -e $STATE/interrupt-drops ]] || exit 28
   fi
 fi
 respond() {
@@ -302,6 +306,8 @@ case "$method $path" in
     if [[ -f $file && $("$JQ" -r '.options.cas // "unset"' <<< "$body") == 0 ]]; then
       respond 400 '{"errors":["check-and-set parameter did not match the current version"]}'
     fi
+    # The custody file must be in place, and non-empty, when the key is written.
+    if [[ -s $(cat "$STATE/outfile" 2> /dev/null) ]]; then : > "$STATE/stored-after-file"; fi
     mkdir -p "$(dirname "$file")"
     "$JQ" -c '.data' <<< "$body" > "$file"
     respond 200 "$(envelope '{"created_time":"2026-11-14T00:00:00Z","custom_metadata":null,"deletion_time":"","destroyed":false,"version":1}')"
@@ -865,4 +871,362 @@ EOF
     [[ $output != *"$secret"* ]] || { echo "a key in the output"; return 1; }
     absent "$secret" "$RECORD/argv"
   done
+}
+
+# seed_env [ID [SECRET]]: the repository's .env, as an operator fills it in: the backup prefix, the
+# state key, and the cluster's S3 key, which differs from the state key. The cluster key is what
+# the volsync recipes put in the store. The object storage's settings are a fixture's.
+seed_env() {
+  printf '%s\n' BACKUP_BUCKET_PREFIX=marker-prefix AWS_ACCESS_KEY_ID=marker-state-id \
+    AWS_SECRET_ACCESS_KEY=marker-state-secret "CLUSTER_S3_ACCESS_KEY_ID=${1-marker-cluster-id}" \
+    "CLUSTER_S3_SECRET_ACCESS_KEY=${2-marker-cluster-secret}" >"$REPO/.env"
+  mkdir -p "$REPO/infra/openstack"
+  printf 'region = "marker-region"\nendpoints = {\n  s3 = "https://s3.example.com"\n}\nuse_path_style = true\n' \
+    >"$REPO/infra/openstack/backend.hcl"
+  VOLSYNC_CUSTODY="$BATS_TEST_TMPDIR/custody/volsync.age"
+  echo "$VOLSYNC_CUSTODY" >"$STATE/outfile"
+}
+
+# master_in FILE: the master password the custody file FILE holds, opened with the Talos age key.
+master_in() {
+  age -d -i "$BATS_TEST_TMPDIR/keys/talos.agekey" "$1" | "$JQ" -r '.volsync.master'
+}
+
+# stored KEY: the property KEY of the key volsync in the fake store.
+# shellcheck disable=SC2016 # $key is a jq variable.
+stored() {
+  "$JQ" -r --arg key "$1" '.[$key]' "$STATE/kv/volsync.json"
+}
+
+# leaked OUTPUT TEXT...: fails when any TEXT is in OUTPUT, the recipe's output, or on a command line
+# the tools recorded, or in any file but the encrypted one, the fakes themselves, the fake store and
+# its record of requests, what the fake command wrote down, and the operator's own .env.
+leaked() {
+  local printed=$1 text
+  shift
+  for text; do
+    [[ $printed != *"$text"* ]] || { echo "$text in the output"; return 1; }
+    absent "$text" "$RECORD/argv"
+    if grep -rlF --exclude-dir=kv --exclude-dir=bin --exclude=requests --exclude=command-env --exclude=.env -- "$text" "$BATS_TEST_TMPDIR"; then
+      echo "$text is in a file, unencrypted"
+      return 1
+    fi
+  done
+}
+
+@test "Seeding writes the master to the custody file, checks it opens, and only then writes the store's key" {
+  local master
+  seed_env
+  recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *"$VOLSYNC_CUSTODY"* ]]
+  # The file opens with the Talos age key, and holds 32 random bytes as 64 hexadecimal digits,
+  # which restic and the template's digest take as they are.
+  master=$(master_in "$VOLSYNC_CUSTODY")
+  [[ $master =~ ^[0-9a-f]{64}$ ]]
+  [ "$(age -d -i "$BATS_TEST_TMPDIR/keys/talos.agekey" "$VOLSYNC_CUSTODY" | "$JQ" -r '.cluster')" = lab-sto2 ]
+  [ "$(stat -c %a "$VOLSYNC_CUSTODY")" = 600 ]
+  # The store's key holds that master and the cluster's S3 key, written only once the file stood,
+  # and only if the key did not exist.
+  [ "$(stored RESTIC_MASTER_PASSWORD)" = "$master" ]
+  [ "$(stored AWS_ACCESS_KEY_ID)" = marker-cluster-id ]
+  [ "$(stored AWS_SECRET_ACCESS_KEY)" = marker-cluster-secret ]
+  [ "$("$JQ" -r 'keys | join(" ")' "$STATE/kv/volsync.json")" = 'AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY RESTIC_MASTER_PASSWORD' ]
+  [ -e "$STATE/stored-after-file" ]
+  [ "$(requests_of POST secrets/data/volsync | "$JQ" -r '.options.cas')" = 0 ]
+  # Over TLS verified against OpenBao's CA, with the operator's token, which is revoked; the
+  # port-forward is closed and nothing but the custody file is left behind.
+  [ "$("$JQ" -r 'select(.tls != "verified") | .path' "$RECORD/requests")" = "" ]
+  [ "$("$JQ" -r 'select(.path != "auth/kubernetes/login") | .token' "$RECORD/requests" | sort -u)" = marker-bao-token ]
+  [ -e "$STATE/revoked" ]
+  forwards_closed
+  [ "$(ls -A "$BATS_TEST_TMPDIR/custody")" = volsync.age ]
+
+  # A recipient the operator's age key does not open: the file is not trusted, the store is never
+  # written, and the file is removed.
+  rm -r "$STATE/kv" "$STATE/stored-after-file" "$VOLSYNC_CUSTODY"
+  mkdir "$STATE/kv"
+  age-keygen -o "$BATS_TEST_TMPDIR/keys/other.agekey" 2>/dev/null
+  OTHER="$(age-keygen -y "$BATS_TEST_TMPDIR/keys/other.agekey")" yq -i '.creation_rules[].age = strenv(OTHER)' "$REPO/talos/.sops.yaml"
+  : >"$RECORD/requests"
+  recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
+  echo "another recipient: $output"
+  [ "$status" -ne 0 ]
+  [ -z "$(requests_of POST secrets/data/volsync)" ]
+  [ -z "$(requests_of PATCH secrets/data/volsync)" ]
+  [ ! -e "$STATE/kv/volsync.json" ]
+  [ ! -e "$VOLSYNC_CUSTODY" ]
+  forwards_closed
+}
+
+@test "A store that already holds the key is not seeded again, and its master is never replaced" {
+  local master before
+  seed_env
+  recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
+  [ "$status" -eq 0 ]
+  master=$(master_in "$VOLSYNC_CUSTODY")
+  before=$(cat "$STATE/kv/volsync.json")
+  cp "$VOLSYNC_CUSTODY" "$BATS_TEST_TMPDIR/custody-before.age"
+
+  # The same file again: the store holds the key, so nothing is written, and the file stays.
+  recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
+  echo "same file: $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"already holds"* ]]
+  [ "$(cat "$STATE/kv/volsync.json")" = "$before" ]
+  cmp "$VOLSYNC_CUSTODY" "$BATS_TEST_TMPDIR/custody-before.age"
+  forwards_closed
+
+  # A new file: a master is never made for a store that has one, and the file it would have held
+  # does not stay behind.
+  recipe bao-seed-volsync "$BATS_TEST_TMPDIR/custody/another.age"
+  echo "another file: $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"already holds"* ]]
+  [ "$(cat "$STATE/kv/volsync.json")" = "$before" ]
+  [ ! -e "$BATS_TEST_TMPDIR/custody/another.age" ]
+  [ "$(find "$BATS_TEST_TMPDIR/custody" -mindepth 1 | wc -l)" -eq 1 ]
+  forwards_closed
+
+  # An existing file is never replaced, and one that is not a custody file of this recipe is
+  # refused before OpenBao is reached; so is a path inside the repository.
+  echo keep-me >"$BATS_TEST_TMPDIR/custody/existing.age"
+  : >"$RECORD/argv"
+  recipe bao-seed-volsync "$BATS_TEST_TMPDIR/custody/existing.age"
+  echo "an unrelated file: $output"
+  [ "$status" -ne 0 ]
+  [ "$(cat "$BATS_TEST_TMPDIR/custody/existing.age")" = keep-me ]
+  custody_file marker-seal-key
+  recipe bao-seed-volsync "$CUSTODY"
+  echo "the recovery keys' file: $output"
+  [ "$status" -ne 0 ]
+  recipe bao-seed-volsync "$REPO/volsync.age"
+  echo "inside the repository: $output"
+  [ "$status" -ne 0 ]
+  [ ! -e "$REPO/volsync.age" ]
+  [ "$(grep -c -E '^(kubectl|curl) ' "$RECORD/argv")" -eq 0 ]
+
+  # --rotate-s3 replaces the S3 key and nothing else: the master stays, in the store and in the
+  # file. No flag replaces the master.
+  seed_env marker-rotated-id marker-rotated-secret
+  : >"$RECORD/requests"
+  recipe bao-seed-volsync --rotate-s3
+  echo "rotated: $output"
+  [ "$status" -eq 0 ]
+  [ "$(stored RESTIC_MASTER_PASSWORD)" = "$master" ]
+  [ "$(stored AWS_ACCESS_KEY_ID)" = marker-rotated-id ]
+  [ "$(stored AWS_SECRET_ACCESS_KEY)" = marker-rotated-secret ]
+  [ "$(requests_of PATCH secrets/data/volsync | "$JQ" -r '.data | keys | join(" ")')" = 'AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY' ]
+  [ -z "$(requests_of POST secrets/data/volsync)" ]
+  cmp "$VOLSYNC_CUSTODY" "$BATS_TEST_TMPDIR/custody-before.age"
+  forwards_closed
+  recipe bao-seed-volsync --replace-master "$VOLSYNC_CUSTODY"
+  echo "a flag for the master: $output"
+  [ "$status" -ne 0 ]
+  [ "$(stored RESTIC_MASTER_PASSWORD)" = "$master" ]
+
+  # Rotating where the store holds no key has no master to keep: it refuses and writes nothing.
+  rm "$STATE/kv/volsync.json"
+  recipe bao-seed-volsync --rotate-s3
+  echo "nothing to rotate: $output"
+  [ "$status" -ne 0 ]
+  [ ! -e "$STATE/kv/volsync.json" ]
+  forwards_closed
+}
+
+@test "A run interrupted between the file and the store goes on from the file" {
+  local master
+  seed_env
+  # Interrupted as the store is written, the write lost: the file holds the master, the store does
+  # not hold the key.
+  echo secrets/data/volsync >"$STATE/interrupt"
+  : >"$STATE/interrupt-drops"
+  recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
+  echo "interrupted: $output"
+  [ "$status" -ne 0 ]
+  [ ! -e "$STATE/kv/volsync.json" ]
+  master=$(master_in "$VOLSYNC_CUSTODY")
+  [[ $master =~ ^[0-9a-f]{64}$ ]]
+  # It says which state it left and how the next run goes on, without the master.
+  [[ $output == *"$VOLSYNC_CUSTODY"* ]]
+  [[ $output == *"from the file"* ]]
+  forwards_closed
+  rm "$STATE/interrupt" "$STATE/interrupt-count"
+  cp "$VOLSYNC_CUSTODY" "$BATS_TEST_TMPDIR/custody-before.age"
+  # The next run reads the master back from the file: no other master is made, and the store holds
+  # the one that was kept.
+  recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
+  echo "continued: $output"
+  [ "$status" -eq 0 ]
+  [ "$(stored RESTIC_MASTER_PASSWORD)" = "$master" ]
+  cmp "$VOLSYNC_CUSTODY" "$BATS_TEST_TMPDIR/custody-before.age"
+  [ -e "$STATE/stored-after-file" ]
+  forwards_closed
+
+  # Interrupted after OpenBao took the write, so the run never heard: the next run finds the key
+  # there, changes nothing, and keeps the file, whose master the store holds.
+  rm -r "$STATE/kv" "$STATE/stored-after-file" "$VOLSYNC_CUSTODY" "$STATE/interrupt-drops"
+  mkdir "$STATE/kv"
+  echo secrets/data/volsync >"$STATE/interrupt"
+  recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
+  echo "interrupted after the write: $output"
+  [ "$status" -ne 0 ]
+  master=$(master_in "$VOLSYNC_CUSTODY")
+  [ "$(stored RESTIC_MASTER_PASSWORD)" = "$master" ]
+  rm "$STATE/interrupt" "$STATE/interrupt-count"
+  cp "$VOLSYNC_CUSTODY" "$BATS_TEST_TMPDIR/custody-before.age"
+  recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
+  echo "found the key: $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"already holds"* ]]
+  [ "$(stored RESTIC_MASTER_PASSWORD)" = "$master" ]
+  cmp "$VOLSYNC_CUSTODY" "$BATS_TEST_TMPDIR/custody-before.age"
+  forwards_closed
+
+  # The same when OpenBao refuses the write.
+  rm -r "$STATE/kv" "$VOLSYNC_CUSTODY"
+  mkdir "$STATE/kv"
+  : >"$STATE/write-refused"
+  recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
+  echo "write refused: $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"from the file"* ]]
+  master=$(master_in "$VOLSYNC_CUSTODY")
+  rm "$STATE/write-refused"
+  recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
+  echo "continued: $output"
+  [ "$status" -eq 0 ]
+  [ "$(stored RESTIC_MASTER_PASSWORD)" = "$master" ]
+  forwards_closed
+}
+
+@test "An S3 key variable that is empty or a placeholder stops the recipe before anything is generated" {
+  local case name
+  # The assignment to make in .env, and the name the recipe must give.
+  local -a cases=('CLUSTER_S3_ACCESS_KEY_ID= CLUSTER_S3_ACCESS_KEY_ID'
+    'CLUSTER_S3_SECRET_ACCESS_KEY= CLUSTER_S3_SECRET_ACCESS_KEY'
+    'CLUSTER_S3_ACCESS_KEY_ID=example-cluster-id CLUSTER_S3_ACCESS_KEY_ID'
+    'CLUSTER_S3_SECRET_ACCESS_KEY=example-cluster-secret CLUSTER_S3_SECRET_ACCESS_KEY'
+    'CLUSTER_S3_ACCESS_KEY_ID=marker-state-id CLUSTER_S3_ACCESS_KEY_ID')
+  for case in "${cases[@]}"; do
+    echo "case: $case"
+    seed_env
+    : >"$RECORD/argv"
+    sed -i "s/^${case%%=*}=.*/${case%% *}/" "$REPO/.env"
+    name=${case##* }
+    recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
+    echo "$output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"$name"* ]]
+    [ ! -e "$VOLSYNC_CUSTODY" ]
+    [ "$(find "$BATS_TEST_TMPDIR/custody" -mindepth 1 | wc -l)" -eq 0 ]
+    # Nothing reached the cluster, and the value is not repeated.
+    [ "$(grep -c -E '^(kubectl|curl) ' "$RECORD/argv")" -eq 0 ]
+    [ ! -e "$STATE/forwards" ]
+    [[ $output != *example-cluster-* && $output != *marker-state-id* ]]
+  done
+  # A variable not set at all.
+  seed_env
+  sed -i '/^CLUSTER_S3_SECRET_ACCESS_KEY=/d' "$REPO/.env"
+  recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
+  echo "unset: $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *CLUSTER_S3_SECRET_ACCESS_KEY* ]]
+  [ ! -e "$VOLSYNC_CUSTODY" ]
+}
+
+# shellcheck disable=SC2016 # $master is a jq variable.
+@test "Nothing of the master or the S3 key is printed, passed as an argument or written unencrypted" {
+  local master
+  seed_env
+  recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
+  echo "seeded: $output"
+  [ "$status" -eq 0 ]
+  master=$(master_in "$VOLSYNC_CUSTODY")
+  leaked "$output" "$master" marker-cluster-id marker-cluster-secret marker-service-account-jwt marker-bao-token
+  # The master and the key travel in the body of the write, and in no other request.
+  [ "$("$JQ" -r --arg master "$master" 'select(.body | contains($master)) | .method + " " + .path' "$RECORD/requests")" = \
+    'POST secrets/data/volsync' ]
+  # Rotating, going on from the file, and the runs that fail say as little.
+  seed_env marker-rotated-id marker-rotated-secret
+  recipe bao-seed-volsync --rotate-s3
+  echo "rotated: $output"
+  [ "$status" -eq 0 ]
+  leaked "$output" "$master" marker-rotated-id marker-rotated-secret
+  recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
+  echo "again: $output"
+  [ "$status" -ne 0 ]
+  leaked "$output" "$master" marker-rotated-id marker-rotated-secret
+  rm -r "$STATE/kv"
+  mkdir "$STATE/kv"
+  : >"$STATE/write-refused"
+  recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
+  echo "write refused: $output"
+  [ "$status" -ne 0 ]
+  leaked "$output" "$master" marker-rotated-id marker-rotated-secret
+  rm "$STATE/write-refused"
+  echo secrets/data/volsync >"$STATE/interrupt"
+  : >"$STATE/interrupt-drops"
+  recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
+  echo "interrupted: $output"
+  [ "$status" -ne 0 ]
+  leaked "$output" "$master" marker-rotated-id marker-rotated-secret
+}
+
+@test "One application's repository password is derived from the custody file without printing it" {
+  local master password other
+  seed_env
+  recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
+  [ "$status" -eq 0 ]
+  master=$(master_in "$VOLSYNC_CUSTODY")
+  # The command it runs says what reached its environment, into a file, and prints nothing.
+  fake report-env <<EOF
+{
+  echo "password=\$RESTIC_PASSWORD"
+  echo "repository=\$RESTIC_REPOSITORY"
+  echo "key=\$AWS_ACCESS_KEY_ID:\$AWS_SECRET_ACCESS_KEY region=\$AWS_DEFAULT_REGION"
+  echo "args=\$*"
+} > "$STATE/command-env"
+EOF
+  : >"$RECORD/argv"
+  recipe bao-volsync-password "$VOLSYNC_CUSTODY" volsync-demo report-env snapshots latest
+  echo "$output"
+  [ "$status" -eq 0 ]
+  password=$(printf '%s/%s' "$master" volsync-demo | sha256sum | cut -d' ' -f1)
+  [ "$(cat "$STATE/command-env")" = "$(printf '%s\n' "password=$password" \
+    'repository=s3:https://s3.example.com/marker-prefix-volsync/volsync-demo' \
+    'key=marker-cluster-id:marker-cluster-secret region=marker-region' 'args=snapshots latest')" ]
+  # It reaches neither the cluster nor OpenBao, and prints nothing.
+  [ "$(grep -c -E '^(kubectl|curl) ' "$RECORD/argv")" -eq 0 ]
+  [ -z "$output" ]
+  leaked "$output" "$master" "$password" marker-cluster-id marker-cluster-secret
+  # Another application's password differs.
+  recipe bao-volsync-password "$VOLSYNC_CUSTODY" other-app report-env
+  [ "$status" -eq 0 ]
+  other=$(printf '%s/%s' "$master" other-app | sha256sum | cut -d' ' -f1)
+  [ "$(sed -n 's/^password=//p' "$STATE/command-env")" = "$other" ]
+  [ "$other" != "$password" ]
+  leaked "$output" "$other"
+  # What it refuses: no command, an application that is no name, a file that is no custody file of
+  # the volsync master, a missing file.
+  rm "$STATE/command-env"
+  recipe bao-volsync-password "$VOLSYNC_CUSTODY" volsync-demo
+  echo "no command: $output"
+  [ "$status" -ne 0 ]
+  recipe bao-volsync-password "$VOLSYNC_CUSTODY" '../Demo' report-env
+  echo "bad name: $output"
+  [ "$status" -ne 0 ]
+  custody_file marker-seal-key
+  recipe bao-volsync-password "$CUSTODY" volsync-demo report-env
+  echo "another custody file: $output"
+  [ "$status" -ne 0 ]
+  recipe bao-volsync-password "$BATS_TEST_TMPDIR/custody/missing.age" volsync-demo report-env
+  echo "missing: $output"
+  [ "$status" -ne 0 ]
+  [ ! -e "$STATE/command-env" ]
+  # The command's own failure is the recipe's.
+  fake report-env <<<'exit 7'
+  recipe bao-volsync-password "$VOLSYNC_CUSTODY" volsync-demo report-env
+  [ "$status" -eq 7 ]
 }

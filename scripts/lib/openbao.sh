@@ -1,8 +1,8 @@
 # shellcheck shell=bash
-# Shared by scripts/bao-put, bao-recovery, bao-root and bao-seal-restore, which source it with
-# scripts/cluster-env: where OpenBao answers and as whom an operator logs in to it, the names a
-# key-value path may hold, opening the operator's custody file, and the session a recipe works in: a
-# private directory, a port-forward to OpenBao's active member, a short-lived token, and requests to
+# Shared by scripts/bao-put, bao-recovery, bao-root, bao-seal-restore, bao-seed-volsync and
+# bao-volsync-password, which source it with scripts/cluster-env: where OpenBao answers and as whom
+# an operator logs in to it, the names a key-value path may hold, opening the operator's custody
+# file, and the session a recipe works in: a private directory, a port-forward to OpenBao's active member, a short-lived token, and requests to
 # OpenBao's API through them. Nothing here prints a token, a value or a key, or passes one as an
 # argument: they reach kubectl, curl, jq and age on standard input or through a file descriptor,
 # and leave them on a pipe.
@@ -19,7 +19,7 @@ bao_seal_secret=openbao-seal-1
 bao_operator_account=openbao-operator
 bao_operator_role=operator
 bao_audience=openbao
-# shellcheck disable=SC2034 # read by scripts/bao-put
+# shellcheck disable=SC2034 # read by scripts/bao-put and bao-seed-volsync
 bao_mount=secrets
 
 # A name in a key-value path or a key: letters, digits, '_', '.' and '-', not starting with '.' or

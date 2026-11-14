@@ -510,8 +510,8 @@ unknown_fields() {
   [ -z "${unknown//$'\n'/}" ]
 }
 
-@test "No backup runs until the secret store holds the repository's credentials" {
-  local overlay enabled namespace opted listed stores repositories target store files file mount key under writers
+@test "Only the seeding recipe writes the repository's credentials into the secret store" {
+  local stores repositories target store files file mount key under writers
   local initial="$TREE/kubernetes/apps/base/openbao/openbao/app/initialize/initialize.json"
   # What the tree holds is checked here; what VolSync does without the Secret is its own code's:
   # the restic mover's Synchronize, in internal/controller/mover/restic/mover.go at v0.17.0,
@@ -537,10 +537,11 @@ unknown_fields() {
   echo "the ExternalSecret reads: ${store:-nothing}; secret stores defined: ${stores:-none}"
   [ -n "$store" ]
   [ "$stores" = "$store" ]
-  # Nothing in the tree writes the key it reads into that store. OpenBao starts with the store's
-  # mount empty, as its initial configuration makes no request under the mount; nothing pushes a
-  # Secret into a store; and no manifest, script or recipe names the key's path or hands it to
-  # bao-put, so its values reach the store only from an operator.
+  # Nothing in the tree writes the key it reads into that store but the seeding recipe. OpenBao
+  # starts with the store's mount empty, as its initial configuration makes no request under the
+  # mount; nothing pushes a Secret into a store; and no other manifest, script or recipe names the
+  # key's path or hands it to bao-put, so its values reach the store only from an operator running
+  # that recipe.
   mount="$(yq -N 'select(.kind == "ClusterSecretStore") | .spec.provider.vault.path' "$files")"
   key="$(yq -N 'select(.kind == "ExternalSecret") | [.spec.dataFrom[].extract.key, .spec.data[].remoteRef.key] | unique | .[]' "$BUILT")"
   echo "the store's mount: ${mount:-none}; the key it reads: ${key:-none}"
@@ -554,8 +555,11 @@ unknown_fields() {
   writers="$(grep -rlE "^kind: PushSecret$|(^|[^[:alnum:]_-])$mount/(data/)?$key([^[:alnum:]_/-]|$)|bao[-_]put[[:blank:]]+$key([^[:alnum:]_/-]|$)" \
     "$REPO/kubernetes" "$REPO/scripts" "$REPO/just" "$REPO/justfile" || true)"
   echo "files that write the key: ${writers:-none}"
-  [ -z "$writers" ]
+  [ "${writers#"$REPO"/}" = scripts/bao-seed-volsync ]
+}
 
+@test "The demo volume's backup and restore objects are in what Flux applies for the cluster" {
+  local overlay enabled namespace opted dependencies name kinds
   overlay="$BATS_TEST_TMPDIR/overlay.yaml"
   kustomize build --load-restrictor LoadRestrictionsNone "$TREE/kubernetes/apps/overlays/lab-sto2" >"$overlay"
   enabled="$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "volsync") | .spec.path' "$overlay")"
@@ -565,12 +569,20 @@ unknown_fields() {
   echo "volsync: ${enabled:-not applied}; namespace: ${namespace:-none}; applications with the component: ${opted:-none}"
   [ "$enabled" = ./apps/base/volsync-system/volsync/app ]
   [ "$namespace" = volsync-system ]
-  [ -z "$opted" ]
-  # The test application stays listed, commented out with its reason.
-  listed="$(grep -E "^[[:blank:]]*#[[:blank:]]*- \.\./\.\./base/demo/$DEMO/ks\.yaml[[:blank:]]+# Disabled: .+" \
-    "$TREE/kubernetes/apps/overlays/lab-sto2/kustomization.yaml")"
-  echo "listed: ${listed:-no}"
-  [ -n "$listed" ]
+  [ "$opted" = "$DEMO" ]
+  # It waits for the operator, External Secrets, LINSTOR's classes and the store's application, each
+  # of which the overlay applies.
+  dependencies="$(DEMO="$DEMO" yq -N 'select(.kind == "Kustomization" and .metadata.name == strenv(DEMO)) | .spec.dependsOn[].name' "$overlay" | sort | paste -sd' ' -)"
+  echo "dependsOn: $dependencies"
+  [ "$dependencies" = "external-secrets linstor-cluster openbao-store volsync" ]
+  for name in $dependencies; do
+    [ "$(NAME="$name" yq -N 'select(.kind == "Kustomization" and .metadata.name == strenv(NAME)) | .metadata.name' "$overlay")" = "$name" ]
+  done
+  # What it builds: the claim, what restores it and what backs it up.
+  built "$DEMO"
+  kinds="$(yq -N '.kind' "$BUILT" | sort | paste -sd' ' -)"
+  echo "built: $kinds"
+  [[ $kinds == *PersistentVolumeClaim* && $kinds == *ReplicationDestination* && $kinds == *ReplicationSource* ]]
 }
 
 @test "every values key of volsync is one its pinned chart defines" {
