@@ -13,6 +13,8 @@ bypassDnsResolution: true
 # gives cluster add-ons.
 priorityClassName: system-cluster-critical
 
+# The chart makes the ServiceMonitor only once its kind exists, so the release installed before
+# Flux, with no definitions in place, has none.
 metrics:
   serviceMonitor:
-    enabled: false
+    enabled: true

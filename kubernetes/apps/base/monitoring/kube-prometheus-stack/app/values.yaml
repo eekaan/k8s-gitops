@@ -1,0 +1,110 @@
+---
+# Values for the kube-prometheus-stack chart, read by the HelmRelease through a ConfigMap generated
+# without substitution. Keys not set here keep the chart's defaults: the Prometheus Operator and
+# kube-state-metrics with one replica each, node-exporter on every node, the chart's alerting and
+# recording rules, and scrape targets for the API server, the kubelets, CoreDNS, the controller
+# manager and the scheduler. Talos labels the last two as upstream does, so the chart's defaults
+# find them, on the secure ports talos/patches/controlplane/metrics.yaml opens to the cluster.
+#
+# The requests below fit three workers of 6 vCPUs and 16 GB each with room to spare: together less
+# than half a CPU and 2 GiB, most of it Prometheus's. Nothing sets a memory limit: a Prometheus
+# killed for memory replays its write-ahead log on start, which needs as much again.
+
+# The prometheus-operator-crds application installs the monitoring.coreos.com definitions, for the
+# operator version this chart runs; the chart installs none. helm-controller leaves out a disabled
+# subchart before it collects the definitions to create, so the release defaults find none.
+crds:
+  enabled: false
+
+# Dashboards come with Grafana, which this chart does not install.
+grafana:
+  enabled: false
+
+# Cilium replaces kube-proxy, so there is none to scrape; this also leaves out KubeProxyDown, which
+# would always fire.
+kubeProxy:
+  enabled: false
+
+# Talos runs etcd on the host, outside Kubernetes, and talos/patches/controlplane/metrics.yaml has
+# it serve its metrics over plain HTTP on 2381, the chart's default port and scheme. The API server
+# runs on every control plane on the host's network, so the Service selects its pods to find the
+# control planes' addresses.
+kubeEtcd:
+  service:
+    selector:
+      component: kube-apiserver
+  serviceMonitor:
+    # The endpoint asks for no credential, and over plain HTTP one would cross the network
+    # readable.
+    authorization: null
+
+prometheus:
+  prometheusSpec:
+    # Every ServiceMonitor, PodMonitor, Probe, ScrapeConfig and PrometheusRule in every namespace,
+    # not only those of this release, so the other applications' monitors are scraped.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    scrapeConfigSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    # One replica: a second would scrape everything again into a store of its own, with nothing to
+    # merge the two, and lose nothing a restart on another worker does not.
+    replicas: 1
+    # Two weeks covers looking back over a working week and the one before it. The size cap, which
+    # counts the write-ahead log too, is 80% of the volume, as Prometheus's storage documentation
+    # recommends, to leave room for compaction, which keeps old and new blocks on disk together
+    # for a while; whichever limit comes first removes the oldest blocks. Prometheus counts a GB as
+    # 1024 MB, so the cap is 16 GiB of the 20 GiB.
+    retention: 14d
+    retentionSize: 16GB
+    resources:
+      requests:
+        cpu: 250m
+        memory: 1Gi
+    # A claim on the cluster's default storage class.
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 20Gi
+
+alertmanager:
+  # Its configuration stays the chart's: every alert routed to the receiver named null, which
+  # sends nothing, until receivers are configured.
+  alertmanagerSpec:
+    # One replica: with nothing to send, a cluster of Alertmanagers would only agree on silences.
+    replicas: 1
+    resources:
+      requests:
+        cpu: 10m
+        memory: 64Mi
+    # Silences and the notification log, which are small; a claim on the default storage class.
+    storage:
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi
+
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+
+kube-state-metrics:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+
+prometheus-node-exporter:
+  resources:
+    requests:
+      cpu: 20m
+      memory: 32Mi
