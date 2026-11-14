@@ -12,8 +12,9 @@ tool versions.
 
 `just` is the entry point on a laptop and in CI. The checks themselves are functions of a
 Dagger module in this repository, which runs each in a container with pinned tools. GitHub
-Actions is the CI system: each job runs one `just` recipe on GitHub's runners, and a job that runs
-the checks starts the Dagger engine for itself.
+Actions is the CI system: each job runs one `just` recipe, on GitHub's runners, where a job that
+runs the checks starts the Dagger engine for itself, or, for trusted runs, on the CI host's
+self-hosted runner, where it uses the host's persistent engine (ADR 0012).
 
 Publishing the cluster's artifact (ADR 0003) is the one job whose recipe, `just publish`, runs
 directly on the runner, with the tools pinned in `mise.toml` installed there by mise. Signing it
@@ -33,7 +34,7 @@ The module uses Dagger 1.0, which is in beta at the time of writing.
 - **Dagger's own pull request integration instead of Actions.** Needs a hosted account, and
   keyless artifact signing depends on the Actions OIDC token.
 - **A long-lived shared Dagger engine.** Keeps caches warm, at the cost of a privileged
-  service to run and secure. The checks here are light enough not to need it.
+  service to run and secure. ADR 0012 adopts one for trusted runs.
 
 ## Consequences
 
