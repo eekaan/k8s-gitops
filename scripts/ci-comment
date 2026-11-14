@@ -81,7 +81,7 @@ if ((artifacts == 0)); then
   id=$(own_comment "$number")
   [[ -n $id ]] || exit 0
   # The comment no longer describes the pull request's head; it says so in this job's own words.
-  printf '%s\n%s\n\nCommit %s did not render, so there is no diff to show for it: its CI run'"'"'s render job says why.\n' \
+  printf '%s\n%s\n\nCommit %s did not render: its CI run ended without leaving a render diff, so there is none to show for it.\n' \
     "$render_comment_marker" "$render_comment_heading" "$HEAD_SHA" >"$tmp/unrendered.md"
   write "$tmp/unrendered.md" "$number" "$id"
   echo "ci-comment: said on pull request #$number that $HEAD_SHA did not render"

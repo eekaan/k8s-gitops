@@ -681,7 +681,7 @@ comment_job() {
   # Where anything the artifact made run would leave its files.
   cd "$BATS_TEST_TMPDIR" || return 1
   env -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
-    PATH="$BIN:$PATH" FAKE="$FAKE" GH_CONFIG_DIR="$BATS_TEST_TMPDIR/gh-config" GH_TOKEN=fixture-token \
+    PATH="${AWKBIN:+$AWKBIN:}$BIN:$PATH" FAKE="$FAKE" GH_CONFIG_DIR="$BATS_TEST_TMPDIR/gh-config" GH_TOKEN=fixture-token \
     GITHUB_REPOSITORY=fixture-owner/fixture-repo RUN_ID=42 HEAD_SHA="$HEAD_SHA" \
     HEAD_REPOSITORY=someone-else/fixture-repo HEAD_BRANCH=feature "$REPO/scripts/ci-comment" 2>&1
 }
@@ -824,10 +824,28 @@ refused() {
   [ ! -e "$BATS_TEST_TMPDIR/ran-from-artifact" ]
 }
 
-@test "The comment job posts nothing but what render-diff writes" {
-  fake_gh
-  # Every kind of comment render-diff writes: nothing changed; objects added, removed and changed
-  # across applications; a diff whose backquotes need a longer fence; a diff cut to fit.
+# variant NAME: sets AWKBIN to a directory whose awk is the implementation NAME, gawk, mawk or
+# busybox's, for the comment job to run first on its PATH; fails when this machine has no such awk.
+variant() {
+  AWKBIN="$BATS_TEST_TMPDIR/awk-$1"
+  mkdir -p "$AWKBIN"
+  case $1 in
+    busybox)
+      command -v busybox > /dev/null && busybox awk 'BEGIN { exit 0 }' 2> /dev/null || return 1
+      printf '#!/bin/sh\nexec busybox awk "$@"\n' > "$AWKBIN/awk"
+      chmod +x "$AWKBIN/awk"
+      ;;
+    *)
+      command -v "$1" > /dev/null || return 1
+      ln -sf "$(command -v "$1")" "$AWKBIN/awk"
+      ;;
+  esac
+}
+
+# grammar_comments: writes every kind of comment render-diff writes: nothing changed; objects
+# added, removed and changed across applications; a diff whose backquotes need a longer fence; a
+# diff cut to fit.
+grammar_comments() {
   comment unchanged
   mkdir -p "$BATS_TEST_TMPDIR"/mixed-{base,head}/demo/{one,two,three}
   printf 'a: 1\n' > "$BATS_TEST_TMPDIR/mixed-base/demo/one/ConfigMap_web_a.yaml"
@@ -849,17 +867,55 @@ refused() {
   for body in unchanged mixed fenced cut; do
     mkdir -p "$BATS_TEST_TMPDIR/written-$body"
     cp "$BATS_TEST_TMPDIR/$body.md" "$BATS_TEST_TMPDIR/written-$body/comment.md"
-    artifact "written-$body/comment.md"
-    post
-    [ "$status" -eq 0 ] || { echo "refused what render-diff writes: $body: $output"; return 1; }
-    [ -e "$FAKE/writes" ]
   done
+}
+
+# edit NAME [OLD NEW]...: the mixed comment with each of its lines OLD made NEW, as NAME/comment.md.
+edit() {
+  local name=$1 file
+  shift
+  mkdir -p "$BATS_TEST_TMPDIR/$name"
+  file="$BATS_TEST_TMPDIR/$name/comment.md"
+  cp "$BATS_TEST_TMPDIR/mixed.md" "$file"
+  while (($# >= 2)); do
+    OLD=$1 NEW=$2 awk '$0 == ENVIRON["OLD"] { $0 = ENVIRON["NEW"] } { print }' "$file" > "$file.new"
+    if cmp -s "$file" "$file.new"; then
+      echo "$name: no line $1"
+      return 1
+    fi
+    mv "$file.new" "$file"
+    shift 2
+  done
+}
+
+# accepted NAME: the comment job posts the artifact holding $BATS_TEST_TMPDIR/NAME/comment.md.
+accepted() {
+  local said
+  artifact "$1/comment.md"
+  said=$(comment_job) || { echo "refused $1: $said"; return 1; }
+  [ -e "$FAKE/writes" ] || { echo "posted nothing for $1"; return 1; }
+}
+
+# grammar_cases: the comment job, with the awk first on PATH that AWKBIN holds, posts every comment
+# render-diff writes and refuses every other.
+grammar_cases() {
+  local body name row summary
+  for body in unchanged mixed fenced cut; do
+    accepted "written-$body"
+  done
+  # shellcheck disable=SC2016 # Markdown code spans
+  row='| `demo/two` | 1 | 0 | 0 |'
+  summary='<summary><code>demo/two</code>: 1 added</summary>'
+  # Counts of up to six digits, which GitHub links to no commit.
+  # shellcheck disable=SC2016 # a Markdown code span
+  edit counted "$row" '| `demo/two` | 999999 | 0 | 0 |' "$summary" '<summary><code>demo/two</code>: 999999 added</summary>'
+  accepted counted
 
   # Anything else outside a diff would render as Markdown in the bot's name: each is refused.
-  # insert NAME LINE: the mixed comment with LINE after its table's last row, as NAME/comment.md.
+  # insert NAME LINE: the mixed comment with LINE after its table's last row, refused.
   insert() {
     mkdir -p "$BATS_TEST_TMPDIR/$1"
-    awk -v line="$2" '{ print } /^\| `demo\/two` / { print line }' "$BATS_TEST_TMPDIR/mixed.md" > "$BATS_TEST_TMPDIR/$1/comment.md"
+    LINE=$2 awk '{ print } /^\| `demo\/two` / { print ENVIRON["LINE"] }' "$BATS_TEST_TMPDIR/mixed.md" > "$BATS_TEST_TMPDIR/$1/comment.md"
     cmp -s "$BATS_TEST_TMPDIR/mixed.md" "$BATS_TEST_TMPDIR/$1/comment.md" && { echo "$1: nothing inserted"; return 1; }
     refused "$1"
   }
@@ -873,21 +929,59 @@ refused() {
   insert free 'All checks have passed.'
   # shellcheck disable=SC2016 # a Markdown code span
   insert row '| `demo/two` | 1 | 0 | 0 | @someone |'
-  # replace NAME OLD NEW: the mixed comment with its line OLD made NEW, as NAME/comment.md.
-  replace() {
-    mkdir -p "$BATS_TEST_TMPDIR/$1"
-    awk -v old="$2" -v new="$3" '$0 == old { $0 = new } { print }' "$BATS_TEST_TMPDIR/mixed.md" > "$BATS_TEST_TMPDIR/$1/comment.md"
-    cmp -s "$BATS_TEST_TMPDIR/mixed.md" "$BATS_TEST_TMPDIR/$1/comment.md" && { echo "$1: nothing replaced"; return 1; }
-    refused "$1"
-  }
-  replace summary '<summary><code>demo/two</code>: 1 added</summary>' '<summary><code>@someone</code>: 1 added</summary>'
-  replace closing '+new: 1' '```'
-  replace indented-closing '+new: 1' ' ```'
-  replace heading '### Render diff' '### Render diff: approved'
-  replace footer "$(grep -m1 '^<sub>' "$BATS_TEST_TMPDIR/mixed.md")" '<sub>Approved by the maintainers.</sub>'
+  # A section's summary holds nothing but the application's name and its counts.
+  edit summary "$summary" '<summary><code>@someone</code>: 1 added</summary>'
+  refused summary
+  edit summary-then-text "$summary" "$summary @someone"
+  refused summary-then-text
+  edit summary-text-first "$summary" '<summary><code>demo/two</code>: @someone 1 added</summary>'
+  refused summary-text-first
+  # An application's name is two DNS labels, in the table and in a summary alike.
+  for name in '@someone/x' 'de@mo/two' 'de.mo/two' 'de#mo/two' 'de mo/two' 'demo/t@o' 'demo/t.o' 'demo/t#o' 'demo/t o'; do
+    # shellcheck disable=SC2016 # a Markdown code span
+    edit row-name "$row" "| \`$name\` | 1 | 0 | 0 |"
+    refused row-name
+    edit summary-name "$summary" "<summary><code>$name</code>: 1 added</summary>"
+    refused summary-name
+  done
+  # Seven digits or more could be read as a commit.
+  # shellcheck disable=SC2016 # a Markdown code span
+  edit row-count "$row" '| `demo/two` | 1000000 | 0 | 0 |'
+  refused row-count
+  edit summary-count "$summary" '<summary><code>demo/two</code>: 1000000 added</summary>'
+  refused summary-count
+  edit closing '+new: 1' '```'
+  refused closing
+  edit indented-closing '+new: 1' ' ```'
+  refused indented-closing
+  edit heading '### Render diff' '### Render diff: approved'
+  refused heading
+  edit footer "$(grep -m1 '^<sub>' "$BATS_TEST_TMPDIR/mixed.md")" '<sub>Approved by the maintainers.</sub>'
+  refused footer
   mkdir -p "$BATS_TEST_TMPDIR/after"
   { cat "$BATS_TEST_TMPDIR/mixed.md"; echo '@someone'; } > "$BATS_TEST_TMPDIR/after/comment.md"
   refused after
+}
+
+@test "The comment job posts nothing but what render-diff writes" {
+  fake_gh
+  grammar_comments
+  # Under every awk this machine has of those a runner may run the check with.
+  local awk ran=()
+  for awk in gawk mawk busybox; do
+    if variant "$awk"; then
+      # Called plainly, so that the first case that fails stops the test.
+      echo "under $awk:"
+      grammar_cases
+      ran+=("$awk")
+    else
+      echo "# $awk is not on this machine: the comment check's run under it is skipped" >&3
+    fi
+  done
+  AWKBIN=
+  echo "under the awk first on PATH:"
+  grammar_cases
+  echo "# the comment check ran under: ${ran[*]:-none of them} and the awk first on PATH" >&3
 }
 
 @test "the comment job updates its own comment, and posts nothing for a pull request that moved on" {

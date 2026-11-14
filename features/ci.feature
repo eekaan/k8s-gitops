@@ -83,9 +83,9 @@ Feature: Continuous integration
     Then the first two are posted byte for byte followed by the job's own line naming the commit, nothing in them runs or reaches the log, the comment stays within GitHub's limit, and every other one is refused without anything being posted or run
 
   Scenario: The comment job posts nothing but what render-diff writes
-    Given every kind of comment render-diff writes, and comments that add a mention, a cross-reference, a link, an image, an HTML tag, free text, another application's name, a line that closes a diff's fence, or another footer
-    When the comment recipe runs for each
-    Then every comment render-diff writes is posted, and every other one is refused without anything being posted
+    Given every kind of comment render-diff writes, one with counts of six digits, and comments that add a mention, a cross-reference, a link, an image, an HTML tag, free text, text before or after a section's counts, an application name with a character no DNS label has, a count of seven digits, a line that closes a diff's fence, or another footer
+    When the comment recipe runs for each, with each of gawk, mawk and busybox's awk that the machine has
+    Then every comment render-diff writes is posted, and every other one is refused without anything being posted, under each awk alike
 
   Scenario: just ci renders the tree as the render job does
     Given the justfile

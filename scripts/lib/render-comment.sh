@@ -12,6 +12,10 @@ render_comment_unchanged='Nothing that Flux applies changes.'
 render_comment_intro='What Flux would apply differently, per application:'
 render_comment_table_head='| Application | Added | Removed | Changed |'
 render_comment_table_rule='| --- | ---: | ---: | ---: |'
+# The most objects of one application the comment counts, six digits: the grammar below refuses
+# more.
+# shellcheck disable=SC2034 # scripts/render-diff reads it
+render_comment_most=999999
 # GitHub refuses a longer comment body: "Body is too long (maximum is 65536 characters)".
 render_comment_limit=65536
 # The most render-diff writes, in bytes, which are never fewer than the characters GitHub counts:
@@ -30,8 +34,9 @@ change to them does not show here.</sub>'
 # on stderr why not otherwise. Byte for byte: a regular file of at most render_comment_room bytes,
 # without a NUL, which ends the text a shell or a C library reads, or a carriage return, which ends
 # a line in Markdown though not here; the marker alone on its first line; then, line by line, the
-# fixed text, table rows and section headings naming applications by their DNS labels, and diffs
-# whose fence no line of theirs could close.
+# fixed text, table rows and section headings naming applications by their DNS labels with counts
+# of at most six digits, and diffs whose fence no line of theirs could close. It uses only what
+# POSIX awk has, so any awk on the runner reads it alike.
 render_comment_check() {
   local file=$1 size
   if [[ ! -f $file || -L $file ]]; then
@@ -58,8 +63,10 @@ render_comment_check() {
     function fail(why) { printf "line %d: %s\n", NR + 1, why > "/dev/stderr"; failed = 1; exit 1 }
     BEGIN {
       app = "[a-z0-9]([-a-z0-9]*[a-z0-9])?/[a-z0-9]([-a-z0-9]*[a-z0-9])?"
-      count = "(0|[1-9][0-9]*)"
-      some = "[1-9][0-9]*"
+      # At most six digits, as render_comment_most allows: GitHub may link a longer number to a
+      # commit. Nested options rather than an interval, which not every awk reads.
+      some = "[1-9]([0-9]([0-9]([0-9]([0-9]([0-9])?)?)?)?)?"
+      count = "(0|" some ")"
       row = "^[|] `" app "` [|] " count " [|] " count " [|] " count " [|]$"
       summary = "^<summary><code>" app "</code>: " some " (added|removed|changed)(, " some " (removed|changed))?(, " some " changed)?</summary>$"
       footers = split(ENVIRON["RC_FOOTER"], footer, "\n")

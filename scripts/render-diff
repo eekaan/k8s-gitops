@@ -72,6 +72,10 @@ for app in "${apps[@]}"; do
       die "diff of $app/$object failed"
   done < <({ names "$base/$app"; names "$head/$app"; } | sort -u)
   ((added + removed + changed > 0)) || continue
+  for count in "$added" "$removed" "$changed"; do
+    ((count <= render_comment_most)) ||
+      die "$app: $count objects, more than the $render_comment_most a comment counts for one application"
+  done
   # A NUL or a carriage return would end the diff's text or line early; they show as \0 and \r.
   sed -i -e 's/\x00/\\0/g' -e 's/\r/\\r/g' "$block.diff"
   rows+=("| \`$app\` | $added | $removed | $changed |")
