@@ -4,6 +4,11 @@
 # script runs against recording fakes of helm, kubectl and sleep put first on its PATH, so nothing
 # reaches a cluster.
 
+# The tests run one at a time even where bats runs a file's tests side by side: flux build rewrites
+# the application's kustomization.yaml in this checkout and puts it back afterwards, so two builds
+# at once can leave the rewritten file behind.
+export BATS_NO_PARALLELIZE_WITHIN_FILE=true
+
 setup() {
   REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   SCRIPT="$REPO/scripts/install-cilium"

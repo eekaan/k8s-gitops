@@ -1,5 +1,7 @@
 ---
-# One job with no path filter, so every pull request gets its result.
+# One job per group of checks the justfile defines, side by side, then the job named ci, the
+# required check on main, which passes only when all of them passed. No job has a path filter, so
+# every pull request gets its result.
 name: ci
 
 "on":
@@ -16,8 +18,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  ci:
+  groups:
     runs-on: ubuntu-latest
+    outputs:
+      groups: ${{ steps.groups.outputs.groups }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785  # v5.2.8
+        with:
+          version: 2026.11.4
+          install_args: just jq
+      - id: groups
+        run: just ci-groups
+
+  check:
+    needs: groups
+    runs-on: ubuntu-latest
+    strategy:
+      # Every group reports its own result, whichever fails first.
+      fail-fast: false
+      matrix:
+        group: ${{ fromJSON(needs.groups.outputs.groups) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -28,4 +52,25 @@ jobs:
         with:
           version: 2026.11.4
           install_args: just http:dagger
-      - run: just ci
+      # The group's name reaches the shell as a variable, never as text spliced into the command.
+      - run: just ci "$GROUP"
+        env:
+          GROUP: ${{ matrix.group }}
+
+  ci:
+    # Runs whatever became of the others: a required check that is skipped counts as passed.
+    if: always()
+    needs: [groups, check]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785  # v5.2.8
+        with:
+          version: 2026.11.4
+          install_args: just
+      - run: just ci-passed $RESULTS
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
