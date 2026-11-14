@@ -139,7 +139,7 @@ sorted() {
     for file in "${files[@]}"; do
       [ -f "$file" ] && [ "${file##*/}" != tools.sh ] || continue
       grep -nE "$around|$path" "$file" | grep -vE '^[0-9]+:[[:space:]]*#' |
-        grep -v 'flux=$(type -P flux)' | sed "s|^|${file#"$ROOT"/}:|" || true
+        grep -vF "flux=\$(type -P flux)" | sed "s|^|${file#"$ROOT"/}:|" || true
     done
   )
   if [ -n "$found" ]; then

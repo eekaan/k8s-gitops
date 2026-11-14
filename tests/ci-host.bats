@@ -98,6 +98,11 @@ EOF
     CI_HOST_IMAGE=fixture-image
     'CI_HOST_SSH_PUBLIC_KEY=ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOperatorKey fixture'
     CI_HOST_SSH_USER=fixture-admin
+    # Secrets of the other stacks and the cluster, which neither gh nor ssh may be given.
+    OS_APPLICATION_CREDENTIAL_SECRET=marker-credential
+    TF_ENCRYPTION=marker-encryption
+    CLUSTER_S3_ACCESS_KEY_ID=marker-cluster-key
+    SOPS_AGE_KEY=marker-age-key
   )
 }
 
@@ -424,8 +429,6 @@ absent() {
 
 @test "The CI host recipes run gh and ssh with none of the stack's secrets" {
   trust
-  ENVIRONMENT+=(OS_APPLICATION_CREDENTIAL_SECRET=marker-credential TF_ENCRYPTION=marker-encryption
-    CLUSTER_S3_ACCESS_KEY_ID=marker-cluster-key SOPS_AGE_KEY=marker-age-key)
 
   recipe ci-host-setup < /dev/null
   [ "$status" -eq 0 ]
