@@ -24,9 +24,9 @@ infra-talman stack='sto2/cluster':
 infra-output stack name:
     scripts/infra-output {{ quote(stack) }} {{ quote(name) }}
 
-# Destroy the cluster stack, then the plumbing stack, each once its name is typed back (--yes: without asking)
+# Destroy the cluster stack, then the plumbing stack, each once its name is typed back (--yes: without asking); given one of them, such as sto2/cluster, that one only
 [positional-arguments]
-infra-destroy *flags:
+infra-destroy *args:
     scripts/infra-destroy "$@"
 
 # Check the OpenStack credential, quota, flavors and external network; pass or FAIL per item, no figures

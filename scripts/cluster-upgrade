@@ -89,9 +89,9 @@ for node in "${nodes[@]}"; do
   step="checking that the Kubernetes API answers before draining $node"
   api_answers
   step="draining $node"
-  kubectl drain "$node" --ignore-daemonsets --delete-emptydir-data --timeout=10m
+  drain_node "$node"
   step="upgrading $node, which is drained"
-  cluster_talman upgrade -n "$node" --extra-flags=--drain=false
+  cluster_talman_drain_off upgrade -n "$node"
   step="waiting for $node, which is drained, to be Ready"
   kubectl wait --for=condition=Ready "node/$node" --timeout=10m
   step="uncordoning $node"

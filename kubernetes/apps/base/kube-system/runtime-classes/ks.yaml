@@ -1,0 +1,15 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: runtime-classes
+  namespace: flux-system
+spec:
+  path: ./apps/base/kube-system/runtime-classes/app
+  # RuntimeClasses are cluster-scoped, so they take no namespace from this; the application sits in
+  # kube-system, as the resource definitions' applications do.
+  targetNamespace: kube-system
+  sourceRef:
+    kind: ExternalArtifact
+    name: runtime-classes
