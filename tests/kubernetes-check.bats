@@ -328,11 +328,16 @@ spec:
     name: opted-out
 EOF
 
-  local children name
+  local children name timeout
   children="$(yq -N 'select(.kind == "Kustomization" and .metadata.labels["k8s-gitops/defaults"] != "disabled") | .metadata.name' "$BUILD")"
   [ -n "$children" ]
+  # A child with the long-timeout label gets the long timeout and every other default.
   for name in $children; do
-    has_defaults "$name" 3m
+    timeout=3m
+    if [ "$(child "$name" '.metadata.labels["k8s-gitops/timeout"] // ""')" = long ]; then
+      timeout=10m
+    fi
+    has_defaults "$name" "$timeout"
   done
   unchanged opted-out
 }
