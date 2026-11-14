@@ -1,0 +1,27 @@
+---
+# External Secrets' controller logs in to OpenBao for the store with a token of openbao-store, which
+# it requests through the TokenRequest API in the namespace the store's serviceAccountRef names. Its
+# chart grants it no token creation (rbac.serviceAccountTokenCreate is off); this Role allows it for
+# openbao-store alone.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: openbao-store-token
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    verbs: ["create"]
+    resourceNames: ["openbao-store"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: openbao-store-token
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: openbao-store-token
+subjects:
+  - kind: ServiceAccount
+    name: external-secrets
+    namespace: external-secrets

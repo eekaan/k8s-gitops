@@ -52,6 +52,6 @@ Feature: Volume backups
     Then its kind and version are served, and every field it sets is in the definition's schema, of the type and among the values the schema allows
 
   Scenario: No backup runs until the secret store holds the repository's credentials
-    Given the test application and the cluster's overlay, built as Flux applies them
-    When the Secret the movers read, the secret stores in the tree and the enabled applications are read
-    Then only the component's ExternalSecret makes that Secret, which VolSync requires before it starts a mover, nothing in the tree defines a secret store, and the overlay applies the volsync application and its namespace and no application that includes components/volsync, and lists the test application commented out with the reason
+    Given the test application and the cluster's overlay, built as Flux applies them, OpenBao's initial configuration, and the manifests, scripts and recipes in the tree
+    When the Secret the movers read, the secret stores in the tree, what writes into the store and the enabled applications are read
+    Then only the component's ExternalSecret makes that Secret, which VolSync requires before it starts a mover, the only secret store the tree defines is the ClusterSecretStore that ExternalSecret names, nothing in the tree writes the key it reads into that store, as OpenBao's initial configuration makes no request under the store's mount and no manifest, script or recipe pushes a Secret, names the key's path or hands the key to bao-put, and the overlay applies the volsync application and its namespace and no application that includes components/volsync, and lists the test application commented out with the reason

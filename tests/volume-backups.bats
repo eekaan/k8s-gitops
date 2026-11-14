@@ -511,7 +511,8 @@ unknown_fields() {
 }
 
 @test "No backup runs until the secret store holds the repository's credentials" {
-  local overlay enabled namespace opted listed stores repositories target
+  local overlay enabled namespace opted listed stores repositories target store files file mount key under writers
+  local initial="$TREE/kubernetes/apps/base/openbao/openbao/app/initialize/initialize.json"
   # What the tree holds is checked here; what VolSync does without the Secret is its own code's:
   # the restic mover's Synchronize, in internal/controller/mover/restic/mover.go at v0.17.0,
   # returns before it creates the mover's Job while validateRepository finds no Secret named in
@@ -527,10 +528,33 @@ unknown_fields() {
   [ -n "$target" ]
   [ "$repositories" = "$target" ]
   [ -z "$(yq -N 'select(.kind == "Secret") | .metadata.name' "$BUILT")" ]
-  # Nothing in the tree defines a secret store for it to read from.
-  stores="$(grep -rlE '^kind: (Cluster)?SecretStore$' "$TREE/kubernetes" || true)"
-  echo "secret stores defined: ${stores:-none}"
-  [ -z "$stores" ]
+  # The one secret store the tree defines is the one the ExternalSecret reads from.
+  store="$(yq -N 'select(.kind == "ExternalSecret") | .spec.secretStoreRef.kind + "/" + .spec.secretStoreRef.name' "$BUILT")"
+  files="$(grep -rlE '^kind: (Cluster)?SecretStore$' "$REPO/kubernetes" || true)"
+  stores="$(for file in $files; do
+    yq -N 'select(.kind == "SecretStore" or .kind == "ClusterSecretStore") | .kind + "/" + .metadata.name' "$file"
+  done)"
+  echo "the ExternalSecret reads: ${store:-nothing}; secret stores defined: ${stores:-none}"
+  [ -n "$store" ]
+  [ "$stores" = "$store" ]
+  # Nothing in the tree writes the key it reads into that store. OpenBao starts with the store's
+  # mount empty, as its initial configuration makes no request under the mount; nothing pushes a
+  # Secret into a store; and no manifest, script or recipe names the key's path or hands it to
+  # bao-put, so its values reach the store only from an operator.
+  mount="$(yq -N 'select(.kind == "ClusterSecretStore") | .spec.provider.vault.path' "$files")"
+  key="$(yq -N 'select(.kind == "ExternalSecret") | [.spec.dataFrom[].extract.key, .spec.data[].remoteRef.key] | unique | .[]' "$BUILT")"
+  echo "the store's mount: ${mount:-none}; the key it reads: ${key:-none}"
+  [ -n "$mount" ]
+  [ "$(grep -c . <<<"$key")" -eq 1 ]
+  [ -s "$initial" ]
+  under="$(jq -r --arg mount "$mount" '[.. | objects | select(has("path")) | .path | strings
+    | select(startswith($mount + "/"))] | .[]' "$initial")"
+  echo "requests of the initial configuration under the mount: ${under:-none}"
+  [ -z "$under" ]
+  writers="$(grep -rlE "^kind: PushSecret$|(^|[^[:alnum:]_-])$mount/(data/)?$key([^[:alnum:]_/-]|$)|bao[-_]put[[:blank:]]+$key([^[:alnum:]_/-]|$)" \
+    "$REPO/kubernetes" "$REPO/scripts" "$REPO/just" "$REPO/justfile" || true)"
+  echo "files that write the key: ${writers:-none}"
+  [ -z "$writers" ]
 
   overlay="$BATS_TEST_TMPDIR/overlay.yaml"
   kustomize build --load-restrictor LoadRestrictionsNone "$TREE/kubernetes/apps/overlays/lab-sto2" >"$overlay"
