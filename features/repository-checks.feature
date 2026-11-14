@@ -71,6 +71,11 @@ Feature: Repository checks
     When the secrets scan runs
     Then it exits zero and the file is scanned
 
+  Scenario: An agent's worktree under .claude/ is ignored in a plain clone
+    Given the repository's .gitignore and no exclude file of the checkout's own
+    When git is asked about a file in a worktree under .claude/worktrees/
+    Then git ignores it, so no check and no commit takes it
+
   Scenario: Lint covers only the files git would commit
     Given a tracked YAML file and a YAML file that git excludes through .git/info/exclude
     When lint runs

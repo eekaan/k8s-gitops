@@ -73,6 +73,17 @@ EOF
   [[ $output != *check-address-literals/key.txt* ]]
 }
 
+@test "An agent's worktree under .claude/ is ignored in a plain clone" {
+  cp "$BATS_TEST_DIRNAME/../.gitignore" .gitignore
+  mkdir -p .claude/worktrees/agent
+  echo agent-file > .claude/worktrees/agent/file.txt
+  [ ! -s .git/info/exclude ] || ! grep -q claude .git/info/exclude
+
+  git check-ignore -q .claude/worktrees/agent/file.txt
+  run git ls-files --others --exclude-standard
+  [[ $output != *.claude* ]]
+}
+
 @test "A mise error stops the recipes" {
   fake_gitleaks
   fake mise <<'EOF'

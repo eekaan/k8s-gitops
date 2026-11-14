@@ -244,6 +244,106 @@ absent() {
   done
 }
 
+@test "OpenTofu's argument and data directory variables are refused" {
+  for name in TF_CLI_ARGS TF_CLI_ARGS_plan TF_CLI_ARGS_init TF_DATA_DIR; do
+    echo "$name"
+    reset_environment
+    with "$name=marker-tofu-setting"
+    rm -f "$RECORD/tofu"
+
+    recipe infra-plan sto2/plumbing
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"$name is set"* ]]
+    [[ $output != *marker-tofu-setting* ]]
+    [ ! -e "$RECORD/tofu" ]
+  done
+}
+
+@test "The infrastructure recipes refuse Go's HTTP/2 debug log" {
+  fake_object_storage
+  for where in environment .env; do
+    reset_environment
+    rm -f "$REPO/.env"
+    if [[ $where == environment ]]; then
+      with GODEBUG=x509sha1=1,http2debug=2
+    else
+      echo 'GODEBUG=http2debug=1' > "$REPO/.env"
+    fi
+    runs=('infra-plan sto2/plumbing' 'infra-apply sto2/plumbing --yes' 'infra-destroy --yes'
+      'infra-output sto2/plumbing talos_version' 'infra-talman' os-smoke infra-state-bucket)
+    # install-cilium reads the process environment only, not .env.
+    if [[ $where == environment ]]; then
+      runs+=(cilium-install)
+    fi
+    for run in "${runs[@]}"; do
+      echo "$where: $run"
+      rm -f "$RECORD/tofu" "$RECORD/argv"
+
+      # shellcheck disable=SC2086 # each run is a recipe and its arguments
+      recipe $run < /dev/null
+
+      [ "$status" -ne 0 ]
+      [[ $output == *"GODEBUG sets http2debug"* ]]
+      [ ! -e "$RECORD/tofu" ]
+      ! grep -qE '^(openstack|talman|kubectl|helm) ' "$RECORD/argv" 2> /dev/null
+    done
+  done
+}
+
+@test "Apply takes --yes before or after the stack" {
+  recipe infra-apply --yes sto2/plumbing < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $(tofu_calls apply) == "-chdir=$PLUMBING apply "* ]]
+
+  rm "$RECORD/tofu"
+  recipe infra-apply sto2/plumbing --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $(tofu_calls apply) == "-chdir=$PLUMBING apply "* ]]
+
+  rm "$RECORD/tofu"
+  for args in 'sto2/plumbing sto2/cluster --yes' '--force sto2/plumbing' '--yes'; do
+    # shellcheck disable=SC2086 # the arguments as an operator types them
+    recipe infra-apply $args < /dev/null
+
+    [ "$status" -eq 2 ]
+    [[ $output == *"usage: infra-apply"* ]]
+    [ ! -e "$RECORD/tofu" ]
+  done
+}
+
+@test "An allowlist entry that is IPv6 or covers every address is refused by its position" {
+  without OPERATOR_CIDRS
+  # Each list and the message that names its first wrong entry.
+  lists=('["198.51.100.0/24", "2001:db8::/32"]' '["198.51.100.0/24", "203.0.113.7/32", "0.0.0.0/0"]'
+    '["203.0.113.9/0"]')
+  messages=('entry 2 is an IPv6 network' 'entry 3 covers every address' 'entry 1 covers every address')
+  for i in "${!lists[@]}"; do
+    for from in OPERATOR_CIDRS operator-cidrs.json; do
+      echo "$from: ${lists[i]}"
+      reset_environment
+      without OPERATOR_CIDRS
+      rm -f "$RECORD/tofu" "$REPO/operator-cidrs.json"
+      if [[ $from == OPERATOR_CIDRS ]]; then
+        with "OPERATOR_CIDRS=${lists[i]}"
+      else
+        printf '%s\n' "${lists[i]}" > "$REPO/operator-cidrs.json"
+      fi
+
+      recipe infra-plan sto2/cluster
+
+      [ "$status" -ne 0 ]
+      [[ $output == *"$from ${messages[i]}"* ]]
+      for shown in 2001:db8 0.0.0.0/0 203.0.113.9 203.0.113.7 198.51.100.0; do
+        [[ $output != *"$shown"* ]]
+      done
+      [ ! -e "$RECORD/tofu" ]
+    done
+  done
+}
+
 @test "The backend is configured from the environment" {
   recipe infra-plan sto2/plumbing
 

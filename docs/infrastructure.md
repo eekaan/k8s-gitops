@@ -19,7 +19,8 @@ command that runs them is a `just` recipe.
   creates nothing on a second run.
 - `just infra-plan sto2/plumbing` plans a stack and prints the plan's summary.
 - `just infra-apply sto2/plumbing` plans a stack, prints the summary and, once the stack's name is
-  typed back, applies that saved plan; `just infra-apply sto2/plumbing --yes` does not ask. After
+  typed back, applies that saved plan; `just infra-apply sto2/plumbing --yes`, or with `--yes`
+  before the stack, does not ask. After
   the cluster stack it writes the cluster's `talman.yaml`, as `just infra-talman` does.
 - `just infra-talman` writes the cluster's `talman.yaml` from the `sto2/cluster` stack's state;
   see [The generated talman.yaml](#the-generated-talmanyaml). It writes what the last apply left
@@ -90,9 +91,13 @@ comments are skipped. Any other line stops the recipe, named by its number and n
 
 A recipe checks the names it needs before it runs anything, and names each one that is missing,
 empty or still a placeholder. It refuses to run while `TF_LOG`, `TF_LOG_PATH`, `TF_LOG_CORE` or
-`TF_LOG_PROVIDER` is set, as tofu's logs would hold addresses and decrypted values, or while
-`TF_WORKSPACE` is set, as it would move a stack's state to another key. No recipe prints a value
-or passes a secret on a command line; secrets reach tofu through its environment.
+`TF_LOG_PROVIDER` is set, as tofu's logs would hold addresses and decrypted values; while
+`TF_WORKSPACE` is set, as it would move a stack's state to another key; while `TF_CLI_ARGS` or any
+`TF_CLI_ARGS_<command>` is set, as they add arguments to the tofu commands the recipes run; while
+`TF_DATA_DIR` is set, as it would move a stack's working directory, with the saved plan and the
+lock, out of its `.terraform/`; and while `GODEBUG` sets `http2debug`, as Go's HTTP/2 debug log
+prints what tofu and its providers send and receive. No recipe prints a value or passes a secret
+on a command line; secrets reach tofu through its environment.
 
 - `TF_STATE_BUCKET`: the bucket that holds state.
 - `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`: S3 credentials for that bucket.
@@ -104,7 +109,9 @@ or passes a secret on a command line; secrets reach tofu through its environment
   `openstack` client read themselves. `os-smoke` needs only this, and `infra-state-bucket` this
   and `TF_STATE_BUCKET`.
 - `OPERATOR_CIDRS`, or else `operator-cidrs.json` at the repository root (gitignored): the
-  operator allowlist of the cluster stack, a JSON list of CIDRs. It reaches tofu only as
+  operator allowlist of the cluster stack, a JSON list of IPv4 CIDRs. An entry that is IPv6, or
+  whose prefix is 0 and so covers every address, is refused, named by its position in the list and
+  not by its value. It reaches tofu only as
   `TF_VAR_api_allowed_cidrs` in its environment, as given: the address of the machine the recipes
   run on is not added, and the recipe says so.
 - `CI`: when set, tofu's errors go to a file instead of the output; see below.

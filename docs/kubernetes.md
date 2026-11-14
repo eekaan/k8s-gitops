@@ -327,7 +327,8 @@ The release is the one helm-controller makes of the HelmRelease: its `releaseNam
 after its `targetNamespace` and a dash when it has one, in the HelmRelease's own namespace, the
 `targetNamespace` of `ks.yaml`. A HelmRelease whose history would be kept in another namespace than
 the release is refused, as helm keeps both in one. The script waits for the API server first, and
-leaves a release that already runs that chart version with those values alone.
+leaves a release that already runs that chart version with those values alone. Like the cluster
+recipes, it refuses to run while `GODEBUG` sets `http2debug` ([cluster.md](cluster.md#environment)).
 
 Once Flux manages a release, installing over it changes what Flux owns, and Flux undoes it at its
 next reconcile. Flux's helm-controller labels every object it installs or upgrades with

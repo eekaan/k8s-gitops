@@ -80,8 +80,11 @@ openstack_client_recent() {
   [[ $client =~ ([0-9]+)\.[0-9]+\.[0-9]+ ]] && ((BASH_REMATCH[1] >= 7))
 }
 
-# tofu's logs hold resource addresses and decrypted attribute values, on screen or in a file, and
-# TF_WORKSPACE would move a stack's state to another key, so the recipes run without them.
+# tofu's logs hold resource addresses and decrypted attribute values, on screen or in a file,
+# TF_WORKSPACE would move a stack's state to another key, TF_CLI_ARGS and TF_CLI_ARGS_<command> add
+# arguments to the commands the recipes run, which could turn off what they rely on, and TF_DATA_DIR
+# would move the stack's working directory, with the saved plan and the lock, out of its .terraform/.
+# So the recipes run without them; each is named, never its value.
 refuse_tofu_overrides() {
   local name refused=0
   for name in TF_LOG TF_LOG_PATH TF_LOG_CORE TF_LOG_PROVIDER; do
@@ -94,7 +97,27 @@ refuse_tofu_overrides() {
     infra_error "TF_WORKSPACE is set; unset it, as it would move the stack's state to another key"
     refused=1
   fi
+  while IFS= read -r name; do
+    if [[ $name == TF_CLI_ARGS || $name == TF_CLI_ARGS_* ]]; then
+      infra_error "$name is set; unset it, as it would add arguments to the tofu commands the recipes run"
+      refused=1
+    fi
+  done < <(compgen -e)
+  if [[ -n ${TF_DATA_DIR+set} ]]; then
+    infra_error "TF_DATA_DIR is set; unset it, as it would move the stack's working directory, with its saved plan and lock, out of .terraform/"
+    refused=1
+  fi
   return "$refused"
+}
+
+# Go's HTTP/2 debug log (GODEBUG=http2debug=2) dumps the frames a Go tool sends and receives: tofu's
+# and its providers' with the cloud and the object storage, talosctl's, kubectl's and helm's, which
+# carry credentials, state and machine configurations. So the recipes run without it.
+refuse_http2_debug() {
+  if [[ ${GODEBUG-} == *http2debug* ]]; then
+    infra_error "GODEBUG sets http2debug; unset it, as Go's HTTP/2 debug log would print credentials, state and machine configurations"
+    return 1
+  fi
 }
 
 # confirm STACK VERB PARTICIPLE: whether STACK's name is typed back, before it is VERBed.
@@ -144,10 +167,11 @@ add_current_address() {
 }
 
 # Exports TF_VAR_api_allowed_cidrs from OPERATOR_CIDRS (CI) or operator-cidrs.json at the
-# repository root: a non-empty JSON list of CIDRs. jq's own errors would quote the list, so they
-# are dropped.
+# repository root: a non-empty JSON list of IPv4 CIDRs, none of which covers every address. A wrong
+# entry is named by its position, as the list is the operator's own and is never printed. jq's own
+# errors would quote the list, so they are dropped.
 export_api_allowed_cidrs() {
-  local from cidrs
+  local from cidrs position problem refused=0
   local valid='select(type == "array" and length > 0 and all(.[]; type == "string"
     and test("^([0-9]{1,3}[.]){3}[0-9]{1,3}/[0-9]{1,2}$|^[0-9A-Fa-f:]+/[0-9]{1,3}$")))'
   if [[ -n ${OPERATOR_CIDRS:-} ]]; then
@@ -164,6 +188,17 @@ export_api_allowed_cidrs() {
     infra_error "$from is not a JSON list of CIDRs"
     return 1
   fi
+  # The cluster stack's networks and listener take IPv4 only, and a /0 would open the APIs to
+  # every address.
+  while read -r position problem; do
+    case $problem in
+      ipv6) infra_error "$from entry $position is an IPv6 network; the cluster stack takes IPv4 networks only" ;;
+      all) infra_error "$from entry $position covers every address; the allowlist names the operator's own networks" ;;
+    esac
+    refused=1
+  done < <(jq -r 'to_entries[]
+    | if (.value | test(":")) then "\(.key + 1) ipv6" elif (.value | endswith("/0")) then "\(.key + 1) all" else empty end' <<< "$cidrs")
+  ((!refused)) || return 1
   TF_VAR_api_allowed_cidrs=$(add_current_address "$cidrs")
   export TF_VAR_api_allowed_cidrs
 }

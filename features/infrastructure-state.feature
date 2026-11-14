@@ -51,6 +51,26 @@ Feature: Infrastructure state and stack recipes
     When infra-plan runs for a stack
     Then it exits non-zero naming the variable and tofu is never started
 
+  Scenario: OpenTofu's argument and data directory variables are refused
+    Given TF_CLI_ARGS, a TF_CLI_ARGS_ variable for one command, or TF_DATA_DIR in the environment
+    When infra-plan runs for a stack
+    Then it exits non-zero naming the variable and not its value, and tofu is never started
+
+  Scenario: The infrastructure recipes refuse Go's HTTP/2 debug log
+    Given GODEBUG setting http2debug, in the environment or in .env
+    When each infrastructure recipe runs, and cilium-install
+    Then it exits non-zero saying so, and no tool is started
+
+  Scenario: Apply takes --yes before or after the stack
+    Given a stack with changes to apply
+    When infra-apply runs with --yes before the stack's name, and with it after
+    Then both apply the plan without asking, and a second stack name or an unknown flag is refused before tofu starts
+
+  Scenario: An allowlist entry that is IPv6 or covers every address is refused by its position
+    Given an operator allowlist with an IPv6 network, or with a network whose prefix is 0
+    When infra-plan runs for the cluster stack
+    Then it exits non-zero naming the entry's position and not its value, and tofu is never started
+
   Scenario: The backend is configured from the environment
     Given a complete environment
     When infra-plan runs for the plumbing stack against a recording tofu

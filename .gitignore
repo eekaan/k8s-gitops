@@ -37,6 +37,8 @@ operator-cidrs.json
 
 # Planning notes stay local.
 .devflow/
+# Agents' worktrees and local settings.
+.claude/
 
 .DS_Store
 *.swp

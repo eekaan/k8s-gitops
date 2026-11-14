@@ -28,15 +28,6 @@ failed_step() {
   fi
 }
 
-# Go's HTTP/2 debug log (GODEBUG=http2debug=2) dumps the frames talosctl, kubectl and helm send and
-# receive, which carry machine configurations and credentials, so the recipes run without it.
-refuse_http2_debug() {
-  if [[ ${GODEBUG-} == *http2debug* ]]; then
-    infra_error "GODEBUG sets http2debug; unset it, as Go's HTTP/2 debug log would print machine configurations and credentials"
-    return 1
-  fi
-}
-
 # cluster_talman ARG...: talman with ARG... on the cluster scripts/cluster-env set up. talman's output,
 # talosctl's within it, names the nodes by address and shows configuration diffs, and CI logs are
 # public, so with CI set it goes to talman_log, in the cluster's clusterconfig/, which git ignores,

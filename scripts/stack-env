@@ -93,6 +93,7 @@ infra_stack_env() {
   load_env || return 1
   local complete=1
   refuse_tofu_overrides || complete=0
+  refuse_http2_debug || complete=0
   require_env TF_STATE_BUCKET AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY TF_STATE_PASSPHRASE || complete=0
   require_openstack_auth || complete=0
   if stack_takes api_allowed_cidrs; then
