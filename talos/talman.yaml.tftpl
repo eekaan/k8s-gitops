@@ -12,6 +12,8 @@ values:
   podSubnet: ${pod_subnet}
   serviceSubnet: ${service_subnet}
   apiSANs: ${jsonencode(api_sans)}
+  # The load balancer's floating address, where the cluster recipes reach the Kubernetes API.
+  apiAddress: ${api_address}
 
 # Installer images are the Image Factory's openstack installer for this schematic; talman computes
 # the schematic's ID offline.

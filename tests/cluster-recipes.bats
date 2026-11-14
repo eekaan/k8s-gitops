@@ -568,7 +568,10 @@ applies() {
     fi
     if [[ $case == api-address || $case == all ]]; then
       without KUBE_API_ADDRESS
-      messages+=("KUBE_API_ADDRESS is not set")
+      if [[ -f $CLUSTER/talman.yaml ]]; then
+        yq -i 'del(.values.apiAddress)' "$CLUSTER/talman.yaml"
+      fi
+      messages+=("KUBE_API_ADDRESS is not set, and talos/lab-sto2/talman.yaml gives no values.apiAddress")
     fi
     if [[ $case == wait ]]; then
       with TALOS_WAIT=soon
@@ -684,6 +687,33 @@ applies() {
   [ "$(yq '.clusters[0].cluster.server' "$kubeconfig")" = "https://$KUBE_API_ADDRESS:6443" ]
 }
 
+@test "Without KUBE_API_ADDRESS the recipes reach the API at the address in talman.yaml" {
+  fake_cluster
+  record yq
+  kubeconfig="$CLUSTER/clusterconfig/kubeconfig"
+  address=$(yq '.values.apiAddress' "$CLUSTER/talman.yaml")
+  [[ $address =~ ^[0-9]+(\.[0-9]+){3}$ ]]
+  [ "$address" != "$KUBE_API_ADDRESS" ]
+  without KUBE_API_ADDRESS
+
+  recipe cluster-kubeconfig
+
+  [ "$status" -eq 0 ]
+  [ "${lines[-1]}" = "$kubeconfig" ]
+  [ "$(yq '[.clusters[].cluster.server] | unique | join(" ")' "$kubeconfig")" = "https://$address:6443" ]
+  [[ $output != *"$address"* ]]
+  absent "$address" "$RECORD/argv"
+
+  # KUBE_API_ADDRESS in the environment wins over talman.yaml.
+  reset_environment
+
+  recipe cluster-kubeconfig
+
+  [ "$status" -eq 0 ]
+  [ "$(yq '[.clusters[].cluster.server] | unique | join(" ")' "$kubeconfig")" = "https://$KUBE_API_ADDRESS:6443" ]
+  [[ $output != *"$KUBE_API_ADDRESS"* ]]
+}
+
 @test "cluster-kubeconfig refuses an API address it cannot put in a URL, without printing it" {
   fake_cluster
   without KUBE_API_ADDRESS
@@ -692,7 +722,7 @@ applies() {
   recipe cluster-kubeconfig
 
   [ "$status" -ne 0 ]
-  [[ $output == *"KUBE_API_ADDRESS is not an IPv4 address or a host name"* ]]
+  [[ $output == *"KUBE_API_ADDRESS is not an IPv4 address"* ]]
   [[ $output != *marker-not-an-address* ]]
   [ ! -e "$RECORD/argv" ]
 }

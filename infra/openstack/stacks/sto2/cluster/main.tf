@@ -86,6 +86,8 @@ locals {
       [module.api_lb.vip_address, module.api_lb.floating_address],
       [for node in local.talman_nodes : node.floating_ip if node.role == "controlplane"],
     )
-    nodes = local.talman_nodes
+    # Where the cluster recipes, which run outside the node network, reach the Kubernetes API.
+    api_address = module.api_lb.floating_address
+    nodes       = local.talman_nodes
   })
 }

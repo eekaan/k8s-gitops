@@ -22,7 +22,7 @@ Feature: Cluster recipes
     Then it exits non-zero naming the file and printing none of its values, while an encrypted bundle passes
 
   Scenario: Bootstrap refuses without its preconditions
-    Given a cluster without its talman.yaml, its secrets.sops.yaml, the age key's location or KUBE_API_ADDRESS
+    Given a cluster without its talman.yaml, its secrets.sops.yaml, the age key's location or an API address in KUBE_API_ADDRESS or talman.yaml
     When cluster-bootstrap runs
     Then it exits non-zero naming each one that is missing, and no node is probed and no tool is run
 
@@ -40,6 +40,11 @@ Feature: Cluster recipes
     Given KUBE_API_ADDRESS in the environment
     When cluster-kubeconfig runs
     Then talos/lab-sto2/clusterconfig/kubeconfig has mode 0600, every cluster in it is served at https://KUBE_API_ADDRESS:6443, and the recipe prints the file's path and neither its content nor the address
+
+  Scenario: Without KUBE_API_ADDRESS the recipes reach the API at the address in talman.yaml
+    Given the cluster's talman.yaml naming the load balancer's floating address in values.apiAddress, and no KUBE_API_ADDRESS
+    When cluster-kubeconfig runs, and then runs with KUBE_API_ADDRESS set
+    Then the first serves every cluster in the kubeconfig at that address on port 6443 and the second at KUBE_API_ADDRESS, and neither prints the address or passes it as an argument
 
   Scenario: A configuration rollout shows the change and asks before applying
     Given a configuration change talman reports for the cluster's nodes

@@ -16,10 +16,12 @@
 #   recipient   an age recipient in talos/.sops.yaml rather than its placeholder
 #   secrets     the cluster's secrets.sops.yaml
 #   age-key     the Talos age key's location
-#   api-address KUBE_API_ADDRESS, the API load balancer's floating address
+#   api-address the API load balancer's floating address, exported as KUBE_API_ADDRESS: from the
+#               environment when it sets one, and otherwise values.apiAddress in the cluster's
+#               talman.yaml, which the cluster stack renders. yq reads it; it is never printed.
 #   wait        TALOS_WAIT, when set, as a number of seconds
 require_cluster() {
-  local need complete=1
+  local need from complete=1
   for need; do
     case $need in
       talman)
@@ -42,10 +44,21 @@ require_cluster() {
         ;;
       age-key) require_age_key || complete=0 ;;
       api-address)
-        if ! require_env KUBE_API_ADDRESS; then
+        from=KUBE_API_ADDRESS
+        if [[ -z ${KUBE_API_ADDRESS:-} && -f $talman_file ]]; then
+          from="values.apiAddress in talos/$cluster/talman.yaml"
+          KUBE_API_ADDRESS=$(yq '.values.apiAddress // ""' "$talman_file" 2> /dev/null) || KUBE_API_ADDRESS=
+          export KUBE_API_ADDRESS
+        fi
+        if [[ -z ${KUBE_API_ADDRESS:-} ]]; then
+          infra_error "KUBE_API_ADDRESS is not set, and talos/$cluster/talman.yaml gives no values.apiAddress; just infra-talman writes talman.yaml with it"
           complete=0
-        elif [[ ! $KUBE_API_ADDRESS =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
-          infra_error "KUBE_API_ADDRESS is not an IPv4 address or a host name; it holds the API load balancer's floating address"
+        elif is_placeholder "$KUBE_API_ADDRESS"; then
+          infra_error "KUBE_API_ADDRESS still holds the placeholder from .env.example"
+          complete=0
+        # The API's certificate names are addresses, so a host name would fail verification.
+        elif [[ ! $KUBE_API_ADDRESS =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+          infra_error "$from is not an IPv4 address; it holds the API load balancer's floating address"
           complete=0
         fi
         ;;

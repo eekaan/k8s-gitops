@@ -11,6 +11,11 @@ Feature: talman.yaml from the cluster stack
     When the cluster stack is planned against mocked providers
     Then talman.yaml's endpoint is the API endpoint output and the certificate names are the load balancer's two addresses and each control plane's floating address
 
+  Scenario: talman.yaml names the address the recipes reach the API on
+    Given the planned load balancer
+    When the cluster stack is planned against mocked providers
+    Then talman.yaml's values.apiAddress is the load balancer's floating address, one of the certificate names
+
   Scenario: Versions come from versions.yaml
     Given a versions file
     When the cluster stack is planned against mocked providers

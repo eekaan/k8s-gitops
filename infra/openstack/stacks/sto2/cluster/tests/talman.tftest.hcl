@@ -126,6 +126,25 @@ run "the_cluster_endpoint_is_the_load_balancers_private_address" {
   }
 }
 
+run "talman_yaml_names_the_address_the_recipes_reach_the_api_on" {
+  command = plan
+
+  assert {
+    condition     = yamldecode(output.talman_yaml).values.apiAddress == output.api_floating_address
+    error_message = "talman.yaml's values.apiAddress must be the api_floating_address output."
+  }
+
+  assert {
+    condition     = yamldecode(output.talman_yaml).values.apiAddress == "203.0.113.50"
+    error_message = "talman.yaml's values.apiAddress must be the load balancer's floating address."
+  }
+
+  assert {
+    condition     = contains(yamldecode(output.talman_yaml).values.apiSANs, yamldecode(output.talman_yaml).values.apiAddress)
+    error_message = "The API address must be one of the API certificate names."
+  }
+}
+
 run "versions_come_from_versions_yaml" {
   command = plan
 

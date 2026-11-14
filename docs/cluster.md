@@ -86,7 +86,7 @@ out of the artifact, which is built from `kubernetes/`.
   there.
 - `just cluster-bootstrap [cluster]` builds the cluster from nodes waiting in maintenance mode.
   It refuses, naming each, when the cluster's `talman.yaml` or `secrets.sops.yaml`, the age key's
-  location or `KUBE_API_ADDRESS` is missing, or when `cluster-config` would refuse. Then, in order:
+  location or the API address is missing, or when `cluster-config` would refuse. Then, in order:
   1. It waits until every node in `talman.yaml` answers on the Talos API port, 50000, at the
      address talman reaches it on, for up to `TALOS_WAIT` seconds. It fails naming the nodes that
      did not answer; rebooting one is left to the operator.
@@ -146,7 +146,7 @@ out of the artifact, which is built from `kubernetes/`.
   version.
 
   Both upgrade recipes do nothing and ask nothing when every node runs its version, and need what
-  `cluster-talos` needs and `KUBE_API_ADDRESS`. An etcd snapshot holds every Secret in the cluster;
+  `cluster-talos` needs and the API address. An etcd snapshot holds every Secret in the cluster;
   talman writes it
   into `clusterconfig/` with mode 0600, and it stays there.
 - `just cluster-config [cluster]` applies what Flux needs before it starts: the namespace
@@ -185,9 +185,12 @@ age-keygen on standard input.
 - `SOPS_AGE_KEY_FILE`: the path of the Talos age key, outside the repository. In CI,
   `SOPS_AGE_KEY` holds the key itself instead. Every recipe that reaches the nodes needs one of
   them, as talman decrypts the bundle.
-- `KUBE_API_ADDRESS`: the Kubernetes API load balancer's floating address, an IPv4 address or host
-  name; `cluster-bootstrap`, `cluster-kubeconfig` and the upgrade recipes need it. It reaches a
-  command line in one place: `cluster-upgrade-k8s` hands it to talosctl as its endpoint.
+- `KUBE_API_ADDRESS`: the Kubernetes API load balancer's floating address, an IPv4 address, as
+  the API's certificate names are addresses. The cluster stack renders it into the cluster's
+  `talman.yaml` as `values.apiAddress`, and the recipes read it from there; set in `.env` or the
+  environment, it takes the place of that. `cluster-bootstrap`, `cluster-kubeconfig` and the
+  upgrade recipes need it. It reaches a command line in one place: `cluster-upgrade-k8s` hands it to
+  talosctl as its endpoint.
 - `TALOS_WAIT`: how many seconds `cluster-bootstrap` and `cluster-talos` wait for the nodes, 600
   when unset.
 - `FLUX_AGE_KEY_FILE`: the path of the Flux age key, outside the repository. In CI, `FLUX_AGE_KEY`

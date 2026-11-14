@@ -36,7 +36,9 @@ The cluster stack renders `talos/talman.yaml.tftpl` from its own values into the
 address on the node network as the endpoint; the Talos and Kubernetes versions from
 `versions.yaml`; the plumbing stack's node subnet and the stack's `pod_subnet` and
 `service_subnet`, Kubernetes' conventional private ranges by default; the load balancer's two
-addresses and each control plane's floating address as the API certificate names; and the nodes,
+addresses and each control plane's floating address as the API certificate names; the load
+balancer's floating address as `values.apiAddress`, where the cluster recipes reach the Kubernetes
+API ([cluster.md](cluster.md#environment)); and the nodes,
 control planes first and then workers, each by name and at its floating address, where talman
 reaches it. Planning fails, naming the variable, when the pod or service subnet is not an IPv4
 network, overlaps the other or the node subnet, or when the pod subnet holds fewer /24s than there

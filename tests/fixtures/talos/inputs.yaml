@@ -12,6 +12,8 @@ api_sans:
   - 192.0.2.211
   - 192.0.2.212
   - 192.0.2.213
+# The API load balancer's floating address, where the cluster recipes reach the Kubernetes API.
+api_address: 192.0.2.210
 pod_subnet: 198.51.100.0/24
 service_subnet: 203.0.113.0/24
 nodes:
