@@ -18,7 +18,7 @@ Actions is the CI system: each job runs one `just` recipe, on GitHub's runners, 
 runs the checks starts the Dagger engine for itself, or, for trusted runs, on the CI host's
 self-hosted runner, where it uses the host's persistent engine (ADR 0012).
 
-Two jobs run their recipe directly on the runner, with the tools pinned in `mise.toml` installed
+Two jobs that need a token of their own run their recipe directly on the runner, with the tools pinned in `mise.toml` installed
 there by mise, because each needs a token of the job's own. Publishing the cluster's artifact
 (ADR 0003), `just publish`, signs it keyless with the job's identity token and pushes it with the
 job's registry token. Commenting the render diff on a pull request, `just ci-comment`, runs from
