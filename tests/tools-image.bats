@@ -10,8 +10,9 @@
 # just ci without a container, dagger is a fake that records its arguments. kubectl, openstack, gh
 # and talosctl are fakes that fail, so a call to any of them shows. The tests tagged hermetic run the
 # real just ci and serve a tools image from a registry of their own in the network of the engine the
-# pinned dagger starts in Docker, under a name their checkout's scripts/tools-image is changed to
-# accept; they push nothing anywhere else.
+# pinned dagger starts in Docker; they record it under a name their checkout's scripts/tools-image is
+# changed to accept, or hand it to the module as just ci hands a recorded one where the checkout
+# must stay as it is. They push nothing anywhere else.
 
 setup() {
   ROOT=$(cd "$BATS_TEST_DIRNAME/.." && pwd)
@@ -380,22 +381,28 @@ values() {
 REGISTRY_IMAGE=registry@sha256:325b4b29b041e82803abeb703e201655e4e23ab83264ec1a7c9ddb0a5b14a6e0
 
 # run_ci [GROUP]: runs the checkout's just ci, for GROUP alone when given, with none of the pinned
-# tools on PATH, so only a container can run the checks.
+# tools on PATH, so only a container can run the checks. With HANDED set, the module is also handed
+# that image, as just ci hands it a recorded one, by a dagger that adds it to the call just ci makes;
+# the checkout, and the bats tests that run in it, stay as they are.
 run_ci() {
   local bin="$BATS_TEST_TMPDIR/hermetic-bin"
   mkdir -p "$bin"
   printf '#!/usr/bin/env bash\n' > "$bin/mise"
   chmod +x "$bin/mise"
   ln -sf "$(command -v docker)" "$bin/docker"
-  ln -sf "$(command -v dagger)" "$bin/dagger"
+  rm -f "$bin/dagger"
+  if [[ -n ${HANDED-} ]]; then
+    printf '#!/usr/bin/env bash\nexec %q "$@" %q\n' "$(command -v dagger)" "--tools-image=$HANDED" > "$bin/dagger"
+    chmod +x "$bin/dagger"
+  else
+    ln -s "$(command -v dagger)" "$bin/dagger"
+  fi
   run env PATH="$bin:/usr/bin:/bin" "$JUST" --justfile "$WORK/justfile" --working-directory "$WORK" ci "$@"
 }
 
 # registry: starts a registry that listens on the loopback address of the engine the pinned dagger
-# starts in Docker, which reaches it there as a registry on localhost, over HTTP, and makes the
-# checkout's scripts/tools-image take SERVED/ci-tools for this repository's tools image, as just ci
-# accepts no other. Sets REGISTRY to the container, which teardown stops, and SERVED to the address
-# images are served from.
+# starts in Docker, which reaches it there as a registry on localhost, over HTTP. Sets REGISTRY to
+# the container, which teardown stops, and SERVED to the address images are served from.
 registry() {
   local version engine port
   if [[ -n ${DAGGER_ENGINE-}${_EXPERIMENTAL_DAGGER_RUNNER_HOST-} ]]; then
@@ -416,8 +423,6 @@ registry() {
   for _ in {1..50}; do
     if docker logs "$REGISTRY" 2>&1 | grep -q 'listening on'; then
       SERVED=localhost:$port
-      sed -i "s|^image=.*$|image=$SERVED/ci-tools|" "$WORK/scripts/tools-image"
-      grep -qxF "image=$SERVED/ci-tools" "$WORK/scripts/tools-image"
       return 0
     fi
     sleep 0.2
@@ -426,11 +431,10 @@ registry() {
   return 1
 }
 
-# stand_in [FILE]: serves the checkout's tools, as just tools-image-publish builds them, from the
+# serve [FILE]: serves the checkout's tools, as just tools-image-publish builds them, from the
 # registry under a tag other than the key, so that only its digest finds it; with FILE, a file of
-# that name is added at /. Records it by digest in the checkout's versions.yaml with the checkout's
-# key, commits, and sets STAND_IN to it.
-stand_in() {
+# that name is added at /. Sets STAND_IN to it, by digest.
+serve() {
   local -a chain
   local pushed
   registry
@@ -441,6 +445,20 @@ stand_in() {
   pushed=$(cd "$WORK" && dagger api call --progress=plain "${chain[@]}" publish --address="$SERVED/ci-tools:stand-in")
   [[ $pushed =~ ^$SERVED/ci-tools:stand-in@(sha256:[0-9a-f]{64})$ ]]
   STAND_IN=$SERVED/ci-tools@${BASH_REMATCH[1]}
+}
+
+# accept_served: makes the checkout's scripts/tools-image take SERVED/ci-tools for this repository's
+# tools image, as just ci accepts a record of no other.
+accept_served() {
+  sed -i "s|^image=.*$|image=$SERVED/ci-tools|" "$WORK/scripts/tools-image"
+  grep -qxF "image=$SERVED/ci-tools" "$WORK/scripts/tools-image"
+}
+
+# stand_in [FILE]: serves the checkout's tools as serve does, and records them by digest in the
+# checkout's versions.yaml with the checkout's key, which its scripts/tools-image accepts; commits.
+stand_in() {
+  serve "$@"
+  accept_served
   record "$(key_of "$WORK")" "$STAND_IN"
   commit "record the stand-in"
 }
@@ -656,29 +674,28 @@ verdicts() {
   mkdir "$WORK/config"
   cp "$BATS_TEST_DIRNAME/fixtures/check-address-literals/undeclared.txt" "$WORK/config/resolver.txt"
   commit "add a file that fails a check"
-  stand_in
+  # The checkout records no image and accepts none but this repository's, so its own bats tests, which
+  # run in both runs, hold; the module is handed the stand-in as just ci hands a recorded image.
+  serve
 
-  run_ci
+  HANDED=$STAND_IN run_ci
 
   [ "$status" -ne 0 ]
   [[ $output == *"tools: $STAND_IN"* ]]
   in_image=$(verdicts)
-  [ "$(grep -c ': failed (' <<< "$in_image")" -eq 1 ]
+  [ "$(grep -c ': failed (' <<< "$in_image")" -eq 1 ] || { echo "$in_image"; return 1; }
   [ "$(grep -c ': passed (' <<< "$in_image")" -ge 1 ]
   # shellcheck disable=SC2016 # just's backticks, as it prints them
   [ "$(grep -c '^recipe `check-literals` failed$' <<< "$in_image")" -eq 1 ]
   failing=$(grep -oE '^== [a-z0-9-]+: failed' <<< "$in_image")
 
-  # The same checkout, its record for other inputs, builds the tools from the pins.
-  record "$(printf 'other inputs' | sha256sum | cut -d' ' -f1)" "$STAND_IN"
-  commit "record the image for other inputs"
-
+  # The same checkout, with no image handed, builds the tools from the pins.
   run_ci
 
   [ "$status" -ne 0 ]
   [[ $output == *"tools: built from the pins"* ]]
   built=$(verdicts)
-  [ "$built" = "$in_image" ]
+  [ "$built" = "$in_image" ] || { diff <(echo "$in_image") <(echo "$built"); return 1; }
   [[ $built == *"$failing"* ]]
 }
 
@@ -696,6 +713,7 @@ verdicts() {
   esac
   pushed=$(cd "$BATS_TEST_TMPDIR/empty" && dagger --progress=plain -c "container --platform $other | with-new-file /other-platform other | publish $SERVED/ci-tools:other-platform")
   [[ $pushed =~ (sha256:[0-9a-f]{64})$ ]]
+  accept_served
   record "$(key_of "$WORK")" "$SERVED/ci-tools@${BASH_REMATCH[1]}"
   commit "record an image for another platform"
 

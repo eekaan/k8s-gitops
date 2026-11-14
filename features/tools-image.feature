@@ -35,7 +35,7 @@ Feature: The prebuilt tools image
 
   Scenario: The checks give the same result in the recorded image as in the tools built from the pins
     Given the image the tools image workflow would publish for the checkout's inputs, and a tracked file that fails one check
-    When just ci runs with that image recorded for these inputs, and again with it recorded for other inputs
+    When just ci runs with the module handed that image, as just ci hands it a recorded one, and again with the tools built from the pins
     Then both runs run the same checks in the same groups, fail the same check in the same group, and pass every other group
 
   Scenario: The tools image is signed and verified before its digest is printed, and nothing is published outside the workflow
