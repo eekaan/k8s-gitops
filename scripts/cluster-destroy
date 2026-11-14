@@ -74,7 +74,19 @@ if [[ $stack_cluster != "$cluster" ]]; then
   if [[ -n $stack_cluster ]]; then
     infra_error "$stack holds $stack_cluster, not $cluster; it destroys that cluster only: just cluster-destroy $stack_cluster. Nothing was destroyed"
   else
-    infra_error "$stack's outputs name no cluster, so it cannot be told to be $cluster. Nothing was destroyed"
+    # A stack that holds nothing, destroyed already or never applied, names no cluster either, and
+    # destroying it again ends as the first run did, leaving no generated file behind.
+    holds=0
+    holds_resources "$stack" || holds=$?
+    case $holds in
+      1)
+        echo "$stack holds no resource, so there is nothing to destroy"
+        remove_generated "$cluster"
+        exit 0
+        ;;
+      0) infra_error "$stack's outputs name no cluster, so it cannot be told to be $cluster. Nothing was destroyed" ;;
+      *) infra_error "cannot read the state of $stack, whose outputs name no cluster. Nothing was destroyed" ;;
+    esac
   fi
   exit 1
 fi

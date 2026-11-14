@@ -472,8 +472,11 @@ out of the artifact, which is built from `kubernetes/`.
   talosconfig and kubeconfig. The plumbing stack, the secrets bundle and the buckets stay. The stack
   holds one cluster, so first, before it asks any cluster anything and whatever flags are given, it
   refuses a name other than the cluster name in the stack's `talman_yaml` output, saying which
-  cluster the stack holds, or that the stack names none, and the name of a cluster that has no
-  directory under `talos/`. `cluster-env` does not make that refusal for every recipe:
+  cluster the stack holds, or that the stack names none while its state holds resources, and the
+  name of a cluster that has no directory under `talos/`. A stack whose state holds no resource,
+  destroyed already or never applied, is not an error: the recipe says so, removes the cluster's
+  generated files if they are there, and exits 0, as `infra-destroy` does; a state that cannot be
+  read, or that is not a state, refuses. `cluster-env` does not make that refusal for every recipe:
   `cluster-secrets` and `infra-talman` run before a cluster's directory exists. Then, through the
   kubeconfig of the cluster it is given, it lists every Service of type LoadBalancer and every
   PersistentVolume of a CSI driver: a cloud load balancer or volume behind one is made by the

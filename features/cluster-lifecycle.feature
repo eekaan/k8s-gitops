@@ -79,7 +79,7 @@ Feature: Cluster lifecycle
   Scenario: A cluster that still owns a load balancer or a volume is not destroyed, and they are named
     Given a Service of type LoadBalancer, a PersistentVolume of a CSI driver other than LINSTOR's, or both, beside Services and volumes of other kinds, LINSTOR's among them
     When cluster-destroy runs with --yes
-    Then it exits non-zero naming each as namespace/name or by the volume's name, and no volume of LINSTOR, without an address or a volume handle, no tofu plan or apply runs, and the generated files stay
+    Then it exits non-zero naming each as namespace/name or by the volume's name, and no volume of LINSTOR, without an address or a volume handle, tofu only reads the stack's state and outputs, and the generated files stay
 
   Scenario: A Service on a pool address does not block a destroy, and a Service on any other load balancer still does
     Given a Service of type LoadBalancer whose address lies in the service range of the cluster's talman.yaml, beside one whose address lies outside it or one with no address yet
@@ -94,7 +94,7 @@ Feature: Cluster lifecycle
   Scenario: A cluster whose API does not answer is not destroyed unless asked
     Given an API that does not answer through the kubeconfig, or no kubeconfig at all
     When cluster-destroy runs with --yes, and then with --unreachable
-    Then the first exits non-zero naming --unreachable and runs no tofu plan or apply, the second destroys the cluster stack, and --unreachable does not let a cluster that answers and owns a load balancer be destroyed
+    Then the first exits non-zero naming --unreachable and tofu only reads the stack's state and outputs, the second destroys the cluster stack, and --unreachable does not let a cluster that answers and owns a load balancer be destroyed
 
   Scenario: Destroying the cluster leaves the plumbing stack, the secrets bundle and the buckets alone
     Given a cluster that owns no load balancer and no volume of a CSI driver
@@ -112,14 +112,19 @@ Feature: Cluster lifecycle
     Then it exits zero, says the cluster stack holds no resource, asks no cluster, plans and destroys nothing for the cluster stack, and the plumbing stack is planned and destroyed as before
 
   Scenario: A cluster stack that holds resources and cannot be asked is still refused unless --unreachable is given
-    Given a cluster stack whose state holds resources and a cluster that has no kubeconfig, and one whose state cannot be read
+    Given a cluster stack whose state holds resources and a cluster that has no kubeconfig, one whose outputs name no cluster, and one whose state cannot be read, answers with nothing or with text that is no state
     When infra-destroy runs with --yes, and then with --unreachable
-    Then the first exits non-zero naming --unreachable and plans nothing; with --unreachable the stack is destroyed, unless its state cannot be read, which refuses whatever is given
+    Then the first exits non-zero naming --unreachable and plans nothing; with --unreachable the stack is destroyed, unless its state cannot be read, or its outputs name no cluster and it is not given --unreachable; an unreadable state refuses whatever is given
+
+  Scenario: A cluster destroy that is run again ends as the first run did, with the cluster stack holding nothing
+    Given a cluster stack that is destroyed already, so its outputs name no cluster and its state holds no resource, with the cluster's generated files still there or gone, and one whose state cannot be read
+    When cluster-destroy runs for the cluster, with --yes and with --unreachable
+    Then for the destroyed stack it exits zero, says the stack holds no resource, removes the generated files that are there and asks and plans nothing; a state that cannot be read exits non-zero, naming the stack and leaving the files
 
   Scenario: A cluster is destroyed only under the name its stack holds
-    Given the cluster stack, whose talman_yaml output names lab-sto2, and a name with no directory under talos/, one with a directory that is not the stack's cluster, lab-sto2 without a directory, and a stack whose outputs name no cluster
+    Given the cluster stack, whose talman_yaml output names lab-sto2, and a name with no directory under talos/, one with a directory that is not the stack's cluster, lab-sto2 without a directory, and a stack whose outputs name no cluster while its state holds resources
     When cluster-destroy runs for each, with --unreachable and --yes
-    Then each exits non-zero, before any cluster is asked, runs no tofu plan or apply and leaves the generated files of lab-sto2 where they are; a name other than lab-sto2 is told lab-sto2 is the cluster the stack holds, a stack that names none is said to, and lab-sto2 without a directory is told so
+    Then each exits non-zero, before any cluster is asked, tofu only reads the stack's state and outputs and leaves the generated files of lab-sto2 where they are; a name other than lab-sto2 is told lab-sto2 is the cluster the stack holds, a stack that names none is said to, and lab-sto2 without a directory is told so
 
   Scenario: Nothing is destroyed without the stack's name
     Given a cluster that owns no load balancer and no volume of a CSI driver

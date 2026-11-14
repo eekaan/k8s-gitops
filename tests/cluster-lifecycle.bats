@@ -257,10 +257,16 @@ restore_generated() {
   done
 }
 
-# no_tofu: tofu has planned and applied nothing; it only reads the stack's outputs, which name the
-# cluster the stack holds.
+# no_tofu: every tofu call was an init, or a read of the stack's outputs or state, which name the
+# cluster the stack holds and whether it holds anything; nothing was planned, applied, destroyed,
+# imported or removed from state.
 no_tofu() {
-  [ -z "$(calls '^tofu .* (plan|apply) ')" ]
+  local changed
+  changed=$(awk '$1 == "tofu" && $3 != "init" && $3 != "output" && $3 != "show"' "$RECORD/argv" 2> /dev/null)
+  if [[ -n $changed ]]; then
+    echo "tofu changed or planned: $changed" >&2
+    return 1
+  fi
 }
 
 @test "A healthy cluster passes every check" {
@@ -962,7 +968,7 @@ kube-system/node-agent-cp-1' ]
 
   [ "$status" -ne 0 ]
   [[ $output == *"holds lab-sto2, not other-cluster"* ]]
-  [ -z "$(calls '^tofu .* (plan|apply) ')" ]
+  no_tofu
   [ -z "$(calls '^kubectl ')" ]
   generated_kept
 
@@ -976,7 +982,7 @@ kube-system/node-agent-cp-1' ]
 
     [ "$status" -ne 0 ]
     [[ $output == *"holds lab-sto2, not other-cluster"* ]]
-    [ -z "$(calls '^tofu .* (plan|apply) ')" ]
+    no_tofu
     [ -z "$(calls '^kubectl ')" ]
     generated_kept
   done
@@ -989,16 +995,18 @@ kube-system/node-agent-cp-1' ]
 
   [ "$status" -ne 0 ]
   [[ $output == *"talos/lab-sto2 does not exist"* ]]
-  [ -z "$(calls '^tofu .* (plan|apply) ')" ]
+  no_tofu
   [ -z "$(calls '^kubectl ')" ]
   mv "$REPO/talos/lab-sto2.away" "$CLUSTER"
   generated_kept
 
-  # A stack whose outputs name no cluster cannot be told to be any name, and nothing is asked.
+  # A stack whose outputs name no cluster, while its state holds resources, cannot be told to be any
+  # name, and nothing is asked.
   fake tofu <<EOF
 printf '%s\n' "tofu \$*" >> "$RECORD/argv"
 case \${2-} in
   output) echo '{}' ;;
+  show) cat "$FIXTURES/state.json" ;;
 esac
 EOF
   for args in 'lab-sto2 --unreachable --yes' 'lab-sto2 --yes' 'lab-sto2'; do
@@ -1008,8 +1016,62 @@ EOF
 
     [ "$status" -ne 0 ]
     [[ $output == *"outputs name no cluster"* ]]
-    [ -z "$(calls '^tofu .* (plan|apply) ')" ]
+    no_tofu
     [ -z "$(calls '^kubectl ')" ]
+    generated_kept
+  done
+}
+
+@test "A cluster destroy that is run again ends as the first run did, with the cluster stack holding nothing" {
+  # The constitution's "A recipe that changes live state is idempotent": the stack is gone, so its
+  # outputs name no cluster and its state holds no resource.
+  fake tofu <<EOF
+printf '%s\n' "tofu \$*" >> "$RECORD/argv"
+case \${2-} in
+  output) echo '{}' ;;
+  show) echo '{"format_version": "1.0"}' ;;
+esac
+EOF
+  for args in '--unreachable --yes' '--yes' ''; do
+    restore_generated
+    rm -f "$RECORD/argv"
+    # shellcheck disable=SC2086 # the arguments as an operator types them
+    recipe cluster-destroy lab-sto2 $args < /dev/null
+
+    [ "$status" -eq 0 ]
+    [[ $output == *"sto2/cluster holds no resource, so there is nothing to destroy"* ]]
+    no_tofu
+    [ -z "$(calls '^kubectl ')" ]
+    for file in "${GENERATED[@]}"; do
+      [ ! -e "$CLUSTER/$file" ]
+    done
+  done
+
+  # Run once more, with the generated files already gone.
+  rm -f "$RECORD/argv"
+  recipe cluster-destroy lab-sto2 --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"holds no resource, so there is nothing to destroy"* ]]
+  no_tofu
+
+  # A state that is not read and parsed is not taken for an empty one: no answer, or text that is no
+  # JSON, leaves the generated files where they are.
+  for answer in '' 'not a state' '[]'; do
+    restore_generated
+    fake tofu <<EOF
+printf '%s\n' "tofu \$*" >> "$RECORD/argv"
+case \${2-} in
+  output) echo '{}' ;;
+  show) printf '%s' '$answer' ;;
+esac
+EOF
+    rm -f "$RECORD/argv"
+    recipe cluster-destroy lab-sto2 --unreachable --yes < /dev/null
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"cannot read the state of sto2/cluster"* ]]
+    no_tofu
     generated_kept
   done
 }

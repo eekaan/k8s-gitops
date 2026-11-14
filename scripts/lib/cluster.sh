@@ -115,6 +115,50 @@ stack_cluster_name() {
   printf '%s' "$name"
 }
 
+# stack_holds_resources: whether the state of the stack that scripts/stack-env has set up and
+# initialised holds a managed resource: 0 when it does, 1 when it holds none, 2 when the state cannot
+# be read. A stack never applied has an empty state and holds none; data sources are not resources.
+# Only a state that was read and parsed as a JSON object counts as empty: no answer, or one that is
+# not a state, is not taken for one.
+stack_holds_resources() {
+  local state count
+  state=$(stack_tofu show -json) || return 2
+  count=$(jq -r 'if type != "object" then error("not a state") else
+    [.values.root_module? // empty | .. | objects | select(.mode? == "managed")] | length end' <<< "$state" 2> /dev/null) || return 2
+  [[ $count =~ ^[0-9]+$ ]] || return 2
+  ((count > 0)) || return 1
+}
+
+# holds_resources STACK: stack_holds_resources for STACK, whose lock it takes and which it
+# initialises itself, in a process of its own (scripts/stack-state), so STACK's inputs and lock do
+# not carry over.
+holds_resources() {
+  "$(dirname "${BASH_SOURCE[0]}")/../stack-state" "$1"
+}
+
+# remove_generated CLUSTER: removes the files generated for CLUSTER that hold the addresses of its
+# nodes and its API: talman.yaml, and the talosconfig and kubeconfig talman writes into
+# clusterconfig/. A later bootstrap or onboarding would otherwise send machine configuration to
+# whoever answers at those addresses. Only a file that git ignores, and so neither tracks nor would
+# commit, is removed; the secrets bundle and etcd snapshots stay. Names what it removes, never what
+# the files held.
+remove_generated() {
+  local path
+  local -a removed=()
+  for path in "talos/$1/talman.yaml" "talos/$1/clusterconfig/talosconfig" "talos/$1/clusterconfig/kubeconfig"; do
+    [[ -e $infra_root/$path || -L $infra_root/$path ]] || continue
+    if git -C "$infra_root" check-ignore -q -- "$path"; then
+      rm -f -- "${infra_root:?}/$path"
+      removed+=("$path")
+    else
+      infra_error "$path is not a file git ignores, so it is left in place; it may hold the destroyed cluster's addresses"
+    fi
+  done
+  if ((${#removed[@]} > 0)); then
+    echo "removed what held the destroyed cluster's addresses: ${removed[*]}"
+  fi
+}
+
 # require_cluster_owns_nothing CLUSTER STACK UNREACHABLE: the check before the cluster stack STACK is
 # destroyed, shared by cluster-destroy and infra-destroy. The load balancers that Services of type
 # LoadBalancer get and the volumes behind PersistentVolumes of a CSI driver are made by the cluster,

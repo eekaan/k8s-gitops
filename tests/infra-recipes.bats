@@ -161,6 +161,17 @@ tofu_calls() {
   awk -v subcommand="$1" '$2 == subcommand' "$RECORD/tofu" 2> /dev/null
 }
 
+# tofu_only_reads: every tofu call was a read of a stack's state or outputs, so nothing was planned,
+# applied, destroyed, imported or removed from state.
+tofu_only_reads() {
+  local changed
+  changed=$(awk '$2 != "init" && $2 != "output" && $2 != "show"' "$RECORD/tofu" 2> /dev/null)
+  if [[ -n $changed ]]; then
+    echo "tofu changed or planned: $changed" >&2
+    return 1
+  fi
+}
+
 # tofu_env SUBCOMMAND NAME: NAME's value in the environment of the last tofu SUBCOMMAND.
 tofu_env() {
   local entry
@@ -753,8 +764,7 @@ EOF
 
   [ "$status" -ne 0 ]
   [[ $output == *"--unreachable"* ]]
-  [ -z "$(tofu_calls plan)" ]
-  [ -z "$(tofu_calls apply)" ]
+  tofu_only_reads
   absent kubectl "$RECORD/argv"
 
   recipe infra-destroy sto2/cluster --yes --unreachable < /dev/null
@@ -772,7 +782,48 @@ EOF
 
   [ "$status" -ne 0 ]
   [[ $output == *"cannot read the state of sto2/cluster"* ]]
-  [ -z "$(tofu_calls apply)" ]
+  tofu_only_reads
+
+  # A state is read and parsed, or it is not taken for an empty one: an answer that is empty, is no
+  # JSON or is not a state refuses the cluster stack's destroy, and the plumbing stack's, whatever
+  # else is given.
+  for answer in '' 'not a state' '[]' 'null'; do
+    fake tofu <<EOF
+printf '%s\n' "\$*" >> "$RECORD/tofu"
+[[ \${2-} != show || \$# -ne 3 ]] || printf '%s' '$answer'
+EOF
+    for args in 'sto2/cluster --yes --unreachable' 'sto2/plumbing --yes'; do
+      rm -f "$RECORD/tofu"
+      # shellcheck disable=SC2086 # the arguments as an operator types them
+      recipe infra-destroy $args < /dev/null
+
+      [ "$status" -ne 0 ]
+      [[ $output == *"cannot read the state of sto2/"* ]]
+      tofu_only_reads
+    done
+  done
+
+  # A stack that holds resources while its outputs name no cluster cannot be asked, so it is refused
+  # unless --unreachable is given, and is not taken for an empty one.
+  fake tofu <<EOF
+printf '%s\n' "\$*" >> "$RECORD/tofu"
+case \${2-} in
+  show) [[ \$# -ne 3 ]] || cat "$FIXTURES/state-with-resources.json" ;;
+  output) echo '{}' ;;
+esac
+EOF
+  rm -f "$RECORD/tofu"
+  recipe infra-destroy sto2/cluster --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"names no cluster"*"--unreachable"* ]]
+  [[ $output != *"holds no resource"* ]]
+  tofu_only_reads
+
+  recipe infra-destroy sto2/cluster --yes --unreachable < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ "$(tofu_calls apply | awk '{ print $1 }')" = "-chdir=$CLUSTER" ]
 }
 
 @test "infra-destroy given a stack destroys that stack only" {
@@ -884,8 +935,7 @@ holds() {
     [ "$status" -ne 0 ]
     [[ $output == *"sto2/ci still holds resources"*"just infra-destroy sto2/ci"* ]]
     [[ $output != *stdout_marker* ]]
-    [ -z "$(tofu_calls plan)" ]
-    [ -z "$(tofu_calls apply)" ]
+    tofu_only_reads
     # The ci stack's state is read where its own backend key says.
     tofu_calls init | grep -qF -- "-backend-config=key=sto2/ci.tfstate"
   done
@@ -899,8 +949,7 @@ holds() {
   [ "$status" -ne 0 ]
   [[ $output == *"sto2/cluster still holds resources"*"just cluster-destroy"* ]]
   [[ $output != *openstack_compute_instance_v2* ]]
-  [ -z "$(tofu_calls plan)" ]
-  [ -z "$(tofu_calls apply)" ]
+  tofu_only_reads
 
   # Without a stack the cluster stack is destroyed first, so its resources do not hold the plumbing
   # stack back; the ci stack's would.
@@ -917,7 +966,7 @@ holds() {
 
   [ "$status" -ne 0 ]
   [[ $output == *"sto2/ci still holds resources"* ]]
-  [ -z "$(tofu_calls apply)" ]
+  tofu_only_reads
 
   # Data sources are not resources, and a stack that was never applied holds none.
   for fixture in state-data-only.json state-never-applied.json; do
@@ -943,8 +992,7 @@ holds() {
 
     [ "$status" -ne 0 ]
     [[ $output == *"sto2/later still holds resources"*"just infra-destroy sto2/later"* ]]
-    [ -z "$(tofu_calls plan)" ]
-    [ -z "$(tofu_calls apply)" ]
+    tofu_only_reads
   done
   holds sto2/later state-never-applied.json
 
@@ -958,7 +1006,7 @@ EOF
 
   [ "$status" -ne 0 ]
   [[ $output == *"cannot read the state of sto2/"* ]]
-  [ -z "$(tofu_calls apply)" ]
+  tofu_only_reads
 }
 
 @test "the ci stack takes the allowlist, the image and the public key from the environment" {

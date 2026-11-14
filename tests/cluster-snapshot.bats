@@ -1210,3 +1210,12 @@ EOF
   grep -q 'bootstrapping etcd' "$CLUSTER/clusterconfig/cluster-restore.log"
   [[ $output != *"reaching the nodes"* ]]
 }
+
+@test "the storage operator's documentation is linked at the version the cluster pins" {
+  pinned=$(yq '.spec.ref.tag' "$ROOT/kubernetes/apps/base/piraeus-datastore/piraeus-operator/app/ocirepository.yaml")
+  [[ $pinned =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+  for file in scripts/cluster-restore docs/runbooks/etcd-restore.md; do
+    links=$(grep -o 'piraeus-operator/blob/[^/]*/' "$ROOT/$file" | sort -u)
+    [ "$links" = "piraeus-operator/blob/v$pinned/" ]
+  done
+}

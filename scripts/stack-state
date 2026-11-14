@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Whether the state of a stack holds a managed resource, for a caller that does not hold the stack's
+# lock: exits 0 when it does, 1 when it holds none, 2 when the state cannot be read
+# (stack_holds_resources in lib/cluster.sh says what is taken for readable). Reading state evaluates
+# no variable, but stack-env requires every input the stack declares, so the ones the ci stack takes
+# from the environment are filled in for it. Prints nothing of the state.
+# Usage: scripts/stack-state STACK
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/cluster.sh
+. "$here/lib/cluster.sh"
+export CI_HOST_IMAGE=${CI_HOST_IMAGE:-state-read-only}
+export CI_HOST_SSH_PUBLIC_KEY=${CI_HOST_SSH_PUBLIC_KEY:-state-read-only}
+# shellcheck source=scripts/stack-env
+. "$here/stack-env" "${1:?usage: stack-state STACK}" || exit 2
+lock_stack || exit 2
+init_stack || exit 2
+status=0
+stack_holds_resources || status=$?
+exit "$status"

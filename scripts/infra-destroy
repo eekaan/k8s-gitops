@@ -52,48 +52,6 @@ if [[ -n $only ]]; then
   stacks=("$only")
 fi
 
-# remove_generated CLUSTER: removes the files generated for CLUSTER that hold the addresses of its
-# nodes and its API: talman.yaml, and the talosconfig and kubeconfig talman writes into
-# clusterconfig/. A later bootstrap or onboarding would otherwise send machine configuration to
-# whoever answers at those addresses. Only a file that git ignores, and so neither tracks nor would
-# commit, is removed; the secrets bundle and etcd snapshots stay. Names what it removes, never what
-# the files held.
-remove_generated() {
-  local path
-  local -a removed=()
-  for path in "talos/$1/talman.yaml" "talos/$1/clusterconfig/talosconfig" "talos/$1/clusterconfig/kubeconfig"; do
-    [[ -e $infra_root/$path || -L $infra_root/$path ]] || continue
-    if git -C "$infra_root" check-ignore -q -- "$path"; then
-      rm -f -- "${infra_root:?}/$path"
-      removed+=("$path")
-    else
-      infra_error "$path is not a file git ignores, so it is left in place; it may hold the destroyed cluster's addresses"
-    fi
-  done
-  if ((${#removed[@]} > 0)); then
-    echo "removed what held the destroyed cluster's addresses: ${removed[*]}"
-  fi
-}
-
-# holds_resources STACK: whether STACK's state holds a managed resource: 0 when it does, 1 when it
-# holds none, 2 when the state cannot be read. A stack never applied has no state and holds none;
-# data sources are not resources. Run in a subshell, so STACK's inputs and lock do not carry over.
-# Reading state evaluates no variable, but stack-env requires every input the stack declares, so the
-# ones the ci stack takes from the environment are filled in for it.
-holds_resources() {
-  (
-    export CI_HOST_IMAGE=${CI_HOST_IMAGE:-state-read-only}
-    export CI_HOST_SSH_PUBLIC_KEY=${CI_HOST_SSH_PUBLIC_KEY:-state-read-only}
-    # shellcheck source=scripts/stack-env
-    . "$here/stack-env" "$1" || exit 2
-    lock_stack || exit 2
-    init_stack || exit 2
-    state=$(stack_tofu show -json) || exit 2
-    jq -e '[.values.root_module? // empty | .. | objects | select(.mode? == "managed")] | length > 0' \
-      <<< "$state" > /dev/null || exit 1
-  )
-}
-
 # require_nothing_on_plumbing: fails, naming the recipe that destroys it, for each stack beside a
 # plumbing stack this run destroys whose state holds a resource, except the stacks this run
 # destroys before it.
@@ -131,24 +89,6 @@ require_nothing_on_plumbing() {
 require_nothing_on_plumbing
 
 for stack in "${stacks[@]}"; do
-  # A cluster stack whose state holds no resource, destroyed already or never applied, has no
-  # cluster to ask and nothing to destroy, so a re-run ends as the first run did. A state that
-  # cannot be read is not taken for an empty one.
-  if [[ $stack == */cluster ]]; then
-    status=0
-    holds_resources "$stack" || status=$?
-    case $status in
-      0) ;;
-      1)
-        echo "$stack holds no resource, so there is nothing to destroy"
-        continue
-        ;;
-      *)
-        infra_error "cannot read the state of $stack; nothing was destroyed"
-        exit 1
-        ;;
-    esac
-  fi
   # One subshell per stack, so neither its inputs nor its lock carry over to the next.
   (
     # shellcheck source=scripts/stack-env
@@ -157,6 +97,22 @@ for stack in "${stacks[@]}"; do
     init_stack
     cluster=
     if [[ $stack == */cluster ]]; then
+      # A cluster stack whose state holds no resource, destroyed already or never applied, has no
+      # cluster to ask and nothing to destroy, so a re-run ends as the first run did. A state that
+      # cannot be read is not taken for an empty one.
+      status=0
+      stack_holds_resources || status=$?
+      case $status in
+        0) ;;
+        1)
+          echo "$stack holds no resource, so there is nothing to destroy"
+          exit 0
+          ;;
+        *)
+          infra_error "cannot read the state of $stack; nothing was destroyed"
+          exit 1
+          ;;
+      esac
       # Read before the destroy, which takes the outputs with it.
       cluster=$(stack_cluster_name)
       require_cluster_owns_nothing "$cluster" "$stack" "$unreachable"
