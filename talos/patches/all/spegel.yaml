@@ -1,0 +1,13 @@
+# containerd keeps the image layers it has unpacked, which Spegel serves to the other nodes. Talos
+# has containerd discard them from its content store once they are unpacked, to save disk space;
+# kept, an image the kubelet pulls holds its layers as pulled in the content store beside their
+# unpacked copy. This is the CRICustomizationConfig Talos' guide to Spegel gives for Talos 1.14 and
+# later; applying it restarts containerd's CRI instance, without a reboot, and removes the mirror
+# configuration a running Spegel wrote, so Spegel is restarted after it (docs/cluster.md).
+---
+apiVersion: v1alpha1
+kind: CRICustomizationConfig
+name: spegel
+content: |
+  [plugins."io.containerd.cri.v1.images"]
+    discard_unpacked_layers = false
