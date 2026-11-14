@@ -19,13 +19,18 @@ type Ci {
   }
 
   """
-  Run the justfile's groups of checks side by side and return what they printed: the groups are the dependencies of the checks recipe, and a group's checks are its own dependencies. A group's renovate-check runs Renovate's validator in its own image; its other checks run in one just run, in a container built from the tools pinned in mise.toml. Every group runs to its end; when a check fails, the call fails with every group's output and names the groups that failed.
+  Run the justfile's groups of checks side by side and return what they printed: the groups are the dependencies of the checks recipe, and a group's checks are its own dependencies. A group's renovate-check runs Renovate's validator in its own image, and its vector-check runs Vector in the image the log collector runs, on the configuration the pinned tools render; its other checks run in one just run, in a container built from the tools pinned in mise.toml. Every group runs to its end; when a check fails, the call fails with every group's output and names the groups that failed.
   """
   pub checks(
     """
     The image renovate-check runs Renovate's validator from.
     """
     renovateImage: String!,
+
+    """
+    The image vector-check runs Vector from, the one the log collector runs.
+    """
+    vectorImage: String!,
 
     """
     The commit where HEAD's history leaves the default branch, or empty without one; the messages of the commits after it are checked.
@@ -49,6 +54,12 @@ type Ci {
       .from(renovateImage)
       .withMountedDirectory("/usr/src/app", source.filter(include: ["renovate.json5", ".renovate/"]))
       .withWorkdir("/usr/src/app")
+    # The configuration the log collector runs with and Vector's unit tests of it, as
+    # scripts/vector-config writes them with the pinned tools, where vector-check reads them.
+    let collector = container
+      .from(vectorImage)
+      .withEnvVariable("VECTOR_SELF_NODE_NAME", "node-1")
+      .withMountedDirectory("/check", checkout.withExec(["scripts/vector-config", "/tmp/vector-check"]).directory("/tmp/vector-check"))
     # One line per group: its name, then its checks as just takes them on its command line, each
     # recipe followed by its arguments.
     let listing = checkout.withExec(["bash", "-c", """
@@ -65,7 +76,7 @@ type Ci {
     """, "bash", group]).stdout
     let groups = listing.trimSpace.split("\n").reject { _.isEmpty }.map { line =>
       let words = line.split(" ")
-      Group(name: words.takeFirst.join(""), checks: words.dropFirst, checkout: checkout, validator: validator)
+      Group(name: words.takeFirst.join(""), checks: words.dropFirst, checkout: checkout, validator: validator, collector: collector)
     }
     if (groups.isEmpty) {
       raise "the checks recipe has no groups"
@@ -144,12 +155,26 @@ type Group {
   let validator: Container!
 
   """
-  Whether every check of the group passed, and what they printed: renovate-check's validator and the just run of the others side by side.
+  Vector's image with the log collector's rendered configuration and Vector's unit tests of it under /check.
+  """
+  let collector: Container!
+
+  """
+  Whether every check of the group passed, and what they printed: renovate-check's validator, vector-check's Vector and the just run of the others side by side.
   """
   outcome: Outcome! {
-    let others = checks.reject { _ == "renovate-check" }
+    let others = checks.reject { _ == "renovate-check" }.reject { _ == "vector-check" }
     let renovate: [Run!]! = if (checks.contains("renovate-check")) {
       [Run(label: "renovate-check", ctr: validator.withExec(["sh", "-c", "renovate-config-validator --strict --no-global renovate.json5 .renovate/*.json5 2>&1"]))]
+    } else {
+      []
+    }
+    # The image has no shell, so Vector's own errors, on standard error, reach the report through
+    # the failed exec's error.
+    let vector: [Run!]! = if (checks.contains("vector-check")) {
+      [Run(label: "vector-check", ctr: collector
+        .withExec(["vector", "validate", "--no-environment", "/check/vector.yaml"])
+        .withExec(["vector", "test", "/check/vector.yaml", "/check/tests.yaml"]))]
     } else {
       []
     }
@@ -160,7 +185,7 @@ type Group {
     } else {
       [Run(label: "", ctr: checkout.withExec(["bash", "-c", `exec 2>&1; just "$@"`, "bash"] + others))]
     }
-    let done = (renovate + justRun).{{ label, outcome }}
+    let done = (renovate + vector + justRun).{{ label, outcome }}
     Outcome(
       passed: done.all { _.outcome.passed },
       output: done.map { r => if (r.label == "") { r.outcome.output } else { r.label + ":\n" + r.outcome.output } }.join("\n"),
@@ -191,7 +216,7 @@ type Run {
         # Dagger's error for an exec that exited non-zero carries what it printed; any other
         # error, such as an image that cannot be pulled, says what went wrong itself.
         let exec: ExecError = JSON.decode(failure.extensions) rescue null
-        Outcome(passed: false, output: if (exec == null) { failure.message } else { exec.stdout })
+        Outcome(passed: false, output: if (exec == null) { failure.message } else { exec.stdout + exec.stderr })
       }
       err: Error => Outcome(passed: false, output: err.message)
     }
@@ -211,4 +236,5 @@ The extensions of Dagger's error for an exec that exited non-zero, as far as a r
 """
 type ExecError {
   stdout: String!
+  stderr: String!
 }

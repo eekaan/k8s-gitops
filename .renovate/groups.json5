@@ -40,6 +40,14 @@
       groupName: "Flux",
     },
     {
+      description: "The log collector: Vector's chart and the image vector-check checks its configuration in",
+      matchPackageNames: ["ghcr.io/vectordotdev/helm-charts/vector", "docker.io/timberio/vector"],
+      groupName: "Vector",
+      // tests/logs.bats fails unless the justfile's image is the one the chart runs, so both move in
+      // one pull request whatever the step of each.
+      separateMajorMinor: false,
+    },
+    {
       description: "The Flux Operator: its image and its operator and instance charts",
       matchPackageNames: ["controlplaneio-fluxcd/**", "ghcr.io/controlplaneio-fluxcd/**"],
       groupName: "Flux Operator",

@@ -1,0 +1,16 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: victoria-logs
+  namespace: flux-system
+spec:
+  path: ./apps/base/monitoring/victoria-logs/app
+  targetNamespace: monitoring
+  # The chart creates a ServiceMonitor, whose kind exists once prometheus-operator-crds is Ready.
+  dependsOn:
+    - name: prometheus-operator-crds
+  sourceRef:
+    kind: ExternalArtifact
+    name: victoria-logs

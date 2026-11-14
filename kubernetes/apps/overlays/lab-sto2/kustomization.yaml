@@ -28,8 +28,8 @@ resources:
   - ../../base/external-secrets/external-secrets/ks.yaml
   - ../../base/external-secrets/openbao-store/ks.yaml
   - ../../base/keda/keda/ks.yaml
-  - ../../base/kube-system/cilium/ks.yaml
   - ../../base/kube-system/cilium-bgp/ks.yaml
+  - ../../base/kube-system/cilium/ks.yaml
   - ../../base/kube-system/descheduler/ks.yaml
   - ../../base/kube-system/gateway-api-crds/ks.yaml
   - ../../base/kube-system/kubelet-csr-approver/ks.yaml
@@ -44,6 +44,8 @@ resources:
   - ../../base/monitoring/grafana-operator/ks.yaml
   - ../../base/monitoring/grafana/ks.yaml
   - ../../base/monitoring/kube-prometheus-stack/ks.yaml
+  - ../../base/monitoring/vector/ks.yaml
+  - ../../base/monitoring/victoria-logs/ks.yaml
   - ../../base/openbao/openbao/ks.yaml
   - ../../base/piraeus-datastore/linstor-cluster/ks.yaml
   - ../../base/piraeus-datastore/piraeus-operator/ks.yaml

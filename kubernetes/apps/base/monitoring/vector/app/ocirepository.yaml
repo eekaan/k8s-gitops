@@ -1,0 +1,19 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/ocirepository-source-v1.json
+# Vector's chart from its publisher's public OCI registry, which its chart repository's README names
+# beside the classic Helm repository. It installs no resource definitions.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: vector
+spec:
+  # The tag is pinned: a new chart arrives by a change to this file, which Flux applies at once.
+  interval: 12h
+  # The chart's packaged layer, which helm-controller reads as it is.
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy
+  url: oci://ghcr.io/vectordotdev/helm-charts/vector
+  ref:
+    # renovate: datasource=docker depName=ghcr.io/vectordotdev/helm-charts/vector
+    tag: 0.61.0

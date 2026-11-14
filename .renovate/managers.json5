@@ -29,5 +29,15 @@
         "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?\\n[^\\n]*?[:=][ \\t]*[\"']?(?<currentValue>[^\\s\"'/@]+)(?:@(?<currentDigest>sha256:[a-f0-9]+))?[\"']?(?:\\s|$)",
       ],
     },
+    {
+      customType: "regex",
+      // A justfile variable such as vector_image := "host/name:tag@sha256:…": Renovate moves the
+      // tag and the digest of its image index together.
+      description: "An image pinned by tag and digest in a justfile variable under a '# renovate: datasource=… depName=…' comment",
+      managerFilePatterns: ["/^justfile$/"],
+      matchStrings: [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\n[a-z_]+[ \\t]*:=[ \\t]*\"[^\"@\\n]+:(?<currentValue>[^\"@:\\n]+)@(?<currentDigest>sha256:[0-9a-f]{64})\"",
+      ],
+    },
   ],
 }
