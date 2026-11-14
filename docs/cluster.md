@@ -45,6 +45,21 @@ change on to `just cluster-upgrade-k8s`. After a new Kubernetes version alone:
    apply writes the new `talman.yaml`.
 2. `just cluster-upgrade-k8s` moves the cluster to the Kubernetes version.
 
+## The workers' data device
+
+Every worker's machine configuration adds `talos/patches/worker/data-volume.yaml`, which
+`talman.yaml` lists in the workers' own patch group; no control plane's does. It is a Talos raw
+volume named `data`, on the disk that is not the system disk: the worker's data volume
+([infrastructure.md](infrastructure.md#the-workers-data-volumes)). Talos makes it one partition
+over that disk, labelled `r-data`, with no filesystem and nothing mounted, and links it as
+`/dev/disk/by-partlabel/r-data`. That path is the same on every worker, whatever the kernel calls
+the disk and whatever the cloud assigns the volume, and it is the name the storage layer is given
+(ADR 0011). A disk with less than 1 GiB free is not taken.
+
+On running workers, `just infra-apply sto2/cluster` attaches the volumes and writes the
+`talman.yaml` that lists the patch, and `just cluster-talos` then creates the raw volume. Taking
+the patch out later leaves the partition and its data on the disk.
+
 ## The Talos age key
 
 The secrets bundle holds the cluster's certificate authorities and keys. It is encrypted with sops

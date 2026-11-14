@@ -1,6 +1,6 @@
 # The Talos nodes, on the plumbing stack's network and booting its Talos image, with their
-# security group, server group and floating IPs, the load balancer in front of their Kubernetes
-# API, and the talman.yaml that configures them.
+# security group, server group and floating IPs, the workers' data volumes, the load balancer in
+# front of their Kubernetes API, and the talman.yaml that configures them.
 
 # The cloud and its credentials come from the environment: OS_CLOUD names the clouds.yaml entry.
 provider "openstack" {}
@@ -34,6 +34,32 @@ module "nodes" {
   controlplane_flavor = var.controlplane_flavor
   worker_flavor       = var.worker_flavor
   tags                = [var.prefix]
+}
+
+# Every worker's data volume: one more disk, empty, that Talos hands to the storage layer
+# (talos/patches/worker/data-volume.yaml). It belongs to this stack, so destroying the stack
+# deletes it and what is on it.
+locals {
+  workers = toset([for name, node in module.nodes.nodes : name if node.role == "worker"])
+}
+
+resource "openstack_blockstorage_volume_v3" "worker_data" {
+  for_each = local.workers
+
+  name        = "${each.key}-data"
+  size        = var.worker_data_volume_size
+  volume_type = var.worker_data_volume_type
+}
+
+# An attachment of its own, not a block device of the instance: the provider replaces a server
+# whose block devices change, and the vm module ignores changes to them, so a block device would
+# never reach a running worker. The instance has no attribute for an attachment made here, so
+# attaching changes no server.
+resource "openstack_compute_volume_attach_v2" "worker_data" {
+  for_each = local.workers
+
+  instance_id = module.nodes.instances[each.key].id
+  volume_id   = openstack_blockstorage_volume_v3.worker_data[each.key].id
 }
 
 module "api_lb" {

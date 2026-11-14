@@ -88,6 +88,23 @@ variable "worker_count" {
   default     = 3
 }
 
+variable "worker_data_volume_size" {
+  description = "Size in GiB of each worker's data volume, the disk the storage layer keeps its data on. At least 2: Talos takes the disk for its raw volume only with 1 GiB free on it (talos/patches/worker/data-volume.yaml)."
+  type        = number
+  default     = 100
+
+  validation {
+    condition     = var.worker_data_volume_size >= 2 && floor(var.worker_data_volume_size) == var.worker_data_volume_size
+    error_message = "worker_data_volume_size must be a whole number of GiB, at least 2."
+  }
+}
+
+variable "worker_data_volume_type" {
+  description = "Volume type of each worker's data volume. By default cbs, the cloud's default volume type."
+  type        = string
+  default     = "cbs"
+}
+
 variable "controlplane_flavor" {
   description = "Nova flavor of the control planes."
   type        = string

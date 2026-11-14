@@ -25,6 +25,21 @@ output "instances" {
   value       = module.nodes.instances
 }
 
+output "worker_data_volumes" {
+  description = "Per worker name: its data volume's ID, name, size in GiB and volume type, and the instance and volume its attachment joins."
+  sensitive   = true
+  value = { for name, volume in openstack_blockstorage_volume_v3.worker_data : name => {
+    id          = volume.id
+    name        = volume.name
+    size        = volume.size
+    volume_type = volume.volume_type
+    attachment = {
+      instance_id = openstack_compute_volume_attach_v2.worker_data[name].instance_id
+      volume_id   = openstack_compute_volume_attach_v2.worker_data[name].volume_id
+    }
+  } }
+}
+
 output "security_group" {
   description = "The nodes' security group: its ID and every ingress rule in it."
   sensitive   = true

@@ -22,7 +22,8 @@ imageFactory:
 
 schematic: ../schematic.yaml
 
-# Only the reserved groups, each with a member: talman refuses a patch group no node is in.
+# Only the reserved groups, each with a member: talman refuses a patch group no node is in, so the
+# workers' group is there only when a worker is.
 patches:
   all:
     - ../patches/all/hostname.yaml
@@ -35,6 +36,10 @@ patches:
     - ../patches/controlplane/api-sans.yaml
     - ../patches/controlplane/etcd.yaml
     - ../patches/cni/cilium.yaml
+%{ if contains([for node in nodes : node.role], "worker") ~}
+  worker:
+    - ../patches/worker/data-volume.yaml
+%{ endif ~}
 
 nodes:
 %{ for node in nodes ~}
