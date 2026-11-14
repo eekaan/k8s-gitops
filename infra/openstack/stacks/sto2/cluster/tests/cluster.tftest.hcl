@@ -341,3 +341,41 @@ run "nodes_share_one_soft_anti_affinity_group" {
     error_message = "Every node must be scheduled into the one server group."
   }
 }
+
+# Without ci_host_number, the run the_apis_are_open_only_to_the_allowlist_and_the_clusters_own_floating_addresses
+# finds the nodes' rules exactly as they are without a CI host.
+run "the_ci_host_reaches_the_nodes_talos_and_kubernetes_apis_once_the_cluster_stack_is_given_its_host_number" {
+  command = plan
+
+  variables {
+    ci_host_number = 6
+  }
+
+  assert {
+    condition = toset([
+      for rule in output.security_group.ingress_rules : "${rule.protocol} ${rule.port_range_min}-${rule.port_range_max} ${rule.remote_ip_prefix}"
+      if rule.remote_ip_prefix == "192.0.2.6/32"
+    ]) == toset(["tcp 50000-50000 192.0.2.6/32", "tcp 6443-6443 192.0.2.6/32"])
+    error_message = "The nodes must admit TCP 50000 and 6443 from the CI host's fixed address, host number 6 of the node subnet, and nothing else from it."
+  }
+
+  assert {
+    condition     = length(output.security_group.ingress_rules) == 21
+    error_message = "The CI host must add its two rules to the nodes' 19 and change none of them."
+  }
+
+  assert {
+    condition     = alltrue([for rule in output.security_group.ingress_rules : rule.security_group_id == output.security_group.id])
+    error_message = "Every rule must belong to the nodes' security group."
+  }
+}
+
+run "_a_ci_host_number_among_the_nodes_is_rejected" {
+  command = plan
+
+  variables {
+    ci_host_number = 20
+  }
+
+  expect_failures = [var.ci_host_number]
+}

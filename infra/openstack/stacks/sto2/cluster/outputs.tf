@@ -41,9 +41,22 @@ output "worker_data_volumes" {
 }
 
 output "security_group" {
-  description = "The nodes' security group: its ID and every ingress rule in it."
+  description = "The nodes' security group: its ID and every ingress rule in it, the CI host's among them."
   sensitive   = true
-  value       = module.nodes.security_group
+  value = merge(module.nodes.security_group, {
+    ingress_rules = concat(module.nodes.security_group.ingress_rules, [
+      for rule in values(openstack_networking_secgroup_rule_v2.ci_host) : {
+        security_group_id = rule.security_group_id
+        direction         = rule.direction
+        ethertype         = rule.ethertype
+        protocol          = rule.protocol
+        port_range_min    = rule.port_range_min
+        port_range_max    = rule.port_range_max
+        remote_ip_prefix  = rule.remote_ip_prefix
+        remote_group_id   = rule.remote_group_id
+      }
+    ])
+  })
 }
 
 output "server_group" {

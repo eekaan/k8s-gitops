@@ -1,8 +1,9 @@
 # Infrastructure
 
 The OpenStack resources are OpenTofu stacks under `infra/openstack/stacks/<region>/`: `plumbing`
-(the node network, its router and the Talos image) and `cluster`, which builds on it. Every
-command that runs them is a `just` recipe.
+(the node network, its router and the Talos image), `cluster`, which builds on it, and `ci`, the
+CI host, which builds on `plumbing` too ([The CI host](#the-ci-host)). Every command that runs
+them is a `just` recipe.
 
 ## Recipes
 
@@ -47,10 +48,14 @@ command that runs them is a `just` recipe.
   removes only files git ignores; the secrets bundle and etcd snapshots stay.
   `just infra-destroy sto2/cluster`, or `sto2/plumbing`, destroys that stack only, the same way.
   `just cluster-destroy` ([cluster.md](cluster.md#recipes)) destroys the cluster stack so, once the
-  cluster owns none of those load balancers and volumes.
+  cluster owns none of those load balancers and volumes. The `ci` stack is destroyed by its name
+  only, `just infra-destroy sto2/ci`, the same way; `just infra-destroy` without a stack leaves it.
+- `just ci-host-setup` and `just ci-host-remove` set up and deregister the CI host's runner
+  ([runbooks/ci-host.md](runbooks/ci-host.md)).
 
-Apply `plumbing` before `cluster`, as the cluster stack reads the plumbing stack's state. Destroy
-goes the other way round. State objects stay in the bucket after a destroy.
+Apply `plumbing` before `cluster` and `ci`, as both read the plumbing stack's state. Destroy goes
+the other way round: `ci` by name, before `plumbing`, whose network its port is on. State objects
+stay in the bucket after a destroy.
 
 ## Before the first plan
 
@@ -118,6 +123,44 @@ The volumes belong to the cluster stack. `just infra-destroy` and `just cluster-
 them with it, and what is on them is gone; backups are what keeps data
 ([ADR 0008](adr/0008-state-and-backups-are-encrypted-before-they-leave.md)).
 
+## The CI host
+
+The `ci` stack makes one Linux VM on the plumbing stack's node network, outside the cluster, that
+runs this repository's CI jobs for trusted events on a persistent Dagger engine
+([ADR 0012](adr/0012-ci-runs-on-a-self-hosted-runner-for-trusted-events.md)). It reads the plumbing
+stack's state and nothing of the cluster stack's, so the cluster can be destroyed and built again
+around it; it is destroyed by name only ([Recipes](#recipes)).
+
+- `<prefix>-ci`, `lab-ci` by default, of the flavor `flavor`, booting from a volume of
+  `root_volume_size_gb` GB made from the image `CI_HOST_IMAGE` names, a Debian or Ubuntu cloud
+  image. Its port is on the node subnet at host number `host_number`, 6 by default: below the DHCP
+  pool and the control planes' 10, apart from the API load balancer's 5. It has a floating IP from
+  the plumbing stack's external network.
+- Its security group admits TCP 22 from each network of the operator allowlist, the same
+  `OPERATOR_CIDRS` or `operator-cidrs.json` the cluster stack takes, and nothing else inbound; it
+  lets the host reach anything. The cloud's default rules are deleted, so the group holds only
+  these.
+- The operator's public key, `CI_HOST_SSH_PUBLIC_KEY`, reaches the image's default user through
+  the host's key pair, `<prefix>-ci`.
+- The cache volume, `<prefix>-ci-cache`, of `cache_volume_size` GiB, 100 by default, and the
+  volume type `volume_type`, the project's default unless set, is attached by an attachment of its
+  own. The host's first boot finds it under `/dev/disk/by-id` by its volume ID, formats it only
+  when it holds no file system, and mounts it at `/var/lib/dagger`, where the engine keeps its
+  state. Replacing the instance leaves the volume and its cache.
+- The user data does nothing more than install a container runtime (`docker.io`), create the
+  runner's user `runner_user`, `ci-runner` by default, with no password, no sudo and no groups,
+  and mount the cache volume. It holds no secret: user data is kept in tofu state and served by
+  the metadata service. Changing it replaces the instance.
+
+Outputs: the sensitive `address` (the floating address, where `just ci-host-setup` connects),
+`private_address`, `instance`, `user_data`, `security_group`, `floating_ip` and `cache_volume`; and
+`runner_name`, `runner_user` and `cache_mountpoint`.
+
+The cluster stack's nodes admit the CI host's fixed address on TCP 50000 (Talos) and 6443
+(Kubernetes) once the cluster stack's `ci_host_number` holds the ci stack's `host_number`, through
+`TF_VAR_ci_host_number` in `.env` or the environment. Without it, the default, the nodes admit
+nothing for it, and the cluster stack plans whether the ci stack exists or not.
+
 ## The generated talman.yaml
 
 The cluster stack renders `talos/talman.yaml.tftpl` from its own values into the sensitive output
@@ -175,11 +218,17 @@ on a command line; secrets reach tofu and rclone through their environment.
   application-credential variables: OpenStack authentication, which tofu's provider and the
   `openstack` client read themselves. `os-smoke` and `infra-s3-key` need only this.
 - `OPERATOR_CIDRS`, or else `operator-cidrs.json` at the repository root (gitignored): the
-  operator allowlist of the cluster stack, a JSON list of IPv4 CIDRs. An entry that is IPv6, or
-  whose prefix is 0 and so covers every address, is refused, named by its position in the list and
-  not by its value. It reaches tofu only as
-  `TF_VAR_api_allowed_cidrs` in its environment, as given: the address of the machine the recipes
-  run on is not added, and the recipe says so.
+  operator allowlist of the cluster stack's APIs and the CI host's SSH, a JSON list of IPv4 CIDRs.
+  An entry that is IPv6, or whose prefix is 0 and so covers every address, is refused, named by its
+  position in the list and not by its value. It reaches tofu only in its environment, as
+  `TF_VAR_api_allowed_cidrs` for the cluster stack and `TF_VAR_ssh_allowed_cidrs` for the ci stack,
+  as given: the address of the machine the recipes run on is not added, and the recipe says so.
+- `CI_HOST_IMAGE` and `CI_HOST_SSH_PUBLIC_KEY`: the ci stack's image name and the operator's SSH
+  public key, which reach tofu as `TF_VAR_image_name` and `TF_VAR_ssh_public_key`; only the ci stack
+  needs them. `CI_HOST_SSH_USER`: the image's default user, whom `just ci-host-setup` and
+  `just ci-host-remove` log in as.
+- `TF_VAR_ci_host_number`: the cluster stack's `ci_host_number`, set once the CI host exists
+  ([The CI host](#the-ci-host)).
 - `CI`: when set, tofu's errors go to a file instead of the output; see below.
 
 ## State
