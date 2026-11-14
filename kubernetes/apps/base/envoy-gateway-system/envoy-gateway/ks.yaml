@@ -1,0 +1,21 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: envoy-gateway
+  namespace: flux-system
+spec:
+  path: ./apps/base/envoy-gateway-system/envoy-gateway/app
+  targetNamespace: envoy-gateway-system
+  # The GatewayClass is a Gateway API object, and the controller watches only the kinds whose
+  # definitions exist when it starts, so both sets of definitions come first.
+  dependsOn:
+    - name: gateway-api-crds
+    - name: envoy-gateway-crds
+  # Ready only once the controller runs, so an application that names this one in dependsOn finds
+  # its GatewayClass served.
+  wait: true
+  sourceRef:
+    kind: ExternalArtifact
+    name: envoy-gateway
