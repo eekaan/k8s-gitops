@@ -1,0 +1,14 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/namespace-v1.json
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cnpg-system
+  annotations:
+    # Removing the namespace from the tree must not delete everything in it.
+    kustomize.toolkit.fluxcd.io/prune: disabled
+  labels:
+    # The operator's pods run as a non-root user with every capability dropped, no privilege
+    # escalation and the runtime's seccomp profile, which the restricted level requires;
+    # tests/postgresql.bats checks the rendered chart against it.
+    pod-security.kubernetes.io/enforce: restricted

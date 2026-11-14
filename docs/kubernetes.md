@@ -20,7 +20,8 @@ the rules below.
   manifests in `app/`.
 - `apps/base/flux-system/artifact-generator/`: publishes one artifact per application.
 - `components/`: Kustomize components. `common` adds the `app-template-defaults` ConfigMap, which
-  an app-template HelmRelease opts into through `valuesFrom`.
+  an app-template HelmRelease opts into through `valuesFrom`; `cnpg-cluster` adds an application's
+  PostgreSQL cluster ([PostgreSQL](#postgresql)).
 
 ## Adding an application
 
@@ -142,9 +143,10 @@ The three `ks.yaml` files set `wait`, so each is Ready only once its definitions
 and `snapshot-controller` once its controller runs as well. An application that creates objects of
 these groups, or whose chart does, names the matching one in `dependsOn` and turns off any copy of
 the same definitions its own chart would install. `linstor-cluster` names `snapshot-controller` for
-its VolumeSnapshotClass ([Storage](#storage)); the monitoring stack ([Monitoring](#monitoring)) and
-the baseline applications with a monitor name `prometheus-operator-crds`; and cert-manager names
-`gateway-api-crds` ([cert-manager](#cert-manager)). No dashboard or route is enabled anywhere.
+its VolumeSnapshotClass ([Storage](#storage)); the monitoring stack ([Monitoring](#monitoring)), the
+baseline applications with a monitor and `cloudnative-pg` ([PostgreSQL](#postgresql)) name
+`prometheus-operator-crds`; and cert-manager names `gateway-api-crds` ([cert-manager](#cert-manager)).
+No dashboard or route is enabled anywhere.
 
 Deleting a definition deletes every object of its kind, so none of these applications ever deletes
 one, also not when it leaves the tree. None applies a definition itself. The monitoring chart's
@@ -380,6 +382,67 @@ configuration to the operator's own satellite DaemonSet at the version the pinne
 the nodes' machine configurations offline to check which nodes LINSTOR selects and which device the
 pool takes; reads the StorageClasses and the VolumeSnapshotClass; and renders the operator's chart
 to check that its definitions are kept.
+
+## PostgreSQL
+
+Applications get PostgreSQL from the CloudNativePG operator, which runs each database as a
+`Cluster`: a primary and streaming replicas, a replica promoted when the primary fails, and the
+Services and credentials an application connects with.
+
+`apps/base/cnpg-system/cloudnative-pg/` installs the operator in its own namespace, `cnpg-system`, at
+the restricted Pod Security level, from the publisher's chart in
+`oci://ghcr.io/cloudnative-pg/charts`; it watches every namespace. The chart ships the
+`postgresql.cnpg.io` definitions as templates of the release, so each chart upgrade upgrades them
+with the operator, and marks each `helm.sh/resource-policy: keep`, so removing the application
+leaves them, and every cluster, in place.
+Two replicas run on different workers: the leader reconciles, both answer the webhook through which
+the API server admits every change to a CloudNativePG object, and a disruption budget keeps one
+through a drain. Its chart's PodMonitor is on, so it names `prometheus-operator-crds` in `dependsOn`,
+and its `ks.yaml` sets `wait`.
+
+An application takes a cluster from the component `components/cnpg-cluster`, in its `ks.yaml`:
+
+```yaml
+spec:
+  dependsOn:
+    - name: cloudnative-pg
+    - name: prometheus-operator-crds
+  components:
+    - ../../../../../components/cnpg-cluster
+  postBuild:
+    substitute:
+      CNPG_CLUSTER_NAME: <app>-db
+      CNPG_STORAGE_SIZE: 10Gi  # each instance's volume; 5Gi when unset
+```
+
+The cluster has three instances of PostgreSQL 18, from the operator's standard image at a minor
+version Renovate moves. Each must run on a different worker, and requests and is limited to 500m CPU
+and 512Mi memory. The operator's disruption budgets move the primary away by switchover before its
+worker is drained, and let drains take one replica at a time. A PodMonitor scrapes every instance.
+Without `CNPG_CLUSTER_NAME` the build fails. The operator creates the database `app`, owned by the
+user `app`, whose password and connection URI are in the Secret `<name>-app`; the Services
+`<name>-rw`, `<name>-ro` and `<name>-r` reach the primary, the replicas and any instance. A patch in
+the application's own `kustomization.yaml` changes anything else, as it applies after the component.
+
+Each instance's volume is on `linstor-node-local` ([StorageClasses](#storageclasses)), one copy on
+the instance's own worker without DRBD. The three instances already are three copies on three
+workers, kept in step by PostgreSQL's replication; the replicated default would keep each of them
+twice, six copies of every write. The operator's documentation advises one replica at the storage
+level, with no storage host holding two instances of a cluster, which the placement rule guarantees.
+The cost is that an instance cannot move: while its worker is down the cluster runs on two, and when
+the worker or its data volume is lost for good, the instance has to be removed with its volume, as
+the operator's kubectl plugin does with `destroy`, after which the operator clones a new one from the
+primary. With three workers, the new one waits for a worker without an instance.
+
+No backup is configured: WAL archiving and base backups to object storage need the object store's
+credentials from the secret store, which does not run yet, and take their place in the component's
+`Cluster` then. Until then a cluster's data lives only on the workers' data volumes
+([Where the data lives](#where-the-data-lives)).
+
+`tests/postgresql.bats` renders the operator's chart and checks its namespace, definitions,
+replicas, budget, monitor and pods; builds an application that takes a cluster from the component,
+and one that does not name it, as Flux applies them; and checks each field of the `Cluster` against
+the pinned chart's definition and its StorageClass against LINSTOR's.
 
 ## Flux itself
 

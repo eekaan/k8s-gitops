@@ -1,0 +1,55 @@
+---
+# One application's PostgreSQL cluster: a primary and two streaming replicas, each on a worker of its
+# own with a volume of its own. CNPG_CLUSTER_NAME names it, and CNPG_STORAGE_SIZE sizes each
+# instance's volume. The operator creates the database app, owned by the user app, with that user's
+# credentials and connection URI in the Secret <name>-app, and the Services <name>-rw for the
+# primary, <name>-ro for the replicas and <name>-r for any instance.
+#
+# No backups yet. WAL archiving and base backups to object storage, through the Barman Cloud plugin,
+# come in spec.plugins once the secret store can give the cluster the object store's credentials;
+# until then the data lives only on the workers' data volumes.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: ${CNPG_CLUSTER_NAME}
+spec:
+  instances: 3
+
+  # PostgreSQL 18 from the operator's community images, in the standard variant, which with the
+  # Barman Cloud plugin replaces the deprecated system images. Without an image here the operator
+  # writes its own default into the Cluster once, when the Cluster is created, and never moves it.
+  # A minor update is a rolling update: the replicas one at a time, then the primary, restarted.
+  # renovate: datasource=docker depName=ghcr.io/cloudnative-pg/postgresql
+  imageName: ghcr.io/cloudnative-pg/postgresql:18.6-standard-trixie
+
+  storage:
+    # One copy per instance, on its own node, without DRBD. The three instances already are three
+    # copies on three workers, kept in step by PostgreSQL's replication, and the operator's
+    # documentation advises a single replica at the storage level for that reason: on the replicated
+    # default class every write would be kept six times. The cost is that an instance cannot move: it
+    # is missing while its node is down, and when its node's data volume is lost it is destroyed and
+    # cloned anew from the primary (docs/kubernetes.md, PostgreSQL).
+    storageClass: linstor-node-local
+    size: ${CNPG_STORAGE_SIZE:=5Gi}
+
+  affinity:
+    # Never two instances on one node, which would put two of the three copies on one data volume.
+    # With three workers, an instance made while a worker is gone waits until it is back or replaced.
+    enablePodAntiAffinity: true
+    topologyKey: kubernetes.io/hostname
+    podAntiAffinityType: required
+
+  # The operator's two disruption budgets: a drain of the primary's node waits for a switchover to a
+  # replica, and drains take one replica at a time.
+  enablePDB: true
+
+  # Guaranteed quality of service, requests equal to limits, as the operator's documentation
+  # recommends for PostgreSQL; PostgreSQL's default shared_buffers, 128MB, is the quarter of the
+  # memory it suggests to start from.
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
