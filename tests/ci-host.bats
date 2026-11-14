@@ -54,6 +54,7 @@ fi
 EOF
   fake gh <<EOF
 printf '%s\n' "gh \$*" >> "$RECORD/argv"
+env | cut -d= -f1 >> "$RECORD/names.gh"
 case "\$*" in
   'repo view --json url --jq .url') echo https://github.com/fixture-owner/fixture-repo ;;
   'api --method POST repos/fixture-owner/fixture-repo/actions/runners/registration-token --jq .token') echo $TOKEN ;;
@@ -128,6 +129,7 @@ EOF
 fake_ssh() {
   fake ssh <<EOF
 printf '%s\n' "ssh \$*" >> "$RECORD/argv"
+env | cut -d= -f1 >> "$RECORD/names.ssh"
 strict= known=
 while ((\$#)); do
   case \$1 in
@@ -417,6 +419,27 @@ absent() {
   for token in "$TOKEN" "$REMOVE_TOKEN"; do
     [[ ${printed[*]} != *"$token"* ]]
     absent "$token" "$RECORD" "$HOST" "$REPO" "$HOME_DIR" "$TEMP_DIR"
+  done
+}
+
+@test "The CI host recipes run gh and ssh with none of the stack's secrets" {
+  trust
+  ENVIRONMENT+=(OS_APPLICATION_CREDENTIAL_SECRET=marker-credential TF_ENCRYPTION=marker-encryption
+    CLUSTER_S3_ACCESS_KEY_ID=marker-cluster-key SOPS_AGE_KEY=marker-age-key)
+
+  recipe ci-host-setup < /dev/null
+  [ "$status" -eq 0 ]
+  recipe ci-host-remove < /dev/null
+  [ "$status" -eq 0 ]
+
+  for tool in gh ssh; do
+    echo "$tool"
+    [ -s "$RECORD/names.$tool" ]
+    if grep -qE '^(AWS_|OS_|TF_VAR_|TF_ENCRYPTION|TF_STATE_PASSPHRASE|CLUSTER_S3_|SOPS_AGE_|FLUX_AGE_|OPERATOR_CIDRS)' "$RECORD/names.$tool"; then
+      return 1
+    fi
+    # What is no secret reaches it.
+    grep -qx CI_HOST_SSH_USER "$RECORD/names.$tool"
   done
 }
 

@@ -5,7 +5,7 @@
 # talosctl, kubectl, helm and flux need none of the S3, cloud or state secrets, and tofu needs
 # neither the cluster's S3 key nor an age key.
 #
-# The tools below are shell functions of the same name, so a recipe runs them as it always has and
+# The tools below are shell functions of the same name, so a recipe runs them by name and
 # each runs the real binary with the secrets it may not see unexported. Every other variable
 # reaches it as it is. The functions come before any binary of the same name in the recipes, so
 # command -v finds the function: scripts ask whether a tool is installed with type -P.
@@ -34,7 +34,8 @@ declare -gA tool_secrets=(
   [OPERATOR_CIDRS]=""
 )
 
-# The variables of .env.example that hold no secret: deployment values and settings.
+# The variables of .env.example that hold no secret: deployment values and settings. Every tool
+# sees these, so a key, token, passphrase or credential never belongs here; it goes in tool_secrets.
 plain_variables=(
   TF_STATE_BUCKET BACKUP_BUCKET_PREFIX CI_HOST_IMAGE CI_HOST_SSH_PUBLIC_KEY CI_HOST_SSH_USER
   KUBE_API_ADDRESS TALOS_WAIT CLUSTER_DOMAIN ADOPTION_INTERVAL ADOPTION_WAIT
@@ -88,3 +89,8 @@ age() { run_tool age "$@"; }
 age-keygen() { run_tool age-keygen "$@"; }
 tofu() { run_tool tofu "$@"; }
 openstack() { run_tool openstack "$@"; }
+# The CI host recipes run these with the stack's environment, and none of them uses a secret.
+gh() { run_tool gh "$@"; }
+ssh() { run_tool ssh "$@"; }
+ssh-keyscan() { run_tool ssh-keyscan "$@"; }
+ssh-keygen() { run_tool ssh-keygen "$@"; }

@@ -206,8 +206,8 @@ prints what tofu and its providers send and receive. No recipe prints a value or
 on a command line; secrets reach tofu and rclone through their environment.
 
 Each tool a recipe runs gets only the secrets it uses. `scripts/lib/tools.sh` runs `tofu`,
-`openstack`, `talman`, `talosctl`, `kubectl`, `helm`, `flux`, `sops`, `age` and `age-keygen` with
-the secrets they may not see unexported, and `s3_rclone` hands rclone the one key pair it is called
+`openstack`, `talman`, `talosctl`, `kubectl`, `helm`, `flux`, `sops`, `age`, `age-keygen`, `gh`,
+`ssh`, `ssh-keyscan` and `ssh-keygen` with the secrets they may not see unexported, and `s3_rclone` hands rclone the one key pair it is called
 with. Every variable of `.env.example` is either a secret there, with the tools that may see it, or
 listed as holding none, and a test fails for one that is neither: a new variable is assigned
 before it passes.
