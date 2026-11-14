@@ -1,0 +1,10 @@
+---
+# Values for the metrics-server chart, read by the HelmRelease through a ConfigMap generated
+# without substitution. Keys not set here keep the chart's defaults. Its default arguments reach
+# each kubelet on the node's InternalIP and verify the kubelet's serving certificate against the
+# cluster CA, which signs the certificates kubelet-csr-approver approves; nothing here turns that
+# off. The API server reaches metrics-server itself without verifying its self-signed certificate,
+# also the chart's default.
+
+serviceMonitor:
+  enabled: false

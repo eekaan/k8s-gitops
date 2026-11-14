@@ -1,0 +1,19 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/ocirepository-source-v1.json
+# The upstream metrics-server chart. Its publisher releases it only to a classic Helm repository,
+# so it comes from a public OCI mirror that republishes each release unchanged.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: metrics-server
+spec:
+  # The tag is pinned: a new chart arrives by a change to this file, which Flux applies at once.
+  interval: 12h
+  # The chart's packaged layer, which helm-controller reads as it is.
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy
+  url: oci://ghcr.io/home-operations/charts-mirror/metrics-server
+  ref:
+    # renovate: datasource=docker depName=ghcr.io/home-operations/charts-mirror/metrics-server
+    tag: 3.14.0

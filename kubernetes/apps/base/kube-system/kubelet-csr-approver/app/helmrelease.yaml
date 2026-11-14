@@ -1,0 +1,31 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/helmrelease-helm-v2.json
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: kubelet-csr-approver
+spec:
+  interval: 30m
+  # A new cluster needs the approver before Flux runs, so its release may already exist: the same
+  # name, in the same namespace, with its history kept there, so Flux upgrades that release instead
+  # of installing a second one.
+  releaseName: kubelet-csr-approver
+  targetNamespace: kube-system
+  storageNamespace: kube-system
+  chartRef:
+    kind: OCIRepository
+    name: kubelet-csr-approver
+  valuesFrom:
+    - kind: ConfigMap
+      name: kubelet-csr-approver-values
+  # This cluster's node names and node network, from cluster-config. They are set here because
+  # Flux substitutes this object and leaves the values ConfigMap alone; these values are merged
+  # over that ConfigMap's.
+  values:
+    # Anchored, so a node name must match the pattern in full, and a missing variable leaves a
+    # pattern that matches no name.
+    providerRegex: ^(${NODE_NAME_REGEX})$
+    # The approver reads an empty list as every address, so a missing variable becomes a value it
+    # cannot parse, and it stops instead.
+    providerIpPrefixes:
+      - ${NODE_CIDR:=none}

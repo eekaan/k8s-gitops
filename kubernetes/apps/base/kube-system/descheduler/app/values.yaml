@@ -1,0 +1,68 @@
+---
+# Values for the descheduler chart, read by the HelmRelease through a ConfigMap generated without
+# substitution. Keys not set here keep the chart's defaults.
+
+# One descheduler that runs its policy every five minutes, instead of a Job every two.
+kind: Deployment
+deschedulingInterval: 5m
+# During a rolling update the old and the new pod never act at once.
+leaderElection:
+  enabled: true
+
+serviceMonitor:
+  enabled: false
+
+# The chart's default policy, with two changes that make it evict less: a pod is evicted only when
+# another node can take it, and a cordoned node's taint is no reason to evict, as draining a node
+# is the operator's decision. Pods with a volume claim stay protected, and no namespace is
+# excluded. The arguments are those of the descheduler's v1alpha2 policy.
+deschedulerPolicyAPIVersion: descheduler/v1alpha2
+deschedulerPolicy:
+  profiles:
+    - name: default
+      pluginConfig:
+        - name: DefaultEvictor
+          args:
+            nodeFit: true
+            podProtections:
+              defaultDisabled:
+                - PodsWithLocalStorage
+              extraEnabled:
+                - PodsWithPVC
+        - name: RemoveDuplicates
+        - name: RemovePodsHavingTooManyRestarts
+          args:
+            podRestartThreshold: 100
+            includingInitContainers: true
+        - name: RemovePodsViolatingNodeAffinity
+          args:
+            nodeAffinityType:
+              - requiredDuringSchedulingIgnoredDuringExecution
+        - name: RemovePodsViolatingNodeTaints
+          args:
+            excludedTaints:
+              - node.kubernetes.io/unschedulable
+        - name: RemovePodsViolatingInterPodAntiAffinity
+        - name: RemovePodsViolatingTopologySpreadConstraint
+        - name: LowNodeUtilization
+          args:
+            thresholds:
+              cpu: 20
+              memory: 20
+              pods: 20
+            targetThresholds:
+              cpu: 50
+              memory: 50
+              pods: 50
+      plugins:
+        balance:
+          enabled:
+            - RemoveDuplicates
+            - RemovePodsViolatingTopologySpreadConstraint
+            - LowNodeUtilization
+        deschedule:
+          enabled:
+            - RemovePodsHavingTooManyRestarts
+            - RemovePodsViolatingNodeTaints
+            - RemovePodsViolatingNodeAffinity
+            - RemovePodsViolatingInterPodAntiAffinity

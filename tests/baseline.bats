@@ -1,8 +1,8 @@
 #!/usr/bin/env bats
 # Proves features/cluster-baseline.feature; each test carries its scenario's title.
-# Needs helm, flux, yq and git on PATH (the versions pinned for the repository). Each chart is
-# pulled once per run from its public registry, and the Gateway API repository is cloned once, at
-# the pinned tag and with only the directories its GitRepository checks out; building and
+# Needs helm, kustomize, flux, yq and git on PATH (the versions pinned for the repository). Each
+# chart is pulled once per run from its public registry, and the Gateway API repository is cloned
+# once, at the pinned tag and with only the directories its GitRepository checks out; building and
 # rendering are offline.
 
 setup_file() {
@@ -21,9 +21,18 @@ setup() {
   REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   CLUSTER="$REPO/kubernetes/clusters/lab-sto2"
   KUBE="$(yq -e '.kubernetes' "$REPO/versions.yaml")"
+  # The applications whose charts make up the baseline, the resource definitions' included.
+  CHARTS=(prometheus-operator-crds kubelet-csr-approver metrics-server spegel reloader descheduler)
   # Nothing to connect to: a step that needed a cluster fails instead of finding one.
   export KUBECONFIG="$BATS_TEST_TMPDIR/no-kubeconfig"
   unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
+}
+
+# example_vars FILE: writes the variables of the cluster's example key lists to FILE as one map.
+example_vars() {
+  # shellcheck disable=SC2016 # $list is a yq variable.
+  yq ea '. as $list ireduce ({}; . * ($list // {}))' \
+    "$CLUSTER/cluster-config.example.yaml" "$CLUSTER/cluster-secrets.example.yaml" >"$1"
 }
 
 # built APP [VARS]: the kube-system application APP as Flux applies it: its app/ built with its
@@ -33,9 +42,7 @@ built() {
   local app=$1 vars=${2:-} ks="$BATS_TEST_TMPDIR/$1-ks.yaml"
   if [ -z "$vars" ]; then
     vars="$BATS_TEST_TMPDIR/example-vars.yaml"
-    # shellcheck disable=SC2016 # $list is a yq variable.
-    yq ea '. as $list ireduce ({}; . * ($list // {}))' \
-      "$CLUSTER/cluster-config.example.yaml" "$CLUSTER/cluster-secrets.example.yaml" >"$vars"
+    example_vars "$vars"
   fi
   # shellcheck disable=SC2016 # $vars is a yq variable.
   yq ea 'select(fileIndex == 0) as $vars | select(fileIndex == 1 and . != null)
@@ -99,6 +106,13 @@ defined_keys() {
   [ -z "$unknown" ]
 }
 
+# deployment_env NAME: the value the rendered Deployment gives its container's environment variable
+# NAME; nothing when it gives none.
+deployment_env() {
+  yq -N "select(.kind == \"Deployment\") | .spec.template.spec.containers[0].env // [] | .[]
+    | select(.name == \"$1\") | .value" "$RENDERED"
+}
+
 # gateway_api: the Gateway API definitions as the application's inner Kustomization applies them:
 # the repository its GitRepository names, cloned at the pinned tag with only the directories the
 # GitRepository checks out, and built at the Kustomization's path with its patches. Writes
@@ -160,6 +174,90 @@ gateway_api() {
   [ "$versions" = "$TAG" ]
 }
 
+@test "Every baseline chart renders with the repository's values" {
+  local app monitors
+  for app in "${CHARTS[@]}"; do
+    render "$app"
+    echo "$app: $(yq -N 'select(. != null) | .kind' "$RENDERED" | sort | uniq -c | xargs)"
+    monitors="$(yq -N 'select(. != null) | select(.kind == "ServiceMonitor" or .kind == "PodMonitor"
+      or .kind == "GrafanaDashboard" or (.kind == "ConfigMap" and (.metadata.labels // {} | has("grafana_dashboard"))))
+      | .kind + "/" + .metadata.name' "$RENDERED")"
+    [ -z "$monitors" ] || { echo "$app renders $monitors"; return 1; }
+  done
+}
+
+@test "Serving certificates are approved only for this cluster's nodes" {
+  local app=kubelet-csr-approver raw declared var vars regex prefixes name prefix
+  local -a names ranges list
+  # The values file sets neither the name pattern nor the address ranges. The HelmRelease's own
+  # values, which Flux substitutes, take both from variables the example cluster-config declares.
+  [ "$(yq '[.providerRegex, .providerIpPrefixes] | map(select(. != null)) | length' \
+    "$REPO/kubernetes/apps/base/kube-system/$app/app/values.yaml")" -eq 0 ]
+  raw="$(kustomize build "$REPO/kubernetes/apps/base/kube-system/$app/app" | yq -N 'select(.kind == "HelmRelease") | .spec.values')"
+  echo "HelmRelease values: $raw"
+  mapfile -t names < <(yq '.providerRegex // ""' <<<"$raw" | grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*' | cut -c3-)
+  mapfile -t ranges < <(yq '.providerIpPrefixes // [] | .[]' <<<"$raw" | grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*' | cut -c3-)
+  echo "name pattern from: ${names[*]}; address ranges from: ${ranges[*]}"
+  [ "${#names[@]}" -gt 0 ]
+  [ "${#ranges[@]}" -gt 0 ]
+  # shellcheck disable=SC2016 # ${ is what the yq expression looks for.
+  [ "$(yq '.providerIpPrefixes | map(select(contains("${") | not)) | length' <<<"$raw")" -eq 0 ]
+  declared="$(yq 'keys | .[]' "$CLUSTER/cluster-config.example.yaml")"
+  for var in "${names[@]}" "${ranges[@]}"; do
+    grep -qxF -- "$var" <<<"$declared" || { echo "$var is not in cluster-config.example.yaml"; return 1; }
+  done
+
+  # Set, the variables reach the approver as a pattern a node name must match in full, and as
+  # its address ranges.
+  vars="$BATS_TEST_TMPDIR/node-vars.yaml"
+  example_vars "$vars"
+  for var in "${names[@]}"; do VAR="$var" yq -i '.[strenv(VAR)] = "node-[0-9]+"' "$vars"; done
+  for var in "${ranges[@]}"; do VAR="$var" yq -i '.[strenv(VAR)] = "192.0.2.0/24"' "$vars"; done
+  render "$app" "$vars"
+  regex="$(deployment_env PROVIDER_REGEX)"
+  prefixes="$(deployment_env PROVIDER_IP_PREFIXES)"
+  echo "set: PROVIDER_REGEX=$regex PROVIDER_IP_PREFIXES=$prefixes"
+  [ "$prefixes" = 192.0.2.0/24 ]
+  for name in node-1 node-23; do
+    [[ $name =~ $regex ]] || { echo "the pattern does not match $name"; return 1; }
+  done
+  for name in node-1.example.com other-node-1 node-x ""; do
+    if [[ $name =~ $regex ]]; then echo "the pattern also matches '$name'"; return 1; fi
+  done
+
+  # Missing or empty, as Flux substitutes a key cluster-config lacks, they leave the approver
+  # approving nothing. Its pattern applies only to the names in a request, and matches none. Its
+  # address ranges must hold no prefix: the approver reads an empty value as every address, and
+  # stops at a value it cannot parse.
+  vars="$BATS_TEST_TMPDIR/empty-vars.yaml"
+  example_vars "$vars"
+  yq -i '.[] = ""' "$vars"
+  render "$app" "$vars"
+  regex="$(deployment_env PROVIDER_REGEX)"
+  prefixes="$(deployment_env PROVIDER_IP_PREFIXES)"
+  echo "missing: PROVIDER_REGEX=$regex PROVIDER_IP_PREFIXES=$prefixes"
+  [ -n "$regex" ]
+  for name in node-1 example-cp-1 a; do
+    if [[ $name =~ $regex ]]; then echo "the pattern matches '$name'"; return 1; fi
+  done
+  [ -n "$prefixes" ]
+  IFS=, read -ra list <<<"$prefixes"
+  for prefix in "${list[@]}"; do
+    if [[ $prefix =~ ^[0-9A-Fa-f.:]+/[0-9]+$ ]]; then echo "$prefix is an address prefix"; return 1; fi
+  done
+}
+
+@test "Metrics are scraped over verified kubelet certificates" {
+  local args
+  render metrics-server
+  args="$(yq -N 'select(.kind == "Deployment") | .spec.template.spec.containers[]
+    | select(.name == "metrics-server") | (.command // []) + (.args // []) | .[]' "$RENDERED")"
+  echo "$args"
+  # The kubelets are reached on an address their serving certificates name.
+  grep -qx -- '--kubelet-preferred-address-types=InternalIP.*' <<<"$args"
+  [ "$(grep -cE -- '^--(kubelet-insecure-tls|deprecated-kubelet-completely-insecure)(=|$)' <<<"$args")" -eq 0 ]
+}
+
 @test "Resource definitions are never pruned" {
   local app kept inner
   # Neither application applies a definition itself, so pruning what it applies deletes none.
@@ -185,4 +283,24 @@ gateway_api() {
 
 @test "every values key of prometheus-operator-crds is one its pinned chart defines" {
   defined_keys prometheus-operator-crds
+}
+
+@test "every values key of kubelet-csr-approver is one its pinned chart defines" {
+  defined_keys kubelet-csr-approver
+}
+
+@test "every values key of metrics-server is one its pinned chart defines" {
+  defined_keys metrics-server
+}
+
+@test "every values key of spegel is one its pinned chart defines" {
+  defined_keys spegel
+}
+
+@test "every values key of reloader is one its pinned chart defines" {
+  defined_keys reloader
+}
+
+@test "every values key of descheduler is one its pinned chart defines" {
+  defined_keys descheduler
 }

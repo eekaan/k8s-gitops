@@ -97,6 +97,9 @@ every child Kustomization lives there too and sets `targetNamespace` for what it
 - Helm values are generated into a ConfigMap with the annotation
   `kustomize.toolkit.fluxcd.io/substitute: disabled`, which leaves any `${...}` in them alone;
   so does the annotation on any other object.
+- A Helm value that comes from a variable is set in the HelmRelease's own `spec.values`, which
+  Flux substitutes and helm-controller merges over the values ConfigMap; `values.yaml` holds no
+  variables.
 
 The check builds every application with Flux's strict substitution, using the placeholders, so a
 variable that is none of the above fails it.
@@ -136,6 +139,37 @@ uninstalls the release. The inner Gateway API `Kustomization` sets `prune: false
 `deletionPolicy: Orphan`, so it leaves what it applied when it is deleted, and keeps a definition
 a newer release drops. `tests/baseline.bats` renders the chart and builds the pinned Gateway API
 source offline to check both, and that they yield definitions only.
+
+## The kube-system baseline
+
+The small services later applications assume are applications in `apps/base/kube-system/` with
+the Cilium application's shape. Their charts come from their publishers' OCI registries,
+except metrics-server's and the descheduler's, which their publisher releases only to a classic
+Helm repository; those come from a public OCI mirror that republishes each release unchanged. No
+ServiceMonitor, PodMonitor or dashboard is enabled in any of them, and none uses a priority class
+Kubernetes does not define itself.
+
+- `kubelet-csr-approver` approves a kubelet's serving certificate request (Talos has the kubelets
+  make them) only when the name it asks for matches `NODE_NAME_REGEX` in full and every address it
+  asks for is in `NODE_CIDR`, both from `cluster-config`, which its HelmRelease sets in its own
+  values. A missing `NODE_NAME_REGEX` leaves a pattern that matches no name; a missing
+  `NODE_CIDR` becomes a value the approver cannot parse, so it stops rather than read an empty
+  list as every address. Nothing in this repository makes node names resolvable in the cluster's
+  DNS, so the approver does not look them up.
+- `metrics-server` serves resource metrics. It verifies each kubelet's serving certificate
+  against the cluster CA, and starts only once `kubelet-csr-approver` is ready, which it names in
+  `dependsOn`.
+- `spegel` shares images between nodes. Talos discards unpacked image layers, which Spegel
+  serves, unless its machine configuration sets containerd's `discard_unpacked_layers` to false,
+  so the application is disabled in the cluster overlay until the Talos patches do.
+- `reloader` restarts a workload annotated for it when a ConfigMap or Secret it uses changes, and
+  nothing else.
+- `descheduler` runs the chart's default policy every five minutes, with two changes: a pod is
+  evicted only when another node can take it, and a cordoned node's taint is no reason to evict.
+
+`tests/baseline.bats` renders every baseline chart with the repository's values, checks that each
+values key is one the pinned chart defines, and reads the approver's and metrics-server's
+rendered configuration.
 
 ## Flux itself
 
@@ -227,6 +261,14 @@ It is an application like any other, and the script reads it rather than a copy:
   script installs, so Flux upgrades that release instead of installing a second one.
 - Substitution is disabled on the values ConfigMap, so the chart gets the same values on both
   paths, and a version change in `ocirepository.yaml` moves both.
+
+The kubelet serving certificate approver, `apps/base/kube-system/kubelet-csr-approver/`, is also
+such an application: until it runs, no kubelet has a serving certificate, so `kubectl logs` and
+`kubectl exec` fail. Its HelmRelease sets `releaseName`, `targetNamespace` and `storageNamespace`
+as Cilium's does, so Flux upgrades a release installed before it instead of installing a second
+one. Unlike Cilium, it takes values from `cluster-config`, the name pattern and the node network,
+through the HelmRelease's own values, so an install before Flux has to substitute them as Flux
+does.
 
 `kube-system` exists before Flux does: its `namespace.yaml` only sets the namespace's labels, and
 like every namespace it is never pruned.

@@ -1,0 +1,18 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/ocirepository-source-v1.json
+# The Spegel chart from its publisher's public OCI registry.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: spegel
+spec:
+  # The tag is pinned: a new chart arrives by a change to this file, which Flux applies at once.
+  interval: 12h
+  # The chart's packaged layer, which helm-controller reads as it is.
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy
+  url: oci://ghcr.io/spegel-org/helm-charts/spegel
+  ref:
+    # renovate: datasource=docker depName=ghcr.io/spegel-org/helm-charts/spegel
+    tag: 0.8.1
