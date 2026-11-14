@@ -12,9 +12,10 @@ crds:
     helm.sh/resource-policy: keep
 
 # Each component keeps a pod through a drain: two replicas and a disruption budget that keeps one
-# available. Only one operator leads, so its second replica is a standby; the metrics servers all
-# answer, requests to them are load balanced, and a second one adds capacity as well as
-# availability. The spread over nodes is a preference, never a reason to leave a pod unscheduled.
+# available. Only one operator leads, so its second replica is a standby; the second metrics server
+# is there for availability as well, since requests are not spread over the two without aggregator
+# routing on the API server. The spread over nodes is a preference, never a reason to leave a pod
+# unscheduled.
 operator:
   replicaCount: 2
 metricsServer:

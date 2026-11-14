@@ -1,0 +1,46 @@
+---
+# Values for the CloudNativePG chart, read by the HelmRelease through a ConfigMap generated without
+# substitution. Keys not set here keep the chart's defaults: the operator watches the Clusters of
+# every namespace, and issues its webhook's certificate itself and puts its CA into the webhook
+# configurations, so nothing else issues one.
+
+crds:
+  # The chart ships the postgresql.cnpg.io definitions as templates of the release, so each chart
+  # upgrade upgrades them with the operator that serves them. The chart gives each one
+  # helm.sh/resource-policy: keep itself: deleting a definition deletes every object of its kind,
+  # and with each Cluster its volumes, so Helm leaves them in place when the release is uninstalled,
+  # as it is when this application leaves the tree.
+  create: true
+
+# Two operators, of which only the leader reconciles; both answer the webhooks, through which the
+# API server sends every change to a CloudNativePG object, refusing the change when none answers.
+# The two must run on different nodes, and a disruption budget beside the release
+# (poddisruptionbudget.yaml) keeps one running while a node is drained.
+replicaCount: 2
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+    nodeTaintsPolicy: Honor
+    # The chart adds no selector of its own; these are its selector labels for this release.
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: cloudnative-pg
+        app.kubernetes.io/instance: cloudnative-pg
+    matchLabelKeys:
+      - pod-template-hash
+
+# The requests and the memory limit of the publisher's own installation manifest. No CPU limit, so
+# the webhook is never throttled while the API server waits for its answer.
+resources:
+  requests:
+    cpu: 100m
+    memory: 100Mi
+  limits:
+    memory: 200Mi
+
+monitoring:
+  # Scraped through its pods; the chart makes no Service for the metrics port.
+  podMonitorEnabled: true
+  grafanaDashboard:
+    create: false
