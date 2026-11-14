@@ -33,6 +33,8 @@ setup() {
   CLUSTER="$REPO/talos/lab-sto2"
   cp -R "$ROOT/scripts" "$REPO/scripts"
   cp "$ROOT/talos/.sops.yaml" "$REPO/talos/.sops.yaml"
+  # The repository's own SOPS rules name its real recipients; a test starts before any key exists.
+  yq -i '.creation_rules[].age = "example-talos-age-recipient"' "$REPO/talos/.sops.yaml"
   cp "$BATS_FILE_TMPDIR/talman.yaml" "$CLUSTER/talman.yaml"
   printf 'cluster:\n  secret: marker-bundle-secret\n' > "$CLUSTER/secrets.sops.yaml"
   # The backend file, the endpoint's only source, with a marker for the endpoint.
@@ -817,6 +819,7 @@ resets_or_bootstraps() {
   without AWS_SECRET_ACCESS_KEY
   with AWS_SECRET_ACCESS_KEY=example-secret
   cp "$ROOT/talos/.sops.yaml" "$REPO/talos/.sops.yaml"
+  yq -i '.creation_rules[].age = "example-talos-age-recipient"' "$REPO/talos/.sops.yaml"
 
   for run in cluster-snapshot 'cluster-restore latest'; do
     read -ra words <<< "$run"

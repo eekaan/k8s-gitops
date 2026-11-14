@@ -33,6 +33,10 @@ setup() {
   cp -R "$ROOT/kubernetes" "$REPO/kubernetes"
   cp "$ROOT/.sops.yaml" "$REPO/.sops.yaml"
   cp "$ROOT/talos/.sops.yaml" "$REPO/talos/.sops.yaml"
+  # The repository's own SOPS rules name its real recipients; a test starts before any key exists.
+  yq -i '.creation_rules[].age = "example-talos-age-recipient"' "$REPO/talos/.sops.yaml"
+  yq -i '.creation_rules[].age = "example-flux-age-recipient"' "$REPO/.sops.yaml"
+  cp "$REPO/.sops.yaml" "$BATS_TEST_TMPDIR/flux-sops.placeholder"
   cp "$BATS_FILE_TMPDIR/talman.yaml" "$TALMAN"
   : > "$REPO/talos/lab-sto2/clusterconfig/kubeconfig"
   # A mise with nothing installed keeps the justfile from putting real tools in front of the fakes.
@@ -496,7 +500,7 @@ helm_flag() {
   [ "$status" -ne 0 ]
   [[ $output == *"FLUX_AGE_KEY_FILE names a path inside the repository"* ]]
   [ ! -e "$REPO/kubernetes/flux.agekey" ]
-  cmp "$REPO/.sops.yaml" "$ROOT/.sops.yaml"
+  cmp "$REPO/.sops.yaml" "$BATS_TEST_TMPDIR/flux-sops.placeholder"
 }
 
 @test "cluster-flux-age-key leaves a .sops.yaml naming another recipient alone" {
