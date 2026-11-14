@@ -22,7 +22,7 @@ application secrets that change over the cluster's life.
   External Secrets and a `ClusterSecretStore`. Application secrets are not committed, encrypted
   or otherwise.
 - **Generated credentials** stay where they are made: a credential a controller generates inside
-  the cluster for its own workload, which nothing outside the cluster needs to know, stays in the
+  the cluster for its own workload, which is read only through the cluster's API, stays in the
   Secret that controller writes, and is neither committed nor copied into OpenBao. The Grafana
   operator's admin password for its Grafana is one.
 - External Secrets is installed before OpenBao; OpenBao's own seal material is produced through

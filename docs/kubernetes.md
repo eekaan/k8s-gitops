@@ -309,8 +309,9 @@ without a disruption budget: a second replica would keep a database of its own. 
 that Git does not hold, so it claims no volume: its data directory is an emptyDir, and the operator
 applies the datasource and every dashboard again every minute. One it cannot apply, as while a
 restarted Grafana starts, it retries after 10 seconds, doubling the wait up to two minutes, so a
-restarted Grafana has them all back within a few minutes. The datasource is the Prometheus Service of the monitoring chart,
-`kube-prometheus-stack-prometheus`, port 9090. Grafana makes no call to the internet on its own: its
+restarted Grafana has them all back within a few minutes. The datasource is the Prometheus Service
+of the monitoring chart, `kube-prometheus-stack-prometheus`, port 9090. Grafana makes no call to the
+internet on its own: its
 configuration turns off usage reporting, the checks for Grafana and plugin updates, the news feed,
 the plugin catalogue, the plugins Grafana would install at every start, the download of plugin
 signing keys, Gravatar images and external snapshots, so it runs only the plugins in its image.
@@ -328,8 +329,7 @@ Nothing routes to Grafana from outside the cluster. `just grafana [cluster]` for
 `GRAFANA_PORT` or 3000, on 127.0.0.1 only, to port 3000 of the Service `grafana-service` in
 `monitoring` through the cluster's kubeconfig, until Ctrl-C; it prints the local URL, and the
 forward ends with the recipe however it ends ([cluster.md](cluster.md#recipes)). Sign in as
-`admin`. The password is under
-`GF_SECURITY_ADMIN_PASSWORD` in the Secret `grafana-admin-credentials` in `monitoring`, which the
+`admin`. The password is under `GF_SECURITY_ADMIN_PASSWORD` in the Secret `grafana-admin-credentials` in `monitoring`, which the
 operator generates when it first creates the Secret and keeps while the `Grafana` exists; nothing in
 Git holds it. Deleting the `Grafana` deletes the Secret, and a new one gets a new password. It is
 the kind of credential ADR 0005 keeps out of OpenBao: one a controller generates in the cluster for
