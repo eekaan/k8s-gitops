@@ -41,8 +41,9 @@ it follows with `just cluster-talos`
 extensions:
 
 - `siderolabs/drbd`: the DRBD kernel modules, for the storage layer, LINSTOR through the Piraeus
-  operator on DRBD, with LVM-thin storage pools and snapshots. Nothing in this repository installs
-  that layer. An extension's modules load only when the machine configuration lists them, and on
+  operator on DRBD, with LVM-thin storage pools and snapshots, which `apps/base/piraeus-datastore/`
+  installs ([kubernetes.md](kubernetes.md#storage)). An extension's modules load only when the
+  machine configuration lists them, and on
   Talos the LINSTOR satellite cannot load a module itself
   ([Piraeus](https://github.com/piraeusdatastore/piraeus-operator/blob/v2/docs/how-to/talos.md)),
   so `talos/patches/all/kernel-modules.yaml` has every node load `drbd`, with its user-mode helper
@@ -97,8 +98,9 @@ volume named `data`, on the disk that is not the system disk: the worker's data 
 ([infrastructure.md](infrastructure.md#the-workers-data-volumes)). Talos makes it one partition
 over that disk, labelled `r-data`, with no filesystem and nothing mounted, and links it as
 `/dev/disk/by-partlabel/r-data`. That path is the same on every worker, whatever the kernel calls
-the disk and whatever the cloud assigns the volume, and it is the name the storage layer is given
-(ADR 0011). A disk with less than 1 GiB free is not taken.
+the disk and whatever the cloud assigns the volume, and it is the device LINSTOR's storage pool is
+made from ([kubernetes.md](kubernetes.md#the-storage-pool), ADR 0011). A disk with less than 1 GiB
+free is not taken.
 
 On running workers, `just infra-apply sto2/cluster` attaches the volumes and writes the
 `talman.yaml` that lists the patch, and `just cluster-talos` then creates the raw volume. Taking
@@ -340,10 +342,15 @@ out of the artifact, which is built from `kubernetes/`.
   every Service of type LoadBalancer and every PersistentVolume of a CSI driver: the cloud's load
   balancers and volumes behind them are made by the cluster, not by OpenTofu, so the destroy would
   leave them in the cloud, where they keep the network from being deleted. While there are any, it
-  names each, by namespace and name or by the volume's name, and destroys nothing. A cluster whose
-  API does not answer, or that has no kubeconfig, cannot be asked and is not destroyed either,
-  unless `--unreachable` is given: the operator then takes on whatever it owned, which stays in the
-  cloud. Before it asks the cluster it checks what `infra-destroy` needs for the stack.
+  names each, by namespace and name or by the volume's name, and destroys nothing. Volumes of
+  LINSTOR's driver, `linstor.csi.linbit.com`, are the exception: their data is on the workers' data
+  volumes ([above](#the-workers-data-device)), which the stack holds and deletes, so none of
+  them stays in the cloud. They do not hold the destroy up; it says how many there are, by number
+  and not by name, before it shows the plan, and the one confirmation, the stack's name typed back
+  or `--yes`, destroys them with the stack. A cluster whose API does not answer, or that has no
+  kubeconfig, cannot be asked and is not destroyed either, unless `--unreachable` is given: the
+  operator then takes on whatever it owned, which stays in the cloud. Before it asks the cluster it
+  checks what `infra-destroy` needs for the stack.
   [runbooks/rebuild.md](runbooks/rebuild.md) has it in the procedure around it.
 
 A failing recipe ends with a line naming the step it failed in.

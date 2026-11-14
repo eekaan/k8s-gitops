@@ -166,12 +166,13 @@ add_current_address() {
   printf '%s' "$1"
 }
 
-# Exports TF_VAR_api_allowed_cidrs from OPERATOR_CIDRS (CI) or operator-cidrs.json at the
-# repository root: a non-empty JSON list of IPv4 CIDRs, none of which covers every address. A wrong
-# entry is named by its position, as the list is the operator's own and is never printed. jq's own
-# errors would quote the list, so they are dropped.
+# export_api_allowed_cidrs [VARIABLE]: exports TF_VAR_<VARIABLE>, TF_VAR_api_allowed_cidrs without
+# one, from OPERATOR_CIDRS (CI) or operator-cidrs.json at the repository root: a non-empty JSON list
+# of IPv4 CIDRs, none of which covers every address. A wrong entry is named by its position, as the
+# list is the operator's own and is never printed. jq's own errors would quote the list, so they are
+# dropped.
 export_api_allowed_cidrs() {
-  local from cidrs position problem refused=0
+  local variable=TF_VAR_${1:-api_allowed_cidrs} from cidrs position problem refused=0
   local valid='select(type == "array" and length > 0 and all(.[]; type == "string"
     and test("^([0-9]{1,3}[.]){3}[0-9]{1,3}/[0-9]{1,2}$|^[0-9A-Fa-f:]+/[0-9]{1,3}$")))'
   if [[ -n ${OPERATOR_CIDRS:-} ]]; then
@@ -188,19 +189,19 @@ export_api_allowed_cidrs() {
     infra_error "$from is not a JSON list of CIDRs"
     return 1
   fi
-  # The cluster stack's networks and listener take IPv4 only, and a /0 would open the APIs to
-  # every address.
+  # The stacks' rules and the cluster's listener take IPv4 only, and a /0 would open the APIs and
+  # the CI host's SSH to every address.
   while read -r position problem; do
     case $problem in
-      ipv6) infra_error "$from entry $position is an IPv6 network; the cluster stack takes IPv4 networks only" ;;
+      ipv6) infra_error "$from entry $position is an IPv6 network; the stacks take IPv4 networks only" ;;
       all) infra_error "$from entry $position covers every address; the allowlist names the operator's own networks" ;;
     esac
     refused=1
   done < <(jq -r 'to_entries[]
     | if (.value | test(":")) then "\(.key + 1) ipv6" elif (.value | test("/0+$")) then "\(.key + 1) all" else empty end' <<< "$cidrs")
   ((!refused)) || return 1
-  TF_VAR_api_allowed_cidrs=$(add_current_address "$cidrs")
-  export TF_VAR_api_allowed_cidrs
+  cidrs=$(add_current_address "$cidrs")
+  export "$variable=$cidrs"
 }
 
 # Reads a plan as tofu show -json prints it and prints tofu's counts line, then one line per action

@@ -2,6 +2,13 @@
 # One job per group of checks the justfile defines, side by side, then the job named ci, the
 # required check on main, which passes only when all of them passed. No job has a path filter, so
 # every pull request gets its result.
+#
+# The groups run on the CI host's self-hosted runner, with its persistent Dagger engine, when the
+# repository variable CI_RUNNER_LABEL names it and just ci-runner finds the run trusted: a push to
+# main, or a pull request from a branch of this repository. Otherwise, and every other job always,
+# on GitHub's hosted runners. A fork's pull request runs the fork's copy of this file, which could
+# name the host's label itself, so this file alone cannot keep a fork off the host: the host's own
+# job-started hook fails every job the same rule does not admit (scripts/lib/ci-host.sh, ADR 0012).
 name: ci
 
 "on":
@@ -34,9 +41,27 @@ jobs:
       - id: groups
         run: just ci-groups
 
-  check:
-    needs: groups
+  runner:
     runs-on: ubuntu-latest
+    outputs:
+      runner: ${{ steps.runner.outputs.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785  # v5.2.8
+        with:
+          version: 2026.11.4
+          install_args: just jq
+      - id: runner
+        run: just ci-runner
+        env:
+          CI_RUNNER_LABEL: ${{ vars.CI_RUNNER_LABEL }}
+
+  check:
+    needs: [groups, runner]
+    runs-on: ${{ fromJSON(needs.runner.outputs.runner) }}
     strategy:
       # Every group reports its own result, whichever fails first.
       fail-fast: false
@@ -53,6 +78,7 @@ jobs:
           version: 2026.11.4
           install_args: just http:dagger
       # The group's name reaches the shell as a variable, never as text spliced into the command.
+      # On the CI host, the runner's DAGGER_ENGINE points dagger at the host's engine.
       - run: just ci "$GROUP"
         env:
           GROUP: ${{ matrix.group }}
@@ -60,7 +86,7 @@ jobs:
   ci:
     # Runs whatever became of the others: a required check that is skipped counts as passed.
     if: always()
-    needs: [groups, check]
+    needs: [groups, runner, check]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

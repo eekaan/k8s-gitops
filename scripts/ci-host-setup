@@ -1,0 +1,268 @@
+#!/usr/bin/env bash
+# Turns the CI host the sto2/ci stack made into this repository's GitHub Actions runner, over SSH:
+# starts the Dagger engine pinned in versions.yaml as a long-running container with its state on the
+# host's cache volume, installs the GitHub Actions runner release pinned there once its package's
+# checksum matches the pin, registers it under the host's name, its only label, and runs it as a
+# service under the host's unprivileged runner user. Jobs on the host reach the engine through its
+# socket (DAGGER_ENGINE), and pass the job-started hook from scripts/lib/ci-host.sh first, which
+# fails every job but the CI workflow's for a push to main or a pull request from a branch of this
+# repository. A second run changes nothing and asks GitHub for nothing.
+# The registration token comes from gh and reaches the runner's configuration on standard input,
+# never as an argument; it is never printed or written to a file. Every connection checks the host's
+# key strictly against the one recorded in ~/.local/state/k8s-gitops/ci-host.known_hosts; a host
+# whose key is not recorded is refused until the fingerprints shown here are accepted with yes.
+# Prints neither the host's address nor anything that holds it.
+# Usage: scripts/ci-host-setup
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/ci-host.sh
+. "$here/lib/ci-host.sh"
+# shellcheck source=scripts/stack-env
+. "$here/stack-env" sto2/ci
+require_env CI_HOST_SSH_USER
+for tool in ssh ssh-keyscan ssh-keygen gh; do
+  if ! command -v "$tool" > /dev/null; then
+    infra_error "$tool is not on PATH; ci-host-setup needs OpenSSH's client and the pinned gh (just tools)"
+    exit 1
+  fi
+done
+
+versions=$infra_root/versions.yaml
+runner_version=$(yq '.actions_runner // ""' "$versions")
+runner_sha256=$(yq '.actions_runner_sha256 // ""' "$versions")
+engine_image=$(yq '.dagger_engine // ""' "$versions")
+if [[ ! $runner_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || ! $runner_sha256 =~ ^[0-9a-f]{64}$ ||
+  ! $engine_image =~ ^registry\.dagger\.io/engine:v[^@[:space:]]+@sha256:[0-9a-f]{64}$ ]]; then
+  infra_error "versions.yaml must pin actions_runner as x.y.z, actions_runner_sha256 as 64 hex digits and dagger_engine as registry.dagger.io/engine:v<version>@sha256:<digest>"
+  exit 1
+fi
+
+lock_stack
+init_stack
+ci_host_connect
+
+# remote_setup: the script the host runs as root: these values, then the steps below.
+remote_setup() {
+  printf '%s=%q\n' runner_user "$ci_host_runner_user" runner_version "$runner_version" \
+    runner_sha256 "$runner_sha256" engine_image "$engine_image" cache "$ci_host_cache"
+  printf '%s\n' "hook=\$(cat << 'CI_HOST_HOOK'" "$(ci_host_hook)" CI_HOST_HOOK ')'
+  cat << 'REMOTE'
+set -euo pipefail
+# The host's file system is under CI_HOST_ROOT, which sudo leaves unset on the host; the tests set
+# it to a directory that stands for the host's.
+root=${CI_HOST_ROOT-}
+runner_dir=/home/$runner_user/actions-runner
+unit=ci-runner.service
+# The runner runs a hook only by its file's extension: bash for .sh.
+hook_file=/usr/local/lib/ci-host/job-started.sh
+engine_config=/etc/ci-host/engine.json
+socket=/run/dagger/engine.sock
+changed=0 restart=0
+
+say() {
+  printf 'ci-host: %s\n' "$1"
+}
+
+fail() {
+  printf 'ci-host: %s\n' "$1" >&2
+  exit 1
+}
+
+# put FILE MODE: writes standard input to FILE with MODE, such as 644, unless FILE already holds it
+# with that mode; returns non-zero when it writes nothing.
+put() {
+  local file=$root$1 tmp
+  mkdir -p "${file%/*}"
+  tmp=$(mktemp "${file%/*}/.ci-host.XXXXXX")
+  cat > "$tmp"
+  if [[ -f $file ]] && cmp -s "$tmp" "$file" && [[ $(stat -c %a "$file") == "$2" ]]; then
+    rm -f "$tmp"
+    return 1
+  fi
+  chmod "$2" "$tmp"
+  mv -f "$tmp" "$file"
+}
+
+# The first boot installs the container runtime, creates the runner's user and mounts the cache.
+if command -v cloud-init > /dev/null; then
+  cloud-init status --wait > /dev/null || true
+fi
+id -u "$runner_user" > /dev/null 2>&1 || fail "the host has no user $runner_user: its first boot has not finished"
+command -v docker > /dev/null || fail "the host has no docker: its first boot has not finished"
+[[ $(uname -m) == x86_64 ]] || fail "versions.yaml pins the runner's package for x86_64 only"
+mountpoint -q "$root$cache" || fail "$cache is not mounted: the engine keeps its state on the cache volume only"
+
+# jq for the job-started hook, curl for the runner's package, and git, without which the jobs'
+# checkout has no history to check.
+missing=()
+for tool in jq curl git; do
+  command -v "$tool" > /dev/null || missing+=("$tool")
+done
+if ((${#missing[@]} > 0)); then
+  apt-get update -q > /dev/null
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends "${missing[@]}" > /dev/null
+  say "installed ${missing[*]}"
+  changed=1
+fi
+
+# The engine: the pinned image as a long-running container, privileged as Dagger's engine needs to
+# be, its state on the cache volume, and its socket in /run/dagger owned by the runner's group,
+# which no other user is in. What it runs gets no root capabilities. docker.io keeps the image's own
+# default mirror.
+if put "$engine_config" 644 << 'EOF'
+{
+  "security": {"insecureRootCapabilities": false},
+  "registries": {"docker.io": {"mirrors": ["mirror.gcr.io"]}}
+}
+EOF
+then
+  say "wrote the engine's configuration"
+  changed=1
+fi
+engine_args=(--addr "unix://$socket" --group "$(id -g "$runner_user")")
+spec=$(printf '%s\n' "$engine_image" "$cache" "${engine_args[@]}" | cat - "$root$engine_config" | sha256sum | cut -d' ' -f1)
+current=$(docker inspect --format '{{index .Config.Labels "ci-host.spec"}} {{.State.Running}}' dagger-engine 2> /dev/null) || current=
+case $current in
+  "$spec true")
+    say "the engine runs the pinned image; unchanged"
+    ;;
+  "$spec false")
+    docker start dagger-engine > /dev/null
+    say "started the engine"
+    changed=1
+    ;;
+  *)
+    if [[ -n $current ]]; then
+      docker rm -f dagger-engine > /dev/null
+    fi
+    docker run --detach --name dagger-engine --restart unless-stopped --privileged \
+      --label "ci-host.spec=$spec" \
+      --volume "$cache:/var/lib/dagger" --volume /run/dagger:/run/dagger \
+      --volume "$engine_config:/etc/dagger/engine.json:ro" \
+      "$engine_image" "${engine_args[@]}" > /dev/null
+    say "started the pinned engine, its state in $cache"
+    changed=1
+    ;;
+esac
+
+# The runner: the pinned release, unpacked only once its package's checksum matches the pin.
+pinned="$runner_version $runner_sha256"
+package_marker=$root$runner_dir/.ci-host-package
+if [[ -f $package_marker && $(< "$package_marker") == "$pinned" ]]; then
+  say "the runner is the pinned release $runner_version; unchanged"
+else
+  download=$(mktemp -d)
+  trap 'rm -rf "$download"' EXIT
+  curl -fsSL --retry 3 -o "$download/runner.tar.gz" \
+    "https://github.com/actions/runner/releases/download/v$runner_version/actions-runner-linux-x64-$runner_version.tar.gz"
+  if ! printf '%s  %s\n' "$runner_sha256" "$download/runner.tar.gz" | sha256sum --check --status; then
+    fail "the runner's package does not have the checksum versions.yaml pins; nothing was installed"
+  fi
+  if systemctl is-active --quiet "$unit"; then
+    systemctl stop "$unit"
+  fi
+  mkdir -p "$root$runner_dir"
+  tar -xzf "$download/runner.tar.gz" -C "$root$runner_dir"
+  chown -R "$runner_user:" "$root$runner_dir"
+  # The libraries the runner's .NET runtime needs and a minimal image may lack, with apt.
+  "$root$runner_dir/bin/installdependencies.sh" > /dev/null
+  printf '%s\n' "$pinned" > "$package_marker"
+  say "installed the runner $runner_version, its checksum verified"
+  changed=1 restart=1
+fi
+
+# The hook and the service are root's: a job runs as the runner's user and cannot change them.
+if put "$hook_file" 755 <<< "$hook"; then
+  say "wrote the job-started hook"
+  changed=1
+fi
+if put "/etc/systemd/system/$unit" 644 << EOF
+[Unit]
+Description=GitHub Actions runner, set up by scripts/ci-host-setup
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+User=$runner_user
+WorkingDirectory=$runner_dir
+ExecStart=$runner_dir/run.sh
+Environment=DAGGER_ENGINE=unix://$socket
+Environment=ACTIONS_RUNNER_HOOK_JOB_STARTED=$hook_file
+Restart=always
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=5min
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+then
+  systemctl daemon-reload
+  say "wrote the runner's service"
+  changed=1 restart=1
+fi
+
+# A registered runner runs as a service; registering needs a token, which the caller fetches.
+if [[ -f $root$runner_dir/.runner ]]; then
+  if ! systemctl is-enabled --quiet "$unit"; then
+    systemctl enable --quiet "$unit"
+    changed=1
+  fi
+  if ((restart)); then
+    systemctl restart "$unit"
+    say "restarted the runner"
+    changed=1
+  elif ! systemctl is-active --quiet "$unit"; then
+    systemctl start "$unit"
+    say "started the runner"
+    changed=1
+  else
+    say "the runner runs; unchanged"
+  fi
+  state=registered
+else
+  state=unregistered
+fi
+if ((!changed)); then
+  say "nothing changed"
+fi
+say "state $state"
+REMOTE
+}
+
+# setup_pass: runs the setup on the host, prints what it reports and sets state to registered or
+# unregistered.
+setup_pass() {
+  local report line
+  report=$(remote_setup | ci_host_ssh 'sudo -n bash -s')
+  state=
+  while IFS= read -r line; do
+    if [[ $line == 'ci-host: state '* ]]; then
+      state=${line#ci-host: state }
+    else
+      printf '%s\n' "$line"
+    fi
+  done <<< "$report"
+}
+
+# Run on the host as the runner's user: the token is read from standard input into the variable the
+# runner's configuration reads it from, so it is never an argument.
+# shellcheck disable=SC2016 # expanded on the host by the runner's bash, with its own arguments
+register='IFS= read -r ACTIONS_RUNNER_INPUT_TOKEN && export ACTIONS_RUNNER_INPUT_TOKEN && cd ~/actions-runner && exec ./config.sh --unattended --url "$1" --name "$2" --labels "$2" --no-default-labels --disableupdate --replace --work _work'
+
+setup_pass
+if [[ $state == unregistered ]]; then
+  ci_host_repository
+  token=$(ci_host_runner_token registration-token)
+  printf '%s\n' "$token" | ci_host_as_runner "$register" "$ci_host_repository_url" "$ci_host_runner_name"
+  unset token
+  echo "ci-host-setup: registered the runner $ci_host_runner_name with $ci_host_repository"
+  setup_pass
+fi
+if [[ $state != registered ]]; then
+  infra_error "the runner is not registered on the CI host"
+  exit 1
+fi
+echo "ci-host-setup: the runner $ci_host_runner_name runs on the CI host. The CI workflow's check jobs for pushes to main and pull requests from branches of this repository run on it while the repository variable CI_RUNNER_LABEL is $ci_host_runner_name; without it they run on GitHub's hosted runners."

@@ -67,6 +67,18 @@ variable "server_group_id" {
   default     = null
 }
 
+variable "user_data" {
+  description = "User data of the instance, such as a cloud-config, or null for none. It is kept in tofu state and served by the metadata service, so it holds no secret; changing it replaces the instance."
+  type        = string
+  default     = null
+}
+
+variable "key_pair" {
+  description = "Name of the Nova key pair whose public key the instance's image gives its default user, or null for none."
+  type        = string
+  default     = null
+}
+
 variable "tags" {
   description = "Tags for the instance and its port."
   type        = list(string)

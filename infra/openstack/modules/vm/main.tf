@@ -1,6 +1,7 @@
 # One instance that boots from a volume made from an image, with one port on a fixed address and
-# optional data volumes. It takes no user data: anything an instance is given as user data ends
-# up in tofu state and in the cloud's metadata service.
+# optional data volumes, user data and key pair. User data is none by default: anything an
+# instance is given as user data ends up in tofu state and in the cloud's metadata service, so it
+# never holds a secret.
 
 resource "openstack_networking_port_v2" "this" {
   name           = var.name
@@ -29,6 +30,8 @@ resource "openstack_compute_instance_v2" "this" {
   name        = var.name
   flavor_name = var.flavor
   tags        = var.tags
+  user_data   = var.user_data
+  key_pair    = var.key_pair
 
   block_device {
     uuid                  = var.image_id

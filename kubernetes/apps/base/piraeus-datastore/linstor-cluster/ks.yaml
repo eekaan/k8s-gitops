@@ -1,0 +1,19 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: linstor-cluster
+  namespace: flux-system
+spec:
+  path: ./apps/base/piraeus-datastore/linstor-cluster/app
+  targetNamespace: piraeus-datastore
+  # The operator's resource definitions and the webhooks that validate its objects, and every
+  # StorageClass of LINSTOR's driver, come with piraeus-operator; the VolumeSnapshotClass's
+  # definition comes with snapshot-controller.
+  dependsOn:
+    - name: piraeus-operator
+    - name: snapshot-controller
+  sourceRef:
+    kind: ExternalArtifact
+    name: linstor-cluster

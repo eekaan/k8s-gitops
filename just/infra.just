@@ -24,10 +24,42 @@ infra-talman stack='sto2/cluster':
 infra-output stack name:
     scripts/infra-output {{ quote(stack) }} {{ quote(name) }}
 
-# Destroy the cluster stack, then the plumbing stack, each once its name is typed back (--yes: without asking); given one of them, such as sto2/cluster, that one only
+# Destroy the cluster stack, then the plumbing stack, each once its name is typed back (--yes: without asking); given one of them, or sto2/ci, which only its name destroys, that one only
 [positional-arguments]
 infra-destroy *args:
     scripts/infra-destroy "$@"
+
+# Make the CI host of the sto2/ci stack this repository's GitHub Actions runner, over SSH: the pinned Dagger engine with its state on the cache volume, the pinned runner, checksum verified, registered with a token from gh and run as a service; a host key not yet recorded is shown and recorded once yes is typed; a second run changes nothing; see docs/runbooks/ci-host.md
+ci-host-setup:
+    scripts/ci-host-setup
+
+# Stop and deregister the CI host's runner, with a remove token from gh; the engine and its cache stay
+ci-host-remove:
+    scripts/ci-host-remove
+
+# Print the runner the CI workflow's check jobs run on, as JSON: CI_RUNNER_LABEL, the CI host's runner, for a job the host admits (a push to main or a pull request from a branch of this repository), ubuntu-latest otherwise or without the label; in a GitHub Actions step, also set it as the step's output runner
+[script]
+ci-runner:
+    set -o pipefail
+    . scripts/lib/ci-host.sh
+    runner=ubuntu-latest
+    label=${CI_RUNNER_LABEL-}
+    if [[ -n $label ]]; then
+      if [[ ! $label =~ ^[A-Za-z0-9._-]+$ ]]; then
+        echo "ci-runner: CI_RUNNER_LABEL is not a runner label" >&2
+        exit 1
+      fi
+      if reason=$(ci_host_admits 2>&1); then
+        runner=$label
+      else
+        echo "ci-runner: on a hosted runner, as the CI host does not run $reason" >&2
+      fi
+    fi
+    runner=$(jq -cn --arg runner "$runner" '$runner')
+    echo "$runner"
+    if [[ -n ${GITHUB_OUTPUT-} ]]; then
+      echo "runner=$runner" >> "$GITHUB_OUTPUT"
+    fi
 
 # Check the OpenStack credential, quota, flavors and external network; pass or FAIL per item, no figures
 os-smoke:
