@@ -829,6 +829,24 @@ holds() {
     [ "$(tofu_calls apply | awk '{ print $1 }')" = "-chdir=$PLUMBING" ]
   done
 
+  # The stacks that hold the plumbing stack back are the directories of its region, so a stack added
+  # later is read as well, with nothing else naming it.
+  mkdir -p "$REPO/infra/openstack/stacks/sto2/later"
+  holds sto2/ci state-never-applied.json
+  holds sto2/cluster state-never-applied.json
+  holds sto2/later state-with-resources.json
+  for args in '--yes' 'sto2/plumbing --yes'; do
+    rm -f "$RECORD/tofu"
+    # shellcheck disable=SC2086 # the arguments as an operator types them
+    recipe infra-destroy $args < /dev/null
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"sto2/later still holds resources"*"just infra-destroy sto2/later"* ]]
+    [ -z "$(tofu_calls plan)" ]
+    [ -z "$(tofu_calls apply)" ]
+  done
+  holds sto2/later state-never-applied.json
+
   # A state that cannot be read is not taken for an empty one.
   fake tofu <<EOF
 printf '%s\n' "\$*" >> "$RECORD/tofu"
