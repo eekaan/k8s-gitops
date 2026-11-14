@@ -14,7 +14,10 @@ holds the machine configurations, the talosconfig and the kubeconfig.
    the cluster's `talman.yaml` is written. `just infra-talman` writes it again without applying.
 2. `just cluster-age-key`, once: the Talos age key. Commit `talos/.sops.yaml`.
 3. `just cluster-secrets`, once per cluster: the secrets bundle. Commit it.
-4. `just cluster-bootstrap`: every node configured, Cilium installed, every node Ready.
+4. `just cluster-flux-age-key`, once: the Flux age key. Commit `.sops.yaml`.
+5. `just cluster-bootstrap`: every node configured, Cilium installed, every node Ready.
+6. `just cluster-flux`: what Flux needs before it starts applied, and Flux installed
+   ([kubernetes.md](kubernetes.md#installing-flux)).
 
 Later changes to a patch or to `talman.yaml`, and nodes OpenTofu adds, reach the nodes with
 `just cluster-talos`.
@@ -31,7 +34,8 @@ version, then `just cluster-upgrade-k8s` moves the cluster to the Kubernetes ver
 The secrets bundle holds the cluster's certificate authorities and keys. It is encrypted with sops
 to one age key, the Talos age key, which the operator holds and CI gets as a secret; it never
 enters the repository or the cluster (ADR 0005). The key Flux decrypts `kubernetes/` with is
-another one, so a key held in the cluster does not open the bundle.
+another one, [the Flux age key](#the-flux-age-key), so a key held in the cluster does not open the
+bundle.
 
 Without the key the bundle cannot be decrypted, and no machine configuration, talosconfig or
 kubeconfig can be made for the running cluster. Keep a copy of it away from the machine it was
@@ -41,6 +45,21 @@ made on.
 `secrets.sops.yaml` one directory below `talos/` and nothing else. talman hands sops that file and
 the bundle's path itself, so the rule applies wherever talman runs from.
 
+## The Flux age key
+
+The SOPS files under `kubernetes/`, such as a cluster's `cluster-secrets`
+([kubernetes.md](kubernetes.md#before-flux-starts)), are encrypted to the Flux age key. The operator
+holds it, CI gets it as a secret, and the cluster holds it as the Secret `sops-age`, which Flux
+decrypts with. The recipes refuse the Talos age key in its place.
+
+`.sops.yaml` at the repository root holds its recipient and a rule that matches `*.sops.yaml` under
+`kubernetes/` and nothing else, encrypting only `data` and `stringData`, so a Secret's kind, name and
+keys stay readable. sops reads the nearest `.sops.yaml` above the directory it runs in, and matches
+the rule against the file's path relative to that `.sops.yaml`. At the root it is found from
+anywhere in the repository but `talos/`, where `talos/.sops.yaml` is nearer and matches nothing
+under `kubernetes/`, so sops refuses rather than encrypt to the Talos age key; and it stays out of
+the artifact, which is built from `kubernetes/`.
+
 ## Recipes
 
 - `just cluster-age-key` creates the key with `age-keygen` at the path `SOPS_AGE_KEY_FILE` names,
@@ -48,6 +67,11 @@ the bundle's path itself, so the rule applies wherever talman runs from.
   of the placeholder. It prints the recipient and nothing else. A second run changes nothing. It
   refuses a path inside the repository, and a `talos/.sops.yaml` that names another recipient,
   which it leaves as it is.
+- `just cluster-flux-age-key` creates the Flux age key with `age-keygen` at the path
+  `FLUX_AGE_KEY_FILE` names, with mode 0600, unless a file is there, and writes its recipient into
+  `.sops.yaml` in place of the placeholder. It prints the recipient and nothing else. A second run
+  changes nothing. It refuses a path inside the repository, the Talos age key, and a `.sops.yaml`
+  that names another recipient, which it leaves as it is.
 - `just cluster-secrets [cluster]` generates the bundle with `talman secrets generate`, which
   encrypts it by the rule in `talos/.sops.yaml`. It refuses when the cluster's `talman.yaml` is
   missing, while `talos/.sops.yaml` holds the placeholder, and when the bundle exists: a new bundle
@@ -114,6 +138,15 @@ the bundle's path itself, so the rule applies wherever talman runs from.
   Both upgrade recipes do nothing and ask nothing when every node runs its version, and need what
   `cluster-bootstrap` needs. An etcd snapshot holds every Secret in the cluster; talman writes it
   into `clusterconfig/` with mode 0600, and it stays there.
+- `just cluster-config [cluster]` applies what Flux needs before it starts: the namespace
+  `flux-system`, the ConfigMap `cluster-config`, the Secret `cluster-secrets` and the Secret
+  `sops-age` ([kubernetes.md](kubernetes.md#before-flux-starts)). It refuses, naming each, when the
+  cluster's `talman.yaml` or kubeconfig, `CLUSTER_DOMAIN`, the Flux age key or its recipient in
+  `.sops.yaml` is missing, when the Flux age key is not the key of that recipient or is the Talos
+  age key, and when a key of `cluster-config` or `cluster-secrets` cannot be filled or is not
+  listed. A second run changes nothing.
+- `just cluster-flux [cluster] [--reapply]` installs Flux on a cluster that runs none
+  ([kubernetes.md](kubernetes.md#installing-flux)). It needs what `cluster-config` needs.
 
 A failing recipe ends with a line naming the step it failed in.
 
@@ -127,16 +160,19 @@ A failing recipe ends with a line naming the step it failed in.
 
 ## What the recipes print
 
-The recipes' own lines name nodes by hostname, never by address, and print none of the age key, the
-bundle, the kubeconfig and `KUBE_API_ADDRESS`. talman's and talosctl's output passes through as
-they print it, and names each node with the address talman reaches it on.
+The recipes' own lines name nodes by hostname, never by address, and print none of the age keys,
+the bundle, the kubeconfig, `KUBE_API_ADDRESS` and the values of `cluster-config` and
+`cluster-secrets`. talman's and talosctl's output passes through as they print it, and names each
+node with the address talman reaches it on; so do kubectl's and helm's, which name the objects they
+apply.
 
 ## Environment
 
 The recipes read `.env` and the environment as the infrastructure recipes do
 ([infrastructure.md](infrastructure.md#environment)), and name each variable that is missing. No
-recipe reads the age key itself or prints a secret: sops and talman get the key's location from
-their environment.
+recipe prints a secret or reads the Talos age key itself: sops and talman get the key's location
+from their environment. `cluster-config` reads the Flux age key, to hand it to kubectl and
+age-keygen on standard input.
 
 - `SOPS_AGE_KEY_FILE`: the path of the Talos age key, outside the repository. In CI,
   `SOPS_AGE_KEY` holds the key itself instead. Every recipe that reaches the nodes needs one of
@@ -146,6 +182,11 @@ their environment.
   command line in one place: `cluster-upgrade-k8s` hands it to talosctl as its endpoint.
 - `TALOS_WAIT`: how many seconds `cluster-bootstrap` and `cluster-talos` wait for the nodes, 600
   when unset.
+- `FLUX_AGE_KEY_FILE`: the path of the Flux age key, outside the repository. In CI, `FLUX_AGE_KEY`
+  holds the key itself instead. `cluster-config` and `cluster-flux` need one of them.
+- `CLUSTER_DOMAIN`: the domain the cluster's applications are published under, a lower-case DNS
+  name, which becomes `CLUSTER_DOMAIN` in `cluster-config`; `cluster-config` and `cluster-flux`
+  need it.
 
 The recipes, the check aside, refuse to run while `GODEBUG` sets `http2debug`: Go's HTTP/2 debug
 log prints the frames talosctl and kubectl send and receive, which carry machine configurations

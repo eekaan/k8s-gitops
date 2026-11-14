@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Creates the Flux age key, which the SOPS files under kubernetes/ are encrypted to and which Flux
+# decrypts them with, at the path FLUX_AGE_KEY_FILE names unless a file is there already, and writes
+# its recipient into .sops.yaml in place of the placeholder. Prints the recipient, which is public,
+# and nothing else. The key is never read here: age-keygen writes it, with mode 0600 and never over
+# a file, and derives the recipient from it. When .sops.yaml names another recipient, nothing is
+# changed and the run fails, as the files already encrypted to that recipient need its key. The
+# Talos age key is refused: the cluster holds the Flux age key, and must not open the Talos
+# secrets bundles with it.
+# Usage: scripts/cluster-flux-age-key
+set -euo pipefail
+
+# shellcheck source=scripts/lib/cluster.sh
+. "$(dirname "$0")/lib/cluster.sh"
+report_failed_step
+
+load_env
+refuse_http2_debug
+require_env FLUX_AGE_KEY_FILE
+key=$FLUX_AGE_KEY_FILE
+if inside_repository "$key"; then
+  infra_error "FLUX_AGE_KEY_FILE names a path inside the repository; the Flux age key is kept outside it"
+  exit 1
+fi
+
+step="reading .sops.yaml"
+written=$(flux_recipient)
+if [[ ! -e $key ]] && ! is_placeholder "$written"; then
+  infra_error ".sops.yaml names another recipient, and FLUX_AGE_KEY_FILE names no key; point it at that recipient's key"
+  exit 1
+fi
+
+if [[ ! -e $key ]]; then
+  step="creating the key"
+  mkdir -p "$(dirname "$key")"
+  # age-keygen prints the public key it made; it is printed once, below.
+  if ! out=$(age-keygen -o "$key" 2>&1); then
+    printf '%s\n' "$out" >&2
+    exit 1
+  fi
+fi
+
+step="reading the key's recipient"
+recipient=$(age-keygen -y "$key")
+if [[ ! $recipient =~ ^age1[0-9a-z]+$ ]]; then
+  infra_error "FLUX_AGE_KEY_FILE does not hold exactly one age key"
+  exit 1
+fi
+if [[ $recipient == "$(sops_recipient)" ]]; then
+  infra_error "FLUX_AGE_KEY_FILE holds the Talos age key; Flux gets a key of its own, so the key the cluster holds does not open the Talos secrets bundles"
+  exit 1
+fi
+
+if [[ $written != "$recipient" ]]; then
+  if ! is_placeholder "$written"; then
+    infra_error ".sops.yaml names another recipient than the key FLUX_AGE_KEY_FILE names; it is left as it is"
+    exit 1
+  fi
+  step="writing the recipient into .sops.yaml"
+  RECIPIENT=$recipient yq -i '.creation_rules[].age = strenv(RECIPIENT)' "$flux_sops_config"
+fi
+echo "$recipient"

@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Applies to a cluster what Flux needs before it starts, in the namespace flux-system, which it
+# creates: the ConfigMap cluster-config and the Secret cluster-secrets, which Flux substitutes
+# variables from, and the Secret sops-age, which kustomize-controller decrypts SOPS files with.
+#   cluster-config   rendered here, never committed, with exactly the keys of the cluster's
+#                    cluster-config.example.yaml (fill_cluster_config in scripts/lib/cluster.sh)
+#   cluster-secrets  decrypted by sops from kubernetes/clusters/<cluster>/secrets/
+#                    cluster-secrets.sops.yaml straight into kubectl; without that file, an empty
+#                    Secret, which is all substitution needs
+#   sops-age         the Flux age key, under the data key age.agekey
+# Everything is checked before anything is applied, and nothing is applied while a key cannot be
+# filled. Each object reaches kubectl on standard input; no value is printed or passed as an
+# argument. kubectl applies server-side, so a second run changes nothing.
+# Usage: scripts/cluster-config [cluster]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "${1-}"
+complete=1
+require_cluster talman || complete=0
+require_kubeconfig || complete=0
+require_pre_flux "$cluster" "$talman_file" || complete=0
+((complete))
+secrets=$(cluster_secrets_file "$cluster")
+
+step="applying the namespace flux-system"
+jq -n '{apiVersion: "v1", kind: "Namespace", metadata: {name: "flux-system"}}' | apply_in_flux_system
+
+step="applying the ConfigMap cluster-config"
+cluster_config_manifest | apply_in_flux_system
+
+step="applying the Secret cluster-secrets"
+if [[ -f $secrets ]]; then
+  flux_sops decrypt "$secrets" | apply_in_flux_system
+else
+  jq -n '{apiVersion: "v1", kind: "Secret", metadata: {name: "cluster-secrets", namespace: "flux-system"}, type: "Opaque"}' |
+    apply_in_flux_system
+fi
+
+step="applying the Secret sops-age"
+# kustomize-controller imports the age keys of every data key whose name ends in .agekey.
+flux_age_key | jq -Rs '{apiVersion: "v1", kind: "Secret", metadata: {name: "sops-age", namespace: "flux-system"},
+  type: "Opaque", data: {"age.agekey": @base64}}' | apply_in_flux_system
+echo "cluster-config: flux-system on $cluster holds cluster-config, cluster-secrets and sops-age"

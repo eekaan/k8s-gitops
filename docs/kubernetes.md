@@ -10,7 +10,9 @@ the rules below.
 - `clusters/<cluster>/`: the cluster's root Kustomization in `ks.yaml`; Flux's own two
   applications in `flux-system/flux-operator/` and `flux-system/flux-instance/` (see
   [Flux itself](#flux-itself)); a `kustomization.yaml` that lists the root's and those two
-  `ks.yaml` files and nothing else; and the example key lists, which nothing lists.
+  `ks.yaml` files and nothing else; the example key lists; and, once the cluster has substitution
+  secrets, `secrets/cluster-secrets.sops.yaml` (see [Before Flux starts](#before-flux-starts)).
+  Nothing lists the last two.
 - `apps/overlays/<cluster>/kustomization.yaml`: what the cluster runs.
 - `apps/base/<namespace>/`: a namespace directory, with `namespace.yaml` and a
   `kustomization.yaml` that sets the namespace and includes `components/common`.
@@ -236,7 +238,8 @@ of its data keys whose name ends in `.agekey`, such as `age.agekey`. It decrypts
 every Kustomization that uses SOPS and names no Secret of its own in `decryption.secretRef`, which
 in this tree is every one. Like `cluster-config` and `cluster-secrets`, the Secret exists before
 Flux does and nothing in the tree creates it; until it exists, every Kustomization that decrypts
-fails, the root and Flux's own included.
+fails, the root and Flux's own included. `just cluster-config` applies all three
+([Before Flux starts](#before-flux-starts)).
 
 Flux 2.10 still gates `ExternalArtifact` sources, which source-watcher produces, behind a feature
 gate on kustomize-controller and helm-controller. The operator turns the gate on by itself
@@ -246,19 +249,86 @@ whenever source-watcher is among the instance's components, so the instance does
 instance's patches to the pinned Flux manifests to check the sync source, its signature identity,
 the components and the age-key flag.
 
+## Before Flux starts
+
+Flux needs four objects that nothing in the tree creates, all in `flux-system`: the namespace
+`flux-system` itself; the ConfigMap `cluster-config` and the Secret `cluster-secrets`, which every
+Kustomization substitutes variables from; and the Secret `sops-age`, which kustomize-controller
+decrypts with ([Controllers](#controllers)).
+
+`just cluster-config [cluster]` applies them through the cluster's kubeconfig
+([cluster.md](cluster.md#recipes)). It checks everything first, naming each problem, and applies
+nothing until all of it is right. Each object reaches kubectl on standard input and is applied
+server-side, so a second run changes nothing; no value is printed, passed as an argument or
+written to disk.
+
+`cluster-config` is rendered at run time and never committed. Its keys are exactly those of
+`clusters/<cluster>/cluster-config.example.yaml`: the recipe fails naming each key the example lists
+that it cannot fill, and each key it would fill that the example does not list. A key a manifest
+starts to use is listed in the example and given its source in `fill_cluster_config` in
+`scripts/lib/cluster.sh` in the same change. The values come from:
+
+- `CLUSTER_DOMAIN`: the environment variable of that name, the domain the cluster's applications are
+  published under, a lower-case DNS name.
+- `NODE_CIDR`: `values.nodeSubnet` in `talos/<cluster>/talman.yaml`, which the cluster stack renders
+  from the plumbing stack's node subnet and which the kubelets take their node addresses from.
+- `NODE_NAME_REGEX`: the hostnames in that `talman.yaml`, joined with `|`, with a trailing number
+  standing for any number: `lab-cp-1` becomes `lab-cp-[0-9]+`, so a node OpenTofu adds later, which
+  it numbers after the others, matches as well.
+
+`cluster-secrets` is decrypted from `clusters/<cluster>/secrets/cluster-secrets.sops.yaml` by sops,
+with the Flux age key, straight into kubectl, when that file exists. Its keys must be exactly those
+of `cluster-secrets.example.yaml`; sops encrypts values only, so the recipe reads them without
+decrypting anything. Without the file an empty Secret is applied, which is all substitution needs,
+and the example must list no key. Nothing in the tree lists `secrets/`, so Flux neither applies nor
+prunes it, and the step that publishes the artifact must leave `clusters/*/secrets/` out: the
+artifact carries what Flux applies.
+
+`sops-age` holds the Flux age key ([cluster.md](cluster.md#the-flux-age-key)) under the data key
+`age.agekey`.
+
+## Installing Flux
+
+`just cluster-flux [cluster] [--reapply]` installs Flux on a cluster that has nodes and Cilium but
+no Flux. It checks what `cluster-config` checks first, then:
+
+1. It refuses a cluster that runs a FluxInstance already, as Flux manages itself from then on.
+   With `--reapply` it applies the objects above again on such a cluster and installs nothing, as
+   `just cluster-config` does.
+2. It applies the objects above.
+3. It installs `flux-operator` and then `flux-instance` from `clusters/<cluster>/flux-system/` with
+   `install-app` ([below](#applications-installed-before-flux)), as the releases `flux-operator`
+   and `flux-instance` in `flux-system`, which Flux adopts once it runs.
+4. It waits up to ten minutes for the FluxInstance `flux` to report Ready, and prints the next
+   step.
+
+A run that stops once the FluxInstance exists is not run again: what keeps it from Ready is fixed
+on the cluster, and from then on the operator and Flux take over.
+
 ## Applications installed before Flux
 
-Flux cannot run before the cluster has a pod network, so the CNI, Cilium in
-`apps/base/kube-system/cilium/`, is installed by a script first and adopted by Flux afterwards.
-It is an application like any other, and the script reads it rather than a copy:
+Some applications have to run before Flux can: the CNI, Cilium in `apps/base/kube-system/cilium/`,
+as Flux cannot run before the cluster has a pod network, and Flux's own operator and instance. Each
+is an application like any other, installed by a script first and adopted by Flux afterwards, and
+the script reads it rather than a copy.
 
-- `just cilium-install` runs `scripts/install-cilium` against the cluster the `KUBECONFIG`
-  environment variable names. It takes the chart location and version from the application's
-  `ocirepository.yaml`, the release name and namespace from its `helmrelease.yaml`, and gives
-  `values.yaml` to helm as it is. It waits for the API server first and for every node to be
-  Ready after, and leaves a release that already runs that chart version with those values alone.
-- The HelmRelease sets `releaseName`, `targetNamespace` and `storageNamespace` to the release the
-  script installs, so Flux upgrades that release instead of installing a second one.
+`just app-install <application directory>` runs `scripts/install-app` against the cluster the
+`KUBECONFIG` environment variable names, for the directory that holds the application's `ks.yaml`
+and `app/`. It takes the chart location and version from the application's `ocirepository.yaml`
+and gives `values.yaml` to helm as it is. The release is the one helm-controller makes of the
+HelmRelease: its `releaseName`, `targetNamespace` and `storageNamespace` where it sets them, and
+otherwise the HelmRelease's name, after its `targetNamespace` and a dash when it has one, in the
+HelmRelease's own namespace, the `targetNamespace` of `ks.yaml`. A HelmRelease whose history would be
+kept in another namespace than the release is refused, as helm keeps both in one. The script waits
+for the API server first, and leaves a release that already runs that chart version with those
+values alone.
+
+- `just cilium-install` runs `scripts/install-cilium`, which installs Cilium so and then waits for
+  every node to be Ready.
+- An application installed this way has a HelmRelease that names the release the script installs,
+  so Flux upgrades that release instead of installing a second one. Cilium's sets `releaseName`,
+  `targetNamespace` and `storageNamespace`; Flux's own leave them to helm-controller's defaults,
+  `flux-operator` and `flux-instance` in `flux-system`.
 - Substitution is disabled on the values ConfigMap, so the chart gets the same values on both
   paths, and a version change in `ocirepository.yaml` moves both.
 

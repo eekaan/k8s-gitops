@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Installs an application from kubernetes/ on a cluster before Flux runs there, as the Helm release
+# its HelmRelease adopts once Flux does: the chart location and version from the application's
+# ocirepository.yaml, the release from its helmrelease.yaml and ks.yaml as Flux reads them, and
+# its values.yaml as it is (install_app in scripts/lib/cluster.sh). Waits for the API server first.
+# A release that already runs that chart version with those values is left alone, so a second run
+# changes nothing.
+#
+# Usage: KUBECONFIG=<path> scripts/install-app <application directory>
+#   such as kubernetes/clusters/lab-sto2/flux-system/flux-operator, the directory with ks.yaml and app/
+# The kubeconfig reaches kubectl and helm through the environment; nothing here opens it.
+set -euo pipefail
+
+# shellcheck source=scripts/lib/cluster.sh
+. "$(dirname "$0")/lib/cluster.sh"
+
+if (($# != 1)) || [[ $1 == -* ]]; then
+  infra_error "usage: install-app <application directory>"
+  exit 2
+fi
+report_failed_step
+refuse_http2_debug
+require_install_tools
+install_app "$1"
