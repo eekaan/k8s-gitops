@@ -103,7 +103,7 @@ checks: static tests-1 tests-2 tests-3
 
 # The groups of checks are the dependencies of checks, and each group's checks its own dependencies: just ci runs every group side by side in containers of its own, and CI runs each as a job of its own. A check, with whatever it depends on, belongs to one group only, or it would run twice.
 # The checks other than the bats tests, the cheapest and most basic first
-static: tools-check check-literals check-commit-literals cluster-secrets-check lint renovate-check scenarios-check infra-check talos-check kubernetes-check secrets-scan
+static: tools-check check-literals check-commit-literals cluster-secrets-check lint renovate-check scenarios-check infra-check talos-check kubernetes-check render-check secrets-scan
 
 # The first of three parts of the bats tests
 tests-1: (test '1/3')

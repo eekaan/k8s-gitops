@@ -70,17 +70,27 @@ Feature: Continuous integration
   Scenario: The render job has read-only permissions, no secrets, and always a hosted runner
     Given the CI workflow's job that renders a pull request's diff
     When its triggers, permissions, runner, steps and recipe are read
-    Then it runs for pull_request and never pull_request_target, with only contents: read, no secret and no token handed to any step, on ubuntu-latest named in the job itself, renders in the Dagger module and uploads the comment as one file in an artifact
+    Then it runs for pull_request and never pull_request_target, with only contents: read, no secret, and no token handed to any step but the read-only one the checkout and mise actions take by default, on ubuntu-latest named in the job itself, renders in the Dagger module and uploads the comment as one file in an artifact
 
   Scenario: The comment job runs no code and checks out nothing from the pull request
     Given the workflow that comments on pull requests
-    When its trigger, jobs and steps are read
-    Then it runs only when the CI workflow completes for a pull request, on a hosted runner, checks out the default branch it runs on and no other ref or repository, uses only the pinned checkout and mise actions, runs one recipe with the run's identifiers in its environment, and has no expression in any command
+    When its trigger, permissions, jobs and steps are read
+    Then it runs only when the CI workflow completes, not cancelled, for a pull request, on a hosted runner, with read access to contents and actions and write access to pull requests only, set for the workflow and in no job, checks out the default branch it runs on and no other ref or repository, uses only the pinned checkout and mise actions, installs its tools without a token, runs one recipe with the run's identifiers in its environment, and has no expression in any command
 
   Scenario: The comment job treats the artifact as text of a bounded size
-    Given an artifact whose one file holds shell and workflow syntax, and artifacts with two files, a symlink, another name, no marker or more than a comment holds
+    Given an artifact whose one file is a comment render-diff writes with shell and workflow syntax in its diff, one exactly as long as the comment job accepts, and artifacts with two files, a symlink, another name, a byte too many, no marker, a first line that only starts with the marker or ends in a carriage return, a NUL or a carriage return in a diff, or a NUL in the marker with a command and a file named after its parts at hand
     When the comment recipe runs for each
-    Then the first is posted byte for byte and nothing in it runs, and every other one is refused without anything being posted
+    Then the first two are posted byte for byte followed by the job's own line naming the commit, nothing in them runs or reaches the log, the comment stays within GitHub's limit, and every other one is refused without anything being posted or run
+
+  Scenario: The comment job posts nothing but what render-diff writes
+    Given every kind of comment render-diff writes, and comments that add a mention, a cross-reference, a link, an image, an HTML tag, free text, another application's name, a line that closes a diff's fence, or another footer
+    When the comment recipe runs for each
+    Then every comment render-diff writes is posted, and every other one is refused without anything being posted
+
+  Scenario: just ci renders the tree as the render job does
+    Given the justfile
+    When the checks of just ci's groups are read
+    Then one group renders this checkout's tree with scripts/render and keeps nothing, so a tree that does not render fails just ci as it fails the required check
 
   Scenario: The render is part of the required result, and the comment is not
     Given the CI workflow and the comment workflow

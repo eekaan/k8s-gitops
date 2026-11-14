@@ -20,9 +20,11 @@ permissions:
   # To find the pull request, and create or update its comment.
   pull-requests: write
 
-# Runs for one commit never overlap, so a re-run cannot create a second comment beside the first.
+# Runs for one pull request's head never overlap, so two cannot both create the comment, and a
+# running one is never cancelled: the older of two finds that the head has moved on and posts
+# nothing.
 concurrency:
-  group: render-comment-${{ github.event.workflow_run.head_sha }}
+  group: render-comment-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
   cancel-in-progress: false
 
 jobs:
@@ -39,6 +41,8 @@ jobs:
         with:
           version: 2026.11.4
           install_args: just gh jq
+          # Not the job's token, which can write to pull requests: mise installs without one.
+          github_token: ""
       # The run's identifiers reach the recipe as variables, never as text in the command.
       - run: just ci-comment
         env:

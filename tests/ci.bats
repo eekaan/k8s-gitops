@@ -543,7 +543,8 @@ render_job() {
   [ "$(yq -o=json -I=0 '.on | keys' "$WORKFLOW")" = '["pull_request","push"]' ]
   [ "$(yq -o=json -I=0 '.permissions' "$WORKFLOW")" = '{"contents":"read"}' ]
   [ "$(yq '.jobs[strenv(RENDER)] | has("permissions")' "$WORKFLOW")" = false ]
-  # No step is handed a secret or the job's token.
+  # No step is handed a secret or the job's token; the checkout and mise actions take the read-only
+  # token by default.
   [ "$(yq '[.jobs[strenv(RENDER)] | .. | select(tag == "!!str") | select(test("secrets\.|github\.token|GITHUB_TOKEN"))] | length' "$WORKFLOW")" = 0 ]
   # A hosted runner named in the job itself, never the runner the check jobs are given.
   [ "$(yq '.jobs[strenv(RENDER)].runs-on' "$WORKFLOW")" = ubuntu-latest ]
@@ -574,10 +575,14 @@ render_job() {
   [ "$(yq -o=json -I=0 '.on | keys' "$COMMENT")" = '["workflow_run"]' ]
   [ "$(yq -o=json -I=0 '.on.workflow_run.workflows' "$COMMENT")" = "$(yq -o=json -I=0 '[.name]' "$WORKFLOW")" ]
   [ "$(yq -o=json -I=0 '.on.workflow_run.types' "$COMMENT")" = '["completed"]' ]
-  # One job, for runs of pull requests only, on a hosted runner.
+  # One job, for runs of pull requests that were not cancelled only, on a hosted runner.
   [ "$(yq '.jobs | length' "$COMMENT")" = 1 ]
-  [[ "$(yq '.jobs[].if' "$COMMENT")" == *"github.event.workflow_run.event == 'pull_request'"* ]]
+  [ "$(yq '.jobs[].if' "$COMMENT")" = "github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion != 'cancelled'" ]
   [ "$(yq '.jobs[].runs-on' "$COMMENT")" = ubuntu-latest ]
+  # Reading the default branch and the run's artifact, and writing to pull requests: nothing more,
+  # and no job asks for more.
+  [ "$(yq -o=json -I=0 '.permissions' "$COMMENT" | jq -c -S .)" = '{"actions":"read","contents":"read","pull-requests":"write"}' ]
+  [ "$(yq '[.jobs[] | select(has("permissions"))] | length' "$COMMENT")" = 0 ]
   # Each checkout takes the commit the run is for, the default branch's: no other ref, repository
   # or path, and the token is not left in it.
   run yq -o=json -I=0 '[.jobs[].steps[] | select(.uses // "" | test("^actions/checkout@")) | .with] | unique' "$COMMENT"
@@ -585,6 +590,8 @@ render_job() {
   # Only the checkout and mise actions, pinned as the CI workflow pins them.
   [ "$(yq -o=json -I=0 '[.jobs[].steps[] | select(has("uses")) | .uses] | unique' "$COMMENT")" = "$(yq -o=json -I=0 '[.jobs[].steps[] | select(.uses // "" | test("^(actions/checkout|jdx/mise-action)@")) | .uses] | unique' "$WORKFLOW")" ]
   [ "$(yq '[.jobs[].steps[] | select(has("uses") | not) | select(has("run") | not)] | length' "$COMMENT")" = 0 ]
+  # mise installs the tools without the job's token, which can write to pull requests.
+  [ "$(yq -o=json -I=0 '[.jobs[].steps[] | select(.uses // "" | test("^jdx/mise-action@")) | .with.github_token]' "$COMMENT")" = '[""]' ]
   # One command, one recipe, which gets the run's identifiers as variables and never as text in
   # the command; no command holds an expression.
   [ "$(yq -o=json -I=0 '[.jobs[].steps[] | select(has("run")) | .run]' "$COMMENT")" = '["just ci-comment"]' ]
@@ -604,7 +611,7 @@ EOF
 
 # fake_gh: a gh first on PATH that records each call in $FAKE/calls, plays GitHub from the files in
 # $FAKE, and keeps each comment it is asked to write as $FAKE/written.json, its method and path in
-# $FAKE/writes.
+# $FAKE/writes. The run's artifact is the directory $FAKE/artifact, listed by the API while it exists.
 fake_gh() {
   BIN="$BATS_TEST_TMPDIR/bin"
   FAKE="$BATS_TEST_TMPDIR/github"
@@ -639,6 +646,13 @@ while (($#)); do
   esac
 done
 case "$method $path" in
+  "GET repos/fixture-owner/fixture-repo/actions/runs/42/artifacts")
+    if [[ -d $FAKE/artifact ]]; then
+      echo '{"total_count": 1, "artifacts": [{"id": 9, "name": "render-diff", "expired": false}]}'
+    else
+      echo '{"total_count": 0, "artifacts": []}'
+    fi
+    ;;
   "GET repos/fixture-owner/fixture-repo/pulls") cat "$FAKE/pulls.json" ;;
   "GET repos/fixture-owner/fixture-repo/issues/7/comments"*) cat "$FAKE/comments.json" ;;
   "POST "* | "PATCH "*)
@@ -658,13 +672,18 @@ EOF
 # post: runs the comment recipe's script for run 42 of a fork's pull request, with the fake gh first
 # on PATH and no credential in reach.
 post() {
+  run comment_job
+}
+
+# comment_job: post's run of the script, its output and its exit status its own.
+comment_job() {
   rm -f "$FAKE/writes" "$FAKE/written.json"
   # Where anything the artifact made run would leave its files.
   cd "$BATS_TEST_TMPDIR" || return 1
-  run env -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
+  env -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
     PATH="$BIN:$PATH" FAKE="$FAKE" GH_CONFIG_DIR="$BATS_TEST_TMPDIR/gh-config" GH_TOKEN=fixture-token \
     GITHUB_REPOSITORY=fixture-owner/fixture-repo RUN_ID=42 HEAD_SHA="$HEAD_SHA" \
-    HEAD_REPOSITORY=someone-else/fixture-repo HEAD_BRANCH=feature "$REPO/scripts/ci-comment"
+    HEAD_REPOSITORY=someone-else/fixture-repo HEAD_BRANCH=feature "$REPO/scripts/ci-comment" 2>&1
 }
 
 # artifact [FILE...]: makes the run's artifact hold FILE..., each copied from $BATS_TEST_TMPDIR/FILE.
@@ -677,61 +696,204 @@ artifact() {
   done
 }
 
-# a_comment: writes to $BATS_TEST_TMPDIR/comment.md what just render-diff writes for two renders
-# that do not differ, so its marker is the one the recipe looks for.
-a_comment() {
-  mkdir -p "$BATS_TEST_TMPDIR/empty"
-  "$REPO/scripts/render-diff" "$BATS_TEST_TMPDIR/empty" "$BATS_TEST_TMPDIR/empty" > "$BATS_TEST_TMPDIR/comment.md"
+# posted: the body of the comment the fake gh was asked to write, into $BATS_TEST_TMPDIR/posted.md.
+posted() {
+  jq -j '.body' "$FAKE/written.json" > "$BATS_TEST_TMPDIR/posted.md"
+}
+
+# comment NAME: writes $BATS_TEST_TMPDIR/NAME.md, what render-diff writes for the renders in
+# $BATS_TEST_TMPDIR/NAME-base and NAME-head, made empty when they do not exist.
+comment() {
+  mkdir -p "$BATS_TEST_TMPDIR/$1-base" "$BATS_TEST_TMPDIR/$1-head"
+  "$REPO/scripts/render-diff" "$BATS_TEST_TMPDIR/$1-base" "$BATS_TEST_TMPDIR/$1-head" > "$BATS_TEST_TMPDIR/$1.md"
+}
+
+# added NAME LINE...: the comment render-diff writes when the render adds one object to the
+# application demo/app, whose lines are LINE..., into $BATS_TEST_TMPDIR/NAME.md.
+added() {
+  local name=$1
+  shift
+  mkdir -p "$BATS_TEST_TMPDIR/$name-base/demo/app" "$BATS_TEST_TMPDIR/$name-head/demo/app"
+  printf '%s\n' "$@" > "$BATS_TEST_TMPDIR/$name-head/demo/app/ConfigMap_web_app.yaml"
+  comment "$name"
+}
+
+# room: the most bytes of a comment the comment job accepts.
+room() {
+  (. "$REPO/scripts/lib/render-comment.sh" && echo "$render_comment_room")
+}
+
+# refused NAME [REASON]: the comment job refuses the artifact holding
+# $BATS_TEST_TMPDIR/NAME/comment.md, saying REASON, by default that it is not a comment render-diff
+# writes, and writes nothing.
+refused() {
+  local said
+  artifact "$1/comment.md"
+  if said=$(comment_job); then
+    echo "posted $1"
+    return 1
+  fi
+  [ ! -e "$FAKE/writes" ] || { echo "wrote for $1"; return 1; }
+  [[ $said == *"${2:-is not a comment render-diff writes}"* ]] || { echo "refused $1 for another reason: $said"; return 1; }
 }
 
 @test "The comment job treats the artifact as text of a bounded size" {
   fake_gh
-  a_comment
-  # Shell and workflow syntax that would run, or be expanded, anywhere it was not plain text: right
-  # after the marker, before anything that would stop a shell parsing on.
-  {
-    sed -n 1p "$BATS_TEST_TMPDIR/comment.md"
-    cat << 'EOF'
-touch ran-a-line
-$(touch ran-a-command) `touch ran-a-backquote` ${{ secrets.ANYTHING }} '; touch ran-quoted; '
-::stop-commands::fixture
-EOF
-    sed 1d "$BATS_TEST_TMPDIR/comment.md"
-  } > "$BATS_TEST_TMPDIR/hostile.md"
-  mv "$BATS_TEST_TMPDIR/hostile.md" "$BATS_TEST_TMPDIR/comment.md"
+  # Shell, workflow command and expression syntax, in the diff, where render-diff puts what a pull
+  # request writes.
+  # shellcheck disable=SC2016 # the syntax is the point
+  added hostile 'data:' '  a: $(touch ran-a-command)' '  b: `touch ran-a-backquote`' \
+    '  c: ${{ secrets.ANYTHING }}' "  d: '; touch ran-quoted; '" '::stop-commands::fixture' 'touch ran-a-line'
+  cp "$BATS_TEST_TMPDIR/hostile.md" "$BATS_TEST_TMPDIR/comment.md"
   artifact comment.md
 
   post
 
   [ "$status" -eq 0 ]
   [ "$(cat "$FAKE/writes")" = "POST repos/fixture-owner/fixture-repo/issues/7/comments" ]
-  jq -j '.body' "$FAKE/written.json" > "$BATS_TEST_TMPDIR/posted.md"
-  cmp "$BATS_TEST_TMPDIR/comment.md" "$BATS_TEST_TMPDIR/posted.md"
+  posted
+  # The artifact byte for byte, then the job's own line naming the commit it describes.
+  size=$(wc -c < "$BATS_TEST_TMPDIR/comment.md")
+  head -c "$size" "$BATS_TEST_TMPDIR/posted.md" | cmp - "$BATS_TEST_TMPDIR/comment.md"
+  tail -c +$((size + 1)) "$BATS_TEST_TMPDIR/posted.md" > "$BATS_TEST_TMPDIR/trailer.md"
+  grep -q "$HEAD_SHA" "$BATS_TEST_TMPDIR/trailer.md"
+  grep -q "own CI run" "$BATS_TEST_TMPDIR/trailer.md"
   # Nothing of it ran, and none of it reached the log, where GitHub reads workflow commands.
-  [[ $output != *"::stop-commands::"* ]]
+  [[ $output != *"stop-commands"* ]]
   run find "$BATS_TEST_TMPDIR" "$REPO" -name 'ran-*'
   [ -z "$output" ]
 
-  # Every other artifact is refused before anything is posted.
-  cp "$BATS_TEST_TMPDIR/comment.md" "$BATS_TEST_TMPDIR/other.md"
-  ln -s "$BATS_TEST_TMPDIR/other.md" "$BATS_TEST_TMPDIR/linked.md"
-  mkdir -p "$BATS_TEST_TMPDIR/symlink" "$BATS_TEST_TMPDIR/unmarked" "$BATS_TEST_TMPDIR/large"
-  ln -s "$BATS_TEST_TMPDIR/other.md" "$BATS_TEST_TMPDIR/symlink/comment.md"
-  sed 1d "$BATS_TEST_TMPDIR/comment.md" > "$BATS_TEST_TMPDIR/unmarked/comment.md"
-  { cat "$BATS_TEST_TMPDIR/comment.md"; head -c 65536 /dev/zero | tr '\0' x; } > "$BATS_TEST_TMPDIR/large/comment.md"
-  local refused
-  for refused in "comment.md other.md" "symlink/comment.md" "other.md" "unmarked/comment.md" "large/comment.md" ""; do
-    # shellcheck disable=SC2086 # the files of each case, split on blanks
-    artifact $refused
-    post
-    [ "$status" -ne 0 ] || { echo "posted an artifact of: ${refused:-nothing}"; return 1; }
-    [ ! -e "$FAKE/writes" ] || { echo "wrote for an artifact of: $refused"; return 1; }
+  # A comment exactly as long as the job accepts is posted, and stays within GitHub's limit with
+  # the job's line; a byte more is refused.
+  local limit
+  limit=$(room)
+  added long x
+  mkdir -p "$BATS_TEST_TMPDIR/exact" "$BATS_TEST_TMPDIR/over"
+  awk -v pad=$((limit - $(wc -c < "$BATS_TEST_TMPDIR/long.md"))) \
+    '!done && $0 == "+x" { line = $0; while (pad-- > 0) line = line "x"; $0 = line; done = 1 } 1' \
+    "$BATS_TEST_TMPDIR/long.md" > "$BATS_TEST_TMPDIR/exact/comment.md"
+  [ "$(wc -c < "$BATS_TEST_TMPDIR/exact/comment.md")" -eq "$limit" ]
+  sed 's/^+x/+xx/' "$BATS_TEST_TMPDIR/exact/comment.md" > "$BATS_TEST_TMPDIR/over/comment.md"
+  artifact exact/comment.md
+  post
+  [ "$status" -eq 0 ]
+  posted
+  [ "$(wc -m < "$BATS_TEST_TMPDIR/posted.md")" -le 65536 ]
+  refused over
+
+  # Every other artifact is refused before anything is posted or run.
+  local case marker
+  marker=$(sed -n 1p "$BATS_TEST_TMPDIR/hostile.md")
+  for case in two symlink other none unmarked prefixed cr nul-diff cr-diff nul-marker; do
+    mkdir -p "$BATS_TEST_TMPDIR/$case"
   done
+  cp "$BATS_TEST_TMPDIR/hostile.md" "$BATS_TEST_TMPDIR/two/comment.md"
+  cp "$BATS_TEST_TMPDIR/hostile.md" "$BATS_TEST_TMPDIR/two/other.md"
+  ln -s "$BATS_TEST_TMPDIR/hostile.md" "$BATS_TEST_TMPDIR/symlink/comment.md"
+  cp "$BATS_TEST_TMPDIR/hostile.md" "$BATS_TEST_TMPDIR/other/other.md"
+  sed 1d "$BATS_TEST_TMPDIR/hostile.md" > "$BATS_TEST_TMPDIR/unmarked/comment.md"
+  { echo "$marker x"; sed 1d "$BATS_TEST_TMPDIR/hostile.md"; } > "$BATS_TEST_TMPDIR/prefixed/comment.md"
+  { printf '%s\r\n' "$marker"; sed 1d "$BATS_TEST_TMPDIR/hostile.md"; } > "$BATS_TEST_TMPDIR/cr/comment.md"
+  sed 's/^+data:$/+da\x00ta:/' "$BATS_TEST_TMPDIR/hostile.md" > "$BATS_TEST_TMPDIR/nul-diff/comment.md"
+  sed 's/^+data:$/+data:\r/' "$BATS_TEST_TMPDIR/hostile.md" > "$BATS_TEST_TMPDIR/cr-diff/comment.md"
+  for case in cr nul-diff cr-diff; do
+    # shellcheck disable=SC2094 # the file is only read, twice
+    if tr -d '\000\r' < "$BATS_TEST_TMPDIR/$case/comment.md" | cmp -s - "$BATS_TEST_TMPDIR/$case/comment.md"; then
+      echo "$case holds no NUL or carriage return"
+      return 1
+    fi
+  done
+  # bash drops a run of NULs and reads the line up to them: a command named after the marker's
+  # middle, with its input from a file named after its start, would run were the file sourced.
+  { printf '<!-- k8s-gitops:render-diff --'; head -c 300 /dev/zero; printf '>\nrest\n'; } > "$BATS_TEST_TMPDIR/nul-marker/comment.md"
+  printf '#!/bin/sh\ntouch "%s/ran-from-artifact"\n' "$BATS_TEST_TMPDIR" > "$BIN/k8s-gitops:render-diff"
+  chmod +x "$BIN/k8s-gitops:render-diff"
+  : > "$BATS_TEST_TMPDIR/!--"
+  refused symlink "not a regular file"
+  for case in unmarked prefixed cr nul-diff cr-diff nul-marker; do
+    refused "$case"
+  done
+  for case in "two/comment.md two/other.md" other/other.md ""; do
+    # shellcheck disable=SC2086 # the files of each case, split on blanks
+    artifact $case
+    post
+    [ "$status" -ne 0 ] || { echo "posted an artifact of: ${case:-nothing}"; return 1; }
+    [ ! -e "$FAKE/writes" ] || { echo "wrote for an artifact of: ${case:-nothing}"; return 1; }
+    [[ $output == *"it must hold one file, comment.md"* || $output == *"not a regular file named comment.md"* ]]
+  done
+  [ ! -e "$BATS_TEST_TMPDIR/ran-from-artifact" ]
+}
+
+@test "The comment job posts nothing but what render-diff writes" {
+  fake_gh
+  # Every kind of comment render-diff writes: nothing changed; objects added, removed and changed
+  # across applications; a diff whose backquotes need a longer fence; a diff cut to fit.
+  comment unchanged
+  mkdir -p "$BATS_TEST_TMPDIR"/mixed-{base,head}/demo/{one,two,three}
+  printf 'a: 1\n' > "$BATS_TEST_TMPDIR/mixed-base/demo/one/ConfigMap_web_a.yaml"
+  printf 'b: 1\n' > "$BATS_TEST_TMPDIR/mixed-base/demo/one/ConfigMap_web_b.yaml"
+  printf 'b: 2\n' > "$BATS_TEST_TMPDIR/mixed-head/demo/one/ConfigMap_web_b.yaml"
+  printf 'c: 1\n' > "$BATS_TEST_TMPDIR/mixed-head/demo/one/ConfigMap_web_c.yaml"
+  printf 'new: 1\n' > "$BATS_TEST_TMPDIR/mixed-head/demo/two/Namespace__new.yaml"
+  printf 'old: 1\n' > "$BATS_TEST_TMPDIR/mixed-base/demo/three/ClusterRole.rbac.authorization.k8s.io__old.yaml"
+  comment mixed
+  added fenced 'fence: |' '  ``````' '  <details><summary>not a section</summary>'
+  mkdir -p "$BATS_TEST_TMPDIR"/cut-{base,head}/demo/{small,large}
+  printf 'small: 1\n' > "$BATS_TEST_TMPDIR/cut-head/demo/small/ConfigMap_web_small.yaml"
+  for ((i = 0; i < 3000; i++)); do
+    printf 'key-%04d: a value long enough to fill a comment quickly\n' "$i"
+  done > "$BATS_TEST_TMPDIR/cut-head/demo/large/ConfigMap_web_large.yaml"
+  comment cut
+  grep -q 'truncated' "$BATS_TEST_TMPDIR/cut.md"
+  local body
+  for body in unchanged mixed fenced cut; do
+    mkdir -p "$BATS_TEST_TMPDIR/written-$body"
+    cp "$BATS_TEST_TMPDIR/$body.md" "$BATS_TEST_TMPDIR/written-$body/comment.md"
+    artifact "written-$body/comment.md"
+    post
+    [ "$status" -eq 0 ] || { echo "refused what render-diff writes: $body: $output"; return 1; }
+    [ -e "$FAKE/writes" ]
+  done
+
+  # Anything else outside a diff would render as Markdown in the bot's name: each is refused.
+  # insert NAME LINE: the mixed comment with LINE after its table's last row, as NAME/comment.md.
+  insert() {
+    mkdir -p "$BATS_TEST_TMPDIR/$1"
+    awk -v line="$2" '{ print } /^\| `demo\/two` / { print line }' "$BATS_TEST_TMPDIR/mixed.md" > "$BATS_TEST_TMPDIR/$1/comment.md"
+    cmp -s "$BATS_TEST_TMPDIR/mixed.md" "$BATS_TEST_TMPDIR/$1/comment.md" && { echo "$1: nothing inserted"; return 1; }
+    refused "$1"
+  }
+  insert mention '@someone this is ready to merge'
+  insert team '@fixture-owner/maintainers'
+  insert reference 'Fixes #7'
+  insert cross-reference 'fixture-owner/fixture-repo#7'
+  insert link '[the checks passed](https://example.invalid/checks)'
+  insert image '![passed](https://example.invalid/passed.png)'
+  insert html '<img src="https://example.invalid/pixel.png">'
+  insert free 'All checks have passed.'
+  # shellcheck disable=SC2016 # a Markdown code span
+  insert row '| `demo/two` | 1 | 0 | 0 | @someone |'
+  # replace NAME OLD NEW: the mixed comment with its line OLD made NEW, as NAME/comment.md.
+  replace() {
+    mkdir -p "$BATS_TEST_TMPDIR/$1"
+    awk -v old="$2" -v new="$3" '$0 == old { $0 = new } { print }' "$BATS_TEST_TMPDIR/mixed.md" > "$BATS_TEST_TMPDIR/$1/comment.md"
+    cmp -s "$BATS_TEST_TMPDIR/mixed.md" "$BATS_TEST_TMPDIR/$1/comment.md" && { echo "$1: nothing replaced"; return 1; }
+    refused "$1"
+  }
+  replace summary '<summary><code>demo/two</code>: 1 added</summary>' '<summary><code>@someone</code>: 1 added</summary>'
+  replace closing '+new: 1' '```'
+  replace indented-closing '+new: 1' ' ```'
+  replace heading '### Render diff' '### Render diff: approved'
+  replace footer "$(grep -m1 '^<sub>' "$BATS_TEST_TMPDIR/mixed.md")" '<sub>Approved by the maintainers.</sub>'
+  mkdir -p "$BATS_TEST_TMPDIR/after"
+  { cat "$BATS_TEST_TMPDIR/mixed.md"; echo '@someone'; } > "$BATS_TEST_TMPDIR/after/comment.md"
+  refused after
 }
 
 @test "the comment job updates its own comment, and posts nothing for a pull request that moved on" {
   fake_gh
-  a_comment
+  comment unchanged
+  cp "$BATS_TEST_TMPDIR/unchanged.md" "$BATS_TEST_TMPDIR/comment.md"
   artifact comment.md
   # A comment of someone else's that starts with the marker is left alone.
   jq -n --rawfile body "$BATS_TEST_TMPDIR/comment.md" '[
@@ -745,13 +907,61 @@ EOF
   # The pull request is found by the head the run was for, never by a number the artifact names.
   grep -qx 'api --method GET repos/fixture-owner/fixture-repo/pulls -f state=open -f head=someone-else:feature -f per_page=100' "$FAKE/calls"
 
+  # Not when two open pull requests have that head, nor when the one that has it is another
+  # repository's: no pull request is the run's for certain, and nothing is posted.
+  local pulls="$FAKE/pulls.json"
+  cp "$pulls" "$FAKE/one.json"
+  jq '. + [.[0] | .number = 8]' "$FAKE/one.json" > "$pulls"
+  post
+  [ "$status" -eq 0 ]
+  [ ! -e "$FAKE/writes" ]
+  jq '.[0].head.repo.full_name = "someone-else/another-repo"' "$FAKE/one.json" > "$pulls"
+  post
+  [ "$status" -eq 0 ]
+  [ ! -e "$FAKE/writes" ]
+
   # A newer push moved the head on: its own run comments, this one posts nothing.
+  jq '.[0].head.sha = "fedcba9876543210fedcba9876543210fedcba98"' "$FAKE/one.json" > "$pulls"
+  post
+  [ "$status" -eq 0 ]
+  [ ! -e "$FAKE/writes" ]
+  [[ $output == *"no open pull request"* ]]
+
+  # Runs for one pull request's head never overlap, and a running one is never cancelled: the
+  # older of two finds the head moved on.
+  # shellcheck disable=SC2016 # the workflow's expression, as written
+  [ "$(yq '.concurrency.group' "$COMMENT")" = 'render-comment-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}' ]
+  [ "$(yq '.concurrency.cancel-in-progress' "$COMMENT")" = false ]
+}
+
+@test "the comment job says when a commit did not render, and posts nothing else without an artifact" {
+  fake_gh
+  comment unchanged
+  # The CI run left no artifact: its render did not complete.
+  rm -rf "$FAKE/artifact"
+
+  post
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"left no render diff"* ]]
+  [ ! -e "$FAKE/writes" ]
+
+  # Its own earlier comment is updated to say so, in words of the job's own.
+  jq -n --rawfile body "$BATS_TEST_TMPDIR/unchanged.md" \
+    '[{id: 202, user: {login: "github-actions[bot]", type: "Bot"}, body: $body}]' > "$FAKE/comments.json"
+  post
+  [ "$status" -eq 0 ]
+  [ "$(cat "$FAKE/writes")" = "PATCH repos/fixture-owner/fixture-repo/issues/comments/202" ]
+  posted
+  [ "$(sed -n 1p "$BATS_TEST_TMPDIR/posted.md")" = "$(sed -n 1p "$BATS_TEST_TMPDIR/unchanged.md")" ]
+  grep -q "$HEAD_SHA did not render" "$BATS_TEST_TMPDIR/posted.md"
+
+  # Not when the pull request has moved on.
   jq '.[0].head.sha = "fedcba9876543210fedcba9876543210fedcba98"' "$FAKE/pulls.json" > "$FAKE/moved.json"
   mv "$FAKE/moved.json" "$FAKE/pulls.json"
   post
   [ "$status" -eq 0 ]
   [ ! -e "$FAKE/writes" ]
-  [[ $output == *"no open pull request"* ]]
 }
 
 @test "The render is part of the required result, and the comment is not" {
@@ -769,4 +979,34 @@ EOF
   [ "$(yq '.name' "$COMMENT")" != "$(yq '.name' "$WORKFLOW")" ]
   [ "$(yq '[.jobs | to_entries[] | select(.key == "ci" or .value.name == "ci")] | length' "$COMMENT")" = 0 ]
   [ "$(yq '[.. | select(tag == "!!str") | select(test("workflow_run|render-comment"))] | length' "$WORKFLOW")" = 0 ]
+}
+
+@test "just ci renders the tree as the render job does" {
+  # The render is a check of exactly one of just ci's groups.
+  [ "$(runs_of "$REPO/justfile" | awk -F'\t' '$2 == "render-check"' | wc -l)" -eq 1 ]
+  # A checkout whose tree is the render fixture's, with the fixture's chart at hand, so nothing is
+  # pulled; Helm's settings and its registry logins are the test's own.
+  local work="$BATS_TEST_TMPDIR/work" scratch="$BATS_TEST_TMPDIR/scratch"
+  mkdir -p "$work" "$scratch"
+  cp -R "$REPO/justfile" "$REPO/just" "$REPO/scripts" "$REPO/tests/fixtures/render/kubernetes" \
+    "$REPO/tests/fixtures/render/versions.yaml" "$work/"
+  local -a env=(HELM_CACHE_HOME="$BATS_TEST_TMPDIR/helm/cache" HELM_CONFIG_HOME="$BATS_TEST_TMPDIR/helm/config"
+    HELM_DATA_HOME="$BATS_TEST_TMPDIR/helm/data" DOCKER_CONFIG="$BATS_TEST_TMPDIR/docker"
+    RENDER_CHART_CACHE="$BATS_TEST_TMPDIR/charts" KUBECONFIG="$BATS_TEST_TMPDIR/no-kubeconfig" TMPDIR="$scratch")
+  mkdir -p "$BATS_TEST_TMPDIR/docker"
+  env "${env[@]}" helm package "$REPO/tests/fixtures/render/charts/greeter" \
+    --destination "$BATS_TEST_TMPDIR/charts/charts.example.invalid/greeter/1.0.0" > /dev/null
+
+  run env "${env[@]}" just --justfile "$work/justfile" render-check
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"render: 5 applications"* ]]
+  # It keeps nothing.
+  [ -z "$(ls -A "$scratch")" ]
+  # A tree that does not render fails it, as it fails the render job, naming the application.
+  yq -i '.broken = true' "$work/kubernetes/apps/base/web/greeter/app/values.yaml"
+  run env "${env[@]}" just --justfile "$work/justfile" render-check
+  [ "$status" -ne 0 ]
+  [[ $output == *"demo/greeter"* ]]
+  [ -z "$(ls -A "$scratch")" ]
 }

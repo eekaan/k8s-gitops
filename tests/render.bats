@@ -45,11 +45,13 @@ render_both() {
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
 
-# compare: just render-diff of the renders of base and head, into the file BODY.
+# compare: just render-diff of the renders of base and head, into the file BODY, which the comment
+# job's check must accept.
 compare() {
   BODY="$BATS_TEST_TMPDIR/comment.md"
   just --justfile "$REPO/justfile" render-diff "$BATS_TEST_TMPDIR/base.out" "$BATS_TEST_TMPDIR/head.out" >"$BODY"
   cat "$BODY"
+  (. "$REPO/scripts/lib/render-comment.sh" && render_comment_check "$BODY")
 }
 
 # object DIR KIND NAME: the object of KIND named NAME among the files of the application's render
@@ -281,7 +283,9 @@ commit() {
 
 # render_code: puts this checkout's render code in WORK.
 render_code() {
+  mkdir -p "$WORK/scripts/lib"
   cp "$REPO/scripts/render" "$REPO/scripts/render-diff" "$REPO/scripts/render-pr" "$WORK/scripts/"
+  cp "$REPO/scripts/lib/render-comment.sh" "$WORK/scripts/lib/"
 }
 
 @test "render-pr renders both commits with the base's render code, or this checkout's when the base has none" {
