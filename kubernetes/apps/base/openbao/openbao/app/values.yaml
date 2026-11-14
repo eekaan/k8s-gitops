@@ -1,7 +1,7 @@
 ---
 # Values for the OpenBao chart, read by the HelmRelease through a ConfigMap generated without
 # substitution, so the server's arguments keep their shell expansion. Keys not set here keep the
-# chart's defaults. ADR 0013 records the seal and custody decision; docs/kubernetes.md describes
+# chart's defaults. ADR 0016 records the seal and custody decision; docs/kubernetes.md describes
 # what runs.
 
 global:

@@ -508,7 +508,7 @@ LINSTOR's.
 ## OpenBao
 
 Runtime secrets live in OpenBao (ADR 0005), which unseals itself with a key the cluster holds while
-the operator keeps its recovery keys (ADR 0013). Three applications hold it:
+the operator keeps its recovery keys (ADR 0016). Three applications hold it:
 
 - `openbao/openbao` runs OpenBao in the namespace `openbao`. It names `external-secrets`,
   `cert-manager`, `linstor-cluster` and `prometheus-operator-crds` in `dependsOn`, for the seal key's

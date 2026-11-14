@@ -3,7 +3,7 @@
 OpenBao holds the cluster's runtime secrets ([kubernetes.md](../kubernetes.md#openbao)). It unseals
 itself with the key in the Secret `openbao-seal-1`, and the operator keeps its recovery keys and a
 copy of that key in a file encrypted to the Talos age key
-([ADR 0013](../adr/0013-openbao-unseals-itself-and-the-operator-keeps-the-recovery-keys.md)). This
+([ADR 0016](../adr/0016-openbao-unseals-itself-and-the-operator-keeps-the-recovery-keys.md)). This
 runbook covers the first initialisation, checking it, bringing the seal key back, restoring access
 with the recovery keys, and rotating.
 

@@ -7,7 +7,7 @@
   ([ADR 0011](0011-persistent-volumes-from-linstor-on-a-data-volume-per-worker.md))
 - Amended: 2026-11-14, OpenBao's seal key is generated once in the cluster and its recovery keys
   are the operator's, outside it
-  ([ADR 0013](0013-openbao-unseals-itself-and-the-operator-keeps-the-recovery-keys.md))
+  ([ADR 0016](0016-openbao-unseals-itself-and-the-operator-keeps-the-recovery-keys.md))
 
 ## Context
 
@@ -25,7 +25,7 @@ application secrets that change over the cluster's life.
 - External Secrets is installed before OpenBao; OpenBao's own seal material is produced through
   it, once, and stays in the cluster; the recovery keys OpenBao makes are kept by the operator
   outside the cluster
-  ([ADR 0013](0013-openbao-unseals-itself-and-the-operator-keeps-the-recovery-keys.md)).
+  ([ADR 0016](0016-openbao-unseals-itself-and-the-operator-keeps-the-recovery-keys.md)).
 
 ## Alternatives considered
 
@@ -38,7 +38,7 @@ application secrets that change over the cluster's life.
 
 - OpenBao's storage, unsealing and recovery material need their own backup and a restore that
   is exercised, since every runtime secret depends on it. The seal key and the recovery keys are
-  in the operator's encrypted file (ADR 0013); snapshots of the storage are still to come.
+  in the operator's encrypted file (ADR 0016); snapshots of the storage are still to come.
 - Secrets that controllers need before OpenBao is running come from bootstrap material.
 - The age private key exists outside the repository only: on the operator's machine and as a
   CI secret.

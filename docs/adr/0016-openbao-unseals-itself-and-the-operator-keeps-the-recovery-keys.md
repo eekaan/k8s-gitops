@@ -1,4 +1,4 @@
-# 0013 — OpenBao unseals itself, and the operator keeps the recovery keys
+# 0016 — OpenBao unseals itself, and the operator keeps the recovery keys
 
 - Status: accepted
 - Date: 2026-11-14

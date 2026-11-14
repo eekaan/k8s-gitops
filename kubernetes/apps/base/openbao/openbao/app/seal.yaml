@@ -1,5 +1,5 @@
 ---
-# OpenBao's static seal key (ADR 0013): 32 characters, hex-encoded into the 64 hexadecimal digits
+# OpenBao's static seal key (ADR 0016): 32 characters, hex-encoded into the 64 hexadecimal digits
 # the static seal reads as its 32-byte AES-256 key. The generator makes a new password each time it
 # is asked; the ExternalSecret below asks once.
 apiVersion: generators.external-secrets.io/v1alpha1

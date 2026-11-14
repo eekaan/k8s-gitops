@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Hands OpenBao's recovery keys to the operator, once (ADR 0013). OpenBao initialises itself without
+# Hands OpenBao's recovery keys to the operator, once (ADR 0016). OpenBao initialises itself without
 # recovery keys; the first rotation of them returns new shares at once, and every later one needs a
 # threshold of the shares that exist. So this runs only while OpenBao holds none, and writes the
 # shares, with the seal key, to FILE outside the repository, encrypted with age to the Talos age

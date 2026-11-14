@@ -1,5 +1,5 @@
 Feature: OpenBao
-  Runtime secrets live in OpenBao, which Flux runs as a three-member raft cluster on the default StorageClass. It initialises itself once, unseals itself after every restart with a key the cluster holds, and External Secrets reads one key-value mount of it through a ClusterSecretStore; an operator writes a value into it from standard input (ADR 0005, ADR 0013).
+  Runtime secrets live in OpenBao, which Flux runs as a three-member raft cluster on the default StorageClass. It initialises itself once, unseals itself after every restart with a key the cluster holds, and External Secrets reads one key-value mount of it through a ClusterSecretStore; an operator writes a value into it from standard input (ADR 0005, ADR 0016).
 
   Scenario: OpenBao is enabled after what it needs, and the store and the demo after it
     Given the cluster's overlay
