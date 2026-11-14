@@ -13,7 +13,7 @@ locals {
   frr_conf = templatefile("${local.stack}/frr.conf.tftpl", {
     hostname = "proof-edge"
     # Documentation addresses and AS numbers, apart from the loopback addresses the speakers use:
-    # the proof runs in one container with no network but its loopback.
+    # the proof's speakers bind and dial loopback addresses only.
     router_id     = "192.0.2.7"
     edge_asn      = 64497
     cluster_asn   = 64496

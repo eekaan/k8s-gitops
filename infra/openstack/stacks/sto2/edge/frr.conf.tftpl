@@ -39,3 +39,7 @@ exit
 route-map NOTHING-OUT deny 10
 exit
 !
+! The service range is unreachable on the edge itself. A Service's /32, learned over BGP, is more
+! specific and wins; with none for the Gateway's address, a translated connection is refused here
+! and does not follow the default route to the cloud's router, toward a private address.
+ip route ${service_range} reject

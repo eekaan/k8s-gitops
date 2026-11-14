@@ -41,8 +41,8 @@ locals {
   # the manifest changes the edges' configuration, which replaces them (edge-rollout).
   peer = yamldecode(file("${path.module}/../../../../../kubernetes/apps/base/kube-system/cilium-bgp/app/bgp-peer.yaml")).spec
 
-  # Every address of the service range can be announced as a /32 at most once, so a peer sending
-  # more than the range holds is misbehaving.
+  # Every address of the service range can be announced as a /32 at most once, so the prefix list
+  # accepts at most this many prefixes: a limit that only a loosened list can reach.
   service_addresses = pow(2, 32 - tonumber(split("/", local.bgp.service_range)[1]))
 
   frr_conf = {

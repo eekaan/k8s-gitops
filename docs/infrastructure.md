@@ -297,6 +297,7 @@ other routing daemon is off in its daemon list. Its configuration, `frr.conf`, i
 `frr.conf.tftpl`, and each statement below is documented for FRR 10.3
 ([BGP](https://docs.frrouting.org/en/stable-10.3/bgp.html),
 [prefix lists](https://docs.frrouting.org/en/stable-10.3/filter.html),
+[static routes](https://docs.frrouting.org/en/stable-10.3/static.html),
 [route maps](https://docs.frrouting.org/en/stable-10.3/routemap.html)):
 
 - It runs in the plumbing stack's `edge_asn`, with the edge's own address as router ID. The peer
@@ -310,11 +311,19 @@ other routing daemon is off in its daemon list. Its configuration, `frr.conf`, i
   prefix list `SERVICES` matches: `permit <service range> ge 32 le 32`, a /32 inside the range and
   nothing shorter, then `deny any`. A route map in each direction is what `bgp ebgp-requires-policy`,
   on by default, asks of an eBGP session. `neighbor workers maximum-prefix` is the number of
-  addresses of the range, so a peer that sends more than the range can hold is misbehaving and its
-  session is torn down; it counts what the policy accepts.
+  addresses of the range. FRR counts the prefixes it accepts (without `force`), and the list lets
+  in no more than the range holds, so the limit is reached only if the list is loosened: it guards
+  against that and tears the session down then. It does not cap what a peer sends and the list
+  denies.
 - Outbound, `neighbor workers route-map NOTHING-OUT out` applies a route map that denies everything,
-  and the configuration has no `network` statement and redistributes nothing: an edge advertises
-  nothing.
+  and the configuration has no `network` statement, no `default-originate` and redistributes
+  nothing: an edge advertises nothing. A stack test compares the whole address family block, so a
+  statement added to it fails.
+- `ip route <service range> reject`, installed by `staticd`, makes the whole service range
+  unreachable on the edge. A Service's /32 learned over BGP is more specific and wins. With no
+  route for the Gateway's address, as right after a build before any worker announces it, a
+  translated connection is refused on the edge and does not follow the edge's default route to the
+  cloud's router, toward a private address of the provider's external side.
 - The timers and the graceful restart time are those of the workers' `CiliumBGPPeerConfig`, which
   `main.tf` reads from `kubernetes/apps/base/kube-system/cilium-bgp/app/bgp-peer.yaml`:
   `neighbor workers timers <keepalive> <hold>`, `timers connect <retry>`, `bgp graceful-restart` and
@@ -334,12 +343,18 @@ other routing daemon is off in its daemon list. Its configuration, `frr.conf`, i
 The routing policy is proved against real BGP speakers (`just edge-policy-check`, and the `static`
 group of `just ci`). The edge's configuration, as the stack's template renders it for fixture
 values, runs in FRR's own container, built for the release the Debian image packages, with no
-network but its loopback and no capability beyond the runtime's default. Three speakers open
+capability beyond the runtime's default; under `just edge-policy-check` it has no network but its
+loopback, and under `just ci`'s Dagger module it has the engine's default network, which the proof
+does not use: it binds and dials loopback addresses only. Three speakers open
 sessions to it, each offering a /32 inside the service range, a /32 outside it, a /30 inside it, the
 range itself and a default route. The check asserts that the speaker in the cluster's AS inside the
 listen range is accepted and only its /32 inside the range is in the edge's table, that the speaker
-in another AS and the one outside the listen range have no session, and that the edge advertised
-nothing back. The proof does not show the routes reaching the kernel, equal-cost paths across
+in another AS and the one outside the listen range have no session, that the edge advertised
+nothing back, that the speaker holds no path learned from the edge (which a `default-originate`
+would add and no count of advertised routes shows), and that both ends' session was established
+once and never dropped, so the readings are not of a session that is reset over and over. The
+static route is taken out of the file the proof's BGP daemon reads, which has no `zebra` or
+`staticd` beside it; the stack's tests check it. The proof does not show the routes reaching the kernel, equal-cost paths across
 several workers, graceful restart across a restart or the nftables rules, which the stack's tests
 compare as text and `nft --check` reads for syntax at first boot. The container's FRR takes 64
 equal-cost paths where Debian's takes 256, so the proof renders with 64.

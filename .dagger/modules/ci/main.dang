@@ -159,7 +159,7 @@ type Group {
   outcome: Outcome! {
     let others = checks.reject { _ == "renovate-check" or _ == "edge-policy-check" }
     # The edge routers' routing policy against real BGP speakers: the checkout renders the edge's
-    # configuration, FRR's container runs the speakers with no network but its loopback, and the
+    # configuration, FRR's container runs the speakers, which bind and dial loopback addresses only, and the
     # checkout checks what they printed. No docker, no privileges.
     let policyInputs = checkout.withExec(["just", "edge-policy-render", "/tmp/edge-policy"]).directory("/tmp/edge-policy")
     let policyPrinted = frr

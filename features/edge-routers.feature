@@ -18,7 +18,7 @@ Feature: Edge routers
   Scenario: An edge installs a /32 inside the service range and refuses anything else
     Given the service range
     When an edge's FRR configuration is rendered
-    Then the inbound policy permits only prefixes of exactly 32 bits inside the service range, denies everything else, and caps the prefixes a peer may send at the number of addresses in the range
+    Then the inbound policy permits only prefixes of exactly 32 bits inside the service range, denies everything else, and sets the maximum of accepted prefixes to the number of addresses in the range, which a loosened prefix list would reach
 
   Scenario: An edge advertises nothing
     Given an edge's FRR configuration
@@ -35,10 +35,15 @@ Feature: Edge routers
     When an edge's nftables rules are rendered
     Then connections to the edge's own address on those ports are translated to the Gateway's address, from the edge's own address, the forward chain drops everything else, and the input chain admits only SSH, BGP from the node subnet and the ICMP path MTU needs
 
-  Scenario: The public ports admit only the configured source networks, the operator allowlist by default, and SSH admits only the operator allowlist
-    Given an operator allowlist and, in another run, a deliberately different set of public source networks
+  Scenario: The public ports admit only the operator allowlist by default, and SSH admits only the operator allowlist
+    Given an operator allowlist and no public source networks set
     When the edge stack is planned against mocked providers
-    Then the public ports admit the allowlist by default and the other networks when they are set, SSH admits the allowlist only, and no rule admits every address unless that is what was set
+    Then the public ports admit the allowlist, SSH admits the allowlist only, and no rule admits every address
+
+  Scenario: The public ports admit the source networks they are given instead of the allowlist
+    Given an operator allowlist and a deliberately different set of public source networks
+    When the edge stack is planned against mocked providers
+    Then the public ports admit those networks only and SSH still admits the allowlist only
 
   Scenario: The user data holds no secret, and the edge's port allows exactly the address pairs the design needs
     Given an SSH public key and an operator allowlist
@@ -55,10 +60,20 @@ Feature: Edge routers
     When just edge-check runs against a complete table, a table with a missing session, and one with a route outside the range
     Then the first run passes, each of the others fails naming the worker or the route's problem, and no output line holds an address
 
+  Scenario: The Gateway's address is the service range's host at the number the plumbing stack is given
+    Given the plumbing stack's service range and a Gateway host number other than the default
+    When the plumbing stack is planned against mocked providers
+    Then the output bgp's gateway_address is the service range's host at that number, inside the range
+
+  Scenario: A Gateway host number beyond the service range is refused at plan time
+    Given a Gateway host number the service range has no host for
+    When the plumbing stack is planned against mocked providers
+    Then the plan is refused on the variable gateway_host, as it is for the range's network address and its last address
+
   Scenario: The Gateway's address is inside the service range and reaches cluster-config
-    Given the plumbing stack's service range and Gateway host number
+    Given the Gateway's address the plumbing stack outputs, inside the service range and not its first host
     When the cluster stack renders talman.yaml and just cluster-config fills the ConfigMap
-    Then GATEWAY_ADDRESS is the service range's host at that number, a host number outside the range is refused at plan time, and the ConfigMap's keys are those the example lists
+    Then GATEWAY_ADDRESS is that address, neither the range's network address nor its last, the ConfigMap's keys are those the example lists, and the LoadBalancer pool still holds the whole range, as keeping the Gateway's address from another Service is the Gateway change's to do
 
   Scenario: os-images prints names only
     Given an OpenStack client that lists images with their IDs, sizes and visibility

@@ -34,11 +34,13 @@ override_data {
         attached_subnet_ids = { nodes = "node-subnet-fixture" }
       }
       bgp = {
-        cluster_asn     = 64496
-        edge_asn        = 64497
-        edge_addresses  = ["192.0.2.7", "192.0.2.8"]
-        service_range   = "203.0.113.16/28"
-        gateway_address = "203.0.113.17"
+        cluster_asn    = 64496
+        edge_asn       = 64497
+        edge_addresses = ["192.0.2.7", "192.0.2.8"]
+        service_range  = "203.0.113.16/28"
+        # Host number 5, not the first host of the range, which is the default: an edge that derived
+        # the address itself from the range could not match it.
+        gateway_address = "203.0.113.21"
       }
     }
   }
@@ -180,9 +182,13 @@ run "an_edge_installs_a_32_inside_the_service_range_and_refuses_anything_else" {
     error_message = "The inbound policy must be applied to the peer group."
   }
 
+  # FRR counts the prefixes it accepts, and with this list at most as many as the range holds can be
+  # accepted, so the limit is reached only if the list is loosened (FRR's BGP manual, neighbor
+  # maximum-prefix): it guards against that, not against a peer that sends many prefixes the list
+  # denies.
   assert {
-    condition     = strcontains(output.config["1"].frr_conf, "\n  neighbor workers maximum-prefix 16\n")
-    error_message = "The maximum number of prefixes must be the number of addresses in the service range, 16 for a /28."
+    condition     = strcontains(output.config["1"].frr_conf, "\n  neighbor workers maximum-prefix 16\n") && !strcontains(output.config["1"].frr_conf, "maximum-prefix 16 ")
+    error_message = "The maximum number of accepted prefixes must be the number of addresses in the service range, 16 for a /28."
   }
 }
 
@@ -197,6 +203,26 @@ run "an_edge_advertises_nothing" {
   assert {
     condition     = !strcontains(output.config["1"].frr_conf, "route-map NOTHING-OUT permit") && !strcontains(output.config["1"].frr_conf, "network ") && !strcontains(output.config["1"].frr_conf, "redistribute")
     error_message = "Nothing may be permitted outbound, originated with a network statement or redistributed."
+  }
+
+  # Exactly this block, so a statement that bypasses the outbound route map, such as default-originate,
+  # fails here wherever it is added to it.
+  assert {
+    condition = regex("(?s) address-family ipv4 unicast\\n.*? exit-address-family\\n", output.config["1"].frr_conf) == join("", [
+      " address-family ipv4 unicast\n",
+      "  maximum-paths 80\n",
+      "  neighbor workers activate\n",
+      "  neighbor workers maximum-prefix 16\n",
+      "  neighbor workers route-map SERVICES-IN in\n",
+      "  neighbor workers route-map NOTHING-OUT out\n",
+      " exit-address-family\n",
+    ])
+    error_message = "The address family must hold exactly the activation, the paths, the prefix limit and the two route maps of the peer group, and nothing that originates or advertises a route."
+  }
+
+  assert {
+    condition     = length(regexall("default-originate|aggregate-address|\\bnetwork\\b|redistribute|allowas-in|addpath", output.config["1"].frr_conf)) == 0
+    error_message = "No statement that originates or advertises a route may be in the configuration."
   }
 }
 
@@ -237,32 +263,70 @@ run "traffic_to_an_edges_public_ports_is_forwarded_to_the_gateways_address_and_n
   command = plan
 
   assert {
-    condition     = strcontains(output.config["1"].nftables_conf, "\n    ip daddr 192.0.2.7 tcp dport { 80, 443 } dnat to 203.0.113.17\n")
+    condition     = strcontains(output.config["1"].nftables_conf, "\n    ip daddr 192.0.2.7 tcp dport { 80, 443 } dnat to 203.0.113.21\n")
     error_message = "Connections to the edge's own address on the public ports must be translated to the Gateway's address."
   }
 
   assert {
-    condition     = strcontains(output.config["1"].nftables_conf, "\n    ip daddr 203.0.113.17 tcp dport { 80, 443 } ct status dnat snat to 192.0.2.7\n") && strcontains(output.config["2"].nftables_conf, "snat to 192.0.2.8\n")
+    condition     = strcontains(output.config["1"].nftables_conf, "\n    ip daddr 203.0.113.21 tcp dport { 80, 443 } ct status dnat snat to 192.0.2.7\n") && strcontains(output.config["2"].nftables_conf, "snat to 192.0.2.8\n")
     error_message = "What is forwarded to the Gateway must leave from the edge's own address."
   }
 
+  # Every rule of every chain, exactly: a rule added to a chain, or a chain or table added to the
+  # file, changes the text and fails here, so these are the only rules.
   assert {
     condition = (
-      strcontains(output.config["1"].nftables_conf, "\n  chain forward {\n    type filter hook forward priority filter; policy drop;\n") &&
-      strcontains(output.config["1"].nftables_conf, "\n    ip daddr 203.0.113.17 tcp dport { 80, 443 } ct state new ct status dnat accept\n") &&
-      strcontains(output.config["1"].nftables_conf, "\n    ct state established,related accept\n")
+      length(regexall("(?m)^table ", output.config["1"].nftables_conf)) == 2 &&
+      length(regexall("(?m)^  chain ", output.config["1"].nftables_conf)) == 4
     )
+    error_message = "The file must hold two tables and four chains: input, forward, prerouting and postrouting."
+  }
+
+  assert {
+    condition = regex("(?s)  chain input \\{\\n(.*?)  \\}\\n", output.config["1"].nftables_conf)[0] == join("", [
+      "    type filter hook input priority filter; policy drop;\n",
+      "    ct state established,related accept\n",
+      "    ct state invalid drop\n",
+      "    iif \"lo\" accept\n",
+      "    tcp dport 22 accept\n",
+      "    ip saddr 192.0.2.0/24 tcp dport 179 accept\n",
+      "    icmp type destination-unreachable icmp code frag-needed accept\n",
+      "    icmpv6 type { packet-too-big, nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert } accept\n",
+    ])
+    error_message = "The input chain must drop by default and admit, besides what belongs to a connection and the loopback, SSH, BGP from the node subnet and the ICMP that path MTU discovery needs, and nothing else."
+  }
+
+  assert {
+    condition = regex("(?s)  chain forward \\{\\n(.*?)  \\}\\n", output.config["1"].nftables_conf)[0] == join("", [
+      "    type filter hook forward priority filter; policy drop;\n",
+      "    ct state established,related accept\n",
+      "    ct state invalid drop\n",
+      "    ip daddr 203.0.113.21 tcp dport { 80, 443 } ct state new ct status dnat accept\n",
+    ])
     error_message = "The forward chain must drop by default and admit only new translated connections to the Gateway on the public ports, and what belongs to them."
   }
 
   assert {
+    condition = regex("(?s)  chain prerouting \\{\\n(.*?)  \\}\\n", output.config["1"].nftables_conf)[0] == join("", [
+      "    type nat hook prerouting priority dstnat; policy accept;\n",
+      "    ip daddr 192.0.2.7 tcp dport { 80, 443 } dnat to 203.0.113.21\n",
+      ]) && regex("(?s)  chain postrouting \\{\\n(.*?)  \\}\\n", output.config["2"].nftables_conf)[0] == join("", [
+      "    type nat hook postrouting priority srcnat; policy accept;\n",
+      "    ip daddr 203.0.113.21 tcp dport { 80, 443 } ct status dnat snat to 192.0.2.8\n",
+    ])
+    error_message = "The translation chains must hold only the destination translation to the Gateway and the source translation to the edge's own address."
+  }
+
+  # With no worker announcing the Gateway's address there is no route to it, and a translated
+  # connection must not follow the default route to the cloud's router: the service range is a
+  # reject route on the edge, which the workers' /32s, being more specific, win over.
+  assert {
     condition = (
-      strcontains(output.config["1"].nftables_conf, "\n  chain input {\n    type filter hook input priority filter; policy drop;\n") &&
-      strcontains(output.config["1"].nftables_conf, "\n    tcp dport 22 accept\n") &&
-      strcontains(output.config["1"].nftables_conf, "\n    ip saddr 192.0.2.0/24 tcp dport 179 accept\n") &&
-      strcontains(output.config["1"].nftables_conf, "\n    icmp type destination-unreachable icmp code frag-needed accept\n")
+      strcontains(output.config["1"].frr_conf, "\nip route 203.0.113.16/28 reject\n") &&
+      length(regexall("(?m)^ip route ", output.config["1"].frr_conf)) == 1 &&
+      strcontains(file("frr-daemons"), "\nstaticd=yes\n")
     )
-    error_message = "The input chain must drop by default and admit SSH, BGP from the node subnet and the ICMP that path MTU discovery needs."
+    error_message = "The edge must hold a reject route for the whole service range, and run the daemon that installs it."
   }
 
   assert {
@@ -271,7 +335,7 @@ run "traffic_to_an_edges_public_ports_is_forwarded_to_the_gateways_address_and_n
   }
 }
 
-run "the_public_ports_admit_only_the_configured_source_networks_the_operator_allowlist_by_default_and_ssh_admits_only_the_operator_allowlist" {
+run "the_public_ports_admit_only_the_operator_allowlist_by_default_and_ssh_admits_only_the_operator_allowlist" {
   command = plan
 
   assert {
@@ -303,7 +367,7 @@ run "the_public_ports_admit_only_the_configured_source_networks_the_operator_all
   }
 }
 
-run "_the_public_ports_take_the_networks_they_are_given" {
+run "the_public_ports_admit_the_source_networks_they_are_given_instead_of_the_allowlist" {
   command = plan
 
   variables {
