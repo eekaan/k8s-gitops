@@ -8,16 +8,10 @@
 # shellcheck source=scripts/lib/ci-host.sh
 . "$(dirname "${BASH_SOURCE[0]}")/ci-host.sh"
 
-# edge_connect: reads the edges' names and floating addresses from the stack's outputs and makes sure
-# each one's SSH host key is recorded, as for the CI host. Sets edge_names, edge_addresses and
-# edge_known_hosts. The addresses are never printed.
-edge_connect() {
+# edge_load: reads the edges' names and floating addresses from the stack's outputs. Sets edge_names,
+# edge_addresses and edge_known_hosts. The addresses are never printed.
+edge_load() {
   local outputs i
-  require_env EDGE_SSH_KEY_FILE || return 1
-  if [[ ! -f $EDGE_SSH_KEY_FILE ]]; then
-    infra_error "$EDGE_SSH_KEY_FILE does not exist; just edge-ssh-key creates the key pair"
-    return 1
-  fi
   outputs=$(stack_tofu output -json) || return 1
   # tofu's JSON holds every output's value, sensitive ones included; only jq reads it.
   mapfile -t edge_addresses < <(jq -r '.addresses.value // [] | .[] | strings' <<< "$outputs")
@@ -34,8 +28,33 @@ edge_connect() {
     fi
   done
   edge_known_hosts=${XDG_STATE_HOME:-$HOME/.local/state}/k8s-gitops/edge.known_hosts
+}
+
+# edge_connect [NUMBER]: edge_load, and makes sure the SSH host key of edge NUMBER, or of both
+# edges, is recorded, as for the CI host.
+edge_connect() {
+  local i
+  require_env EDGE_SSH_KEY_FILE || return 1
+  if [[ ! -f $EDGE_SSH_KEY_FILE ]]; then
+    infra_error "$EDGE_SSH_KEY_FILE does not exist; just edge-ssh-key creates the key pair"
+    return 1
+  fi
+  edge_load || return 1
   for i in 0 1; do
-    ssh_host_trust "${edge_addresses[i]}" "$edge_known_hosts" "edge router ${edge_names[i]}" || return 1
+    if [[ -z ${1-} || $1 == $((i + 1)) ]]; then
+      ssh_host_trust "${edge_addresses[i]}" "$edge_known_hosts" "edge router ${edge_names[i]}" || return 1
+    fi
+  done
+}
+
+# edge_forget_keys NUMBER...: drops the recorded SSH host keys of the edges, 1 or 2. A replacement
+# instance has host keys of its own at the same floating address, and the connection checks them
+# strictly against what is recorded, so the old ones would refuse it for good. Needs edge_load.
+edge_forget_keys() {
+  local number
+  for number; do
+    ssh-keygen -R "${edge_addresses[number - 1]}" -f "$edge_known_hosts" > /dev/null 2>&1 || true
+    rm -f "$edge_known_hosts.old"
   done
 }
 
@@ -48,22 +67,22 @@ edge_ssh() {
     -o ConnectTimeout=30 "${EDGE_SSH_USER:-debian}@${edge_addresses[$1]}" "$2"
 }
 
-# edge_replaced: the edge numbers, 1 and 2, whose instance the saved plan replaces, one per line.
+# edge_replaced: the edge numbers, 1 and 2, whose instance the saved plan deletes, replacing it or
+# not, one per line.
 edge_replaced() {
   # shellcheck disable=SC2154 # scripts/stack-env sets plan_file
   stack_tofu show -json "$plan_file" | jq -r '
     .resource_changes[]?
-    | select(.type == "openstack_compute_instance_v2" and (.change.actions | sort) == ["create", "delete"])
+    | select(.type == "openstack_compute_instance_v2" and (.change.actions | index("delete")))
     | .address | capture("^module\\.edge\\[\"(?<number>[0-9]+)\"\\]") | .number'
 }
 
-# edge_refuse_double_replace: fails when the saved plan replaces both edges, which would leave
-# nothing serving until both are rebuilt.
+# edge_refuse_double_replace: sets edge_replaced_numbers to the edges the saved plan deletes or
+# replaces, and fails when that is both, which would leave nothing serving until both are rebuilt.
 edge_refuse_double_replace() {
-  local replaced
-  replaced=$(edge_replaced | sort -u | wc -l)
-  if ((replaced > 1)); then
-    infra_error "the plan replaces both edge routers at once, which would leave none serving; just edge-rollout replaces them one at a time, with a check in between"
+  mapfile -t edge_replaced_numbers < <(edge_replaced | sort -u)
+  if ((${#edge_replaced_numbers[@]} > 1)); then
+    infra_error "the plan replaces both edge routers at once, or deletes both instances, which would leave none serving; just edge-rollout replaces them one at a time, with a check in between"
     return 1
   fi
 }

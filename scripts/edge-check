@@ -45,7 +45,7 @@ if [[ -z ${EDGE_STACK_LOCKED-} ]]; then
   lock_stack
 fi
 init_stack
-edge_connect
+edge_connect "$only"
 
 talman=$infra_root/talos/$cluster/talman.yaml
 workers=() service_range='' node_subnet=''

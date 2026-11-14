@@ -57,11 +57,20 @@ An edge is rebuilt, not patched. For a new image or a change to its configuratio
 
 1. `just infra-plan sto2/edge` shows what changes. A change to the template or the image replaces
    both instances.
-2. `just edge-rollout` rolls it out: it checks that the other edge serves, replaces the first, waits
-   for `just edge-check --edge 1` to pass, and only then does the second. It stops at the first
-   edge that does not pass its check, and leaves the edge after it as it was.
+2. `just edge-rollout` rolls it out: it checks that the other edge serves, replaces the first,
+   records the new instance's SSH host keys, waits for `just edge-check --edge 1` to pass, and only
+   then does the second. It stops at the first edge that does not pass its check, and leaves the
+   edge after it as it was.
 3. To replace one edge alone, `just infra-apply sto2/edge` applies a plan that replaces one. It
-   refuses a plan that replaces both.
+   refuses a plan that replaces both, or deletes both.
+
+A replacement has SSH host keys of its own at the same floating address, and the connection holds
+to the recorded keys, so the replaced edge's recorded keys are dropped before it is replaced and
+the new ones are recorded once its first boot is far enough along for SSH. `just edge-rollout` shows
+the new keys' fingerprints and asks for `yes`; compare them with the ones the instance printed on
+its console, as at the first build. After `just infra-apply sto2/edge` has replaced one edge, the
+next `just edge-check` shows and records them. An edge whose keys are not recorded cannot pass its
+check, so a rollout that is not answered stops there.
 
 While an edge is replaced the workers' sessions to it are down and come back when it is up. The
 other edge carries the traffic, and half of the clients' attempts to the published addresses fail

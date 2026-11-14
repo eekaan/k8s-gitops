@@ -77,8 +77,8 @@ ci_host_connect() {
 
 # ssh_host_trust ADDRESS KNOWN_HOSTS LABEL: when the host's key is not in KNOWN_HOSTS, shows the
 # fingerprints of the keys the host offers and records them only once yes is typed. Never trusts a
-# key on its own. LABEL names the host in what it prints, such as "CI host". Shared with
-# scripts/lib/edge.sh.
+# key on its own. LABEL names the host in what it prints, such as "CI host". Returns 2 when the keys
+# were not accepted, 1 when the host does not answer. Shared with scripts/lib/edge.sh.
 ssh_host_trust() {
   local address=$1 known_hosts=$2 label=$3 scanned answer=
   if [[ -s $known_hosts ]] && ssh-keygen -F "$address" -f "$known_hosts" > /dev/null 2>&1; then
@@ -97,7 +97,7 @@ ssh_host_trust() {
   read -r answer || true
   if [[ $answer != yes ]]; then
     infra_error "the host key was not accepted; nothing was done on the host"
-    return 1
+    return 2
   fi
   mkdir -p "${known_hosts%/*}"
   chmod 700 "${known_hosts%/*}"

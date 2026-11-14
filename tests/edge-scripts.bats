@@ -38,9 +38,12 @@ YAML
 {"addresses": {"sensitive": true, "value": ["$ADDRESS_1", "$ADDRESS_2"]},
  "names": {"sensitive": false, "value": ["lab-edge-1", "lab-edge-2"]}}
 JSON
-  # Both edges' host keys are recorded already; recording one is the CI host's tests' business too.
-  echo '|1|fixture=|fixture= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOfAnEdgeFixtureFixture' \
-    > "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts"
+  # Each edge offers a host key of its own, kept in a file of the fake host, and both are recorded
+  # already. A replacement of an edge offers another key at the same address.
+  for address in "$ADDRESS_1" "$ADDRESS_2"; do
+    echo "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${address//./}Original" > "$HOST/key-$address"
+    echo "$address ssh-ed25519 $(cat "$HOST/key-$address")" >> "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts"
+  done
 
   # A mise with nothing installed keeps the justfile from putting real tools in front of the fakes.
   fake mise < /dev/null
@@ -52,11 +55,33 @@ printf '%s\n' "tofu \$*" >> "$RECORD/argv"
 case \${2-} in
   output) cat "$BATS_TEST_TMPDIR/outputs.json" ;;
   show) [[ ! -f "$BATS_TEST_TMPDIR/plan.json" ]] || cat "$BATS_TEST_TMPDIR/plan.json" ;;
+  # A plan that targets one edge replaces it: once applied, that edge's address offers a new host key.
+  plan)
+    for argument; do
+      [[ \$argument =~ ^-target=module\.edge\[\"([12])\"\]\$ ]] && echo "\${BASH_REMATCH[1]}" > "$RECORD/targeted" || true
+    done
+    ;;
+  apply)
+    if [[ -f "$RECORD/targeted" ]]; then
+      case \$(cat "$RECORD/targeted") in
+        1) echo "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${ADDRESS_1//./}Replacement" > "$HOST/key-$ADDRESS_1" ;;
+        2) echo "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${ADDRESS_2//./}Replacement" > "$HOST/key-$ADDRESS_2" ;;
+      esac
+      rm "$RECORD/targeted"
+    fi
+    ;;
 esac
 EOF
+  # The three calls the scripts make: a lookup (-F), dropping an address (-R) and the fingerprints
+  # (-l) of the keys on standard input, on the unhashed known_hosts file the fake ssh-keyscan feeds.
   fake ssh-keygen << EOF
 printf '%s\n' "ssh-keygen \$*" >> "$RECORD/argv"
-[[ \$1 == -F && -s \$4 ]]
+case \$1 in
+  -F) grep -q "^\$2 " "\$4" 2> /dev/null ;;
+  -R) grep -v "^\$2 " "\$4" > "\$4.new" || true; mv "\$4.new" "\$4" ;;
+  -l) read -r address type key; echo "256 SHA256:\$key \$address (ED25519)" ;;
+  *) exit 1 ;;
+esac
 EOF
   # An ssh that refuses unless host key checking is strict against the recorded keys and the edges'
   # key is the one named, and otherwise runs the command here, as the edge's login shell would, with
@@ -80,21 +105,30 @@ while ((\$#)); do
 done
 [[ \$strict == yes && \$only == yes && \$identity == "$KEY" && -s \$known ]] || { echo "fake ssh: refused" >&2; exit 255; }
 case \$1 in
-  debian@$ADDRESS_1) edge=1 ;;
-  debian@$ADDRESS_2) edge=2 ;;
+  debian@$ADDRESS_1) edge=1 address=$ADDRESS_1 ;;
+  debian@$ADDRESS_2) edge=2 address=$ADDRESS_2 ;;
   *) echo "fake ssh: unexpected destination" >&2; exit 255 ;;
 esac
+# What strict host key checking does: the recorded key must be the one the host offers.
+grep -qx "\$address ssh-ed25519 \$(cat "$HOST/key-\$address")" "\$known" || { echo "fake ssh: REMOTE HOST IDENTIFICATION HAS CHANGED" >&2; exit 255; }
 shift
 exec env EDGE_FIXTURE="$HOST/edge-\$edge" PATH="$HOST_BIN:\$PATH" bash -c "\$*"
 EOF
   # Nothing else may reach a host, a cloud or a container runtime from this machine.
-  for tool in scp sftp openstack curl docker ssh-keyscan; do
+  for tool in scp sftp openstack curl docker; do
     fake "$tool" << EOF
 printf '%s\n' "$tool \$*" >> "$RECORD/argv"
 echo "unexpected call: $tool \$*" >&2
 exit 1
 EOF
   done
+  # The host keys an address offers, as ssh-keyscan prints them; nothing from an address with none.
+  fake ssh-keyscan << EOF
+printf '%s\n' "ssh-keyscan \$*" >> "$RECORD/argv"
+address=\${*: -1}
+[[ -f "$HOST/key-\$address" ]] || exit 1
+echo "\$address ssh-ed25519 \$(cat "$HOST/key-\$address")"
+EOF
   # What an edge answers: FRR's state and tables, the loaded rules and the kernel's setting.
   host_fake sudo << 'EOF'
 [[ $1 == -n ]] && shift
@@ -245,6 +279,12 @@ no_address() {
   [[ $output == *"skip  lab-edge-1: sessions:"* && $output == *"skip  lab-edge-1: routes:"* ]]
 }
 
+# rollout: scripts/edge-rollout --yes in the copy, the operator typing yes for every host key the
+# replaced edges offer.
+rollout() {
+  run bash -c 'printf "yes\nyes\nyes\nyes\n" | env "$@"' _ "${ENVIRONMENT[@]}" "$REPO/scripts/edge-rollout" --yes
+}
+
 # plan_replacing NUMBER...: a plan, as tofu show -json prints it, that replaces the instances of the
 # edges named and changes nothing else.
 plan_replacing() {
@@ -293,7 +333,7 @@ EOF
   # replaces an edge it checks the other one.
   plan_replacing 1 2
   : > "$RECORD/argv"
-  run env "${ENVIRONMENT[@]}" "$REPO/scripts/edge-rollout" --yes
+  rollout
   echo "$output"
   [ "$status" -eq 0 ]
   expected=$(printf '%s\n' \
@@ -312,7 +352,7 @@ EOF
   # planned, applied or touched.
   : > "$RECORD/argv"
   echo 1 > "$RECORD/check-1"
-  run env "${ENVIRONMENT[@]}" "$REPO/scripts/edge-rollout" --yes
+  rollout
   echo "$output"
   [ "$status" -ne 0 ]
   [[ $output == *"edge 1 does not pass its check"* ]]
@@ -323,9 +363,92 @@ EOF
   : > "$RECORD/argv"
   rm "$RECORD/check-1"
   echo 1 > "$RECORD/check-2"
-  run env "${ENVIRONMENT[@]}" "$REPO/scripts/edge-rollout" --yes
+  rollout
   [ "$status" -ne 0 ]
   [[ $output == *"edge 2 does not pass its check, so edge 1 is not replaced"* ]]
+  absent ' apply ' "$RECORD/argv"
+}
+
+# trail: what the host key handling did, in order, one step per line: an apply, dropping an edge's
+# recorded keys, scanning an edge for its keys, and a connection to an edge. EDGE is 1 or 2.
+trail() {
+  grep -E "^tofu .* apply |^ssh-keygen -R |^ssh-keyscan |^ssh .*@" "$RECORD/argv" |
+    sed -E "s/^tofu .*/apply/; s/^ssh-keygen -R $ADDRESS_1 .*/forget 1/; s/^ssh-keygen -R $ADDRESS_2 .*/forget 2/; \
+      s/^ssh-keyscan .*$ADDRESS_1\$/scan 1/; s/^ssh-keyscan .*$ADDRESS_2\$/scan 2/; \
+      s/^ssh .*@$ADDRESS_1 .*/ssh 1/; s/^ssh .*@$ADDRESS_2 .*/ssh 2/"
+}
+
+# recorded NUMBER: the key the known_hosts file holds for edge NUMBER.
+recorded() {
+  local address=$ADDRESS_1
+  [[ $1 == 1 ]] || address=$ADDRESS_2
+  grep "^$address " "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts" | awk '{ print $3 }'
+}
+
+@test "a replaced edge offers new host keys at its old address, and the rollout goes on only after they are recorded" {
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_state 2 active "$WORKERS" 203.0.113.17/32
+  plan_replacing 1 2
+  original_1=$(recorded 1)
+
+  # The operator types yes once per replaced edge, as the fingerprints are shown. edge-check is the
+  # real script here: its ssh refuses a host whose key is not the recorded one.
+  : > "$RECORD/argv"
+  run bash -c 'printf "yes\nyes\n" | env "$@"' _ "${ENVIRONMENT[@]}" "$REPO/scripts/edge-rollout" --yes
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *"SHA256:AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${ADDRESS_1//./}Replacement"* ]]
+  [ "$(recorded 1)" = "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${ADDRESS_1//./}Replacement" ]
+  [ "$(recorded 1)" != "$original_1" ]
+  [ "$(recorded 2)" = "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${ADDRESS_2//./}Replacement" ]
+  # The first edge's keys are dropped before its replacement, the new ones are scanned and recorded
+  # after it, and only then is it connected to; the second edge is not replaced before that.
+  expected=$(printf '%s\n' \
+    'ssh 2' 'forget 1' 'apply' 'scan 1' 'ssh 1' \
+    'ssh 1' 'forget 2' 'apply' 'scan 2' 'ssh 2')
+  [ "$(trail)" = "$expected" ]
+  no_address "$output"
+
+  # Declined: the first edge's new keys are not recorded, so its check cannot pass and the second
+  # edge is never touched.
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  for address in "$ADDRESS_1" "$ADDRESS_2"; do
+    echo "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${address//./}Original" > "$HOST/key-$address"
+    grep -v "^$address " "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts" > "$BATS_TEST_TMPDIR/known" || true
+    echo "$address ssh-ed25519 $(cat "$HOST/key-$address")" >> "$BATS_TEST_TMPDIR/known"
+    cp "$BATS_TEST_TMPDIR/known" "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts"
+  done
+  : > "$RECORD/argv"
+  run bash -c 'printf "no\n" | env "$@"' _ "${ENVIRONMENT[@]}" "$REPO/scripts/edge-rollout" --yes
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"edge 1"*"host key"* ]]
+  [ "$(grep -c '^tofu .* apply ' "$RECORD/argv")" -eq 1 ]
+  absent 'module.edge\["2"\]' "$RECORD/argv"
+  [ "$(recorded 1)" = "" ]
+}
+
+@test "applying a plan that replaces one edge drops its recorded host keys and no other edge's" {
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_state 2 active "$WORKERS" 203.0.113.17/32
+  plan_replacing 2
+  original_1=$(recorded 1)
+  run env "${ENVIRONMENT[@]}" "$REPO/scripts/infra-apply" sto2/edge --yes
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(trail)" = "$(printf '%s\n' 'forget 2' 'apply')" ]
+  [ "$(recorded 2)" = "" ]
+  [ "$(recorded 1)" = "$original_1" ]
+  no_address "$output"
+
+  # Deleting both instances outright leaves none serving as much as replacing both does.
+  plan_replacing 1 2
+  jq '.resource_changes[].change.actions = ["delete"]' "$BATS_TEST_TMPDIR/plan.json" > "$BATS_TEST_TMPDIR/plan.tmp"
+  mv "$BATS_TEST_TMPDIR/plan.tmp" "$BATS_TEST_TMPDIR/plan.json"
+  : > "$RECORD/argv"
+  run env "${ENVIRONMENT[@]}" "$REPO/scripts/infra-apply" sto2/edge --yes
+  [ "$status" -ne 0 ]
+  [[ $output == *"both edge routers"* ]]
   absent ' apply ' "$RECORD/argv"
 }
 

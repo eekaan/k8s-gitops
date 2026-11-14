@@ -5,7 +5,9 @@
 # summary, and once the stack's name is typed back (--yes: without asking), replaces edge 1, waits
 # until scripts/edge-check passes for it, and only then edge 2. Before it replaces an edge it checks
 # that the other one passes, so an edge is never replaced while the other is not serving. A check
-# that does not pass in EDGE_ROLLOUT_WAIT seconds (900 when unset), tried every EDGE_ROLLOUT_INTERVAL
+# its replacement has SSH host keys of its own at the same address, so the recorded keys are dropped
+# before the replacement and the new ones recorded, their fingerprints shown and yes typed, before
+# its check runs. A check that does not pass in EDGE_ROLLOUT_WAIT seconds (900 when unset), tried every EDGE_ROLLOUT_INTERVAL
 # seconds (15), stops the rollout there: an edge after it is not touched. The last step plans the
 # whole stack again and prints what is left.
 # Usage: scripts/edge-rollout [--yes]
@@ -36,15 +38,40 @@ fi
 lock_stack
 export EDGE_STACK_LOCKED=1
 init_stack
+edge_load
 echo "$stack:"
 plan_stack
 ((confirmed)) || confirm "$stack" "roll out" "rolled out"
+
+# check NUMBER: scripts/edge-check for edge NUMBER. stack-env keeps the state passphrase out of the
+# environment of what it runs, and edge-check, which sources stack-env itself, needs it again.
+check() {
+  TF_STATE_PASSPHRASE=${TF_STATE_PASSPHRASE-} "$here/edge-check" --edge "$1"
+}
+
+# records_new_keys NUMBER: shows the host keys edge NUMBER offers and records them once yes is typed,
+# trying again while the new instance does not answer until the wait is over.
+records_new_keys() {
+  local deadline=$((SECONDS + wait_seconds)) status
+  while :; do
+    status=0
+    ssh_host_trust "${edge_addresses[$1 - 1]}" "$edge_known_hosts" "edge router ${edge_names[$1 - 1]}" || status=$?
+    if ((status == 0)); then
+      return 0
+    fi
+    # Declined, or the wait is over.
+    if ((status == 2 || SECONDS >= deadline)); then
+      return 1
+    fi
+    sleep "$interval"
+  done
+}
 
 # passes NUMBER: whether edge-check passes for edge NUMBER, tried until the wait is over.
 passes() {
   local deadline=$((SECONDS + wait_seconds))
   while :; do
-    if "$here/edge-check" --edge "$1"; then
+    if check "$1"; then
       return 0
     fi
     if ((SECONDS >= deadline)); then
@@ -59,7 +86,7 @@ passes() {
 for number in 1 2; do
   other=$((3 - number))
   echo "edge $number: checking that edge $other serves before it is replaced"
-  if ! "$here/edge-check" --edge "$other"; then
+  if ! check "$other"; then
     infra_error "edge $other does not pass its check, so edge $number is not replaced"
     exit 1
   fi
@@ -67,8 +94,14 @@ for number in 1 2; do
   stack_tofu plan -input=false -out="$plan_file" "-target=module.edge[\"$number\"]" \
     "-target=openstack_networking_floatingip_associate_v2.edge[\"$number\"]" > /dev/null
   stack_tofu show -json "$plan_file" | plan_summary
+  edge_forget_keys "$number"
   apply_plan
-  echo "edge $number: applied; waiting for its check to pass"
+  echo "edge $number: applied; its SSH host keys are new"
+  if ! records_new_keys "$number"; then
+    infra_error "edge $number's new SSH host key was not recorded within ${wait_seconds}s or was not accepted; the rollout stops here and no later edge was touched"
+    exit 1
+  fi
+  echo "edge $number: waiting for its check to pass"
   if ! passes "$number"; then
     infra_error "edge $number does not pass its check within ${wait_seconds}s; the rollout stops here and no later edge was touched"
     exit 1

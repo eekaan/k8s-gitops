@@ -40,12 +40,22 @@ init_stack
 echo "$stack:"
 plan_stack
 # One plan replacing both edge routers would leave none serving; edge-rollout does it one at a time.
+edge_replaced_numbers=()
 if [[ $stack == */edge ]]; then
   edge_refuse_double_replace
 fi
 ((confirmed)) || confirm "$stack" apply applied
+# A replaced edge's instance has new SSH host keys at the same address, so the recorded ones go
+# before it is replaced; edge-check records the new ones, showing their fingerprints.
+if ((${#edge_replaced_numbers[@]} > 0)); then
+  edge_load
+  edge_forget_keys "${edge_replaced_numbers[@]}"
+fi
 apply_plan
 echo "$stack applied"
+if ((${#edge_replaced_numbers[@]} > 0)); then
+  echo "the replaced edge's SSH host keys are no longer recorded; just edge-check shows the new ones and records them once yes is typed"
+fi
 # The apply can change the nodes and their addresses, so talman.yaml is written again from the
 # state it left, under this run's lock.
 if [[ $stack == */cluster ]]; then
