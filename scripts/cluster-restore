@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# Restores a cluster's etcd from one of its snapshots in the etcd backup bucket, into the same
+# nodes with the same secrets bundle, the way Talos' disaster recovery and talman's --recover-from
+# do. Before anything changes it checks what it needs; finds the snapshot, by a name
+# cluster-snapshots prints or as latest; downloads it with the state key into a private temporary
+# directory and decrypts it there with the Talos age key, which reaches age by its file's path or on
+# its standard input, never as an argument; and waits until every node answers on the Talos API
+# port. Then it says what happens and asks for the cluster's name to be typed back, unless --yes:
+#   1. talman reset wipes every node's EPHEMERAL partition, where etcd keeps its data and the
+#      kubelet and containerd theirs, and reboots it, without leaving etcd first, as every member
+#      goes. STATE, which holds the node's machine configuration, stays, so each node comes back as
+#      itself, and the control planes wait for etcd to be bootstrapped. Workers are reset too, so
+#      no node runs on what the cluster held after the snapshot.
+#   2. Once every node answers again, talman apply --bootstrap --recover-from restores etcd from
+#      the snapshot on the first control plane; the other control planes join it.
+#   3. The kubeconfig is fetched as cluster-kubeconfig does, and every node in talman.yaml must
+#      report Ready after the reset: the restored etcd holds each node's Ready condition as it was
+#      at the snapshot, so only a report since counts.
+# What cluster-bootstrap applies before Flux starts (Cilium, cluster-config, cluster-secrets,
+# sops-age, the kubelet serving-certificate approver) is a set of Kubernetes objects, which the
+# restored etcd holds as they were at the snapshot, with Flux, which reconciles the rest from its
+# artifact; none of it is applied again. The decrypted snapshot is removed once etcd is restored,
+# and on every exit.
+# Usage: scripts/cluster-restore <snapshot>|latest [cluster] [--yes]
+set -euo pipefail
+umask 077
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/s3.sh
+. "$here/lib/s3.sh"
+# shellcheck source=scripts/lib/cluster.sh
+. "$here/lib/cluster.sh"
+
+usage() {
+  infra_error "usage: cluster-restore <snapshot>|latest [cluster] [--yes]; <snapshot> is a name just cluster-snapshots prints"
+  exit 2
+}
+
+snapshot='' cluster='' confirmed=0
+for arg; do
+  case $arg in
+    --yes) confirmed=1 ;;
+    -*) usage ;;
+    *)
+      if [[ -z $snapshot ]]; then
+        snapshot=$arg
+      elif [[ -z $cluster ]]; then
+        cluster=$arg
+      else
+        usage
+      fi
+      ;;
+  esac
+done
+if [[ $snapshot != latest && ! $snapshot =~ $s3_snapshot_name_re ]]; then
+  usage
+fi
+
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "$cluster"
+complete=1
+require_cluster talman secrets age-key api-address wait || complete=0
+require_env BACKUP_BUCKET_PREFIX AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY || complete=0
+require_commands age kubectl || complete=0
+((complete))
+s3_bucket_name_ok BACKUP_BUCKET_PREFIX prefix
+s3_require_client
+
+# decrypt ENCRYPTED PLAINTEXT: decrypts with the Talos age key: the file SOPS_AGE_KEY_FILE names, or
+# without one, as in CI, SOPS_AGE_KEY on age's standard input.
+decrypt() {
+  if [[ -n ${SOPS_AGE_KEY_FILE:-} && -f $SOPS_AGE_KEY_FILE ]]; then
+    age --decrypt --identity "$SOPS_AGE_KEY_FILE" --output "$2" "$1"
+  else
+    printf '%s\n' "$SOPS_AGE_KEY" | age --decrypt --identity - --output "$2" "$1"
+  fi
+}
+
+# not_ready_since SINCE HOSTNAME...: the HOSTNAMEs that are not a Ready node whose kubelet has
+# reported since SINCE, a UTC time as Kubernetes writes it, comma-separated; nothing when every one
+# is. Fails when the API does not answer through the kubeconfig.
+not_ready_since() {
+  local since=$1 nodes
+  shift
+  nodes=$(kubectl get nodes --output json --request-timeout=10s 2> /dev/null) || return 1
+  jq -r --arg since "$since" '
+    [.items[] | select(any(.status.conditions[]?;
+        .type == "Ready" and .status == "True" and .lastHeartbeatTime >= $since))
+      | .metadata.name] as $ready
+    | [$ARGS.positional[] | select(IN($ready[]) | not)] | join(", ")' --args "$@" <<< "$nodes"
+}
+
+step="finding the snapshot in the etcd bucket"
+if ! listing=$(s3_etcd_snapshots "$cluster"); then
+  infra_error "rclone cannot list the etcd bucket with the state key, or it does not exist; nothing was reset"
+  exit 1
+fi
+name=
+while read -r listed _; do
+  if [[ -n $listed && ($snapshot == latest || $listed == "$snapshot") ]]; then
+    name=$listed
+    break
+  fi
+done <<< "$listing"
+if [[ -z $name && $snapshot == latest ]]; then
+  infra_error "the etcd bucket holds no snapshot of $cluster; nothing was reset"
+  exit 1
+elif [[ -z $name ]]; then
+  infra_error "the etcd bucket holds no snapshot $snapshot of $cluster; just cluster-snapshots lists them"
+  exit 1
+fi
+
+step="making a private directory for the snapshot"
+make_private_dir
+encrypted=$work_dir/$name
+decrypted=$work_dir/etcd.db
+
+step="downloading $name"
+# rclone copies nothing, and succeeds, when the object is not there.
+if ! s3_rclone state copyto "store:$BACKUP_BUCKET_PREFIX-etcd/$cluster/$name" "$encrypted" \
+  > /dev/null 2>&1 || [[ ! -s $encrypted ]]; then
+  infra_error "rclone cannot download $name with the state key; nothing was reset"
+  exit 1
+fi
+
+step="decrypting $name with the Talos age key"
+if [[ $(head -n 1 "$encrypted") != age-encryption.org/v1 ]]; then
+  infra_error "$name is not an age file; nothing was reset"
+  exit 1
+fi
+if ! decrypt "$encrypted" "$decrypted" 2> /dev/null; then
+  infra_error "the Talos age key cannot decrypt $name; nothing was reset"
+  exit 1
+fi
+
+step="waiting for every node to answer on the Talos API port"
+wait_for_talos_api "$talman_file"
+
+echo "cluster-restore: every node of $cluster is reset, and the cluster's state is replaced by the one in $name: everything written to the cluster after the snapshot was taken is lost."
+echo "cluster-restore: talman reset wipes each node's EPHEMERAL partition, with etcd's data, and reboots it; then talman apply --bootstrap restores etcd from the snapshot."
+step="waiting for $cluster to be typed back"
+((confirmed)) || confirm "$cluster" "reset and restore" restored
+
+step="resetting every node of $cluster"
+since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+cluster_talman reset --graceful=false --wipe-labels=EPHEMERAL --yes
+
+step="waiting for every node to answer on the Talos API port after the reset"
+wait_for_talos_api "$talman_file"
+
+step="restoring etcd from $name with talman apply --bootstrap"
+cluster_talman apply --bootstrap --recover-from "$decrypted" --yes
+rm -f -- "$decrypted" "$encrypted"
+
+step="fetching the kubeconfig"
+"$here/cluster-kubeconfig" "$cluster" > /dev/null
+
+step="waiting for every node to be Ready"
+hostnames=$(talman_nodes "$talman_file" | cut -d' ' -f1)
+mapfile -t nodes <<< "$hostnames"
+# The API comes back once etcd runs, and a kubelet reports when it starts; ninety tries, ten
+# seconds apart.
+for ((attempt = 1; ; attempt++)); do
+  if not_ready=$(not_ready_since "$since" "${nodes[@]}"); then
+    [[ -n $not_ready ]] || break
+  else
+    not_ready=
+  fi
+  if ((attempt >= 90)); then
+    if [[ -n $not_ready ]]; then
+      infra_error "$not_ready did not report Ready after the reset"
+    else
+      infra_error "the Kubernetes API does not answer through the kubeconfig"
+    fi
+    exit 1
+  fi
+  sleep 10
+done
+echo "cluster-restore: $cluster is restored from $name; every node is Ready"

@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# A stand-in for rclone against the object storage's buckets and objects, installed by the tests as
+# <tmp>/bin/rclone. It finds its files from its own path:
+#   <tmp>/store/<bucket>/<key>   the objects of each bucket the project owns; a bucket is a directory
+#   <tmp>/store-fails/upload     while it exists, an upload fails
+#   <tmp>/store-fails/download   while it exists, a download fails
+#   <tmp>/store-fails/list       while it exists, listing fails
+# It answers as the pinned rclone answers an S3 API: an upload into a bucket that does not exist
+# creates the bucket first, unless the no-check-bucket option is set, when the store refuses it
+# (NoSuchBucket); listing a bucket that does not exist exits 3, directory not found, after a partial
+# "["; listing a prefix that holds nothing is an empty list; downloading an object that does not
+# exist copies nothing and exits 0.
+# It records "rclone ARGS" in <tmp>/record/argv and each call's environment in
+# <tmp>/record/env.rclone.<n>. For each upload it records what it was handed, in
+# <tmp>/record/upload.<n>: the source's path, its first line, and the names in its directory at that
+# moment. Like rclone, it prints bucket names and the endpoint, which the recipes keep to themselves.
+set -uo pipefail
+
+root=${0%/bin/*}
+store=$root/store
+fails=$root/store-fails
+record=$root/record
+printf '%s\n' "rclone $*" >> "$record/argv"
+call=1
+while [[ -e $record/env.rclone.$call ]]; do
+  call=$((call + 1))
+done
+while IFS= read -r -d '' entry; do
+  printf '%s\0' "$entry"
+done < "/proc/$$/environ" > "$record/env.rclone.$call"
+
+endpoint=${RCLONE_CONFIG_STORE_ENDPOINT-}
+if [[ ${RCLONE_CONFIG_STORE_TYPE-} != s3 || -z ${RCLONE_CONFIG_STORE_ACCESS_KEY_ID-} ]]; then
+  echo "Failed to create file system for store: didn't find section in config file" >&2
+  exit 1
+fi
+
+command=$1
+shift
+no_check_bucket=0
+[[ ${RCLONE_S3_NO_CHECK_BUCKET-} == true || ${RCLONE_CONFIG_STORE_NO_CHECK_BUCKET-} == true ]] && no_check_bucket=1
+paths=()
+for arg; do
+  case $arg in
+    --s3-no-check-bucket | --s3-no-check-bucket=true) no_check_bucket=1 ;;
+    --files-only) ;;
+    -*)
+      echo "unexpected option: rclone $command $arg" >&2
+      exit 2
+      ;;
+    *) paths+=("$arg") ;;
+  esac
+done
+
+case $command in
+  copyto)
+    source=${paths[0]} target=${paths[1]}
+    if [[ $target == store:* ]]; then
+      key=${target#store:}
+      bucket=${key%%/*}
+      upload=1
+      while [[ -e $record/upload.$upload ]]; do
+        upload=$((upload + 1))
+      done
+      {
+        echo "source $source"
+        echo "header $(head -n 1 "$source" 2> /dev/null)"
+        echo "siblings $(find "$(dirname "$source")" -mindepth 1 -printf '%f ' 2> /dev/null)"
+      } > "$record/upload.$upload"
+      if [[ -e $fails/upload ]]; then
+        echo "ERROR : $key: Failed to copy: AccessDenied at $endpoint" >&2
+        exit 1
+      fi
+      if [[ ! -d $store/$bucket ]]; then
+        if ((no_check_bucket)); then
+          echo "ERROR : $key: Failed to copy: api error NoSuchBucket: The specified bucket does not exist at $endpoint" >&2
+          exit 1
+        fi
+        mkdir -p "$store/$bucket"
+      fi
+      mkdir -p "$(dirname "$store/$key")"
+      cp "$source" "$store/$key"
+      echo "INFO  : $key: Copied (new) to $bucket at $endpoint" >&2
+    else
+      key=${source#store:}
+      if [[ -e $fails/download ]]; then
+        echo "ERROR : $key: Failed to copy: AccessDenied at $endpoint" >&2
+        exit 1
+      fi
+      if [[ -f $store/$key ]]; then
+        cp "$store/$key" "$target"
+      fi
+    fi
+    ;;
+  lsjson)
+    key=${paths[0]#store:}
+    bucket=${key%%/*}
+    if [[ -e $fails/list ]]; then
+      echo "ERROR : $key: AccessDenied listing at $endpoint" >&2
+      exit 1
+    fi
+    if [[ ! -d $store/$bucket ]]; then
+      echo "["
+      echo "ERROR : error listing $bucket at $endpoint: directory not found" >&2
+      exit 3
+    fi
+    dir=$store/${key%/}
+    echo "["
+    if [[ -d $dir ]]; then
+      find "$dir" -mindepth 1 -maxdepth 1 -type f -printf '%f\t%s\n' | sort |
+        jq -R -c 'split("\t") | {Path: .[0], Name: .[0], Size: (.[1] | tonumber), MimeType: "application/octet-stream", IsDir: false}' |
+        paste -sd, -
+    fi
+    echo "]"
+    ;;
+  *)
+    echo "unexpected call: rclone $command $*" >&2
+    exit 2
+    ;;
+esac

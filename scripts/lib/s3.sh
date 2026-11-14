@@ -1,12 +1,17 @@
 # shellcheck shell=bash
 # Shared by the scripts that reach the object storage through its S3 API: the key sets, the backup
-# buckets' roles, and the one way rclone is run against the store. Builds on scripts/lib/infra.sh.
+# buckets' roles, the one way rclone is run against the store, and the etcd snapshots in the etcd
+# bucket. Builds on scripts/lib/infra.sh.
 
 # shellcheck source=scripts/lib/infra.sh
 . "$(dirname "${BASH_SOURCE[0]}")/infra.sh"
 
 # The backup buckets are named <BACKUP_BUCKET_PREFIX>-<role>, one per role.
 s3_backup_roles=(etcd openbao volsync postgres)
+
+# An etcd snapshot's object in the etcd bucket is <cluster>/<name>, its name the UTC time it was
+# taken, so that names sort as the snapshots were taken.
+s3_snapshot_name_re='^[0-9]{8}T[0-9]{6}Z\.snapshot\.age$'
 
 # What rclone keeps from the caller's environment: where programs and its home are, and how this
 # machine reaches the network.
@@ -119,6 +124,18 @@ s3_owned_buckets() {
       printf '%s\n' "${line%/}"
     fi
   done <<< "$listing"
+}
+
+# s3_etcd_snapshots CLUSTER: CLUSTER's etcd snapshots in the etcd bucket,
+# <BACKUP_BUCKET_PREFIX>-etcd, as the state key lists them: the objects directly under CLUSTER/ named
+# as a snapshot is, each as its name and size in bytes, one per line, newest first; nothing when
+# there is none. Returns 1, printing nothing of rclone's, when the bucket cannot be listed, as when it
+# does not exist: rclone then exits 3, while a prefix without objects lists as empty.
+s3_etcd_snapshots() {
+  local listing
+  listing=$(s3_rclone state lsjson --files-only "store:$BACKUP_BUCKET_PREFIX-etcd/$1/" 2> /dev/null) || return 1
+  jq -r --arg name "$s3_snapshot_name_re" \
+    '[.[] | select(.Name | test($name))] | sort_by(.Name) | reverse[] | "\(.Name) \(.Size)"' <<< "$listing"
 }
 
 # s3_create_buckets KEYSET NAME...: creates each bucket NAME that KEYSET's project does not own

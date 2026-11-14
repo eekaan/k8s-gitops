@@ -55,6 +55,19 @@ cluster-kubeconfig cluster='lab-sto2':
 cluster-talos *args:
     scripts/cluster-talos "$@"
 
+# Take an etcd snapshot of a cluster, encrypt it to the Talos age key's recipient and upload only the encrypted file to the etcd backup bucket as <cluster>/<UTC time>.snapshot.age; prints its name and size
+cluster-snapshot cluster='lab-sto2':
+    scripts/cluster-snapshot {{ quote(cluster) }}
+
+# List a cluster's etcd snapshots in the etcd backup bucket, newest first, by name and size
+cluster-snapshots cluster='lab-sto2':
+    scripts/cluster-snapshots {{ quote(cluster) }}
+
+# Restore a cluster's etcd from a snapshot cluster-snapshots lists, or latest: download and decrypt it, then once the cluster's name is typed back reset every node's EPHEMERAL partition, bootstrap etcd from the snapshot and wait until every node is Ready (--yes: without asking)
+[positional-arguments]
+cluster-restore snapshot *args:
+    scripts/cluster-restore "$@"
+
 # Upgrade Talos to the version talman.yaml gives: show which nodes are behind, then snapshot etcd and drain, upgrade and uncordon each in turn once the cluster's name is typed back (--yes: without asking)
 [positional-arguments]
 cluster-upgrade *args:

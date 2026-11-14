@@ -162,6 +162,38 @@ out of the artifact, which is built from `kubernetes/`.
   `cluster-talos` needs and the API address. An etcd snapshot holds every Secret in the cluster;
   talman writes it
   into `clusterconfig/` with mode 0600, and it stays there.
+- `just cluster-snapshot [cluster]` keeps an etcd snapshot, encrypted, in the etcd backup bucket,
+  `BACKUP_BUCKET_PREFIX` followed by `-etcd`
+  ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)). `talman etcd snapshot`
+  writes it into a private temporary directory, mode 0700, under `TMPDIR` and outside the
+  repository; age encrypts it there to the Talos age key's recipient in `talos/.sops.yaml`, which
+  needs no private key; the plaintext is removed; and only the encrypted file is uploaded, with the
+  state key, as `<cluster>/<UTC time>.snapshot.age`, the time as `yyyymmddThhmmssZ`. The upload
+  passes rclone's `--s3-no-check-bucket`, so it never creates a bucket: without the etcd bucket it
+  fails. Once the bucket lists the object at the size uploaded, the recipe prints one line, the
+  cluster, the object's name and its size. The directory is removed whenever the recipe exits, a
+  failed run and one interrupted by Ctrl-C or SIGTERM included. It needs the cluster's
+  `talman.yaml` and `secrets.sops.yaml`, the age key's location and its recipient, the bucket
+  prefix and the state key.
+- `just cluster-snapshots [cluster]` lists the cluster's snapshots in the etcd bucket, reading only:
+  one per line, newest first, by name and size in bytes. It needs the bucket prefix and the state
+  key.
+- `just cluster-restore <snapshot> [cluster] [--yes]` restores the cluster's etcd from a snapshot
+  `cluster-snapshots` lists, or from `latest`, into the same nodes with the same secrets bundle;
+  [runbooks/etcd-restore.md](runbooks/etcd-restore.md) says when, and what is lost. Before it
+  changes anything it checks what it needs, finds the snapshot, downloads it into a private
+  temporary directory as `cluster-snapshot` makes one, decrypts it there with the Talos age key, and
+  waits for every node as `cluster-bootstrap` does; a snapshot that is not there, is not an age file
+  or that the key cannot decrypt stops it. It says that every node is reset and the cluster's state
+  replaced by the snapshot's, losing what was written since, and goes on once the cluster's name is
+  typed back; `--yes` does not ask. `talman reset` then wipes every node's EPHEMERAL partition
+  without leaving etcd and reboots it, and once every node answers again,
+  `talman apply --bootstrap --recover-from` restores etcd from the snapshot on the first control
+  plane, which the others join. It fetches the kubeconfig as `cluster-kubeconfig` does, and asks
+  every ten seconds, ninety times at most, until every node in `talman.yaml` reports Ready after the
+  reset. What `cluster-bootstrap` applies before Flux is not applied again, as the restored etcd
+  holds it. The decrypted snapshot is removed once etcd is restored and whenever the recipe exits.
+  It needs what `cluster-talos` needs, the API address, the bucket prefix and the state key.
 - `just cluster-config [cluster]` applies what Flux needs before it starts: the namespace
   `flux-system`, the ConfigMap `cluster-config`, the Secret `cluster-secrets` and the Secret
   `sops-age` ([kubernetes.md](kubernetes.md#before-flux-starts)). It refuses, naming each, when the
@@ -180,39 +212,49 @@ A failing recipe ends with a line naming the step it failed in.
 ## Not automated
 
 - Rebooting a node that does not answer on the Talos API port.
-- Copying an etcd snapshot anywhere else, encrypted or not.
 
 ## What the recipes print
 
 The recipes' own lines name nodes by hostname, never by address, and print none of the age keys,
-the bundle, the kubeconfig, `KUBE_API_ADDRESS` and the values of `cluster-config` and
-`cluster-secrets`. talman's output, talosctl's within it, names each node with the address talman
+the bundle, the kubeconfig, `KUBE_API_ADDRESS`, the values of `cluster-config` and
+`cluster-secrets`, an etcd snapshot's content, the backup buckets' names and the object storage's
+endpoint. talman's output, talosctl's within it, names each node with the address talman
 reaches it on and shows configuration diffs. Without `CI` set it passes through as talman prints
 it. With `CI` set, as CI logs are public, `cluster-bootstrap`, `cluster-kubeconfig`,
-`cluster-talos` and both upgrade recipes write it to `clusterconfig/<recipe>.log` in the cluster's
-directory, which git ignores, started afresh by each run, and print for each talman call only
-whether it succeeded or failed and that file's path. kubectl's and helm's output passes through,
-naming the objects they apply.
+`cluster-talos`, `cluster-restore`, `cluster-snapshot` and both upgrade recipes write it to
+`clusterconfig/<recipe>.log` in the cluster's directory, which git ignores, started afresh by each
+run, and print for each talman call only whether it succeeded or failed and that file's path.
+Of talman's output `cluster-snapshot` shows only the errors, and with `CI` set not those either.
+What rclone prints names the bucket and the endpoint, so the etcd recipes never show it. kubectl's
+and helm's output passes through, naming the objects they apply.
 
 ## Environment
 
 The recipes read `.env` and the environment as the infrastructure recipes do
 ([infrastructure.md](infrastructure.md#environment)), and name each variable that is missing. No
-recipe prints a secret or reads the Talos age key itself: sops and talman get the key's location
-from their environment. `cluster-config` reads the Flux age key, to hand it to kubectl and
-age-keygen on standard input.
+recipe prints a secret or passes one on a command line. sops and talman get the Talos age key's
+location from their environment; `cluster-restore` hands age the key file's path, or, when only
+`SOPS_AGE_KEY` holds the key, the key on standard input. `cluster-config` reads the Flux age key,
+to hand it to kubectl and age-keygen on standard input.
 
 - `SOPS_AGE_KEY_FILE`: the path of the Talos age key, outside the repository. In CI,
   `SOPS_AGE_KEY` holds the key itself instead. Every recipe that reaches the nodes needs one of
-  them, as talman decrypts the bundle.
+  them, as talman decrypts the bundle, and `cluster-restore` decrypts the snapshot with it.
+- `BACKUP_BUCKET_PREFIX`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`: the start of the backup
+  buckets' names and the state key ([infrastructure.md](infrastructure.md#environment)), with which
+  `cluster-snapshot`, `cluster-snapshots` and `cluster-restore` reach the etcd bucket through
+  rclone, configured as the infrastructure recipes configure it
+  ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)).
+- `TMPDIR`: where `cluster-snapshot` and `cluster-restore` make their private directory, `/tmp`
+  when unset. Inside the repository it is refused.
 - `KUBE_API_ADDRESS`: the Kubernetes API load balancer's floating address, an IPv4 address, as
   the API's certificate names are addresses. The cluster stack renders it into the cluster's
   `talman.yaml` as `values.apiAddress`, and the recipes read it from there; set in `.env` or the
-  environment, it takes the place of that. `cluster-bootstrap`, `cluster-kubeconfig` and the
-  upgrade recipes need it. It reaches a command line in one place: `cluster-upgrade-k8s` hands it to
-  talosctl as its endpoint.
-- `TALOS_WAIT`: how many seconds `cluster-bootstrap` and `cluster-talos` wait for the nodes, 600
-  when unset.
+  environment, it takes the place of that. `cluster-bootstrap`, `cluster-kubeconfig`,
+  `cluster-restore` and the upgrade recipes need it. It reaches a command line in one place:
+  `cluster-upgrade-k8s` hands it to talosctl as its endpoint.
+- `TALOS_WAIT`: how many seconds `cluster-bootstrap`, `cluster-talos` and `cluster-restore` wait
+  for the nodes, 600 when unset.
 - `FLUX_AGE_KEY_FILE`: the path of the Flux age key, outside the repository. In CI, `FLUX_AGE_KEY`
   holds the key itself instead. `cluster-bootstrap`, `cluster-config` and `cluster-flux` need one
   of them.

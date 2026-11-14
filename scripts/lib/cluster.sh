@@ -2,9 +2,10 @@
 # Shared by scripts/cluster-env, the cluster-* scripts, the install scripts, the adoption check and
 # the secrets bundle check: the Talos age key's location, talos/.sops.yaml's recipient, the check
 # that a secrets bundle is encrypted, a cluster's nodes and the wait for their Talos API, the line
-# that names the step a recipe failed in, the talman run that keeps its output out of a CI log, the
-# Flux age key and the other objects Flux needs before it starts, the release an application's
-# HelmRelease makes, and the install of an application before Flux. Builds on scripts/lib/infra.sh,
+# that names the step a recipe failed in, the private directory an etcd snapshot is kept in while a
+# recipe works on it, the talman run that keeps its output out of a CI log, the Flux age key and the
+# other objects Flux needs before it starts, the release an application's HelmRelease makes, and
+# the install of an application before Flux. Builds on scripts/lib/infra.sh,
 # which reads the environment. Nothing here prints a secret or a deployment value, or passes one as
 # an argument: sops and talman get the Talos age key's location from their environment, and the Flux
 # age key and the values of the objects applied before Flux reach age-keygen, jq and kubectl on
@@ -28,6 +29,45 @@ failed_step() {
   if (($1 != 0)); then
     infra_error "failed while $step"
   fi
+}
+
+# require_commands NAME...: fails naming each NAME that is not on PATH.
+require_commands() {
+  local name complete=1
+  for name; do
+    if ! command -v "$name" > /dev/null; then
+      infra_error "$name is not on PATH; install the pinned tools with: just tools"
+      complete=0
+    fi
+  done
+  ((complete))
+}
+
+# make_private_dir: makes work_dir, a directory only this user can enter, under TMPDIR, for a file
+# that must not stay on disk, such as an etcd snapshot, which holds every Kubernetes Secret. Every
+# exit of the script removes it, through its EXIT trap, which bash runs on success, on failure and
+# when SIGINT or SIGTERM ends it; after that, a failing script names its step as report_failed_step
+# has it do. Ctrl-C ends the script even when the program it interrupted handles SIGINT itself and
+# exits 0, after which bash would otherwise go on. A TMPDIR inside the repository is refused, as a
+# file there could be committed.
+make_private_dir() {
+  if inside_repository "${TMPDIR:-/tmp}"; then
+    infra_error "TMPDIR lies inside the repository; the snapshot is kept outside it"
+    return 1
+  fi
+  work_dir=$(umask 077 && mktemp -d -t "${0##*/}.XXXXXXXXXX") || return 1
+  trap 'remove_private_dir $?' EXIT
+  trap 'exit 130' INT
+}
+
+remove_private_dir() {
+  local status=$1
+  if ! rm -rf -- "$work_dir"; then
+    infra_error "cannot remove $work_dir, which holds an etcd snapshot; remove it"
+    ((status != 0)) || status=1
+  fi
+  failed_step "$status"
+  exit "$status"
 }
 
 # cluster_talman ARG...: talman with ARG... on the cluster scripts/cluster-env set up. talman's output,
