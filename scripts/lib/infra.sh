@@ -158,14 +158,6 @@ export_state_encryption() {
   export -n TF_STATE_PASSPHRASE
 }
 
-# Hook for adding this machine's public address to the allowlist for the run, so an operator on a
-# new network is not locked out. Looking the address up needs a network call and is not done:
-# the allowlist is passed on as it is, and the hook says so.
-add_current_address() {
-  infra_error "not implemented: adding this machine's public address to the allowlist; the allowlist is used as given"
-  printf '%s' "$1"
-}
-
 # export_api_allowed_cidrs [VARIABLE]: exports TF_VAR_<VARIABLE>, TF_VAR_api_allowed_cidrs without
 # one, from OPERATOR_CIDRS (CI) or operator-cidrs.json at the repository root: a non-empty JSON list
 # of IPv4 CIDRs, none of which covers every address. A wrong entry is named by its position, as the
@@ -200,7 +192,6 @@ export_api_allowed_cidrs() {
   done < <(jq -r 'to_entries[]
     | if (.value | test(":")) then "\(.key + 1) ipv6" elif (.value | test("/0+$")) then "\(.key + 1) all" else empty end' <<< "$cidrs")
   ((!refused)) || return 1
-  cidrs=$(add_current_address "$cidrs")
   export "$variable=$cidrs"
 }
 

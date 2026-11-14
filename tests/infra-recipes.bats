@@ -353,6 +353,31 @@ absent() {
   done
 }
 
+@test "The allowlist is used as given and no recipe says otherwise" {
+  with CI_HOST_IMAGE=fixture-image 'CI_HOST_SSH_PUBLIC_KEY=ssh-ed25519 AAAAfixture operator'
+  for stack in sto2/cluster sto2/ci; do
+    for flags in '' --yes; do
+      echo "$stack $flags"
+      rm -f "$RECORD/tofu"
+
+      if [[ -n $flags ]]; then
+        recipe infra-apply "$flags" "$stack" < /dev/null
+      else
+        recipe infra-plan "$stack"
+      fi
+
+      [ "$status" -eq 0 ]
+      [[ $output != *"public address"* && $output != *"not implemented"* ]]
+      [[ $(tofu_calls plan) == *"-chdir=$REPO/infra/openstack/stacks/$stack plan "* ]]
+      [ "$(tofu_env plan "TF_VAR_$([[ $stack == */ci ]] && echo ssh || echo api)_allowed_cidrs")" = '["203.0.113.77/32"]' ]
+    done
+  done
+
+  recipe infra-destroy --yes < /dev/null
+
+  [[ $output != *"public address"* ]]
+}
+
 @test "The backend is configured from the environment" {
   recipe infra-plan sto2/plumbing
 
@@ -871,11 +896,6 @@ EOF
 }
 
 @test "the unimplemented hooks say so when they are reached" {
-  recipe infra-plan sto2/cluster
-
-  [ "$status" -eq 0 ]
-  [[ $output == *"not implemented: adding this machine's public address to the allowlist"* ]]
-
   recipe infra-destroy --yes < /dev/null
 
   [ "$status" -eq 0 ]

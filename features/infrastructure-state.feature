@@ -106,6 +106,11 @@ Feature: Infrastructure state and stack recipes
     When infra-plan runs for the cluster stack against a recording tofu
     Then the allowlist is in the tofu process environment and in no argument
 
+  Scenario: The allowlist is used as given and no recipe says otherwise
+    Given an operator allowlist and the cluster and ci stacks
+    When infra-plan, infra-apply and infra-destroy run for each, with --yes where they ask
+    Then no recipe prints anything about adding an address to the allowlist, and tofu gets the allowlist exactly as the operator wrote it
+
   Scenario: Two operations on one stack do not overlap
     Given an operation in progress on a stack
     When a second one starts on the same stack
