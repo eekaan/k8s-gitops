@@ -56,12 +56,12 @@ plain_variables=(
 )
 
 # secret_variable NAME: whether NAME is a secret: one tool_secrets lists, or one of the families the
-# tools read by prefix, the cloud credential's OS_*, the object storage's AWS_* and the inputs the
-# stacks take, TF_VAR_*. stack-env makes the last from the stacks' own variables, so none is written
-# by hand or named in .env.example.
+# tools read by prefix, the cloud credential's OS_*, the object storage's AWS_*, the registry tokens
+# tofu reads, TF_TOKEN_*, and the inputs the stacks take, TF_VAR_*. stack-env makes the last from the
+# stacks' own variables, so none is written by hand or named in .env.example.
 secret_variable() {
   case $1 in
-    OS_* | AWS_* | TF_VAR_*) return 0 ;;
+    OS_* | AWS_* | TF_VAR_* | TF_TOKEN_*) return 0 ;;
   esac
   [[ -n ${tool_secrets[$1]+set} ]]
 }
@@ -81,7 +81,7 @@ tool_sees() {
     return
   fi
   case $1:$2 in
-    tofu:OS_* | tofu:AWS_* | tofu:TF_VAR_* | openstack:OS_*) return 0 ;;
+    tofu:OS_* | tofu:AWS_* | tofu:TF_VAR_* | tofu:TF_TOKEN_* | openstack:OS_*) return 0 ;;
   esac
   return 1
 }
