@@ -196,6 +196,9 @@ cluster_files() {
 #   starting.NODE      NODE's API server answers that many requests for /readyz at its own address,
 #                      after those it refuses, with an error, not ready, before it answers ok
 #   asked.NODE         how many requests for /readyz NODE's API server has answered
+#   api-gone.NODE      NODE's API server refuses connections once it has answered ok to /readyz
+#   answered.NODE      NODE's API server has answered ok to /readyz
+#   lb-slow            a request through the load balancer takes that many seconds
 #   lb-cut.NODE        the load balancer sends no connection to NODE's API server
 #   lb-back.NODE       the load balancer sends NODE's API server no connection for that many seconds
 #                      from the first request through it, as its health monitor takes NODE back
@@ -490,7 +493,7 @@ unanswered() {
 # unreachable SERVER: fails as kubectl does when the API server it is pointed at never answers,
 # dropped or refused, naming the server's address.
 unreachable() {
-  if [[ -e $STATE/api-refused.$1 ]]; then
+  if [[ -e $STATE/api-refused.$1 || -e $STATE/api-gone.$1 ]]; then
     printf 'The connection to the server %s:6443 was refused - did you specify the right host or port?\n' "$(address "$1")" >&2
   else
     printf 'Unable to connect to the server: dial tcp %s:6443: i/o timeout\n' "$(address "$1")" >&2
@@ -498,8 +501,10 @@ unreachable() {
   exit 1
 }
 # refusing SERVER: whether SERVER refuses connections now: always with api-refused.SERVER empty, and
-# for its first that many requests for /readyz with a number in it.
+# for its first that many requests for /readyz with a number in it; with api-gone.SERVER, once it has
+# answered ok to one.
 refusing() {
+  [[ ! -e $STATE/api-gone.$1 || ! -e $STATE/answered.$1 ]] || return 0
   [[ -e $STATE/api-refused.$1 ]] || return 1
   local first
   first=$(cat "$STATE/api-refused.$1")
@@ -521,6 +526,7 @@ case $line in
           '[+]ping ok\n[+]log ok\n[+]etcd ok\n[+]poststarthook/start-apiserver-admission-initializer ok\n[-]poststarthook/rbac/bootstrap-roles failed: reason withheld\n[-]poststarthook/scheduling/bootstrap-system-priority-classes failed: reason withheld\n[+]poststarthook/start-kube-aggregator-informers ok\n[+]shutdown ok\nreadyz check failed' >&2
         exit 1
       fi
+      : > "$STATE/answered.$server"
     fi
     echo ok
     ;;
@@ -542,6 +548,8 @@ case $line in
         break
       done
       echo $((turn + i + 1)) > "$STATE/lb-turn"
+      # A request through the load balancer that takes lb-slow seconds.
+      [[ ! -e $STATE/lb-slow ]] || echo $((clock + $(cat "$STATE/lb-slow"))) > "$STATE/clock"
       [[ -n $server ]] || exit 1
     elif [[ -e $STATE/api-cut.$server ]] || refusing "$server"; then
       unreachable "$server"
@@ -1673,6 +1681,20 @@ waited() {
       [[ $output != *"$address"* ]]
     done
   done
+
+  # One that stops answering at its own address once it was ready fails as that, not as the load
+  # balancer's.
+  rm -f "$STATE"/* "$RECORD/argv"
+  printf '%s\n' cp-1 worker-2 > "$STATE/pending"
+  : > "$STATE/api-gone.cp-1"
+
+  recipe cluster-talos --first cp-1 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [ "$(applies)" = "$(tries cp-1)" ]
+  [[ $output == *"cp-1's API server was ready at its own address, then did not answer there for its metrics"* ]]
+  [[ $output == *"kubectl said: The connection to the server <address>:6443 was refused"* ]]
+  [[ $output != *"load balancer"* ]]
 }
 
 @test "cluster-talos --first gives the load balancer's health monitor time to take a restarted control plane back" {
@@ -1702,6 +1724,38 @@ waited() {
   [[ $output == *"no fresh request through the load balancer reached cp-1's API server within 20s"* ]]
   [ "$(waited '^kubectl get --raw /metrics ')" -ge 15 ]
   [ "$(waited '^kubectl get --raw /metrics ')" -le 25 ]
+
+  # Requests that are slow to come back end the wait by its bound too, not after a round of them.
+  rm -f "$STATE"/* "$RECORD/argv"
+  printf '%s\n' cp-1 worker-2 > "$STATE/pending"
+  echo 1000 > "$STATE/lb-back.cp-1"
+  echo 4 > "$STATE/lb-slow"
+
+  recipe cluster-talos --first cp-1 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"no fresh request through the load balancer reached cp-1's API server within 20s"* ]]
+  # Requests start at 0, 4, 8, 12, 16 and 20 seconds, and none after.
+  [ "$(calls '^kubectl get --raw /metrics ' | wc -l)" -eq 6 ]
+}
+
+@test "cluster-talos --first keeps a node only while its try window allows, however long the waits ran" {
+  fake_cluster
+  mkdir -p "$CLUSTER/clusterconfig"
+  : > "$CLUSTER/clusterconfig/kubeconfig"
+  # The API server is ready at its last chance, 90 seconds after the Ready wait, the load balancer
+  # takes it back after 20 more, and cluster-check takes 70: the checks end 245 seconds after the
+  # try, five past the last moment a node is kept, 60 seconds before Talos reverts it.
+  printf '%s\n' cp-1 worker-2 > "$STATE/pending"
+  echo 18 > "$STATE/starting.cp-1"
+  echo 20 > "$STATE/lb-back.cp-1"
+  echo 70 > "$STATE/slow-check"
+
+  recipe cluster-talos --first cp-1 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [ "$(applies)" = "$(tries cp-1)" ]
+  [[ $output == *"the checks of cp-1 ended less than 60s before Talos reverts it"* ]]
 }
 
 @test "the rollout's scripts feed no command's output to a reader that may stop before it ends" {
@@ -2069,6 +2123,12 @@ EOF
   [ "$status" -eq 0 ]
   recipe cluster-upgrade --yes < /dev/null
   [ "$status" -eq 0 ]
+  # The rollout's checks pass their kubectl and talman calls through quietly, to the same functions.
+  printf '%s\n' cp-1 worker-2 > "$STATE/pending"
+  recipe cluster-talos --first cp-1 --yes < /dev/null
+  [ "$status" -eq 0 ]
+  [ -n "$(calls '^talman talosctl -n cp-1 -n cp-2 etcd status$')" ]
+  [ -n "$(calls '^kubectl --server https://[^ ]+:6443 get --raw /readyz ')" ]
 
   # talman runs sops, so it gets the Talos age key and none of the S3, cloud or state secrets.
   [ "$(names_of talman)" = "SOPS_AGE_KEY SOPS_AGE_KEY_FILE" ]

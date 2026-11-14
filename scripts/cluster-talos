@@ -50,7 +50,10 @@ lb_attempts=15 lb_wait=20 lb_poll=5
 # The checks of a node end, and it is kept, by 240 seconds after the try, while more than keep_margin
 # of its window is left. They reach the Ready wait at ready_after at the earliest; a control plane's
 # API server then has up to readyz_wait to become ready and the load balancer up to lb_wait to take it
-# back, 175 seconds in all, which leaves 65 for cluster-check and the last dry run, which take a few.
+# back. Neither wait starts a request after its bound, and a request gives up after 10 seconds, so
+# they end within 100 and, after one more request at the node's own address, 40 seconds: 205 in all,
+# which leaves 35 for cluster-check and the last dry run, which take a few. Checks that end later
+# than 240 seconds after the try, as when earlier ones ran long, keep nothing: the node reverts.
 
 usage() {
   infra_error "usage: cluster-talos [cluster] [--onboard] [--yes] [--first <node>]"
@@ -308,18 +311,19 @@ apiserver_ready() {
   return 1
 }
 
-# behind_load_balancer NODE: whether the load balancer sends fresh connections to NODE's API server
-# within lb_wait seconds: one of a round of lb_attempts requests through its address, each on a
-# connection of its own, which the load balancer gives the control planes in its rotation in turn, is
-# answered by NODE's.
+# behind_load_balancer STARTED: whether the load balancer sends fresh connections to the API server
+# that started at STARTED within lb_wait seconds: one of a round of lb_attempts requests through its
+# address, each on a connection of its own, which the load balancer gives the control planes in its
+# rotation in turn, is answered by that server. No request starts after lb_wait, so the wait ends
+# within one request's timeout of it.
 behind_load_balancer() {
-  local own seen attempt deadline
-  own=$(apiserver_started "$1") || return 1
+  local seen attempt deadline
   deadline=$(($(now) + lb_wait))
   while :; do
     for ((attempt = 0; attempt < lb_attempts; attempt++)); do
+      (($(now) <= deadline)) || return 1
       seen=$(apiserver_started) || continue
-      [[ $seen != "$own" ]] || return 0
+      [[ $seen != "$1" ]] || return 0
     done
     (($(now) + lb_poll <= deadline)) || return 1
     sleep "$lb_poll"
@@ -338,7 +342,7 @@ node_ready() {
 # masqueraded to its own node's address, so a request a control plane's API server sends to NODE
 # arrives as a pod on that control plane would.
 check_tried() {
-  local node=$1 tried_at=$2 other via status wait unanswered
+  local node=$1 tried_at=$2 other via status wait unanswered started
   other=$(yq "[.nodes[] | select(.hostname != \"$node\") | .hostname] | .[0] // \"\"" "$talman_file")
   via=$(yq "[.nodes[] | select(.role == \"controlplane\" and .hostname != \"$node\") | .hostname] | .[0] // \"\"" "$talman_file")
   if [[ -z $other || -z $via ]]; then
@@ -394,7 +398,11 @@ check_tried() {
   # takes to become ready and to be taken back.
   if [[ $(role_of "$node") == controlplane ]]; then
     apiserver_ready "$node" || return 1
-    if ! behind_load_balancer "$node"; then
+    if ! started=$(apiserver_started "$node"); then
+      failure="$node's API server was ready at its own address, then did not answer there for its metrics"
+      return 1
+    fi
+    if ! behind_load_balancer "$started"; then
       failure="no fresh request through the load balancer reached $node's API server within ${lb_wait}s, $lb_attempts every ${lb_poll}s, so the load balancer does not reach it"
       return 1
     fi
