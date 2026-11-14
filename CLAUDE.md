@@ -29,8 +29,10 @@ reserved class E range, and examples use the documentation ranges.
 
 ## Agents
 
-- Commit, push feature branches and open pull requests. Never push to `main`, never merge,
-  never sign commits. No trailers or footers in commit messages or pull request descriptions.
+- Commit, push feature branches and open pull requests, and merge a pull request once its
+  required checks have passed. Never push to `main`, never merge past a failing or missing
+  check, never sign commits. No trailers or footers in commit messages or pull request
+  descriptions.
 - Nothing discards work: no `git reset --hard`, `git checkout` or `git restore` over a path,
   `git clean`, `git stash`, `git branch -D`, `git worktree remove` or `prune`, or `rm` on
   tracked files.
