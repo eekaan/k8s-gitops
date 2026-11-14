@@ -170,6 +170,11 @@ line_of() {
   grep -F -- "  $1: " <<< "$output" || true
 }
 
+# script_lines: the recipe's own lines of the last run, without just's line about a failed recipe.
+script_lines() {
+  grep -v '^error: recipe ' <<< "$output" || true
+}
+
 # calls PATTERN: the recorded calls matching the extended regex, one per line.
 calls() {
   grep -E -- "$1" "$RECORD/argv" 2> /dev/null || true
@@ -379,7 +384,7 @@ no_tofu() {
   [ "$(cat "$STATE/rebooted")" = cp-2 ]
   reboots=$(calls '^talman reboot( |$)' | grep -v finished)
   [ "$(wc -l <<< "$reboots")" -eq 1 ]
-  [ "$reboots" = 'talman reboot -n cp-2 --yes' ]
+  [ "$reboots" = 'talman reboot -n cp-2 --yes --extra-flags=--drain=false' ]
   # The probe asked /readyz, with a short timeout, while talman rebooted the node.
   started=$(call_line '^talman reboot -n ')
   finished=$(call_line '^talman reboot finished')
@@ -502,6 +507,125 @@ no_tofu() {
       [ "$(probes)" -gt 0 ]
     fi
     nothing_left
+  done
+}
+
+@test "The node is drained before it is rebooted and uncordoned once it is Ready" {
+  recipe cluster-reboot cp-2 --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  cordoned=$(call_line '^kubectl cordon cp-2$')
+  drained=$(call_line '^kubectl drain cp-2 ')
+  rebooted=$(call_line '^talman reboot -n cp-2 ')
+  finished=$(call_line '^talman reboot finished')
+  ready=$(last_call_line '^kubectl get nodes ')
+  uncordoned=$(call_line '^kubectl uncordon cp-2$')
+  for call in "$cordoned" "$drained" "$rebooted" "$finished" "$ready" "$uncordoned"; do
+    [ -n "$call" ]
+  done
+  [ "$cordoned" -lt "$drained" ]
+  [ "$drained" -lt "$rebooted" ]
+  # The probe runs through the drain too.
+  evicted=$(call_line '^drain of cp-2 finished')
+  [ "$evicted" -lt "$rebooted" ]
+  during=$(awk -v from="$drained" -v to="$evicted" 'NR > from && NR < to && /^kubectl get --raw \/readyz /' "$RECORD/argv" | wc -l)
+  [ "$during" -ge 1 ]
+  [ "$finished" -lt "$ready" ]
+  [ "$ready" -lt "$uncordoned" ]
+  # Drained as cluster-upgrade drains, with talosctl's own drain off, and unschedulable going down.
+  [ "$(calls '^kubectl drain ')" = 'kubectl drain cp-2 --ignore-daemonsets --delete-emptydir-data --timeout=10m' ]
+  [[ " $(calls '^talman reboot -n ') " == *" --extra-flags=--drain=false "* ]]
+  [ "$(cat "$RECORD/reboot-state")" = 'cp-2 cordoned' ]
+  [ "$(cat "$RECORD/uncordoned")" = 'cp-2 back' ]
+  [ ! -e "$STATE/cordoned.cp-2" ]
+  [ "$(calls '^kubectl (cordon|drain|uncordon) ' | grep -Ecv ' cp-2( |$)')" -eq 0 ]
+  [[ $output == *"cp-2 is schedulable again"* ]]
+  [[ $output == *"cp-2 is Ready again, and /readyz answered every probe"* ]]
+
+  recipe cluster-check
+
+  [ "$status" -eq 0 ]
+}
+
+@test "A node that was cordoned before the reboot stays cordoned" {
+  : > "$STATE/cordoned.cp-3"
+
+  recipe cluster-reboot cp-3 --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ -n "$(calls '^kubectl drain cp-3 ')" ]
+  [ "$(cat "$RECORD/reboot-state")" = 'cp-3 cordoned' ]
+  [ -z "$(calls '^kubectl uncordon ')" ]
+  [ -e "$STATE/cordoned.cp-3" ]
+  [[ $output == *"cp-3 was cordoned before the reboot and stays cordoned"* ]]
+  [[ $output != *"schedulable again"* ]]
+}
+
+@test "Pods the shutdown left Failed on the node are removed, and nothing else" {
+  # Not the shutdown's: a Failed pod on the node for another reason, pods a shutdown of other nodes
+  # left Failed, and a running pod on the node.
+  others=('kube-system job-crashed Failed cp-1 Error' 'apps web-rejected-old Failed cp-2 NodeShutdown'
+    'apps agent-terminated-old Failed worker-1 Terminated' 'apps web-running Running cp-1')
+  printf '%s\n' "${others[@]}" > "$STATE/pods"
+
+  recipe cluster-reboot cp-1 --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ "$(sort "$RECORD/deleted")" = 'apps/web-cp-1-1
+kube-system/node-agent-cp-1' ]
+  [ -n "$(calls '^kubectl delete pod --namespace apps (.* )?web-cp-1-1( |$)')" ]
+  [ -n "$(calls '^kubectl delete pod --namespace kube-system (.* )?node-agent-cp-1( |$)')" ]
+  [ "$(call_line '^kubectl delete ')" -gt "$(last_call_line '^kubectl get nodes ')" ]
+  [ "$(cat "$STATE/pods")" = "$(printf '%s\n' "${others[@]}")" ]
+  [[ $output == *"removed 2 pods the shutdown left Failed on cp-1"* ]]
+
+  # cluster-check still fails on the Failed pod that is not the shutdown's.
+  recipe cluster-check
+
+  [ "$status" -ne 0 ]
+  [[ $(line_of 'pods in kube-system') == "FAIL  pods in kube-system: "*kube-system/job-crashed* ]]
+  [[ $(line_of 'pods in kube-system') != *node-agent* ]]
+
+  # A shutdown that leaves nothing: nothing is deleted, and the recipe says so.
+  reset_cluster
+  : > "$STATE/clean-shutdown"
+
+  recipe cluster-reboot cp-1 --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ -z "$(calls '^kubectl delete ')" ]
+  [[ $output == *"the shutdown left no pod Failed on cp-1"* ]]
+}
+
+@test "A failed reboot leaves the node cordoned and says so" {
+  for case in drain-fails reboot-fails never-back cordoned-before; do
+    echo "$case"
+    reset_cluster
+    reset_environment
+    case $case in
+      never-back)
+        : > "$STATE/never-back"
+        with REBOOT_WAIT=0
+        ;;
+      cordoned-before) : > "$STATE/cordoned.worker-2" && : > "$STATE/reboot-fails" ;;
+      *) : > "$STATE/$case" ;;
+    esac
+
+    recipe cluster-reboot worker-2 --yes < /dev/null
+
+    [ "$status" -ne 0 ]
+    [ -e "$STATE/cordoned.worker-2" ]
+    [ -z "$(calls '^kubectl uncordon ')" ]
+    [ -z "$(calls '^kubectl delete ')" ]
+    last=$(script_lines | tail -1)
+    if [[ $case == cordoned-before ]]; then
+      [[ $last == *"worker-2 stays cordoned, as it was before"* ]]
+    else
+      [[ $last == *"worker-2 is left cordoned"*"kubectl uncordon worker-2"* ]]
+    fi
+    if [[ $case == drain-fails ]]; then
+      [ -z "$(calls '^talman ')" ]
+    fi
   done
 }
 

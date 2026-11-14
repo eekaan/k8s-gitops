@@ -5,11 +5,19 @@
 #   reboot-fails  the reboot fails
 #   never-back    the node's kubelet never reports again
 #   interrupt     the recipe is sent this signal, INT or TERM, while talman reboots, and talman ends
+#   clean-shutdown  the shutdown leaves no pod behind
 # A reboot takes three seconds. It selects the nodes as talman does: those -n/--node names by
 # hostname or address and those -g/--group names by role, every node with neither, and writes their
 # hostnames to <tmp>/state/rebooted; afterwards it marks each as back, for the fake kubectl. Like
 # talman, it asks first unless --yes, and names the nodes it reaches by address. It records
-# "talman ARGS" in <tmp>/record/argv when it starts and "talman reboot finished" when it is done.
+# "talman ARGS" in <tmp>/record/argv when it starts and "talman reboot finished" when it is done,
+# and whether each node was cordoned when it went down, as "<hostname> cordoned" or
+# "<hostname> schedulable", in <tmp>/record/reboot-state.
+#
+# Like a kubelet shutting down, it leaves pods in phase Failed on each node it reboots, in the fake
+# kubectl's pods file: one terminated by the shutdown (reason Terminated) and one bound to the node
+# just before it went down and rejected (NodeShutdown). On a node that is not cordoned, the
+# scheduler goes on placing a replica there, which is rejected each time: three more NodeShutdown.
 set -uo pipefail
 
 root=${0%/bin/*}
@@ -52,6 +60,13 @@ if ((!yes)); then
   exit 1
 fi
 printf '%s\n' "${selected[@]}" | sort -u > "$state/rebooted"
+while IFS= read -r node; do
+  if [[ -e $state/cordoned.$node ]]; then
+    echo "$node cordoned" >> "$record/reboot-state"
+  else
+    echo "$node schedulable" >> "$record/reboot-state"
+  fi
+done < "$state/rebooted"
 
 sleep 1
 if [[ -e $state/interrupt ]]; then
@@ -70,6 +85,17 @@ else
   sleep 1
 fi
 sleep 1
+if [[ ! -e $state/clean-shutdown ]]; then
+  while IFS= read -r node; do
+    echo "kube-system node-agent-$node Failed $node Terminated" >> "$state/pods"
+    echo "apps web-$node-1 Failed $node NodeShutdown" >> "$state/pods"
+    if [[ ! -e $state/cordoned.$node ]]; then
+      for replica in 2 3 4; do
+        echo "apps web-$node-$replica Failed $node NodeShutdown" >> "$state/pods"
+      done
+    fi
+  done < "$state/rebooted"
+fi
 if [[ ! -e $state/never-back ]]; then
   while IFS= read -r node; do
     : > "$state/back.$node"

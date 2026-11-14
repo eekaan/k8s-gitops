@@ -64,8 +64,10 @@ step it failed in ([cluster.md](../cluster.md#recipes)).
    check of its pods is skipped, and the recipe says so.
 
 3. **`just cluster-reboot <node>`** for a control plane, by its hostname in `talman.yaml`: the check
-   that the Kubernetes API stays available through its load balancer. While the node reboots,
-   `/readyz` is asked through the kubeconfig once a second, and once the node is Ready again the
-   recipe prints how many probes failed and the longest run of failures. It fails when any probe
-   failed; `--tolerate <seconds>` accepts a gap up to that long, when the operator judges one
-   acceptable.
+   that the Kubernetes API stays available through its load balancer. The recipe drains the node,
+   reboots it and waits until it is Ready again, asking `/readyz` through the kubeconfig once a
+   second all the while; then it prints how many probes failed and the longest run of failures,
+   uncordons the node and deletes the pods the shutdown left Failed on it
+   ([cluster.md](../cluster.md#recipes)). It fails when any probe failed; `--tolerate <seconds>`
+   accepts a gap up to that long, when the operator judges one acceptable. Run `just cluster-check`
+   again afterwards: every check passes.
