@@ -143,22 +143,8 @@ Resource definitions that several applications use are applications of their own
 The three `ks.yaml` files set `wait`, so each is Ready only once its definitions are established,
 and `snapshot-controller` once its controller runs as well. An application that creates objects of
 these groups, or whose chart does, names the matching one in `dependsOn` and turns off any copy of
-the same definitions its own chart would install. `linstor-cluster` names `snapshot-controller` for
-<<<<<<< HEAD
-its VolumeSnapshotClass ([Storage](#storage)); the monitoring stack ([Monitoring](#monitoring)),
-the baseline applications with a monitor, `cloudnative-pg` ([PostgreSQL](#postgresql)) and both
-Grafana applications ([Grafana](#grafana)) name `prometheus-operator-crds`; cert-manager
-([cert-manager](#cert-manager)) and `envoy-gateway` ([Envoy Gateway](#envoy-gateway)) name
-`gateway-api-crds`, and `envoy-gateway` turns off its chart's copy of the Gateway API. No route is
-enabled anywhere, and no chart's dashboard outside the `grafana` application.
-=======
-its VolumeSnapshotClass ([Storage](#storage)); the monitoring stack ([Monitoring](#monitoring)), the
-baseline applications with a monitor and `cloudnative-pg` ([PostgreSQL](#postgresql)) name
-`prometheus-operator-crds`; `volsync` names both ([Volume backups](#volume-backups)); cert-manager
-([cert-manager](#cert-manager)) and `envoy-gateway` ([Envoy Gateway](#envoy-gateway)) name
-`gateway-api-crds`, and `envoy-gateway` turns off its chart's copy of the Gateway API. No dashboard
-or route is enabled anywhere.
->>>>>>> origin/main
+the same definitions its own chart would install; each application's section below says which it
+names. No route is enabled anywhere, and no chart's dashboard outside the `grafana` application.
 
 Deleting a definition deletes every object of its kind, so none of these applications ever deletes
 one, also not when it leaves the tree. None applies a definition itself. The monitoring chart's
@@ -238,16 +224,12 @@ classes and their handlers.
 
 `apps/base/external-secrets/external-secrets/` runs the External Secrets operator in its own
 namespace, `external-secrets`. It is how runtime secrets reach workloads (ADR 0005): an
-<<<<<<< HEAD
 `ExternalSecret` names a key in a secret store, and the operator writes it into a Secret. The
 exception is a credential a controller generates in the cluster for its own workload, which stays
 in the Secret that controller writes, such as Grafana's admin password ([Grafana](#grafana)). No
-secret store is configured yet, and nothing in the tree creates an `ExternalSecret`.
-=======
-`ExternalSecret` names a key in a secret store, and the operator writes it into a Secret. No secret
-store is configured yet. The `volsync` component makes an `ExternalSecret` of the ClusterSecretStore
-`openbao` ([Volume backups](#volume-backups)), and no enabled application includes it.
->>>>>>> origin/main
+secret store is configured yet. The `volsync` component makes an `ExternalSecret` of the
+ClusterSecretStore `openbao` ([Volume backups](#volume-backups)), and no enabled application
+includes it.
 
 - The chart comes from its publisher's OCI registry and installs and upgrades the operator's
   resource definitions itself, as the publisher documents. No other chart in the tree ships them,
