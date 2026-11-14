@@ -115,25 +115,33 @@ stack_cluster_name() {
   printf '%s' "$name"
 }
 
-# stack_holds_resources: whether the state of the stack that scripts/stack-env has set up and
-# initialised holds a managed resource: 0 when it does, 1 when it holds none, 2 when the state cannot
-# be read. A stack never applied has an empty state and holds none; data sources are not resources.
-# Only a state that was read and parsed as a JSON object counts as empty: no answer, or one that is
-# not a state, is not taken for one.
+# stack_holds_resources: prints holds when the state of the stack that scripts/stack-env has set up
+# and initialised holds a managed resource, and empty when it holds none; data sources are not
+# resources and a stack never applied holds none. Only a state that was read and parsed as a JSON
+# object counts as empty. Any other outcome prints nothing and fails, and a caller takes anything but
+# exactly one of the two words, whatever the status, for a state it could not read, as a failure of
+# bash itself leaves no word to take for an answer.
 stack_holds_resources() {
   local state count
   state=$(stack_tofu show -json) || return 2
   count=$(jq -r 'if type != "object" then error("not a state") else
     [.values.root_module? // empty | .. | objects | select(.mode? == "managed")] | length end' <<< "$state" 2> /dev/null) || return 2
   [[ $count =~ ^[0-9]+$ ]] || return 2
-  ((count > 0)) || return 1
+  if ((count > 0)); then echo holds; else echo empty; fi
 }
 
-# holds_resources STACK: stack_holds_resources for STACK, whose lock it takes and which it
-# initialises itself, in a process of its own (scripts/stack-state), so STACK's inputs and lock do
-# not carry over.
+# holds_resources STACK: whether STACK's state holds a managed resource: 0 when it does, 1 when it
+# holds none, 2 when it cannot be read. STACK's lock is taken and the stack initialised in a process
+# of its own (scripts/stack-state), so STACK's inputs and lock do not carry over; its answer is taken
+# only as the word it prints, with status 0.
 holds_resources() {
-  "$(dirname "${BASH_SOURCE[0]}")/../stack-state" "$1"
+  local answer
+  answer=$("$(dirname "${BASH_SOURCE[0]}")/../stack-state" "$1") || return 2
+  case $answer in
+    holds) return 0 ;;
+    empty) return 1 ;;
+    *) return 2 ;;
+  esac
 }
 
 # remove_generated CLUSTER: removes the files generated for CLUSTER that hold the addresses of its

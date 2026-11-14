@@ -165,7 +165,7 @@ tofu_calls() {
 # applied, destroyed, imported or removed from state.
 tofu_only_reads() {
   local changed
-  changed=$(awk '$2 != "init" && $2 != "output" && $2 != "show"' "$RECORD/tofu" 2> /dev/null)
+  changed=$(awk '$2 != "init" && $2 != "output" && $2 != "show"' "$RECORD/tofu" 2> /dev/null || true)
   if [[ -n $changed ]]; then
     echo "tofu changed or planned: $changed" >&2
     return 1
@@ -695,6 +695,9 @@ EOF
   recipe infra-destroy --yes < /dev/null
 
   [ "$status" -eq 0 ]
+  # Each stack is initialised once, under the lock its destroy holds.
+  [ "$(tofu_calls init | awk '{ print $1 }' | grep -cxF -- "-chdir=$CLUSTER")" -eq 1 ]
+  [ "$(tofu_calls init | awk '{ print $1 }' | grep -cxF -- "-chdir=$PLUMBING")" -eq 1 ]
   [ "$(tofu_calls apply | awk '{ print $1 }')" = "-chdir=$CLUSTER
 -chdir=$PLUMBING" ]
 }
@@ -824,6 +827,36 @@ EOF
 
   [ "$status" -eq 0 ]
   [ "$(tofu_calls apply | awk '{ print $1 }')" = "-chdir=$CLUSTER" ]
+}
+
+@test "A stack whose state could not be reached is not taken for one that holds nothing" {
+  # The ci stack holds a resource, but its lock cannot be taken, as .terraform is no directory
+  # (a directory that cannot be written does the same, and this holds as root too). The read fails
+  # the way bash does, with status 1, which is not an answer that the stack holds nothing.
+  holds sto2/ci state-with-resources.json
+  : > "$CI_STACK/.terraform"
+  for args in '--yes' 'sto2/plumbing --yes'; do
+    rm -f "$RECORD/tofu"
+    # shellcheck disable=SC2086 # the arguments as an operator types them
+    recipe infra-destroy $args < /dev/null
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"cannot read the state of sto2/ci"* ]]
+    [[ $output != *"sto2/plumbing destroyed"* ]]
+    tofu_only_reads
+  done
+
+  # The same for a read that ends without a word, or with another one, and status 0.
+  rm "$CI_STACK/.terraform"
+  for body in 'exit 0' 'echo something'; do
+    printf '#!/usr/bin/env bash\n%s\n' "$body" > "$REPO/scripts/stack-state"
+    rm -f "$RECORD/tofu"
+    recipe infra-destroy sto2/plumbing --yes < /dev/null
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"cannot read the state of sto2/ci"* ]]
+    tofu_only_reads
+  done
 }
 
 @test "infra-destroy given a stack destroys that stack only" {

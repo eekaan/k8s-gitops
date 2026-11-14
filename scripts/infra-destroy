@@ -100,11 +100,10 @@ for stack in "${stacks[@]}"; do
       # A cluster stack whose state holds no resource, destroyed already or never applied, has no
       # cluster to ask and nothing to destroy, so a re-run ends as the first run did. A state that
       # cannot be read is not taken for an empty one.
-      status=0
-      stack_holds_resources || status=$?
-      case $status in
-        0) ;;
-        1)
+      answer=$(stack_holds_resources) || answer=
+      case $answer in
+        holds) ;;
+        empty)
           echo "$stack holds no resource, so there is nothing to destroy"
           exit 0
           ;;

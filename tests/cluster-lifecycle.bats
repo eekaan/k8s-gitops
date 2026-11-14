@@ -831,7 +831,11 @@ kube-system/node-agent-cp-1' ]
   [ "$status" -ne 0 ]
   [[ $output == *"--unreachable"* ]]
   [ -z "$(calls '^kubectl ')" ]
+  no_tofu
+  # Nothing but tofu's reads ran at all.
+  [ "$(grep -cv '^tofu ' "$RECORD/argv")" -eq 0 ]
   mv "$BATS_TEST_TMPDIR/kubeconfig" "$CLUSTER/clusterconfig/kubeconfig"
+  generated_kept
 
   # With --unreachable, an API that does not answer is not asked to answer.
   : > "$STATE/api-down"
@@ -863,6 +867,7 @@ kube-system/node-agent-cp-1' ]
   [ -n "$asked" ]
   [ "$(call_line '^tofu .* output ')" -lt "$asked" ]
   [ "$asked" -lt "$(call_line '^tofu .* plan ')" ]
+  [ "$asked" -lt "$(call_line '^tofu .* apply ')" ]
   [ "$(calls '^tofu ' | grep -cv "^tofu -chdir=$STACK ")" -eq 0 ]
   [ "$(calls '^tofu .* plan ' | wc -l)" -eq 1 ]
   [[ $(calls '^tofu .* plan ') == *" -destroy "* ]]
@@ -1016,6 +1021,7 @@ EOF
 
     [ "$status" -ne 0 ]
     [[ $output == *"outputs name no cluster"* ]]
+    [[ $output == *"just infra-destroy sto2/cluster --unreachable"* ]]
     no_tofu
     [ -z "$(calls '^kubectl ')" ]
     generated_kept
@@ -1032,6 +1038,11 @@ case \${2-} in
   show) echo '{"format_version": "1.0"}' ;;
 esac
 EOF
+  # Another cluster's generated files are no concern of this one's destroy.
+  mkdir -p "$REPO/talos/other-cluster/clusterconfig"
+  for file in "${GENERATED[@]}"; do
+    echo marker > "$REPO/talos/other-cluster/$file"
+  done
   for args in '--unreachable --yes' '--yes' ''; do
     restore_generated
     rm -f "$RECORD/argv"
@@ -1044,8 +1055,17 @@ EOF
     [ -z "$(calls '^kubectl ')" ]
     for file in "${GENERATED[@]}"; do
       [ ! -e "$CLUSTER/$file" ]
+      [ -f "$REPO/talos/other-cluster/$file" ]
     done
   done
+
+  # A name with no directory under talos/ is refused whatever the stack holds.
+  rm -f "$RECORD/argv"
+  recipe cluster-destroy ghost --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"talos/ghost does not exist"* ]]
+  no_tofu
 
   # Run once more, with the generated files already gone.
   rm -f "$RECORD/argv"
@@ -1064,6 +1084,26 @@ printf '%s\n' "tofu \$*" >> "$RECORD/argv"
 case \${2-} in
   output) echo '{}' ;;
   show) printf '%s' '$answer' ;;
+esac
+EOF
+    rm -f "$RECORD/argv"
+    recipe cluster-destroy lab-sto2 --unreachable --yes < /dev/null
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"cannot read the state of sto2/cluster"* ]]
+    no_tofu
+    generated_kept
+  done
+
+  # A read that fails the way bash does, with status 1, or that ends without the word that says what
+  # it found, is not an answer that the stack holds nothing.
+  for body in 'exit 1' 'exit 0' 'echo something; exit 0'; do
+    restore_generated
+    printf '#!/usr/bin/env bash\n%s\n' "$body" > "$REPO/scripts/stack-state"
+    fake tofu <<EOF
+printf '%s\n' "tofu \$*" >> "$RECORD/argv"
+case \${2-} in
+  output) echo '{}' ;;
 esac
 EOF
     rm -f "$RECORD/argv"

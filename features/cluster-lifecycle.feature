@@ -117,9 +117,14 @@ Feature: Cluster lifecycle
     Then the first exits non-zero naming --unreachable and plans nothing; with --unreachable the stack is destroyed, unless its state cannot be read, or its outputs name no cluster and it is not given --unreachable; an unreadable state refuses whatever is given
 
   Scenario: A cluster destroy that is run again ends as the first run did, with the cluster stack holding nothing
-    Given a cluster stack that is destroyed already, so its outputs name no cluster and its state holds no resource, with the cluster's generated files still there or gone, and one whose state cannot be read
+    Given a cluster stack that is destroyed already, so its outputs name no cluster and its state holds no resource, with the cluster's generated files still there or gone, a name with no directory under talos/, and one whose state cannot be read
     When cluster-destroy runs for the cluster, with --yes and with --unreachable
-    Then for the destroyed stack it exits zero, says the stack holds no resource, removes the generated files that are there and asks and plans nothing; a state that cannot be read exits non-zero, naming the stack and leaving the files
+    Then for the destroyed stack it exits zero, says the stack holds no resource, removes the generated files that are there and asks and plans nothing; a name with no directory is refused; a state that cannot be read exits non-zero, naming the stack and leaving the files, and another cluster's files are left alone
+
+  Scenario: A stack whose state could not be reached is not taken for one that holds nothing
+    Given the ci stack, whose state holds a resource, and a lock on it that cannot be taken, or a read of its state that ends without saying what it found
+    When infra-destroy runs with --yes, and with sto2/plumbing
+    Then it exits non-zero naming the ci stack as one whose state cannot be read, destroys nothing and runs no tofu beyond reads
 
   Scenario: A cluster is destroyed only under the name its stack holds
     Given the cluster stack, whose talman_yaml output names lab-sto2, and a name with no directory under talos/, one with a directory that is not the stack's cluster, lab-sto2 without a directory, and a stack whose outputs name no cluster while its state holds resources

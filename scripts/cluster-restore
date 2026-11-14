@@ -5,8 +5,9 @@
 # cluster-snapshots prints or as latest; downloads it with the state key into a private temporary
 # directory and decrypts it there with the Talos age key, which reaches age by its file's path or on
 # its standard input, never as an argument; and waits until every node answers on the Talos API
-# port. Then it counts the PersistentVolumes of LINSTOR's driver the cluster has now (or says its API
-# does not answer), says what a restore does to LINSTOR's volumes, what happens, and asks for the
+# port. Then it counts the PersistentVolumes of LINSTOR's driver the cluster has now (or says why it
+# cannot: it has no kubeconfig, its API does not answer, or its kubeconfig is not allowed to list
+# them), says what a restore does to LINSTOR's volumes, what happens, and asks for the
 # cluster's name to be typed back, unless --yes:
 #   1. talman reset, selecting the nodes whose role is controlplane, wipes each control plane's
 #      EPHEMERAL partition, where etcd keeps its data, and reboots it, without leaving etcd first,

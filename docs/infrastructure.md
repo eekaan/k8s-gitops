@@ -48,8 +48,9 @@ them is a `just` recipe.
   cannot be asked, nothing is destroyed, unless `--unreachable` is given. A cluster stack whose
   state holds no resource, destroyed already or never applied, is not asked and is skipped with a
   line saying so, so a re-run ends as the first run did; a state that cannot be read, or that is
-  not a state, refuses the run. Once the cluster stack is destroyed, the recipe removes the files generated for its cluster that hold the nodes'
-  and the API's addresses, which the cloud may give to someone else: `talos/<cluster>/talman.yaml`
+  not a state, refuses the run, and so does one whose lock cannot be taken. Once the cluster stack
+  is destroyed, the recipe removes the files generated for its cluster that hold the nodes' and the
+  API's addresses, which the cloud may give to someone else: `talos/<cluster>/talman.yaml`
   and the talosconfig and kubeconfig in its `clusterconfig/`. It names each file it removes and
   removes only files git ignores; the secrets bundle and etcd snapshots stay.
   `just infra-destroy sto2/cluster`, or `sto2/plumbing`, destroys that stack only, the same way.
@@ -62,7 +63,8 @@ them is a `just` recipe.
   destroy before it, and plans and destroys nothing while one holds a resource: it exits non-zero
   naming that stack and the recipe that destroys it, `just infra-destroy sto2/ci` or
   `just cluster-destroy`, and prints no resource's address. A stack that was never applied, or holds
-  data sources only, holds nothing; a state that cannot be read refuses the run too.
+  data sources only, holds nothing; a state that cannot be read, for any reason, refuses the run
+  too.
 - `just ci-host-setup` and `just ci-host-remove` set up and deregister the CI host's runner
   ([runbooks/ci-host.md](runbooks/ci-host.md)).
 

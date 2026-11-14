@@ -80,11 +80,15 @@ if [[ $stack_cluster != "$cluster" ]]; then
     holds_resources "$stack" || holds=$?
     case $holds in
       1)
+        if [[ ! -d $cluster_dir ]]; then
+          infra_error "talos/$cluster does not exist. Nothing was destroyed"
+          exit 1
+        fi
         echo "$stack holds no resource, so there is nothing to destroy"
         remove_generated "$cluster"
         exit 0
         ;;
-      0) infra_error "$stack's outputs name no cluster, so it cannot be told to be $cluster. Nothing was destroyed" ;;
+      0) infra_error "$stack's outputs name no cluster, so it cannot be told to be $cluster; just infra-destroy $stack --unreachable destroys it without asking. Nothing was destroyed" ;;
       *) infra_error "cannot read the state of $stack, whose outputs name no cluster. Nothing was destroyed" ;;
     esac
   fi
