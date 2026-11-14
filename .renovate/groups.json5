@@ -22,6 +22,18 @@
       groupName: "Cilium",
     },
     {
+      description: "The Prometheus Operator: the chart of its resource definitions and the monitoring chart, which runs it",
+      matchPackageNames: [
+        "ghcr.io/prometheus-community/charts/prometheus-operator-crds",
+        "ghcr.io/prometheus-community/charts/kube-prometheus-stack",
+      ],
+      groupName: "Prometheus Operator",
+      // The two version numbers can move by different steps for the same operator release, a major
+      // in one where the other takes a minor or a patch. In one pull request whatever the step,
+      // each at its latest, the two name the same operator, which tests/monitoring.bats checks.
+      separateMajorMinor: false,
+    },
+    {
       description: "The Flux Operator: its image and its operator and instance charts",
       matchPackageNames: ["controlplaneio-fluxcd/**", "ghcr.io/controlplaneio-fluxcd/**"],
       groupName: "Flux Operator",

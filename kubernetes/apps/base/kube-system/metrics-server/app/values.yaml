@@ -6,5 +6,9 @@
 # off. The API server reaches metrics-server itself without verifying its self-signed certificate,
 # also the chart's default.
 
+# The chart's ServiceMonitor scrapes without a credential, so /metrics is served without
+# authorization; metrics-server's other paths still ask the API server.
+metrics:
+  enabled: true
 serviceMonitor:
-  enabled: false
+  enabled: true

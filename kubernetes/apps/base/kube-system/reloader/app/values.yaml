@@ -6,7 +6,9 @@ reloader:
   # Only a workload annotated for it is restarted when a ConfigMap or Secret it uses changes;
   # nothing else is.
   autoReloadAll: false
+  # Scraped through its pods: the chart makes the Service a ServiceMonitor would select only when
+  # reloader.service is set, and one monitor is enough.
   serviceMonitor:
     enabled: false
   podMonitor:
-    enabled: false
+    enabled: true

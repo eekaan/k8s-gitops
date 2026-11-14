@@ -14,7 +14,12 @@ Feature: Cluster baseline
   Scenario: Every baseline chart renders with the repository's values
     Given each baseline application's pinned chart and values
     When each is rendered offline
-    Then all render without error and none yields a ServiceMonitor, PodMonitor or dashboard object
+    Then all render without error and none yields a dashboard object
+
+  Scenario: Every baseline application that serves metrics has its monitor on
+    Given each baseline application's pinned chart and values, with the monitoring API present
+    When each is rendered offline
+    Then kubelet-csr-approver, metrics-server, descheduler and spegel each yield a ServiceMonitor and reloader a PodMonitor, each selected by the Service or pods the chart yields, and each of the five names prometheus-operator-crds in dependsOn
 
   Scenario: Serving certificates are approved only for this cluster's nodes
     Given the certificate approver's values
