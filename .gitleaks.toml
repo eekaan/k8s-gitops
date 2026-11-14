@@ -2,5 +2,5 @@
 useDefault = true
 
 [[allowlists]]
-description = "Test fixtures hold deliberate bad examples."
-paths = ['''^tests/fixtures/''']
+description = "The address check's own fixtures exist to be flagged; scripts/check-address-literals skips the same files."
+paths = ['''^tests/fixtures/check-address-literals/''']

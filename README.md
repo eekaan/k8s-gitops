@@ -20,11 +20,11 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
 [just](https://just.systems) installed:
 
 - `just tools` installs the pinned tools.
-- `just ci` runs every check that needs no credentials: tool versions, address literals, that
-  every Talos secrets bundle is encrypted, shellcheck and yamllint, the Renovate configuration
-  (`just renovate-check`: Renovate's own validator, run from its pinned container image, so `just
-  ci` needs a container runtime, Docker), scenario proofs, the OpenTofu
-  check (`just infra-check`: formatting, that every stack enforces state encryption, validation
+- `just ci` runs every check that needs no credentials: tool versions, address literals in the
+  files and the commit messages, that every Talos secrets bundle is encrypted, shellcheck and
+  yamllint, the Renovate configuration (`just renovate-check`: Renovate's own validator, run from
+  its pinned container image, so `just ci` needs a container runtime, Docker), scenario proofs,
+  the OpenTofu check (`just infra-check`: formatting, that every stack enforces state encryption, validation
   without a state backend and the mocked
   `tofu test` runs), the Talos check
   (`just talos-check`: every node's machine configuration rendered from the template, the
@@ -44,9 +44,13 @@ The repository checks:
 - `just tools-check` fails when a pinned tool is missing or its binary reports a different version.
 - `just kubernetes-check` builds `kubernetes/` offline with kustomize and Flux and fails when an
   application, a `ks.yaml` or a variable breaks the layout in `docs/kubernetes.md`.
-- `just check-literals` fails when a tracked file holds an IPv4 literal outside the documentation
-  ranges, loopback, `0.0.0.0`, the metadata address and netmasks, unless `.address-allowlist`
-  declares it with a reason.
+- `just check-literals` fails when a file git would commit, tracked or untracked and not ignored,
+  holds an IPv4 literal outside the documentation ranges, loopback, `0.0.0.0`, the metadata
+  address and netmasks, unless `.address-allowlist` declares it with a reason. It skips the
+  address check's own fixtures in `tests/fixtures/check-address-literals/`, which exist to be
+  flagged; so does gitleaks.
+- `just check-commit-literals` applies the same rules to the messages of the commits between the
+  default branch, the remote's or a local `main`, and `HEAD`, and passes when neither exists.
 - `just scenarios-check` fails when a scenario has no proof or more than one, when a `@pending`
   scenario has no issue key or already has a proof, when a `@by:` tag names a recipe that does
   not exist, when two scenarios share a title, or when a test claims a scenario that does not

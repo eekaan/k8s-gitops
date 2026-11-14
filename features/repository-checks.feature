@@ -11,10 +11,25 @@ Feature: Repository checks
     When the address-literal check runs
     Then it exits zero
 
-  Scenario: Fixture paths are not scanned
-    Given a file under the fixtures path containing an arbitrary IPv4 address
+  Scenario: Only the address check's own fixtures are not scanned
+    Given a file under tests/fixtures/check-address-literals/ and a file elsewhere under tests/fixtures/, each with an IPv4 address outside the allowed ranges
     When the address-literal check runs
-    Then it exits zero
+    Then it exits non-zero naming the second file and not the first
+
+  Scenario: Files git would commit are scanned and files it ignores are not
+    Given an untracked file, and files git ignores through .gitignore and .git/info/exclude such as an agent's worktree under .claude/, each with an IPv4 address outside the allowed ranges
+    When the address-literal check runs
+    Then it exits non-zero naming the untracked file and none of the ignored ones
+
+  Scenario: A commit message with an address literal fails the check
+    Given commits after the default branch whose messages hold an IPv4 address outside the allowed ranges and one inside them, and such an address in a commit on the default branch
+    When the commit message check runs
+    Then it exits non-zero naming the commit, the line and the literal after the default branch, and nothing else; without a default branch it exits zero saying so
+
+  Scenario: The secrets scan exempts only the address check's fixtures
+    Given a key in the shape of a cloud access key under tests/fixtures/check-address-literals/ and under another fixtures directory
+    When the secrets scan runs
+    Then it exits non-zero naming the second file and not the first
 
   Scenario: A version string is not an address
     Given a tracked file containing a dotted version such as v1.14.6 or 2.10.0

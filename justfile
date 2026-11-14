@@ -48,9 +48,13 @@ secrets-scan:
     (cd "$tree" && gitleaks dir --no-banner --redact --verbose --config "$repo/.gitleaks.toml" .)
     gitleaks git --no-banner --redact --verbose --config .gitleaks.toml .
 
-# Fail on IPv4 literals a public repository must not hold
+# Fail on IPv4 literals a public repository must not hold, in the files git would commit
 check-literals:
     scripts/check-address-literals
+
+# Fail on IPv4 literals a public repository must not hold, in the messages of the commits after the default branch
+check-commit-literals:
+    scripts/check-address-literals --commit-messages
 
 # Fail on a scenario in features/ without its proof, or a test claiming a scenario that is not there
 scenarios-check:
@@ -61,7 +65,7 @@ test:
     bats tests
 
 # Run every check that needs no credentials, the cheapest and most basic first
-ci: tools-check check-literals cluster-secrets-check lint renovate-check scenarios-check infra-check talos-check kubernetes-check secrets-scan test
+ci: tools-check check-literals check-commit-literals cluster-secrets-check lint renovate-check scenarios-check infra-check talos-check kubernetes-check secrets-scan test
 
 # Validate the Renovate configuration with Renovate's own validator, in its container image
 renovate-check:

@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# Fails when a file tracked by git holds an IPv4 literal that is not known to be safe to publish.
+# Fails when a file git would commit, tracked or untracked and not ignored, holds an IPv4 literal
+# that is not known to be safe to publish. The address check's own fixtures, which exist to be
+# flagged, are skipped. With --commit-messages it checks the messages of the commits between the
+# default branch and HEAD instead, by the same rules: the remote's default branch, or a local main,
+# when either exists.
 # IPv6 literals are out of scope: nothing here matches them.
+# Usage: scripts/check-address-literals [--commit-messages]
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -41,8 +46,9 @@ publishable() {
 
 findings=0
 
+# scan NAME FILE: reports each literal in FILE that may not be published, as NAME:LINE: LITERAL.
 scan() {
-  local path=$1 hits status=0 hit number rest address literal after
+  local name=$1 path=$2 hits status=0 hit number rest address literal after
   # In a UTF-8 locale grep -I takes a line with an invalid byte for binary and drops it.
   hits=$(LC_ALL=C grep -nIE -- "$candidate" "$path") || status=$?
   (( status <= 1 )) || exit "$status"
@@ -62,23 +68,56 @@ scan() {
       fi
       is_address "$address" || continue
       publishable "$literal" && continue
-      printf '%s:%s: %s\n' "$path" "$number" "$literal" >&2
+      printf '%s:%s: %s\n' "$name" "$number" "$literal" >&2
       findings=$((findings + 1))
     done
   done <<< "$hits"
 }
 
+advice="Use a documentation range (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24), read the value at run time, or declare it in .address-allowlist with the reason it is safe to publish."
+
+if [[ ${1-} == --commit-messages ]]; then
+  base=
+  for ref in refs/remotes/origin/HEAD refs/heads/main; do
+    if git rev-parse --verify -q "$ref^{commit}" > /dev/null; then
+      base=$ref
+      break
+    fi
+  done
+  if [[ -z $base ]]; then
+    echo "No default branch to compare HEAD with; no commit messages to check."
+    exit 0
+  fi
+  message=$(mktemp)
+  trap 'rm -f "$message"' EXIT
+  count=0
+  while IFS= read -r commit; do
+    git log -1 --format=%B "$commit" > "$message"
+    scan "commit $(git rev-parse --short "$commit")" "$message"
+    count=$((count + 1))
+  done < <(git rev-list "$base..HEAD")
+  if (( findings > 0 )); then
+    echo "Reword those commits before they are pushed. $advice" >&2
+    exit 1
+  fi
+  echo "No undeclared address literals in the $count commit messages after $(git rev-parse --abbrev-ref "$base")."
+  exit 0
+elif (( $# > 0 )); then
+  echo "usage: check-address-literals [--commit-messages]" >&2
+  exit 2
+fi
+
 while IFS= read -r -d '' path; do
   case $path in
-    tests/fixtures/* | LICENSE) continue ;;
+    tests/fixtures/check-address-literals/* | LICENSE) continue ;;
   esac
-  # A symlink's target can lie outside the repository; only the link itself is tracked.
+  # A symlink's target can lie outside the repository; git commits only the link itself.
   [[ -f $path && ! -L $path ]] || continue
-  scan "$path"
-done < <(git ls-files -z)
+  scan "$path" "$path"
+done < <(git ls-files -z --cached --others --exclude-standard)
 
 if (( findings > 0 )); then
-  echo "Use a documentation range (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24), read the value at run time, or declare it in .address-allowlist with the reason it is safe to publish." >&2
+  echo "$advice" >&2
   exit 1
 fi
-echo "No undeclared address literals in tracked files."
+echo "No undeclared address literals in the files git would commit."

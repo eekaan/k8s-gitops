@@ -45,14 +45,68 @@ EOF
   [ "$status" -eq 0 ]
 }
 
-@test "Fixture paths are not scanned" {
-  mkdir -p tests/fixtures
-  cp "$FIXTURES/undeclared.txt" tests/fixtures/resolver.txt
-  git add tests/fixtures/resolver.txt
+@test "Only the address check's own fixtures are not scanned" {
+  mkdir -p tests/fixtures/check-address-literals tests/fixtures/other
+  cp "$FIXTURES/undeclared.txt" tests/fixtures/check-address-literals/undeclared.txt
+  cp "$FIXTURES/undeclared.txt" tests/fixtures/other/resolver.txt
+  git add tests
 
   run "$SCRIPT"
 
+  [ "$status" -ne 0 ]
+  [[ $output == *"tests/fixtures/other/resolver.txt:2: $CLASS_E.3"* ]]
+  [[ $output != *check-address-literals/undeclared.txt* ]]
+}
+
+@test "Files git would commit are scanned and files it ignores are not" {
+  cp "$FIXTURES/undeclared.txt" untracked.txt
+  mkdir -p ignored excluded .claude/worktrees/agent
+  cp "$FIXTURES/undeclared.txt" ignored/resolver.txt
+  echo 'ignored/' > .gitignore
+  git add .gitignore
+  cp "$FIXTURES/undeclared.txt" excluded/resolver.txt
+  echo 'excluded/' >> .git/info/exclude
+  # An agent's worktree inside the checkout, which only the checkout's own exclude file names.
+  cp "$FIXTURES/undeclared.txt" .claude/worktrees/agent/resolver.txt
+  echo '.claude/worktrees/' >> .git/info/exclude
+
+  run "$SCRIPT"
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"untracked.txt:2: $CLASS_E.3"* ]]
+  [[ $output != *ignored/* && $output != *excluded/* && $output != *.claude/* ]]
+}
+
+# commit MESSAGE: commits whatever is staged, or nothing, with MESSAGE.
+commit() {
+  git -c user.name=fixture -c user.email=fixture@example.invalid commit -q --allow-empty -m "$1"
+}
+
+@test "A commit message with an address literal fails the check" {
+  git symbolic-ref HEAD refs/heads/main
+  commit "start, with $CLASS_E.9 on the default branch"
+  git checkout -q -b feature
+  commit "point the example at 192.0.2.10"
+  commit "add a resolver
+
+It answers at $CLASS_E.3 on the node network."
+  flagged=$(git rev-parse --short HEAD)
+  commit "describe the resolver"
+
+  run "$SCRIPT" --commit-messages
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"commit $flagged:3: $CLASS_E.3"* ]]
+  [ "$(grep -c "$CLASS_E" <<< "$output")" -eq 1 ]
+  [[ $output != *192.0.2.10* ]]
+
+  # Without a default branch there is no range to check.
+  git branch -q -m main old-main
+
+  run "$SCRIPT" --commit-messages
+
   [ "$status" -eq 0 ]
+  [[ $output == *"No default branch to compare HEAD with"* ]]
 }
 
 @test "A version string is not an address" {

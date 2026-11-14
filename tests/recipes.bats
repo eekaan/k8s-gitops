@@ -55,6 +55,24 @@ EOF
   [[ $output == *dash-named-file* ]]
 }
 
+@test "The secrets scan exempts only the address check's fixtures" {
+  cp "$BATS_TEST_DIRNAME/../.gitleaks.toml" .gitleaks.toml
+  mkdir -p tests/fixtures/check-address-literals tests/fixtures/other
+  # In the shape of an AWS access key ID, put together here so this file holds none.
+  key=AKIA$(printf '%s' QZ7XK2M4B6N3P5R7)
+  for dir in check-address-literals other; do
+    echo "aws_access_key_id = $key" > "tests/fixtures/$dir/key.txt"
+  done
+  git add .
+  git -c user.name=fixture -c user.email=fixture@example.invalid commit -q -m fixtures
+
+  recipe secrets-scan
+
+  [ "$status" -ne 0 ]
+  [[ $output == *tests/fixtures/other/key.txt* ]]
+  [[ $output != *check-address-literals/key.txt* ]]
+}
+
 @test "A mise error stops the recipes" {
   fake_gitleaks
   fake mise <<'EOF'
