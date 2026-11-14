@@ -1041,7 +1041,7 @@ world_app() {
 
   check
   [ "$status" -ne 0 ]
-  refused_line kubernetes/apps/base/demo/world/ks.yaml world later apps/overlays/test "does not enable"
+  refused_line kubernetes/apps/base/demo/world/ks.yaml "Kustomization world names later" apps/overlays/test "does not enable"
 
   overlay_add ../../base/demo/later/ks.yaml
   check
@@ -1054,7 +1054,7 @@ world_app() {
 
   check
   [ "$status" -ne 0 ]
-  refused_line kubernetes/apps/base/demo/world/ks.yaml world hello apps/overlays/test "does not wait"
+  refused_line kubernetes/apps/base/demo/world/ks.yaml "Kustomization world names hello" apps/overlays/test "does not wait"
 
   # wait, or health checks, make the target Ready only once what it applies is.
   yq -i '.spec.wait = true' "$TREE/kubernetes/apps/base/demo/hello/ks.yaml"
@@ -1065,8 +1065,14 @@ world_app() {
   check
   [ "$status" -eq 0 ]
 
+  # So do health check expressions.
+  yq -i 'del(.spec.healthChecks) | .spec.healthCheckExprs = [{"apiVersion": "v1", "kind": "ConfigMap", "current": "true"}]' \
+    "$TREE/kubernetes/apps/base/demo/hello/ks.yaml"
+  check
+  [ "$status" -eq 0 ]
+
   # What counts is the built Kustomization, after the root's patches, and not the text of its file.
-  yq -i 'del(.spec.healthChecks)' "$TREE/kubernetes/apps/base/demo/hello/ks.yaml"
+  yq -i 'del(.spec.healthCheckExprs)' "$TREE/kubernetes/apps/base/demo/hello/ks.yaml"
   check
   [ "$status" -ne 0 ]
   yq -i '.spec.patches = [{"target": {"group": "kustomize.toolkit.fluxcd.io", "kind": "Kustomization"},
@@ -1137,6 +1143,22 @@ EOF
   check
   [ "$status" -ne 0 ]
   refused_line kubernetes/apps/base/demo/hello/app/statefulset.yaml "StatefulSet hello" "no schema"
+
+  # So is a kind of any other group Kubernetes serves itself.
+  local group_kind
+  for group_kind in flowcontrol.apiserver.k8s.io/v1:FlowSchema resource.k8s.io/v1:ResourceClaim \
+    authentication.k8s.io/v1:TokenReview authorization.k8s.io/v1:SubjectAccessReview \
+    storagemigration.k8s.io/v1beta1:StorageVersionMigration; do
+    put "$dir/other.yaml" <<<"---
+apiVersion: ${group_kind%%:*}
+kind: ${group_kind##*:}
+metadata:
+  name: other"
+    yq -i '.resources = ((.resources // []) + ["other.yaml"] | unique)' "$TREE/$dir/kustomization.yaml"
+    check
+    [ "$status" -ne 0 ]
+    refused_line kubernetes/apps/base/demo/hello/app/other.yaml "${group_kind##*:} other" "no schema"
+  done
 }
 
 @test "A manifest an application keeps where the artifact does not carry it is refused" {
@@ -1285,6 +1307,20 @@ EOF
   [ "$status" -ne 0 ]
   refused_line kubernetes/apps/base/demo/hooked/ks.yaml "Job hooked-migrate" busybox
 
+  # A bare Pod that is a test hook, and an init container of a pod template, are read as well.
+  hooked_app 'podTestImage: busybox'
+  check
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/hooked/ks.yaml "Pod hooked-test-pod" busybox
+  hooked_app 'initImage: busybox'
+  check
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/hooked/ks.yaml "Deployment hooked" busybox
+  hooked_app 'podTestImage: busybox:1.37.0
+initImage: busybox:1.37.0'
+  check
+  [ "$status" -eq 0 ]
+
   # A tag other than latest, or a digest, is a reference that does not move under the release.
   hooked_app 'testImage: busybox:1.37.0'
   check
@@ -1319,4 +1355,97 @@ EOF
   check
   [ "$status" -ne 0 ]
   fails_naming .image-allowlist "reason"
+}
+
+# schemas_ref_manager: the custom manager of .renovate/managers.json5 that reads a git ref from
+# versions.yaml, as JSON (the file is JSON5 with comments, which YAML reads once they are dropped).
+schemas_ref_manager() {
+  grep -v '^[[:space:]]*//' "$REPO/.renovate/managers.json5" |
+    yq -o json -I0 '.customManagers[] | select(.datasourceTemplate == "git-refs" and (.managerFilePatterns | join(" ") | contains("versions")))'
+}
+
+@test "the schemas commit is a versions.yaml entry that Renovate moves with Kubernetes" {
+  local manager ref dep groups
+  manager="$(schemas_ref_manager)"
+  [ -n "$manager" ]
+
+  # What the manager reads out of versions.yaml is the commit under its comment, of a public
+  # repository at a branch, which is the shape Renovate's git-refs datasource moves.
+  [ "$(jq -r '.customType' <<<"$manager")" = regex ]
+  ref="$(jq -Rs --argjson m "$manager" '. as $text | $m.matchStrings | map(. as $re | $text | capture($re)) | first' "$REPO/versions.yaml")"
+  echo "$ref"
+  [[ $(jq -r '.depName' <<<"$ref") =~ ^https://github\.com/yannh/kubernetes-json-schema$ ]]
+  [[ $(jq -r '.currentValue' <<<"$ref") =~ ^[a-z]+$ ]]
+  [[ $(jq -r '.currentDigest' <<<"$ref") =~ ^[0-9a-f]{40}$ ]]
+  [ "$(jq -r '.currentDigest' <<<"$ref")" = "$(yq '.kubernetes_schemas' "$REPO/versions.yaml")" ]
+
+  # It is in the group of the Kubernetes version it holds schemas for.
+  dep="$(jq -r '.depName' <<<"$ref")"
+  groups="$(grep -v '^[[:space:]]*//' "$REPO/.renovate/groups.json5" | yq -o json -I0 '.packageRules')"
+  jq -e --arg dep "$dep" 'map(select(.groupName == "Kubernetes" and (.matchPackageNames | index($dep) != null) and (.matchPackageNames | index("kubernetes/kubernetes") != null))) | length == 1' <<<"$groups"
+}
+
+@test "the check fetches Kubernetes' schemas at the commit versions.yaml holds" {
+  valid_tree
+  local shims="$BATS_TEST_TMPDIR/shims" ref=0123456789abcdef0123456789abcdef01234567
+  mkdir -p "$shims"
+  # curl hands back an empty archive and kubeconform reports nothing, and records what it was asked.
+  cat >"$shims/curl" <<'EOF'
+#!/usr/bin/env bash
+while (($#)); do [[ $1 == --output ]] && out=$2; shift; done
+tar -czf "$out" -T /dev/null
+EOF
+  cat >"$shims/kubeconform" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >>"$BATS_TEST_TMPDIR/kubeconform.args"
+echo '{"resources": []}'
+EOF
+  chmod +x "$shims/curl" "$shims/kubeconform"
+  unset KUBERNETES_CHECK_SCHEMAS
+
+  printf '%s\n' '---' 'kubernetes: v1.37.1' "kubernetes_schemas: $ref" >"$TREE/versions.yaml"
+  run env PATH="$shims:$PATH" "$CHECK" "$TREE"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  grep -qF "yannh/kubernetes-json-schema/$ref/" "$BATS_TEST_TMPDIR/kubeconform.args"
+
+  printf '%s\n' '---' 'kubernetes: v1.37.1' >"$TREE/versions.yaml"
+  run env PATH="$shims:$PATH" "$CHECK" "$TREE"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  fails_naming versions.yaml kubernetes_schemas
+}
+
+@test "a jq that fails on what the check reads fails the check, naming what it could not read" {
+  valid_tree
+  hooked_app 'testImage: registry.example.invalid/probe:1.0.0'
+  local shims="$BATS_TEST_TMPDIR/shims" real
+  real="$(command -v jq)"
+  mkdir -p "$shims"
+  # A jq that fails on the program named in FAIL_ON and runs every other program.
+  cat >"$shims/jq" <<EOF
+#!/usr/bin/env bash
+if [[ -n \${FAIL_ON:-} && "\$*" == *"\$FAIL_ON"* ]]; then
+  echo "jq: error: simulated" >&2
+  exit 5
+fi
+exec "$real" "\$@"
+EOF
+  chmod +x "$shims/jq"
+
+  run env PATH="$shims:$PATH" "$CHECK" "$TREE"
+  echo "$output"
+  [ "$status" -eq 0 ]
+
+  run env FAIL_ON='def pinned' PATH="$shims:$PATH" "$CHECK" "$TREE"
+  echo "$output"
+  fails_naming hooked "none of its images was checked"
+
+  run env FAIL_ON='"missing"' PATH="$shims:$PATH" "$CHECK" "$TREE"
+  echo "$output"
+  fails_naming kubernetes/clusters/test/ks.yaml "dependsOn were not checked"
+
+  run env FAIL_ON='.resources[]' PATH="$shims:$PATH" "$CHECK" "$TREE"
+  echo "$output"
+  fails_naming kubeconform "not all checked"
 }

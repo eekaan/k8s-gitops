@@ -13,6 +13,11 @@ spec:
       labels:
         app: {{ .Release.Name }}
     spec:
+{{- if .Values.initImage }}
+      initContainers:
+        - name: init
+          image: {{ .Values.initImage }}
+{{- end }}
       containers:
         - name: hooked
           image: {{ .Values.image }}

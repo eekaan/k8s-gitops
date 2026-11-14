@@ -53,7 +53,7 @@ spec:
 - `dependsOn`, `wait`, `healthCheckExprs`, `components` and `postBuild.substitute` belong to the
   application. The fields the root sets do not; see below.
 - What `dependsOn` names is an application the cluster's overlay enables, and one that waits: it
-  sets `wait: true` or `healthChecks`, so it is Ready only once what it applies is. A dependency on
+  sets `wait: true`, `healthChecks` or `healthCheckExprs`, so it is Ready only once what it applies is. A dependency on
   an application a cluster deliberately does not enable is an error: the dependent would never
   reconcile there, so the dependent is not enabled either, or the dependency is.
 - A new namespace gets its directory: `namespace.yaml` with the Pod Security labels and the
@@ -95,9 +95,10 @@ child that sets any of these fields without opting out fails the check.
 Beyond the layout above, `just kubernetes-check` refuses what the cluster would refuse or never
 reconcile, judged on what Flux builds, so the root's patches count:
 
-- **Dependencies.** Each `dependsOn` of a Kustomization names one that the same cluster applies: one
-  the overlay lists, or one the cluster directory builds (the root, `flux-operator`,
-  `flux-instance`). It must also wait after the root's patches: `wait: true`, `healthChecks` or
+- **Dependencies.** Each `dependsOn` of the Kustomizations the overlay and the cluster directory
+  build (the application Kustomizations, the root, `flux-operator`, `flux-instance`) names one that
+  the same cluster applies: one the overlay lists, or one the cluster directory builds. The
+  Kustomizations an application applies from its own `app/` are not read. It must also wait after the root's patches: `wait: true`, `healthChecks` or
   `healthCheckExprs`. Otherwise the dependent never reconciles, or starts before its dependency's
   objects are ready. The message names both Kustomizations and the overlay.
 - **Schemas.** Everything Flux builds, for every application (enabled or not) and each cluster's
@@ -106,13 +107,20 @@ reconcile, judged on what Flux builds, so the root's patches count:
   naming the file, the object and the field. Objects of other kinds, the custom resources of the
   charts, have no schema: the check prints each kind with the number of objects it could not
   validate (`no schema for Certificate (cert-manager.io/v1): 2 objects`), so a pass never silently
-  means a skip. A kind of Kubernetes' own groups or Flux's with no schema is an error. The schemas
+  means a skip. A kind of a group Kubernetes serves itself (the core group, `apps`, `batch`, `policy`,
+  `autoscaling`, and the `*.k8s.io` groups `rbac.authorization`, `networking`, `storage`,
+  `admissionregistration`, `apiextensions`, `scheduling`, `node`, `coordination`, `certificates`,
+  `discovery`, `events`, `apiregistration`, `flowcontrol.apiserver`, `resource`, `authentication`,
+  `authorization`, `storagemigration`, `internal.apiserver`) or of Flux's with no schema is an error;
+  the kinds of any other group are counted. The schemas
   are fetched at exact versions, never from a moving reference: Flux's from the release asset
   `crd-schemas.tar.gz` of the Flux release pinned in `mise.toml`, Kubernetes' a kind at a time from
-  the public `yannh/kubernetes-json-schema` repository at the commit named in
-  `scripts/kubernetes-check` (raising `kubernetes` in `versions.yaml` past what that commit holds
-  fails the check until the commit moves). The requests are plain GETs that send nothing from the
-  tree. `KUBERNETES_CHECK_SCHEMAS`, a directory with `kubernetes/<version>-standalone-strict/` and
+  the public `yannh/kubernetes-json-schema` repository at the commit `kubernetes_schemas` in
+  `versions.yaml` names. Renovate moves that commit through the `# renovate-ref:` comment above it,
+  in the Kubernetes group with `kubernetes` and the `kubectl` pin, so the schemas follow the version;
+  a `kubernetes` newer than the commit holds fails the check until the commit moves. The requests
+  are plain GETs that carry nothing from the tree beyond each object's kind, group and version,
+  which name the schema file asked for, whether or not it exists. `KUBERNETES_CHECK_SCHEMAS`, a directory with `kubernetes/<version>-standalone-strict/` and
   `flux/`, replaces both sources, as the tests do with their fixtures.
 - **Images.** Every image of every object `scripts/render` writes, the Helm hooks of the enabled
   releases included, has a tag other than `latest` or a digest. A mutable or missing tag is pulled
@@ -683,7 +691,9 @@ with host paths.
   `LinstorSatelliteConfiguration`s, the StorageClasses and the VolumeSnapshotClass. It names
   `piraeus-operator` and `snapshot-controller` in `dependsOn`, as the operator's webhooks validate
   its objects and every StorageClass of LINSTOR's driver, and the VolumeSnapshotClass needs the
-  snapshot definitions ([Resource definitions](#resource-definitions)).
+  snapshot definitions ([Resource definitions](#resource-definitions)). Its `ks.yaml` sets `wait`,
+  so it is Ready once the storage cluster and its satellite configurations are healthy, which is
+  what the applications that name it in `dependsOn` wait for.
 
 ### What runs
 

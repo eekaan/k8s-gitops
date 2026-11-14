@@ -11,9 +11,10 @@
 #   - every image of every object scripts/render writes, hooks included, has a tag other than
 #     latest or a digest, unless .image-allowlist lists it with its reason.
 # Reports every failure, naming the file and the rule, then exits non-zero. Never contacts a
-# cluster. Fetches only public files with plain GET requests and sends nothing from the tree: the
-# Flux release's crd-schemas archive, and Kubernetes' schemas a kind at a time, both at exact
-# versions, and the charts scripts/render pulls (RENDER_CHART_CACHE, as there).
+# cluster. Fetches only public files with plain GET requests, at exact versions: the Flux release's
+# crd-schemas archive, Kubernetes' schemas a kind at a time (the request paths name each object's
+# kind, group and version, CRDs' too, and nothing else from the tree), and the charts
+# scripts/render pulls (RENDER_CHART_CACHE, as there).
 #
 # KUBERNETES_CHECK_SCHEMAS, a directory, replaces both schema sources and nothing is fetched for
 # them: kubernetes/<version>-standalone-strict/<kind>-<group>-<version>.json beside
@@ -38,11 +39,10 @@ done
 [[ -d kubernetes ]] || { echo "kubernetes-check: no kubernetes/ directory in $PWD" >&2; exit 1; }
 [[ -f versions.yaml ]] || { echo "kubernetes-check: no versions.yaml in $PWD; it names the Kubernetes version the schemas are for" >&2; exit 1; }
 
-# Kubernetes' schemas come from the public yannh/kubernetes-json-schema repository at one commit,
-# so the files never change under an unchanged tree; a Kubernetes version newer than the commit's
-# makes the check fail until the commit moves. Flux's come with the release the flux2 pin in
-# mise.toml names.
-kubernetes_schemas_ref=2bfaff3898a7a4fa4e4760da3d2656211c9b4c71
+# Kubernetes' schemas come from the public yannh/kubernetes-json-schema repository at the commit
+# versions.yaml names (kubernetes_schemas), so the files never change under an unchanged tree.
+# Renovate moves that commit with the Kubernetes version; a version newer than the commit holds
+# makes the check fail until it does. Flux's come with the release the flux2 pin in mise.toml names.
 
 failures=0
 fail() {
@@ -402,6 +402,17 @@ for dir in kubernetes/clusters/*/; do
   overlay="${overlay%/}"
   kustomizations "${root_built[$dir]}" >"$tmp/dependents.jsonl"
   kustomizations "${sync_built[$dir]}" >>"$tmp/dependents.jsonl"
+  if ! jq -rs 'def ns: .metadata.namespace // "default";
+    def ready: .spec.wait == true or ((.spec.healthChecks // []) | length > 0) or ((.spec.healthCheckExprs // []) | length > 0);
+    . as $all
+    | (reduce $all[] as $k ({}; .[($k | ns) + "/" + $k.metadata.name] = $k)) as $by
+    | $all[] | . as $k | (.spec.dependsOn // [])[]
+    | ((.namespace // ($k | ns)) + "/" + .name) as $key
+    | [(if $by[$key] == null then "missing" elif ($by[$key] | ready) then "ok" else "nowait" end),
+       $k.metadata.name, (if .namespace then $key else .name end)] | join("|")' "$tmp/dependents.jsonl" >"$tmp/dependency-verdicts"; then
+    fail "$dir/ks.yaml: cannot read the Kustomizations built for $overlay, so their dependsOn were not checked"
+    continue
+  fi
   while IFS='|' read -r verdict dependent dep; do
     dependencies=$((dependencies + 1))
     file="${ks_name_file[$dependent]:-$dir/ks.yaml}"
@@ -413,14 +424,7 @@ for dir in kubernetes/clusters/*/; do
         fail "$file: Kustomization $dependent names $dep in dependsOn, but $dep does not wait, as built for $overlay: it sets neither wait nor healthChecks, so $dependent starts before the objects of $dep are ready; set wait: true on $dep"
         ;;
     esac
-  done < <(jq -rs 'def ns: .metadata.namespace // "default";
-    def ready: .spec.wait == true or ((.spec.healthChecks // []) | length > 0) or ((.spec.healthCheckExprs // []) | length > 0);
-    . as $all
-    | (reduce $all[] as $k ({}; .[($k | ns) + "/" + $k.metadata.name] = $k)) as $by
-    | $all[] | . as $k | (.spec.dependsOn // [])[]
-    | ((.namespace // ($k | ns)) + "/" + .name) as $key
-    | [(if $by[$key] == null then "missing" elif ($by[$key] | ready) then "ok" else "nowait" end),
-       $k.metadata.name, (if .namespace then $key else .name end)] | join("|")' "$tmp/dependents.jsonl")
+  done <"$tmp/dependency-verdicts"
 done
 
 # source_of APP_DIR KIND NAME LABEL: the file an object that a build yielded comes from, when it can
@@ -445,7 +449,7 @@ source_of() {
 
 # The objects of Kubernetes' own API groups and of Flux's must have a schema: a kind without one is
 # a wrong apiVersion or schemas older than the cluster, and it would otherwise go unchecked.
-builtin_group_re='^(|apps|batch|policy|autoscaling|(rbac\.authorization|networking|storage|admissionregistration|apiextensions|scheduling|node|coordination|certificates|discovery|events|apiregistration)\.k8s\.io)$'
+builtin_group_re='^(|apps|batch|policy|autoscaling|(rbac\.authorization|networking|storage|admissionregistration|apiextensions|scheduling|node|coordination|certificates|discovery|events|apiregistration|flowcontrol\.apiserver|resource|authentication|authorization|storagemigration|internal\.apiserver)\.k8s\.io)$'
 flux_group_re='(\.toolkit\.fluxcd\.io|^source\.extensions\.fluxcd\.io)$'
 
 # schema_check: validates everything flux_build built, with unknown fields refused, against Kubernetes'
@@ -482,6 +486,11 @@ schema_check() {
       fail "cannot fetch Flux's schemas from $url: $err"
       return
     fi
+    kubernetes_schemas_ref="$(yq '.kubernetes_schemas // ""' versions.yaml 2>/dev/null)" || kubernetes_schemas_ref=""
+    if [[ ! $kubernetes_schemas_ref =~ ^[0-9a-f]{40}$ ]]; then
+      fail "versions.yaml: kubernetes_schemas is not a commit: ${kubernetes_schemas_ref:-none}; Kubernetes' schemas are fetched at that commit of yannh/kubernetes-json-schema"
+      return
+    fi
     kube_location="https://raw.githubusercontent.com/yannh/kubernetes-json-schema/$kubernetes_schemas_ref/{{.NormalizedKubernetesVersion}}-standalone{{.StrictSuffix}}/{{.ResourceKind}}{{.KindSuffix}}.json"
   fi
 
@@ -496,6 +505,11 @@ schema_check() {
     -schema-location "$kube_location" "$tmp"/validate/*.yaml >"$tmp/kubeconform.json" 2>"$tmp/kubeconform.err" || true
   if ! jq -e '.resources' "$tmp/kubeconform.json" >/dev/null 2>&1; then
     fail "kubeconform did not validate the built objects: $(cat "$tmp/kubeconform.err" "$tmp/kubeconform.json" 2>/dev/null)"
+    return
+  fi
+  if ! jq -r '.resources[] | [.status, (.filename | split("/")[-1] | rtrimstr(".yaml")), .kind, .version, .name,
+    ((.msg // "") | gsub("[\n\t]"; " "))] | join("|")' "$tmp/kubeconform.json" >"$tmp/verdicts"; then
+    fail "cannot read the verdicts kubeconform gave, so the built objects were not all checked"
     return
   fi
   while IFS='|' read -r status index kind api name msg; do
@@ -519,8 +533,7 @@ schema_check() {
         fail "$where: $kind $name: ${msg:-$status}"
         ;;
     esac
-  done < <(jq -r '.resources[] | [.status, (.filename | split("/")[-1] | rtrimstr(".yaml")), .kind, .version, .name,
-    ((.msg // "") | gsub("[\n\t]"; " "))] | join("|")' "$tmp/kubeconform.json")
+  done <"$tmp/verdicts"
   ((${#skipped[@]} > 0)) || return 0
   while IFS= read -r key; do
     n=${skipped[$key]}
@@ -567,13 +580,7 @@ image_rule() {
     app="${cluster_app##*/}"
     objects="$tmp/objects.jsonl"
     yq -N -o json -I0 '.' "$cluster_app"/*.yaml >"$objects" 2>/dev/null || { fail "$cluster_app: cannot read what scripts/render wrote"; continue; }
-    while IFS='|' read -r verdict kind name image hooks; do
-      images=$((images + 1))
-      [[ $verdict == bad ]] || continue
-      [[ -z ${image_allowed["$app $image"]:-} ]] || continue
-      file="${ks_name_file[$app]:-${cluster_app#"$out"/}}"
-      fail "$file: $kind $name${hooks:+ (a Helm hook)} runs image $image, which has no tag other than latest and no digest: pin a tag or a digest in the chart's values or the release's post-renderer, or list it with its reason in .image-allowlist"
-    done < <(jq -rs 'def pinned: test("@sha256:[0-9a-f]{64}$") or (split("/")[-1] | test(":[A-Za-z0-9_][A-Za-z0-9._-]*$") and (test(":latest$") | not));
+    if ! jq -rs 'def pinned: test("@sha256:[0-9a-f]{64}$") or (split("/")[-1] | test(":[A-Za-z0-9_][A-Za-z0-9._-]*$") and (test(":latest$") | not));
       def hooks: ((.metadata.annotations["helm.sh/hook"] // "") | split(",") | map(gsub("^ +| +$"; "")) | map(select(. != "")));
       def testonly: (hooks | length > 0) and (hooks | all(. == "test" or . == "test-success" or . == "test-failure"));
       . as $all
@@ -594,7 +601,17 @@ image_rule() {
            "namespace": ($o.metadata.labels["helm.toolkit.fluxcd.io/namespace"] // "default")}))
       | [.. | objects | (.containers?, .initContainers?, .ephemeralContainers?) | arrays | .[] | objects | .image? | strings][]
       | [(if pinned then "ok" else "bad" end), $o.kind, $o.metadata.name, ., (if ($o | hooks | length) > 0 then "hook" else "" end)]
-      | join("|")' "$objects")
+      | join("|")' "$objects" >"$tmp/image-verdicts"; then
+      fail "$app: cannot read the images of what scripts/render wrote, so none of its images was checked"
+      continue
+    fi
+    while IFS='|' read -r verdict kind name image hooks; do
+      images=$((images + 1))
+      [[ $verdict == bad ]] || continue
+      [[ -z ${image_allowed["$app $image"]:-} ]] || continue
+      file="${ks_name_file[$app]:-${cluster_app#"$out"/}}"
+      fail "$file: $kind $name${hooks:+ (a Helm hook)} runs image $image, which has no tag other than latest and no digest: pin a tag or a digest in the chart's values or the release's post-renderer, or list it with its reason in .image-allowlist"
+    done <"$tmp/image-verdicts"
   done
 }
 image_rule

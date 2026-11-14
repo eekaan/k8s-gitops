@@ -31,3 +31,18 @@ spec:
         - name: migrate
           image: {{ .Values.upgradeImage }}
 {{- end }}
+{{- if .Values.podTestImage }}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ .Release.Name }}-test-pod
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": test
+spec:
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: {{ .Values.podTestImage }}
+{{- end }}
