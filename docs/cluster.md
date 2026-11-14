@@ -538,8 +538,8 @@ naming the place. With `CI` set nothing of rclone's words is shown: they go to
 `clusterconfig/<recipe>.errors.log` in the cluster's directory, which git ignores, started afresh by
 each run, and only that file's path is printed, as for talman's output. kubectl's and helm's output
 passes through, naming the objects they apply, except in `cluster-check`, `cluster-reboot`,
-`cluster-destroy` and `grafana`: they print node and object names only, and none of what kubectl prints, as the
-objects it reads and its errors hold the API server's, the nodes' and the pods' addresses; only
+`cluster-destroy` and `grafana`: they print node and object names only, and none of what kubectl
+prints, as the objects it reads and its errors hold the API server's, the nodes' and the pods' addresses; only
 `kubectl drain`'s passes through in `cluster-reboot`, as in `cluster-upgrade`, naming the pods it
 evicts and those it cannot, with its errors passed through the same filter line by line, so a
 connection error still says why, `connection refused`.

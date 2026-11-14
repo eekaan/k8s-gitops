@@ -40,6 +40,7 @@ require_snapshot() {
 prepare_snapshot() {
   s3_bucket_name_ok BACKUP_BUCKET_PREFIX prefix || return 1
   s3_require_client || return 1
+  # shellcheck disable=SC2154 # scripts/cluster-env sets cluster_dir
   start_errors_log "$cluster_dir/clusterconfig/${0##*/}.errors.log"
   snapshot_recipient=$(sops_recipient)
   if [[ ! $snapshot_recipient =~ ^age1[0-9a-z]+$ ]]; then

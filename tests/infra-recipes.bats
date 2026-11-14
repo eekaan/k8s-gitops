@@ -732,6 +732,25 @@ EOF
   [[ $output == *"sto2/plumbing is busy"* ]]
 }
 
+@test "A stack whose lock cannot be taken fails naming it and runs nothing" {
+  # .terraform is a file, so neither its directory nor the lock file in it can be made; the same
+  # happens when it cannot be written.
+  : > "$PLUMBING/.terraform"
+  holds sto2/cluster state-never-applied.json
+  for args in 'infra-plan sto2/plumbing' 'infra-destroy sto2/plumbing --yes'; do
+    rm -f "$RECORD/tofu"
+    # shellcheck disable=SC2086 # the arguments as an operator types them
+    recipe $args < /dev/null
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"cannot lock sto2/plumbing: its lock file cannot be made in"*".terraform"* ]]
+    [[ $output != *"unbound variable"* ]]
+    # Only the other stacks' state was read, and nothing of this one's.
+    tofu_only_reads
+    absent "-chdir=$PLUMBING " "$RECORD/tofu"
+  done
+}
+
 @test "Apply asks before it applies the saved plan" {
   recording_tofu "$FIXTURES/plan.json"
 
