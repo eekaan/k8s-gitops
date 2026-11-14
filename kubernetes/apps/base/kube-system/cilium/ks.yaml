@@ -5,9 +5,16 @@ kind: Kustomization
 metadata:
   name: cilium
   namespace: flux-system
+  labels:
+    # A new version or configuration rolls the agents node by node, which the release allows 10m.
+    k8s-gitops/timeout: long
 spec:
   path: ./apps/base/kube-system/cilium/app
   targetNamespace: kube-system
+  # Ready only once the release is, and with it every agent: an agent starts only once Cilium's
+  # operator has defined every kind it uses, so cilium-bgp, which names this one in dependsOn,
+  # finds the definitions of its objects in place.
+  wait: true
   sourceRef:
     kind: ExternalArtifact
     name: cilium

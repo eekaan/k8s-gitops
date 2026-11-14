@@ -1,0 +1,18 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: cilium-bgp
+  namespace: flux-system
+spec:
+  # Every object here is of a kind Cilium's operator defines when it starts, so none of them can be
+  # applied before Cilium runs: scripts/install-cilium installs Cilium alone, and Flux applies these
+  # after it.
+  dependsOn:
+    - name: cilium
+  path: ./apps/base/kube-system/cilium-bgp/app
+  targetNamespace: kube-system
+  sourceRef:
+    kind: ExternalArtifact
+    name: cilium-bgp

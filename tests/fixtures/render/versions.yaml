@@ -1,0 +1,3 @@
+---
+# The Kubernetes version the fixture's charts are rendered for.
+kubernetes: v1.35.0

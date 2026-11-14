@@ -1,0 +1,30 @@
+---
+# Every worker, and no control plane, runs one BGP instance in the cluster's AS and peers with both
+# edge routers in theirs, over eBGP. Talos labels its control planes
+# node-role.kubernetes.io/control-plane and its workers with no role, and only the workers' ports
+# may carry the service range. The edge routers sit on the node subnet, one hop from every worker,
+# so the sessions keep eBGP's TTL of 1. Without localPort a worker opens its sessions and listens
+# for none.
+apiVersion: cilium.io/v2
+kind: CiliumBGPClusterConfig
+metadata:
+  name: edge
+spec:
+  nodeSelector:
+    matchExpressions:
+      - key: node-role.kubernetes.io/control-plane
+        operator: DoesNotExist
+  bgpInstances:
+    - name: cluster
+      localASN: ${BGP_CLUSTER_ASN}
+      peers:
+        - name: edge-1
+          peerASN: ${BGP_EDGE_ASN}
+          peerAddress: ${BGP_EDGE_ADDRESS_1}
+          peerConfigRef:
+            name: edge
+        - name: edge-2
+          peerASN: ${BGP_EDGE_ASN}
+          peerAddress: ${BGP_EDGE_ADDRESS_2}
+          peerConfigRef:
+            name: edge

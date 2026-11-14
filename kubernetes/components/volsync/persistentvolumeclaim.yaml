@@ -1,0 +1,19 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/persistentvolumeclaim-v1.json
+# The application's volume, on the default StorageClass. VolSync fills it, when it is created, from
+# the snapshot the ReplicationDestination restored, and it stays Pending until that snapshot exists;
+# with no backup in the repository yet, the snapshot is of an empty volume.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ${VOLSYNC_CLAIM:=${APP}}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  dataSourceRef:
+    apiGroup: volsync.backube
+    kind: ReplicationDestination
+    name: ${APP}-restore
+  resources:
+    requests:
+      storage: ${VOLSYNC_CAPACITY}

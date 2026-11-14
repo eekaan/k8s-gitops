@@ -72,6 +72,10 @@ cluster-restore snapshot *args:
 cluster-check cluster='lab-sto2':
     scripts/cluster-check {{ quote(cluster) }}
 
+# Forward a local port, GRAFANA_PORT or 3000, on 127.0.0.1 only, to Grafana on a cluster through its kubeconfig until Ctrl-C; prints the local URL and where the admin password is kept, never the password
+grafana cluster='lab-sto2':
+    scripts/grafana {{ quote(cluster) }}
+
 # Reboot one node, by its hostname in talman.yaml, once its name is typed back (--yes: without asking), asking /readyz through the kubeconfig once a second until the node is Ready again; fails when a probe failed (--tolerate <seconds>: accept a gap that long)
 [positional-arguments]
 cluster-reboot node *args:

@@ -103,7 +103,7 @@ checks: static tests-1 tests-2 tests-3
 
 # The groups of checks are the dependencies of checks, and each group's checks its own dependencies: just ci runs every group side by side in containers of its own, and CI runs each as a job of its own. A check, with whatever it depends on, belongs to one group only, or it would run twice.
 # The checks other than the bats tests, the cheapest and most basic first
-static: tools-check check-literals check-commit-literals cluster-secrets-check lint renovate-check scenarios-check infra-check talos-check kubernetes-check secrets-scan
+static: tools-check check-literals check-commit-literals cluster-secrets-check lint renovate-check scenarios-check infra-check talos-check kubernetes-check render-check secrets-scan
 
 # The first of three parts of the bats tests
 tests-1: (test '1/3')
@@ -156,6 +156,21 @@ ci-passed *results:
       exit 1
     fi
     echo "ci-passed: all $# jobs succeeded"
+
+# The CI workflow's render job: in the Dagger module, in the tools container just ci uses, render the commit BASE (the first parent of HEAD when empty) and this checkout with the base's render code, and save the pull request comment comparing them to OUT
+[script]
+ci-render out base='':
+    set -o pipefail
+    mkdir -p "$(dirname {{ quote(out) }})"
+    # The same tools arguments just ci hands the module, so the render runs in the same container.
+    tools=$(scripts/tools-image ci-args)
+    mapfile -t tools <<< "$tools"
+    if [[ -t 2 ]]; then progress=auto; else progress=plain; fi
+    dagger api call --progress="$progress" -o {{ quote(out) }} ci render-diff "${tools[@]}" --base={{ quote(base) }}
+
+# The comment workflow's job: put the comment the render job of the CI run RUN_ID left on its pull request, as text only; needs GH_TOKEN, GITHUB_REPOSITORY, RUN_ID, HEAD_SHA, HEAD_REPOSITORY and HEAD_BRANCH
+ci-comment:
+    scripts/ci-comment
 
 # The image of Renovate's validator, for renovate-check here and for just ci's Dagger module
 renovate_image := "ghcr.io/renovatebot/renovate:44.227.4@sha256:fe058db9710840a4821f20190b3769e3ce709a049b8640aa2bf5f044969fe702"

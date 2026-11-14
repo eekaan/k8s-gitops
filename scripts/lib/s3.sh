@@ -52,22 +52,30 @@ s3_bucket_name_ok() {
   fi
 }
 
-# s3_require_client: fails unless rclone is on PATH, then reads the object storage's S3 endpoint,
-# region and addressing into s3_endpoint, s3_region and s3_path_style from
-# infra/openstack/backend.hcl, where OpenTofu's s3 backend reads them. The values are not printed.
+# s3_require_client: fails unless rclone is on PATH, then reads the store's settings with
+# s3_read_backend.
 s3_require_client() {
-  local backend=infra/openstack/backend.hcl settings
   if ! command -v rclone > /dev/null; then
     infra_error "rclone is not on PATH; install the pinned tools with: just tools"
     return 1
   fi
+  s3_read_backend
+}
+
+# s3_read_backend: reads the object storage's S3 endpoint, region and addressing into s3_endpoint,
+# s3_region and s3_path_style from infra/openstack/backend.hcl, where OpenTofu's s3 backend reads
+# them. The endpoint is https, a host name and an optional port, and nothing after them: a client
+# such as restic reads a path there as the bucket. The values are not printed.
+s3_read_backend() {
+  local backend=infra/openstack/backend.hcl settings
   if ! settings=$(yq -p hcl -o json "$infra_root/$backend" 2> /dev/null | jq -er '
     [.endpoints.s3, .region, .use_path_style]
-    | select((.[0] | type == "string" and test("^https://[^[:space:]]+$"))
+    | select((.[0] | type == "string"
+        and test("^https://[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[0-9]{1,5})?$"))
       and (.[1] | type == "string" and test("^[a-z0-9-]+$"))
       and (.[2] | type == "boolean"))
     | @tsv' 2> /dev/null); then
-    infra_error "$backend does not hold the object storage's https endpoint (endpoints.s3), region and use_path_style"
+    infra_error "$backend does not hold the object storage's endpoint (endpoints.s3: https, a host name and an optional port), region and use_path_style"
     return 1
   fi
   IFS=$'\t' read -r s3_endpoint s3_region s3_path_style <<< "$settings"

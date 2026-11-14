@@ -2,6 +2,10 @@
 
 - Status: accepted
 - Date: 2026-11-14
+- Amended: 2026-11-14, a second job runs its recipe on the runner with a token of its own: the
+  render diff's comment, which runs from the default branch after a fork's CI run as well
+- Amended: 2026-11-14, the checks run in a published, signed tools image while its key matches the
+  checkout's inputs, and publishing it is a third job that runs its recipe on the runner
 
 ## Context
 
@@ -16,18 +20,21 @@ Actions is the CI system: each job runs one `just` recipe, on GitHub's runners, 
 runs the checks starts the Dagger engine for itself, or, for trusted runs, on the CI host's
 self-hosted runner, where it uses the host's persistent engine (ADR 0012).
 
-The jobs that publish, the cluster's artifact (ADR 0003) with `just publish` and the tools image
-with `just tools-image-publish`, run their recipes directly on the runner, with the tools pinned in
-`mise.toml` installed there by mise. Signing keyless takes the job's own identity token, and
-pushing the job's registry token, which reaches a Docker configuration of the run's own; no
-function of the module takes either, so the checks stay hermetic and need no credentials, and
-nothing the checks run can sign or publish.
+Three jobs that need a token of their own run their recipe directly on the runner, with the tools
+pinned in `mise.toml` installed there by mise. Publishing the cluster's artifact (ADR 0003),
+`just publish`, and the tools image, `just tools-image-publish`, each sign keyless with the job's
+identity token and push with the job's registry token, which reaches a Docker configuration of the
+run's own. Commenting the render diff on a pull request, `just ci-comment`, runs from the default
+branch in a workflow of its own with a `pull-requests: write` token, and reads the render job's
+artifact as text only. No function of the module takes any of these tokens, so the checks stay
+hermetic and need no credentials, and nothing the checks run can sign, publish or comment.
 
-The container the checks run in is built from the pins once for each change of its inputs (the
-base image, the package step and `mise.toml`), by the tools image workflow on `main`, pushed to
-this repository's registry, signed, and recorded by digest in `versions.yaml` with the key of those
-inputs. `just ci` hands the module that image while the key matches the checkout's inputs, and the
-module builds the same layer itself otherwise.
+The container the checks and the render job run in is built from the pins once for each change of
+its inputs (the base image, the package step, `mise.toml` and the steps of the module's tools
+layer), by the tools image workflow on `main`, pushed to this repository's registry, signed, and
+recorded by digest in `versions.yaml` with the key of those inputs. `just ci` and `just ci-render`
+hand the module that image while the key matches the checkout's inputs, and the module builds the
+same layer itself otherwise.
 
 One job always runs and aggregates the others; it is the only required check on `main`, so
 path-filtered jobs never leave a pull request waiting.
@@ -49,7 +56,9 @@ The module uses Dagger 1.0, which is in beta at the time of writing.
   without changing what a job is called or what it proves.
 - The module format follows the 1.0 beta and may change before 1.0 is stable; the move to the
   stable release is planned work.
-- Jobs that need credentials do not run for pull requests from forks.
+- Jobs that need credentials do not run for pull requests from forks, except the render diff's
+  comment, which GitHub runs from the default branch once a fork's CI run completes and which takes
+  nothing from the pull request but the text of that run's artifact.
 - The publish job installs its tools on the runner with mise, from the same pins as the module's
   container and a laptop, so publishing the cluster's artifact does not depend on the module. The
   tools image job builds its image with the module's own layer, so the checks run in what the

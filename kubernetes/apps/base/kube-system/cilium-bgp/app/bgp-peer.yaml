@@ -1,0 +1,26 @@
+---
+# The sessions with the edge routers. The timers are the smallest hold and keepalive times Cilium's
+# documentation suggests for data centre networks, and a short connect retry, so a lost edge router
+# or worker is noticed within nine seconds. Graceful restart, which the documentation recommends for
+# Service routes, keeps an edge router forwarding to a worker while its Cilium agent restarts, as
+# the datapath keeps working meanwhile; the restart time is the documented default, longer than an
+# agent takes to start. No TCP MD5 password: the sessions run inside the project's own node network
+# (ADR 0013). IPv4 only, as the cluster is.
+apiVersion: cilium.io/v2
+kind: CiliumBGPPeerConfig
+metadata:
+  name: edge
+spec:
+  timers:
+    connectRetryTimeSeconds: 5
+    holdTimeSeconds: 9
+    keepAliveTimeSeconds: 3
+  gracefulRestart:
+    enabled: true
+    restartTimeSeconds: 120
+  families:
+    - afi: ipv4
+      safi: unicast
+      advertisements:
+        matchLabels:
+          k8s-gitops/bgp-advertisement: services
