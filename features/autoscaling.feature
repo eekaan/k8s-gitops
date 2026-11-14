@@ -23,6 +23,11 @@ Feature: Autoscaling and reflection add-ons
     When their APIService objects are read
     Then KEDA registers external.metrics.k8s.io, metrics-server registers metrics.k8s.io, and no two APIService objects claim the same group and version
 
+  Scenario: KEDA's admission webhooks let objects through while no webhook answers
+    Given the rendered KEDA chart
+    When its webhook configurations are read
+    Then every webhook's failure policy is Ignore
+
   Scenario: KEDA's namespace holds its Pod Security level
     Given the keda namespace directory and the rendered chart
     When the namespace's labels and the pod templates are read
@@ -46,7 +51,7 @@ Feature: Autoscaling and reflection add-ons
   Scenario: Every pod the add-ons run has resource requests
     Given the three applications' rendered charts
     When their pod templates are read
-    Then every container and init container requests CPU and memory, and no container has a limit except KEDA's, which its publisher's documentation sets
+    Then every container and init container requests CPU and memory, except those of the chart's Helm test pods, which run only for `helm test` and set none, and no container has a limit except KEDA's, which its publisher's documentation sets
 
   Scenario: Every monitor selects a Service or pods that its own render contains
     Given the three applications' rendered charts, with the monitoring API present

@@ -146,7 +146,7 @@ pod_templates() {
 }
 
 @test "KEDA, the autoscaler's recommender and Reflector are enabled and pinned to exact versions" {
-  local overlay app path version spec
+  local overlay app path version spec refkeys url
   overlay="$(kustomize build --load-restrictor LoadRestrictionsNone "$TREE/kubernetes/apps/overlays/lab-sto2")"
   for app in keda vpa reflector; do
     path="$(APP=$app yq -N 'select(.kind == "Kustomization" and .metadata.name == strenv(APP)) | .spec.path' <<<"$overlay")"
@@ -155,6 +155,11 @@ pod_templates() {
     built "$app"
     # The chart's version: the tag of an OCIRepository, or the version a HelmRelease asks a
     # HelmRepository for. An exact release, never a range, a digest-less moving tag or a latest.
+    # Flux gives a ref's semver, semverFilter and digest precedence over its tag, so an
+    # OCIRepository's ref holds the tag alone (or the tag and a digest), never a range.
+    refkeys="$(yq -N 'select(.kind == "OCIRepository") | .spec.ref // {} | keys | sort | join(",")' "$BUILT")"
+    echo "$app ref keys: ${refkeys:-none}"
+    [[ -z $refkeys || $refkeys == tag || $refkeys == digest,tag ]]
     version="$(yq -N 'select(.kind == "OCIRepository") | .spec.ref.tag // ""' "$BUILT")"
     [ -n "$version" ] || version="$(yq -N 'select(.kind == "HelmRelease") | .spec.chart.spec.version // ""' "$BUILT")"
     echo "$app chart version: ${version:-none}"
@@ -163,7 +168,9 @@ pod_templates() {
     # is read by Renovate's Flux manager, which needs the HelmRepository beside it.
     spec="$(cat "$TREE/$APP_DIR/app/"*.yaml)"
     if grep -q '^kind: OCIRepository' <<<"$spec"; then
-      grep -q '# renovate: datasource=docker depName=' <<<"$spec"
+      # The comment names the repository the OCIRepository pulls from.
+      url="$(yq -N 'select(.kind == "OCIRepository") | .spec.url' "$BUILT")"
+      grep -qxF "    # renovate: datasource=docker depName=${url#oci://}" <<<"$spec"
     else
       grep -q '^kind: HelmRepository' <<<"$spec"
     fi
@@ -220,10 +227,22 @@ pod_templates() {
   [ -z "$duplicates" ]
 }
 
+@test "KEDA's admission webhooks let objects through while no webhook answers" {
+  local policies
+  render keda
+  policies="$(yq -N 'select(.kind == "ValidatingWebhookConfiguration" or .kind == "MutatingWebhookConfiguration")
+    | .kind + "/" + .metadata.name + " " + (.webhooks[].failurePolicy // "unset")' "$RENDERED")"
+  echo "webhook failure policies: ${policies:-none}"
+  [ -n "$policies" ]
+  [ -z "$(grep -v ' Ignore$' <<<"$policies" || true)" ]
+}
+
 @test "KEDA's namespace holds its Pod Security level" {
-  local level violations
-  app_dir keda
-  level="$(yq '.metadata.labels["pod-security.kubernetes.io/enforce"]' "$TREE/$NAMESPACE_DIR/namespace.yaml")"
+  local level violations overlay
+  # The level the cluster gets: the Namespace as the overlay builds it, not the source file.
+  overlay="$(kustomize build --load-restrictor LoadRestrictionsNone "$TREE/kubernetes/apps/overlays/lab-sto2")"
+  level="$(yq -N 'select(.kind == "Namespace" and .metadata.name == "keda")
+    | .metadata.labels["pod-security.kubernetes.io/enforce"] // "none"' <<<"$overlay")"
   echo "enforced level: $level"
   [ "$level" = restricted ]
   render keda
@@ -293,35 +312,45 @@ pod_templates() {
     | (.apiGroups | join(",")) + "|" + (.resources | join(",")) + "|" + (.verbs | join(","))' "$RENDERED" | tr -d '"' | sort)"
   echo "rules: $(paste -sd' ' <<<"$rules")"
   [ "$rules" = "$(printf '%s\n' '|configmaps,secrets|*' '|namespaces|watch,list' | sort)" ]
-  bindings="$(yq -N 'select(.kind == "ClusterRoleBinding") | .subjects[].kind + "/" + .subjects[].name + "/" + .subjects[].namespace' "$RENDERED")"
-  echo "cluster-wide bindings: $bindings"
-  [ "$bindings" = "ServiceAccount/reflector/kube-system" ]
+  # Every binding, namespaced or not, so that no other grant is bound to anyone.
+  bindings="$(yq -N 'select(.kind == "ClusterRoleBinding" or .kind == "RoleBinding")
+    | .kind + " " + .roleRef.name + " <- " + (.subjects | map(.kind + "/" + .name + "/" + .namespace) | join(","))' "$RENDERED")"
+  echo "bindings: $bindings"
+  [ "$(wc -l <<<"$bindings")" -eq 1 ]
+  [[ $bindings == 'ClusterRoleBinding '*' <- ServiceAccount/reflector/kube-system' ]]
   # The docs state the right and the control on it.
-  grep -q 'Reflector' "$REPO/docs/kubernetes.md"
-  grep -q 'reflection-allowed' "$REPO/docs/kubernetes.md"
-  # Nothing in the tree is reflected: a copy needs an annotation of Reflector's on its source.
-  reflecting="$(grep -rIl 'reflector\.v1\.k8s\.emberstack\.com' "$TREE/kubernetes" || true)"
+  grep -qF 'Reflector can read and write every Secret and ConfigMap in every namespace, and list and watch' "$REPO/docs/kubernetes.md"
+  grep -qF 'only an object carrying `reflection-allowed` is copied' "$REPO/docs/kubernetes.md"
+  # Nothing in the tree is reflected: a copy needs an annotation of Reflector's on its source. The
+  # whole kubernetes directory is searched, the cluster directories with their secrets included;
+  # grep writes nothing, so it reads the checkout.
+  reflecting="$(grep -rIl 'reflector\.v1\.k8s\.emberstack\.com' "$REPO/kubernetes" || true)"
   echo "files with a reflection annotation: ${reflecting:-none}"
   [ -z "$reflecting" ]
 }
 
 @test "The add-ons keep running while a node is drained" {
   local app component replicas spread budget failed=""
-  local -A labels=([keda-operator]=keda-operator [keda-operator-metrics-apiserver]=keda-operator-metrics-apiserver
-    [keda-admission-webhooks]=keda-admission-webhooks)
+  local -a components=(keda-operator keda-operator-metrics-apiserver keda-admission-webhooks)
   render keda
-  for component in "${!labels[@]}"; do
-    replicas="$(yq -N "select(.kind == \"Deployment\" and .metadata.name == \"$component\") | .spec.replicas" "$RENDERED")"
-    spread="$(yq -N "select(.kind == \"Deployment\" and .metadata.name == \"$component\")
-      | .spec.template.spec.topologySpreadConstraints // [] | .[]
-      | select(.topologyKey == \"kubernetes.io/hostname\" and .maxSkew == 1
-        and .labelSelector.matchLabels.app == \"${labels[$component]}\") | .whenUnsatisfiable" "$RENDERED")"
-    budget="$(yq -N "select(.kind == \"PodDisruptionBudget\" and .spec.selector.matchLabels.app == \"${labels[$component]}\")
-      | (.spec.minAvailable // \"none\" | tostring) + \" \" + (.spec.maxUnavailable // \"none\" | tostring)" "$RENDERED")"
+  for component in "${components[@]}"; do
+    # The spread and the budget are compared with the labels of the rendered pod template, so a
+    # selector that matches no pod of the component does not count.
+    read -r replicas spread budget < <(yq -N -o json -I0 'select(. != null)' "$RENDERED" | jq -rs --arg c "$component" '
+      (.[] | select(.kind == "Deployment" and .metadata.name == $c)) as $d
+      | ($d.spec.template.metadata.labels // {}) as $labels
+      | def selects: (.matchLabels // {}) as $m | ($m | length) > 0 and ($m | to_entries | all($labels[.key] == .value));
+      [($d.spec.replicas // 1 | tostring),
+       ([$d.spec.template.spec.topologySpreadConstraints // [] | .[]
+         | select(.topologyKey == "kubernetes.io/hostname" and .maxSkew == 1 and (.labelSelector | selects))
+         | .whenUnsatisfiable][0] // "none"),
+       ([.[] | select(.kind == "PodDisruptionBudget" and (.spec.selector | selects))
+         | (.spec.minAvailable // "none" | tostring) + "/" + (.spec.maxUnavailable // "none" | tostring)][0] // "none")]
+      | join(" ")')
     echo "$component: replicas ${replicas:-none}, spread: ${spread:-none}, budget: ${budget:-none}"
     [ "${replicas:-0}" = 2 ] || failed+=" $component:replicas"
-    [ -n "$spread" ] || failed+=" $component:spread"
-    [ "$budget" = "1 none" ] || failed+=" $component:budget"
+    [ "${spread:-none}" != none ] || failed+=" $component:spread"
+    [ "$budget" = "1/none" ] || failed+=" $component:budget"
   done
   # One replica each, as neither elects a leader that a second replica could share the work with
   # (Reflector) or the second replica would hold 500Mi of requests for a failover the checkpoints

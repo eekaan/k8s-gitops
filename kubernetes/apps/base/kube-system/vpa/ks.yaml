@@ -9,8 +9,9 @@ spec:
   path: ./apps/base/kube-system/vpa/app
   targetNamespace: kube-system
   # The recommender reads usage from the resource metrics API, which metrics-server serves, and the
-  # chart's Helm test fails without it. Its chart makes a PodMonitor, a kind that exists once
-  # prometheus-operator-crds is Ready.
+  # chart's Helm test fails without it. metrics-server's Kustomization sets no wait, so this orders
+  # the two applications and does not promise that the API answers when the test runs. Its chart
+  # makes a PodMonitor, a kind that exists once prometheus-operator-crds is Ready.
   dependsOn:
     - name: metrics-server
     - name: prometheus-operator-crds
