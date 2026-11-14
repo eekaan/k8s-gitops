@@ -32,6 +32,11 @@ Feature: Logs
     When the Vector image the collector runs validates the configuration and runs the tests
     Then the configuration loads, and lines of each format Talos writes keep their own time and level, the node's name and their service's
 
+  Scenario: The collector's configuration is rendered with flux and helm given none of the secrets
+    Given every secret variable the recipes read set to a marker, and a recording flux and helm
+    When scripts/vector-config renders the configuration
+    Then each tool's recorded environment holds none of the secrets, and holds the run's own settings
+
   Scenario: The collector's configuration is checked with the image the collector runs
     Given the justfile, the Dagger module and the vector application's pinned chart
     When the image vector-check runs and the image the rendered DaemonSet runs are read

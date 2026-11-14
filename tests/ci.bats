@@ -379,8 +379,15 @@ EOF
   [ "$(yq 'length' <<< "$output")" -eq 1 ]
   [ "$output" = "$(yq -o=json -I=0 "$select" "$WORKFLOW")" ]
   run yq '.jobs.publish.steps[] | select(.uses | test("^jdx/mise-action@")) | .with.install_args' "$publish"
-  [ "$(tr ' ' '\n' <<< "$output" | sort | paste -sd ' ')" = "cosign flux2 jq just" ]
+  [ "$(tr ' ' '\n' <<< "$output" | sort | paste -sd ' ')" = "cosign flux2 jq just kustomize yq" ]
   local tool
+  # just publish runs just kubernetes-check first, with the tools that script requires.
+  local required
+  required=$(sed -n 's/^for tool in \(.*\); do$/\1/p' "$REPO/scripts/kubernetes-check")
+  [ -n "$required" ]
+  for tool in ${required/flux/flux2}; do
+    grep -qw -- "$tool" <<< "$output" || { echo "not installed for the check: $tool"; return 1; }
+  done
   for tool in $output; do
     yq -p toml -o yaml -e ".tools | has(\"$tool\")" "$REPO/mise.toml" > /dev/null || { echo "not pinned in mise.toml: $tool"; return 1; }
   done
@@ -873,6 +880,7 @@ fake_gh() {
   cat > "$BIN/gh" << 'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FAKE/calls"
+env | cut -d= -f1 >> "$FAKE/names"
 if [[ $1 == run && $2 == download ]]; then
   while (($#)); do
     [[ $1 == --dir ]] && dir=$2
@@ -1312,6 +1320,28 @@ grammar_cases() {
   [ ! -e "$FAKE/writes" ]
 }
 
+@test "The comment job runs gh with its own token and none of the other secrets" {
+  fake_gh
+  comment unchanged
+  cp "$BATS_TEST_TMPDIR/unchanged.md" "$BATS_TEST_TMPDIR/comment.md"
+  artifact comment.md
+  local names=(AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY CLUSTER_S3_ACCESS_KEY_ID CLUSTER_S3_SECRET_ACCESS_KEY
+    OS_CLOUD OS_APPLICATION_CREDENTIAL_ID OS_APPLICATION_CREDENTIAL_SECRET TF_STATE_PASSPHRASE
+    TF_ENCRYPTION SOPS_AGE_KEY SOPS_AGE_KEY_FILE FLUX_AGE_KEY FLUX_AGE_KEY_FILE OPERATOR_CIDRS)
+  local name
+  for name in "${names[@]}"; do export "$name=marker-$name"; done
+
+  post
+
+  [ "$status" -eq 0 ]
+  [ -s "$FAKE/names" ]
+  grep -qx GH_TOKEN "$FAKE/names"
+  for name in "${names[@]}"; do
+    echo "$name"
+    if grep -qx "$name" "$FAKE/names"; then return 1; fi
+  done
+}
+
 @test "The render is part of the required result, and the comment is not" {
   render_job
   # The required job waits for the render job and hands its result to ci-passed, which fails on
@@ -1357,4 +1387,41 @@ grammar_cases() {
   [ "$status" -ne 0 ]
   [[ $output == *"demo/greeter"* ]]
   [ -z "$(ls -A "$scratch")" ]
+}
+
+@test "The tool installer is pinned to an exact version in every workflow, a workflow whose token can write checks its binary, and the publish job keeps no cache" {
+  local workflow uses=0 version
+  shopt -s nullglob
+  for workflow in "$REPO"/.github/workflows/*.yaml "$REPO"/.github/workflows/*.yml; do
+    run yq '.jobs[].steps[] | select(.uses | test("^jdx/mise-action@")) | .with.version' "$workflow"
+    [ "$status" -eq 0 ]
+    while IFS= read -r version; do
+      [ -n "$version" ] || continue
+      uses=$((uses + 1))
+      [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "${workflow##*/}: mise is not pinned to an exact version: $version"; return 1; }
+    done <<< "$output"
+  done
+  [ "$uses" -gt 0 ]
+  # A workflow whose token can write has the mise binary checked against a checksum, the same in
+  # every such use. Whether the value is the pinned release's is not read here: a mise bump carries
+  # its checksum, and the publish job fails closed on a mismatch.
+  local writes sums=() sum
+  for workflow in "$REPO"/.github/workflows/*.yaml "$REPO"/.github/workflows/*.yml; do
+    writes=$(yq '[.permissions // {}, (.jobs[].permissions // {})] | map(to_entries) | flatten | map(select(.value == "write")) | length' "$workflow")
+    ((writes)) || continue
+    run yq '.jobs[].steps[] | select(.uses | test("^jdx/mise-action@")) | .with.sha256' "$workflow"
+    [ "$status" -eq 0 ]
+    while IFS= read -r sum; do
+      [ -n "$sum" ] || continue
+      [[ $sum =~ ^[0-9a-f]{64}$ ]] || { echo "${workflow##*/}: no checksum for a mise whose workflow can write: $sum"; return 1; }
+      sums+=("$sum")
+    done <<< "$output"
+  done
+  [ "${#sums[@]}" -ge 2 ]
+  [ "$(printf '%s\n' "${sums[@]}" | sort -u | wc -l)" -eq 1 ]
+  # The job that signs never restores a tool cache: an entry is chosen by key, and the job's
+  # identity token can sign.
+  local publish="$REPO/.github/workflows/publish.yaml"
+  run yq '.jobs.publish.steps[] | select(.uses | test("^jdx/mise-action@")) | .with.cache' "$publish"
+  [ "$output" = false ]
 }

@@ -36,6 +36,51 @@ Feature: Repository checks
     When the secrets scan runs
     Then it exits non-zero naming the second file and not the first
 
+  Scenario: The secrets scan judges the history reachable from HEAD, not every ref of the clone
+    Given a repository with a commit holding a key in the shape of a cloud access key on a branch that HEAD does not reach
+    When the secrets scan runs on a branch without that commit, and then on the branch with it
+    Then the first run exits zero and the second exits non-zero naming the file
+
+  Scenario: The secrets scan reads a commit that HEAD reaches only through a merge's second parent
+    Given a branch with a commit holding a key in the shape of a cloud access key and a commit that removes it, merged into the branch under scan with a merge commit
+    When the secrets scan runs on the merged branch
+    Then it exits non-zero naming the file
+
+  Scenario: A merge conflict marker in a file git would commit fails the check
+    Given a tracked Markdown file, a tracked YAML file and an untracked file, each holding a block as git writes a conflict, the Markdown file ending in a heading underlined with seven equals signs, and an ignored file holding a block too
+    When the conflict marker check runs
+    Then it exits non-zero and names each of the three files with the line of the opening, the middle and the closing marker, does not name the heading's underline, and does not name the ignored file
+
+  Scenario: A marker in a file with CRLF line endings fails the check
+    Given a Markdown file with CRLF line endings holding a block as git writes a conflict
+    When the conflict marker check runs
+    Then it exits non-zero and names the file with the line of each of the three markers
+
+  Scenario: Each file of an unresolved merge is reported once
+    Given a repository in a merge that stopped on four files, each changed on both sides since the common base
+    When the conflict marker check runs
+    Then it exits non-zero, names the opening marker of each file once, and counts four files
+
+  Scenario: Text that only looks like a conflict marker passes the check
+    Given a Markdown heading underlined with seven equals signs, runs of six and of eight angle brackets, an indented marker, a marker in the middle of a line and a YAML value that is seven equals signs
+    When the conflict marker check runs
+    Then it exits zero
+
+  Scenario: A file named like an awk assignment does not hide the files after it
+    Given a clean Markdown file named a=b.md and, after it in name order, two files holding a block as git writes a conflict
+    When the conflict marker check runs
+    Then it exits non-zero and names both files with the line of the opening marker
+
+  Scenario: A file's name is printed as it is, backslashes included
+    Given a file whose name holds a backslash and a letter, such as back\tslash.md, holding a block as git writes a conflict
+    When the conflict marker check runs
+    Then it exits non-zero and names the file as it is written, backslash included
+
+  Scenario: A file the check cannot read, or cannot scan, fails it
+    Given a clean file whose scan fails, and a clean file that nobody may read
+    When the conflict marker check runs
+    Then it exits non-zero and names the file
+
   Scenario: A version string is not an address
     Given a tracked file containing a dotted version such as v1.14.6 or 2.10.0
     When the address-literal check runs

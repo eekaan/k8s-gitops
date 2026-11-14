@@ -30,7 +30,7 @@ lint:
     git ls-files -z --cached --others --exclude-standard -- 'scripts/*' '*.bats' | xargs -0 -r shellcheck
     git ls-files -z --cached --others --exclude-standard -- '*.yaml' '*.yml' .yamllint.yaml | xargs -0 -r yamllint
 
-# Scan the files git would commit and the whole git history for secrets
+# Scan the files git would commit and the history reachable from HEAD for secrets
 [script]
 secrets-scan:
     set -o pipefail
@@ -47,7 +47,9 @@ secrets-scan:
       fi
     done
     (cd "$tree" && gitleaks dir --no-banner --redact --verbose --config "$repo/.gitleaks.toml" .)
-    gitleaks git --no-banner --redact --verbose --config .gitleaks.toml .
+    # The history reachable from HEAD, which is all a CI checkout holds; by default gitleaks reads
+    # every ref, so a commit on another branch of a clone would fail the scan only there.
+    gitleaks git --no-banner --redact --verbose --config .gitleaks.toml --log-opts=HEAD .
 
 # Fail on IPv4 literals a public repository must not hold, in the files git would commit
 check-literals:
@@ -56,6 +58,10 @@ check-literals:
 # Fail on IPv4 literals a public repository must not hold, in the messages of the commits after the default branch
 check-commit-literals:
     scripts/check-address-literals --commit-messages
+
+# Fail on a merge conflict marker in the files git would commit
+check-conflict-markers:
+    scripts/check-conflict-markers
 
 # Fail on a scenario in features/ without its proof, or a test claiming a scenario that is not there
 scenarios-check:
@@ -104,7 +110,7 @@ checks: static tests-1 tests-2 tests-3
 
 # The groups of checks are the dependencies of checks, and each group's checks its own dependencies: just ci runs every group side by side in containers of its own, and CI runs each as a job of its own. A check, with whatever it depends on, belongs to one group only, or it would run twice.
 # The checks other than the bats tests, the cheapest and most basic first
-static: tools-check check-literals check-commit-literals cluster-secrets-check lint renovate-check scenarios-check infra-check talos-check kubernetes-check render-check vector-check secrets-scan
+static: tools-check check-literals check-commit-literals check-conflict-markers cluster-secrets-check lint renovate-check scenarios-check infra-check talos-check kubernetes-check render-check vector-check secrets-scan
 
 # The first of three parts of the bats tests
 tests-1: (test '1/3')
@@ -190,6 +196,8 @@ vector-check:
     set -o pipefail
     dir=$(mktemp -d)
     trap 'rm -rf "$dir"' EXIT
+    # docker is run with none of the secrets a recipe's environment may hold.
+    . scripts/lib/tools.sh
     scripts/vector-config "$dir"
     docker run --rm --network none -e VECTOR_SELF_NODE_NAME=node-1 -v "$dir":/check:ro {{ vector_image }} validate --no-environment /check/vector.yaml
     docker run --rm --network none -e VECTOR_SELF_NODE_NAME=node-1 -v "$dir":/check:ro {{ vector_image }} test /check/vector.yaml /check/tests.yaml

@@ -21,6 +21,31 @@ Feature: Publishing the cluster's artifact
     When just publish runs
     Then the artifact is pushed, signed and verified, the tag is not touched, the run names the newer commit and exits zero
 
+  Scenario: A newer commit on main whose tree fails the check still keeps the tag where it is
+    Given a publish run on refs/heads/main whose tree passes just kubernetes-check, and a newer commit on origin/main that changes kubernetes/ and whose tree fails it
+    When just publish runs
+    Then the check runs once, on the run's own tree, the artifact is pushed, signed and verified, the tag is not touched, and the run names the newer commit and exits zero
+
+  Scenario: The tag only ever moves forward, in every order of runs and re-runs, when the newest commit fails the check
+    Given commits A, B and C on main that each change kubernetes/, B passing just kubernetes-check and C failing it, and a publish run for each commit at each point at which the commits have arrived
+    When the runs and their re-runs happen in any order
+    Then a run tags exactly when its commit is the newest on main and passes, so the tag never moves to an older artifact, and when C arrives before B's run the tag stays where it was
+
+  Scenario: The tag only ever moves forward, in every order of runs and re-runs, when every commit passes
+    Given commits A, B and C on main that each change kubernetes/ and all pass just kubernetes-check, and a publish run for each commit at each point at which the commits have arrived
+    When the runs and their re-runs happen in any order
+    Then a run tags exactly when its commit is the newest on main, so the tag never moves to an older artifact and ends on C
+
+  Scenario: The artifact is published only after the Kubernetes check passes
+    Given a publish run on refs/heads/main whose tree passes just kubernetes-check
+    When just publish runs
+    Then the check runs first, without the registry token or the job's identity token, before the registry login, and the login, the push, the signature, the verification and the tag follow it in that order
+
+  Scenario: A failing check publishes nothing, moves no tag and fails the run with the check's reason
+    Given a publish run, on refs/heads/main or on another branch, whose tree fails just kubernetes-check
+    When just publish runs
+    Then the registry is not logged in to, nothing is pushed, signed or tagged, and the run exits non-zero with the check's own message and the step it failed in
+
   Scenario: A failed verification leaves the tag alone and fails the run
     Given a publish run on refs/heads/main whose signature does not verify
     When just publish runs

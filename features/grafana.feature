@@ -67,6 +67,11 @@ Feature: Grafana
     When the recipe is interrupted with Ctrl-C or SIGTERM, kubectl does not report the forward within GRAFANA_WAIT seconds, or kubectl stops by itself
     Then the recipe exits non-zero and no kubectl it started is still running
 
+  Scenario: just grafana runs kubectl with none of the secrets
+    Given every secret variable the recipes read set to a marker and a recording kubectl
+    When just grafana runs
+    Then kubectl records the names of its environment, which hold none of the secrets, and hold the kubeconfig and the settings of the recipe
+
   Scenario: just grafana needs the cluster's kubeconfig and a port
     Given no kubeconfig for the cluster, or a GRAFANA_PORT or GRAFANA_WAIT that is not a number in range
     When just grafana runs

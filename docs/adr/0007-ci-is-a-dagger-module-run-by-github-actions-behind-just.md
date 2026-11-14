@@ -4,6 +4,8 @@
 - Date: 2026-11-14
 - Amended: 2026-11-14, a second job runs its recipe on the runner with a token of its own: the
   render diff's comment, which runs from the default branch after a fork's CI run as well
+- Amended: 2026-11-14, the publish job also runs the Kubernetes check on the runner, from the same
+  pins as the module, before it publishes
 - Amended: 2026-11-14, the checks run in a published, signed tools image while its key matches the
   checkout's inputs, and publishing it is a third job that runs its recipe on the runner
 
@@ -15,7 +17,8 @@ tool versions.
 ## Decision
 
 `just` is the entry point on a laptop and in CI. The checks themselves are functions of a
-Dagger module in this repository, which runs each in a container with pinned tools. GitHub
+Dagger module in this repository, which runs each in a container with pinned tools; the publish
+job also runs `just kubernetes-check` on the runner, from the same pins, before it publishes. GitHub
 Actions is the CI system: each job runs one `just` recipe, on GitHub's runners, where a job that
 runs the checks starts the Dagger engine for itself, or, for trusted runs, on the CI host's
 self-hosted runner, where it uses the host's persistent engine (ADR 0012).
