@@ -1,0 +1,31 @@
+---
+# The one Grafana, which the operator runs as the Deployment grafana-deployment behind the Service
+# grafana-service, port 3000, inside the cluster only. The operator writes the admin user, admin,
+# and a random password into the Secret grafana-admin-credentials when it first creates it, and
+# keeps them while the Grafana exists. Grafana's data directory is an emptyDir: its datasource and
+# dashboards come from Git, and the operator applies them again after every restart.
+apiVersion: grafana.integreatly.org/v1beta1
+kind: Grafana
+metadata:
+  name: grafana
+  labels:
+    # The datasource and the dashboards select this Grafana by this label, and the ServiceMonitor
+    # selects its Service by it, which the operator copies there.
+    app.kubernetes.io/instance: grafana
+spec:
+  # Without a version the operator writes its own default here once, and it never changes again.
+  # renovate: datasource=docker depName=docker.io/grafana/grafana
+  version: 13.1.3
+  config:
+    # Logs go to the container's output only, not also to a file in the pod.
+    log:
+      mode: console
+    # Grafana's own default; only the admin signs in, through the login form.
+    auth.anonymous:
+      enabled: "false"
+  deployment:
+    spec:
+      # Each replica would keep a database of its own, and the operator writes to whichever one the
+      # Service picks. A drain restarts the one replica on another node, and a disruption budget for
+      # it would only block the drain.
+      replicas: 1

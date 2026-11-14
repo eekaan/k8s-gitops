@@ -1,0 +1,28 @@
+---
+# Values for the Grafana operator's chart, read by the HelmRelease through a ConfigMap generated
+# without substitution. Keys not set here keep the chart's defaults: the operator watches every
+# namespace, so an application anywhere can bring its own GrafanaDashboard, and runs with leader
+# election.
+
+crds:
+  # The release installs and upgrades the operator's resource definitions as templates, as the
+  # chart's documentation describes for upgrades without a manual step, so they always match the
+  # operator that serves them; in the default, immutable mode they would come from a crds/
+  # directory, which Helm itself never upgrades. The chart marks them helm.sh/resource-policy: keep,
+  # so Helm leaves them when the release is uninstalled, as it is when this application leaves the
+  # tree: deleting a definition deletes every object of its kind.
+  immutable: false
+
+# One operator. Nothing calls it: it serves no webhook, and Grafana keeps serving while it is down.
+# A drain only delays applying a change from Git until the operator runs on another node, and a
+# disruption budget for one replica would block every drain.
+replicas: 1
+# The requests of the publisher's own manifests for the operator. No limits: its memory grows with
+# the objects it watches.
+resources:
+  requests:
+    cpu: 100m
+    memory: 20Mi
+
+serviceMonitor:
+  enabled: true

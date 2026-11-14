@@ -26,6 +26,8 @@ resources:
   - ../../base/kube-system/runtime-classes/ks.yaml
   - ../../base/kube-system/snapshot-controller/ks.yaml
   # - ../../base/kube-system/spegel/ks.yaml  # Disabled: Talos discards unpacked image layers, which Spegel serves, until its machine configuration sets containerd's discard_unpacked_layers to false
+  - ../../base/monitoring/grafana-operator/ks.yaml
+  - ../../base/monitoring/grafana/ks.yaml
   - ../../base/monitoring/kube-prometheus-stack/ks.yaml
   - ../../base/piraeus-datastore/linstor-cluster/ks.yaml
   - ../../base/piraeus-datastore/piraeus-operator/ks.yaml

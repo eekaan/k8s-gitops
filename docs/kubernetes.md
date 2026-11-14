@@ -142,9 +142,11 @@ The three `ks.yaml` files set `wait`, so each is Ready only once its definitions
 and `snapshot-controller` once its controller runs as well. An application that creates objects of
 these groups, or whose chart does, names the matching one in `dependsOn` and turns off any copy of
 the same definitions its own chart would install. `linstor-cluster` names `snapshot-controller` for
-its VolumeSnapshotClass ([Storage](#storage)); the monitoring stack ([Monitoring](#monitoring)) and
-the baseline applications with a monitor name `prometheus-operator-crds`; and cert-manager names
-`gateway-api-crds` ([cert-manager](#cert-manager)). No dashboard or route is enabled anywhere.
+its VolumeSnapshotClass ([Storage](#storage)); the monitoring stack ([Monitoring](#monitoring)),
+the baseline applications with a monitor and both Grafana applications ([Grafana](#grafana)) name
+`prometheus-operator-crds`; and cert-manager names `gateway-api-crds`
+([cert-manager](#cert-manager)). No route is enabled anywhere, and no chart's dashboard outside the
+Grafana application.
 
 Deleting a definition deletes every object of its kind, so none of these applications ever deletes
 one, also not when it leaves the tree. None applies a definition itself. The monitoring chart's
@@ -238,8 +240,9 @@ privileged, as node-exporter reads each node through the host's network and proc
 through host paths. The chart installs no resource definitions: `prometheus-operator-crds` does
 ([Resource definitions](#resource-definitions)), and the application names it in `dependsOn`. The
 two charts run the same operator version: Renovate moves them in one pull request, and
-`tests/monitoring.bats` fails when the pinned charts name different ones. Grafana and its
-dashboards are not installed.
+`tests/monitoring.bats` fails when the pinned charts name different ones. The application installs
+no Grafana and no dashboards; [Grafana](#grafana) runs on its own and takes its dashboards from the
+same chart.
 
 Prometheus picks up every ServiceMonitor, PodMonitor, Probe, ScrapeConfig and PrometheusRule in
 every namespace, and evaluates the chart's default alerting and recording rules. It scrapes:
@@ -272,6 +275,50 @@ storage class, which neither names; without one, the claims and the two pods sta
 `tests/monitoring.bats` builds the application as Flux applies it, renders the pinned chart with
 its values, and checks the namespace, the targets, the rules, the receivers, the claims and that
 each values key is one the chart or a subchart reads.
+
+## Grafana
+
+The Grafana operator runs one Grafana in `monitoring`, with the cluster's Prometheus as its
+datasource and the monitoring chart's dashboards. Two applications in `apps/base/monitoring/` hold
+them:
+
+- `grafana-operator` installs the operator from its publisher's chart,
+  `oci://ghcr.io/grafana/helm-charts/grafana-operator`. The release installs and upgrades the
+  `grafana.integreatly.org` definitions as its own templates, each marked
+  `helm.sh/resource-policy: keep`, so removing the application leaves them and every Grafana object
+  in place; only this chart ships them. One operator runs, with leader election and the requests of
+  the publisher's own manifests: nothing calls it, and while it restarts Grafana keeps serving and
+  only changes from Git wait. Its chart's ServiceMonitor is on. Its `ks.yaml` sets `wait`.
+- `grafana` holds the `Grafana`, its `GrafanaDatasource`, a ServiceMonitor for Grafana's own
+  metrics and the dashboards release, and names `grafana-operator` in `dependsOn`.
+
+The Grafana runs the version its `grafana.yaml` pins, which Renovate updates, as one replica
+without a disruption budget: a second replica would keep a database of its own. It keeps nothing
+that Git does not hold, so it claims no volume: its data directory is an emptyDir, and the operator
+applies the datasource and every dashboard again each minute, so a restarted Grafana has them back
+within one. The datasource is the Prometheus Service of the monitoring chart,
+`kube-prometheus-stack-prometheus`, port 9090.
+
+The dashboards come from the monitoring stack's own chart. The release `grafana-dashboards` installs
+`kube-prometheus-stack` at the version the monitoring application runs, with everything off but the
+dashboards the chart renders for what the cluster scrapes: the Kubernetes mixin's, node-exporter's
+for Linux nodes, and those of the API server, the kubelets, the controller manager, the scheduler,
+etcd, CoreDNS, Prometheus, Alertmanager and Grafana. They match the recording rules and job names of
+the Prometheus they query, and Renovate moves both pins in one pull request. Each is a ConfigMap and
+a `GrafanaDashboard` that loads it into the folder Kubernetes, so neither the operator nor Grafana
+fetches a dashboard from the network.
+
+Nothing routes to Grafana from outside the cluster. Reach it with `kubectl port-forward` to port
+3000 of the Service `grafana-service` in `monitoring`, and sign in as `admin`. The password is under
+`GF_SECURITY_ADMIN_PASSWORD` in the Secret `grafana-admin-credentials` in `monitoring`, which the
+operator generates when it first creates the Secret and keeps while the `Grafana` exists; nothing in
+Git holds it. Deleting the `Grafana` deletes the Secret, and a new one gets a new password.
+Anonymous access is off.
+
+`tests/grafana.bats` builds both applications as Flux applies them, renders the two charts and the
+monitoring application's, and checks the definitions, the monitors, the version and replicas, the
+absence of volumes, Secrets and routes, the datasource's Service and that the dashboards are exactly
+those the monitoring chart renders for the cluster's monitoring values.
 
 ## cert-manager
 
