@@ -71,6 +71,16 @@ Feature: Infrastructure state and stack recipes
     When infra-plan runs for the cluster stack
     Then it exits non-zero naming the entry's position and not its value, and tofu is never started
 
+  Scenario: An allowlist entry wider than /16 or with host bits set is refused by its position
+    Given an operator allowlist with a network of prefix 15, a host address written with prefix 1, and an address with bits set below a /24
+    When infra-plan runs for the cluster stack
+    Then it exits non-zero naming each entry's position and the rule it breaks and not its value, and tofu is never started
+
+  Scenario: The recipes and the stacks accept and refuse the same allowlist entries
+    Given entries accepted and refused, with the prefixes on either side of the shortest allowed one
+    When the recipes' check, the cluster stack's variable and the ci stack's variable each take an entry alone
+    Then each entry is accepted by all three or refused by all three
+
   Scenario: The backend is configured from the environment
     Given a complete environment
     When infra-plan runs for the plumbing stack against a recording tofu

@@ -219,10 +219,15 @@ on a command line; secrets reach tofu and rclone through their environment.
   `openstack` client read themselves. `os-smoke` and `infra-s3-key` need only this.
 - `OPERATOR_CIDRS`, or else `operator-cidrs.json` at the repository root (gitignored): the
   operator allowlist of the cluster stack's APIs and the CI host's SSH, a JSON list of IPv4 CIDRs.
-  An entry that is IPv6, or whose prefix is 0 and so covers every address, is refused, named by its
-  position in the list and not by its value. It reaches tofu only in its environment, as
-  `TF_VAR_api_allowed_cidrs` for the cluster stack and `TF_VAR_ssh_allowed_cidrs` for the ci stack,
-  as given: the address of the machine the recipes run on is not added, and the recipe says so.
+  A network is no wider than `/16`, 65,536 addresses, the widest an operator's own allowlist
+  reasonably holds, and is written by its own address, as `192.0.2.0/24` and not `192.0.2.5/24`.
+  IPv6 networks are refused, as the stacks' rules and the load balancer's listener take IPv4 only,
+  so no IPv6 prefix limit applies. An entry that breaks a rule is refused, named by its position in
+  the list and the rule, not by its value. The `api_allowed_cidrs` variable of the cluster stack and
+  the `ssh_allowed_cidrs` variable of the ci stack hold the same rule, so a `tofu` run outside the
+  recipes cannot open the APIs or SSH wider either. The list reaches tofu only in its environment,
+  as `TF_VAR_api_allowed_cidrs` for the cluster stack and `TF_VAR_ssh_allowed_cidrs` for the ci
+  stack, as given: nothing is added to it, such as the address of the machine the recipes run on.
 - `CI_HOST_IMAGE` and `CI_HOST_SSH_PUBLIC_KEY`: the ci stack's image name and the operator's SSH
   public key, which reach tofu as `TF_VAR_image_name` and `TF_VAR_ssh_public_key`; only the ci stack
   needs them. `CI_HOST_SSH_USER`: the image's default user, whom `just ci-host-setup` and

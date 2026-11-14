@@ -378,6 +378,82 @@ absent() {
   [[ $output != *"public address"* ]]
 }
 
+@test "An allowlist entry wider than /16 or with host bits set is refused by its position" {
+  # Each list and the messages naming each of its wrong entries, in order.
+  lists=('["198.51.100.0/24", "255.254.0.0/15"]' '["255.0.0.1/1", "0.0.0.0/1", "128.0.0.0/1"]'
+    '["198.51.100.7/24", "203.0.113.0/24", "255.1.0.1/16"]' '["192.0.2.0/24", "255.01.0.0/24", "256.0.0.0/24"]')
+  messages=('entry 2 is wider than /16' 'entry 1 is wider than /16|entry 2 is wider than /16|entry 3 is wider than /16'
+    'entry 1 has bits set below its prefix|entry 3 has bits set below its prefix'
+    'entry 2 is not an IPv4 network|entry 3 is not an IPv4 network')
+  for i in "${!lists[@]}"; do
+    for from in OPERATOR_CIDRS operator-cidrs.json; do
+      echo "$from: ${lists[i]}"
+      reset_environment
+      without OPERATOR_CIDRS
+      rm -f "$RECORD/tofu" "$REPO/operator-cidrs.json"
+      if [[ $from == OPERATOR_CIDRS ]]; then
+        with "OPERATOR_CIDRS=${lists[i]}"
+      else
+        printf '%s\n' "${lists[i]}" > "$REPO/operator-cidrs.json"
+      fi
+
+      recipe infra-plan sto2/cluster
+
+      [ "$status" -ne 0 ]
+      IFS="|" read -ra rules <<< "${messages[i]}"
+      for message in "${rules[@]}"; do
+        [[ $output == *"$from $message"* ]]
+      done
+      for shown in 255.254.0.0 255.0.0.1 198.51.100.7 203.0.113.0 255.1.0.1 255.01.0.0 256.0.0.0; do
+        [[ $output != *"$shown"* ]]
+      done
+      [ ! -e "$RECORD/tofu" ]
+    done
+  done
+}
+
+# stack_accepts STACK VARIABLE ENTRY: whether the variable of the stack, given the allowlist of the
+# one ENTRY, passes its validation. The variable's block is planned alone, as tofu does with a
+# variable it is given outside the recipes.
+stack_accepts() {
+  local dir="$BATS_TEST_TMPDIR/validation/$1"
+  mkdir -p "$dir"
+  awk -v name="$2" '$0 == "variable \"" name "\" {" {p = 1} p {print} p && /^}/ {exit}' \
+    "$REPO/infra/openstack/stacks/sto2/$1/variables.tf" > "$dir/main.tf"
+  [ -s "$dir/main.tf" ]
+  (cd "$dir" && tofu plan -input=false -no-color -var="$2=$(jq -cn --arg entry "$3" '[$entry]')" > /dev/null 2>&1)
+}
+
+# shell_accepts ENTRY: whether the recipes' check passes the allowlist of the one ENTRY.
+shell_accepts() {
+  OPERATOR_CIDRS=$(jq -cn --arg entry "$1" '[$entry]') \
+    bash -c '. "$1/scripts/lib/infra.sh" && export_api_allowed_cidrs' _ "$REPO" > /dev/null 2>&1
+}
+
+@test "The recipes and the stacks accept and refuse the same allowlist entries" {
+  accepted=(192.0.2.0/24 198.51.100.0/24 203.0.113.77/32 255.0.0.0/16 255.1.0.0/17 255.2.0.0/16
+    203.0.113.192/26 255.255.255.255/32 255.0.0.0/32)
+  refused=(0.0.0.0/0 0.0.0.0/1 128.0.0.0/1 255.0.0.1/1 255.0.0.0/8 255.254.0.0/15 255.2.0.0/15 192.0.2.5/24
+    255.0.0.1/16 203.0.113.64/25x 192.0.2.0/33 192.0.2.0/-1 192.0.2.0/2a 256.0.0.0/24 192.0.2.0/024
+    192.0.2.0/00 255.01.0.0/24 192.0.2.0 192.0.2.0/ 2001:db8::/32 not-a-cidr '' ' 192.0.2.0/24'
+    '192.0.2.0/24 ' 1.2.3/24 1.2.3.4.5/24)
+  for entry in "${accepted[@]}"; do
+    echo "accepted: $entry"
+    shell_accepts "$entry"
+    stack_accepts cluster api_allowed_cidrs "$entry"
+    stack_accepts ci ssh_allowed_cidrs "$entry"
+  done
+  for entry in "${refused[@]}"; do
+    echo "refused: $entry"
+    # A negated command never fails a test, so each is run to see its status.
+    if shell_accepts "$entry" || stack_accepts cluster api_allowed_cidrs "$entry" ||
+      stack_accepts ci ssh_allowed_cidrs "$entry"; then
+      echo "accepted by a check that should refuse it" >&2
+      return 1
+    fi
+  done
+}
+
 @test "The backend is configured from the environment" {
   recipe infra-plan sto2/plumbing
 

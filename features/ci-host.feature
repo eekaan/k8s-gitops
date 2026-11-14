@@ -8,6 +8,11 @@ Feature: CI host
     When the ci stack is planned against mocked providers
     Then the host's security group admits TCP 22 from each of those networks once and nothing else inbound, lets the host reach anything, and is the only group of the host's port, which has port security and a floating IP
 
+  Scenario: The SSH allowlist rejects a network wider than /16 or with host bits set
+    Given an allowlist with a network whose prefix is shorter than 16, two halves of the address space, or an address with bits set below its prefix
+    When the ci stack is planned
+    Then planning fails with a message naming the variable
+
   Scenario: The CI host survives a destroy of the cluster stack and is destroyed only by name
     Given the ci stack beside the cluster and plumbing stacks
     When just infra-destroy runs without a stack, and with sto2/cluster
