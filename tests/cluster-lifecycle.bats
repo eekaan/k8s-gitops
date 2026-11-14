@@ -704,7 +704,7 @@ kube-system/node-agent-cp-1' ]
 @test "a service range or a load-balancer address that is not a valid IPv4 one counts as not the pool's" {
   # Each a service range and a Service's only address that arithmetic alone would put inside it.
   cases=('192.0.2.128/0 192.0.2.130' '192.0.2.130/33 192.0.2.130' '999.0.0.0/8 999.0.0.1'
-    '192.0.2.128/28 192.0.1.384' '192.0.2.128/28 192.0.2.130.1')
+    '192.0.2.128/28 192.0.1.384' '192.0.2.128/28 192.0.2.130.1' '192.0.1.256/24 192.0.2.130')
   for case in "${cases[@]}"; do
     read -r range address <<< "$case"
     echo "$range $address"
