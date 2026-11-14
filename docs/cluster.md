@@ -130,7 +130,7 @@ patch out; until it has, the three targets are down in Prometheus and their aler
 
 Every node filters what reaches it itself, with Talos' ingress firewall
 ([Talos](https://docs.siderolabs.com/talos/v1.14/networking/ingress-firewall),
-[ADR 0013](adr/0013-nodes-firewall-themselves-with-talos-ingress-firewall.md)), so the cluster's
+[ADR 0017](adr/0017-nodes-firewall-themselves-with-talos-ingress-firewall.md)), so the cluster's
 protection does not depend on the cloud's security groups. `talos/patches/all/firewall.yaml` sets
 the firewall's default action to block and gives the node one rule for each listener of its role.
 Talos itself admits traffic on the loopback interface, replies to connections the node opened,

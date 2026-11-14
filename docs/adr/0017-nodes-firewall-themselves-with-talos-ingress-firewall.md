@@ -1,4 +1,4 @@
-# 0013 — Nodes firewall themselves with Talos' ingress firewall
+# 0017 — Nodes firewall themselves with Talos' ingress firewall
 
 - Status: accepted
 - Date: 2026-11-14
