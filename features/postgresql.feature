@@ -24,12 +24,12 @@ Feature: PostgreSQL
   Scenario: The operator chart and the PostgreSQL image are pinned where Renovate updates them
     Given the application's OCIRepository and the component's Cluster
     When their versions and the comment line above each are read
-    Then each is an exact version under a renovate comment that names the registry path it is pulled from
+    Then the chart's tag is an exact version and the image's tag names a PostgreSQL minor version, each under a renovate comment that names the registry path it is pulled from
 
   Scenario: An application gets a three-instance PostgreSQL cluster from the component
     Given an application whose Kustomization names the cnpg-cluster component and sets its cluster's name
     When it is built as Flux applies it
-    Then it yields one Cluster of that name in the application's namespace, with three instances that must run on three different nodes, the operator's disruption budgets on, an exact PostgreSQL image and no backup, and one PodMonitor that selects that Cluster's instances and their metrics port
+    Then it yields one Cluster of that name in the application's namespace, with three instances that must run on three different nodes, the operator's disruption budgets on, an image whose tag names a PostgreSQL minor version and no backup, and one PodMonitor that selects that Cluster's instances and their metrics port
 
   Scenario: Each PostgreSQL instance keeps its data once, on its own node
     Given the component's Cluster built for an application, and the StorageClasses the cluster's applications apply
@@ -40,6 +40,11 @@ Feature: PostgreSQL
     Given the component's Cluster built for an application, and the Cluster definition of the pinned chart
     When each field and value is looked up in the definition's schema
     Then each field is defined there, and each value has the type the schema gives and, where it lists them, one of the values it allows
+
+  Scenario: An application changes its cluster with a patch that targets the Cluster by kind
+    Given two applications that take a cluster from the component and patch it in their own kustomization, one targeting the Cluster by kind and one by the name the application gives it
+    When each is built as Flux applies it
+    Then the patch by kind changes the Cluster the component made and leaves the rest of it, and the patch by name changes nothing, as the Cluster still has the variable for its name when the patches apply
 
   Scenario: An application must name the cluster it takes from the component
     Given an application whose Kustomization names the cnpg-cluster component without setting its cluster's name

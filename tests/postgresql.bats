@@ -90,11 +90,17 @@ render() {
     --values "$VALUES" --values "$INLINE" >"$RENDERED"
 }
 
-# database APP [NAME]: writes into the copy an application APP in the demo namespace that has no
-# manifests of its own and takes a cluster from the component, with the ks.yaml docs/kubernetes.md
-# gives for it, its cluster named NAME, or without a name when NAME is not given; then builds it as
-# built() does, setting BUILT, and returns the build's status, printing Flux's error when it fails.
+# database APP [NAME]: writes the application APP as database_app() does, then builds it as built()
+# does, setting BUILT, and returns the build's status, printing Flux's error when it fails.
 database() {
+  database_app "$@"
+  built demo "$1"
+}
+
+# database_app APP [NAME]: writes into the copy an application APP in the demo namespace that has no
+# manifests of its own and takes a cluster from the component, with the ks.yaml docs/kubernetes.md
+# gives for it, its cluster named NAME, or without a name when NAME is not given.
+database_app() {
   local app=$1 name=${2:-} dir="$TREE/kubernetes/apps/base/demo/$1"
   mkdir -p "$dir/app"
   printf '%s\n' '---' 'apiVersion: kustomize.config.k8s.io/v1beta1' 'kind: Kustomization' 'resources: []' \
@@ -109,7 +115,18 @@ database() {
   if [ -n "$name" ]; then
     NAME="$name" yq -i '.spec.postBuild.substitute.CNPG_CLUSTER_NAME = strenv(NAME)' "$dir/ks.yaml"
   fi
-  built demo "$app"
+}
+
+# resize APP TARGET: adds to the kustomization.yaml of APP's app/ a patch, with the target TARGET (a
+# YAML map), that gives each instance 1Gi of memory, requested and as its limit.
+resize() {
+  TARGET="$2" yq -i '.patches = [{"target": (strenv(TARGET) | from_yaml), "patch": "- op: replace
+  path: /spec/resources/requests/memory
+  value: 1Gi
+- op: replace
+  path: /spec/resources/limits/memory
+  value: 1Gi
+"}]' "$TREE/kubernetes/apps/base/demo/$1/app/kustomization.yaml"
 }
 
 # pin FILE KEY: the comment line above the first line of FILE whose key is KEY, then that line's
@@ -282,7 +299,8 @@ pin() {
   echo "image: ${image[1]:-none} under '${image[0]:-nothing}'"
   [[ ${image[0]:-} =~ ^\ *#\ renovate:\ datasource=docker\ depName=([^ ]+)$ ]]
   [ "${BASH_REMATCH[1]}" = "$repository" ]
-  # A tag that names the minor version, never one that moves to the next.
+  # A tag that names the PostgreSQL minor version, so the next minor arrives only by a change here.
+  # The publisher rebuilds the image under the same tag, so it is not an exact image.
   [[ ${image[1]#"$repository":} =~ ^[0-9]+\.[0-9]+(-[a-z0-9]+)*$ ]]
 }
 
@@ -295,7 +313,7 @@ pin() {
   echo "clusters: ${clusters:-none}"
   [ "$clusters" = demo/orders-db ]
   # The operator's defaults where the Cluster leaves a field out: anti-affinity on, by node name, and
-  # disruption budgets on.
+  # disruption budgets on. The image comes from the Cluster, with a tag that names the minor version.
   spec="$(yq -N 'select(.kind == "Cluster") | .spec | "instances=" + (.instances | tostring)
     + " antiAffinity=" + (.affinity.enablePodAntiAffinity // true | tostring)
     + " type=" + (.affinity.podAntiAffinityType // "preferred")
@@ -352,7 +370,9 @@ pin() {
   yq -N -o json 'select(.kind == "Cluster")' "$BUILT" >"$cluster"
   [ -s "$cluster" ]
   # Each value's place in the schema: a property, an array's items, a map's additionalProperties,
-  # or anything at all below a field that keeps unknown fields. Metadata is the API server's.
+  # or anything at all below a field that keeps unknown fields. Metadata is the API server's. Every
+  # path counts, those of maps and lists and of false and null values included: paths(scalars)
+  # would drop the last two, and an empty map or list has no path below it.
   problems="$(jq -r --slurpfile schema "$schema" '
     def node($s; $p): reduce $p[] as $k ($s;
       if . == null or .["x-any"] then .
@@ -364,18 +384,43 @@ pin() {
     def types($n): if $n["x-kubernetes-int-or-string"] then ["integer", "string"]
       elif $n.type then [$n.type] else [($n.anyOf // [])[].type | select(. != null)] end;
     def kind: if type == "number" then (if . == floor then "integer" else "number" end) else type end;
+    def shown: if type == "object" then "a map" elif type == "array" then "a list" else tojson end;
     . as $doc | $schema[0] as $s
-    | paths(scalars) as $p | select($p[0] != "apiVersion" and $p[0] != "kind" and $p[0] != "metadata")
+    | paths as $p | select($p[0] != "apiVersion" and $p[0] != "kind" and $p[0] != "metadata")
     | ($doc | getpath($p)) as $v | node($s; $p) as $n | ($p | map(tostring) | join(".")) as $at
     | if $n == null then "\($at): not in the definition"
       elif $n["x-any"] then empty
       elif (types($n) | length) > 0 and (any(types($n)[]; . == ($v | kind) or (. == "number" and ($v | kind) == "integer")) | not)
-        then "\($at): \($v | tojson) is not of type \(types($n) | join(" or "))"
-      elif $n.enum != null and (any($n.enum[]; . == $v) | not) then "\($at): \($v | tojson) is not one of \($n.enum | tojson)"
+        then "\($at): \($v | shown) is not of type \(types($n) | join(" or "))"
+      elif ($v | type) != "object" and ($v | type) != "array" and $n.enum != null and (any($n.enum[]; . == $v) | not)
+        then "\($at): \($v | tojson) is not one of \($n.enum | tojson)"
       else empty end' "$cluster")"
-  echo "fields: $(jq -r '[paths(scalars) | map(tostring) | join(".")] | join(" ")' "$cluster")"
+  echo "fields: $(jq -r '[paths | select(.[0] == "spec") | map(tostring) | join(".")] | join(" ")' "$cluster")"
   echo "problems: ${problems:-none}"
   [ -z "$problems" ]
+}
+
+@test "An application changes its cluster with a patch that targets the Cluster by kind" {
+  local by_kind by_name
+  local fields='.metadata.name + " instances=" + (.spec.instances | tostring)
+    + " class=" + .spec.storage.storageClass + " requests=" + .spec.resources.requests.memory
+    + " limits=" + .spec.resources.limits.memory'
+  # The application's own patches apply after the component, to the Cluster the component made.
+  database_app resized resized-db
+  resize resized '{kind: Cluster}'
+  built demo resized
+  by_kind="$(yq -N "select(.kind == \"Cluster\") | $fields" "$BUILT")"
+  # Flux substitutes after the build, so when the patches apply the Cluster is still named
+  # ${CNPG_CLUSTER_NAME}; a target by the name the application gives it matches nothing, and
+  # kustomize skips the patch without an error.
+  database_app misnamed misnamed-db
+  resize misnamed '{kind: Cluster, name: misnamed-db}'
+  built demo misnamed
+  by_name="$(yq -N "select(.kind == \"Cluster\") | $fields" "$BUILT")"
+  echo "patched by kind: $by_kind"
+  echo "patched by name: $by_name"
+  [ "$by_kind" = "resized-db instances=3 class=linstor-node-local requests=1Gi limits=1Gi" ]
+  [ "$by_name" = "misnamed-db instances=3 class=linstor-node-local requests=512Mi limits=512Mi" ]
 }
 
 @test "An application must name the cluster it takes from the component" {

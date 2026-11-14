@@ -454,24 +454,43 @@ spec:
       CNPG_STORAGE_SIZE: 10Gi  # each instance's volume; 5Gi when unset
 ```
 
-The cluster has three instances of PostgreSQL 18, from the operator's standard image at a minor
-version Renovate moves. Each must run on a different worker, and requests and is limited to 500m CPU
-and 512Mi memory. The operator's disruption budgets move the primary away by switchover before its
-worker is drained, and let drains take one replica at a time. A PodMonitor scrapes every instance.
-Without `CNPG_CLUSTER_NAME` the build fails. The operator creates the database `app`, owned by the
-user `app`, whose password and connection URI are in the Secret `<name>-app`; the Services
-`<name>-rw`, `<name>-ro` and `<name>-r` reach the primary, the replicas and any instance. A patch in
-the application's own `kustomization.yaml` changes anything else, as it applies after the component.
+The cluster has three instances of PostgreSQL 18, from the operator's standard image, whose tag names
+a minor version that Renovate moves. The publisher rebuilds the image under that tag and a node keeps
+the build it pulled first, so instances can run different builds of one minor version. Each instance
+must run on a different worker, and requests and is limited to 500m CPU and 512Mi memory. The
+operator's disruption budgets move the primary away by switchover before its worker is drained, and
+let drains take one replica at a time. A PodMonitor scrapes every instance. Without
+`CNPG_CLUSTER_NAME` the build fails. The operator creates the database `app`, owned by the user
+`app`, whose password and connection URI are in the Secret `<name>-app`; the Services `<name>-rw`,
+`<name>-ro` and `<name>-r` reach the primary, the replicas and any instance.
+
+A patch in the application's own `kustomization.yaml` changes anything else, as it applies after the
+component. It targets the Cluster by kind alone: Flux substitutes after the build, so when the patch
+applies the Cluster is still named `${CNPG_CLUSTER_NAME}`, and a target by the name the application
+gives it matches nothing and is skipped without an error.
+
+```yaml
+patches:
+  - target:
+      kind: Cluster
+    patch: |-
+      - op: replace
+        path: /spec/resources/requests/memory
+        value: 1Gi
+      - op: replace
+        path: /spec/resources/limits/memory
+        value: 1Gi
+```
 
 Each instance's volume is on `linstor-node-local` ([StorageClasses](#storageclasses)), one copy on
 the instance's own worker without DRBD. The three instances already are three copies on three
 workers, kept in step by PostgreSQL's replication; the replicated default would keep each of them
 twice, six copies of every write. The operator's documentation advises one replica at the storage
 level, with no storage host holding two instances of a cluster, which the placement rule guarantees.
-The cost is that an instance cannot move: while its worker is down the cluster runs on two, and when
-the worker or its data volume is lost for good, the instance has to be removed with its volume, as
-the operator's kubectl plugin does with `destroy`, after which the operator clones a new one from the
-primary. With three workers, the new one waits for a worker without an instance.
+The cost is that an instance cannot move: while its worker is down the cluster runs on two. When the
+worker or its data volume is lost for good, the instance's PersistentVolumeClaim and then its pod
+are deleted, which removes the instance, and the operator clones a new one from the primary. With
+three workers, the new one waits for a worker without an instance.
 
 No backup is configured: WAL archiving and base backups to object storage need the object store's
 credentials from the secret store, which does not run yet, and take their place in the component's
@@ -479,9 +498,10 @@ credentials from the secret store, which does not run yet, and take their place 
 ([Where the data lives](#where-the-data-lives)).
 
 `tests/postgresql.bats` renders the operator's chart and checks its namespace, definitions,
-replicas, budget, monitor and pods; builds an application that takes a cluster from the component,
-and one that does not name it, as Flux applies them; and checks each field of the `Cluster` against
-the pinned chart's definition and its StorageClass against LINSTOR's.
+replicas, budget, monitor and pods; builds applications that take a cluster from the component, one
+that does not name it and two that patch it, by kind and by name, as Flux applies them; and checks
+each field of the `Cluster` against the pinned chart's definition and its StorageClass against
+LINSTOR's.
 
 ## Flux itself
 
