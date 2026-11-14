@@ -6,7 +6,10 @@
 # the file it came from in file, the pod's name in host and the time it was read in timestamp. The
 # formats are the kernel's messages, the prefix Go's log package gives machined's, apid's and
 # trustd's lines, etcd's JSON, containerd's logfmt and the kubelet's klog. Each line stays whole,
-# takes its own time and level where it has them, and gets the node's name and its service's.
+# takes its own time and level where it has them, and gets the node's name and its service's. The
+# kernel's audit records are dropped. The last tests start at the pods' transform with a record as the
+# kubernetes_logs source hands it on, its labels in kubernetes.pod_labels. The tests named in
+# sentence case are scenarios of features/logs.feature, proved here.
 tests:
   - name: a kernel message keeps the kernel's time and priority
     inputs:
@@ -152,3 +155,87 @@ tests:
               assert_eq!(.message, "Starting systemd-udevd version 257")
               assert_eq!(.timestamp, t'2026-11-14T13:00:00Z')
               assert!(!exists(.level))
+
+  - name: Kernel audit records are dropped and counted
+    inputs:
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/kernel.log"
+          .host = "vector-x1y2z"
+          .message = "kern:    info: [2026-11-14T12:00:03.000000000Z]: audit: type=1400 audit(1794571203.000:42): apparmor=\"DENIED\" operation=\"open\""
+          .timestamp = t'2026-11-14T13:00:00Z'
+    # The records leave at a filter transform, which Vector counts in component_discarded_events_total
+    # of its own metrics; no event reaches the sink from it.
+    no_outputs_from:
+      - drop_audit
+
+  - name: a kernel line that is not an audit record goes on to the store
+    inputs:
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/kernel.log"
+          .host = "vector-x1y2z"
+          .message = "kern:    warn: [2026-11-14T12:00:04.000000000Z]: auditing is not mentioned here: drbd: module verification failed"
+          .timestamp = t'2026-11-14T13:00:00Z'
+    outputs:
+      - extract_from: drop_audit
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.talos_service, "kernel")
+              assert_eq!(.level, "warn")
+
+  - name: A pod's record carries the named labels and no field per other label
+    inputs:
+      - insert_at: pod_fields
+        type: vrl
+        source: |
+          .message = "level=info msg=\"scrape\""
+          .timestamp = t'2026-11-14T13:00:00Z'
+          .kubernetes.pod_namespace = "monitoring"
+          .kubernetes.pod_name = "vector-x1y2z"
+          .kubernetes.container_name = "vector"
+          .kubernetes.pod_node_name = "node-3"
+          .kubernetes.pod_labels = {
+            "app.kubernetes.io/name": "vector",
+            "app.kubernetes.io/instance": "vector",
+            "app.kubernetes.io/component": "Agent",
+            "app.kubernetes.io/managed-by": "Helm",
+            "controller-revision-hash": "7d9f8c6b5",
+            "pod-template-generation": "3"
+          }
+    outputs:
+      - extract_from: pod_fields
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.kubernetes.pod_labels, {
+                "app.kubernetes.io/name": "vector",
+                "app.kubernetes.io/instance": "vector",
+                "app.kubernetes.io/component": "Agent"
+              })
+              assert_eq!(.node, "node-3")
+              assert_eq!(.kubernetes.pod_namespace, "monitoring")
+              assert_eq!(.kubernetes.pod_name, "vector-x1y2z")
+              assert_eq!(.message, "level=info msg=\"scrape\"")
+
+  - name: a pod's record without the named labels carries no label field
+    inputs:
+      - insert_at: pod_fields
+        type: vrl
+        source: |
+          .message = "hello"
+          .timestamp = t'2026-11-14T13:00:00Z'
+          .kubernetes.pod_namespace = "default"
+          .kubernetes.pod_name = "plain"
+          .kubernetes.pod_node_name = "node-1"
+          .kubernetes.pod_labels = {"run": "plain"}
+    outputs:
+      - extract_from: pod_fields
+        conditions:
+          - type: vrl
+            source: |
+              assert!(!exists(.kubernetes.pod_labels))
+              assert_eq!(.node, "node-1")

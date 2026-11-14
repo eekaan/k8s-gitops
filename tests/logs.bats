@@ -551,6 +551,262 @@ defined_keys() {
   done
 }
 
+# logs_copy: a copy of the repository's scripts, with a kubeconfig for the cluster lab-sto2, for just
+# logs to run in through the repository's justfile, against recording fakes: a mise with nothing
+# installed, which keeps the justfile from putting real tools in front of the fakes, and a kubectl
+# that records its arguments, the kubeconfig it was given and the names of its environment, then
+# acts as the file $STATE/mode says: ok answers with the file $STATE/answer and, on its error
+# output, a line naming an address; refuse fails as the API server does when the proxied store
+# answers 400; down fails as kubectl does when the API server does not answer, naming its address;
+# big answers with 4000 records of about 250 bytes. Sets COPY, BIN, RECORD, STATE and KUBECONFIG_FILE.
+logs_copy() {
+  COPY="$BATS_TEST_TMPDIR/copy" BIN="$BATS_TEST_TMPDIR/bin"
+  RECORD="$BATS_TEST_TMPDIR/record" STATE="$BATS_TEST_TMPDIR/state"
+  mkdir -p "$COPY/talos/lab-sto2/clusterconfig" "$BIN" "$RECORD" "$STATE"
+  cp -R "$REPO/scripts" "$COPY/scripts"
+  KUBECONFIG_FILE="$COPY/talos/lab-sto2/clusterconfig/kubeconfig"
+  echo 'not a real kubeconfig' >"$KUBECONFIG_FILE"
+  echo ok >"$STATE/mode"
+  printf '#!/usr/bin/env bash\n' >"$BIN/mise"
+  { printf '#!/usr/bin/env bash\nRECORD=%q STATE=%q\n' "$RECORD" "$STATE"; cat <<'EOF'; } >"$BIN/kubectl"
+printf '%s\n' "$*" >>"$RECORD/argv"
+printf '%s\n' "${KUBECONFIG-unset}" >>"$RECORD/kubeconfig"
+env | cut -d= -f1 >>"$RECORD/names"
+case $(cat "$STATE/mode") in
+  ok)
+    echo 'W1114 12:00:00 request to https://192.0.2.10:6443 was slow' >&2
+    cat "$STATE/answer"
+    ;;
+  refuse)
+    echo 'Error from server (BadRequest): cannot parse query "kubernetes.pod_name:(": unexpected end of query' >&2
+    exit 1
+    ;;
+  down)
+    echo 'Unable to connect to the server: dial tcp 192.0.2.10:6443: connect: connection refused' >&2
+    exit 1
+    ;;
+  big)
+    awk 'BEGIN { pad = sprintf("%200s", ""); gsub(/ /, "x", pad)
+      for (i = 4000; i >= 1; i--)
+        printf "{\"_time\":\"2026-11-14T%02d:%02d:%02d.000000000Z\",\"_msg\":\"record %d %s\",\"node\":\"node-1\"}\n", 12 + int(i / 3600), int(i / 60) % 60, i % 60, i, pad }'
+    ;;
+esac
+EOF
+  chmod +x "$BIN/mise" "$BIN/kubectl"
+}
+
+# answer_records: the answer VictoriaLogs gives, newest first as it does when it stops at the limit:
+# a pod's record, a Talos service's record and a pod's record with a message of several lines.
+answer_records() {
+  cat >"$STATE/answer" <<'EOF'
+{"_msg":"third: the kubelet restarted","_stream":"{node=\"node-2\",talos_service=\"kubelet\"}","_time":"2026-11-14T12:00:03.000000000Z","node":"node-2","talos_service":"kubelet"}
+{"_msg":"second\nline two \u001b[31mred\u001b[0m","_stream":"{}","_time":"2026-11-14T12:00:02.500000000Z","kubernetes.pod_name":"grafana-deployment-5d4f","kubernetes.pod_namespace":"monitoring","node":"node-1"}
+{"_msg":"first: scrape done","_stream":"{}","_time":"2026-11-14T12:00:01.000000000Z","kubernetes.pod_name":"vector-x1y2z","kubernetes.pod_namespace":"monitoring","node":"node-1"}
+EOF
+}
+
+# logs_recipe ARG...: runs just logs ARG... in the copy with only TMPDIR and HOME set, failing after
+# a minute rather than hanging.
+logs_recipe() {
+  run timeout 60 env -i HOME="$BATS_TEST_TMPDIR" TMPDIR="$BATS_TEST_TMPDIR" PATH="$BIN:$PATH" \
+    "$(command -v just)" --justfile "$REPO/justfile" --working-directory "$COPY" logs "$@"
+}
+
+# last_request: the one request kubectl last recorded, as "path" and the decoded parameters, in
+# REQUEST_PATH, QUERY, START and LIMIT.
+last_request() {
+  local argv params
+  argv="$(tail -n 1 "$RECORD/argv")"
+  [[ $argv == "get --raw "* ]] || { echo "kubectl ran: $argv"; return 1; }
+  REQUEST_PATH="${argv#get --raw }"
+  params="${REQUEST_PATH#*\?}"
+  REQUEST_PATH="${REQUEST_PATH%%\?*}"
+  QUERY="$(jq -rn --arg p "$params" '$p | split("&") | map(select(startswith("query="))) | .[0] | .[6:] | @urid')"
+  START="$(jq -rn --arg p "$params" '$p | split("&") | map(select(startswith("start="))) | .[0] // "" | .[6:] | @urid')"
+  LIMIT="$(jq -rn --arg p "$params" '$p | split("&") | map(select(startswith("limit="))) | .[0] // "" | .[6:]')"
+}
+
+# window_seconds: how many seconds before now START, the request's start, lies.
+window_seconds() {
+  echo $(($(date -u +%s) - $(date -u -d "$START" +%s)))
+}
+
+@test "An operator's query prints the matching records, oldest first, without an address" {
+  local seconds
+  logs_copy
+  answer_records
+
+  logs_recipe '_time:5m error'
+  echo "status $status; $output"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '%s\n' \
+    '2026-11-14T12:00:01.000000000Z monitoring/vector-x1y2z first: scrape done' \
+    '2026-11-14T12:00:02.500000000Z monitoring/grafana-deployment-5d4f second line two [31mred[0m' \
+    '2026-11-14T12:00:03.000000000Z node-2 third: the kubelet restarted')" ]
+  # No address, from the API server's warnings on kubectl's error output or from anywhere else.
+  [[ $output != *192.0.2.* && $output != *https://* ]]
+  # The query goes through the API's service proxy to the store's Service and port, with the
+  # query as given, the last 15 minutes and 200 records unless told otherwise, through the
+  # cluster's kubeconfig.
+  last_request
+  echo "request: $REQUEST_PATH; query: $QUERY; start: $START; limit: $LIMIT"
+  [ "$REQUEST_PATH" = /api/v1/namespaces/monitoring/services/victoria-logs:9428/proxy/select/logsql/query ]
+  [ "$QUERY" = '_time:5m error' ]
+  [ "$LIMIT" = 200 ]
+  seconds="$(window_seconds)"
+  echo "the window starts $seconds seconds ago"
+  ((seconds >= 899 && seconds <= 910))
+  [ "$(sort -u "$RECORD/kubeconfig")" = "$KUBECONFIG_FILE" ]
+
+  logs_recipe 'kubernetes.pod_namespace:monitoring' --since 2h --limit 5 lab-sto2
+  echo "status $status; $output"
+  [ "$status" -eq 0 ]
+  last_request
+  echo "query: $QUERY; start: $START; limit: $LIMIT"
+  [ "$QUERY" = 'kubernetes.pod_namespace:monitoring' ]
+  [ "$LIMIT" = 5 ]
+  seconds="$(window_seconds)"
+  echo "the window starts $seconds seconds ago"
+  ((seconds >= 7199 && seconds <= 7210))
+
+  logs_recipe '*' --limit 7 --since 90s
+  [ "$status" -eq 0 ]
+  last_request
+  [ "$LIMIT" = 7 ]
+  seconds="$(window_seconds)"
+  ((seconds >= 89 && seconds <= 100))
+}
+
+@test "A query VictoriaLogs refuses, and an API that does not answer, each fail and say why" {
+  logs_copy
+  answer_records
+
+  echo refuse >"$STATE/mode"
+  logs_recipe 'kubernetes.pod_name:('
+  echo "refused: status $status; $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *'cannot parse query "kubernetes.pod_name:(": unexpected end of query'* ]]
+
+  echo down >"$STATE/mode"
+  logs_recipe '*'
+  echo "down: status $status; $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"did not answer"* ]]
+  [[ $output != *192.0.2.10* ]]
+  [[ $output != *6443* ]]
+
+  # An answer that is not what VictoriaLogs sends is no success either.
+  echo ok >"$STATE/mode"
+  echo '<html>bad gateway</html>' >"$STATE/answer"
+  logs_recipe '*'
+  echo "not records: status $status; $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"not JSON lines"* ]]
+
+  # Refused before kubectl runs.
+  rm -f "$RECORD/argv"
+  logs_recipe
+  echo "no query: status $status; $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *usage* ]]
+  logs_recipe '*' --since soon
+  [ "$status" -ne 0 ]
+  [[ $output == *"--since is not a duration"* ]]
+  logs_recipe '*' --limit 0
+  [ "$status" -ne 0 ]
+  [[ $output == *"--limit is not a whole number"* ]]
+  rm "$KUBECONFIG_FILE"
+  logs_recipe '*'
+  [ "$status" -ne 0 ]
+  [[ $output == *"talos/lab-sto2/clusterconfig/kubeconfig does not exist; just cluster-kubeconfig fetches it"* ]]
+  [ ! -e "$RECORD/argv" ]
+}
+
+@test "An answer larger than a pipe's buffer is printed whole" {
+  logs_copy
+  echo big >"$STATE/mode"
+  logs_recipe '*' --limit 5000
+  echo "status $status; lines $(wc -l <<<"$output")"
+  [ "$status" -eq 0 ]
+  [ "$(wc -l <<<"$output")" -eq 4000 ]
+  # The oldest first: record 1 is the oldest by time, record 4000 the newest.
+  [[ $(head -n 1 <<<"$output") == *" record 1 x"* ]]
+  [[ $(tail -n 1 <<<"$output") == *" record 4000 x"* ]]
+}
+
+@test "Grafana reads logs from VictoriaLogs through a datasource the tree declares" {
+  local grafana labels sources name namespace port url type uid plugins version board map key json ours
+  built grafana
+  ours="$BUILT"
+  grafana="$(yq -N -o json -I0 'select(.kind == "Grafana")' "$ours")"
+  labels="$(jq -c '.metadata.labels // {}' <<<"$grafana")"
+  sources="$(yq -N -o json -I0 'select(.kind == "GrafanaDatasource") | select(.spec.datasource.type == "victoriametrics-logs-datasource")' "$ours")"
+  echo "VictoriaLogs datasources: ${sources:-none}"
+  [ "$(grep -c . <<<"$sources")" -eq 1 ]
+  jq -e --argjson labels "$labels" '(.spec.instanceSelector.matchLabels // {}) as $selector
+    | ($selector | length > 0) and ($selector | to_entries | all($labels[.key] == .value))' <<<"$sources"
+  type="$(jq -r '.spec.datasource.type' <<<"$sources")"
+  uid="$(jq -r '.spec.uid // ""' <<<"$sources")"
+  [ -n "$uid" ]
+  # Grafana's server queries the store, through its Service, so a browser needs no way to it.
+  [ "$(jq -r '.spec.datasource.access' <<<"$sources")" = proxy ]
+  url="$(jq -r '.spec.datasource.url // ""' <<<"$sources")"
+  render "$STORE"
+  read -r name namespace port <<<"$(store_service)"
+  echo "datasource URL: $url; the store's Service: $name $namespace $port"
+  [[ $url =~ ^http://([a-z0-9-]+)\.([a-z0-9-]+)\.svc(\.cluster\.local)?:([0-9]+)/?$ ]]
+  [ "${BASH_REMATCH[1]}" = "$name" ]
+  [ "${BASH_REMATCH[2]}" = "$namespace" ]
+  [ "${BASH_REMATCH[4]}" = "$port" ]
+  # The plugin is asked for by the type's name, at an exact version, and nothing else is.
+  plugins="$(jq -c '.spec.plugins // []' <<<"$sources")"
+  echo "plugins: $plugins"
+  [ "$(jq -r 'length' <<<"$plugins")" -eq 1 ]
+  [ "$(jq -r '.[0].name' <<<"$plugins")" = "$type" ]
+  version="$(jq -r '.[0].version' <<<"$plugins")"
+  [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+  # Renovate's regex manager reads the version on the line under such a comment.
+  [ "$(grep -B1 -E "^[[:blank:]]+version: [\"']?${version//./\\.}[\"']?\$" "$REPO/kubernetes/apps/base/$NAMESPACE/grafana/app/grafanadatasource-victoria-logs.yaml" | head -1 | sed 's/^[[:blank:]]*//')" \
+    = '# renovate: datasource=github-releases depName=VictoriaMetrics/victorialogs-datasource' ]
+
+  # The dashboard: loaded into the Grafana from a ConfigMap of the application, and reading this
+  # datasource, with volume by namespace and by node and a logs panel filtered by two variables.
+  board="$(yq -N -o json -I0 'select(.kind == "GrafanaDashboard" and .spec.configMapRef != null)' "$ours")"
+  echo "dashboards of the application: $(jq -r '.metadata.name' <<<"$board" | paste -sd' ' -)"
+  [ "$(grep -c . <<<"$board")" -eq 1 ]
+  jq -e --argjson labels "$labels" '(.spec.instanceSelector.matchLabels // {}) as $selector
+    | ($selector | length > 0) and ($selector | to_entries | all($labels[.key] == .value))' <<<"$board"
+  map="$(jq -r '.spec.configMapRef.name' <<<"$board")" key="$(jq -r '.spec.configMapRef.key' <<<"$board")"
+  json="$(yq -N -o json "select(.kind == \"ConfigMap\" and .metadata.name == \"$map\") | .data[\"$key\"]" "$ours")"
+  [ -n "$json" ]
+  json="$(jq -r '.' <<<"$json")"
+  echo "variables: $(jq -r '[.templating.list[].name] | join(" ")' <<<"$json")"
+  [ "$(jq -r '[.templating.list[].name] | sort | join(" ")' <<<"$json")" = "namespace pod" ]
+  # Every query of every panel and variable goes to the datasource declared above.
+  [ "$(jq -r --arg uid "$uid" --arg type "$type" '[.panels[].targets[].datasource, .templating.list[].datasource]
+    | all(.uid == $uid and .type == $type)' <<<"$json")" = true ]
+  # Volume by namespace and by node, as stats over time grouped by the field.
+  jq -e '[.panels[] | select(.type == "timeseries") | .targets[] | select(.queryType == "statsRange") | .expr]
+    | (any(test("by \\(\"kubernetes.pod_namespace\"\\)"))) and (any(test("by \\(node\\)")))' <<<"$json"
+  # The logs panel is filtered by both variables.
+  jq -e '[.panels[] | select(.type == "logs") | .targets[].expr]
+    | length > 0 and all(test("kubernetes.pod_namespace\":\\$namespace") and test("kubernetes.pod_name\":\\$pod"))' <<<"$json"
+}
+
+@test "every Vector unit test the scenarios name is in tests/vector" {
+  local title
+  for title in "Kernel audit records are dropped and counted" \
+    "A pod's record carries the named labels and no field per other label"; do
+    echo "$title"
+    [ "$(yq -N "[.tests[] | select(.name == \"${title//\"/\\\"}\")] | length" "$REPO/tests/vector/talos-lines.yaml")" -eq 1 ]
+  done
+  # A filter transform is what Vector counts as discarded events, in component_discarded_events_total.
+  render "$COLLECTOR"
+  collector_config
+  [ "$(jq -r '.transforms.drop_audit.type' "$CONFIG")" = filter ]
+  jq -e '.sinks.victoria_logs.inputs | index("drop_audit") != null' "$CONFIG"
+}
+
 @test "every values key of victoria-logs is one its pinned chart defines" {
   defined_keys "$STORE"
 }

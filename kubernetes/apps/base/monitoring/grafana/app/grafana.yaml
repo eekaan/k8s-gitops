@@ -26,7 +26,8 @@ spec:
     # Grafana reaches the internet on its own unless told not to: usage counters to
     # stats.grafana.org, checks for newer Grafana and plugin releases and the news feed from
     # grafana.com, profile pictures from gravatar.com and snapshots published to
-    # snapshots.raintank.io. Everything it runs comes from Git and the image instead.
+    # snapshots.raintank.io. Everything it runs comes from Git and the image instead, but the one plugin
+    # that is installed at start, which the VictoriaLogs datasource asks for.
     analytics:
       reporting_enabled: "false"
       check_for_updates: "false"
@@ -35,12 +36,15 @@ spec:
       news_feed_enabled: "false"
     plugins:
       # Grafana otherwise installs a list of plugins from grafana.com at every start, unpinned and
-      # updated, into a data directory that starts empty each time; with this off it also ignores
-      # the plugins a GrafanaDashboard asks for, so a dashboard uses only those in the image.
+      # updated, into a data directory that starts empty each time. This turns that list off. The
+      # plugins a GrafanaDatasource or GrafanaDashboard asks for reach Grafana as GF_INSTALL_PLUGINS,
+      # which the image's entrypoint installs whatever this says: the VictoriaLogs datasource's is
+      # the only one asked for (grafanadatasource-victoria-logs.yaml).
       preinstall_disabled: "true"
       # No plugin catalogue to install or update plugins from grafana.com.
       plugin_admin_enabled: "false"
-      # The image's plugins are verified with the key Grafana ships; none is fetched.
+      # The image's plugins, and the one installed at start, are verified with the key Grafana ships;
+      # no key is fetched.
       public_key_retrieval_disabled: "true"
     security:
       disable_gravatar: "true"

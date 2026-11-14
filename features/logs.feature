@@ -56,3 +56,35 @@ Feature: Logs
     Given the vector and victoria-logs applications' pinned charts and values, with the monitoring API present
     When they are rendered offline
     Then the store yields a ServiceMonitor that selects its Service on a port the Service serves, the collector a PodMonitor that selects its pods on the port its metrics exporter listens on, and both applications name prometheus-operator-crds in dependsOn
+
+  Scenario: An operator's query prints the matching records, oldest first, without an address
+    Given a cluster's kubeconfig and a kubectl that answers VictoriaLogs' query endpoint through the service proxy with records, newest first
+    When just logs runs with a LogsQL query, and with --since, --limit and a cluster
+    Then kubectl asks the Kubernetes API for the query, the start of the window, 15 minutes back unless --since says otherwise, and the limit, 200 unless --limit says otherwise, through the cluster's kubeconfig, and the recipe prints one line per record, its time, its node or namespace and pod, and its message, the oldest first, and no address
+
+  Scenario: A query VictoriaLogs refuses, and an API that does not answer, each fail and say why
+    Given a kubectl that reports the refused query as the server's error, and one that fails naming the API server's address
+    When just logs runs
+    Then it exits non-zero in both cases, prints the server's own message for the query and a reason without the address for the API, and prints no record; it refuses a missing query, a bad duration or limit and a missing kubeconfig without running kubectl
+
+  Scenario: An answer larger than a pipe's buffer is printed whole
+    Given a kubectl that answers with far more than a pipe holds
+    When just logs runs
+    Then every record is printed and the recipe exits zero
+
+  Scenario: Grafana reads logs from VictoriaLogs through a datasource the tree declares
+    Given the grafana application and the victoria-logs application's pinned chart
+    When the first is built as Flux applies it and the second is rendered offline
+    Then a GrafanaDatasource selects the Grafana, is of the VictoriaLogs plugin's type, names the store's Service in its namespace on a port the Service serves, asks for exactly that plugin at an exact version that Renovate updates and for no other, and a GrafanaDashboard loads a dashboard of log volume by namespace and by node and a logs panel with namespace and pod variables, from a ConfigMap of the application
+
+  @by:vector-check
+  Scenario: Kernel audit records are dropped and counted
+    Given the collector's rendered configuration and Vector's unit tests of it
+    When a kernel audit line and another kernel line are sent through the collector's Talos transforms
+    Then the audit line leaves the pipeline at a filter transform, which Vector counts as discarded events in its own metrics, and the other line goes on
+
+  @by:vector-check
+  Scenario: A pod's record carries the named labels and no field per other label
+    Given the collector's rendered configuration and Vector's unit tests of it
+    When a pod's record with several labels is sent through the collector's pod transform
+    Then it keeps the app.kubernetes.io name, instance and component labels it has, no other label, and the node's name in node

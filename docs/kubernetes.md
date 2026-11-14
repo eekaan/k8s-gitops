@@ -389,7 +389,13 @@ of the monitoring chart, `kube-prometheus-stack-prometheus`, port 9090. Grafana 
 internet on its own: its
 configuration turns off usage reporting, the checks for Grafana and plugin updates, the news feed,
 the plugin catalogue, the plugins Grafana would install at every start, the download of plugin
-signing keys, Gravatar images and external snapshots, so it runs only the plugins in its image.
+signing keys, Gravatar images and external snapshots. The one exception is the plugin of the
+VictoriaLogs datasource ([Logs](#logs)): Grafana does not ship it, so the operator asks Grafana to
+install it at start, `victoriametrics-logs-datasource` at the exact version in
+`grafanadatasource-victoria-logs.yaml`, which Renovate moves. The Grafana image's entrypoint
+downloads that one archive from grafana.com's plugin catalogue at every start, and Grafana loads it
+only if its signature verifies against the public key Grafana ships. Nothing else is fetched, and
+`tests/grafana.bats` fails when any other datasource or dashboard asks for a plugin.
 
 The dashboards come from the monitoring stack's own chart. The release `grafana-dashboards` installs
 `kube-prometheus-stack` at the version the monitoring application runs, with everything off but the
@@ -440,6 +446,27 @@ What is collected, by a collector on every node, control planes included, from f
   etcd's, logfmt such as containerd's and the kubelet's klog. Any other line keeps the time it was
   read.
 
+Two kinds of record are made smaller before they are sent:
+
+- the kernel's audit records, the lines of the service `kernel` that the kernel prints as `audit:`
+  or `auditd:`, which the kernel's audit subsystem writes, are dropped by the filter
+  transform `drop_audit`. Vector counts what a filter drops in `component_discarded_events_total`
+  of its own metrics, which Prometheus scrapes from the PodMonitor, so the drop is visible as the
+  `drop_audit` series. The log of Talos's `auditd` service, `/var/log/auditd.log`, is another file
+  and is still shipped;
+- a pod's labels are not stored one field each: VictoriaLogs makes a field of every name, and
+  labels such as `pod-template-hash` and `controller-revision-hash` take a new value with every
+  rollout. The transform `pod_fields` keeps three, the Kubernetes recommended labels that name the
+  application, `app.kubernetes.io/name`, `app.kubernetes.io/instance` and
+  `app.kubernetes.io/component`, in `kubernetes.pod_labels`, and no other; a pod without them has
+  no such field. It also sets `node` on a pod's record, as Talos's lines have it.
+
+A record has the fields `_time`, `_msg` and `_stream`, and a pod's `kubernetes.pod_namespace`,
+`kubernetes.pod_name`, `kubernetes.container_name`, `kubernetes.pod_node_name`, `node`,
+`kubernetes.pod_labels` as above and the source's other fields; a Talos
+service's `node`, `talos_service`, `file`, `level` and, for the kernel, `facility`. The stream is
+the namespace, pod and container of a pod, or the node and service of a Talos service.
+
 Talos flushes its files every 15 seconds, so its lines reach the store within about that. While the
 collector is not reading, such as during its own restart, lines wait in the files, and it goes on
 from its place in each file: a pod's lines as long as the kubelet has not rotated them away, and a
@@ -455,8 +482,8 @@ read every file there. On a control plane that includes the API server's audit l
 `Metadata` level: who did what to which object, and when, without request or response bodies, so
 without Secret values. The collector does not ship it: its file source's patterns,
 `/var/log/*.log` and `/var/log/*.log.1`, match files at the top of `/var/log` only, and its pod-log
-source reads only `/var/log/pods`. It does ship the kernel's audit records, which Talos's `auditd`
-service writes on every node to its own log at the top, `/var/log/auditd.log`. What keeps the audit
+source reads only `/var/log/pods`. It does ship the log of Talos's `auditd` service, which every node
+writes at the top, `/var/log/auditd.log`. What keeps the audit
 log out of the store is this reviewed configuration, which `tests/logs.bats` matches against
 Talos's layout of `/var/log`; who can read it through the collector is whoever may run commands in
 the pods of `monitoring`.
@@ -492,16 +519,33 @@ cluster's pods and nodes, and no host outside the cluster has a route to them. N
 has an ingress, a route or a Service of type LoadBalancer or NodePort, and the nodes' security group
 admits from outside the cluster only the Talos and Kubernetes APIs.
 
-Grafana has no datasource for the logs. To query, forward the Service's port with
-`kubectl -n monitoring port-forward svc/victoria-logs 9428`, then open VictoriaLogs' web interface
-at `http://localhost:9428/select/vmui/`, or send LogsQL to
-`http://localhost:9428/select/logsql/query`, such as `query=_time:1h talos_service:kubelet` for the
-last hour of every node's kubelet, or `query=_time:1h kubernetes.pod_namespace:monitoring`.
+Reading the logs, with the cluster's kubeconfig:
+
+- `just logs '<LogsQL query>' [--since 15m] [--limit 200] [cluster]` prints the records the query
+  matches, from the last 15 minutes and at most 200 unless told otherwise (`--since` is a whole
+  number with `s`, `m`, `h`, `d` or `w`), one line each, the oldest first: the time, the namespace
+  and pod, or the node for a Talos service's record, and the message. It asks the Kubernetes API for
+  VictoriaLogs' `/select/logsql/query` through the API's service proxy to the Service
+  `victoria-logs`, so no port is forwarded and none is left behind, and prints neither kubectl's
+  output nor an address. A query the store refuses fails with the store's message, and an API that
+  does not answer with that said. The query is LogsQL, such as `talos_service:kubelet`,
+  `kubernetes.pod_namespace:monitoring error` or `node:node-1 talos_service:kernel`; a query that
+  ends in a `stats` pipe prints its records as JSON. VictoriaLogs keeps the records with the
+  largest times when the limit cuts the answer, in no order, and the recipe sorts what it got.
+- In Grafana, behind `just grafana`, the datasource VictoriaLogs and the dashboard Logs, in the
+  folder Logs: the volume of logs by namespace and by node, and a logs panel for the namespaces and
+  pods chosen in the two variables above it. The datasource is the `GrafanaDatasource`
+  `victoria-logs`, of the plugin's type, to the Service's port 9428 through Grafana's server, with
+  the plugin pinned as [Grafana](#grafana) says. The dashboard's JSON is
+  `grafana/app/dashboards/logs.json`, which kustomize makes the ConfigMap the `GrafanaDashboard`
+  `logs` loads.
 
 `tests/logs.bats` builds both applications as Flux applies them, renders their pinned charts and
 checks each of these. `just vector-check` renders the collector's configuration with
 `scripts/vector-config` and has Vector itself, in the image the collector runs, validate it and run
-its unit tests, `tests/vector/talos-lines.yaml`, which hold a line of each format above. The image
+its unit tests, `tests/vector/talos-lines.yaml`, which hold a line of each format above, an audit
+line and a pod's record with several labels. `just logs` runs in `tests/logs.bats` against a
+recording kubectl. The image
 is `vector_image` in the justfile, pinned by the digest of its image index under a
 `# renovate: datasource=docker depName=…` comment: Renovate's custom manager for the justfile moves
 its tag and digest, in the same pull request as the chart, and `tests/logs.bats` fails, saying what

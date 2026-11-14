@@ -6,7 +6,7 @@
 #
 # Vector runs as an agent, one pod on every node, and sends to the VictoriaLogs store
 # (victoria-logs) every pod's log lines and the log of each of the node's Talos services, the
-# kernel's included, which Talos writes to /var/log (ADR 0014). It reads files only: nothing on the
+# kernel's included less its audit records, which Talos writes to /var/log (ADR 0014). It reads files only: nothing on the
 # node sends to it, and it listens only for Prometheus.
 role: Agent
 
@@ -141,14 +141,44 @@ customConfig:
         }
         # The pod's name, which the file source records as the host.
         del(.host)
+    # The kernel's audit records, which Talos's kernel log carries between its other messages, are
+    # dropped: a filter keeps the events its condition is true for, and Vector counts the others in
+    # component_discarded_events_total, which the prometheus sink exports. Only the kernel's own
+    # lines are matched, by the audit: or auditd: the kernel prints after its prefix.
+    drop_audit:
+      type: filter
+      inputs:
+        - talos_files
+      condition:
+        type: vrl
+        source: |
+          !(.talos_service == "kernel" && match(string(.message) ?? "", r'^[a-z0-9]+:\s*[a-z]+: \[[^\]]+\]: audit(d)?(\[\d+\])?: '))
+    # The node's name, as on Talos's lines, and three of the pod's labels. The source stores every
+    # label of a pod as a field of its own, and VictoriaLogs makes one field of each name, so a
+    # pod's hash labels, such as pod-template-hash, would add a field with every rollout; these
+    # three, the Kubernetes recommended labels that name the application, are what an operator
+    # filters on. A pod without any keeps no labels field.
+    pod_fields:
+      type: remap
+      inputs:
+        - pods
+      source: |
+        .node = .kubernetes.pod_node_name
+        named = ["app.kubernetes.io/name", "app.kubernetes.io/instance", "app.kubernetes.io/component"]
+        labels = filter(object(.kubernetes.pod_labels) ?? {}) -> |key, _value| { includes(named, key) }
+        if is_empty(labels) {
+          del(.kubernetes.pod_labels)
+        } else {
+          .kubernetes.pod_labels = labels
+        }
   sinks:
     # VictoriaLogs' Elasticsearch-compatible bulk API, as its documentation sets Vector up. Each
     # container's lines are one stream, and each Talos service's on each node.
     victoria_logs:
       type: elasticsearch
       inputs:
-        - pods
-        - talos_files
+        - pod_fields
+        - drop_audit
       endpoints:
         - http://victoria-logs.monitoring.svc.cluster.local:9428/insert/elasticsearch/
       api_version: v8

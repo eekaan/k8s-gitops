@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# Prints the cluster's logs that a LogsQL query matches, one line per record: its time, the
+# namespace and pod it came from or, for a Talos service's record, its node, and its message, the
+# oldest first. The query goes to VictoriaLogs' /select/logsql/query through the Kubernetes API's
+# service proxy, kubectl get --raw on the cluster's kubeconfig as scripts/cluster-env finds it, so
+# no port is forwarded and none is left behind. It changes nothing on the cluster and reads no
+# Secret. kubectl's own output is never shown, as its errors can name the API server's address: a
+# query the store refuses is reported with the store's message, anything else with a reason.
+# --since DURATION (a whole number with s, m, h, d or w; 15m when unset) is the window, ending now;
+# --limit N (200 when unset) is how many records at most.
+#
+# The endpoint's arguments are those of VictoriaLogs' querying documentation,
+# https://docs.victoriametrics.com/victorialogs/querying/ : query, start (an RFC 3339 time here)
+# and limit, which keeps the records with the largest _time, in no order; the answer is JSON lines,
+# one record each, with _time, _msg and _stream and the record's other fields beside them, and a
+# refused query is an HTTP error with the reason as its body. The records are sorted here.
+#
+# The answer goes to a file, not through a pipe: a reader that closes early, as head or grep -q do,
+# ends its writer with SIGPIPE, which pipefail turns into a failure of a large answer that is fine.
+# Usage: scripts/logs QUERY [--since DURATION] [--limit N] [cluster]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/cluster.sh
+. "$here/lib/cluster.sh"
+
+query='' since=15m limit=200 cluster='' have_query=0
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case ${args[i]} in
+    --since | --limit)
+      if ((i + 1 >= ${#args[@]})); then
+        infra_error "${args[i]} needs a value"
+        exit 2
+      fi
+      if [[ ${args[i]} == --since ]]; then since=${args[i + 1]}; else limit=${args[i + 1]}; fi
+      i=$((i + 1))
+      ;;
+    --*)
+      infra_error "unknown option ${args[i]}; usage: logs QUERY [--since DURATION] [--limit N] [cluster]"
+      exit 2
+      ;;
+    *)
+      if ((!have_query)); then
+        query=${args[i]} have_query=1
+      elif [[ -z $cluster ]]; then
+        cluster=${args[i]}
+      else
+        infra_error "usage: logs QUERY [--since DURATION] [--limit N] [cluster]"
+        exit 2
+      fi
+      ;;
+  esac
+done
+if [[ -z $query ]]; then
+  infra_error "usage: logs QUERY [--since DURATION] [--limit N] [cluster]"
+  exit 2
+fi
+
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "$cluster"
+complete=1
+require_kubeconfig || complete=0
+require_commands kubectl jq date || complete=0
+if [[ ! $since =~ ^([1-9][0-9]{0,8})([smhdw])$ ]]; then
+  infra_error "--since is not a duration: a whole number with s, m, h, d or w, such as 90s or 2h"
+  complete=0
+else
+  case ${BASH_REMATCH[2]} in
+    s) factor=1 ;;
+    m) factor=60 ;;
+    h) factor=3600 ;;
+    d) factor=86400 ;;
+    w) factor=604800 ;;
+  esac
+  seconds=$((BASH_REMATCH[1] * factor))
+fi
+if [[ ! $limit =~ ^[1-9][0-9]{0,8}$ ]]; then
+  infra_error "--limit is not a whole number of records, 1 or more"
+  complete=0
+fi
+((complete))
+
+work=$(mktemp -d -t logs.XXXXXXXXXX)
+# A failing script names the step it failed in, as in every cluster recipe, once the private
+# directory is gone.
+# shellcheck disable=SC2329 # It runs from the EXIT trap.
+finish() {
+  local code=$1
+  rm -rf -- "$work"
+  failed_step "$code"
+  exit "$code"
+}
+trap 'finish $?' EXIT
+step="asking the Kubernetes API for the logs"
+
+start=$(date -u -d "@$(($(date -u +%s) - seconds))" +%Y-%m-%dT%H:%M:%SZ)
+encoded=$(jq -rn --arg q "$query" '$q | @uri')
+path="/api/v1/namespaces/monitoring/services/victoria-logs:9428/proxy/select/logsql/query"
+if ! kubectl get --raw "$path?query=$encoded&start=$start&limit=$limit" > "$work/answer" 2> "$work/error"; then
+  # Error from server (BadRequest): <the store's message> is what kubectl prints for an answer the
+  # store gave; any other failure is the connection to the API server, whose message names its
+  # address.
+  if [[ $(< "$work/error") =~ ^Error\ from\ server\ \([A-Za-z]+\):\ (.*)$ ]]; then
+    message=${BASH_REMATCH[1]}
+    # An address the store's message happens to carry is left out as well.
+    message=$(sed -E 's/[0-9]{1,3}(\.[0-9]{1,3}){3}(:[0-9]+)?/<address>/g' <<< "$message")
+    infra_error "VictoriaLogs or the Kubernetes API refused the query: $message"
+  else
+    infra_error "the Kubernetes API did not answer; check that the cluster is up and that just cluster-kubeconfig has fetched a current kubeconfig"
+  fi
+  exit 1
+fi
+
+# shellcheck disable=SC2034 # failed_step in scripts/lib/cluster.sh names it
+step="reading the answer"
+# Stats queries answer without _time or _msg: such a record is printed as it is. A message's
+# newlines and other control characters, the escape of a terminal's colours among them, are left
+# out so that a record stays one line and cannot drive the operator's terminal.
+if ! jq -rs '
+  def clean: gsub("[\r\n]+"; " ") | gsub("[\\x00-\\x08\\x0b-\\x1f\\x7f]"; "");
+  sort_by(._time // "")[]
+  | if has("_time") and has("_msg") then
+      [._time,
+       (if (.["kubernetes.pod_namespace"] // "") != "" then
+          .["kubernetes.pod_namespace"] + "/" + (.["kubernetes.pod_name"] // "?")
+        else (.node // "-") end),
+       (._msg | tostring | clean)] | join(" ")
+    else tojson | clean end' "$work/answer" > "$work/lines" 2> /dev/null; then
+  infra_error "VictoriaLogs answered with something that is not JSON lines"
+  exit 1
+fi
+cat "$work/lines"

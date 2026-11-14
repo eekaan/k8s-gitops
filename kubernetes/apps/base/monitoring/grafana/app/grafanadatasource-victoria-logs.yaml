@@ -1,0 +1,36 @@
+---
+# The cluster's VictoriaLogs, through the Service its chart puts in front of it (ADR 0014). Grafana's
+# server queries it, so a browser needs no way to it. The type is the VictoriaLogs plugin's, which
+# Grafana does not ship.
+#
+# This is the one thing Grafana fetches from the network: the operator sets the plugin in
+# GF_INSTALL_PLUGINS on Grafana's container, and the Grafana image's entrypoint runs
+# `grafana cli plugins install victoriametrics-logs-datasource <version>` at every start, which
+# downloads that plugin's archive, at exactly that version, from grafana.com's plugin catalogue
+# (https://grafana.com/api/plugins/victoriametrics-logs-datasource/versions/<version>/download).
+# Grafana verifies a plugin's signature against the public key it ships when it loads it. The setting
+# that turns off Grafana's list of preinstalled plugins, plugins.preinstall_disabled, does not
+# apply to GF_INSTALL_PLUGINS, which the image's entrypoint reads before Grafana starts. The plugin
+# is an Apache-2.0 release of its publisher's, VictoriaMetrics/victorialogs-datasource.
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDatasource
+metadata:
+  name: victoria-logs
+spec:
+  instanceSelector:
+    matchLabels:
+      app.kubernetes.io/instance: grafana
+  # A restarted Grafana starts without it. The operator applies it again every minute, and retries
+  # a failed attempt after 10 seconds, doubling the wait up to two minutes while Grafana starts.
+  resyncPeriod: 1m
+  # The dashboard names the datasource by this, so it finds it however Grafana numbers its own.
+  uid: victoria-logs
+  plugins:
+    - name: victoriametrics-logs-datasource
+      # renovate: datasource=github-releases depName=VictoriaMetrics/victorialogs-datasource
+      version: 0.34.0
+  datasource:
+    name: VictoriaLogs
+    type: victoriametrics-logs-datasource
+    access: proxy
+    url: http://victoria-logs.monitoring.svc:9428
