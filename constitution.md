@@ -22,6 +22,8 @@
 ## Done means
 - Every scenario of the change passes under `just ci`.
 - Docs are updated in the same change and describe the present state.
+- A second, read-only review of the change against its scenarios and this file has no blocking
+  finding left open when its pull request opens.
 - CI is green on the pull request, and a change with a live effect is proved on the cluster
   after merge.
 
