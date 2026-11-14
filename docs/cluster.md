@@ -223,17 +223,34 @@ out of the artifact, which is built from `kubernetes/`.
 - `just cluster-reboot <node> [cluster] [--yes] [--tolerate <seconds>]` reboots one node, named by
   its hostname in the cluster's `talman.yaml`, while it watches the Kubernetes API through its load
   balancer; for a control plane, that is the check that the API does not go away with one. Any
-  other name, an address among them, is refused before anything runs. Once the node's name is
-  typed back, or with `--yes`, a probe in the background asks `/readyz` through the kubeconfig once
-  a second, giving each try two seconds, while `talman reboot -n <node> --yes` reboots the node and
-  waits for it to come back, and then while the recipe waits, up to `REBOOT_WAIT` seconds, until
-  the node is Ready with a heartbeat from after the reboot, as `cluster-restore` waits for its
-  nodes. Then it stops the probe and prints how many probes it made, how many failed and the
-  longest run of failures, in seconds. It exits 0 only when the node is Ready again and no probe
-  failed; `--tolerate <seconds>` accepts runs of failures up to that long, for the operator to say
-  what counts as an interruption. The probe keeps its counts in memory and writes no file; it is
-  stopped, with the kubectl or sleep it is waiting for, on every exit of the recipe, a failed or
-  interrupted run included. It needs what `cluster-talos` needs and the kubeconfig.
+  other name, an address among them, is refused before anything runs; a node kubectl cannot read
+  through the kubeconfig, before anything changes. Once the node's name is typed back, or with
+  `--yes`, a probe in the background
+  asks `/readyz` through the kubeconfig once a second, giving each try two seconds, while the
+  recipe, in order:
+  1. cordons the node and drains it with `kubectl drain`, as `cluster-upgrade` drains, so nothing
+     new is placed on it while it goes down: a kubelet that is shutting down rejects every pod it
+     is given, and the scheduler would go on giving it the same replica, each rejected pod left in
+     phase Failed;
+  2. reboots it with `talman reboot -n <node> --yes`, which waits for it to come back, with
+     talosctl's own drain off, as it reaches the API at the cluster endpoint, which only the nodes
+     reach;
+  3. waits, up to `REBOOT_WAIT` seconds, until the node is Ready with a heartbeat from after the
+     reboot, as `cluster-restore` waits for its nodes.
+
+  Then it stops the probe and prints how many probes it made, how many failed and the longest run
+  of failures, in seconds. It uncordons the node, unless it was unschedulable before the recipe
+  ran: such a node stays cordoned, and the recipe says so. It deletes, by namespace and name, the
+  pods the shutdown left in phase Failed on the node, with the reason `NodeShutdown` (rejected
+  while it shut down) or `Terminated` (terminated as it went down), which stay until they are
+  deleted and on which `cluster-check` fails, and says how many, none included; every other pod
+  stays. It exits 0 only when the node is Ready again and no probe failed; `--tolerate <seconds>`
+  accepts runs of failures up to that long, for the operator to say what counts as an
+  interruption. A run that stops once the node is cordoned, as when the drain, the reboot or the
+  wait fails, leaves it cordoned and says so in its last line: uncordon it with kubectl once it is
+  Ready. The probe keeps its counts in memory and writes no file; it is stopped, with the kubectl
+  or sleep it is waiting for, on every exit of the recipe, a failed or interrupted run included. It
+  needs what `cluster-talos` needs and the kubeconfig.
 - `just cluster-destroy [cluster] [--yes] [--unreachable]` destroys the cluster stack,
   `sto2/cluster`, as `just infra-destroy sto2/cluster` does
   ([infrastructure.md](infrastructure.md#recipes)): it shows the plan's summary, destroys once the
@@ -272,7 +289,8 @@ What rclone prints names the bucket and the endpoint, so the etcd recipes never 
 and helm's output passes through, naming the objects they apply, except in `cluster-check`,
 `cluster-reboot` and `cluster-destroy`: they print node and object names only, and none of what
 kubectl prints, as the objects it reads and its errors hold the API server's, the nodes' and the
-pods' addresses.
+pods' addresses; only `kubectl drain`'s passes through in `cluster-reboot`, as in
+`cluster-upgrade`, naming the pods it evicts and those it cannot.
 
 ## Environment
 

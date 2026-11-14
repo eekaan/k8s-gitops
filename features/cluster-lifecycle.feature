@@ -51,6 +51,26 @@ Feature: Cluster lifecycle
     When cluster-reboot runs for each
     Then afterwards no process of the probe, of kubectl or of its sleep runs, no file is left in TMPDIR, and no probe is made once the recipe has ended
 
+  Scenario: The node is drained before it is rebooted and uncordoned once it is Ready
+    Given a schedulable node of talman.yaml
+    When cluster-reboot runs for it
+    Then, with the probe already running, kubectl cordons the node and drains it as cluster-upgrade drains, through the kubeconfig, talman reboots it with talosctl's own drain off, so the node is unschedulable when it goes down, and only once it reports Ready after the reboot is it uncordoned; no other node is cordoned, drained or uncordoned, and cluster-check passes afterwards
+
+  Scenario: A node that was cordoned before the reboot stays cordoned
+    Given a node that is unschedulable before cluster-reboot runs
+    When cluster-reboot runs for it
+    Then it is drained and rebooted, it is not uncordoned once it is Ready, and the recipe says it stays cordoned as it was
+
+  Scenario: Pods the shutdown left Failed on the node are removed, and nothing else
+    Given pods the node's shutdown leaves in phase Failed on it with the reason NodeShutdown or Terminated, beside a Failed pod there with another reason, Failed pods with those reasons on other nodes, and a running pod on the node
+    When cluster-reboot runs for the node, and again with a shutdown that leaves nothing
+    Then once the node is back exactly the shutdown's pods are deleted, by namespace and name through kubectl, and the recipe says how many; the others stay, cluster-check still fails on the Failed pod with another reason, and with nothing left nothing is deleted and the recipe says so
+
+  Scenario: A failed reboot leaves the node cordoned and says so
+    Given a drain that cannot evict a pod, a reboot talman fails, or a node that does not come back
+    When cluster-reboot runs for each, and for a node that was cordoned before and fails to reboot
+    Then it exits non-zero, the node is not uncordoned, no pod is deleted, and the recipe's last line says the node is left cordoned and how to uncordon it, or that it stays cordoned as it was
+
   Scenario: A cluster that still owns a load balancer or a volume is not destroyed, and they are named
     Given a Service of type LoadBalancer, a PersistentVolume of a CSI driver, or both, beside Services and volumes of other kinds
     When cluster-destroy runs with --yes
