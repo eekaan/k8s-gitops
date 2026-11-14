@@ -131,6 +131,9 @@ recipe() {
 #   apply-fails     talman apply --bootstrap fails
 #   stale           hostnames whose kubelet has not reported since the reset: their Ready condition
 #                   is the one etcd held, from before
+#   linstor-volumes how many PersistentVolumes of LINSTOR's CSI driver kubectl lists, beside two of
+#                   other kinds
+#   api-down        kubectl cannot reach the API, and its error names the API server's address
 #   down            addresses of the nodes that do not answer on the Talos API port: those talman
 #                   reset with --reboot=false, which shuts a node down instead of rebooting it
 # talman records what it bootstraps from: the file's path in recovered-from and, as it was at that
@@ -266,6 +269,19 @@ esac
 EOF
   fake_tool kubectl <<'EOF'
 printf '%s\n' "kubectl $*" >> "$RECORD/argv"
+if [[ -e $STATE/api-down ]]; then
+  echo "Unable to connect to the server: dial tcp 198.51.100.66:6443: connect: connection refused" >&2
+  exit 1
+fi
+if [[ "${1-} ${2-}" == "get persistentvolumes" ]]; then
+  items=('{"metadata": {"name": "local-volume-1"}, "spec": {"local": {"path": "/var/mnt/local"}}}')
+  items+=('{"metadata": {"name": "pvc-cinder-1"}, "spec": {"csi": {"driver": "cinder.csi.openstack.org", "volumeHandle": "marker-volume-handle"}}}')
+  for ((i = 1; i <= $(cat "$STATE/linstor-volumes" 2> /dev/null || echo 0); i++)); do
+    items+=("{\"metadata\": {\"name\": \"pvc-linstor-$i\"}, \"spec\": {\"csi\": {\"driver\": \"linstor.csi.linbit.com\", \"volumeHandle\": \"marker-volume-handle\"}}}")
+  done
+  printf '{"apiVersion": "v1", "kind": "List", "items": [%s]}\n' "$(IFS=,; echo "${items[*]}")"
+  exit 0
+fi
 if [[ "${1-} ${2-}" != "get nodes" ]]; then
   echo "unexpected call: kubectl $*" >&2
   exit 1
@@ -709,6 +725,77 @@ resets_or_bootstraps() {
   [ ! -e "$STATE/down" ]
   [ "$(calls '^timeout .*/dev/tcp/' | wc -l)" -ge 12 ]
   [ -n "$(calls '^talman apply ')" ]
+}
+
+@test "A restore counts the volumes first and says what it does to them" {
+  put_snapshot 20261101T000000Z.snapshot.age
+  mkdir -p "$CLUSTER/clusterconfig"
+  : > "$CLUSTER/clusterconfig/kubeconfig"
+
+  for count in 3 1 0; do
+    echo "$count"
+    echo "$count" > "$STATE/linstor-volumes"
+    clear_record
+
+    recipe cluster-restore latest <<< no
+
+    [ "$status" -ne 0 ]
+    # What the recipe printed before it asked for the cluster's name.
+    asked=${output%%"Type lab-sto2 to reset and restore it"*}
+    [ "$asked" != "$output" ]
+    case $count in
+      1) [[ $asked == *"lab-sto2 has 1 PersistentVolume of LINSTOR"* ]] ;;
+      0) [[ $asked == *"lab-sto2 has no PersistentVolume of LINSTOR"* ]] ;;
+      *) [[ $asked == *"lab-sto2 has $count PersistentVolumes of LINSTOR"* ]] ;;
+    esac
+    # What it does to them, and where to read on.
+    [[ $asked == *"LINSTOR keeps its database in the Kubernetes API"* ]]
+    [[ $asked == *"a volume created after the snapshot is orphaned on the workers"* ]]
+    [[ $asked == *"a volume deleted after it comes back"* ]]
+    [[ $asked == *"etcd-restore.md"* ]]
+    # By number, not by name, and nothing of the volumes but that.
+    for shown in pvc-linstor pvc-cinder local-volume marker-volume-handle; do
+      [[ $output != *"$shown"* ]]
+    done
+    [ -n "$(calls '^kubectl get persistentvolumes ')" ]
+    [ -z "$(resets_or_bootstraps)" ]
+  done
+
+  # The count comes with --yes too, and the restore goes on.
+  echo 2 > "$STATE/linstor-volumes"
+  clear_record
+
+  recipe cluster-restore latest --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"lab-sto2 has 2 PersistentVolumes of LINSTOR"* ]]
+  [[ $output != *"Type lab-sto2"* ]]
+
+  # An API that does not answer cannot be counted, which is said, without its address.
+  : > "$STATE/api-down"
+  clear_record
+
+  recipe cluster-restore latest <<< no
+
+  [ "$status" -ne 0 ]
+  asked=${output%%"Type lab-sto2 to reset and restore it"*}
+  [ "$asked" != "$output" ]
+  [[ $asked == *"cannot be counted"* ]]
+  [[ $asked == *"LINSTOR keeps its database in the Kubernetes API"* ]]
+  [[ $output != *198.51.100.66* ]]
+  [ -z "$(resets_or_bootstraps)" ]
+  rm "$STATE/api-down"
+
+  # Without a kubeconfig it cannot be asked either, and kubectl is not run.
+  rm "$CLUSTER/clusterconfig/kubeconfig"
+  clear_record
+
+  recipe cluster-restore latest <<< no
+
+  [ "$status" -ne 0 ]
+  asked=${output%%"Type lab-sto2 to reset and restore it"*}
+  [[ $asked == *"cannot be counted"* ]]
+  [ -z "$(calls '^kubectl ')" ]
 }
 
 @test "A snapshot this key cannot decrypt stops the restore before anything is reset" {

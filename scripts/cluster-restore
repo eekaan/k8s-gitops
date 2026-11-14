@@ -5,7 +5,9 @@
 # cluster-snapshots prints or as latest; downloads it with the state key into a private temporary
 # directory and decrypts it there with the Talos age key, which reaches age by its file's path or on
 # its standard input, never as an argument; and waits until every node answers on the Talos API
-# port. Then it says what happens and asks for the cluster's name to be typed back, unless --yes:
+# port. Then it counts the PersistentVolumes of LINSTOR's driver the cluster has now (or says its API
+# does not answer), says what a restore does to LINSTOR's volumes, what happens, and asks for the
+# cluster's name to be typed back, unless --yes:
 #   1. talman reset, selecting the nodes whose role is controlplane, wipes each control plane's
 #      EPHEMERAL partition, where etcd keeps its data, and reboots it, without leaving etcd first,
 #      as every member goes; this is the reset Talos' disaster recovery prescribes. STATE, which
@@ -63,7 +65,7 @@ fi
 complete=1
 require_cluster talman secrets age-key api-address wait || complete=0
 require_env BACKUP_BUCKET_PREFIX AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY || complete=0
-require_commands age kubectl || complete=0
+require_commands age kubectl jq || complete=0
 ((complete))
 s3_bucket_name_ok BACKUP_BUCKET_PREFIX prefix
 s3_require_client
@@ -124,6 +126,28 @@ fi
 step="waiting for every node to answer on the Talos API port"
 wait_for_talos_api "$talman_file"
 
+# LINSTOR keeps its database in the Kubernetes API (the Piraeus operator's LinstorCluster sets no
+# other: https://github.com/piraeusdatastore/piraeus-operator/blob/v2.12.1/docs/explanation/components.md
+# says the controller's database is stored as Kubernetes objects). A restore rolls it back with the
+# PersistentVolumes and claims, while the data and DRBD metadata on the workers stay as they are.
+step="counting the PersistentVolumes of LINSTOR the cluster has now"
+linstor_driver=linstor.csi.linbit.com
+if [[ ! -f $KUBECONFIG ]]; then
+  volumes=
+elif ! volumes=$(kubectl get persistentvolumes --output json --request-timeout=30s 2> /dev/null); then
+  volumes=
+fi
+if [[ -z $volumes ]]; then
+  echo "cluster-restore: the PersistentVolumes of LINSTOR ($linstor_driver) that $cluster has now cannot be counted, as its API does not answer through its kubeconfig."
+else
+  linstor_volumes=$(jq --arg driver "$linstor_driver" '[.items[] | select(.spec.csi.driver? == $driver)] | length' <<< "$volumes")
+  case $linstor_volumes in
+    0) echo "cluster-restore: $cluster has no PersistentVolume of LINSTOR ($linstor_driver) now." ;;
+    1) echo "cluster-restore: $cluster has 1 PersistentVolume of LINSTOR ($linstor_driver) now." ;;
+    *) echo "cluster-restore: $cluster has $linstor_volumes PersistentVolumes of LINSTOR ($linstor_driver) now." ;;
+  esac
+fi
+echo "cluster-restore: LINSTOR keeps its database in the Kubernetes API, so the restore rolls its records and the PersistentVolumes and claims back to the snapshot's, while the volumes' data and DRBD metadata on the workers stay as they are: a volume created after the snapshot is orphaned on the workers, and a volume deleted after it comes back pointing at nothing. docs/runbooks/etcd-restore.md says how to find and remove them, and when not to restore; confirming the restore confirms this."
 echo "cluster-restore: the control planes of $cluster are reset, and the cluster's state is replaced by the one in $name: everything written to the cluster after the snapshot was taken is lost."
 echo "cluster-restore: talman reset wipes each control plane's EPHEMERAL partition, with etcd's data, and reboots it; the workers are not reset. Then talman apply --bootstrap restores etcd from the snapshot."
 step="waiting for $cluster to be typed back"

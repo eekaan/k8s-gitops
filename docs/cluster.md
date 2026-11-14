@@ -270,10 +270,16 @@ out of the artifact, which is built from `kubernetes/`.
   temporary directory as `cluster-snapshot` makes one, decrypts it there with the Talos age key, and
   waits for every node as `cluster-bootstrap` does; a snapshot that is not there, is not an age file
   or that the key cannot decrypt stops it. It says that the control planes are reset, the workers
-  not, and the cluster's state replaced by the snapshot's, losing what was written since, and goes
-  on once the cluster's name is typed back; `--yes` does not ask. `talman reset --group
-  controlplane` then wipes each control plane's EPHEMERAL partition without leaving etcd and reboots
-  it, and once every node answers again, `talman apply --bootstrap --recover-from` restores etcd
+  not, and the cluster's state replaced by the snapshot's, losing what was written since. It counts
+  the PersistentVolumes of LINSTOR's driver the cluster has now, when its API answers through the
+  kubeconfig, and says so when it does not, and says, by number and not by name, that LINSTOR keeps
+  its database in the Kubernetes API: a restore rolls its records back with the PersistentVolumes
+  and claims while the volumes' data on the workers stays current, so a volume created after the
+  snapshot is orphaned on the workers and one deleted after it comes back pointing at nothing
+  ([the runbook](runbooks/etcd-restore.md#volumes-since-the-snapshot) says how to find and remove
+  them, and when not to restore). It goes on once the cluster's name is typed back; `--yes` does
+  not ask. `talman reset --group controlplane --reboot=true` then wipes each control plane's
+  EPHEMERAL partition without leaving etcd and reboots it, and once every node answers again, `talman apply --bootstrap --recover-from` restores etcd
   from the snapshot on the first control plane, which the others join. It fetches the kubeconfig as
   `cluster-kubeconfig` does, and asks every ten seconds, ninety times at most, until every node in
   `talman.yaml`, workers included, reports Ready after the reset. What `cluster-bootstrap` applies

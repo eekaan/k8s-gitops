@@ -51,6 +51,11 @@ Feature: etcd snapshots
     When cluster-restore runs for the latest
     Then talman reset is told to reboot, the nodes it reset answer on the Talos API port again, and etcd is bootstrapped from the snapshot, where a reset told not to reboot would leave them silent and fail the wait
 
+  Scenario: A restore counts the volumes first and says what it does to them
+    Given a cluster with PersistentVolumes of LINSTOR's CSI driver beside others, or none, an API that does not answer, and no kubeconfig
+    When cluster-restore runs for a snapshot and the cluster's name is not typed back, and with --yes
+    Then before it asks it says by number, without a volume's name, how many PersistentVolumes of LINSTOR the cluster has, or that they cannot be counted, and that LINSTOR keeps its database in the Kubernetes API, so a volume created after the snapshot is orphaned on the workers and one deleted after it comes back pointing at nothing, and where the runbook says what to do; nothing is reset without the name
+
   Scenario: A snapshot this key cannot decrypt stops the restore before anything is reset
     Given an object encrypted to another age key, and one that is not an age file
     When cluster-restore runs for each
