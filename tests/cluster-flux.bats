@@ -39,18 +39,38 @@ setup() {
   cp "$REPO/.sops.yaml" "$BATS_TEST_TMPDIR/flux-sops.placeholder"
   cp "$BATS_FILE_TMPDIR/talman.yaml" "$TALMAN"
   : > "$REPO/talos/lab-sto2/clusterconfig/kubeconfig"
+  # The S3 backend settings OpenTofu's state reads, with markers in place of the real endpoint and
+  # region.
+  ENDPOINT='https://s3.marker-endpoint.example.com'
+  REGION='marker-region-1'
+  mkdir -p "$REPO/infra/openstack"
+  backend_hcl "$ENDPOINT"
   # A mise with nothing installed keeps the justfile from putting real tools in front of the fakes.
   fake mise < /dev/null
   FLUX_KEY="$BATS_TEST_TMPDIR/keys/flux.agekey"
   DOMAIN='marker-domain.example.com'
+  PREFIX='marker-backup-prefix'
   BASE_ENVIRONMENT=(
     FLUX_AGE_KEY_FILE="$FLUX_KEY"
     CLUSTER_DOMAIN="$DOMAIN"
+    BACKUP_BUCKET_PREFIX="$PREFIX"
     TMPDIR="$BATS_TEST_TMPDIR"
   )
   reset_environment
   fake_cluster
   record age-keygen sops yq jq flux
+}
+
+# backend_hcl ENDPOINT: the copy's infra/openstack/backend.hcl, with REGION and the S3 endpoint
+# ENDPOINT, or no endpoint when ENDPOINT is empty.
+backend_hcl() {
+  {
+    printf 'region = "%s"\n' "$REGION"
+    if [[ -n $1 ]]; then
+      printf 'endpoints = {\n  s3 = "%s"\n}\n' "$1"
+    fi
+    printf 'use_path_style = true\n'
+  } > "$REPO/infra/openstack/backend.hcl"
 }
 
 # fake NAME: a binary first on the recipe's PATH, its body read from stdin.
@@ -385,6 +405,9 @@ helm_flag() {
   config=$(object ConfigMap flux-system cluster-config)
   [ "$(jq -r '.data | keys | join(" ")' <<< "$config")" = "$(yq 'keys | sort | join(" ")' "$CLUSTER/cluster-config.example.yaml")" ]
   [ "$(jq -r '.data.CLUSTER_DOMAIN' <<< "$config")" = "$DOMAIN" ]
+  [ "$(jq -r '.data.BACKUP_BUCKET_PREFIX' <<< "$config")" = "$PREFIX" ]
+  [ "$(jq -r '.data.S3_ENDPOINT' <<< "$config")" = "$ENDPOINT" ]
+  [ "$(jq -r '.data.S3_REGION' <<< "$config")" = "$REGION" ]
   [ "$(jq -r '.data.NODE_CIDR' <<< "$config")" = "$(yq '.values.nodeSubnet' "$TALMAN")" ]
   regex=$(jq -r '.data.NODE_NAME_REGEX' <<< "$config")
   for name in $(yq '.nodes[].hostname' "$TALMAN"); do
@@ -451,6 +474,40 @@ helm_flag() {
   [ "$status" -ne 0 ]
   [[ $output == *"CLUSTER_DOMAIN is not set"* ]]
   [ -z "$(calls '^kubectl ')" ]
+
+  # The backup buckets' prefix, missing or not the start of a bucket name, and no endpoint.
+  reset_environment
+  without BACKUP_BUCKET_PREFIX
+  recipe cluster-config
+  [ "$status" -ne 0 ]
+  [[ $output == *"BACKUP_BUCKET_PREFIX is not set"* ]]
+  [ -z "$(calls '^kubectl ')" ]
+  reset_environment
+  with BACKUP_BUCKET_PREFIX=Marker_Prefix
+  recipe cluster-config
+  [ "$status" -ne 0 ]
+  [[ $output == *"BACKUP_BUCKET_PREFIX is not the start of a bucket name"* ]]
+  [[ $output != *Marker_Prefix* ]]
+  [ -z "$(calls '^kubectl ')" ]
+  reset_environment
+  backend_hcl ''
+  recipe cluster-config
+  [ "$status" -ne 0 ]
+  [[ $output == *"S3_ENDPOINT"* && $output == *"infra/openstack/backend.hcl"* ]]
+  [ -z "$(calls '^kubectl ')" ]
+  # An endpoint is a scheme and a host, with a port or without: restic reads a path after the host
+  # as the bucket.
+  for endpoint in "$ENDPOINT/a-bucket" "$ENDPOINT/" "$ENDPOINT?x=1" "$ENDPOINT:port" http://s3.example.com; do
+    backend_hcl "$endpoint"
+    recipe cluster-config
+    [ "$status" -ne 0 ] || { echo "accepted the endpoint $endpoint"; return 1; }
+    [[ $output == *"S3_ENDPOINT"* ]]
+    [ -z "$(calls '^kubectl ')" ]
+  done
+  backend_hcl "$ENDPOINT:8443"
+  recipe cluster-config
+  [ "$status" -eq 0 ]
+  [ "$(object ConfigMap flux-system cluster-config | jq -r '.data.S3_ENDPOINT')" = "$ENDPOINT:8443" ]
 }
 
 @test "The cluster age key reaches the cluster under a key Flux reads and is never shown" {
@@ -761,6 +818,18 @@ helm_flag() {
   [ "$status" -ne 0 ]
   [[ $output == *"not the key .sops.yaml encrypts to"* ]]
   [ -z "$(calls '^(kubectl|helm|sops) ')" ]
+
+  # Everything else in place, without the backup buckets' prefix.
+  rm "$FLUX_KEY"
+  flux_key
+  without BACKUP_BUCKET_PREFIX
+  for name in cluster-config cluster-flux; do
+    recipe "$name"
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"BACKUP_BUCKET_PREFIX is not set"* ]]
+  done
+  [ -z "$(calls '^(kubectl|helm|sops) ')" ]
 }
 
 @test "the Flux recipes refuse Go's HTTP/2 debug log" {
@@ -897,6 +966,16 @@ helm_flag() {
   [[ $output == *".sops.yaml holds no Flux age recipient yet"* ]]
   [[ $output == *"EXTRA_SETTING"* ]]
   [ -z "$(calls '^(timeout|talman|install-cilium|kubectl|helm) ')" ]
+
+  # Everything else in place, without the backup buckets' prefix.
+  cp "$ROOT/kubernetes/clusters/lab-sto2/cluster-config.example.yaml" "$CLUSTER/"
+  reset_environment
+  flux_key
+  without BACKUP_BUCKET_PREFIX
+  recipe cluster-bootstrap
+  [ "$status" -ne 0 ]
+  [[ $output == *"BACKUP_BUCKET_PREFIX is not set"* ]]
+  [ -z "$(calls '^(timeout|talman|install-cilium|kubectl|helm) ')" ]
 }
 
 @test "No deployment value or secret reaches a command line or the output" {
@@ -953,15 +1032,20 @@ helm_flag() {
     "$(grep '^AGE-SECRET-KEY-' "$FLUX_KEY")"
     marker-api-token
     "$DOMAIN"
+    "$PREFIX"
+    "$ENDPOINT"
+    "$REGION"
     "$(jq -r '.data.NODE_CIDR' <<< "$config")"
     "$(jq -r '.data.NODE_NAME_REGEX' <<< "$config")"
   )
+  [ "$(jq -r '.data.BACKUP_BUCKET_PREFIX + " " + .data.S3_ENDPOINT + " " + .data.S3_REGION' <<< "$config")" = "$PREFIX $ENDPOINT $REGION" ]
   grep -q '^sops decrypt ' "$RECORD/argv"
   grep -q '^kubectl apply ' "$RECORD/argv"
   grep -q '^helm upgrade .*/kubelet-csr-approver' "$RECORD/argv"
   grep -q '^flux envsubst ' "$RECORD/argv"
-  # talman.yaml holds the node subnet and the node names; nothing else may.
-  rm "$TALMAN"
+  # talman.yaml holds the node subnet and the node names, and backend.hcl the endpoint; nothing
+  # else may.
+  rm "$TALMAN" "$REPO/infra/openstack/backend.hcl"
   for marker in "${markers[@]}"; do
     [ -n "$marker" ]
     absent "$marker" "$RECORD/argv"

@@ -397,7 +397,8 @@ out of the artifact, which is built from `kubernetes/`.
 - `just cluster-config [cluster]` applies what Flux needs before it starts: the namespace
   `flux-system`, the ConfigMap `cluster-config`, the Secret `cluster-secrets` and the Secret
   `sops-age` ([kubernetes.md](kubernetes.md#before-flux-starts)). It refuses, naming each, when the
-  cluster's `talman.yaml` or kubeconfig, `CLUSTER_DOMAIN`, the Flux age key or its recipient in
+  cluster's `talman.yaml` or kubeconfig, `CLUSTER_DOMAIN`, `BACKUP_BUCKET_PREFIX`, the object
+  storage's endpoint or region in `infra/openstack/backend.hcl`, the Flux age key or its recipient in
   `.sops.yaml` is missing, when the Flux age key is not the key of that recipient or is the Talos
   age key, and when a key of `cluster-config` or `cluster-secrets` cannot be filled or is not
   listed. A second run changes nothing.
@@ -520,7 +521,9 @@ to hand it to kubectl and age-keygen on standard input.
   buckets' names and the state key ([infrastructure.md](infrastructure.md#environment)), with which
   `cluster-snapshot`, `cluster-snapshots` and `cluster-restore` reach the etcd bucket through
   rclone, configured as the infrastructure recipes configure it
-  ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)).
+  ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)). `cluster-bootstrap`,
+  `cluster-config` and `cluster-flux` need the prefix as well, which becomes `BACKUP_BUCKET_PREFIX`
+  in `cluster-config`.
 - `TMPDIR`: where `cluster-snapshot` and `cluster-restore` make their private directory, `/tmp`
   when unset. Inside the repository it is refused.
 - `KUBE_API_ADDRESS`: the Kubernetes API load balancer's floating address, an IPv4 address, as
