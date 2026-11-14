@@ -21,7 +21,9 @@ balancer service, the same design runs on other infrastructure, and BGP is learn
 - **Routing.** Plain eBGP in the edge AS. The workers open the sessions and never listen, so an edge
   takes dynamic neighbours from the node subnet only, in one peer group whose remote AS is the
   cluster's. It accepts a prefix only if it is a /32 inside the service range, denies everything
-  else, caps the prefixes a peer may send at the size of the range, and advertises nothing. The
+  else, sets the maximum of accepted prefixes to the size of the range (a guard only a loosened
+  prefix list can reach, as FRR counts accepted prefixes and the list lets in no more than the range
+  holds), and advertises nothing. The
   timers and the graceful restart time are read from the workers' `CiliumBGPPeerConfig` in the
   manifests, so the two ends cannot disagree. Equal-cost multipath covers as many paths as there can
   be workers, and the kernel hashes a flow's layer 4 fields, so a connection stays on one path.
