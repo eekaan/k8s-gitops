@@ -215,6 +215,7 @@ recipe_copy() {
   { printf '#!/usr/bin/env bash\nRECORD=%q STATE=%q\n' "$RECORD" "$STATE"; cat <<'EOF'; } >"$BIN/kubectl"
 printf '%s\n' "$*" >>"$RECORD/argv"
 printf '%s\n' "${KUBECONFIG-unset}" >>"$RECORD/kubeconfig"
+env | cut -d= -f1 >>"$RECORD/names"
 echo "$$ $PPID" >"$STATE/pids"
 last=${!#}
 case $(cat "$STATE/mode") in
@@ -688,6 +689,28 @@ EOF
   [[ $output == *"http://127.0.0.1:3000"* ]]
   [[ $output == *"stopped with status 1"* ]]
   kubectl_gone
+}
+
+@test "just grafana runs kubectl with none of the secrets" {
+  recipe_copy
+  # Every secret variable the recipes read, as a marker, besides the settings the recipe reads.
+  names=(AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY CLUSTER_S3_ACCESS_KEY_ID CLUSTER_S3_SECRET_ACCESS_KEY
+    OS_CLOUD OS_APPLICATION_CREDENTIAL_ID OS_APPLICATION_CREDENTIAL_SECRET TF_STATE_PASSPHRASE
+    TF_ENCRYPTION SOPS_AGE_KEY SOPS_AGE_KEY_FILE FLUX_AGE_KEY FLUX_AGE_KEY_FILE OPERATOR_CIDRS)
+  for name in "${names[@]}"; do with "$name=marker-$name"; done
+  with GRAFANA_PORT=3456
+  echo fail >"$STATE/mode"
+
+  grafana_recipe
+
+  [ -s "$RECORD/names" ]
+  # What is no secret reaches kubectl, and the kubeconfig it is run with.
+  grep -qx KUBECONFIG "$RECORD/names"
+  grep -qx GRAFANA_PORT "$RECORD/names"
+  for name in "${names[@]}"; do
+    echo "$name"
+    if grep -qx "$name" "$RECORD/names"; then return 1; fi
+  done
 }
 
 @test "just grafana needs the cluster's kubeconfig and a port" {
