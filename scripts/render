@@ -24,8 +24,9 @@
 # metadata Flux strips is removed. Fails naming the application and the step when anything does not
 # render. Never contacts a cluster, and reads no registry login. A chart's URL and name come from the
 # tree, a pull request's included: they are checked against a strict shape and passed to helm as
-# arguments, a pull adds no repository to any Helm configuration, and the most a hostile URL can make
-# the runner do is fetch that URL, which a registry named by an OCIRepository allows already.
+# arguments, a pull adds no repository to any Helm configuration, and a hostile URL makes the runner
+# fetch the repository and its index direct, and what the index points to: outbound fetches only,
+# which a registry named by an OCIRepository allows already.
 #
 # Writes OUT/<cluster>/<application>/<Kind>[.<group>]_<namespace>_<name>.yaml, the name without the
 # hash kustomize appends to a generated ConfigMap or Secret, so that a changed one compares with
@@ -48,7 +49,7 @@ if [[ ${1:-} == --forms ]]; then
   shift
   set -- "" "$@"
 fi
-(($# >= 1 && $# <= 2)) || die "usage: scripts/render OUT [DIR]"
+(($# >= 1 && $# <= 2)) || die "usage: scripts/render OUT [DIR] | scripts/render --forms [DIR]"
 out=$1
 dir=${2:-$(dirname "${BASH_SOURCE[0]}")/..}
 [[ -d $dir/kubernetes ]] || die "no kubernetes/ directory in $dir"
@@ -70,8 +71,11 @@ trap 'rm -rf "$tmp"' EXIT
 # No kubeconfig and no in-cluster address: a tool that tried to reach a cluster fails instead.
 export KUBECONFIG=/dev/null
 unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
-# Helm's settings and the Docker configuration it reads registry logins from are the run's own.
+# Helm's settings and the Docker configuration it reads registry logins from are the run's own,
+# whatever the caller's environment sets.
 export HELM_CACHE_HOME="$tmp/helm/cache" HELM_CONFIG_HOME="$tmp/helm/config" HELM_DATA_HOME="$tmp/helm/data"
+export HELM_REPOSITORY_CONFIG="$tmp/helm/repositories.yaml" HELM_REGISTRY_CONFIG="$tmp/helm/registry.json"
+export HELM_PLUGINS="$tmp/helm/plugins"
 export DOCKER_CONFIG="$tmp/docker"
 mkdir -p "$DOCKER_CONFIG"
 charts=${RENDER_CHART_CACHE:-$tmp/charts}
@@ -182,7 +186,7 @@ release() {
     url=$(jq -r '.spec.url // ""' <<<"$repo")
     tag=$(jq -r '.spec.ref.tag // ""' <<<"$repo")
     [[ $url =~ ^oci://[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+$ && /$url/ != */../* ]] || die "$where: not an OCI chart URL: $url"
-    [[ $tag =~ ^[A-Za-z0-9_][A-Za-z0-9._+-]*$ ]] || die "$where: its OCIRepository names no tag (a version range or a digest is not rendered)"
+    [[ $tag =~ ^[A-Za-z0-9_][A-Za-z0-9._+-]*$ ]] || die "$where: its OCIRepository names no tag (a version range or a digest alone is not rendered)"
     pulled="$charts/${url#oci://}/$tag"
     pull=("$url" --version "$tag")
   elif jq -e '.spec.chart.spec != null' <<<"$hr" >/dev/null; then

@@ -988,18 +988,19 @@ diff, collapsed. A pull request that changes nothing Flux applies says so.
 it (application `flux-system`), then every Kustomization that applies from the tree, the root
 (`cluster`), Flux's own applications and each application the overlay enables, built as
 `just kubernetes-check` builds them. Each HelmRelease is expanded to the objects its chart renders:
-the chart its OCIRepository names, or the one its `chart.spec` names in a `HelmRepository` (a
-classic `https://` repository or an OCI one), pulled from its public source at the exact version
-the tree pins, with the values of its ConfigMaps and its own values over them, the release name and namespace helm-controller gives it,
-the Kubernetes version in `versions.yaml`, every API version a definition in the render serves, its
-post-renderers and helm-controller's labels. A chart version bump therefore shows the objects that
-change. An application may take its chart only from an `OCIRepository` or a `HelmRepository`, at an
-exact version, from a source that names no credential (the render has no secrets), with values from
-ConfigMaps of the application; any other form (a version range, a `GitRepository` or `Bucket`, a
-`secretRef`, values from a Secret) fails the render, naming the release.
-`scripts/render --forms` checks that every release is of a form the render accepts, without pulling
-a chart, and `tests/render.bats` runs it on this tree. `RENDER_CHART_CACHE` names a directory to
-keep pulled charts in between renders. A tree that does not render fails, naming the application. `just render-diff <base> <head>` prints the comment
+the chart its OCIRepository names at its tag, or the one its `chart.spec` names in a `HelmRepository`
+(a classic `https://` repository or an OCI one) at an exact version, pulled from its public source at
+the version the tree pins, with the values of its ConfigMaps and its own values over them, the
+release name and namespace helm-controller gives it, the Kubernetes version in `versions.yaml`, every
+API version a definition in the render serves, its post-renderers and helm-controller's labels. A
+chart version bump therefore shows the objects that change. An application may take its chart only
+from an `OCIRepository` (at a tag) or a `HelmRepository` (at an exact version), from a source that
+names no credential (the render has no secrets), with values from ConfigMaps of the application; any
+other form (a version range, a `GitRepository` or `Bucket`, a `secretRef`, values from a Secret)
+fails the render, naming the release. `scripts/render --forms` checks that every release is of a form
+the render accepts, without pulling a chart, and `tests/render.bats` runs it on this tree.
+`RENDER_CHART_CACHE` names a directory to keep pulled charts in between renders. A tree that does
+not render fails, naming the application. `just render-diff <base> <head>` prints the comment
 comparing two renders.
 
 What it is rendered with, and what it never shows:
