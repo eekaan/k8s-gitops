@@ -281,6 +281,24 @@ gateway_api() {
   [[ $inner =~ ^false\ (MirrorPrune|Orphan)$ ]]
 }
 
+@test "Each container runtime the image adds has a RuntimeClass with its handler" {
+  local enabled objects
+  # The cluster runs the application: its overlay applies the application's Kustomization.
+  enabled="$(kustomize build --load-restrictor LoadRestrictionsNone "$REPO/kubernetes/apps/overlays/lab-sto2" |
+    yq -N 'select(.kind == "Kustomization" and .metadata.name == "runtime-classes") | .spec.path')"
+  echo "runtime-classes in the overlay: ${enabled:-none}"
+  [ "$enabled" = ./apps/base/kube-system/runtime-classes/app ]
+  # The handlers are those the extensions' READMEs give: runsc for gVisor, kata for Kata
+  # Containers' Cloud Hypervisor. A RuntimeClass is cluster-scoped, so it carries no namespace,
+  # whatever the application's targetNamespace.
+  built runtime-classes
+  objects="$(yq -N 'select(. != null) | .apiVersion + " " + .kind + "/" + .metadata.name
+    + " handler=" + (.handler // "none") + " namespace=" + (.metadata.namespace // "none")' "$BUILT" | sort)"
+  echo "$objects"
+  [ "$objects" = "$(printf '%s\n' 'node.k8s.io/v1 RuntimeClass/gvisor handler=runsc namespace=none' \
+    'node.k8s.io/v1 RuntimeClass/kata handler=kata namespace=none')" ]
+}
+
 @test "every values key of prometheus-operator-crds is one its pinned chart defines" {
   defined_keys prometheus-operator-crds
 }

@@ -46,6 +46,16 @@ Feature: Talos machine configuration
     When it is read
     Then no bundled CNI is configured and kube-proxy is disabled
 
+  Scenario: The node image carries the DRBD, gVisor and Kata Containers extensions and no other
+    Given talos/schematic.yaml, which the plumbing stack builds the image from and talman computes the installer image from
+    When its official extensions are read
+    Then they are siderolabs/drbd, siderolabs/gvisor and siderolabs/kata-containers, each once, and no other
+
+  Scenario: Every node's machine configuration loads the kernel modules DRBD and LINSTOR's storage pools need
+    Given the template, the patches, the schematic and fixture node data
+    When the Talos check renders every node's configuration with talman and validates it with talosctl
+    Then each of the six configurations loads drbd with usermode_helper=disabled, drbd_transport_tcp, dm-thin-pool and dm-snapshot, and no other kernel module
+
   Scenario: An output directory inside the repository is refused
     Given an output directory inside the repository, named directly, relative to it or through a symlink
     When the Talos check runs

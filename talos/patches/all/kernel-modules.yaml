@@ -1,0 +1,30 @@
+# Kernel modules for LINSTOR (the Piraeus operator) on DRBD, with LVM-thin storage pools and
+# snapshots. On Talos its satellite cannot load a module itself, so Piraeus' Talos guide has every
+# module it needs listed in the machine configuration. Talos loads each listed module at boot; a
+# change to a module's parameters takes effect at the next reboot.
+---
+# DRBD, which the drbd system extension ships. DRBD runs user-mode helper scripts on events such as
+# a resync; the extension ships the modules only, and LINBIT has the helpers disabled wherever
+# Kubernetes runs DRBD, as Piraeus' guide does.
+apiVersion: v1alpha1
+kind: KernelModuleConfig
+name: drbd
+parameters:
+  - usermode_helper=disabled
+---
+# DRBD's TCP transport, which replication between nodes runs over, from the same extension.
+apiVersion: v1alpha1
+kind: KernelModuleConfig
+name: drbd_transport_tcp
+---
+# The device mapper's thin provisioning target, which LVM-thin storage pools are built on.
+apiVersion: v1alpha1
+kind: KernelModuleConfig
+name: dm-thin-pool
+---
+# The device mapper's snapshot target, which snapshots on LVM storage pools use. The pinned Talos
+# kernel has it built in, and Talos counts a built-in module as loaded; it is listed so that a
+# kernel that builds it as a module loads it too.
+apiVersion: v1alpha1
+kind: KernelModuleConfig
+name: dm-snapshot

@@ -1,7 +1,12 @@
 ---
 # Image Factory schematic of the node image. The plumbing stack registers it and builds the image
 # from it; the same schematic gives the same ID wherever it is computed.
-# No system extensions.
+# Three official system extensions, named as in the Image Factory's list for the Talos version:
+# DRBD's kernel modules, and gVisor and Kata Containers, each a containerd runtime handler.
+# docs/cluster.md says what in the repository goes with each.
 customization:
   systemExtensions:
-    officialExtensions: []
+    officialExtensions:
+      - siderolabs/drbd
+      - siderolabs/gvisor
+      - siderolabs/kata-containers

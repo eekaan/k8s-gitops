@@ -34,9 +34,9 @@ they were created with and are upgraded in place over the Talos API; they are no
    machine it runs on.
 
 4. **`just infra-apply sto2/cluster`**. The plan changes outputs only: `talman_yaml` for a new
-   version, `schematic_id` for a new schematic. The nodes ignore changes to their boot device, so
-   the new image replaces no server and no boot volume; nodes added later boot it. The apply writes
-   the cluster's `talman.yaml`.
+   version or a changed `talos/talman.yaml.tftpl`, `schematic_id` for a new schematic. The nodes
+   ignore changes to their boot device, so the new image replaces no server and no boot volume;
+   nodes added later boot it. The apply writes the cluster's `talman.yaml`.
 
 5. **`just infra-talman`** writes `talman.yaml` again from the cluster stack's state and runs its
    checks without planning: talman must compute from `talos/schematic.yaml` the schematic ID the
@@ -47,6 +47,30 @@ they were created with and are upgraded in place over the Talos API; they are no
 6. **`just cluster-upgrade`** moves each node that does not run the version and schematic in
    `talman.yaml` to them, one node at a time ([cluster.md](../cluster.md#recipes)). A new
    Kubernetes version in the same change follows with `just cluster-upgrade-k8s`.
+
+7. **`just cluster-talos`**, after the upgrade and never before it, when the change adds an
+   extension together with configuration that depends on it, such as the DRBD modules
+   `talos/patches/all/kernel-modules.yaml` loads from `siderolabs/drbd`. The upgrade changes the
+   image and leaves the machine configuration as it is: talman's `upgrade` moves each node to the
+   installer image its schematic and version resolve to, and `talosctl upgrade` takes an image, not
+   a configuration. Talos activates an extension only when it installs or upgrades
+   ([Talos](https://docs.siderolabs.com/talos/v1.14/build-and-extend-talos/custom-images-and-development/system-extensions)),
+   so a node has the extension's modules once the upgrade has rebooted it. `cluster-talos` then
+   shows the new configuration in its dry run and applies it node by node, and Talos loads a module
+   as soon as the configuration lists it.
+
+   In the other order nothing refuses the configuration, but the module does not load. Talos
+   validates a `KernelModuleConfig` for a name only
+   ([source](https://github.com/siderolabs/talos/blob/v1.14.6/pkg/machinery/config/types/runtime/kernel_module.go)),
+   so `talosctl validate`, `talman validate` and the apply all pass on a node whose image lacks the
+   module. The node keeps running, but its kernel module controller fails with `module not found`
+   for that module and retries
+   ([source](https://github.com/siderolabs/talos/blob/v1.14.6/internal/app/machined/pkg/controllers/runtime/kernel_module_spec.go)),
+   until an upgrade brings the module and the node loads it at boot.
+
+   Flux applies what the change holds under `kubernetes/`, such as a RuntimeClass for an
+   extension's runtime handler, as soon as it is merged, whatever image the nodes run. A pod that
+   selects a RuntimeClass on a node whose image lacks the handler does not start.
 
 ## What the cloud holds afterwards
 
