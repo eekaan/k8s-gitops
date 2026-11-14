@@ -100,3 +100,8 @@ Feature: Infrastructure state and stack recipes
     Given both stacks
     When infra-destroy runs against a recording tofu without confirmation
     Then nothing is destroyed, and with confirmation the cluster stack is destroyed before the plumbing stack
+
+  Scenario: Destroying the cluster removes the generated files that hold its addresses
+    Given the cluster's generated talman.yaml, talosconfig and kubeconfig, its secrets bundle and an etcd snapshot
+    When infra-destroy destroys the cluster stack, when its destroy fails, and with the kubeconfig tracked by git
+    Then once the cluster stack is destroyed the talman.yaml, talosconfig and kubeconfig git ignores are removed and named, none of their content is printed, and the secrets bundle and the snapshot stay; a tracked kubeconfig stays, named; after a failed destroy nothing is removed

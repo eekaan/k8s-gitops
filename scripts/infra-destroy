@@ -2,7 +2,9 @@
 # Destroys the cluster stack and then the plumbing stack, whose network and image the cluster stack
 # builds on. Each stack's destroy is planned and summarised first, and runs only once the stack's
 # name is typed back, or with --yes (CI). The plumbing stack is left alone when the cluster stack
-# is not destroyed. State objects stay.
+# is not destroyed. State objects stay. Once the cluster stack is destroyed, the files generated for
+# its cluster that hold the nodes' and the API's addresses are removed, as the cloud may give those
+# addresses to someone else.
 # Usage: scripts/infra-destroy [--yes]
 set -euo pipefail
 
@@ -28,6 +30,43 @@ remove_cluster_made_load_balancers_and_volumes() {
   infra_error "not implemented: removing the load balancers and volumes the cluster created outside OpenTofu; they are left in place"
 }
 
+# cluster_name: the name of the cluster the stack's talman_yaml output configures, empty when the
+# stack has none. tofu's JSON holds every output's value; only jq and yq read it.
+cluster_name() {
+  local outputs name
+  outputs=$(stack_tofu output -json) || return 1
+  name=$(jq -r '.talman_yaml.value // ""' <<< "$outputs" | yq '.clusterName // ""')
+  # The name becomes a path under talos/, so it is a plain name that cannot lead out of it.
+  if [[ -n $name && ! $name =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
+    infra_error "the clusterName in $stack's talman_yaml is not a name of lower-case letters, digits and hyphens"
+    return 1
+  fi
+  printf '%s' "$name"
+}
+
+# remove_generated CLUSTER: removes the files generated for CLUSTER that hold the addresses of its
+# nodes and its API: talman.yaml, and the talosconfig and kubeconfig talman writes into
+# clusterconfig/. A later bootstrap or onboarding would otherwise send machine configuration to
+# whoever answers at those addresses. Only a file that git ignores, and so neither tracks nor would
+# commit, is removed; the secrets bundle and etcd snapshots stay. Names what it removes, never what
+# the files held.
+remove_generated() {
+  local path
+  local -a removed=()
+  for path in "talos/$1/talman.yaml" "talos/$1/clusterconfig/talosconfig" "talos/$1/clusterconfig/kubeconfig"; do
+    [[ -e $infra_root/$path || -L $infra_root/$path ]] || continue
+    if git -C "$infra_root" check-ignore -q -- "$path"; then
+      rm -f -- "${infra_root:?}/$path"
+      removed+=("$path")
+    else
+      infra_error "$path is not a file git ignores, so it is left in place; it may hold the destroyed cluster's addresses"
+    fi
+  done
+  if ((${#removed[@]} > 0)); then
+    echo "removed what held the destroyed cluster's addresses: ${removed[*]}"
+  fi
+}
+
 for stack in "${stacks[@]}"; do
   # One subshell per stack, so neither its inputs nor its lock carry over to the next.
   (
@@ -38,10 +77,16 @@ for stack in "${stacks[@]}"; do
     echo "$stack:"
     plan_destroy
     ((confirmed)) || confirm "$stack" destroy destroyed
+    cluster=
     if [[ $stack == */cluster ]]; then
       remove_cluster_made_load_balancers_and_volumes
+      # Read before the destroy, which takes the outputs with it.
+      cluster=$(cluster_name)
     fi
     apply_plan
     echo "$stack destroyed"
+    if [[ -n $cluster ]]; then
+      remove_generated "$cluster"
+    fi
   )
 done

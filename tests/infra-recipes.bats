@@ -474,6 +474,71 @@ EOF
 -chdir=$PLUMBING" ]
 }
 
+@test "Destroying the cluster removes the generated files that hold its addresses" {
+  # The copy as a git repository with this repository's ignore rules, holding the files the recipes
+  # generate for the fixture's cluster, which its talman_yaml output names fixture.
+  export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+  git init -q "$REPO"
+  cp "$ROOT/.gitignore" "$REPO/.gitignore"
+  cluster="$REPO/talos/fixture"
+  mkdir -p "$cluster/clusterconfig"
+  generated=(talman.yaml clusterconfig/talosconfig clusterconfig/kubeconfig)
+  kept=(secrets.sops.yaml clusterconfig/etcd-fixture.db)
+  # generated_files: the fixture cluster's files, each holding a marker of its content.
+  generated_files() {
+    local file
+    for file in "${generated[@]}" "${kept[@]}"; do
+      echo "marker-content-of-$file" > "$cluster/$file"
+    done
+  }
+  generated_files
+  fake tofu <<EOF
+printf '%s\n' "\$*" >> "$RECORD/tofu"
+case \${2-} in
+  show) cat "$FIXTURES/no-changes.json" ;;
+  output) cat "$FIXTURES/outputs.json" ;;
+  apply) [[ ! -e "$BATS_TEST_TMPDIR/cluster-fails" || \$1 != *cluster ]] ;;
+esac
+EOF
+  : > "$BATS_TEST_TMPDIR/cluster-fails"
+
+  recipe infra-destroy --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  for file in "${generated[@]}" "${kept[@]}"; do
+    [ -f "$cluster/$file" ]
+  done
+
+  rm "$BATS_TEST_TMPDIR/cluster-fails"
+
+  recipe infra-destroy --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  for file in "${generated[@]}"; do
+    [ ! -e "$cluster/$file" ]
+    [[ $output == *"talos/fixture/$file"* ]]
+  done
+  for file in "${kept[@]}"; do
+    [ "$(cat "$cluster/$file")" = "marker-content-of-$file" ]
+  done
+  [[ $output != *marker-content-of-* ]]
+  # The files go once the cluster stack is destroyed, before the plumbing stack is.
+  [ "$(grep -n 'sto2/cluster destroyed' <<< "$output" | cut -d: -f1)" -lt "$(grep -n 'talos/fixture/talman.yaml' <<< "$output" | cut -d: -f1)" ]
+  [ "$(grep -n 'talos/fixture/talman.yaml' <<< "$output" | cut -d: -f1)" -lt "$(grep -n 'sto2/plumbing destroyed' <<< "$output" | cut -d: -f1)" ]
+
+  # A file git tracks is never removed, even under a name the recipes generate.
+  generated_files
+  git -C "$REPO" add -f talos/fixture/clusterconfig/kubeconfig
+
+  recipe infra-destroy --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ ! -e "$cluster/talman.yaml" ] && [ ! -e "$cluster/clusterconfig/talosconfig" ]
+  [ "$(cat "$cluster/clusterconfig/kubeconfig")" = marker-content-of-clusterconfig/kubeconfig ]
+  [[ $output == *"talos/fixture/clusterconfig/kubeconfig is not a file git ignores, so it is left in place"* ]]
+  [[ $output != *marker-content-of-* ]]
+}
+
 @test "infra-destroy --yes destroys the cluster and then the plumbing without asking" {
   recipe infra-destroy --yes < /dev/null
 

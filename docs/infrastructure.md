@@ -31,7 +31,11 @@ command that runs them is a `just` recipe.
   summarised first, and runs once the stack's name is typed back; `just infra-destroy --yes` does
   not ask. When the cluster stack is not destroyed, the plumbing stack is left as it is. The load
   balancers and volumes the cluster creates itself, outside OpenTofu, are not removed, and the
-  recipe says so; while any are left, the plumbing network cannot be deleted.
+  recipe says so; while any are left, the plumbing network cannot be deleted. Once the cluster
+  stack is destroyed, the recipe removes the files generated for its cluster that hold the nodes'
+  and the API's addresses, which the cloud may give to someone else: `talos/<cluster>/talman.yaml`
+  and the talosconfig and kubeconfig in its `clusterconfig/`. It names each file it removes and
+  removes only files git ignores; the secrets bundle and etcd snapshots stay.
 
 Apply `plumbing` before `cluster`, as the cluster stack reads the plumbing stack's state. Destroy
 goes the other way round. State objects stay in the bucket after a destroy.
