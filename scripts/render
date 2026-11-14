@@ -6,8 +6,13 @@
 # scripts/kubernetes-check builds them: strict substitution, with the cluster's example key lists in
 # place of cluster-config and cluster-secrets. Each HelmRelease is expanded to the objects its chart
 # renders, as helm-controller renders them:
-#   - the chart its OCIRepository names, pulled from its registry, or taken from RENDER_CHART_CACHE,
-#     a directory holding <registry>/<repository>/<tag>/<chart>.tgz, when set and the chart is there;
+#   - the chart its OCIRepository names, or the one its chart.spec names in a HelmRepository (a
+#     classic repository over https, or an OCI one), pulled at the exact version the tree pins, or
+#     taken from RENDER_CHART_CACHE, a directory when set and the chart is there, holding
+#     <registry>/<repository>/<tag>/<chart>.tgz for an OCIRepository,
+#     <registry>/<repository>/<chart>/<version>/<chart>.tgz for an OCI HelmRepository and
+#     https:/<host>/<path>/<chart>/<version>/<chart>.tgz for a classic one; a source that is
+#     anything else, names a credential or pins a range is refused;
 #   - the values of its valuesFrom ConfigMaps, then its own spec.values over them;
 #   - helm-controller's release name and namespace, the Kubernetes version in versions.yaml, every
 #     API version a definition in the render serves, as on a cluster where all of them exist, and the
@@ -17,13 +22,19 @@
 # change every time: the chart is rendered twice and each value that differs is masked. No Secret's
 # data leaves the render: every value of a Secret's data and stringData is replaced, and the sops
 # metadata Flux strips is removed. Fails naming the application and the step when anything does not
-# render. Never contacts a cluster, and reads no registry login.
+# render. Never contacts a cluster, and reads no registry login. A chart's URL and name come from the
+# tree, a pull request's included: they are checked against a strict shape and passed to helm as
+# arguments, a pull adds no repository to any Helm configuration, and a hostile URL makes the runner
+# fetch the repository and its index direct, and what the index points to: outbound fetches only,
+# which a registry named by an OCIRepository allows already.
 #
 # Writes OUT/<cluster>/<application>/<Kind>[.<group>]_<namespace>_<name>.yaml, the name without the
 # hash kustomize appends to a generated ConfigMap or Secret, so that a changed one compares with
 # the one it replaces. OUT must not exist or be empty.
 #
 # Usage: scripts/render OUT [DIR]   (DIR holds kubernetes/ and versions.yaml; defaults to this repository)
+#        scripts/render --forms [DIR]   builds the tree and checks that every HelmRelease is of a form
+#                                       this render accepts, without pulling or rendering a chart
 set -euo pipefail
 shopt -s nullglob
 
@@ -32,19 +43,27 @@ die() {
   exit 1
 }
 
-(($# >= 1 && $# <= 2)) || die "usage: scripts/render OUT [DIR]"
+forms_only=0
+if [[ ${1:-} == --forms ]]; then
+  forms_only=1
+  shift
+  set -- "" "$@"
+fi
+(($# >= 1 && $# <= 2)) || die "usage: scripts/render OUT [DIR] | scripts/render --forms [DIR]"
 out=$1
 dir=${2:-$(dirname "${BASH_SOURCE[0]}")/..}
 [[ -d $dir/kubernetes ]] || die "no kubernetes/ directory in $dir"
 [[ -f $dir/versions.yaml ]] || die "no versions.yaml in $dir"
-if [[ -e $out ]]; then
+if ((!forms_only)) && [[ -e $out ]]; then
   [[ -d $out && -z $(find "$out" -mindepth 1 -print -quit) ]] || die "$out exists and is not an empty directory"
 fi
 for tool in flux helm kustomize yq jq; do
   command -v "$tool" >/dev/null || die "$tool not found on PATH"
 done
-mkdir -p "$out"
-out=$(cd "$out" && pwd)
+if ((!forms_only)); then
+  mkdir -p "$out"
+  out=$(cd "$out" && pwd)
+fi
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -52,8 +71,11 @@ trap 'rm -rf "$tmp"' EXIT
 # No kubeconfig and no in-cluster address: a tool that tried to reach a cluster fails instead.
 export KUBECONFIG=/dev/null
 unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
-# Helm's settings and the Docker configuration it reads registry logins from are the run's own.
+# Helm's settings and the Docker configuration it reads registry logins from are the run's own,
+# whatever the caller's environment sets.
 export HELM_CACHE_HOME="$tmp/helm/cache" HELM_CONFIG_HOME="$tmp/helm/config" HELM_DATA_HOME="$tmp/helm/data"
+export HELM_REPOSITORY_CONFIG="$tmp/helm/repositories.yaml" HELM_REGISTRY_CONFIG="$tmp/helm/registry.json"
+export HELM_PLUGINS="$tmp/helm/plugins"
 export DOCKER_CONFIG="$tmp/docker"
 mkdir -p "$DOCKER_CONFIG"
 charts=${RENDER_CHART_CACHE:-$tmp/charts}
@@ -146,38 +168,90 @@ done
 release() {
   local cluster=$1 app=$2 index=$3 hr=$4 name namespace where kind chart_ns repo url tag pulled release target
   local work="$tmp/releases/$cluster/$app/$index" built="$tmp/built/$cluster/$app.yaml" i entry
-  local -a tgz
+  local chart version type field
+  local -a tgz pull
   name=$(jq -r '.metadata.name // ""' <<<"$hr")
   namespace=$(jq -r '.metadata.namespace // "default"' <<<"$hr")
   where="$cluster/$app: HelmRelease $namespace/$name"
   mkdir -p "$work"
-  kind=$(jq -r '.spec.chartRef.kind // ""' <<<"$hr")
-  [[ $kind == OCIRepository ]] || die "$where: only a chartRef to an OCIRepository is rendered"
-  chart_ns=$(jq -r --arg ns "$namespace" '.spec.chartRef.namespace // $ns' <<<"$hr")
-  repo=$(name="$(jq -r '.spec.chartRef.name' <<<"$hr")" ns="$chart_ns" yq -N -o json -I0 \
-    'select(.kind == "OCIRepository" and .metadata.name == strenv(name) and (.metadata.namespace // "default") == strenv(ns))' "$built")
-  [[ -n $repo && $repo != *$'\n'* ]] || die "$where: its OCIRepository is not one object of the application"
-  url=$(jq -r '.spec.url // ""' <<<"$repo")
-  tag=$(jq -r '.spec.ref.tag // ""' <<<"$repo")
-  [[ $url =~ ^oci://[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+$ && /$url/ != */../* ]] || die "$where: not an OCI chart URL: $url"
-  [[ $tag =~ ^[A-Za-z0-9_][A-Za-z0-9._+-]*$ ]] || die "$where: its OCIRepository names no tag"
-  pulled="$charts/${url#oci://}/$tag"
-  tgz=("$pulled"/*.tgz)
-  if ((${#tgz[@]} == 0)); then
-    mkdir -p "$pulled"
-    helm pull "$url" --version "$tag" --destination "$pulled" >"$work/pull.log" 2>&1 ||
-      die "$where: helm pull $url $tag failed: $(cat "$work/pull.log")"
-    tgz=("$pulled"/*.tgz)
+  if jq -e '.spec.chartRef != null and .spec.chart != null' <<<"$hr" >/dev/null; then
+    die "$where: names both a chartRef and a chart"
+  elif jq -e '.spec.chartRef != null' <<<"$hr" >/dev/null; then
+    kind=$(jq -r '.spec.chartRef.kind // ""' <<<"$hr")
+    [[ $kind == OCIRepository ]] || die "$where: a chartRef to a ${kind:-(no kind)} is not rendered, only one to an OCIRepository"
+    chart_ns=$(jq -r --arg ns "$namespace" '.spec.chartRef.namespace // $ns' <<<"$hr")
+    repo=$(name="$(jq -r '.spec.chartRef.name' <<<"$hr")" ns="$chart_ns" yq -N -o json -I0 \
+      'select(.kind == "OCIRepository" and .metadata.name == strenv(name) and (.metadata.namespace // "default") == strenv(ns))' "$built")
+    [[ -n $repo && $repo != *$'\n'* ]] || die "$where: its OCIRepository is not one object of the application"
+    url=$(jq -r '.spec.url // ""' <<<"$repo")
+    tag=$(jq -r '.spec.ref.tag // ""' <<<"$repo")
+    [[ $url =~ ^oci://[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+$ && /$url/ != */../* ]] || die "$where: not an OCI chart URL: $url"
+    [[ $tag =~ ^[A-Za-z0-9_][A-Za-z0-9._+-]*$ ]] || die "$where: its OCIRepository names no tag (a version range or a digest alone is not rendered)"
+    pulled="$charts/${url#oci://}/$tag"
+    pull=("$url" --version "$tag")
+  elif jq -e '.spec.chart.spec != null' <<<"$hr" >/dev/null; then
+    kind=$(jq -r '.spec.chart.spec.sourceRef.kind // ""' <<<"$hr")
+    [[ $kind == HelmRepository ]] || die "$where: a chart from a ${kind:-(no kind)} is not rendered, only one from a HelmRepository"
+    chart=$(jq -r '.spec.chart.spec.chart // ""' <<<"$hr")
+    version=$(jq -r '.spec.chart.spec.version // ""' <<<"$hr")
+    # A range, a wildcard or no version would let the chart change under an unchanged tree.
+    [[ $version =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]] ||
+      die "$where: chart version ${version:-(none)} is not an exact version"
+    # No leading dash, so the name is never taken for an option.
+    [[ $chart =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "$where: not a chart name: ${chart:-(none)}"
+    jq -e '(.spec.chart.spec.valuesFiles // []) | length == 0' <<<"$hr" >/dev/null ||
+      die "$where: valuesFiles of a chart are not rendered"
+    chart_ns=$(jq -r --arg ns "$namespace" '.spec.chart.spec.sourceRef.namespace // $ns' <<<"$hr")
+    repo=$(name="$(jq -r '.spec.chart.spec.sourceRef.name' <<<"$hr")" ns="$chart_ns" yq -N -o json -I0 \
+      'select(.kind == "HelmRepository" and .metadata.name == strenv(name) and (.metadata.namespace // "default") == strenv(ns))' "$built")
+    [[ -n $repo && $repo != *$'\n'* ]] || die "$where: its HelmRepository is not one object of the application"
+    # The render has no secrets, and no cloud identity to log in with.
+    for field in secretRef certSecretRef; do
+      jq -e --arg field "$field" '.spec[$field] == null' <<<"$repo" >/dev/null ||
+        die "$where: its HelmRepository names a $field, and the render has no secrets"
+    done
+    [[ $(jq -r '.spec.provider // "generic"' <<<"$repo") == generic ]] ||
+      die "$where: its HelmRepository takes its login from a cloud provider, and the render has none"
+    type=$(jq -r '.spec.type // "default"' <<<"$repo")
+    url=$(jq -r '.spec.url // ""' <<<"$repo")
+    url=${url%/}
+    case $type in
+      default)
+        [[ $url =~ ^https://[a-z0-9.-]+(:[0-9]+)?(/[A-Za-z0-9._~-]+)*$ && /$url/ != */../* && /$url/ != */./* ]] ||
+          die "$where: not an https chart repository URL: $url"
+        pulled="$charts/https:/${url#https://}/$chart/$version"
+        pull=("$chart" --repo "$url" --version "$version")
+        ;;
+      oci)
+        [[ $url =~ ^oci://[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)*$ && /$url/ != */../* && /$url/ != */./* ]] ||
+          die "$where: not an oci:// chart repository URL: $url"
+        pulled="$charts/${url#oci://}/$chart/$version"
+        pull=("$url/$chart" --version "$version")
+        ;;
+      *) die "$where: its HelmRepository is of type $type, which is not rendered" ;;
+    esac
+  else
+    die "$where: names no chart: neither a chartRef nor a chart.spec"
   fi
-  ((${#tgz[@]} == 1)) || die "$where: $pulled holds no single chart"
-  echo "${tgz[0]}" >"$work/chart"
+  if ((!forms_only)); then
+    tgz=("$pulled"/*.tgz)
+    if ((${#tgz[@]} == 0)); then
+      mkdir -p "$pulled"
+      helm pull "${pull[@]}" --destination "$pulled" >"$work/pull.log" 2>&1 ||
+        die "$where: helm pull ${pull[*]} failed: $(cat "$work/pull.log")"
+      tgz=("$pulled"/*.tgz)
+    fi
+    ((${#tgz[@]} == 1)) || die "$where: $pulled holds no single chart"
+    echo "${tgz[0]}" >"$work/chart"
+  fi
   # The values of each ConfigMap in valuesFrom, in order, then the HelmRelease's own over them.
   i=0
   while IFS= read -r entry; do
     [[ -n $entry ]] || continue
     i=$((i + 1))
-    [[ $(jq -r '.kind' <<<"$entry") == ConfigMap && $(jq -r '.targetPath // ""' <<<"$entry") == "" ]] ||
-      die "$where: only whole values from a ConfigMap of the application are rendered"
+    kind=$(jq -r '.kind' <<<"$entry")
+    [[ $kind == ConfigMap ]] || die "$where: values from a $kind are not rendered, only from a ConfigMap of the application"
+    [[ $(jq -r '.targetPath // ""' <<<"$entry") == "" ]] || die "$where: values from a ConfigMap into a targetPath are not rendered, only whole values"
     name="$(jq -r '.name' <<<"$entry")" ns="$namespace" key="$(jq -r '.valuesKey // "values.yaml"' <<<"$entry")" \
       yq -N 'select(.kind == "ConfigMap" and .metadata.name == strenv(name) and (.metadata.namespace // "default") == strenv(ns))
         | .data[strenv(key)] // ""' "$built" >"$work/values-$i.yaml"
@@ -191,6 +265,8 @@ release() {
   [[ $release =~ $label && ${target:-$namespace} =~ $label ]] || die "$where: release $release in ${target:-$namespace} is not a DNS label"
   printf '%s\n' "$release" "${target:-$namespace}" "$where" "$(jq -r '.metadata.name' <<<"$hr")" "$namespace" >"$work/release"
   jq -c '.spec.postRenderers // []' <<<"$hr" >"$work/post-renderers.json"
+  jq -e 'all(.[]; keys == ["kustomize"] and (.kustomize | keys - ["images", "patches"] | length == 0))' \
+    "$work/post-renderers.json" >/dev/null || die "$where: only kustomize post-renderers with patches and images are rendered"
 }
 
 # template WORK OUT [API-VERSIONS]: renders the release prepared in WORK into OUT.
@@ -217,8 +293,6 @@ post_render() {
   where=$(sed -n 3p "$work/release")
   count=$(jq 'length' "$work/post-renderers.json")
   for ((i = 0; i < count; i++)); do
-    jq -e --argjson i "$i" '.[$i] | keys == ["kustomize"] and (.kustomize | keys - ["images", "patches"] | length == 0)' \
-      "$work/post-renderers.json" >/dev/null || die "$where: only kustomize post-renderers with patches and images are rendered"
     patched="$work/post-render-$i"
     rm -rf "$patched"
     mkdir -p "$patched"
@@ -233,16 +307,22 @@ post_render() {
 # Every HelmRelease of every application, prepared and rendered a first time with no API version but
 # Kubernetes' own, to learn which definitions the whole render holds.
 mkdir -p "$tmp/releases"
+releases=0
 for app in "${apps[@]}"; do
   index=0
   while IFS= read -r hr; do
     [[ -n $hr ]] || continue
     index=$((index + 1))
+    releases=$((releases + 1))
     release "${app%%/*}" "${app#*/}" "$index" "$hr"
-    template "$tmp/releases/$app/$index" "$tmp/releases/$app/$index/first.yaml"
+    ((forms_only)) || template "$tmp/releases/$app/$index" "$tmp/releases/$app/$index/first.yaml"
   done < <(yq -N -o json -I0 'select(.kind == "HelmRelease" and ((.apiVersion // "") | test("^helm\.toolkit\.fluxcd\.io/")))' \
     "$tmp/built/$app.yaml")
 done
+if ((forms_only)); then
+  echo "render: $releases releases accepted in ${#apps[@]} applications"
+  exit 0
+fi
 
 # helm-controller renders with the cluster's API versions; this render takes those of every definition
 # the tree installs, as served once all of them are established.
