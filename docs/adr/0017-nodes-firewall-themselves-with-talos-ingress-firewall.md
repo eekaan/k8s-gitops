@@ -23,11 +23,14 @@ Every node drops inbound traffic by default and admits each listener from its so
 Talos' ingress firewall: a `NetworkDefaultActionConfig` that blocks and a `NetworkRuleConfig` per
 listener, in the node's machine configuration. The listeners are written down once, in
 `talos/firewall.yaml`, with the nodes that have them and the sources they accept; the cluster stack
-renders the sources into networks from the inputs the security group takes, the allowlist, the node
-subnet, the pod range, the nodes' floating addresses and each node's own address, and talman writes
-the rules into each node's configuration. Control planes and workers get the rules of their own
-listeners. A port that pods reach admits the nodes' own addresses and the pod range; the overlay and
-Cilium's health checks admit the nodes' own addresses only.
+renders the sources into networks from the inputs the security group takes, the allowlist, the pod
+range, the nodes' floating addresses and each node's own address, the API load balancer's address
+and pool and the CI host's address, and talman writes the rules into each node's configuration.
+Control planes and workers get the rules of their own listeners. A port that pods reach admits the
+nodes' own addresses and the pod range; the overlay and Cilium's health checks admit the nodes' own
+addresses only. No rule admits the node network as a whole: it also holds the edge routers the
+workers announce Services to ([ADR 0013](0013-service-addresses-announced-over-bgp-to-edge-routers.md)),
+which face the internet, so an edge router's address reaches no listener on a node.
 
 The base layer is Talos' rather than Cilium's. Talos applies it with the machine configuration,
 before Kubernetes and the CNI run, so it holds while a node joins, while Cilium starts or restarts,
@@ -49,17 +52,23 @@ What reaches a node without passing the firewall, and what controls each:
   which Talos enforces wherever a namespace sets no other.
 - Cilium serves Services' external addresses the same way, and any Service could name one: every
   control plane's API server enables the `DenyServiceExternalIPs` admission plugin, which refuses a
-  new one.
-- Cilium would serve Services' load-balancer addresses the same way: nothing assigns or announces
-  one, as there is no cloud controller and Cilium's address management, L2 announcements and BGP
-  control plane are off. A change that turns one of them on brings its own control.
+  new one. It reads `spec.externalIPs` alone and passes subresources, so the load-balancer addresses
+  Cilium writes into a Service's status, and Services labelled for BGP, are not affected.
+- Cilium serves Services' load-balancer addresses the same way: it assigns them from the service
+  range, and the workers announce them to the edge routers. They are reachable only through the
+  edge routers, and the workers' own security group admits traffic to the service ports, and
+  nothing else, from the two edge addresses only.
 - Traffic to a pod's address goes to the pod, not the node: no route from outside the node network
   leads to the pod range, and network policies govern it between pods.
 
-The cloud's security groups remain as the outer ring for the first two, which a node cannot cover
-itself. The cluster stack's `security_group_rules` selects today's full rules or a reduced set that
-keeps them and opens every other port; with the reduced set, nothing but those two depends on the
-security groups.
+The cloud's security groups remain as the outer ring for the first, second and fifth, which a node
+cannot cover itself: the nodes' group for the Talos API and the NodePort range, the workers' group
+for the service ports. The cluster stack's `security_group_rules` selects today's full rules or a
+reduced set that keeps them and gives the control planes a group of their own that opens every other
+port. The workers get nothing more with either: a security group rule never matches a packet's
+destination, so a rule open to all on a worker's port, which carries the service range, would open
+every port of a load-balancer address too. With the reduced set, nothing but those three depends on
+the security groups.
 
 ## Alternatives considered
 
@@ -88,5 +97,7 @@ security groups.
 - The allowlist reaches the nodes through the generated `talman.yaml`, and the nodes admit their
   APIs only from the allowlist they hold. A change of it is rolled out from an address the nodes
   admit before the change, so a network leaves the allowlist only after the one that replaces it has
-  reached the nodes. With the old address gone, the way back is from the node network, which the
-  nodes still admit: each node's configuration applied through its Talos API at its own address.
+  reached the nodes. With the old address gone, the way back is from the CI host's address, when the
+  nodes' configuration admits it: each node's configuration applied through its Talos API at its own
+  address. Without one, there is no way back, which is the price of keeping the edge routers, on the
+  same network, off the Talos API.
