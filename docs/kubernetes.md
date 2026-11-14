@@ -1382,8 +1382,12 @@ that can write:
   pull request and push to `main` on a hosted runner, with the workflow's `contents: read` token and
   no secrets. For a pull request GitHub runs the pull request's own copy of the workflow, a fork's
   included, so the job is given nothing worth taking. `just ci-render` runs `scripts/render-pr` in
-  the Dagger module (ADR 0007): it renders the base, the first parent of the commit under test, and
-  the commit itself, both with the base's `scripts/render` and `scripts/render-diff`, so that a pull
+  the Dagger module (ADR 0007), in the tools container `just ci` uses, chosen the same way (README,
+  The tools image). That image is public and pulled without credentials, and a record of any other
+  image stops the recipe, so a pull request that runs the job in another one has changed the files
+  the job runs, as it could change the module itself. The render covers the base, the first parent
+  of the commit under test, and the commit itself, both with the base's `scripts/render` and
+  `scripts/render-diff`, so that a pull
   request that changes only the tree is shown by the reviewed render code. A base without the render
   code, or one its own render code does not render, is rendered with the commit's, and the job's
   log says so. The job uploads the comment as the artifact `render-diff`.
