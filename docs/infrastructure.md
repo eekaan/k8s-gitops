@@ -322,7 +322,7 @@ docker of `vector-check` has only the scan.
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | `tofu`; rclone, as the state key set |
 | `TF_ENCRYPTION` | `tofu` |
 | `TF_STATE_PASSPHRASE` | none, as `TF_ENCRYPTION` carries the key derived from it |
-| `CLUSTER_S3_ACCESS_KEY_ID`, `CLUSTER_S3_SECRET_ACCESS_KEY` | rclone, as the cluster key set; `bao-seed-volsync` and `bao-volsync-password` read them themselves and pass them on only in jq's environment and, for the second, the environment of the command it runs, never to a wrapped tool |
+| `CLUSTER_S3_ACCESS_KEY_ID`, `CLUSTER_S3_SECRET_ACCESS_KEY` | rclone, as the cluster key set; `bao-seed-volsync` and `bao-volsync-password` read them themselves, so they are in the environment of every process those scripts start, and are named on no command line; the second also gives them to the command it runs, and neither passes them to a wrapped tool |
 | `OS_*`, the cloud credential | `tofu`, `openstack` |
 | `GH_TOKEN`, `GITHUB_TOKEN` | `gh` |
 | `TF_VAR_*`, the stacks' inputs, among them the allowlist; `TF_TOKEN_*`, registry tokens | `tofu` |

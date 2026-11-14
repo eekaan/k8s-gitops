@@ -3,8 +3,9 @@
 # The recipes run from a copy of the repository against recording fakes of kubectl and curl: a
 # cluster whose port-forward runs until it is stopped, and an OpenBao behind it that answers as its
 # API does. age and age-keygen are the pinned ones, offline, with a throwaway key in the test's
-# directory; jq, age, base64, cat, sed and grep are recorded on their way, so every command line the
-# recipes run is in the record.
+# directory. The recipes' PATH holds only the fakes, recorders and bash: every other command they
+# run is a recorder of the real one, so every command line they run is in the record, and a command
+# no recorder names is not found.
 
 # The fakes keep their state in each test's own directory, and a test waits for the port-forwards
 # it started; nothing is shared between tests, which may run side by side.
@@ -31,7 +32,12 @@ setup() {
   CUSTODY="$BATS_TEST_TMPDIR/custody/openbao.age"
   # A mise with nothing installed keeps the justfile from putting real tools in front of the fakes.
   fake mise </dev/null
-  record jq age base64 cat sed grep
+  # The shell the recipes and the fakes run in is the one command outside the record.
+  SYS="$BATS_TEST_TMPDIR/sys"
+  mkdir -p "$SYS"
+  ln -s "$(command -v bash)" "$SYS/bash"
+  record jq age base64 cat sed grep awk tr env head od sha256sum cut date mktemp ln rm mv mkdir chmod \
+    dirname basename realpath yq paste sort wc sleep
   fake_cluster
 }
 
@@ -72,7 +78,7 @@ EOF
 # its environment, the Talos age key's location included. A recipe that blocks fails after two
 # minutes instead of hanging the tests.
 recipe() {
-  run timeout 120 env -i HOME="$BATS_TEST_TMPDIR" PATH="$BIN:$PATH" TMPDIR="$BATS_TEST_TMPDIR/tmp" \
+  run timeout 120 env -i HOME="$BATS_TEST_TMPDIR" PATH="$BIN:$SYS" TMPDIR="$BATS_TEST_TMPDIR/tmp" \
     SOPS_AGE_KEY_FILE="$BATS_TEST_TMPDIR/keys/talos.agekey" \
     "$JUST" --justfile "$ROOT/justfile" --working-directory "$REPO" "$@"
 }
@@ -114,6 +120,7 @@ forwards_closed() {
 # files in STATE:
 #   login-refused     OpenBao refuses the login
 #   write-refused     OpenBao refuses every write to the key-value mount
+#   create-refused    OpenBao refuses a POST to the key-value mount, and answers a patch as usual
 #   no-forward        the port-forward fails to start
 #   interrupt         curl sends SIGINT to the recipe's script at the request whose path it names,
 #   interrupt-at      at the Nth request to that path (the first when absent)
@@ -293,19 +300,28 @@ case "$method $path" in
     echo "minted orphan" >> "$STATE/events"
     respond 200 '{"request_id":"fake","lease_id":"","renewable":false,"lease_duration":0,"data":null,"wrap_info":null,"warnings":null,"auth":{"client_token":"marker-orphan-token","accessor":"marker-orphan-accessor","policies":["root"],"token_policies":["root"],"lease_duration":900,"renewable":false,"orphan":true}}'
     ;;
+  # The key-value backend answers a patch of a key that has no metadata with 404, and tests the
+  # request's check-and-set option against the key's current version, 1 or more here, before it
+  # writes (pathDataPatch in internal/builtin/logical/kv/path_data.go in OpenBao v2.7.2).
   "PATCH secrets/data/"*)
     [[ -e $STATE/write-refused ]] && respond 403 '{"errors":["permission denied"]}'
     file=$STATE/kv/${path#secrets/data/}.json
     [[ -f $file ]] || respond 404 '{"errors":[]}'
+    if [[ $("$JQ" -r '.options.cas // "unset"' <<< "$body") == 0 ]]; then
+      respond 400 '{"errors":["check-and-set parameter did not match the current version"]}'
+    fi
     "$JQ" -c --argjson patch "$("$JQ" -c '.data' <<< "$body")" '. * $patch' "$file" > "$file.new" && mv "$file.new" "$file"
     respond 200 "$(envelope '{"created_time":"2026-11-14T00:00:00Z","custom_metadata":null,"deletion_time":"","destroyed":false,"version":2}')"
     ;;
+  # A write to a key that exists is an update, not a create: the existence check of the data path
+  # (dataExistenceCheck in path_data.go) makes the request one, and the router does that before
+  # the handler and its check-and-set test (internal/vault/request_handling.go in OpenBao v2.7.2).
+  # The operator role may create and patch, and never update (operator-policy.json), so OpenBao
+  # answers 403 to the token.
   "POST secrets/data/"*)
-    [[ -e $STATE/write-refused ]] && respond 403 '{"errors":["permission denied"]}'
+    [[ -e $STATE/write-refused || -e $STATE/create-refused ]] && respond 403 '{"errors":["permission denied"]}'
     file=$STATE/kv/${path#secrets/data/}.json
-    if [[ -f $file && $("$JQ" -r '.options.cas // "unset"' <<< "$body") == 0 ]]; then
-      respond 400 '{"errors":["check-and-set parameter did not match the current version"]}'
-    fi
+    [[ ! -f $file ]] || respond 403 '{"errors":["permission denied"]}'
     # The custody file must be in place, and non-empty, when the key is written.
     if [[ -s $(cat "$STATE/outfile" 2> /dev/null) ]]; then : > "$STATE/stored-after-file"; fi
     mkdir -p "$(dirname "$file")"
@@ -943,9 +959,38 @@ leaked() {
   forwards_closed
   [ "$(ls -A "$BATS_TEST_TMPDIR/custody")" = volsync.age ]
 
+  # Another seeding makes another master: it depends on nothing the recipe is given, the cluster's
+  # name included.
+  rm -r "$STATE/kv" "$STATE/stored-after-file" "$VOLSYNC_CUSTODY"
+  mkdir "$STATE/kv"
+  recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
+  [ "$status" -eq 0 ]
+  [ "$(master_in "$VOLSYNC_CUSTODY")" != "$master" ]
+
+  # A file that opens, but to something else than was written, is not trusted either: nothing is
+  # written to the store, and nothing stays in the custody directory.
+  rm -r "$STATE/kv" "$STATE/stored-after-file" "$VOLSYNC_CUSTODY"
+  mkdir "$STATE/kv"
+  fake age <<AGE
+printf '%s\n' "age \$*" >> "$RECORD/argv"
+if [[ " \$* " == *" --encrypt "* ]]; then
+  cat > /dev/null
+  printf '{"cluster":"lab-sto2"}' | exec "$(command -v age)" "\$@"
+fi
+exec "$(command -v age)" "\$@"
+AGE
+  : >"$RECORD/requests"
+  recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
+  echo "a file that opens to another content: $output"
+  [ "$status" -ne 0 ]
+  [ -z "$(requests_of POST secrets/data/volsync)" ]
+  [ -z "$(ls -A "$BATS_TEST_TMPDIR/custody")" ]
+  forwards_closed
+  record age
+
   # A recipient the operator's age key does not open: the file is not trusted, the store is never
   # written, and the file is removed.
-  rm -r "$STATE/kv" "$STATE/stored-after-file" "$VOLSYNC_CUSTODY"
+  rm -rf "$STATE/kv" "$STATE/stored-after-file" "$VOLSYNC_CUSTODY"
   mkdir "$STATE/kv"
   age-keygen -o "$BATS_TEST_TMPDIR/keys/other.agekey" 2>/dev/null
   OTHER="$(age-keygen -y "$BATS_TEST_TMPDIR/keys/other.agekey")" yq -i '.creation_rules[].age = strenv(OTHER)' "$REPO/talos/.sops.yaml"
@@ -954,9 +999,12 @@ leaked() {
   echo "another recipient: $output"
   [ "$status" -ne 0 ]
   [ -z "$(requests_of POST secrets/data/volsync)" ]
-  [ -z "$(requests_of PATCH secrets/data/volsync)" ]
+  # The one patch it sent asks whether the key exists and carries no data.
+  [ "$(requests_of PATCH secrets/data/volsync | "$JQ" -c '.')" = '{"data":{},"options":{"cas":0}}' ]
   [ ! -e "$STATE/kv/volsync.json" ]
   [ ! -e "$VOLSYNC_CUSTODY" ]
+  # Nothing is left in the custody directory, the partial file included.
+  [ -z "$(ls -A "$BATS_TEST_TMPDIR/custody")" ]
   forwards_closed
 }
 
@@ -970,21 +1018,25 @@ leaked() {
   cp "$VOLSYNC_CUSTODY" "$BATS_TEST_TMPDIR/custody-before.age"
 
   # The same file again: the store holds the key, so nothing is written, and the file stays.
+  : >"$RECORD/requests"
   recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
   echo "same file: $output"
   [ "$status" -ne 0 ]
   [[ $output == *"already holds"* ]]
   [ "$(cat "$STATE/kv/volsync.json")" = "$before" ]
+  [ -z "$(requests_of POST secrets/data/volsync)" ]
   cmp "$VOLSYNC_CUSTODY" "$BATS_TEST_TMPDIR/custody-before.age"
   forwards_closed
 
   # A new file: a master is never made for a store that has one, and the file it would have held
   # does not stay behind.
+  : >"$RECORD/requests"
   recipe bao-seed-volsync "$BATS_TEST_TMPDIR/custody/another.age"
   echo "another file: $output"
   [ "$status" -ne 0 ]
   [[ $output == *"already holds"* ]]
   [ "$(cat "$STATE/kv/volsync.json")" = "$before" ]
+  [ -z "$(requests_of POST secrets/data/volsync)" ]
   [ ! -e "$BATS_TEST_TMPDIR/custody/another.age" ]
   [ "$(find "$BATS_TEST_TMPDIR/custody" -mindepth 1 | wc -l)" -eq 1 ]
   forwards_closed
@@ -1000,6 +1052,13 @@ leaked() {
   custody_file marker-seal-key
   recipe bao-seed-volsync "$CUSTODY"
   echo "the recovery keys' file: $output"
+  [ "$status" -ne 0 ]
+  # So is another cluster's custody file, though it holds a master.
+  # shellcheck disable=SC2016 # $master is a jq variable.
+  "$JQ" -n --arg master "$(printf 'a%.0s' {1..64})" '{cluster: "lab-other", volsync: {master: $master}}' |
+    age --encrypt --recipient "$RECIPIENT" --output "$BATS_TEST_TMPDIR/custody/foreign.age"
+  recipe bao-seed-volsync "$BATS_TEST_TMPDIR/custody/foreign.age"
+  echo "another cluster's file: $output"
   [ "$status" -ne 0 ]
   recipe bao-seed-volsync "$REPO/volsync.age"
   echo "inside the repository: $output"
@@ -1040,7 +1099,9 @@ leaked() {
   seed_env
   # Interrupted as the store is written, the write lost: the file holds the master, the store does
   # not hold the key.
+  # The second request to the key: the first asks whether it exists.
   echo secrets/data/volsync >"$STATE/interrupt"
+  echo 2 >"$STATE/interrupt-at"
   : >"$STATE/interrupt-drops"
   recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
   echo "interrupted: $output"
@@ -1068,7 +1129,9 @@ leaked() {
   # there, changes nothing, and keeps the file, whose master the store holds.
   rm -r "$STATE/kv" "$STATE/stored-after-file" "$VOLSYNC_CUSTODY" "$STATE/interrupt-drops"
   mkdir "$STATE/kv"
+  # The second request to the key: the first asks whether it exists.
   echo secrets/data/volsync >"$STATE/interrupt"
+  echo 2 >"$STATE/interrupt-at"
   recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
   echo "interrupted after the write: $output"
   [ "$status" -ne 0 ]
@@ -1087,13 +1150,13 @@ leaked() {
   # The same when OpenBao refuses the write.
   rm -r "$STATE/kv" "$VOLSYNC_CUSTODY"
   mkdir "$STATE/kv"
-  : >"$STATE/write-refused"
+  : >"$STATE/create-refused"
   recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
   echo "write refused: $output"
   [ "$status" -ne 0 ]
   [[ $output == *"from the file"* ]]
   master=$(master_in "$VOLSYNC_CUSTODY")
-  rm "$STATE/write-refused"
+  rm "$STATE/create-refused"
   recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
   echo "continued: $output"
   [ "$status" -eq 0 ]
@@ -1160,13 +1223,15 @@ leaked() {
   leaked "$output" "$master" marker-rotated-id marker-rotated-secret
   rm -r "$STATE/kv"
   mkdir "$STATE/kv"
-  : >"$STATE/write-refused"
+  : >"$STATE/create-refused"
   recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
   echo "write refused: $output"
   [ "$status" -ne 0 ]
   leaked "$output" "$master" marker-rotated-id marker-rotated-secret
-  rm "$STATE/write-refused"
+  rm "$STATE/create-refused"
+  # The second request to the key: the first asks whether it exists.
   echo secrets/data/volsync >"$STATE/interrupt"
+  echo 2 >"$STATE/interrupt-at"
   : >"$STATE/interrupt-drops"
   recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
   echo "interrupted: $output"

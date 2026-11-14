@@ -86,11 +86,13 @@ and has no flag that does: a run that finds the key refuses and keeps what is th
 from the recovery keys reads it, through `bao-root`, which runs OpenBao's CLI, and the master goes
 down a pipe into a new custody file and appears on no command line or screen. The new file's path
 must not exist, as `age` replaces what is at its output, and `<recipient>` is the age recipient in
-`talos/.sops.yaml`; `<recovery file>` is the file `just bao-recovery` wrote:
+`talos/.sops.yaml`; `<recovery file>` is the file `just bao-recovery` wrote. The shell stops when
+`bao kv get` fails, so no file holds an empty master, and `lab-sto2` is the cluster's name:
 
 ```sh
-just bao-root <recovery file> bash -c 'bao kv get -mount=secrets -field=RESTIC_MASTER_PASSWORD volsync |
-  jq -Rsc "{cluster: \"lab-sto2\", volsync: {master: rtrimstr(\"\\n\")}}" | age --encrypt --recipient "$1" --output "$2"' _ <recipient> <new file>
+just bao-root <recovery file> bash -euo pipefail -c 'master=$(bao kv get -mount=secrets -field=RESTIC_MASTER_PASSWORD volsync)
+  printf "%s" "$master" | jq -Rsc "{cluster: \"lab-sto2\", volsync: {master: .}}" |
+    age --encrypt --recipient "$1" --output "$2"' _ <recipient> <new file>
 ```
 
 The recipes are tested against fakes of OpenBao; this command, which runs OpenBao's own CLI, is

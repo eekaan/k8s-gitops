@@ -8,14 +8,17 @@
 # opened again with the operator's Talos age key to what was written, and never put over a file that
 # exists, as bao-recovery orders its custody file before its commit. Only then does it create the key,
 # and only if no key exists: a master that changes orphans every repository, so nothing here
-# replaces one. The key is created with check-and-set 0, so a key that exists makes OpenBao refuse,
-# which the operator role needs, as it may create and patch keys and never read them.
+# replaces one. The operator role may create and patch keys and never read or update them, so the
+# recipe asks before it makes anything: an empty patch with check-and-set 0 of the key is answered
+# 404 where there is no key, and refused for its check-and-set where there is one, and writes
+# nothing either way. OpenBao answers a write to a key that exists with permission denied, which
+# is why the key is created only after that answer.
 # The cluster's S3 key is read from CLUSTER_S3_ACCESS_KEY_ID and CLUSTER_S3_SECRET_ACCESS_KEY, the
 # in-cluster key and not the operator's state key; an empty one, a placeholder, or the state key's
 # stops the run before anything is made.
 # A run that fails after FILE is written and before OpenBao holds the key says so, and the next run
 # with the same FILE reads the master back from it, makes no other, and goes on. A run that finds
-# the key already there changes nothing: a file it made is removed, a file that was there is kept.
+# the key already there changes nothing and makes no file; a file that was there is kept.
 # --rotate-s3 replaces the S3 key properties of the key and keeps the master, and takes no file.
 # Nothing of the master or the key is printed, passed as an argument or written unencrypted: they
 # stay in memory and on pipes between jq, age and curl. Works through the session of
@@ -98,26 +101,26 @@ if ((!rotate)); then
 fi
 ((complete))
 
-# have_file is 1 once FILE holds the master, made by this run (made) or read from FILE; stored is 1
-# once OpenBao holds the key; holds is 1 when OpenBao refused because it holds one already. partial
-# is the file being written.
-have_file=$resume made=0 stored=0 holds=0 partial=""
+# have_file is 1 once FILE holds the master, made by this run or read from FILE; stored is 1 once
+# OpenBao holds the key; holds is 1 when OpenBao already holds one. partial is the file being
+# written.
+have_file=$resume stored=0 holds=0 partial=""
 
 # bao_abort: removes a partial file, and on a failure after FILE holds the master and before OpenBao
 # holds the key says which state that left and how the next run goes on. A run that found the key
-# already there has changed nothing: it removes the file it made, which holds a master the store
-# never had, and keeps one that was there.
+# already there has changed nothing and made no file, and keeps one that was there.
 bao_abort() {
   [[ -z $partial ]] || rm -f -- "$partial"
-  ((have_file && !stored)) || return 0
-  if ((holds && made)); then
-    rm -f -- "$file"
-    infra_error "OpenBao already holds the key $volsync_key, with a master this run did not make; the file it made, $file, is removed and nothing in OpenBao changed"
-  elif ((holds)); then
-    infra_error "OpenBao already holds the key $volsync_key; nothing in it changed, and $file is kept, as it may hold that key's master"
-  else
-    infra_error "OpenBao may not hold the key $volsync_key yet, and $file holds its master; run this again with the same file: it goes on from the file, with the same master, and says so if OpenBao holds the key by then"
+  if ((holds)); then
+    if ((have_file)); then
+      infra_error "OpenBao already holds the key $volsync_key; nothing in it changed, and $file is kept, as it may hold that key's master"
+    else
+      infra_error "OpenBao already holds the key $volsync_key; nothing was made and nothing in it changed"
+    fi
+    return 0
   fi
+  ((have_file && !stored)) || return 0
+  infra_error "OpenBao may not hold the key $volsync_key yet, and $file holds its master; run this again with the same file: it goes on from the file, with the same master, and says so if OpenBao holds the key by then"
 }
 
 bao_open
@@ -137,6 +140,23 @@ if ((rotate)); then
   fi
   echo "bao-seed-volsync: replaced the S3 key of the key $volsync_key; its master is unchanged"
   exit 0
+fi
+
+# Whether the key exists, before a master is made: the patch is answered 404 where there is none.
+step="asking whether OpenBao holds the key $volsync_key"
+probed=0
+printf '%s' '{"data":{},"options":{"cas":0}}' |
+  bao_request PATCH "$bao_mount/data/$volsync_key" application/merge-patch+json > /dev/null 2> "$work_dir/refusal" || probed=$?
+if ((probed == 0)); then
+  infra_error "OpenBao took an empty patch with check-and-set 0 of the key $volsync_key; it was not meant to"
+  exit 1
+elif ((probed != 44)); then
+  if grep -q 'check-and-set' "$work_dir/refusal"; then
+    holds=1
+  else
+    cat "$work_dir/refusal" >&2
+  fi
+  exit 1
 fi
 
 if ((!resume)); then
@@ -166,7 +186,7 @@ if ((!resume)); then
     infra_error "$file exists now; the master password goes into a new file"
     exit 1
   fi
-  have_file=1 made=1
+  have_file=1
   rm -- "$partial"
   partial=""
 fi
@@ -176,18 +196,12 @@ body=$(printf '%s' "$master" | jq -Rsc \
   '{data: {RESTIC_MASTER_PASSWORD: ., AWS_ACCESS_KEY_ID: env.CLUSTER_S3_ACCESS_KEY_ID,
     AWS_SECRET_ACCESS_KEY: env.CLUSTER_S3_SECRET_ACCESS_KEY}, options: {cas: 0}}')
 master=
-# Only while there is nothing at the key: OpenBao refuses the write when a key exists.
+# Only while there is nothing at the key, as the patch above found: with a key made since, OpenBao
+# refuses this write, and the next run finds the key.
 written=0
-printf '%s' "$body" | bao_request POST "$bao_mount/data/$volsync_key" > /dev/null 2> "$work_dir/refusal" || written=$?
+printf '%s' "$body" | bao_request POST "$bao_mount/data/$volsync_key" > /dev/null || written=$?
 body=
-if ((written != 0)); then
-  if grep -q 'check-and-set' "$work_dir/refusal"; then
-    holds=1
-  else
-    cat "$work_dir/refusal" >&2
-  fi
-  exit 1
-fi
+((written == 0)) || exit 1
 stored=1
 
 if ((resume)); then

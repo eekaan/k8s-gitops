@@ -54,7 +54,7 @@ Feature: Volume backups
   Scenario: Only the seeding recipe writes the repository's credentials into the secret store
     Given the test application built as Flux applies it, OpenBao's initial configuration, and the manifests, scripts and recipes in the tree
     When the Secret the movers read, the secret stores in the tree and what writes into the store are read
-    Then only the component's ExternalSecret makes that Secret, which VolSync requires before it starts a mover, the only secret store the tree defines is the ClusterSecretStore that ExternalSecret names, OpenBao's initial configuration makes no request under the store's mount, no manifest pushes a Secret, and the only file that names the key's path or writes it is bao-seed-volsync
+    Then only the component's ExternalSecret makes that Secret, which VolSync requires before it starts a mover, the only secret store the tree defines is the ClusterSecretStore that ExternalSecret names, OpenBao's initial configuration makes no request under the store's mount, no manifest pushes a Secret, the only file that names the key's path is bao-seed-volsync, which binds that key to its write, and the only scripts that write under the store's data path are it and bao-put, which takes its key as an argument
 
   Scenario: The demo volume's backup and restore objects are in what Flux applies for the cluster
     Given the cluster's overlay, built as Flux applies it, and the application volsync-demo

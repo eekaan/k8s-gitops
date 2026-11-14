@@ -2,10 +2,10 @@
 # Shared by scripts/bao-put, bao-recovery, bao-root, bao-seal-restore, bao-seed-volsync and
 # bao-volsync-password, which source it with scripts/cluster-env: where OpenBao answers and as whom
 # an operator logs in to it, the names a key-value path may hold, opening the operator's custody
-# file, and the session a recipe works in: a private directory, a port-forward to OpenBao's active member, a short-lived token, and requests to
-# OpenBao's API through them. Nothing here prints a token, a value or a key, or passes one as an
-# argument: they reach kubectl, curl, jq and age on standard input or through a file descriptor,
-# and leave them on a pipe.
+# file, and the session a recipe works in: a private directory, a port-forward to OpenBao's active
+# member, a short-lived token, and requests to OpenBao's API through them. Nothing here prints a
+# token, a value or a key, or passes one as an argument: they reach kubectl, curl, jq and age on
+# standard input or through a file descriptor, and leave them on a pipe.
 
 bao_namespace=openbao
 bao_service=openbao-active

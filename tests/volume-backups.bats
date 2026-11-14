@@ -556,6 +556,15 @@ unknown_fields() {
     "$REPO/kubernetes" "$REPO/scripts" "$REPO/just" "$REPO/justfile" || true)"
   echo "files that write the key: ${writers:-none}"
   [ "${writers#"$REPO"/}" = scripts/bao-seed-volsync ]
+  # That recipe's own write is to the key, and no script but bao-put, whose key is its argument,
+  # writes to the mount's data path otherwise: a script that wrote the key through variables would
+  # show here.
+  grep -qE "^volsync_key=$key\$" "$REPO/scripts/bao-seed-volsync"
+  # shellcheck disable=SC2016 # the pattern names shell variables.
+  grep -qE 'bao_request POST "\$bao_mount/data/\$volsync_key"' "$REPO/scripts/bao-seed-volsync"
+  writers="$(grep -rlE 'bao_request (POST|PUT|PATCH) "[^"]*/data/' "$REPO/scripts" | sed "s#^$REPO/##" | sort | paste -sd' ' -)"
+  echo "scripts that write under the mount's data path: ${writers:-none}"
+  [ "$writers" = "scripts/bao-put scripts/bao-seed-volsync" ]
 }
 
 @test "The demo volume's backup and restore objects are in what Flux applies for the cluster" {

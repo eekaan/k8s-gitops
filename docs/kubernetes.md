@@ -812,17 +812,17 @@ are `RESTIC_MASTER_PASSWORD`, the master password, and the cluster's S3 key, `AW
 An application's password is the SHA-256 digest of the master, a slash and the application's name,
 with nothing after it, written as 64 lower-case hexadecimal digits. The component writes the master
 into no Secret, so one application's Secret opens no other application's repository, and only the
-master is kept outside the cluster. To open a repository with restic by hand, compute its password from the
-master that way, with a tool that reads the master from a file or its standard input and never
-from its command line, and give the password to restic in a file or from a command
-(`RESTIC_PASSWORD_FILE`, `RESTIC_PASSWORD_COMMAND`), never as an argument. Every namespace that
+master is kept outside the cluster. To open a repository with restic, `just bao-volsync-password
+<file> <app> restic ...` derives the application's password that way from the master in the custody
+file and runs the command with the repository, the password and the cluster's S3 key in its
+environment, printing none of them: nobody computes a digest at a prompt. Every namespace that
 takes the component holds the cluster's S3 key, which reaches every bucket of the project: whoever
 can read Secrets there can read, replace or delete any application's backups, though not decrypt
 them (ADR 0015).
 
 ### What an operator does once, and what then happens by itself
 
-OpenBao starts with its key-value mount empty and nothing in the tree writes the key `volsync`, so
+OpenBao starts with its key-value mount empty and nothing Flux applies writes the key `volsync`, so
 the operator seeds it once, after `just bao-recovery`, with the cluster's S3 key in `.env`
 (`CLUSTER_S3_ACCESS_KEY_ID` and `CLUSTER_S3_SECRET_ACCESS_KEY`, which `just infra-s3-key cluster`
 makes) and `just cluster-config` applied, so the repository's prefix, endpoint and region are in
@@ -839,11 +839,13 @@ just bao-seed-volsync <file>
 - makes the master, 32 random bytes from the kernel written as 64 hexadecimal digits, which restic
   and the template's digest take as they are, and writes it to `<file>` encrypted with age to the
   Talos age key's recipient; opens the file again with the operator's Talos age key and compares it
-  with what it wrote; and only then creates the key, with the master and the cluster's S3 key, as
-  the operator role may create and patch keys and never read them. The key is created only while
-  none exists, so a store that holds one is refused, `<file>` it made is removed, and the master
-  in the store is never replaced: a master that changes orphans every repository, so no flag
-  replaces it. An existing `<file>` is never replaced either;
+  with what it wrote; and only then creates the key, with the master and the cluster's S3 key. The
+  operator role may create and patch keys, and never read or update them, so before it makes
+  anything the recipe asks whether the key exists with an empty patch and check-and-set 0, which
+  writes nothing: OpenBao answers 404 where there is no key and refuses on check-and-set where
+  there is one. A store that holds one is refused before a master is made, no `<file>` is made, and
+  the master in the store is never replaced: a master that changes orphans every repository, so no
+  flag replaces it. An existing `<file>` is never replaced either;
 - after a failure between writing `<file>` and the store holding the key, as when OpenBao refuses
   the write or the run is interrupted, says which state it left; the next run with the same `<file>`
   reads the master back from it, makes no other and goes on. A store that already holds the key
