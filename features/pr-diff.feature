@@ -7,6 +7,21 @@ Feature: The render diff of a pull request
     When just render runs
     Then each application the cluster applies, its root and its sync included, has a render of its own and the disabled one has none, with the example values substituted and the root's defaults applied, and the HelmRelease is expanded to the objects its chart renders with the repository's values, its definitions and its monitor included, post-rendered and labelled as helm-controller does, with the values the chart makes up anew on every render masked
 
+  Scenario: A release whose chart comes from a Helm repository is rendered to the objects its chart renders at the pinned version
+    Given a tree whose cluster overlay enables an application whose HelmRelease takes its chart from a HelmRepository at an exact version
+    When just render runs
+    Then the chart is pulled by name from the repository at exactly that version, and the HelmRelease is expanded to the objects the chart renders at that version, with its values, labelled as helm-controller labels them
+
+  Scenario: A release whose chart version is not exact, or whose source needs a credential, is refused, and the refusal names it
+    Given trees whose HelmRelease pins a version range, a wildcard or no version, names a chart that is no chart name, takes its chart from a GitRepository, or whose HelmRepository has a URL that is not https, or names a secretRef or a certSecretRef, or is an OCI repository with a URL that is not oci://
+    When just render runs on each
+    Then each fails, naming the release and what is refused, and nothing is pulled
+
+  Scenario: Every release the cluster's overlay enables is one the render accepts
+    Given this repository's tree
+    When the render checks the form of every HelmRelease the cluster's overlay enables, without pulling a chart
+    Then each is accepted
+
   Scenario: A changed value shows as a changed object in that application's diff, and nowhere else
     Given renders of a tree before and after one value of its chart is changed
     When just render-diff compares them

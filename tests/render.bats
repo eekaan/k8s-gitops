@@ -1,8 +1,10 @@
 #!/usr/bin/env bats
 # Proves features/pr-diff.feature; each test carries its scenario's title.
 # Needs helm, kustomize, flux, yq, jq, git and diff on PATH (the versions pinned for the repository).
-# Offline: the fixture's one chart is packaged from tests/fixtures/render/charts and handed to the
-# render through its chart cache, and the registry its OCIRepository names does not resolve.
+# Offline: the fixture's charts are packaged from tests/fixtures/render/charts. The OCI one is
+# handed to the render through its chart cache; the registry its OCIRepository names does not
+# resolve. The one a HelmRepository names is packaged at the version asked for by a stand-in for
+# helm's pull from a repository, which logs what it was asked for; the repository does not resolve.
 
 setup_file() {
   # Helm's settings, and the Docker configuration it reads registry logins from, stay in the run's
@@ -15,6 +17,30 @@ setup_file() {
   export RENDER_CHART_CACHE="$BATS_FILE_TMPDIR/charts"
   helm package "$BATS_TEST_DIRNAME/fixtures/render/charts/greeter" \
     --destination "$RENDER_CHART_CACHE/charts.example.invalid/greeter/1.0.0" >/dev/null
+  export PULL_LOG="$BATS_FILE_TMPDIR/pull.log"
+  export REAL_HELM LEDGER_CHART="$BATS_TEST_DIRNAME/fixtures/render/charts/ledger"
+  REAL_HELM="$(command -v helm)"
+  mkdir -p "$BATS_FILE_TMPDIR/bin"
+  cat >"$BATS_FILE_TMPDIR/bin/helm" <<'EOF'
+#!/usr/bin/env bash
+# Stands in for helm pull from a repository (--repo); anything else is the real helm.
+args=("$@")
+if [[ ${1:-} == pull && " $* " == *" --repo "* ]]; then
+  chart=${2:-}
+  for ((i = 0; i < ${#args[@]}; i++)); do
+    case ${args[i]} in
+      --repo) repo=${args[i + 1]} ;;
+      --version) version=${args[i + 1]} ;;
+      --destination) destination=${args[i + 1]} ;;
+    esac
+  done
+  echo "chart=$chart repo=$repo version=${version:-}" >>"$PULL_LOG"
+  exec "$REAL_HELM" package "$LEDGER_CHART" --version "${version:?no version}" --destination "$destination"
+fi
+exec "$REAL_HELM" "$@"
+EOF
+  chmod +x "$BATS_FILE_TMPDIR/bin/helm"
+  export PATH="$BATS_FILE_TMPDIR/bin:$PATH"
 }
 
 setup() {
@@ -35,6 +61,12 @@ tree() {
 # render NAME: runs just render for the tree NAME, into $BATS_TEST_TMPDIR/NAME.out.
 render() {
   run just --justfile "$REPO/justfile" render "$BATS_TEST_TMPDIR/$1.out" "$BATS_TEST_TMPDIR/$1"
+}
+
+# render_direct NAME: the same without just, which puts the pinned tools ahead of the stand-in for
+# helm's pull from a repository on PATH.
+render_direct() {
+  run "$REPO/scripts/render" "$BATS_TEST_TMPDIR/$1.out" "$BATS_TEST_TMPDIR/$1"
 }
 
 # render_both: renders the trees base and head, each of which must render.
@@ -323,4 +355,80 @@ EOF
   [[ $output == *"the base has no render code"* ]]
   BODY="$BATS_TEST_TMPDIR/without-code.md"
   [ "$(rows)" = "$(row demo/greeter 0 0 3)" ]
+}
+
+# ledger NAME: a copy of the fixture tree in $BATS_TEST_TMPDIR/NAME that enables the ledger, whose
+# chart comes from a Helm repository; sets LEDGER to its application directory.
+ledger() {
+  tree "$1"
+  sed -i 's|^  # - \(../../base/web/ledger/ks.yaml\).*|  - \1|' "$BATS_TEST_TMPDIR/$1/kubernetes/apps/overlays/demo/kustomization.yaml"
+  LEDGER="$BATS_TEST_TMPDIR/$1/kubernetes/apps/base/web/ledger/app"
+}
+
+# refused FILE EXPRESSION WORDS: the ledger with the yq EXPRESSION applied to its FILE is refused,
+# the message naming the release and holding WORDS.
+refused() {
+  n=$((${n:-0} + 1))
+  ledger "refused-$n"
+  yq -i "$2" "$LEDGER/$1"
+
+  if message="$("$REPO/scripts/render" "$BATS_TEST_TMPDIR/refused-$n.out" "$BATS_TEST_TMPDIR/refused-$n" 2>&1)"; then
+    echo "$2: rendered"
+    return 1
+  fi
+
+  [[ $message == *"demo/ledger: HelmRelease web/ledger"* ]] || { echo "$2: $message"; return 1; }
+  [[ $message == *"$3"* ]] || { echo "$2: $message"; return 1; }
+}
+
+@test "A release whose chart comes from a Helm repository is rendered to the objects its chart renders at the pinned version" {
+  ledger base
+  rm -f "$PULL_LOG"
+
+  render_direct base
+
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  local out="$BATS_TEST_TMPDIR/base.out/demo/ledger" config
+  # The chart is pulled by name from the repository's URL at exactly the version the release pins.
+  [ "$(cat "$PULL_LOG")" = "chart=ledger repo=https://charts.example.invalid/stable version=2.3.4" ]
+  config="$(object "$out" ConfigMap ledger)"
+  [ "$(yq '.data["chart-version"]' <<<"$config")" = 2.3.4 ]
+  [ "$(yq '.data.greeting' <<<"$config")" = "from the release" ]
+  [ "$(yq '.metadata.namespace' <<<"$config")" = web ]
+  [ "$(yq '.metadata.labels["helm.toolkit.fluxcd.io/name"]' <<<"$config")" = ledger ]
+  [ -n "$(object "$out" HelmRepository ledger)" ]
+}
+
+@test "A release whose chart version is not exact, or whose source needs a credential, is refused, and the refusal names it" {
+  rm -f "$PULL_LOG"
+
+  refused helmrelease.yaml '.spec.chart.spec.version = "~2.3.0"' "not an exact version"
+  refused helmrelease.yaml '.spec.chart.spec.version = ">=2.0.0"' "not an exact version"
+  refused helmrelease.yaml '.spec.chart.spec.version = "2.x"' "not an exact version"
+  refused helmrelease.yaml 'del(.spec.chart.spec.version)' "not an exact version"
+  refused helmrelease.yaml '.spec.chart.spec.chart = "--repo"' "not a chart name"
+  refused helmrelease.yaml '.spec.chart.spec.sourceRef.kind = "GitRepository"' "a GitRepository"
+  refused helmrepository.yaml '.spec.url = "http://charts.example.invalid/stable"' "not an https"
+  refused helmrepository.yaml '.spec.url = "https://user@charts.example.invalid/stable"' "not an https"
+  refused helmrepository.yaml '.spec.secretRef.name = "registry-login"' "secretRef"
+  refused helmrepository.yaml '.spec.certSecretRef.name = "registry-ca"' "certSecretRef"
+  refused helmrepository.yaml '.spec.type = "oci"' "not an oci://"
+  # Nothing was pulled for any of them.
+  [ ! -e "$PULL_LOG" ]
+}
+
+@test "Every release the cluster's overlay enables is one the render accepts" {
+  run "$REPO/scripts/render" --forms "$REPO"
+
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ $output == *"releases accepted"* ]]
+
+  # A form the render refuses fails it, naming the release, with nothing pulled.
+  ledger refused
+  yq -i '.spec.chart.spec.version = "~2.3.0"' "$LEDGER/helmrelease.yaml"
+  rm -f "$PULL_LOG"
+  run "$REPO/scripts/render" --forms "$BATS_TEST_TMPDIR/refused"
+  [ "$status" -ne 0 ]
+  [[ $output == *"demo/ledger: HelmRelease web/ledger: chart version ~2.3.0 is not an exact version"* ]]
+  [ ! -e "$PULL_LOG" ]
 }
