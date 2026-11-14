@@ -10,6 +10,12 @@
 # key, and rclone is tests/fixtures/etcd-snapshots/rclone, whose buckets are directories.
 
 setup_file() {
+  # The tests that run the real talman and sops use whichever is first on PATH: the pinned installs
+  # go first, as the justfile puts them, so that an older talman earlier on PATH does not answer.
+  if command -v mise > /dev/null; then
+    PATH="$(mise bin-paths | paste -sd: -):$PATH"
+    export PATH
+  fi
   # The Talos check's fixture cluster: talos/talman.yaml.tftpl rendered from tests/fixtures/talos,
   # as talos/<cluster>/talman.yaml is rendered from the cluster stack.
   local encoded
