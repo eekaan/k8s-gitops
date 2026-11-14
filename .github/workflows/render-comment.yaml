@@ -1,0 +1,53 @@
+---
+# Puts the CI render job's comment on its pull request (docs/kubernetes.md, The render diff). A
+# pull request's CI run, a fork's included, runs the pull request's own copy of the CI workflow, with
+# a read-only token and no secrets, so it cannot comment. GitHub runs a workflow_run workflow such as
+# this one from the default branch, with the repository's token, whatever the run it follows had.
+# So nothing here comes from the pull request: the job checks out the default branch, runs its
+# recipe, and reads the render job's artifact as text only (scripts/ci-comment). It is not a
+# required check: a comment that fails to post blocks no merge.
+name: render-comment
+
+"on":
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+
+permissions:
+  contents: read
+  # To download the CI run's artifact.
+  actions: read
+  # To find the pull request, and create or update its comment.
+  pull-requests: write
+
+# Runs for one pull request's head never overlap, so two cannot both create the comment, and a
+# running one is never cancelled: the older of two finds that the head has moved on and posts
+# nothing.
+concurrency:
+  group: render-comment-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  comment:
+    # Runs for pull requests only; a cancelled run left nothing to post.
+    if: github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.conclusion != 'cancelled'
+    runs-on: ubuntu-latest
+    steps:
+      # The commit this run is for: the default branch's latest.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785  # v5.2.8
+        with:
+          version: 2026.11.4
+          install_args: just gh jq
+          # Not the job's token, which can write to pull requests: mise installs without one.
+          github_token: ""
+      # The run's identifiers reach the recipe as variables, never as text in the command.
+      - run: just ci-comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}

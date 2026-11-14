@@ -127,6 +127,36 @@ its environment. What rclone prints names the buckets and the endpoint, so it is
 errors the etcd recipes show the reason only, with places and keys replaced, as
 [cluster.md](cluster.md#what-the-recipes-print) says.
 
+## The node subnet
+
+The plumbing stack's node subnet, `node_cidr`, `10.10.0.0/24` by default, is shared by every
+stack. Neutron hands out addresses itself only from the DHCP pool; everything else holds a fixed
+address below it, by host number:
+
+| Host number | Holder | Set by |
+| --- | --- | --- |
+| 1 | the gateway, the router's port | Neutron |
+| 5 | the Kubernetes API's load balancer | the cluster stack |
+| 6 | the CI host ([The CI host](#the-ci-host)) | the ci stack's `host_number` |
+| 7 and 8 | the two edge routers ([Services announced over BGP](#services-announced-over-bgp)) | the plumbing stack's `edge_hosts` |
+| 10 and up | the control planes | the cluster stack |
+| 20 and up | the workers | the cluster stack |
+| 100 to 200 | the DHCP pool | the plumbing stack |
+
+These collisions are refused when a stack is planned:
+
+- the edge routers on each other, on the gateway or in the DHCP pool (the plumbing stack);
+- the CI host outside 2 to 9, on 5, or on an edge router (the ci stack, and the cluster stack for
+  `ci_host_number`);
+- a node or the API load balancer on an edge router (the cluster stack);
+- the default service range on the default node, pod or service subnet (`just infra-check`,
+  offline), and a configured one on the node subnet (the plumbing stack) or on the pod or service
+  subnet (the cluster stack).
+
+Nothing else is checked. The control planes and the workers keep apart from each other and below
+the DHCP pool by their numbering alone, as long as there are at most ten control planes and eighty
+workers.
+
 ## The workers' data volumes
 
 The cluster stack gives every worker, and no control plane, one more volume besides its boot
@@ -144,6 +174,53 @@ The volumes belong to the cluster stack. `just infra-destroy` and `just cluster-
 them with it, and what is on them is gone; backups are what keeps data
 ([ADR 0008](adr/0008-state-and-backups-are-encrypted-before-they-leave.md)).
 
+## Services announced over BGP
+
+Services of type `LoadBalancer` take their addresses from the service range, and every worker
+advertises them over BGP to two edge routers on the node subnet
+([kubernetes.md](kubernetes.md#service-addresses), ADR 0013). The plumbing stack defines the
+numbers, once, as variables with defaults, and gives them to the cluster stack in its sensitive
+output `bgp`:
+
+- `service_range`, `10.20.0.0/28` by default: the range addresses come from. It lies in one of
+  RFC 1918's private ranges and outside `node_cidr`, and the cluster stack refuses a `pod_subnet`
+  or `service_subnet` that overlaps it. Only BGP makes it reachable, through the edge routers.
+- `edge_hosts`, 7 and 8 by default: the host numbers of the edge routers' two addresses on the node
+  subnet ([The node subnet](#the-node-subnet)), below the DHCP pool and above the gateway. They are
+  reserved for the edge routers; no stack creates an instance at them yet, and until one does, the
+  workers' BGP sessions stay down. The cluster stack refuses a plan in which a node, the API load
+  balancer or `ci_host_number` takes one, and the ci stack one in which its `host_number` does.
+- `cluster_asn` and `edge_asn`, 64513 and 64512 by default: the workers' and the edge routers'
+  autonomous system numbers, two different private 16-bit numbers (64512 to 65534), for eBGP.
+
+The cluster stack hands them on in `talman.yaml` ([below](#the-generated-talmanyaml)) and makes
+the node network carry the range:
+
+- Every worker's port lists the service range among its allowed address pairs. Port security lets
+  a port send only from its own address and the pairs (Neutron's API reference, the
+  `allowed_address_pairs` and `port_security_enabled` attributes of a port), and with OVN as
+  Neutron's backend also receive only for them, so without the pair a worker could neither answer
+  from a service address nor, there, be sent a packet for one. Control planes announce nothing and
+  get no pair. The provider updates a port's allowed address pairs and security groups in place,
+  so adding them to a running worker changes neither its port nor its server.
+- The workers have a security group of their own besides the nodes', `<prefix>-workers`, whose
+  only rules admit TCP on each port of `service_ports`, 80 and 443 by default, from each edge
+  address, and which has no egress rule of its own. A rule matches a packet's protocol, port and
+  source, never its destination, so it also admits those ports to the worker's own address: only
+  TCP, only from the two edge addresses, and answered there only by a workload on the host's
+  network or with a host port on that port, as Cilium serves a `LoadBalancer` Service's port on
+  its address alone. No NodePort (30000 to 32767) is admitted from the edge routers unless
+  `service_ports` names one. The workers open their BGP sessions to the edge routers on TCP 179
+  themselves, through the nodes' group, which keeps Neutron's default egress rules; security
+  groups are stateful, so the edge routers' side of a session passes, and no rule admits a
+  connection to TCP 179. The sensitive output `worker_security_group` gives the group and its
+  rules.
+- The nodes' group is unchanged, and the edge addresses are not in it, but it already admits TCP
+  6443 from the whole node subnet, for the API load balancer's connections to the API servers, and
+  the edge addresses are on that subnet. In total, then, an edge router reaches the service ports
+  on the workers, through the workers' group, and TCP 6443 on every node, which only control
+  planes answer; nothing else.
+
 ## The CI host
 
 The `ci` stack makes one Linux VM on the plumbing stack's node network, outside the cluster, that
@@ -155,8 +232,10 @@ around it; it is destroyed by name only ([Recipes](#recipes)).
 - `<prefix>-ci`, `lab-ci` by default, of the flavor `flavor`, booting from a volume of
   `root_volume_size_gb` GB made from the image `CI_HOST_IMAGE` names, a Debian or Ubuntu cloud
   image. Its port is on the node subnet at host number `host_number`, 6 by default: below the DHCP
-  pool and the control planes' 10, apart from the API load balancer's 5. It has a floating IP from
-  the plumbing stack's external network.
+  pool and the control planes' 10, apart from the API load balancer's 5 and the edge routers' 7
+  and 8, which the stack reads from the plumbing stack's state and refuses
+  ([The node subnet](#the-node-subnet)). It has a floating IP from the plumbing stack's external
+  network.
 - Its security group admits TCP 22 from each network of the operator allowlist, the same
   `OPERATOR_CIDRS` or `operator-cidrs.json` the cluster stack takes, and nothing else inbound; it
   lets the host reach anything. The cloud's default rules are deleted, so the group holds only
@@ -191,7 +270,10 @@ address on the node network as the endpoint; the Talos and Kubernetes versions f
 `service_subnet`, Kubernetes' conventional private ranges by default; the load balancer's two
 addresses and each control plane's floating address as the API certificate names; the load
 balancer's floating address as `values.apiAddress`, where the cluster recipes reach the Kubernetes
-API ([cluster.md](cluster.md#environment)); and the nodes,
+API ([cluster.md](cluster.md#environment)); the plumbing stack's service range as
+`values.serviceRange` and its AS numbers and edge addresses as `values.bgp`, which
+`just cluster-config` hands to the cluster ([Services announced over BGP](#services-announced-over-bgp));
+and the nodes,
 control planes first and then workers, each by name and at its floating address, where talman
 reaches it. Planning fails, naming the variable, when the pod or service subnet is not an IPv4
 network, overlaps the other or the node subnet, or when the pod subnet holds fewer /24s than there

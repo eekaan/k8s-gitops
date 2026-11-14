@@ -1,7 +1,8 @@
 # The machines of a Talos cluster. Every node boots the Talos image without machine configuration
 # and waits in maintenance mode, with a fixed private address and a floating IP whose Talos and
 # Kubernetes APIs answer only the operator allowlist; machine configuration is applied over the
-# Talos API.
+# Talos API. Workers can be given more: allowed address pairs, and a security group of their own
+# for traffic to Services.
 
 locals {
   # Fixed addresses below the node subnet's DHCP pool: control planes from host number 10,
@@ -83,6 +84,33 @@ resource "openstack_networking_secgroup_rule_v2" "api_from_subnet" {
   remote_ip_prefix  = var.network.cidr
 }
 
+# The workers' own group, on top of the nodes': only the rules for traffic to Services. A rule
+# matches a packet's protocol, port and source, never its destination, so it admits the same
+# traffic to the worker's own address and to every address its allowed address pairs carry.
+resource "openstack_networking_secgroup_v2" "workers" {
+  name        = "${var.name}-workers"
+  description = "Workers of ${var.name}: connections to Services from the sources the cluster names."
+  # Ingress rules only; the nodes' group keeps Neutron's default egress rules for the workers.
+  delete_default_rules = true
+  tags                 = var.tags
+}
+
+# Keyed by port and position in the sources, as the API rules are.
+resource "openstack_networking_secgroup_rule_v2" "worker_ingress" {
+  for_each = {
+    for pair in setproduct(var.worker_ingress.tcp_ports, range(nonsensitive(length(var.worker_ingress.sources)))) :
+    "${pair[0]}-${pair[1]}" => { port = pair[0], source = pair[1] }
+  }
+
+  security_group_id = openstack_networking_secgroup_v2.workers.id
+  direction         = "ingress"
+  ethertype         = "IPv4"
+  protocol          = "tcp"
+  port_range_min    = each.value.port
+  port_range_max    = each.value.port
+  remote_ip_prefix  = var.worker_ingress.sources[each.value.source]
+}
+
 # Spreads the nodes over hypervisors where the cloud can, and still places them where it cannot.
 resource "openstack_compute_servergroup_v2" "this" {
   name     = var.name
@@ -93,18 +121,26 @@ module "node" {
   source   = "../vm"
   for_each = local.nodes
 
-  name                  = each.key
-  flavor                = local.flavors[each.value.role]
-  image_id              = var.image_id
-  root_volume_size_gb   = var.root_volume_size_gb
-  volume_type           = var.volume_type
-  server_group_id       = openstack_compute_servergroup_v2.this.id
-  network_id            = var.network.network_id
-  subnet_id             = var.network.subnet_id
-  fixed_ip              = cidrhost(var.network.cidr, each.value.host)
-  security_group_ids    = [openstack_networking_secgroup_v2.this.id]
-  allowed_address_pairs = var.allowed_address_pairs
-  tags                  = var.tags
+  name                = each.key
+  flavor              = local.flavors[each.value.role]
+  image_id            = var.image_id
+  root_volume_size_gb = var.root_volume_size_gb
+  volume_type         = var.volume_type
+  server_group_id     = openstack_compute_servergroup_v2.this.id
+  network_id          = var.network.network_id
+  subnet_id           = var.network.subnet_id
+  fixed_ip            = cidrhost(var.network.cidr, each.value.host)
+  # The provider updates a port's security groups and allowed address pairs in place, so adding
+  # either to a running worker's port changes neither the port nor its server.
+  security_group_ids = concat(
+    [openstack_networking_secgroup_v2.this.id],
+    each.value.role == "worker" ? [openstack_networking_secgroup_v2.workers.id] : [],
+  )
+  allowed_address_pairs = concat(
+    var.allowed_address_pairs,
+    each.value.role == "worker" ? var.worker_allowed_address_pairs : [],
+  )
+  tags = var.tags
 }
 
 # The address is a resource of its own, keyed by node name, so a node keeps its floating IP when

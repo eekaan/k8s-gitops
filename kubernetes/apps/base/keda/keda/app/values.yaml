@@ -1,0 +1,72 @@
+---
+# Values for the KEDA chart, read by the HelmRelease through a ConfigMap generated without
+# substitution. Keys not set here keep the chart's defaults. The requests and limits are the ones
+# KEDA's documentation gives for each component, which the chart sets.
+
+crds:
+  install: true
+  additionalAnnotations:
+    # Deleting a definition deletes every ScaledObject and trigger authentication of its kind, so
+    # Helm leaves the definitions in place when the release is uninstalled, as it is when this
+    # application leaves the tree.
+    helm.sh/resource-policy: keep
+
+# Each component keeps a pod through a drain: two replicas and a disruption budget that keeps one
+# available. Only one operator leads, so its second replica is a standby; the second metrics server
+# is there for availability as well, since requests are not spread over the two without aggregator
+# routing on the API server. The spread over nodes is a preference, never a reason to leave a pod
+# unscheduled.
+operator:
+  replicaCount: 2
+metricsServer:
+  replicaCount: 2
+webhooks:
+  replicaCount: 2
+  # The chart's default, kept on purpose: while no webhook answers, a ScaledObject or trigger
+  # authentication is admitted unchecked instead of refused.
+  failurePolicy: Ignore
+
+podDisruptionBudget:
+  operator:
+    minAvailable: 1
+  metricServer:
+    minAvailable: 1
+  webhooks:
+    minAvailable: 1
+
+topologySpreadConstraints:
+  operator:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app: keda-operator
+  metricsServer:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app: keda-operator-metrics-apiserver
+  webhooks:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app: keda-admission-webhooks
+
+prometheus:
+  operator:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+  metricServer:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+  webhooks:
+    enabled: true
+    serviceMonitor:
+      enabled: true

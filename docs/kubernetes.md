@@ -20,7 +20,9 @@ the rules below.
   manifests in `app/`.
 - `apps/base/flux-system/artifact-generator/`: publishes one artifact per application.
 - `components/`: Kustomize components. `common` adds the `app-template-defaults` ConfigMap, which
-  an app-template HelmRelease opts into through `valuesFrom`.
+  an app-template HelmRelease opts into through `valuesFrom`; `cnpg-cluster` adds an application's
+  PostgreSQL cluster ([PostgreSQL](#postgresql)); `volsync` backs an application's volume up
+  ([Volume backups](#volume-backups)).
 
 ## Adding an application
 
@@ -141,12 +143,8 @@ Resource definitions that several applications use are applications of their own
 The three `ks.yaml` files set `wait`, so each is Ready only once its definitions are established,
 and `snapshot-controller` once its controller runs as well. An application that creates objects of
 these groups, or whose chart does, names the matching one in `dependsOn` and turns off any copy of
-the same definitions its own chart would install. `linstor-cluster` names `snapshot-controller` for
-its VolumeSnapshotClass ([Storage](#storage)); the monitoring stack ([Monitoring](#monitoring)) and
-the baseline applications with a monitor name `prometheus-operator-crds`; cert-manager
-([cert-manager](#cert-manager)) and `envoy-gateway` ([Envoy Gateway](#envoy-gateway)) name
-`gateway-api-crds`, and `envoy-gateway` turns off its chart's copy of the Gateway API. No dashboard
-or route is enabled anywhere.
+the same definitions its own chart would install; each application's section below says which it
+names. No route is enabled anywhere, and no chart's dashboard outside the `grafana` application.
 
 Deleting a definition deletes every object of its kind, so none of these applications ever deletes
 one, also not when it leaves the tree. None applies a definition itself. The monitoring chart's
@@ -180,9 +178,22 @@ does not define itself.
   against the cluster CA, and starts only once `kubelet-csr-approver` is ready, which it names in
   `dependsOn`. Its own `/metrics` is served without authorization, as its chart's ServiceMonitor
   carries no credential.
-- `spegel` shares images between nodes. Talos discards unpacked image layers, which Spegel
-  serves, unless its machine configuration sets containerd's `discard_unpacked_layers` to false,
-  so the application is disabled in the cluster overlay until the Talos patches do.
+- `spegel` shares images between nodes, serving the image layers containerd keeps on each node,
+  which every node's machine configuration has it keep;
+  [cluster.md](cluster.md#image-layers-for-spegel) says which images that is, and how a change to
+  the nodes is rolled out while it runs. It writes containerd's registry mirror configuration to
+  `/etc/cri/conf.d/hosts`, where Talos' containerd reads it.
+
+  Its registry, on every node's port 30020 and on its pod, takes no credentials, by Spegel's design:
+  containerd sends a mirror none, and Spegel could not check them
+  ([Spegel](https://spegel.dev/docs/faq/#why-am-i-able-to-pull-private-images-without-image-pull-secrets)).
+  An image a node pulled with credentials is therefore served within the cluster; the nodes'
+  security group (`infra/openstack/modules/talos-nodes`) admits nothing from outside the node
+  network but the Talos and Kubernetes APIs ([cluster.md](cluster.md#the-control-planes-metrics)).
+
+  Prometheus scrapes its metrics port, where Spegel 0.8.1 also serves Go's profiler
+  ([Spegel](https://github.com/spegel-org/spegel/blob/v0.8.1/main.go#L278-L305)); the values turn
+  off the debug page beside it.
 - `reloader` restarts a workload annotated for it when a ConfigMap or Secret it uses changes, and
   nothing else.
 - `descheduler` runs the chart's default policy every five minutes, with two changes: a pod is
@@ -190,7 +201,8 @@ does not define itself.
 
 `tests/baseline.bats` renders every baseline chart with the repository's values, checks that each
 values key is one the pinned chart defines and that each monitor selects a Service or pods the
-chart makes, and reads the approver's and metrics-server's rendered configuration.
+chart makes, and reads the approver's, metrics-server's and Spegel's rendered configuration,
+Spegel's debug page included.
 
 The approver's chart makes its ServiceMonitor only once the kind exists, so the release installed
 before Flux has none, and Flux's first upgrade, which waits for `prometheus-operator-crds`, adds
@@ -208,12 +220,70 @@ whatever image the nodes run, and a pod that selects one on a node whose image l
 does not start. `tests/baseline.bats` builds the application as Flux applies it and checks the two
 classes and their handlers.
 
+## Service addresses
+
+A Service of type `LoadBalancer` gets its address from Cilium and is announced over BGP by the
+workers to two edge routers, which publish it (ADR 0013). `apps/base/kube-system/cilium-bgp/` holds
+what that takes, beside the Cilium application, whose values turn on Cilium's LoadBalancer IP
+management and its BGP control plane and keep Layer 2 announcements off. These settings live in
+the ConfigMap `cilium-config`, and `rollOutCiliumPods` and `operator.rollOutPods` restart the agents
+and the operator whenever it changes: a change to any of them, as the one that turned them on,
+restarts every agent, node by node, and the operator.
+
+- **Opting in.** A Service gets an address, and has it advertised, only with the label
+  `k8s-gitops/announce: bgp`. Any other `LoadBalancer` Service stays pending, so no address is handed
+  out that nothing announces.
+- **The pool.** One `CiliumLoadBalancerIPPool` holds exactly the service range
+  ([infrastructure.md](infrastructure.md#services-announced-over-bgp)), `10.20.0.0/28` by default:
+  sixteen addresses. Services can share one with Cilium's `lbipam.cilium.io/sharing-key`
+  annotation where their ports differ.
+- **Who announces.** One `CiliumBGPClusterConfig` gives every worker, and no control plane, a BGP
+  instance in the cluster's AS that peers with both edge routers in theirs, over eBGP. Talos labels
+  its control planes `node-role.kubernetes.io/control-plane`, which the node selector excludes, and
+  only the workers' ports may carry the service range. The edge routers are on the node subnet, one
+  hop away, so the sessions keep eBGP's TTL of 1. A worker opens its sessions and listens for none.
+- **The sessions.** The `CiliumBGPPeerConfig` sets a hold time of 9 seconds, keepalives every 3 and
+  a connect retry of 5, and turns on graceful restart with a restart time of 120 seconds, so an
+  edge router keeps forwarding to a worker while its Cilium agent restarts. IPv4 unicast only, and
+  no password (ADR 0013).
+- **What is advertised.** The `CiliumBGPAdvertisement` the peer configuration selects advertises
+  the `LoadBalancer` address of each labelled Service, as a /32, and nothing else: no pod range and
+  no cluster IP.
+- **Before the edge routers exist** the sessions stay down: a labelled Service gets an address, but
+  nothing outside the cluster reaches it.
+- **`externalTrafficPolicy`.** With `Cluster`, the default, every worker announces every labelled
+  address, the edge routers spread connections over all of them, and a worker forwards each to an
+  endpoint on any node, translating the source to its own address when the endpoint is elsewhere.
+  With `Local`, only workers with a ready endpoint of the Service announce its address, and a
+  connection reaches an endpoint on the worker it arrived at with its source unchanged. Either way
+  the source a Service sees is what reaches the worker, which is an edge router's address while
+  the edge routers translate the client's address to their own (ADR 0013). A worker whose last
+  endpoint goes away withdraws a `Local` address; a `Cluster` address stays announced while the
+  Service has no endpoint at all.
+
+Every object there is of a kind that Cilium's operator defines once it leads, the BGP kinds only
+while the BGP control plane is on, so the Cilium application holds none of them:
+`scripts/install-cilium` installs Cilium before any of those definitions exists. `cilium-bgp` names
+`cilium` in `dependsOn`, and the Cilium application sets `wait` and carries
+`k8s-gitops/timeout: long`, as its release may take 10 minutes to roll the agents: it is Ready only
+once its release is, with every agent running, and an agent starts only once every kind it uses is
+defined. So Flux applies the pool and the BGP objects only after their definitions exist, also on
+the change that turns the BGP control plane on. The objects are cluster-scoped; the
+API server drops the namespace the application's `targetNamespace` gives them. Their numbers come
+from `cluster-config` ([Before Flux starts](#before-flux-starts)). `tests/install-cilium.bats`
+renders the chart and the nodes' machine configurations and builds every application as Flux
+applies it to check each of these.
+
 ## External Secrets
 
 `apps/base/external-secrets/external-secrets/` runs the External Secrets operator in its own
 namespace, `external-secrets`. It is how runtime secrets reach workloads (ADR 0005): an
-`ExternalSecret` names a key in a secret store, and the operator writes it into a Secret. No secret
-store is configured yet, and nothing in the tree creates an `ExternalSecret`.
+`ExternalSecret` names a key in a secret store, and the operator writes it into a Secret. The
+exception is a credential a controller generates in the cluster for its own workload, which stays
+in the Secret that controller writes, such as Grafana's admin password ([Grafana](#grafana)). No
+secret store is configured yet. The `volsync` component makes an `ExternalSecret` of the
+ClusterSecretStore `openbao` ([Volume backups](#volume-backups)), and no enabled application
+includes it.
 
 - The chart comes from its publisher's OCI registry and installs and upgrades the operator's
   resource definitions itself, as the publisher documents. No other chart in the tree ships them,
@@ -240,8 +310,9 @@ privileged, as node-exporter reads each node through the host's network and proc
 through host paths. The chart installs no resource definitions: `prometheus-operator-crds` does
 ([Resource definitions](#resource-definitions)), and the application names it in `dependsOn`. The
 two charts run the same operator version: Renovate moves them in one pull request, and
-`tests/monitoring.bats` fails when the pinned charts name different ones. Grafana and its
-dashboards are not installed.
+`tests/monitoring.bats` fails when the pinned charts name different ones. The application installs
+no Grafana and no dashboards; [Grafana](#grafana) runs on its own and takes its dashboards from the
+same chart.
 
 Prometheus picks up every ServiceMonitor, PodMonitor, Probe, ScrapeConfig and PrometheusRule in
 every namespace, and evaluates the chart's default alerting and recording rules. It scrapes:
@@ -275,6 +346,69 @@ storage class, which neither names; without one, the claims and the two pods sta
 its values, and checks the namespace, the targets, the rules, the receivers, the claims and that
 each values key is one the chart or a subchart reads.
 
+## Grafana
+
+The Grafana operator runs one Grafana in `monitoring`, with the cluster's Prometheus as its
+datasource and the monitoring chart's dashboards. Two applications in `apps/base/monitoring/` hold
+them:
+
+- `grafana-operator` installs the operator from its publisher's chart,
+  `oci://ghcr.io/grafana/helm-charts/grafana-operator`. The release installs and upgrades the
+  `grafana.integreatly.org` definitions as its own templates, each marked
+  `helm.sh/resource-policy: keep`, so removing the application leaves them and every Grafana object
+  in place; only this chart ships them. One operator runs, with leader election and the requests of
+  the publisher's own manifests: nothing calls it, and while it restarts Grafana keeps serving and
+  only changes from Git wait. Its chart's ServiceMonitor is on. Its `ks.yaml` sets `wait`.
+- The operator watches `monitoring` only. Its service account has a Role there and no ClusterRole,
+  so it creates, reads, changes and deletes Secrets, ConfigMaps, Services, service accounts,
+  claims, Deployments, Ingresses and HTTPRoutes in `monitoring` and nowhere else. A dashboard for an
+  application in another namespace is therefore a `GrafanaDashboard`, with the ConfigMap it loads if
+  it loads one, in an application under `apps/base/monitoring/`, as an application's
+  `targetNamespace` puts everything it applies in its own namespace. Watching another namespace is
+  a deliberate change: it gives the operator the same rights there, and watching every namespace
+  gives it them everywhere, `flux-system` included.
+- `grafana` holds the `Grafana`, its `GrafanaDatasource`, a ServiceMonitor for Grafana's own
+  metrics and the dashboards release, and names `grafana-operator` in `dependsOn`.
+
+The Grafana runs the version its `grafana.yaml` pins, which Renovate updates, as one replica
+without a disruption budget: a second replica would keep a database of its own. It keeps nothing
+that Git does not hold, so it claims no volume: its data directory is an emptyDir, and the operator
+applies the datasource and every dashboard again every minute. One it cannot apply, as while a
+restarted Grafana starts, it retries after 10 seconds, doubling the wait up to two minutes, so a
+restarted Grafana has them all back within a few minutes. The datasource is the Prometheus Service
+of the monitoring chart, `kube-prometheus-stack-prometheus`, port 9090. Grafana makes no call to the
+internet on its own: its
+configuration turns off usage reporting, the checks for Grafana and plugin updates, the news feed,
+the plugin catalogue, the plugins Grafana would install at every start, the download of plugin
+signing keys, Gravatar images and external snapshots, so it runs only the plugins in its image.
+
+The dashboards come from the monitoring stack's own chart. The release `grafana-dashboards` installs
+`kube-prometheus-stack` at the version the monitoring application runs, with everything off but the
+dashboards the chart renders for what the cluster scrapes: the Kubernetes mixin's, node-exporter's
+for Linux nodes, and those of the API server, the kubelets, the controller manager, the scheduler,
+etcd, CoreDNS, Prometheus, Alertmanager and Grafana. They match the recording rules and job names of
+the Prometheus they query, and Renovate moves both pins in one pull request. Each is a ConfigMap and
+a `GrafanaDashboard` that loads it into the folder Kubernetes, so neither the operator nor Grafana
+fetches a dashboard from the network.
+
+Nothing routes to Grafana from outside the cluster. `just grafana [cluster]` forwards a local port,
+`GRAFANA_PORT` or 3000, on 127.0.0.1 only, to port 3000 of the Service `grafana-service` in
+`monitoring` through the cluster's kubeconfig, until Ctrl-C; it prints the local URL, and the
+forward ends with the recipe however it ends ([cluster.md](cluster.md#recipes)). Sign in as
+`admin`. The password is under `GF_SECURITY_ADMIN_PASSWORD` in the Secret
+`grafana-admin-credentials` in `monitoring`, which the
+operator generates when it first creates the Secret and keeps while the `Grafana` exists; nothing in
+Git holds it. Deleting the `Grafana` deletes the Secret, and a new one gets a new password. It is
+the kind of credential ADR 0005 keeps out of OpenBao: one a controller generates in the cluster for
+its own workload, which stays in the Secret that controller writes. Anonymous access is off.
+
+`tests/grafana.bats` builds both applications as Flux applies them, renders the two charts and the
+monitoring application's, and checks the definitions, the operator's namespace and rights, the
+monitors, the version and replicas, the absence of volumes, Secrets and routes, the datasource's
+Service, that the dashboards are exactly those the monitoring chart renders for the cluster's
+monitoring values, and each setting that keeps Grafana off the internet against the defaults of the
+Grafana release it pins. It runs `just grafana` against a recording kubectl.
+
 ## cert-manager
 
 `apps/base/cert-manager/cert-manager/` installs cert-manager, which issues and renews the TLS
@@ -299,6 +433,97 @@ one. They run at `system-cluster-critical` with small requests and no limits. No
 PodMonitor is enabled. `tests/baseline.bats` renders the chart with these values and checks the
 namespace, the definitions and their policy, the Gateway API configuration and dependency, and the
 replicas, spreads and budgets.
+
+## Autoscaling and reflection
+
+Three small add-ons that the applications this cluster runs assume, each enabled in the cluster's
+overlay. `tests/autoscaling.bats` builds each as Flux applies it and renders its chart to check
+what follows.
+
+### KEDA
+
+`apps/base/keda/keda/` runs KEDA in its own namespace, `keda`, at the restricted Pod Security level
+its pods meet. An application scales on events by creating a `ScaledObject` (or `ScaledJob`) that
+names its workload and a trigger; KEDA creates and owns the HorizontalPodAutoscaler that follows it.
+The chart is the publisher's, from a public OCI mirror, as it releases only to a classic Helm
+repository.
+
+- The release installs and upgrades the `keda.sh` and `eventing.keda.sh` definitions, as the
+  publisher's chart does; each carries `helm.sh/resource-policy: keep`, so uninstalling the release
+  leaves them, and every `ScaledObject`, in place. The application's `ks.yaml` sets `wait`, so an
+  application that names `keda` in `dependsOn` starts once they exist.
+- The operator, the metrics server and the admission webhooks each run two replicas, preferably on
+  different nodes, under a disruption budget that keeps one running. Only one operator is the
+  leader, so its second replica is a standby that shortens a failover. The second metrics server is
+  there for availability too, so one keeps answering through a drain or a pod's failure: the API
+  server reaches them through their Service's address without aggregator routing, so requests are
+  not spread over the two, and KEDA's documentation supports one. Requests and limits are the ones
+  KEDA's documentation gives for each component.
+- KEDA's metrics server registers the `external.metrics.k8s.io` API. metrics-server registers
+  `metrics.k8s.io`; the two groups differ, so the registrations do not collide. Only one provider
+  can serve `external.metrics.k8s.io`: no other application may register it.
+- The admission webhooks' failure policy is `Ignore`: while no webhook answers, a `ScaledObject` is
+  admitted without being checked. A missing operator is worse for what it owns: HorizontalPodAutoscalers
+  that follow a `ScaledObject` stay, but the metrics server gets the values they read from the
+  operator, and the operator does the scaling from and to zero itself, so without it they cannot
+  compute, their workload stays at its current size, and nothing scales it from or to zero.
+- KEDA 2.21's documentation tests Kubernetes 1.34 to 1.36; the cluster runs a newer release, so KEDA
+  runs outside the versions its publisher has tested.
+- One ServiceMonitor for each of the three components.
+
+### Vertical Pod Autoscaler
+
+`apps/base/kube-system/vpa/` runs the recommender only, in `kube-system` with the other small
+services the cluster assumes, from the Fairwinds chart.
+The project's own `vertical-pod-autoscaler` chart (in the autoscaler repository's Helm index) says
+it is under development and not ready for production, so the cluster uses Fairwinds', which tracks
+an older release of the recommender (1.7.1, where the project's is 1.8.1). Fairwinds' chart is
+published only to a classic Helm repository and no public OCI mirror carries it, so the application
+has a `HelmRepository` beside its `HelmRelease`, which Renovate follows as it does the others. The
+recommender reads container usage from metrics-server and writes a recommendation
+to the status of each `VerticalPodAutoscaler` an application creates; it does not act on it. The
+chart's updater and admission controller are off, so nothing evicts a pod and no webhook or
+certificate generator is rendered, and no role bound in the release lets a service account change a
+pod.
+
+- The definitions (`VerticalPodAutoscaler` and its checkpoint) are in the chart's `crds/`
+  directory, which Helm installs once and never removes with a release, so they stay when the
+  application leaves the tree. Flux creates and replaces them on upgrade through the release
+  defaults. `ks.yaml` sets `wait` and names `metrics-server`, whose API the chart's Helm test reads;
+  metrics-server's own `ks.yaml` does not set `wait`, so on a new cluster the test can run before
+  that API answers, fail, and use up an install retry.
+- The chart's three `vpa-test-*` pods run after each install and upgrade, because the cluster's
+  Helm releases run their tests. They set no requests, and the chart has no value to set them; they
+  are the one exception to every container having requests, and they are left out of the check.
+- One replica, with the chart's requests and no limits. The project's FAQ says only one recommender
+  is active; a second would need `--leader-elect=true` and would add a second 500Mi request for a
+  faster failover only, as the recommender keeps its history in checkpoint objects. There is
+  therefore no disruption budget.
+- The recommender keeps what it has seen as long as it runs, plus checkpoints. It could read
+  history from the monitoring stack's Prometheus instead (`--storage=prometheus`), which gives it
+  recommendations at once after a restart; that needs kubelet container metrics to be scraped under
+  the names it expects, and nothing here configures it.
+- A PodMonitor for the recommender.
+
+### Reflector
+
+`apps/base/kube-system/reflector/` runs Reflector in `kube-system`, from its publisher's chart on
+its OCI registry. It copies a Secret or ConfigMap into other namespaces, which is how one wildcard
+certificate serves several of them: the source carries
+`reflector.v1.k8s.emberstack.com/reflection-allowed: "true"` and
+`reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces`, and a copy is made in each
+namespace the second names (`reflection-auto-enabled` and `reflection-auto-namespaces` make the
+copies without the destination asking).
+
+Reflector can read and write every Secret and ConfigMap in every namespace, and list and watch
+namespaces: that is what it is for, and its ClusterRole grants exactly that and nothing else. The
+control is the annotations: only an object carrying `reflection-allowed` is copied, and only into
+the namespaces its annotation names. An empty `reflection-allowed-namespaces` allows every
+namespace, so every source lists them. Nothing in this repository carries a reflection annotation
+yet; `tests/autoscaling.bats` fails when a file under `kubernetes/` does.
+
+One replica: Reflector has no leader election, so a second would copy what the first does, and
+the chart makes no disruption budget. Its chart serves no metrics and has no monitor.
 
 ## Storage
 
@@ -383,6 +608,133 @@ the nodes' machine configurations offline to check which nodes LINSTOR selects a
 pool takes; reads the StorageClasses and the VolumeSnapshotClass; and renders the operator's chart
 to check that its definitions are kept.
 
+## Volume backups
+
+VolSync backs an application's volume up to the VolSync bucket
+([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)) with its restic mover, and
+fills the volume from the latest backup when the volume and its restore are created together
+(ADR 0015).
+
+`apps/base/volsync-system/volsync/` installs the operator in its own namespace, `volsync-system`,
+at the restricted Pod Security level. Its publisher releases the chart only to a classic Helm
+repository, so it comes from the public OCI mirror metrics-server's comes from. The release
+installs and upgrades the ReplicationSource and ReplicationDestination definitions, each kept when
+it is uninstalled. The controller runs two replicas on different nodes, one acting at a time, with
+the chart's requests and limits; the application's own disruption budget keeps one through a drain.
+The chart's ServiceMonitor sends no credential, so the metrics are served without authorization.
+The application names `snapshot-controller`, which VolSync needs installed, and
+`prometheus-operator-crds` in `dependsOn`, and sets `wait`.
+
+### Backing up a volume
+
+An application opts in from its `ks.yaml`, before its volume exists, and names `volsync`,
+`external-secrets` and `linstor-cluster` in `dependsOn`:
+
+```yaml
+spec:
+  components:
+    - ../../../../../components/volsync
+  postBuild:
+    substitute:
+      APP: <app>
+      VOLSYNC_CAPACITY: 1Gi
+      VOLSYNC_SCHEDULE: "17 3 * * *"
+```
+
+The component backs up one volume per application. `APP` is the application's own name, the
+`metadata.name` of its Kustomization: `just kubernetes-check` fails on a `ks.yaml` that adds the
+component with any other `APP`, as two applications with one `APP` would share a repository.
+`VOLSYNC_CLAIM` names the volume, `APP` when unset; `VOLSYNC_UID` and `VOLSYNC_GID`, 1000 when
+unset, are the user and group the movers run as, which must be able to read and write its files.
+The component makes:
+
+- the volume, a claim of `VOLSYNC_CAPACITY` on the default StorageClass, whose data source is the
+  ReplicationDestination `<app>-restore` ([Restoring](#restoring)). A claim's data source cannot be
+  added once the claim exists, so a volume that exists keeps its data;
+- the ReplicationSource `<app>`, which backs the volume up on the cron schedule `VOLSYNC_SCHEDULE`:
+  it takes a snapshot through the default VolumeSnapshotClass, so the backup is of one moment, and
+  restic uploads the files of a volume made from it. An empty volume is not backed up. Each run keeps
+  the newest backup of each of the last 7 days, 4 weeks and 3 months, and every 7 days the
+  repository is pruned. Each application takes its own minute, so backups do not start together;
+- the ExternalSecret `<app>-volsync`, which writes the Secret the movers read
+  ([The repository and its password](#the-repository-and-its-password)).
+
+The movers run in the application's namespace, unprivileged: VolSync drops their capabilities and
+forbids privilege escalation, and the component gives them a non-root user and group and the
+runtime's seccomp profile, as the restricted level requires.
+
+### Restoring
+
+The ReplicationDestination `<app>-restore` restores the latest backup once, when it is created, as
+its trigger is manual, and keeps a snapshot of what it restored; VolSync makes the claim from that
+snapshot whenever the claim is created.
+
+- When the claim and the ReplicationDestination are created together, on the application's first
+  deployment, or after both were deleted, as when the application leaves the tree and comes back or
+  the cluster is rebuilt, the volume starts with the latest backup, or empty when there is none.
+- A claim deleted and created again while the ReplicationDestination stays gets the snapshot kept
+  from that one restore, which after a first deployment is of an empty volume, not the latest
+  backup.
+- To restore the latest backup into an application that runs: suspend its Kustomization, and its
+  HelmRelease when a chart runs it, as drift detection would undo a scale-down; stop the pods that
+  use the claim; delete the claim and the ReplicationDestination `<app>-restore`; and resume what
+  was suspended. Flux creates both again, the ReplicationDestination restores the latest
+  backup, and the claim is made from it. What was written to the volume after that backup is lost.
+
+`APP` and `BACKUP_BUCKET_PREFIX` name the repository, so neither changes once an application has
+backups: under a path that holds no repository, restic creates an empty one and the restore
+succeeds with an empty volume, without an error.
+
+A claim stays Pending, with the pods that use it, until a pod uses it, as LINSTOR's classes make a
+volume once its first pod is scheduled, and until the ReplicationDestination's first restore has
+completed and recorded its snapshot in `status.latestImage`; that needs the Secret, so without the
+secret store it never completes. A claim whose ReplicationDestination is gone, or whose recorded
+snapshot is gone, stays Pending until the ReplicationDestination is created again. The claim's
+events say which: `VolSyncPopulatorReplicationDestinationMissing`,
+`VolSyncPopulatorReplicationDestinationNoLatestImage`, or `VolSyncPopulatorPVCCreated` once the
+volume is being made; a missing snapshot shows in the VolSync controller's log. An application whose
+Kustomization sets `wait` is not Ready while its claim is Pending, so it holds up every application
+that names it in `dependsOn` until its first restore completes.
+
+### The repository and its password
+
+Each application has a restic repository of its own, `s3:<S3_ENDPOINT>/<BACKUP_BUCKET_PREFIX>-volsync/<app>`,
+encrypted with a password of its own. restic creates the repository the first time a mover reaches
+it. The ExternalSecret reads the key `volsync` of the ClusterSecretStore `openbao`, whose properties
+are `RESTIC_MASTER_PASSWORD`, the master password, and the cluster's S3 key, `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY`. The Secret it writes holds only what its template renders:
+
+- `RESTIC_REPOSITORY`: the repository, from `cluster-config`;
+- `RESTIC_PASSWORD`: the application's password, derived from the master;
+- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`: the cluster's S3 key;
+- `AWS_DEFAULT_REGION`: `S3_REGION`, from `cluster-config`.
+
+An application's password is the SHA-256 digest of the master, a slash and the application's name,
+with nothing after it, written as 64 lower-case hexadecimal digits. The component writes the master
+into no Secret, so one application's Secret opens no other application's repository, and only the
+master is kept outside the cluster. To open a repository with restic by hand, compute its password from the
+master that way, with a tool that reads the master from a file or its standard input and never
+from its command line, and give the password to restic in a file or from a command
+(`RESTIC_PASSWORD_FILE`, `RESTIC_PASSWORD_COMMAND`), never as an argument. Every namespace that
+takes the component holds the cluster's S3 key, which reaches every bucket of the project: whoever
+can read Secrets there can read, replace or delete any application's backups, though not decrypt
+them (ADR 0015).
+
+### What is still needed
+
+No ClusterSecretStore exists yet, so the Secret is never written and VolSync starts no mover. The
+test application `apps/base/demo/volsync-demo/`, a pod that holds a 1 GiB volume and writes the
+time it first found it empty, is disabled in the overlay. Before the first backup runs:
+
+1. the ClusterSecretStore `openbao` holds the key `volsync` with `RESTIC_MASTER_PASSWORD`, also
+   kept outside the cluster, and the cluster's S3 key as `AWS_ACCESS_KEY_ID` and
+   `AWS_SECRET_ACCESS_KEY`;
+2. `just cluster-config` has applied `BACKUP_BUCKET_PREFIX`, `S3_ENDPOINT` and `S3_REGION`;
+3. `volsync-demo` is enabled in the overlay, with the store's application in its `dependsOn`.
+
+`tests/volume-backups.bats` builds the applications as Flux applies them and renders the VolSync
+and External Secrets charts to check this section.
+
 ## Envoy Gateway
 
 Envoy Gateway implements the Gateway API: for each Gateway that names its GatewayClass it runs
@@ -420,6 +772,87 @@ No Gateway exists yet. A Gateway's proxies are reached through a Service of type
 which needs the cloud controller, and its HTTPS listener needs a certificate from an issuer, which
 cert-manager has none of yet. Until both are in place the controller accepts the GatewayClass and
 runs no proxy.
+
+## PostgreSQL
+
+Applications get PostgreSQL from the CloudNativePG operator, which runs each database as a
+`Cluster`: a primary and streaming replicas, a replica promoted when the primary fails, and the
+Services and credentials an application connects with.
+
+`apps/base/cnpg-system/cloudnative-pg/` installs the operator in its own namespace, `cnpg-system`, at
+the restricted Pod Security level, from the publisher's chart in
+`oci://ghcr.io/cloudnative-pg/charts`; it watches every namespace. The chart ships the
+`postgresql.cnpg.io` definitions as templates of the release, so each chart upgrade upgrades them
+with the operator, and marks each `helm.sh/resource-policy: keep`, so removing the application
+leaves them, and every cluster, in place.
+Two replicas run on different workers: the leader reconciles, both answer the webhook through which
+the API server admits every change to a CloudNativePG object, and a disruption budget keeps one
+through a drain. Its chart's PodMonitor is on, so it names `prometheus-operator-crds` in `dependsOn`,
+and its `ks.yaml` sets `wait`.
+
+An application takes a cluster from the component `components/cnpg-cluster`, in its `ks.yaml`:
+
+```yaml
+spec:
+  dependsOn:
+    - name: cloudnative-pg
+    - name: prometheus-operator-crds
+  components:
+    - ../../../../../components/cnpg-cluster
+  postBuild:
+    substitute:
+      CNPG_CLUSTER_NAME: <app>-db
+      CNPG_STORAGE_SIZE: 10Gi  # each instance's volume; 5Gi when unset
+```
+
+The cluster has three instances of PostgreSQL 18, from the operator's standard image, whose tag names
+a minor version that Renovate moves. The publisher rebuilds the image under that tag and a node keeps
+the build it pulled first, so instances can run different builds of one minor version. Each instance
+must run on a different worker, and requests and is limited to 500m CPU and 512Mi memory. The
+operator's disruption budgets move the primary away by switchover before its worker is drained, and
+let drains take one replica at a time. A PodMonitor scrapes every instance. Without
+`CNPG_CLUSTER_NAME` the build fails. The operator creates the database `app`, owned by the user
+`app`, whose password and connection URI are in the Secret `<name>-app`; the Services `<name>-rw`,
+`<name>-ro` and `<name>-r` reach the primary, the replicas and any instance.
+
+A patch in the application's own `kustomization.yaml` changes anything else, as it applies after the
+component. It targets the Cluster by kind alone: Flux substitutes after the build, so when the patch
+applies the Cluster is still named `${CNPG_CLUSTER_NAME}`, and a target by the name the application
+gives it matches nothing and is skipped without an error.
+
+```yaml
+patches:
+  - target:
+      kind: Cluster
+    patch: |-
+      - op: replace
+        path: /spec/resources/requests/memory
+        value: 1Gi
+      - op: replace
+        path: /spec/resources/limits/memory
+        value: 1Gi
+```
+
+Each instance's volume is on `linstor-node-local` ([StorageClasses](#storageclasses)), one copy on
+the instance's own worker without DRBD. The three instances already are three copies on three
+workers, kept in step by PostgreSQL's replication; the replicated default would keep each of them
+twice, six copies of every write. The operator's documentation advises one replica at the storage
+level, with no storage host holding two instances of a cluster, which the placement rule guarantees.
+The cost is that an instance cannot move: while its worker is down the cluster runs on two. When the
+worker or its data volume is lost for good, the instance's PersistentVolumeClaim and then its pod
+are deleted, which removes the instance, and the operator clones a new one from the primary. With
+three workers, the new one waits for a worker without an instance.
+
+No backup is configured: WAL archiving and base backups to object storage need the object store's
+credentials from the secret store, which does not run yet, and take their place in the component's
+`Cluster` then. Until then a cluster's data lives only on the workers' data volumes
+([Where the data lives](#where-the-data-lives)).
+
+`tests/postgresql.bats` renders the operator's chart and checks its namespace, definitions,
+replicas, budget, monitor and pods; builds applications that take a cluster from the component, one
+that does not name it and two that patch it, by kind and by name, as Flux applies them; and checks
+each field of the `Cluster` against the pinned chart's definition and its StorageClass against
+LINSTOR's.
 
 ## Flux itself
 
@@ -543,6 +976,81 @@ but not its visibility, so the package's visibility is set to public in its sett
 the first run; until then the cluster cannot pull it. A public package cannot be made private
 again.
 
+## The render diff
+
+A manifest change reaches the cluster only by merging (ADR 0003), so every pull request gets one
+comment, updated on each push, that shows what Flux would apply differently once it is merged: a
+table with the objects each application adds, removes and changes, then each changed application's
+diff, collapsed. A pull request that changes nothing Flux applies says so.
+
+`just render <out> [dir]` renders a tree as Flux applies it, offline, one file per object under
+`<out>/<cluster>/<application>/`: the cluster directory as the instance's sync Kustomization applies
+it (application `flux-system`), then every Kustomization that applies from the tree, the root
+(`cluster`), Flux's own applications and each application the overlay enables, built as
+`just kubernetes-check` builds them. Each HelmRelease is expanded to the objects its chart renders:
+the chart its OCIRepository names, pulled from its public registry, with the values of its
+ConfigMaps and its own values over them, the release name and namespace helm-controller gives it,
+the Kubernetes version in `versions.yaml`, every API version a definition in the render serves, its
+post-renderers and helm-controller's labels. A chart version bump therefore shows the objects that
+change. `RENDER_CHART_CACHE` names a directory to keep pulled charts in between renders. A tree that
+does not render fails, naming the application. `just render-diff <base> <head>` prints the comment
+comparing two renders.
+
+What it is rendered with, and what it never shows:
+
+- `cluster-config` and `cluster-secrets` are not in the repository: each cluster's
+  `cluster-config.example.yaml` and `cluster-secrets.example.yaml` stand in for them, and the
+  comment's footer says so.
+- No Secret's data: every value of a Secret's `data` and `stringData` is replaced by `(redacted)`,
+  keys kept, and sops' metadata is dropped, so a changed Secret value does not show. That includes
+  the Alertmanager configuration, which the monitoring chart renders into a Secret.
+- Values a chart makes up anew on every render, such as generated certificates and their CA
+  bundles: the chart is rendered twice and every value that differs reads
+  `(generated at render time)`, so they never show as a change.
+- Sources outside the tree are not fetched: the Gateway API, snapshot and Envoy Gateway definitions
+  show as the source and the inner Kustomization that apply them, not as the objects those apply.
+- A diff longer than a comment holds is cut, and the comment says so: the smallest applications'
+  diffs are shown whole, the next is cut, the rest are left out, and the table stays whole. The cut
+  leaves room under GitHub's 65536 characters for the comment job's own line.
+
+`just render-check`, one of the checks of `just ci`'s `static` group, renders the tree as the render
+job does and keeps nothing, so a tree that does not render fails `just ci` as it fails the required
+check. Pulling the charts and rendering take about half a minute.
+
+In CI two jobs make it, in two workflows, so that nothing from a pull request ever runs with a token
+that can write:
+
+- The `render` job of `.github/workflows/ci.yaml`, part of the required check `ci`, runs for every
+  pull request and push to `main` on a hosted runner, with the workflow's `contents: read` token and
+  no secrets. For a pull request GitHub runs the pull request's own copy of the workflow, a fork's
+  included, so the job is given nothing worth taking. `just ci-render` runs `scripts/render-pr` in
+  the Dagger module (ADR 0007): it renders the base, the first parent of the commit under test, and
+  the commit itself, both with the base's `scripts/render` and `scripts/render-diff`, so that a pull
+  request that changes only the tree is shown by the reviewed render code. A base without the render
+  code is rendered with the commit's. The job uploads the comment as the artifact `render-diff`.
+- `.github/workflows/render-comment.yaml` runs when the CI workflow completes for a pull request,
+  unless that run was cancelled. GitHub runs it from the default branch, with this repository's
+  token, whatever the run it follows had, so it checks out only the default branch and runs
+  `just ci-comment`, with `actions: read` to download the artifact and `pull-requests: write` to
+  comment; mise installs its tools without that token. `scripts/ci-comment` treats the artifact as
+  text: it refuses anything but one regular file, `comment.md`, that `scripts/lib/render-comment.sh`
+  accepts byte for byte, a comment `scripts/render-diff` could have written, never runs it or prints
+  it, and sends it as a JSON string. Outside the fenced diffs that grammar allows only the fixed text,
+  and application names and counts of a strict shape, so no mention, reference, link, image or HTML
+  renders in the bot's name. It finds the pull request by the head commit and repository the run was
+  for, and posts nothing when that head has moved on or two pull requests have it. It updates the one
+  comment of its own that starts with the marker, or creates it, and adds a line of its own naming
+  the commit the diff describes. A run that left no artifact did not render: the job updates its own
+  comment, if there is one, to say so in its own words. It is not a required check: a comment that
+  fails to post blocks no merge. An artifact that unpacks to far more than it holds fills only this
+  job's runner.
+
+The comment is the pull request's own account of its change. GitHub runs a pull request's copy of the
+CI workflow, so a pull request that changes the render code, the CI workflow, the justfile or the
+Dagger module can make the comment say anything the grammar allows, such as that nothing changes
+while its manifests do. Review of such a pull request reads the change itself and does not rely on
+the comment.
+
 ## Before Flux starts
 
 Flux needs four objects that nothing in the tree creates, all in `flux-system`: the namespace
@@ -564,11 +1072,26 @@ starts to use is listed in the example and given its source in `fill_cluster_con
 
 - `CLUSTER_DOMAIN`: the environment variable of that name, the domain the cluster's applications are
   published under, a lower-case DNS name.
+- `BACKUP_BUCKET_PREFIX`: the environment variable of that name, the start of the backup buckets'
+  names ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)).
+- `S3_ENDPOINT` and `S3_REGION`: the object storage's S3 endpoint and region, `endpoints.s3` and
+  `region` in `infra/openstack/backend.hcl`, where OpenTofu's state backend reads them. The endpoint
+  is `https://`, a host name and an optional port, with nothing after them, as an S3 client reads a
+  path there as the bucket.
 - `NODE_CIDR`: `values.nodeSubnet` in `talos/<cluster>/talman.yaml`, which the cluster stack renders
   from the plumbing stack's node subnet and which the kubelets take their node addresses from.
 - `NODE_NAME_REGEX`: the hostnames in that `talman.yaml`, joined with `|`, with a trailing number
   standing for any number: `lab-cp-1` becomes `lab-cp-[0-9]+`, so a node OpenTofu adds later, which
   it numbers after the others, matches as well.
+- `SERVICE_RANGE`: `values.serviceRange` in that `talman.yaml`, the range `LoadBalancer` Services
+  take their addresses from ([Service addresses](#service-addresses)).
+- `BGP_CLUSTER_ASN` and `BGP_EDGE_ASN`: `values.bgp.clusterASN` and `values.bgp.edgeASN` there, the
+  workers' and the edge routers' AS numbers.
+- `BGP_EDGE_ADDRESS_1` and `BGP_EDGE_ADDRESS_2`: the two addresses of `values.bgp.edgeAddresses`
+  there, the edge routers'.
+
+The cluster stack renders the last five from the plumbing stack's numbers for BGP
+([infrastructure.md](infrastructure.md#services-announced-over-bgp)).
 
 `cluster-secrets` is decrypted from `clusters/<cluster>/secrets/cluster-secrets.sops.yaml` by sops,
 with the Flux age key, straight into kubectl, when that file exists. Its keys must be exactly those

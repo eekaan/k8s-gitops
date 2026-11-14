@@ -328,11 +328,16 @@ spec:
     name: opted-out
 EOF
 
-  local children name
+  local children name timeout
   children="$(yq -N 'select(.kind == "Kustomization" and .metadata.labels["k8s-gitops/defaults"] != "disabled") | .metadata.name' "$BUILD")"
   [ -n "$children" ]
   for name in $children; do
-    has_defaults "$name" 3m
+    # A child labelled for the long timeout gets 10m instead, as the next test shows.
+    timeout=3m
+    if [ "$(child "$name" '.metadata.labels["k8s-gitops/timeout"]')" = long ]; then
+      timeout=10m
+    fi
+    has_defaults "$name" "$timeout"
   done
   unchanged opted-out
 }
@@ -926,4 +931,43 @@ EOF
 
   check
   fails_naming kubernetes/apps/base/demo/namespace.yaml NAMESPACE_OWNER
+}
+
+@test "An application that backs up its volume under another application's name fails the check" {
+  valid_tree
+  # A stand-in for components/volsync, which names the backup repository after APP.
+  put kubernetes/components/volsync/kustomization.yaml <<'EOF2'
+---
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - configmap.yaml
+EOF2
+  put kubernetes/components/volsync/configmap.yaml <<'EOF2'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: volsync-fixture
+EOF2
+  local components='  components:
+    - ../../../../../components/volsync'
+
+  hello_ks <<<"$components
+  postBuild:
+    substitute:
+      APP: greeting"
+  check
+  fails_naming kubernetes/apps/base/demo/hello/ks.yaml "postBuild.substitute.APP must be hello"
+
+  hello_ks <<<"$components"
+  check
+  fails_naming kubernetes/apps/base/demo/hello/ks.yaml "postBuild.substitute.APP must be hello"
+
+  hello_ks <<<"$components
+  postBuild:
+    substitute:
+      APP: hello"
+  check
+  [ "$status" -eq 0 ]
 }

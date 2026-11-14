@@ -1,6 +1,6 @@
 Feature: Cluster stack
   Six Talos nodes, reachable on their APIs from the operator only, each worker with a data volume
-  for the storage layer.
+  for the storage layer, and the workers able to carry the service range the edge routers reach.
 
   Scenario: Three control planes and three workers are planned
     Given the default node counts
@@ -59,3 +59,18 @@ Feature: Cluster stack
     Given another size and volume type for the data volumes
     When the cluster stack is planned against mocked providers
     Then every worker's data volume has that size and type
+
+  Scenario: The edge addresses and the service range overlap nothing
+    Given the plumbing stack's two edge addresses on the node subnet and its service range outside it
+    When the cluster stack is planned against mocked providers
+    Then neither edge address is in the DHCP pool, the gateway's, a node's, the API load balancer's or the other's, and the service range overlaps neither the node, pod nor service subnet; an edge address on a node or on the load balancer, a CI host number that is an edge router's, and a service range overlapping the pod or the service subnet, fail the plan
+
+  Scenario: Workers may receive and answer for the service range, and control planes may not
+    Given the plumbing stack's service range
+    When the cluster stack is planned against mocked providers
+    Then every worker's port lists the service range as its one allowed address pair, and no control plane's port lists any
+
+  Scenario: The edge routers can reach the workers for BGP and for service traffic, and nothing else is opened
+    Given the two edge addresses and the default service ports
+    When the cluster stack is planned against mocked providers
+    Then the workers, and only they, carry a group of their own whose only rules admit TCP 80 and 443 from each edge address, with no egress rule of its own; in total an edge address reaches TCP 80 and 443 on the workers through that group and TCP 6443 on every node through the nodes' rule for the node subnet, which only control planes answer, and nothing else, TCP 179 included, as each worker opens its BGP sessions itself through the nodes' group, which keeps its open egress

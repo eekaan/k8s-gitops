@@ -42,13 +42,20 @@ variable "ssh_public_key" {
 }
 
 variable "host_number" {
-  description = "Host number of the CI host's fixed address on the node subnet: above the gateway, below the control planes' 10 and the DHCP pool, and apart from the API load balancer's 5. The cluster stack's ci_host_number, when the nodes are to admit the CI host."
+  description = "Host number of the CI host's fixed address on the node subnet: above the gateway, below the control planes' 10 and the DHCP pool, and apart from the API load balancer's 5 and the plumbing stack's edge_hosts. The cluster stack's ci_host_number, when the nodes are to admit the CI host."
   type        = number
   default     = 6
 
   validation {
     condition     = floor(var.host_number) == var.host_number && var.host_number >= 2 && var.host_number <= 9 && var.host_number != 5
     error_message = "host_number must be a whole number from 2 to 9 other than 5: above the gateway, below the control planes' 10 and the DHCP pool, apart from the API load balancer's 5."
+  }
+
+  # The plumbing stack reserves the edge routers' fixed addresses by host number as well. Its state
+  # must give them: a plumbing state without them fails the plan rather than skip the check.
+  validation {
+    condition     = !contains(local.plumbing.bgp.edge_addresses, try(cidrhost(local.plumbing.network.cidr, var.host_number), null))
+    error_message = "host_number must not be one of the plumbing stack's edge_hosts: the CI host and the edge routers each need a fixed address of their own on the node subnet."
   }
 }
 
