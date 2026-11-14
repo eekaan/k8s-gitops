@@ -16,11 +16,18 @@ Actions is the CI system: each job runs one `just` recipe, on GitHub's runners, 
 runs the checks starts the Dagger engine for itself, or, for trusted runs, on the CI host's
 self-hosted runner, where it uses the host's persistent engine (ADR 0012).
 
-Publishing the cluster's artifact (ADR 0003) is the one job whose recipe, `just publish`, runs
-directly on the runner, with the tools pinned in `mise.toml` installed there by mise. Signing it
-keyless takes the job's own identity token, and pushing it the job's registry token; the module
-never gets either, so the checks stay hermetic and need no credentials, and nothing the module runs
-can sign or publish.
+The jobs that publish, the cluster's artifact (ADR 0003) with `just publish` and the tools image
+with `just tools-image-publish`, run their recipes directly on the runner, with the tools pinned in
+`mise.toml` installed there by mise. Signing keyless takes the job's own identity token, and
+pushing the job's registry token, which reaches a Docker configuration of the run's own; no
+function of the module takes either, so the checks stay hermetic and need no credentials, and
+nothing the checks run can sign or publish.
+
+The container the checks run in is built from the pins once for each change of its inputs (the
+base image, the package step and `mise.toml`), by the tools image workflow on `main`, pushed to
+this repository's registry, signed, and recorded by digest in `versions.yaml` with the key of those
+inputs. `just ci` hands the module that image while the key matches the checkout's inputs, and the
+module builds the same layer itself otherwise.
 
 One job always runs and aggregates the others; it is the only required check on `main`, so
 path-filtered jobs never leave a pull request waiting.
@@ -44,4 +51,9 @@ The module uses Dagger 1.0, which is in beta at the time of writing.
   stable release is planned work.
 - Jobs that need credentials do not run for pull requests from forks.
 - The publish job installs its tools on the runner with mise, from the same pins as the module's
-  container and a laptop, so publishing does not depend on the module.
+  container and a laptop, so publishing the cluster's artifact does not depend on the module. The
+  tools image job builds its image with the module's own layer, so the checks run in what the
+  module would build.
+- A change to the pins takes a second pull request, after the merge, to record the new tools
+  image; until then the checks build the tools themselves, as they do on an engine of another
+  platform than the image's.

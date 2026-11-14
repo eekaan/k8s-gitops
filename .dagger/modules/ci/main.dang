@@ -19,13 +19,28 @@ type Ci {
   }
 
   """
-  Run the justfile's groups of checks side by side and return what they printed: the groups are the dependencies of the checks recipe, and a group's checks are its own dependencies. A group's renovate-check runs Renovate's validator in its own image; its other checks run in one just run, in a container built from the tools pinned in mise.toml. Every group runs to its end; when a check fails, the call fails with every group's output and names the groups that failed.
+  Run the justfile's groups of checks side by side and return what they printed, after a line that says where the tools came from: the groups are the dependencies of the checks recipe, and a group's checks are its own dependencies. A group's renovate-check runs Renovate's validator in its own image; its other checks run in one just run, in the tools container: the tools image given, or one built from the tools pinned in mise.toml. Every group runs to its end; when a check fails, the call fails with every group's output and names the groups that failed.
   """
   pub checks(
     """
     The image renovate-check runs Renovate's validator from.
     """
     renovateImage: String!,
+
+    """
+    The image the tools container is built from.
+    """
+    toolsBase: String!,
+
+    """
+    The shell command that installs the system packages mise needs, run in toolsBase before mise install.
+    """
+    toolsPackages: String!,
+
+    """
+    The tools image published for toolsBase, toolsPackages and mise.toml, by digest, or empty. It is used on an engine of its own platform only; otherwise, and when empty, the tools container is built.
+    """
+    toolsImage: String! = "",
 
     """
     The commit where HEAD's history leaves the default branch, or empty without one; the messages of the commits after it are checked.
@@ -37,6 +52,18 @@ type Ci {
     """
     group: String! = "",
   ): String! {
+    # An image of another platform would run under emulation, if at all.
+    let engine = toString(defaultPlatform)
+    let platform = if (toolsImage == "") { "" } else { toString(container.from(toolsImage).platform) }
+    let fits = toolsImage != "" and platform == engine
+    let tools = if (fits) { container.from(toolsImage) } else { toolsLayer(toolsBase, toolsPackages) }
+    let origin = if (fits) {
+      "tools: " + toolsImage
+    } else if (toolsImage == "") {
+      "tools: built from the pins, as no tools image is given"
+    } else {
+      "tools: built from the pins, as " + toolsImage + " is for " + platform + " and the engine runs " + engine
+    }
     let checkout = tools
       .withDirectory("/src", source)
       .withDirectory("/src/.git", git)
@@ -80,20 +107,29 @@ type Ci {
     let summary = (if (failed.isEmpty) { [] } else { ["failed: " + failed.join(" ")] })
       + (if (passed.isEmpty) { [] } else { ["passed: " + passed.join(" ")] })
     if (failed.isEmpty) {
-      report + "\n" + summary.join("\n")
+      origin + "\n" + report + "\n" + summary.join("\n")
     } else {
-      raise report + "\n" + summary.join("\n")
+      raise origin + "\n" + report + "\n" + summary.join("\n")
     }
   }
 
   """
-  The pinned tools, in a layer that depends on mise.toml alone, so changes to other files reuse it.
+  The tools pinned in mise.toml, in a layer that depends on base, packages and mise.toml alone, so changes to other files reuse it: the checks' tools container when no tools image is given, and the image the tools image workflow publishes. A tools image's key covers those three inputs only: a change to the steps here must come with a change to one of them, or the checks go on running in an image built without it.
   """
-  let tools: Container! {
+  pub toolsLayer(
+    """
+    The image to start from.
+    """
+    base: String!,
+
+    """
+    The shell command that installs the system packages mise needs, run before mise install.
+    """
+    packages: String!,
+  ): Container! {
     container
-      .from("jdxcode/mise:2026.11.4-debian@sha256:7769fb680659f7730db5b9c0d245c00ba517dfec9c720f6679248cb32e124095")
-      # mise installs yamllint through its pypi backend, which needs pipx and Python.
-      .withExec(["sh", "-c", "apt-get update && apt-get install -y --no-install-recommends pipx && rm -rf /var/lib/apt/lists/*"])
+      .from(base)
+      .withExec(["sh", "-c", packages])
       .withWorkdir("/src")
       .withEnvVariable("MISE_TRUSTED_CONFIG_PATHS", "/src")
       .withFile("/src/mise.toml", source.file("mise.toml"))

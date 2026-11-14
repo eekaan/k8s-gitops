@@ -115,9 +115,16 @@ tests-2: (test '2/3')
 tests-3: (test '3/3')
 
 # Without a terminal, as in CI, Dagger's default progress is a line every 30 seconds; plain prints every step and each check's output as it happens.
-# Run the checks inside containers built from the pins, as CI does: every group side by side, or only the group named, such as just ci tests-2; renovate-check's validator in its own image, the other checks in a container with the tools pinned in mise.toml
+# Run the checks inside containers built from the pins, as CI does: every group side by side, or only the group named, such as just ci tests-2; renovate-check's validator in its own image, the other checks in a container with the tools pinned in mise.toml, the tools image versions.yaml records when it was built for these pins
+[script]
 ci group='':
-    base=$(scripts/check-address-literals --base); if [ -t 2 ]; then progress=auto; else progress=plain; fi; dagger api call --progress="$progress" ci checks --base="$base" --renovate-image='{{ renovate_image }}' --group={{ quote(group) }}
+    set -o pipefail
+    base=$(scripts/check-address-literals --base)
+    # The tools' inputs, and the recorded tools image when it was built for them, one argument per line.
+    tools=$(scripts/tools-image ci-args)
+    mapfile -t tools <<< "$tools"
+    if [[ -t 2 ]]; then progress=auto; else progress=plain; fi
+    dagger api call --progress="$progress" ci checks --base="$base" --renovate-image='{{ renovate_image }}' "${tools[@]}" --group={{ quote(group) }}
 
 # Print the groups of checks as a JSON list, the CI workflow's matrix of jobs; in a GitHub Actions step, also set it as the step's output groups
 [script]
@@ -160,3 +167,15 @@ renovate-check:
 # Publish kubernetes/ as the signed artifact Flux follows, and move its main tag; runs only in the publish workflow
 publish:
     scripts/publish
+
+# Print the key of the tools image's inputs: ci_tools_base and ci_tools_packages in versions.yaml, and mise.toml
+tools-image-key:
+    scripts/tools-image key
+
+# Build the tools with the pinned Dagger, push them to ghcr.io tagged with their key, sign the digest keyless and verify it, then print it; nothing is built when the key's image is signed already; runs only in the tools image workflow on main
+tools-image-publish:
+    scripts/tools-image publish
+
+# Record the tools image at digest in versions.yaml, with the key of these inputs, once its signature verifies without credentials as the tools image workflow's on main for that key
+tools-image-pin digest:
+    scripts/tools-image pin {{ quote(digest) }}
