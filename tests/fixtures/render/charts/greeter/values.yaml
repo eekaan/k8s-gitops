@@ -1,0 +1,6 @@
+---
+replicas: 3
+domain: ""
+password: ""
+# true makes the chart refuse to render.
+broken: false
