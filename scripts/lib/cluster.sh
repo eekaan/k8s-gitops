@@ -98,6 +98,22 @@ cluster_talman() {
   return "$status"
 }
 
+# stack_cluster_name: the name of the cluster the stack's talman_yaml output configures, empty when
+# the stack has none, for a stack that scripts/stack-env has set up and initialised. tofu's JSON holds
+# every output's value; only jq and yq read it.
+stack_cluster_name() {
+  local outputs name
+  outputs=$(stack_tofu output -json) || return 1
+  name=$(jq -r '.talman_yaml.value // ""' <<< "$outputs" | yq '.clusterName // ""')
+  # The name becomes a path under talos/, so it is a plain name that cannot lead out of it.
+  if [[ -n $name && ! $name =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
+    # shellcheck disable=SC2154 # scripts/stack-env sets stack
+    infra_error "the clusterName in $stack's talman_yaml is not a name of lower-case letters, digits and hyphens"
+    return 1
+  fi
+  printf '%s' "$name"
+}
+
 # inside_repository PATH: whether PATH, with symlinks resolved, lies in the repository.
 inside_repository() {
   local resolved root

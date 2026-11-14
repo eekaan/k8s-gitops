@@ -91,6 +91,11 @@ Feature: Cluster lifecycle
     When cluster-destroy runs with --yes
     Then the cluster is asked before tofu runs, every tofu call is on the cluster stack, which is planned for destruction, summarised and destroyed, none is on the plumbing stack, the talman.yaml, talosconfig and kubeconfig git ignores are removed, the secrets bundle stays as it was, and no S3 or OpenStack client runs
 
+  Scenario: A cluster is destroyed only under the name its stack holds
+    Given the cluster stack, whose talman_yaml output names lab-sto2, and a name with no directory under talos/, and one with a directory that is not the stack's cluster
+    When cluster-destroy runs for each, with --unreachable and --yes
+    Then each exits non-zero saying which name the stack holds, before any cluster is asked, runs no tofu plan or apply, and leaves the generated files of lab-sto2 where they are
+
   Scenario: Nothing is destroyed without the stack's name
     Given a cluster that owns no load balancer and no volume of a CSI driver
     When cluster-destroy runs and no answer, a wrong one, the cluster's name or the plumbing stack's name is typed back

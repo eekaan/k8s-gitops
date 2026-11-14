@@ -337,8 +337,12 @@ out of the artifact, which is built from `kubernetes/`.
   `sto2/cluster`, as `just infra-destroy sto2/cluster` does
   ([infrastructure.md](infrastructure.md#recipes)): it shows the plan's summary, destroys once the
   stack's name is typed back, or with `--yes`, and then removes the cluster's `talman.yaml`,
-  talosconfig and kubeconfig. The plumbing stack, the secrets bundle and the buckets stay. First,
-  through the kubeconfig of the cluster it is given, it lists
+  talosconfig and kubeconfig. The plumbing stack, the secrets bundle and the buckets stay. The stack
+  holds one cluster, so first, before it asks any cluster anything and whatever flags are given, it
+  refuses a name that has no directory under `talos/` and a name other than the cluster name in the
+  stack's `talman_yaml` output, saying which cluster the stack holds. `cluster-env` does not make
+  that refusal for every recipe: `cluster-secrets` and `infra-talman` run before a cluster's
+  directory exists. Then, through the kubeconfig of the cluster it is given, it lists
   every Service of type LoadBalancer and every PersistentVolume of a CSI driver: the cloud's load
   balancers and volumes behind them are made by the cluster, not by OpenTofu, so the destroy would
   leave them in the cloud, where they keep the network from being deleted. While there are any, it

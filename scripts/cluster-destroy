@@ -15,6 +15,10 @@
 # cannot be asked and may still own some, so it is not destroyed either, unless --unreachable is
 # given, with which the operator takes on what may be left. Neither kubectl's errors nor anything of
 # the objects but their names are printed, as they can hold addresses.
+#
+# The stack holds one cluster, and destroying it destroys that cluster whatever name was given. So
+# before it asks the cluster anything, whatever flags are given, it refuses a name with no directory
+# under talos/ and a name other than the cluster name in the stack's talman_yaml output.
 # Usage: scripts/cluster-destroy [cluster] [--yes] [--unreachable]
 set -euo pipefail
 
@@ -57,6 +61,34 @@ stack_env() {
 # So that nothing runs while any of it is missing; what it prints is shown only when something is.
 if ! checked=$(stack_env 2>&1); then
   printf '%s\n' "$checked" >&2
+  exit 1
+fi
+
+# The stack holds one cluster, and destroying it destroys that one whatever name was typed, so the
+# name must be the stack's own. cluster-secrets and infra-talman run before a cluster's directory
+# exists, which is why cluster-env does not refuse a name without one and this recipe does.
+step="checking that $cluster is the cluster $stack holds"
+if [[ ! -d $cluster_dir ]]; then
+  infra_error "talos/$cluster does not exist: name the cluster $stack holds"
+  exit 1
+fi
+
+# stack_holds: the name of the cluster the stack holds. Run in a subshell, so the stack's lock is
+# released before infra-destroy takes it.
+stack_holds() {
+  # shellcheck source=scripts/stack-env
+  . "$here/stack-env" "$stack" || return 1
+  lock_stack || return 1
+  init_stack || return 1
+  stack_cluster_name
+}
+stack_cluster=$(stack_holds) || exit 1
+if [[ $stack_cluster != "$cluster" ]]; then
+  if [[ -n $stack_cluster ]]; then
+    infra_error "$stack holds $stack_cluster, not $cluster; it destroys that cluster only: just cluster-destroy $stack_cluster. Nothing was destroyed"
+  else
+    infra_error "$stack's outputs name no cluster, so it cannot be told to be $cluster. Nothing was destroyed"
+  fi
   exit 1
 fi
 

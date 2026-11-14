@@ -19,6 +19,8 @@ set -euo pipefail
 here=$(dirname "$0")
 # shellcheck source=scripts/lib/infra.sh
 . "$here/lib/infra.sh"
+# shellcheck source=scripts/lib/cluster.sh
+. "$here/lib/cluster.sh"
 
 stacks=(sto2/cluster sto2/plumbing)
 named=("${stacks[@]}" sto2/ci)
@@ -47,20 +49,6 @@ fi
 # which would keep the network from being deleted. It is not done; the hook says so.
 remove_cluster_made_load_balancers_and_volumes() {
   infra_error "not implemented: removing the load balancers and volumes the cluster created outside OpenTofu; they are left in place"
-}
-
-# cluster_name: the name of the cluster the stack's talman_yaml output configures, empty when the
-# stack has none. tofu's JSON holds every output's value; only jq and yq read it.
-cluster_name() {
-  local outputs name
-  outputs=$(stack_tofu output -json) || return 1
-  name=$(jq -r '.talman_yaml.value // ""' <<< "$outputs" | yq '.clusterName // ""')
-  # The name becomes a path under talos/, so it is a plain name that cannot lead out of it.
-  if [[ -n $name && ! $name =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
-    infra_error "the clusterName in $stack's talman_yaml is not a name of lower-case letters, digits and hyphens"
-    return 1
-  fi
-  printf '%s' "$name"
 }
 
 # remove_generated CLUSTER: removes the files generated for CLUSTER that hold the addresses of its
@@ -155,7 +143,7 @@ for stack in "${stacks[@]}"; do
     if [[ $stack == */cluster ]]; then
       remove_cluster_made_load_balancers_and_volumes
       # Read before the destroy, which takes the outputs with it.
-      cluster=$(cluster_name)
+      cluster=$(stack_cluster_name)
     fi
     apply_plan
     echo "$stack destroyed"

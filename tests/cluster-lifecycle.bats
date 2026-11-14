@@ -253,9 +253,10 @@ restore_generated() {
   done
 }
 
-# no_tofu: tofu has not run.
+# no_tofu: tofu has planned and applied nothing; it only reads the stack's outputs, which name the
+# cluster the stack holds.
 no_tofu() {
-  [ -z "$(calls '^tofu ')" ]
+  [ -z "$(calls '^tofu .* (plan|apply) ')" ]
 }
 
 @test "A healthy cluster passes every check" {
@@ -720,7 +721,7 @@ kube-system/node-agent-cp-1' ]
 
   [ "$status" -ne 0 ]
   [[ $output == *"--unreachable"* ]]
-  [ ! -e "$RECORD/argv" ]
+  [ -z "$(calls '^kubectl ')" ]
   mv "$BATS_TEST_TMPDIR/kubeconfig" "$CLUSTER/clusterconfig/kubeconfig"
 
   # With --unreachable, an API that does not answer is not asked to answer.
@@ -751,7 +752,8 @@ kube-system/node-agent-cp-1' ]
   # The cluster is asked first, then only the cluster stack is planned for destruction and destroyed.
   asked=$(last_call_line '^kubectl get ')
   [ -n "$asked" ]
-  [ "$asked" -lt "$(call_line '^tofu ')" ]
+  [ "$(call_line '^tofu .* output ')" -lt "$asked" ]
+  [ "$asked" -lt "$(call_line '^tofu .* plan ')" ]
   [ "$(calls '^tofu ' | grep -cv "^tofu -chdir=$STACK ")" -eq 0 ]
   [ "$(calls '^tofu .* plan ' | wc -l)" -eq 1 ]
   [[ $(calls '^tofu .* plan ') == *" -destroy "* ]]
@@ -766,6 +768,32 @@ kube-system/node-agent-cp-1' ]
   done
   cmp "$CLUSTER/secrets.sops.yaml" "$BATS_TEST_TMPDIR/cluster.before/secrets.sops.yaml"
   [ -z "$(calls '^(rclone|openstack|helm|talosctl|talman) ')" ]
+}
+
+@test "A cluster is destroyed only under the name its stack holds" {
+  # No directory under talos/ for the name: nothing is read, asked or destroyed.
+  recipe cluster-destroy other-cluster --unreachable --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"talos/other-cluster does not exist"* ]]
+  [ -z "$(calls '^tofu .* (plan|apply) ')" ]
+  [ -z "$(calls '^kubectl ')" ]
+  generated_kept
+
+  # A directory for it, as cluster-secrets and infra-talman make before a cluster exists: the stack
+  # still holds another cluster, which is the only one it destroys.
+  mkdir -p "$REPO/talos/other-cluster"
+  for args in '--unreachable --yes' '--yes' ''; do
+    rm -f "$RECORD/argv"
+    # shellcheck disable=SC2086 # the arguments as an operator types them
+    recipe cluster-destroy other-cluster $args <<< other-cluster
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"holds lab-sto2, not other-cluster"* ]]
+    [ -z "$(calls '^tofu .* (plan|apply) ')" ]
+    [ -z "$(calls '^kubectl ')" ]
+    generated_kept
+  done
 }
 
 @test "Nothing is destroyed without the stack's name" {
