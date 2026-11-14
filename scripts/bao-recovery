@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# Hands OpenBao's recovery keys to the operator, once (ADR 0013). OpenBao initialises itself without
+# recovery keys; the first rotation of them returns new shares at once, and every later one needs a
+# threshold of the shares that exist. So this runs only while OpenBao holds none, and writes the
+# shares, with the seal key, to FILE outside the repository, encrypted with age to the Talos age
+# key's recipient in talos/.sops.yaml: a key the cluster does not hold. The rotation asks for
+# verification, so OpenBao commits the shares only once the script has written FILE and given a
+# threshold of them back. Nothing of them is printed, passed as an argument or written unencrypted;
+# they travel on pipes between curl, kubectl, jq and age. Works through the session of
+# scripts/lib/openbao.sh as the operator role.
+# Usage: scripts/bao-recovery <file> [cluster]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/openbao.sh
+. "$here/lib/openbao.sh"
+
+# Five shares, any three of which restore access: the defaults of bao operator init.
+shares=5
+threshold=3
+
+if (($# < 1 || $# > 2)); then
+  echo "bao-recovery: give the file to write, outside the repository: just bao-recovery <file> [cluster]" >&2
+  exit 1
+fi
+file=$1
+
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "${2-}"
+complete=1
+require_commands kubectl curl jq base64 age mktemp || complete=0
+require_kubeconfig || complete=0
+recipient=$(sops_recipient)
+if is_placeholder "$recipient" || [[ ! $recipient =~ ^age1[0-9a-z]+$ ]]; then
+  infra_error "talos/.sops.yaml holds no age recipient yet; just cluster-age-key writes it"
+  complete=0
+fi
+dir=$(dirname -- "$file")
+if inside_repository "$file"; then
+  infra_error "$file lies inside the repository; the recovery keys are kept outside it"
+  complete=0
+elif [[ -e $file || -L $file ]]; then
+  infra_error "$file exists; the recovery keys go into a new file"
+  complete=0
+elif [[ ! -d $dir || ! -w $dir ]]; then
+  infra_error "$dir is not a directory this user can write to"
+  complete=0
+fi
+((complete))
+
+# pending is 1 from the moment OpenBao returned shares until it committed them; partial is the file
+# being written, placed whether it was moved to FILE.
+pending=0 partial="" placed=0
+
+# bao_abort: on a failure while the shares are pending, cancels the rotation, so OpenBao keeps none
+# and the recipe can run again, and removes what it wrote, unless OpenBao committed the shares after
+# all, in which case FILE holds them and stays.
+bao_abort() {
+  local held
+  ((pending)) || return 0
+  bao_request DELETE sys/rotate/recovery/init > /dev/null 2>&1 || true
+  [[ -z $partial ]] || rm -f -- "$partial"
+  ((placed)) || return 0
+  held=$(bao_request GET sys/seal-status 2> /dev/null | jq -r '.n // "unknown"') || held=unknown
+  if [[ $held == 0 ]]; then
+    rm -f -- "$file"
+    infra_error "OpenBao did not commit the recovery keys, and $file is removed; run this again"
+  else
+    infra_error "OpenBao holds $held recovery key shares; keep $file, which may hold them, and check it as docs/runbooks/openbao.md says"
+  fi
+}
+
+bao_open
+
+step="reading OpenBao's seal status"
+read -r initialized sealed recovery held <<< "$(bao_request GET sys/seal-status |
+  jq -r '[.initialized, .sealed, .recovery_seal, .n] | map(tostring) | join(" ")')"
+if [[ $initialized != true || $sealed != false ]]; then
+  infra_error "OpenBao is not initialised and unsealed"
+  exit 1
+fi
+if [[ $recovery != true ]]; then
+  infra_error "OpenBao's seal takes no recovery keys"
+  exit 1
+fi
+if [[ $held != 0 ]]; then
+  infra_error "OpenBao holds $held recovery key shares already; they were handed out when they were made, and only a threshold of them makes new ones"
+  exit 1
+fi
+
+bao_login
+
+step="generating the recovery keys"
+rotation=$(jq -nc --argjson shares "$shares" --argjson threshold "$threshold" \
+  '{secret_shares: $shares, secret_threshold: $threshold, require_verification: true}' |
+  bao_request POST sys/rotate/recovery/init)
+pending=1
+if ! printf '%s' "$rotation" | jq -e --argjson shares "$shares" \
+  '.data.keys_base64 | length == $shares' > /dev/null; then
+  infra_error "OpenBao returned no recovery keys"
+  exit 1
+fi
+
+step="writing $file"
+partial=$(umask 077 && mktemp "$dir/.${file##*/}.XXXXXXXXXX")
+{
+  printf '%s\n' "$rotation"
+  kubectl get secret "$bao_seal_secret" --namespace "$bao_namespace" --output json
+} | jq -sc --arg cluster "$cluster" --arg secret "$bao_seal_secret" --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+  {cluster: $cluster, created: $created,
+   recovery: {shares: .[0].data.n, threshold: .[0].data.t, keys_base64: .[0].data.keys_base64},
+   seal: {secret: $secret, key_id: $secret, key: (.[1].data.key | @base64d)}}' |
+  age --encrypt --recipient "$recipient" --output "$partial"
+mv -- "$partial" "$file"
+partial="" placed=1
+
+step="committing the recovery keys"
+for ((share = 0; share < threshold; share++)); do
+  verified=$(printf '%s' "$rotation" | jq -c --argjson share "$share" \
+    '{nonce: .data.verification_nonce, key: .data.keys_base64[$share]}' |
+    bao_request POST sys/rotate/recovery/verify)
+done
+rotation=
+if ! printf '%s' "$verified" | jq -e '.data.complete == true' > /dev/null; then
+  infra_error "OpenBao did not report the recovery keys committed"
+  exit 1
+fi
+pending=0
+
+echo "bao-recovery: wrote $file: OpenBao's $shares recovery key shares, any $threshold of which restore access, and its seal key, encrypted to the Talos age key's recipient $recipient"
+echo "bao-recovery: keep it outside the cluster; it holds the only copy of the shares (docs/runbooks/openbao.md)"

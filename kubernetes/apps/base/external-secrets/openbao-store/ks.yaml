@@ -1,0 +1,27 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: openbao-store
+  namespace: flux-system
+spec:
+  path: ./apps/base/external-secrets/openbao-store/app
+  targetNamespace: external-secrets
+  # The operator's definitions and webhook, which validates the store; and OpenBao serving, as the
+  # operator logs in to it to make the store Ready.
+  dependsOn:
+    - name: external-secrets
+    - name: openbao
+  # Ready only once the operator reports the store Ready, which kstatus does not read from a
+  # ClusterSecretStore by itself, so an application that names this one in dependsOn finds secrets
+  # coming through it.
+  wait: true
+  healthCheckExprs:
+    - apiVersion: external-secrets.io/v1
+      kind: ClusterSecretStore
+      current: has(status.conditions) && status.conditions.exists(e, e.type == 'Ready' && e.status == 'True')
+      failed: has(status.conditions) && status.conditions.exists(e, e.type == 'Ready' && e.status == 'False')
+  sourceRef:
+    kind: ExternalArtifact
+    name: openbao-store

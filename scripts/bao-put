@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Writes one value into OpenBao's key-value mount, as the key KEY of the secret at PATH under
+# secrets/, from the operator's machine. The value comes from standard input, never from an
+# argument: typed without echo when standard input is a terminal, otherwise all of it, without the
+# newlines that end it. It reaches OpenBao only in the body of the write, through a port-forward the
+# script opens and closes, over TLS verified against OpenBao's CA, with a ten-minute token for the
+# operator role, which it revokes (scripts/lib/openbao.sh). A secret at PATH keeps its other keys;
+# one that does not exist is created. Prints the path and the key, never the value.
+# Usage: scripts/bao-put <path> <key> [cluster]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/openbao.sh
+. "$here/lib/openbao.sh"
+
+if (($# < 2 || $# > 3)); then
+  echo "bao-put: give the path and the key, and the value on standard input: just bao-put <path> <key> [cluster]" >&2
+  exit 1
+fi
+path=$1 key=$2
+
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "${3-}"
+complete=1
+if ! bao_valid_path "$path"; then
+  infra_error "$path is not a key-value path: names of letters, digits, '_', '.' and '-', not starting with '.' or '-', joined by '/'"
+  complete=0
+fi
+if ! bao_valid_key "$key"; then
+  infra_error "$key is not a key: letters, digits, '_', '.' and '-', not starting with '.' or '-'"
+  complete=0
+fi
+require_commands kubectl curl jq base64 || complete=0
+require_kubeconfig || complete=0
+((complete))
+
+step="reading the value from standard input"
+if [[ -t 0 ]]; then
+  printf 'value of %s in %s/%s: ' "$key" "$bao_mount" "$path" >&2
+  IFS= read -rs value || true
+  printf '\n' >&2
+  body=$(printf '%s' "$value" | jq -Rsc --arg key "$key" 'if . == "" then empty else {data: {($key): .}} end')
+  value=
+else
+  body=$(jq -Rsc --arg key "$key" 'sub("\n+$"; "") | if . == "" then empty else {data: {($key): .}} end')
+fi
+if [[ -z $body ]]; then
+  infra_error "no value on standard input; type it when asked, or pipe it in"
+  exit 1
+fi
+
+bao_open
+bao_login
+
+step="writing $key of $bao_mount/$path"
+written=0
+printf '%s' "$body" | bao_request PATCH "$bao_mount/data/$path" application/merge-patch+json > /dev/null || written=$?
+if ((written == 44)); then
+  # Nothing at the path yet: create it, and only while there still is nothing.
+  printf '%s' "$body" | jq -c '. + {options: {cas: 0}}' | bao_request POST "$bao_mount/data/$path" > /dev/null
+elif ((written != 0)); then
+  exit 1
+fi
+body=
+echo "bao-put: wrote $key of $bao_mount/$path"

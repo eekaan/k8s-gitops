@@ -1,0 +1,173 @@
+---
+# Values for the OpenBao chart, read by the HelmRelease through a ConfigMap generated without
+# substitution, so the server's arguments keep their shell expansion. Keys not set here keep the
+# chart's defaults. ADR 0013 records the seal and custody decision; docs/kubernetes.md describes
+# what runs.
+
+global:
+  # The listener serves TLS; the chart's probes, its test pod and its monitor use https.
+  tlsDisable: false
+
+# Only the servers: no agent injector, no CSI provider and no UI Service.
+injector:
+  enabled: false
+csi:
+  enabled: false
+ui:
+  enabled: false
+
+server:
+  # A new release replaces one member at a time, in reverse order, each once the one before is
+  # Ready again, that is unsealed; the chart's default, OnDelete, would leave the old pods running.
+  updateStrategyType: RollingUpdate
+  # Idle use of a member holding a few hundred secrets; no limits, as memory grows with the store.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+
+  # The chart's pod security context runs the server as a non-root user with the runtime's seccomp
+  # profile; the container also drops every capability, which the restricted level requires. The
+  # chart's test pod takes the same container context.
+  statefulSet:
+    securityContext:
+      container:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+
+  # One member per node, and only on workers: nodes without the role label Talos gives every control
+  # plane, where LINSTOR's volumes are reachable too. A member is never scheduled beside another, so
+  # a drain takes at most one. A string, as the chart's default is, which the chart renders as a
+  # template; the anti-affinity is the chart's default.
+  affinity: |
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: DoesNotExist
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ template "openbao.name" . }}
+              app.kubernetes.io/instance: "{{ .Release.Name }}"
+              component: server
+          topologyKey: kubernetes.io/hostname
+
+  # Only openbao-0 reads the initial configuration, and only while neither other member answers;
+  # the script prints the -config flag for it, or nothing.
+  extraArgs: "$(sh /openbao/userconfig/openbao-initialize/initialize-args.sh)"
+
+  # The CA the servers' own CLI verifies the listener with.
+  extraEnvironmentVars:
+    BAO_CACERT: /openbao/ca/ca.crt
+
+  # Mounted into the servers only, each under /openbao/userconfig/<name>: the seal key, the
+  # listener's key and certificate, and the initial configuration. The chart's test pod also mounts
+  # what `volumes` lists, so only the CA is there. tests/openbao.bats fails if a chart drops this key.
+  extraVolumes:
+    - type: secret
+      name: openbao-seal-1
+    - type: secret
+      name: openbao-tls
+    - type: configMap
+      name: openbao-initialize
+  volumes:
+    - name: ca
+      secret:
+        secretName: openbao-tls
+        items:
+          - key: ca.crt
+            path: ca.crt
+  volumeMounts:
+    - name: ca
+      mountPath: /openbao/ca
+      readOnly: true
+
+  # Each member's raft data, on a claim of the default StorageClass, which is not named. The store
+  # holds a few hundred small secrets and their versions, far below 100 MiB with raft's log and the
+  # snapshots it keeps beside it; 2 GiB leaves room to grow, and a thin volume uses only what is
+  # written.
+  dataStorage:
+    size: 2Gi
+
+  ha:
+    enabled: true
+    replicas: 3
+    # One member of three may be unavailable, which leaves a majority of two.
+    disruptionBudget:
+      enabled: true
+      maxUnavailable: 1
+    raft:
+      enabled: true
+      # Each member's raft ID is its pod's name, so a member that comes back is the same member.
+      setNodeId: true
+      # The chart replaces a few capitalised placeholder names in this text when each server starts;
+      # none of them appears here.
+      config: |
+        ui = false
+
+        listener "tcp" {
+          address = "[::]:8200"
+          cluster_address = "[::]:8201"
+          tls_cert_file = "/openbao/userconfig/openbao-tls/tls.crt"
+          tls_key_file = "/openbao/userconfig/openbao-tls/tls.key"
+          # cert-manager renews the certificate in place; the listener picks it up within 30 seconds.
+          tls_auto_reload = true
+          telemetry {
+            # The ServiceMonitor scrapes /v1/sys/metrics without a token.
+            unauthenticated_metrics_access = true
+          }
+        }
+
+        # Every member joins whichever of the others leads, at start and after an eviction.
+        storage "raft" {
+          path = "/openbao/data"
+          retry_join {
+            leader_api_addr = "https://openbao-0.openbao-internal:8200"
+            leader_ca_cert_file = "/openbao/ca/ca.crt"
+          }
+          retry_join {
+            leader_api_addr = "https://openbao-1.openbao-internal:8200"
+            leader_ca_cert_file = "/openbao/ca/ca.crt"
+          }
+          retry_join {
+            leader_api_addr = "https://openbao-2.openbao-internal:8200"
+            leader_ca_cert_file = "/openbao/ca/ca.crt"
+          }
+        }
+
+        # Auto-unseal with the key in the Secret openbao-seal-1, read from its file at start.
+        seal "static" {
+          current_key_id = "openbao-seal-1"
+          current_key = "file:///openbao/userconfig/openbao-seal-1/key"
+        }
+
+        service_registration "kubernetes" {}
+
+        # Requests and responses, with every secret value in them hashed, to the servers' log.
+        audit "file" "stdout" {
+          options {
+            file_path = "stdout"
+          }
+        }
+
+        telemetry {
+          prometheus_retention_time = "30s"
+          disable_hostname = true
+        }
+
+# The chart's ServiceMonitor scrapes the active member's Service, verifying its certificate against
+# the CA's Secret under the name the certificate holds.
+serverTelemetry:
+  serviceMonitor:
+    enabled: true
+    tlsConfig:
+      ca:
+        secret:
+          name: openbao-ca
+          key: ca.crt
+      serverName: openbao-active.openbao.svc

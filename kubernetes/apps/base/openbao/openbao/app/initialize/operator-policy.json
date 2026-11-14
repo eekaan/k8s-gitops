@@ -1,0 +1,22 @@
+{
+  "path": {
+    "secrets/data/*": {
+      "capabilities": ["create", "patch"]
+    },
+    "sys/rotate/recovery/init": {
+      "capabilities": ["read", "update", "delete"]
+    },
+    "sys/rotate/recovery/update": {
+      "capabilities": ["update"]
+    },
+    "sys/rotate/recovery/verify": {
+      "capabilities": ["update"]
+    },
+    "sys/generate-root-token/attempt": {
+      "capabilities": ["read", "update", "delete"]
+    },
+    "sys/generate-root-token/update": {
+      "capabilities": ["update"]
+    }
+  }
+}

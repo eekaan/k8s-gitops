@@ -6,6 +6,7 @@ set script-interpreter := ['bash', '-eu']
 import? 'just/infra.just'
 import? 'just/cluster.just'
 import? 'just/flux.just'
+import? 'just/openbao.just'
 
 # The pinned installs go first on PATH. `mise exec` is not enough: in a shell where mise is
 # activated it appends them behind entries already on PATH, so another install could answer.

@@ -1,0 +1,127 @@
+{
+  "initialize": [
+    {
+      "kubernetes-auth": {
+        "request": [
+          {
+            "enable-kubernetes-auth": {
+              "operation": "update",
+              "path": "sys/auth/kubernetes",
+              "data": {
+                "type": "kubernetes"
+              }
+            }
+          },
+          {
+            "configure-kubernetes-auth": {
+              "operation": "update",
+              "path": "auth/kubernetes/config",
+              "data": {
+                "kubernetes_host": "https://kubernetes.default.svc"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "secrets": {
+        "request": [
+          {
+            "mount-secrets": {
+              "operation": "update",
+              "path": "sys/mounts/secrets",
+              "data": {
+                "type": "kv",
+                "options": {
+                  "version": "2"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "external-secrets": {
+        "request": [
+          {
+            "external-secrets-policy": {
+              "operation": "update",
+              "path": "sys/policies/acl/external-secrets",
+              "data": {
+                "policy": {
+                  "eval_type": "string",
+                  "eval_source": "file",
+                  "path": "/openbao/userconfig/openbao-initialize/external-secrets-policy.json"
+                }
+              }
+            }
+          },
+          {
+            "external-secrets-role": {
+              "operation": "update",
+              "path": "auth/kubernetes/role/external-secrets",
+              "data": {
+                "bound_service_account_names": ["openbao-store"],
+                "bound_service_account_namespaces": ["external-secrets"],
+                "audience": "openbao",
+                "token_policies": ["external-secrets"],
+                "token_ttl": "10m",
+                "token_max_ttl": "1h"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "operator": {
+        "request": [
+          {
+            "operator-policy": {
+              "operation": "update",
+              "path": "sys/policies/acl/operator",
+              "data": {
+                "policy": {
+                  "eval_type": "string",
+                  "eval_source": "file",
+                  "path": "/openbao/userconfig/openbao-initialize/operator-policy.json"
+                }
+              }
+            }
+          },
+          {
+            "operator-role": {
+              "operation": "update",
+              "path": "auth/kubernetes/role/operator",
+              "data": {
+                "bound_service_account_names": ["openbao-operator"],
+                "bound_service_account_namespaces": ["openbao"],
+                "audience": "openbao",
+                "token_policies": ["operator"],
+                "token_ttl": "10m",
+                "token_max_ttl": "10m"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "raft": {
+        "request": [
+          {
+            "autopilot": {
+              "operation": "update",
+              "path": "sys/storage/raft/autopilot/configuration",
+              "data": {
+                "cleanup_dead_servers": false
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

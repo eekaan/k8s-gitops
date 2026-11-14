@@ -12,10 +12,13 @@ resources:
   - ../../base/external-secrets
   - ../../base/kube-system
   - ../../base/monitoring
+  - ../../base/openbao
   - ../../base/piraeus-datastore
   - ../../base/cert-manager/cert-manager/ks.yaml
   - ../../base/demo/hello/ks.yaml
+  - ../../base/demo/hello-secret/ks.yaml
   - ../../base/external-secrets/external-secrets/ks.yaml
+  - ../../base/external-secrets/openbao-store/ks.yaml
   - ../../base/kube-system/cilium/ks.yaml
   - ../../base/kube-system/descheduler/ks.yaml
   - ../../base/kube-system/gateway-api-crds/ks.yaml
@@ -27,5 +30,6 @@ resources:
   - ../../base/kube-system/snapshot-controller/ks.yaml
   # - ../../base/kube-system/spegel/ks.yaml  # Disabled: Talos discards unpacked image layers, which Spegel serves, until its machine configuration sets containerd's discard_unpacked_layers to false
   - ../../base/monitoring/kube-prometheus-stack/ks.yaml
+  - ../../base/openbao/openbao/ks.yaml
   - ../../base/piraeus-datastore/linstor-cluster/ks.yaml
   - ../../base/piraeus-datastore/piraeus-operator/ks.yaml
