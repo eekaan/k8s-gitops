@@ -1,6 +1,6 @@
 # The Talos nodes, on the plumbing stack's network and booting its Talos image, with their
-# security group, server group and floating IPs, and the load balancer in front of their
-# Kubernetes API.
+# security group, server group and floating IPs, the load balancer in front of their Kubernetes
+# API, and the talman.yaml that configures them.
 
 # The cloud and its credentials come from the environment: OS_CLOUD names the clouds.yaml entry.
 provider "openstack" {}
@@ -12,6 +12,7 @@ data "terraform_remote_state" "plumbing" {
 
 locals {
   plumbing = data.terraform_remote_state.plumbing.outputs
+  versions = yamldecode(file("${path.module}/${var.versions_file}"))
 }
 
 module "nodes" {
@@ -53,4 +54,38 @@ module "api_lb" {
   loadbalancer_provider = var.api_lb_provider
   flavor_id             = var.api_lb_flavor_id
   tags                  = [var.prefix]
+}
+
+# talman's configuration of the cluster, from this stack's own nodes and load balancer. talman runs
+# outside the node network and reaches every node at its floating address.
+locals {
+  # Control planes first, then workers, each by name: a stable order, so the file changes only
+  # when a node does.
+  talman_nodes = flatten([
+    for role in ["controlplane", "worker"] : [
+      for name in sort(keys(module.nodes.nodes)) : {
+        hostname    = name
+        role        = role
+        address     = module.nodes.nodes[name].floating_address
+        floating_ip = module.nodes.nodes[name].floating_address
+      } if module.nodes.nodes[name].role == role
+    ]
+  ])
+
+  talman_yaml = templatefile("${path.module}/../../../../../talos/talman.yaml.tftpl", {
+    cluster_name       = var.cluster_name
+    endpoint           = module.api_lb.endpoint
+    talos_version      = local.versions.talos
+    kubernetes_version = local.versions.kubernetes
+    node_subnet        = local.plumbing.network.cidr
+    pod_subnet         = var.pod_subnet
+    service_subnet     = var.service_subnet
+    # Every address the Kubernetes API is reached on: the load balancer's on the node network and
+    # its floating one, and each control plane's floating address.
+    api_sans = concat(
+      [module.api_lb.vip_address, module.api_lb.floating_address],
+      [for node in local.talman_nodes : node.floating_ip if node.role == "controlplane"],
+    )
+    nodes = local.talman_nodes
+  })
 }

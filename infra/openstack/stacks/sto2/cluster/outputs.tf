@@ -71,3 +71,15 @@ output "api_load_balancer" {
   sensitive   = true
   value       = module.api_lb.load_balancer
 }
+
+output "talman_yaml" {
+  description = "The cluster's talman.yaml: talos/talman.yaml.tftpl rendered with these nodes, the API load balancer, the versions file and the subnets. scripts/infra-talman writes it to talos/<cluster_name>/talman.yaml."
+  sensitive   = true
+  value       = local.talman_yaml
+}
+
+output "schematic_id" {
+  description = "Image Factory schematic ID of the image the nodes boot. talman computes the installer image from the same talos/schematic.yaml, and scripts/infra-talman checks that the two IDs agree."
+  # A hash of talos/schematic.yaml, a committed file, so it tells nothing about the deployment.
+  value = nonsensitive(local.plumbing.image.schematic_id)
+}

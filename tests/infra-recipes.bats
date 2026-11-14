@@ -27,6 +27,14 @@ setup() {
   for tool in jq yq grep flock; do
     record "$tool"
   done
+  # talman, which infra-apply runs on the cluster's talman.yaml, recorded and agreeing with the
+  # fixture's schematic ID; tests/infra-talman.bats runs the real one.
+  fake talman <<EOF
+printf '%s\n' "talman \$*" >> "$RECORD/argv"
+if [[ " \$* " == *' schematic id -o json '* ]]; then
+  jq '{nodes: [{hostname: "fixture", schematicID: .schematic_id.value}]}' "$FIXTURES/outputs.json"
+fi
+EOF
   # Everything the recipes read; the secrets are markers that must never be seen.
   BASE_ENVIRONMENT=(
     TF_STATE_BUCKET=fixture-state-bucket

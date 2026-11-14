@@ -14,6 +14,8 @@ infra/openstack/modules/*/.terraform.lock.hcl
 
 # talman's per-cluster config and generated machine configs carry cluster secrets.
 talos/*/talman.yaml
+# The recipe writes talman.yaml through a temporary file beside it.
+talos/*/.talman.yaml.*
 clusterconfig/
 
 # Keys and credentials only ever live on the operator's machine.

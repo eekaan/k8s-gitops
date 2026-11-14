@@ -6,10 +6,14 @@ infra-check: tools-check
 infra-plan stack:
     scripts/infra-plan {{ quote(stack) }}
 
-# Plan a stack such as sto2/plumbing, print the plan's summary, and apply that plan once the stack's name is typed back (--yes: without asking)
+# Plan a stack such as sto2/plumbing, print the plan's summary, and apply that plan once the stack's name is typed back (--yes: without asking); after the cluster stack, write its talman.yaml as infra-talman does
 [positional-arguments]
 infra-apply stack *flags:
     scripts/infra-apply "$@"
+
+# Write talos/<cluster>/talman.yaml from the cluster stack's output, mode 0600 and never printed, once talman computes the image's schematic and validates it
+infra-talman stack='sto2/cluster':
+    scripts/infra-talman {{ quote(stack) }}
 
 # Print one non-sensitive output of a stack, such as: just infra-output sto2/plumbing talos_version
 infra-output stack name:

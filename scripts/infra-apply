@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Plans a stack and prints the plan's summary as infra-plan does; once the stack's name is typed
 # back, or with --yes (CI), applies exactly that saved plan. Its state is written encrypted to the
-# object storage.
+# object storage. After a cluster stack, it writes the cluster's talman.yaml as infra-talman does.
 # Usage: scripts/infra-apply <region>/<stack> [--yes], such as scripts/infra-apply sto2/plumbing
 set -euo pipefail
 
 here=$(dirname "$0")
 # shellcheck source=scripts/lib/infra.sh
 . "$here/lib/infra.sh"
+# shellcheck source=scripts/infra-talman
+. "$here/infra-talman"
 
 confirmed=0
 case ${2-} in
@@ -28,3 +30,8 @@ plan_stack
 ((confirmed)) || confirm "$stack" apply applied
 apply_plan
 echo "$stack applied"
+# The apply can change the nodes and their addresses, so talman.yaml is written again from the
+# state it left, under this run's lock.
+if [[ $stack == */cluster ]]; then
+  write_talman
+fi

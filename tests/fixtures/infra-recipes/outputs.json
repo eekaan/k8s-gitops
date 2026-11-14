@@ -8,5 +8,15 @@
     "sensitive": true,
     "type": ["object", { "cidr": "string", "network_id": "string" }],
     "value": { "cidr": "192.0.2.0/24", "network_id": "marker-sensitive-network-id" }
+  },
+  "talman_yaml": {
+    "sensitive": true,
+    "type": "string",
+    "value": "apiVersion: talman.dev/v1\nclusterName: fixture\n"
+  },
+  "schematic_id": {
+    "sensitive": false,
+    "type": "string",
+    "value": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   }
 }

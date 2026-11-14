@@ -14,7 +14,10 @@ command that runs them is a `just` recipe.
   client is not pinned in `mise.toml`; it is installed separately.
 - `just infra-plan sto2/plumbing` plans a stack and prints the plan's summary.
 - `just infra-apply sto2/plumbing` plans a stack, prints the summary and, once the stack's name is
-  typed back, applies that saved plan; `just infra-apply sto2/plumbing --yes` does not ask.
+  typed back, applies that saved plan; `just infra-apply sto2/plumbing --yes` does not ask. After
+  the cluster stack it writes the cluster's `talman.yaml`, as `just infra-talman` does.
+- `just infra-talman` writes the cluster's `talman.yaml` from the `sto2/cluster` stack's state;
+  see [The generated talman.yaml](#the-generated-talmanyaml).
 - `just infra-output sto2/plumbing talos_version` prints one output of a stack. It refuses a
   sensitive output, as those hold the deployment's addresses and IDs.
 - `just infra-destroy` destroys `sto2/cluster`, then `sto2/plumbing`. Each destroy is planned and
@@ -25,6 +28,29 @@ command that runs them is a `just` recipe.
 
 Apply `plumbing` before `cluster`, as the cluster stack reads the plumbing stack's state. Destroy
 goes the other way round. State objects stay in the bucket after a destroy.
+
+## The generated talman.yaml
+
+The cluster stack renders `talos/talman.yaml.tftpl` from its own values into the sensitive output
+`talman_yaml`: the cluster's name from `cluster_name`, `lab-sto2` by default; the load balancer's
+address on the node network as the endpoint; the Talos and Kubernetes versions from
+`versions.yaml`; the plumbing stack's node subnet and the stack's `pod_subnet` and
+`service_subnet`, Kubernetes' conventional private ranges by default; the load balancer's two
+addresses and each control plane's floating address as the API certificate names; and the nodes,
+control planes first and then workers, each by name and at its floating address, where talman
+reaches it. Planning fails, naming the variable, when the pod or service subnet is not an IPv4
+network, overlaps the other or the node subnet, or when the pod subnet holds fewer /24s than there
+are nodes, as Kubernetes gives each node a /24 of it. The output `schematic_id` is the schematic ID
+of the image the nodes boot.
+
+`just infra-talman` writes `talman_yaml` to `talos/<cluster>/talman.yaml`, which git ignores, with
+mode 0600, and never prints it. It writes a temporary file beside it and checks that file first.
+talman must compute from `talos/schematic.yaml` the schematic ID the image was built from: OpenTofu
+built the image from that file, and talman computes the installer image from it on its own, so if
+they disagreed an upgrade would install another image than the one the nodes booted. Then
+`talman validate` must pass with the repository's patches. Only then is the file renamed into place.
+When a check fails the recipe says why, naming both IDs for a mismatch, removes the temporary file
+and leaves an earlier `talman.yaml` as it was.
 
 ## Environment
 
@@ -113,4 +139,5 @@ sources and resources without changes are left out. The full plan stays encrypte
 When tofu fails, its errors can name resources and hold attribute values, API endpoints and the
 bucket. Without `CI` set they are shown as tofu prints them. With `CI` set they go to
 `.terraform/tofu-errors.log` in the stack's directory, and the recipe prints only which tofu
-command failed and that file's path.
+command failed and that file's path. talman's errors, which can quote node addresses, are handled
+the same way.

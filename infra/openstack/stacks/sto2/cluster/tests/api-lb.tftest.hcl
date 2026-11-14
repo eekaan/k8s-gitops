@@ -32,7 +32,8 @@ override_data {
         attached_subnet_ids = { nodes = "node-subnet-fixture" }
       }
       image = {
-        id = "talos-image-fixture"
+        id           = "talos-image-fixture"
+        schematic_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
       }
     }
   }
