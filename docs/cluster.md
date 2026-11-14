@@ -230,18 +230,18 @@ out of the artifact, which is built from `kubernetes/`.
   goes through the nodes in `talman.yaml`'s order, one at a time. A node that is behind is drained
   with `kubectl drain`, upgraded with `talman upgrade`, and uncordoned once its kubelet has
   reported Ready since the upgrade began, within ten minutes, before the next is drained; a Ready
-  condition from before it does not count. A node on its version is left alone. Before each drain the API must answer
-  `/readyz` through the kubeconfig within five minutes, or nothing more is drained. talosctl's own
-  drain is turned off, as it reaches the API at the cluster endpoint, which only the nodes reach.
-  At the end every node must run its version. A run that stops after draining a node leaves that
+  condition from before it does not count. A node on its version is left alone. Before each drain
+  the API must answer `/readyz` through the kubeconfig within five minutes, or nothing more is
+  drained. talosctl's own drain is turned off, as it reaches the API at the cluster endpoint,
+  which only the nodes reach. At the end every node must run its version. A run that stops after draining a node leaves that
   node cordoned: uncordon it with kubectl once it is back; a second run skips it once it is on its
   version.
 - `just cluster-upgrade-k8s [cluster] [--yes]` upgrades Kubernetes to the version `talman.yaml`
   gives. It shows what `talman upgrade-k8s --dry-run` says, and once the cluster's name is typed
   back, or with `--yes`, takes an etcd snapshot as `cluster-snapshot` does and runs
-  `talman upgrade-k8s`; talosctl moves the control plane components and the kubelets node by node. It reaches the API at
-  `KUBE_API_ADDRESS`, given to talosctl as its endpoint. At the end every node must run the
-  version.
+  `talman upgrade-k8s`; talosctl moves the control plane components and the kubelets node by
+  node. It reaches the API at `KUBE_API_ADDRESS`, given to talosctl as its endpoint. At the end
+  every node must run the version.
 
   Both upgrade recipes do nothing and ask nothing when every node runs its version. Before they
   ask, they need what `cluster-talos` needs, the API address, and what `cluster-snapshot` needs:
@@ -392,9 +392,9 @@ The recipes read `.env` and the environment as the infrastructure recipes do
 ([infrastructure.md](infrastructure.md#environment)), and name each variable that is missing. No
 recipe prints a secret or passes one on a command line. Each tool gets only the secrets it uses
 ([infrastructure.md](infrastructure.md#environment)): talman, talosctl, kubectl and helm get none of
-the S3, cloud or state secrets. sops and talman get the Talos age key's
-location from their environment; `cluster-restore` hands age the key file's path, or, when only
-`SOPS_AGE_KEY` holds the key, the key on standard input. `cluster-config` reads the Flux age key,
+the S3, cloud or state secrets. sops and talman get the Talos age key's location from their
+environment; `cluster-restore` hands age the key file's path, or, when only `SOPS_AGE_KEY` holds
+the key, the key on standard input. `cluster-config` reads the Flux age key,
 to hand it to kubectl and age-keygen on standard input.
 
 - `SOPS_AGE_KEY_FILE`: the path of the Talos age key, outside the repository. In CI,
