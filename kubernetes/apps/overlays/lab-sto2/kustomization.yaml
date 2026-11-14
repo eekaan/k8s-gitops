@@ -8,6 +8,7 @@ kind: Kustomization
 resources:
   - ../../base/flux-system/artifact-generator
   - ../../base/cert-manager
+  - ../../base/cnpg-system
   - ../../base/demo
   - ../../base/envoy-gateway-system
   - ../../base/external-secrets
@@ -15,6 +16,7 @@ resources:
   - ../../base/monitoring
   - ../../base/piraeus-datastore
   - ../../base/cert-manager/cert-manager/ks.yaml
+  - ../../base/cnpg-system/cloudnative-pg/ks.yaml
   - ../../base/demo/hello/ks.yaml
   - ../../base/envoy-gateway-system/envoy-gateway-crds/ks.yaml
   - ../../base/envoy-gateway-system/envoy-gateway/ks.yaml
