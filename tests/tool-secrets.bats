@@ -122,6 +122,32 @@ sorted() {
   done
 }
 
+@test "No script runs a wrapped tool around its wrapper" {
+  mapfile -t tools < <(sed -nE 's/^([a-z-]+)\(\) \{ run_tool .*/\1/p' "$ROOT/scripts/lib/tools.sh")
+  [ "${#tools[@]}" -ge 14 ]
+  alternation=$(IFS='|'; echo "${tools[*]}")
+  # A command that starts another: the tool after it, past its options, durations and assignments,
+  # is the binary with the whole environment, as is one run by a path from type -P. Asking
+  # whether a tool is installed is type -P with its output discarded, and the one path a script
+  # keeps is flux's in substitute, which runs it with an environment of its own.
+  runner='(^|[^[:alnum:]_.-])(command|env|exec|timeout|xargs|sudo|nice|nohup|setsid|stdbuf)'
+  around="$runner([[:space:]]+(-[^[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*|[0-9.]+[smhd]?))*"
+  around+="[[:space:]]+\"?($alternation)([[:space:]\"']|\$)"
+  path='\$\(type -P ('"$alternation"')\)'
+  files=("$ROOT"/scripts/* "$ROOT"/scripts/lib/* "$ROOT"/justfile "$ROOT"/just/*.just)
+  found=$(
+    for file in "${files[@]}"; do
+      [ -f "$file" ] && [ "${file##*/}" != tools.sh ] || continue
+      grep -nE "$around|$path" "$file" | grep -vE '^[0-9]+:[[:space:]]*#' |
+        grep -v 'flux=$(type -P flux)' | sed "s|^|${file#"$ROOT"/}:|" || true
+    done
+  )
+  if [ -n "$found" ]; then
+    echo "$found" >&2
+    return 1
+  fi
+}
+
 @test "A variable added to .env.example is assigned to the tools that may see it" {
   mapfile -t names < <(sed -nE 's/^#? ?([A-Z][A-Z0-9_]*)=.*/\1/p' "$ROOT/.env.example")
   [ "${#names[@]}" -gt 20 ]
