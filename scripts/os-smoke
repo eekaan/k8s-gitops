@@ -45,9 +45,10 @@ stack_defaults() {
 # Figures from the API are compared in jq, as numbers or not at all: bash arithmetic would evaluate
 # a string as an expression.
 
-# quota_state RESOURCE: left, used up or missing, from the compute, volume and network quota.
+# quota_state SERVICE RESOURCE: left, used up or missing, from SERVICE's quota with usage, which
+# quota holds.
 quota_state() {
-  printf '%s' "$quota" | jq -r --arg resource "$1" '
+  printf '%s' "${quota[$1]}" | jq -r --arg resource "$2" '
     [.[]? | select(.Resource == $resource)][0]
     | ((.Limit? | tonumber?) // null) as $limit
     | ((."In Use"? | tonumber?) // null) as $used
@@ -95,9 +96,20 @@ if ! project=$(openstack token issue -f value -c project_id 2> /dev/null) || [[ 
 fi
 pass token
 
-quota=$(openstack quota show --usage -f json 2> /dev/null) || quota='[]'
-for resource in instances cores ram volumes gigabytes networks subnets routers floating-ips secgroup-rules; do
-  report_quota "$resource" "$(quota_state "$resource")"
+# Each service is asked for its own quota: the compute quota still lists floating IPs, networks and
+# security-group rules under the names the network service uses, and the network service is the
+# one that enforces them.
+declare -A quota=()
+for service in compute volume network; do
+  quota[$service]=$(openstack quota show --usage "--$service" -f json 2> /dev/null) || quota[$service]='[]'
+done
+# The item as it is reported, the service that holds its quota, and the service's name for it.
+for item in instances:compute:instances cores:compute:cores ram:compute:ram \
+  volumes:volume:volumes gigabytes:volume:gigabytes \
+  networks:network:networks subnets:network:subnets routers:network:routers \
+  floating-ips:network:floating_ips secgroup-rules:network:security_group_rules; do
+  IFS=: read -r name service resource <<< "$item"
+  report_quota "$name" "$(quota_state "$service" "$resource")"
 done
 report_quota load-balancers "$(load_balancer_state)"
 

@@ -1,0 +1,7 @@
+[
+  { "Resource": "floating_ips", "Limit": 4479, "In Use": 3309, "Reserved": 0 },
+  { "Resource": "networks", "Limit": 4476, "In Use": 3306, "Reserved": 0 },
+  { "Resource": "routers", "Limit": 4478, "In Use": 3308, "Reserved": 0 },
+  { "Resource": "subnets", "Limit": 4477, "In Use": 3307, "Reserved": 0 },
+  { "Resource": "security_group_rules", "Limit": -1, "In Use": 3310, "Reserved": 0 }
+]

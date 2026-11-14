@@ -803,7 +803,9 @@ case "\$*" in
   --version) echo '$version' ;;
   'loadbalancer quota show --help') exit $octavia ;;
   'token issue -f value -c project_id') echo fixture-project-id ;;
-  'quota show --usage -f json') cat "$FIXTURES/quota.json" ;;
+  'quota show --usage --compute -f json') cat "$FIXTURES/quota-compute.json" ;;
+  'quota show --usage --volume -f json') cat "$FIXTURES/quota-volume.json" ;;
+  'quota show --usage --network -f json') cat "$FIXTURES/quota-network.json" ;;
   'loadbalancer quota show fixture-project-id -f json') echo '$lb_quota' ;;
   'loadbalancer list -f json') echo '[{"id": "fixture-lb-id"}]' ;;
   'flavor show $missing -f value -c name') echo "No Flavor found for $missing" >&2; exit 1 ;;
@@ -823,7 +825,7 @@ stack_flavors() {
 # no_figures_in OUTPUT: fails when OUTPUT holds any quota or usage figure the fake cloud reports.
 no_figures_in() {
   local figure
-  for figure in $(jq '.. | numbers | select(. > 99)' "$FIXTURES/quota.json") 4482 4483; do
+  for figure in $(jq '.. | numbers | select(. > 99)' "$FIXTURES"/quota-*.json) 4482 4483; do
     if [[ $1 == *"$figure"* ]]; then
       echo "os-smoke printed the figure $figure" >&2
       return 1
@@ -853,6 +855,25 @@ no_figures_in() {
   no_figures_in "$output"
   [[ $output != *fixture-project-id* ]]
   [[ $output != *fixture-network-id* ]]
+}
+
+@test "os-smoke reads each quota from the service that enforces it" {
+  # The compute quota still lists floating IPs, networks and security-group rules, from before the
+  # network service held them; the fixture's are used up there and left in the network quota.
+  fake_openstack
+  only OS_CLOUD=fixture-cloud
+
+  recipe os-smoke
+
+  [ "$status" -eq 0 ]
+  for item in networks floating-ips secgroup-rules; do
+    [[ $output == *"pass  quota $item"* ]]
+  done
+  for service in compute volume network; do
+    grep -qxF "openstack quota show --usage --$service -f json" "$RECORD/argv"
+  done
+  run grep -xF 'openstack quota show --usage -f json' "$RECORD/argv"
+  [ "$status" -ne 0 ]
 }
 
 @test "os-smoke fails naming a flavor that does not exist" {

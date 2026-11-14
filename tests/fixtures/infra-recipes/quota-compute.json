@@ -1,0 +1,9 @@
+[
+  { "Resource": "cores", "Limit": 4472, "In Use": 3302, "Reserved": 0 },
+  { "Resource": "instances", "Limit": 4471, "In Use": 3301, "Reserved": 0 },
+  { "Resource": "ram", "Limit": 4473, "In Use": 3303, "Reserved": 0 },
+  { "Resource": "floating_ips", "Limit": 4490, "In Use": 4490, "Reserved": 0 },
+  { "Resource": "networks", "Limit": 4491, "In Use": 4491, "Reserved": 0 },
+  { "Resource": "security_group_rules", "Limit": 4492, "In Use": 4492, "Reserved": 0 },
+  { "Resource": "key-pairs", "Limit": 4481, "In Use": 3311, "Reserved": 0 }
+]
