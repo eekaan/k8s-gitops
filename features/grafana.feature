@@ -57,6 +57,21 @@ Feature: Grafana
     When it is built as Flux applies it
     Then its Grafana's configuration turns off usage reporting, the checks for Grafana and plugin updates, the news feed, the plugin catalogue, the plugins Grafana installs at every start, the download of plugin signing keys, Gravatar images and external snapshots, each by a key that release's defaults define with the setting that calls out
 
+  Scenario: just grafana forwards a local port to Grafana
+    Given a cluster's kubeconfig and a kubectl that forwards
+    When just grafana runs, with the local port GRAFANA_PORT names or 3000
+    Then kubectl forwards that port, on 127.0.0.1 only, to port 3000 of the Service grafana-service in monitoring through the cluster's kubeconfig, and the recipe prints the local URL and where the admin password is kept, reads no Secret and prints none of kubectl's own output
+
+  Scenario: just grafana ends the forward on every way out
+    Given a kubectl that keeps forwarding until it is stopped
+    When the recipe is interrupted with Ctrl-C or SIGTERM, kubectl does not report the forward within GRAFANA_WAIT seconds, or kubectl stops by itself
+    Then the recipe exits non-zero and no kubectl it started is still running
+
+  Scenario: just grafana needs the cluster's kubeconfig and a port
+    Given no kubeconfig for the cluster, or a GRAFANA_PORT or GRAFANA_WAIT that is not a number in range
+    When just grafana runs
+    Then it fails naming each problem and runs no kubectl
+
   Scenario: Grafana has its monitor on
     Given the grafana application
     When it is built as Flux applies it

@@ -323,8 +323,11 @@ the Prometheus they query, and Renovate moves both pins in one pull request. Eac
 a `GrafanaDashboard` that loads it into the folder Kubernetes, so neither the operator nor Grafana
 fetches a dashboard from the network.
 
-Nothing routes to Grafana from outside the cluster. Reach it with `kubectl port-forward` to port
-3000 of the Service `grafana-service` in `monitoring`, and sign in as `admin`. The password is under
+Nothing routes to Grafana from outside the cluster. `just grafana [cluster]` forwards a local port,
+`GRAFANA_PORT` or 3000, on 127.0.0.1 only, to port 3000 of the Service `grafana-service` in
+`monitoring` through the cluster's kubeconfig, until Ctrl-C; it prints the local URL, and the
+forward ends with the recipe however it ends ([cluster.md](cluster.md#recipes)). Sign in as
+`admin`. The password is under
 `GF_SECURITY_ADMIN_PASSWORD` in the Secret `grafana-admin-credentials` in `monitoring`, which the
 operator generates when it first creates the Secret and keeps while the `Grafana` exists; nothing in
 Git holds it. Deleting the `Grafana` deletes the Secret, and a new one gets a new password. It is
@@ -332,9 +335,11 @@ the kind of credential ADR 0005 keeps out of OpenBao: one a controller generates
 its own workload, which stays in the Secret that controller writes. Anonymous access is off.
 
 `tests/grafana.bats` builds both applications as Flux applies them, renders the two charts and the
-monitoring application's, and checks the definitions, the monitors, the version and replicas, the
-absence of volumes, Secrets and routes, the datasource's Service and that the dashboards are exactly
-those the monitoring chart renders for the cluster's monitoring values.
+monitoring application's, and checks the definitions, the operator's namespace and rights, the
+monitors, the version and replicas, the absence of volumes, Secrets and routes, the datasource's
+Service, that the dashboards are exactly those the monitoring chart renders for the cluster's
+monitoring values, and each setting that keeps Grafana off the internet against the defaults of the
+Grafana release it pins. It runs `just grafana` against a recording kubectl.
 
 ## cert-manager
 

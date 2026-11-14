@@ -1,8 +1,10 @@
 #!/usr/bin/env bats
 # Proves features/grafana.feature; each test carries its scenario's title.
-# Needs helm, kustomize, flux, yq, jq and git on PATH (the versions pinned for the repository). Each
-# chart is pulled once per run from its public registry, and Grafana's defaults.ini once from its
-# public repository at the release tag the Grafana pins; building and rendering are offline.
+# Needs helm, kustomize, flux, yq, jq, git and just on PATH (the versions pinned for the
+# repository). Each chart is pulled once per run from its public registry, and Grafana's
+# defaults.ini once from its public repository at the release tag the Grafana pins; building and
+# rendering are offline. just grafana runs from a copy of the scripts against a recording kubectl,
+# which reaches no cluster.
 
 # The tests run one at a time even where bats runs a file's tests side by side: a test that starts
 # while another pulls a chart finds the chart's directory before the chart is in it.
@@ -189,6 +191,112 @@ ini_value() {
   awk -v section="[$2]" -v key="$3" '
     /^\[/ { inside = ($0 == section); next }
     inside && $1 == key && $2 == "=" { sub(/^[^=]*=[ \t]*/, ""); print; exit }' "$1"
+}
+
+# recipe_copy: a copy of the repository's scripts, with a kubeconfig for the cluster lab-sto2, for
+# just grafana to run in through the repository's justfile, against recording fakes: a mise with
+# nothing installed, which keeps the justfile from putting real tools in front of the fakes, and a
+# kubectl that records its arguments and the kubeconfig it was given, then acts as the file
+# $STATE/mode says: forward reports a forward and runs until SIGTERM ends it, as kubectl does;
+# silent runs without reporting one; fail stops at once with an error naming an address; drop
+# reports a forward and stops a moment later. Sets COPY, BIN, RECORD, STATE, KUBECONFIG_FILE, JUST
+# and ENVIRONMENT, the only variables the recipe gets.
+recipe_copy() {
+  COPY="$BATS_TEST_TMPDIR/copy" BIN="$BATS_TEST_TMPDIR/bin"
+  RECORD="$BATS_TEST_TMPDIR/record" STATE="$BATS_TEST_TMPDIR/state"
+  mkdir -p "$COPY/talos/lab-sto2/clusterconfig" "$BIN" "$RECORD" "$STATE"
+  cp -R "$REPO/scripts" "$COPY/scripts"
+  KUBECONFIG_FILE="$COPY/talos/lab-sto2/clusterconfig/kubeconfig"
+  echo 'not a real kubeconfig' >"$KUBECONFIG_FILE"
+  echo forward >"$STATE/mode"
+  JUST=$(command -v just)
+  only
+  printf '#!/usr/bin/env bash\n' >"$BIN/mise"
+  { printf '#!/usr/bin/env bash\nRECORD=%q STATE=%q\n' "$RECORD" "$STATE"; cat <<'EOF'; } >"$BIN/kubectl"
+printf '%s\n' "$*" >>"$RECORD/argv"
+printf '%s\n' "${KUBECONFIG-unset}" >>"$RECORD/kubeconfig"
+echo "$$ $PPID" >"$STATE/pids"
+last=${!#}
+case $(cat "$STATE/mode") in
+  fail)
+    echo 'error: dial tcp 192.0.2.10:6443: connect: connection refused' >&2
+    exit 1
+    ;;
+  forward | drop) echo "Forwarding from 127.0.0.1:${last%%:*} -> ${last##*:}" ;;
+esac
+trap 'echo SIGTERM >>"$RECORD/ended"; exit 0' TERM
+if [[ $(cat "$STATE/mode") == drop ]]; then
+  sleep 1
+  echo 'error: lost connection to pod' >&2
+  exit 1
+fi
+while :; do sleep 0.1; done
+EOF
+  chmod +x "$BIN/mise" "$BIN/kubectl"
+}
+
+# with ENTRY...: adds the NAME=VALUE ENTRY... to the environment just grafana gets.
+with() {
+  ENVIRONMENT+=("$@")
+}
+
+# only ENTRY...: the environment just grafana gets is TMPDIR and the NAME=VALUE ENTRY... alone.
+only() {
+  ENVIRONMENT=(TMPDIR="$BATS_TEST_TMPDIR" "$@")
+}
+
+# grafana_recipe: runs just grafana in the copy with only ENVIRONMENT set, failing after a minute
+# rather than hanging.
+grafana_recipe() {
+  run timeout 60 env -i HOME="$BATS_TEST_TMPDIR" PATH="$BIN:$PATH" "${ENVIRONMENT[@]}" \
+    "$JUST" --justfile "$REPO/justfile" --working-directory "$COPY" grafana
+}
+
+# grafana_start: starts just grafana as grafana_recipe runs it, in the background, with its output
+# in $BATS_TEST_TMPDIR/out. Sets OUT and JUST_PID.
+grafana_start() {
+  OUT="$BATS_TEST_TMPDIR/out"
+  env -i HOME="$BATS_TEST_TMPDIR" PATH="$BIN:$PATH" "${ENVIRONMENT[@]}" \
+    "$JUST" --justfile "$REPO/justfile" --working-directory "$COPY" grafana >"$OUT" 2>&1 3>&- &
+  JUST_PID=$!
+}
+
+# printed TEXT: waits up to 20 seconds for TEXT in OUT.
+printed() {
+  local tick
+  for ((tick = 0; tick < 200; tick++)); do
+    if grep -qF -- "$1" "$OUT"; then return 0; fi
+    sleep 0.1
+  done
+  echo "no '$1' after 20 seconds in:"
+  cat "$OUT"
+  return 1
+}
+
+# finished: waits up to 20 seconds for just, started by grafana_start, to end, and sets STATUS to
+# its exit status.
+finished() {
+  local tick
+  for ((tick = 0; tick < 200; tick++)); do
+    if ! kill -0 "$JUST_PID" 2>/dev/null; then
+      STATUS=0
+      wait "$JUST_PID" || STATUS=$?
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "just grafana still runs after 20 seconds"
+  return 1
+}
+
+# kubectl_gone: fails while the last kubectl the fake recorded still runs.
+kubectl_gone() {
+  local kubectl_pid
+  read -r kubectl_pid _ <"$STATE/pids"
+  if kill -0 "$kubectl_pid" 2>/dev/null; then
+    echo "kubectl $kubectl_pid still runs"
+    return 1
+  fi
 }
 
 # seconds DURATION: DURATION, such as 30s, 1m or 2h, in seconds; fails on any other form.
@@ -500,6 +608,109 @@ snapshots.external_enabled false
 EOF
   echo "failed:${failed:- none}"
   [ -z "$failed" ]
+}
+
+@test "just grafana forwards a local port to Grafana" {
+  local script_pid port
+  recipe_copy
+  for port in default 3456; do
+    if [[ $port == default ]]; then port=3000; else with GRAFANA_PORT="$port"; fi
+    grafana_start
+    printed "http://127.0.0.1:$port"
+    cat "$OUT"
+    # Only once kubectl reports the forward.
+    [ -s "$STATE/pids" ]
+    read -r _ script_pid <"$STATE/pids"
+    kill -INT "$script_pid" "$JUST_PID"
+    finished
+  done
+  echo "kubectl ran: $(cat "$RECORD/argv")"
+  [ "$(cat "$RECORD/argv")" = "$(printf '%s\n' \
+    'port-forward --address 127.0.0.1 --namespace monitoring service/grafana-service 3000:3000' \
+    'port-forward --address 127.0.0.1 --namespace monitoring service/grafana-service 3456:3000')" ]
+  [ "$(sort -u "$RECORD/kubeconfig")" = "$KUBECONFIG_FILE" ]
+  grep -qF 'GF_SECURITY_ADMIN_PASSWORD' "$OUT"
+  grep -qF 'grafana-admin-credentials' "$OUT"
+  if grep -qF 'Forwarding from' "$OUT"; then echo "kubectl's own output was printed"; return 1; fi
+}
+
+@test "just grafana ends the forward on every way out" {
+  local script_pid
+  recipe_copy
+  # Ctrl-C: the terminal signals the recipe, while kubectl, run in the background, ignores it.
+  grafana_start
+  printed "http://127.0.0.1:3000"
+  read -r _ script_pid <"$STATE/pids"
+  kill -INT "$script_pid" "$JUST_PID"
+  finished
+  echo "after Ctrl-C: status $STATUS; $(cat "$OUT")"
+  [ "$STATUS" -ne 0 ]
+  kubectl_gone
+  [ "$(cat "$RECORD/ended")" = SIGTERM ]
+
+  # SIGTERM, which just passes on to the recipe.
+  rm "$RECORD/ended"
+  grafana_start
+  printed "http://127.0.0.1:3000"
+  kill -TERM "$JUST_PID"
+  finished
+  echo "after SIGTERM: status $STATUS"
+  [ "$STATUS" -ne 0 ]
+  kubectl_gone
+  [ "$(cat "$RECORD/ended")" = SIGTERM ]
+
+  # kubectl never reports the forward.
+  rm "$RECORD/ended"
+  echo silent >"$STATE/mode"
+  with GRAFANA_WAIT=1
+  grafana_recipe
+  echo "kubectl silent: status $status; $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"did not report the forward within 1 seconds"* ]]
+  [[ $output != *"http://"* ]]
+  kubectl_gone
+  [ "$(cat "$RECORD/ended")" = SIGTERM ]
+
+  # kubectl stops before it forwards, with an error that names the API server's address.
+  echo fail >"$STATE/mode"
+  grafana_recipe
+  echo "kubectl failing: status $status; $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"stopped with status 1 before it forwarded"* ]]
+  [[ $output != *192.0.2.10* ]]
+  kubectl_gone
+
+  # kubectl stops while it forwards.
+  echo drop >"$STATE/mode"
+  grafana_recipe
+  echo "kubectl dropping: status $status; $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"http://127.0.0.1:3000"* ]]
+  [[ $output == *"stopped with status 1"* ]]
+  kubectl_gone
+}
+
+@test "just grafana needs the cluster's kubeconfig and a port" {
+  local port
+  recipe_copy
+  rm "$KUBECONFIG_FILE"
+  with GRAFANA_PORT=65536 GRAFANA_WAIT=soon
+  grafana_recipe
+  echo "status $status; $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"talos/lab-sto2/clusterconfig/kubeconfig does not exist; just cluster-kubeconfig fetches it"* ]]
+  [[ $output == *"GRAFANA_PORT is not a port number"* ]]
+  [[ $output == *"GRAFANA_WAIT is not a whole number of seconds"* ]]
+  # With the kubeconfig in place, each port alone is refused.
+  echo 'not a real kubeconfig' >"$KUBECONFIG_FILE"
+  for port in 0 080 abc 3000x; do
+    only GRAFANA_PORT="$port"
+    grafana_recipe
+    echo "GRAFANA_PORT='$port': status $status; $output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"GRAFANA_PORT is not a port number"* ]]
+  done
+  [ ! -e "$RECORD/argv" ]
 }
 
 @test "Grafana has its monitor on" {
