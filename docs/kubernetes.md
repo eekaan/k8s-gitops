@@ -953,23 +953,28 @@ job's identity token it stops before calling anything, so nobody signs from a la
    is the identity the instance accepts; a failure stops the run;
 6. tags that digest `main`.
 
-A pull request's checks run against its branch as it was pushed, and the branch rule does not
-require a branch to be up to date, so two passing pull requests can merge into a tree that fails.
-The first step makes the publish run judge the tree that is actually on `main`: when that tree does
-not build, the run fails, nothing is pushed, signed or tagged, and the cluster stays on the last
-artifact that passed until a later commit on `main` does.
+A pull request's checks run against its branch as it was pushed; the publish run judges the tree
+that is on `main`. When that tree does not build, the run fails, nothing is pushed, signed or
+tagged, and the cluster stays on the last artifact that passed until a run for a later commit that
+changes `kubernetes/` or the workflow, or a manual run, publishes a tree that does. The gate is the
+offline build: `just render-check` is not part of it, as it pulls charts from their public
+registries and needs helm, which the publish job does not install.
 
-Every workflow installs its tools with the same pinned `mise-action` at an exact mise release. The
-publish job, which signs, also gives the action the checksum of that release's binary and turns its
-cache off, so the tools that run beside the identity token are the pinned ones, downloaded, never
-restored from an entry another job saved.
+Every workflow installs its tools with the same pinned `mise-action` at an exact mise release. A
+workflow whose token can write, `publish` and `render-comment`, also gives the action the checksum
+of that release's linux-x64 binary, so the tools that run beside the token are the pinned ones; the
+action fails the job when the binary differs. A bump of the mise version changes the checksum with it,
+in every workflow that has one. The publish job also turns the action's cache off, so nothing runs
+from an entry another job saved.
 
 The tag moves last and by digest: `main` only ever names an artifact that is signed and verified,
 and signing, verifying and tagging all name it by its digest, so the tag ends on exactly the bytes
 that were signed and verified; a tag can change between two steps, a digest cannot. It moves only on
-a run on `refs/heads/main`, and only when no newer commit on `main` changes `kubernetes/` or the
-workflow. Runs share one concurrency group that never cancels a run in progress, so they never
-overlap: a run that starts while another is in progress waits for it, and GitHub replaces a waiting
+a run on `refs/heads/main`, and only when no newer commit on `main` that changes `kubernetes/` or
+the workflow has a tree that passes the check; the run runs the check on that commit's `kubernetes/`
+too. A newer commit whose tree fails it publishes nothing, so the run tags its own artifact, which
+is then the last that passed. Runs share one concurrency group that never cancels a run in progress,
+so they never overlap: a run that starts while another is in progress waits for it, and GitHub replaces a waiting
 run with a newer one. A run on another branch, or one a newer commit overtook, such as a re-run of an
 old one, still pushes, signs and verifies, says why the tag stayed where it is, and succeeds. An
 artifact signed by a run on another branch carries that branch's identity, which the instance

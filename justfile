@@ -29,7 +29,7 @@ lint:
     git ls-files -z --cached --others --exclude-standard -- 'scripts/*' '*.bats' | xargs -0 -r shellcheck
     git ls-files -z --cached --others --exclude-standard -- '*.yaml' '*.yml' .yamllint.yaml | xargs -0 -r yamllint
 
-# Scan the files git would commit and the whole git history for secrets
+# Scan the files git would commit and the history reachable from HEAD for secrets
 [script]
 secrets-scan:
     set -o pipefail

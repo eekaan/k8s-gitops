@@ -177,6 +177,15 @@ EOF
   echo "aws_access_key_id = AKIA$(printf '%s' QZ7XK2M4B6N3P5R7)" > key.txt
   git add key.txt
   "${commit[@]}" -m "a commit with a key, on another branch"
+  # The key is gone from the tree and from the last commit on the branch, so only the history
+  # reachable from HEAD holds it: the files scan finds nothing, and neither does a scan of the
+  # last commit alone.
+  rm key.txt
+  git add -A
+  "${commit[@]}" -m "remove the key"
+  echo unrelated > notes.txt
+  git add notes.txt
+  "${commit[@]}" -m "a later commit"
   git switch -q clean
   [ ! -e key.txt ]
 
@@ -185,6 +194,7 @@ EOF
   [ "$status" -eq 0 ]
 
   git switch -q flagged
+  [ ! -e key.txt ]
 
   recipe secrets-scan
 
