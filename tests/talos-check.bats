@@ -288,6 +288,31 @@ EOF
   done
 }
 
+@test "The node image carries the DRBD, gVisor and Kata Containers extensions and no other" {
+  # The plumbing stack builds the image from this file, and talman computes from it the installer
+  # image the nodes install and upgrade to. Not deduplicated, so a name listed twice shows.
+  extensions=$(yq '.customization.systemExtensions.officialExtensions // [] | .[]' "$ROOT/talos/schematic.yaml" | sort)
+  echo "official extensions: $(paste -sd' ' <<< "$extensions")"
+
+  [ "$extensions" = "$(printf '%s\n' siderolabs/drbd siderolabs/gvisor siderolabs/kata-containers)" ]
+}
+
+@test "Every node's machine configuration loads the kernel modules DRBD and LINSTOR's storage pools need" {
+  run "$SCRIPT" "$RENDERED"
+
+  [ "$status" -eq 0 ]
+  # Each module with its parameters, one line per KernelModuleConfig document.
+  expected=$(printf '%s\n' 'dm-snapshot' 'dm-thin-pool' 'drbd usermode_helper=disabled' 'drbd_transport_tcp' | sort)
+  checked=0
+  for hostname in $(nodes); do
+    modules=$(yq -N 'select(.kind == "KernelModuleConfig") | [.name] + (.parameters // []) | join(" ")' "$RENDERED/$hostname.yaml" | sort)
+    echo "$hostname loads: $(paste -sd, <<< "$modules")"
+    [ "$modules" = "$expected" ]
+    checked=$((checked + 1))
+  done
+  [ "$checked" -eq 6 ]
+}
+
 @test "An output directory inside the repository is refused" {
   copy_tree
   ln -s "$COPY/talos" "$BATS_TEST_TMPDIR/linked"

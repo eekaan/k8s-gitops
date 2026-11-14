@@ -1,0 +1,17 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/runtimeclass-node-v1.json
+# Kata Containers, from the node image's siderolabs/kata-containers extension, which registers the
+# containerd runtime handler kata, on Cloud Hypervisor: a pod that sets runtimeClassName: kata runs
+# in a virtual machine of its own. That needs hardware virtualisation on the node, which on a cloud
+# instance means nested virtualisation; on a node without it the pod does not start.
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: kata
+handler: kata
+# The virtual machine's own share, the figure the extension's README gives, which the scheduler and
+# resource quotas count on top of the containers' requests.
+overhead:
+  podFixed:
+    memory: 130Mi
+    cpu: 250m
