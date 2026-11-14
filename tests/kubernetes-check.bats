@@ -331,7 +331,6 @@ EOF
   local children name timeout
   children="$(yq -N 'select(.kind == "Kustomization" and .metadata.labels["k8s-gitops/defaults"] != "disabled") | .metadata.name' "$BUILD")"
   [ -n "$children" ]
-  # A child with the long-timeout label gets the long timeout and every other default.
   for name in $children; do
     # A child labelled for the long timeout gets 10m instead, as the next test shows.
     timeout=3m
