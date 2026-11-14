@@ -15,14 +15,34 @@ cd "$(git rev-parse --show-toplevel)"
 failures=0
 while IFS= read -r -d '' path; do
   [[ -f $path && ! -L $path ]] || continue
-  # grep -I treats a file with a NUL byte as binary; an empty file has nothing to find.
-  grep -Iq '' -- "$path" 2> /dev/null || continue
-  if found=$(LC_ALL=C awk -v file="$path" '
+  if [[ ! -r $path ]]; then
+    echo "check-conflict-markers: $path: cannot be read" >&2
+    failures=$((failures + 1))
+    continue
+  fi
+  # grep -I treats a file with a NUL byte as binary, and an empty file has nothing to find: both
+  # answer 1. Any other answer is an error.
+  status=0
+  grep -Iq '' -- "$path" || status=$?
+  if ((status == 1)); then
+    continue
+  elif ((status)); then
+    echo "check-conflict-markers: $path: cannot be scanned" >&2
+    failures=$((failures + 1))
+    continue
+  fi
+  # The name reaches awk through the environment: as an operand, a name such as a=b.md would be
+  # taken for an assignment and awk would read the rest of the file list from standard input, and
+  # -v would expand the backslashes in it.
+  if ! found=$(FILE=$path LC_ALL=C awk '
     { sub(/\r$/, "") }
-    /^<<<<<<<($| )/ { open = 1; print "check-conflict-markers: " file ":" FNR ": opening marker of a merge conflict"; next }
-    /^>>>>>>>($| )/ { open = 0; print "check-conflict-markers: " file ":" FNR ": closing marker of a merge conflict"; next }
-    open && /^=======$/ { print "check-conflict-markers: " file ":" FNR ": middle marker of a merge conflict" }
-  ' "$path"); [[ -n $found ]]; then
+    /^<<<<<<<($| )/ { open = 1; print "check-conflict-markers: " ENVIRON["FILE"] ":" FNR ": opening marker of a merge conflict"; next }
+    /^>>>>>>>($| )/ { open = 0; print "check-conflict-markers: " ENVIRON["FILE"] ":" FNR ": closing marker of a merge conflict"; next }
+    open && /^=======$/ { print "check-conflict-markers: " ENVIRON["FILE"] ":" FNR ": middle marker of a merge conflict" }
+  ' < "$path"); then
+    echo "check-conflict-markers: $path: cannot be scanned" >&2
+    failures=$((failures + 1))
+  elif [[ -n $found ]]; then
     echo "$found" >&2
     failures=$((failures + 1))
   fi

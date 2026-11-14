@@ -56,6 +56,21 @@ Feature: Repository checks
     When the conflict marker check runs
     Then it exits zero
 
+  Scenario: A file named like an awk assignment does not hide the files after it
+    Given a clean Markdown file named a=b.md and, after it in name order, two files holding a block as git writes a conflict
+    When the conflict marker check runs
+    Then it exits non-zero and names both files with the line of the opening marker
+
+  Scenario: A file's name is printed as it is, backslashes included
+    Given a file whose name holds a backslash and a letter, such as back\tslash.md, holding a block as git writes a conflict
+    When the conflict marker check runs
+    Then it exits non-zero and names the file as it is written, backslash included
+
+  Scenario: A file the check cannot read, or cannot scan, fails it
+    Given a clean file whose scan fails, and a clean file that nobody may read
+    When the conflict marker check runs
+    Then it exits non-zero and names the file
+
   Scenario: A version string is not an address
     Given a tracked file containing a dotted version such as v1.14.6 or 2.10.0
     When the address-literal check runs

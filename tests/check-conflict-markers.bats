@@ -60,3 +60,49 @@ conflict() {
 
   [ "$status" -eq 0 ]
 }
+
+@test "A file named like an awk assignment does not hide the files after it" {
+  # Files are listed in name order, so the marker file comes after the clean one.
+  echo clean > 'a=b.md'
+  conflict 'z=1.md'
+  conflict zz.md
+  git add .
+
+  run "$SCRIPT"
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"z=1.md:2:"* ]]
+  [[ $output == *"zz.md:2:"* ]]
+}
+
+@test "A file's name is printed as it is, backslashes included" {
+  conflict 'back\tslash.md'
+  git add .
+
+  run "$SCRIPT"
+
+  [ "$status" -ne 0 ]
+  [[ $output == *'back\tslash.md:2:'* ]]
+}
+
+@test "A file the check cannot read, or cannot scan, fails it" {
+  local bin="$BATS_TEST_TMPDIR/bin"
+  mkdir -p "$bin"
+  echo clean > readable.md
+  git add .
+
+  # A scan that fails fails the check, whatever the file holds.
+  printf '#!/usr/bin/env bash\nexit 2\n' > "$bin/awk"
+  chmod +x "$bin/awk"
+  PATH="$bin:$PATH" run "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ $output == *readable.md* ]]
+
+  # So does a file nobody may read; root reads it anyway, and then there is nothing to prove.
+  echo clean > unreadable.md
+  chmod 000 unreadable.md
+  [ ! -r unreadable.md ] || skip "this user reads a file whatever its mode"
+  run "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [[ $output == *unreadable.md* ]]
+}
