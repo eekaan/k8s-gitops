@@ -22,25 +22,40 @@ seal for.
   (`refreshPolicy: CreatedOnce`), leaves the Secret without an owner (`creationPolicy: Orphan`) and
   marks it immutable. Nothing syncs it again, nothing changes it, and deleting the ExternalSecret
   or the application leaves it in place. It is never committed, encrypted or otherwise.
-- **Initialisation**: OpenBao initialises itself, once, on empty storage, from initialize stanzas
+- **Initialisation**: OpenBao initialises itself, once, on a first install, from initialize stanzas
   in its configuration (self-initialisation): the Kubernetes auth method, the key-value mount
-  `secrets/`, the roles and policies of External Secrets and of the operator, and autopilot's
-  settings. Only the first member reads them, and only while no other member answers. OpenBao
-  revokes the root token it initialised with as soon as the stanzas have run, and never returns
-  it; no root token is stored anywhere.
+  `secrets/`, the roles and policies of External Secrets, of the operator and of the snapshot job
+  to come, and autopilot's settings. Only the first member reads them, and only on positive
+  evidence of a first install: its own storage is empty, and the Kubernetes API answers that
+  neither other member's claim exists. Without that answer it does not start, so an empty member
+  never starts a second store beside the first. OpenBao revokes the root token it initialised with
+  as soon as the stanzas have run, and never returns it; no root token is stored anywhere.
 - **Recovery material**: self-initialisation makes no recovery keys. `just bao-recovery <file>`
   makes them once, through OpenBao's authenticated rotation, logged in as the operator role: five
-  shares, three of which restore access. It writes them, with a copy of the seal key, to a new
-  file outside the repository, encrypted with age to the Talos age key's recipient, the operator's
-  key that the cluster does not hold, and has OpenBao commit the shares only once the file is
-  written. The shares are never printed, logged in the clear or stored in the cluster. The file is
-  the operator's to keep outside the cluster. An encrypted file rather than the terminal: nothing
-  lands in scrollback or a terminal log, and the file goes where the operator keeps the Talos age
-  key's other material.
-- **Operator access**: the operator authenticates with a ten-minute token for the service account
-  `openbao-operator`, minted through the Kubernetes API, as OpenBao's role `operator`, which may
-  write to the key-value mount and make the recovery keys, and read nothing. Minting it takes the
-  right to create `serviceaccounts/token` for that account.
+  shares, three of which restore access. It runs right after the first reconcile, before anything
+  else logs in as that role. It writes them, with a copy of the seal key, to a new file outside
+  the repository, encrypted with age to the Talos age key's recipient, the operator's key that the
+  cluster does not hold, opens the file again with that key, and has OpenBao commit the shares only
+  then. The shares are never printed, logged in the clear or stored in the cluster. The file is the
+  operator's to keep outside the cluster. An encrypted file rather than the terminal: nothing lands
+  in scrollback or a terminal log, and the file goes where the operator keeps the Talos age key's
+  other material. `just bao-root` turns three of the shares into a short-lived root token for one
+  command, and `just bao-seal-restore` writes the seal key back from the file.
+- **Who may do what**: each role binds one service account, checks the audience `openbao`, carries
+  one policy and not OpenBao's `default` policy, and gives ten-minute tokens.
+  - `external-secrets`, for `openbao-store` in `external-secrets`: reads and lists every key of the
+    mount, and looks up and revokes its own token, as External Secrets does.
+  - `operator`, for `openbao-operator` in `openbao`: creates keys of the mount and changes them,
+    never reads them; makes the recovery keys while none exist, and rotates them with a threshold
+    of the current shares; starts a root token generation, which completes only with a threshold of
+    the shares; revokes its own token.
+  - `snapshot`, for `openbao-snapshot` in `openbao`: takes a snapshot of the raft storage. No job
+    uses it yet.
+- **Who may mint which token**: a token for one of these accounts is minted through the Kubernetes
+  API by a subject allowed to create `serviceaccounts/token` for it. External Secrets' controller
+  may for `openbao-store` alone, through a Role that names it; its chart's grant to create every
+  account's token is off. For `openbao-operator` and `openbao-snapshot` that is cluster
+  administrators and Flux, which hold cluster-admin.
 
 ## Alternatives considered
 
@@ -68,7 +83,19 @@ seal for.
 - The recovery keys are what restores privileged access when the operator role or its policies are
   broken: a threshold of them makes a short-lived root token. Losing them loses that way back, not
   the data, which stays readable through the roles that work.
-- Changing a role, policy or mount after the first start is a request made with OpenBao's API, as
-  the initial configuration never runs again on initialised storage.
-- Snapshots of OpenBao's storage to object storage (ADR 0008) come later; restoring one needs the
-  seal key it was taken under, which the operator's file holds.
+- The `operator` role reaches a root token through the recovery keys: before `bao-recovery` has run,
+  whoever first asks receives new recovery keys, and afterwards a root token takes a threshold of
+  the shares the operator's file holds. Only a subject with cluster-admin may mint an `operator`
+  token, and such a subject reads the seal Secret and every Secret the store fills anyway. If
+  `bao-recovery`'s first run finds recovery keys already, someone else holds them, and the store is
+  rebuilt before it holds a secret.
+- Changing a role, policy or mount after the first start takes a root token from the recovery keys,
+  as the initial configuration never runs again on initialised storage. A first initialisation
+  that fails part way leaves a mark on storage after which OpenBao refuses to unseal, and is started
+  again from nothing.
+- An empty first member after a full restart waits for the others, which start only once it is
+  Ready, so the store stays down until an operator lets the others start first: the price of never
+  running a second store.
+- Snapshots of OpenBao's storage to object storage (ADR 0008) come later, as their job needs the
+  object storage's key from this store; the role it logs in as exists. Restoring one needs the seal
+  key it was taken under, which the operator's file holds.
