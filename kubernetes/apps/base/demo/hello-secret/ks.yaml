@@ -1,0 +1,19 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: hello-secret
+  namespace: flux-system
+spec:
+  path: ./apps/base/demo/hello-secret/app
+  targetNamespace: demo
+  # The ExternalSecret names the store, which its application makes Ready.
+  dependsOn:
+    - name: openbao-store
+  # Not waited for: the key it reads exists once an operator writes it with just bao-put, and
+  # until then the ExternalSecret reports the missing key and tries again.
+  wait: false
+  sourceRef:
+    kind: ExternalArtifact
+    name: hello-secret

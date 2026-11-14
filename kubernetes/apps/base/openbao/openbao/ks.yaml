@@ -1,0 +1,29 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: openbao
+  namespace: flux-system
+  labels:
+    # The first install starts three members one after another, each once the one before is
+    # unsealed, and makes a volume for each.
+    k8s-gitops/timeout: long
+spec:
+  path: ./apps/base/openbao/openbao/app
+  targetNamespace: openbao
+  # External Secrets' definitions and webhook, for the generator and ExternalSecret that make the
+  # seal key; cert-manager's, for the CA and the listener's certificate; the storage cluster, whose
+  # default StorageClass the members' claims use; and the monitoring definitions, for the chart's
+  # ServiceMonitor.
+  dependsOn:
+    - name: external-secrets
+    - name: cert-manager
+    - name: linstor-cluster
+    - name: prometheus-operator-crds
+  # Ready only once the release is, which helm-controller waits for until every member is Ready,
+  # that is unsealed, so the store that names this application in dependsOn finds OpenBao serving.
+  wait: true
+  sourceRef:
+    kind: ExternalArtifact
+    name: openbao
