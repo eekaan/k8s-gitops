@@ -391,9 +391,10 @@ the operator keeps its recovery keys (ADR 0013). Three applications hold it:
 
 - `openbao/openbao` runs OpenBao in the namespace `openbao`. It names `external-secrets`,
   `cert-manager`, `linstor-cluster` and `prometheus-operator-crds` in `dependsOn`, for the seal key's
-  generator, its certificates, its volumes and its monitor; sets `wait`, so it is Ready once every
-  member is unsealed; and has the long timeout, as the first install starts three members one after
-  another.
+  generator, its certificates, its volumes and its monitor; and sets `wait`, so it is Ready once every
+  member is unsealed. The first install starts three members one after another and can outlast the
+  three-minute timeout; the Kustomization then tries again every minute, while helm-controller's
+  own ten-minute install goes on, until the release is Ready.
 - `external-secrets/openbao-store` holds the ClusterSecretStore `openbao` and its service account. It
   names `external-secrets` and `openbao` in `dependsOn`, and is Ready once the store reports Ready,
   which a health check expression reads, as kstatus does not.
@@ -492,9 +493,11 @@ only copy. The operator keeps it outside the cluster, with the Talos age key.
 
 ### How a secret gets in, and how an application gets it out
 
-`just bao-put <path> <key> [cluster]` writes one value, read from standard input, typed without echo
-at a terminal or piped in without the newlines that end it, as the key `<key>` of the secret at
-`secrets/<path>`. The secret keeps its other keys, or is created. The recipe opens a port-forward to
+`just bao-put <path> <key>` writes one value, read from standard input, typed without echo at a
+terminal or piped in without the newlines that end it, as the key `<key>` of the secret at
+`secrets/<path>` in `lab-sto2`. The secret keeps its other keys, or is created. It takes exactly the
+two arguments, and a refusal repeats none of them, so a value typed where an argument goes is not
+printed. The recipe opens a port-forward to
 `openbao-active` and closes it on every exit; verifies OpenBao's certificate against the CA; mints a
 ten-minute token for `openbao-operator` with the audience `openbao`, logs in as `operator`, and
 revokes OpenBao's token when it is done. The value travels only in the body of the write; the recipe

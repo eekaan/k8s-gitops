@@ -5,10 +5,6 @@ kind: Kustomization
 metadata:
   name: openbao
   namespace: flux-system
-  labels:
-    # The first install starts three members one after another, each once the one before is
-    # unsealed, and makes a volume for each.
-    k8s-gitops/timeout: long
 spec:
   path: ./apps/base/openbao/openbao/app
   targetNamespace: openbao
@@ -23,6 +19,8 @@ spec:
     - name: prometheus-operator-crds
   # Ready only once the release is, which helm-controller waits for until every member is Ready,
   # that is unsealed, so the store that names this application in dependsOn finds OpenBao serving.
+  # The first install, three members one after another, can outlast the root's timeout; the
+  # Kustomization then tries again every minute until the release is Ready.
   wait: true
   sourceRef:
     kind: ExternalArtifact

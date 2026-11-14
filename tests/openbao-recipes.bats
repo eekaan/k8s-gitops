@@ -352,8 +352,11 @@ requests_of() {
 }
 
 @test "bao-put refuses without a path and a key" {
+  # The last cases give the value where the key or a third argument goes, as a slip would: they are
+  # refused like the others, and nothing it is given is echoed back.
   local -a cases=('' 'demo/hello' '../demo greeting' '/demo greeting' 'demo//hello greeting'
-    'demo/hello gre/eting' 'demo/.. greeting' 'demo/hello -greeting')
+    'demo/hello gre/eting' 'demo/.. greeting' 'demo/hello -greeting' 'demo/hello marker-argument-value!'
+    'demo/hello greeting marker-argument-value')
   local args
   for args in "${cases[@]}"; do
     # shellcheck disable=SC2086 # each case is its arguments, split.
@@ -361,6 +364,8 @@ requests_of() {
     echo "bao-put $args: $output"
     [ "$status" -ne 0 ]
     [[ $output == *bao-put:* ]]
+    [[ $output != *marker-argument-value* ]] || { echo "an argument is echoed"; return 1; }
+    [[ $output != *../demo* && $output != *gre/eting* && $output != *-greeting* ]] || { echo "an argument is echoed"; return 1; }
   done
   # No value on standard input.
   recipe bao-put demo/hello greeting </dev/null

@@ -73,8 +73,8 @@ Feature: OpenBao
 
   Scenario: bao-put refuses without a path and a key
     Given a fake cluster
-    When bao-put runs without arguments, with a path only, with a path or key that is not a plain key-value name, or with no value on standard input
-    Then it exits non-zero naming the problem, and reaches neither the cluster nor OpenBao
+    When bao-put runs without arguments, with a path only, with a path or key that is not a plain key-value name, with a third argument such as the value, or with no value on standard input
+    Then it exits non-zero naming the problem without echoing what it was given, and reaches neither the cluster nor OpenBao
 
   Scenario: bao-recovery hands out the recovery keys once, encrypted to the operator's age key
     Given a fake OpenBao that has no recovery keys yet, and the Talos age key's recipient
