@@ -1,0 +1,12 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/helmrepository-source-v1.json
+# The Vertical Pod Autoscaler's project publishes no chart. Fairwinds publishes the one its
+# documentation points to, to a classic Helm repository only, and no public OCI mirror carries it,
+# so Flux reads the repository's index.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: fairwinds
+spec:
+  interval: 12h
+  url: https://charts.fairwinds.com/stable
