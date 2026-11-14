@@ -6,14 +6,15 @@
 # the line that names the step a recipe failed in, the private directory an etcd snapshot is kept in
 # while a recipe works on it, the talman run that keeps its output out of a CI log, the Flux age key
 # and the other objects Flux needs before it starts, the release an application's HelmRelease makes,
-# and the install of an application before Flux. Builds on scripts/lib/infra.sh, which reads the
+# and the install of an application before Flux. Builds on scripts/lib/s3.sh, for the backup
+# buckets' prefix and the object storage's endpoint, and so on scripts/lib/infra.sh, which reads the
 # environment. Nothing here prints a secret or a deployment value, or passes one as
 # an argument: sops and talman get the Talos age key's location from their environment, and the Flux
 # age key and the values of the objects applied before Flux reach age-keygen, jq and kubectl on
 # standard input.
 
-# shellcheck source=scripts/lib/infra.sh
-. "$(dirname "${BASH_SOURCE[0]}")/infra.sh"
+# shellcheck source=scripts/lib/s3.sh
+. "$(dirname "${BASH_SOURCE[0]}")/s3.sh"
 
 sops_config=$infra_root/talos/.sops.yaml
 # The rule for the SOPS files under kubernetes/, which Flux decrypts with the Flux age key.
@@ -341,17 +342,34 @@ declare -A cluster_config=()
 
 # fill_cluster_config CLUSTER TALMAN_FILE: fills cluster_config, and fails naming each key of the
 # cluster's cluster-config.example.yaml it cannot fill and each key it fills that the example does not
-# list. Every value depends on the deployment, so none is committed or printed:
-#   CLUSTER_DOMAIN   the domain the cluster's applications are published under, from the environment
-#   NODE_CIDR        the node subnet, values.nodeSubnet in the cluster's talman.yaml, which the
-#                    cluster stack renders and the kubelets take their node addresses from
-#   NODE_NAME_REGEX  a pattern of the hostnames in that talman.yaml (node_name_regex)
-# A missing talman.yaml leaves its two keys to the caller's require_cluster, which names the file.
+# list. Every value depends on the deployment, and none is printed. The ConfigMap itself is never
+# committed; the object storage's endpoint and region are, in the backend settings OpenTofu's state
+# reads them from.
+#   CLUSTER_DOMAIN        the domain the cluster's applications are published under, from the
+#                         environment
+#   BACKUP_BUCKET_PREFIX  the start of the backup buckets' names, from the environment
+#                         (s3_bucket_name_ok)
+#   S3_ENDPOINT,          the object storage's S3 endpoint and region, from
+#   S3_REGION             infra/openstack/backend.hcl (s3_read_backend)
+#   NODE_CIDR             the node subnet, values.nodeSubnet in the cluster's talman.yaml, which the
+#                         cluster stack renders and the kubelets take their node addresses from
+#   NODE_NAME_REGEX       a pattern of the hostnames in that talman.yaml (node_name_regex)
+#   SERVICE_RANGE         the range LoadBalancer Services take their addresses from,
+#                         values.serviceRange
+#   BGP_CLUSTER_ASN,      the workers' and the edge routers' AS numbers, values.bgp
+#   BGP_EDGE_ASN
+#   BGP_EDGE_ADDRESS_1,   the edge routers' two addresses, values.bgp
+#   BGP_EDGE_ADDRESS_2
+# The last five the cluster stack renders from the plumbing stack's numbers for BGP (ADR 0013).
+# A missing talman.yaml leaves its keys to the caller's require_cluster, which names the file.
 fill_cluster_config() {
-  local cluster=$1 talman=$2 example value keys key complete=1
+  local cluster=$1 talman=$2 example value keys key complete=1 i
   local dns_name='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
-  local -a listed=()
-  local -A sources=([CLUSTER_DOMAIN]=1 [NODE_CIDR]=1 [NODE_NAME_REGEX]=1) wanted=()
+  local ipv4='([0-9]{1,3}\.){3}[0-9]{1,3}'
+  local -a listed=() edges=()
+  local -A sources=([CLUSTER_DOMAIN]=1 [BACKUP_BUCKET_PREFIX]=1 [S3_ENDPOINT]=1 [S3_REGION]=1
+    [NODE_CIDR]=1 [NODE_NAME_REGEX]=1 [SERVICE_RANGE]=1 [BGP_CLUSTER_ASN]=1 [BGP_EDGE_ASN]=1
+    [BGP_EDGE_ADDRESS_1]=1 [BGP_EDGE_ADDRESS_2]=1) wanted=()
   example=$infra_root/kubernetes/clusters/$cluster/cluster-config.example.yaml
   cluster_config=()
   if [[ ! -f $example ]]; then
@@ -369,6 +387,18 @@ fill_cluster_config() {
   else
     complete=0
   fi
+  if require_env BACKUP_BUCKET_PREFIX && s3_bucket_name_ok BACKUP_BUCKET_PREFIX prefix; then
+    cluster_config[BACKUP_BUCKET_PREFIX]=$BACKUP_BUCKET_PREFIX
+  else
+    complete=0
+  fi
+  if s3_read_backend; then
+    cluster_config[S3_ENDPOINT]=$s3_endpoint
+    cluster_config[S3_REGION]=$s3_region
+  else
+    infra_error "cannot fill S3_ENDPOINT and S3_REGION of cluster-config from infra/openstack/backend.hcl"
+    complete=0
+  fi
   if [[ -f $talman ]]; then
     value=$(yq '.values.nodeSubnet // ""' "$talman" 2> /dev/null) || value=
     if [[ $value =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}$ ]]; then
@@ -381,6 +411,32 @@ fill_cluster_config() {
       cluster_config[NODE_NAME_REGEX]=$value
     else
       infra_error "cannot fill NODE_NAME_REGEX of cluster-config: ${talman#"$infra_root"/} gives no node hostnames"
+      complete=0
+    fi
+    value=$(yq '.values.serviceRange // ""' "$talman" 2> /dev/null) || value=
+    if [[ $value =~ ^$ipv4/[0-9]{1,2}$ ]]; then
+      cluster_config[SERVICE_RANGE]=$value
+    else
+      infra_error "cannot fill SERVICE_RANGE of cluster-config: ${talman#"$infra_root"/} gives no IPv4 network in values.serviceRange"
+      complete=0
+    fi
+    for key in clusterASN:BGP_CLUSTER_ASN edgeASN:BGP_EDGE_ASN; do
+      value=$(yq ".values.bgp.${key%%:*} // \"\"" "$talman" 2> /dev/null) || value=
+      if [[ $value =~ ^[1-9][0-9]*$ ]]; then
+        cluster_config[${key#*:}]=$value
+      else
+        infra_error "cannot fill ${key#*:} of cluster-config: ${talman#"$infra_root"/} gives no AS number in values.bgp.${key%%:*}"
+        complete=0
+      fi
+    done
+    value=$(yq '.values.bgp.edgeAddresses // [] | .[]' "$talman" 2> /dev/null) || value=
+    mapfile -t edges < <(printf '%s' "$value")
+    if ((${#edges[@]} == 2)) && [[ ${edges[0]} =~ ^$ipv4$ && ${edges[1]} =~ ^$ipv4$ ]]; then
+      for i in 0 1; do
+        cluster_config[BGP_EDGE_ADDRESS_$((i + 1))]=${edges[i]}
+      done
+    else
+      infra_error "cannot fill BGP_EDGE_ADDRESS_1 and BGP_EDGE_ADDRESS_2 of cluster-config: ${talman#"$infra_root"/} gives no two IPv4 addresses in values.bgp.edgeAddresses"
       complete=0
     fi
   fi

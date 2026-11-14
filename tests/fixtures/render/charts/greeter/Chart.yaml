@@ -1,0 +1,6 @@
+---
+# The chart the fixture's greeter HelmRelease installs. Its templates end in .tpl, which helm renders
+# like .yaml, so that yamllint leaves their template syntax alone.
+apiVersion: v2
+name: greeter
+version: 1.0.0

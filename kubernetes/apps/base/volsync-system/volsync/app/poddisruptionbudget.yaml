@@ -1,0 +1,15 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/poddisruptionbudget-policy-v1.json
+# The chart makes no disruption budget. This one keeps one of the controller's two replicas running
+# while a node is drained, and lets the drain evict the other; it selects the pods by the chart's
+# selector labels for the release volsync.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: volsync
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: volsync
+      app.kubernetes.io/instance: volsync

@@ -1,0 +1,320 @@
+#!/usr/bin/env bash
+# Renders what Flux would apply from the kubernetes/ tree, offline, one file per object, for
+# scripts/render-diff to compare. For each cluster: the cluster directory as the instance's sync
+# Kustomization applies it, then every Kustomization that applies from the tree in turn (the root,
+# Flux's own applications and each application the overlay enables), built with Flux as
+# scripts/kubernetes-check builds them: strict substitution, with the cluster's example key lists in
+# place of cluster-config and cluster-secrets. Each HelmRelease is expanded to the objects its chart
+# renders, as helm-controller renders them:
+#   - the chart its OCIRepository names, pulled from its registry, or taken from RENDER_CHART_CACHE,
+#     a directory holding <registry>/<repository>/<tag>/<chart>.tgz, when set and the chart is there;
+#   - the values of its valuesFrom ConfigMaps, then its own spec.values over them;
+#   - helm-controller's release name and namespace, the Kubernetes version in versions.yaml, every
+#     API version a definition in the render serves, as on a cluster where all of them exist, and the
+#     chart's own definitions;
+#   - its kustomize post-renderers, then helm-controller's labels.
+# A value the chart makes up anew on every render, such as a generated certificate, would show as a
+# change every time: the chart is rendered twice and each value that differs is masked. No Secret's
+# data leaves the render: every value of a Secret's data and stringData is replaced, and the sops
+# metadata Flux strips is removed. Fails naming the application and the step when anything does not
+# render. Never contacts a cluster, and reads no registry login.
+#
+# Writes OUT/<cluster>/<application>/<Kind>[.<group>]_<namespace>_<name>.yaml, the name without the
+# hash kustomize appends to a generated ConfigMap or Secret, so that a changed one compares with
+# the one it replaces. OUT must not exist or be empty.
+#
+# Usage: scripts/render OUT [DIR]   (DIR holds kubernetes/ and versions.yaml; defaults to this repository)
+set -euo pipefail
+shopt -s nullglob
+
+die() {
+  echo "render: $*" >&2
+  exit 1
+}
+
+(($# >= 1 && $# <= 2)) || die "usage: scripts/render OUT [DIR]"
+out=$1
+dir=${2:-$(dirname "${BASH_SOURCE[0]}")/..}
+[[ -d $dir/kubernetes ]] || die "no kubernetes/ directory in $dir"
+[[ -f $dir/versions.yaml ]] || die "no versions.yaml in $dir"
+if [[ -e $out ]]; then
+  [[ -d $out && -z $(find "$out" -mindepth 1 -print -quit) ]] || die "$out exists and is not an empty directory"
+fi
+for tool in flux helm kustomize yq jq; do
+  command -v "$tool" >/dev/null || die "$tool not found on PATH"
+done
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+# No kubeconfig and no in-cluster address: a tool that tried to reach a cluster fails instead.
+export KUBECONFIG=/dev/null
+unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
+# Helm's settings and the Docker configuration it reads registry logins from are the run's own.
+export HELM_CACHE_HOME="$tmp/helm/cache" HELM_CONFIG_HOME="$tmp/helm/config" HELM_DATA_HOME="$tmp/helm/data"
+export DOCKER_CONFIG="$tmp/docker"
+mkdir -p "$DOCKER_CONFIG"
+charts=${RENDER_CHART_CACHE:-$tmp/charts}
+mkdir -p "$charts"
+charts=$(cd "$charts" && pwd)
+
+kube=$(yq '.kubernetes // ""' "$dir/versions.yaml")
+[[ $kube =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "versions.yaml: kubernetes is not a version: $kube"
+
+# flux build rewrites the kustomization.yaml it builds while it runs, and reads only paths below
+# its working directory: it builds a copy that holds the tree alone.
+mkdir -p "$tmp/tree"
+cp -R "$dir/kubernetes" "$tmp/tree/"
+cd "$tmp/tree"
+
+label='^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+
+# build CLUSTER APP KS: builds the Kustomization in the file KS, the application APP, from its
+# spec.path in the tree, with the cluster's example values under its own postBuild.substitute, into
+# $tmp/built/CLUSTER/APP.yaml.
+build() {
+  local cluster=$1 app=$2 ks=$3 path err
+  path=$(yq '.spec.path // ""' "$ks")
+  path=${path#./}
+  path=${path%/}
+  if [[ ! $path =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ || /$path/ == */../* || ! -d kubernetes/$path ]]; then
+    die "$cluster/$app: spec.path ${path:-(none)} is not a directory of the tree"
+  fi
+  # shellcheck disable=SC2016 # $values is a yq variable.
+  yq ea 'select(fileIndex == 0) as $values | select(fileIndex == 1)
+    | .spec.postBuild.substitute = ($values * (.spec.postBuild.substitute // {}))' \
+    "$tmp/values/$cluster.yaml" "$ks" >"$tmp/ks.yaml"
+  if ! err=$(flux build kustomization "$app" --path "kubernetes/$path" --kustomization-file "$tmp/ks.yaml" \
+    --dry-run --strict-substitute --in-memory-build --cache-dir "$tmp/kube-cache" 2>&1 >"$tmp/built/$cluster/$app.yaml"); then
+    die "$cluster/$app: flux build of $path failed: $err"
+  fi
+}
+
+# Every Kustomization that applies from the tree, built; queued as the builds find them.
+apps=()
+for cluster_dir in kubernetes/clusters/*/; do
+  cluster_dir=${cluster_dir%/}
+  cluster=${cluster_dir##*/}
+  [[ -f $cluster_dir/ks.yaml && -f $cluster_dir/kustomization.yaml ]] || continue
+  [[ $cluster =~ $label ]] || die "$cluster_dir: the cluster's name is not a DNS label"
+  mkdir -p "$tmp/built/$cluster" "$tmp/ks/$cluster" "$tmp/values"
+  examples=("$cluster_dir"/cluster-config.example.yaml "$cluster_dir"/cluster-secrets.example.yaml)
+  echo '{}' >"$tmp/values/$cluster.yaml"
+  if ((${#examples[@]} > 0)); then
+    # shellcheck disable=SC2016 # $list is a yq variable.
+    yq ea '. as $list ireduce ({}; . * ($list // {})) | with_entries(.value |= tostring)' "${examples[@]}" \
+      >"$tmp/values/$cluster.yaml" || die "$cluster_dir: the example key lists are not plain maps"
+  fi
+  # A stand-in for the instance's sync Kustomization, named after its namespace as the instance
+  # names it, with the root's decryption and substitution, as the instance's patches give it.
+  sync_path="./clusters/$cluster" yq ea '[select(. != null)] | .[0]
+    | {"apiVersion": .apiVersion, "kind": .kind,
+       "metadata": {"name": "flux-system", "namespace": "flux-system"},
+       "spec": {"path": strenv(sync_path), "sourceRef": {"kind": "OCIRepository", "name": "flux-system"},
+         "decryption": .spec.decryption, "postBuild": {"substituteFrom": .spec.postBuild.substituteFrom}}}' \
+    "$cluster_dir/ks.yaml" >"$tmp/ks/$cluster/flux-system.yaml"
+  queue=(flux-system)
+  declare -A seen=([flux-system]=1)
+  while ((${#queue[@]} > 0)); do
+    app=${queue[0]}
+    queue=("${queue[@]:1}")
+    build "$cluster" "$app" "$tmp/ks/$cluster/$app.yaml"
+    apps+=("$cluster/$app")
+    # A Kustomization whose source is the cluster's own artifact, or an artifact the generator makes
+    # from it at the same paths, applies from this tree. Any other source, such as a GitRepository,
+    # is not in the tree, and the Kustomization stays an object of the application that applies it.
+    while IFS= read -r ks; do
+      [[ -n $ks ]] || continue
+      child=$(jq -r '.metadata.name // ""' <<<"$ks")
+      [[ $child =~ $label ]] || die "$cluster/$app: a Kustomization's name is not a DNS label: $child"
+      [[ -z ${seen[$child]:-} ]] || die "$cluster/$app: two Kustomizations are named $child"
+      seen[$child]=1
+      yq -p json -o yaml . <<<"$ks" >"$tmp/ks/$cluster/$child.yaml"
+      queue+=("$child")
+    done < <(yq -N -o json -I0 'select(.kind == "Kustomization" and ((.apiVersion // "") | test("^kustomize\.toolkit\.fluxcd\.io/"))
+      and ((.spec.sourceRef.kind == "OCIRepository" and .spec.sourceRef.name == "flux-system") or .spec.sourceRef.kind == "ExternalArtifact"))' \
+      "$tmp/built/$cluster/$app.yaml")
+  done
+  unset seen
+done
+((${#apps[@]} > 0)) || die "no cluster directory with a ks.yaml and a kustomization.yaml under kubernetes/clusters"
+
+# release CLUSTER APP INDEX HR: prepares the INDEXth HelmRelease of the application, HR as JSON: its
+# chart, values and release, in $tmp/releases/CLUSTER/APP/INDEX/.
+release() {
+  local cluster=$1 app=$2 index=$3 hr=$4 name namespace where kind chart_ns repo url tag pulled release target
+  local work="$tmp/releases/$cluster/$app/$index" built="$tmp/built/$cluster/$app.yaml" i entry
+  local -a tgz
+  name=$(jq -r '.metadata.name // ""' <<<"$hr")
+  namespace=$(jq -r '.metadata.namespace // "default"' <<<"$hr")
+  where="$cluster/$app: HelmRelease $namespace/$name"
+  mkdir -p "$work"
+  kind=$(jq -r '.spec.chartRef.kind // ""' <<<"$hr")
+  [[ $kind == OCIRepository ]] || die "$where: only a chartRef to an OCIRepository is rendered"
+  chart_ns=$(jq -r --arg ns "$namespace" '.spec.chartRef.namespace // $ns' <<<"$hr")
+  repo=$(name="$(jq -r '.spec.chartRef.name' <<<"$hr")" ns="$chart_ns" yq -N -o json -I0 \
+    'select(.kind == "OCIRepository" and .metadata.name == strenv(name) and (.metadata.namespace // "default") == strenv(ns))' "$built")
+  [[ -n $repo && $repo != *$'\n'* ]] || die "$where: its OCIRepository is not one object of the application"
+  url=$(jq -r '.spec.url // ""' <<<"$repo")
+  tag=$(jq -r '.spec.ref.tag // ""' <<<"$repo")
+  [[ $url =~ ^oci://[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+$ && /$url/ != */../* ]] || die "$where: not an OCI chart URL: $url"
+  [[ $tag =~ ^[A-Za-z0-9_][A-Za-z0-9._+-]*$ ]] || die "$where: its OCIRepository names no tag"
+  pulled="$charts/${url#oci://}/$tag"
+  tgz=("$pulled"/*.tgz)
+  if ((${#tgz[@]} == 0)); then
+    mkdir -p "$pulled"
+    helm pull "$url" --version "$tag" --destination "$pulled" >"$work/pull.log" 2>&1 ||
+      die "$where: helm pull $url $tag failed: $(cat "$work/pull.log")"
+    tgz=("$pulled"/*.tgz)
+  fi
+  ((${#tgz[@]} == 1)) || die "$where: $pulled holds no single chart"
+  echo "${tgz[0]}" >"$work/chart"
+  # The values of each ConfigMap in valuesFrom, in order, then the HelmRelease's own over them.
+  i=0
+  while IFS= read -r entry; do
+    [[ -n $entry ]] || continue
+    i=$((i + 1))
+    [[ $(jq -r '.kind' <<<"$entry") == ConfigMap && $(jq -r '.targetPath // ""' <<<"$entry") == "" ]] ||
+      die "$where: only whole values from a ConfigMap of the application are rendered"
+    name="$(jq -r '.name' <<<"$entry")" ns="$namespace" key="$(jq -r '.valuesKey // "values.yaml"' <<<"$entry")" \
+      yq -N 'select(.kind == "ConfigMap" and .metadata.name == strenv(name) and (.metadata.namespace // "default") == strenv(ns))
+        | .data[strenv(key)] // ""' "$built" >"$work/values-$i.yaml"
+    [[ -s $work/values-$i.yaml || $(jq -r '.optional // false' <<<"$entry") == true ]] ||
+      die "$where: values from ConfigMap $(jq -r '.name' <<<"$entry") are not in the application"
+  done < <(jq -c '.spec.valuesFrom // [] | .[]' <<<"$hr")
+  jq '.spec.values // {}' <<<"$hr" >"$work/values-inline.yaml"
+  # helm-controller's release: spec.releaseName, or the HelmRelease's name after its targetNamespace.
+  target=$(jq -r '.spec.targetNamespace // ""' <<<"$hr")
+  release=$(jq -r --arg target "$target" '.spec.releaseName // (if $target != "" then $target + "-" else "" end) + .metadata.name' <<<"$hr")
+  [[ $release =~ $label && ${target:-$namespace} =~ $label ]] || die "$where: release $release in ${target:-$namespace} is not a DNS label"
+  printf '%s\n' "$release" "${target:-$namespace}" "$where" "$(jq -r '.metadata.name' <<<"$hr")" "$namespace" >"$work/release"
+  jq -c '.spec.postRenderers // []' <<<"$hr" >"$work/post-renderers.json"
+}
+
+# template WORK OUT [API-VERSIONS]: renders the release prepared in WORK into OUT.
+template() {
+  local work=$1 dest=$2 release namespace where err file
+  local -a args=() lines
+  mapfile -t lines <"$work/release"
+  release=${lines[0]} namespace=${lines[1]} where=${lines[2]}
+  if [[ -n ${3:-} ]]; then
+    args+=("--api-versions=$3")
+  fi
+  for file in "$work"/values-[0-9]*.yaml "$work/values-inline.yaml"; do
+    args+=(--values "$file")
+  done
+  if ! err=$(helm template "$release" "$(cat "$work/chart")" --namespace "$namespace" --kube-version "$kube" \
+    --include-crds "${args[@]}" 2>&1 >"$dest"); then
+    die "$where: helm template failed: $err"
+  fi
+}
+
+# post_render WORK FILE: applies the release's kustomize post-renderers to the objects in FILE.
+post_render() {
+  local work=$1 file=$2 where count i patched
+  where=$(sed -n 3p "$work/release")
+  count=$(jq 'length' "$work/post-renderers.json")
+  for ((i = 0; i < count; i++)); do
+    jq -e --argjson i "$i" '.[$i] | keys == ["kustomize"] and (.kustomize | keys - ["images", "patches"] | length == 0)' \
+      "$work/post-renderers.json" >/dev/null || die "$where: only kustomize post-renderers with patches and images are rendered"
+    patched="$work/post-render-$i"
+    rm -rf "$patched"
+    mkdir -p "$patched"
+    cp "$file" "$patched/rendered.yaml"
+    jq --argjson i "$i" '{"apiVersion": "kustomize.config.k8s.io/v1beta1", "kind": "Kustomization",
+      "resources": ["rendered.yaml"]} + .[$i].kustomize' "$work/post-renderers.json" >"$patched/kustomization.yaml"
+    kustomize build "$patched" >"$file" 2>"$work/post-render.log" ||
+      die "$where: post-renderer $((i + 1)) failed: $(cat "$work/post-render.log")"
+  done
+}
+
+# Every HelmRelease of every application, prepared and rendered a first time with no API version but
+# Kubernetes' own, to learn which definitions the whole render holds.
+mkdir -p "$tmp/releases"
+for app in "${apps[@]}"; do
+  index=0
+  while IFS= read -r hr; do
+    [[ -n $hr ]] || continue
+    index=$((index + 1))
+    release "${app%%/*}" "${app#*/}" "$index" "$hr"
+    template "$tmp/releases/$app/$index" "$tmp/releases/$app/$index/first.yaml"
+  done < <(yq -N -o json -I0 'select(.kind == "HelmRelease" and ((.apiVersion // "") | test("^helm\.toolkit\.fluxcd\.io/")))' \
+    "$tmp/built/$app.yaml")
+done
+
+# helm-controller renders with the cluster's API versions; this render takes those of every definition
+# the tree installs, as served once all of them are established.
+definitions=("$tmp"/built/*/*.yaml "$tmp"/releases/*/*/*/first.yaml)
+# shellcheck disable=SC2016 # $spec is a yq variable.
+apis=$(yq -N 'select(.kind == "CustomResourceDefinition") | .spec as $spec | ($spec.versions // [])[] | select(.served)
+  | [$spec.group + "/" + .name, $spec.group + "/" + .name + "/" + $spec.names.kind] | .[]' "${definitions[@]}" | sort -u | paste -sd, -)
+
+# objects WORK: the release's objects as JSON lines, keys sorted: rendered twice, post-rendered and
+# labelled as helm-controller labels them, every value that differs between the two masked.
+objects() {
+  local work=$1 run hr_name hr_namespace
+  hr_name=$(sed -n 4p "$work/release")
+  hr_namespace=$(sed -n 5p "$work/release")
+  for run in a b; do
+    template "$work" "$work/$run.yaml" "$apis"
+    post_render "$work" "$work/$run.yaml"
+    yq -o json -I0 'select(. != null)' "$work/$run.yaml" |
+      jq -c -S --arg name "$hr_name" --arg namespace "$hr_namespace" \
+        '.metadata.labels["helm.toolkit.fluxcd.io/name"] = $name | .metadata.labels["helm.toolkit.fluxcd.io/namespace"] = $namespace' \
+        >"$work/$run.jsonl"
+  done
+  jq -n -c --slurpfile a "$work/a.jsonl" --slurpfile b "$work/b.jsonl" '
+    def mask($x; $y):
+      if $x == $y then $x
+      elif ($x | type) == "object" and ($y | type) == "object" and ($x | keys) == ($y | keys) then
+        reduce ($x | keys[]) as $k ({}; .[$k] = mask($x[$k]; $y[$k]))
+      elif ($x | type) == "array" and ($y | type) == "array" and ($x | length) == ($y | length) then
+        [range($x | length) as $i | mask($x[$i]; $y[$i])]
+      else "(generated at render time)" end;
+    if ($a | length) != ($b | length) then error("the chart renders a different number of objects each time")
+    else range($a | length) as $i | mask($a[$i]; $b[$i]) end' ||
+    die "$(sed -n 3p "$work/release"): the chart does not render the same objects twice"
+}
+
+# Each application's objects: what Flux builds, and what its HelmReleases' charts render.
+for app in "${apps[@]}"; do
+  objects_file="$tmp/objects.jsonl"
+  yq -o json -I0 'select(. != null)' "$tmp/built/$app.yaml" | jq -c -S . >"$objects_file"
+  for work in "$tmp/releases/$app"/*/; do
+    objects "${work%/}" >>"$objects_file"
+  done
+  # No Secret's data leaves the render, decrypted or not, and the sops metadata Flux strips goes.
+  jq -c -S 'del(.sops)
+    | if .kind == "Secret" then
+        reduce ("data", "stringData") as $field (.;
+          if has($field) then .[$field] |= (if type == "object" then map_values("(redacted)") else "(redacted)" end) else . end)
+      else . end' "$objects_file" >"$tmp/redacted.jsonl"
+  if jq -e -s 'any(.[]; .kind == "Secret" and ([(.data // {}), (.stringData // {})] | map(.[]?) | any(. != "(redacted)")))' \
+    "$tmp/redacted.jsonl" >/dev/null; then
+    die "$app: a Secret's data is still in the render"
+  fi
+  # One file per object, named after its kind, group, namespace and name, which hold only the
+  # characters Kubernetes allows in them; a generated ConfigMap or Secret without its hash.
+  jq -r '
+    ((.apiVersion // "") | if test("/") then sub("/[^/]*$"; "") else "" end) as $group
+    | (.metadata.name // "") as $name
+    | (if (.kind == "ConfigMap" or .kind == "Secret") and $group == "" then $name | sub("-[2456789bcdfghkmt]{10}$"; "") else $name end) as $base
+    | if ((.kind // "") | test("^[A-Za-z0-9]+$")) and ($group | test("^[a-z0-9.-]*$"))
+        and ((.metadata.namespace // "") | test("^[a-z0-9-]*$")) and ($base | test("^[A-Za-z0-9][A-Za-z0-9._:-]*$"))
+      then .kind + (if $group != "" then "." + $group else "" end) + "_" + (.metadata.namespace // "") + "_" + $base + ".yaml"
+      else error("an object with a kind, group, namespace or name Kubernetes would refuse: \(.kind) \(.apiVersion) \(.metadata.namespace) \(.metadata.name)") end' \
+    "$tmp/redacted.jsonl" >"$tmp/names" 2>"$tmp/names.log" || die "$app: $(cat "$tmp/names.log")"
+  twice=$(sort "$tmp/names" | uniq -d)
+  [[ -z $twice ]] || die "$app: more than one object renders as $twice"
+  mkdir -p "$out/$app"
+  yq -p json -o yaml '.' "$tmp/redacted.jsonl" >"$tmp/redacted.yaml"
+  # yq separates the documents of its stream with a line ---, which no line of a document is.
+  awk -v dest="$out/$app" 'BEGIN { n = 0; i = 0 }
+    NR == FNR { name[n++] = $0; next }
+    /^---$/ { close(file); i++; next }
+    { file = dest "/" name[i]; print > file }' "$tmp/names" "$tmp/redacted.yaml"
+  [[ $(find "$out/$app" -type f | wc -l) -eq $(wc -l <"$tmp/names") ]] || die "$app: the objects did not split one to a file"
+done
+echo "render: ${#apps[@]} applications in $out"

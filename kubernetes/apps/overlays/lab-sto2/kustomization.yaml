@@ -12,29 +12,39 @@ resources:
   - ../../base/demo
   - ../../base/envoy-gateway-system
   - ../../base/external-secrets
+  - ../../base/keda
   - ../../base/kube-system
   - ../../base/monitoring
   - ../../base/openbao
   - ../../base/piraeus-datastore
+  - ../../base/volsync-system
   - ../../base/cert-manager/cert-manager/ks.yaml
   - ../../base/cnpg-system/cloudnative-pg/ks.yaml
   - ../../base/demo/hello-secret/ks.yaml
   - ../../base/demo/hello/ks.yaml
+  # - ../../base/demo/volsync-demo/ks.yaml  # Disabled: no ClusterSecretStore openbao holds the repository's password and S3 key yet, so its movers have no Secret to read
   - ../../base/envoy-gateway-system/envoy-gateway-crds/ks.yaml
   - ../../base/envoy-gateway-system/envoy-gateway/ks.yaml
   - ../../base/external-secrets/external-secrets/ks.yaml
   - ../../base/external-secrets/openbao-store/ks.yaml
+  - ../../base/keda/keda/ks.yaml
   - ../../base/kube-system/cilium/ks.yaml
+  - ../../base/kube-system/cilium-bgp/ks.yaml
   - ../../base/kube-system/descheduler/ks.yaml
   - ../../base/kube-system/gateway-api-crds/ks.yaml
   - ../../base/kube-system/kubelet-csr-approver/ks.yaml
   - ../../base/kube-system/metrics-server/ks.yaml
   - ../../base/kube-system/prometheus-operator-crds/ks.yaml
+  - ../../base/kube-system/reflector/ks.yaml
   - ../../base/kube-system/reloader/ks.yaml
   - ../../base/kube-system/runtime-classes/ks.yaml
   - ../../base/kube-system/snapshot-controller/ks.yaml
-  # - ../../base/kube-system/spegel/ks.yaml  # Disabled: Talos discards unpacked image layers, which Spegel serves, until its machine configuration sets containerd's discard_unpacked_layers to false
+  - ../../base/kube-system/spegel/ks.yaml
+  - ../../base/kube-system/vpa/ks.yaml
+  - ../../base/monitoring/grafana-operator/ks.yaml
+  - ../../base/monitoring/grafana/ks.yaml
   - ../../base/monitoring/kube-prometheus-stack/ks.yaml
   - ../../base/openbao/openbao/ks.yaml
   - ../../base/piraeus-datastore/linstor-cluster/ks.yaml
   - ../../base/piraeus-datastore/piraeus-operator/ks.yaml
+  - ../../base/volsync-system/volsync/ks.yaml

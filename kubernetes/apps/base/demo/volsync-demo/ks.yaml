@@ -1,0 +1,27 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: volsync-demo
+  namespace: flux-system
+spec:
+  path: ./apps/base/demo/volsync-demo/app
+  targetNamespace: demo
+  # The volume, backed up every night and restored from the latest backup when it is created.
+  components:
+    - ../../../../../components/volsync
+  postBuild:
+    substitute:
+      APP: volsync-demo
+      VOLSYNC_CAPACITY: 1Gi
+      VOLSYNC_SCHEDULE: "17 3 * * *"
+  # The component's objects are of VolSync's and External Secrets' kinds, and the volume and its
+  # snapshots come from LINSTOR's default classes.
+  dependsOn:
+    - name: volsync
+    - name: external-secrets
+    - name: linstor-cluster
+  sourceRef:
+    kind: ExternalArtifact
+    name: volsync-demo

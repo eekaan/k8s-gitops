@@ -64,6 +64,22 @@ extensions:
   off. `just cluster-talos` applies the setting to running nodes, where a sysctl takes effect
   without a reboot
   ([Talos](https://docs.siderolabs.com/talos/v1.14/configure-your-talos-cluster/system-configuration/editing-machine-configuration)).
+
+  The kubelet's seccomp default narrows that cost. `talos/patches/all/seccomp-default.yaml` has
+  every node's kubelet run a container whose pod sets no seccomp profile under the container
+  runtime's default profile instead of none
+  ([Kubernetes](https://kubernetes.io/docs/tutorials/security/seccomp/#enable-the-use-of-runtimedefault-as-the-default-seccomp-profile-for-all-workloads),
+  [Talos](https://docs.siderolabs.com/talos/v1.14/reference/configuration/kubernetes/kubeletconfig)).
+  To a container without `CAP_SYS_ADMIN` among its capabilities, containerd's default profile
+  refuses `unshare`, `setns`, `clone3`, and a `clone` that asks for any new namespace, a user
+  namespace among them
+  ([containerd](https://github.com/containerd/containerd/blob/v2.3.7/contrib/seccomp/seccomp_default.go),
+  the version Talos 1.14.6 runs). It narrows nothing for a privileged container, which always runs
+  without a profile ([Kubernetes](https://kubernetes.io/docs/tutorials/security/seccomp/)), for a
+  container that sets `Unconfined` or a profile of its own, or for a container with
+  `CAP_SYS_ADMIN`, to which the default profile allows these calls. The configuration Talos
+  generates turns the default on by itself; the patch states it, so that a change of that default
+  cannot turn it off, and changes nothing on a node that runs the generated configuration.
 - `siderolabs/kata-containers`: Kata Containers, which registers the containerd runtime handlers
   `kata`, on Cloud Hypervisor, and `kata-qemu`; the RuntimeClass `kata` selects the first. Kata
   runs each pod in a virtual machine of its own and needs hardware virtualisation on the node, which
@@ -105,6 +121,105 @@ free is not taken.
 On running workers, `just infra-apply sto2/cluster` attaches the volumes and writes the
 `talman.yaml` that lists the patch, and `just cluster-talos` then creates the raw volume. Taking
 the patch out later leaves the partition and its data on the disk.
+
+## Image layers for Spegel
+
+Spegel shares images between the nodes ([kubernetes.md](kubernetes.md#the-kube-system-baseline)),
+serving the layers of each node's images from containerd's content store. Talos has containerd
+discard a layer from the content store once it is unpacked, to save disk space
+([Talos](https://docs.siderolabs.com/kubernetes-guides/advanced-guides/spegel)): its own CRI
+configuration sets `discard_unpacked_layers = true`
+([Talos](https://github.com/siderolabs/talos/blob/v1.14.6/hack/cri-plugin.part#L3-L4)).
+`talos/patches/all/spegel.yaml` has every node keep them: a `CRICustomizationConfig` named `spegel`
+sets `discard_unpacked_layers` to false in containerd's images plugin, as that guide gives it for
+Talos 1.14 and later. Talos merges it as `20-spegel.part`, after its own `00-base.part`
+([Talos](https://github.com/siderolabs/talos/blob/v1.14.6/internal/app/machined/pkg/controllers/files/cri_config.go#L154-L161)).
+
+This is not a combination Talos supports: its maintainers support neither Spegel nor a changed
+`discard_unpacked_layers` "in a way it should work fully"
+([siderolabs/talos#14784](https://github.com/siderolabs/talos/issues/14784), open, reported on
+Talos 1.14.5 with Spegel 0.8.1). The setting reaches the images the kubelet pulls, and no others:
+
+- An image the kubelet pulls once the patch is live on the node keeps its layers, and Spegel serves
+  them to the other nodes.
+- An image pulled before that lost its layers when it was unpacked, and the setting does not bring
+  them back, so Spegel cannot serve it from that node until it is removed and pulled again
+  (inferred from containerd's documentation, not yet seen on a cluster).
+- An image pulled through the Talos API, such as by `talosctl image pull`, loses its layers
+  whatever the setting: Talos pulls it with containerd's `ChildGCLabelsFilterLayers`, which leaves
+  the layers unreferenced for garbage collection
+  ([Talos](https://github.com/siderolabs/talos/blob/v1.14.6/internal/pkg/containers/image/pull.go#L186-L190)),
+  as the issue above shows.
+
+### What it costs
+
+The setting lets containerd's garbage collection remove a layer from the content store once it is
+unpacked into the snapshotter
+([containerd](https://github.com/containerd/containerd/blob/v2.3.7/docs/cri/config.md)). With it
+off, an image the kubelet pulls keeps its layers as the registry served them, usually compressed,
+in the content store, beside their unpacked copy in the snapshotter, until the image is removed.
+Both are under `/var/lib/containerd`, which stays a directory of the system disk's EPHEMERAL volume
+unless a `VolumeConfig` gives it a partition of its own, as does `/var/lib/kubelet`
+([Talos](https://github.com/siderolabs/talos/releases/tag/v1.14.0)), and none does.
+
+Spegel collects nothing itself and leaves it to the kubelet's image garbage collection
+([Spegel](https://spegel.dev/docs/faq/#why-is-my-node-running-out-of-disk-space)), which bounds
+it: from 75% use of that filesystem the kubelet deletes unused images, least recently used first,
+down to 65% (`talos/patches/all/kubelet.yaml`,
+[Kubernetes](https://kubernetes.io/docs/concepts/architecture/garbage-collection/#containers-images)).
+Below the kubelet's default hard eviction thresholds, 15% free for images and 10% for the node,
+which neither Talos nor the patches change, it reports disk pressure, collects dead containers and
+unused images, and then evicts pods
+([Kubernetes](https://kubernetes.io/docs/concepts/scheduling-eviction/node-pressure-eviction/#hard-eviction-thresholds)).
+
+### Rolling it out
+
+The patch reaches the nodes before Spegel runs: `just cluster-talos` applies it from the pull
+request's branch, and the merge that has Flux start Spegel comes after. Applying, changing or
+removing a `CRICustomizationConfig` restarts containerd's CRI instance and needs no reboot
+([Talos](https://docs.siderolabs.com/talos/v1.14/configure-your-talos-cluster/images-container-runtime/containerd)).
+Talos' Spegel guide still has a reboot step, which Talos 1.14 made unnecessary ("a machine reboot is
+no longer required to apply changes to CRI configuration",
+[Talos](https://github.com/siderolabs/talos/releases/tag/v1.14.0)); this follows the 1.14
+documentation. Talos stops CRI by signalling the containerd process alone, whether or not it runs
+in the workload sandbox
+([Talos](https://github.com/siderolabs/talos/blob/v1.14.6/internal/app/machined/pkg/system/runner/process/process.go#L475-L496),
+[Talos](https://github.com/siderolabs/talos/blob/v1.14.6/internal/app/machined/pkg/system/runner/process/process.go#L575-L592)),
+and runc's shims, which hold the containers, run in a cgroup apart from containerd's
+([Talos](https://github.com/siderolabs/talos/blob/v1.14.6/hack/cri-plugin.part#L14-L15),
+[Talos](https://github.com/siderolabs/talos/blob/v1.14.6/internal/app/machined/pkg/system/services/cri.go#L184)),
+so running containers keep running while the kubelet loses the CRI for the restart (inferred from
+source, not yet seen on a cluster).
+
+Once Flux starts it, each Spegel pod's init container writes the mirror configuration that sends
+the node's pulls to Spegel first, `_default/hosts.toml` under `/etc/cri/conf.d/hosts`
+([Spegel](https://github.com/spegel-org/spegel/blob/v0.8.1/pkg/oci/containerd/mirror.go#L121-L134)).
+Talos rewrites that directory whenever the node's registry configuration or a CRI customization
+changes
+([Talos](https://github.com/siderolabs/talos/blob/v1.14.6/internal/app/machined/pkg/controllers/files/cri_config.go#L43-L58)),
+and removes from it every directory its own registry configuration does not name
+([Talos](https://github.com/siderolabs/talos/blob/v1.14.6/internal/app/machined/pkg/controllers/files/cri_config.go#L260-L280)),
+which is all of Spegel's, as no machine configuration here sets a registry mirror. A CRI restart
+recreates no pod, so nothing writes it back, and the nodes pull from the upstream registries, with
+nothing reporting it, until Spegel's pods start again (inferred from source, not yet seen on a
+cluster). So while Spegel runs, its DaemonSet is restarted after any `just cluster-talos` that
+changes the nodes' CRI customizations or registry mirrors, this patch included, and its init
+containers write the configuration again.
+
+### Checking it on a node
+
+- The merged CRI configuration, `/etc/cri/conf.d/cri.toml`, which containerd imports, names
+  `in-memory customization "spegel"` in its header, and its `plugins."io.containerd.cri.v1.images"`
+  table holds `discard_unpacked_layers = false`
+  ([Talos](https://github.com/siderolabs/talos/blob/v1.14.6/hack/cri-containerd.toml#L12-L14),
+  [Talos](https://github.com/siderolabs/talos/blob/v1.14.6/internal/pkg/toml/merge.go#L44-L50)).
+- Once `just cluster-talos` has run and Spegel's pods have started again,
+  `/etc/cri/conf.d/hosts/_default/hosts.toml` is there and names the node's Spegel, on port 30020.
+- A layer of an image the kubelet pulled after the rollout is still in containerd's content store,
+  under `/var/lib/containerd/io.containerd.content.v1.content/blobs/sha256/`, minutes later.
+- Spegel's `spegel_mirror_requests_total` with `cache="hit"` rises in Prometheus as nodes pull
+  images another node holds
+  ([Spegel](https://github.com/spegel-org/spegel/blob/v0.8.1/pkg/registry/registry.go#L239-L247)).
 
 ## The control planes' metrics
 
@@ -282,7 +397,8 @@ out of the artifact, which is built from `kubernetes/`.
 - `just cluster-config [cluster]` applies what Flux needs before it starts: the namespace
   `flux-system`, the ConfigMap `cluster-config`, the Secret `cluster-secrets` and the Secret
   `sops-age` ([kubernetes.md](kubernetes.md#before-flux-starts)). It refuses, naming each, when the
-  cluster's `talman.yaml` or kubeconfig, `CLUSTER_DOMAIN`, the Flux age key or its recipient in
+  cluster's `talman.yaml` or kubeconfig, `CLUSTER_DOMAIN`, `BACKUP_BUCKET_PREFIX`, the object
+  storage's endpoint or region in `infra/openstack/backend.hcl`, the Flux age key or its recipient in
   `.sops.yaml` is missing, when the Flux age key is not the key of that recipient or is the Talos
   age key, and when a key of `cluster-config` or `cluster-secrets` cannot be filled or is not
   listed. A second run changes nothing.
@@ -302,6 +418,14 @@ out of the artifact, which is built from `kubernetes/`.
   certificate. While the namespace `flux-system` does not exist, as before `just cluster-config`
   has run, the check of its pods is skipped, and its line and the last line say so. It runs
   `kubectl get` and `kubectl logs` only. It needs the cluster's `talman.yaml` and kubeconfig.
+- `just grafana [cluster]` forwards a local port to Grafana through the cluster's kubeconfig until
+  Ctrl-C ([kubernetes.md](kubernetes.md#grafana)): `kubectl port-forward`, listening on 127.0.0.1
+  only, from `GRAFANA_PORT` to port 3000 of the Service `grafana-service` in `monitoring`. Once
+  kubectl reports the forward it prints the local URL and where the admin password is kept, never
+  the password, and reads no Secret. It ends the forward on every way out: Ctrl-C, SIGTERM or
+  SIGHUP, kubectl not reporting the forward within `GRAFANA_WAIT` seconds, kubectl stopping, or a
+  failure, each but an interruption naming its cause. It changes nothing on the cluster and needs
+  the cluster's kubeconfig.
 - `just cluster-reboot <node> [cluster] [--yes] [--tolerate <seconds>]` reboots one node, named by
   its hostname in the cluster's `talman.yaml`, while it watches the Kubernetes API through its load
   balancer; for a control plane, that is the check that the API does not go away with one. Any
@@ -339,18 +463,22 @@ out of the artifact, which is built from `kubernetes/`.
   stack's name is typed back, or with `--yes`, and then removes the cluster's `talman.yaml`,
   talosconfig and kubeconfig. The plumbing stack, the secrets bundle and the buckets stay. First,
   through the kubeconfig of the cluster it is given, it lists
-  every Service of type LoadBalancer and every PersistentVolume of a CSI driver: the cloud's load
-  balancers and volumes behind them are made by the cluster, not by OpenTofu, so the destroy would
-  leave them in the cloud, where they keep the network from being deleted. While there are any, it
-  names each, by namespace and name or by the volume's name, and destroys nothing. Volumes of
-  LINSTOR's driver, `linstor.csi.linbit.com`, are the exception: their data is on the workers' data
-  volumes ([above](#the-workers-data-device)), which the stack holds and deletes, so none of
-  them stays in the cloud. They do not hold the destroy up; it says how many there are, by number
-  and not by name, before it shows the plan, and the one confirmation, the stack's name typed back
-  or `--yes`, destroys them with the stack. A cluster whose API does not answer, or that has no
-  kubeconfig, cannot be asked and is not destroyed either, unless `--unreachable` is given: the
-  operator then takes on whatever it owned, which stays in the cloud. Before it asks the cluster it
-  checks what `infra-destroy` needs for the stack.
+  every Service of type LoadBalancer and every PersistentVolume of a CSI driver: a cloud load
+  balancer or volume behind one is made by the cluster, not by OpenTofu, so the destroy would leave
+  it in the cloud, where it keeps the network from being deleted. A Service whose every
+  load-balancer address lies in the service range of the cluster's `talman.yaml` does not count:
+  Cilium gave it that address and the workers announce it, and nothing in the cloud stands behind
+  it ([kubernetes.md](kubernetes.md#service-addresses)). A Service without an address yet, or with
+  one outside the range, counts, as does every one when `talman.yaml` names no service range. While
+  there are any, it names each, by namespace and name or by the volume's name, and destroys
+  nothing. Volumes of LINSTOR's driver, `linstor.csi.linbit.com`, are the other exception: their
+  data is on the workers' data volumes ([above](#the-workers-data-device)), which the stack holds
+  and deletes, so none of them stays in the cloud. They do not hold the destroy up; it says how
+  many there are, by number and not by name, before it shows the plan, and the one confirmation,
+  the stack's name typed back or `--yes`, destroys them with the stack. A cluster whose API does
+  not answer, or that has no kubeconfig, cannot be asked and is not destroyed either, unless
+  `--unreachable` is given: the operator then takes on whatever it owned, which stays in the
+  cloud. Before it asks the cluster it checks what `infra-destroy` needs for the stack.
   [runbooks/rebuild.md](runbooks/rebuild.md) has it in the procedure around it.
 
 A failing recipe ends with a line naming the step it failed in.
@@ -358,6 +486,8 @@ A failing recipe ends with a line naming the step it failed in.
 ## Not automated
 
 - Rebooting a node that does not answer on the Talos API port.
+- Restarting Spegel's DaemonSet after `just cluster-talos` changes the nodes' CRI customizations or
+  registry mirrors ([Rolling it out](#rolling-it-out)); the recipe does not say when a change does.
 
 ## What the recipes print
 
@@ -374,9 +504,9 @@ file's path.
 Of talman's output `cluster-snapshot` shows only the errors, and with `CI` set not those either.
 What rclone prints names the bucket and the endpoint, so the etcd recipes never show it. kubectl's
 and helm's output passes through, naming the objects they apply, except in `cluster-check`,
-`cluster-reboot` and `cluster-destroy`: they print node and object names only, and none of what
-kubectl prints, as the objects it reads and its errors hold the API server's, the nodes' and the
-pods' addresses; only `kubectl drain`'s passes through in `cluster-reboot`, as in
+`cluster-reboot`, `cluster-destroy` and `grafana`: they print node and object names only, and none
+of what kubectl prints, as the objects it reads and its errors hold the API server's, the nodes' and
+the pods' addresses; only `kubectl drain`'s passes through in `cluster-reboot`, as in
 `cluster-upgrade`, naming the pods it evicts and those it cannot.
 
 ## Environment
@@ -395,7 +525,9 @@ to hand it to kubectl and age-keygen on standard input.
   buckets' names and the state key ([infrastructure.md](infrastructure.md#environment)), with which
   `cluster-snapshot`, `cluster-snapshots` and `cluster-restore` reach the etcd bucket through
   rclone, configured as the infrastructure recipes configure it
-  ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)).
+  ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)). `cluster-bootstrap`,
+  `cluster-config` and `cluster-flux` need the prefix as well, which becomes `BACKUP_BUCKET_PREFIX`
+  in `cluster-config`.
 - `TMPDIR`: where `cluster-snapshot` and `cluster-restore` make their private directory, `/tmp`
   when unset. Inside the repository it is refused.
 - `KUBE_API_ADDRESS`: the Kubernetes API load balancer's floating address, an IPv4 address, as
@@ -416,6 +548,8 @@ to hand it to kubectl and age-keygen on standard input.
   and `cluster-flux` need it.
 - `ADOPTION_INTERVAL` and `ADOPTION_WAIT`: how many seconds `app-adoption` waits between two
   polls, 10 when unset, and in all, 900 when unset.
+- `GRAFANA_PORT` and `GRAFANA_WAIT`: the local port `grafana` forwards from, 3000 when unset, and how
+  many seconds it waits for kubectl to report the forward, 20 when unset.
 - `CI`: when set, talman's output goes to a file instead of the output; see
   [What the recipes print](#what-the-recipes-print).
 

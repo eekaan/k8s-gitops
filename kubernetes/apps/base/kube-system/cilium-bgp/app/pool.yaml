@@ -1,0 +1,15 @@
+---
+# The addresses Services of type LoadBalancer take: the whole service range, which nothing but BGP
+# routes. Only a Service labelled k8s-gitops/announce: bgp gets one, the label that also has it
+# advertised (bgp-advertisement.yaml), so no address is handed out that nothing announces; any other
+# LoadBalancer Service stays pending.
+apiVersion: cilium.io/v2
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: services
+spec:
+  blocks:
+    - cidr: ${SERVICE_RANGE}
+  serviceSelector:
+    matchLabels:
+      k8s-gitops/announce: bgp

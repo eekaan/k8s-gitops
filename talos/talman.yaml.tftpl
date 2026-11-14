@@ -14,6 +14,14 @@ values:
   apiSANs: ${jsonencode(api_sans)}
   # The load balancer's floating address, where the cluster recipes reach the Kubernetes API.
   apiAddress: ${api_address}
+  # Services announced over BGP, from the plumbing stack: the range LoadBalancer addresses come
+  # from, the AS numbers and the edge routers the workers peer with. just cluster-config hands them
+  # to the cluster in cluster-config; no Talos patch reads them.
+  serviceRange: ${service_range}
+  bgp:
+    clusterASN: ${bgp.cluster_asn}
+    edgeASN: ${bgp.edge_asn}
+    edgeAddresses: ${jsonencode(bgp.edge_addresses)}
 
 # Installer images are the Image Factory's openstack installer for this schematic; talman computes
 # the schematic's ID offline.
@@ -34,6 +42,8 @@ patches:
     - ../patches/all/node-ip.yaml
     - ../patches/all/kernel-modules.yaml
     - ../patches/all/user-namespaces.yaml
+    - ../patches/all/seccomp-default.yaml
+    - ../patches/all/spegel.yaml
   controlplane:
     - ../patches/controlplane/api-sans.yaml
     - ../patches/controlplane/etcd.yaml

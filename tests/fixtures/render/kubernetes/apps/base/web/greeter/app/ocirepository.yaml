@@ -1,0 +1,15 @@
+---
+# A registry that does not resolve: the tests hand the render the chart packaged from
+# tests/fixtures/render/charts/greeter instead, so nothing is pulled.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: greeter
+spec:
+  interval: 12h
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy
+  url: oci://charts.example.invalid/greeter
+  ref:
+    tag: 1.0.0
