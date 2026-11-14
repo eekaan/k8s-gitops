@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Fails when a file git would commit, tracked or untracked and not ignored, holds a merge conflict
+# marker, naming the file and the line. Nothing else parses Markdown, and a YAML file with a marker
+# in a comment or a block scalar still loads.
+# A marker is a line as git writes it: seven < or seven > at the start of the line, followed by a
+# space or the end of the line, and the seven = line between them, which only counts after an
+# opening marker that no closing one has ended. A line of seven = on its own anywhere else is a
+# Markdown heading's underline. A run of any other length, an indented run and a run inside a line
+# are not markers. Files with a NUL byte are binary and skipped, as are symlinks.
+# Usage: scripts/check-conflict-markers
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+failures=0
+while IFS= read -r -d '' path; do
+  [[ -f $path && ! -L $path ]] || continue
+  # grep -I treats a file with a NUL byte as binary; an empty file has nothing to find.
+  grep -Iq '' -- "$path" 2> /dev/null || continue
+  if found=$(LC_ALL=C awk -v file="$path" '
+    { sub(/\r$/, "") }
+    /^<<<<<<<($| )/ { open = 1; print "check-conflict-markers: " file ":" FNR ": opening marker of a merge conflict"; next }
+    /^>>>>>>>($| )/ { open = 0; print "check-conflict-markers: " file ":" FNR ": closing marker of a merge conflict"; next }
+    open && /^=======$/ { print "check-conflict-markers: " file ":" FNR ": middle marker of a merge conflict" }
+  ' "$path"); [[ -n $found ]]; then
+    echo "$found" >&2
+    failures=$((failures + 1))
+  fi
+done < <(git ls-files -z --cached --others --exclude-standard)
+
+if ((failures)); then
+  echo "check-conflict-markers: $failures file(s) hold a merge conflict marker; resolve the conflict and remove its lines" >&2
+  exit 1
+fi
+echo "No merge conflict markers in the files git would commit."

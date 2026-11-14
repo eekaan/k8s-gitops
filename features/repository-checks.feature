@@ -41,6 +41,21 @@ Feature: Repository checks
     When the secrets scan runs on a branch without that commit, and then on the branch with it
     Then the first run exits zero and the second exits non-zero naming the file
 
+  Scenario: A merge conflict marker in a file git would commit fails the check
+    Given a tracked Markdown file, a tracked YAML file and an untracked file, each holding a block as git writes a conflict, and an ignored file holding one too
+    When the conflict marker check runs
+    Then it exits non-zero and names each of the three files with the line of the opening, the middle and the closing marker, and does not name the ignored file
+
+  Scenario: A marker in a file with CRLF line endings fails the check
+    Given a Markdown file with CRLF line endings holding a block as git writes a conflict
+    When the conflict marker check runs
+    Then it exits non-zero and names the file with the line of each of the three markers
+
+  Scenario: Text that only looks like a conflict marker passes the check
+    Given a Markdown heading underlined with seven equals signs, runs of six and of eight angle brackets, an indented marker, a marker in the middle of a line and a YAML value that is seven equals signs
+    When the conflict marker check runs
+    Then it exits zero
+
   Scenario: A version string is not an address
     Given a tracked file containing a dotted version such as v1.14.6 or 2.10.0
     When the address-literal check runs

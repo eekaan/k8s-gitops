@@ -22,7 +22,7 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
 - `just tools` installs the pinned tools.
 - `just checks` runs every check that needs no credentials, with the tools on this machine, group
   by group. The group `static` holds tool versions, address literals in the files and the commit
-  messages, that every Talos secrets bundle is encrypted, shellcheck and yamllint, the Renovate
+  messages, merge conflict markers, that every Talos secrets bundle is encrypted, shellcheck and yamllint, the Renovate
   configuration (`just renovate-check`: Renovate's own validator, run from its pinned container
   image, so it needs a container runtime, Docker), scenario proofs, the OpenTofu check
   (`just infra-check`: formatting, that the Talos schematic lists no QEMU guest agent extension,
@@ -85,6 +85,10 @@ The repository checks:
 - `just check-commit-literals` applies the same rules to the messages of the commits between the
   default branch (the remote's, the remote's `main` as a CI checkout fetches it, or a local
   `main`) and `HEAD`, and passes when there is none.
+- `just check-conflict-markers` fails, naming the file and the line, when a file git would commit
+  holds a merge conflict marker as git writes it: a line starting with seven `<` or seven `>`
+  and then a space or the end of the line, or a line of seven `=` after an opening marker. A
+  Markdown heading underlined with seven `=` is not one.
 - `just scenarios-check` fails when a scenario has no proof or more than one, when a `@pending`
   scenario has no issue key or already has a proof, when a `@by:` tag names a recipe that does
   not exist, when two scenarios share a title, or when a test claims a scenario that does not
