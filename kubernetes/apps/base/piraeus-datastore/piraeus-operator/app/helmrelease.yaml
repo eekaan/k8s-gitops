@@ -1,0 +1,31 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/helmrelease-helm-v2.json
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: piraeus-operator
+spec:
+  interval: 30m
+  chartRef:
+    kind: OCIRepository
+    name: piraeus-operator
+  valuesFrom:
+    - kind: ConfigMap
+      name: piraeus-operator-values
+  postRenderers:
+    # The chart renders the operator's resource definitions as templates of the release. Deleting a
+    # definition deletes every object of its kind, the LinstorCluster and every satellite's among
+    # them, so Helm leaves each definition in place when the release is uninstalled, as it is when
+    # this application leaves the tree.
+    - kustomize:
+        patches:
+          - target:
+              group: apiextensions.k8s.io
+              kind: CustomResourceDefinition
+            patch: |
+              apiVersion: apiextensions.k8s.io/v1
+              kind: CustomResourceDefinition
+              metadata:
+                name: _
+                annotations:
+                  helm.sh/resource-policy: keep

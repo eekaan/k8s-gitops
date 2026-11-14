@@ -1,0 +1,11 @@
+---
+# Snapshots of LINSTOR's volumes, taken in the thin pool of each node that holds a replica. The
+# default class, as it is the only one; deleting a VolumeSnapshot deletes its snapshot in LINSTOR.
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: linstor
+  annotations:
+    snapshot.storage.kubernetes.io/is-default-class: "true"
+driver: linstor.csi.linbit.com
+deletionPolicy: Delete

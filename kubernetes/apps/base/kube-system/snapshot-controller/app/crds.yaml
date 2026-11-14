@@ -1,0 +1,25 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+# Applies the snapshot definitions from the GitRepository beside it, with upstream's kustomization
+# there. It lives in kube-system with its source, where the application's targetNamespace puts
+# both. It is not a child of the root, so it gets none of the root's defaults and sets what it needs
+# itself; it substitutes nothing.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: external-snapshotter-crds
+spec:
+  interval: 30m
+  retryInterval: 1m
+  timeout: 3m
+  sourceRef:
+    kind: GitRepository
+    name: external-snapshotter
+  path: ./client/config/crd
+  # Deleting a definition deletes every object of its kind, every VolumeSnapshot among them, so
+  # nothing this Kustomization applied is ever deleted: not a definition a newer release drops, and
+  # none when the Kustomization itself is deleted, as it is when the application leaves the tree.
+  prune: false
+  deletionPolicy: Orphan
+  # Ready once every definition is established; the controller's Kustomization waits for that.
+  wait: true

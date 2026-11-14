@@ -1,0 +1,22 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/gitrepository-source-v1.json
+# The CSI snapshot controller's own repository at a release tag, the source the Piraeus
+# documentation points to. Only the two directories applied are checked out: the definitions of
+# the snapshot.storage.k8s.io and groupsnapshot.storage.k8s.io groups, and the controller's
+# deployment.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: external-snapshotter
+spec:
+  # The tag is pinned: a new release arrives by a change to this file, which Flux applies at once.
+  interval: 12h
+  url: https://github.com/kubernetes-csi/external-snapshotter
+  ref:
+    # Releases are tagged vX.Y.Z; the repository's client module is also released, as client/vX.Y.Z,
+    # which this source does not follow.
+    # renovate: datasource=github-releases depName=kubernetes-csi/external-snapshotter versioning=regex:^v(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$
+    tag: v8.7.0
+  sparseCheckout:
+    - client/config/crd
+    - deploy/kubernetes/snapshot-controller

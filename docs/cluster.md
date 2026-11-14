@@ -41,8 +41,9 @@ it follows with `just cluster-talos`
 extensions:
 
 - `siderolabs/drbd`: the DRBD kernel modules, for the storage layer, LINSTOR through the Piraeus
-  operator on DRBD, with LVM-thin storage pools and snapshots. Nothing in this repository installs
-  that layer. An extension's modules load only when the machine configuration lists them, and on
+  operator on DRBD, with LVM-thin storage pools and snapshots, which `apps/base/piraeus-datastore/`
+  installs ([kubernetes.md](kubernetes.md#storage)). An extension's modules load only when the
+  machine configuration lists them, and on
   Talos the LINSTOR satellite cannot load a module itself
   ([Piraeus](https://github.com/piraeusdatastore/piraeus-operator/blob/v2/docs/how-to/talos.md)),
   so `talos/patches/all/kernel-modules.yaml` has every node load `drbd`, with its user-mode helper
@@ -88,8 +89,9 @@ volume named `data`, on the disk that is not the system disk: the worker's data 
 ([infrastructure.md](infrastructure.md#the-workers-data-volumes)). Talos makes it one partition
 over that disk, labelled `r-data`, with no filesystem and nothing mounted, and links it as
 `/dev/disk/by-partlabel/r-data`. That path is the same on every worker, whatever the kernel calls
-the disk and whatever the cloud assigns the volume, and it is the name the storage layer is given
-(ADR 0011). A disk with less than 1 GiB free is not taken.
+the disk and whatever the cloud assigns the volume, and it is the device LINSTOR's storage pool is
+made from ([kubernetes.md](kubernetes.md#the-storage-pool), ADR 0011). A disk with less than 1 GiB
+free is not taken.
 
 On running workers, `just infra-apply sto2/cluster` attaches the volumes and writes the
 `talman.yaml` that lists the patch, and `just cluster-talos` then creates the raw volume. Taking

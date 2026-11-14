@@ -9,6 +9,7 @@ resources:
   - ../../base/flux-system/artifact-generator
   - ../../base/demo
   - ../../base/kube-system
+  - ../../base/piraeus-datastore
   - ../../base/demo/hello/ks.yaml
   - ../../base/kube-system/cilium/ks.yaml
   - ../../base/kube-system/descheduler/ks.yaml
@@ -18,4 +19,7 @@ resources:
   - ../../base/kube-system/prometheus-operator-crds/ks.yaml
   - ../../base/kube-system/reloader/ks.yaml
   - ../../base/kube-system/runtime-classes/ks.yaml
+  - ../../base/kube-system/snapshot-controller/ks.yaml
   # - ../../base/kube-system/spegel/ks.yaml  # Disabled: Talos discards unpacked image layers, which Spegel serves, until its machine configuration sets containerd's discard_unpacked_layers to false
+  - ../../base/piraeus-datastore/linstor-cluster/ks.yaml
+  - ../../base/piraeus-datastore/piraeus-operator/ks.yaml
