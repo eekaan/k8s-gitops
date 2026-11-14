@@ -5,6 +5,8 @@
 - Amended: 2026-11-14, the OpenStack credential is the cloud controller's only, as volumes come
   from LINSTOR, which needs none
   ([ADR 0011](0011-persistent-volumes-from-linstor-on-a-data-volume-per-worker.md))
+- Amended: 2026-11-14, a credential a controller generates in the cluster for its own workload
+  stays in the Secret that controller writes
 
 ## Context
 
@@ -19,6 +21,10 @@ application secrets that change over the cluster's life.
 - **Runtime secrets** live in OpenBao running in the cluster and reach workloads through
   External Secrets and a `ClusterSecretStore`. Application secrets are not committed, encrypted
   or otherwise.
+- **Generated credentials** stay where they are made: a credential a controller generates inside
+  the cluster for its own workload, which nothing outside the cluster needs to know, stays in the
+  Secret that controller writes, and is neither committed nor copied into OpenBao. The Grafana
+  operator's admin password for its Grafana is one.
 - External Secrets is installed before OpenBao; OpenBao's own seal material is produced through
   it.
 
@@ -34,5 +40,7 @@ application secrets that change over the cluster's life.
 - OpenBao's storage, unsealing and recovery material need their own backup and a restore that
   is exercised, since every runtime secret depends on it.
 - Secrets that controllers need before OpenBao is running come from bootstrap material.
+- A generated credential lives only in its Secret: deleting the Secret, or the object that owns
+  it, makes the controller generate a new one, and nothing restores the old.
 - The age private key exists outside the repository only: on the operator's machine and as a
   CI secret.
