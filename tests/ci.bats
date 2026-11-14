@@ -528,6 +528,46 @@ the_jobs() {
   [ "$refs" -gt 0 ]
 }
 
+# dagger_call: whether the text on stdin holds a line, not a comment, that runs dagger api call.
+dagger_call() {
+  grep -qE '^[^#]*(^|[^[:alnum:]_-])dagger[[:space:]]+api[[:space:]]+call([[:space:]]|$)'
+}
+
+# calls_module RECIPE: whether the justfile's RECIPE, or a script under scripts/ that it runs, calls
+# the Dagger module.
+calls_module() {
+  local body script
+  body=$(just --justfile "$REPO/justfile" --show "$1")
+  if dagger_call <<< "$body"; then
+    return 0
+  fi
+  while IFS= read -r script; do
+    if [[ -f $REPO/$script ]] && dagger_call < "$REPO/$script"; then
+      return 0
+    fi
+  done < <(grep -oE 'scripts/[A-Za-z0-9_./-]+' <<< "$body" | sort -u)
+  return 1
+}
+
+@test "Every workflow job that calls the Dagger module checks out the whole history" {
+  local workflow job command recipe calls=0
+  shopt -s nullglob
+  for workflow in "$REPO"/.github/workflows/*.yaml "$REPO"/.github/workflows/*.yml; do
+    # shellcheck disable=SC2016 # yq's variable, as yq reads it
+    while IFS=$'\t' read -r job command; do
+      [[ $command =~ ^just[[:space:]]+([a-z][a-z0-9-]*) ]] || continue
+      recipe=${BASH_REMATCH[1]}
+      calls_module "$recipe" || continue
+      calls=$((calls + 1))
+      # The module reads the workspace's Git history, which a shallow clone of a commit with parents
+      # cannot give.
+      [ "$(JOB=$job yq -o=json -I=0 '[.jobs[strenv(JOB)].steps[] | select(.uses // "" | test("^actions/checkout@")) | .with.fetch-depth]' "$workflow")" = '[0]' ] ||
+        { echo "${workflow##*/}: the job $job runs just $recipe, which calls the Dagger module, without checking out the whole history"; return 1; }
+    done < <(yq -r '.jobs | to_entries[] | .key as $job | .value.steps[] | select(has("run")) | [$job, .run] | @tsv' "$workflow")
+  done
+  [ "$calls" -gt 0 ]
+}
+
 # render_job: sets RENDER, exported, to the CI workflow's one job that runs just ci-render.
 render_job() {
   RENDER=$(yq '[.jobs | to_entries[] | select(.value.steps[] | .run // "" | test("^just ci-render( |$)")) | .key] | .[]' "$WORKFLOW")
