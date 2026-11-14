@@ -1,5 +1,5 @@
 Feature: Cluster baseline
-  Resource definitions, runtime classes and small services that later applications assume.
+  Resource definitions, runtime classes, the certificate and gateway controllers and small services that later applications assume.
 
   Scenario: The monitoring resource definitions are installed without a controller
     Given the pinned chart and its values
@@ -14,7 +14,12 @@ Feature: Cluster baseline
   Scenario: Every baseline chart renders with the repository's values
     Given each baseline application's pinned chart and values
     When each is rendered offline
-    Then all render without error and none yields a ServiceMonitor, PodMonitor or dashboard object
+    Then all render without error and none yields a dashboard object
+
+  Scenario: Every baseline application that serves metrics has its monitor on
+    Given each baseline application's pinned chart and values, with the monitoring API present
+    When each is rendered offline
+    Then kubelet-csr-approver, metrics-server, descheduler and spegel each yield a ServiceMonitor and reloader a PodMonitor, each selected by the Service or pods the chart yields, and each of the five names prometheus-operator-crds in dependsOn
 
   Scenario: Serving certificates are approved only for this cluster's nodes
     Given the certificate approver's values
@@ -35,6 +40,21 @@ Feature: Cluster baseline
     Given the runtime-classes application, enabled in the cluster's overlay
     When it is built offline as Flux applies it
     Then it yields exactly two RuntimeClasses, without a namespace: gvisor with gVisor's handler runsc, and kata with Kata Containers' handler kata
+
+  Scenario: The certificate controller runs in its own namespace with its resource definitions
+    Given the cert-manager application and its namespace directory, enabled in the cluster's overlay
+    When its pinned chart is rendered offline with the repository's values
+    Then its controller, webhook and CA injector run in the namespace cert-manager, no object it renders is in another namespace, and it yields the cert-manager.io and acme.cert-manager.io definitions, each kept when the release is uninstalled
+
+  Scenario: The certificate controller handles Gateway API resources
+    Given the cert-manager application and the Gateway API resource definitions application
+    When its Kustomization is read and its chart is rendered offline
+    Then the controller's configuration turns Gateway API support on, and the application starts only once the Gateway API definitions are established
+
+  Scenario: The certificate controller keeps running while a node is drained
+    Given the cert-manager chart rendered offline with the repository's values
+    When its Deployments and PodDisruptionBudgets are read
+    Then the controller, webhook and CA injector each run at least two replicas spread over the nodes, under a disruption budget that keeps one available and leaves at least one free to evict
 
   Scenario: Envoy Gateway's chart installs no resource definitions
     Given the Envoy Gateway application's pinned chart and values
