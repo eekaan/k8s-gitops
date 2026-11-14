@@ -696,10 +696,10 @@ succeeds with an empty volume, without an error.
 
 A claim stays Pending, with the pods that use it, until a pod uses it, as LINSTOR's classes make a
 volume once its first pod is scheduled, and until the ReplicationDestination's first restore has
-completed and recorded its snapshot in `status.latestImage`; that needs the Secret, so without the
-secret store it never completes. A claim whose ReplicationDestination is gone, or whose recorded
-snapshot is gone, stays Pending until the ReplicationDestination is created again. The claim's
-events say which: `VolSyncPopulatorReplicationDestinationMissing`,
+completed and recorded its snapshot in `status.latestImage`; that needs the Secret, so until the
+secret store holds the key `volsync` it never completes. A claim whose ReplicationDestination is
+gone, or whose recorded snapshot is gone, stays Pending until the ReplicationDestination is created
+again. The claim's events say which: `VolSyncPopulatorReplicationDestinationMissing`,
 `VolSyncPopulatorReplicationDestinationNoLatestImage`, or `VolSyncPopulatorPVCCreated` once the
 volume is being made; a missing snapshot shows in the VolSync controller's log. An application whose
 Kustomization sets `wait` is not Ready while its claim is Pending, so it holds up every application
@@ -731,9 +731,11 @@ them (ADR 0015).
 
 ### What is still needed
 
-No ClusterSecretStore exists yet, so the Secret is never written and VolSync starts no mover. The
-test application `apps/base/demo/volsync-demo/`, a pod that holds a 1 GiB volume and writes the
-time it first found it empty, is disabled in the overlay. Before the first backup runs:
+The ClusterSecretStore `openbao` exists, but nothing in the tree writes the key `volsync` into it:
+OpenBao starts with its key-value mount empty, and only an operator fills it, with `just bao-put`.
+Until then the Secret is never written and VolSync starts no mover. The test application
+`apps/base/demo/volsync-demo/`, a pod that holds a 1 GiB volume and writes the time it first found
+it empty, is disabled in the overlay. Before the first backup runs:
 
 1. the ClusterSecretStore `openbao` holds the key `volsync` with `RESTIC_MASTER_PASSWORD`, also
    kept outside the cluster, and the cluster's S3 key as `AWS_ACCESS_KEY_ID` and
