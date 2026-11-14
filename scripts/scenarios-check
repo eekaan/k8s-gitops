@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+# Fails unless every scenario in features/ is proved under its own name, or is @pending with the
+# issue that will prove it.
+#
+# Scenarios are the Scenario: and Scenario Outline: blocks (and their Gherkin synonyms Example:
+# and Scenario Template:) in the features/**/*.feature files git sees. A scenario not tagged
+# @pending has exactly one proof, either
+#   - a bats test with exactly the scenario's title: @test "<title>" in a *.bats file,
+#   - an OpenTofu test run named after the scenario's slug: run "<slug>" in a *.tftest.hcl or
+#     *.tofutest.hcl file. Run names hold only letters, digits, underscores and hyphens, so the
+#     slug is the title in lower case, apostrophes dropped, every other run of characters that
+#     are not ASCII letters or digits made one underscore, and underscores trimmed from both
+#     ends: "The plan doesn't touch a node's disk, ever" is the_plan_doesnt_touch_a_nodes_disk_ever.
+#     OpenTofu refuses a run name that starts with a digit, so a title that starts with one is
+#     proved by bats or a recipe.
+#   - or a @by:<recipe> tag, for behaviour whose real verification is a tool run rather than a
+#     named test (a config validator, an offline stack check): <recipe> is a recipe of the
+#     repository's justfile or a file it imports, as just --summary lists them. The check does not
+#     run the recipe; it fails when the recipe does not exist or just is not on PATH.
+# Titles are unique across features/ by slug, as one run name cannot prove two scenarios.
+#
+# A @pending scenario names its issue on a tag line of the scenario, its Rule or its Feature
+# (@pending @FND-7, @pending #12 or a URL) and has no proof yet, @by: tags included; once it has
+# one, the tag goes.
+#
+# Every test claims the scenario its name points at, so a renamed scenario cannot leave its proof
+# behind unnoticed. A test that proves no scenario says so by its name: a bats title that starts
+# with a lower-case letter, or an OpenTofu run name that starts with an underscore (a slug never
+# does), such as a setup run.
+#
+# Prints one line per problem, path:line: what is wrong, and exits non-zero; otherwise one line
+# with the counts.
+set -euo pipefail
+shopt -s extglob
+# Titles compare byte for byte, and only ASCII letters fold to lower case.
+export LC_ALL=C
+
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+
+scenario_re='^[[:blank:]]*(Scenario|Scenario Outline|Scenario Template|Example):[[:blank:]]*(.*[^[:blank:]])?'
+pending_re='(^|[[:blank:]])@pending([[:blank:]]|$)'
+issue_re='#[0-9]+|[A-Z][A-Z0-9]+-[0-9]+|https?://'
+by_re='(^|[[:blank:]])@by:([^[:blank:]]+)'
+# The pattern bats itself reads test names with.
+bats_test_re='^[[:blank:]]*@test[[:blank:]]+(.*[^[:blank:]])[[:blank:]]+\{'
+tofu_run_re='^[[:blank:]]*run[[:blank:]]+"([^"]*)"[[:blank:]]*\{'
+
+problems=()
+problem() {
+  problems+=("$1")
+}
+
+slug() {
+  local s=${1,,}
+  s=${s//\'/}
+  s=${s//$'\xe2\x80\x99'/}
+  s=${s//+([^a-z0-9])/_}
+  s=${s##+(_)}
+  printf '%s' "${s%%+(_)}"
+}
+
+s_where=() s_title=() s_slug=() s_pending=() s_issue=() s_by=() s_count=() s_proofs=()
+declare -A by_title=() by_slug=()
+any_by=0
+
+add_scenario() {
+  local where=$1 title=$2 tags=$3 key first rest i=${#s_title[@]}
+  if [[ -z $title ]]; then
+    problem "$where: scenario has no title"
+    return
+  fi
+  key=$(slug "$title")
+  first=${by_title[$title]-}
+  if [[ -z $first && -n $key ]]; then
+    first=${by_slug[$key]-}
+  fi
+  if [[ -n $first ]]; then
+    if [[ ${s_title[first]} == "$title" ]]; then
+      problem "$where: scenario \"$title\" has the same title as ${s_where[first]}"
+    else
+      problem "$where: scenario \"$title\" has the same slug $key as \"${s_title[first]}\" at ${s_where[first]}"
+    fi
+    return
+  fi
+  s_where[i]=$where s_title[i]=$title s_slug[i]=$key s_pending[i]=0 s_issue[i]=0 s_by[i]='' s_count[i]=0 s_proofs[i]=
+  if [[ $tags =~ $pending_re ]]; then
+    s_pending[i]=1
+  fi
+  if [[ $tags =~ $issue_re ]]; then
+    s_issue[i]=1
+  fi
+  rest=$tags
+  while [[ $rest =~ $by_re ]]; do
+    s_by[i]+=" ${BASH_REMATCH[2]}"
+    any_by=1
+    rest=${rest#*"${BASH_REMATCH[0]}"}
+  done
+  by_title[$title]=$i
+  if [[ -n $key ]]; then
+    by_slug[$key]=$i
+  fi
+}
+
+read_feature() {
+  local path=$1 n=0 line tags='' feature_tags='' rule_tags='' in_doc=0
+  while IFS= read -r line || [[ -n $line ]]; do
+    n=$((n + 1))
+    line=${line%$'\r'}
+    # A doc string is step data; a keyword inside one starts nothing.
+    if [[ $line =~ ^[[:blank:]]*(\"\"\"|\`\`\`) ]]; then
+      in_doc=$((1 - in_doc))
+    elif ((in_doc)) || [[ $line =~ ^[[:blank:]]*# ]]; then
+      continue
+    elif [[ $line =~ ^[[:blank:]]*@ ]]; then
+      tags+=" $line"
+    elif [[ $line =~ ^[[:blank:]]*Feature: ]]; then
+      feature_tags=$tags rule_tags='' tags=''
+    elif [[ $line =~ ^[[:blank:]]*Rule: ]]; then
+      rule_tags=$tags tags=''
+    elif [[ $line =~ $scenario_re ]]; then
+      add_scenario "$path:$n" "${BASH_REMATCH[2]}" "$feature_tags $rule_tags $tags"
+      tags=''
+    elif [[ $line =~ ^[[:blank:]]*(Background|Examples|Scenarios): ]]; then
+      tags=''
+    fi
+  done < "$path"
+}
+
+prove() {
+  local where=$1 i=$2
+  s_count[i]=$((s_count[i] + 1))
+  s_proofs[i]+=" $where"
+}
+
+read_bats() {
+  local path=$1 n=0 line name
+  while IFS= read -r line || [[ -n $line ]]; do
+    n=$((n + 1))
+    line=${line//$'\r'/}
+    [[ $line =~ $bats_test_re ]] || continue
+    # Like bats: one quote is taken off each end, and nothing is unescaped.
+    name=${BASH_REMATCH[1]#[\'\"]}
+    name=${name%[\'\"]}
+    if [[ -n $name && -n ${by_title[$name]-} ]]; then
+      prove "$path:$n" "${by_title[$name]}"
+    elif [[ $name != [a-z]* ]]; then
+      problem "$path:$n: @test \"$name\" matches no scenario title; rename it after the scenario it proves, or start it with a lower-case letter if it proves none"
+    fi
+  done < "$path"
+}
+
+read_tofu() {
+  local path=$1 n=0 line name
+  while IFS= read -r line || [[ -n $line ]]; do
+    n=$((n + 1))
+    [[ $line =~ $tofu_run_re ]] || continue
+    name=${BASH_REMATCH[1]}
+    if [[ -n $name && -n ${by_slug[$name]-} ]]; then
+      prove "$path:$n" "${by_slug[$name]}"
+    elif [[ $name != _* ]]; then
+      problem "$path:$n: run \"$name\" matches no scenario's slug; rename it after the scenario it proves, or start it with an underscore if it proves none"
+    fi
+  done < "$path"
+}
+
+features=() bats_files=() tofu_files=()
+# Untracked files count too, so a new test or feature is checked before it is added.
+while IFS= read -r -d '' path; do
+  [[ -f $path ]] || continue
+  case $path in
+    features/*.feature) features+=("$path") ;;
+    *.bats) bats_files+=("$path") ;;
+    *.tftest.hcl | *.tofutest.hcl) tofu_files+=("$path") ;;
+  esac
+done < <(git ls-files -z --cached --others --exclude-standard)
+
+for path in "${features[@]}"; do
+  read_feature "$path"
+done
+for path in "${bats_files[@]}"; do
+  read_bats "$path"
+done
+for path in "${tofu_files[@]}"; do
+  read_tofu "$path"
+done
+
+declare -A recipes=()
+recipes_unknown=
+if ((any_by)); then
+  # The repository's own justfile, so a justfile in a directory above can never answer for it.
+  if ! command -v just > /dev/null; then
+    recipes_unknown='just is not on PATH to look the recipe up'
+  elif ! summary=$(just --justfile justfile --summary 2> /dev/null); then
+    recipes_unknown='just cannot list the recipes of ./justfile; run just --summary to see why'
+  else
+    read -ra names <<< "$summary"
+    for name in "${names[@]}"; do
+      recipes[$name]=1
+    done
+  fi
+fi
+
+proved=0 pending=0
+for i in "${!s_title[@]}"; do
+  where=${s_where[i]} title=${s_title[i]} count=${s_count[i]} proofs=${s_proofs[i]}
+  read -ra by <<< "${s_by[i]}"
+  for name in "${by[@]}"; do
+    count=$((count + 1))
+    proofs+=" @by:$name"
+    if [[ -n $recipes_unknown ]]; then
+      problem "$where: scenario \"$title\" is tagged @by:$name, but $recipes_unknown"
+    elif [[ -z ${recipes[$name]-} ]]; then
+      problem "$where: scenario \"$title\" is tagged @by:$name, but the justfile has no recipe $name"
+    fi
+  done
+  if ((s_pending[i])); then
+    pending=$((pending + 1))
+    if ((!s_issue[i])); then
+      problem "$where: scenario \"$title\" is @pending without the issue that will prove it, such as @pending @FND-7"
+    fi
+    if ((count)); then
+      problem "$where: scenario \"$title\" is @pending but has a proof:$proofs; remove the @pending tag, or the proof until it can pass"
+    fi
+  elif ((count == 1)); then
+    proved=$((proved + 1))
+  elif ((count == 0)) && [[ ${s_slug[i]} != [a-z]* ]]; then
+    problem "$where: scenario \"$title\" has no proof: no bats @test \"$title\" and no @by:<recipe> tag; an OpenTofu run cannot prove it, as run names start with a letter or an underscore"
+  elif ((count == 0)); then
+    problem "$where: scenario \"$title\" has no proof: no bats @test \"$title\", no OpenTofu run \"${s_slug[i]}\" and no @by:<recipe> tag"
+  else
+    problem "$where: scenario \"$title\" has $count proofs:$proofs; keep one"
+  fi
+done
+
+if ((${#problems[@]})); then
+  printf '%s\n' "${problems[@]}" | sort -t: -k1,1 -k2,2n >&2
+  exit 1
+fi
+echo "${#s_title[@]} scenarios: $proved proved, $pending pending."

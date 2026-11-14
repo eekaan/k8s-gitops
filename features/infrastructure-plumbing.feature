@@ -1,6 +1,7 @@
 Feature: Plumbing stack
   One network, one router and one Talos image, described without credentials.
 
+  @by:infra-check
   Scenario: The stacks format and validate offline
     Given no cloud credentials and no state backend
     When the infrastructure check runs

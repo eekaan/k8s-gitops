@@ -6,7 +6,7 @@ Feature: Dependency updates
   Renovate reads renovate.json5 and the presets under .renovate/ from main. Automatic merging is
   one setting: the automerge value of the auto-merge switch rule in .renovate/automerge.json5.
 
-  @by:renovate-config-validator
+  @by:renovate-check
   Scenario: The Renovate configuration passes the strict validator
     Given renovate.json5 and every preset under .renovate/
     When renovate-config-validator checks them with --strict as repository configuration

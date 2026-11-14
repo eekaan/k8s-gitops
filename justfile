@@ -52,12 +52,16 @@ secrets-scan:
 check-literals:
     scripts/check-address-literals
 
+# Fail on a scenario in features/ without its proof, or a test claiming a scenario that is not there
+scenarios-check:
+    scripts/scenarios-check
+
 # Run the bats tests
 test:
     bats tests
 
 # Run every check that needs no credentials, the cheapest and most basic first
-ci: tools-check check-literals lint infra-check secrets-scan test
+ci: tools-check check-literals lint scenarios-check infra-check secrets-scan test
 
 # Validate the Renovate configuration with Renovate's own validator, in its container image
 renovate-check:
