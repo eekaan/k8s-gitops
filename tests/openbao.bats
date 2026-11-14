@@ -783,7 +783,7 @@ covers() {
 }
 
 @test "Only the first member initialises OpenBao, and only on a first install" {
-  local command guard data decision args script raft claims role account names member mode flag status
+  local command guard data decision args script raft claims role account names member mode flag status overrides word name
   local work="$BATS_TEST_TMPDIR/guard"
   render
   statefulset
@@ -855,6 +855,27 @@ if [[ -n \${LS_FAILS:-} ]]; then echo "ls: cannot open directory: Permission den
 exec "$real_ls" "\$@"
 EOF
   chmod +x "$work/bin/ls"
+  # A timeout as BusyBox's in the guard's image: it runs PROG in its own place and sends it SIG, TERM
+  # unless -s names another, once SECS have passed. With $TIMEOUT_EXPIRES set they have passed before
+  # PROG answers.
+  cat >"$work/bin/timeout" <<'EOF'
+#!/usr/bin/env bash
+signal=TERM
+while [[ $1 == -* ]]; do
+  case $1 in
+    -s) signal=$2 && shift 2 ;;
+    -k) shift 2 ;;
+    *) echo "timeout: unknown option $1" >&2 && exit 1 ;;
+  esac
+done
+shift
+if [[ -n ${TIMEOUT_EXPIRES:-} ]]; then
+  kill -s "$signal" $$
+  sleep 5
+fi
+exec "$@"
+EOF
+  chmod +x "$work/bin/timeout"
   # guard_run MEMBER MODE CONTENT: runs the guard as MEMBER, its data directory holding CONTENT (a
   # file name, or nothing), against the fake API; sets status, flag (the decision) and claims (the
   # fake's record).
@@ -876,6 +897,28 @@ EOF
   [ "$(mounted "${flag#-config=}")" = "ConfigMap/openbao-initialize initialize.json" ]
   [ "$flag" = "-config=${flag#-config=}" ]
   [[ " $claims " == *" get persistentvolumeclaim $names "* && $claims == *" --ignore-not-found"* && $claims == *"--namespace openbao"* ]]
+  # kubectl reaches the API through the pod's in-cluster configuration, which client-go takes only
+  # while the configuration its flags and kubeconfig files make is the default one
+  # (tools/clientcmd/merged_client_builder.go:111-124 and loader.go:385-394 in Kubernetes v1.36.1).
+  # Every flag kubectl binds to that configuration (cli-runtime's genericclioptions/config_flags.go:
+  # 42-61, and --kubeconfig at 369) can make it another: --request-timeout sets its Timeout
+  # (client_config.go:208-214), and kubectl then asks http://localhost:8080. Only --namespace leaves
+  # it as it is (client_config.go:399-406). A fake API cannot show this, so the rule itself is held:
+  # the guard's call carries none of those flags, and nothing gives the guard a kubeconfig.
+  overrides=" cluster user context server s tls-server-name insecure-skip-tls-verify client-certificate client-key
+    certificate-authority token as as-uid as-group as-user-extra username password request-timeout disable-compression
+    kubeconfig "
+  overrides="$(tr -s ' \n' '  ' <<<"$overrides")"
+  for word in $claims; do
+    [[ $word == -* ]] || continue
+    name="${word%%=*}"
+    name="${name#-}"
+    name="${name#-}"
+    [[ $overrides != *" $name "* ]] || { echo "the guard's kubectl call overrides its configuration with $word"; return 1; }
+  done
+  [ -z "$(jq -r '.spec.template.spec.initContainers[] | select(.name == "initialize-guard") | .env // [] | .[].name
+    | select(. == "KUBECONFIG")' "$STS")" ]
+  [ "$(grep -c 'KUBECONFIG' "$work/guard.sh")" -eq 0 ]
   # A directory holding only what a new file system makes counts as empty.
   guard_run openbao-0 none lost+found
   [ "$status" -eq 0 ]
@@ -908,6 +951,10 @@ EOF
     [ "$status" -ne 0 ]
     [ -z "$flag" ]
   done
+  # Nor is a call that does not end in time: its timeout stops it, and the guard fails.
+  TIMEOUT_EXPIRES=1 guard_run openbao-0 none ''
+  [ "$status" -ne 0 ]
+  [ -z "$flag" ]
 
   # The server takes the flag only as the guard writes it, and nothing from a missing or other file.
   guard_run openbao-0 none ''
