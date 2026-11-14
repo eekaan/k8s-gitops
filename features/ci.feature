@@ -106,3 +106,8 @@ Feature: Continuous integration
     Given the CI workflow and the comment workflow
     When the jobs the required job waits for and the comment workflow's jobs are read
     Then the required job waits for the render job, which nothing skips, and the comment workflow is a workflow of its own with no job named ci
+
+  Scenario: Every workflow job that calls the Dagger module checks out the whole history
+    Given every workflow file under .github/workflows/ and the recipes its jobs run
+    When a job runs a recipe that, itself or in the script it runs, calls the Dagger module
+    Then that job checks out the whole history, as the module reads the workspace's Git history, which a shallow clone of a commit with parents cannot give
