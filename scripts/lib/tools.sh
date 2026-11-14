@@ -19,7 +19,7 @@
 # state passphrase, so tofu never needs TF_STATE_PASSPHRASE itself. SOPS_AGE_KEY_FILE names the Talos
 # age key for talman, which runs sops, and for age, which decrypts with it by its path; the Flux age
 # key reaches sops only through flux_sops, as the one key sops is given.
-declare -A tool_secrets=(
+declare -gA tool_secrets=(
   [AWS_ACCESS_KEY_ID]="tofu"
   [AWS_SECRET_ACCESS_KEY]="tofu"
   [TF_ENCRYPTION]="tofu"

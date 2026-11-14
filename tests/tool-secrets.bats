@@ -130,3 +130,19 @@ sorted() {
   run bash -c '. "$1/scripts/lib/infra.sh" && variable_assigned "$2"' _ "$REPO" NEW_SECRET_ACCESS_KEY
   [ "$status" -ne 0 ]
 }
+
+@test "the tools' table holds when the libraries are sourced inside a function, among odd variable names" {
+  # A name that is no shell identifier, as a container runtime may add to the environment.
+  ENVIRONMENT+=('odd-name=1')
+
+  # shellcheck disable=SC2016 # the inner bash expands $1, its own argument
+  run env -i HOME="$BATS_TEST_TMPDIR" PATH="$BIN:$PATH" "${ENVIRONMENT[@]}" \
+    bash -c 'load() { . "$1/scripts/lib/infra.sh"; }; load "$1" && kubectl get && tofu plan' _ "$REPO"
+
+  [ "$status" -eq 0 ]
+  [ -z "$(seen kubectl)" ]
+  [ "$(seen tofu | wc -w)" -gt 3 ]
+  if grep -qx CLUSTER_S3_ACCESS_KEY_ID "$RECORD/names.tofu"; then
+    return 1
+  fi
+}
