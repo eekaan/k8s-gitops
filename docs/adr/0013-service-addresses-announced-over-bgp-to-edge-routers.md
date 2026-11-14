@@ -24,8 +24,8 @@ with or without a cloud load balancer.
   subnet, in the edge routers' AS, and advertises the address of each labelled Service as a /32:
   nothing else, no pod range and no cluster IP. The AS numbers are private 16-bit ones (RFC 6996),
   64513 for the cluster and 64512 for the edge routers by default; the edge routers sit at host
-  numbers 6 and 7 of the node subnet. All four numbers live in the plumbing stack, which outlives a
-  rebuild of the cluster.
+  numbers 7 and 8 of the node subnet, beside the CI host's 6. All four numbers live in the plumbing
+  stack, which outlives a rebuild of the cluster.
 - **Edge routers.** Two general-purpose Linux VMs on the node subnet, running FRR, which the
   deployment runs itself: they hold the deployment's public addresses, learn the service addresses
   from the workers, and forward public traffic to them over equal-cost paths through the workers
