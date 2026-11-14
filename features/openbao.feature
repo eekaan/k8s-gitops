@@ -73,8 +73,8 @@ Feature: OpenBao
 
   Scenario: Only the first member initialises OpenBao, and only on a first install
     Given the guard each member's init container runs, from the built application, the rendered StatefulSet and a fake Kubernetes API
-    When it runs as each member, with data of its own or none, while the API times out, refuses, errs, or answers with the other members' claims present or absent
-    Then only openbao-0, with no data of its own and neither data-openbao-1 nor data-openbao-2 existing, adds the initial configuration to the server's arguments; every other run adds nothing, a run without an answer fails so the pod does not start, and the guard may read those two claims and nothing else
+    When it runs as each member, with data of its own or none, while the API times out, refuses, errs, does not answer in time, or answers with the other members' claims present or absent
+    Then only openbao-0, with no data of its own and neither data-openbao-1 nor data-openbao-2 existing, adds the initial configuration to the server's arguments; every other run adds nothing, a run without an answer in time fails so the pod does not start, the guard reaches the API through the pod's in-cluster configuration, as its kubectl call carries no flag and it has no kubeconfig that would replace that configuration, and it may read those two claims and nothing else
 
   Scenario: bao-put never puts the value on a command line or in its output
     Given a fake cluster and a fake OpenBao behind a port-forward

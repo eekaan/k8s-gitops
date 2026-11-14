@@ -10,7 +10,8 @@ its cache on a volume of its own, so the checks reuse what earlier runs built
 
 Only the CI workflow's jobs for a push to `main` or a pull request whose head is a branch of this
 repository. Everything else runs on GitHub's hosted runners: pull requests from forks, the publish
-workflow, and every job while the repository variable `CI_RUNNER_LABEL` is not set.
+and tools image workflows, and every job while the repository variable `CI_RUNNER_LABEL` is not
+set.
 
 Two things decide it, by the same rule in `scripts/lib/ci-host.sh`:
 

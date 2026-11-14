@@ -379,8 +379,15 @@ EOF
   [ "$(yq 'length' <<< "$output")" -eq 1 ]
   [ "$output" = "$(yq -o=json -I=0 "$select" "$WORKFLOW")" ]
   run yq '.jobs.publish.steps[] | select(.uses | test("^jdx/mise-action@")) | .with.install_args' "$publish"
-  [ "$(tr ' ' '\n' <<< "$output" | sort | paste -sd ' ')" = "cosign flux2 jq just" ]
+  [ "$(tr ' ' '\n' <<< "$output" | sort | paste -sd ' ')" = "cosign flux2 jq just kustomize yq" ]
   local tool
+  # just publish runs just kubernetes-check first, with the tools that script requires.
+  local required
+  required=$(sed -n 's/^for tool in \(.*\); do$/\1/p' "$REPO/scripts/kubernetes-check")
+  [ -n "$required" ]
+  for tool in ${required/flux/flux2}; do
+    grep -qw -- "$tool" <<< "$output" || { echo "not installed for the check: $tool"; return 1; }
+  done
   for tool in $output; do
     yq -p toml -o yaml -e ".tools | has(\"$tool\")" "$REPO/mise.toml" > /dev/null || { echo "not pinned in mise.toml: $tool"; return 1; }
   done
@@ -1126,4 +1133,41 @@ grammar_cases() {
   [ "$status" -ne 0 ]
   [[ $output == *"demo/greeter"* ]]
   [ -z "$(ls -A "$scratch")" ]
+}
+
+@test "The tool installer is pinned to an exact version in every workflow, a workflow whose token can write checks its binary, and the publish job keeps no cache" {
+  local workflow uses=0 version
+  shopt -s nullglob
+  for workflow in "$REPO"/.github/workflows/*.yaml "$REPO"/.github/workflows/*.yml; do
+    run yq '.jobs[].steps[] | select(.uses | test("^jdx/mise-action@")) | .with.version' "$workflow"
+    [ "$status" -eq 0 ]
+    while IFS= read -r version; do
+      [ -n "$version" ] || continue
+      uses=$((uses + 1))
+      [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "${workflow##*/}: mise is not pinned to an exact version: $version"; return 1; }
+    done <<< "$output"
+  done
+  [ "$uses" -gt 0 ]
+  # A workflow whose token can write has the mise binary checked against a checksum, the same in
+  # every such use. Whether the value is the pinned release's is not read here: a mise bump carries
+  # its checksum, and the publish job fails closed on a mismatch.
+  local writes sums=() sum
+  for workflow in "$REPO"/.github/workflows/*.yaml "$REPO"/.github/workflows/*.yml; do
+    writes=$(yq '[.permissions // {}, (.jobs[].permissions // {})] | map(to_entries) | flatten | map(select(.value == "write")) | length' "$workflow")
+    ((writes)) || continue
+    run yq '.jobs[].steps[] | select(.uses | test("^jdx/mise-action@")) | .with.sha256' "$workflow"
+    [ "$status" -eq 0 ]
+    while IFS= read -r sum; do
+      [ -n "$sum" ] || continue
+      [[ $sum =~ ^[0-9a-f]{64}$ ]] || { echo "${workflow##*/}: no checksum for a mise whose workflow can write: $sum"; return 1; }
+      sums+=("$sum")
+    done <<< "$output"
+  done
+  [ "${#sums[@]}" -ge 2 ]
+  [ "$(printf '%s\n' "${sums[@]}" | sort -u | wc -l)" -eq 1 ]
+  # The job that signs never restores a tool cache: an entry is chosen by key, and the job's
+  # identity token can sign.
+  local publish="$REPO/.github/workflows/publish.yaml"
+  run yq '.jobs.publish.steps[] | select(.uses | test("^jdx/mise-action@")) | .with.cache' "$publish"
+  [ "$output" = false ]
 }
