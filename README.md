@@ -2,6 +2,18 @@
 
 Talos Kubernetes on OpenStack, provisioned with OpenTofu and reconciled by Flux.
 
+- **Infrastructure** (`infra/`): OpenTofu creates the network, the Talos image, the virtual
+  machines and their floating IPs. Nodes boot without machine configuration.
+- **Talos** (`talos/`): [talman](https://github.com/ludwighansson/talman) renders each node's
+  machine configuration from patches and applies it over the Talos API.
+- **Cluster state** (`kubernetes/`): Flux reconciles the cluster from a signed OCI artifact
+  built from `main`.
+
+That is the design; [`docs/roadmap.md`](docs/roadmap.md) says how much of it is built.
+Decisions are recorded in [`docs/adr/`](docs/adr/) and the standing rules in
+[`constitution.md`](constitution.md). The repository is public and describes a real
+deployment: [`CLAUDE.md`](CLAUDE.md) lists what it never contains.
+
 ## Working on it
 
 Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mise.jdx.dev) and
@@ -28,3 +40,9 @@ The three repository checks:
   not exist, when two scenarios share a title, or when a test claims a scenario that does not
   exist. It does not run `@by:` recipes. `scripts/scenarios-check` gives the slug rule and how a
   test that proves no scenario is named.
+
+## Acknowledgements
+
+The Flux layout and a number of manifests are adapted from
+[xunholy/k8s-gitops](https://github.com/xunholy/k8s-gitops), which is published under the
+Apache License 2.0.
