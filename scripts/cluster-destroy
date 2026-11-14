@@ -4,21 +4,18 @@
 # --yes, and then removes the files generated for the cluster that hold its addresses. The plumbing
 # stack, the secrets bundle and the buckets stay.
 #
-# The load balancers that Services of type LoadBalancer get and the volumes behind PersistentVolumes
-# of a CSI driver are made by the cluster, not by OpenTofu, so the stack's destroy would leave them
-# in the cloud, where they also keep the network from being deleted. So first, through the cluster's
-# kubeconfig, it lists every such Service and PersistentVolume, and while there are any, it names
-# them and destroys nothing. LINSTOR's volumes are the exception: their data is on the workers' data
-# volumes, which the stack holds and destroys, so nothing of them stays in the cloud. They do not
-# hold the destroy up; it says how many there are before it asks, and confirming the destroy
-# confirms that they go with it. A cluster whose API does not answer, or that has no kubeconfig,
-# cannot be asked and may still own some, so it is not destroyed either, unless --unreachable is
-# given, with which the operator takes on what may be left. Neither kubectl's errors nor anything of
-# the objects but their names are printed, as they can hold addresses.
-#
 # The stack holds one cluster, and destroying it destroys that cluster whatever name was given. So
 # before it asks the cluster anything, whatever flags are given, it refuses a name with no directory
 # under talos/ and a name other than the cluster name in the stack's talman_yaml output.
+#
+# The load balancers that Services of type LoadBalancer get and the volumes behind PersistentVolumes
+# of a CSI driver are made by the cluster, not by OpenTofu, so the stack's destroy would leave them
+# in the cloud, where they also keep the network from being deleted. infra-destroy, which this
+# recipe runs, asks the cluster for them through its kubeconfig before it plans, whichever way the
+# stack is destroyed (require_cluster_owns_nothing in lib/cluster.sh): while there are any it names
+# them and destroys nothing; LINSTOR's volumes, whose data is on the workers' data volumes in the
+# stack, are counted and go with it; a cluster that cannot be asked is not destroyed unless
+# --unreachable is given.
 # Usage: scripts/cluster-destroy [cluster] [--yes] [--unreachable]
 set -euo pipefail
 
@@ -44,12 +41,9 @@ for arg; do
   esac
 done
 stack=sto2/cluster
-# LINSTOR's CSI driver, whose volumes are on the workers' data volumes in the stack.
-linstor_driver=linstor.csi.linbit.com
 
 # shellcheck source=scripts/cluster-env
 . "$here/cluster-env" "$cluster"
-require_commands kubectl jq
 
 # stack_env: reads and checks what infra-destroy needs for the stack, as infra-destroy does, naming
 # what is missing. Run in a subshell, it leaves this script's environment as it is.
@@ -64,9 +58,8 @@ if ! checked=$(stack_env 2>&1); then
   exit 1
 fi
 
-# The stack holds one cluster, and destroying it destroys that one whatever name was typed, so the
-# name must be the stack's own. cluster-secrets and infra-talman run before a cluster's directory
-# exists, which is why cluster-env does not refuse a name without one and this recipe does.
+# cluster-secrets and infra-talman run before a cluster's directory exists, which is why cluster-env
+# does not refuse a name without one and this recipe does.
 step="checking that $cluster is the cluster $stack holds"
 if [[ ! -d $cluster_dir ]]; then
   infra_error "talos/$cluster does not exist: name the cluster $stack holds"
@@ -92,57 +85,8 @@ if [[ $stack_cluster != "$cluster" ]]; then
   exit 1
 fi
 
-say() {
-  printf '%s: %s\n' "${0##*/}" "$1"
-}
-
-step="asking $cluster for its load balancers and volumes"
-asked=0
-if [[ ! -f $KUBECONFIG ]]; then
-  why="${KUBECONFIG#"$infra_root"/} does not exist"
-elif services=$(kubectl get services --all-namespaces --output json --request-timeout=30s 2> /dev/null) &&
-  volumes=$(kubectl get persistentvolumes --output json --request-timeout=30s 2> /dev/null); then
-  asked=1
-else
-  why="the API of $cluster does not answer through its kubeconfig"
-fi
-
-if ((asked)); then
-  balancers=$(jq -r '.items[] | select(.spec.type == "LoadBalancer")
-    | "\(.metadata.namespace)/\(.metadata.name)"' <<< "$services")
-  csi_volumes=$(jq -r --arg linstor "$linstor_driver" '.items[]
-    | select(.spec.csi != null and .spec.csi.driver != $linstor)
-    | "\(.metadata.name) \(.spec.csi.driver // "unnamed")"' <<< "$volumes")
-  linstor_volumes=$(jq --arg linstor "$linstor_driver" '[.items[] | select(.spec.csi.driver? == $linstor)] | length' <<< "$volumes")
-  if [[ -n $balancers || -n $csi_volumes ]]; then
-    while read -r name; do
-      [[ -z $name ]] || infra_error "the Service $name is of type LoadBalancer"
-    done <<< "$balancers"
-    while read -r name driver; do
-      [[ -z $name ]] || infra_error "the PersistentVolume $name is a volume of the CSI driver $driver"
-    done <<< "$csi_volumes"
-    infra_error "$cluster still owns load balancers or volumes that are not in the state of $stack, which a destroy would leave in the cloud, keeping the network from being deleted; remove them first. Nothing was destroyed"
-    exit 1
-  fi
-  if ((linstor_volumes == 0)); then
-    say "$cluster owns no Service of type LoadBalancer and no PersistentVolume of a CSI driver"
-  else
-    say "$cluster owns no Service of type LoadBalancer and no PersistentVolume of a CSI driver other than LINSTOR's"
-    if ((linstor_volumes == 1)); then
-      counted="1 PersistentVolume of LINSTOR ($linstor_driver), whose data is on the workers' data volumes in $stack: it is"
-    else
-      counted="$linstor_volumes PersistentVolumes of LINSTOR ($linstor_driver), whose data is on the workers' data volumes in $stack: they are"
-    fi
-    say "$cluster has $counted destroyed with the stack, and confirming its destroy confirms that"
-  fi
-elif ((unreachable)); then
-  say "$why; with --unreachable it is destroyed without being asked, and a load balancer or volume it owns stays in the cloud"
-else
-  infra_error "$why, so $cluster cannot be asked whether it owns load balancers or volumes, which are not in the state of $stack. Nothing was destroyed; --unreachable destroys it without asking, leaving any it owns in the cloud"
-  exit 1
-fi
-
 step="destroying $stack"
 flags=()
 ((!confirmed)) || flags+=(--yes)
+((!unreachable)) || flags+=(--unreachable)
 "$here/infra-destroy" "$stack" "${flags[@]}"

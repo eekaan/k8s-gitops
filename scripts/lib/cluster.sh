@@ -114,6 +114,81 @@ stack_cluster_name() {
   printf '%s' "$name"
 }
 
+# require_cluster_owns_nothing CLUSTER STACK UNREACHABLE: the check before the cluster stack STACK is
+# destroyed, shared by cluster-destroy and infra-destroy. The load balancers that Services of type
+# LoadBalancer get and the volumes behind PersistentVolumes of a CSI driver are made by the cluster,
+# not by OpenTofu, so the stack's destroy would leave them in the cloud, where they also keep the
+# network from being deleted. So, through CLUSTER's kubeconfig, it lists every such Service and
+# PersistentVolume, and while there are any, names them and fails. LINSTOR's volumes are the
+# exception: their data is on the workers' data volumes, which the stack holds and destroys, so
+# nothing of them stays in the cloud; it says how many there are. A cluster whose API does not
+# answer, that has no kubeconfig, or whose name the stack does not give (empty CLUSTER), cannot be
+# asked and may still own some, so it fails too, unless UNREACHABLE is 1, with which the operator takes
+# on what may be left. Neither kubectl's errors nor anything of the objects but their names are
+# printed, as they can hold addresses.
+require_cluster_owns_nothing() {
+  local cluster=$1 stack=$2 unreachable=$3 kubeconfig why services volumes balancers csi_volumes
+  local linstor_volumes counted name driver
+  # LINSTOR's CSI driver, whose volumes are on the workers' data volumes in the stack.
+  local linstor_driver=linstor.csi.linbit.com
+  require_commands kubectl jq || return 1
+  local asked=0
+  if [[ -z $cluster ]]; then
+    why="$stack names no cluster, so there is no kubeconfig to ask"
+    cluster="the cluster of $stack"
+  else
+    kubeconfig=$infra_root/talos/$cluster/clusterconfig/kubeconfig
+    if [[ ! -f $kubeconfig ]]; then
+      why="${kubeconfig#"$infra_root"/} does not exist"
+    elif services=$(KUBECONFIG=$kubeconfig kubectl get services --all-namespaces --output json --request-timeout=30s 2> /dev/null) &&
+      volumes=$(KUBECONFIG=$kubeconfig kubectl get persistentvolumes --output json --request-timeout=30s 2> /dev/null); then
+      asked=1
+    else
+      why="the API of $cluster does not answer through its kubeconfig"
+    fi
+  fi
+
+  if ((asked)); then
+    balancers=$(jq -r '.items[] | select(.spec.type == "LoadBalancer")
+      | "\(.metadata.namespace)/\(.metadata.name)"' <<< "$services")
+    csi_volumes=$(jq -r --arg linstor "$linstor_driver" '.items[]
+      | select(.spec.csi != null and .spec.csi.driver != $linstor)
+      | "\(.metadata.name) \(.spec.csi.driver // "unnamed")"' <<< "$volumes")
+    linstor_volumes=$(jq --arg linstor "$linstor_driver" '[.items[] | select(.spec.csi.driver? == $linstor)] | length' <<< "$volumes")
+    if [[ -n $balancers || -n $csi_volumes ]]; then
+      while read -r name; do
+        [[ -z $name ]] || infra_error "the Service $name is of type LoadBalancer"
+      done <<< "$balancers"
+      while read -r name driver; do
+        [[ -z $name ]] || infra_error "the PersistentVolume $name is a volume of the CSI driver $driver"
+      done <<< "$csi_volumes"
+      infra_error "$cluster still owns load balancers or volumes that are not in the state of $stack, which a destroy would leave in the cloud, keeping the network from being deleted; remove them first. Nothing was destroyed"
+      return 1
+    fi
+    if ((linstor_volumes == 0)); then
+      infra_say "$cluster owns no Service of type LoadBalancer and no PersistentVolume of a CSI driver"
+    else
+      infra_say "$cluster owns no Service of type LoadBalancer and no PersistentVolume of a CSI driver other than LINSTOR's"
+      if ((linstor_volumes == 1)); then
+        counted="1 PersistentVolume of LINSTOR ($linstor_driver), whose data is on the workers' data volumes in $stack: it is"
+      else
+        counted="$linstor_volumes PersistentVolumes of LINSTOR ($linstor_driver), whose data is on the workers' data volumes in $stack: they are"
+      fi
+      infra_say "$cluster has $counted destroyed with the stack, and confirming its destroy confirms that"
+    fi
+  elif ((unreachable)); then
+    infra_say "$why; with --unreachable it is destroyed without being asked, and a load balancer or volume it owns stays in the cloud"
+  else
+    infra_error "$why, so $cluster cannot be asked whether it owns load balancers or volumes, which are not in the state of $stack. Nothing was destroyed; --unreachable destroys it without asking, leaving any it owns in the cloud"
+    return 1
+  fi
+}
+
+# infra_say MESSAGE: MESSAGE on stdout, after the name of the script, as infra_error does on stderr.
+infra_say() {
+  printf '%s: %s\n' "${0##*/}" "$1"
+}
+
 # inside_repository PATH: whether PATH, with symlinks resolved, lies in the repository.
 inside_repository() {
   local resolved root

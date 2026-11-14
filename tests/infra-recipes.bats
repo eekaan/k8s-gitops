@@ -20,6 +20,14 @@ setup() {
   cp "$ROOT"/infra/openstack/stacks/sto2/plumbing/*.tf "$PLUMBING/"
   cp "$ROOT"/infra/openstack/stacks/sto2/cluster/*.tf "$CLUSTER/"
   cp "$ROOT"/infra/openstack/stacks/sto2/ci/*.tf "$CI_STACK/"
+  # A cluster that owns no load balancer and no volume, which infra-destroy asks before it destroys
+  # the cluster stack; its kubeconfig is the one the fixture's cluster would have.
+  mkdir -p "$REPO/talos/fixture/clusterconfig"
+  : > "$REPO/talos/fixture/clusterconfig/kubeconfig"
+  fake kubectl <<EOF
+printf '%s\n' "kubectl \$*" >> "$RECORD/argv"
+echo '{"items": []}'
+EOF
   # What tofu itself prints: a resource address on stdout, and on stderr when it fails.
   STDOUT_MARKER='module.fixture.openstack_networking_port_v2.stdout_marker'
   ERROR_MARKER='module.fixture.openstack_networking_port_v2.error_marker'
@@ -661,6 +669,7 @@ EOF
 printf '%s\n' "\$*" >> "$RECORD/tofu"
 case \${2-} in
   show) cat "$FIXTURES/no-changes.json" ;;
+  output) cat "$FIXTURES/outputs.json" ;;
   apply) [[ \$1 != *cluster ]] ;;
 esac
 EOF
@@ -965,16 +974,19 @@ EOF
   [ ! -e "$RECORD/tofu" ]
 }
 
-@test "the unimplemented hooks say so when they are reached" {
+@test "the unimplemented hook says so when it is reached" {
   recipe infra-plan sto2/cluster
 
   [ "$status" -eq 0 ]
   [[ $output == *"not implemented: adding this machine's public address to the allowlist"* ]]
 
+  # Destroying the cluster stack does not claim a step it does not take: the cluster is asked for
+  # what it owns instead.
   recipe infra-destroy --yes < /dev/null
 
   [ "$status" -eq 0 ]
-  [[ $output == *"not implemented: removing the load balancers and volumes the cluster created outside OpenTofu; they are left in place"* ]]
+  [[ $output != *"not implemented: removing the load balancers"* ]]
+  [[ $output == *"owns no Service of type LoadBalancer"* ]]
 }
 
 # fake_openstack [--missing-flavor NAME] [--version TEXT] [--no-octavia] [--lb-quota JSON]:

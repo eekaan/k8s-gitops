@@ -770,6 +770,64 @@ kube-system/node-agent-cp-1' ]
   [ -z "$(calls '^(rclone|openstack|helm|talosctl|talman) ')" ]
 }
 
+@test "The cluster stack is asked the same way whichever recipe destroys it" {
+  for args in 'sto2/cluster' ''; do
+    for owned in load-balancer csi-volume; do
+      echo "$args $owned"
+      reset_cluster
+      restore_generated
+      : > "$STATE/$owned"
+
+      # shellcheck disable=SC2086 # the arguments as an operator types them
+      recipe infra-destroy $args --yes < /dev/null
+
+      [ "$status" -ne 0 ]
+      if [[ $owned == load-balancer ]]; then
+        [[ $output == *"Service apps/web"* ]]
+      else
+        [[ $output == *"PersistentVolume pvc-0a1b2c3d"* ]]
+      fi
+      for other in default/kubernetes local-volume-1 marker-volume-handle 198.51.100.62; do
+        [[ $output != *"$other"* ]]
+      done
+      no_tofu
+      generated_kept
+    done
+
+    # An API that does not answer, and no kubeconfig: refused, naming --unreachable.
+    reset_cluster
+    : > "$STATE/api-down"
+    # shellcheck disable=SC2086
+    recipe infra-destroy $args --yes < /dev/null
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"--unreachable"* ]]
+    [[ $output != *198.51.100.66* ]]
+    no_tofu
+    generated_kept
+
+    # shellcheck disable=SC2086
+    recipe infra-destroy $args --unreachable --yes < /dev/null
+
+    [ "$status" -eq 0 ]
+    [[ $output == *"sto2/cluster destroyed"* ]]
+    restore_generated
+  done
+
+  # A cluster that owns nothing is destroyed, and nothing is said to be left undone.
+  reset_cluster
+  restore_generated
+  echo 2 > "$STATE/linstor-volumes"
+
+  recipe infra-destroy sto2/cluster --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"2 PersistentVolumes of LINSTOR"*"destroyed with the stack"* ]]
+  [[ $output == *"sto2/cluster destroyed"* ]]
+  [[ $output != *"not implemented: removing"* ]]
+  [ "$(call_line '^kubectl get persistentvolumes ')" -lt "$(call_line '^tofu .* plan ')" ]
+}
+
 @test "A cluster is destroyed only under the name its stack holds" {
   # No directory under talos/ for the name: nothing is read, asked or destroyed.
   recipe cluster-destroy other-cluster --unreachable --yes < /dev/null

@@ -91,6 +91,11 @@ Feature: Cluster lifecycle
     When cluster-destroy runs with --yes
     Then the cluster is asked before tofu runs, every tofu call is on the cluster stack, which is planned for destruction, summarised and destroyed, none is on the plumbing stack, the talman.yaml, talosconfig and kubeconfig git ignores are removed, the secrets bundle stays as it was, and no S3 or OpenStack client runs
 
+  Scenario: The cluster stack is asked the same way whichever recipe destroys it
+    Given a cluster that owns a Service of type LoadBalancer or a PersistentVolume of another CSI driver, one whose API does not answer, and one that owns nothing
+    When infra-destroy runs with sto2/cluster and without a stack, with --yes, and with --unreachable
+    Then it asks the cluster as cluster-destroy does and refuses what cluster-destroy refuses, naming what the cluster owns or --unreachable, before it plans anything; it prints no step it does not take; and what the cluster owns nothing of is destroyed
+
   Scenario: A cluster is destroyed only under the name its stack holds
     Given the cluster stack, whose talman_yaml output names lab-sto2, and a name with no directory under talos/, and one with a directory that is not the stack's cluster
     When cluster-destroy runs for each, with --unreachable and --yes

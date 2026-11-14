@@ -360,7 +360,9 @@ out of the artifact, which is built from `kubernetes/`.
   or `--yes`, destroys them with the stack. A cluster whose API does not answer, or that has no
   kubeconfig, cannot be asked and is not destroyed either, unless `--unreachable` is given: the
   operator then takes on whatever it owned, which stays in the cloud. Before it asks the cluster it
-  checks what `infra-destroy` needs for the stack.
+  checks what `infra-destroy` needs for the stack. The asking is `infra-destroy`'s own, through
+  shared code, so `just infra-destroy sto2/cluster`, and `just infra-destroy` with no stack, ask
+  the same and refuse the same; they take `--unreachable` too.
   [runbooks/rebuild.md](runbooks/rebuild.md) has it in the procedure around it.
 
 A failing recipe ends with a line naming the step it failed in.
