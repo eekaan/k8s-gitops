@@ -65,16 +65,19 @@ What reaches a node without passing the firewall, and what controls each:
 
 The cloud's security groups remain as the outer ring for the first, second and fifth, which a node
 cannot cover itself: the nodes' group for the Talos API and the NodePort range, the workers' group
-for the service ports. The cluster stack's `security_group_rules` selects today's full rules or a
+for the service ports. The cluster stack's `security_group_rules` selects the full rules or a
 reduced set that keeps them and gives the control planes a group of their own that opens every other
 port. The workers get nothing more with either: a security group rule never matches a packet's
 destination, so a rule open to all on a worker's port, which carries the service range, would open
-every port of a load-balancer address too. What keeps a packet for a service address from being
-served on a control plane, where the reduced set opens the ports Cilium would serve it on, is that
-control planes announce nothing and their ports carry no allowed address pair for the service range,
-and that a Service's external address is refused when new: a cluster takes the reduced set only
-while no Service already holds one, and once all three are seen on the running cluster. With the
-reduced set, nothing but those three depends on the security groups.
+every port of a load-balancer address too. On a control plane, where the reduced set opens the ports
+Cilium serves before the firewall, four things keep anything from being served there: control
+planes announce nothing and their ports carry no allowed address pair for the service range, which
+the cluster's configuration and its tests hold; a Service's external address is refused when new,
+and one a Service already holds is kept, so the reduced set suits a cluster where no Service holds
+one, as none of the repository's does; and no pod on a control plane declares a host port, as Pod
+Security refuses one outside `kube-system`, `monitoring` and `piraeus-datastore`, where the one pod
+that declares one, node-exporter, runs on the host network, whose port the firewall filters. With
+the reduced set, nothing but those four depends on the security groups.
 
 ## Alternatives considered
 
