@@ -1,0 +1,41 @@
+frr defaults traditional
+hostname ${hostname}
+log syslog informational
+service integrated-vtysh-config
+!
+! The workers open the sessions and never listen, so the edge takes dynamic neighbours: any host of
+! the node subnet that opens a session in the cluster's AS joins the one peer group. The peer group
+! is declared before the listen range that names it.
+router bgp ${edge_asn}
+ bgp router-id ${router_id}
+ no bgp default ipv4-unicast
+ bgp graceful-restart
+ bgp graceful-restart restart-time ${restart_time}
+ neighbor workers peer-group
+ neighbor workers remote-as ${cluster_asn}
+ bgp listen limit ${max_workers}
+ bgp listen range ${node_cidr} peer-group workers
+ neighbor workers timers ${keepalive} ${hold}
+ neighbor workers timers connect ${connect}
+ !
+ address-family ipv4 unicast
+  maximum-paths ${max_workers}
+  neighbor workers activate
+  neighbor workers maximum-prefix ${max_prefix}
+  neighbor workers route-map SERVICES-IN in
+  neighbor workers route-map NOTHING-OUT out
+ exit-address-family
+exit
+!
+! Only a host route inside the service range is accepted; everything else is denied.
+ip prefix-list SERVICES seq 10 permit ${service_range} ge 32 le 32
+ip prefix-list SERVICES seq 20 deny any
+!
+route-map SERVICES-IN permit 10
+ match ip address prefix-list SERVICES
+exit
+!
+! Nothing is announced to the workers.
+route-map NOTHING-OUT deny 10
+exit
+!

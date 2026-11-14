@@ -1,0 +1,379 @@
+#!/usr/bin/env bats
+# Proves the scenarios of features/edge-routers.feature about the edge scripts: edge-check and
+# edge-rollout, with the tests of the scripts around them. The scripts run in a copy against
+# recording fakes of tofu, ssh and the edge's own commands, so nothing here reaches a cloud or a
+# host, no test reads this checkout's .env, and the edges' key is a file in the test's own directory.
+
+setup() {
+  ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  BIN="$BATS_TEST_TMPDIR/bin"
+  HOST_BIN="$BATS_TEST_TMPDIR/host-bin"
+  RECORD="$BATS_TEST_TMPDIR/record"
+  HOME_DIR="$BATS_TEST_TMPDIR/home"
+  HOST="$BATS_TEST_TMPDIR/host"
+  REPO="$BATS_TEST_TMPDIR/repo"
+  mkdir -p "$BIN" "$HOST_BIN" "$RECORD" "$HOME_DIR/.local/state/k8s-gitops" "$HOST" \
+    "$REPO/infra/openstack/stacks/sto2/edge" "$REPO/talos/lab-sto2" "$BATS_TEST_TMPDIR/keys"
+  : > "$RECORD/argv"
+  cp -R "$ROOT/scripts" "$REPO/scripts"
+  cp "$ROOT/infra/openstack/backend.hcl" "$REPO/infra/openstack/backend.hcl"
+  cp "$ROOT"/infra/openstack/stacks/sto2/edge/*.tf "$REPO/infra/openstack/stacks/sto2/edge/"
+  ADDRESS_1=203.0.113.51
+  ADDRESS_2=203.0.113.52
+  KEY="$BATS_TEST_TMPDIR/keys/edge"
+  echo 'fixture private key, never read' > "$KEY"
+  echo 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureEdgePublicKeyFixtureFixtureFix fixture' > "$KEY.pub"
+  # The cluster: three workers on the node subnet at host numbers 20, 21 and 22.
+  cat > "$REPO/talos/lab-sto2/talman.yaml" << YAML
+values:
+  nodeSubnet: 192.0.2.0/24
+  serviceRange: 203.0.113.16/28
+nodes:
+  - {hostname: lab-cp-1, role: controlplane, ipAddress: 203.0.113.61}
+  - {hostname: lab-w-1, role: worker, ipAddress: 203.0.113.71}
+  - {hostname: lab-w-2, role: worker, ipAddress: 203.0.113.72}
+  - {hostname: lab-w-3, role: worker, ipAddress: 203.0.113.73}
+YAML
+  cat > "$BATS_TEST_TMPDIR/outputs.json" << JSON
+{"addresses": {"sensitive": true, "value": ["$ADDRESS_1", "$ADDRESS_2"]},
+ "names": {"sensitive": false, "value": ["lab-edge-1", "lab-edge-2"]}}
+JSON
+  # Both edges' host keys are recorded already; recording one is the CI host's tests' business too.
+  echo '|1|fixture=|fixture= ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOfAnEdgeFixtureFixture' \
+    > "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts"
+
+  # A mise with nothing installed keeps the justfile from putting real tools in front of the fakes.
+  fake mise < /dev/null
+  for tool in jq yq grep flock cat sed; do
+    record "$tool"
+  done
+  fake tofu << EOF
+printf '%s\n' "tofu \$*" >> "$RECORD/argv"
+case \${2-} in
+  output) cat "$BATS_TEST_TMPDIR/outputs.json" ;;
+  show) [[ ! -f "$BATS_TEST_TMPDIR/plan.json" ]] || cat "$BATS_TEST_TMPDIR/plan.json" ;;
+esac
+EOF
+  fake ssh-keygen << EOF
+printf '%s\n' "ssh-keygen \$*" >> "$RECORD/argv"
+[[ \$1 == -F && -s \$4 ]]
+EOF
+  # An ssh that refuses unless host key checking is strict against the recorded keys and the edges'
+  # key is the one named, and otherwise runs the command here, as the edge's login shell would, with
+  # the fake edge's own commands first on PATH.
+  fake ssh << EOF
+printf '%s\n' "ssh \$*" >> "$RECORD/argv"
+strict= known= identity= only=
+while ((\$#)); do
+  case \$1 in
+    -i) identity=\$2; shift 2 ;;
+    -o)
+      case \$2 in
+        StrictHostKeyChecking=*) strict=\${2#*=} ;;
+        UserKnownHostsFile=*) known=\${2#*=} ;;
+        IdentitiesOnly=*) only=\${2#*=} ;;
+      esac
+      shift 2
+      ;;
+    *) break ;;
+  esac
+done
+[[ \$strict == yes && \$only == yes && \$identity == "$KEY" && -s \$known ]] || { echo "fake ssh: refused" >&2; exit 255; }
+case \$1 in
+  debian@$ADDRESS_1) edge=1 ;;
+  debian@$ADDRESS_2) edge=2 ;;
+  *) echo "fake ssh: unexpected destination" >&2; exit 255 ;;
+esac
+shift
+exec env EDGE_FIXTURE="$HOST/edge-\$edge" PATH="$HOST_BIN:\$PATH" bash -c "\$*"
+EOF
+  # Nothing else may reach a host, a cloud or a container runtime from this machine.
+  for tool in scp sftp openstack curl docker ssh-keyscan; do
+    fake "$tool" << EOF
+printf '%s\n' "$tool \$*" >> "$RECORD/argv"
+echo "unexpected call: $tool \$*" >&2
+exit 1
+EOF
+  done
+  # What an edge answers: FRR's state and tables, the loaded rules and the kernel's setting.
+  host_fake sudo << 'EOF'
+[[ $1 == -n ]] && shift
+exec "$@"
+EOF
+  host_fake systemctl << 'EOF'
+cat "$EDGE_FIXTURE/frr"
+EOF
+  host_fake vtysh << 'EOF'
+case $2 in
+  'show bgp ipv4 unicast summary json') cat "$EDGE_FIXTURE/sessions.json" ;;
+  'show bgp ipv4 unicast json') cat "$EDGE_FIXTURE/table.json" ;;
+  *) echo "fake vtysh: unexpected $*" >&2; exit 1 ;;
+esac
+EOF
+  host_fake nft << 'EOF'
+cat "$EDGE_FIXTURE/rules"
+EOF
+  host_fake sysctl << 'EOF'
+cat "$EDGE_FIXTURE/forwarding"
+EOF
+
+  ENVIRONMENT=(
+    PATH="$BIN:$PATH"
+    HOME="$HOME_DIR"
+    XDG_STATE_HOME=
+    TF_STATE_BUCKET=fixture-state-bucket
+    AWS_ACCESS_KEY_ID=marker-access-key-id
+    AWS_SECRET_ACCESS_KEY=marker-secret-access-key
+    TF_STATE_PASSPHRASE=marker-state-passphrase
+    OS_AUTH_URL=https://identity.example.invalid/v3
+    'OPERATOR_CIDRS=["198.51.100.0/24"]'
+    EDGE_IMAGE=fixture-image
+    EDGE_SSH_KEY_FILE="$KEY"
+    EDGE_ROLLOUT_WAIT=0
+    EDGE_ROLLOUT_INTERVAL=0
+  )
+  WORKERS='192.0.2.20 192.0.2.21 192.0.2.22'
+}
+
+# fake NAME: a binary first on the scripts' PATH, its body read from stdin.
+fake() {
+  { echo '#!/usr/bin/env bash'; cat; } > "$BIN/$1"
+  chmod +x "$BIN/$1"
+}
+
+# host_fake NAME: a binary first on the fake edge's PATH, its body read from stdin.
+host_fake() {
+  { echo '#!/usr/bin/env bash'; cat; } > "$HOST_BIN/$1"
+  chmod +x "$HOST_BIN/$1"
+}
+
+# record NAME: puts NAME's arguments in the record, then runs the real NAME.
+record() {
+  local real
+  real=$(command -v "$1")
+  fake "$1" << EOF
+printf '%s\n' "$1 \$*" >> "$RECORD/argv"
+exec "$real" "\$@"
+EOF
+}
+
+# edge_state NUMBER FRR_STATE SESSIONS PREFIXES [FORWARDING]: what edge NUMBER answers. SESSIONS is
+# the addresses of the established sessions and PREFIXES the routes in the table, each with a path
+# per session.
+edge_state() {
+  local dir="$HOST/edge-$1"
+  mkdir -p "$dir"
+  echo "$2" > "$dir/frr"
+  jq -n --arg addresses "$3" '{peers: ($addresses | split(" ") | map(select(. != ""))
+    | map({key: ., value: {state: "Established"}}) | from_entries)}' > "$dir/sessions.json"
+  jq -n --arg prefixes "$4" --arg addresses "$3" '{routes: ($prefixes | split(" ") | map(select(. != ""))
+    | map({key: ., value: ($addresses | split(" ") | map(select(. != "")) | map({valid: true, bestpath: true, multipath: true}))})
+    | from_entries)}' > "$dir/table.json"
+  printf 'table inet edge\ntable ip edge-nat\n' > "$dir/rules"
+  echo "${5:-1}" > "$dir/forwarding"
+}
+
+# edge_check [ARG...]: scripts/edge-check in the copy, in the environment above.
+edge_check() {
+  run env "${ENVIRONMENT[@]}" "$REPO/scripts/edge-check" "$@"
+}
+
+# absent GREP_ARG...: fails when grep -q finds a match; the last command of a function, as bats
+# ignores a failing ! anywhere else.
+absent() {
+  ! grep -q "$@"
+}
+
+# no_address OUTPUT: fails when OUTPUT holds an IPv4 address.
+no_address() {
+  ! grep -qE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' <<< "$1"
+}
+
+@test "edge-check passes with every worker's session established and fails, saying which, when one is missing or a route outside the range is present, and no address is printed" {
+  # Both edges complete: three sessions each, and a next hop per session for every Service address.
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_state 2 active "$WORKERS" "203.0.113.17/32 203.0.113.18/32"
+  edge_check
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output != *FAIL* ]]
+  [[ $output == *"lab-edge-1: 3 of 3 worker sessions are established"* ]]
+  [[ $output == *"lab-edge-2: 3 of 3 worker sessions are established"* ]]
+  no_address "$output"
+
+  # One worker's session is missing on the second edge: it fails, and says which worker.
+  edge_state 2 active "192.0.2.20 192.0.2.22" 203.0.113.17/32
+  edge_check
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"pass  lab-edge-1: 3 of 3 worker sessions are established"* ]]
+  [[ $output == *"FAIL  lab-edge-2: 2 of 3 worker sessions are established; no session from lab-w-2"* ]]
+  no_address "$output"
+
+  # A route outside the range, and a prefix shorter than a /32 inside it, are in the first edge's table.
+  edge_state 2 active "$WORKERS" 203.0.113.17/32
+  edge_state 1 active "$WORKERS" "203.0.113.17/32 198.51.100.5/32 203.0.113.16/30"
+  edge_check
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL  lab-edge-1: 2 of 3 routes in the table are not a /32 inside the service range"* ]]
+  [[ $output == *"pass  lab-edge-2: the table holds 1 routes, each a /32 inside the service range"* ]]
+  no_address "$output"
+
+  # FRR down, the rules not loaded and forwarding off each fail on their own.
+  edge_state 1 inactive "$WORKERS" 203.0.113.17/32 0
+  printf 'table inet filter\n' > "$HOST/edge-1/rules"
+  edge_check --edge 1
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL  lab-edge-1: FRR is not running"* ]]
+  [[ $output == *"FAIL  lab-edge-1: the nftables rules are not loaded"* ]]
+  [[ $output == *"FAIL  lab-edge-1: the kernel does not forward"* ]]
+  [[ $output != *lab-edge-2* ]]
+
+  # A route with fewer next hops than sessions is for a person to read, as a local-only Service has.
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  jq '.routes["203.0.113.17/32"] |= .[:1]' "$HOST/edge-1/table.json" > "$HOST/edge-1/table.tmp"
+  mv "$HOST/edge-1/table.tmp" "$HOST/edge-1/table.json"
+  edge_check --edge 1
+  [ "$status" -eq 0 ]
+  [[ $output == *"skip  lab-edge-1: next hops: 1 of 1 routes have fewer next hops than sessions"* ]]
+
+  # Without the cluster's talman.yaml the checks that need it are skipped, not failed.
+  mv "$REPO/talos/lab-sto2/talman.yaml" "$REPO/talos/lab-sto2/talman.moved"
+  edge_check --edge 1
+  [ "$status" -eq 0 ]
+  [[ $output == *"skip  lab-edge-1: sessions:"* && $output == *"skip  lab-edge-1: routes:"* ]]
+}
+
+# plan_replacing NUMBER...: a plan, as tofu show -json prints it, that replaces the instances of the
+# edges named and changes nothing else.
+plan_replacing() {
+  local numbers
+  numbers=$(printf '%s\n' "$@" | jq -R . | jq -s .)
+  jq -n --argjson numbers "$numbers" '{resource_changes: [$numbers[] | {
+    address: "module.edge[\"\(.)\"].openstack_compute_instance_v2.this",
+    mode: "managed", type: "openstack_compute_instance_v2",
+    change: {actions: ["delete", "create"]}}]}' > "$BATS_TEST_TMPDIR/plan.json"
+}
+
+# steps: the calls that matter to the order, one per line: edge-check, a targeted plan, an apply.
+steps() {
+  grep -E '^edge-check |^tofu .* plan .*-target=|^tofu .* apply ' "$RECORD/argv" |
+    sed -E 's/ -input=false//; s|-chdir=[^ ]*/||; s/ -out=[^ ]*//; s/ -target=openstack_networking_floatingip_associate_v2[^ ]*//; s/ +/ /g; s/^tofu [^ ]* /tofu /; s/^(tofu apply) .*/\1/'
+}
+
+@test "A change to the configuration rolls out one edge at a time and stops when the check fails" {
+  # The copy's edge-check is a recording fake whose verdict for an edge is the exit status in the
+  # file check-<number> in the record's directory, 0 when there is none.
+  cat > "$REPO/scripts/edge-check" << EOF
+#!/usr/bin/env bash
+printf '%s\n' "edge-check \$*" >> "$RECORD/argv"
+status=\$(cat "$RECORD/check-\${2-}" 2> /dev/null || echo 0)
+[[ \$status == 0 ]] || echo "FAIL  fixture: the check fails"
+exit "\$status"
+EOF
+  chmod +x "$REPO/scripts/edge-check"
+  plan_replacing 1 2
+
+  # Applied as it is, a plan that replaces both is refused, and nothing is applied.
+  run env "${ENVIRONMENT[@]}" "$REPO/scripts/infra-apply" sto2/edge --yes
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"replaces both edge routers at once"* ]]
+  [[ $output == *"just edge-rollout"* ]]
+  absent ' apply ' "$RECORD/argv"
+
+  # One edge replaced is applied as any plan is.
+  plan_replacing 2
+  run env "${ENVIRONMENT[@]}" "$REPO/scripts/infra-apply" sto2/edge --yes
+  [ "$status" -eq 0 ]
+  grep -q ' apply ' "$RECORD/argv"
+
+  # The rollout replaces the first edge, checks it, and only then replaces the second; and before it
+  # replaces an edge it checks the other one.
+  plan_replacing 1 2
+  : > "$RECORD/argv"
+  run env "${ENVIRONMENT[@]}" "$REPO/scripts/edge-rollout" --yes
+  echo "$output"
+  [ "$status" -eq 0 ]
+  expected=$(printf '%s\n' \
+    'edge-check --edge 2' \
+    'tofu plan -target=module.edge["1"]' \
+    'tofu apply' \
+    'edge-check --edge 1' \
+    'edge-check --edge 1' \
+    'tofu plan -target=module.edge["2"]' \
+    'tofu apply' \
+    'edge-check --edge 2')
+  steps
+  [ "$(steps)" = "$expected" ]
+
+  # The first edge fails its check once replaced: the rollout stops, and the second edge is never
+  # planned, applied or touched.
+  : > "$RECORD/argv"
+  echo 1 > "$RECORD/check-1"
+  run env "${ENVIRONMENT[@]}" "$REPO/scripts/edge-rollout" --yes
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"edge 1 does not pass its check"* ]]
+  [ "$(grep -c '^tofu .* apply ' "$RECORD/argv")" -eq 1 ]
+  absent 'module.edge\["2"\]' "$RECORD/argv"
+
+  # The second edge not serving keeps the first from being replaced at all.
+  : > "$RECORD/argv"
+  rm "$RECORD/check-1"
+  echo 1 > "$RECORD/check-2"
+  run env "${ENVIRONMENT[@]}" "$REPO/scripts/edge-rollout" --yes
+  [ "$status" -ne 0 ]
+  [[ $output == *"edge 2 does not pass its check, so edge 1 is not replaced"* ]]
+  absent ' apply ' "$RECORD/argv"
+}
+
+@test "the edge key is made once, at the path .env names, mode 0600, and nothing but that is printed" {
+  rm "$KEY" "$KEY.pub"
+  # An ssh-keygen that makes the two files, as the real one does, and records its arguments.
+  fake ssh-keygen << EOF
+printf '%s\n' "ssh-keygen \$*" >> "$RECORD/argv"
+file=\${*: -1}
+printf 'fixture private key\n' > "\$file"
+chmod 600 "\$file"
+printf 'ssh-ed25519 fixture\n' > "\$file.pub"
+EOF
+  run env "${ENVIRONMENT[@]}" "$REPO/scripts/edge-ssh-key"
+  [ "$status" -eq 0 ]
+  [ "$output" = "created the edge routers' SSH key pair" ]
+  [ "$(stat -c %a "$KEY")" = 600 ]
+  [ "$(grep -c '^ssh-keygen ' "$RECORD/argv")" -eq 1 ]
+
+  run env "${ENVIRONMENT[@]}" "$REPO/scripts/edge-ssh-key"
+  [ "$status" -eq 0 ]
+  [ "$output" = "the edge routers' SSH key pair exists; nothing was created" ]
+  [ "$(grep -c '^ssh-keygen ' "$RECORD/argv")" -eq 1 ]
+
+  # A relative path is refused, and so is a name that is not set.
+  run env "${ENVIRONMENT[@]}" EDGE_SSH_KEY_FILE=relative/key "$REPO/scripts/edge-ssh-key"
+  [ "$status" -ne 0 ]
+  run env "${ENVIRONMENT[@]}" EDGE_SSH_KEY_FILE= "$REPO/scripts/edge-ssh-key"
+  [ "$status" -ne 0 ]
+  [[ $output == *EDGE_SSH_KEY_FILE* ]]
+}
+
+@test "edge-routes prints to a terminal only" {
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  # Not a terminal: standard output is the pipe bats captures.
+  run env "${ENVIRONMENT[@]}" "$REPO/scripts/edge-routes"
+  [ "$status" -ne 0 ]
+  [[ $output == *"not a terminal"* ]]
+  # CI set: refused whatever standard output is.
+  run env "${ENVIRONMENT[@]}" CI=true "$REPO/scripts/edge-routes"
+  [ "$status" -ne 0 ]
+  [[ $output == *"CI is set"* ]]
+  absent '^ssh ' "$RECORD/argv"
+}
+
+@test "the edge stack's public ports default to the cluster stack's service ports" {
+  # The workers admit the service ports from the edges, and the edges forward the public ports.
+  edge=$(yq -p hcl -o json "$ROOT/infra/openstack/stacks/sto2/edge/variables.tf" | jq -c '.variable.public_ports.default')
+  cluster=$(yq -p hcl -o json "$ROOT/infra/openstack/stacks/sto2/cluster/variables.tf" | jq -c '.variable.service_ports.default')
+  [ "$edge" = "$cluster" ]
+}

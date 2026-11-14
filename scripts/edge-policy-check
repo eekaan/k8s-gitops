@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Proves the edge routers' routing policy with a real BGP speaker, with docker on this machine: the
+# FRR configuration the edge stack renders (scripts/edge-policy-render) runs in IMAGE, a container
+# with no network but its loopback and none of the capabilities beyond the runtime's defaults, with
+# speakers that open sessions to it and offer prefixes (tests/fixtures/edge-policy/proof.sh), and
+# scripts/edge-policy-assert checks what it reports. just ci does the same inside its Dagger
+# module, with no docker on the runner; see ADR 0007 for what that module may use.
+# Usage: scripts/edge-policy-check IMAGE
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+if (($# != 1)); then
+  echo "usage: edge-policy-check IMAGE" >&2
+  exit 2
+fi
+image=$1
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+"$root/scripts/edge-policy-render" "$work/in"
+chmod -R a+rX "$work/in"
+docker run --rm --network none --entrypoint sh --volume "$work/in:/work:ro" "$image" /work/proof.sh /work > "$work/out"
+"$root/scripts/edge-policy-assert" "$work/out"

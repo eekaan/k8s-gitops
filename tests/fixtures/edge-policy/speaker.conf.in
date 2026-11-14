@@ -1,0 +1,24 @@
+hostname speaker-@NAME@
+router bgp @AS@
+ bgp router-id @ADDRESS@
+ no bgp ebgp-requires-policy
+ no bgp network import-check
+ no bgp default ipv4-unicast
+ neighbor 127.0.0.1 remote-as 64497
+ neighbor 127.0.0.1 update-source @ADDRESS@
+ neighbor 127.0.0.1 ebgp-multihop 2
+ neighbor 127.0.0.1 timers 3 9
+ neighbor 127.0.0.1 timers connect 1
+ address-family ipv4 unicast
+  network @INSIDE@/32
+  network 198.51.100.5/32
+  network 203.0.113.16/30
+  network 203.0.113.16/28
+  network 0.0.0.0/0
+  neighbor 127.0.0.1 activate
+  neighbor 127.0.0.1 route-map NEXTHOP out
+ exit-address-family
+exit
+route-map NEXTHOP permit 10
+ set ip next-hop 192.0.2.99
+exit

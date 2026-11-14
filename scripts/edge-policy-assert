@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Checks what the real-speaker proof of the edge routers' routing policy printed (tests/fixtures/
+# edge-policy/proof.sh, run in FRR by edge-policy-check): of the five prefixes a speaker in the
+# cluster's AS offered, only the /32 inside the service range is in the edge's table; the speakers
+# in another AS and outside the listen range have no session; and the edge advertised nothing back.
+# Prints pass or FAIL per item and exits non-zero on any FAIL.
+# Usage: scripts/edge-policy-assert FILE, FILE being the proof's output
+set -euo pipefail
+
+if (($# != 1)) || [[ ! -s $1 ]]; then
+  echo "usage: edge-policy-assert FILE, the proof's output" >&2
+  exit 2
+fi
+out=$1
+failed=0
+
+# section NAME: the JSON the proof printed under NAME.
+section() {
+  sed -n "/^== $1\$/,/^== /{/^== /d;p}" "$out"
+}
+# expect DESCRIPTION SECTION JQ_FILTER: passes when the filter is true of the section's JSON.
+expect() {
+  if section "$2" | jq -e "$3" > /dev/null 2>&1; then
+    printf 'pass  %s\n' "$1"
+  else
+    printf 'FAIL  %s\n' "$1"
+    failed=1
+  fi
+}
+
+expect "the speaker offered all five prefixes" offered '.peers["127.0.0.1"].pfxSnt == 5'
+expect "exactly one session is established, the speaker in the cluster's AS inside the listen range" sessions \
+  '[.peers | to_entries[] | select(.value.state == "Established") | .key] == ["127.0.0.2"]'
+expect "the speaker in another AS has no session" sessions '.peers | has("127.0.0.3") | not'
+expect "the speaker outside the listen range has no session" sessions '.peers | has("127.0.1.1") | not'
+expect "the table holds the /32 inside the service range and nothing else" table \
+  '(.routes | keys) == ["203.0.113.17/32"]'
+expect "the edge accepted one prefix of the five" sessions '.peers["127.0.0.2"].pfxRcd == 1'
+expect "the edge advertised nothing" advertised '(.advertisedRoutes | length) == 0'
+expect "the speaker received nothing from the edge" offered '.peers["127.0.0.1"].pfxRcd == 0'
+exit "$failed"

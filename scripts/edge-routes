@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Prints, over SSH and reading only, an edge router's BGP sessions and the routes it has learned, as
+# FRR shows them, for a person learning the protocol. The output holds the workers' addresses and the
+# service addresses, so it goes to a terminal only: the script refuses when CI or GITHUB_ACTIONS is
+# set, and when its standard output is not a terminal, as in a pipe, a file or a CI log.
+# Usage: scripts/edge-routes [1|2]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/edge.sh
+. "$here/lib/edge.sh"
+
+index=0
+case ${1-1} in
+  1) ;;
+  2) index=1 ;;
+  *)
+    infra_error "usage: edge-routes [1|2]"
+    exit 2
+    ;;
+esac
+if [[ -n ${CI-} || -n ${GITHUB_ACTIONS-} ]]; then
+  infra_error "CI is set: the output holds addresses and goes to a terminal only"
+  exit 1
+fi
+if [[ ! -t 1 ]]; then
+  infra_error "standard output is not a terminal: the output holds addresses and goes to a terminal only"
+  exit 1
+fi
+# shellcheck source=scripts/stack-env
+. "$here/stack-env" sto2/edge
+lock_stack
+init_stack
+edge_connect
+
+echo "${edge_names[index]}:"
+edge_ssh "$index" 'sudo -n vtysh -c "show bgp ipv4 unicast summary" -c "show bgp ipv4 unicast"'

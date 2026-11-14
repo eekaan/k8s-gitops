@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Rolls a change to the edge routers' configuration out one edge at a time. Both edges render from
+# one template and a change to the rendered configuration replaces an instance, so one plan would
+# replace both at once, which scripts/infra-apply refuses. This plans the stack and prints the
+# summary, and once the stack's name is typed back (--yes: without asking), replaces edge 1, waits
+# until scripts/edge-check passes for it, and only then edge 2. Before it replaces an edge it checks
+# that the other one passes, so an edge is never replaced while the other is not serving. A check
+# that does not pass in EDGE_ROLLOUT_WAIT seconds (900 when unset), tried every EDGE_ROLLOUT_INTERVAL
+# seconds (15), stops the rollout there: an edge after it is not touched. The last step plans the
+# whole stack again and prints what is left.
+# Usage: scripts/edge-rollout [--yes]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/edge.sh
+. "$here/lib/edge.sh"
+
+confirmed=0
+for arg; do
+  case $arg in
+    --yes) confirmed=1 ;;
+    *)
+      infra_error "usage: edge-rollout [--yes]"
+      exit 2
+      ;;
+  esac
+done
+wait_seconds=${EDGE_ROLLOUT_WAIT:-900} interval=${EDGE_ROLLOUT_INTERVAL:-15}
+if [[ ! $wait_seconds =~ ^[0-9]+$ || ! $interval =~ ^[0-9]+$ ]]; then
+  infra_error "EDGE_ROLLOUT_WAIT and EDGE_ROLLOUT_INTERVAL are whole numbers of seconds"
+  exit 1
+fi
+
+# shellcheck source=scripts/stack-env
+. "$here/stack-env" sto2/edge
+lock_stack
+export EDGE_STACK_LOCKED=1
+init_stack
+echo "$stack:"
+plan_stack
+((confirmed)) || confirm "$stack" "roll out" "rolled out"
+
+# passes NUMBER: whether edge-check passes for edge NUMBER, tried until the wait is over.
+passes() {
+  local deadline=$((SECONDS + wait_seconds))
+  while :; do
+    if "$here/edge-check" --edge "$1"; then
+      return 0
+    fi
+    if ((SECONDS >= deadline)); then
+      return 1
+    fi
+    sleep "$interval"
+  done
+}
+
+# Each edge with its floating IP association, as the instance's replacement leaves the port and the
+# address in place; what the edge depends on, the shared group and key pair, comes with it.
+for number in 1 2; do
+  other=$((3 - number))
+  echo "edge $number: checking that edge $other serves before it is replaced"
+  if ! "$here/edge-check" --edge "$other"; then
+    infra_error "edge $other does not pass its check, so edge $number is not replaced"
+    exit 1
+  fi
+  echo "edge $number: replacing"
+  stack_tofu plan -input=false -out="$plan_file" "-target=module.edge[\"$number\"]" \
+    "-target=openstack_networking_floatingip_associate_v2.edge[\"$number\"]" > /dev/null
+  stack_tofu show -json "$plan_file" | plan_summary
+  apply_plan
+  echo "edge $number: applied; waiting for its check to pass"
+  if ! passes "$number"; then
+    infra_error "edge $number does not pass its check within ${wait_seconds}s; the rollout stops here and no later edge was touched"
+    exit 1
+  fi
+done
+
+echo "$stack: both edges replaced and passing; what is left of the plan:"
+plan_stack

@@ -1,0 +1,27 @@
+#cloud-config
+# An edge router, configured once at first boot; scripts/edge-check and the runbook read it back.
+ssh_pwauth: false
+disable_root: true
+write_files:
+  - path: /etc/edge/frr.conf
+    permissions: "0644"
+    content: |
+      ${indent(6, frr_conf)}
+  - path: /etc/edge/daemons
+    permissions: "0644"
+    content: |
+      ${indent(6, daemons)}
+  - path: /etc/edge/nftables.conf
+    permissions: "0644"
+    content: |
+      ${indent(6, nftables_conf)}
+  - path: /etc/edge/sysctl.conf
+    permissions: "0644"
+    content: |
+      ${indent(6, sysctl)}
+  - path: /usr/local/sbin/edge-first-boot
+    permissions: "0755"
+    content: |
+      ${indent(6, first_boot)}
+runcmd:
+  - [/usr/local/sbin/edge-first-boot]

@@ -80,3 +80,25 @@ infra-backup-buckets:
 # Check that the cluster's S3 key is not the state key and lists each backup bucket; pass or FAIL per item, no names or keys
 infra-backup-check:
     scripts/infra-backup-check
+
+# List the names of the public images the cloud offers, one per line, optionally only those containing a pattern, so that EDGE_IMAGE and CI_HOST_IMAGE can be chosen without a console; reads only and prints nothing but names
+os-images pattern='':
+    scripts/os-images {{ quote(pattern) }}
+
+# Create the SSH key pair of the edge routers at EDGE_SSH_KEY_FILE, mode 0600 and without a passphrase, unless a key is there; says only whether it created one
+edge-ssh-key:
+    scripts/edge-ssh-key
+
+# Check, reading only and over SSH, that both edge routers serve (or only edge 1 or 2): FRR runs, every worker has an established session, the table holds only /32s inside the service range, the rules are loaded and the kernel forwards; pass, FAIL or skip per line, no address; see docs/runbooks/edge.md
+[positional-arguments]
+edge-check *args:
+    scripts/edge-check "$@"
+
+# Print an edge router's BGP sessions and learned routes, with addresses, for a person learning the protocol; to a terminal only, refused in CI and in a pipe
+edge-routes edge='1':
+    scripts/edge-routes {{ quote(edge) }}
+
+# Replace the edge routers one at a time after a change to their configuration, once the stack's name is typed back (--yes: without asking): replace one, wait until edge-check passes for it, then the other; stops at the first edge that does not pass
+[positional-arguments]
+edge-rollout *flags:
+    scripts/edge-rollout "$@"

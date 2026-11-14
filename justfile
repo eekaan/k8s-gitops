@@ -103,7 +103,7 @@ checks: static tests-1 tests-2 tests-3
 
 # The groups of checks are the dependencies of checks, and each group's checks its own dependencies: just ci runs every group side by side in containers of its own, and CI runs each as a job of its own. A check, with whatever it depends on, belongs to one group only, or it would run twice.
 # The checks other than the bats tests, the cheapest and most basic first
-static: tools-check check-literals check-commit-literals cluster-secrets-check lint renovate-check scenarios-check infra-check talos-check kubernetes-check render-check secrets-scan
+static: tools-check check-literals check-commit-literals cluster-secrets-check lint renovate-check edge-policy-check scenarios-check infra-check talos-check kubernetes-check render-check secrets-scan
 
 # The first of three parts of the bats tests
 tests-1: (test '1/3')
@@ -115,9 +115,9 @@ tests-2: (test '2/3')
 tests-3: (test '3/3')
 
 # Without a terminal, as in CI, Dagger's default progress is a line every 30 seconds; plain prints every step and each check's output as it happens.
-# Run the checks inside containers built from the pins, as CI does: every group side by side, or only the group named, such as just ci tests-2; renovate-check's validator in its own image, the other checks in a container with the tools pinned in mise.toml
+# Run the checks inside containers built from the pins, as CI does: every group side by side, or only the group named, such as just ci tests-2; renovate-check's validator and edge-policy-check's FRR in their own images, the other checks in a container with the tools pinned in mise.toml
 ci group='':
-    base=$(scripts/check-address-literals --base); if [ -t 2 ]; then progress=auto; else progress=plain; fi; dagger api call --progress="$progress" ci checks --base="$base" --renovate-image='{{ renovate_image }}' --group={{ quote(group) }}
+    base=$(scripts/check-address-literals --base); if [ -t 2 ]; then progress=auto; else progress=plain; fi; dagger api call --progress="$progress" ci checks --base="$base" --renovate-image='{{ renovate_image }}' --frr-image='{{ frr_image }}' --group={{ quote(group) }}
 
 # Print the groups of checks as a JSON list, the CI workflow's matrix of jobs; in a GitHub Actions step, also set it as the step's output groups
 [script]
@@ -165,6 +165,22 @@ renovate_image := "ghcr.io/renovatebot/renovate:44.227.4@sha256:fe058db9710840a4
 renovate-check:
     docker run --rm --network none -v "$PWD":/usr/src/app:ro -w /usr/src/app {{ renovate_image }} renovate-config-validator --strict --no-global renovate.json5 .renovate/*.json5
 
+# The image of FRR for edge-policy-check here and for just ci's Dagger module: the upstream build of the release the edge routers' Debian image packages (10.3). Its own build takes 64 equal-cost paths, Debian's 256, which the proof's configuration allows for; it moves with the edge image's release, by hand
+frr_image := "quay.io/frrouting/frr:10.3.4@sha256:c8790a83db3cb105c0823f76afe55de5c9f77d968fb1ebd28174a8ddd49b989c"
+
+# Prove the edge routers' routing policy with a real BGP speaker: the FRR configuration the edge stack renders runs in FRR's container with only its loopback and offered prefixes by speakers of the cluster's AS, another AS and an address outside the listen range, and only the /32 inside the service range may end up in its table, with nothing advertised back; needs docker, as renovate-check does, which just ci's module does not
+edge-policy-check:
+    scripts/edge-policy-check {{ frr_image }}
+
+# Write what the edge routing policy's proof runs into a directory: the edge stack's rendered FRR configuration, and the proof's script and speaker template; needs tofu only
+edge-policy-render dir:
+    scripts/edge-policy-render {{ quote(dir) }}
+
+# Check what the edge routing policy's proof printed, a file: pass or FAIL per item
+edge-policy-assert file:
+    scripts/edge-policy-assert {{ quote(file) }}
+
 # Publish kubernetes/ as the signed artifact Flux follows, and move its main tag; runs only in the publish workflow
 publish:
     scripts/publish
+

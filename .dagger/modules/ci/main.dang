@@ -28,6 +28,11 @@ type Ci {
     renovateImage: String!,
 
     """
+    The image edge-policy-check runs FRR from.
+    """
+    frrImage: String!,
+
+    """
     The commit where HEAD's history leaves the default branch, or empty without one; the messages of the commits after it are checked.
     """
     base: String! = "",
@@ -65,7 +70,7 @@ type Ci {
     """, "bash", group]).stdout
     let groups = listing.trimSpace.split("\n").reject { _.isEmpty }.map { line =>
       let words = line.split(" ")
-      Group(name: words.takeFirst.join(""), checks: words.dropFirst, checkout: checkout, validator: validator)
+      Group(name: words.takeFirst.join(""), checks: words.dropFirst, checkout: checkout, validator: validator, frr: container.from(frrImage))
     }
     if (groups.isEmpty) {
       raise "the checks recipe has no groups"
@@ -144,10 +149,28 @@ type Group {
   let validator: Container!
 
   """
-  Whether every check of the group passed, and what they printed: renovate-check's validator and the just run of the others side by side.
+  FRR's image, which edge-policy-check's speakers run in.
+  """
+  let frr: Container!
+
+  """
+  Whether every check of the group passed, and what they printed: renovate-check's validator, edge-policy-check's FRR and the just run of the others side by side.
   """
   outcome: Outcome! {
-    let others = checks.reject { _ == "renovate-check" }
+    let others = checks.reject { _ == "renovate-check" or _ == "edge-policy-check" }
+    # The edge routers' routing policy against real BGP speakers: the checkout renders the edge's
+    # configuration, FRR's container runs the speakers with no network but its loopback, and the
+    # checkout checks what they printed. No docker, no privileges.
+    let policyInputs = checkout.withExec(["just", "edge-policy-render", "/tmp/edge-policy"]).directory("/tmp/edge-policy")
+    let policyPrinted = frr
+      .withMountedDirectory("/work", policyInputs)
+      .withExec(["sh", "-c", "sh /work/proof.sh /work > /tmp/proof.out"])
+      .file("/tmp/proof.out")
+    let edgePolicy: [Run!]! = if (checks.contains("edge-policy-check")) {
+      [Run(label: "edge-policy-check", ctr: checkout.withFile("/tmp/proof.out", policyPrinted).withExec(["bash", "-c", `exec 2>&1; just edge-policy-assert /tmp/proof.out`]))]
+    } else {
+      []
+    }
     let renovate: [Run!]! = if (checks.contains("renovate-check")) {
       [Run(label: "renovate-check", ctr: validator.withExec(["sh", "-c", "renovate-config-validator --strict --no-global renovate.json5 .renovate/*.json5 2>&1"]))]
     } else {
@@ -160,7 +183,7 @@ type Group {
     } else {
       [Run(label: "", ctr: checkout.withExec(["bash", "-c", `exec 2>&1; just "$@"`, "bash"] + others))]
     }
-    let done = (renovate + justRun).{{ label, outcome }}
+    let done = (renovate + edgePolicy + justRun).{{ label, outcome }}
     Outcome(
       passed: done.all { _.outcome.passed },
       output: done.map { r => if (r.label == "") { r.outcome.output } else { r.label + ":\n" + r.outcome.output } }.join("\n"),

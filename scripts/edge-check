@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# Checks, reading only, over SSH, that both edge routers (or the one named with --edge) are serving:
+# FRR runs; as many BGP sessions are established as the cluster's talman.yaml lists workers, and the
+# table says which worker has none; the table holds only /32s inside the service range; each has as
+# many next hops as there are sessions, or fewer, which is for a person to read, as a Service that
+# is local-only is announced by some workers only; the nftables rules are loaded; and the kernel
+# forwards. Prints pass, FAIL or skip per line, never an address, and exits non-zero on any FAIL.
+# A check that needs the cluster's talman.yaml is skipped while it does not exist.
+# Usage: scripts/edge-check [--edge 1|2] [cluster]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/edge.sh
+. "$here/lib/edge.sh"
+
+only='' cluster=lab-sto2
+while (($#)); do
+  case $1 in
+    --edge)
+      [[ ${2-} == 1 || ${2-} == 2 ]] || {
+        infra_error "usage: edge-check [--edge 1|2] [cluster]"
+        exit 2
+      }
+      only=$2
+      shift 2
+      ;;
+    -*)
+      infra_error "usage: edge-check [--edge 1|2] [cluster]"
+      exit 2
+      ;;
+    *)
+      cluster=$1
+      shift
+      ;;
+  esac
+done
+if [[ ! $cluster =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
+  infra_error "$cluster is not a cluster: name a directory under talos/, such as lab-sto2"
+  exit 1
+fi
+# shellcheck source=scripts/stack-env
+. "$here/stack-env" sto2/edge
+# scripts/edge-rollout holds the stack's lock while it runs this.
+if [[ -z ${EDGE_STACK_LOCKED-} ]]; then
+  lock_stack
+fi
+init_stack
+edge_connect
+
+talman=$infra_root/talos/$cluster/talman.yaml
+workers=() service_range='' node_subnet=''
+if [[ -f $talman ]]; then
+  mapfile -t workers < <(yq '.nodes[] | select(.role == "worker") | .hostname' "$talman")
+  service_range=$(yq '.values.serviceRange // ""' "$talman")
+  node_subnet=$(yq '.values.nodeSubnet // ""' "$talman")
+fi
+
+ipv4_number() {
+  local -a octets
+  IFS=. read -r -a octets <<< "$1"
+  echo $(((10#${octets[0]} << 24) | (10#${octets[1]} << 16) | (10#${octets[2]} << 8) | 10#${octets[3]}))
+}
+ipv4_string() {
+  echo "$(($1 >> 24 & 255)).$(($1 >> 16 & 255)).$(($1 >> 8 & 255)).$(($1 & 255))"
+}
+# in_range PREFIX: whether PREFIX is a /32 inside the service range.
+in_range() {
+  local bits=${service_range#*/} mask
+  [[ $1 =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/32$ ]] || return 1
+  mask=$(((0xffffffff << (32 - bits)) & 0xffffffff))
+  ((($(ipv4_number "${1%/*}") & mask) == ($(ipv4_number "${service_range%/*}") & mask)))
+}
+# worker_address NAME: where the cluster stack puts a worker on the node subnet: the host number 20
+# for <prefix>-w-1, 21 for -w-2, and so on (docs/infrastructure.md, the node subnet). Prints nothing
+# for a name of another form.
+worker_address() {
+  [[ $1 =~ -w-([0-9]+)$ ]] || return 0
+  ipv4_string $(($(ipv4_number "${node_subnet%/*}") + 20 + 10#${BASH_REMATCH[1]} - 1))
+}
+
+failed=0
+say() { printf '%-5s %s: %s\n' "$1" "$2" "$3"; }
+pass() { say pass "$1" "$2"; }
+fail() {
+  say FAIL "$1" "$2"
+  failed=1
+}
+skip() { say skip "$1" "$2"; }
+
+# What an edge is asked, as one command, in sections.
+remote='echo "== frr"; systemctl is-active frr || true
+echo "== sessions"; sudo -n vtysh -c "show bgp ipv4 unicast summary json" || true
+echo "== table"; sudo -n vtysh -c "show bgp ipv4 unicast json" || true
+echo "== rules"; sudo -n nft list tables || true
+echo "== forwarding"; sysctl -n net.ipv4.ip_forward || true'
+
+check_edge() {
+  local index=$1 edge=${edge_names[$1]} report section_frr section_sessions section_table section_rules section_forwarding
+  local -a established=() prefixes=() missing=() outside=() fewer=()
+  local prefix hops worker address
+  if ! report=$(edge_ssh "$index" "$remote" 2> /dev/null); then
+    fail "$edge" "cannot connect over SSH"
+    return
+  fi
+  # section NAME: what the edge printed under NAME.
+  section() { sed -n "/^== $1\$/,/^== /{/^== /d;p}" <<< "$report"; }
+  section_frr=$(section frr)
+  section_sessions=$(section sessions)
+  section_table=$(section table)
+  section_rules=$(section rules)
+  section_forwarding=$(section forwarding)
+
+  if [[ $section_frr == active ]]; then
+    pass "$edge" "FRR is running"
+  else
+    fail "$edge" "FRR is not running"
+  fi
+
+  mapfile -t established < <(jq -r '.peers // {} | to_entries[] | select(.value.state == "Established") | .key' <<< "$section_sessions" 2> /dev/null)
+  if ((${#workers[@]} == 0)); then
+    skip "$edge" "sessions: talos/$cluster/talman.yaml lists no workers, so none is expected"
+  else
+    for worker in "${workers[@]}"; do
+      address=$(worker_address "$worker")
+      if [[ -n $address && " ${established[*]} " != *" $address "* ]]; then
+        missing+=("$worker")
+      fi
+    done
+    if ((${#established[@]} == ${#workers[@]} && ${#missing[@]} == 0)); then
+      pass "$edge" "${#established[@]} of ${#workers[@]} worker sessions are established"
+    elif ((${#missing[@]} > 0)); then
+      fail "$edge" "${#established[@]} of ${#workers[@]} worker sessions are established; no session from ${missing[*]}"
+    else
+      fail "$edge" "${#established[@]} of ${#workers[@]} worker sessions are established"
+    fi
+  fi
+
+  mapfile -t prefixes < <(jq -r '.routes // {} | keys[]' <<< "$section_table" 2> /dev/null)
+  if [[ -z $service_range ]]; then
+    skip "$edge" "routes: talos/$cluster/talman.yaml gives no service range"
+  else
+    for prefix in "${prefixes[@]}"; do
+      in_range "$prefix" || outside+=("$prefix")
+    done
+    if ((${#outside[@]} > 0)); then
+      fail "$edge" "${#outside[@]} of ${#prefixes[@]} routes in the table are not a /32 inside the service range"
+    else
+      pass "$edge" "the table holds ${#prefixes[@]} routes, each a /32 inside the service range"
+    fi
+    for prefix in "${prefixes[@]}"; do
+      hops=$(jq -r --arg prefix "$prefix" '[.routes[$prefix][] | select(.multipath == true or .bestpath == true)] | length' <<< "$section_table")
+      if ((hops > ${#established[@]})); then
+        fail "$edge" "a route has more next hops than there are sessions"
+        break
+      elif ((hops < ${#established[@]})); then
+        fewer+=("$prefix")
+      fi
+    done
+    if ((${#prefixes[@]} == 0)); then
+      skip "$edge" "next hops: no Service address is announced"
+    elif ((${#fewer[@]} > 0)); then
+      skip "$edge" "next hops: ${#fewer[@]} of ${#prefixes[@]} routes have fewer next hops than sessions, as a Service that is local-only has"
+    else
+      pass "$edge" "each route has a next hop for each of the ${#established[@]} sessions"
+    fi
+  fi
+
+  if grep -qx 'table inet edge' <<< "$section_rules" && grep -qx 'table ip edge-nat' <<< "$section_rules"; then
+    pass "$edge" "the nftables rules are loaded"
+  else
+    fail "$edge" "the nftables rules are not loaded"
+  fi
+  if [[ $section_forwarding == 1 ]]; then
+    pass "$edge" "the kernel forwards"
+  else
+    fail "$edge" "the kernel does not forward"
+  fi
+}
+
+for index in 0 1; do
+  if [[ -z $only || $only == $((index + 1)) ]]; then
+    check_edge "$index"
+  fi
+done
+exit "$failed"
