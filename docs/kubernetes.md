@@ -356,5 +356,30 @@ through the HelmRelease's own values, which `install-app` substitutes as Flux do
 `just cluster-bootstrap` installs it so, after Cilium and once `cluster-config` is applied
 ([cluster.md](cluster.md#recipes)).
 
+`just app-adoption <application directory> [cluster]` shows that Flux adopted such an application
+as designed, through the cluster's kubeconfig as `just cluster-flux` uses it. Start it, then
+`just cluster-flux`. It polls every `ADOPTION_INTERVAL` seconds, 10 when unset, until the
+application's HelmRelease exists and is Ready for its current generation, for up to `ADOPTION_WAIT`
+seconds, 900 when unset, and reads every node's Ready condition at each poll. A HelmRelease that is
+stalled, or whose release or Helm tests fail, ends the wait with helm-controller's reason and
+message. Then it prints pass or FAIL for each check, and exits 0 only when all of them pass:
+
+- one release: exactly one Helm release has the HelmRelease's release name, in any namespace, so
+  Flux did not install a second one;
+- adopted: the release's first revision, installed before Flux, lacks the labels helm-controller
+  gives the objects it installs, and the deployed revision has them, so helm-controller upgraded
+  the release that was there;
+- HelmRelease Ready: the HelmRelease is Ready, and its `status.history` gives the deployed revision
+  the chart version in `ocirepository.yaml`, to which helm-controller appends the chart artifact's
+  digest as build metadata; when the wait ended otherwise, what it waited for or the failure;
+- nodes Ready: every node was Ready at every poll; a FAIL names each node that was not, and at how
+  many polls.
+
+It only reads, and prints object names: no node's address, no manifest, and none of kubectl's or
+helm's own errors, which can name the API server's address. helm-controller's first revision may
+restart the application's pods once: it renders the chart under that version with the digest, and
+a chart that writes its version into its pod templates, as Cilium's does in the label
+`helm.sh/chart`, changes every pod template.
+
 `kube-system` exists before Flux does: its `namespace.yaml` only sets the namespace's labels, and
 like every namespace it is never pruned.

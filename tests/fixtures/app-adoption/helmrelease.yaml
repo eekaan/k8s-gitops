@@ -1,0 +1,44 @@
+---
+# The HelmRelease cilium, trimmed, as helm-controller reports it once it has adopted the release
+# installed before Flux: Ready for its generation, with the upgrade it made, revision 2, in its
+# history. tests/app-adoption.bats sets the history's chartVersion to the one helm-controller gives
+# the chart the application's ocirepository.yaml pins, and changes the rest to make other states.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: cilium
+  namespace: kube-system
+  generation: 1
+spec:
+  interval: 30m
+  releaseName: cilium
+  targetNamespace: kube-system
+  storageNamespace: kube-system
+  chartRef:
+    kind: OCIRepository
+    name: cilium
+status:
+  observedGeneration: 1
+  storageNamespace: kube-system
+  conditions:
+    - type: Ready
+      status: "True"
+      observedGeneration: 1
+      reason: UpgradeSucceeded
+      message: Helm upgrade succeeded for release kube-system/cilium.v2 with chart cilium
+    - type: Released
+      status: "True"
+      observedGeneration: 1
+      reason: UpgradeSucceeded
+      message: Helm upgrade succeeded for release kube-system/cilium.v2 with chart cilium
+  history:
+    - name: cilium
+      namespace: kube-system
+      version: 2
+      status: deployed
+      chartName: cilium
+      chartVersion: ""
+      digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      configDigest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+      firstDeployed: "2026-01-01T00:00:00Z"
+      lastDeployed: "2026-01-01T00:10:00Z"

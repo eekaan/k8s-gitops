@@ -1,0 +1,261 @@
+#!/usr/bin/env bash
+# Watches Flux take over an application that was installed before it, such as Cilium, and says
+# whether that went as designed. Started before Flux adopts the application (on a new cluster,
+# before just cluster-flux), it polls until the application's HelmRelease exists and reports Ready
+# for its current generation, every ADOPTION_INTERVAL seconds (10) for up to ADOPTION_WAIT seconds
+# (900), and reads every node's Ready condition at each poll. A HelmRelease that is stalled, or whose
+# release or Helm tests failed, ends the wait at once. Then it prints pass or FAIL for each check,
+# with one line of why:
+#   one release        exactly one Helm release has the HelmRelease's release name, across every
+#                      namespace;
+#   adopted            the release's first revision, installed before Flux, lacks the labels
+#                      helm-controller gives every object it renders (managed_by_flux in
+#                      scripts/lib/cluster.sh), and its deployed revision has them;
+#   HelmRelease Ready  the HelmRelease is Ready, and its status.history gives the deployed revision
+#                      the chart version in the application's ocirepository.yaml, with or without
+#                      the chart artifact's digest; a wait that ended without it says what it waited
+#                      for, or the failure helm-controller reported;
+#   nodes Ready        every node was Ready at every poll; a FAIL names each node that was not, and
+#                      at how many polls.
+# Exits 0 only when every check passes.
+#
+# It only reads, with kubectl get, helm list, helm history and helm get manifest: it never patches,
+# annotates, reconciles or installs anything. It prints object names, and helm-controller's reason
+# and message for a failure; never a node's addresses, a manifest, or kubectl's and helm's own
+# output, which can name the API server's address.
+#
+# Usage: scripts/app-adoption <application directory> [cluster]
+#   such as kubernetes/apps/base/kube-system/cilium, the directory with ks.yaml and app/, on the
+#   cluster whose kubeconfig scripts/cluster-env sets, lab-sto2 when none is given
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/cluster.sh
+. "$here/lib/cluster.sh"
+
+if (($# < 1 || $# > 2)) || [[ $1 == -* || ${2-} == -* ]]; then
+  infra_error "usage: app-adoption <application directory> [cluster]"
+  exit 2
+fi
+dir=$1
+
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "${2-}"
+complete=1
+require_kubeconfig || complete=0
+if fields=$(app_release "$dir"); then
+  read -r release namespace name hr_namespace <<< "$fields"
+  version=$(app_field "$dir/app/ocirepository.yaml" .spec.ref.tag) || complete=0
+else
+  complete=0
+fi
+# A poll every zero seconds would only load the API server.
+if [[ ! ${ADOPTION_INTERVAL:-10} =~ ^[0-9]+$ ]] || ((10#${ADOPTION_INTERVAL:-10} == 0)); then
+  infra_error "ADOPTION_INTERVAL is not a whole number of seconds above zero"
+  complete=0
+fi
+if [[ ! ${ADOPTION_WAIT:-900} =~ ^[0-9]+$ ]]; then
+  infra_error "ADOPTION_WAIT is not a whole number of seconds"
+  complete=0
+fi
+for tool in yq jq helm kubectl; do
+  if ! command -v "$tool" > /dev/null; then
+    infra_error "$tool not found on PATH"
+    complete=0
+  fi
+done
+((complete))
+interval=$((10#${ADOPTION_INTERVAL:-10}))
+longest=$((10#${ADOPTION_WAIT:-900}))
+helmrelease=$hr_namespace/$name
+kind=helmreleases.helm.toolkit.fluxcd.io
+
+# say LINE: LINE after the script's name.
+say() {
+  printf '%s: %s\n' "${0##*/}" "$1"
+}
+
+# unreadable WHAT: stops the check, as kubectl could not read WHAT. Its error is left out, as it can
+# name the API server's address.
+unreadable() {
+  infra_error "kubectl could not read $1; its error is not printed, as it can name the API server's address"
+  exit 1
+}
+
+# Per node, at how many polls it was not Ready, and what the last poll found.
+declare -A not_ready=() last_ready=()
+
+# read_nodes: reads every node's Ready condition, counts each node that is not Ready in not_ready,
+# and says when a node leaves Ready and when it is back. Of kubectl's answer only the nodes' names and
+# that condition are read.
+read_nodes() {
+  local nodes node ready
+  nodes=$(kubectl get nodes --output json 2> /dev/null |
+    jq -r '.items[]? | .metadata.name + " "
+      + (first(.status.conditions[]? | select(.type == "Ready") | .status) // "Unknown")') || return 1
+  while read -r node ready; do
+    [[ -n $node ]] || continue
+    if [[ $ready != True ]]; then
+      not_ready[$node]=$((${not_ready[$node]-0} + 1))
+      [[ ${last_ready[$node]-True} != True ]] || say "node $node is not Ready"
+    elif [[ ${last_ready[$node]-True} != True ]]; then
+      say "node $node is Ready again"
+    fi
+    last_ready[$node]=$ready
+  done <<< "$nodes"
+}
+
+# What a HelmRelease reports, as a state and a detail separated by a tab (helm-controller v1.7.1,
+# which the pinned Flux runs: api/v2/condition_types.go and internal/reconcile/atomic_release.go):
+#   failed   Stalled is True, as helm-controller has given up, or Released or TestSuccess is False,
+#            as its install, upgrade or Helm tests failed; the detail is that condition's type,
+#            reason and message, on one line
+#   ready    Ready is True, for the HelmRelease's current generation
+#   waiting  anything else, such as a source not ready yet; the detail is what it waits for
+# shellcheck disable=SC2016 # $ready and $failed are jq variables.
+state_of='
+  def condition($type): first(.status.conditions[]? | select(.type == $type)) // null;
+  condition("Ready") as $ready
+  | ([condition("Stalled") | select(.status == "True")]
+    + [condition("Released"), condition("TestSuccess") | select(.status == "False")]) as $failed
+  | if ($failed | length) > 0 then
+      "failed\t" + ($failed[0] | "\(.type) \(.reason // "unknown"): \(.message // "")" | gsub("\\s+"; " "))
+    elif $ready.status == "True" and .status.observedGeneration == .metadata.generation then
+      "ready\t"
+    else
+      "waiting\tto be Ready for generation \(.metadata.generation) (Ready: \([$ready.status // "Unknown", $ready.reason // empty] | join(" ")))"
+    end'
+
+# read_helmrelease: reads the HelmRelease into object, and what it reports into state and detail
+# (state_of); while Flux's HelmRelease kind or the HelmRelease does not exist yet, it is waiting.
+read_helmrelease() {
+  local found
+  object=''
+  found=$(kubectl get customresourcedefinitions "$kind" --ignore-not-found --output name 2> /dev/null) || return 1
+  if [[ -z $found ]]; then
+    state=waiting detail="Flux's HelmRelease kind to exist"
+    return 0
+  fi
+  object=$(kubectl get "$kind" "$name" --namespace "$hr_namespace" --ignore-not-found --output json 2> /dev/null) || return 1
+  if [[ -z $object ]]; then
+    state=waiting detail="the HelmRelease $helmrelease to exist"
+    return 0
+  fi
+  found=$(jq -r "$state_of" <<< "$object") || return 1
+  IFS=$'\t' read -r state detail <<< "$found"
+  [[ $state != waiting ]] || detail="the HelmRelease $helmrelease $detail"
+}
+
+step="watching the adoption"
+say "watching the HelmRelease $helmrelease adopt release $release in $namespace, polling every ${interval}s for up to ${longest}s; it reads only"
+deadline=$((SECONDS + longest))
+polls=0 shown=''
+while :; do
+  polls=$((polls + 1))
+  read_nodes || unreadable "the nodes"
+  read_helmrelease || unreadable "the HelmRelease $helmrelease"
+  [[ $state == waiting ]] || break
+  if [[ $detail != "$shown" ]]; then
+    say "waiting for $detail"
+    shown=$detail
+  fi
+  if ((SECONDS >= deadline)); then
+    state=timeout
+    break
+  fi
+  sleep "$interval"
+done
+
+step="checking the adoption"
+failures=0
+# result VERDICT CHECK WHY: one check's result, pass or FAIL, with its name and why.
+result() {
+  printf '%-4s  %s: %s\n' "$1" "$2" "$3"
+  [[ $1 == pass ]] || failures=$((failures + 1))
+}
+
+# A second release of the name means Flux installed one of its own instead of adopting the first.
+# helm list takes a regular expression, in which a dot in a release name is no wildcard.
+if found=$(helm list --all-namespaces --filter "^${release//./\\.}\$" --output json 2> /dev/null) &&
+  found=$(jq -r --arg release "$release" \
+    '[.[] | select(.name == $release) | .namespace] | sort | "\(length) \(join(", "))"' <<< "$found"); then
+  read -r count where <<< "$found"
+  case $count in
+    1) result pass "one release" "$release exists once, in $where" ;;
+    0) result FAIL "one release" "no release named $release exists" ;;
+    *) result FAIL "one release" "$count releases named $release exist, in $where" ;;
+  esac
+else
+  result FAIL "one release" "helm could not list the releases"
+fi
+
+# helm history lists the revisions in ascending order; the first is the install before Flux.
+deployed=''
+if found=$(helm history "$release" --namespace "$namespace" --output json 2> /dev/null) &&
+  found=$(jq -r '"\(length) \(map(.revision) | min // "none") \([.[] | select(.status == "deployed") | .revision] | max // "none")"' <<< "$found"); then
+  read -r count first deployed <<< "$found"
+  first_labels=0 deployed_labels=0
+  if ((count < 2)); then
+    if ((count == 1)); then noun=revision; else noun=revisions; fi
+    result FAIL adopted "release $release has $count $noun; helm-controller has not upgraded the revision installed before Flux"
+  elif [[ $deployed == none ]]; then
+    result FAIL adopted "release $release has no deployed revision"
+  else
+    managed_by_flux "$release" "$namespace" "$first" || first_labels=$?
+    managed_by_flux "$release" "$namespace" "$deployed" || deployed_labels=$?
+    if ((first_labels == 2)); then
+      result FAIL adopted "helm has no manifest of revision $first of release $release"
+    elif ((first_labels == 0)); then
+      result FAIL adopted "revision $first already carries helm-controller's labels: Flux installed release $release, and nothing was adopted"
+    elif ((deployed_labels == 2)); then
+      result FAIL adopted "helm has no manifest of revision $deployed of release $release"
+    elif ((deployed_labels != 0)); then
+      result FAIL adopted "the deployed revision $deployed does not carry helm-controller's labels"
+    else
+      result pass adopted "revision $first, installed before Flux, does not carry helm-controller's labels, and the deployed revision $deployed does"
+    fi
+  fi
+else
+  result FAIL adopted "helm has no history of release $release in $namespace"
+fi
+
+case $state in
+  failed) result FAIL "HelmRelease Ready" "$helmrelease reports $detail" ;;
+  timeout) result FAIL "HelmRelease Ready" "waited ${longest}s for $detail" ;;
+  *)
+    chart=''
+    if [[ $deployed =~ ^[0-9]+$ ]]; then
+      chart=$(jq -r --argjson revision "$deployed" \
+        'first(.status.history[]? | select(.version == $revision) | .chartVersion) // ""' <<< "$object") || chart=''
+    fi
+    # helm-controller versions a chart from an OCIRepository <version>+<the artifact's digest,
+    # shortened>, which is build metadata: the version is what comes before the +
+    # (mutateChartWithSourceRevision in internal/controller/helmrelease_controller.go).
+    if [[ ! $deployed =~ ^[0-9]+$ ]]; then
+      result FAIL "HelmRelease Ready" "$helmrelease is Ready, but helm shows no deployed revision to find in its status.history"
+    elif [[ -z $chart ]]; then
+      result FAIL "HelmRelease Ready" "$helmrelease is Ready, but its status.history has no revision $deployed"
+    elif [[ ${chart%%+*} != "$version" ]]; then
+      result FAIL "HelmRelease Ready" "$helmrelease is Ready, but its status.history gives the deployed revision $deployed chart version $chart, and ocirepository.yaml $version"
+    else
+      result pass "HelmRelease Ready" "$helmrelease is Ready, and its status.history gives the deployed revision $deployed chart version $chart, which is ocirepository.yaml's $version"
+    fi
+    ;;
+esac
+
+if ((${#not_ready[@]} == 0)); then
+  result pass "nodes Ready" "every node was Ready at every poll, $polls in all"
+else
+  left=''
+  mapfile -t nodes < <(printf '%s\n' "${!not_ready[@]}" | sort)
+  for node in "${nodes[@]}"; do
+    left+="${left:+, }$node for ${not_ready[$node]} of $polls polls"
+  done
+  result FAIL "nodes Ready" "not Ready during the wait: $left"
+fi
+
+if ((failures > 0)); then
+  infra_error "$failures of 4 checks failed"
+  exit 1
+fi
+say "release $release in $namespace is adopted by the HelmRelease $helmrelease as designed"

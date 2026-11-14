@@ -265,6 +265,37 @@ EOF
   [ "$(upgrade_flag -n --namespace)" = "$storage" ]
 }
 
+@test "Flux installs the chart and values the install script installs" {
+  built="$BATS_TEST_TMPDIR/built.yaml"
+  # The application as Flux applies it, built from its Kustomization. flux build reads only paths
+  # below the working directory.
+  cd "$REPO"
+  flux build kustomization cilium --path ./kubernetes/apps/base/kube-system/cilium/app \
+    --kustomization-file ./kubernetes/apps/base/kube-system/cilium/ks.yaml --dry-run >"$built"
+  chart_ref
+
+  # One chart source and one values ConfigMap: no second copy of either.
+  [ "$(yq -N 'select(.kind == "OCIRepository") | .metadata.name' "$built" | wc -l)" -eq 1 ]
+  [ "$(yq -N 'select(.kind == "ConfigMap") | .metadata.name' "$built" | wc -l)" -eq 1 ]
+  # The chart comes from that source, in the HelmRelease's namespace when chartRef names none, at
+  # the location and version install-cilium reads.
+  source="$(yq -N 'select(.kind == "OCIRepository") | .metadata.namespace + "/" + .metadata.name' "$built")"
+  [ "$(yq -N 'select(.kind == "HelmRelease") | .spec.chartRef.kind' "$built")" = OCIRepository ]
+  [ "$(yq -N 'select(.kind == "HelmRelease") | (.spec.chartRef.namespace // .metadata.namespace) + "/" + .spec.chartRef.name' "$built")" = "$source" ]
+  [ "$(yq -N 'select(.kind == "OCIRepository") | .spec.url' "$built")" = "$url" ]
+  [ "$(yq -N 'select(.kind == "OCIRepository") | .spec.ref.tag' "$built")" = "$tag" ]
+  # The values are the generated ConfigMap's whole values.yaml key, helm-controller's default key,
+  # and nothing else: no other source, no target path, no values of the HelmRelease's own.
+  [ "$(yq -N 'select(.kind == "HelmRelease") | .spec.valuesFrom | length' "$built")" -eq 1 ]
+  [ "$(yq -N 'select(.kind == "HelmRelease") | .spec.valuesFrom[0] | .kind + " " + (.valuesKey // "values.yaml") + " " + (.targetPath // "none")' "$built")" = "ConfigMap values.yaml none" ]
+  [ "$(yq -N 'select(.kind == "HelmRelease") | .spec.values // "none"' "$built")" = none ]
+  name="$(yq -N 'select(.kind == "HelmRelease") | .spec.valuesFrom[0].name' "$built")"
+  [ "$name" = "$(yq -N 'select(.kind == "ConfigMap") | .metadata.name' "$built")" ]
+  # The ConfigMap holds values.yaml byte for byte, the file install-cilium gives helm.
+  yq -o json "select(.kind == \"ConfigMap\" and .metadata.name == \"$name\")" "$built" |
+    jq -j '.data["values.yaml"]' | cmp - "$APP/values.yaml"
+}
+
 @test "a second run against the release it installed changes nothing" {
   recording_tools
   deployed_helm "$APP/values.yaml"

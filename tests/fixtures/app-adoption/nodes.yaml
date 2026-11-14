@@ -1,0 +1,73 @@
+---
+# Three Ready nodes, trimmed, as kubectl get nodes --output json lists them. Their addresses are
+# markers from the documentation ranges: tests/app-adoption.bats fails when one reaches what
+# app-adoption prints.
+apiVersion: v1
+kind: List
+items:
+  - apiVersion: v1
+    kind: Node
+    metadata:
+      name: example-cp-1
+      labels:
+        kubernetes.io/hostname: example-cp-1
+    status:
+      addresses:
+        - type: InternalIP
+          address: 198.51.100.11
+        - type: ExternalIP
+          address: 203.0.113.11
+        - type: Hostname
+          address: example-cp-1
+      conditions:
+        - type: MemoryPressure
+          status: "False"
+          reason: KubeletHasSufficientMemory
+        - type: Ready
+          status: "True"
+          reason: KubeletReady
+          message: kubelet is posting ready status
+  - apiVersion: v1
+    kind: Node
+    metadata:
+      name: example-worker-1
+      labels:
+        kubernetes.io/hostname: example-worker-1
+    status:
+      addresses:
+        - type: InternalIP
+          address: 198.51.100.21
+        - type: ExternalIP
+          address: 203.0.113.21
+        - type: Hostname
+          address: example-worker-1
+      conditions:
+        - type: MemoryPressure
+          status: "False"
+          reason: KubeletHasSufficientMemory
+        - type: Ready
+          status: "True"
+          reason: KubeletReady
+          message: kubelet is posting ready status
+  - apiVersion: v1
+    kind: Node
+    metadata:
+      name: example-worker-2
+      labels:
+        kubernetes.io/hostname: example-worker-2
+    status:
+      addresses:
+        - type: InternalIP
+          address: 198.51.100.22
+        - type: ExternalIP
+          address: 203.0.113.22
+        - type: Hostname
+          address: example-worker-2
+      conditions:
+        - type: MemoryPressure
+          status: "False"
+          reason: KubeletHasSufficientMemory
+        - type: Ready
+          status: "True"
+          reason: KubeletReady
+          message: kubelet is posting ready status

@@ -12,6 +12,11 @@ cilium-install *flags:
 app-install path *flags:
     scripts/install-app "$@"
 
+# Watch Flux adopt an application installed before it, such as kubernetes/apps/base/kube-system/cilium, on a cluster (lab-sto2 when none is given), reading only; start it before Flux adopts it. Prints pass or FAIL for one release, the bootstrap revision followed by helm-controller's, the HelmRelease Ready and every node Ready
+[positional-arguments]
+app-adoption path *args:
+    scripts/app-adoption "$@"
+
 # Create the Talos age key at SOPS_AGE_KEY_FILE unless a file is there, and write its recipient into talos/.sops.yaml; prints the recipient
 cluster-age-key:
     scripts/cluster-age-key

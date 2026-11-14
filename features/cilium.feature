@@ -30,3 +30,8 @@ Feature: Cilium
     Given the HelmRelease
     When it is read
     Then its release name, target namespace and storage namespace are the ones the install script uses
+
+  Scenario: Flux installs the chart and values the install script installs
+    Given the application as Flux builds it from its ks.yaml and app/
+    When its HelmRelease is read
+    Then its chartRef names the one OCIRepository, which has the location and version of ocirepository.yaml, and its valuesFrom names only the ConfigMap generated from values.yaml, which holds that file byte for byte

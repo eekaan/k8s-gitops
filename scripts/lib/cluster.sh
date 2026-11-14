@@ -1,13 +1,14 @@
 # shellcheck shell=bash
-# Shared by scripts/cluster-env, the cluster-* scripts, the install scripts and the secrets bundle
-# check: the Talos age key's location, talos/.sops.yaml's recipient, the check that a secrets bundle
-# is encrypted, a cluster's nodes and the wait for their Talos API, the line that names the step a
-# recipe failed in, the talman run that keeps its output out of a CI log, the Flux age key and the
-# other objects Flux needs before it starts, and the install of an application before Flux. Builds
-# on scripts/lib/infra.sh, which reads the environment. Nothing here prints a secret or a deployment
-# value, or passes one as an argument: sops and talman get the Talos age key's location from their
-# environment, and the Flux age key and the values of the objects applied before Flux reach
-# age-keygen, jq and kubectl on standard input.
+# Shared by scripts/cluster-env, the cluster-* scripts, the install scripts, the adoption check and
+# the secrets bundle check: the Talos age key's location, talos/.sops.yaml's recipient, the check
+# that a secrets bundle is encrypted, a cluster's nodes and the wait for their Talos API, the line
+# that names the step a recipe failed in, the talman run that keeps its output out of a CI log, the
+# Flux age key and the other objects Flux needs before it starts, the release an application's
+# HelmRelease makes, and the install of an application before Flux. Builds on scripts/lib/infra.sh,
+# which reads the environment. Nothing here prints a secret or a deployment value, or passes one as
+# an argument: sops and talman get the Talos age key's location from their environment, and the Flux
+# age key and the values of the objects applied before Flux reach age-keygen, jq and kubectl on
+# standard input.
 
 # shellcheck source=scripts/lib/infra.sh
 . "$(dirname "${BASH_SOURCE[0]}")/infra.sh"
@@ -485,14 +486,18 @@ helmrelease_values() {
   printf '%s' "$config" | substitute "$file" | yq '.spec.values // {}'
 }
 
-# managed_by_flux RELEASE NAMESPACE: whether Flux's helm-controller installed or upgraded the release
-# last. Its post-renderer labels every object it renders with helm.toolkit.fluxcd.io/name and
-# helm.toolkit.fluxcd.io/namespace, the HelmRelease's (helm-controller v1.7.1, which the pinned Flux
-# runs: internal/postrender/build.go and common_renderer.go), and helm keeps the rendered objects in
-# the release's manifest. Without a release there is no manifest, and nothing manages it.
+# managed_by_flux RELEASE NAMESPACE [REVISION]: whether Flux's helm-controller installed or upgraded
+# the release last, or, given REVISION, made that revision. Its post-renderer labels every object it
+# renders with helm.toolkit.fluxcd.io/name and helm.toolkit.fluxcd.io/namespace, the HelmRelease's
+# (helm-controller v1.7.1, which the pinned Flux runs: internal/postrender/build.go and
+# common_renderer.go), and helm keeps the rendered objects in the manifest of each revision. Returns
+# 1 when they lack the label, and 2 when helm has no manifest: without a release there is none, and
+# nothing manages it. Nothing of the manifest is printed.
 managed_by_flux() {
   local manifest
-  manifest=$(helm get manifest "$1" --namespace "$2" 2> /dev/null) || return 1
+  local -a revision=()
+  [[ -z ${3-} ]] || revision=(--revision "$3")
+  manifest=$(helm get manifest "$1" --namespace "$2" "${revision[@]}" 2> /dev/null) || return 2
   yq ea -e '[select(.metadata.labels["helm.toolkit.fluxcd.io/name"] != null)] | length > 0' <<< "$manifest" > /dev/null 2>&1
 }
 
@@ -504,26 +509,21 @@ app_field() {
   fi
 }
 
-# install_app DIR [YES]: installs the application in DIR, a directory of kubernetes/ with the
-# application's ks.yaml beside its app/, on the cluster KUBECONFIG names, as the Helm release its
-# HelmRelease adopts once Flux runs. The chart location and version come from app/ocirepository.yaml;
-# the values from app/values.yaml as it is, then the HelmRelease's own values as Flux substitutes them
-# (helmrelease_values), on helm's standard input; and the release from app/helmrelease.yaml, with
-# helm-controller's defaults where it sets none: the name of the HelmRelease, after its
-# targetNamespace and a dash when it has one, and the HelmRelease's own namespace, which Flux takes
-# from ks.yaml's targetNamespace. Waits for the API server first. A release that runs that chart
-# version with those values already is left alone, so a second run changes nothing. A release Flux
-# manages (managed_by_flux) is refused, as Flux owns it from then on, unless YES is 1.
-install_app() {
-  local dir=$1 yes=${2:-0} app name namespace url version release target storage values overrides wanted chart installed attempts
-  step="reading the application"
+# app_release DIR: the Helm release that the HelmRelease of the application in DIR, a directory of
+# kubernetes/ with the application's ks.yaml beside its app/, makes, as helm-controller makes it
+# (GetReleaseName, GetReleaseNamespace and GetStorageNamespace in its api/v2): the HelmRelease's
+# releaseName, targetNamespace and storageNamespace where it sets them, and otherwise its name, after
+# its targetNamespace and a dash when it has one, and its own namespace, which Flux takes from
+# ks.yaml's targetNamespace. Prints, on one line, the release, the namespace it is installed into and
+# keeps its history in, the HelmRelease's name and the HelmRelease's namespace. Fails, naming the
+# file, when the release has no namespace or would keep its history in another one.
+app_release() {
+  local dir=$1 app name namespace release target storage
   if [[ ! -f $dir/ks.yaml || ! -f $dir/app/helmrelease.yaml ]]; then
     infra_error "$dir is not an application directory: it has no ks.yaml beside app/helmrelease.yaml"
     return 1
   fi
   app=$(cd "$dir/app" && pwd)
-  url=$(app_field "$app/ocirepository.yaml" .spec.url) || return 1
-  version=$(app_field "$app/ocirepository.yaml" .spec.ref.tag) || return 1
   name=$(app_field "$app/helmrelease.yaml" .metadata.name) || return 1
   namespace=$(yq '.spec.targetNamespace // ""' "$dir/ks.yaml")
   [[ -n $namespace ]] || namespace=$(yq '.metadata.namespace // ""' "$app/helmrelease.yaml")
@@ -536,13 +536,31 @@ install_app() {
   storage=$(yq '.spec.storageNamespace // ""' "$app/helmrelease.yaml")
   [[ -n $release ]] || release=${target:+$target-}$name
   storage=${storage:-$namespace}
-  namespace=${target:-$namespace}
   # helm keeps a release's history in the namespace it installs into; Flux finds the release
-  # installed here only if the HelmRelease looks for it there.
-  if [[ $storage != "$namespace" ]]; then
-    infra_error "helmrelease.yaml installs into $namespace but keeps the history in $storage; helm uses one namespace for both"
+  # installed there only if the HelmRelease looks for it there.
+  if [[ $storage != "${target:-$namespace}" ]]; then
+    infra_error "helmrelease.yaml installs into ${target:-$namespace} but keeps the history in $storage; helm uses one namespace for both"
     return 1
   fi
+  printf '%s %s %s %s\n' "$release" "${target:-$namespace}" "$name" "$namespace"
+}
+
+# install_app DIR [YES]: installs the application in DIR, a directory of kubernetes/ with the
+# application's ks.yaml beside its app/, on the cluster KUBECONFIG names, as the Helm release its
+# HelmRelease adopts once Flux runs (app_release). The chart location and version come from
+# app/ocirepository.yaml; the values from app/values.yaml as it is, then the HelmRelease's own values
+# as Flux substitutes them (helmrelease_values), on helm's standard input. Waits for the API server
+# first. A release that runs that chart version with those values already is left alone, so a second
+# run changes nothing. A release Flux manages (managed_by_flux) is refused, as Flux owns it from then
+# on, unless YES is 1.
+install_app() {
+  local dir=$1 yes=${2:-0} app fields namespace url version release values overrides wanted chart installed attempts
+  step="reading the application"
+  fields=$(app_release "$dir") || return 1
+  read -r release namespace _ <<< "$fields"
+  app=$(cd "$dir/app" && pwd)
+  url=$(app_field "$app/ocirepository.yaml" .spec.url) || return 1
+  version=$(app_field "$app/ocirepository.yaml" .spec.ref.tag) || return 1
   values=$app/values.yaml
   if ! yq -e 'tag == "!!map"' "$values" > /dev/null 2>&1; then
     infra_error "$values is not a YAML map of values"
