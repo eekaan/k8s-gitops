@@ -1,0 +1,6 @@
+# Images that scripts/kubernetes-check accepts although they have no tag other than latest and no
+# digest. One exception per line: the application (its Kustomization's name), the image exactly as
+# the rendered object writes it, then a comment saying why it is safe to leave unpinned. An entry
+# without a reason fails the check.
+#
+# hooked busybox  # example: the reason goes here

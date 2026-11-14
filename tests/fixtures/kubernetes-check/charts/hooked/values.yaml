@@ -1,0 +1,6 @@
+---
+image: registry.example.invalid/hooked:1.0.0
+# The image of the test hook; empty renders none.
+testImage: ""
+# The image of a hook that runs before each upgrade; empty renders none.
+upgradeImage: ""

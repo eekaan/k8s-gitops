@@ -8,6 +8,9 @@ metadata:
 spec:
   path: ./apps/base/piraeus-datastore/linstor-cluster/app
   targetNamespace: piraeus-datastore
+  # Ready only once what it applies is, so an application that names this one in dependsOn starts
+  # after the storage cluster, its classes and its snapshot class exist.
+  wait: true
   # The operator's resource definitions and the webhooks that validate its objects, and every
   # StorageClass of LINSTOR's driver, come with piraeus-operator; the VolumeSnapshotClass's
   # definition comes with snapshot-controller.

@@ -3,7 +3,8 @@
 `kubernetes/` is everything Flux reconciles; CI publishes it as the cluster's artifact
 (ADR 0003, [Publishing](#publishing)). `just kubernetes-check` builds it offline with kustomize and Flux, and fails, naming
 the file, when a cluster directory, a `ks.yaml`, an application directory or a variable breaks
-the rules below.
+the rules below, or when something the cluster would refuse passes the build
+([What the check refuses](#what-the-check-refuses)).
 
 ## Layout
 
@@ -17,7 +18,9 @@ the rules below.
 - `apps/base/<namespace>/`: a namespace directory, with `namespace.yaml` and a
   `kustomization.yaml` that sets the namespace and includes `components/common`.
 - `apps/base/<namespace>/<app>/`: an application, its Flux Kustomization in `ks.yaml` and its
-  manifests in `app/`.
+  manifests in `app/`, which is all the artifact generator publishes. A manifest outside `app/`, or
+  in it but not listed by `app/kustomization.yaml` (directly, through a directory or component it
+  lists, as a patch or as a generator's file), is never applied, and the check refuses it.
 - `apps/base/flux-system/artifact-generator/`: publishes one artifact per application.
 - `components/`: Kustomize components. `common` adds the `app-template-defaults` ConfigMap, which
   an app-template HelmRelease opts into through `valuesFrom`; `cnpg-cluster` adds an application's
@@ -49,6 +52,10 @@ spec:
   `<namespace>`, and `path` is the application's own `app/`.
 - `dependsOn`, `wait`, `healthCheckExprs`, `components` and `postBuild.substitute` belong to the
   application. The fields the root sets do not; see below.
+- What `dependsOn` names is an application the cluster's overlay enables, and one that waits: it
+  sets `wait: true` or `healthChecks`, so it is Ready only once what it applies is. A dependency on
+  an application a cluster deliberately does not enable is an error: the dependent would never
+  reconcile there, so the dependent is not enabled either, or the dependency is.
 - A new namespace gets its directory: `namespace.yaml` with the Pod Security labels and the
   annotation `kustomize.toolkit.fluxcd.io/prune: disabled`, so removing it from the tree does not
   delete what runs in it.
@@ -82,6 +89,41 @@ child that sets any of these fields without opting out fails the check.
   release gets none of the release defaults.
 - `k8s-gitops/timeout: long` on a child Kustomization: a 10m timeout with every other default
   kept. It does nothing on a child that opted out.
+
+## What the check refuses
+
+Beyond the layout above, `just kubernetes-check` refuses what the cluster would refuse or never
+reconcile, judged on what Flux builds, so the root's patches count:
+
+- **Dependencies.** Each `dependsOn` of a Kustomization names one that the same cluster applies: one
+  the overlay lists, or one the cluster directory builds (the root, `flux-operator`,
+  `flux-instance`). It must also wait after the root's patches: `wait: true`, `healthChecks` or
+  `healthCheckExprs`. Otherwise the dependent never reconciles, or starts before its dependency's
+  objects are ready. The message names both Kustomizations and the overlay.
+- **Schemas.** Everything Flux builds, for every application (enabled or not) and each cluster's
+  root, is validated by kubeconform with unknown fields refused: against Kubernetes' schemas for the
+  Kubernetes version in `versions.yaml`, and Flux's for the pinned release. A misspelt field fails,
+  naming the file, the object and the field. Objects of other kinds, the custom resources of the
+  charts, have no schema: the check prints each kind with the number of objects it could not
+  validate (`no schema for Certificate (cert-manager.io/v1): 2 objects`), so a pass never silently
+  means a skip. A kind of Kubernetes' own groups or Flux's with no schema is an error. The schemas
+  are fetched at exact versions, never from a moving reference: Flux's from the release asset
+  `crd-schemas.tar.gz` of the Flux release pinned in `mise.toml`, Kubernetes' a kind at a time from
+  the public `yannh/kubernetes-json-schema` repository at the commit named in
+  `scripts/kubernetes-check` (raising `kubernetes` in `versions.yaml` past what that commit holds
+  fails the check until the commit moves). The requests are plain GETs that send nothing from the
+  tree. `KUBERNETES_CHECK_SCHEMAS`, a directory with `kubernetes/<version>-standalone-strict/` and
+  `flux/`, replaces both sources, as the tests do with their fixtures.
+- **Images.** Every image of every object `scripts/render` writes, the Helm hooks of the enabled
+  releases included, has a tag other than `latest` or a digest. A mutable or missing tag is pulled
+  anew at every upgrade, and a failed pull in a Helm test fails the upgrade, which the default
+  remediation rolls back. The check runs the render once, so it pulls the charts as
+  `just render-check` does. A test hook the release does not run (`test.enable` unset or false, or
+  the test excluded by name in `test.filters`) is not pulled and is left out. The root's defaults
+  set `test.enable: true` on every release and overwrite a release's own value, so a release that
+  must not run a test excludes it by name, as `kubelet-csr-approver` does with its chart's
+  `test-connection`. An exception is one line of `.image-allowlist`: the application, the image as
+  rendered, and the reason, which the check requires.
 
 ## Every child Kustomization is in flux-system
 
@@ -590,8 +632,7 @@ pod.
   directory, which Helm installs once and never removes with a release, so they stay when the
   application leaves the tree. Flux creates and replaces them on upgrade through the release
   defaults. `ks.yaml` sets `wait` and names `metrics-server`, whose API the chart's Helm test reads;
-  metrics-server's own `ks.yaml` does not set `wait`, so on a new cluster the test can run before
-  that API answers, fail, and use up an install retry.
+  metrics-server's own `ks.yaml` sets `wait` too, so the test runs once that API answers.
 - The chart's three `vpa-test-*` pods run after each install and upgrade, because the cluster's
   Helm releases run their tests. They set no requests, and the chart has no value to set them; they
   are the one exception to every container having requests, and they are left out of the check.

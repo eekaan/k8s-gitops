@@ -8,6 +8,9 @@ metadata:
 spec:
   path: ./apps/base/kube-system/metrics-server/app
   targetNamespace: kube-system
+  # Ready only once the metrics API is served, so an application that names this one in dependsOn
+  # starts when it answers.
+  wait: true
   # metrics-server reads each kubelet over its serving certificate, which exists only once the
   # approver has approved the kubelet's request. Its chart makes a ServiceMonitor, a kind that
   # exists once prometheus-operator-crds is Ready.

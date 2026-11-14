@@ -1,6 +1,23 @@
 #!/usr/bin/env bats
 # Proves features/kubernetes-layout.feature; each test carries its scenario's title.
-# Needs kustomize, yq and flux on PATH (the versions pinned for the repository).
+# Needs kustomize, yq, jq, helm, flux and kubeconform on PATH (the versions pinned for the
+# repository). The fixture trees validate against the small schemas in
+# tests/fixtures/kubernetes-check/schemas and render the chart packaged from
+# tests/fixtures/kubernetes-check/charts, so nothing is fetched; the one test of the repository's own
+# tree fetches the real schemas and charts from their public sources.
+
+setup_file() {
+  # Helm's settings, and the Docker configuration it reads registry logins from, stay in the run's
+  # own directory.
+  export HELM_CACHE_HOME="$BATS_FILE_TMPDIR/helm/cache"
+  export HELM_CONFIG_HOME="$BATS_FILE_TMPDIR/helm/config"
+  export HELM_DATA_HOME="$BATS_FILE_TMPDIR/helm/data"
+  export DOCKER_CONFIG="$BATS_FILE_TMPDIR/docker"
+  mkdir -p "$DOCKER_CONFIG"
+  export RENDER_CHART_CACHE="$BATS_FILE_TMPDIR/charts"
+  helm package "$BATS_TEST_DIRNAME/fixtures/kubernetes-check/charts/hooked" \
+    --destination "$RENDER_CHART_CACHE/charts.example.invalid/hooked/1.0.0" >/dev/null
+}
 
 setup() {
   REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
@@ -9,6 +26,7 @@ setup() {
   # Nothing to connect to: a step that needed a cluster fails instead of finding one.
   export KUBECONFIG="$BATS_TEST_TMPDIR/no-kubeconfig"
   unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
+  export KUBERNETES_CHECK_SCHEMAS="$BATS_TEST_DIRNAME/fixtures/kubernetes-check/schemas"
 }
 
 # put PATH: writes stdin to PATH in the fixture tree.
@@ -62,6 +80,10 @@ EOF
 # A small tree that passes the check: one cluster with Flux's own two applications, one
 # namespace, one application. Each failure scenario breaks one rule in it.
 valid_tree() {
+  put versions.yaml <<'EOF'
+---
+kubernetes: v1.37.1
+EOF
   put kubernetes/clusters/test/kustomization.yaml <<'EOF'
 ---
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -97,6 +119,11 @@ EOF
   put kubernetes/clusters/test/cluster-config.example.yaml <<'EOF'
 ---
 CLUSTER_DOMAIN: example.com
+EOF
+  # scripts/render, which the image rule reads, takes both lists of every cluster.
+  put kubernetes/clusters/test/cluster-secrets.example.yaml <<'EOF'
+---
+{}
 EOF
   put kubernetes/apps/overlays/test/kustomization.yaml <<'EOF'
 ---
@@ -180,6 +207,16 @@ fails_naming() {
     { echo "no failure message naming '$1' that says '$2'"; return 1; }
 }
 
+# refused_line FILE WORDS...: a failure message that names FILE and every one of WORDS.
+refused_line() {
+  local file=$1 line word
+  shift
+  line=$(grep -F -- "$file" <<<"$output") || { echo "no failure message names $file"; return 1; }
+  for word in "$@"; do
+    grep -qF -- "$word" <<<"$line" || { echo "no message that names $file says '$word':"; echo "$line"; return 1; }
+  done
+}
+
 # build_root: copies the repository's kubernetes/ tree, adds the child Kustomizations given on
 # stdin to the cluster's overlay, and builds the root the way Flux does into $BUILD.
 build_root() {
@@ -225,10 +262,21 @@ unchanged() {
   [ "$got" = "$want" ]
 }
 
-@test "The tree builds offline" {
+@test "The tree passes every rule" {
+  # The repository's own tree is validated against the real schemas and its charts are pulled from
+  # their publishers: the fixtures' schema location is left unset.
+  unset KUBERNETES_CHECK_SCHEMAS
   run "$CHECK"
   echo "$output"
   [ "$status" -eq 0 ]
+
+  # Every rule ran and had something to look at: dependencies of the enabled applications checked,
+  # objects validated against a schema, the ones without a schema counted by kind, and the images
+  # of the rendered releases looked at.
+  [[ $output =~ ([1-9][0-9]*)\ dependencies ]]
+  [[ $output =~ ([1-9][0-9]*)\ objects\ validated ]]
+  [[ $output =~ ([1-9][0-9]*)\ images ]]
+  grep -qE '^kubernetes-check: no schema for [A-Za-z]+ \([^)]+\): [1-9][0-9]* objects?$' <<<"$output"
 
   local built=0 dir
   while read -r dir; do
@@ -970,4 +1018,305 @@ EOF2
       APP: hello"
   check
   [ "$status" -eq 0 ]
+}
+
+# overlay_add PATH: lists PATH, a ks.yaml, in the fixture cluster's overlay.
+overlay_add() {
+  yq -i ".resources += [\"$1\"]" "$TREE/kubernetes/apps/overlays/test/kustomization.yaml"
+}
+
+# world_app DEPENDENCY: the enabled application world, which names DEPENDENCY in dependsOn.
+world_app() {
+  app kubernetes/apps/base/demo/world world demo world ./apps/base/demo/world/app
+  yq -i ".spec.dependsOn = [{\"name\": \"$1\"}]" "$TREE/kubernetes/apps/base/demo/world/ks.yaml"
+  overlay_add ../../base/demo/world/ks.yaml
+}
+
+@test "A dependency on an application the cluster does not enable is refused" {
+  valid_tree
+  # later is in apps/base, as every application is, but the overlay does not list it.
+  app kubernetes/apps/base/demo/later later demo later ./apps/base/demo/later/app
+  yq -i '.spec.wait = true' "$TREE/kubernetes/apps/base/demo/later/ks.yaml"
+  world_app later
+
+  check
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/world/ks.yaml world later apps/overlays/test "does not enable"
+
+  overlay_add ../../base/demo/later/ks.yaml
+  check
+  [ "$status" -eq 0 ]
+}
+
+@test "A dependency whose target does not wait is refused" {
+  valid_tree
+  world_app hello
+
+  check
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/world/ks.yaml world hello apps/overlays/test "does not wait"
+
+  # wait, or health checks, make the target Ready only once what it applies is.
+  yq -i '.spec.wait = true' "$TREE/kubernetes/apps/base/demo/hello/ks.yaml"
+  check
+  [ "$status" -eq 0 ]
+  yq -i 'del(.spec.wait) | .spec.healthChecks = [{"apiVersion": "v1", "kind": "ConfigMap", "name": "hello", "namespace": "demo"}]' \
+    "$TREE/kubernetes/apps/base/demo/hello/ks.yaml"
+  check
+  [ "$status" -eq 0 ]
+
+  # What counts is the built Kustomization, after the root's patches, and not the text of its file.
+  yq -i 'del(.spec.healthChecks)' "$TREE/kubernetes/apps/base/demo/hello/ks.yaml"
+  check
+  [ "$status" -ne 0 ]
+  yq -i '.spec.patches = [{"target": {"group": "kustomize.toolkit.fluxcd.io", "kind": "Kustomization"},
+    "patch": "apiVersion: kustomize.toolkit.fluxcd.io/v1\nkind: Kustomization\nmetadata:\n  name: _\nspec:\n  wait: true\n"}]' \
+    "$TREE/kubernetes/clusters/test/ks.yaml"
+  check
+  [ "$status" -eq 0 ]
+}
+
+@test "An object with a field its schema does not have is refused, and objects without a schema are counted by kind" {
+  valid_tree
+  local dir=kubernetes/apps/base/demo/hello/app
+  put "$dir/deployment.yaml" <<'EOF'
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello
+spec:
+  replicaz: 2
+EOF
+  put "$dir/widgets.yaml" <<'EOF'
+---
+apiVersion: example.invalid/v1
+kind: Widget
+metadata:
+  name: first
+---
+apiVersion: example.invalid/v1
+kind: Widget
+metadata:
+  name: second
+---
+apiVersion: example.invalid/v1
+kind: Gadget
+metadata:
+  name: only
+EOF
+  yq -i '.resources += ["deployment.yaml", "widgets.yaml"]' "$TREE/$dir/kustomization.yaml"
+  world_app hello
+  yq -i '.spec.wait = true | .spec.waitt = true' "$TREE/kubernetes/apps/base/demo/hello/ks.yaml"
+
+  check
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/hello/app/deployment.yaml "Deployment hello" replicaz
+  refused_line kubernetes/apps/base/demo/hello/ks.yaml "Kustomization hello" waitt
+  # The kinds with no schema are not failures, and none is passed over unnamed.
+  grep -qxF "kubernetes-check: no schema for Widget (example.invalid/v1): 2 objects" <<<"$output"
+  grep -qxF "kubernetes-check: no schema for Gadget (example.invalid/v1): 1 object" <<<"$output"
+
+  yq -i 'del(.spec.waitt)' "$TREE/kubernetes/apps/base/demo/hello/ks.yaml"
+  yq -i 'del(.spec.replicaz) | .spec.replicas = 2' "$TREE/$dir/deployment.yaml"
+  check
+  [ "$status" -eq 0 ]
+  grep -qxF "kubernetes-check: no schema for Widget (example.invalid/v1): 2 objects" <<<"$output"
+  grep -qxF "kubernetes-check: no schema for Gadget (example.invalid/v1): 1 object" <<<"$output"
+
+  # A kind of Kubernetes' own or Flux's that the schemas lack is an error, never a skip: the schemas
+  # would be out of date, or the apiVersion wrong.
+  put "$dir/statefulset.yaml" <<'EOF'
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: hello
+EOF
+  yq -i '.resources += ["statefulset.yaml"]' "$TREE/$dir/kustomization.yaml"
+  check
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/hello/app/statefulset.yaml "StatefulSet hello" "no schema"
+}
+
+@test "A manifest an application keeps where the artifact does not carry it is refused" {
+  valid_tree
+  local dir=kubernetes/apps/base/demo/hello
+  # Outside app/, which is all the artifact generator publishes.
+  put "$dir/extra.yaml" <<'EOF'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: extra
+EOF
+  # In app/, but nothing lists it, so the build never reads it.
+  put "$dir/app/unlisted.yaml" <<'EOF'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unlisted
+EOF
+  # Not manifests: values a generator reads, and notes.
+  put "$dir/app/values.yaml" <<'EOF'
+---
+replicas: 1
+EOF
+  put "$dir/notes.yaml" <<'EOF'
+---
+- a list that is not an object
+EOF
+
+  check
+  [ "$status" -ne 0 ]
+  refused_line "$dir/extra.yaml" "outside app/"
+  refused_line "$dir/app/unlisted.yaml" "kustomization.yaml"
+  [[ $output != *"$dir/app/values.yaml"* ]]
+  [[ $output != *"$dir/notes.yaml"* ]]
+
+  # What the build reaches counts, however it reaches it: a directory, a patch, a generator's file.
+  rm "${TREE:?}/$dir/extra.yaml" "${TREE:?}/$dir/notes.yaml" "${TREE:?}/$dir/app/unlisted.yaml"
+  put "$dir/app/sub/kustomization.yaml" <<'EOF'
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - listed.yaml
+EOF
+  put "$dir/app/sub/listed.yaml" <<'EOF'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: listed
+EOF
+  put "$dir/app/patch.yaml" <<'EOF'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hello
+data:
+  patched: "yes"
+EOF
+  yq -i '.resources += ["sub"] | .patches = [{"path": "patch.yaml"}]
+    | .configMapGenerator = [{"name": "generated", "files": ["values.yaml"]}]' "$TREE/$dir/app/kustomization.yaml"
+  check
+  [ "$status" -eq 0 ]
+}
+
+# hooked_app VALUES: the enabled application hooked, whose release installs the fixture chart with
+# the values VALUES (a YAML map) and runs its Helm tests.
+hooked_app() {
+  local dir=kubernetes/apps/base/demo/hooked
+  app "$dir" hooked demo hooked ./apps/base/demo/hooked/app
+  put "$dir/app/kustomization.yaml" <<'EOF'
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - configmap.yaml
+  - ocirepository.yaml
+  - helmrelease.yaml
+EOF
+  put "$dir/app/ocirepository.yaml" <<'EOF'
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: hooked
+spec:
+  interval: 12h
+  url: oci://charts.example.invalid/hooked
+  ref:
+    tag: 1.0.0
+EOF
+  {
+    cat <<'EOF'
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: hooked
+spec:
+  interval: 30m
+  releaseName: hooked
+  chartRef:
+    kind: OCIRepository
+    name: hooked
+  test:
+    enable: true
+  values:
+EOF
+    printf '%s\n' "    ${1//$'\n'/$'\n'    }"
+  } | put "$dir/app/helmrelease.yaml"
+  grep -qxF '  - ../../base/demo/hooked/ks.yaml' "$TREE/kubernetes/apps/overlays/test/kustomization.yaml" ||
+    overlay_add ../../base/demo/hooked/ks.yaml
+}
+
+@test "An image without a tag or digest in a rendered release or its hooks is refused" {
+  valid_tree
+  local digest=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  local release=kubernetes/apps/base/demo/hooked/app/helmrelease.yaml
+
+  # The chart's own Deployment and a test that names a tag pass.
+  hooked_app 'testImage: registry.example.invalid/probe:1.0.0'
+  check
+  [ "$status" -eq 0 ]
+  [[ $output =~ ([1-9][0-9]*)\ images ]]
+
+  # A hook that pulls an image by no tag, by latest, or by a registry's port alone is refused.
+  local image
+  for image in busybox busybox:latest registry.example.invalid:5000/busybox; do
+    hooked_app "testImage: $image"
+    check
+    [ "$status" -ne 0 ]
+    refused_line kubernetes/apps/base/demo/hooked/ks.yaml "Job hooked-test-connection" "$image" "tag"
+  done
+
+  # An object of the chart that is no hook, and a hook that is no test, are the same.
+  hooked_app 'image: registry.example.invalid/hooked'
+  check
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/hooked/ks.yaml "Deployment hooked" registry.example.invalid/hooked
+  hooked_app 'upgradeImage: busybox'
+  check
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/hooked/ks.yaml "Job hooked-migrate" busybox
+
+  # A tag other than latest, or a digest, is a reference that does not move under the release.
+  hooked_app 'testImage: busybox:1.37.0'
+  check
+  [ "$status" -eq 0 ]
+  hooked_app "testImage: busybox@$digest"
+  check
+  [ "$status" -eq 0 ]
+
+  # A test the release does not run pulls nothing: tests off, or this one excluded by name.
+  hooked_app 'testImage: busybox'
+  yq -i '.spec.test.enable = false' "$TREE/$release"
+  check
+  [ "$status" -eq 0 ]
+  yq -i '.spec.test.enable = true | .spec.test.filters = [{"name": "hooked-test-connection", "exclude": true}]' "$TREE/$release"
+  check
+  [ "$status" -eq 0 ]
+  yq -i '.spec.test.filters = [{"name": "another-test", "exclude": true}]' "$TREE/$release"
+  check
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/hooked/ks.yaml "Job hooked-test-connection" busybox
+
+  # An exception is listed by application and image, with its reason, in one file of the tree.
+  put .image-allowlist <<'EOF'
+# One exception per line: the application, the image as the chart renders it, and why it is safe.
+hooked busybox  # the fixture's probe, pulled from a registry the fixture controls
+EOF
+  check
+  [ "$status" -eq 0 ]
+  put .image-allowlist <<'EOF'
+hooked busybox
+EOF
+  check
+  [ "$status" -ne 0 ]
+  fails_naming .image-allowlist "reason"
 }

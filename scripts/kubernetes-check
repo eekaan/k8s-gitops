@@ -1,23 +1,48 @@
 #!/usr/bin/env bash
-# Offline check of the kubernetes/ tree: every kustomization builds, Flux builds each cluster's
-# root Kustomization and each application with strict substitution, and the layout rules in
-# docs/kubernetes.md hold. Reports every failure, naming the file and the rule, then exits
-# non-zero. Never contacts a cluster.
+# Offline check of the kubernetes/ tree, for what the cluster would refuse or never reconcile:
+# every kustomization builds, Flux builds each cluster's root Kustomization and each application
+# with strict substitution, and the layout rules in docs/kubernetes.md hold. On what Flux builds:
+#   - every dependsOn of a Kustomization names one the cluster's overlay (or its root) defines, and
+#     that one waits (wait or health checks, after the root's patches are applied);
+#   - every object validates, with unknown fields refused, against Kubernetes' schemas for the
+#     version in versions.yaml and Flux's for the pinned release; objects of other kinds have no
+#     schema and are counted by kind, so a pass never silently means a skip;
+#   - an application keeps manifests only where its build reads them, in app/;
+#   - every image of every object scripts/render writes, hooks included, has a tag other than
+#     latest or a digest, unless .image-allowlist lists it with its reason.
+# Reports every failure, naming the file and the rule, then exits non-zero. Never contacts a
+# cluster. Fetches only public files with plain GET requests and sends nothing from the tree: the
+# Flux release's crd-schemas archive, and Kubernetes' schemas a kind at a time, both at exact
+# versions, and the charts scripts/render pulls (RENDER_CHART_CACHE, as there).
 #
-# Usage: scripts/kubernetes-check [DIR]   (DIR holds kubernetes/; defaults to this repository)
+# KUBERNETES_CHECK_SCHEMAS, a directory, replaces both schema sources and nothing is fetched for
+# them: kubernetes/<version>-standalone-strict/<kind>-<group>-<version>.json beside
+# flux/<kind>-<group>-<version>.json. The tests point it at fixtures.
+#
+# Usage: scripts/kubernetes-check [DIR]   (DIR holds kubernetes/ and versions.yaml; defaults to this repository)
 set -euo pipefail
 shopt -s nullglob
 
-cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+schemas="${KUBERNETES_CHECK_SCHEMAS:-}"
+[[ -z $schemas ]] || schemas="$(cd "$schemas" && pwd)"
+cd "${1:-$repo_root}"
 
 # No kubeconfig and no in-cluster address: a tool that tried to reach a cluster fails instead.
 export KUBECONFIG=/dev/null
 unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
 
-for tool in kustomize yq flux; do
+for tool in kustomize yq jq flux helm kubeconform; do
   command -v "$tool" >/dev/null || { echo "kubernetes-check: $tool not found on PATH" >&2; exit 1; }
 done
 [[ -d kubernetes ]] || { echo "kubernetes-check: no kubernetes/ directory in $PWD" >&2; exit 1; }
+[[ -f versions.yaml ]] || { echo "kubernetes-check: no versions.yaml in $PWD; it names the Kubernetes version the schemas are for" >&2; exit 1; }
+
+# Kubernetes' schemas come from the public yannh/kubernetes-json-schema repository at one commit,
+# so the files never change under an unchanged tree; a Kubernetes version newer than the commit's
+# makes the check fail until the commit moves. Flux's come with the release the flux2 pin in
+# mise.toml names.
+kubernetes_schemas_ref=2bfaff3898a7a4fa4e4760da3d2656211c9b4c71
 
 failures=0
 fail() {
@@ -29,6 +54,7 @@ fail() {
 # namespace field, so a Kustomization anywhere else cannot read cluster-config or cluster-secrets.
 # An application's Kustomization also names the namespace it deploys into.
 ks_files=0
+declare -A ks_name_file=()
 ks_list="$(find kubernetes -name ks.yaml | sort)"
 while IFS= read -r ks; do
   [[ -n $ks ]] || continue
@@ -52,6 +78,8 @@ while IFS= read -r ks; do
       fail "$ks: document $doc must be a Flux Kustomization (kustomize.toolkit.fluxcd.io), found ${api:-no apiVersion} ${kind:-no kind}"
       continue
     fi
+    # The file a built Kustomization came from, for the messages about what Flux builds.
+    ks_name_file[$name]="$ks"
     [[ $ns == flux-system ]] ||
       fail "$ks: Kustomization $name must be in namespace flux-system, found ${ns:-none} (substituteFrom reads cluster-config from the Kustomization's own namespace)"
     [[ -n $src_kind && -n $src_name ]] ||
@@ -116,6 +144,58 @@ while IFS= read -r ks; do
   done <<<"$docs"
 done <<<"$ks_list"
 
+# reached: the kustomization files and the files they list, as paths from here, filled by reach.
+declare -A reached=()
+
+# reach DIR: marks the kustomization file in DIR and every file it lists as reached, and goes on into
+# each directory it lists. The lists are the fields kustomize reads a file or directory from.
+reach() {
+  local dir=$1 kfile entry path
+  for kfile in "$dir/kustomization.yaml" "$dir/kustomization.yml" "$dir/Kustomization"; do
+    [[ -f $kfile ]] && break
+    kfile=""
+  done
+  [[ -n $kfile && -z ${reached[$kfile]:-} ]] || return 0
+  reached[$kfile]=1
+  while IFS= read -r entry; do
+    [[ $entry != *://* && $entry != git@* ]] || continue
+    path="$(realpath -m --relative-to=. -- "$dir/$entry")"
+    if [[ -d $path ]]; then
+      reach "$path"
+    else
+      reached[$path]=1
+    fi
+  done < <(yq -N '[(.resources // [])[], (.components // [])[], (.crds // [])[], (.configurations // [])[],
+      ((.patchesStrategicMerge // [])[] | select(tag == "!!str")),
+      ((.patches // [])[] | .path // ""), ((.patchesJson6902 // [])[] | .path // ""),
+      ((.replacements // [])[] | select(tag == "!!map") | .path // ""),
+      (.openapi.path // ""), ((.helmCharts // [])[] | .valuesFile // ""),
+      (((.configMapGenerator // []) + (.secretGenerator // []))[]
+        | ((.files // [])[] | sub("^[^=]*="; "")), (.envs // [])[], (.env // ""))]
+    | .[] | select(. != "" and (contains("\n") | not))' "$kfile" 2>/dev/null)
+}
+
+# app_manifests DIR: every Kubernetes manifest (a document with an apiVersion and a kind) in the
+# application directory DIR is one its app/kustomization.yaml reaches. The artifact generator
+# publishes only app/, and the build reads only what the kustomization lists, so any other
+# manifest is in Git, passes the build and never reaches the cluster.
+app_manifests() {
+  local dir=$1 file count
+  reached=()
+  reach "$dir/app"
+  while IFS= read -r file; do
+    [[ $file != "$dir/ks.yaml" && -z ${reached[$file]:-} ]] || continue
+    count="$(yq ea '[select(tag == "!!map" and (.apiVersion // "") != "" and (.kind // "") != "")] | length' "$file" 2>/dev/null)" ||
+      continue
+    [[ $count =~ ^[1-9] ]] || continue
+    if [[ $file != "$dir"/app/* ]]; then
+      fail "$file: a Kubernetes manifest outside app/, which is all the artifact generator publishes, so the cluster never gets it; move it into $dir/app/ and list it in app/kustomization.yaml"
+    else
+      fail "$file: a Kubernetes manifest that $dir/app/kustomization.yaml does not reach through resources, components, patches or generators, so the build leaves it out; list it, or delete it"
+    fi
+  done < <(find "$dir" -type f \( -name '*.yaml' -o -name '*.yml' \) | sort)
+}
+
 # An application directory holds its Flux Kustomization in ks.yaml and its manifests in app/,
 # which is also what the artifact generator publishes. Flux's own applications in a cluster
 # directory have the same shape.
@@ -127,6 +207,7 @@ for dir in kubernetes/apps/base/*/*/ kubernetes/clusters/*/*/*/; do
   apps=$((apps + 1))
   [[ -f $dir/ks.yaml && -d $dir/app ]] ||
     fail "$dir: an application directory needs both ks.yaml and app/"
+  app_manifests "$dir"
   # The directory name becomes the name of the application's Kustomization and artifact, which
   # all live in flux-system, enabled or not. A cluster's own applications share that namespace
   # with every application in apps/base, but not with another cluster's.
@@ -219,12 +300,21 @@ hint() {
 }
 
 flux_builds=0
-# flux_build KS PATH LABEL HINT_ARG...: builds the Kustomization in KS from PATH as Flux does, with
-# strict substitution, and names where an unset variable is used, passing HINT_ARG to hint. LABEL
-# is what the output calls the build.
+mkdir "$tmp/built"
+# What each successful flux_build wrote, kept for the rules on what Flux builds: the file, what the
+# output called the build, and the application directory the objects come from, if it is one.
+built_files=()
+built_labels=()
+built_app_dirs=()
+last_built=""
+flux_failed=0
+# flux_build KS PATH LABEL APP_DIR HINT_ARG...: builds the Kustomization in KS from PATH as Flux does,
+# with strict substitution, and names where an unset variable is used, passing HINT_ARG to hint.
+# LABEL is what the output calls the build; the result is in last_built when it succeeded.
 flux_build() {
-  local ks=$1 path=$2 label=$3 name err var where
-  shift 3
+  local ks=$1 path=$2 label=$3 app_dir=$4 name err var where
+  shift 4
+  last_built=""
   # A ks.yaml that cannot be read is reported with the ks.yaml rules above.
   name="$(yq ea '[select(. != null)] | .[0].metadata.name' "$ks" 2>/dev/null)" || return 0
   # shellcheck disable=SC2016 # $values is a yq variable.
@@ -233,16 +323,26 @@ flux_build() {
     "$values" "$ks" >"$tmp/ks.yaml" 2>/dev/null || return 0
   flux_builds=$((flux_builds + 1))
   if err="$(flux build kustomization "$name" --path "$path" --kustomization-file "$tmp/ks.yaml" \
-    --dry-run --strict-substitute --in-memory-build 2>&1 >/dev/null)"; then
+    --dry-run --strict-substitute --in-memory-build 2>&1 >"$tmp/built/$flux_builds.yaml")"; then
     echo "built $label"
+    last_built="$tmp/built/$flux_builds.yaml"
+    built_files+=("$last_built")
+    built_labels+=("$label")
+    built_app_dirs+=("$app_dir")
   elif [[ $err =~ variable\ not\ set\ \(strict\ mode\):\ \"([A-Za-z_][A-Za-z0-9_]*)\" ]]; then
     var="${BASH_REMATCH[1]}"
     where="$(hint "$var" "$@")"
+    flux_failed=1
     fail "${where:-$label}: variable $var is not set: list it in a cluster's cluster-config.example.yaml or cluster-secrets.example.yaml, set it in the application's postBuild.substitute, or give it a default (\${$var:=value})"
   else
+    flux_failed=1
     fail "$label: flux build of $path failed: $err"
   fi
 }
+
+# What flux_build built for each cluster directory: the directory as the instance's sync
+# Kustomization applies it, and its root Kustomization's overlay.
+declare -A sync_built=() root_built=()
 
 # The instance's sync Kustomization applies each cluster directory with the root's decryption and
 # substitution (tests/flux.bats proves they match), so the root's and Flux's own ks.yaml files are
@@ -257,7 +357,8 @@ for dir in kubernetes/clusters/*/; do
        "spec": {"path": strenv(sync_path), "sourceRef": {"kind": "OCIRepository", "name": "flux-system"},
          "decryption": .spec.decryption, "postBuild": {"substituteFrom": .spec.postBuild.substituteFrom}}}' \
     "$dir/ks.yaml" >"$tmp/sync.yaml" 2>/dev/null || continue
-  flux_build "$tmp/sync.yaml" "$dir" "$dir as the instance's sync Kustomization" --exclude-dir=app "$dir"
+  flux_build "$tmp/sync.yaml" "$dir" "$dir as the instance's sync Kustomization" "" --exclude-dir=app "$dir"
+  [[ -z $last_built ]] || sync_built[$dir]="$last_built"
 done
 
 # The root applies its patches to the children; only a Flux build shows they still apply. It also
@@ -270,7 +371,8 @@ for ks in kubernetes/clusters/*/ks.yaml; do
   for dir in kubernetes/apps kubernetes/components; do
     [[ -d $dir ]] && hints+=("$dir")
   done
-  flux_build "$ks" "$path" "$ks" --exclude-dir=app "${hints[@]}"
+  flux_build "$ks" "$path" "$ks" "" --exclude-dir=app "${hints[@]}"
+  [[ -z $last_built ]] || root_built[${ks%/ks.yaml}]="$last_built"
 done
 
 # Every application, enabled or not, and Flux's own, with its own substitution.
@@ -279,11 +381,226 @@ for dir in kubernetes/apps/base/*/*/ kubernetes/clusters/*/*/*/; do
   [[ -f $dir/ks.yaml && -d $dir/app && -z ${broken[$dir/app]:-} ]] || continue
   hints=("$dir/app")
   [[ -d kubernetes/components ]] && hints+=(kubernetes/components)
-  flux_build "$dir/ks.yaml" "$dir/app" "$dir/ks.yaml" "${hints[@]}"
+  flux_build "$dir/ks.yaml" "$dir/app" "$dir/ks.yaml" "$dir" "${hints[@]}"
 done
+
+# kustomizations FILE: the Flux Kustomizations among the objects FILE holds, one JSON object a line.
+kustomizations() {
+  yq -N -o json -I0 'select(. != null and .kind == "Kustomization" and ((.apiVersion // "") | test("^kustomize\.toolkit\.fluxcd\.io/")))' "$1"
+}
+
+# What a Kustomization that names another in dependsOn needs, judged on what Flux builds, so the
+# root's patches count: the other is one the cluster applies, which is one its overlay lists or one
+# its cluster directory builds, and it is Ready only once what it applies is, through wait or health
+# checks; otherwise the dependent never reconciles, or starts before its dependency's objects exist.
+dependencies=0
+for dir in kubernetes/clusters/*/; do
+  dir="${dir%/}"
+  [[ -n ${root_built[$dir]:-} && -n ${sync_built[$dir]:-} ]] || continue
+  overlay="$(yq ea '[select(. != null)] | .[0].spec.path' "$dir/ks.yaml" 2>/dev/null)" || continue
+  overlay="kubernetes/${overlay#./}"
+  overlay="${overlay%/}"
+  kustomizations "${root_built[$dir]}" >"$tmp/dependents.jsonl"
+  kustomizations "${sync_built[$dir]}" >>"$tmp/dependents.jsonl"
+  while IFS='|' read -r verdict dependent dep; do
+    dependencies=$((dependencies + 1))
+    file="${ks_name_file[$dependent]:-$dir/ks.yaml}"
+    case $verdict in
+      missing)
+        fail "$file: Kustomization $dependent names $dep in dependsOn, but $overlay does not enable $dep, nor does $dir build it, so $dependent would never reconcile; list the ks.yaml of $dep in $overlay/kustomization.yaml, or drop the dependency"
+        ;;
+      nowait)
+        fail "$file: Kustomization $dependent names $dep in dependsOn, but $dep does not wait, as built for $overlay: it sets neither wait nor healthChecks, so $dependent starts before the objects of $dep are ready; set wait: true on $dep"
+        ;;
+    esac
+  done < <(jq -rs 'def ns: .metadata.namespace // "default";
+    def ready: .spec.wait == true or ((.spec.healthChecks // []) | length > 0) or ((.spec.healthCheckExprs // []) | length > 0);
+    . as $all
+    | (reduce $all[] as $k ({}; .[($k | ns) + "/" + $k.metadata.name] = $k)) as $by
+    | $all[] | . as $k | (.spec.dependsOn // [])[]
+    | ((.namespace // ($k | ns)) + "/" + .name) as $key
+    | [(if $by[$key] == null then "missing" elif ($by[$key] | ready) then "ok" else "nowait" end),
+       $k.metadata.name, (if .namespace then $key else .name end)] | join("|")' "$tmp/dependents.jsonl")
+done
+
+# source_of APP_DIR KIND NAME LABEL: the file an object that a build yielded comes from, when it can
+# be told: the ks.yaml of a Kustomization, or the file of the application's app/ that holds an object
+# of that kind and name; otherwise LABEL.
+source_of() {
+  local app_dir=$1 kind=$2 name=$3 label=$4 file
+  if [[ $kind == Kustomization && -n ${ks_name_file[$name]:-} ]]; then
+    echo "${ks_name_file[$name]}"
+    return
+  fi
+  if [[ -n $app_dir ]]; then
+    while IFS= read -r file; do
+      if [[ $(kind=$kind name=$name yq ea '[select(.kind == strenv(kind) and .metadata.name == strenv(name))] | length' "$file" 2>/dev/null) =~ ^[1-9] ]]; then
+        echo "$file"
+        return
+      fi
+    done < <(find "$app_dir/app" -type f \( -name '*.yaml' -o -name '*.yml' \) | sort)
+  fi
+  echo "$label"
+}
+
+# The objects of Kubernetes' own API groups and of Flux's must have a schema: a kind without one is
+# a wrong apiVersion or schemas older than the cluster, and it would otherwise go unchecked.
+builtin_group_re='^(|apps|batch|policy|autoscaling|(rbac\.authorization|networking|storage|admissionregistration|apiextensions|scheduling|node|coordination|certificates|discovery|events|apiregistration)\.k8s\.io)$'
+flux_group_re='(\.toolkit\.fluxcd\.io|^source\.extensions\.fluxcd\.io)$'
+
+# schema_check: validates everything flux_build built, with unknown fields refused, against Kubernetes'
+# schemas for the version in versions.yaml and Flux's CRD schemas; counts the objects of the kinds
+# that have neither and prints each kind with its count.
+schema_valid=0
+schema_skipped=0
+schema_check() {
+  local kube flux_dir kube_location flux_version url err tool i n key status index kind api name msg group where
+  local -A skipped=()
+  kube="$(yq '.kubernetes // ""' versions.yaml 2>/dev/null)" || kube=""
+  if [[ ! $kube =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    fail "versions.yaml: kubernetes is not a version: ${kube:-none}; the schemas are the Kubernetes version's"
+    return
+  fi
+  kube="${kube#v}"
+  if [[ -n $schemas ]]; then
+    flux_dir="$schemas/flux"
+    kube_location="$schemas/kubernetes/{{.NormalizedKubernetesVersion}}-standalone{{.StrictSuffix}}/{{.ResourceKind}}{{.KindSuffix}}.json"
+  else
+    flux_version="$(yq -p toml '.tools.flux2 // ""' "$repo_root/mise.toml" 2>/dev/null)" || flux_version=""
+    if [[ ! $flux_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      fail "mise.toml: the flux2 pin is not an exact version: ${flux_version:-none}; Flux's schemas are fetched for that release"
+      return
+    fi
+    url="https://github.com/fluxcd/flux2/releases/download/v$flux_version/crd-schemas.tar.gz"
+    for tool in curl tar; do
+      command -v "$tool" >/dev/null || { fail "$tool not found on PATH, which fetching Flux's schemas needs"; return; }
+    done
+    flux_dir="$tmp/flux-schemas"
+    mkdir "$flux_dir"
+    if ! err="$(curl --fail --silent --show-error --location --retry 3 --max-time 120 --output "$tmp/crd-schemas.tar.gz" "$url" 2>&1)" ||
+      ! err="$(tar -xzf "$tmp/crd-schemas.tar.gz" -C "$flux_dir" 2>&1)"; then
+      fail "cannot fetch Flux's schemas from $url: $err"
+      return
+    fi
+    kube_location="https://raw.githubusercontent.com/yannh/kubernetes-json-schema/$kubernetes_schemas_ref/{{.NormalizedKubernetesVersion}}-standalone{{.StrictSuffix}}/{{.ResourceKind}}{{.KindSuffix}}.json"
+  fi
+
+  # What Flux strips at apply, the sops metadata of an encrypted object, is no field of its kind.
+  mkdir "$tmp/validate" "$tmp/schema-cache"
+  for i in "${!built_files[@]}"; do
+    yq 'select(. != null) | del(.sops)' "${built_files[i]}" >"$tmp/validate/$i.yaml" 2>/dev/null ||
+      { fail "${built_labels[i]}: cannot read what flux build yielded"; return; }
+  done
+  kubeconform -strict -ignore-missing-schemas -kubernetes-version "$kube" -cache "$tmp/schema-cache" \
+    -output json -verbose -schema-location "$flux_dir/{{.ResourceKind}}{{.KindSuffix}}.json" \
+    -schema-location "$kube_location" "$tmp"/validate/*.yaml >"$tmp/kubeconform.json" 2>"$tmp/kubeconform.err" || true
+  if ! jq -e '.resources' "$tmp/kubeconform.json" >/dev/null 2>&1; then
+    fail "kubeconform did not validate the built objects: $(cat "$tmp/kubeconform.err" "$tmp/kubeconform.json" 2>/dev/null)"
+    return
+  fi
+  while IFS='|' read -r status index kind api name msg; do
+    where="${built_labels[index]}"
+    case $status in
+      statusValid) schema_valid=$((schema_valid + 1)) ;;
+      statusSkipped)
+        group=""
+        [[ $api != */* ]] || group="${api%%/*}"
+        if [[ $group =~ $builtin_group_re || $group =~ $flux_group_re ]]; then
+          where="$(source_of "${built_app_dirs[index]}" "$kind" "$name" "$where")"
+          fail "$where: $kind $name: no schema for $api in the Kubernetes or Flux schemas: the apiVersion or kind is wrong, or the schemas are older than this API"
+        else
+          key="$kind ($api)"
+          skipped[$key]=$((${skipped[$key]:-0} + 1))
+          schema_skipped=$((schema_skipped + 1))
+        fi
+        ;;
+      statusInvalid | statusError)
+        where="$(source_of "${built_app_dirs[index]}" "$kind" "$name" "$where")"
+        fail "$where: $kind $name: ${msg:-$status}"
+        ;;
+    esac
+  done < <(jq -r '.resources[] | [.status, (.filename | split("/")[-1] | rtrimstr(".yaml")), .kind, .version, .name,
+    ((.msg // "") | gsub("[\n\t]"; " "))] | join("|")' "$tmp/kubeconform.json")
+  ((${#skipped[@]} > 0)) || return 0
+  while IFS= read -r key; do
+    n=${skipped[$key]}
+    echo "kubernetes-check: no schema for $key: $n object$( ((n == 1)) || echo s)"
+  done < <(printf '%s\n' "${!skipped[@]}" | sort)
+}
+if ((${#built_files[@]} > 0)); then
+  schema_check
+fi
+
+# image_allowed: "APPLICATION IMAGE" for every exception .image-allowlist lists, with the reason it
+# gives; an entry without one is refused.
+declare -A image_allowed=()
+if [[ -f .image-allowlist ]]; then
+  lineno=0
+  while IFS= read -r line; do
+    lineno=$((lineno + 1))
+    [[ $line =~ ^[[:space:]]*(#.*)?$ ]] && continue
+    if [[ $line =~ ^([^[:space:]#]+)[[:space:]]+([^[:space:]#]+)[[:space:]]*#[[:space:]]*[^[:space:]] ]]; then
+      image_allowed["${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"]=1
+    else
+      fail ".image-allowlist:$lineno: an exception is the application, the image as the chart renders it and the reason, as: APPLICATION IMAGE  # reason"
+    fi
+  done <.image-allowlist
+fi
+
+# Every image of every object scripts/render writes: the objects Flux builds and the ones each
+# release's chart renders, hooks included. A tag that moves, or none, means a pull at a time nobody
+# chose: a failed pull fails a Helm test, which rolls the release back. A test hook of a release that
+# does not run it (tests off, or this one excluded) is never pulled and is left out.
+images=0
+image_rule() {
+  local out="$tmp/render" log app cluster_app objects verdict kind name image hooks file
+  if ((flux_failed || ${#broken[@]} > 0)); then
+    echo "kubernetes-check: the images are not checked: the tree does not build" >&2
+    return
+  fi
+  if ! log="$("$repo_root/scripts/render" "$out" "$PWD" 2>&1)"; then
+    fail "scripts/render does not render the tree, so no image of it was checked: $log"
+    return
+  fi
+  for cluster_app in "$out"/*/*/; do
+    cluster_app="${cluster_app%/}"
+    app="${cluster_app##*/}"
+    objects="$tmp/objects.jsonl"
+    yq -N -o json -I0 '.' "$cluster_app"/*.yaml >"$objects" 2>/dev/null || { fail "$cluster_app: cannot read what scripts/render wrote"; continue; }
+    while IFS='|' read -r verdict kind name image hooks; do
+      images=$((images + 1))
+      [[ $verdict == bad ]] || continue
+      [[ -z ${image_allowed["$app $image"]:-} ]] || continue
+      file="${ks_name_file[$app]:-${cluster_app#"$out"/}}"
+      fail "$file: $kind $name${hooks:+ (a Helm hook)} runs image $image, which has no tag other than latest and no digest: pin a tag or a digest in the chart's values or the release's post-renderer, or list it with its reason in .image-allowlist"
+    done < <(jq -rs 'def pinned: test("@sha256:[0-9a-f]{64}$") or (split("/")[-1] | test(":[A-Za-z0-9_][A-Za-z0-9._-]*$") and (test(":latest$") | not));
+      def hooks: ((.metadata.annotations["helm.sh/hook"] // "") | split(",") | map(gsub("^ +| +$"; "")) | map(select(. != "")));
+      def testonly: (hooks | length > 0) and (hooks | all(. == "test" or . == "test-success" or . == "test-failure"));
+      . as $all
+      | def runs($n; $release):
+          ($all | map(select(.kind == "HelmRelease" and .metadata.name == $release.name
+              and (.metadata.namespace // "default") == $release.namespace)) | first) as $hr
+          | if $hr == null then true
+            else ($hr.spec.test.enable // false) == true
+              and (($hr.spec.test.filters // []) as $f
+                | (($f | map(select(.exclude != true) | .name)) as $in
+                  | ($in | length) == 0 or ($in | index($n) != null))
+                  and (($f | map(select(.exclude == true) | .name) | index($n)) == null))
+            end;
+      $all[]
+      | . as $o
+      | select(($o | testonly | not) or runs($o.metadata.name;
+          {"name": ($o.metadata.labels["helm.toolkit.fluxcd.io/name"] // ""),
+           "namespace": ($o.metadata.labels["helm.toolkit.fluxcd.io/namespace"] // "default")}))
+      | [.. | objects | (.containers?, .initContainers?, .ephemeralContainers?) | arrays | .[] | objects | .image? | strings][]
+      | [(if pinned then "ok" else "bad" end), $o.kind, $o.metadata.name, ., (if ($o | hooks | length) > 0 then "hook" else "" end)]
+      | join("|")' "$objects")
+  done
+}
+image_rule
 
 if ((failures > 0)); then
   echo "kubernetes-check: $failures failure(s)" >&2
   exit 1
 fi
-echo "kubernetes-check: passed ($kustomize_builds kustomize builds, $flux_builds flux builds, $ks_files ks.yaml, $apps applications)"
+echo "kubernetes-check: passed ($kustomize_builds kustomize builds, $flux_builds flux builds, $ks_files ks.yaml, $apps applications, $dependencies dependencies, $schema_valid objects validated, $schema_skipped without a schema, $images images)"
