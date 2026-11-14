@@ -197,7 +197,7 @@ export_api_allowed_cidrs() {
     esac
     refused=1
   done < <(jq -r 'to_entries[]
-    | if (.value | test(":")) then "\(.key + 1) ipv6" elif (.value | endswith("/0")) then "\(.key + 1) all" else empty end' <<< "$cidrs")
+    | if (.value | test(":")) then "\(.key + 1) ipv6" elif (.value | test("/0+$")) then "\(.key + 1) all" else empty end' <<< "$cidrs")
   ((!refused)) || return 1
   TF_VAR_api_allowed_cidrs=$(add_current_address "$cidrs")
   export TF_VAR_api_allowed_cidrs

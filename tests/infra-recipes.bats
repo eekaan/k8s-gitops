@@ -318,8 +318,9 @@ absent() {
   without OPERATOR_CIDRS
   # Each list and the message that names its first wrong entry.
   lists=('["198.51.100.0/24", "2001:db8::/32"]' '["198.51.100.0/24", "203.0.113.7/32", "0.0.0.0/0"]'
-    '["203.0.113.9/0"]')
-  messages=('entry 2 is an IPv6 network' 'entry 3 covers every address' 'entry 1 covers every address')
+    '["203.0.113.9/0"]' '["198.51.100.0/24", "203.0.113.9/00"]')
+  messages=('entry 2 is an IPv6 network' 'entry 3 covers every address' 'entry 1 covers every address'
+    'entry 2 covers every address')
   for i in "${!lists[@]}"; do
     for from in OPERATOR_CIDRS operator-cidrs.json; do
       echo "$from: ${lists[i]}"
