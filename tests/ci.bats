@@ -1110,8 +1110,9 @@ grammar_cases() {
   [ "$status" -ne 0 ]
   [[ $output == *"demo/greeter"* ]]
   [ -z "$(ls -A "$scratch")" ]
+}
 
-@test "The tool installer is pinned to an exact version in every workflow, and the publish job verifies it and keeps no cache" {
+@test "The tool installer is pinned to an exact version in every workflow, a workflow whose token can write checks its binary, and the publish job keeps no cache" {
   local workflow uses=0 version
   shopt -s nullglob
   for workflow in "$REPO"/.github/workflows/*.yaml "$REPO"/.github/workflows/*.yml; do
@@ -1124,11 +1125,26 @@ grammar_cases() {
     done <<< "$output"
   done
   [ "$uses" -gt 0 ]
-  # The job that signs checks the mise binary against the checksum of the pinned release, and never
-  # restores a tool cache: a cache entry is chosen by key, and the job's identity token can sign.
+  # A workflow whose token can write has the mise binary checked against a checksum, the same in
+  # every such use. Whether the value is the pinned release's is not read here: a mise bump carries
+  # its checksum, and the publish job fails closed on a mismatch.
+  local writes sums=() sum
+  for workflow in "$REPO"/.github/workflows/*.yaml "$REPO"/.github/workflows/*.yml; do
+    writes=$(yq '[.permissions // {}, (.jobs[].permissions // {})] | map(to_entries) | flatten | map(select(.value == "write")) | length' "$workflow")
+    ((writes)) || continue
+    run yq '.jobs[].steps[] | select(.uses | test("^jdx/mise-action@")) | .with.sha256' "$workflow"
+    [ "$status" -eq 0 ]
+    while IFS= read -r sum; do
+      [ -n "$sum" ] || continue
+      [[ $sum =~ ^[0-9a-f]{64}$ ]] || { echo "${workflow##*/}: no checksum for a mise whose workflow can write: $sum"; return 1; }
+      sums+=("$sum")
+    done <<< "$output"
+  done
+  [ "${#sums[@]}" -ge 2 ]
+  [ "$(printf '%s\n' "${sums[@]}" | sort -u | wc -l)" -eq 1 ]
+  # The job that signs never restores a tool cache: an entry is chosen by key, and the job's
+  # identity token can sign.
   local publish="$REPO/.github/workflows/publish.yaml"
-  run yq '.jobs.publish.steps[] | select(.uses | test("^jdx/mise-action@")) | .with.sha256' "$publish"
-  [[ $output =~ ^[0-9a-f]{64}$ ]]
   run yq '.jobs.publish.steps[] | select(.uses | test("^jdx/mise-action@")) | .with.cache' "$publish"
   [ "$output" = false ]
 }
