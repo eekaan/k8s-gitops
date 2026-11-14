@@ -24,7 +24,9 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
   by group. The group `static` holds tool versions, address literals in the files and the commit
   messages, that every Talos secrets bundle is encrypted, shellcheck and yamllint, the Renovate
   configuration (`just renovate-check`: Renovate's own validator, run from its pinned container
-  image, so it needs a container runtime, Docker), scenario proofs, the OpenTofu check
+  image, so it needs a container runtime, Docker), the edge routers' routing policy
+  (`just edge-policy-check`: their rendered FRR configuration against real BGP speakers in FRR's
+  pinned container image, which needs Docker as well), scenario proofs, the OpenTofu check
   (`just infra-check`: formatting, that the Talos schematic lists no QEMU guest agent extension,
   that every stack enforces state encryption, that no stack or module declares a bucket, that the
   default service range overlaps no default node, pod or service subnet, validation without a
@@ -60,7 +62,18 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
 
 `docs/infrastructure.md` covers the recipes that plan, apply and destroy the OpenTofu stacks: what
 they need in the environment, how state is stored and encrypted, and what they print.
-`docs/cluster.md` covers the recipes that create and change the Talos cluster. `docs/kubernetes.md`
+`docs/cluster.md` covers the recipes that create and change the Talos cluster. The edge routers
+that publish the cluster's Services have recipes of their own, each described in
+`docs/infrastructure.md#the-edge-routers` and `docs/runbooks/edge.md`:
+
+- `just os-images [pattern]` lists the names of the cloud's public images.
+- `just edge-ssh-key` creates the edge routers' SSH key pair at `EDGE_SSH_KEY_FILE`.
+- `just edge-check` checks, reading only, that both edge routers serve.
+- `just edge-routes` shows an edge router's BGP sessions and routes, in a terminal only.
+- `just edge-rollout` replaces the edge routers one at a time, checking each before the next.
+- `just edge-policy-check` proves the edge routers' routing policy with real BGP speakers.
+
+`docs/kubernetes.md`
 covers the tree Flux reconciles and how the publish workflow pushes, signs and verifies it before
 moving the `main` tag Flux follows, on every merge to `main` that changes it. `docs/runbooks/`
 holds the procedures that take more than one recipe, such as replacing the Talos image.
