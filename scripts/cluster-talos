@@ -38,7 +38,7 @@ wait_for_talos_api "$talman_file"
 
 step="asking each node what the configuration would change"
 changes=0
-talman apply --dry-run --detailed-exit-code --redact-secrets "${onboard[@]}" || changes=$?
+cluster_talman apply --dry-run --detailed-exit-code --redact-secrets "${onboard[@]}" || changes=$?
 case $changes in
   0)
     echo "cluster-talos: nothing to change on $cluster"
@@ -52,5 +52,5 @@ step="waiting for $cluster to be typed back"
 ((confirmed)) || confirm "$cluster" "apply this configuration to" changed
 
 step="applying the configuration"
-talman apply "${onboard[@]}"
+cluster_talman apply "${onboard[@]}"
 echo "cluster-talos: the configuration of $cluster is applied"

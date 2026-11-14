@@ -34,7 +34,7 @@ require_cluster talman secrets age-key api-address
 
 step="asking each node which Kubernetes it runs"
 behind=0
-talman upgrade-k8s --dry-run --detailed-exit-code || behind=$?
+cluster_talman upgrade-k8s --dry-run --detailed-exit-code || behind=$?
 case $behind in
   0)
     echo "cluster-upgrade-k8s: every node of $cluster runs the configured Kubernetes"
@@ -48,8 +48,8 @@ step="waiting for $cluster to be typed back"
 ((confirmed)) || confirm "$cluster" "upgrade Kubernetes on" upgraded
 
 step="upgrading Kubernetes"
-talman upgrade-k8s --snapshot --extra-flags="--endpoint=https://$KUBE_API_ADDRESS:6443"
+cluster_talman upgrade-k8s --snapshot --extra-flags="--endpoint=https://$KUBE_API_ADDRESS:6443"
 
 step="checking that every node runs the configured Kubernetes"
-talman upgrade-k8s --dry-run --detailed-exit-code > /dev/null
+cluster_talman upgrade-k8s --dry-run --detailed-exit-code > /dev/null
 echo "cluster-upgrade-k8s: every node of $cluster runs the configured Kubernetes"

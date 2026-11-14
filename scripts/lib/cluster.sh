@@ -37,6 +37,33 @@ refuse_http2_debug() {
   fi
 }
 
+# cluster_talman ARG...: talman with ARG... on the cluster scripts/cluster-env set up. talman's output,
+# talosctl's within it, names the nodes by address and shows configuration diffs, and CI logs are
+# public, so with CI set it goes to talman_log, in the cluster's clusterconfig/, which git ignores,
+# and only whether talman succeeded and where its output is are printed. The file holds what this
+# run's talman calls printed. With --detailed-exit-code, talman's 2 reports changes, not a failure.
+# Returns talman's status.
+cluster_talman() {
+  local status=0 log
+  if [[ -z ${CI:-} ]]; then
+    talman "$@"
+    return
+  fi
+  if [[ -z ${talman_log_started-} ]]; then
+    # shellcheck disable=SC2154 # scripts/cluster-env sets talman_log
+    (umask 077 && mkdir -p "${talman_log%/*}" && : > "$talman_log")
+    talman_log_started=1
+  fi
+  talman "$@" >> "$talman_log" 2>&1 || status=$?
+  log=${talman_log#"$infra_root"/}
+  if ((status == 0)) || { ((status == 2)) && [[ " $* " == *" --detailed-exit-code "* ]]; }; then
+    printf '%s: talman %s succeeded; its output is in %s\n' "${0##*/}" "$1" "$log"
+  else
+    infra_error "talman $1 failed; its output is in $log"
+  fi
+  return "$status"
+}
+
 # inside_repository PATH: whether PATH, with symlinks resolved, lies in the repository.
 inside_repository() {
   local resolved root

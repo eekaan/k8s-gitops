@@ -154,12 +154,14 @@ cluster_files() {
 #   k8s-behind         the kubelets run a Kubernetes behind kubernetesVersion
 #   api-down           the Kubernetes API does not answer /readyz
 # talosctl's own drain and upgrade-k8s reach the API at the cluster endpoint, the load balancer's
-# address on the node network, so the fake talman fails them unless told otherwise.
+# address on the node network, so the fake talman fails them unless told otherwise. Like talman, the
+# fake names the nodes it reaches by address.
 fake_cluster() {
   cluster_files
   fake_tool talman <<'EOF'
 printf '%s\n' "talman $*" >> "$RECORD/argv"
 dir=$TALMAN_CONFIG
+echo "== reaching the nodes at $(sed -n 's/^ *ipAddress: //p' "$dir/talman.yaml" | paste -sd, -)"
 given() {
   [[ " ${args[*]} " == *" $1 "* ]]
 }
@@ -924,6 +926,74 @@ applies() {
   [ -z "$(upgrades)" ]
 }
 
+@test "With CI set, talman's output stays out of the log" {
+  fake_cluster
+  with CI=true
+  mapfile -t addresses < <(yq '.nodes[].ipAddress' "$CLUSTER/talman.yaml")
+  [ "${#addresses[@]}" -eq 6 ]
+  printed=()
+  # shown_in RECIPE: the file RECIPE keeps talman's output in, as the recipes name it.
+  shown_in() {
+    echo "its output is in talos/lab-sto2/clusterconfig/$1.log"
+  }
+
+  recipe cluster-bootstrap
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"cluster-bootstrap: talman apply succeeded; $(shown_in cluster-bootstrap)"* ]]
+  [[ $output == *"cluster-kubeconfig: talman kubeconfig succeeded; $(shown_in cluster-kubeconfig)"* ]]
+  grep -q 'bootstrapping etcd' "$CLUSTER/clusterconfig/cluster-bootstrap.log"
+  printed+=("$output")
+
+  : > "$STATE/changes"
+
+  recipe cluster-talos --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ "$(grep -c "cluster-talos: talman apply succeeded; $(shown_in cluster-talos)" <<< "$output")" -eq 2 ]
+  grep -q 'Config diff:' "$CLUSTER/clusterconfig/cluster-talos.log"
+  grep -q "${addresses[0]}" "$CLUSTER/clusterconfig/cluster-talos.log"
+  printed+=("$output")
+
+  printf '%s\n' cp-2 > "$STATE/talos-behind"
+  : > "$STATE/k8s-behind"
+
+  recipe cluster-upgrade --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"cluster-upgrade: talman upgrade succeeded; $(shown_in cluster-upgrade)"* ]]
+  [[ $output == *"cluster-upgrade: talman etcd succeeded; $(shown_in cluster-upgrade)"* ]]
+  grep -q 'cp-2: upgraded' "$CLUSTER/clusterconfig/cluster-upgrade.log"
+  printed+=("$output")
+
+  recipe cluster-upgrade-k8s --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"cluster-upgrade-k8s: talman upgrade-k8s succeeded; $(shown_in cluster-upgrade-k8s)"* ]]
+  grep -q 'upgraded Kubernetes' "$CLUSTER/clusterconfig/cluster-upgrade-k8s.log"
+  printed+=("$output")
+
+  # A talman call that fails says so and where its output is, and each run starts its file afresh.
+  : > "$STATE/changes"
+  : > "$STATE/unreachable"
+
+  recipe cluster-talos --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"cluster-talos: talman apply failed; $(shown_in cluster-talos)"* ]]
+  [[ $output == *"cluster-talos: failed while asking each node what the configuration would change"* ]]
+  printed+=("$output")
+  grep -q 'answers neither' "$CLUSTER/clusterconfig/cluster-talos.log"
+  run grep -c 'Applied configuration' "$CLUSTER/clusterconfig/cluster-talos.log"
+  [ "$output" -eq 0 ]
+
+  for shown in "${addresses[@]}" 'Config diff:' 'answers neither' 'dial tcp'; do
+    [[ ${printed[*]} != *"$shown"* ]]
+  done
+  cd "$ROOT"
+  git check-ignore --no-index -q talos/lab-sto2/clusterconfig/cluster-talos.log
+}
+
 @test "No cluster secret reaches a command line or the output" {
   git_repository
   record talman talosctl sops age-keygen yq jq git
@@ -992,6 +1062,35 @@ applies() {
   run_and_keep ok cluster-upgrade-k8s --yes < /dev/null
   run_and_keep ok cluster-upgrade < /dev/null
   run_and_keep ok cluster-upgrade-k8s < /dev/null
+
+  # The same recipes with CI set, as in a public CI log, where no node address may show either.
+  local_runs=${#printed[@]}
+  with CI=true
+  rm -f "$STATE/bootstrapped"
+  run_and_keep ok cluster-bootstrap
+  run_and_keep failed cluster-bootstrap
+  run_and_keep ok cluster-kubeconfig
+  : > "$STATE/changes"
+  echo worker-3 > "$STATE/new-nodes"
+  run_and_keep failed cluster-talos <<< no
+  run_and_keep failed cluster-talos --yes < /dev/null
+  run_and_keep ok cluster-talos --onboard --yes < /dev/null
+  printf '%s\n' cp-2 worker-1 > "$STATE/talos-behind"
+  : > "$STATE/k8s-behind"
+  run_and_keep failed cluster-upgrade <<< no
+  run_and_keep failed cluster-upgrade-k8s <<< no
+  : > "$STATE/api-down"
+  run_and_keep failed cluster-upgrade --yes < /dev/null
+  rm "$STATE/api-down"
+  run_and_keep ok cluster-upgrade --yes < /dev/null
+  run_and_keep ok cluster-upgrade-k8s --yes < /dev/null
+  reset_environment
+  ci_printed=("${printed[@]:local_runs}")
+  [ "${#ci_printed[@]}" -eq 11 ]
+  [[ ${ci_printed[*]} == *"its output is in talos/lab-sto2/clusterconfig/"* ]]
+  for address in $(yq '.nodes[].ipAddress' "$CLUSTER/talman.yaml"); do
+    [[ ${ci_printed[*]} != *"$address"* ]]
+  done
 
   markers+=(
     AGE-SECRET-KEY-MARKER-AGE-KEY-FILE

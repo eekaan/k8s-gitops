@@ -179,9 +179,13 @@ A failing recipe ends with a line naming the step it failed in.
 
 The recipes' own lines name nodes by hostname, never by address, and print none of the age keys,
 the bundle, the kubeconfig, `KUBE_API_ADDRESS` and the values of `cluster-config` and
-`cluster-secrets`. talman's and talosctl's output passes through as they print it, and names each
-node with the address talman reaches it on; so do kubectl's and helm's, which name the objects they
-apply.
+`cluster-secrets`. talman's output, talosctl's within it, names each node with the address talman
+reaches it on and shows configuration diffs. Without `CI` set it passes through as talman prints
+it. With `CI` set, as CI logs are public, `cluster-bootstrap`, `cluster-kubeconfig`,
+`cluster-talos` and both upgrade recipes write it to `clusterconfig/<recipe>.log` in the cluster's
+directory, which git ignores, started afresh by each run, and print for each talman call only
+whether it succeeded or failed and that file's path. kubectl's and helm's output passes through,
+naming the objects they apply.
 
 ## Environment
 
@@ -208,6 +212,8 @@ age-keygen on standard input.
 - `CLUSTER_DOMAIN`: the domain the cluster's applications are published under, a lower-case DNS
   name, which becomes `CLUSTER_DOMAIN` in `cluster-config`; `cluster-bootstrap`, `cluster-config`
   and `cluster-flux` need it.
+- `CI`: when set, talman's output goes to a file instead of the output; see
+  [What the recipes print](#what-the-recipes-print).
 
 The recipes, the check aside, refuse to run while `GODEBUG` sets `http2debug`: Go's HTTP/2 debug
 log prints the frames talosctl and kubectl send and receive, which carry machine configurations

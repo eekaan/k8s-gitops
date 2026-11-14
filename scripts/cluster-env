@@ -4,9 +4,10 @@
 # Resolves the cluster's directory under talos/, reads .env when there is one, refuses Go's HTTP/2
 # debug log, and exports what talman and kubectl need: TALMAN_CONFIG, the cluster's directory, and
 # KUBECONFIG, the kubeconfig talman fetches into its output directory there. SOPS_AGE_KEY_FILE or
-# SOPS_AGE_KEY reach sops as they are. Sets cluster, cluster_dir, talman_file and secrets_file, and
-# from here on a failing script names the step it failed in. require_cluster then checks what a
-# script needs before it runs anything.
+# SOPS_AGE_KEY reach sops as they are. Sets cluster, cluster_dir, talman_file, secrets_file and
+# talman_log, where cluster_talman keeps talman's output with CI set, and from here on a failing
+# script names the step it failed in. require_cluster then checks what a script needs before it
+# runs anything.
 
 # shellcheck source=scripts/lib/cluster.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/cluster.sh"
@@ -83,6 +84,8 @@ cluster_env() {
   cluster_dir=$infra_root/talos/$cluster
   talman_file=$cluster_dir/talman.yaml
   secrets_file=$cluster_dir/secrets.sops.yaml
+  # One file per recipe: cluster-bootstrap runs cluster-kubeconfig, which keeps its own.
+  talman_log=$cluster_dir/clusterconfig/${0##*/}.log
 
   load_env || return 1
   refuse_http2_debug || return 1

@@ -66,7 +66,12 @@ Feature: Cluster recipes
     When cluster-upgrade-k8s runs, without the cluster's name typed back and then with it
     Then the first shows talman's dry run and upgrades nothing; the second runs talman upgrade-k8s once, with an etcd snapshot first and the API reached at KUBE_API_ADDRESS, and then finds every node on the version; and with every node on it, it exits zero without asking or upgrading
 
+  Scenario: With CI set, talman's output stays out of the log
+    Given a talman whose output names the nodes by address and shows configuration diffs
+    When cluster-bootstrap, cluster-kubeconfig, cluster-talos, cluster-upgrade and cluster-upgrade-k8s run with CI set, and a talman call fails
+    Then for each talman call they print only whether it succeeded or failed and the file under talos/lab-sto2/clusterconfig/, which git ignores, that holds its output, and no node address or diff is printed
+
   Scenario: No cluster secret reaches a command line or the output
     Given an age key, a secrets bundle and a kubeconfig whose secrets are known
-    When every cluster recipe runs against recording tools, and in the ways each one stops
-    Then no secret appears in any recorded argument list or in anything the recipes print
+    When every cluster recipe runs against recording tools, and in the ways each one stops, without and with CI set
+    Then no secret appears in any recorded argument list or in anything the recipes print, and with CI set no node address is printed either

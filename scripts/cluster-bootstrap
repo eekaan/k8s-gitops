@@ -27,7 +27,7 @@ step="waiting for every node to answer on the Talos API port"
 wait_for_talos_api "$talman_file"
 
 step="bootstrapping the cluster with talman apply"
-talman apply --bootstrap --onboard-new-nodes
+cluster_talman apply --bootstrap --onboard-new-nodes
 
 step="fetching the kubeconfig"
 "$here/cluster-kubeconfig" "$cluster"

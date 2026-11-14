@@ -52,7 +52,7 @@ api_answers() {
 
 step="asking each node whether its Talos is behind"
 behind=0
-talman upgrade --dry-run --detailed-exit-code || behind=$?
+cluster_talman upgrade --dry-run --detailed-exit-code || behind=$?
 case $behind in
   0)
     echo "cluster-upgrade: every node of $cluster runs its configured Talos"
@@ -72,14 +72,14 @@ step="checking that the Kubernetes API answers"
 api_answers
 
 step="taking an etcd snapshot"
-talman etcd snapshot
+cluster_talman etcd snapshot
 
 hostnames=$(talman_nodes "$talman_file" | cut -d' ' -f1)
 mapfile -t nodes <<< "$hostnames"
 for node in "${nodes[@]}"; do
   step="asking $node whether its Talos is behind"
   behind=0
-  talman upgrade -n "$node" --dry-run --detailed-exit-code > /dev/null || behind=$?
+  cluster_talman upgrade -n "$node" --dry-run --detailed-exit-code > /dev/null || behind=$?
   case $behind in
     0) continue ;;
     2) ;;
@@ -91,7 +91,7 @@ for node in "${nodes[@]}"; do
   step="draining $node"
   kubectl drain "$node" --ignore-daemonsets --delete-emptydir-data --timeout=10m
   step="upgrading $node, which is drained"
-  talman upgrade -n "$node" --extra-flags=--drain=false
+  cluster_talman upgrade -n "$node" --extra-flags=--drain=false
   step="waiting for $node, which is drained, to be Ready"
   kubectl wait --for=condition=Ready "node/$node" --timeout=10m
   step="uncordoning $node"
@@ -99,5 +99,5 @@ for node in "${nodes[@]}"; do
 done
 
 step="checking that every node runs its configured Talos"
-talman upgrade --dry-run --detailed-exit-code > /dev/null
+cluster_talman upgrade --dry-run --detailed-exit-code > /dev/null
 echo "cluster-upgrade: every node of $cluster runs its configured Talos"
