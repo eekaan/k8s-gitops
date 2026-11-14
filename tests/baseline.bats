@@ -5,6 +5,12 @@
 # once, at the pinned tag and with only the directories its GitRepository checks out; building and
 # rendering are offline.
 
+# The tests run one at a time even where bats runs a file's tests side by side: flux build rewrites
+# the kustomization.yaml of the application it builds in this checkout and puts it back afterwards,
+# so two builds of one application at once can leave the rewritten file behind; and a test that
+# starts while another pulls a chart finds the chart's directory before the chart is in it.
+export BATS_NO_PARALLELIZE_WITHIN_FILE=true
+
 setup_file() {
   # Helm's cache and registry settings stay in the run's own directory, and so does the Docker
   # configuration helm falls back to for credentials, so no login is read.

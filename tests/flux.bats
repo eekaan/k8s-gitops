@@ -3,6 +3,10 @@
 # Needs helm, kustomize, yq and flux on PATH (the versions pinned for the repository). Each chart is
 # pulled once per run from its public registry; everything else, rendering included, is offline.
 
+# The tests run one at a time even where bats runs a file's tests side by side: a test that starts
+# while another pulls a chart finds the chart's directory before the chart is in it.
+export BATS_NO_PARALLELIZE_WITHIN_FILE=true
+
 setup_file() {
   # Helm's cache and registry settings stay in the run's own directory, and so does the Docker
   # configuration helm falls back to for credentials, so no login is read.

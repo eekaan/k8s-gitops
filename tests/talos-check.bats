@@ -1,5 +1,10 @@
 #!/usr/bin/env bats
 
+# The tests run one at a time even where bats runs a file's tests side by side: the check renders
+# the template with tofu console in tests/fixtures/talos, which holds the state lock there while it
+# runs, so a second check at the same time fails on the lock.
+export BATS_NO_PARALLELIZE_WITHIN_FILE=true
+
 setup() {
   ROOT=$(cd "$BATS_TEST_DIRNAME/.." && pwd)
   SCRIPT="$ROOT/scripts/talos-check"

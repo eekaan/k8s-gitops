@@ -20,24 +20,36 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
 [just](https://just.systems) installed:
 
 - `just tools` installs the pinned tools.
-- `just checks` runs every check that needs no credentials, with the tools on this machine: tool
-  versions, address literals in the files and the commit messages, that every Talos secrets
-  bundle is encrypted, shellcheck and yamllint, the Renovate configuration
-  (`just renovate-check`: Renovate's own validator, run from its pinned container image, so it
-  needs a container runtime, Docker), scenario proofs, the OpenTofu check (`just infra-check`:
-  formatting, that the Talos schematic lists no QEMU guest agent extension, that every stack
-  enforces state encryption, that no stack or module declares a bucket, validation without a
-  state backend and the mocked `tofu test` runs), the Talos check (`just talos-check`: every node's machine
-  configuration rendered from the template, the patches and fixture node data, and validated,
-  offline), the offline build of `kubernetes/`, gitleaks over the committable files and the git
-  history, and the bats tests.
-- `just ci` runs the same checks through the Dagger module in `.dagger/modules/ci`: Renovate's
-  validator in its own image, every other check in a container built from the pins. It needs only
-  `just`, the pinned `dagger` and a container runtime such as Docker, and it is what CI runs on
-  every pull request. Dagger shows every step and each check's output while it runs: its live
-  view in a terminal, and line by line where there is none, as in CI. The live view can name the
-  checkout's path on the machine, so paste the checks' own lines into a pull request, not the
-  whole of it.
+- `just checks` runs every check that needs no credentials, with the tools on this machine, group
+  by group. The group `static` holds tool versions, address literals in the files and the commit
+  messages, that every Talos secrets bundle is encrypted, shellcheck and yamllint, the Renovate
+  configuration (`just renovate-check`: Renovate's own validator, run from its pinned container
+  image, so it needs a container runtime, Docker), scenario proofs, the OpenTofu check
+  (`just infra-check`: formatting, that the Talos schematic lists no QEMU guest agent extension,
+  that every stack enforces state encryption, that no stack or module declares a bucket,
+  validation without a state backend and the mocked `tofu test` runs), the Talos check
+  (`just talos-check`: every node's machine configuration rendered from the template, the patches
+  and fixture node data, and validated, offline), the offline build of `kubernetes/`, and gitleaks
+  over the committable files and the git history. The groups `tests-1` to `tests-3` each run a
+  third of the bats tests.
+- The groups are the dependencies of the `checks` recipe, and a group's checks are its own
+  dependencies; a new check goes into exactly one group, and then runs in `just checks`, in
+  `just ci` and in CI.
+- `just test` runs the bats tests but the hermetic ones, the tests of each file side by side (a file
+  whose tests share state runs them one at a time, and says why); `just test 2/3` runs the second
+  of three parts of the test files, which are split by their number of tests.
+- `just ci` runs the same groups through the Dagger module in `.dagger/modules/ci`, side by side,
+  each in containers of its own: Renovate's validator in its own image, every other check in a
+  container built from the pins. `just ci tests-2` runs one group, as each CI job does. It needs
+  only `just`, the pinned `dagger` and a container runtime such as Docker. Every group runs to its
+  end, and the run ends with each group's output under a heading `== <group>: passed` or
+  `failed`, followed by its checks, and a line naming the groups that failed. Dagger shows every
+  step and each check's output while it runs: its live view in a terminal, and line by line where
+  there is none, as in CI. The live view can name the checkout's path on the machine, so paste the
+  checks' own lines into a pull request, not the whole of it.
+- In CI, a first job lists the groups (`just ci-groups`), one job per group runs `just ci <group>`,
+  each showing its own result on the pull request, and the job named `ci`, the required check on
+  `main`, passes only when every one of them succeeded (`just ci-passed`).
 - `just test-hermetic` runs the bats tests that drive `just ci` itself.
 
 `docs/infrastructure.md` covers the recipes that plan, apply and destroy the OpenTofu stacks: what

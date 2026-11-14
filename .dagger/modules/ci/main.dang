@@ -19,7 +19,7 @@ type Ci {
   }
 
   """
-  Run every dependency of the justfile's checks recipe once and return the output: renovate-check as Renovate's validator in its own image, the others with just in a container built from the tools pinned in mise.toml.
+  Run the justfile's groups of checks side by side and return what they printed: the groups are the dependencies of the checks recipe, and a group's checks are its own dependencies. A group's renovate-check runs Renovate's validator in its own image; its other checks run in one just run, in a container built from the tools pinned in mise.toml. Every group runs to its end; when a check fails, the call fails with every group's output and names the groups that failed.
   """
   pub checks(
     """
@@ -31,14 +31,13 @@ type Ci {
     The commit where HEAD's history leaves the default branch, or empty without one; the messages of the commits after it are checked.
     """
     base: String! = "",
+
+    """
+    The one group to run, such as tests-2; every group when empty.
+    """
+    group: String! = "",
   ): String! {
-    let renovate = container
-      .from(renovateImage)
-      .withMountedDirectory("/usr/src/app", source.filter(include: ["renovate.json5", ".renovate/"]))
-      .withWorkdir("/usr/src/app")
-      .withExec(["sh", "-c", "renovate-config-validator --strict --no-global renovate.json5 .renovate/*.json5"])
-      .combinedOutput
-    let others = tools
+    let checkout = tools
       .withDirectory("/src", source)
       .withDirectory("/src/.git", git)
       # The snapshot's index matches HEAD, so a file staged here but not yet committed would look untracked.
@@ -46,17 +45,45 @@ type Ci {
       # The snapshot holds HEAD's history and no other ref, so the default branch is named where it
       # leaves that history, under the name a CI checkout gives the remote's main.
       .withExec(["sh", "-c", """if [ -n "$1" ]; then git update-ref refs/remotes/origin/main "$1"; fi""", "sh", base])
-      .withExec(["sh", "-c", """
-        set -eu
-        # renovate-check runs the validator through docker, which this container lacks; it ran in its own image above.
-        recipes=$(just --dump --dump-format json | jq -r '.recipes.checks.dependencies[].recipe | select(. != "renovate-check")')
-        # Without a recipe, just would run its default and pass having checked nothing.
-        test -n "$recipes"
-        # One just run, so a recipe that several others depend on runs once.
-        just $recipes
-      """])
-      .combinedOutput
-    renovate + others
+    let validator = container
+      .from(renovateImage)
+      .withMountedDirectory("/usr/src/app", source.filter(include: ["renovate.json5", ".renovate/"]))
+      .withWorkdir("/usr/src/app")
+    # One line per group: its name, then its checks as just takes them on its command line, each
+    # recipe followed by its arguments.
+    let listing = checkout.withExec(["bash", "-c", """
+      set -euo pipefail
+      just --dump --dump-format json | jq -r --arg group "$1" '
+        .recipes as $recipes
+        | [$recipes.checks.dependencies[].recipe] as $groups
+        | if $group == "" or ($groups | index($group)) != null then $groups[]
+          else error("no group " + $group + "; the groups are " + ($groups | join(" "))) end
+        | select($group == "" or . == $group)
+        | [., ($recipes[.].dependencies[] | .recipe, (.arguments[]
+            | if type == "string" and test("^[^[:space:]]+$") then . else error("the arguments of the checks of a group are single words") end))]
+        | join(" ")'
+    """, "bash", group]).stdout
+    let groups = listing.trimSpace.split("\n").reject { _.isEmpty }.map { line =>
+      let words = line.split(" ")
+      Group(name: words.takeFirst.join(""), checks: words.dropFirst, checkout: checkout, validator: validator)
+    }
+    if (groups.isEmpty) {
+      raise "the checks recipe has no groups"
+    }
+    let ran = groups.{{ name, checks, outcome }}
+    let report = ran.map { g =>
+      let verdict = if (g.outcome.passed) { "passed" } else { "failed" }
+      "== " + g.name + ": " + verdict + " (" + g.checks.join(" ") + ")\n" + g.outcome.output
+    }.join("\n")
+    let failed = ran.reject { _.outcome.passed }.map { _.name }
+    let passed = ran.filter { _.outcome.passed }.map { _.name }
+    let summary = (if (failed.isEmpty) { [] } else { ["failed: " + failed.join(" ")] })
+      + (if (passed.isEmpty) { [] } else { ["passed: " + passed.join(" ")] })
+    if (failed.isEmpty) {
+      report + "\n" + summary.join("\n")
+    } else {
+      raise report + "\n" + summary.join("\n")
+    }
   }
 
   """
@@ -72,4 +99,98 @@ type Ci {
       .withFile("/src/mise.toml", source.file("mise.toml"))
       .withExec(["mise", "install"])
   }
+}
+
+"""
+One group of checks, run in containers of its own.
+"""
+type Group {
+  """
+  The group's recipe.
+  """
+  name: String!
+
+  """
+  The group's checks, as just takes them on its command line.
+  """
+  checks: [String!]!
+
+  """
+  The tools container with the checkout under test.
+  """
+  let checkout: Container!
+
+  """
+  Renovate's image with the Renovate configuration under test.
+  """
+  let validator: Container!
+
+  """
+  Whether every check of the group passed, and what they printed: renovate-check's validator and the just run of the others side by side.
+  """
+  outcome: Outcome! {
+    let others = checks.reject { _ == "renovate-check" }
+    let renovate: [Run!]! = if (checks.contains("renovate-check")) {
+      [Run(label: "renovate-check", ctr: validator.withExec(["sh", "-c", "renovate-config-validator --strict --no-global renovate.json5 .renovate/*.json5 2>&1"]))]
+    } else {
+      []
+    }
+    # One just run, so a recipe that several checks depend on runs once. Without a recipe, just
+    # would run its default and pass having checked nothing.
+    let justRun: [Run!]! = if (others.isEmpty) {
+      []
+    } else {
+      [Run(label: "", ctr: checkout.withExec(["bash", "-c", `exec 2>&1; just "$@"`, "bash"] + others))]
+    }
+    let done = (renovate + justRun).{{ label, outcome }}
+    Outcome(
+      passed: done.all { _.outcome.passed },
+      output: done.map { r => if (r.label == "") { r.outcome.output } else { r.label + ":\n" + r.outcome.output } }.join("\n"),
+    )
+  }
+}
+
+"""
+One container run of a group's checks, everything it prints on stdout, so that it reads in the order it was printed.
+"""
+type Run {
+  """
+  What the run checks, when it is not a just run, which names its recipes itself.
+  """
+  label: String!
+
+  """
+  The container, ending in the exec that checks.
+  """
+  let ctr: Container!
+
+  """
+  Whether the run passed, and what it printed. A failed exec is not cached, so a check that failed runs again next time.
+  """
+  outcome: Outcome! {
+    Outcome(passed: true, output: ctr.stdout) rescue {
+      failure: GraphQLError => {
+        # Dagger's error for an exec that exited non-zero carries what it printed; any other
+        # error, such as an image that cannot be pulled, says what went wrong itself.
+        let exec: ExecError = JSON.decode(failure.extensions) rescue null
+        Outcome(passed: false, output: if (exec == null) { failure.message } else { exec.stdout })
+      }
+      err: Error => Outcome(passed: false, output: err.message)
+    }
+  }
+}
+
+"""
+Whether a run or a group passed, and what it printed.
+"""
+type Outcome {
+  passed: Boolean!
+  output: String!
+}
+
+"""
+The extensions of Dagger's error for an exec that exited non-zero, as far as a report needs them.
+"""
+type ExecError {
+  stdout: String!
 }
