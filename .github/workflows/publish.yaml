@@ -1,0 +1,42 @@
+---
+# Publishes kubernetes/ as the signed artifact Flux follows (ADR 0003). This file's path and the
+# branch are the signing identity the FluxInstance verifies: renaming the file, or publishing from
+# another branch, needs the FluxInstance changed in the same change.
+name: publish
+
+# Never for a pull request: one never gets packages: write or an identity token.
+"on":
+  push:
+    branches: [main]
+    paths:
+      - kubernetes/**
+      - .github/workflows/publish.yaml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+# Runs never overlap: one that starts while another is in progress waits for it, so an older run
+# cannot move the tag after a newer one.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The recipe reads main's history to find a newer commit than this run's.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785  # v5.2.8
+        with:
+          version: 2026.11.4
+          install_args: just flux2 cosign jq
+      - run: just publish
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}

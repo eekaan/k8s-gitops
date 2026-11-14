@@ -1,7 +1,7 @@
 # The kubernetes/ tree
 
 `kubernetes/` is everything Flux reconciles; CI publishes it as the cluster's artifact
-(ADR 0003). `just kubernetes-check` builds it offline with kustomize and Flux, and fails, naming
+(ADR 0003, [Publishing](#publishing)). `just kubernetes-check` builds it offline with kustomize and Flux, and fails, naming
 the file, when a cluster directory, a `ks.yaml`, an application directory or a variable breaks
 the rules below.
 
@@ -249,6 +249,49 @@ whenever source-watcher is among the instance's components, so the instance does
 instance's patches to the pinned Flux manifests to check the sync source, its signature identity,
 the components and the age-key flag.
 
+## Publishing
+
+`.github/workflows/publish.yaml` publishes this tree as `oci://ghcr.io/eekaan/k8s-gitops/manifests`,
+the artifact the instance syncs. It runs on every push to `main` that changes `kubernetes/` or the
+workflow itself, and by hand (`workflow_dispatch`); never for a pull request, which gets neither
+write access to packages nor an identity token. Its one command is `just publish`, which runs
+`scripts/publish` on the runner rather than in the Dagger module, as signing takes the job's own
+identity token (ADR 0007). The script refuses to run anywhere else: without GitHub Actions and the
+job's identity token it stops before calling anything, so nobody signs from a laptop. In order, it:
+
+1. logs in to ghcr.io with the job's token on standard input, into a Docker configuration of the
+   run's own, which flux and cosign both read and which is removed when the run ends;
+2. pushes `kubernetes/`, without any cluster's `secrets/`, with `flux push artifact`, tagged with the
+   full commit SHA, with the repository as its source and `<branch>@sha1:<commit>` as its revision,
+   reproducibly; a reported digest that is not `sha256:` and 64 hexadecimal digits stops the run;
+3. signs that digest keyless with cosign: a short-lived certificate for the job's identity, recorded
+   in Sigstore's public transparency log;
+4. verifies the signature against the identity the instance accepts; a failure stops the run;
+5. tags that digest `main`.
+
+The tag moves last and by digest: `main` only ever names an artifact that is signed and verified,
+and signing, verifying and tagging all name it by its digest, so the tag ends on exactly the bytes
+that were signed and verified; a tag can change between two steps, a digest cannot. It moves only on
+a run on `refs/heads/main`, and only when no newer commit on `main` changes `kubernetes/` or the
+workflow. Runs share one concurrency group that never cancels a run in progress, so they never
+overlap: a run that starts while another is in progress waits for it, and GitHub replaces a waiting
+run with a newer one. A run on another branch, or one a newer commit overtook, such as a re-run of an
+old one, still pushes and signs, says why the tag stayed where it is, and succeeds. The run prints
+its steps, the digest and whether the tag moved.
+
+The signing identity is this workflow file on that branch: the subject
+`https://github.com/eekaan/k8s-gitops/.github/workflows/publish.yaml@refs/heads/main` from the
+issuer `https://token.actions.githubusercontent.com`, which the instance requires
+([Flux itself](#flux-itself)). Renaming the workflow file, or publishing from another branch,
+changes the identity, so the instance's patch changes in the same change. `tests/publish.bats` fails
+when the identity the script verifies and the one the instance's values accept differ.
+
+The package must be public for the cluster to pull it without credentials. GitHub makes a new
+package private, and a package linked to its repository takes the repository's access permissions
+but not its visibility, so the package's visibility is set to public in its settings once, after
+the first run; until then the cluster cannot pull it. A public package cannot be made private
+again.
+
 ## Before Flux starts
 
 Flux needs four objects that nothing in the tree creates, all in `flux-system`: the namespace
@@ -281,8 +324,8 @@ with the Flux age key, straight into kubectl, when that file exists. Its keys mu
 of `cluster-secrets.example.yaml`; sops encrypts values only, so the recipe reads them without
 decrypting anything. Without the file an empty Secret is applied, which is all substitution needs,
 and the example must list no key. Nothing in the tree lists `secrets/`, so Flux neither applies nor
-prunes it, and the step that publishes the artifact must leave `clusters/*/secrets/` out: the
-artifact carries what Flux applies.
+prunes it, and publishing leaves `clusters/*/secrets/` out of the artifact
+([Publishing](#publishing)): the artifact carries what Flux applies.
 
 `sops-age` holds the Flux age key ([cluster.md](cluster.md#the-flux-age-key)) under the data key
 `age.agekey`.

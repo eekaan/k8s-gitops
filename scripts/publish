@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# Publishes kubernetes/ as the OCI artifact Flux follows (ADR 0003), and runs only in the publish
+# workflow. In order: logs in to the registry; pushes the artifact tagged with the commit; signs the
+# digest the push reports, keyless, with the job's identity token; verifies that signature against
+# the identity the FluxInstance accepts; and only then tags that digest main. The tag moves last and
+# by digest, so main only ever names the bytes that were signed and verified, whatever becomes of the
+# commit's tag in between. It moves only on a run on refs/heads/main for which no newer commit on
+# main changes what is published, so a run that finishes late never moves it back; otherwise the run
+# says why the tag stayed, and exits 0.
+# Reads what GitHub Actions sets: GITHUB_ACTIONS, ACTIONS_ID_TOKEN_REQUEST_URL and
+# ACTIONS_ID_TOKEN_REQUEST_TOKEN (a job with id-token: write), GITHUB_REF and GITHUB_ACTOR; and
+# REGISTRY_TOKEN, the job's token with packages: write. The token reaches docker login on standard
+# input only. flux and cosign both read registry logins from the Docker configuration, which here is
+# a directory of the run's own, removed when it ends. Prints its steps, the digest and whether the
+# tag moved.
+# Usage: scripts/publish
+set -euo pipefail
+
+# The artifact the FluxInstance syncs, and the signing identity it accepts: this repository's
+# publish workflow on main, as GitHub's token issuer names it. tests/publish.bats fails when these
+# and the FluxInstance's values differ.
+repository=eekaan/k8s-gitops
+artifact=ghcr.io/$repository/manifests
+source_url=https://github.com/$repository
+identity=$source_url/.github/workflows/publish.yaml@refs/heads/main
+issuer=https://token.actions.githubusercontent.com
+
+say() {
+  printf 'publish: %s\n' "$1"
+}
+
+refuse() {
+  printf 'publish: %s\n' "$1" >&2
+  exit 1
+}
+
+# Keyless signing needs the job's identity token, which only a workflow run can request; nobody
+# signs from a laptop.
+if [[ ${GITHUB_ACTIONS:-} != true || -z ${ACTIONS_ID_TOKEN_REQUEST_URL:-} || -z ${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-} ]]; then
+  refuse "refusing to publish outside the publish workflow: it needs GitHub Actions and the job's identity token"
+fi
+for name in GITHUB_REF GITHUB_ACTOR REGISTRY_TOKEN; do
+  [[ -n ${!name:-} ]] || refuse "$name is not set; the publish workflow sets it"
+done
+
+cd "$(dirname "$0")/.."
+DOCKER_CONFIG=$(mktemp -d)
+export DOCKER_CONFIG
+step="starting"
+finish() {
+  rm -rf "$DOCKER_CONFIG"
+  if (($1)); then
+    printf 'publish: failed while %s\n' "$step" >&2
+  fi
+}
+trap 'finish $?' EXIT
+
+# begin STEP: names the step the run is in, here and in the line a failure ends with.
+begin() {
+  step=$1
+  say "$step"
+}
+
+begin "logging in to ghcr.io"
+printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin > /dev/null
+
+sha=$(git rev-parse HEAD)
+begin "pushing kubernetes/ at $sha"
+# A cluster's secrets/ is applied before Flux starts, and Flux never reads it (docs/kubernetes.md).
+pushed=$(flux push artifact "oci://$artifact:$sha" --path ./kubernetes --source "$source_url" \
+  --revision "${GITHUB_REF#refs/*/}@sha1:$sha" --reproducible --add-ignore-paths 'clusters/*/secrets/' \
+  --output json)
+digest=$(jq -r '.digest' <<< "$pushed")
+if [[ ! $digest =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  refuse "the push reported no sha256 digest, so nothing is signed"
+fi
+say "pushed $digest"
+
+begin "signing $digest"
+cosign sign --yes --oidc-provider github-actions "$artifact@$digest"
+
+begin "verifying $digest"
+# The verified signatures are printed as JSON; the run reports only that they verified.
+cosign verify --certificate-identity "$identity" --certificate-oidc-issuer "$issuer" "$artifact@$digest" > /dev/null
+
+if [[ $GITHUB_REF != refs/heads/main ]]; then
+  say "tag main not moved: the run is on $GITHUB_REF, and only a run on refs/heads/main moves it"
+  exit 0
+fi
+begin "looking for a newer commit on main"
+git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main
+newer=$(git log -1 --format=%h "$sha..refs/remotes/origin/main" -- kubernetes .github/workflows/publish.yaml)
+if [[ -n $newer ]]; then
+  say "tag main not moved: $newer on main changes what is published, and its own run moves the tag"
+  exit 0
+fi
+
+begin "tagging $digest main"
+flux tag artifact "oci://$artifact@$digest" --tag main
+say "tag main moved to $digest"

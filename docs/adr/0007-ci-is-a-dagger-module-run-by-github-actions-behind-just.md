@@ -12,8 +12,14 @@ tool versions.
 
 `just` is the entry point on a laptop and in CI. The checks themselves are functions of a
 Dagger module in this repository, which runs each in a container with pinned tools. GitHub
-Actions is the CI system: each job runs one `just` recipe, on GitHub's runners, with the Dagger
-engine started for that job.
+Actions is the CI system: each job runs one `just` recipe on GitHub's runners, and a job that runs
+the checks starts the Dagger engine for itself.
+
+Publishing the cluster's artifact (ADR 0003) is the one job whose recipe, `just publish`, runs
+directly on the runner, with the tools pinned in `mise.toml` installed there by mise. Signing it
+keyless takes the job's own identity token, and pushing it the job's registry token; the module
+never gets either, so the checks stay hermetic and need no credentials, and nothing the module runs
+can sign or publish.
 
 One job always runs and aggregates the others; it is the only required check on `main`, so
 path-filtered jobs never leave a pull request waiting.
@@ -22,7 +28,7 @@ The module uses Dagger 1.0, which is in beta at the time of writing.
 
 ## Alternatives considered
 
-- **Recipes run directly on the runner.** Nothing to learn, but tool installation is repeated
+- **Checks run directly on the runner.** Nothing to learn, but tool installation is repeated
   per workflow and drifts from the laptop.
 - **Dagger's own pull request integration instead of Actions.** Needs a hosted account, and
   keyless artifact signing depends on the Actions OIDC token.
@@ -36,3 +42,5 @@ The module uses Dagger 1.0, which is in beta at the time of writing.
 - The module format follows the 1.0 beta and may change before 1.0 is stable; the move to the
   stable release is planned work.
 - Jobs that need credentials do not run for pull requests from forks.
+- The publish job installs its tools on the runner with mise, from the same pins as the module's
+  container and a laptop, so publishing does not depend on the module.

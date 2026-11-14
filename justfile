@@ -82,3 +82,7 @@ renovate_image := "ghcr.io/renovatebot/renovate:44.227.4@sha256:fe058db9710840a4
 # Validate the Renovate configuration with Renovate's own validator, in its container image
 renovate-check:
     docker run --rm --network none -v "$PWD":/usr/src/app:ro -w /usr/src/app {{ renovate_image }} renovate-config-validator --strict --no-global renovate.json5 .renovate/*.json5
+
+# Publish kubernetes/ as the signed artifact Flux follows, and move its main tag; runs only in the publish workflow
+publish:
+    scripts/publish
