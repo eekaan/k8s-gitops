@@ -290,6 +290,14 @@ them:
   in place; only this chart ships them. One operator runs, with leader election and the requests of
   the publisher's own manifests: nothing calls it, and while it restarts Grafana keeps serving and
   only changes from Git wait. Its chart's ServiceMonitor is on. Its `ks.yaml` sets `wait`.
+- The operator watches `monitoring` only. Its service account has a Role there and no ClusterRole,
+  so it creates, reads, changes and deletes Secrets, ConfigMaps, Services, service accounts,
+  claims, Deployments, Ingresses and HTTPRoutes in `monitoring` and nowhere else. A dashboard for an
+  application in another namespace is therefore a `GrafanaDashboard`, with the ConfigMap it loads if
+  it loads one, in an application under `apps/base/monitoring/`, as an application's
+  `targetNamespace` puts everything it applies in its own namespace. Watching another namespace is
+  a deliberate change: it gives the operator the same rights there, and watching every namespace
+  gives it them everywhere, `flux-system` included.
 - `grafana` holds the `Grafana`, its `GrafanaDatasource`, a ServiceMonitor for Grafana's own
   metrics and the dashboards release, and names `grafana-operator` in `dependsOn`.
 

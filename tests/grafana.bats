@@ -253,6 +253,28 @@ seconds() {
   depends grafana-operator | grep -qx prometheus-operator-crds
 }
 
+@test "The Grafana operator acts only in the namespace monitoring" {
+  local account watch bindings roles
+  render grafana-operator
+  account="$(yq -N 'select(.kind == "Deployment") | .spec.template.spec.serviceAccountName' "$RENDERED")"
+  watch="$(yq -N 'select(.kind == "Deployment") | .spec.template.spec.containers[0].env[]
+    | select(.name == "WATCH_NAMESPACE") | .value' "$RENDERED")"
+  echo "service account: ${account:-none}; namespaces watched: ${watch:-all}"
+  [ -n "$account" ]
+  [ "$watch" = "$NAMESPACE" ]
+  # A ClusterRoleBinding, or a RoleBinding elsewhere, would let the operator read and change
+  # Secrets, ConfigMaps and the rest outside its own namespace.
+  bindings="$(ACCOUNT=$account yq -N 'select((.kind == "RoleBinding" or .kind == "ClusterRoleBinding")
+      and ([.subjects[] | select(.kind == "ServiceAccount" and .name == strenv(ACCOUNT))] | length) > 0)
+    | .kind + " " + (.metadata.namespace // "cluster-wide") + " " + .roleRef.kind + "/" + .roleRef.name' "$RENDERED" | sort)"
+  roles="$(yq -N 'select(.kind == "ClusterRole") | .metadata.name' "$RENDERED")"
+  echo "bindings: $bindings"
+  echo "ClusterRoles: ${roles:-none}"
+  [ -n "$bindings" ]
+  [ "$(grep -vc "^RoleBinding $NAMESPACE Role/" <<<"$bindings")" -eq 0 ]
+  [ -z "$roles" ]
+}
+
 @test "One Grafana runs from the operator at a pinned version" {
   local enabled grafanas version pin replicas budgets wait
   overlay

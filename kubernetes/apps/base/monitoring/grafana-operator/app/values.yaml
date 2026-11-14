@@ -1,8 +1,15 @@
 ---
 # Values for the Grafana operator's chart, read by the HelmRelease through a ConfigMap generated
-# without substitution. Keys not set here keep the chart's defaults: the operator watches every
-# namespace, so an application anywhere can bring its own GrafanaDashboard, and runs with leader
-# election.
+# without substitution. Keys not set here keep the chart's defaults, among them leader election.
+
+# The operator watches only its own namespace, monitoring, where the Grafana and every object for it
+# live, and its service account gets a Role there and no ClusterRole: it can create, read, change
+# and delete Secrets, ConfigMaps, Services, service accounts, claims, Deployments, Ingresses and
+# HTTPRoutes in monitoring only. Watching another namespace gives it those rights there too, and
+# watching all of them gives it them in every namespace.
+namespaceScope: true
+rbac:
+  useClusterRole: false
 
 crds:
   # The release installs and upgrades the operator's resource definitions as templates, as the

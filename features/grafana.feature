@@ -12,6 +12,11 @@ Feature: Grafana
     When the chart is rendered offline
     Then it yields one ServiceMonitor, selected by the operator's metrics Service on the port it scrapes, and the application names prometheus-operator-crds in dependsOn
 
+  Scenario: The Grafana operator acts only in the namespace monitoring
+    Given the grafana-operator application's pinned chart and values
+    When the chart is rendered offline
+    Then the operator watches the namespace monitoring only, the release defines no ClusterRole, and every binding of the operator's service account is a RoleBinding in monitoring, so it can read or change Secrets nowhere else
+
   Scenario: One Grafana runs from the operator at a pinned version
     Given the grafana application, enabled in the cluster's overlay
     When it is built as Flux applies it
