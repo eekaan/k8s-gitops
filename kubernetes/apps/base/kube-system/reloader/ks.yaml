@@ -8,6 +8,9 @@ metadata:
 spec:
   path: ./apps/base/kube-system/reloader/app
   targetNamespace: kube-system
+  # Its chart makes a PodMonitor, a kind that exists once prometheus-operator-crds is Ready.
+  dependsOn:
+    - name: prometheus-operator-crds
   sourceRef:
     kind: ExternalArtifact
     name: reloader

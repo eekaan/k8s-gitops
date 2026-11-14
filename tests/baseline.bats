@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # Proves features/cluster-baseline.feature; each test carries its scenario's title.
-# Needs helm, kustomize, flux, yq and git on PATH (the versions pinned for the repository). Each
+# Needs helm, kustomize, flux, yq, jq and git on PATH (the versions pinned for the repository). Each
 # chart is pulled once per run from its public registry, and the Gateway API repository is cloned
 # once, at the pinned tag and with only the directories its GitRepository checks out; building and
 # rendering are offline.
@@ -124,6 +124,30 @@ defined_keys() {
   [ -z "$unknown" ]
 }
 
+# monitor_targets: one line per ServiceMonitor or PodMonitor in $RENDERED, "Kind/name -> Kind/name"
+# naming each rendered object it scrapes: for a ServiceMonitor, a Service whose labels its selector
+# matches and that names every port it scrapes; for a PodMonitor, a workload whose pod template
+# does so. A monitor that scrapes none of them ends in "-> none".
+monitor_targets() {
+  yq -N -o json -I0 'select(. != null)' "$RENDERED" | jq -rs '. as $all | .[]
+    | select(.kind == "ServiceMonitor" or .kind == "PodMonitor") | . as $monitor
+    | ($monitor.spec.selector.matchLabels // {}) as $selector
+    | [($monitor.spec.endpoints // $monitor.spec.podMetricsEndpoints // [])[].port] as $ports
+    | [$all[] | if $monitor.kind == "ServiceMonitor" then
+          select(.kind == "Service")
+          | {name: ("Service/" + .metadata.name), labels: (.metadata.labels // {}), ports: [.spec.ports[]?.name]}
+        else
+          select(.kind == "Deployment" or .kind == "DaemonSet" or .kind == "StatefulSet")
+          | {name: (.kind + "/" + .metadata.name), labels: (.spec.template.metadata.labels // {}),
+             ports: [.spec.template.spec.containers[].ports[]?.name]}
+        end
+      | select(.labels as $labels | ($selector | length > 0)
+          and ($selector | to_entries | all($labels[.key] == .value)))
+      | select(.ports as $named | ($ports | length > 0) and ($ports | all(. as $port | any($named[]; . == $port))))
+      | .name] as $targets
+    | "\($monitor.kind)/\($monitor.metadata.name) -> \(if ($targets | length) > 0 then $targets | join(" ") else "none" end)"'
+}
+
 # deployment_env NAME: the value the rendered Deployment gives its container's environment variable
 # NAME; nothing when it gives none.
 deployment_env() {
@@ -193,14 +217,35 @@ gateway_api() {
 }
 
 @test "Every baseline chart renders with the repository's values" {
-  local app monitors
+  local app dashboards
   for app in "${CHARTS[@]}"; do
     render "$app"
     echo "$app: $(yq -N 'select(. != null) | .kind' "$RENDERED" | sort | uniq -c | xargs)"
-    monitors="$(yq -N 'select(. != null) | select(.kind == "ServiceMonitor" or .kind == "PodMonitor"
-      or .kind == "GrafanaDashboard" or (.kind == "ConfigMap" and (.metadata.labels // {} | has("grafana_dashboard"))))
+    dashboards="$(yq -N 'select(. != null) | select(.kind == "GrafanaDashboard"
+      or (.kind == "ConfigMap" and (.metadata.labels // {} | has("grafana_dashboard"))))
       | .kind + "/" + .metadata.name' "$RENDERED")"
-    [ -z "$monitors" ] || { echo "$app renders $monitors"; return 1; }
+    [ -z "$dashboards" ] || { echo "$app renders $dashboards"; return 1; }
+  done
+}
+
+@test "Every baseline application that serves metrics has its monitor on" {
+  local app kind targets depends
+  local -A wanted=([kubelet-csr-approver]=ServiceMonitor [metrics-server]=ServiceMonitor
+    [descheduler]=ServiceMonitor [spegel]=ServiceMonitor [reloader]=PodMonitor)
+  for app in "${!wanted[@]}"; do
+    kind=${wanted[$app]}
+    render "$app"
+    targets="$(monitor_targets)"
+    echo "$app: ${targets:-no monitor}"
+    # Exactly one monitor, of the kind the chart scrapes the application with, so nothing is
+    # scraped twice.
+    [ "$(grep -c . <<<"$targets")" -eq 1 ]
+    [[ $targets == "$kind/"* ]]
+    [[ $targets != *' -> none' ]]
+    # The monitor's kind exists only once the definitions are installed.
+    depends="$(yq '.spec.dependsOn // [] | .[].name' "$REPO/kubernetes/apps/base/kube-system/$app/ks.yaml")"
+    echo "$app depends on: ${depends:-nothing}"
+    grep -qx prometheus-operator-crds <<<"$depends"
   done
 }
 

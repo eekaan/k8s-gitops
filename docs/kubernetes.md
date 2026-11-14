@@ -131,9 +131,10 @@ Resource definitions that several applications use are applications of their own
 
 Both `ks.yaml` files set `wait`, so each is Ready only once its definitions are established. An
 application that creates objects of these groups, or whose chart does, names the matching one in
-`dependsOn` and turns off any copy of the same definitions its own chart would install.
-cert-manager names `gateway-api-crds` ([cert-manager](#cert-manager)); no ServiceMonitor,
-PodMonitor, dashboard or route is enabled anywhere.
+`dependsOn` and turns off any copy of the same definitions its own chart would install. The
+monitoring stack ([Monitoring](#monitoring)) and the baseline applications with a monitor name
+`prometheus-operator-crds`, and cert-manager names `gateway-api-crds`
+([cert-manager](#cert-manager)); no dashboard or route is enabled anywhere.
 
 Deleting a definition deletes every object of its kind, so neither application ever deletes one,
 also not when it leaves the tree. Neither applies a definition itself. The monitoring chart's
@@ -148,9 +149,11 @@ source offline to check both, and that they yield definitions only.
 The small services later applications assume are applications in `apps/base/kube-system/` with
 the Cilium application's shape. Their charts come from their publishers' OCI registries,
 except metrics-server's and the descheduler's, which their publisher releases only to a classic
-Helm repository; those come from a public OCI mirror that republishes each release unchanged. No
-ServiceMonitor, PodMonitor or dashboard is enabled in any of them, and none uses a priority class
-Kubernetes does not define itself.
+Helm repository; those come from a public OCI mirror that republishes each release unchanged. Each
+of them that serves metrics has its chart's monitor on, a ServiceMonitor or, for Reloader, whose
+chart makes no Service by default, a PodMonitor, and names `prometheus-operator-crds` in
+`dependsOn`. No dashboard is enabled in any of them, and none uses a priority class Kubernetes
+does not define itself.
 
 - `kubelet-csr-approver` approves a kubelet's serving certificate request (Talos has the kubelets
   make them) only when the name it asks for matches `NODE_NAME_REGEX` in full and every address it
@@ -161,7 +164,8 @@ Kubernetes does not define itself.
   DNS, so the approver does not look them up.
 - `metrics-server` serves resource metrics. It verifies each kubelet's serving certificate
   against the cluster CA, and starts only once `kubelet-csr-approver` is ready, which it names in
-  `dependsOn`.
+  `dependsOn`. Its own `/metrics` is served without authorization, as its chart's ServiceMonitor
+  carries no credential.
 - `spegel` shares images between nodes. Talos discards unpacked image layers, which Spegel
   serves, unless its machine configuration sets containerd's `discard_unpacked_layers` to false,
   so the application is disabled in the cluster overlay until the Talos patches do.
@@ -171,8 +175,12 @@ Kubernetes does not define itself.
   evicted only when another node can take it, and a cordoned node's taint is no reason to evict.
 
 `tests/baseline.bats` renders every baseline chart with the repository's values, checks that each
-values key is one the pinned chart defines, and reads the approver's and metrics-server's
-rendered configuration.
+values key is one the pinned chart defines and that each monitor selects a Service or pods the
+chart makes, and reads the approver's and metrics-server's rendered configuration.
+
+The approver's chart makes its ServiceMonitor only once the kind exists, so the release installed
+before Flux has none, and Flux's first upgrade, which waits for `prometheus-operator-crds`, adds
+it.
 
 ## Runtime classes
 
@@ -208,6 +216,50 @@ store is configured yet, and nothing in the tree creates an `ExternalSecret`.
 
 `tests/external-secrets.bats` builds the application as Flux applies it and renders the chart to
 check each of these.
+
+## Monitoring
+
+`apps/base/monitoring/kube-prometheus-stack/` installs the Prometheus Operator, one Prometheus, one
+Alertmanager, kube-state-metrics and node-exporter in the namespace `monitoring`, from the
+prometheus-community `kube-prometheus-stack` chart. The namespace's Pod Security level is
+privileged, as node-exporter reads each node through the host's network and process namespaces and
+through host paths. The chart installs no resource definitions: `prometheus-operator-crds` does
+([Resource definitions](#resource-definitions)), and the application names it in `dependsOn`. The
+two charts run the same operator version: Renovate moves them in one pull request, and
+`tests/monitoring.bats` fails when the pinned charts name different ones. Grafana and its
+dashboards are not installed.
+
+Prometheus picks up every ServiceMonitor, PodMonitor, Probe, ScrapeConfig and PrometheusRule in
+every namespace, and evaluates the chart's default alerting and recording rules. It scrapes:
+
+- the API server, every kubelet with its container metrics, CoreDNS, kube-state-metrics,
+  node-exporter on every node, and the stack's own components;
+- on every control plane, the controller manager and the scheduler on their secure ports, and
+  etcd's metrics over plain HTTP, which Talos serves once the node runs
+  `talos/patches/controlplane/metrics.yaml` ([cluster.md](cluster.md#the-control-planes-metrics)).
+  Talos runs etcd outside Kubernetes, so etcd's Service selects the API server's pods, which run on
+  the control planes' host network, for their addresses, and Prometheus sends etcd no credential;
+- the monitors of the baseline applications ([The kube-system baseline](#the-kube-system-baseline)).
+
+It does not scrape:
+
+- kube-proxy, which Cilium replaces: its target and its alert rule are off, so nothing fires for
+  its absence;
+- Cilium, whose ServiceMonitors stay off: `scripts/install-cilium` installs Cilium from the same
+  values before any monitoring definition exists, and its chart refuses a ServiceMonitor without
+  one;
+- Flux's controllers, for which nothing defines a monitor.
+
+Alertmanager routes every alert to its one receiver, `null`, which sends nothing: alerts show in
+Prometheus and Alertmanager and go nowhere else.
+
+Prometheus keeps 14 days of data, and at most 16 GiB, on a 20 GiB volume; Alertmanager keeps its
+silences and notification log on a 1 GiB volume. Both volumes are claims on the cluster's default
+storage class, which neither names; without one, the claims and the two pods stay Pending.
+
+`tests/monitoring.bats` builds the application as Flux applies it, renders the pinned chart with
+its values, and checks the namespace, the targets, the rules, the receivers, the claims and that
+each values key is one the chart or a subchart reads.
 
 ## cert-manager
 
