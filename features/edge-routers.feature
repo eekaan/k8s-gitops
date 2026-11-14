@@ -55,6 +55,16 @@ Feature: Edge routers
     When just edge-rollout runs, and again with the first edge's check failing
     Then just infra-apply sto2/edge refuses the plan, the rollout replaces the first edge, checks it, and only then replaces the second, and with the check failing the second edge is never touched
 
+  Scenario: A new image is taken up only by an edge whose replacement is forced, which keeps its port and floating IP
+    Given the edges applied from one image, and a newer image under the same name
+    When the stack is planned with the first edge's instance replaced on purpose
+    Then the first edge's new instance boots a volume made from the newer image on the same port, behind the same floating IP, and the second edge keeps its instance and its volume made from the old image
+
+  Scenario: A forced rollout replaces one edge at a time and stops when the check fails
+    Given edges that serve, and a plan that replaces neither
+    When just edge-rollout --replace runs, and again with the first edge missing a worker's session once replaced
+    Then it replaces the first edge's instance alone, records its new host keys, waits until its check passes with every worker's session established, and only then replaces the second edge's instance; with the check failing, the second edge is never planned, applied or touched
+
   Scenario: edge-check passes with every worker's session established and fails, saying which, when one is missing or a route outside the range is present, and no address is printed
     Given fake edges that report their sessions, routes and rules
     When just edge-check runs against a complete table, a table with a missing session, and one with a route outside the range

@@ -50,25 +50,40 @@ JSON
   for tool in jq yq grep flock cat sed; do
     record "$tool"
   done
+  # The plan a run saves is plan.json, the change the configuration makes, with the instance of each
+  # edge given with -replace replaced as well, and, when the run targets one edge, that edge's part
+  # of it only. Once applied, the address of each edge whose instance the saved plan replaces offers
+  # a new host key.
   fake tofu << EOF
 printf '%s\n' "tofu \$*" >> "$RECORD/argv"
 case \${2-} in
   output) cat "$BATS_TEST_TMPDIR/outputs.json" ;;
-  show) [[ ! -f "$BATS_TEST_TMPDIR/plan.json" ]] || cat "$BATS_TEST_TMPDIR/plan.json" ;;
-  # A plan that targets one edge replaces it: once applied, that edge's address offers a new host key.
+  show) cat "$RECORD/plan.saved" ;;
   plan)
+    targeted=0 forced=()
     for argument; do
-      [[ \$argument =~ ^-target=module\.edge\[\"([12])\"\]\$ ]] && echo "\${BASH_REMATCH[1]}" > "$RECORD/targeted" || true
+      if [[ \$argument =~ ^-target=module\.edge\[\"([12])\"\]\$ ]]; then
+        targeted=\${BASH_REMATCH[1]}
+      elif [[ \$argument =~ ^-replace=module\.edge\[\"([12])\"\]\.openstack_compute_instance_v2\.this\$ ]]; then
+        forced+=("\${BASH_REMATCH[1]}")
+      fi
     done
+    { [[ -f "$BATS_TEST_TMPDIR/plan.json" ]] && cat "$BATS_TEST_TMPDIR/plan.json" || echo '{}'; } |
+      jq --arg targeted "\$targeted" --args '.resource_changes = ([.resource_changes[]?] + [\$ARGS.positional[]
+        | {address: "module.edge[\\"\\(.)\\"].openstack_compute_instance_v2.this", mode: "managed",
+           type: "openstack_compute_instance_v2", change: {actions: ["delete", "create"]}}]
+        | unique_by(.address)
+        | map(select(\$targeted == "0" or (.address | startswith("module.edge[\\"" + \$targeted + "\\"]")))))' \
+        "\${forced[@]}" > "$RECORD/plan.saved"
     ;;
   apply)
-    if [[ -f "$RECORD/targeted" ]]; then
-      case \$(cat "$RECORD/targeted") in
+    for number in \$(jq -r '.resource_changes[] | select(.type == "openstack_compute_instance_v2" and (.change.actions | index("delete")))
+        | .address | capture("^module\\\\.edge\\\\[\"(?<n>[12])\"\\\\]").n' "$RECORD/plan.saved"); do
+      case \$number in
         1) echo "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${ADDRESS_1//./}Replacement" > "$HOST/key-$ADDRESS_1" ;;
         2) echo "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${ADDRESS_2//./}Replacement" > "$HOST/key-$ADDRESS_2" ;;
       esac
-      rm "$RECORD/targeted"
-    fi
+    done
     ;;
 esac
 EOF
@@ -395,6 +410,17 @@ recorded() {
   grep "^$address " "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts" | awk '{ print $3 }'
 }
 
+# original_keys: both edges offer their original host keys again, and those are the ones recorded.
+original_keys() {
+  local address
+  for address in "$ADDRESS_1" "$ADDRESS_2"; do
+    echo "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${address//./}Original" > "$HOST/key-$address"
+    grep -v "^$address " "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts" > "$BATS_TEST_TMPDIR/known" || true
+    echo "$address ssh-ed25519 $(cat "$HOST/key-$address")" >> "$BATS_TEST_TMPDIR/known"
+    cp "$BATS_TEST_TMPDIR/known" "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts"
+  done
+}
+
 @test "a replaced edge offers new host keys at its old address, and the rollout goes on only after they are recorded" {
   edge_state 1 active "$WORKERS" 203.0.113.17/32
   edge_state 2 active "$WORKERS" 203.0.113.17/32
@@ -419,23 +445,117 @@ recorded() {
   [ "$(trail)" = "$expected" ]
   no_address "$output"
 
-  # Declined: the first edge's new keys are not recorded, so its check cannot pass and the second
-  # edge is never touched.
+  # Declined: the first edge's new keys are not recorded, the rollout stops at once, without waiting
+  # for an answer that will not change, and the second edge is never touched. The wait is long here,
+  # and the clock is a sleep that records how long it was asked to wait and ends the rollout, so one
+  # that waited could not hang the test.
   edge_state 1 active "$WORKERS" 203.0.113.17/32
-  for address in "$ADDRESS_1" "$ADDRESS_2"; do
-    echo "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${address//./}Original" > "$HOST/key-$address"
-    grep -v "^$address " "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts" > "$BATS_TEST_TMPDIR/known" || true
-    echo "$address ssh-ed25519 $(cat "$HOST/key-$address")" >> "$BATS_TEST_TMPDIR/known"
-    cp "$BATS_TEST_TMPDIR/known" "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts"
-  done
+  original_keys
+  fake sleep << EOF
+printf '%s\n' "sleep \$*" >> "$RECORD/argv"
+kill -TERM "\$PPID"
+EOF
   : > "$RECORD/argv"
-  run bash -c 'printf "no\n" | env "$@"' _ "${ENVIRONMENT[@]}" "$REPO/scripts/edge-rollout" --yes
+  run bash -c 'printf "no\n" | env "$@"' _ "${ENVIRONMENT[@]}" EDGE_ROLLOUT_WAIT=900 EDGE_ROLLOUT_INTERVAL=15 \
+    "$REPO/scripts/edge-rollout" --yes
   echo "$output"
-  [ "$status" -ne 0 ]
-  [[ $output == *"edge 1"*"host key"* ]]
+  [ "$status" -eq 1 ]
+  [[ $output == *"edge 1's new SSH host key"*"was not accepted"* ]]
+  absent '^sleep ' "$RECORD/argv"
+  absent "^ssh .*@$ADDRESS_1 " "$RECORD/argv"
   [ "$(grep -c '^tofu .* apply ' "$RECORD/argv")" -eq 1 ]
   absent 'module.edge\["2"\]' "$RECORD/argv"
   [ "$(recorded 1)" = "" ]
+}
+
+@test "an edge whose instance the rollout's plan does not replace keeps its recorded host keys" {
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_state 2 active "$WORKERS" 203.0.113.17/32
+  # A change that updates the edges' security group in place and replaces no instance.
+  jq -n '{resource_changes: [{address: "openstack_networking_secgroup_rule_v2.ssh[\"0\"]", mode: "managed",
+    type: "openstack_networking_secgroup_rule_v2", change: {actions: ["update"]}}]}' > "$BATS_TEST_TMPDIR/plan.json"
+  original_1=$(recorded 1) original_2=$(recorded 2)
+  : > "$RECORD/argv"
+  run env "${ENVIRONMENT[@]}" "$REPO/scripts/edge-rollout" --yes < /dev/null
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(trail)" = "$(printf '%s\n' 'ssh 2' 'apply' 'ssh 1' 'ssh 1' 'apply' 'ssh 2')" ]
+  [ "$(recorded 1)" = "$original_1" ]
+  [ "$(recorded 2)" = "$original_2" ]
+  [[ $output == *"edge 1: applied; its instance was not replaced"* ]]
+}
+
+# sequence: what a rollout did, in order, one step per line: every plan with what it targets and
+# replaces, a check of an edge, dropping an edge's recorded keys, an apply, and scanning an edge for
+# its keys.
+sequence() {
+  grep -E '^edge-check |^tofu .* plan |^tofu .* apply |^ssh-keygen -R |^ssh-keyscan ' "$RECORD/argv" |
+    sed -E "s/^edge-check --edge ([12])$/check \1/; s/^tofu .* apply .*/apply/; \
+      s/^tofu [^ ]* plan( -input=false)?( -out=[^ ]*)?/plan/; \
+      s/^ssh-keygen -R $ADDRESS_1 .*/forget 1/; s/^ssh-keygen -R $ADDRESS_2 .*/forget 2/; \
+      s/^ssh-keyscan .*$ADDRESS_1\$/scan 1/; s/^ssh-keyscan .*$ADDRESS_2\$/scan 2/"
+}
+
+# real_edge_check: the copy's edge-check, recorded: the real script runs behind it, so a check
+# passes only with every worker's session established, over a connection that holds to the
+# recorded keys.
+real_edge_check() {
+  mv "$REPO/scripts/edge-check" "$REPO/scripts/edge-check.real"
+  cat > "$REPO/scripts/edge-check" << EOF
+#!/usr/bin/env bash
+printf '%s\n' "edge-check \$*" >> "$RECORD/argv"
+exec "$REPO/scripts/edge-check.real" "\$@"
+EOF
+  chmod +x "$REPO/scripts/edge-check"
+}
+
+@test "A forced rollout replaces one edge at a time and stops when the check fails" {
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_state 2 active "$WORKERS" 203.0.113.17/32
+  # The configuration changed nothing: only the forced replacement replaces anything.
+  echo '{"resource_changes": []}' > "$BATS_TEST_TMPDIR/plan.json"
+  real_edge_check
+
+  : > "$RECORD/argv"
+  run bash -c 'printf "yes\nyes\n" | env "$@"' _ "${ENVIRONMENT[@]}" "$REPO/scripts/edge-rollout" --replace --yes
+  echo "$output"
+  [ "$status" -eq 0 ]
+  # Each plan that is applied targets one edge and replaces that edge's instance and nothing else;
+  # the second edge is planned only once the first one's new keys are recorded and its check passes.
+  expected=$(printf '%s\n' \
+    'plan' \
+    'check 2' \
+    'plan -target=module.edge["1"] -target=openstack_networking_floatingip_associate_v2.edge["1"] -replace=module.edge["1"].openstack_compute_instance_v2.this' \
+    'forget 1' 'apply' 'scan 1' 'check 1' \
+    'check 1' \
+    'plan -target=module.edge["2"] -target=openstack_networking_floatingip_associate_v2.edge["2"] -replace=module.edge["2"].openstack_compute_instance_v2.this' \
+    'forget 2' 'apply' 'scan 2' 'check 2' \
+    'plan')
+  sequence
+  [ "$(sequence)" = "$expected" ]
+  [ "$(recorded 1)" = "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${ADDRESS_1//./}Replacement" ]
+  [ "$(recorded 2)" = "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${ADDRESS_2//./}Replacement" ]
+  [[ $output == *"pass  lab-edge-1: 3 of 3 worker sessions are established"* ]]
+  no_address "$output"
+
+  # Once replaced, the first edge has no session from one worker: its check fails, the rollout
+  # stops, and the second edge is never planned, applied or touched.
+  original_keys
+  edge_state 1 active "192.0.2.20 192.0.2.22" 203.0.113.17/32
+  : > "$RECORD/argv"
+  run bash -c 'printf "yes\nyes\n" | env "$@"' _ "${ENVIRONMENT[@]}" "$REPO/scripts/edge-rollout" --replace --yes
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL  lab-edge-1: 2 of 3 worker sessions are established; no session from lab-w-2"* ]]
+  [[ $output == *"edge 1 does not pass its check"* ]]
+  expected=$(printf '%s\n' \
+    'plan' \
+    'check 2' \
+    'plan -target=module.edge["1"] -target=openstack_networking_floatingip_associate_v2.edge["1"] -replace=module.edge["1"].openstack_compute_instance_v2.this' \
+    'forget 1' 'apply' 'scan 1' 'check 1')
+  [ "$(sequence)" = "$expected" ]
+  absent 'edge\["2"\]' "$RECORD/argv"
+  [ "$(recorded 2)" = "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${ADDRESS_2//./}Original" ]
 }
 
 @test "applying a plan that replaces one edge drops its recorded host keys and no other edge's" {
