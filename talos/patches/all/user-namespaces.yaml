@@ -1,0 +1,12 @@
+# Unprivileged user namespaces, which gVisor needs to create a pod's sandbox: without them a pod
+# with the gvisor RuntimeClass does not start. Talos' kernel hardening defaults follow the KSPP and
+# set user.max_user_namespaces to 0, so no user namespace can be created; this overrides that
+# default on every node with the limit gVisor's extension README and Talos' guide to user
+# namespaces give. The cost falls on every workload on the node, not only gVisor's: user namespaces
+# open a large kernel attack surface to unprivileged processes, which is why the KSPP and Talos
+# turn them off. A sysctl takes effect when the configuration is applied, without a reboot.
+---
+apiVersion: v1alpha1
+kind: SysctlConfig
+params:
+  user.max_user_namespaces: "11255"

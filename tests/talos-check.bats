@@ -344,6 +344,22 @@ EOF
   [ "$checked" -eq 6 ]
 }
 
+@test "Every node's machine configuration allows unprivileged user namespaces, which gVisor needs" {
+  run "$SCRIPT" "$RENDERED"
+
+  [ "$status" -eq 0 ]
+  # Every value the configuration gives the limit: in a SysctlConfig document, or in the deprecated
+  # machine.sysctls, which SysctlConfig overrides. A key may be written with slashes for dots.
+  checked=0
+  for hostname in $(nodes); do
+    values=$(yq -N '((select(.kind == "SysctlConfig") | .params), (select(.version == "v1alpha1") | .machine.sysctls)) // {} | to_entries[] | select(.key | sub("/", ".") == "user.max_user_namespaces") | .value' "$RENDERED/$hostname.yaml")
+    echo "$hostname sets user.max_user_namespaces to: $(paste -sd, <<< "$values")"
+    [ "$values" = 11255 ]
+    checked=$((checked + 1))
+  done
+  [ "$checked" -eq 6 ]
+}
+
 @test "Every worker's machine configuration names the data device the same way, and no control plane's does" {
   run "$SCRIPT" "$RENDERED"
 
