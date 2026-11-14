@@ -63,6 +63,7 @@ setup() {
     AWS_ACCESS_KEY_ID=marker-state-access-key-id
     AWS_SECRET_ACCESS_KEY=marker-state-secret-key
     TMPDIR="$WORK"
+    TALOS_WAIT=5
   )
   reset_environment
 }
@@ -130,6 +131,8 @@ recipe() {
 #   apply-fails     talman apply --bootstrap fails
 #   stale           hostnames whose kubelet has not reported since the reset: their Ready condition
 #                   is the one etcd held, from before
+#   down            addresses of the nodes that do not answer on the Talos API port: those talman
+#                   reset with --reboot=false, which shuts a node down instead of rebooting it
 # talman records what it bootstraps from: the file's path in recovered-from and, as it was at that
 # moment, its content in recovered. Like talman, the fake names the nodes it reaches by address.
 fake_cluster() {
@@ -197,6 +200,21 @@ case "$1" in
       mapfile -t selected < <("$YQ" '.nodes[].hostname' "$TALMAN_CONFIG/talman.yaml")
     fi
     printf '%s\n' "${selected[@]}" | sort -u > "$STATE/reset-nodes"
+    # talman reset reboots the nodes it resets unless --reboot=false, which shuts them down: they
+    # then answer nothing until someone starts them.
+    reboot=1
+    for ((i = 0; i < ${#args[@]}; i++)); do
+      case ${args[i]} in
+        --reboot=false | --reboot=0) reboot=0 ;;
+        --reboot=true | --reboot=1) reboot=1 ;;
+        --reboot) [[ ${args[i + 1]-} != false ]] || reboot=0 ;;
+      esac
+    done
+    if ((!reboot)); then
+      while IFS= read -r node; do
+        NODE=$node "$YQ" '.nodes[] | select(.hostname == strenv(NODE)) | .ipAddress' "$TALMAN_CONFIG/talman.yaml"
+      done < "$STATE/reset-nodes" >> "$STATE/down"
+    fi
     echo "== resetting $(paste -sd, "$STATE/reset-nodes") at $addresses"
     ;;
   apply)
@@ -268,7 +286,7 @@ EOF
   # The nodes answer a connection to the Talos API port only.
   fake_tool timeout <<'EOF'
 printf '%s\n' "timeout $*" >> "$RECORD/argv"
-[[ $* == *"/dev/tcp/"*50000* ]]
+[[ $* == *"/dev/tcp/"*50000* ]] && ! grep -qxF -- "${!#}" "$STATE/down" 2> /dev/null
 EOF
   fake sleep < /dev/null
   for tool in openstack helm; do
@@ -676,6 +694,21 @@ resets_or_bootstraps() {
   cmp "$STATE/recovered" "$STATE/older"
   [[ $output == *"20261102T000000Z.snapshot.age"* ]]
   nothing_left
+}
+
+@test "A restore reboots the control planes it resets" {
+  put_snapshot 20261101T000000Z.snapshot.age
+
+  recipe cluster-restore latest --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  # The reset says that it reboots, and the nodes answer on the Talos API port afterwards: a reset
+  # that shuts them down leaves them silent.
+  reset=$(calls '^talman reset( |$)')
+  [[ " $reset " == *" --reboot=true "* ]]
+  [ ! -e "$STATE/down" ]
+  [ "$(calls '^timeout .*/dev/tcp/' | wc -l)" -ge 12 ]
+  [ -n "$(calls '^talman apply ')" ]
 }
 
 @test "A snapshot this key cannot decrypt stops the restore before anything is reset" {

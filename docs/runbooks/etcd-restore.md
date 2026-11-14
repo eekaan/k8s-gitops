@@ -45,7 +45,7 @@ cloud's volume, not in etcd.
    recovery
    ([Talos 1.14](https://docs.siderolabs.com/talos/v1.14/build-and-extend-talos/cluster-operations-and-maintenance/disaster-recovery))
    and talman's `--recover-from` have it:
-   1. `talman reset --group controlplane --graceful=false --wipe-labels=EPHEMERAL --yes` wipes the
+   1. `talman reset --group controlplane --graceful=false --wipe-labels=EPHEMERAL --reboot=true --yes` wipes the
       EPHEMERAL partition of each control plane, the nodes whose role is `controlplane`, one at a
       time, and reboots it. EPHEMERAL holds etcd's data. No member leaves etcd first, as every
       member goes. STATE, with the node's machine configuration, stays: each control plane comes

@@ -46,6 +46,11 @@ Feature: etcd snapshots
     When cluster-restore runs for one of them by name, and for latest, and the cluster's name is typed back
     Then talman resets the EPHEMERAL partition of every control plane and of no worker, without a graceful leave, then bootstraps etcd from a file holding that snapshot's content, then the kubeconfig is fetched and every node, workers included, is waited for until it reports Ready after the reset, in that order, and nothing applied before Flux starts is applied again
 
+  Scenario: A restore reboots the control planes it resets
+    Given snapshots of the cluster in the etcd bucket, and nodes that answer on the Talos API port only while they run
+    When cluster-restore runs for the latest
+    Then talman reset is told to reboot, the nodes it reset answer on the Talos API port again, and etcd is bootstrapped from the snapshot, where a reset told not to reboot would leave them silent and fail the wait
+
   Scenario: A snapshot this key cannot decrypt stops the restore before anything is reset
     Given an object encrypted to another age key, and one that is not an age file
     When cluster-restore runs for each

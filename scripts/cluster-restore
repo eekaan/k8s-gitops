@@ -11,6 +11,8 @@
 #      as every member goes; this is the reset Talos' disaster recovery prescribes. STATE, which
 #      holds the node's machine configuration, stays, so each comes back as itself and waits for
 #      etcd to be bootstrapped. The workers are not reset, and keep what their EPHEMERAL holds.
+#      The reboot is asked for (--reboot=true): a reset that shut the nodes down would leave them
+#      silent after etcd's data is gone.
 #   2. Once every node answers again, talman apply --bootstrap --recover-from restores etcd from
 #      the snapshot on the first control plane; the other control planes join it.
 #   3. The kubeconfig is fetched as cluster-kubeconfig does, and every node in talman.yaml, workers
@@ -129,7 +131,7 @@ step="waiting for $cluster to be typed back"
 
 step="resetting the control planes of $cluster"
 since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-cluster_talman reset --group controlplane --graceful=false --wipe-labels=EPHEMERAL --yes
+cluster_talman reset --group controlplane --graceful=false --wipe-labels=EPHEMERAL --reboot=true --yes
 
 step="waiting for every node to answer on the Talos API port after the reset"
 wait_for_talos_api "$talman_file"
