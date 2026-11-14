@@ -5,8 +5,9 @@
 # stack, the secrets bundle and the buckets stay.
 #
 # The stack holds one cluster, and destroying it destroys that cluster whatever name was given. So
-# before it asks the cluster anything, whatever flags are given, it refuses a name with no directory
-# under talos/ and a name other than the cluster name in the stack's talman_yaml output.
+# before it asks the cluster anything, whatever flags are given, it refuses a name other than the
+# cluster name in the stack's talman_yaml output, naming that cluster, and the name of a cluster with
+# no directory under talos/.
 #
 # The load balancers that Services of type LoadBalancer get and the volumes behind PersistentVolumes
 # of a CSI driver are made by the cluster, not by OpenTofu, so the stack's destroy would leave them
@@ -58,14 +59,6 @@ if ! checked=$(stack_env 2>&1); then
   exit 1
 fi
 
-# cluster-secrets and infra-talman run before a cluster's directory exists, which is why cluster-env
-# does not refuse a name without one and this recipe does.
-step="checking that $cluster is the cluster $stack holds"
-if [[ ! -d $cluster_dir ]]; then
-  infra_error "talos/$cluster does not exist: name the cluster $stack holds"
-  exit 1
-fi
-
 # stack_holds: the name of the cluster the stack holds. Run in a subshell, so the stack's lock is
 # released before infra-destroy takes it.
 stack_holds() {
@@ -75,6 +68,7 @@ stack_holds() {
   init_stack || return 1
   stack_cluster_name
 }
+step="checking that $cluster is the cluster $stack holds"
 stack_cluster=$(stack_holds) || exit 1
 if [[ $stack_cluster != "$cluster" ]]; then
   if [[ -n $stack_cluster ]]; then
@@ -82,6 +76,12 @@ if [[ $stack_cluster != "$cluster" ]]; then
   else
     infra_error "$stack's outputs name no cluster, so it cannot be told to be $cluster. Nothing was destroyed"
   fi
+  exit 1
+fi
+# cluster-secrets and infra-talman run before a cluster's directory exists, which is why cluster-env
+# does not refuse a name without one and this recipe does.
+if [[ ! -d $cluster_dir ]]; then
+  infra_error "talos/$cluster does not exist, though $stack holds $cluster"
   exit 1
 fi
 

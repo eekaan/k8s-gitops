@@ -81,6 +81,11 @@ Feature: Cluster lifecycle
     When cluster-destroy runs with --yes
     Then it exits non-zero naming each as namespace/name or by the volume's name, and no volume of LINSTOR, without an address or a volume handle, no tofu plan or apply runs, and the generated files stay
 
+  Scenario: A Service on a pool address does not block a destroy, and a Service on any other load balancer still does
+    Given a Service of type LoadBalancer whose address lies in the service range of the cluster's talman.yaml, beside one whose address lies outside it or one with no address yet
+    When cluster-destroy runs with --yes for the first alone, for it beside each of the others, and for it with a talman.yaml that names no service range
+    Then the first alone is destroyed; beside either other, or without a service range to compare with, nothing is destroyed and only the Services that block are named
+
   Scenario: LINSTOR's volumes go with the cluster stack once the destroy is confirmed, and are counted first
     Given PersistentVolumes of LINSTOR's CSI driver, whose data is on the workers' data volumes in the cluster stack, and no other load balancer or volume the cluster made
     When cluster-destroy runs and no answer, a wrong one or the stack's name is typed back, and with --yes
@@ -97,14 +102,14 @@ Feature: Cluster lifecycle
     Then the cluster is asked before anything is planned, every tofu call is on the cluster stack, which is planned for destruction, summarised and destroyed, none is on the plumbing stack, the talman.yaml, talosconfig and kubeconfig git ignores are removed, the secrets bundle stays as it was, and no S3 or OpenStack client runs
 
   Scenario: The cluster stack is asked the same way whichever recipe destroys it
-    Given a cluster that owns a Service of type LoadBalancer or a PersistentVolume of another CSI driver, one whose API does not answer, and one that owns nothing
+    Given a cluster that owns a Service of type LoadBalancer or a PersistentVolume of another CSI driver, one whose only Service of that type is on a pool address, one whose API does not answer, and one that owns nothing
     When infra-destroy runs with sto2/cluster and without a stack, with --yes, and with --unreachable
-    Then it asks the cluster as cluster-destroy does and refuses what cluster-destroy refuses, naming what the cluster owns or --unreachable, before it plans anything; it prints no step it does not take; and what the cluster owns nothing of is destroyed
+    Then it asks the cluster as cluster-destroy does and refuses what cluster-destroy refuses, naming what the cluster owns or --unreachable, before it plans anything, and a Service on a pool address blocks neither; it prints no step it does not take; and what the cluster owns nothing of is destroyed
 
   Scenario: A cluster is destroyed only under the name its stack holds
-    Given the cluster stack, whose talman_yaml output names lab-sto2, and a name with no directory under talos/, and one with a directory that is not the stack's cluster
+    Given the cluster stack, whose talman_yaml output names lab-sto2, and a name with no directory under talos/, one with a directory that is not the stack's cluster, lab-sto2 without a directory, and a stack whose outputs name no cluster
     When cluster-destroy runs for each, with --unreachable and --yes
-    Then each exits non-zero saying which name the stack holds, before any cluster is asked, runs no tofu plan or apply, and leaves the generated files of lab-sto2 where they are
+    Then each exits non-zero, before any cluster is asked, runs no tofu plan or apply and leaves the generated files of lab-sto2 where they are; a name other than lab-sto2 is told lab-sto2 is the cluster the stack holds, a stack that names none is said to, and lab-sto2 without a directory is told so
 
   Scenario: Nothing is destroyed without the stack's name
     Given a cluster that owns no load balancer and no volume of a CSI driver

@@ -121,7 +121,11 @@ stack_cluster_name() {
 # LoadBalancer get and the volumes behind PersistentVolumes of a CSI driver are made by the cluster,
 # not by OpenTofu, so the stack's destroy would leave them in the cloud, where they also keep the
 # network from being deleted. So, through CLUSTER's kubeconfig, it lists every such Service and
-# PersistentVolume, and while there are any, names them and fails. LINSTOR's volumes are the
+# PersistentVolume, and while there are any, names them and fails. A Service whose every
+# load-balancer address lies in the service range of the cluster's talman.yaml is left out: Cilium
+# gave it that address from its pool, the workers announce it over BGP, and nothing in the cloud
+# stands behind it. A Service with no address yet, or one outside the range, still counts, as does
+# every such Service when talman.yaml names no service range. LINSTOR's volumes are the other
 # exception: their data is on the workers' data volumes, which the stack holds and destroys, so
 # nothing of them stays in the cloud; it says how many there are. A cluster whose API does not
 # answer, that has no kubeconfig, or whose name the stack does not give (empty CLUSTER), cannot be
@@ -130,10 +134,10 @@ stack_cluster_name() {
 # printed, as they can hold addresses.
 require_cluster_owns_nothing() {
   local cluster=$1 stack=$2 unreachable=$3 kubeconfig why services volumes balancers csi_volumes
-  local linstor_volumes counted name driver
+  local linstor_volumes counted name driver service_range
   # LINSTOR's CSI driver, whose volumes are on the workers' data volumes in the stack.
   local linstor_driver=linstor.csi.linbit.com
-  require_commands kubectl jq || return 1
+  require_commands kubectl jq yq || return 1
   local asked=0
   if [[ -z $cluster ]]; then
     why="$stack names no cluster, so there is no kubeconfig to ask"
@@ -151,7 +155,26 @@ require_cluster_owns_nothing() {
   fi
 
   if ((asked)); then
-    balancers=$(jq -r '.items[] | select(.spec.type == "LoadBalancer")
+    # The service range the cluster stack rendered into talman.yaml; without one, no address counts
+    # as the pool's.
+    service_range=
+    if [[ -f $infra_root/talos/$cluster/talman.yaml ]]; then
+      service_range=$(yq '.values.serviceRange // ""' "$infra_root/talos/$cluster/talman.yaml" 2> /dev/null) || service_range=
+    fi
+    # A range is known only as an IPv4 network with octets 0 to 255 and a prefix of 1 to 32, and an
+    # address is the pool's only as an IPv4 address with octets 0 to 255 inside it: anything else
+    # could pass the arithmetic without being in the range.
+    balancers=$(jq -r --arg range "$service_range" '
+      def ipv4: type == "string" and test("^[0-9]{1,3}(\\.[0-9]{1,3}){3}$")
+        and (split(".") | all(tonumber <= 255));
+      def ip4: split(".") | map(tonumber) | .[0] * 16777216 + .[1] * 65536 + .[2] * 256 + .[3];
+      def in_range($cidr): ($cidr | split("/")) as $net | pow(2; 32 - ($net[1] | tonumber)) as $size
+        | ((ip4 / $size) | floor) == (($net[0] | ip4) / $size | floor);
+      def from_pool: if .hostname == null and (.ip | ipv4) then .ip | in_range($range) else false end;
+      ($range | test("^[^/]+/[0-9]{1,2}$") and (split("/") | (.[0] | ipv4) and (.[1] | tonumber | . >= 1 and . <= 32))) as $known
+      | .items[] | select(.spec.type == "LoadBalancer")
+      | (.status.loadBalancer.ingress // []) as $ingress
+      | select(if $known and ($ingress | length) > 0 then ($ingress | all(from_pool)) | not else true end)
       | "\(.metadata.namespace)/\(.metadata.name)"' <<< "$services")
     csi_volumes=$(jq -r --arg linstor "$linstor_driver" '.items[]
       | select(.spec.csi != null and .spec.csi.driver != $linstor)
@@ -159,7 +182,7 @@ require_cluster_owns_nothing() {
     linstor_volumes=$(jq --arg linstor "$linstor_driver" '[.items[] | select(.spec.csi.driver? == $linstor)] | length' <<< "$volumes")
     if [[ -n $balancers || -n $csi_volumes ]]; then
       while read -r name; do
-        [[ -z $name ]] || infra_error "the Service $name is of type LoadBalancer"
+        [[ -z $name ]] || infra_error "the Service $name is of type LoadBalancer, with an address outside the service range, or none yet"
       done <<< "$balancers"
       while read -r name driver; do
         [[ -z $name ]] || infra_error "the PersistentVolume $name is a volume of the CSI driver $driver"
@@ -168,9 +191,9 @@ require_cluster_owns_nothing() {
       return 1
     fi
     if ((linstor_volumes == 0)); then
-      infra_say "$cluster owns no Service of type LoadBalancer and no PersistentVolume of a CSI driver"
+      infra_say "$cluster owns no Service of type LoadBalancer outside its service range and no PersistentVolume of a CSI driver"
     else
-      infra_say "$cluster owns no Service of type LoadBalancer and no PersistentVolume of a CSI driver other than LINSTOR's"
+      infra_say "$cluster owns no Service of type LoadBalancer outside its service range and no PersistentVolume of a CSI driver other than LINSTOR's"
       if ((linstor_volumes == 1)); then
         counted="1 PersistentVolume of LINSTOR ($linstor_driver), whose data is on the workers' data volumes in $stack: it is"
       else

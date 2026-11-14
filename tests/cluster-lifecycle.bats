@@ -14,6 +14,9 @@ setup_file() {
   local encoded
   encoded=$(tofu -chdir="$BATS_TEST_DIRNAME/fixtures/talos" console -no-color <<< 'base64encode(local.talman_yaml)')
   base64 -d <<< "${encoded//\"/}" > "$BATS_FILE_TMPDIR/talman.yaml"
+  # The range LoadBalancer Services take their addresses from, as the cluster stack renders it; it
+  # holds the pool Service's address and neither of the others'.
+  yq -i '.values.serviceRange = "192.0.2.128/28"' "$BATS_FILE_TMPDIR/talman.yaml"
 }
 
 setup() {
@@ -680,6 +683,82 @@ kube-system/node-agent-cp-1' ]
   done
 }
 
+@test "A Service on a pool address does not block a destroy, and a Service on any other load balancer still does" {
+  # The fixture's service range holds the pool Service's address and neither of the others'.
+  [ "$(yq '.values.serviceRange' "$CLUSTER/talman.yaml")" = 192.0.2.128/28 ]
+  : > "$STATE/pool-load-balancer"
+
+  recipe cluster-destroy --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ "$(calls '^tofu .* apply ' | wc -l)" -eq 1 ]
+  [[ $output != *"gateways/public"* ]]
+
+  # Beside a Service at another address, one with no address yet, one with an address in the range
+  # and another outside it, or one whose load balancer has a host name, nothing is destroyed, and
+  # only the Service that blocks is named.
+  declare -A blocking=([load-balancer]=apps/web [pending-load-balancer]=apps/queued
+    [mixed-load-balancer]=apps/mixed [hostname-load-balancer]=apps/named)
+  for other in "${!blocking[@]}"; do
+    echo "$other"
+    reset_cluster
+    restore_generated
+    : > "$STATE/pool-load-balancer"
+    : > "$STATE/$other"
+
+    recipe cluster-destroy --yes < /dev/null
+
+    [ "$status" -ne 0 ]
+    no_tofu
+    generated_kept
+    [[ $output != *"gateways/public"* ]]
+    [[ $output == *"the Service ${blocking[$other]} is of type LoadBalancer, with an address outside the service range, or none yet"* ]]
+  done
+
+  # Without a service range in talman.yaml, no address can be shown to be the pool's.
+  reset_cluster
+  restore_generated
+  yq -i 'del(.values.serviceRange)' "$CLUSTER/talman.yaml"
+  : > "$STATE/pool-load-balancer"
+
+  recipe cluster-destroy --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  no_tofu
+  [[ $output == *"Service gateways/public"* ]]
+}
+
+@test "a service range or a load-balancer address that is not a valid IPv4 one counts as not the pool's" {
+  # Each a service range and a Service's only address that arithmetic alone would put inside it.
+  cases=('192.0.2.128/0 192.0.2.130' '192.0.2.130/33 192.0.2.130' '999.0.0.0/8 999.0.0.1'
+    '192.0.2.128/28 192.0.1.384' '192.0.2.128/28 192.0.2.130.1' '192.0.1.256/24 192.0.2.130')
+  for case in "${cases[@]}"; do
+    read -r range address <<< "$case"
+    echo "$range $address"
+    reset_cluster
+    restore_generated
+    range=$range yq -i '.values.serviceRange = strenv(range)' "$CLUSTER/talman.yaml"
+    jq -nc --arg address "$address" '{metadata: {namespace: "apps", name: "odd"}, spec: {type: "LoadBalancer"},
+      status: {loadBalancer: {ingress: [{ip: $address}]}}}' > "$STATE/extra-services"
+
+    recipe cluster-destroy --yes < /dev/null
+
+    [ "$status" -ne 0 ]
+    no_tofu
+    [[ $output == *"Service apps/odd"* ]]
+  done
+
+  # The same Service at a valid address in a valid range does not block.
+  reset_cluster
+  restore_generated
+  jq -nc '{metadata: {namespace: "apps", name: "odd"}, spec: {type: "LoadBalancer"},
+    status: {loadBalancer: {ingress: [{ip: "192.0.2.130"}]}}}' > "$STATE/extra-services"
+
+  recipe cluster-destroy --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+}
+
 @test "LINSTOR's volumes go with the cluster stack once the destroy is confirmed, and are counted first" {
   for answer in '' no lab-sto2; do
     echo "answer: $answer"
@@ -817,6 +896,31 @@ kube-system/node-agent-cp-1' ]
       generated_kept
     done
 
+    # A Service on a pool address is not a load balancer of the cloud's, by either recipe; beside a
+    # Service at another address, that one is named and nothing is destroyed.
+    reset_cluster
+    restore_generated
+    : > "$STATE/pool-load-balancer"
+    : > "$STATE/load-balancer"
+    # shellcheck disable=SC2086
+    recipe infra-destroy $args --yes < /dev/null
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"Service apps/web"* ]]
+    [[ $output != *"gateways/public"* ]]
+    no_tofu
+    generated_kept
+
+    reset_cluster
+    restore_generated
+    : > "$STATE/pool-load-balancer"
+    # shellcheck disable=SC2086
+    recipe infra-destroy $args --yes < /dev/null
+
+    [ "$status" -eq 0 ]
+    [[ $output == *"sto2/cluster destroyed"* ]]
+    restore_generated
+
     # An API that does not answer, and no kubeconfig: refused, naming --unreachable.
     reset_cluster
     : > "$STATE/api-down"
@@ -856,7 +960,7 @@ kube-system/node-agent-cp-1' ]
   recipe cluster-destroy other-cluster --unreachable --yes < /dev/null
 
   [ "$status" -ne 0 ]
-  [[ $output == *"talos/other-cluster does not exist"* ]]
+  [[ $output == *"holds lab-sto2, not other-cluster"* ]]
   [ -z "$(calls '^tofu .* (plan|apply) ')" ]
   [ -z "$(calls '^kubectl ')" ]
   generated_kept
@@ -871,6 +975,36 @@ kube-system/node-agent-cp-1' ]
 
     [ "$status" -ne 0 ]
     [[ $output == *"holds lab-sto2, not other-cluster"* ]]
+    [ -z "$(calls '^tofu .* (plan|apply) ')" ]
+    [ -z "$(calls '^kubectl ')" ]
+    generated_kept
+  done
+
+  # The cluster the stack holds, without a directory of its own, is told so.
+  rmdir "$REPO/talos/other-cluster"
+  mv "$CLUSTER" "$REPO/talos/lab-sto2.away"
+  rm -f "$RECORD/argv"
+  recipe cluster-destroy lab-sto2 --unreachable --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"talos/lab-sto2 does not exist"* ]]
+  [ -z "$(calls '^tofu .* (plan|apply) ')" ]
+  mv "$REPO/talos/lab-sto2.away" "$CLUSTER"
+
+  # A stack whose outputs name no cluster cannot be told to be any name, and nothing is asked.
+  fake tofu <<EOF
+printf '%s\n' "tofu \$*" >> "$RECORD/argv"
+case \${2-} in
+  output) echo '{}' ;;
+esac
+EOF
+  for args in 'lab-sto2 --unreachable --yes' 'lab-sto2 --yes' 'lab-sto2'; do
+    rm -f "$RECORD/argv"
+    # shellcheck disable=SC2086 # the arguments as an operator types them
+    recipe cluster-destroy $args <<< lab-sto2
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"outputs name no cluster"* ]]
     [ -z "$(calls '^tofu .* (plan|apply) ')" ]
     [ -z "$(calls '^kubectl ')" ]
     generated_kept
