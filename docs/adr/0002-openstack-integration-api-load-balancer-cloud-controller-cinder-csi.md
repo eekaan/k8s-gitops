@@ -2,6 +2,8 @@
 
 - Status: proposed
 - Date: 2026-11-14
+- Amended: 2026-11-14, volumes come from LINSTOR, not Cinder CSI
+  ([ADR 0011](0011-persistent-volumes-from-linstor-on-a-data-volume-per-worker.md))
 
 ## Context
 
@@ -20,7 +22,8 @@ Talos, so both are verified on a running cluster before anything is built on the
 - The OpenStack cloud controller manager provides `Service` objects of type `LoadBalancer`
   through Octavia. A cluster that uses it is bootstrapped with its kubelets in external
   cloud-provider mode.
-- Cinder CSI provides volumes. The default StorageClass uses the cloud's default volume type.
+- This record chose Cinder CSI for volumes. ADR 0011 replaces that part of it: volumes come from
+  LINSTOR on a volume attached to each worker, and the cluster runs no Cinder CSI.
 
 ## Alternatives considered
 
@@ -41,8 +44,8 @@ Talos, so both are verified on a running cluster before anything is built on the
 - With a cloud controller, a node also reports its floating address. The kubelet then asks for
   it in its serving certificate, so the certificate approver's allowed address ranges have to
   include the floating addresses from that point on.
-- The cloud controller and the CSI driver need an OpenStack credential inside the cluster. It
-  is separate from the one OpenTofu uses and is delivered as SOPS-encrypted bootstrap material.
-- Load balancers and volumes created by the cluster are not in tofu state, so teardown removes
-  them before the stacks are destroyed.
-- This record becomes accepted, or is replaced, when both verifications have run.
+- The cloud controller needs an OpenStack credential inside the cluster. It is separate from the
+  one OpenTofu uses and is delivered as SOPS-encrypted bootstrap material.
+- Load balancers created by the cluster are not in tofu state, so teardown removes them before
+  the stacks are destroyed.
+- This record becomes accepted, or is replaced, when the cloud controller's verification has run.
