@@ -1,0 +1,14 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/namespace-v1.json
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: volsync-system
+  annotations:
+    # Removing the namespace from the tree must not delete everything in it.
+    kustomize.toolkit.fluxcd.io/prune: disabled
+  labels:
+    # The controller runs as a non-root user with the runtime's seccomp profile, no capabilities and
+    # no privilege escalation, which the restricted level requires; tests/volume-backups.bats checks
+    # the rendered chart against it. The movers run in the namespaces of the volumes they copy.
+    pod-security.kubernetes.io/enforce: restricted

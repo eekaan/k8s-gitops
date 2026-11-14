@@ -1,0 +1,83 @@
+---
+# Values for the kube-prometheus-stack chart as the source of the Grafana's dashboards, read by the
+# HelmRelease through a ConfigMap generated without substitution. The kube-prometheus-stack
+# application runs the monitoring stack from the same chart; this release turns every part of it
+# off and keeps only the dashboards the chart renders for what the cluster scrapes: the Kubernetes
+# mixin's, node-exporter's on Linux nodes, and those of Prometheus, Alertmanager and Grafana
+# itself. Each is a ConfigMap and a GrafanaDashboard that loads it into the Grafana, so Grafana
+# fetches nothing at run time. tests/grafana.bats fails when the release renders anything else, or
+# a dashboard that differs from the one the monitoring application's values would render.
+
+# Object names start with this instead of the release's name and the chart's, cut to 26 letters.
+fullnameOverride: grafana-dashboards
+
+# The monitoring application runs all of these; the definitions come from prometheus-operator-crds.
+crds:
+  enabled: false
+defaultRules:
+  create: false
+prometheusOperator:
+  enabled: false
+prometheus:
+  enabled: false
+kubeStateMetrics:
+  enabled: false
+
+# Without Grafana, Alertmanager and node-exporter, but with their dashboards. node-exporter's are
+# for Linux nodes only: Talos nodes run Linux.
+grafana:
+  enabled: false
+  forceDeployDashboards: true
+  operator:
+    dashboardsConfigMapRefEnabled: true
+    # The Grafana's label, which every dashboard selects it by.
+    matchLabels:
+      app.kubernetes.io/instance: grafana
+    folder: Kubernetes
+    # A restarted Grafana starts without its dashboards. The operator applies each again every
+    # minute, and retries a failed attempt after 10 seconds, doubling the wait up to two minutes
+    # while Grafana starts.
+    resyncPeriod: 1m
+alertmanager:
+  enabled: false
+  forceDeployDashboards: true
+nodeExporter:
+  enabled: false
+  forceDeployDashboards: true
+  operatingSystems:
+    aix:
+      enabled: false
+    darwin:
+      enabled: false
+
+# The control plane's dashboards, without the Services and ServiceMonitors that come with them: the
+# monitoring application scrapes these already, and a second monitor would scrape each target
+# twice. kube-proxy has none, as Cilium replaces it.
+kubeApiServer:
+  serviceMonitor:
+    enabled: false
+kubelet:
+  serviceMonitor:
+    enabled: false
+kubeControllerManager:
+  service:
+    enabled: false
+  serviceMonitor:
+    enabled: false
+coreDns:
+  service:
+    enabled: false
+  serviceMonitor:
+    enabled: false
+kubeEtcd:
+  service:
+    enabled: false
+  serviceMonitor:
+    enabled: false
+kubeScheduler:
+  service:
+    enabled: false
+  serviceMonitor:
+    enabled: false
+kubeProxy:
+  enabled: false

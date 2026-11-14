@@ -38,6 +38,10 @@ setup() {
   cp "$REPO/talos/.sops.yaml" "$BATS_TEST_TMPDIR/talos-sops.placeholder"
   cp "$ROOT/.gitignore" "$REPO/.gitignore"
   cp "$BATS_FILE_TMPDIR/talman.yaml" "$CLUSTER/talman.yaml"
+  # The S3 backend settings cluster-config reads the object storage's endpoint from.
+  mkdir -p "$REPO/infra/openstack"
+  printf 'region = "us-east-1"\nendpoints = {\n  s3 = "https://s3.example.com"\n}\nuse_path_style = true\n' \
+    > "$REPO/infra/openstack/backend.hcl"
   # A mise with nothing installed keeps the justfile from putting real tools in front of the fakes.
   fake mise < /dev/null
   KEY="$BATS_TEST_TMPDIR/keys/talos.agekey"
@@ -49,6 +53,7 @@ setup() {
     KUBE_API_ADDRESS="$KUBE_API_ADDRESS"
     FLUX_AGE_KEY_FILE="$FLUX_KEY"
     CLUSTER_DOMAIN=example.com
+    BACKUP_BUCKET_PREFIX=fixture-backups
     TMPDIR="$BATS_TEST_TMPDIR"
   )
   reset_environment

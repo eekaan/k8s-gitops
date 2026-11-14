@@ -24,10 +24,11 @@ output "instances" {
 }
 
 output "security_group" {
-  description = "The nodes' security group: its ID and every ingress rule this module puts in it. Sensitive, as the rules hold the operator allowlist."
+  description = "The nodes' security group: its ID, whether Neutron's default egress rules were removed from it, and every ingress rule this module puts in it. Sensitive, as the rules hold the operator allowlist."
   sensitive   = true
   value = {
-    id = openstack_networking_secgroup_v2.this.id
+    id                   = openstack_networking_secgroup_v2.this.id
+    delete_default_rules = openstack_networking_secgroup_v2.this.delete_default_rules
     ingress_rules = [
       for rule in concat(
         values(openstack_networking_secgroup_rule_v2.intra),
@@ -36,6 +37,27 @@ output "security_group" {
         [openstack_networking_secgroup_rule_v2.api_from_subnet],
         values(openstack_networking_secgroup_rule_v2.open),
         ) : {
+        security_group_id = rule.security_group_id
+        direction         = rule.direction
+        ethertype         = rule.ethertype
+        protocol          = rule.protocol
+        port_range_min    = rule.port_range_min
+        port_range_max    = rule.port_range_max
+        remote_ip_prefix  = rule.remote_ip_prefix
+        remote_group_id   = rule.remote_group_id
+      }
+    ]
+  }
+}
+
+output "worker_security_group" {
+  description = "The workers' own security group: its ID, whether Neutron's default egress rules were removed from it, and every ingress rule in it. Sensitive, as the rules hold the sources worker_ingress names."
+  sensitive   = true
+  value = {
+    id                   = openstack_networking_secgroup_v2.workers.id
+    delete_default_rules = openstack_networking_secgroup_v2.workers.delete_default_rules
+    ingress_rules = [
+      for rule in values(openstack_networking_secgroup_rule_v2.worker_ingress) : {
         security_group_id = rule.security_group_id
         direction         = rule.direction
         ethertype         = rule.ethertype

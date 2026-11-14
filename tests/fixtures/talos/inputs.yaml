@@ -25,6 +25,16 @@ service_subnet: 203.0.113.0/24
 operator_cidrs:
   - 198.51.100.0/26
   - 198.51.100.64/26
+# The plumbing stack's numbers for Services announced over BGP: the range LoadBalancer addresses come
+# from, outside the node subnet, and the documentation AS numbers and two edge addresses on the node
+# subnet.
+service_range: 192.0.2.128/28
+bgp:
+  cluster_asn: 64496
+  edge_asn: 64497
+  edge_addresses:
+    - 192.0.2.7
+    - 192.0.2.8
 # Each node at its floating address, and with its own address on the node network.
 nodes:
   - hostname: cp-1

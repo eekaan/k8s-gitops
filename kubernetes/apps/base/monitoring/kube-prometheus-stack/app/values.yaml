@@ -16,7 +16,8 @@
 crds:
   enabled: false
 
-# Dashboards come with Grafana, which this chart does not install.
+# This release installs no Grafana and no dashboards. The grafana application takes its dashboards
+# from this chart, at the same version, in a release of its own.
 grafana:
   enabled: false
 

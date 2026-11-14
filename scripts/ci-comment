@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# The comment job's work (just ci-comment): once the CI workflow completed for a pull request, puts
+# the comment its render job left, as the artifact render-diff, on the pull request: it updates the
+# one comment of this job's that starts with the render diff's marker, or creates it.
+#
+# The artifact comes from a run of the pull request's own workflow file, which a fork can change at
+# will, so it is untrusted text. It is refused unless it is exactly one regular file, comment.md,
+# that scripts/lib/render-comment.sh accepts byte for byte: a comment render-diff could have written,
+# whose only free text is inside fenced diffs, where no mention, reference, link, image or HTML
+# renders. It reaches GitHub as a JSON string jq writes from it, followed by a line of this job's own
+# naming the commit the diff describes. Nothing runs it, sources it, or prints it to the log, where
+# GitHub would read workflow commands in it. The pull request is the one open pull request whose head
+# is the commit the run was for, in the repository the run was for, looked up through the API;
+# nothing in the artifact names it. When that head has moved on, the newer run comments and this one
+# posts nothing. A run that left no artifact did not render: the job's own comment, if any, is
+# updated to say so.
+#
+# Needs gh and jq, and in the environment GH_TOKEN, GITHUB_REPOSITORY, RUN_ID, HEAD_SHA,
+# HEAD_REPOSITORY and HEAD_BRANCH, which the comment workflow sets from the run it follows.
+set -euo pipefail
+
+# shellcheck source=scripts/lib/render-comment.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/render-comment.sh"
+
+die() {
+  echo "ci-comment: $*" >&2
+  exit 1
+}
+
+for name in GH_TOKEN GITHUB_REPOSITORY RUN_ID HEAD_SHA HEAD_REPOSITORY HEAD_BRANCH; do
+  [[ -n ${!name:-} ]] || die "$name is not set"
+done
+repository_re='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+[[ $GITHUB_REPOSITORY =~ $repository_re && $HEAD_REPOSITORY =~ $repository_re ]] || die "a repository is not owner/name"
+[[ $RUN_ID =~ ^[1-9][0-9]*$ ]] || die "RUN_ID is not a run's number"
+[[ $HEAD_SHA =~ ^[0-9a-f]{40}$ ]] || die "HEAD_SHA is not a commit"
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+# pull_request: the number of the one open pull request whose head is HEAD_SHA in HEAD_REPOSITORY,
+# or nothing.
+pull_request() {
+  local pulls number
+  pulls=$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" -f state=open -f "head=${HEAD_REPOSITORY%%/*}:$HEAD_BRANCH" -f per_page=100)
+  number=$(jq -r --arg sha "$HEAD_SHA" --arg repository "$HEAD_REPOSITORY" '
+    [.[] | select(.head.sha == $sha and .head.repo.full_name == $repository) | .number]
+    | if length == 1 then .[0] | tostring else "" end' <<<"$pulls")
+  [[ -z $number || $number =~ ^[1-9][0-9]*$ ]] || die "the pull request's number is not a number"
+  printf '%s' "$number"
+}
+
+# own_comment NUMBER: the id of this job's comment on the pull request, or nothing; others' comments
+# may start with the marker too.
+own_comment() {
+  local id
+  id=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$1/comments?per_page=100" |
+    jq -rs --arg marker "$render_comment_marker" '[.[] | .[]? | select(.user.login == "github-actions[bot]" and .user.type == "Bot"
+      and ((.body // "") | startswith($marker))) | .id] | first // empty')
+  [[ -z $id || $id =~ ^[1-9][0-9]*$ ]] || die "the comment's id is not a number"
+  printf '%s' "$id"
+}
+
+# write BODY NUMBER ID: puts the file BODY on the pull request NUMBER as the comment ID, or as a new
+# one without an ID.
+write() {
+  jq -n --rawfile body "$1" '{body: $body}' >"$tmp/request.json"
+  if [[ -n $3 ]]; then
+    gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$3" --input "$tmp/request.json" >/dev/null
+  else
+    gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$2/comments" --input "$tmp/request.json" >/dev/null
+  fi
+}
+
+artifacts=$(gh api --method GET "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts" -f name=render-diff -f per_page=100 |
+  jq '[.artifacts[]? | select(.name == "render-diff" and (.expired | not))] | length')
+if ((artifacts == 0)); then
+  echo "ci-comment: run $RUN_ID left no render diff: its render did not complete"
+  number=$(pull_request)
+  [[ -n $number ]] || exit 0
+  id=$(own_comment "$number")
+  [[ -n $id ]] || exit 0
+  # The comment no longer describes the pull request's head; it says so in this job's own words.
+  printf '%s\n%s\n\nCommit %s did not render: its CI run ended without leaving a render diff, so there is none to show for it.\n' \
+    "$render_comment_marker" "$render_comment_heading" "$HEAD_SHA" >"$tmp/unrendered.md"
+  write "$tmp/unrendered.md" "$number" "$id"
+  echo "ci-comment: said on pull request #$number that $HEAD_SHA did not render"
+  exit 0
+fi
+((artifacts == 1)) || die "run $RUN_ID left $artifacts artifacts named render-diff"
+
+gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name render-diff --dir "$tmp/artifact" ||
+  die "the artifact render-diff of run $RUN_ID did not download"
+# Counted, not listed: the names are the artifact's, and stay out of the log.
+entries=$(find "$tmp/artifact" -mindepth 1 | wc -l)
+file="$tmp/artifact/comment.md"
+((entries == 1)) || die "the artifact holds $entries entries; it must hold one file, comment.md"
+# The check refuses anything but a regular file; the reason it gives is its own, and names no byte
+# of the artifact.
+render_comment_check "$file" 2>"$tmp/refused" || die "comment.md is not a comment render-diff writes: $(head -c 200 "$tmp/refused")"
+
+number=$(pull_request)
+if [[ -z $number ]]; then
+  echo "ci-comment: no open pull request has $HEAD_SHA as its head; a newer run comments, if any"
+  exit 0
+fi
+{
+  cat "$file"
+  printf '\n<sub>The diff of commit %s, as that pull request'"'"'s own CI run rendered it: a change to the render code, the CI workflow, the justfile or the Dagger module decides what it says.</sub>\n' "$HEAD_SHA"
+} >"$tmp/comment.md"
+id=$(own_comment "$number")
+write "$tmp/comment.md" "$number" "$id"
+if [[ -n $id ]]; then
+  echo "ci-comment: updated the render diff on pull request #$number"
+else
+  echo "ci-comment: commented the render diff on pull request #$number"
+fi

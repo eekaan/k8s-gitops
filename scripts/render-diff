@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# Writes on stdout, as Markdown, the pull request comment that compares two renders of
+# scripts/render: a table with the objects each application adds, removes and changes, then each
+# changed application's unified diff, collapsed. Its fixed text, its size and its grammar are those
+# of scripts/lib/render-comment.sh, which the comment job posts nothing but; what the renders hold
+# appears only inside a diff's code block. Past the size a comment may hold, the diffs are cut and
+# the comment says so, keeping the whole table and the footer.
+#
+# Usage: scripts/render-diff BASE HEAD   (directories scripts/render wrote)
+set -euo pipefail
+shopt -s nullglob
+# Sizes are counted in bytes, which are never fewer than the characters GitHub counts.
+export LC_ALL=C
+
+# shellcheck source=scripts/lib/render-comment.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/render-comment.sh"
+
+die() {
+  echo "render-diff: $*" >&2
+  exit 1
+}
+
+(($# == 2)) || die "usage: scripts/render-diff BASE HEAD"
+base=$1 head=$2
+for side in "$base" "$head"; do
+  [[ -d $side ]] || die "$side is not a directory"
+done
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+# Applications and objects are named as scripts/render names them; anything else is not a render.
+app_re='^[a-z0-9]([-a-z0-9]*[a-z0-9])?/[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+object_re='^[A-Za-z0-9][A-Za-z0-9._:-]*\.yaml$'
+
+# names DIR: the entries of DIR, one per line, sorted.
+names() {
+  local entry
+  for entry in "$1"/*; do
+    printf '%s\n' "${entry##*/}"
+  done | sort
+}
+
+mapfile -t apps < <({
+  for side in "$base" "$head"; do
+    for app in "$side"/*/*/; do
+      app=${app%/}
+      printf '%s\n' "${app#"$side"/}"
+    done
+  done
+} | sort -u)
+
+rows=() blocks=()
+for app in "${apps[@]}"; do
+  [[ $app =~ $app_re ]] || die "$app is not an application of a render"
+  added=0 removed=0 changed=0
+  block="$tmp/block-${#blocks[@]}"
+  : >"$block.diff"
+  while IFS= read -r object; do
+    [[ $object =~ $object_re ]] || die "$app/$object is not an object of a render"
+    old="$base/$app/$object" new="$head/$app/$object"
+    if [[ ! -f $old ]]; then
+      old=/dev/null added=$((added + 1))
+    elif [[ ! -f $new ]]; then
+      new=/dev/null removed=$((removed + 1))
+    elif cmp -s "$old" "$new"; then
+      continue
+    else
+      changed=$((changed + 1))
+    fi
+    diff -u --label "a/$app/$object" --label "b/$app/$object" "$old" "$new" >>"$block.diff" || (($? == 1)) ||
+      die "diff of $app/$object failed"
+  done < <({ names "$base/$app"; names "$head/$app"; } | sort -u)
+  ((added + removed + changed > 0)) || continue
+  for count in "$added" "$removed" "$changed"; do
+    ((count <= render_comment_most)) ||
+      die "$app: $count objects, more than the $render_comment_most a comment counts for one application"
+  done
+  # A NUL or a carriage return would end the diff's text or line early; they show as \0 and \r.
+  sed -i -e 's/\x00/\\0/g' -e 's/\r/\\r/g' "$block.diff"
+  rows+=("| \`$app\` | $added | $removed | $changed |")
+  counts=()
+  ((added == 0)) || counts+=("$added added")
+  ((removed == 0)) || counts+=("$removed removed")
+  ((changed == 0)) || counts+=("$changed changed")
+  summary=$(printf '%s, ' "${counts[@]}")
+  echo "<summary><code>$app</code>: ${summary%, }</summary>" >"$block.summary"
+  blocks+=("$block")
+done
+
+printf '%s\n%s\n\n' "$render_comment_marker" "$render_comment_heading" >"$tmp/header"
+printf '\n%s\n' "$render_comment_footer" >"$tmp/footer"
+
+if ((${#rows[@]} == 0)); then
+  {
+    cat "$tmp/header"
+    echo "$render_comment_unchanged"
+    cat "$tmp/footer"
+  } >"$tmp/comment"
+else
+  {
+    printf '%s\n\n%s\n%s\n' "$render_comment_intro" "$render_comment_table_head" "$render_comment_table_rule"
+    printf '%s\n' "${rows[@]}"
+  } >>"$tmp/header"
+
+  # fence FILE: a code fence longer than any run of backquotes in FILE, so no line of it ends the
+  # block.
+  fence() {
+    local longest
+    longest=$({ grep -o '`\+' "$1" || true; } | awk '{ if (length($0) > n) n = length($0) } END { print n + 0 }')
+    printf '%*s' $((longest < 3 ? 3 : longest + 1)) '' | tr ' ' '`'
+  }
+
+  # details BLOCK DIFF FENCE: the collapsed section of BLOCK's application, holding DIFF in a code
+  # block between FENCE lines.
+  details() {
+    printf '\n<details>\n'
+    cat "$1.summary"
+    printf '\n%sdiff\n' "$3"
+    cat "$2"
+    printf '%s\n</details>\n' "$3"
+  }
+
+  size() {
+    wc -c <"$1"
+  }
+
+  note="$tmp/note"
+  # The note a cut comment ends with is kept in reserve while the diffs are added.
+  printf '\n%s\n' "$render_comment_note" >"$note"
+  budget=$((render_comment_room - $(size "$tmp/header") - $(size "$tmp/footer") - $(size "$note")))
+
+  # Each application's section, whole. Past the room the smallest go in whole, so that most
+  # applications show their whole diff, the next is cut to the room left and the rest are left
+  # out; those shown keep the table's order.
+  : >"$tmp/sizes"
+  for i in "${!blocks[@]}"; do
+    block=${blocks[i]}
+    fence "$block.diff" >"$block.fence"
+    details "$block" "$block.diff" "$(cat "$block.fence")" >"$block.section"
+    echo "$(size "$block.section") $i" >>"$tmp/sizes"
+  done
+  shown=() used=0 truncated=0
+  cut='... cut here'
+  while read -r bytes i; do
+    if ((truncated == 0 && used + bytes <= budget)); then
+      shown[i]=1 used=$((used + bytes))
+      continue
+    fi
+    ((truncated == 0)) || continue
+    truncated=1
+    # As many whole lines of this diff as fit, then nothing more: a part of a diff needs no longer
+    # fence than the whole.
+    block=${blocks[i]}
+    details "$block" /dev/null "$(cat "$block.fence")" >"$tmp/empty"
+    room=$((budget - used - $(size "$tmp/empty") - ${#cut} - 1))
+    if ((room > 0)); then
+      awk -v room="$room" '{ used += length($0) + 1; if (used > room) exit; print }' "$block.diff" >"$tmp/cut"
+      echo "$cut" >>"$tmp/cut"
+      details "$block" "$tmp/cut" "$(cat "$block.fence")" >"$block.section"
+      shown[i]=1
+    fi
+  done < <(sort -n -k1,1 -k2,2 "$tmp/sizes")
+
+  {
+    cat "$tmp/header"
+    for i in "${!blocks[@]}"; do
+      [[ -z ${shown[i]:-} ]] || cat "${blocks[i]}.section"
+    done
+    ((truncated == 0)) || cat "$note"
+    cat "$tmp/footer"
+  } >"$tmp/comment"
+fi
+# What the comment job would refuse is never written.
+render_comment_check "$tmp/comment" || die "the comment it wrote is not one the comment job accepts"
+cat "$tmp/comment"

@@ -14,6 +14,14 @@ values:
   apiSANs: ${jsonencode(api_sans)}
   # The load balancer's floating address, where the cluster recipes reach the Kubernetes API.
   apiAddress: ${api_address}
+  # Services announced over BGP, from the plumbing stack: the range LoadBalancer addresses come
+  # from, the AS numbers and the edge routers the workers peer with. just cluster-config hands them
+  # to the cluster in cluster-config; no Talos patch reads them.
+  serviceRange: ${service_range}
+  bgp:
+    clusterASN: ${bgp.cluster_asn}
+    edgeASN: ${bgp.edge_asn}
+    edgeAddresses: ${jsonencode(bgp.edge_addresses)}
   # The ingress firewall's rules for each role (talos/patches/all/firewall.yaml): every listener of
   # talos/firewall.yaml the role has, accepting the networks of its sources. A port is written as a
   # range, the one form in which a rule takes it quoted.
@@ -54,6 +62,8 @@ patches:
     - ../patches/all/node-ip.yaml
     - ../patches/all/kernel-modules.yaml
     - ../patches/all/user-namespaces.yaml
+    - ../patches/all/seccomp-default.yaml
+    - ../patches/all/spegel.yaml
     - ../patches/all/firewall.yaml
   controlplane:
     - ../patches/controlplane/api-sans.yaml

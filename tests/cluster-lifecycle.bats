@@ -656,6 +656,82 @@ kube-system/node-agent-cp-1' ]
   done
 }
 
+@test "A Service on a pool address does not block a destroy, and a Service on any other load balancer still does" {
+  # The fixture's service range holds the pool Service's address and neither of the others'.
+  [ "$(yq '.values.serviceRange' "$CLUSTER/talman.yaml")" = 192.0.2.128/28 ]
+  : > "$STATE/pool-load-balancer"
+
+  recipe cluster-destroy --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ "$(calls '^tofu .* apply ' | wc -l)" -eq 1 ]
+  [[ $output != *"gateways/public"* ]]
+
+  # Beside a Service at another address, one with no address yet, one with an address in the range
+  # and another outside it, or one whose load balancer has a host name, nothing is destroyed, and
+  # only the Service that blocks is named.
+  declare -A blocking=([load-balancer]=apps/web [pending-load-balancer]=apps/queued
+    [mixed-load-balancer]=apps/mixed [hostname-load-balancer]=apps/named)
+  for other in "${!blocking[@]}"; do
+    echo "$other"
+    reset_cluster
+    restore_generated
+    : > "$STATE/pool-load-balancer"
+    : > "$STATE/$other"
+
+    recipe cluster-destroy --yes < /dev/null
+
+    [ "$status" -ne 0 ]
+    no_tofu
+    generated_kept
+    [[ $output != *"gateways/public"* ]]
+    [[ $output == *"the Service ${blocking[$other]} is of type LoadBalancer, with an address outside the service range, or none yet"* ]]
+  done
+
+  # Without a service range in talman.yaml, no address can be shown to be the pool's.
+  reset_cluster
+  restore_generated
+  yq -i 'del(.values.serviceRange)' "$CLUSTER/talman.yaml"
+  : > "$STATE/pool-load-balancer"
+
+  recipe cluster-destroy --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  no_tofu
+  [[ $output == *"Service gateways/public"* ]]
+}
+
+@test "a service range or a load-balancer address that is not a valid IPv4 one counts as not the pool's" {
+  # Each a service range and a Service's only address that arithmetic alone would put inside it.
+  cases=('192.0.2.128/0 192.0.2.130' '192.0.2.130/33 192.0.2.130' '999.0.0.0/8 999.0.0.1'
+    '192.0.2.128/28 192.0.1.384' '192.0.2.128/28 192.0.2.130.1' '192.0.1.256/24 192.0.2.130')
+  for case in "${cases[@]}"; do
+    read -r range address <<< "$case"
+    echo "$range $address"
+    reset_cluster
+    restore_generated
+    range=$range yq -i '.values.serviceRange = strenv(range)' "$CLUSTER/talman.yaml"
+    jq -nc --arg address "$address" '{metadata: {namespace: "apps", name: "odd"}, spec: {type: "LoadBalancer"},
+      status: {loadBalancer: {ingress: [{ip: $address}]}}}' > "$STATE/extra-services"
+
+    recipe cluster-destroy --yes < /dev/null
+
+    [ "$status" -ne 0 ]
+    no_tofu
+    [[ $output == *"Service apps/odd"* ]]
+  done
+
+  # The same Service at a valid address in a valid range does not block.
+  reset_cluster
+  restore_generated
+  jq -nc '{metadata: {namespace: "apps", name: "odd"}, spec: {type: "LoadBalancer"},
+    status: {loadBalancer: {ingress: [{ip: "192.0.2.130"}]}}}' > "$STATE/extra-services"
+
+  recipe cluster-destroy --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+}
+
 @test "LINSTOR's volumes go with the cluster stack once the destroy is confirmed, and are counted first" {
   for answer in '' no lab-sto2; do
     echo "answer: $answer"

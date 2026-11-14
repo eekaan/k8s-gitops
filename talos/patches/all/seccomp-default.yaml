@@ -1,0 +1,11 @@
+# The kubelet runs a container whose pod sets no seccomp profile under the container runtime's
+# default profile instead of none. Every node allows unprivileged user namespaces
+# (user-namespaces.yaml); to a container without CAP_SYS_ADMIN, containerd's default profile
+# refuses unshare, setns, clone3 and a clone that asks for a new namespace, a user namespace among
+# them, which narrows who can create one. A privileged container, one that sets Unconfined or a
+# profile of its own, and one with CAP_SYS_ADMIN are not narrowed by it. The configuration Talos
+# generates turns it on already; it is stated so that a change of that default cannot turn it off.
+---
+apiVersion: v1alpha1
+kind: KubeletConfig
+defaultRuntimeSeccompProfileEnabled: true

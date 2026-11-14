@@ -1,0 +1,28 @@
+---
+# Values for the VolSync chart, read by the HelmRelease through a ConfigMap generated without
+# substitution. Keys not set here keep the chart's defaults: the controller's resource requests and
+# limits, and the publisher's mover images at the chart's own version. The movers run in the
+# namespace of each volume they copy, without privileges unless that namespace allows them.
+
+# The release installs and upgrades the ReplicationSource and ReplicationDestination definitions as
+# templates of the chart, each marked helm.sh/resource-policy: keep, so they move with the
+# controller that serves them and stay, with every backup schedule, when the release is uninstalled.
+manageCRDs: true
+
+# Two replicas on two different nodes; the controller always runs with leader election, so one acts
+# at a time. poddisruptionbudget.yaml keeps one running while a node is drained, as the chart makes
+# no disruption budget.
+replicaCount: 2
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - topologyKey: kubernetes.io/hostname
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: volsync
+            app.kubernetes.io/instance: volsync
+
+metrics:
+  # The chart's ServiceMonitor scrapes without a credential, so /metrics is served without
+  # authorization.
+  disableAuth: true

@@ -82,6 +82,24 @@ variable "allowed_address_pairs" {
   default     = []
 }
 
+variable "worker_allowed_address_pairs" {
+  description = "Ranges every worker's port may also send from and receive for, on top of allowed_address_pairs; control planes' ports get none of them. Empty by default."
+  type        = list(string)
+  default     = []
+}
+
+variable "worker_ingress" {
+  description = "TCP ports the workers accept connections on from the given sources, in a security group of the workers' own, for traffic to Services that arrives from outside the cluster. None by default."
+  type = object({
+    sources   = list(string)
+    tcp_ports = list(number)
+  })
+  default = {
+    sources   = []
+    tcp_ports = []
+  }
+}
+
 variable "tags" {
   description = "Tags for every resource that takes them."
   type        = list(string)

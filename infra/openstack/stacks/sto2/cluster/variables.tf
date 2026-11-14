@@ -37,6 +37,11 @@ variable "pod_subnet" {
     condition     = try(pow(2, 24 - tonumber(split("/", var.pod_subnet)[1])) >= var.controlplane_count + var.worker_count, true)
     error_message = "pod_subnet must hold a /24 for every node, as Kubernetes gives each node a /24 of it."
   }
+
+  validation {
+    condition     = try(!cidrcontains(var.pod_subnet, cidrhost(local.plumbing.bgp.service_range, 0)) && !cidrcontains(local.plumbing.bgp.service_range, cidrhost(var.pod_subnet, 0)), true)
+    error_message = "pod_subnet must not overlap the plumbing stack's service_range, which LoadBalancer addresses come from."
+  }
 }
 
 variable "service_subnet" {
@@ -57,6 +62,22 @@ variable "service_subnet" {
   validation {
     condition     = try(!cidrcontains(var.service_subnet, var.pod_subnet) && !cidrcontains(var.pod_subnet, var.service_subnet), true)
     error_message = "service_subnet must not overlap pod_subnet."
+  }
+
+  validation {
+    condition     = try(!cidrcontains(var.service_subnet, cidrhost(local.plumbing.bgp.service_range, 0)) && !cidrcontains(local.plumbing.bgp.service_range, cidrhost(var.service_subnet, 0)), true)
+    error_message = "service_subnet must not overlap the plumbing stack's service_range, which LoadBalancer addresses come from."
+  }
+}
+
+variable "service_ports" {
+  description = "TCP ports the edge routers reach Services on at the workers. By default HTTP and HTTPS, what a gateway serves."
+  type        = list(number)
+  default     = [80, 443]
+
+  validation {
+    condition     = length(distinct(var.service_ports)) == length(var.service_ports) && alltrue([for port in var.service_ports : floor(port) == port && port >= 1 && port <= 65535])
+    error_message = "service_ports must be TCP port numbers, 1 to 65535, each listed once."
   }
 }
 
@@ -88,13 +109,20 @@ variable "security_group_rules" {
 }
 
 variable "ci_host_number" {
-  description = "Host number on the node subnet of the CI host the ci stack makes, its host_number, 6 by default: its fixed address then reaches the nodes' Talos API (TCP 50000) and Kubernetes API (TCP 6443). Null, the default, while there is no CI host: the nodes admit nothing for it, and the stack plans without the ci stack."
+  description = "Host number on the node subnet of the CI host the ci stack makes, its host_number, 6 by default, never one of the plumbing stack's edge_hosts: its fixed address then reaches the nodes' Talos API (TCP 50000) and Kubernetes API (TCP 6443). Null, the default, while there is no CI host: the nodes admit nothing for it, and the stack plans without the ci stack."
   type        = number
   default     = null
 
   validation {
     condition     = var.ci_host_number == null || try(floor(var.ci_host_number) == var.ci_host_number && var.ci_host_number >= 2 && var.ci_host_number <= 9 && var.ci_host_number != 5, false)
     error_message = "ci_host_number must be null or a whole number from 2 to 9 other than 5, the ci stack's host_number: above the gateway, below the control planes' 10 and the DHCP pool, apart from the API load balancer's 5."
+  }
+
+  # The plumbing stack reserves the edge routers' fixed addresses by host number as well. A plumbing
+  # state without them fails the plan where main.tf reads local.bgp.
+  validation {
+    condition     = var.ci_host_number == null || try(!contains(local.plumbing.bgp.edge_addresses, cidrhost(local.plumbing.network.cidr, var.ci_host_number)), true)
+    error_message = "ci_host_number must not be one of the plumbing stack's edge_hosts: the CI host and the edge routers each need a fixed address of their own on the node subnet."
   }
 }
 
