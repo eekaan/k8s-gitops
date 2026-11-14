@@ -45,6 +45,9 @@ command that runs them is a `just` recipe.
   and the API's addresses, which the cloud may give to someone else: `talos/<cluster>/talman.yaml`
   and the talosconfig and kubeconfig in its `clusterconfig/`. It names each file it removes and
   removes only files git ignores; the secrets bundle and etcd snapshots stay.
+  `just infra-destroy sto2/cluster`, or `sto2/plumbing`, destroys that stack only, the same way.
+  `just cluster-destroy` ([cluster.md](cluster.md#recipes)) destroys the cluster stack so, once the
+  cluster owns none of those load balancers and volumes.
 
 Apply `plumbing` before `cluster`, as the cluster stack reads the plumbing stack's state. Destroy
 goes the other way round. State objects stay in the bucket after a destroy.

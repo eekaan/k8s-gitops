@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+# Says whether a cluster is healthy, reading only, through its kubeconfig, which points at the API
+# load balancer. Prints pass, FAIL or skip for each check, with one line of why, and exits 0 only
+# when none fails:
+#   /readyz               the API answers /readyz;
+#   nodes Ready           every node is Ready; a FAIL names those that are not;
+#   node count            there are as many nodes as the cluster's talman.yaml lists; a FAIL names
+#                         those it lists that are missing and those there that it does not list;
+#   no kube-proxy         no kube-proxy pod runs in any namespace, as Cilium takes its place;
+#   pods in kube-system   every pod there is Running or Succeeded; a FAIL names the others;
+#   pods in flux-system   the same, skipped, saying so, while the namespace does not exist, as before
+#                         Flux is installed;
+#   certificate requests  no certificate signing request is Pending, neither approved nor denied;
+#   pod logs              kubectl fetches the last log line of a Running pod in kube-system, which the
+#                         API server reads from the pod's kubelet, over the kubelet's serving
+#                         certificate.
+# It runs kubectl get and kubectl logs only. It prints node and object names, never an address, a
+# log line or kubectl's own errors, which can name the API server's or a node's address.
+# Usage: scripts/cluster-check [cluster]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/cluster.sh
+. "$here/lib/cluster.sh"
+
+if (($# > 1)) || [[ ${1-} == -* ]]; then
+  infra_error "usage: cluster-check [cluster]"
+  exit 2
+fi
+
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "${1-}"
+complete=1
+require_cluster talman || complete=0
+require_kubeconfig || complete=0
+require_commands kubectl jq yq || complete=0
+((complete))
+
+step="reading talman.yaml"
+hostnames=$(talman_nodes "$talman_file" | cut -d' ' -f1)
+mapfile -t listed <<< "$hostnames"
+
+failures=0 checks=0 skipped=()
+# result VERDICT CHECK WHY: one check's result, pass, FAIL or skip, with its name and why.
+result() {
+  printf '%-4s  %s: %s\n' "$1" "$2" "$3"
+  checks=$((checks + 1))
+  case $1 in
+    FAIL) failures=$((failures + 1)) ;;
+    skip) skipped+=("$2") ;;
+  esac
+}
+
+# get ARG...: kubectl get ARG... as JSON. Its errors are left out, as they can name the API server's
+# address.
+get() {
+  kubectl get "$@" --output json --request-timeout=10s 2> /dev/null
+}
+
+# joined: the lines on standard input, joined with commas.
+joined() {
+  paste -sd, - | sed 's/,/, /g'
+}
+
+step="checking the cluster"
+if kubectl get --raw /readyz --request-timeout=10s > /dev/null 2>&1; then
+  result pass /readyz "the API answers through the kubeconfig"
+else
+  result FAIL /readyz "no answer through the kubeconfig"
+fi
+
+if nodes=$(get nodes); then
+  count=$(jq '.items | length' <<< "$nodes")
+  not_ready=$(jq -r '.items[] | select(any(.status.conditions[]?; .type == "Ready" and .status == "True") | not)
+    | .metadata.name' <<< "$nodes" | joined)
+  if [[ -z $not_ready ]]; then
+    result pass "nodes Ready" "$count nodes, every one Ready"
+  else
+    result FAIL "nodes Ready" "not Ready: $not_ready"
+  fi
+  missing=$(jq -r '[.items[].metadata.name] as $there | $ARGS.positional[] | select(IN($there[]) | not)' \
+    --args "${listed[@]}" <<< "$nodes" | joined)
+  unlisted=$(jq -r '.items[].metadata.name | select(IN($ARGS.positional[]) | not)' \
+    --args "${listed[@]}" <<< "$nodes" | joined)
+  if [[ -z $missing && -z $unlisted && $count == "${#listed[@]}" ]]; then
+    result pass "node count" "$count nodes, as talos/$cluster/talman.yaml lists"
+  else
+    why="$count nodes, and talos/$cluster/talman.yaml lists ${#listed[@]}"
+    [[ -z $missing ]] || why+="; not in the cluster: $missing"
+    [[ -z $unlisted ]] || why+="; not in talman.yaml: $unlisted"
+    result FAIL "node count" "$why"
+  fi
+else
+  result FAIL "nodes Ready" "kubectl could not read the nodes"
+  result FAIL "node count" "kubectl could not read the nodes"
+fi
+
+# pods_not_running NAMESPACE: each pod in NAMESPACE that is neither Running nor Succeeded, as
+# namespace/name and its phase.
+pods_not_running() {
+  jq -r --arg namespace "$1" '.items[] | select(.metadata.namespace == $namespace)
+    | select(.status.phase != "Running" and .status.phase != "Succeeded")
+    | "\(.metadata.namespace)/\(.metadata.name) (\(.status.phase // "no phase"))"' <<< "$pods" | joined
+}
+
+# pods_in NAMESPACE: the check of the pods in NAMESPACE.
+pods_in() {
+  local others count
+  others=$(pods_not_running "$1")
+  count=$(jq --arg namespace "$1" '[.items[] | select(.metadata.namespace == $namespace)] | length' <<< "$pods")
+  if [[ -z $others ]]; then
+    result pass "pods in $1" "every one Running or Succeeded, $count in all"
+  else
+    result FAIL "pods in $1" "not Running or Succeeded: $others"
+  fi
+}
+
+flux=''
+flux_read=1
+flux=$(kubectl get namespace flux-system --ignore-not-found --output name --request-timeout=10s 2> /dev/null) || flux_read=0
+if pods=$(get pods --all-namespaces); then
+  proxies=$(jq -r '.items[] | select((.metadata.name | startswith("kube-proxy"))
+      or .metadata.labels["k8s-app"] == "kube-proxy")
+    | "\(.metadata.namespace)/\(.metadata.name)"' <<< "$pods" | joined)
+  if [[ -z $proxies ]]; then
+    result pass "no kube-proxy" "no kube-proxy pod runs"
+  else
+    result FAIL "no kube-proxy" "kube-proxy runs: $proxies"
+  fi
+  pods_in kube-system
+  if ((!flux_read)); then
+    result FAIL "pods in flux-system" "kubectl could not read the namespace flux-system"
+  elif [[ -z $flux ]]; then
+    result skip "pods in flux-system" "the namespace flux-system does not exist, as before what Flux needs is applied"
+  else
+    pods_in flux-system
+  fi
+else
+  for check in "no kube-proxy" "pods in kube-system" "pods in flux-system"; do
+    result FAIL "$check" "kubectl could not read the pods"
+  done
+fi
+
+if requests=$(get certificatesigningrequests); then
+  pending=$(jq -r '.items[] | select([.status.conditions[]?.type] | any(. == "Approved" or . == "Denied" or . == "Failed") | not)
+    | .metadata.name' <<< "$requests" | joined)
+  if [[ -z $pending ]]; then
+    result pass "certificate requests" "none is Pending"
+  else
+    result FAIL "certificate requests" "Pending: $pending"
+  fi
+else
+  result FAIL "certificate requests" "kubectl could not read the certificate signing requests"
+fi
+
+if [[ -z ${pods-} ]]; then
+  result FAIL "pod logs" "kubectl could not read the pods"
+else
+  pod=$(jq -r 'first(.items | sort_by(.metadata.name)[] | select(.metadata.namespace == "kube-system"
+    and .status.phase == "Running") | .metadata.name) // ""' <<< "$pods")
+  if [[ -z $pod ]]; then
+    result FAIL "pod logs" "no pod in kube-system is Running to fetch logs from"
+  elif kubectl logs --namespace kube-system "$pod" --all-containers --tail=1 --request-timeout=10s > /dev/null 2>&1; then
+    result pass "pod logs" "fetched the logs of kube-system/$pod"
+  else
+    result FAIL "pod logs" "kubectl could not fetch the logs of kube-system/$pod; the kubelet's serving certificate may not be approved"
+  fi
+fi
+
+if ((failures > 0)); then
+  infra_error "$failures of $checks checks failed"
+  exit 1
+fi
+summary="every check of $cluster passes"
+if ((${#skipped[@]} > 0)); then
+  summary+="; skipped: $(printf '%s\n' "${skipped[@]}" | joined)"
+fi
+echo "cluster-check: $summary"

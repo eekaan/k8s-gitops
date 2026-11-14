@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# A stand-in for kubectl against a running cluster, installed by tests/cluster-lifecycle.bats as
+# <tmp>/bin/kubectl. It finds its files from its own path and answers the reads the cluster recipes
+# make from files in <tmp>/state:
+#   api-down          the API does not answer; kubectl's error names the API server's address
+#   readyz-fails      the API answers, but /readyz says it is not ready
+#   nodes             the cluster's nodes, by hostname, one per line
+#   not-ready         hostnames whose Ready condition is False
+#   back.<hostname>   the node's kubelet has reported since it rebooted: its Ready condition's
+#                     heartbeat is the current time; without it, a heartbeat from long ago
+#   kube-proxy        a kube-proxy pod runs in kube-system
+#   pods              more pods, one per line as <namespace> <name> <phase>
+#   no-flux           the namespace flux-system does not exist, and no pod runs in it
+#   pending-csr       a certificate signing request is Pending
+#   logs-fail         a pod's logs cannot be fetched, as before its kubelet's serving certificate is
+#                     approved, with an error naming the node's address
+#   load-balancer     a Service of type LoadBalancer exists
+#   csi-volume        a PersistentVolume of a CSI driver exists
+# Every object it answers with holds addresses from the documentation ranges, as do its errors and the
+# log line, which the recipes must never print. It records "kubectl ARGS" in <tmp>/record/argv, and
+# a /readyz it refuses in <tmp>/record/readyz-refused.
+set -uo pipefail
+
+root=${0%/bin/*}
+state=$root/state
+record=$root/record
+printf '%s\n' "kubectl $*" >> "$record/argv"
+
+args=" $* "
+if [[ -e $state/api-down ]]; then
+  if [[ $args == *" /readyz "* ]]; then
+    echo refused >> "$record/readyz-refused"
+  fi
+  echo "Unable to connect to the server: dial tcp 198.51.100.66:6443: connect: connection refused" >&2
+  exit 1
+fi
+
+# listed FILE: whether FILE exists.
+listed() {
+  [[ -e $state/$1 ]]
+}
+
+nodes() {
+  local node ready beat now
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  while IFS= read -r node; do
+    [[ -n $node ]] || continue
+    ready=True
+    if grep -qxF -- "$node" "$state/not-ready" 2> /dev/null; then
+      ready=False
+    fi
+    beat=2026-01-01T00:00:00Z
+    if listed "back.$node"; then
+      beat=$now
+    fi
+    jq -n --arg node "$node" --arg ready "$ready" --arg beat "$beat" --arg now "$now" '{
+      metadata: {name: $node},
+      status: {
+        addresses: [
+          {type: "InternalIP", address: "198.51.100.31"},
+          {type: "ExternalIP", address: "198.51.100.41"},
+          {type: "Hostname", address: $node}],
+        conditions: [
+          {type: "MemoryPressure", status: "False", lastHeartbeatTime: $now},
+          {type: "Ready", status: $ready, lastHeartbeatTime: $beat,
+           message: "kubelet on 198.51.100.31 reports \($ready)"}]}}'
+  done < "$state/nodes"
+}
+
+# pod NAMESPACE NAME PHASE [K8S_APP]
+pod() {
+  jq -n --arg namespace "$1" --arg name "$2" --arg phase "$3" --arg app "${4-}" '{
+    metadata: ({namespace: $namespace, name: $name} + if $app == "" then {} else {labels: {"k8s-app": $app}} end),
+    spec: {nodeName: "cp-1", containers: [{name: "main"}]},
+    status: {phase: $phase, hostIP: "198.51.100.31", podIP: "198.51.100.51"}}'
+}
+
+pods() {
+  local namespace name phase
+  pod kube-system cilium-a1b2c Running cilium
+  pod kube-system coredns-c3d4e Running kube-dns
+  pod kube-system kubelet-csr-approver-e5f6g Running
+  pod kube-system etcd-defrag-h7i8j Succeeded
+  # Outside the namespaces the check reads, a pod in any phase is no concern of it.
+  pod default app-k9l0m Pending
+  if ! listed no-flux; then
+    pod flux-system source-controller-n1o2p Running
+  fi
+  if listed kube-proxy; then
+    pod kube-system kube-proxy-q3r4s Running kube-proxy
+  fi
+  if listed pods; then
+    while read -r namespace name phase; do
+      pod "$namespace" "$name" "$phase"
+    done < "$state/pods"
+  fi
+}
+
+csrs() {
+  jq -n '{metadata: {name: "csr-approved-1"}, spec: {signerName: "kubernetes.io/kubelet-serving", username: "system:node:cp-1"},
+    status: {conditions: [{type: "Approved", status: "True"}], certificate: "marker-certificate"}}'
+  jq -n '{metadata: {name: "csr-denied-1"}, spec: {signerName: "kubernetes.io/kubelet-serving", username: "system:node:cp-2"},
+    status: {conditions: [{type: "Denied", status: "True"}]}}'
+  if listed pending-csr; then
+    jq -n '{metadata: {name: "csr-pending-1"}, spec: {signerName: "kubernetes.io/kubelet-serving", username: "system:node:worker-1"}, status: {}}'
+  fi
+}
+
+services() {
+  jq -n '{metadata: {namespace: "default", name: "kubernetes"}, spec: {type: "ClusterIP", clusterIP: "198.51.100.61"}}'
+  jq -n '{metadata: {namespace: "kube-system", name: "hubble-relay"}, spec: {type: "NodePort", clusterIP: "198.51.100.63"}}'
+  if listed load-balancer; then
+    jq -n '{metadata: {namespace: "apps", name: "web"}, spec: {type: "LoadBalancer", clusterIP: "198.51.100.64"},
+      status: {loadBalancer: {ingress: [{ip: "198.51.100.62"}]}}}'
+  fi
+}
+
+volumes() {
+  jq -n '{metadata: {name: "local-volume-1"}, spec: {local: {path: "/var/mnt/local"}, nodeAffinity: {}}}'
+  if listed csi-volume; then
+    jq -n '{metadata: {name: "pvc-0a1b2c3d"}, spec: {csi: {driver: "cinder.csi.openstack.org", volumeHandle: "marker-volume-handle"}}}'
+  fi
+}
+
+# list: the objects on standard input as a kubectl List.
+list() {
+  jq -s '{apiVersion: "v1", kind: "List", items: .}'
+}
+
+case $args in
+  *" get --raw /readyz "*)
+    if listed readyz-fails; then
+      echo 'Error from server (InternalError): an error on the server ("[-]etcd failed: reason withheld") has prevented the request from succeeding' >&2
+      exit 1
+    fi
+    echo ok
+    ;;
+  *" get nodes "*) nodes | list ;;
+  *" get pods "*) pods | list ;;
+  *" get namespace flux-system "*) listed no-flux || echo namespace/flux-system ;;
+  *" get certificatesigningrequests "*) csrs | list ;;
+  *" get services "*) services | list ;;
+  *" get persistentvolumes "*) volumes | list ;;
+  " logs "*)
+    if listed logs-fail; then
+      echo 'Error from server: Get "https://198.51.100.31:10250/containerLogs/kube-system/cilium-a1b2c/main?tailLines=1": remote error: tls: internal error' >&2
+      exit 1
+    fi
+    echo "level=info msg=\"serving on 198.51.100.52:4244\""
+    ;;
+  *)
+    echo "unexpected call: kubectl $*" >&2
+    exit 1
+    ;;
+esac

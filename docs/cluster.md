@@ -24,8 +24,10 @@ and the kubeconfig.
    leaving Ready, start `just app-adoption kubernetes/apps/base/kube-system/cilium` in a second
    terminal first ([kubernetes.md](kubernetes.md#applications-installed-before-flux)).
 
-Later changes to a patch or to `talman.yaml`, and nodes OpenTofu adds, reach the nodes with
-`just cluster-talos`.
+`just cluster-check` then says whether the cluster is healthy. Later changes to a patch or to
+`talman.yaml`, and nodes OpenTofu adds, reach the nodes with `just cluster-talos`.
+[runbooks/rebuild.md](runbooks/rebuild.md) takes a running cluster down to nothing with
+`just cluster-destroy` and builds it again.
 
 ## Upgrades
 
@@ -207,6 +209,45 @@ out of the artifact, which is built from `kubernetes/`.
 - `just app-adoption <application directory> [cluster]` watches Flux adopt an application that
   was installed before it and prints pass or FAIL per check; it only reads
   ([kubernetes.md](kubernetes.md#applications-installed-before-flux)).
+- `just cluster-check [cluster]` says, reading only, whether the cluster is healthy, through its
+  kubeconfig, which points at the API load balancer. It prints pass, FAIL or skip and one line of
+  why for each check, and exits 0 only when none fails: `/readyz` answers; every node is Ready, a
+  FAIL naming those that are not; there are as many nodes as the cluster's `talman.yaml` lists, a
+  FAIL naming those missing and those it does not list; no kube-proxy pod runs anywhere; every pod
+  in `kube-system` and in `flux-system` is Running or Succeeded, a FAIL naming the others; no
+  certificate signing request is Pending; and kubectl fetches the last log line of a Running pod in
+  `kube-system`, which the API server reads from the pod's kubelet over the kubelet's serving
+  certificate. While the namespace `flux-system` does not exist, as before `just cluster-config`
+  has run, the check of its pods is skipped, and its line and the last line say so. It runs
+  `kubectl get` and `kubectl logs` only. It needs the cluster's `talman.yaml` and kubeconfig.
+- `just cluster-reboot <node> [cluster] [--yes] [--tolerate <seconds>]` reboots one node, named by
+  its hostname in the cluster's `talman.yaml`, while it watches the Kubernetes API through its load
+  balancer; for a control plane, that is the check that the API does not go away with one. Any
+  other name, an address among them, is refused before anything runs. Once the node's name is
+  typed back, or with `--yes`, a probe in the background asks `/readyz` through the kubeconfig once
+  a second, giving each try two seconds, while `talman reboot -n <node> --yes` reboots the node and
+  waits for it to come back, and then while the recipe waits, up to `REBOOT_WAIT` seconds, until
+  the node is Ready with a heartbeat from after the reboot, as `cluster-restore` waits for its
+  nodes. Then it stops the probe and prints how many probes it made, how many failed and the
+  longest run of failures, in seconds. It exits 0 only when the node is Ready again and no probe
+  failed; `--tolerate <seconds>` accepts runs of failures up to that long, for the operator to say
+  what counts as an interruption. The probe keeps its counts in memory and writes no file; it is
+  stopped, with the kubectl or sleep it is waiting for, on every exit of the recipe, a failed or
+  interrupted run included. It needs what `cluster-talos` needs and the kubeconfig.
+- `just cluster-destroy [cluster] [--yes] [--unreachable]` destroys the cluster stack,
+  `sto2/cluster`, as `just infra-destroy sto2/cluster` does
+  ([infrastructure.md](infrastructure.md#recipes)): it shows the plan's summary, destroys once the
+  stack's name is typed back, or with `--yes`, and then removes the cluster's `talman.yaml`,
+  talosconfig and kubeconfig. The plumbing stack, the secrets bundle and the buckets stay. First,
+  through the kubeconfig of the cluster it is given, it lists
+  every Service of type LoadBalancer and every PersistentVolume of a CSI driver: the cloud's load
+  balancers and volumes behind them are made by the cluster, not by OpenTofu, so the destroy would
+  leave them in the cloud, where they keep the network from being deleted. While there are any, it
+  names each, by namespace and name or by the volume's name, and destroys nothing. A cluster whose
+  API does not answer, or that has no kubeconfig, cannot be asked and is not destroyed either,
+  unless `--unreachable` is given: the operator then takes on whatever it owned, which stays in the
+  cloud. Before it asks the cluster it checks what `infra-destroy` needs for the stack.
+  [runbooks/rebuild.md](runbooks/rebuild.md) has it in the procedure around it.
 
 A failing recipe ends with a line naming the step it failed in.
 
@@ -222,12 +263,16 @@ the bundle, the kubeconfig, `KUBE_API_ADDRESS`, the values of `cluster-config` a
 endpoint. talman's output, talosctl's within it, names each node with the address talman
 reaches it on and shows configuration diffs. Without `CI` set it passes through as talman prints
 it. With `CI` set, as CI logs are public, `cluster-bootstrap`, `cluster-kubeconfig`,
-`cluster-talos`, `cluster-restore`, `cluster-snapshot` and both upgrade recipes write it to
-`clusterconfig/<recipe>.log` in the cluster's directory, which git ignores, started afresh by each
-run, and print for each talman call only whether it succeeded or failed and that file's path.
+`cluster-talos`, `cluster-reboot`, `cluster-restore`, `cluster-snapshot` and both upgrade recipes
+write it to `clusterconfig/<recipe>.log` in the cluster's directory, which git ignores, started
+afresh by each run, and print for each talman call only whether it succeeded or failed and that
+file's path.
 Of talman's output `cluster-snapshot` shows only the errors, and with `CI` set not those either.
 What rclone prints names the bucket and the endpoint, so the etcd recipes never show it. kubectl's
-and helm's output passes through, naming the objects they apply.
+and helm's output passes through, naming the objects they apply, except in `cluster-check`,
+`cluster-reboot` and `cluster-destroy`: they print node and object names only, and none of what
+kubectl prints, as the objects it reads and its errors hold the API server's, the nodes' and the
+pods' addresses.
 
 ## Environment
 
@@ -256,6 +301,8 @@ to hand it to kubectl and age-keygen on standard input.
   `cluster-upgrade-k8s` hands it to talosctl as its endpoint.
 - `TALOS_WAIT`: how many seconds `cluster-bootstrap`, `cluster-talos` and `cluster-restore` wait
   for the nodes, 600 when unset.
+- `REBOOT_WAIT`: how many seconds `cluster-reboot` waits, once talman has rebooted the node, for it
+  to report Ready, 600 when unset.
 - `FLUX_AGE_KEY_FILE`: the path of the Flux age key, outside the repository. In CI, `FLUX_AGE_KEY`
   holds the key itself instead. `cluster-bootstrap`, `cluster-config` and `cluster-flux` need one
   of them.
@@ -267,6 +314,6 @@ to hand it to kubectl and age-keygen on standard input.
 - `CI`: when set, talman's output goes to a file instead of the output; see
   [What the recipes print](#what-the-recipes-print).
 
-The recipes, the check aside, refuse to run while `GODEBUG` sets `http2debug`: Go's HTTP/2 debug
-log prints the frames talosctl and kubectl send and receive, which carry machine configurations
-and credentials.
+The recipes, the secrets bundle check aside, refuse to run while `GODEBUG` sets `http2debug`: Go's
+HTTP/2 debug log prints the frames talosctl and kubectl send and receive, which carry machine
+configurations and credentials.

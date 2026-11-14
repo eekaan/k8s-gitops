@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Destroys a cluster: its stack, the cluster stack sto2/cluster, through infra-destroy, which plans
+# the destroy, prints the plan's summary, destroys once the stack's name is typed back, or with
+# --yes, and then removes the files generated for the cluster that hold its addresses. The plumbing
+# stack, the secrets bundle and the buckets stay.
+#
+# The load balancers that Services of type LoadBalancer get and the volumes behind PersistentVolumes
+# of a CSI driver are made by the cluster, not by OpenTofu, so the stack's destroy would leave them
+# in the cloud, where they also keep the network from being deleted. So first, through the cluster's
+# kubeconfig, it lists every such Service and PersistentVolume, and while there are any, it names
+# them and destroys nothing. A cluster whose API does not answer, or that has no kubeconfig, cannot
+# be asked and may still own some, so it is not destroyed either, unless --unreachable is given,
+# with which the operator takes on what may be left. Neither kubectl's errors nor anything of the
+# objects but their names are printed, as they can hold addresses.
+# Usage: scripts/cluster-destroy [cluster] [--yes] [--unreachable]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/cluster.sh
+. "$here/lib/cluster.sh"
+
+usage() {
+  infra_error "usage: cluster-destroy [cluster] [--yes] [--unreachable]"
+  exit 2
+}
+
+cluster='' confirmed=0 unreachable=0
+for arg; do
+  case $arg in
+    --yes) confirmed=1 ;;
+    --unreachable) unreachable=1 ;;
+    -*) usage ;;
+    *)
+      [[ -z $cluster ]] || usage
+      cluster=$arg
+      ;;
+  esac
+done
+stack=sto2/cluster
+
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "$cluster"
+require_commands kubectl jq
+
+# stack_env: reads and checks what infra-destroy needs for the stack, as infra-destroy does, naming
+# what is missing. Run in a subshell, it leaves this script's environment as it is.
+stack_env() {
+  # shellcheck source=scripts/stack-env
+  . "$here/stack-env" "$stack"
+}
+
+# So that nothing runs while any of it is missing; what it prints is shown only when something is.
+if ! checked=$(stack_env 2>&1); then
+  printf '%s\n' "$checked" >&2
+  exit 1
+fi
+
+say() {
+  printf '%s: %s\n' "${0##*/}" "$1"
+}
+
+step="asking $cluster for its load balancers and volumes"
+asked=0
+if [[ ! -f $KUBECONFIG ]]; then
+  why="${KUBECONFIG#"$infra_root"/} does not exist"
+elif services=$(kubectl get services --all-namespaces --output json --request-timeout=30s 2> /dev/null) &&
+  volumes=$(kubectl get persistentvolumes --output json --request-timeout=30s 2> /dev/null); then
+  asked=1
+else
+  why="the API of $cluster does not answer through its kubeconfig"
+fi
+
+if ((asked)); then
+  balancers=$(jq -r '.items[] | select(.spec.type == "LoadBalancer")
+    | "\(.metadata.namespace)/\(.metadata.name)"' <<< "$services")
+  csi_volumes=$(jq -r '.items[] | select(.spec.csi != null)
+    | "\(.metadata.name) \(.spec.csi.driver // "unnamed")"' <<< "$volumes")
+  if [[ -n $balancers || -n $csi_volumes ]]; then
+    while read -r name; do
+      [[ -z $name ]] || infra_error "the Service $name is of type LoadBalancer"
+    done <<< "$balancers"
+    while read -r name driver; do
+      [[ -z $name ]] || infra_error "the PersistentVolume $name is a volume of the CSI driver $driver"
+    done <<< "$csi_volumes"
+    infra_error "$cluster still owns load balancers or volumes that are not in the state of $stack, which a destroy would leave in the cloud, keeping the network from being deleted; remove them first. Nothing was destroyed"
+    exit 1
+  fi
+  say "$cluster owns no Service of type LoadBalancer and no PersistentVolume of a CSI driver"
+elif ((unreachable)); then
+  say "$why; with --unreachable it is destroyed without being asked, and a load balancer or volume it owns stays in the cloud"
+else
+  infra_error "$why, so $cluster cannot be asked whether it owns load balancers or volumes, which are not in the state of $stack. Nothing was destroyed; --unreachable destroys it without asking, leaving any it owns in the cloud"
+  exit 1
+fi
+
+step="destroying $stack"
+flags=()
+((!confirmed)) || flags+=(--yes)
+"$here/infra-destroy" "$stack" "${flags[@]}"

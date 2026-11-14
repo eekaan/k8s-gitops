@@ -68,6 +68,20 @@ cluster-snapshots cluster='lab-sto2':
 cluster-restore snapshot *args:
     scripts/cluster-restore "$@"
 
+# Check a cluster's health, reading only: /readyz through the kubeconfig, every node Ready and as many as talman.yaml lists, no kube-proxy, every pod in kube-system and flux-system Running or Succeeded, no certificate signing request Pending, a pod's logs fetched; pass, FAIL or skip per check
+cluster-check cluster='lab-sto2':
+    scripts/cluster-check {{ quote(cluster) }}
+
+# Reboot one node, by its hostname in talman.yaml, once its name is typed back (--yes: without asking), asking /readyz through the kubeconfig once a second until the node is Ready again; fails when a probe failed (--tolerate <seconds>: accept a gap that long)
+[positional-arguments]
+cluster-reboot node *args:
+    scripts/cluster-reboot "$@"
+
+# Destroy a cluster's stack, sto2/cluster, once the cluster owns no Service of type LoadBalancer and no PersistentVolume of a CSI driver and the stack's name is typed back (--yes: without asking; --unreachable: also when the API does not answer); the plumbing stack and the secrets bundle stay
+[positional-arguments]
+cluster-destroy *args:
+    scripts/cluster-destroy "$@"
+
 # Upgrade Talos to the version talman.yaml gives: show which nodes are behind, then snapshot etcd and drain, upgrade and uncordon each in turn once the cluster's name is typed back (--yes: without asking)
 [positional-arguments]
 cluster-upgrade *args:

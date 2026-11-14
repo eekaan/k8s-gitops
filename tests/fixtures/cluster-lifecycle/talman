@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# A stand-in for talman reboot, installed by tests/cluster-lifecycle.bats as <tmp>/bin/talman. It
+# finds its files from its own path and reboots the way files in <tmp>/state say:
+#   reboot-gap    while the node reboots, the API stops answering for this many seconds
+#   reboot-fails  the reboot fails
+#   never-back    the node's kubelet never reports again
+#   interrupt     the recipe is sent this signal, INT or TERM, while talman reboots, and talman ends
+# A reboot takes three seconds. It selects the nodes as talman does: those -n/--node names by
+# hostname or address and those -g/--group names by role, every node with neither, and writes their
+# hostnames to <tmp>/state/rebooted; afterwards it marks each as back, for the fake kubectl. Like
+# talman, it asks first unless --yes, and names the nodes it reaches by address. It records
+# "talman ARGS" in <tmp>/record/argv when it starts and "talman reboot finished" when it is done.
+set -uo pipefail
+
+root=${0%/bin/*}
+state=$root/state
+record=$root/record
+printf '%s\n' "talman $*" >> "$record/argv"
+config=${TALMAN_CONFIG:?}/talman.yaml
+addresses=$(yq '.nodes[].ipAddress' "$config" | paste -sd, -)
+echo "== reaching the nodes at $addresses"
+
+if [[ ${1-} != reboot ]]; then
+  echo "unexpected call: talman $*" >&2
+  exit 1
+fi
+args=("$@")
+selected=() selecting=0 yes=0
+for ((i = 1; i < ${#args[@]}; i++)); do
+  case ${args[i]} in
+    -y | --yes) yes=1 && continue ;;
+    -g | --group | -n | --node) by=${args[i]} values=${args[i + 1]-} && i=$((i + 1)) ;;
+    --group=* | --node=*) by=${args[i]%%=*} values=${args[i]#*=} ;;
+    *) continue ;;
+  esac
+  selecting=1
+  IFS=, read -ra values <<< "$values"
+  for value in "${values[@]}"; do
+    if [[ $by == -g || $by == --group ]]; then
+      query='.nodes[] | select(.role == strenv(VALUE)) | .hostname'
+    else
+      query='.nodes[] | select(.hostname == strenv(VALUE) or .ipAddress == strenv(VALUE)) | .hostname'
+    fi
+    mapfile -t -O "${#selected[@]}" selected < <(VALUE=$value yq "$query" "$config")
+  done
+done
+if ((!selecting)); then
+  mapfile -t selected < <(yq '.nodes[].hostname' "$config")
+fi
+if ((!yes)); then
+  echo "error: talman reboot asks before it reboots $addresses, and its standard input gave no answer" >&2
+  exit 1
+fi
+printf '%s\n' "${selected[@]}" | sort -u > "$state/rebooted"
+
+sleep 1
+if [[ -e $state/interrupt ]]; then
+  kill "-$(cat "$state/interrupt")" "$PPID"
+  exit 130
+fi
+if [[ -e $state/reboot-fails ]]; then
+  echo "error: rebooting $(paste -sd, "$state/rebooted") at $addresses: the node did not come back within the timeout" >&2
+  exit 1
+fi
+if [[ -e $state/reboot-gap ]]; then
+  : > "$state/api-down"
+  sleep "$(cat "$state/reboot-gap")"
+  rm -f "$state/api-down"
+else
+  sleep 1
+fi
+sleep 1
+if [[ ! -e $state/never-back ]]; then
+  while IFS= read -r node; do
+    : > "$state/back.$node"
+  done < "$state/rebooted"
+fi
+echo "== rebooted $(paste -sd, "$state/rebooted") at $addresses"
+printf '%s\n' "talman reboot finished" >> "$record/argv"

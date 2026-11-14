@@ -669,6 +669,39 @@ EOF
   absent "-chdir=$PLUMBING " "$RECORD/tofu"
 }
 
+@test "infra-destroy given a stack destroys that stack only" {
+  recipe infra-destroy sto2/cluster <<< "no"
+
+  [ "$status" -ne 0 ]
+  [ -z "$(tofu_calls apply)" ]
+
+  rm -f "$RECORD/tofu"
+  recipe infra-destroy sto2/cluster <<< "sto2/cluster"
+
+  [ "$status" -eq 0 ]
+  [ "$(tofu_calls plan | awk '{ print $1 }')" = "-chdir=$CLUSTER" ]
+  [[ $(tofu_calls plan) == *" -destroy "* ]]
+  [ "$(tofu_calls apply | awk '{ print $1 }')" = "-chdir=$CLUSTER" ]
+  absent "-chdir=$PLUMBING " "$RECORD/tofu"
+
+  rm -f "$RECORD/tofu"
+  recipe infra-destroy --yes sto2/plumbing < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ "$(tofu_calls apply | awk '{ print $1 }')" = "-chdir=$PLUMBING" ]
+  absent "-chdir=$CLUSTER " "$RECORD/tofu"
+
+  rm -f "$RECORD/tofu"
+  for args in 'sto2/nothing --yes' 'sto2/cluster sto2/plumbing' '--force'; do
+    # shellcheck disable=SC2086 # the arguments as an operator types them
+    recipe infra-destroy $args < /dev/null
+
+    [ "$status" -eq 2 ]
+    [[ $output == *"usage: infra-destroy"* ]]
+    [ ! -e "$RECORD/tofu" ]
+  done
+}
+
 @test "infra-apply --yes applies the plan it saved under the stack's .terraform without asking" {
   recipe infra-apply sto2/plumbing --yes < /dev/null
 
