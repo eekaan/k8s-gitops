@@ -1,0 +1,26 @@
+---
+# The initialise guard (initialize/initialize-guard.sh) reads whether the other members' claims
+# exist, as the servers' own account, which the chart names after the release. It may get those two
+# claims by name and nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: openbao-initialize-guard
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get"]
+    resourceNames: ["data-openbao-1", "data-openbao-2"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: openbao-initialize-guard
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: openbao-initialize-guard
+subjects:
+  - kind: ServiceAccount
+    name: openbao
+    namespace: openbao
