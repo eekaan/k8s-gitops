@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# The comment job's work (just ci-comment): once the CI workflow completed for a pull request, puts
+# the comment its render job left, as the artifact render-diff, on the pull request: it updates the
+# one comment of this job's that starts with the render diff's marker, or creates it.
+#
+# The artifact comes from a run of the pull request's own workflow file, which a fork can change at
+# will, so it is untrusted: it is only ever text, refused unless it is exactly one regular file,
+# comment.md, of at most 65536 bytes that starts with the marker, and it reaches GitHub as a JSON
+# string jq writes from it. Nothing runs it, sources it, or prints it to the log, where GitHub would
+# read workflow commands in it. The pull request is the open one whose head is the commit the run
+# was for, looked up through the API; nothing in the artifact names it. When that head has moved on,
+# the newer run comments and this one posts nothing.
+#
+# Needs gh and jq, and in the environment GH_TOKEN, GITHUB_REPOSITORY, RUN_ID, HEAD_SHA,
+# HEAD_REPOSITORY and HEAD_BRANCH, which the comment workflow sets from the run it follows.
+set -euo pipefail
+
+marker='<!-- k8s-gitops:render-diff -->'
+# GitHub refuses a longer comment body; scripts/render-diff never writes one.
+limit=65536
+
+die() {
+  echo "ci-comment: $*" >&2
+  exit 1
+}
+
+for name in GH_TOKEN GITHUB_REPOSITORY RUN_ID HEAD_SHA HEAD_REPOSITORY HEAD_BRANCH; do
+  [[ -n ${!name:-} ]] || die "$name is not set"
+done
+repository_re='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+[[ $GITHUB_REPOSITORY =~ $repository_re && $HEAD_REPOSITORY =~ $repository_re ]] || die "a repository is not owner/name"
+[[ $RUN_ID =~ ^[1-9][0-9]*$ ]] || die "RUN_ID is not a run's number"
+[[ $HEAD_SHA =~ ^[0-9a-f]{40}$ ]] || die "HEAD_SHA is not a commit"
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name render-diff --dir "$tmp/artifact" ||
+  die "run $RUN_ID left no artifact render-diff"
+# Counted, not listed: the names are the artifact's, and stay out of the log.
+entries=$(find "$tmp/artifact" -mindepth 1 | wc -l)
+file="$tmp/artifact/comment.md"
+((entries == 1)) || die "the artifact holds $entries entries; it must hold one file, comment.md"
+[[ -f $file && ! -L $file ]] || die "the artifact's one entry is not a regular file named comment.md"
+size=$(wc -c <"$file")
+((size <= limit)) || die "comment.md holds $size bytes; a comment holds $limit characters at most"
+first=
+IFS= read -r first <"$file" || true
+[[ $first == "$marker" ]] || die "comment.md does not start with the render diff's marker"
+
+owner=${HEAD_REPOSITORY%%/*}
+pulls=$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" -f state=open -f "head=$owner:$HEAD_BRANCH" -f per_page=100)
+number=$(jq -r --arg sha "$HEAD_SHA" --arg repository "$HEAD_REPOSITORY" '
+  [.[] | select(.head.sha == $sha and .head.repo.full_name == $repository) | .number]
+  | if length == 1 then .[0] | tostring else "" end' <<<"$pulls")
+if [[ -z $number ]]; then
+  echo "ci-comment: no open pull request has $HEAD_SHA as its head; a newer run comments, if any"
+  exit 0
+fi
+[[ $number =~ ^[1-9][0-9]*$ ]] || die "the pull request's number is not a number"
+
+# This job's own comment: others' comments may start with the marker too.
+id=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$number/comments?per_page=100" |
+  jq -rs --arg marker "$marker" '[.[] | .[]? | select(.user.login == "github-actions[bot]" and .user.type == "Bot"
+    and ((.body // "") | startswith($marker))) | .id] | first // empty')
+jq -n --rawfile body "$file" '{body: $body}' >"$tmp/request.json"
+if [[ -n $id ]]; then
+  [[ $id =~ ^[1-9][0-9]*$ ]] || die "the comment's id is not a number"
+  gh api --method PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" --input "$tmp/request.json" >/dev/null
+  echo "ci-comment: updated the render diff on pull request #$number"
+else
+  gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$number/comments" --input "$tmp/request.json" >/dev/null
+  echo "ci-comment: commented the render diff on pull request #$number"
+fi

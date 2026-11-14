@@ -66,3 +66,23 @@ Feature: Continuous integration
     Given the publish workflow
     When its jobs are read, and the CI host's job-started hook gets a job of it for a push to main
     Then its one job names ubuntu-latest itself, and the hook fails the job
+
+  Scenario: The render job has read-only permissions, no secrets, and always a hosted runner
+    Given the CI workflow's job that renders a pull request's diff
+    When its triggers, permissions, runner, steps and recipe are read
+    Then it runs for pull_request and never pull_request_target, with only contents: read, no secret and no token handed to any step, on ubuntu-latest named in the job itself, renders in the Dagger module and uploads the comment as one file in an artifact
+
+  Scenario: The comment job runs no code and checks out nothing from the pull request
+    Given the workflow that comments on pull requests
+    When its trigger, jobs and steps are read
+    Then it runs only when the CI workflow completes for a pull request, on a hosted runner, checks out the default branch it runs on and no other ref or repository, uses only the pinned checkout and mise actions, runs one recipe with the run's identifiers in its environment, and has no expression in any command
+
+  Scenario: The comment job treats the artifact as text of a bounded size
+    Given an artifact whose one file holds shell and workflow syntax, and artifacts with two files, a symlink, another name, no marker or more than a comment holds
+    When the comment recipe runs for each
+    Then the first is posted byte for byte and nothing in it runs, and every other one is refused without anything being posted
+
+  Scenario: The render is part of the required result, and the comment is not
+    Given the CI workflow and the comment workflow
+    When the jobs the required job waits for and the comment workflow's jobs are read
+    Then the required job waits for the render job, which nothing skips, and the comment workflow is a workflow of its own with no job named ci

@@ -500,6 +500,65 @@ but not its visibility, so the package's visibility is set to public in its sett
 the first run; until then the cluster cannot pull it. A public package cannot be made private
 again.
 
+## The render diff
+
+A manifest change reaches the cluster only by merging (ADR 0003), so every pull request gets one
+comment, updated on each push, that shows what Flux would apply differently once it is merged: a
+table with the objects each application adds, removes and changes, then each changed application's
+diff, collapsed. A pull request that changes nothing Flux applies says so.
+
+`just render <out> [dir]` renders a tree as Flux applies it, offline, one file per object under
+`<out>/<cluster>/<application>/`: the cluster directory as the instance's sync Kustomization applies
+it (application `flux-system`), then every Kustomization that applies from the tree, the root
+(`cluster`), Flux's own applications and each application the overlay enables, built as
+`just kubernetes-check` builds them. Each HelmRelease is expanded to the objects its chart renders:
+the chart its OCIRepository names, pulled from its public registry, with the values of its
+ConfigMaps and its own values over them, the release name and namespace helm-controller gives it,
+the Kubernetes version in `versions.yaml`, every API version a definition in the render serves, its
+post-renderers and helm-controller's labels. A chart version bump therefore shows the objects that
+change. `RENDER_CHART_CACHE` names a directory to keep pulled charts in between renders. A tree that
+does not render fails, naming the application. `just render-diff <base> <head>` prints the comment
+comparing two renders.
+
+What it is rendered with, and what it never shows:
+
+- `cluster-config` and `cluster-secrets` are not in the repository: each cluster's
+  `cluster-config.example.yaml` and `cluster-secrets.example.yaml` stand in for them, and the
+  comment's footer says so.
+- No Secret's data: every value of a Secret's `data` and `stringData` is replaced by `(redacted)`,
+  keys kept, and sops' metadata is dropped, so a changed Secret value does not show. That includes
+  the Alertmanager configuration, which the monitoring chart renders into a Secret.
+- Values a chart makes up anew on every render, such as generated certificates and their CA
+  bundles: the chart is rendered twice and every value that differs reads
+  `(generated at render time)`, so they never show as a change.
+- Sources outside the tree are not fetched: the Gateway API and snapshot definitions show as their
+  GitRepository and inner Kustomization, not the objects those apply.
+- A diff longer than a comment holds, 65536 characters, is cut, and the comment says so: the
+  smallest applications' diffs are shown whole, the next is cut, the rest are left out, and the
+  table stays whole.
+
+In CI two jobs make it, in two workflows, so that nothing from a pull request ever runs with a token
+that can write:
+
+- The `render` job of `.github/workflows/ci.yaml`, part of the required check `ci`, runs for every
+  pull request and push to `main` on a hosted runner, with the workflow's `contents: read` token and
+  no secrets. For a pull request GitHub runs the pull request's own copy of the workflow, a fork's
+  included, so the job is given nothing worth taking. `just ci-render` runs `scripts/render-pr` in
+  the Dagger module (ADR 0007): it renders the base, the first parent of the commit under test, and
+  the commit itself, both with the base's `scripts/render` and `scripts/render-diff`, so the
+  comment shows only what the change does to the tree, and a change to the render code is reviewed
+  as code. A base without the render code is rendered with the commit's. The job uploads the
+  comment as the artifact `render-diff`.
+- `.github/workflows/render-comment.yaml` runs when the CI workflow completes for a pull request.
+  GitHub runs it from the default branch, with this repository's token, whatever the run it follows
+  had, so it checks out only the default branch and runs `just ci-comment`, with `actions: read` to
+  download the artifact and `pull-requests: write` to comment. `scripts/ci-comment` treats the
+  artifact as text: it refuses anything but one regular file, `comment.md`, of at most 65536 bytes
+  that starts with the comment's marker, never runs it or prints it, and sends it as a JSON string.
+  It finds the pull request by the head commit the run was for, and posts nothing when that head has
+  moved on. It updates the one comment of its own that starts with the marker, or creates it. It is
+  not a required check: a comment that fails to post blocks no merge.
+
 ## Before Flux starts
 
 Flux needs four objects that nothing in the tree creates, all in `flux-system`: the namespace

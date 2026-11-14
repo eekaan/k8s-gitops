@@ -3,6 +3,7 @@
 setup() {
   REPO=$(cd "$BATS_TEST_DIRNAME/.." && pwd)
   WORKFLOW="$REPO/.github/workflows/ci.yaml"
+  COMMENT="$REPO/.github/workflows/render-comment.yaml"
   export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 }
 
@@ -525,4 +526,247 @@ the_jobs() {
     done <<< "$output"
   done
   [ "$refs" -gt 0 ]
+}
+
+# render_job: sets RENDER, exported, to the CI workflow's one job that runs just ci-render.
+render_job() {
+  RENDER=$(yq '[.jobs | to_entries[] | select(.value.steps[] | .run // "" | test("^just ci-render( |$)")) | .key] | .[]' "$WORKFLOW")
+  [ -n "$RENDER" ]
+  [ "$(wc -l <<< "$RENDER")" -eq 1 ]
+  export RENDER
+}
+
+@test "The render job has read-only permissions, no secrets, and always a hosted runner" {
+  render_job
+  # pull_request gives a fork's run a read-only token and no secrets; pull_request_target would
+  # give it write access and secrets.
+  [ "$(yq -o=json -I=0 '.on | keys' "$WORKFLOW")" = '["pull_request","push"]' ]
+  [ "$(yq -o=json -I=0 '.permissions' "$WORKFLOW")" = '{"contents":"read"}' ]
+  [ "$(yq '.jobs[strenv(RENDER)] | has("permissions")' "$WORKFLOW")" = false ]
+  # No step is handed a secret or the job's token.
+  [ "$(yq '[.jobs[strenv(RENDER)] | .. | select(tag == "!!str") | select(test("secrets\.|github\.token|GITHUB_TOKEN"))] | length' "$WORKFLOW")" = 0 ]
+  # A hosted runner named in the job itself, never the runner the check jobs are given.
+  [ "$(yq '.jobs[strenv(RENDER)].runs-on' "$WORKFLOW")" = ubuntu-latest ]
+  # Its one command writes the comment where the one upload takes it from, as an artifact of one file.
+  # shellcheck disable=SC2016 # the workflow's command, as written
+  [ "$(yq '[.jobs[strenv(RENDER)].steps[] | select(has("run")) | .run] | .[]' "$WORKFLOW")" = 'just ci-render "$RUNNER_TEMP/render-diff/comment.md"' ]
+  run yq -o=json -I=0 '[.jobs[strenv(RENDER)].steps[] | select(.uses // "" | test("^actions/upload-artifact@")) | .with | to_entries | sort_by(.key) | from_entries]' "$WORKFLOW"
+  # shellcheck disable=SC2016 # the workflow's expression, as written
+  [ "$output" = '[{"if-no-files-found":"error","name":"render-diff","path":"${{ runner.temp }}/render-diff/comment.md","retention-days":7}]' ]
+
+  # The recipe renders in the Dagger module and saves what its function returns to that file.
+  local bin="$BATS_TEST_TMPDIR/bin" out="$BATS_TEST_TMPDIR/out/comment.md"
+  mkdir -p "$bin"
+  printf '#!/usr/bin/env bash\n' > "$bin/mise"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "%s"\n' "$BATS_TEST_TMPDIR/dagger.args" > "$bin/dagger"
+  chmod +x "$bin/mise" "$bin/dagger"
+  run env PATH="$bin:/usr/bin:/bin" "$(command -v just)" --justfile "$REPO/justfile" --working-directory "$REPO" ci-render "$out"
+  [ "$status" -eq 0 ]
+  run cat "$BATS_TEST_TMPDIR/dagger.args"
+  [[ $output == *$'\nci\nrender-diff\n'* ]]
+  [[ $output == *$'\n-o\n'"$out"$'\n'* || $output == *$'\n--output='"$out"$'\n'* ]]
+}
+
+@test "The comment job runs no code and checks out nothing from the pull request" {
+  [ -f "$COMMENT" ]
+  # It runs once the CI workflow completes, from the default branch's copy of this file, never for
+  # a pull request's own event, whose files are the pull request's.
+  [ "$(yq -o=json -I=0 '.on | keys' "$COMMENT")" = '["workflow_run"]' ]
+  [ "$(yq -o=json -I=0 '.on.workflow_run.workflows' "$COMMENT")" = "$(yq -o=json -I=0 '[.name]' "$WORKFLOW")" ]
+  [ "$(yq -o=json -I=0 '.on.workflow_run.types' "$COMMENT")" = '["completed"]' ]
+  # One job, for runs of pull requests only, on a hosted runner.
+  [ "$(yq '.jobs | length' "$COMMENT")" = 1 ]
+  [[ "$(yq '.jobs[].if' "$COMMENT")" == *"github.event.workflow_run.event == 'pull_request'"* ]]
+  [ "$(yq '.jobs[].runs-on' "$COMMENT")" = ubuntu-latest ]
+  # Each checkout takes the commit the run is for, the default branch's: no other ref, repository
+  # or path, and the token is not left in it.
+  run yq -o=json -I=0 '[.jobs[].steps[] | select(.uses // "" | test("^actions/checkout@")) | .with] | unique' "$COMMENT"
+  [ "$output" = '[{"persist-credentials":false}]' ]
+  # Only the checkout and mise actions, pinned as the CI workflow pins them.
+  [ "$(yq -o=json -I=0 '[.jobs[].steps[] | select(has("uses")) | .uses] | unique' "$COMMENT")" = "$(yq -o=json -I=0 '[.jobs[].steps[] | select(.uses // "" | test("^(actions/checkout|jdx/mise-action)@")) | .uses] | unique' "$WORKFLOW")" ]
+  [ "$(yq '[.jobs[].steps[] | select(has("uses") | not) | select(has("run") | not)] | length' "$COMMENT")" = 0 ]
+  # One command, one recipe, which gets the run's identifiers as variables and never as text in
+  # the command; no command holds an expression.
+  [ "$(yq -o=json -I=0 '[.jobs[].steps[] | select(has("run")) | .run]' "$COMMENT")" = '["just ci-comment"]' ]
+  run yq -o=json -I=0 '.jobs[].steps[] | select(has("run")) | .env | to_entries | sort_by(.key) | from_entries' "$COMMENT"
+  [ "$output" = "$(jq -c -S . <<'EOF'
+{"GH_TOKEN": "${{ github.token }}", "RUN_ID": "${{ github.event.workflow_run.id }}",
+ "HEAD_SHA": "${{ github.event.workflow_run.head_sha }}",
+ "HEAD_REPOSITORY": "${{ github.event.workflow_run.head_repository.full_name }}",
+ "HEAD_BRANCH": "${{ github.event.workflow_run.head_branch }}"}
+EOF
+)" ]
+  [ "$(yq '[.jobs[].steps[] | select(has("run")) | .run | select(test("\$\{\{"))] | length' "$COMMENT")" = 0 ]
+  # The pull request's head is named nowhere else but in the name of the concurrency group, so
+  # nothing checks it out or runs it.
+  [ "$(yq '[del(.concurrency) | .. | select(tag == "!!str") | select(test("head_|pull_request\.|github\.head_ref"))] | length' "$COMMENT")" = 3 ]
+}
+
+# fake_gh: a gh first on PATH that records each call in $FAKE/calls, plays GitHub from the files in
+# $FAKE, and keeps each comment it is asked to write as $FAKE/written.json, its method and path in
+# $FAKE/writes.
+fake_gh() {
+  BIN="$BATS_TEST_TMPDIR/bin"
+  FAKE="$BATS_TEST_TMPDIR/github"
+  mkdir -p "$BIN" "$FAKE"
+  cat > "$BIN/gh" << 'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FAKE/calls"
+if [[ $1 == run && $2 == download ]]; then
+  while (($#)); do
+    [[ $1 == --dir ]] && dir=$2
+    shift
+  done
+  mkdir -p "$dir"
+  if [[ -d $FAKE/artifact ]]; then
+    cp -a "$FAKE/artifact/." "$dir/"
+  else
+    echo "no valid artifacts found to download" >&2
+    exit 1
+  fi
+  exit 0
+fi
+[[ $1 == api ]] || { echo "fake gh: unexpected: $*" >&2; exit 1; }
+shift
+method=GET input= path=
+while (($#)); do
+  case $1 in
+    --method | -X) method=$2; shift 2 ;;
+    --input) input=$2; shift 2 ;;
+    -f | -F | --raw-field | --field) shift 2 ;;
+    --paginate) shift ;;
+    *) path=$1; shift ;;
+  esac
+done
+case "$method $path" in
+  "GET repos/fixture-owner/fixture-repo/pulls") cat "$FAKE/pulls.json" ;;
+  "GET repos/fixture-owner/fixture-repo/issues/7/comments"*) cat "$FAKE/comments.json" ;;
+  "POST "* | "PATCH "*)
+    cp "$input" "$FAKE/written.json"
+    echo "$method $path" >> "$FAKE/writes"
+    echo '{}'
+    ;;
+  *) echo "fake gh: unexpected: $method $path" >&2; exit 1 ;;
+esac
+EOF
+  chmod +x "$BIN/gh"
+  HEAD_SHA=0123456789abcdef0123456789abcdef01234567
+  jq -n --arg sha "$HEAD_SHA" '[{number: 7, head: {sha: $sha, ref: "feature", repo: {full_name: "someone-else/fixture-repo"}}}]' > "$FAKE/pulls.json"
+  echo '[]' > "$FAKE/comments.json"
+}
+
+# post: runs the comment recipe's script for run 42 of a fork's pull request, with the fake gh first
+# on PATH and no credential in reach.
+post() {
+  rm -f "$FAKE/writes" "$FAKE/written.json"
+  # Where anything the artifact made run would leave its files.
+  cd "$BATS_TEST_TMPDIR" || return 1
+  run env -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN \
+    PATH="$BIN:$PATH" FAKE="$FAKE" GH_CONFIG_DIR="$BATS_TEST_TMPDIR/gh-config" GH_TOKEN=fixture-token \
+    GITHUB_REPOSITORY=fixture-owner/fixture-repo RUN_ID=42 HEAD_SHA="$HEAD_SHA" \
+    HEAD_REPOSITORY=someone-else/fixture-repo HEAD_BRANCH=feature "$REPO/scripts/ci-comment"
+}
+
+# artifact [FILE...]: makes the run's artifact hold FILE..., each copied from $BATS_TEST_TMPDIR/FILE.
+artifact() {
+  rm -rf "$FAKE/artifact"
+  mkdir -p "$FAKE/artifact"
+  local file
+  for file in "$@"; do
+    cp -P "$BATS_TEST_TMPDIR/$file" "$FAKE/artifact/"
+  done
+}
+
+# a_comment: writes to $BATS_TEST_TMPDIR/comment.md what just render-diff writes for two renders
+# that do not differ, so its marker is the one the recipe looks for.
+a_comment() {
+  mkdir -p "$BATS_TEST_TMPDIR/empty"
+  "$REPO/scripts/render-diff" "$BATS_TEST_TMPDIR/empty" "$BATS_TEST_TMPDIR/empty" > "$BATS_TEST_TMPDIR/comment.md"
+}
+
+@test "The comment job treats the artifact as text of a bounded size" {
+  fake_gh
+  a_comment
+  # Shell and workflow syntax that would run, or be expanded, anywhere it was not plain text: right
+  # after the marker, before anything that would stop a shell parsing on.
+  {
+    sed -n 1p "$BATS_TEST_TMPDIR/comment.md"
+    cat << 'EOF'
+touch ran-a-line
+$(touch ran-a-command) `touch ran-a-backquote` ${{ secrets.ANYTHING }} '; touch ran-quoted; '
+::stop-commands::fixture
+EOF
+    sed 1d "$BATS_TEST_TMPDIR/comment.md"
+  } > "$BATS_TEST_TMPDIR/hostile.md"
+  mv "$BATS_TEST_TMPDIR/hostile.md" "$BATS_TEST_TMPDIR/comment.md"
+  artifact comment.md
+
+  post
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$FAKE/writes")" = "POST repos/fixture-owner/fixture-repo/issues/7/comments" ]
+  jq -j '.body' "$FAKE/written.json" > "$BATS_TEST_TMPDIR/posted.md"
+  cmp "$BATS_TEST_TMPDIR/comment.md" "$BATS_TEST_TMPDIR/posted.md"
+  # Nothing of it ran, and none of it reached the log, where GitHub reads workflow commands.
+  [[ $output != *"::stop-commands::"* ]]
+  run find "$BATS_TEST_TMPDIR" "$REPO" -name 'ran-*'
+  [ -z "$output" ]
+
+  # Every other artifact is refused before anything is posted.
+  cp "$BATS_TEST_TMPDIR/comment.md" "$BATS_TEST_TMPDIR/other.md"
+  ln -s "$BATS_TEST_TMPDIR/other.md" "$BATS_TEST_TMPDIR/linked.md"
+  mkdir -p "$BATS_TEST_TMPDIR/symlink" "$BATS_TEST_TMPDIR/unmarked" "$BATS_TEST_TMPDIR/large"
+  ln -s "$BATS_TEST_TMPDIR/other.md" "$BATS_TEST_TMPDIR/symlink/comment.md"
+  sed 1d "$BATS_TEST_TMPDIR/comment.md" > "$BATS_TEST_TMPDIR/unmarked/comment.md"
+  { cat "$BATS_TEST_TMPDIR/comment.md"; head -c 65536 /dev/zero | tr '\0' x; } > "$BATS_TEST_TMPDIR/large/comment.md"
+  local refused
+  for refused in "comment.md other.md" "symlink/comment.md" "other.md" "unmarked/comment.md" "large/comment.md" ""; do
+    # shellcheck disable=SC2086 # the files of each case, split on blanks
+    artifact $refused
+    post
+    [ "$status" -ne 0 ] || { echo "posted an artifact of: ${refused:-nothing}"; return 1; }
+    [ ! -e "$FAKE/writes" ] || { echo "wrote for an artifact of: $refused"; return 1; }
+  done
+}
+
+@test "the comment job updates its own comment, and posts nothing for a pull request that moved on" {
+  fake_gh
+  a_comment
+  artifact comment.md
+  # A comment of someone else's that starts with the marker is left alone.
+  jq -n --rawfile body "$BATS_TEST_TMPDIR/comment.md" '[
+    {id: 101, user: {login: "someone", type: "User"}, body: $body},
+    {id: 202, user: {login: "github-actions[bot]", type: "Bot"}, body: $body}]' > "$FAKE/comments.json"
+
+  post
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$FAKE/writes")" = "PATCH repos/fixture-owner/fixture-repo/issues/comments/202" ]
+  # The pull request is found by the head the run was for, never by a number the artifact names.
+  grep -qx 'api --method GET repos/fixture-owner/fixture-repo/pulls -f state=open -f head=someone-else:feature -f per_page=100' "$FAKE/calls"
+
+  # A newer push moved the head on: its own run comments, this one posts nothing.
+  jq '.[0].head.sha = "fedcba9876543210fedcba9876543210fedcba98"' "$FAKE/pulls.json" > "$FAKE/moved.json"
+  mv "$FAKE/moved.json" "$FAKE/pulls.json"
+  post
+  [ "$status" -eq 0 ]
+  [ ! -e "$FAKE/writes" ]
+  [[ $output == *"no open pull request"* ]]
+}
+
+@test "The render is part of the required result, and the comment is not" {
+  render_job
+  # The required job waits for the render job and hands its result to ci-passed, which fails on
+  # anything but success; nothing skips the render job or lets it fail without failing.
+  [ "$(yq '.jobs.ci.needs | contains([strenv(RENDER)])' "$WORKFLOW")" = true ]
+  [ "$(yq '.jobs[strenv(RENDER)] | [has("if"), has("continue-on-error")] | any' "$WORKFLOW")" = false ]
+  [ "$(yq '[.jobs[strenv(RENDER)].steps[] | select(has("if") or has("continue-on-error"))] | length' "$WORKFLOW")" = 0 ]
+  run just --justfile "$REPO/justfile" ci-passed success success success failure
+  [ "$status" -ne 0 ]
+  # The comment is a workflow of its own, which nothing in the CI workflow waits for, and none of
+  # its jobs reports a check named ci, the required check's name.
+  [ -f "$COMMENT" ]
+  [ "$(yq '.name' "$COMMENT")" != "$(yq '.name' "$WORKFLOW")" ]
+  [ "$(yq '[.jobs | to_entries[] | select(.key == "ci" or .value.name == "ci")] | length' "$COMMENT")" = 0 ]
+  [ "$(yq '[.. | select(tag == "!!str") | select(test("workflow_run|render-comment"))] | length' "$WORKFLOW")" = 0 ]
 }

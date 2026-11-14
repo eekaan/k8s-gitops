@@ -51,6 +51,9 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
   each showing its own result on the pull request, and the job named `ci`, the required check on
   `main`, passes only when every one of them succeeded (`just ci-passed`).
 - `just test-hermetic` runs the bats tests that drive `just ci` itself.
+- `just render <out>` renders what Flux would apply, charts expanded, one file per object, and
+  `just render-diff <base> <head>` prints what changes between two renders, as the comment every
+  pull request gets ([docs/kubernetes.md](docs/kubernetes.md#the-render-diff)).
 
 `docs/infrastructure.md` covers the recipes that plan, apply and destroy the OpenTofu stacks: what
 they need in the environment, how state is stored and encrypted, and what they print.
