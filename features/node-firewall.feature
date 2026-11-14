@@ -71,4 +71,4 @@ Feature: Nodes firewall themselves
   Scenario: With today's security groups selected, the stack plans no change
     Given the cluster stack with its default security group rules
     When it is planned against mocked providers
-    Then the default is today's rules, and the nodes' security group holds exactly today's ingress rules and no rule open to all
+    Then the default is today's rules, the nodes' security group holds exactly today's ingress rules and no rule open to all, each rule keeps today's resource address, and the plan of the running cluster, its last part, shows no change to a resource

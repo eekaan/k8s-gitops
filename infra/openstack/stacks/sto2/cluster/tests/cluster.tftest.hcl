@@ -382,8 +382,10 @@ run "_a_ci_host_number_among_the_nodes_is_rejected" {
 
 # The rules as the stack has them without security_group_rules: the same ingress rules, in number and
 # attributes, as the run the_apis_are_open_only_to_the_allowlist_and_the_clusters_own_floating_addresses
-# finds, and none open to all. A mocked plan does not show resource addresses; the real plan of the
-# running cluster shows that it changes no rule.
+# finds, none open to all and none for a CI host. Their resource addresses, which an assertion here
+# cannot reach inside the module, are asserted by the run _todays_rules_keep_their_resource_addresses
+# in security-group-addresses.tftest.hcl; the plan of the running cluster, showing no change to a
+# resource, completes the proof.
 run "with_todays_security_groups_selected_the_stack_plans_no_change" {
   command = plan
 
@@ -420,6 +422,11 @@ run "with_todays_security_groups_selected_the_stack_plans_no_change" {
   assert {
     condition     = length(output.security_group.ingress_rules) == 19
     error_message = "By default the nodes' security group must hold today's 19 ingress rules and no other."
+  }
+
+  assert {
+    condition     = length(openstack_networking_secgroup_rule_v2.ci_host) == 0
+    error_message = "By default the stack must hold no rule for a CI host."
   }
 
   assert {

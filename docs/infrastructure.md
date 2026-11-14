@@ -154,7 +154,9 @@ in `.env` or the environment:
   before the firewall, and what controls each, is in
   [cluster.md](cluster.md#what-the-firewall-does-not-see).
 
-Planning with `full` changes no rule of a running cluster.
+Planning with `full` changes no rule of a running cluster. The stack's tests check it offline, for
+the rules' content and their resource addresses, which a plan would replace a rule over; the plan of
+the running cluster, which shows no change to a resource, is the rest of that proof.
 
 ## The CI host
 
