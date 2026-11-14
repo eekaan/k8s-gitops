@@ -33,6 +33,8 @@ resources:
   - ../../base/kube-system/runtime-classes/ks.yaml
   - ../../base/kube-system/snapshot-controller/ks.yaml
   - ../../base/kube-system/spegel/ks.yaml
+  - ../../base/monitoring/grafana-operator/ks.yaml
+  - ../../base/monitoring/grafana/ks.yaml
   - ../../base/monitoring/kube-prometheus-stack/ks.yaml
   - ../../base/piraeus-datastore/linstor-cluster/ks.yaml
   - ../../base/piraeus-datastore/piraeus-operator/ks.yaml

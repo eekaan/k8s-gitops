@@ -143,13 +143,8 @@ Resource definitions that several applications use are applications of their own
 The three `ks.yaml` files set `wait`, so each is Ready only once its definitions are established,
 and `snapshot-controller` once its controller runs as well. An application that creates objects of
 these groups, or whose chart does, names the matching one in `dependsOn` and turns off any copy of
-the same definitions its own chart would install. `linstor-cluster` names `snapshot-controller` for
-its VolumeSnapshotClass ([Storage](#storage)); the monitoring stack ([Monitoring](#monitoring)), the
-baseline applications with a monitor and `cloudnative-pg` ([PostgreSQL](#postgresql)) name
-`prometheus-operator-crds`; `volsync` names both ([Volume backups](#volume-backups)); cert-manager
-([cert-manager](#cert-manager)) and `envoy-gateway` ([Envoy Gateway](#envoy-gateway)) name
-`gateway-api-crds`, and `envoy-gateway` turns off its chart's copy of the Gateway API. No dashboard
-or route is enabled anywhere.
+the same definitions its own chart would install; each application's section below says which it
+names. No route is enabled anywhere, and no chart's dashboard outside the `grafana` application.
 
 Deleting a definition deletes every object of its kind, so none of these applications ever deletes
 one, also not when it leaves the tree. None applies a definition itself. The monitoring chart's
@@ -229,9 +224,12 @@ classes and their handlers.
 
 `apps/base/external-secrets/external-secrets/` runs the External Secrets operator in its own
 namespace, `external-secrets`. It is how runtime secrets reach workloads (ADR 0005): an
-`ExternalSecret` names a key in a secret store, and the operator writes it into a Secret. No secret
-store is configured yet. The `volsync` component makes an `ExternalSecret` of the ClusterSecretStore
-`openbao` ([Volume backups](#volume-backups)), and no enabled application includes it.
+`ExternalSecret` names a key in a secret store, and the operator writes it into a Secret. The
+exception is a credential a controller generates in the cluster for its own workload, which stays
+in the Secret that controller writes, such as Grafana's admin password ([Grafana](#grafana)). No
+secret store is configured yet. The `volsync` component makes an `ExternalSecret` of the
+ClusterSecretStore `openbao` ([Volume backups](#volume-backups)), and no enabled application
+includes it.
 
 - The chart comes from its publisher's OCI registry and installs and upgrades the operator's
   resource definitions itself, as the publisher documents. No other chart in the tree ships them,
@@ -258,8 +256,9 @@ privileged, as node-exporter reads each node through the host's network and proc
 through host paths. The chart installs no resource definitions: `prometheus-operator-crds` does
 ([Resource definitions](#resource-definitions)), and the application names it in `dependsOn`. The
 two charts run the same operator version: Renovate moves them in one pull request, and
-`tests/monitoring.bats` fails when the pinned charts name different ones. Grafana and its
-dashboards are not installed.
+`tests/monitoring.bats` fails when the pinned charts name different ones. The application installs
+no Grafana and no dashboards; [Grafana](#grafana) runs on its own and takes its dashboards from the
+same chart.
 
 Prometheus picks up every ServiceMonitor, PodMonitor, Probe, ScrapeConfig and PrometheusRule in
 every namespace, and evaluates the chart's default alerting and recording rules. It scrapes:
@@ -292,6 +291,69 @@ storage class, which neither names; without one, the claims and the two pods sta
 `tests/monitoring.bats` builds the application as Flux applies it, renders the pinned chart with
 its values, and checks the namespace, the targets, the rules, the receivers, the claims and that
 each values key is one the chart or a subchart reads.
+
+## Grafana
+
+The Grafana operator runs one Grafana in `monitoring`, with the cluster's Prometheus as its
+datasource and the monitoring chart's dashboards. Two applications in `apps/base/monitoring/` hold
+them:
+
+- `grafana-operator` installs the operator from its publisher's chart,
+  `oci://ghcr.io/grafana/helm-charts/grafana-operator`. The release installs and upgrades the
+  `grafana.integreatly.org` definitions as its own templates, each marked
+  `helm.sh/resource-policy: keep`, so removing the application leaves them and every Grafana object
+  in place; only this chart ships them. One operator runs, with leader election and the requests of
+  the publisher's own manifests: nothing calls it, and while it restarts Grafana keeps serving and
+  only changes from Git wait. Its chart's ServiceMonitor is on. Its `ks.yaml` sets `wait`.
+- The operator watches `monitoring` only. Its service account has a Role there and no ClusterRole,
+  so it creates, reads, changes and deletes Secrets, ConfigMaps, Services, service accounts,
+  claims, Deployments, Ingresses and HTTPRoutes in `monitoring` and nowhere else. A dashboard for an
+  application in another namespace is therefore a `GrafanaDashboard`, with the ConfigMap it loads if
+  it loads one, in an application under `apps/base/monitoring/`, as an application's
+  `targetNamespace` puts everything it applies in its own namespace. Watching another namespace is
+  a deliberate change: it gives the operator the same rights there, and watching every namespace
+  gives it them everywhere, `flux-system` included.
+- `grafana` holds the `Grafana`, its `GrafanaDatasource`, a ServiceMonitor for Grafana's own
+  metrics and the dashboards release, and names `grafana-operator` in `dependsOn`.
+
+The Grafana runs the version its `grafana.yaml` pins, which Renovate updates, as one replica
+without a disruption budget: a second replica would keep a database of its own. It keeps nothing
+that Git does not hold, so it claims no volume: its data directory is an emptyDir, and the operator
+applies the datasource and every dashboard again every minute. One it cannot apply, as while a
+restarted Grafana starts, it retries after 10 seconds, doubling the wait up to two minutes, so a
+restarted Grafana has them all back within a few minutes. The datasource is the Prometheus Service
+of the monitoring chart, `kube-prometheus-stack-prometheus`, port 9090. Grafana makes no call to the
+internet on its own: its
+configuration turns off usage reporting, the checks for Grafana and plugin updates, the news feed,
+the plugin catalogue, the plugins Grafana would install at every start, the download of plugin
+signing keys, Gravatar images and external snapshots, so it runs only the plugins in its image.
+
+The dashboards come from the monitoring stack's own chart. The release `grafana-dashboards` installs
+`kube-prometheus-stack` at the version the monitoring application runs, with everything off but the
+dashboards the chart renders for what the cluster scrapes: the Kubernetes mixin's, node-exporter's
+for Linux nodes, and those of the API server, the kubelets, the controller manager, the scheduler,
+etcd, CoreDNS, Prometheus, Alertmanager and Grafana. They match the recording rules and job names of
+the Prometheus they query, and Renovate moves both pins in one pull request. Each is a ConfigMap and
+a `GrafanaDashboard` that loads it into the folder Kubernetes, so neither the operator nor Grafana
+fetches a dashboard from the network.
+
+Nothing routes to Grafana from outside the cluster. `just grafana [cluster]` forwards a local port,
+`GRAFANA_PORT` or 3000, on 127.0.0.1 only, to port 3000 of the Service `grafana-service` in
+`monitoring` through the cluster's kubeconfig, until Ctrl-C; it prints the local URL, and the
+forward ends with the recipe however it ends ([cluster.md](cluster.md#recipes)). Sign in as
+`admin`. The password is under `GF_SECURITY_ADMIN_PASSWORD` in the Secret
+`grafana-admin-credentials` in `monitoring`, which the
+operator generates when it first creates the Secret and keeps while the `Grafana` exists; nothing in
+Git holds it. Deleting the `Grafana` deletes the Secret, and a new one gets a new password. It is
+the kind of credential ADR 0005 keeps out of OpenBao: one a controller generates in the cluster for
+its own workload, which stays in the Secret that controller writes. Anonymous access is off.
+
+`tests/grafana.bats` builds both applications as Flux applies them, renders the two charts and the
+monitoring application's, and checks the definitions, the operator's namespace and rights, the
+monitors, the version and replicas, the absence of volumes, Secrets and routes, the datasource's
+Service, that the dashboards are exactly those the monitoring chart renders for the cluster's
+monitoring values, and each setting that keeps Grafana off the internet against the defaults of the
+Grafana release it pins. It runs `just grafana` against a recording kubectl.
 
 ## cert-manager
 
