@@ -23,9 +23,9 @@ that namespace.
   VolSync's documentation supports no repository shared between volumes.
 - Each repository has a password of its own, derived from one master password: the SHA-256 digest
   of the master, a slash and the application's name. External Secrets computes it when it writes
-  the application's Secret, so the master stays in the secret store and never reaches a namespace,
-  and the Secret in one namespace opens that namespace's repository only. Only the master is kept
-  outside the cluster; every application's password can be computed again from it.
+  the application's Secret, so the component writes the master into no Secret, and the Secret in
+  one namespace opens that namespace's repository only. Only the master is kept outside the
+  cluster; every application's password can be computed again from it.
 - Every repository is reached with the cluster's S3 key, as the object storage's keys belong to the
   project, not to one bucket or path. Each namespace that takes the component holds the key, which
   reaches every bucket of the project ([infrastructure.md](../infrastructure.md#s3-keys-and-backup-buckets)):
@@ -55,7 +55,8 @@ that namespace.
 - Losing the master password makes every backup unreadable, so it is kept outside the cluster as
   well as in the secret store. Changing the master, or the derivation, changes every repository's
   password: each repository has to be given the new one with restic before the Secrets change.
-- The secret store's own access rules decide who may read the master; nothing in an application's
-  namespace holds it.
+- An ExternalSecret that may use the store can read the key that holds the master, so what keeps
+  the master is the store's conditions on namespaces and who may create ExternalSecrets; no Secret
+  the component writes holds it.
 - The cluster's S3 key can delete what is in the bucket; encryption protects the backups from being
   read, not from being deleted.

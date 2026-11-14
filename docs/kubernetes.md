@@ -468,9 +468,10 @@ snapshot whenever the claim is created.
 - A claim deleted and created again while the ReplicationDestination stays gets the snapshot kept
   from that one restore, which after a first deployment is of an empty volume, not the latest
   backup.
-- To restore the latest backup into an application that runs: suspend its Kustomization, stop the
-  pods that use the claim, delete the claim and the ReplicationDestination `<app>-restore`, and
-  resume the Kustomization. Flux creates both again, the ReplicationDestination restores the latest
+- To restore the latest backup into an application that runs: suspend its Kustomization, and its
+  HelmRelease when a chart runs it, as drift detection would undo a scale-down; stop the pods that
+  use the claim; delete the claim and the ReplicationDestination `<app>-restore`; and resume what
+  was suspended. Flux creates both again, the ReplicationDestination restores the latest
   backup, and the claim is made from it. What was written to the volume after that backup is lost.
 
 `APP` and `BACKUP_BUCKET_PREFIX` name the repository, so neither changes once an application has
@@ -502,9 +503,9 @@ are `RESTIC_MASTER_PASSWORD`, the master password, and the cluster's S3 key, `AW
 - `AWS_DEFAULT_REGION`: `S3_REGION`, from `cluster-config`.
 
 An application's password is the SHA-256 digest of the master, a slash and the application's name,
-with nothing after it, written as 64 lower-case hexadecimal digits. The master never reaches a
-namespace, so one application's Secret opens no other application's repository, and only the master
-is kept outside the cluster. To open a repository with restic by hand, compute its password from the
+with nothing after it, written as 64 lower-case hexadecimal digits. The component writes the master
+into no Secret, so one application's Secret opens no other application's repository, and only the
+master is kept outside the cluster. To open a repository with restic by hand, compute its password from the
 master that way, with a tool that reads the master from a file or its standard input and never
 from its command line, and give the password to restic in a file or from a command
 (`RESTIC_PASSWORD_FILE`, `RESTIC_PASSWORD_COMMAND`), never as an argument. Every namespace that
