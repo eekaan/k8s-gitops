@@ -26,8 +26,9 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
   configuration (`just renovate-check`: Renovate's own validator, run from its pinned container
   image, so it needs a container runtime, Docker), scenario proofs, the OpenTofu check
   (`just infra-check`: formatting, that the Talos schematic lists no QEMU guest agent extension,
-  that every stack enforces state encryption, that no stack or module declares a bucket,
-  validation without a state backend and the mocked `tofu test` runs), the Talos check
+  that every stack enforces state encryption, that no stack or module declares a bucket, that the
+  default service range overlaps no default node, pod or service subnet, validation without a
+  state backend and the mocked `tofu test` runs), the Talos check
   (`just talos-check`: every node's machine configuration rendered from the template, the patches
   and fixture node data, and validated, offline), the offline build of `kubernetes/`, and gitleaks
   over the committable files and the git history. The groups `tests-1` to `tests-3` each run a

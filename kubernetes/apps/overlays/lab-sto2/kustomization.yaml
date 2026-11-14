@@ -24,6 +24,7 @@ resources:
   - ../../base/envoy-gateway-system/envoy-gateway/ks.yaml
   - ../../base/external-secrets/external-secrets/ks.yaml
   - ../../base/kube-system/cilium/ks.yaml
+  - ../../base/kube-system/cilium-bgp/ks.yaml
   - ../../base/kube-system/descheduler/ks.yaml
   - ../../base/kube-system/gateway-api-crds/ks.yaml
   - ../../base/kube-system/kubelet-csr-approver/ks.yaml
