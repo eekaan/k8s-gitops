@@ -9,6 +9,9 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
+# docker is run with none of the secrets the environment may hold.
+# shellcheck source=scripts/lib/tools.sh
+. "$root/scripts/lib/tools.sh"
 if (($# != 1)); then
   echo "usage: edge-policy-check IMAGE" >&2
   exit 2

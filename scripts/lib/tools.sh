@@ -21,8 +21,9 @@
 # The tools that may see each secret, by name; the empty list is none. TF_ENCRYPTION carries the
 # state passphrase, so tofu never needs TF_STATE_PASSPHRASE itself. SOPS_AGE_KEY_FILE names the Talos
 # age key for talman, which runs sops, and for age, which decrypts with it by its path; the Flux age
-# key reaches sops only through flux_sops, as the one key sops is given. gh alone sees the tokens
-# that are its own.
+# key reaches sops only through flux_sops, as the one key sops is given. The edge routers' key
+# reaches ssh by its path on the command line, so no tool needs EDGE_SSH_KEY_FILE in its
+# environment. gh alone sees the tokens that are its own.
 declare -gA tool_secrets=(
   [AWS_ACCESS_KEY_ID]="tofu"
   [AWS_SECRET_ACCESS_KEY]="tofu"
@@ -42,6 +43,7 @@ declare -gA tool_secrets=(
   [SOPS_AGE_KEY_CMD]="talman sops"
   [FLUX_AGE_KEY]=""
   [FLUX_AGE_KEY_FILE]=""
+  [EDGE_SSH_KEY_FILE]=""
   [OPERATOR_CIDRS]=""
   [GH_TOKEN]="gh"
   [GITHUB_TOKEN]="gh"
@@ -52,7 +54,7 @@ declare -gA tool_secrets=(
 plain_variables=(
   TF_STATE_BUCKET BACKUP_BUCKET_PREFIX CI_HOST_IMAGE CI_HOST_SSH_PUBLIC_KEY CI_HOST_SSH_USER
   KUBE_API_ADDRESS TALOS_WAIT CLUSTER_DOMAIN ADOPTION_INTERVAL ADOPTION_WAIT
-  GRAFANA_PORT GRAFANA_WAIT
+  GRAFANA_PORT GRAFANA_WAIT EDGE_IMAGE EDGE_SSH_USER EDGE_ROLLOUT_WAIT EDGE_ROLLOUT_INTERVAL
 )
 
 # secret_variable NAME: whether NAME is a secret: one tool_secrets lists, or one of the families the

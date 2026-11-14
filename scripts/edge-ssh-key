@@ -16,7 +16,7 @@ if [[ $file != /* ]]; then
   infra_error "EDGE_SSH_KEY_FILE is not an absolute path"
   exit 1
 fi
-if ! command -v ssh-keygen > /dev/null; then
+if ! type -P ssh-keygen > /dev/null; then
   infra_error "ssh-keygen is not on PATH; edge-ssh-key needs OpenSSH's client"
   exit 1
 fi
