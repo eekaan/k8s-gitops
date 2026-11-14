@@ -17,7 +17,10 @@
 #   pending-csr       a certificate signing request is Pending
 #   logs-fail         a pod's logs cannot be fetched, as before its kubelet's serving certificate is
 #                     approved, with an error naming the node's address
-#   load-balancer     a Service of type LoadBalancer exists
+#   load-balancer     a Service of type LoadBalancer exists, at an address outside the service range
+#   pool-load-balancer  a Service of type LoadBalancer exists at an address in the service range of
+#                     the fixture's talman.yaml
+#   pending-load-balancer  a Service of type LoadBalancer exists without an address yet
 #   csi-volume        a PersistentVolume of a CSI driver exists
 # Every object it answers with holds addresses from the documentation ranges, as do its errors and the
 # log line, which the recipes must never print. It records "kubectl ARGS" in <tmp>/record/argv, and
@@ -154,6 +157,14 @@ services() {
   if listed load-balancer; then
     jq -n '{metadata: {namespace: "apps", name: "web"}, spec: {type: "LoadBalancer", clusterIP: "198.51.100.64"},
       status: {loadBalancer: {ingress: [{ip: "198.51.100.62"}]}}}'
+  fi
+  if listed pool-load-balancer; then
+    jq -n '{metadata: {namespace: "gateways", name: "public"}, spec: {type: "LoadBalancer", clusterIP: "198.51.100.65"},
+      status: {loadBalancer: {ingress: [{ip: "192.0.2.130", ipMode: "VIP"}]}}}'
+  fi
+  if listed pending-load-balancer; then
+    jq -n '{metadata: {namespace: "apps", name: "queued"}, spec: {type: "LoadBalancer", clusterIP: "198.51.100.67"},
+      status: {loadBalancer: {}}}'
   fi
 }
 

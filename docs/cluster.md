@@ -316,10 +316,15 @@ out of the artifact, which is built from `kubernetes/`.
   stack's name is typed back, or with `--yes`, and then removes the cluster's `talman.yaml`,
   talosconfig and kubeconfig. The plumbing stack, the secrets bundle and the buckets stay. First,
   through the kubeconfig of the cluster it is given, it lists
-  every Service of type LoadBalancer and every PersistentVolume of a CSI driver: the cloud's load
-  balancers and volumes behind them are made by the cluster, not by OpenTofu, so the destroy would
-  leave them in the cloud, where they keep the network from being deleted. While there are any, it
-  names each, by namespace and name or by the volume's name, and destroys nothing. A cluster whose
+  every Service of type LoadBalancer and every PersistentVolume of a CSI driver: a cloud load
+  balancer or volume behind one is made by the cluster, not by OpenTofu, so the destroy would leave
+  it in the cloud, where it keeps the network from being deleted. A Service whose every
+  load-balancer address lies in the service range of the cluster's `talman.yaml` does not count:
+  Cilium gave it that address and the workers announce it, and nothing in the cloud stands behind
+  it ([kubernetes.md](kubernetes.md#service-addresses)). A Service without an address yet, or with
+  one outside the range, counts, as does every one when `talman.yaml` names no service range. While
+  there are any, it names each, by namespace and name or by the volume's name, and destroys
+  nothing. A cluster whose
   API does not answer, or that has no kubeconfig, cannot be asked and is not destroyed either,
   unless `--unreachable` is given: the operator then takes on whatever it owned, which stays in the
   cloud. Before it asks the cluster it checks what `infra-destroy` needs for the stack.

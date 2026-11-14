@@ -36,6 +36,12 @@ override_data {
         id           = "talos-image-fixture"
         schematic_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
       }
+      bgp = {
+        cluster_asn    = 64496
+        edge_asn       = 64497
+        edge_addresses = ["192.0.2.6", "192.0.2.7"]
+        service_range  = "203.0.113.16/28"
+      }
     }
   }
 }
@@ -254,10 +260,12 @@ run "the_apis_are_open_only_to_the_allowlist_and_the_clusters_own_floating_addre
 
   assert {
     condition = length(output.instances) == 6 && alltrue([
-      for instance in values(output.instances) :
-      instance.port.port_security_enabled == true && instance.port.security_group_ids == toset([output.security_group.id])
+      for name, instance in output.instances :
+      instance.port.port_security_enabled == true && instance.port.security_group_ids == toset(
+        output.nodes[name].role == "worker" ? [output.security_group.id, output.worker_security_group.id] : [output.security_group.id]
+      )
     ])
-    error_message = "Every node's port must have port security on and the nodes' security group as its only group."
+    error_message = "Every node's port must have port security on, and the nodes' security group as its only group besides, for a worker, the workers' own (service-addresses.tftest.hcl)."
   }
 }
 

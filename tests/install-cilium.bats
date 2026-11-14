@@ -2,7 +2,10 @@
 # Proves features/cilium.feature; each test carries its scenario's title.
 # The chart tests pull the pinned chart from its public registry with the pinned helm. The install
 # script runs against recording fakes of helm, kubectl and sleep put first on its PATH, so nothing
-# reaches a cluster.
+# reaches a cluster. The BGP tests work on a copy of the tree: they render talman.yaml from the Talos
+# fixture as the cluster stack does, fill cluster-config from it with the copy's own
+# scripts/lib/cluster.sh, build every application as Flux applies it, and render the nodes' machine
+# configurations offline with scripts/talos-check.
 
 # The tests run one at a time even where bats runs a file's tests side by side: flux build rewrites
 # the application's kustomization.yaml in this checkout and puts it back afterwards, so two builds
@@ -393,4 +396,228 @@ EOF
   [ "$status" -ne 0 ]
   [[ $output == *KUBECONFIG* ]]
   [ ! -s "$CALLS" ]
+}
+
+# The label a Service opts in with, to an address from the pool and to its advertisement.
+OPT_IN='{"k8s-gitops/announce": "bgp"}'
+
+# A jq definition: SELECTOR | selects(LABELS), whether the Kubernetes label selector, absent or
+# empty for every object, selects an object with the labels LABELS.
+# shellcheck disable=SC2016 # $labels and the rest are jq variables.
+SELECTS='def selects($labels): (. // {}) as $s
+  | (($s.matchLabels // {}) | to_entries | all(.key as $k | .value as $v | $labels[$k] == $v))
+  and (($s.matchExpressions // []) | all(.key as $k | (.values // []) as $vs
+    | ($labels | has($k)) as $has | ($has and any($vs[]; . == $labels[$k])) as $in
+    | if .operator == "In" then $in
+      elif .operator == "NotIn" then ($in | not)
+      elif .operator == "Exists" then $has
+      elif .operator == "DoesNotExist" then ($has | not)
+      else error("unknown operator \(.operator)") end));'
+
+# bgp_tree: a copy, in COPY, of the files git would commit that the BGP checks read: flux build
+# rewrites a kustomization.yaml it builds while it runs, and the copy's scripts read nothing of this
+# checkout but the copy.
+bgp_tree() {
+  COPY="$BATS_TEST_TMPDIR/repository"
+  local path
+  while IFS= read -r -d '' path; do
+    if [[ -f $REPO/$path ]]; then
+      mkdir -p "$COPY/$(dirname "$path")"
+      cp "$REPO/$path" "$COPY/$path"
+    fi
+  done < <(git -C "$REPO" ls-files -z --cached --others --exclude-standard -- kubernetes scripts talos versions.yaml tests/fixtures/talos)
+}
+
+# bgp_inputs: in the copy, TALMAN, talos/talman.yaml.tftpl rendered from tests/fixtures/talos as the
+# cluster stack renders a cluster's talman.yaml, and CONFIG, the data of the ConfigMap
+# cluster-config that just cluster-config makes of it, as JSON, made by the copy's own
+# scripts/lib/cluster.sh in an environment of its own.
+bgp_inputs() {
+  local encoded
+  bgp_tree
+  TALMAN="$BATS_TEST_TMPDIR/talman.yaml"
+  encoded=$(tofu -chdir="$COPY/tests/fixtures/talos" console -no-color <<< 'base64encode(local.talman_yaml)')
+  base64 -d <<< "${encoded//\"/}" > "$TALMAN"
+  CONFIG="$BATS_TEST_TMPDIR/cluster-config.json"
+  # shellcheck disable=SC2016 # $1 and $2 are the inner shell's.
+  env -i PATH="$PATH" HOME="$BATS_TEST_TMPDIR" CLUSTER_DOMAIN=example.com bash -c \
+    '. "$1/scripts/lib/cluster.sh" && fill_cluster_config lab-sto2 "$2" && cluster_config_manifest' _ "$COPY" "$TALMAN" |
+    jq '.data' > "$CONFIG"
+  [ "$(jq length "$CONFIG")" -gt 0 ]
+}
+
+# apps: the copy's applications, as namespace/name, one per line.
+apps() {
+  (cd "$COPY/kubernetes/apps/base" && find . -mindepth 3 -maxdepth 3 -name ks.yaml) | sed 's|^\./||; s|/ks\.yaml$||' | sort
+}
+
+# built APP: the application APP, as namespace/name, as Flux applies it: built in the copy from its
+# ks.yaml, substituted strictly from CONFIG and its own postBuild.substitute, one JSON object a line.
+built() {
+  local ks="$BATS_TEST_TMPDIR/ks-${1//\//-}.yaml" name=${1#*/}
+  # shellcheck disable=SC2016 # $config is a yq variable.
+  CONFIG=$CONFIG yq '(load(strenv(CONFIG)) | with_entries(.value |= tostring)) as $config
+    | .spec.postBuild.substitute = ($config * (.spec.postBuild.substitute // {}))' \
+    "$COPY/kubernetes/apps/base/$1/ks.yaml" > "$ks"
+  (cd "$COPY/kubernetes" && flux build kustomization "$name" --path "./apps/base/$1/app" \
+    --kustomization-file "$ks" --dry-run --strict-substitute --in-memory-build) |
+    yq -o json -I0 'select(. != null)'
+}
+
+# tree_objects: every object of every application as Flux applies it, one JSON object a line, each
+# as {"app": namespace/name, "object": ...}.
+tree_objects() {
+  local app
+  while IFS= read -r app; do
+    built "$app" | jq -c --arg app "$app" '{app: $app, object: .}'
+  done < <(apps)
+}
+
+# chart_config KEY: KEY of the ConfigMap cilium-config the pinned chart renders with values.yaml,
+# rendered once per test into RENDER.
+chart_config() {
+  RENDER="$BATS_TEST_TMPDIR/render.yaml"
+  if [[ ! -s $RENDER ]]; then
+    chart_ref
+    helm template cilium "$url" --version "$tag" --namespace kube-system \
+      --kube-version "$(yq -e '.kubernetes' "$REPO/versions.yaml")" --values "$APP/values.yaml" > "$RENDER"
+  fi
+  yq "select(.kind == \"ConfigMap\" and .metadata.name == \"cilium-config\") | .data[\"$1\"] // \"\"" "$RENDER"
+}
+
+@test "Cilium assigns LoadBalancer addresses from exactly the service range" {
+  bgp_inputs
+  range=$(yq -e '.values.serviceRange' "$TALMAN")
+  [ "$(jq -r '.SERVICE_RANGE' "$CONFIG")" = "$range" ]
+  [ "$(chart_config enable-lb-ipam)" = true ]
+  [ "$(chart_config default-lb-service-ipam)" = lbipam ]
+  tree_objects > "$BATS_TEST_TMPDIR/tree.jsonl"
+
+  # One pool in the whole tree, whose one block is the service range, enabled.
+  pools=$(jq -c 'select(.object.kind == "CiliumLoadBalancerIPPool") | .object' "$BATS_TEST_TMPDIR/tree.jsonl")
+  echo "$pools"
+  [ "$(grep -c . <<< "$pools")" -eq 1 ]
+  [ "$(jq -c '.spec.blocks' <<< "$pools")" = "[{\"cidr\":\"$range\"}]" ]
+  [ "$(jq '.spec.disabled // false' <<< "$pools")" = false ]
+  # Only to Services that opt in.
+  [ "$(jq --argjson labels "$OPT_IN" "$SELECTS .spec.serviceSelector | selects(\$labels)" <<< "$pools")" = true ]
+  for labels in '{}' '{"k8s-gitops/announce": "yes"}' '{"app": "web"}'; do
+    [ "$(jq --argjson labels "$labels" "$SELECTS .spec.serviceSelector | selects(\$labels)" <<< "$pools")" = false ]
+  done
+}
+
+@test "Only workers speak BGP, and they peer with exactly the two edge routers, as the cluster's AS to the edge AS" {
+  bgp_inputs
+  [ "$(chart_config enable-bgp-control-plane)" = true ]
+  tree_objects > "$BATS_TEST_TMPDIR/tree.jsonl"
+  configs=$(jq -c 'select(.object.kind == "CiliumBGPClusterConfig") | .object' "$BATS_TEST_TMPDIR/tree.jsonl")
+  echo "$configs"
+  [ "$(grep -c . <<< "$configs")" -eq 1 ]
+  [ -z "$(jq -r 'select(.object.kind == "CiliumBGPNodeConfigOverride" or .object.kind == "CiliumBGPPeeringPolicy") | .object.kind' "$BATS_TEST_TMPDIR/tree.jsonl")" ]
+
+  # The node selector, against the labels each node's machine configuration gives it.
+  run "$COPY/scripts/talos-check" "$BATS_TEST_TMPDIR/rendered"
+  [ "$status" -eq 0 ]
+  selected=() workers=()
+  while IFS=' ' read -r node role; do
+    labels=$(yq -o json -I0 'select(.kind == "KubeNodeConfig") | .labels // {}' "$BATS_TEST_TMPDIR/rendered/$node.yaml")
+    labels=$(jq -c --arg node "$node" '. + {"kubernetes.io/hostname": $node, "kubernetes.io/os": "linux"}' <<< "$labels")
+    if [[ $(jq --argjson labels "$labels" "$SELECTS .spec.nodeSelector | selects(\$labels)" <<< "$configs") == true ]]; then
+      selected+=("$node")
+    fi
+    [[ $role != worker ]] || workers+=("$node")
+  done < <(yq '.nodes[] | .hostname + " " + .role' "$TALMAN")
+  echo "selected: ${selected[*]}; workers: ${workers[*]}"
+  [ "${#workers[@]}" -eq 3 ]
+  [ "${selected[*]}" = "${workers[*]}" ]
+
+  # One instance, as the cluster's AS, peering with both edge addresses, each in the edge AS.
+  cluster_asn=$(yq -e '.values.bgp.clusterASN' "$TALMAN")
+  edge_asn=$(yq -e '.values.bgp.edgeASN' "$TALMAN")
+  [ "$cluster_asn" != "$edge_asn" ]
+  [ "$(jq '.spec.bgpInstances | length' <<< "$configs")" -eq 1 ]
+  [ "$(jq '.spec.bgpInstances[0].localASN' <<< "$configs")" = "$cluster_asn" ]
+  # No listening port: each worker opens its sessions and accepts none.
+  [ "$(jq '.spec.bgpInstances[0].localPort // "none"' <<< "$configs")" = '"none"' ]
+  peers=$(jq -r '.spec.bgpInstances[0].peers[] | "\(.peerAddress) \(.peerASN)"' <<< "$configs" | sort)
+  [ "$peers" = "$(yq '.values.bgp.edgeAddresses[] | . + " '"$edge_asn"'"' "$TALMAN" | sort)" ]
+  [ "$(grep -c . <<< "$peers")" -eq 2 ]
+  # Both edge addresses lie on the node subnet, one hop from every worker.
+  while read -r address _; do
+    jq -en --arg address "$address" --arg subnet "$(yq -e '.values.nodeSubnet' "$TALMAN")" '
+      def ip4: split(".") | map(tonumber) | .[0] * 16777216 + .[1] * 65536 + .[2] * 256 + .[3];
+      ($subnet | split("/")) as $net | pow(2; 32 - ($net[1] | tonumber)) as $size
+      | (($address | ip4) / $size | floor) == (($net[0] | ip4) / $size | floor)'
+  done <<< "$peers"
+
+  # Every peer takes the one peer configuration: explicit timers, graceful restart, eBGP's single
+  # hop, IPv4 unicast only.
+  [ "$(jq -r '[.spec.bgpInstances[0].peers[].peerConfigRef.name] | unique | .[]' <<< "$configs")" = edge ]
+  peer_config=$(jq -c 'select(.object.kind == "CiliumBGPPeerConfig" and .object.metadata.name == "edge") | .object' "$BATS_TEST_TMPDIR/tree.jsonl")
+  [ -n "$peer_config" ]
+  jq -e '.spec.timers | .holdTimeSeconds and .keepAliveTimeSeconds and .connectRetryTimeSeconds' <<< "$peer_config"
+  jq -e '.spec.gracefulRestart.enabled == true and .spec.gracefulRestart.restartTimeSeconds > 0' <<< "$peer_config"
+  jq -e '(.spec.ebgpMultihop // 1) == 1' <<< "$peer_config"
+  [ "$(jq -c '[.spec.families[] | {afi, safi}]' <<< "$peer_config")" = '[{"afi":"ipv4","safi":"unicast"}]' ]
+}
+
+@test "Only the addresses of Services that opt in are advertised; pod and ClusterIP ranges never are" {
+  bgp_inputs
+  tree_objects > "$BATS_TEST_TMPDIR/tree.jsonl"
+  # The advertisements the peer configurations select, by their labels.
+  # shellcheck disable=SC2016 # $tree and the rest are jq variables.
+  advertised=$(jq -nc --slurpfile tree "$BATS_TEST_TMPDIR/tree.jsonl" "$SELECTS"'
+    [$tree[] | .object | select(.kind == "CiliumBGPPeerConfig") | .spec.families[].advertisements] as $selectors
+    | [$tree[] | .object | select(.kind == "CiliumBGPAdvertisement")
+      | . as $ad | select(any($selectors[]; selects($ad.metadata.labels // {})))]')
+  echo "$advertised"
+  [ "$(jq length <<< "$advertised")" -ge 1 ]
+  # Each advertises LoadBalancer addresses of Services, and nothing else.
+  [ "$(jq -c '[.[].spec.advertisements[] | {advertisementType, addresses: .service.addresses}] | unique' <<< "$advertised")" = \
+    '[{"advertisementType":"Service","addresses":["LoadBalancerIP"]}]' ]
+  # Of Services that opt in only.
+  # shellcheck disable=SC2016 # $labels is a jq variable.
+  [ "$(jq --argjson labels "$OPT_IN" "$SELECTS"' [.[].spec.advertisements[].selector | selects($labels)] | all' <<< "$advertised")" = true ]
+  for labels in '{}' '{"k8s-gitops/announce": "yes"}' '{"app": "web"}'; do
+    # shellcheck disable=SC2016 # $labels is a jq variable.
+    [ "$(jq --argjson labels "$labels" "$SELECTS"' [.[].spec.advertisements[].selector | selects($labels)] | any' <<< "$advertised")" = false ]
+  done
+  # No advertisement anywhere in the tree is of pods, pod pools, interfaces or other Service addresses.
+  [ -z "$(jq -r 'select(.object.kind == "CiliumBGPAdvertisement") | .object.spec.advertisements[]
+    | select(.advertisementType != "Service" or (.service.addresses // [] | any(. != "LoadBalancerIP"))) | .advertisementType' \
+    "$BATS_TEST_TMPDIR/tree.jsonl")" ]
+}
+
+@test "Layer 2 announcements stay off" {
+  bgp_inputs
+  [ "$(chart_config enable-l2-announcements)" != true ]
+  [ "$(chart_config enable-l2-pod-announcements)" != true ]
+  [ "$(yq '.l2announcements.enabled' "$APP/values.yaml")" = false ]
+  tree_objects > "$BATS_TEST_TMPDIR/tree.jsonl"
+  [ -z "$(jq -r 'select(.object.kind == "CiliumL2AnnouncementPolicy") | .app' "$BATS_TEST_TMPDIR/tree.jsonl")" ]
+}
+
+@test "A fresh bootstrap still installs Cilium before its own resource definitions exist" {
+  recording_tools
+
+  install
+
+  # The script installs the chart and applies nothing besides.
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^helm upgrade ' "$CALLS")" -eq 1 ]
+  [ "$(grep -cE '^kubectl (apply|create|replace|patch) ' "$CALLS")" -eq 0 ]
+  cmp "$STATE/helm-values.yaml" "$APP/values.yaml"
+
+  # The Cilium application holds nothing of Cilium's own kinds, which only its operator defines.
+  bgp_inputs
+  tree_objects > "$BATS_TEST_TMPDIR/tree.jsonl"
+  [ -z "$(jq -r 'select(.app == "kube-system/cilium" and (.object.apiVersion | startswith("cilium.io/"))) | .object.kind' "$BATS_TEST_TMPDIR/tree.jsonl")" ]
+  # Every application that does names cilium in dependsOn and is enabled.
+  owners=$(jq -r 'select(.object.apiVersion | startswith("cilium.io/")) | .app' "$BATS_TEST_TMPDIR/tree.jsonl" | sort -u)
+  echo "applications with Cilium objects: $owners"
+  [ -n "$owners" ]
+  while IFS= read -r app; do
+    [ "$(yq '[.spec.dependsOn[].name] | contains(["cilium"])' "$COPY/kubernetes/apps/base/$app/ks.yaml")" = true ]
+    grep -qxF "  - ../../base/$app/ks.yaml" "$COPY/kubernetes/apps/overlays/lab-sto2/kustomization.yaml"
+  done <<< "$owners"
 }

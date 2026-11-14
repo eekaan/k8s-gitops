@@ -185,6 +185,54 @@ whatever image the nodes run, and a pod that selects one on a node whose image l
 does not start. `tests/baseline.bats` builds the application as Flux applies it and checks the two
 classes and their handlers.
 
+## Service addresses
+
+A Service of type `LoadBalancer` gets its address from Cilium and is announced over BGP by the
+workers to two edge routers, which publish it (ADR 0013). `apps/base/kube-system/cilium-bgp/` holds
+what that takes, beside the Cilium application, whose values turn on Cilium's LoadBalancer IP
+management and its BGP control plane and keep Layer 2 announcements off:
+
+- **Opting in.** A Service gets an address, and has it advertised, only with the label
+  `k8s-gitops/announce: bgp`. Any other `LoadBalancer` Service stays pending, so no address is handed
+  out that nothing announces.
+- **The pool.** One `CiliumLoadBalancerIPPool` holds exactly the service range
+  ([infrastructure.md](infrastructure.md#services-announced-over-bgp)), `10.20.0.0/28` by default:
+  sixteen addresses. Services can share one with Cilium's `lbipam.cilium.io/sharing-key`
+  annotation where their ports differ.
+- **Who announces.** One `CiliumBGPClusterConfig` gives every worker, and no control plane, a BGP
+  instance in the cluster's AS that peers with both edge routers in theirs, over eBGP. Talos labels
+  its control planes `node-role.kubernetes.io/control-plane`, which the node selector excludes, and
+  only the workers' ports may carry the service range. The edge routers are on the node subnet, one
+  hop away, so the sessions keep eBGP's TTL of 1. A worker opens its sessions and listens for none.
+- **The sessions.** The `CiliumBGPPeerConfig` sets a hold time of 9 seconds, keepalives every 3 and
+  a connect retry of 5, and turns on graceful restart with a restart time of 120 seconds, so an
+  edge router keeps forwarding to a worker while its Cilium agent restarts. IPv4 unicast only, and
+  no password (ADR 0013).
+- **What is advertised.** The `CiliumBGPAdvertisement` the peer configuration selects advertises
+  the `LoadBalancer` address of each labelled Service, as a /32, and nothing else: no pod range and
+  no cluster IP.
+- **Before the edge routers exist** the sessions stay down: a labelled Service gets an address, but
+  nothing outside the cluster reaches it.
+- **`externalTrafficPolicy`.** With `Cluster`, the default, every worker announces every labelled
+  address, the edge routers spread connections over all of them, and a worker forwards each to an
+  endpoint on any node, translating the source to its own address when the endpoint is elsewhere.
+  With `Local`, only workers with a ready endpoint of the Service announce its address, and a
+  connection reaches an endpoint on the worker it arrived at with its source unchanged. Either way
+  the source a Service sees is what reaches the worker, which is an edge router's address while
+  the edge routers translate the client's address to their own (ADR 0013). A worker whose last
+  endpoint goes away withdraws a `Local` address; a `Cluster` address stays announced while the
+  Service has no endpoint at all.
+
+Every object there is of a kind that Cilium's operator defines when it starts, so the application
+names `cilium` in `dependsOn` and the Cilium application holds none of them: `scripts/install-cilium`
+installs Cilium before any of those definitions exists, and Flux applies the pool and the BGP
+objects once Cilium runs. Should Flux get to them before the operator has defined their kinds, the
+application fails and is tried again after its retry interval. The objects are cluster-scoped; the
+API server drops the namespace the application's `targetNamespace` gives them. Their numbers come
+from `cluster-config` ([Before Flux starts](#before-flux-starts)). `tests/install-cilium.bats`
+renders the chart and the nodes' machine configurations and builds every application as Flux
+applies it to check each of these.
+
 ## External Secrets
 
 `apps/base/external-secrets/external-secrets/` runs the External Secrets operator in its own
@@ -353,6 +401,15 @@ starts to use is listed in the example and given its source in `fill_cluster_con
 - `NODE_NAME_REGEX`: the hostnames in that `talman.yaml`, joined with `|`, with a trailing number
   standing for any number: `lab-cp-1` becomes `lab-cp-[0-9]+`, so a node OpenTofu adds later, which
   it numbers after the others, matches as well.
+- `SERVICE_RANGE`: `values.serviceRange` in that `talman.yaml`, the range `LoadBalancer` Services
+  take their addresses from ([Service addresses](#service-addresses)).
+- `BGP_CLUSTER_ASN` and `BGP_EDGE_ASN`: `values.bgp.clusterASN` and `values.bgp.edgeASN` there, the
+  workers' and the edge routers' AS numbers.
+- `BGP_EDGE_ADDRESS_1` and `BGP_EDGE_ADDRESS_2`: the two addresses of `values.bgp.edgeAddresses`
+  there, the edge routers'.
+
+The cluster stack renders the last five from the plumbing stack's numbers for BGP
+([infrastructure.md](infrastructure.md#services-announced-over-bgp)).
 
 `cluster-secrets` is decrypted from `clusters/<cluster>/secrets/cluster-secrets.sops.yaml` by sops,
 with the Flux age key, straight into kubectl, when that file exists. Its keys must be exactly those

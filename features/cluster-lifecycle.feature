@@ -76,6 +76,11 @@ Feature: Cluster lifecycle
     When cluster-destroy runs with --yes
     Then it exits non-zero naming each as namespace/name or by the volume's name, without an address or a volume handle, no tofu runs, and the generated files stay
 
+  Scenario: A Service on a pool address does not block a destroy, and a Service on any other load balancer still does
+    Given a Service of type LoadBalancer whose address lies in the service range of the cluster's talman.yaml, beside one whose address lies outside it or one with no address yet
+    When cluster-destroy runs with --yes for the first alone, for it beside each of the others, and for it with a talman.yaml that names no service range
+    Then the first alone is destroyed; beside either other, or without a service range to compare with, nothing is destroyed and only the Services that block are named
+
   Scenario: A cluster whose API does not answer is not destroyed unless asked
     Given an API that does not answer through the kubeconfig, or no kubeconfig at all
     When cluster-destroy runs with --yes, and then with --unreachable

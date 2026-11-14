@@ -5,6 +5,16 @@ output "nodes" {
   description = "Per node name: its role (controlplane or worker), fixed private address, floating address and port ID."
   sensitive   = true
   value       = module.nodes.nodes
+
+  # The plumbing stack reserves the edge routers' addresses below the DHCP pool, where this stack
+  # also places the nodes and the API load balancer.
+  precondition {
+    condition = length(setintersection(
+      toset(local.bgp.edge_addresses),
+      toset(concat([for node in values(module.nodes.nodes) : node.private_address], [module.api_lb.vip_address])),
+    )) == 0
+    error_message = "An edge router's address from the plumbing stack's edge_hosts is also a node's or the API load balancer's; choose edge_hosts apart from them."
+  }
 }
 
 output "controlplane_port_ids" {
@@ -41,9 +51,15 @@ output "worker_data_volumes" {
 }
 
 output "security_group" {
-  description = "The nodes' security group: its ID and every ingress rule in it."
+  description = "The nodes' security group: its ID, whether Neutron's default egress rules were removed from it, and every ingress rule in it."
   sensitive   = true
   value       = module.nodes.security_group
+}
+
+output "worker_security_group" {
+  description = "The workers' own security group: its ID, that it holds no egress rule of its own, and every ingress rule in it, which admit the service ports from the edge routers' addresses."
+  sensitive   = true
+  value       = module.nodes.worker_security_group
 }
 
 output "server_group" {

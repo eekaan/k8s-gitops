@@ -89,19 +89,20 @@ hubble:
 encryption:
   enabled: false
 
-# Load balancers and their addresses come from the cloud, so Cilium neither assigns nor announces
-# any.
-enableLBIPAM: false
+# Services of type LoadBalancer take their addresses from the pool of the cilium-bgp application,
+# and the workers advertise them over BGP to the edge routers, which that application configures
+# (ADR 0013). Layer 2 announcements stay off.
+enableLBIPAM: true
+bgpControlPlane:
+  enabled: true
 l2announcements:
   enabled: false
 
-# Off until something uses them: Gateway API also needs its CRDs, BGP needs peers and a cluster
-# mesh needs a second cluster.
+# Off until something uses them: Gateway API also needs its CRDs, and a cluster mesh needs a second
+# cluster.
 gatewayAPI:
   enabled: false
 ingressController:
-  enabled: false
-bgpControlPlane:
   enabled: false
 clustermesh:
   useAPIServer: false

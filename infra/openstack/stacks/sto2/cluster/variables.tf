@@ -37,6 +37,11 @@ variable "pod_subnet" {
     condition     = try(pow(2, 24 - tonumber(split("/", var.pod_subnet)[1])) >= var.controlplane_count + var.worker_count, true)
     error_message = "pod_subnet must hold a /24 for every node, as Kubernetes gives each node a /24 of it."
   }
+
+  validation {
+    condition     = try(!cidrcontains(var.pod_subnet, cidrhost(local.plumbing.bgp.service_range, 0)) && !cidrcontains(local.plumbing.bgp.service_range, cidrhost(var.pod_subnet, 0)), true)
+    error_message = "pod_subnet must not overlap the plumbing stack's service_range, which LoadBalancer addresses come from."
+  }
 }
 
 variable "service_subnet" {
@@ -57,6 +62,22 @@ variable "service_subnet" {
   validation {
     condition     = try(!cidrcontains(var.service_subnet, var.pod_subnet) && !cidrcontains(var.pod_subnet, var.service_subnet), true)
     error_message = "service_subnet must not overlap pod_subnet."
+  }
+
+  validation {
+    condition     = try(!cidrcontains(var.service_subnet, cidrhost(local.plumbing.bgp.service_range, 0)) && !cidrcontains(local.plumbing.bgp.service_range, cidrhost(var.service_subnet, 0)), true)
+    error_message = "service_subnet must not overlap the plumbing stack's service_range, which LoadBalancer addresses come from."
+  }
+}
+
+variable "service_ports" {
+  description = "TCP ports the edge routers reach Services on at the workers. By default HTTP and HTTPS, what a gateway serves."
+  type        = list(number)
+  default     = [80, 443]
+
+  validation {
+    condition     = length(distinct(var.service_ports)) == length(var.service_ports) && alltrue([for port in var.service_ports : floor(port) == port && port >= 1 && port <= 65535])
+    error_message = "service_ports must be TCP port numbers, 1 to 65535, each listed once."
   }
 }
 

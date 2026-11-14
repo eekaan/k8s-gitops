@@ -9,3 +9,11 @@ CLUSTER_DOMAIN: example.com
 NODE_CIDR: 192.0.2.0/24
 # A regular expression (Go RE2 syntax) that every node name matches in full.
 NODE_NAME_REGEX: example-(cp|w)-[0-9]+
+# The range Services of type LoadBalancer take their addresses from, as an address prefix.
+SERVICE_RANGE: 198.51.100.0/28
+# The workers' and the edge routers' autonomous system numbers, and the edge routers' two addresses
+# on the node network, which the workers peer with over BGP.
+BGP_CLUSTER_ASN: "64496"
+BGP_EDGE_ASN: "64497"
+BGP_EDGE_ADDRESS_1: 192.0.2.6
+BGP_EDGE_ADDRESS_2: 192.0.2.7

@@ -117,6 +117,44 @@ The volumes belong to the cluster stack. `just infra-destroy` and `just cluster-
 them with it, and what is on them is gone; backups are what keeps data
 ([ADR 0008](adr/0008-state-and-backups-are-encrypted-before-they-leave.md)).
 
+## Services announced over BGP
+
+Services of type `LoadBalancer` take their addresses from the service range, and every worker
+advertises them over BGP to two edge routers on the node subnet
+([kubernetes.md](kubernetes.md#service-addresses), ADR 0013). The plumbing stack defines the
+numbers, once, as variables with defaults, and gives them to the cluster stack in its sensitive
+output `bgp`:
+
+- `service_range`, `10.20.0.0/28` by default: the range addresses come from. It lies in one of
+  RFC 1918's private ranges and outside `node_cidr`, and the cluster stack refuses a `pod_subnet`
+  or `service_subnet` that overlaps it. Only BGP makes it reachable, through the edge routers.
+- `edge_hosts`, 6 and 7 by default: the host numbers of the edge routers' two addresses on the node
+  subnet, below the DHCP pool and above the gateway. They are reserved for the edge routers; no
+  stack creates an instance at them yet, and until one does, the workers' BGP sessions stay down.
+  The cluster stack refuses a plan in which a node or the API load balancer takes one.
+- `cluster_asn` and `edge_asn`, 64513 and 64512 by default: the workers' and the edge routers'
+  autonomous system numbers, two different private 16-bit numbers (64512 to 65534), for eBGP.
+
+The cluster stack hands them on in `talman.yaml` ([below](#the-generated-talmanyaml)) and makes
+the node network carry the range:
+
+- Every worker's port lists the service range among its allowed address pairs. Port security lets
+  a port send only from its own address and the pairs (Neutron's API reference, the
+  `allowed_address_pairs` and `port_security_enabled` attributes of a port), and with OVN as
+  Neutron's backend also receive only for them, so without the pair a worker could neither answer
+  from a service address nor, there, be sent a packet for one. Control planes announce nothing and
+  get no pair. The provider updates a port's allowed address pairs and security groups in place,
+  so adding them to a running worker changes neither its port nor its server.
+- The workers have a security group of their own besides the nodes', `<prefix>-workers`, whose
+  only rules admit TCP on each port of `service_ports`, 80 and 443 by default, from each edge
+  address, and which has no egress rule of its own. A rule matches a packet's protocol, port and
+  source, never its destination, so it also admits those ports to the worker's own address. The
+  workers open their BGP sessions to the edge routers on TCP 179 themselves, through the nodes'
+  group, which keeps Neutron's default egress rules; security groups are stateful, so the edge
+  routers' side of a session passes, and no rule admits a connection to TCP 179. The nodes' group
+  is unchanged: the edge addresses are not nodes. The sensitive output `worker_security_group`
+  gives the group and its rules.
+
 ## The generated talman.yaml
 
 The cluster stack renders `talos/talman.yaml.tftpl` from its own values into the sensitive output
@@ -126,7 +164,10 @@ address on the node network as the endpoint; the Talos and Kubernetes versions f
 `service_subnet`, Kubernetes' conventional private ranges by default; the load balancer's two
 addresses and each control plane's floating address as the API certificate names; the load
 balancer's floating address as `values.apiAddress`, where the cluster recipes reach the Kubernetes
-API ([cluster.md](cluster.md#environment)); and the nodes,
+API ([cluster.md](cluster.md#environment)); the plumbing stack's service range as
+`values.serviceRange` and its AS numbers and edge addresses as `values.bgp`, which
+`just cluster-config` hands to the cluster ([Services announced over BGP](#services-announced-over-bgp));
+and the nodes,
 control planes first and then workers, each by name and at its floating address, where talman
 reaches it. Planning fails, naming the variable, when the pod or service subnet is not an IPv4
 network, overlaps the other or the node subnet, or when the pod subnet holds fewer /24s than there

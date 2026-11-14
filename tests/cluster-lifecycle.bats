@@ -655,6 +655,52 @@ kube-system/node-agent-cp-1' ]
   done
 }
 
+@test "A Service on a pool address does not block a destroy, and a Service on any other load balancer still does" {
+  # The fixture's service range holds the pool Service's address and neither of the others'.
+  [ "$(yq '.values.serviceRange' "$CLUSTER/talman.yaml")" = 192.0.2.128/28 ]
+  : > "$STATE/pool-load-balancer"
+
+  recipe cluster-destroy --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ "$(calls '^tofu .* apply ' | wc -l)" -eq 1 ]
+  [[ $output != *"gateways/public"* ]]
+
+  # Beside a Service at another address, or one with no address yet, nothing is destroyed, and only
+  # the Service that blocks is named.
+  for other in load-balancer pending-load-balancer; do
+    echo "$other"
+    reset_cluster
+    restore_generated
+    : > "$STATE/pool-load-balancer"
+    : > "$STATE/$other"
+
+    recipe cluster-destroy --yes < /dev/null
+
+    [ "$status" -ne 0 ]
+    no_tofu
+    generated_kept
+    [[ $output != *"gateways/public"* ]]
+    if [[ $other == load-balancer ]]; then
+      [[ $output == *"Service apps/web"* ]]
+    else
+      [[ $output == *"Service apps/queued"* ]]
+    fi
+  done
+
+  # Without a service range in talman.yaml, no address can be shown to be the pool's.
+  reset_cluster
+  restore_generated
+  yq -i 'del(.values.serviceRange)' "$CLUSTER/talman.yaml"
+  : > "$STATE/pool-load-balancer"
+
+  recipe cluster-destroy --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  no_tofu
+  [[ $output == *"Service gateways/public"* ]]
+}
+
 @test "A cluster whose API does not answer is not destroyed unless asked" {
   : > "$STATE/api-down"
 

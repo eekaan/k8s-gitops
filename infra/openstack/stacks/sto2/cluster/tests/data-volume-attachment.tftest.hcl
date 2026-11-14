@@ -39,6 +39,12 @@ override_data {
         id           = "talos-image-fixture"
         schematic_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
       }
+      bgp = {
+        cluster_asn    = 64496
+        edge_asn       = 64497
+        edge_addresses = ["192.0.2.6", "192.0.2.7"]
+        service_range  = "203.0.113.16/28"
+      }
     }
   }
 }

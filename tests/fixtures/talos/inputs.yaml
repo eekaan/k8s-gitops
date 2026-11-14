@@ -21,6 +21,16 @@ api_address: 192.0.2.210
 # documentation range is large enough.
 pod_subnet: 10.244.0.0/16
 service_subnet: 203.0.113.0/24
+# The plumbing stack's numbers for Services announced over BGP: the range LoadBalancer addresses come
+# from, outside the node subnet, and the documentation AS numbers and two edge addresses on the node
+# subnet.
+service_range: 192.0.2.128/28
+bgp:
+  cluster_asn: 64496
+  edge_asn: 64497
+  edge_addresses:
+    - 192.0.2.6
+    - 192.0.2.7
 nodes:
   - hostname: cp-1
     role: controlplane

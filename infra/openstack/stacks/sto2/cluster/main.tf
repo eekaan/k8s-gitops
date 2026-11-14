@@ -1,6 +1,7 @@
 # The Talos nodes, on the plumbing stack's network and booting its Talos image, with their
-# security group, server group and floating IPs, the workers' data volumes, the load balancer in
-# front of their Kubernetes API, and the talman.yaml that configures them.
+# security groups, server group and floating IPs, the workers' data volumes and their part in
+# Services announced over BGP, the load balancer in front of their Kubernetes API, and the
+# talman.yaml that configures them.
 
 # The cloud and its credentials come from the environment: OS_CLOUD names the clouds.yaml entry.
 provider "openstack" {}
@@ -13,6 +14,9 @@ data "terraform_remote_state" "plumbing" {
 locals {
   plumbing = data.terraform_remote_state.plumbing.outputs
   versions = yamldecode(file("${path.module}/${var.versions_file}"))
+
+  # The numbers Services announced over BGP rest on, which the plumbing stack defines.
+  bgp = local.plumbing.bgp
 }
 
 module "nodes" {
@@ -33,7 +37,19 @@ module "nodes" {
   worker_count        = var.worker_count
   controlplane_flavor = var.controlplane_flavor
   worker_flavor       = var.worker_flavor
-  tags                = [var.prefix]
+
+  # A worker receives packets addressed to the service range and answers from it, which port
+  # security allows only for the port's own address and its allowed address pairs. Control planes
+  # announce nothing (the cilium-bgp application selects workers only), so they get no pair.
+  worker_allowed_address_pairs = [local.bgp.service_range]
+  # The edge routers reach the workers on the service ports. Each worker opens its BGP sessions to
+  # the edge routers itself, through the nodes' group's egress, so no rule admits TCP 179.
+  worker_ingress = {
+    sources   = [for address in local.bgp.edge_addresses : "${address}/32"]
+    tcp_ports = var.service_ports
+  }
+
+  tags = [var.prefix]
 }
 
 # Every worker's data volume: one more disk, empty, that Talos hands to the storage layer
@@ -106,6 +122,9 @@ locals {
     node_subnet        = local.plumbing.network.cidr
     pod_subnet         = var.pod_subnet
     service_subnet     = var.service_subnet
+    # On through talman.yaml to cluster-config, from which the cilium-bgp application takes them.
+    service_range = local.bgp.service_range
+    bgp           = local.bgp
     # Every address the Kubernetes API is reached on: the load balancer's on the node network and
     # its floating one, and each control plane's floating address.
     api_sans = concat(

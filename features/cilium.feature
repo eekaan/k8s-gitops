@@ -35,3 +35,28 @@ Feature: Cilium
     Given the application as Flux builds it from its ks.yaml and app/
     When its HelmRelease is read
     Then its chartRef names the one OCIRepository, which has the location and version of ocirepository.yaml, and its valuesFrom names only the ConfigMap generated from values.yaml, which holds that file byte for byte
+
+  Scenario: Cilium assigns LoadBalancer addresses from exactly the service range
+    Given a talman.yaml as the cluster stack renders it, and the cluster-config cluster-config makes of it
+    When the chart is rendered and every application is built as Flux builds it
+    Then LB IPAM is on, the tree holds one pool, whose one block is the service range, and it gives addresses only to Services labelled k8s-gitops/announce: bgp
+
+  Scenario: Only workers speak BGP, and they peer with exactly the two edge routers, as the cluster's AS to the edge AS
+    Given that talman.yaml and cluster-config, and every node's machine configuration rendered offline
+    When the chart is rendered and every application is built as Flux builds it
+    Then the BGP control plane is on, the tree holds one BGP cluster configuration and no per-node override, its node selector selects every worker and no control plane by the labels Talos gives them, and its one instance peers as the cluster's AS with the two edge addresses in the edge AS, which differs from it, with explicit timers, graceful restart, eBGP's single hop and no listening port
+
+  Scenario: Only the addresses of Services that opt in are advertised; pod and ClusterIP ranges never are
+    Given the applications as Flux builds them
+    When the advertisements the peer configuration selects are read
+    Then each advertises the LoadBalancer addresses of Services labelled k8s-gitops/announce: bgp and nothing else, a Service without that label is not selected, and no advertisement anywhere in the tree is of pod ranges, pod pools or interfaces
+
+  Scenario: Layer 2 announcements stay off
+    Given the pinned chart, values.yaml and the applications as Flux builds them
+    When the chart is rendered
+    Then Cilium's configuration enables neither Layer 2 announcements nor Layer 2 pod announcements, and the tree holds no Layer 2 announcement policy
+
+  Scenario: A fresh bootstrap still installs Cilium before its own resource definitions exist
+    Given a cluster with no Cilium and so none of Cilium's resource definitions
+    When the install script runs against recording tools, and every application is built as Flux builds it
+    Then the script installs the chart and applies no object, the Cilium application holds no object of Cilium's own kinds, and every application that does names cilium in dependsOn and is enabled in the cluster overlay
