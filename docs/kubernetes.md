@@ -1067,9 +1067,12 @@ positive evidence of a first install: its own data directory is empty, and the K
 that neither `data-openbao-1` nor `data-openbao-2` exists. The StatefulSet makes those claims when it
 first starts the other members and keeps them for the cluster's life, so either one means the store
 exists. The guard reads them with kubectl as the servers' own account, which the Role
-`openbao-initialize-guard` lets get those two claims and nothing else. When the API gives no answer,
-or the data directory cannot be listed, whatever the reason, the guard fails, and the pod does not
-start; it never initialises on missing evidence. The server takes the decision through
+`openbao-initialize-guard` lets get those two claims and nothing else. kubectl finds the API through
+the pod's in-cluster configuration, which client-go drops for `http://localhost:8080` once a flag
+such as `--request-timeout` changes its configuration, so the call carries no such flag and
+`timeout` ends it after 10 seconds instead. When the API gives no answer in that time, or the data
+directory cannot be listed, whatever the reason, the guard fails, and the pod does not start; it
+never initialises on missing evidence. The server takes the decision through
 `app/initialize/initialize-args.sh`, which passes the `-config` flag only as the guard wrote it.
 
 The guard holds the servers' account token, as every container of the pod does, so it may do all

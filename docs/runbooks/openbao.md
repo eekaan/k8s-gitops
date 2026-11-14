@@ -91,6 +91,17 @@ have joined, it is not safe: that store holds what nothing else does.
 The same rebuild serves when `bao-recovery` finds recovery keys someone else made, before anything
 was written: delete the pods and the three claims, in any order, and the members start from nothing.
 
+A guard that gets no answer from the Kubernetes API is another failure, and nothing is to be
+deleted. `openbao-0` stays in `Init:Error`, then `Init:CrashLoopBackOff`, and
+`kubectl --namespace openbao logs openbao-0 --container initialize-guard` ends with
+`initialize-guard: no answer from the Kubernetes API on the other members' claims; not initialising`,
+after kubectl's own error. The server never started, so nothing was initialised and its claim holds
+nothing. If kubectl's error names `localhost:8080`, it did not use the pod's in-cluster
+configuration, which a flag on its call such as `--request-timeout` turns off; a `Forbidden` names a
+missing Role or RoleBinding `openbao-initialize-guard`; a timeout, the API out of reach. Fix the cause
+through a pull request; the init container is retried, or `kubectl --namespace openbao delete pod
+openbao-0` starts it at once.
+
 ## A member that does not rejoin
 
 A member whose volume is new starts empty, does not initialise, and joins the others through
