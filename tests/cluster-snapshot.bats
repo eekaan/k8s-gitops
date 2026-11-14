@@ -607,6 +607,10 @@ resets_or_bootstraps() {
 
   [ "$status" -ne 0 ]
   [[ $output == *"the etcd bucket must exist; just infra-backup-buckets creates it"* ]]
+  # The listing before the upload may find the bucket missing without a word; the upload's own
+  # reason is what is shown.
+  [[ $output == *"NoSuchBucket"* ]]
+  [[ $output != *"directory not found"* ]]
   [ "$(calls '^rclone copyto ' | wc -l)" -eq 1 ]
   [[ " $(calls '^rclone copyto ') " == *" --s3-no-check-bucket "* ]]
   [ -z "$(find "$STORE" -mindepth 1)" ]

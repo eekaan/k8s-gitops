@@ -995,9 +995,9 @@ EOF
 }
 
 @test "A stack whose state could not be reached is not taken for one that holds nothing" {
-  # The ci stack holds a resource, but its lock cannot be taken, as .terraform is no directory
-  # (a directory that cannot be written does the same, and this holds as root too). The read fails
-  # the way bash does, with status 1, which is not an answer that the stack holds nothing.
+  # The ci stack holds a resource, but its lock cannot be taken, as .terraform is no directory (a
+  # directory that cannot be written does the same, and this holds as root too): the read ends with
+  # status 2 and its own reason, and is not an answer that the stack holds nothing.
   holds sto2/ci state-with-resources.json
   : > "$CI_STACK/.terraform"
   for args in '--yes' 'sto2/plumbing --yes'; do
@@ -1013,7 +1013,7 @@ EOF
 
   # The same for a read that ends without a word, or with another one, and status 0.
   rm "$CI_STACK/.terraform"
-  for body in 'exit 0' 'echo something'; do
+  for body in 'exit 0' 'echo something' 'exit 1' 'printf "holds\nempty\n"' 'echo empty; exit 1' 'echo holds; exit 1'; do
     printf '#!/usr/bin/env bash\n%s\n' "$body" > "$REPO/scripts/stack-state"
     rm -f "$RECORD/tofu"
     recipe infra-destroy sto2/plumbing --yes < /dev/null
@@ -1046,8 +1046,12 @@ EOF
 
   [ "$status" -eq 0 ]
   [ "$(tofu_calls apply | awk '{ print $1 }')" = "-chdir=$PLUMBING" ]
-  # The cluster stack's state is read, as the plumbing stack's destroy needs it empty; it is not planned or applied.
+  # The cluster stack's state is read, as the plumbing stack's destroy needs it empty; nothing is
+  # planned, applied or otherwise written to it.
   [ "$(tofu_calls plan | awk '{ print $1 }')" = "-chdir=$PLUMBING" ]
+  absent "-chdir=$CLUSTER plan" "$RECORD/tofu"
+  absent "-chdir=$CLUSTER apply" "$RECORD/tofu"
+  absent "-chdir=$CLUSTER destroy" "$RECORD/tofu"
 
   rm -f "$RECORD/tofu"
   for args in 'sto2/nothing --yes' 'sto2/cluster sto2/plumbing' '--force'; do
@@ -1344,7 +1348,7 @@ EOF
   recipe infra-destroy --yes < /dev/null
 
   [ "$status" -eq 0 ]
-  [[ $output != *"not implemented: removing the load balancers"* ]]
+  [[ $output != *"not implemented"* ]]
   [[ $output == *"owns no Service of type LoadBalancer"* ]]
 }
 

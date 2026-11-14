@@ -1097,7 +1097,7 @@ EOF
 
   # A read that fails the way bash does, with status 1, or that ends without the word that says what
   # it found, is not an answer that the stack holds nothing.
-  for body in 'exit 1' 'exit 0' 'echo something; exit 0'; do
+  for body in 'exit 1' 'exit 0' 'echo something; exit 0' 'printf "holds\nempty\n"' 'echo empty; exit 1' 'echo holds; exit 1'; do
     restore_generated
     printf '#!/usr/bin/env bash\n%s\n' "$body" > "$REPO/scripts/stack-state"
     fake tofu <<EOF
