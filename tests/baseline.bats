@@ -28,7 +28,7 @@ setup() {
   CLUSTER="$REPO/kubernetes/clusters/lab-sto2"
   KUBE="$(yq -e '.kubernetes' "$REPO/versions.yaml")"
   # The applications whose charts make up the baseline, the resource definitions' included.
-  CHARTS=(prometheus-operator-crds kubelet-csr-approver metrics-server spegel reloader descheduler)
+  CHARTS=(prometheus-operator-crds kubelet-csr-approver metrics-server spegel reloader descheduler cert-manager)
   # Nothing to connect to: a step that needed a cluster fails instead of finding one.
   export KUBECONFIG="$BATS_TEST_TMPDIR/no-kubeconfig"
   unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
@@ -41,29 +41,39 @@ example_vars() {
     "$CLUSTER/cluster-config.example.yaml" "$CLUSTER/cluster-secrets.example.yaml" >"$1"
 }
 
-# built APP [VARS]: the kube-system application APP as Flux applies it: its app/ built with its
-# ks.yaml, substituting strictly the variables of the cluster's example key lists, or those of the
-# YAML map in the file VARS instead. Writes $BATS_TEST_TMPDIR/APP-built.yaml and sets BUILT.
+# app_dir APP: sets APP_DIR to the directory of the application APP, in whichever namespace
+# directory it is, relative to the repository.
+app_dir() {
+  local -a dirs=("$REPO"/kubernetes/apps/base/*/"$1")
+  [ -f "${dirs[0]}/ks.yaml" ] || { echo "$1: no application directory with a ks.yaml"; return 1; }
+  APP_DIR="${dirs[0]#"$REPO"/}"
+}
+
+# built APP [VARS]: the application APP as Flux applies it: its app/ built with its ks.yaml,
+# substituting strictly the variables of the cluster's example key lists, or those of the YAML map
+# in the file VARS instead. Writes $BATS_TEST_TMPDIR/APP-built.yaml and sets BUILT and APP_DIR.
 built() {
   local app=$1 vars=${2:-} ks="$BATS_TEST_TMPDIR/$1-ks.yaml"
+  app_dir "$app"
   if [ -z "$vars" ]; then
     vars="$BATS_TEST_TMPDIR/example-vars.yaml"
     example_vars "$vars"
   fi
   # shellcheck disable=SC2016 # $vars is a yq variable.
   yq ea 'select(fileIndex == 0) as $vars | select(fileIndex == 1 and . != null)
-    | .spec.postBuild.substitute = $vars' "$vars" "$REPO/kubernetes/apps/base/kube-system/$app/ks.yaml" >"$ks"
+    | .spec.postBuild.substitute = $vars' "$vars" "$REPO/$APP_DIR/ks.yaml" >"$ks"
   BUILT="$BATS_TEST_TMPDIR/$app-built.yaml"
   # flux build reads only paths below the working directory.
-  (cd "$REPO" && flux build kustomization "$app" --path "./kubernetes/apps/base/kube-system/$app/app" \
+  (cd "$REPO" && flux build kustomization "$app" --path "./$APP_DIR/app" \
     --kustomization-file "$ks" --dry-run --strict-substitute) >"$BUILT"
 }
 
 # render APP [VARS]: renders the chart that APP's HelmRelease installs, built as built() builds
 # it, from the URL and tag of its OCIRepository, with the values helm-controller gives the chart:
 # those of the ConfigMap the HelmRelease reads, then the HelmRelease's own over them. The
-# ServiceMonitor and Grafana dashboard APIs count as present, so that only the values keep such
-# objects out. Writes $BATS_TEST_TMPDIR/APP.yaml and sets RENDERED, CHART, VALUES and INLINE.
+# ServiceMonitor, PodMonitor and Grafana dashboard APIs count as present, by group and version and
+# by kind, as charts test for either, so that only the values keep such objects out. Writes
+# $BATS_TEST_TMPDIR/APP.yaml and sets RENDERED, CHART, VALUES and INLINE.
 render() {
   local app=$1 url tag name release namespace pulled
   built "$@"
@@ -86,6 +96,8 @@ render() {
   RENDERED="$BATS_TEST_TMPDIR/$app.yaml"
   helm template "$release" "$CHART" --namespace "$namespace" --kube-version "$KUBE" --include-crds \
     --api-versions monitoring.coreos.com/v1 --api-versions grafana.integreatly.org/v1beta1 \
+    --api-versions monitoring.coreos.com/v1/ServiceMonitor --api-versions monitoring.coreos.com/v1/PodMonitor \
+    --api-versions grafana.integreatly.org/v1beta1/GrafanaDashboard \
     --values "$VALUES" --values "$INLINE" >"$RENDERED"
 }
 
@@ -305,6 +317,109 @@ gateway_api() {
     'node.k8s.io/v1 RuntimeClass/kata handler=kata namespace=none')" ]
 }
 
+@test "The certificate controller runs in its own namespace with its resource definitions" {
+  local overlay enabled namespace deployments elsewhere crds group
+  # The cluster runs the application and its namespace directory: its overlay applies both.
+  overlay="$(kustomize build --load-restrictor LoadRestrictionsNone "$REPO/kubernetes/apps/overlays/lab-sto2")"
+  enabled="$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "cert-manager") | .spec.targetNamespace' <<<"$overlay")"
+  namespace="$(yq -N 'select(.kind == "Namespace" and .metadata.name == "cert-manager") | .metadata.name' <<<"$overlay")"
+  echo "cert-manager in the overlay: targetNamespace ${enabled:-none}; namespace ${namespace:-none}"
+  [ "$enabled" = cert-manager ]
+  [ "$namespace" = cert-manager ]
+
+  render cert-manager
+  deployments="$(yq -N 'select(.kind == "Deployment") | .metadata.namespace + "/" + .metadata.name' "$RENDERED" | sort)"
+  echo "deployments: $deployments"
+  [ "$deployments" = "$(printf '%s\n' cert-manager/cert-manager cert-manager/cert-manager-cainjector \
+    cert-manager/cert-manager-webhook)" ]
+  # Nothing in kube-system or any other namespace, not even the leader election lease's Role.
+  elsewhere="$(yq -N 'select(. != null and .metadata.namespace != null and .metadata.namespace != "cert-manager")
+    | .kind + "/" + .metadata.name + " in " + .metadata.namespace' "$RENDERED")"
+  echo "in another namespace: ${elsewhere:-none}"
+  [ -z "$elsewhere" ]
+
+  # Deleting a definition deletes every certificate and issuer of its kind, so Helm keeps each one
+  # when the release is uninstalled, as it is when the application leaves the tree.
+  crds="$(yq -N 'select(.kind == "CustomResourceDefinition") | .spec.group + " " + .metadata.name + " "
+    + (.metadata.annotations["helm.sh/resource-policy"] // "none")' "$RENDERED")"
+  echo "$crds"
+  for group in cert-manager.io acme.cert-manager.io; do
+    grep -q "^$group " <<<"$crds" || { echo "no definition of $group"; return 1; }
+  done
+  grep -qx 'cert-manager.io certificates.cert-manager.io keep' <<<"$crds"
+  grep -qx 'cert-manager.io clusterissuers.cert-manager.io keep' <<<"$crds"
+  [ "$(grep -vc ' keep$' <<<"$crds")" -eq 0 ]
+}
+
+@test "The certificate controller handles Gateway API resources" {
+  local depends wait config args
+  # It starts only once the Gateway API definitions are established: it waits for their
+  # application, which is Ready only then. cert-manager checks for them once, when it starts.
+  app_dir cert-manager
+  depends="$(yq '.spec.dependsOn // [] | .[].name' "$REPO/$APP_DIR/ks.yaml")"
+  wait="$(yq '.spec.wait' "$REPO/kubernetes/apps/base/kube-system/gateway-api-crds/ks.yaml")"
+  echo "cert-manager depends on: ${depends:-nothing}; gateway-api-crds waits: $wait"
+  grep -qx gateway-api-crds <<<"$depends"
+  [ "$wait" = true ]
+
+  render cert-manager
+  config="$(yq -N 'select(.kind == "ConfigMap" and .metadata.name == "cert-manager") | .data["config.yaml"]' "$RENDERED")"
+  echo "controller configuration: ${config:-none}"
+  [ "$(yq '.apiVersion + " " + .kind' <<<"$config")" = 'controller.config.cert-manager.io/v1alpha1 ControllerConfiguration' ]
+  [ "$(yq '.gatewayAPI.enabled' <<<"$config")" = true ]
+  # The controller reads that configuration.
+  args="$(yq -N 'select(.kind == "Deployment" and .metadata.name == "cert-manager") | .spec.template.spec
+    | ((.volumes[] | select(.configMap.name == "cert-manager") | "volume " + .name),
+      (.containers[0].args[] | select(test("^--config="))))' "$RENDERED")"
+  echo "controller: $args"
+  grep -qx -- '--config=/var/cert-manager/config/config.yaml' <<<"$args"
+  grep -q '^volume ' <<<"$args"
+}
+
+@test "The certificate controller keeps running while a node is drained" {
+  local component deployment labels replicas spread budget min max failed=""
+  render cert-manager
+  for component in controller webhook cainjector; do
+    deployment="$BATS_TEST_TMPDIR/$component.yaml"
+    COMPONENT="$component" yq -N 'select(.kind == "Deployment"
+      and .spec.template.metadata.labels["app.kubernetes.io/component"] == strenv(COMPONENT))' "$RENDERED" >"$deployment"
+    if [ ! -s "$deployment" ]; then
+      failed+=" $component:missing"
+      continue
+    fi
+    labels="$(yq -o json -I0 '.spec.template.metadata.labels // {}' "$deployment")"
+    replicas="$(yq '.spec.replicas // 1' "$deployment")"
+    # A spread over the nodes that counts this component's pods only.
+    # shellcheck disable=SC2016 # $labels is a yq variable.
+    spread="$(LABELS="$labels" yq -N '(strenv(LABELS) | from_yaml) as $labels
+      | .spec.template.spec.topologySpreadConstraints // [] | .[]
+      | select(.topologyKey == "kubernetes.io/hostname" and .maxSkew == 1
+        and (.labelSelector.matchLabels // {} | length) > 0
+        and (.labelSelector.matchLabels | to_entries | all_c(.value == $labels[.key])))
+      | .whenUnsatisfiable' "$deployment")"
+    # A budget whose selector picks this component's pods.
+    # shellcheck disable=SC2016 # $labels is a yq variable.
+    budget="$(LABELS="$labels" yq -N '(strenv(LABELS) | from_yaml) as $labels | select(.kind == "PodDisruptionBudget"
+      and (.spec.selector.matchLabels // {} | length) > 0
+      and (.spec.selector.matchLabels | to_entries | all_c(.value == $labels[.key])))
+      | (.spec.minAvailable // "none" | tostring) + " " + (.spec.maxUnavailable // "none" | tostring)' "$RENDERED")"
+    read -r min max <<<"${budget:-none none}"
+    echo "$component: replicas $replicas, spread over nodes: ${spread:-none}, budget minAvailable $min maxUnavailable $max"
+    if ((replicas < 2)); then failed+=" $component:replicas"; fi
+    [ -n "$spread" ] || failed+=" $component:spread"
+    # The budget keeps one pod available and lets a drain evict another.
+    if [[ $min =~ ^[0-9]+$ && $max == none ]]; then
+      ((min >= 1 && min < replicas)) || failed+=" $component:budget"
+    elif [[ $max =~ ^[0-9]+$ && $min == none ]]; then
+      ((max >= 1 && max < replicas)) || failed+=" $component:budget"
+    else
+      failed+=" $component:budget"
+    fi
+  done
+  echo "failed:${failed:- none}"
+  [ -z "$failed" ]
+}
+
 @test "every values key of prometheus-operator-crds is one its pinned chart defines" {
   defined_keys prometheus-operator-crds
 }
@@ -327,4 +442,8 @@ gateway_api() {
 
 @test "every values key of descheduler is one its pinned chart defines" {
   defined_keys descheduler
+}
+
+@test "every values key of cert-manager is one its pinned chart defines" {
+  defined_keys cert-manager
 }

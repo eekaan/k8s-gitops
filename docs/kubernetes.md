@@ -131,8 +131,9 @@ Resource definitions that several applications use are applications of their own
 
 Both `ks.yaml` files set `wait`, so each is Ready only once its definitions are established. An
 application that creates objects of these groups, or whose chart does, names the matching one in
-`dependsOn` and turns off any copy of the same definitions its own chart would install. No
-application does yet: no ServiceMonitor, PodMonitor, dashboard or route is enabled anywhere.
+`dependsOn` and turns off any copy of the same definitions its own chart would install.
+cert-manager names `gateway-api-crds` ([cert-manager](#cert-manager)); no ServiceMonitor,
+PodMonitor, dashboard or route is enabled anywhere.
 
 Deleting a definition deletes every object of its kind, so neither application ever deletes one,
 also not when it leaves the tree. Neither applies a definition itself. The monitoring chart's
@@ -184,6 +185,31 @@ definitions, gives it none. A pod selects one with `runtimeClassName`; none does
 whatever image the nodes run, and a pod that selects one on a node whose image lacks its handler
 does not start. `tests/baseline.bats` builds the application as Flux applies it and checks the two
 classes and their handlers.
+
+## cert-manager
+
+`apps/base/cert-manager/cert-manager/` installs cert-manager, which issues and renews the TLS
+certificates applications and gateways ask for, from the issuers they name (ADR 0006). No issuer is
+configured yet, so it issues nothing.
+
+It runs in its own namespace, `cert-manager`, at the restricted Pod Security level, from the
+publisher's chart in `oci://quay.io/jetstack/charts`; its leader election leases are there too, so
+nothing it installs is in another namespace. The release installs and upgrades the `cert-manager.io`
+and `acme.cert-manager.io` definitions, as the publisher recommends under Flux: only this chart
+ships them, so they move with the controller that serves them rather than being an application of
+their own. Each carries `helm.sh/resource-policy: keep`, so removing the application leaves them,
+and every certificate and issuer, in place. Gateway API support is on; cert-manager looks for the
+Gateway API definitions only when it starts, so the application names `gateway-api-crds` in
+`dependsOn`. Its `ks.yaml` sets `wait`, so an application that names `cert-manager` in `dependsOn`
+starts once cert-manager runs.
+
+Following the publisher's production guidance, the controller and the CA injector run two replicas
+each, one leading, and the webhook three, one per worker, spread over the nodes where the scheduler
+can; each has a disruption budget that keeps one pod available, so a drain never takes the last
+one. They run at `system-cluster-critical` with small requests and no limits. No ServiceMonitor or
+PodMonitor is enabled. `tests/baseline.bats` renders the chart with these values and checks the
+namespace, the definitions and their policy, the Gateway API configuration and dependency, and the
+replicas, spreads and budgets.
 
 ## Flux itself
 

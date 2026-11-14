@@ -1,5 +1,5 @@
 Feature: Cluster baseline
-  Resource definitions, runtime classes and small services that later applications assume.
+  Resource definitions, runtime classes, the certificate controller and small services that later applications assume.
 
   Scenario: The monitoring resource definitions are installed without a controller
     Given the pinned chart and its values
@@ -35,3 +35,18 @@ Feature: Cluster baseline
     Given the runtime-classes application, enabled in the cluster's overlay
     When it is built offline as Flux applies it
     Then it yields exactly two RuntimeClasses, without a namespace: gvisor with gVisor's handler runsc, and kata with Kata Containers' handler kata
+
+  Scenario: The certificate controller runs in its own namespace with its resource definitions
+    Given the cert-manager application and its namespace directory, enabled in the cluster's overlay
+    When its pinned chart is rendered offline with the repository's values
+    Then its controller, webhook and CA injector run in the namespace cert-manager, no object it renders is in another namespace, and it yields the cert-manager.io and acme.cert-manager.io definitions, each kept when the release is uninstalled
+
+  Scenario: The certificate controller handles Gateway API resources
+    Given the cert-manager application and the Gateway API resource definitions application
+    When its Kustomization is read and its chart is rendered offline
+    Then the controller's configuration turns Gateway API support on, and the application starts only once the Gateway API definitions are established
+
+  Scenario: The certificate controller keeps running while a node is drained
+    Given the cert-manager chart rendered offline with the repository's values
+    When its Deployments and PodDisruptionBudgets are read
+    Then the controller, webhook and CA injector each run at least two replicas spread over the nodes, under a disruption budget that keeps one available and leaves at least one free to evict

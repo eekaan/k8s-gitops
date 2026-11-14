@@ -7,8 +7,10 @@ kind: Kustomization
 # enabled application. A disabled application stays listed, commented out with the reason.
 resources:
   - ../../base/flux-system/artifact-generator
+  - ../../base/cert-manager
   - ../../base/demo
   - ../../base/kube-system
+  - ../../base/cert-manager/cert-manager/ks.yaml
   - ../../base/demo/hello/ks.yaml
   - ../../base/kube-system/cilium/ks.yaml
   - ../../base/kube-system/descheduler/ks.yaml
