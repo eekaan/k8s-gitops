@@ -285,6 +285,16 @@ rollout() {
   run bash -c 'printf "yes\nyes\nyes\nyes\n" | env "$@"' _ "${ENVIRONMENT[@]}" "$REPO/scripts/edge-rollout" --yes
 }
 
+@test "a check of one edge asks nothing about the other edge's host key" {
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  grep -v "^$ADDRESS_2 " "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts" > "$BATS_TEST_TMPDIR/known"
+  cp "$BATS_TEST_TMPDIR/known" "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts"
+  edge_check --edge 1 < /dev/null
+  echo "$output"
+  [ "$status" -eq 0 ]
+  absent '^ssh-keyscan ' "$RECORD/argv"
+}
+
 # plan_replacing NUMBER...: a plan, as tofu show -json prints it, that replaces the instances of the
 # edges named and changes nothing else.
 plan_replacing() {

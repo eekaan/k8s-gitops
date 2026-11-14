@@ -2,7 +2,8 @@
 # Checks what the real-speaker proof of the edge routers' routing policy printed (tests/fixtures/
 # edge-policy/proof.sh, run in FRR by edge-policy-check): of the five prefixes a speaker in the
 # cluster's AS offered, only the /32 inside the service range is in the edge's table; the speakers
-# in another AS and outside the listen range have no session; and the edge advertised nothing back.
+# in another AS and outside the listen range have no session; and the edge advertised nothing back,
+# the speaker holds no path learned from it, and the sessions never dropped.
 # Prints pass or FAIL per item and exits non-zero on any FAIL.
 # Usage: scripts/edge-policy-assert FILE, FILE being the proof's output
 set -euo pipefail
@@ -38,4 +39,15 @@ expect "the table holds the /32 inside the service range and nothing else" table
 expect "the edge accepted one prefix of the five" sessions '.peers["127.0.0.2"].pfxRcd == 1'
 expect "the edge advertised nothing" advertised '(.advertisedRoutes | length) == 0'
 expect "the speaker received nothing from the edge" offered '.peers["127.0.0.1"].pfxRcd == 0'
+# A statement that bypasses the outbound route map, default-originate, sends a default route that no
+# count of advertised routes shows. What the speaker holds is the proof: of the paths in its table
+# none was learned from the edge (its own, locally originated ones have no peer).
+expect "the speaker holds no path learned from the edge, so the edge originated no default route" learned \
+  '[.routes[][] | select(.peerId == "127.0.0.1")] | length == 0'
+# A session that is reset over and over holds nothing at the moment it is read; both sessions stayed
+# up from the first connection to the last reading, so the checks above read them as they were.
+expect "the session between the edge and the speaker was established once and never dropped" sessions \
+  '.peers["127.0.0.2"] | .connectionsEstablished == 1 and .connectionsDropped == 0'
+expect "the speaker's session to the edge is established and was never dropped" offered \
+  '.peers["127.0.0.1"] | .state == "Established" and .connectionsEstablished == 1 and .connectionsDropped == 0'
 exit "$failed"
