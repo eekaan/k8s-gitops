@@ -64,6 +64,22 @@ extensions:
   off. `just cluster-talos` applies the setting to running nodes, where a sysctl takes effect
   without a reboot
   ([Talos](https://docs.siderolabs.com/talos/v1.14/configure-your-talos-cluster/system-configuration/editing-machine-configuration)).
+
+  The kubelet's seccomp default narrows that cost. `talos/patches/all/seccomp-default.yaml` has
+  every node's kubelet run a container whose pod sets no seccomp profile under the container
+  runtime's default profile instead of none
+  ([Kubernetes](https://kubernetes.io/docs/tutorials/security/seccomp/#enable-the-use-of-runtimedefault-as-the-default-seccomp-profile-for-all-workloads),
+  [Talos](https://docs.siderolabs.com/talos/v1.14/reference/configuration/kubernetes/kubeletconfig)).
+  To a container without `CAP_SYS_ADMIN` among its capabilities, containerd's default profile
+  refuses `unshare`, `setns`, `clone3`, and a `clone` that asks for any new namespace, a user
+  namespace among them
+  ([containerd](https://github.com/containerd/containerd/blob/v2.3.7/contrib/seccomp/seccomp_default.go),
+  the version Talos 1.14.6 runs). It narrows nothing for a privileged container, which always runs
+  without a profile ([Kubernetes](https://kubernetes.io/docs/tutorials/security/seccomp/)), for a
+  container that sets `Unconfined` or a profile of its own, or for a container with
+  `CAP_SYS_ADMIN`, to which the default profile allows these calls. The configuration Talos
+  generates turns the default on by itself; the patch states it, so that a change of that default
+  cannot turn it off, and changes nothing on a node that runs the generated configuration.
 - `siderolabs/kata-containers`: Kata Containers, which registers the containerd runtime handlers
   `kata`, on Cloud Hypervisor, and `kata-qemu`; the RuntimeClass `kata` selects the first. Kata
   runs each pod in a virtual machine of its own and needs hardware virtualisation on the node, which
@@ -118,7 +134,7 @@ Talos 1.14 and later.
 
 The cost is disk: the setting lets containerd's garbage collection remove a layer from the content
 store once it is unpacked into the snapshotter
-([containerd](https://github.com/containerd/containerd/blob/v2.3.4/docs/cri/config.md)), so with it
+([containerd](https://github.com/containerd/containerd/blob/v2.3.7/docs/cri/config.md)), so with it
 off every image the node pulls is held twice on the node's disk, its layers as pulled in the
 content store and unpacked in the snapshotter, until the image is removed. Both are under
 `/var/lib/containerd`, which stays a directory of the system disk's EPHEMERAL volume unless a

@@ -71,6 +71,11 @@ Feature: Talos machine configuration
     When the Talos check renders every node's configuration with talman and validates it with talosctl
     Then each of the six configurations sets discard_unpacked_layers of containerd's images plugin once, to false, in a CRI customization, in place of Talos' default, which discards them
 
+  Scenario: Every node's kubelet runs a container that sets no seccomp profile under the runtime's default, whatever Talos generates
+    Given the template, the patches, the schematic and fixture node data, and a copy of them in which a patch listed first for every node turns the kubelet's seccomp default off
+    When the Talos check renders every node's configuration from each
+    Then each of the six configurations from both enables the container runtime's default seccomp profile, so the repository's own patches turn it on, not only the configuration Talos generates
+
   Scenario: Every worker's machine configuration names the data device the same way, and no control plane's does
     Given fixture node data with three control planes and three workers
     When the configuration is rendered and validated

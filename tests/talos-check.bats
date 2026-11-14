@@ -382,6 +382,37 @@ EOF
   [ "$checked" -eq 6 ]
 }
 
+@test "Every node's kubelet runs a container that sets no seccomp profile under the runtime's default, whatever Talos generates" {
+  # The configuration Talos generates turns the setting on by itself. In a copy, a patch listed
+  # first for every node turns it off, standing in for a Talos default that does not, so only a
+  # patch of the repository's listed after it turns it on again.
+  copy_tree
+  off=../patches/all/seccomp-default-off.yaml
+  printf '%s\n' --- 'apiVersion: v1alpha1' 'kind: KubeletConfig' 'defaultRuntimeSeccompProfileEnabled: false' \
+    > "$COPY/talos/patches/${off#../patches/}"
+  sed -i "/^  all:\$/a\\    - $off" "$COPY/talos/talman.yaml.tftpl"
+  [ "$(grep -A 1 '^  all:$' "$COPY/talos/talman.yaml.tftpl" | tail -n 1)" = "    - $off" ]
+
+  for tree in repository copy; do
+    if [[ $tree == repository ]]; then
+      script=$SCRIPT
+    else
+      script=$COPY/scripts/talos-check
+    fi
+    run "$script" "$RENDERED/$tree"
+
+    [ "$status" -eq 0 ]
+    checked=0
+    for hostname in $(nodes); do
+      enabled=$(yq 'select(.kind == "KubeletConfig") | .defaultRuntimeSeccompProfileEnabled' "$RENDERED/$tree/$hostname.yaml")
+      echo "$tree: $hostname: defaultRuntimeSeccompProfileEnabled: $enabled"
+      [ "$enabled" = true ]
+      checked=$((checked + 1))
+    done
+    [ "$checked" -eq 6 ]
+  done
+}
+
 @test "Every worker's machine configuration names the data device the same way, and no control plane's does" {
   run "$SCRIPT" "$RENDERED"
 
