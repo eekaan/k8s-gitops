@@ -6,4 +6,4 @@
 # bundle is encrypted before that. The private half never enters the repository (ADR 0005).
 creation_rules:
   - path_regex: ^[^/]+/secrets\.sops\.yaml$
-    age: example-talos-age-recipient
+    age: age1pklkf3zmxckt2xv2anwljpylrlkzkzv2tuwn2eurcht8jhu36ququnulxj

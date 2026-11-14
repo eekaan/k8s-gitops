@@ -13,4 +13,4 @@
 creation_rules:
   - path_regex: ^kubernetes/(.*/)?[^/]+\.sops\.yaml$
     encrypted_regex: ^(data|stringData)$
-    age: example-flux-age-recipient
+    age: age1hy4qcevmxt3x5ddzy9qape8rpv5zdk3rww0rql6jrnugm3f7eywsefteq0
