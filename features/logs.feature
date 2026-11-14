@@ -75,7 +75,7 @@ Feature: Logs
   Scenario: Grafana reads logs from VictoriaLogs through a datasource the tree declares
     Given the grafana application and the victoria-logs application's pinned chart
     When the first is built as Flux applies it and the second is rendered offline
-    Then a GrafanaDatasource selects the Grafana, is of the VictoriaLogs plugin's type, names the store's Service in its namespace on a port the Service serves, asks for exactly that plugin at an exact version that Renovate updates and for no other, and a GrafanaDashboard loads a dashboard of log volume by namespace and by node and a logs panel with namespace and pod variables, from a ConfigMap of the application
+    Then a GrafanaDatasource selects the Grafana, is of the VictoriaLogs plugin's type, names the store's Service in its namespace on a port the Service serves, asks for exactly that plugin at an exact version that Renovate updates and for no other, the Grafana's container sets what makes the image's entrypoint install it while Grafana's own preinstall of plugins stays off, and a GrafanaDashboard loads a dashboard of log volume by namespace and by node and a logs panel with namespace and pod variables, from a ConfigMap of the application
 
   @by:vector-check
   Scenario: Kernel audit records are dropped and counted

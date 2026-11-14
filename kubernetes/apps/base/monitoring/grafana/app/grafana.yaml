@@ -26,8 +26,8 @@ spec:
     # Grafana reaches the internet on its own unless told not to: usage counters to
     # stats.grafana.org, checks for newer Grafana and plugin releases and the news feed from
     # grafana.com, profile pictures from gravatar.com and snapshots published to
-    # snapshots.raintank.io. Everything it runs comes from Git and the image instead, but the one plugin
-    # that is installed at start, which the VictoriaLogs datasource asks for.
+    # snapshots.raintank.io. Everything it runs comes from Git and the image instead, but the one
+    # plugin of the VictoriaLogs datasource, which the container's environment below installs.
     analytics:
       reporting_enabled: "false"
       check_for_updates: "false"
@@ -36,15 +36,15 @@ spec:
       news_feed_enabled: "false"
     plugins:
       # Grafana otherwise installs a list of plugins from grafana.com at every start, unpinned and
-      # updated, into a data directory that starts empty each time. This turns that list off. The
-      # plugins a GrafanaDatasource or GrafanaDashboard asks for reach Grafana as GF_INSTALL_PLUGINS,
-      # which the image's entrypoint installs whatever this says: the VictoriaLogs datasource's is
-      # the only one asked for (grafanadatasource-victoria-logs.yaml).
+      # updated, into a data directory that starts empty each time. This turns that list off, and
+      # with it the install of the plugins a GrafanaDatasource or GrafanaDashboard asks for, which
+      # the operator hands to the container as GF_INSTALL_PLUGINS: Grafana's server reads that only
+      # while this is off. The container's environment below installs the one plugin instead.
       preinstall_disabled: "true"
       # No plugin catalogue to install or update plugins from grafana.com.
       plugin_admin_enabled: "false"
-      # The image's plugins, and the one installed at start, are verified with the key Grafana ships;
-      # no key is fetched.
+      # The image's plugins, and the one installed at start, are verified with the key Grafana
+      # ships; no key is fetched.
       public_key_retrieval_disabled: "true"
     security:
       disable_gravatar: "true"
@@ -56,3 +56,15 @@ spec:
       # Service picks. A drain restarts the one replica on another node, and a disruption budget for
       # it would only block the drain.
       replicas: 1
+      template:
+        spec:
+          containers:
+            # The image's entrypoint, run.sh, installs the plugins in GF_INSTALL_PLUGINS, which the
+            # operator sets from the datasource's plugins (grafanadatasource-victoria-logs.yaml), with
+            # `grafana cli plugins install` before it starts Grafana, and only with this set. It runs
+            # under set -e: a download that fails stops Grafana from starting, and the pod restarts
+            # until grafana.com answers. The patch merges into the operator's container by its name.
+            - name: grafana
+              env:
+                - name: GF_INSTALL_PLUGINS_FORCE
+                  value: "true"

@@ -1,6 +1,7 @@
 Feature: Grafana
   One Grafana in the namespace monitoring, run by the Grafana operator, with the cluster's Prometheus
-  as its datasource and the monitoring chart's dashboards, all of it from Git.
+  and VictoriaLogs as its datasources, the monitoring chart's dashboards and one of logs, all of it
+  from Git.
 
   Scenario: The Grafana operator installs and upgrades its resource definitions
     Given the grafana-operator application, enabled in the cluster's overlay

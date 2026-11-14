@@ -390,10 +390,14 @@ internet on its own: its
 configuration turns off usage reporting, the checks for Grafana and plugin updates, the news feed,
 the plugin catalogue, the plugins Grafana would install at every start, the download of plugin
 signing keys, Gravatar images and external snapshots. The one exception is the plugin of the
-VictoriaLogs datasource ([Logs](#logs)): Grafana does not ship it, so the operator asks Grafana to
-install it at start, `victoriametrics-logs-datasource` at the exact version in
-`grafanadatasource-victoria-logs.yaml`, which Renovate moves. The Grafana image's entrypoint
-downloads that one archive from grafana.com's plugin catalogue at every start, and Grafana loads it
+VictoriaLogs datasource ([Logs](#logs)): Grafana does not ship it. The operator hands it to Grafana's
+container as `GF_INSTALL_PLUGINS`, `victoriametrics-logs-datasource` at the exact version in
+`grafanadatasource-victoria-logs.yaml`, which Renovate moves, and `grafana.yaml` sets
+`GF_INSTALL_PLUGINS_FORCE=true` on the container. With that set the Grafana image's entrypoint runs
+`grafana cli plugins install victoriametrics-logs-datasource <version>` at every start, which
+downloads that one archive from grafana.com's plugin catalogue; Grafana's own server would install
+it only with its preinstalled-plugins list on, which stays off. The entrypoint runs under `set -e`,
+so a failed download stops Grafana from starting until grafana.com answers. Grafana loads the plugin
 only if its signature verifies against the public key Grafana ships. Nothing else is fetched, and
 `tests/grafana.bats` fails when any other datasource or dashboard asks for a plugin.
 
@@ -450,10 +454,10 @@ Two kinds of record are made smaller before they are sent:
 
 - the kernel's audit records, the lines of the service `kernel` that the kernel prints as `audit:`
   or `auditd:`, which the kernel's audit subsystem writes, are dropped by the filter
-  transform `drop_audit`. Vector counts what a filter drops in `component_discarded_events_total`
-  of its own metrics, which Prometheus scrapes from the PodMonitor, so the drop is visible as the
-  `drop_audit` series. The log of Talos's `auditd` service, `/var/log/auditd.log`, is another file
-  and is still shipped;
+  transform `drop_audit`. Vector counts what a filter drops in
+  `vector_component_discarded_events_total` of its own metrics, which Prometheus scrapes from the
+  PodMonitor, so the drop is visible as the series with `component_id="drop_audit"`. The log of
+  Talos's `auditd` service, `/var/log/auditd.log`, is another file and is still shipped;
 - a pod's labels are not stored one field each: VictoriaLogs makes a field of every name, and
   labels such as `pod-template-hash` and `controller-revision-hash` take a new value with every
   rollout. The transform `pod_fields` keeps three, the Kubernetes recommended labels that name the
@@ -465,7 +469,7 @@ A record has the fields `_time`, `_msg` and `_stream`, and a pod's `kubernetes.p
 `kubernetes.pod_name`, `kubernetes.container_name`, `kubernetes.pod_node_name`, `node`,
 `kubernetes.pod_labels` as above and the source's other fields; a Talos
 service's `node`, `talos_service`, `file`, `level` and, for the kernel, `facility`. The stream is
-the namespace, pod and container of a pod, or the node and service of a Talos service.
+the namespace, pod, container and node of a pod, or the node and service of a Talos service.
 
 Talos flushes its files every 15 seconds, so its lines reach the store within about that. While the
 collector is not reading, such as during its own restart, lines wait in the files, and it goes on
@@ -527,8 +531,11 @@ Reading the logs, with the cluster's kubeconfig:
   and pod, or the node for a Talos service's record, and the message. It asks the Kubernetes API for
   VictoriaLogs' `/select/logsql/query` through the API's service proxy to the Service
   `victoria-logs`, so no port is forwarded and none is left behind, and prints neither kubectl's
-  output nor an address. A query the store refuses fails with the store's message, and an API that
-  does not answer with that said. The query is LogsQL, such as `talos_service:kubelet`,
+  output nor an address. A query the store refuses fails with the store's own message: kubectl
+  keeps the body of a 400 out of its error, so the recipe asks again, with kubectl's verbose log
+  going to a file it reads the body from and never shows, which holds the API server's address. A
+  failure of the store itself shows the message kubectl gives for it, and an API that does not
+  answer fails with that said. The query is LogsQL, such as `talos_service:kubelet`,
   `kubernetes.pod_namespace:monitoring error` or `node:node-1 talos_service:kernel`; a query that
   ends in a `stats` pipe prints its records as JSON. VictoriaLogs keeps the records with the
   largest times when the limit cuts the answer, in no order, and the recipe sorts what it got.

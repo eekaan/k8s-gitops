@@ -3,15 +3,17 @@
 # server queries it, so a browser needs no way to it. The type is the VictoriaLogs plugin's, which
 # Grafana does not ship.
 #
-# This is the one thing Grafana fetches from the network: the operator sets the plugin in
-# GF_INSTALL_PLUGINS on Grafana's container, and the Grafana image's entrypoint runs
-# `grafana cli plugins install victoriametrics-logs-datasource <version>` at every start, which
-# downloads that plugin's archive, at exactly that version, from grafana.com's plugin catalogue
+# This is the one thing Grafana fetches from the network. The operator hands the plugin below to
+# Grafana's container as GF_INSTALL_PLUGINS, and grafana.yaml sets GF_INSTALL_PLUGINS_FORCE there,
+# so that the image's entrypoint runs `grafana cli plugins install victoriametrics-logs-datasource
+# <version>` before it starts Grafana, at every start. That downloads the plugin's archive, at
+# exactly that version, from grafana.com's plugin catalogue
 # (https://grafana.com/api/plugins/victoriametrics-logs-datasource/versions/<version>/download).
-# Grafana verifies a plugin's signature against the public key it ships when it loads it. The setting
-# that turns off Grafana's list of preinstalled plugins, plugins.preinstall_disabled, does not
-# apply to GF_INSTALL_PLUGINS, which the image's entrypoint reads before Grafana starts. The plugin
-# is an Apache-2.0 release of its publisher's, VictoriaMetrics/victorialogs-datasource.
+# Grafana's own server would install it only with plugins.preinstall_disabled off, which would let it
+# install its list of plugins as well. The entrypoint runs under set -e: a failed download stops
+# Grafana from starting. Grafana verifies a plugin's signature against the public key it ships when
+# it loads it. The plugin is an Apache-2.0 release of its publisher's,
+# VictoriaMetrics/victorialogs-datasource.
 apiVersion: grafana.integreatly.org/v1beta1
 kind: GrafanaDatasource
 metadata:

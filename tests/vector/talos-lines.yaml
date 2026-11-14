@@ -163,10 +163,10 @@ tests:
         source: |
           .file = "/var/log/kernel.log"
           .host = "vector-x1y2z"
-          .message = "kern:    info: [2026-11-14T12:00:03.000000000Z]: audit: type=1400 audit(1794571203.000:42): apparmor=\"DENIED\" operation=\"open\""
+          .message = "kern:  notice: [2026-11-14T12:00:03.000000000Z]: audit: type=1400 audit(1794571203.000:42): apparmor=\"DENIED\" operation=\"open\""
           .timestamp = t'2026-11-14T13:00:00Z'
-    # The records leave at a filter transform, which Vector counts in component_discarded_events_total
-    # of its own metrics; no event reaches the sink from it.
+    # The records leave at a filter transform, which Vector counts in
+    # vector_component_discarded_events_total of its own metrics; no event reaches the sink from it.
     no_outputs_from:
       - drop_audit
 
@@ -186,6 +186,25 @@ tests:
             source: |
               assert_eq!(.talos_service, "kernel")
               assert_eq!(.level, "warn")
+
+  # The kernel prints audit records with pr_notice, so a line at the same priority that is no audit
+  # record must go on: the filter matches the audit prefix, not a priority.
+  - name: a kernel line at the audit records' priority goes on to the store
+    inputs:
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/kernel.log"
+          .host = "vector-x1y2z"
+          .message = "kern:  notice: [2026-11-14T12:00:05.000000000Z]: Console: switching to colour dummy device 80x25"
+          .timestamp = t'2026-11-14T13:00:00Z'
+    outputs:
+      - extract_from: drop_audit
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.talos_service, "kernel")
+              assert_eq!(.level, "notice")
 
   - name: A pod's record carries the named labels and no field per other label
     inputs:

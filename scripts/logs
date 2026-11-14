@@ -98,11 +98,30 @@ start=$(date -u -d "@$(($(date -u +%s) - seconds))" +%Y-%m-%dT%H:%M:%SZ)
 encoded=$(jq -rn --arg q "$query" '$q | @uri')
 path="/api/v1/namespaces/monitoring/services/victoria-logs:9428/proxy/select/logsql/query"
 if ! kubectl get --raw "$path?query=$encoded&start=$start&limit=$limit" > "$work/answer" 2> "$work/error"; then
-  # Error from server (BadRequest): <the store's message> is what kubectl prints for an answer the
-  # store gave; any other failure is the connection to the API server, whose message names its
-  # address.
-  if [[ $(< "$work/error") =~ ^Error\ from\ server\ \([A-Za-z]+\):\ (.*)$ ]]; then
+  # kubectl prints Error from server (<reason>): <message> for an answer the API server or the
+  # store gave, after any warning lines; any other failure is the connection to the API server,
+  # whose message names its address.
+  failure=$(grep -m1 '^Error from server (' "$work/error" || true)
+  if [[ $failure =~ ^Error\ from\ server\ \([A-Za-z]+\):\ (.*)$ ]]; then
     message=${BASH_REMATCH[1]}
+    # The Kubernetes API relays the store's 400 with a plain-text body, which kubectl keeps out of
+    # its message ("the server rejected our request for an unknown reason") and shows only in the
+    # log of a verbose run, as the block `"Response Body" body=<`, the body's lines each after a
+    # tab, and ` >`. The query is read-only, so it is asked again to read that log, which is
+    # never shown, as it names the API server's address.
+    if [[ $failure == *'(BadRequest): the server rejected our request for an unknown reason' ]] \
+      && ! kubectl -v=8 get --raw "$path?query=$encoded&start=$start&limit=$limit" > /dev/null 2> "$work/verbose"; then
+      body='' inside=0
+      while IFS= read -r line; do
+        if ((inside)); then
+          [[ $line == ' >' ]] && break
+          body+="${body:+ }${line#$'\t'}"
+        elif [[ $line == *'"Response Body" body=<' ]]; then
+          inside=1
+        fi
+      done < "$work/verbose"
+      [[ -z $body ]] || message=$body
+    fi
     # An address the store's message happens to carry is left out as well.
     message=$(sed -E 's/[0-9]{1,3}(\.[0-9]{1,3}){3}(:[0-9]+)?/<address>/g' <<< "$message")
     infra_error "VictoriaLogs or the Kubernetes API refused the query: $message"
@@ -119,7 +138,12 @@ step="reading the answer"
 # out so that a record stays one line and cannot drive the operator's terminal.
 if ! jq -rs '
   def clean: gsub("[\r\n]+"; " ") | gsub("[\\x00-\\x08\\x0b-\\x1f\\x7f]"; "");
-  sort_by(._time // "")[]
+  # VictoriaLogs writes _time as RFC 3339 with trailing zeros of the fraction dropped, so
+  # a whole second has none and .12 is shorter than .123: the fraction is padded to nine digits
+  # for the sort, which as a string would put 01.123Z before 01.12Z and 01Z last.
+  def key: (._time // "") | capture("^(?<d>[^.Z+]*)(\\.(?<f>[0-9]*))?(?<z>.*)$")
+    | .d + "." + ((.f // "") + "000000000" | .[:9]) + .z;
+  sort_by(key)[]
   | if has("_time") and has("_msg") then
       [._time,
        (if (.["kubernetes.pod_namespace"] // "") != "" then
@@ -130,4 +154,8 @@ if ! jq -rs '
   infra_error "VictoriaLogs answered with something that is not JSON lines"
   exit 1
 fi
-cat "$work/lines"
+# A reader that stops early, such as head, ends cat with SIGPIPE: that is not a failure.
+cat "$work/lines" || {
+  code=$?
+  ((code == 141)) || exit "$code"
+}

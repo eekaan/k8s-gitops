@@ -518,9 +518,9 @@ file's path.
 Of talman's output `cluster-snapshot` shows only the errors, and with `CI` set not those either.
 What rclone prints names the bucket and the endpoint, so the etcd recipes never show it. kubectl's
 and helm's output passes through, naming the objects they apply, except in `cluster-check`,
-`cluster-reboot`, `cluster-destroy`, `grafana` and `logs`: they print node and object names only, and `logs` the records and the store's own message, and none
-of what kubectl prints, as the objects it reads and its errors hold the API server's, the nodes' and
-the pods' addresses; only `kubectl drain`'s passes through in `cluster-reboot`, as in
+`cluster-reboot`, `cluster-destroy`, `grafana` and `logs`: they print node and object names only, and
+`logs` the records and the store's own message, and none of what kubectl prints, as the objects it
+reads and its errors hold the API server's, the nodes' and the pods' addresses; only `kubectl drain`'s passes through in `cluster-reboot`, as in
 `cluster-upgrade`, naming the pods it evicts and those it cannot.
 
 ## Environment
