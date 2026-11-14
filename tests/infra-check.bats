@@ -161,6 +161,59 @@ EOF
   [ "${lines[-1]}" = "infra-check: failed: talos/schematic.yaml" ]
 }
 
+# defaults STACK NAME VALUE...: a variables.tf in the stack STACK whose variables NAME default to
+# VALUE, pair by pair.
+defaults() {
+  local file="infra/openstack/stacks/$1/variables.tf"
+  shift
+  : > "$file"
+  while (($#)); do
+    printf 'variable "%s" {\n  type    = string\n  default = "%s"\n}\n\n' "$1" "$2" >> "$file"
+    shift 2
+  done
+}
+
+@test "a default service range overlapping a default node, pod or service subnet fails the check, naming both" {
+  repository service-range
+  valid_stack region/plumbing
+  valid_stack region/cluster
+  defaults region/plumbing node_cidr 192.0.2.0/25 service_range 192.0.2.128/28
+  defaults region/cluster pod_subnet 198.51.100.0/24 service_subnet 203.0.113.0/24
+
+  run "$SCRIPT"
+
+  [ "$status" -eq 0 ]
+
+  for overlapping in 'pod_subnet 192.0.2.128/26' 'service_subnet 192.0.2.0/24' 'node_cidr 192.0.2.0/24'; do
+    read -r name value <<< "$overlapping"
+    echo "$name"
+    defaults region/plumbing node_cidr 192.0.2.0/25 service_range 192.0.2.128/28
+    defaults region/cluster pod_subnet 198.51.100.0/24 service_subnet 203.0.113.0/24
+    if [[ $name == node_cidr ]]; then
+      defaults region/plumbing node_cidr "$value" service_range 192.0.2.128/28
+    elif [[ $name == pod_subnet ]]; then
+      defaults region/cluster pod_subnet "$value" service_subnet 203.0.113.0/24
+    else
+      defaults region/cluster pod_subnet 198.51.100.0/24 service_subnet "$value"
+    fi
+
+    run "$SCRIPT"
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"infra-check: infra/openstack/stacks/region: the plumbing stack's default service_range overlaps the default $name"* ]]
+    [[ $output != *"192.0.2."* ]]
+    [ "${lines[-1]}" = "infra-check: failed: infra/openstack/stacks/region" ]
+  done
+
+  # A default that is not an IPv4 network is named too.
+  defaults region/plumbing node_cidr 192.0.2.0/25 service_range not-a-network
+
+  run "$SCRIPT"
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"infra-check: infra/openstack/stacks/region: the default service_range is not an IPv4 network"* ]]
+}
+
 @test "A tree without stacks fails the check" {
   repository stackless
   mkdir -p infra/openstack/modules/network
