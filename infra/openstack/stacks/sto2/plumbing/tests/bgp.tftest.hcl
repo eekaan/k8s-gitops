@@ -138,7 +138,7 @@ run "_the_gateway_address_is_a_host_of_the_service_range" {
   }
 }
 
-run "_a_gateway_address_given_by_host_number_is_that_host_of_the_range" {
+run "the_gateways_address_is_the_service_ranges_host_at_the_number_the_plumbing_stack_is_given" {
   command = plan
 
   variables {
@@ -146,7 +146,7 @@ run "_a_gateway_address_given_by_host_number_is_that_host_of_the_range" {
   }
 
   assert {
-    condition     = output.bgp.gateway_address == cidrhost(output.bgp.service_range, 9) && output.bgp.gateway_address != cidrhost(output.bgp.service_range, 1)
+    condition     = output.bgp.gateway_address == cidrhost(output.bgp.service_range, 9) && output.bgp.gateway_address != cidrhost(output.bgp.service_range, 1) && cidrcontains(output.bgp.service_range, output.bgp.gateway_address)
     error_message = "The Gateway's address must be the given host of the service range."
   }
 }
@@ -172,7 +172,7 @@ run "_the_last_address_of_the_service_range_is_not_a_gateway_host" {
   expect_failures = [var.gateway_host]
 }
 
-run "_a_host_number_beyond_the_service_range_is_not_a_gateway_host" {
+run "a_gateway_host_number_beyond_the_service_range_is_refused_at_plan_time" {
   command = plan
 
   variables {

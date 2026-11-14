@@ -44,7 +44,7 @@ override_data {
         edge_asn        = 64497
         edge_addresses  = ["192.0.2.7", "192.0.2.8"]
         service_range   = "203.0.113.16/28"
-        gateway_address = "203.0.113.17"
+        gateway_address = "203.0.113.21"
       }
     }
   }
@@ -77,7 +77,7 @@ run "the_edge_addresses_and_the_service_range_overlap_nothing" {
       clusterASN     = 64496
       edgeASN        = 64497
       edgeAddresses  = var.edges
-      gatewayAddress = "203.0.113.17"
+      gatewayAddress = "203.0.113.21"
     }
     error_message = "talman.yaml must carry the service range, both AS numbers, both edge addresses and the Gateway's address as the plumbing stack's state gives them."
   }
@@ -158,7 +158,7 @@ run "_an_edge_address_on_a_node_is_rejected" {
           edge_asn        = 64497
           edge_addresses  = ["192.0.2.7", "192.0.2.20"]
           service_range   = "203.0.113.16/28"
-          gateway_address = "203.0.113.17"
+          gateway_address = "203.0.113.21"
         }
       }
     }
@@ -193,7 +193,7 @@ run "_an_edge_address_on_the_api_load_balancer_is_rejected" {
           edge_asn        = 64497
           edge_addresses  = ["192.0.2.5", "192.0.2.8"]
           service_range   = "203.0.113.16/28"
-          gateway_address = "203.0.113.17"
+          gateway_address = "203.0.113.21"
         }
       }
     }

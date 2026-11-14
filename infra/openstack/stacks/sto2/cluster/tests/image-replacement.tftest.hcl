@@ -44,7 +44,7 @@ override_data {
         edge_asn        = 64497
         edge_addresses  = ["192.0.2.7", "192.0.2.8"]
         service_range   = "203.0.113.16/28"
-        gateway_address = "203.0.113.17"
+        gateway_address = "203.0.113.21"
       }
     }
   }
@@ -91,7 +91,7 @@ run "a_new_image_replaces_no_server_and_no_boot_volume" {
           edge_asn        = 64497
           edge_addresses  = ["192.0.2.7", "192.0.2.8"]
           service_range   = "203.0.113.16/28"
-          gateway_address = "203.0.113.17"
+          gateway_address = "203.0.113.21"
         }
       }
     }

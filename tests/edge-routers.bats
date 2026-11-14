@@ -47,12 +47,16 @@ ipv4_number() {
   gateway=$(jq -er '.GATEWAY_ADDRESS' "$config")
   [ "$gateway" = "$(yq -e '.values.bgp.gatewayAddress' "$talman")" ]
   [[ $gateway =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]
+  # It is the address the stack was given, which is not the range's first host, the plumbing
+  # stack's default: a template that worked the address out from the range could not match.
+  [ "$gateway" = "$(yq -e '.bgp.gateway_address' "$ROOT/tests/fixtures/talos/inputs.yaml")" ]
 
   # Inside the range, and neither its network address nor its last.
   bits=${range#*/}
   mask=$(((0xffffffff << (32 - bits)) & 0xffffffff))
   [ $(($(ipv4_number "$gateway") & mask)) -eq "$(ipv4_number "${range%/*}")" ]
   [ "$(ipv4_number "$gateway")" -ne "$(ipv4_number "${range%/*}")" ]
+  [ "$(ipv4_number "$gateway")" -ne $(($(ipv4_number "${range%/*}") + 1)) ]
   [ "$(ipv4_number "$gateway")" -ne $(($(ipv4_number "${range%/*}") + (1 << (32 - bits)) - 1)) ]
 
   # The example lists the key, and the pool is untouched: it still holds the whole range, so
