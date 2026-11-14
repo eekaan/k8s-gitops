@@ -493,6 +493,17 @@ helmrelease_values() {
   printf '%s' "$config" | substitute "$file" | yq '.spec.values // {}'
 }
 
+# managed_by_flux RELEASE NAMESPACE: whether Flux's helm-controller installed or upgraded the release
+# last. Its post-renderer labels every object it renders with helm.toolkit.fluxcd.io/name and
+# helm.toolkit.fluxcd.io/namespace, the HelmRelease's (helm-controller v1.7.1, which the pinned Flux
+# runs: internal/postrender/build.go and common_renderer.go), and helm keeps the rendered objects in
+# the release's manifest. Without a release there is no manifest, and nothing manages it.
+managed_by_flux() {
+  local manifest
+  manifest=$(helm get manifest "$1" --namespace "$2" 2> /dev/null) || return 1
+  yq ea -e '[select(.metadata.labels["helm.toolkit.fluxcd.io/name"] != null)] | length > 0' <<< "$manifest" > /dev/null 2>&1
+}
+
 # app_field FILE PATH: the value at PATH in FILE, which must be set.
 app_field() {
   if ! yq -e "$2" "$1" 2> /dev/null; then
@@ -501,17 +512,18 @@ app_field() {
   fi
 }
 
-# install_app DIR: installs the application in DIR, a directory of kubernetes/ with the application's
-# ks.yaml beside its app/, on the cluster KUBECONFIG names, as the Helm release its HelmRelease adopts
-# once Flux runs. The chart location and version come from app/ocirepository.yaml; the values from
-# app/values.yaml as it is, then the HelmRelease's own values as Flux substitutes them
+# install_app DIR [YES]: installs the application in DIR, a directory of kubernetes/ with the
+# application's ks.yaml beside its app/, on the cluster KUBECONFIG names, as the Helm release its
+# HelmRelease adopts once Flux runs. The chart location and version come from app/ocirepository.yaml;
+# the values from app/values.yaml as it is, then the HelmRelease's own values as Flux substitutes them
 # (helmrelease_values), on helm's standard input; and the release from app/helmrelease.yaml, with
 # helm-controller's defaults where it sets none: the name of the HelmRelease, after its
 # targetNamespace and a dash when it has one, and the HelmRelease's own namespace, which Flux takes
 # from ks.yaml's targetNamespace. Waits for the API server first. A release that runs that chart
-# version with those values already is left alone, so a second run changes nothing.
+# version with those values already is left alone, so a second run changes nothing. A release Flux
+# manages (managed_by_flux) is refused, as Flux owns it from then on, unless YES is 1.
 install_app() {
-  local dir=$1 app name namespace url version release target storage values overrides wanted chart installed attempts
+  local dir=$1 yes=${2:-0} app name namespace url version release target storage values overrides wanted chart installed attempts
   step="reading the application"
   if [[ ! -f $dir/ks.yaml || ! -f $dir/app/helmrelease.yaml ]]; then
     infra_error "$dir is not an application directory: it has no ks.yaml beside app/helmrelease.yaml"
@@ -575,6 +587,10 @@ install_app() {
     [[ "$(helm get values "$release" --namespace "$namespace" --output json | yq -p json -o json -I0 'sort_keys(..)')" == "$wanted" ]]; then
     printf '%s: release %s already runs %s %s with these values; nothing to install\n' "${0##*/}" "$release" "$chart" "$version"
     return 0
+  fi
+  if ((!yes)) && managed_by_flux "$release" "$namespace"; then
+    infra_error "release $release in $namespace is managed by Flux's helm-controller, whose label helm.toolkit.fluxcd.io/name its objects carry; installing over it changes what Flux manages, and Flux undoes it. --yes installs anyway"
+    return 1
   fi
 
   step="installing the chart"

@@ -70,16 +70,27 @@ esac
 EOF
 }
 
-# deployed_helm VALUES: helm as it answers once the release runs the pinned chart version with the
-# values in VALUES, printed the way helm prints them: as JSON or as YAML without comments.
+# deployed_helm VALUES [MANIFEST]: helm as it answers once the release runs the pinned chart version
+# with the values in VALUES, printed the way helm prints them: as JSON or as YAML without comments;
+# and with the objects in MANIFEST, or one object without labels, as the release's manifest.
 deployed_helm() {
   cp -- "$1" "$STATE/deployed-values.yaml"
+  if [[ -n ${2-} ]]; then
+    cp -- "$2" "$STATE/deployed-manifest.yaml"
+  else
+    printf -- '---\napiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: cilium\n  namespace: kube-system\n' \
+      >"$STATE/deployed-manifest.yaml"
+  fi
   yq '.spec.ref.tag' "$APP/ocirepository.yaml" >"$STATE/deployed-version"
   fake helm <<'EOF'
 version=$(cat "$STATE/deployed-version")
 case $1 in
   list) echo "[{\"name\":\"cilium\",\"namespace\":\"kube-system\",\"revision\":\"1\",\"status\":\"deployed\",\"chart\":\"cilium-$version\",\"app_version\":\"$version\"}]" ;;
   get)
+    if [[ $2 == manifest ]]; then
+      cat "$STATE/deployed-manifest.yaml"
+      exit
+    fi
     if [[ $* == *json* ]]; then
       yq -o json '.' "$STATE/deployed-values.yaml"
     else
@@ -274,6 +285,57 @@ EOF
 
   [ "$status" -eq 0 ]
   [ "$(grep -c '^helm upgrade ' "$CALLS")" -eq 1 ]
+}
+
+@test "An install over a release Flux manages is refused unless asked" {
+  recording_tools
+  printf -- '---\nkubeProxyReplacement: false\n' >"$BATS_TEST_TMPDIR/other-values.yaml"
+  # Objects as helm-controller's post-renderer leaves them, labelled with the HelmRelease.
+  cat >"$BATS_TEST_TMPDIR/flux-manifest.yaml" <<'EOF'
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cilium
+  namespace: kube-system
+  labels:
+    helm.toolkit.fluxcd.io/name: cilium
+    helm.toolkit.fluxcd.io/namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cilium
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    helm.toolkit.fluxcd.io/name: cilium
+    helm.toolkit.fluxcd.io/namespace: kube-system
+EOF
+  deployed_helm "$BATS_TEST_TMPDIR/other-values.yaml" "$BATS_TEST_TMPDIR/flux-manifest.yaml"
+
+  install
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"release cilium in kube-system is managed by Flux's helm-controller"* ]]
+  [[ $output == *"--yes"* ]]
+  [ "$(grep -c '^helm upgrade ' "$CALLS")" -eq 0 ]
+  [ "$(grep -c '^kubectl wait ' "$CALLS")" -eq 0 ]
+
+  run env PATH="$BIN:$PATH" "$SCRIPT" --yes
+
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^helm upgrade ' "$CALLS")" -eq 1 ]
+}
+
+@test "install-cilium refuses an argument it does not know before it calls anything" {
+  recording_tools
+
+  run env PATH="$BIN:$PATH" "$SCRIPT" --force
+
+  [ "$status" -eq 2 ]
+  [[ $output == *"usage: install-cilium [--yes]"* ]]
+  [ ! -s "$CALLS" ]
 }
 
 @test "an API server that never answers stops the script, naming the step" {

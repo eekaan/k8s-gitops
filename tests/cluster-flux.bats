@@ -645,6 +645,22 @@ helm_flag() {
   [ -z "$(calls '^helm ')" ]
 }
 
+@test "app-install hands its flags to install-app, which knows --yes only" {
+  cp -R "$BATS_TEST_DIRNAME/fixtures/install-app/example" "$BATS_TEST_TMPDIR/example"
+  with KUBECONFIG="$REPO/talos/lab-sto2/clusterconfig/kubeconfig"
+
+  recipe app-install "$BATS_TEST_TMPDIR/example" --force
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"usage: install-app <application directory> [--yes]"* ]]
+  [ -z "$(calls '^(kubectl|helm) ')" ]
+
+  recipe app-install "$BATS_TEST_TMPDIR/example" --yes
+
+  [ "$status" -eq 0 ]
+  [ -n "$(calls '^helm upgrade ')" ]
+}
+
 @test "cluster-flux --reapply on a cluster without Flux installs it" {
   flux_key
 

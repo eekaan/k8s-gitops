@@ -329,6 +329,14 @@ after its `targetNamespace` and a dash when it has one, in the HelmRelease's own
 the release is refused, as helm keeps both in one. The script waits for the API server first, and
 leaves a release that already runs that chart version with those values alone.
 
+Once Flux manages a release, installing over it changes what Flux owns, and Flux undoes it at its
+next reconcile. Flux's helm-controller labels every object it installs or upgrades with
+`helm.toolkit.fluxcd.io/name` and `helm.toolkit.fluxcd.io/namespace`, naming the HelmRelease
+(its post-renderer, in the helm-controller the pinned Flux runs), and helm keeps those objects in
+the release's manifest. `install-app` reads that manifest with `helm get manifest` and refuses a
+release whose objects carry the label, unless `--yes` is given:
+`just app-install <application directory> --yes`, or `just cilium-install --yes`.
+
 - `just cilium-install` runs `scripts/install-cilium`, which installs Cilium so and then waits for
   every node to be Ready.
 - An application installed this way has a HelmRelease that names the release the script installs,

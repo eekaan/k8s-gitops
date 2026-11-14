@@ -21,6 +21,11 @@ Feature: Cilium
     When the install script runs
     Then it exits non-zero and the output names the failing step
 
+  Scenario: An install over a release Flux manages is refused unless asked
+    Given a Cilium release running other values, whose objects carry the label helm.toolkit.fluxcd.io/name that Flux's helm-controller sets
+    When the install script runs, and then runs with --yes
+    Then the first exits non-zero naming the release and saying Flux's helm-controller manages it, and upgrades nothing; the second upgrades the release
+
   Scenario: Flux adopts the installed release
     Given the HelmRelease
     When it is read

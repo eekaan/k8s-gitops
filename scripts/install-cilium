@@ -3,18 +3,30 @@
 # application kubernetes/apps/base/kube-system/cilium as scripts/install-app installs any
 # application, as the Helm release that its HelmRelease adopts afterwards. Then waits for every node
 # to be Ready, which a node is only once it has a pod network. A release that already runs this
-# chart version with these values is left alone, so a second run changes nothing.
+# chart version with these values is left alone, so a second run changes nothing. A release Flux's
+# helm-controller manages is refused unless --yes is given.
 #
-# Usage: KUBECONFIG=<path> scripts/install-cilium
+# Usage: KUBECONFIG=<path> scripts/install-cilium [--yes]
 # The kubeconfig reaches kubectl and helm through the environment; nothing here opens it.
 set -euo pipefail
 
 # shellcheck source=scripts/lib/cluster.sh
 . "$(dirname "$0")/lib/cluster.sh"
+
+yes=0
+for arg; do
+  case $arg in
+    --yes) yes=1 ;;
+    *)
+      infra_error "usage: install-cilium [--yes]"
+      exit 2
+      ;;
+  esac
+done
 report_failed_step
 refuse_http2_debug
 require_install_tools
-install_app "$infra_root/kubernetes/apps/base/kube-system/cilium"
+install_app "$infra_root/kubernetes/apps/base/kube-system/cilium" "$yes"
 
 step="waiting for the nodes to be Ready"
 echo "install-cilium: waiting for every node to be Ready"

@@ -2,13 +2,15 @@
 talos-check: tools-check
     scripts/talos-check
 
-# Install Cilium from its application in kubernetes/ on the cluster KUBECONFIG names, before Flux runs
-cilium-install:
-    scripts/install-cilium
+# Install Cilium from its application in kubernetes/ on the cluster KUBECONFIG names, before Flux runs; a release Flux manages is refused (--yes: installed over)
+[positional-arguments]
+cilium-install *flags:
+    scripts/install-cilium "$@"
 
-# Install an application from kubernetes/, such as kubernetes/apps/base/kube-system/kubelet-csr-approver, on the cluster KUBECONFIG names before Flux runs, as the release Flux adopts
-app-install path:
-    scripts/install-app {{ quote(path) }}
+# Install an application from kubernetes/, such as kubernetes/apps/base/kube-system/kubelet-csr-approver, on the cluster KUBECONFIG names before Flux runs, as the release Flux adopts; a release Flux manages is refused (--yes: installed over)
+[positional-arguments]
+app-install path *flags:
+    scripts/install-app "$@"
 
 # Create the Talos age key at SOPS_AGE_KEY_FILE unless a file is there, and write its recipient into talos/.sops.yaml; prints the recipient
 cluster-age-key:
