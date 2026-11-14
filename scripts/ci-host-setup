@@ -89,7 +89,7 @@ if command -v cloud-init > /dev/null; then
   cloud-init status --wait > /dev/null || true
 fi
 id -u "$runner_user" > /dev/null 2>&1 || fail "the host has no user $runner_user: its first boot has not finished"
-command -v docker > /dev/null || fail "the host has no docker: its first boot has not finished"
+type -P docker > /dev/null || fail "the host has no docker: its first boot has not finished"
 [[ $(uname -m) == x86_64 ]] || fail "versions.yaml pins the runner's package for x86_64 only"
 mountpoint -q "$root$cache" || fail "$cache is not mounted: the engine keeps its state on the cache volume only"
 
