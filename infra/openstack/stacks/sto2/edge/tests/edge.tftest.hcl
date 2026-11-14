@@ -437,6 +437,28 @@ run "_the_first_boot_script_checks_the_release_before_it_installs_anything" {
   }
 }
 
+# The operator allowlist is held to the rule the cluster and ci stacks hold it to: no network wider
+# than /16, each written by its own address.
+run "_an_ssh_allowlist_network_wider_than_16_is_rejected" {
+  command = plan
+
+  variables {
+    ssh_allowed_cidrs = ["198.51.100.0/24", "255.254.0.0/15"]
+  }
+
+  expect_failures = [var.ssh_allowed_cidrs]
+}
+
+run "_an_ssh_allowlist_address_with_bits_set_below_its_prefix_is_rejected" {
+  command = plan
+
+  variables {
+    ssh_allowed_cidrs = ["198.51.100.7/24"]
+  }
+
+  expect_failures = [var.ssh_allowed_cidrs]
+}
+
 run "_a_public_port_that_is_not_a_port_is_rejected" {
   command = plan
 

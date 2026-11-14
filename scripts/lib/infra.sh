@@ -165,7 +165,7 @@ export_state_encryption() {
 # The shortest prefix an allowlist entry may have. A /16 is 65,536 addresses, the widest network an
 # operator's own allowlist reasonably holds, such as an organisation's address block; /8 networks,
 # which are a 256th of the address space each, and the halves of it that a pair of /1 entries make
-# are not an allowlist. Only IPv4 is accepted, so there is no IPv6 prefix. The cluster and ci
+# are not an allowlist. Only IPv4 is accepted, so there is no IPv6 prefix. The cluster, ci and edge
 # stacks' variables hold the same number.
 allowlist_shortest_prefix=16
 
@@ -194,9 +194,9 @@ export_api_allowed_cidrs() {
     return 1
   fi
   # The stacks' rules and the cluster's listener take IPv4 only. Each entry is checked as the
-  # variables of the cluster and ci stacks check it, so a run outside the recipes is held to the
-  # same rule: written as tofu's cidrsubnet gives it back, no bit set below the prefix, and no wider
-  # than the shortest prefix.
+  # variables of the cluster, ci and edge stacks check it, so a run outside the recipes is held to
+  # the same rule: written as tofu's cidrsubnet gives it back, no bit set below the prefix, and no
+  # wider than the shortest prefix.
   problems=$(jq -r --argjson shortest "$allowlist_shortest_prefix" '
     def octet: test("^(0|[1-9][0-9]{0,2})$") and tonumber <= 255;
     def problem:
