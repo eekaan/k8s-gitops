@@ -928,14 +928,17 @@ keeps() {
   [ "$kept_at" -lt "$next" ]
   asked=$(grep -n '^talman apply ' "$RECORD/argv" | grep -E -- ' --dry-run( |$)' | grep -E -- ' -n worker-2( |$)' |
     cut -d: -f1 | awk -v after="$tried" '$1 > after' | head -1)
-  [ -n "$asked" ] && [ "$asked" -lt "$kept_at" ]
+  [ -n "$asked" ]
+  [ "$asked" -lt "$kept_at" ]
   for hostname in $(yq '.nodes[].hostname' "$CLUSTER/talman.yaml"); do
     probed=$(grep -n "^timeout .*/dev/tcp/.* $(node_address "$hostname")\$" "$RECORD/argv" | cut -d: -f1 |
       awk -v after="$tried" '$1 > after' | head -1)
-    [ -n "$probed" ] && [ "$probed" -lt "$kept_at" ]
+    [ -n "$probed" ]
+    [ "$probed" -lt "$kept_at" ]
   done
   checked=$(grep -n '^cluster-check' "$RECORD/argv" | cut -d: -f1 | awk -v after="$tried" '$1 > after' | head -1)
-  [ -n "$checked" ] && [ "$checked" -lt "$kept_at" ]
+  [ -n "$checked" ]
+  [ "$checked" -lt "$kept_at" ]
 
   # An unhealthy cluster gets no apply at all.
   printf '%s\n' cp-1 worker-2 > "$STATE/pending"
