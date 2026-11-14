@@ -17,6 +17,12 @@ crds:
   annotations:
     helm.sh/resource-policy: keep
 
+rbac:
+  # The controller may create a token for a service account a store names only where a Role allows
+  # it for that account by name: openbao-store's application holds the one for the store's account.
+  # The chart would otherwise let it create a token for every service account in the cluster.
+  serviceAccountTokenCreate: false
+
 # The controller.
 replicaCount: 2
 # Of the two controllers, and of the two certificate controllers, only one acts at a time.
