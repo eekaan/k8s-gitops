@@ -18,7 +18,8 @@ Talos, so both are verified on a running cluster before anything is built on the
   floating IP and the control planes' floating IPs are certificate SANs. Inside the cluster,
   KubePrism balances API traffic on every node.
 - The OpenStack cloud controller manager provides `Service` objects of type `LoadBalancer`
-  through Octavia. The kubelets run in external cloud-provider mode from bootstrap.
+  through Octavia. A cluster that uses it is bootstrapped with its kubelets in external
+  cloud-provider mode.
 - Cinder CSI provides volumes. The default StorageClass uses the cloud's default volume type.
 
 ## Alternatives considered
@@ -34,7 +35,12 @@ Talos, so both are verified on a running cluster before anything is built on the
 ## Consequences
 
 - The cloud-provider mode is fixed at bootstrap; changing it later means registering every
-  node again. The decision is confirmed by rebuilding the cluster in the chosen mode.
+  node again. The Talos patches do not set it while this record is proposed, so the cluster is
+  bootstrapped without it, and it is rebuilt from nothing in external mode when the cloud
+  controller is adopted. Nothing that must outlive that rebuild runs on it before then.
+- With a cloud controller, a node also reports its floating address. The kubelet then asks for
+  it in its serving certificate, so the certificate approver's allowed address ranges have to
+  include the floating addresses from that point on.
 - The cloud controller and the CSI driver need an OpenStack credential inside the cluster. It
   is separate from the one OpenTofu uses and is delivered as SOPS-encrypted bootstrap material.
 - Load balancers and volumes created by the cluster are not in tofu state, so teardown removes
