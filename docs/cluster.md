@@ -95,6 +95,27 @@ On running workers, `just infra-apply sto2/cluster` attaches the volumes and wri
 `talman.yaml` that lists the patch, and `just cluster-talos` then creates the raw volume. Taking
 the patch out later leaves the partition and its data on the disk.
 
+## The control planes' metrics
+
+Every control plane's machine configuration adds `talos/patches/controlplane/metrics.yaml`, so
+Prometheus, from its pod, can scrape the controller manager, the scheduler and etcd
+([kubernetes.md](kubernetes.md#monitoring)). Talos binds the controller manager and the scheduler
+to 127.0.0.1, and etcd serves its metrics only on its client port, which takes client
+certificates. The patch makes each listen on all of the node's addresses, as `talman.yaml` holds
+no node's own address on the node network:
+
+- the controller manager's secure port, 10257, and the scheduler's, 10259: HTTPS, with every
+  request but the health checks authorized by the API server, so only a token allowed to read
+  `/metrics`, such as Prometheus's, gets the metrics;
+- etcd's metrics and health on 2381: plain HTTP, without authentication. It serves etcd's own
+  counters and latencies, not the keys or values it stores.
+
+The nodes' security group (`infra/openstack/modules/talos-nodes`) admits everything between the
+nodes and, from anywhere else, only the Talos and Kubernetes APIs. Every node, and every pod
+through its node, therefore reaches these ports, and nothing outside the cluster does, also not on
+a node's floating address. `just cluster-talos` rolls the patch out; until it has, the three
+targets are down in Prometheus and their alerts fire.
+
 ## The Talos age key
 
 The secrets bundle holds the cluster's certificate authorities and keys. It is encrypted with sops

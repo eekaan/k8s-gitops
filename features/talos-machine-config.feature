@@ -41,6 +41,11 @@ Feature: Talos machine configuration
     When the configuration is rendered
     Then every control plane's configuration lists them for both the Talos API and the Kubernetes API server, and no worker's does
 
+  Scenario: Control planes serve the controller manager's, the scheduler's and etcd's metrics beyond the node itself
+    Given the template, the patches and fixture node data
+    When the configuration is rendered
+    Then every control plane's controller manager and scheduler listen on all of the node's addresses and its etcd serves metrics over plain HTTP on port 2381 on all of them, and no worker's configuration sets any of these
+
   Scenario: Cilium replaces the bundled CNI and kube-proxy
     Given the rendered control plane configuration
     When it is read
