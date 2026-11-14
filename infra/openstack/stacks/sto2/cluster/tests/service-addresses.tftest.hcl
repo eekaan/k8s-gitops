@@ -318,12 +318,10 @@ run "the_edge_routers_can_reach_the_workers_for_bgp_and_for_service_traffic_and_
   }
 }
 
-# The service ports come from a variable; the edge routers reach exactly those.
 # The run above pins the workers' own group, and what an edge router reaches on a worker, with the
-# nodes' rules as they are by default. The reduced rules of the nodes' firewall work leave both as
-# they are: what the reduced set opens to all goes to the control planes alone, as a rule never
-# matches a packet's destination and would otherwise open every port of the service range on the
-# workers, ahead of their firewall.
+# nodes' rules as they are by default. The reduced rules leave both as they are: what the reduced
+# set opens to all goes to the control planes alone, as a rule never matches a packet's destination
+# and would otherwise open every port of the service range on the workers, ahead of their firewall.
 run "the_workers_security_group_is_the_same_with_either_set_of_the_nodes_rules" {
   command = plan
 
@@ -378,6 +376,7 @@ run "the_workers_security_group_is_the_same_with_either_set_of_the_nodes_rules" 
   }
 }
 
+# The service ports come from a variable; the edge routers reach exactly those.
 run "_the_edge_routers_reach_the_service_ports_the_variable_names" {
   command = plan
 

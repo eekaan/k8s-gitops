@@ -405,15 +405,25 @@ machine, each of these must pass, in this order:
    health port.
 5. For a control plane, its etcd member and another control plane's, each asked through its own
    Talos API, follow the same leader in the same term, vote and report no error, such as having no
-   leader, and the other control plane lists the node's member.
+   leader, and the other control plane lists the node's member. talosctl's table is read by
+   position, so one that is not its twelve columns with `ERRORS` last fails the check.
 6. The node is still Ready 65 seconds after the apply: Kubernetes' node lifecycle controller marks a
    node not Ready once its kubelet has not renewed its lease for `node-monitor-grace-period`,
    50 seconds by default, and looks every 5 seconds, and the kubelet renews its lease every 10
    seconds, a quarter of its 40 ([Kubernetes](https://github.com/kubernetes/kubernetes/blob/v1.37.1/pkg/controller/nodelifecycle/config/v1alpha1/defaults.go#L40-L53)).
    Talos sets none of them.
-7. `just cluster-check` passes: the Kubernetes API through the load balancer, every node Ready, the
+7. For a control plane, its own Kubernetes API answers `/readyz` at its own address, and the load
+   balancer still sends it connections: of fifteen fresh requests through the load balancer's
+   address for the API server's metrics, one is answered by the tried node's API server, told apart
+   from the others by the start time of its process, `process_start_time_seconds`, which the same
+   request at the node's own address gives. Talos turns the API server's profiling off, and nothing
+   else it serves names its member. The load balancer gives each new connection to the next member
+   in turn, and its health monitor, which checks every member every five seconds and takes one out
+   after three failures, has by then taken out one it cannot reach; a check through the load
+   balancer alone would not see that, as it routes around such a member.
+8. `just cluster-check` passes: the Kubernetes API through the load balancer, every node Ready, the
    pods of `kube-system` running and a pod's logs fetched through its kubelet.
-8. The node's Talos API still reports the configuration in effect. Talos reverts a tried
+9. The node's Talos API still reports the configuration in effect. Talos reverts a tried
    configuration once and for all, so one still in effect was in effect throughout the checks.
 
 Only then, and only while more than a minute of the window is left, is the same configuration
@@ -421,11 +431,43 @@ applied again, which keeps it. A failed check stops the rollout: the node revert
 nodes before it keep theirs and those after it are untouched, and the recipe says which are which,
 as it does when a later node cannot say what the configuration would change.
 
-The checks open new connections where they can, but a connection open before the try, such as
-etcd's between its members or the API server's to a kubelet, stays open through it, as the firewall
-admits what belongs to a connection it has seen. A rule that is wrong for such a connection shows
-when the connection is opened again; the offline checks of the rules (`tests/node-firewall.bats`)
-are what pin them.
+### What the checks prove, and what to watch afterwards
+
+The firewall admits what belongs to a connection it has seen, so a connection open before the try
+keeps working through it, and only a connection opened inside the window tests a rule. On the
+tried node, the checks open fresh connections on these paths:
+
+- the Talos API, TCP 50000, from the operator's address (checks 1, 2, 5 and 9);
+- node-exporter, TCP 9100, from another control plane's address, as `members` (check 3);
+- Cilium's overlay, UDP 8472, both ways with another node: a VXLAN packet is never a reply, so every
+  one is judged (check 4);
+- for a control plane, the Kubernetes API, TCP 6443, from the operator's address and from the load
+  balancer's addresses, as `loadbalancer` (check 7).
+
+These are reached in the window as well, but on a connection that may be older than the try, so
+they are not proved there: the kubelet, TCP 10250, which the API server may reach on a connection it
+keeps (checks 3 and 8); Cilium's health port, TCP 4240, which Cilium probes on connections it keeps
+(check 4). And these are not reached in the window at all: etcd's peer and client ports, TCP
+2379-2380, whose members hold their streams open; etcd's metrics, the controller manager's and the
+scheduler's ports, TCP 2381, 10257 and 10259, and node-exporter's and the kubelet's from Prometheus,
+which keeps its scrape connections; Hubble, TCP 4244, which Hubble Relay keeps; any path from a pod
+on the node itself, from the pod range; trustd, TCP 50001, which a worker reaches when it joins; the
+CI host; and the nodes' floating addresses. `tests/node-firewall.bats` pins their rules offline.
+
+After the rollout, each of these is proved once its client opens a new connection, which a restart
+makes it do. Until each has been, watch:
+
+1. Prometheus, restarted once: two scrape intervals later, `up` is 1 for every target of the
+   kubelet, node-exporter, etcd, controller manager and scheduler jobs, a target on every node.
+2. metrics-server, restarted once: `kubectl top nodes` answers for every node.
+3. Hubble Relay, restarted once: it reports every node connected.
+4. Cilium's agents, restarted one node at a time: `cilium-health status` reports every node
+   reachable on the health port and through the overlay.
+5. One control plane, rebooted with `just cluster-reboot`: once it is back, `etcd status` from every
+   control plane shows the same leader and no error, as its peers have opened their streams again.
+6. trustd and the CI host stay unproved until a worker joins and the CI host connects; the paths
+   from pods on a node to the node itself, until a pod there, such as Prometheus on a control
+   plane, uses one.
 
 ### The way back
 
@@ -443,17 +485,38 @@ change of the allowlist reaches them only from an address they admit before it. 
    old allowlist.
 3. Remove the old network, and apply and roll out the same way, now from the new one.
 
-When the old address is gone already, the nodes admit their Talos API, outside the allowlist, only
-from the nodes themselves and, when the configuration they hold was rendered with `ci_host_number`
-set, from the CI host's address. The way back then runs from that address: from the CI host, or a
-machine started at its address on the node network for the purpose. With the cluster's talosconfig,
-each node's rendered configuration, which `talman render` writes, is applied through the node's
-Talos API at the node's own address on the node network, with talosctl's `apply-config`. No recipe
-does this: `talman.yaml` names the nodes by their floating addresses, which a host on the node
-network reaches through the router, arriving from an address the nodes do not admit. Without
-`ci_host_number` there is no such address, which is why the order above matters. Neither the
-cloud's console nor the Kubernetes API is a way back: the console shows Talos' dashboard only, and
-the Kubernetes API does not change a machine configuration.
+When the old address is gone already, the way back runs through the cluster itself:
+
+1. `just infra-apply sto2/cluster` with the new network in the allowlist, from anywhere: it changes
+   the cloud's side, the security group and the load balancer's listener, which then admits the new
+   network, and writes a `talman.yaml` with it.
+2. The Kubernetes API now answers through the load balancer: the load balancer connects to the API
+   servers from its own addresses, which every control plane's firewall accepts as `loadbalancer`.
+   This holds only while the load balancer proxies, as Octavia's amphora provider does; one that
+   passes the client's address through would arrive from the new network, which no node admits
+   yet.
+3. A pod in `kube-system`, on the host network, runs talosctl with the cluster's talosconfig and
+   each node's configuration as `talman render` writes it from the new `talman.yaml`, and applies
+   them, one node at a time, through each node's Talos API at the node's own address on the node
+   network: the pod's connections come from its node's own address, which every node accepts as
+   `members`, and reach its own node over the loopback interface. A pod on the pod network reaches
+   the other nodes the same way, masqueraded, but its own node only through the node's floating
+   address, as `floating`.
+4. Once the nodes hold the new allowlist, `just cluster-talos` runs from the new network again.
+
+The talosconfig and the rendered configurations hold the cluster's keys. They reach the pod as a
+Secret in `kube-system`, whose Pod Security level allows the host network and which only cluster
+administrators reach, created for the recovery and deleted with the pod as soon as it is done. No
+recipe does this yet; one would render the configurations, put them and a talosconfig whose
+endpoints are the nodes' own addresses into that Secret through kubectl's standard input, run the
+pod from talosctl's image pinned by digest, apply in try mode node by node and keep each once it
+answers from the new network, and delete the pod and the Secret on every exit.
+
+The other way back is the CI host's address, when the configuration the nodes hold was rendered
+with `ci_host_number` set: from the CI host, or a machine started at its address, the same
+configurations are applied through each node's Talos API at its own address. Neither the cloud's
+console nor a host elsewhere on the node network is a way back: the console shows Talos' dashboard
+only, and the nodes admit no other address there.
 
 ## The Talos age key
 
@@ -556,7 +619,8 @@ out of the artifact, which is built from `kubernetes/`.
   it, the named node first ([Rolling it out](#rolling-it-out)): it checks the cluster with
   `cluster-check` before anything is applied, and applies to a node in Talos' try mode, with talman
   waiting up to two minutes for it to answer, checks the paths into it from the other nodes, its
-  readiness and the cluster, and applies again to keep it, one node at a time, skipping the nodes
+  readiness, for a control plane its own Kubernetes API and its place behind the load balancer, and
+  the cluster, and applies again to keep it, one node at a time, skipping the nodes
   the configuration does not change. A failed check stops the rollout, saying that the node reverts
   by itself, which nodes kept the configuration before it and which are untouched. It needs what
   `cluster-talos` needs, the kubeconfig, at least two nodes of which one is another control plane,

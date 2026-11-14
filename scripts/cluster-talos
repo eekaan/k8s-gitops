@@ -33,6 +33,11 @@ try_minutes=5 answer_timeout=2m keep_margin=60
 # not Ready, and looks every node-monitor-period, 5 seconds; the kubelet renews its lease every 10
 # seconds, a quarter of its 40-second lease. Talos sets none of them.
 ready_after=65
+# How many fresh requests through the load balancer may go to other control planes before one must
+# reach the tried one: it gives each new connection to the next member in turn, so with three
+# members and other clients' connections between ours, fifteen leave a reachable member unseen only
+# by a rare chance, which fails safe, as the node then reverts.
+lb_attempts=15
 
 usage() {
   infra_error "usage: cluster-talos [cluster] [--onboard] [--yes] [--first <node>]"
@@ -173,12 +178,41 @@ cilium_health() {
 etcd_healthy() {
   local status members
   status=$(talman talosctl -n "$1" -n "$2" etcd status 2> /dev/null) || return 1
-  # Columns are padded with three spaces or more; a value holds single spaces only.
-  awk -F '   +' 'NR > 1 { rows++; leader[rows] = $5; term[rows] = $7
+  # Columns are padded with three spaces or more; a value holds single spaces only. The columns are
+  # read by position, so the table must be the one talosctl 1.14 prints: twelve columns, ERRORS last.
+  awk -F '   +' 'NR == 1 { if (NF != 12 || $1 != "NODE" || $5 != "LEADER" || $NF != "ERRORS") { unknown = 1; exit } next }
+    { rows++; leader[rows] = $5; term[rows] = $7
       if ($5 ~ /^0+$/ || $9 != "false" || $12 != "") bad = 1 }
-    END { exit !(rows == 2 && !bad && leader[1] == leader[2] && term[1] == term[2]) }' <<< "$status" || return 1
+    END { exit unknown || !(rows == 2 && !bad && leader[1] == leader[2] && term[1] == term[2]) }' <<< "$status" || return 1
   members=$(talman talosctl -n "$2" etcd members 2> /dev/null) || return 1
   awk -F '   +' -v node="$1" 'NR > 1 && $3 == node { found = 1 } END { exit !found }' <<< "$members"
+}
+
+# apiserver_started VIA...: the start time of the API server that answers a fresh request for
+# its metrics, through the API server on the control plane VIA, or through the load balancer
+# without VIA. Each API server process has its own, so it tells which control plane answered: Talos
+# turns the API server's profiling off, and nothing else it serves names its member.
+apiserver_started() {
+  local metrics
+  if (($# > 0)); then
+    metrics=$(get_through "$1" --raw /metrics) || return 1
+  else
+    metrics=$(kubectl get --raw /metrics --request-timeout=10s 2> /dev/null) || return 1
+  fi
+  awk '$1 == "process_start_time_seconds" { print $2; found = 1; exit } END { exit !found }' <<< "$metrics"
+}
+
+# behind_load_balancer NODE: whether the load balancer sends fresh connections to NODE's API server:
+# one of lb_attempts requests through its address, each on a connection of its own, which the load
+# balancer gives the control planes in turn, is answered by NODE's.
+behind_load_balancer() {
+  local own seen attempt
+  own=$(apiserver_started "$1") || return 1
+  for ((attempt = 0; attempt < lb_attempts; attempt++)); do
+    seen=$(apiserver_started) || continue
+    [[ $seen != "$own" ]] || return 0
+  done
+  return 1
 }
 
 # node_ready NODE: whether NODE's Ready condition is True.
@@ -241,6 +275,20 @@ check_tried() {
   if ! node_ready "$node"; then
     failure="$node is not Ready ${ready_after}s after it was applied in try mode"
     return 1
+  fi
+  # A control plane's own API server, at its own address and behind the load balancer, whose health
+  # monitor has by now taken out a member it cannot reach: the load balancer connects from its own
+  # addresses, which only this node's firewall judges, and routes around a member it cannot reach,
+  # which a check through it alone would not see.
+  if [[ $(role_of "$node") == controlplane ]]; then
+    if [[ $(get_through "$node" --raw /readyz) != ok ]]; then
+      failure="$node's Kubernetes API does not answer at its own address"
+      return 1
+    fi
+    if ! behind_load_balancer "$node"; then
+      failure="none of $lb_attempts fresh requests through the load balancer reached $node's API server, so the load balancer does not reach it"
+      return 1
+    fi
   fi
   if ! "$here/cluster-check" "$cluster"; then
     failure="cluster-check failed once $node was applied in try mode"

@@ -175,6 +175,10 @@ cluster_files() {
 #   notready.NODE      NODE's Ready condition is Unknown
 #   etcd-cut.NODE      NODE's etcd member has no leader
 #   etcd-unlisted.NODE no control plane's etcd member lists NODE's
+#   etcd-old-table     talosctl's etcd status prints the older table of ten columns
+#   api-cut.NODE       the Kubernetes API at NODE's own address does not answer
+#   lb-cut.NODE        the load balancer sends no connection to NODE's API server
+#   lb-turn            which control plane the load balancer sends the next connection to
 #   reverts-late.NODE  NODE's configuration in try mode reverts while scripts/cluster-check runs
 #   clock              the time date +%s gives, which sleep and a slow cluster-check move on
 #   talos-behind       the hostnames of nodes whose Talos is behind their configured version
@@ -200,7 +204,12 @@ if [[ $1 == talosctl ]]; then
       asked+=("${args[i + 1]}")
     fi
   done
-  if given status; then
+  if given status && [[ -e $STATE/etcd-old-table ]]; then
+    printf 'NODE   MEMBER   DB SIZE   IN USE   LEADER   RAFT INDEX   RAFT TERM   RAFT APPLIED INDEX   LEARNER   ERRORS\n'
+    for node in "${asked[@]}"; do
+      printf '192.0.2.211   %s   41 MB   18 MB (43.90%%)   1a2b3c4d5e6f7a8b   1234   7   1234   false   etcdserver: no leader\n' "member-$node"
+    done
+  elif given status; then
     printf 'NODE   MEMBER   DB SIZE   IN USE   LEADER   RAFT INDEX   RAFT TERM   RAFT APPLIED INDEX   LEARNER   PROTOCOL   STORAGE   ERRORS\n'
     for node in "${asked[@]}"; do
       leader=1a2b3c4d5e6f7a8b errors=
@@ -399,7 +408,37 @@ fi
 # What the try mode's checks ask: a node's kubelet and node-exporter through an API server, the
 # Cilium agent on a node and its health probes, and a node's Ready condition.
 line=" $* "
+# The control plane at the address --server names, if any; the load balancer otherwise.
+server=
+if [[ $line == *" --server https://"* ]]; then
+  server=${line#* --server https://}
+  server=$(yq ".nodes[] | select(.ipAddress == \"${server%%:6443 *}\") | .hostname" "$TALMAN_CONFIG/talman.yaml")
+fi
 case $line in
+  *" get --raw /readyz "*)
+    [[ -z $server || ! -e $STATE/api-cut.$server ]] || exit 1
+    echo ok
+    ;;
+  *" get --raw /metrics "*)
+    # An API server's metrics, with the start time of its process. Through the load balancer, each
+    # new connection goes to the next control plane it can reach.
+    if [[ -z $server ]]; then
+      mapfile -t members < <(yq '.nodes[] | select(.role == "controlplane") | .hostname' "$TALMAN_CONFIG/talman.yaml")
+      turn=$(cat "$STATE/lb-turn" 2> /dev/null || echo 0)
+      for ((i = 0; i < ${#members[@]}; i++)); do
+        candidate=${members[(turn + i) % ${#members[@]}]}
+        if [[ ! -e $STATE/lb-cut.$candidate ]]; then
+          server=$candidate
+          break
+        fi
+      done
+      echo $((turn + i + 1)) > "$STATE/lb-turn"
+      [[ -n $server ]] || exit 1
+    elif [[ -e $STATE/api-cut.$server ]]; then
+      exit 1
+    fi
+    printf '%s\n' '# TYPE process_start_time_seconds gauge' "process_start_time_seconds 1.8000000${server##*-}5e+09"
+    ;;
   *" get --raw /api/v1/nodes/http:"*":9100/proxy/metrics "*)
     node=${line#* /api/v1/nodes/http:}
     node=${node%%:9100/*}
@@ -1084,6 +1123,13 @@ keeps() {
   between "$tried_cp" "$kept_cp" '^talman talosctl -n cp-1 -n cp-2 etcd status$'
   between "$tried_cp" "$kept_cp" '^talman talosctl -n cp-2 etcd members$'
   between "$tried_cp" "$kept_cp" "^kubectl --server https://$(node_address cp-2):6443 get --raw /api/v1/nodes/cp-1/proxy/healthz "
+  # A control plane's own Kubernetes API, at its own address, and a fresh request through the load
+  # balancer that lands on it, told apart by its API server's start time.
+  between "$tried_cp" "$kept_cp" "^kubectl --server https://$(node_address cp-1):6443 get --raw /readyz "
+  between "$tried_cp" "$kept_cp" "^kubectl --server https://$(node_address cp-1):6443 get --raw /metrics "
+  between "$tried_cp" "$kept_cp" '^kubectl get --raw /metrics '
+  # A worker has no API server to ask.
+  [ -z "$(sed -n "${tried},${kept_at}p" "$RECORD/argv" | awk '/ get --raw \/(readyz|metrics) /')" ]
 
   # Each check stops the rollout when it fails: the tried node is not kept and nothing follows it.
   for failing in kubelet-cut.worker-2 exporter-cut.worker-2 overlay-cut.worker-2 overlay-cut.cp-1 \
@@ -1104,6 +1150,18 @@ keeps() {
     [ "$status" -ne 0 ]
     [ "$(applies)" = "$(tries worker-2)" ]
     [[ $output == *"worker-2 is not kept"* ]]
+  done
+  for failing in api-cut.cp-1 lb-cut.cp-1 etcd-old-table; do
+    rm -f "$STATE"/* "$RECORD/argv"
+    printf '%s\n' cp-1 worker-2 > "$STATE/pending"
+    : > "$STATE/$failing"
+
+    recipe cluster-talos --first cp-1 --yes < /dev/null
+
+    echo "$failing: $status"
+    [ "$status" -ne 0 ]
+    [ "$(applies)" = "$(tries cp-1)" ]
+    [[ $output == *"cp-1 is not kept"* ]]
   done
   for failing in etcd-cut.cp-1 etcd-cut.cp-2 etcd-unlisted.cp-1; do
     rm -f "$STATE"/* "$RECORD/argv"

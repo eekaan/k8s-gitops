@@ -244,6 +244,17 @@ environment, selects what the outer ring holds:
   all; the control planes' own firewall admits no listener from it, and a control plane carries no
   service range.
 
+  What keeps a packet for a service address from being served on a control plane, where `reduced`
+  opens the ports Cilium would serve it on: control planes announce nothing, as `cilium-bgp`
+  selects workers only, so no route leads such a packet to them, and their ports carry no allowed
+  address pair for the service range, so port security does not pass it to them either. A
+  Service's external addresses, which Cilium serves on any node, are refused at admission when new
+  (`DenyServiceExternalIPs`, [cluster.md](cluster.md#what-the-firewall-does-not-see)), but one a
+  Service already holds is kept: a cluster takes `reduced` only while no Service holds one, as
+  today's does not. `reduced` is applied only once all three are seen on the running cluster: no
+  `CiliumBGPNodeConfig` for a control plane, no allowed address pair on a control plane's port in
+  the plan, and no Service with `spec.externalIPs`.
+
 Planning with `full` changes no rule of a running cluster. The stack's tests check it offline, for
 the rules' content and their resource addresses, which a plan would replace a rule over; the plan of
 the running cluster, which shows no change to a resource, is the rest of that proof.
