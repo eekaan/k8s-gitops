@@ -2,6 +2,9 @@
 
 - Status: accepted
 - Date: 2026-11-14
+- Amended: 2026-11-14, the publishing run first runs the Kubernetes check on the commit it
+  publishes and publishes nothing when it fails, so the `main` tag only names an artifact built
+  from a tree that passed
 
 ## Context
 

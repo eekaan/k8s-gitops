@@ -112,7 +112,7 @@ probe_api() {
     # or as soon as this one ends when it took longer.
     sleep 1 > /dev/null &
     tick=$!
-    kubectl get --raw /readyz --request-timeout=2s > /dev/null 2>&1 &
+    (exec_tool kubectl get --raw /readyz --request-timeout=2s) > /dev/null 2>&1 &
     probe=$!
     if wait "$probe"; then
       if [[ -n $down_since ]]; then

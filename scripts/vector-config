@@ -8,6 +8,10 @@
 # Usage: scripts/vector-config DIR
 set -euo pipefail
 
+# flux and helm are run with none of the secrets a recipe's environment may hold.
+# shellcheck source=scripts/lib/tools.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/tools.sh"
+
 [[ $# -eq 1 && -n $1 ]] || { echo "usage: scripts/vector-config DIR" >&2; exit 2; }
 out=$1
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -16,7 +20,7 @@ app=kubernetes/apps/base/monitoring/vector
 cluster=kubernetes/clusters/lab-sto2
 
 for tool in flux helm yq; do
-  command -v "$tool" >/dev/null || { echo "vector-config: $tool not found on PATH" >&2; exit 1; }
+  type -P "$tool" >/dev/null || { echo "vector-config: $tool not found on PATH" >&2; exit 1; }
 done
 
 # No kubeconfig and no in-cluster address: a tool that tried to reach a cluster fails instead.

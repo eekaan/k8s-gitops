@@ -1067,9 +1067,12 @@ positive evidence of a first install: its own data directory is empty, and the K
 that neither `data-openbao-1` nor `data-openbao-2` exists. The StatefulSet makes those claims when it
 first starts the other members and keeps them for the cluster's life, so either one means the store
 exists. The guard reads them with kubectl as the servers' own account, which the Role
-`openbao-initialize-guard` lets get those two claims and nothing else. When the API gives no answer,
-or the data directory cannot be listed, whatever the reason, the guard fails, and the pod does not
-start; it never initialises on missing evidence. The server takes the decision through
+`openbao-initialize-guard` lets get those two claims and nothing else. kubectl finds the API through
+the pod's in-cluster configuration, which client-go drops for `http://localhost:8080` once a flag
+such as `--request-timeout` changes its configuration, so the call carries no such flag and
+`timeout` ends it after 10 seconds instead. When the API gives no answer in that time, or the data
+directory cannot be listed, whatever the reason, the guard fails, and the pod does not start; it
+never initialises on missing evidence. The server takes the decision through
 `app/initialize/initialize-args.sh`, which passes the `-config` flag only as the guard wrote it.
 
 The guard holds the servers' account token, as every container of the pod does, so it may do all
@@ -1291,24 +1294,56 @@ write access to packages nor an identity token. Its one command is `just publish
 identity token (ADR 0007). The script refuses to run anywhere else: without GitHub Actions and the
 job's identity token it stops before calling anything, so nobody signs from a laptop. In order, it:
 
-1. logs in to ghcr.io with the job's token on standard input, into a Docker configuration of the
+1. runs `just kubernetes-check` on the commit it publishes, with the pinned tools the workflow
+   installs; a failure stops the run, with the check's own message, before the registry is touched;
+2. logs in to ghcr.io with the job's token on standard input, into a Docker configuration of the
    run's own, which flux and cosign both read and which is removed when the run ends;
-2. pushes `kubernetes/`, without any cluster's `secrets/`, with `flux push artifact`, tagged with the
+3. pushes `kubernetes/`, without any cluster's `secrets/`, with `flux push artifact`, tagged with the
    full commit SHA, with the repository as its source and `<branch>@sha1:<commit>` as its revision,
    reproducibly; a reported digest that is not `sha256:` and 64 hexadecimal digits stops the run;
-3. signs that digest keyless with cosign: a short-lived certificate for the job's identity, recorded
+4. signs that digest keyless with cosign: a short-lived certificate for the job's identity, recorded
    in Sigstore's public transparency log;
-4. verifies the signature against the identity of this workflow at the run's ref, which on `main`
+5. verifies the signature against the identity of this workflow at the run's ref, which on `main`
    is the identity the instance accepts; a failure stops the run;
-5. tags that digest `main`.
+6. tags that digest `main`.
+
+A pull request's checks run against its branch as it was pushed; the publish run judges the tree
+that is on `main`, and only its own: the check runs on the commit the run publishes and on no other.
+When that tree does not build, the run fails, nothing is pushed, signed or tagged, and the cluster
+stays on the last tagged artifact until a run for a later commit that changes `kubernetes/` or the
+workflow, or a manual run, publishes a tree that does. The gate is `just kubernetes-check`, the
+offline build, and no more: `just render-check` pulls charts from the network and needs helm in the
+job that signs, so it stays out of that job.
+
+Every workflow installs its tools with the same pinned `mise-action` at an exact mise release. A
+workflow whose token can write, `publish`, `tools-image` and `render-comment`, also gives the action the
+checksum
+of that release's linux-x64 binary, so the tools that run beside the token are the pinned ones; the
+action fails the job when the binary differs. A bump of the mise version changes the checksum with it,
+in every workflow that has one, and the checksum is the one for `./mise-v<version>-linux-x64` in the
+release's `SHASUMS256.txt`. Renovate does not track either input: it can raise a version but cannot
+carry the checksum with it, so a version alone would fail the signing job's check, and the bump is
+by hand.
+The two jobs that sign, `publish` and `tools-image`, also turn the action's cache off, so nothing
+runs from an entry another job saved.
 
 The tag moves last and by digest: `main` only ever names an artifact that is signed and verified,
 and signing, verifying and tagging all name it by its digest, so the tag ends on exactly the bytes
 that were signed and verified; a tag can change between two steps, a digest cannot. It moves only on
-a run on `refs/heads/main`, and only when no newer commit on `main` changes `kubernetes/` or the
-workflow. Runs share one concurrency group that never cancels a run in progress, so they never
-overlap: a run that starts while another is in progress waits for it, and GitHub replaces a waiting
-run with a newer one. A run on another branch, or one a newer commit overtook, such as a re-run of an
+a run on `refs/heads/main` for which no newer commit on `main` changes `kubernetes/` or the
+workflow, so an older run, a re-run of one included, never moves it back; the newest such commit's
+own run decides, and a run does not judge a newer commit's tree. That leaves two cases in which the
+tag stays on an older artifact than the newest passing commit's. In the first, a newer commit
+that changes `kubernetes/` arrives before the passing commit's run reaches the tag, and fails its
+check: the passing commit's run leaves the tag alone and the failing one publishes nothing, and the
+same happens when GitHub replaces the passing commit's waiting run with the failing one's. In the
+second, a re-run of an older run starts while the passing commit's run is waiting, and GitHub
+replaces the waiting run with the re-run, which leaves the tag alone, as the passing commit is newer
+than its own. In both, the tag stays where it was until a later run publishes a tree that passes:
+the run of the next commit that passes, or, in the second case, a manual run as well. Runs
+share one concurrency group that never cancels a run in progress, so they never overlap: a run that
+starts while another is in progress waits for it, and GitHub replaces a waiting run with a newer one.
+A run on another branch, or one a newer commit overtook, such as a re-run of an
 old one, still pushes, signs and verifies, says why the tag stayed where it is, and succeeds. An
 artifact signed by a run on another branch carries that branch's identity, which the instance
 refuses. The run prints
@@ -1382,8 +1417,12 @@ that can write:
   pull request and push to `main` on a hosted runner, with the workflow's `contents: read` token and
   no secrets. For a pull request GitHub runs the pull request's own copy of the workflow, a fork's
   included, so the job is given nothing worth taking. `just ci-render` runs `scripts/render-pr` in
-  the Dagger module (ADR 0007): it renders the base, the first parent of the commit under test, and
-  the commit itself, both with the base's `scripts/render` and `scripts/render-diff`, so that a pull
+  the Dagger module (ADR 0007), in the tools container `just ci` uses, chosen the same way (README,
+  The tools image). That image is public and pulled without credentials, and a record of any other
+  image stops the recipe, so a pull request that runs the job in another one has changed the files
+  the job runs, as it could change the module itself. The render covers the base, the first parent
+  of the commit under test, and the commit itself, both with the base's `scripts/render` and
+  `scripts/render-diff`, so that a pull
   request that changes only the tree is shown by the reviewed render code. A base without the render
   code, or one its own render code does not render, is rendered with the commit's, and the job's
   log says so. The job uploads the comment as the artifact `render-diff`.

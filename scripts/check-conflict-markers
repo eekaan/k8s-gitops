@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Fails when a file git would commit, tracked or untracked and not ignored, holds a merge conflict
+# marker, naming the file and the line. Nothing else parses Markdown, and a YAML file with a marker
+# in a comment or a block scalar still loads.
+# A marker is a line as git writes it: seven < or seven > at the start of the line, followed by a
+# space or the end of the line, and the seven = line between them, which only counts after an
+# opening marker that no closing one has ended. A line of seven = on its own anywhere else is a
+# Markdown heading's underline. A run of any other length, an indented run and a run inside a line
+# are not markers. Files with a NUL byte are binary and skipped, as are symlinks.
+# Usage: scripts/check-conflict-markers
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+failures=0
+# During an unresolved merge the index holds a conflicted file once per stage; each is scanned once.
+while IFS= read -r -d '' path; do
+  [[ -f $path && ! -L $path ]] || continue
+  if [[ ! -r $path ]]; then
+    echo "check-conflict-markers: $path: cannot be read" >&2
+    failures=$((failures + 1))
+    continue
+  fi
+  # grep -I treats a file with a NUL byte as binary, and an empty file has nothing to find: both
+  # answer 1. Any other answer is an error.
+  status=0
+  grep -Iq '' -- "$path" || status=$?
+  if ((status == 1)); then
+    continue
+  elif ((status)); then
+    echo "check-conflict-markers: $path: cannot be scanned" >&2
+    failures=$((failures + 1))
+    continue
+  fi
+  # The name reaches awk through the environment: as an operand, a name such as a=b.md would be
+  # taken for an assignment and awk would read the rest of the file list from standard input, and
+  # -v would expand the backslashes in it.
+  if ! found=$(FILE=$path LC_ALL=C awk '
+    { sub(/\r$/, "") }
+    /^<<<<<<<($| )/ { open = 1; print "check-conflict-markers: " ENVIRON["FILE"] ":" FNR ": opening marker of a merge conflict"; next }
+    /^>>>>>>>($| )/ { open = 0; print "check-conflict-markers: " ENVIRON["FILE"] ":" FNR ": closing marker of a merge conflict"; next }
+    open && /^=======$/ { print "check-conflict-markers: " ENVIRON["FILE"] ":" FNR ": middle marker of a merge conflict" }
+  ' < "$path"); then
+    echo "check-conflict-markers: $path: cannot be scanned" >&2
+    failures=$((failures + 1))
+  elif [[ -n $found ]]; then
+    echo "$found" >&2
+    failures=$((failures + 1))
+  fi
+done < <(git ls-files -z --cached --others --exclude-standard --deduplicate)
+
+if ((failures)); then
+  echo "check-conflict-markers: $failures file(s) hold a merge conflict marker; resolve the conflict and remove its lines" >&2
+  exit 1
+fi
+echo "No merge conflict markers in the files git would commit."

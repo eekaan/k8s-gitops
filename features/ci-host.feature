@@ -8,6 +8,11 @@ Feature: CI host
     When the ci stack is planned against mocked providers
     Then the host's security group admits TCP 22 from each of those networks once and nothing else inbound, lets the host reach anything, and is the only group of the host's port, which has port security and a floating IP
 
+  Scenario: The SSH allowlist rejects a network wider than /16 or with host bits set
+    Given an allowlist with a network whose prefix is shorter than 16, two halves of the address space, or an address with bits set below its prefix
+    When the ci stack is planned
+    Then planning fails with a message naming the variable
+
   Scenario: The CI host survives a destroy of the cluster stack and is destroyed only by name
     Given the ci stack beside the cluster and plumbing stacks
     When just infra-destroy sto2/cluster runs, and just infra-destroy sto2/ci
@@ -37,6 +42,11 @@ Feature: CI host
     Given gh hands out a registration token and a remove token
     When just ci-host-setup registers the runner and just ci-host-remove deregisters it
     Then the runner's configuration gets each token in its environment, read from standard input, and neither token is in a command line, the output or a file on either side
+
+  Scenario: The CI host recipes run gh and ssh with none of the stack's secrets
+    Given the stack's secrets set to markers and a recording gh and ssh
+    When just ci-host-setup and just ci-host-remove run
+    Then neither tool's environment holds the state key, the cloud credential, the encryption settings, a stack input, the cluster's S3 key or an age key
 
   Scenario: A host whose key is not known is refused until its fingerprint has been accepted
     Given a CI host whose SSH host key is not recorded

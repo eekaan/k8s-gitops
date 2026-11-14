@@ -19,6 +19,9 @@
 # HEAD_REPOSITORY and HEAD_BRANCH, which the comment workflow sets from the run it follows.
 set -euo pipefail
 
+# gh gets the job's own token and none of the secrets a recipe's environment may hold.
+# shellcheck source=scripts/lib/tools.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/tools.sh"
 # shellcheck source=scripts/lib/render-comment.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/render-comment.sh"
 

@@ -341,26 +341,33 @@ out of the artifact, which is built from `kubernetes/`.
 - `just cluster-upgrade [cluster] [--yes]` upgrades Talos on every node that does not run the
   version and schematic `talman.yaml` gives it. It shows which nodes `talman upgrade --dry-run`
   says are behind, and once the cluster's name is typed back, or with `--yes`, fetches the
-  kubeconfig as `cluster-kubeconfig` does, takes an etcd snapshot with `talman etcd snapshot`, and
+  kubeconfig as `cluster-kubeconfig` does, takes an etcd snapshot as `cluster-snapshot` does, and
   goes through the nodes in `talman.yaml`'s order, one at a time. A node that is behind is drained
-  with `kubectl drain`, upgraded with `talman upgrade`, and uncordoned once it is Ready, before the
-  next is drained; a node on its version is left alone. Before each drain the API must answer
-  `/readyz` through the kubeconfig within five minutes, or nothing more is drained. talosctl's own
-  drain is turned off, as it reaches the API at the cluster endpoint, which only the nodes reach.
-  At the end every node must run its version. A run that stops after draining a node leaves that
-  node cordoned: uncordon it with kubectl once it is back; a second run skips it once it is on its
+  with `kubectl drain`, upgraded with `talman upgrade`, and uncordoned once its kubelet has
+  reported Ready since `talman upgrade` returned for it, within ten minutes, before the next is
+  drained; a Ready condition from before then, including one posted after the drain, does not
+  count. A node on its version is left alone. Before each drain the API must answer `/readyz`
+  through the kubeconfig within five minutes, or nothing more is drained. talosctl's own drain is
+  turned off, as it reaches the API at the cluster endpoint, which only the nodes reach. At the end
+  every node must run its version. A run that stops after draining a node leaves that node
+  cordoned: uncordon it with kubectl once it is back; a second run skips it once it is on its
   version.
 - `just cluster-upgrade-k8s [cluster] [--yes]` upgrades Kubernetes to the version `talman.yaml`
   gives. It shows what `talman upgrade-k8s --dry-run` says, and once the cluster's name is typed
-  back, or with `--yes`, runs `talman upgrade-k8s` with an etcd snapshot first; talosctl moves the
-  control plane components and the kubelets node by node. It reaches the API at
-  `KUBE_API_ADDRESS`, given to talosctl as its endpoint. At the end every node must run the
-  version.
+  back, or with `--yes`, takes an etcd snapshot as `cluster-snapshot` does and runs
+  `talman upgrade-k8s`; talosctl moves the control plane components and the kubelets node by
+  node. It reaches the API at `KUBE_API_ADDRESS`, given to talosctl as its endpoint. At the end
+  every node must run the version.
 
-  Both upgrade recipes do nothing and ask nothing when every node runs its version, and need what
-  `cluster-talos` needs and the API address. An etcd snapshot holds every Secret in the cluster;
-  talman writes it
-  into `clusterconfig/` with mode 0600, and it stays there.
+  Both upgrade recipes do nothing and ask nothing when every node runs its version. Before they
+  ask, they need what `cluster-talos` needs, the API address, and what `cluster-snapshot` needs:
+  the age key's recipient, the bucket prefix and the state key. An etcd snapshot holds every Secret
+  in the cluster, so the recipes take it the way `cluster-snapshot` does, encrypted and uploaded,
+  and leave nothing of it on disk; a snapshot that cannot be taken stops the run before any node
+  is touched. They never pass `--snapshot` to talman, which would write an unencrypted
+  `etcd-<cluster>-<UTC time>.db` into `clusterconfig/`. Such a file there, mode 0600, is an etcd
+  snapshot in the clear that holds every Secret of the cluster: no recipe removes it, and removing
+  it is the operator's.
 - `just cluster-snapshot [cluster]` keeps an etcd snapshot, encrypted, in the etcd backup bucket,
   `BACKUP_BUCKET_PREFIX` followed by `-etcd`
   ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)). `talman etcd snapshot`
@@ -374,7 +381,8 @@ out of the artifact, which is built from `kubernetes/`.
   line, the cluster, the object's name and its size. The directory is removed whenever the recipe
   exits, a failed run and one interrupted by Ctrl-C or SIGTERM included. It needs the cluster's
   `talman.yaml` and `secrets.sops.yaml`, the age key's location and its recipient, the bucket
-  prefix and the state key.
+  prefix and the state key. `scripts/lib/snapshot.sh` holds the code, which both upgrade recipes
+  run as well.
 - `just cluster-snapshots [cluster]` lists the cluster's snapshots in the etcd bucket, reading only:
   one per line, newest first, by name and size in bytes. It needs the bucket prefix and the state
   key.
@@ -540,9 +548,11 @@ connection error still says why, `connection refused`.
 
 The recipes read `.env` and the environment as the infrastructure recipes do
 ([infrastructure.md](infrastructure.md#environment)), and name each variable that is missing. No
-recipe prints a secret or passes one on a command line. sops and talman get the Talos age key's
-location from their environment; `cluster-restore` hands age the key file's path, or, when only
-`SOPS_AGE_KEY` holds the key, the key on standard input. `cluster-config` reads the Flux age key,
+recipe prints a secret or passes one on a command line. Each tool gets only the secrets it uses
+([infrastructure.md](infrastructure.md#environment)): talman, talosctl, kubectl and helm get none of
+the S3, cloud or state secrets. sops and talman get the Talos age key's location from their
+environment; `cluster-restore` hands age the key file's path, or, when only `SOPS_AGE_KEY` holds
+the key, the key on standard input. `cluster-config` reads the Flux age key,
 to hand it to kubectl and age-keygen on standard input.
 
 - `SOPS_AGE_KEY_FILE`: the path of the Talos age key, outside the repository. In CI,
@@ -550,13 +560,13 @@ to hand it to kubectl and age-keygen on standard input.
   them, as talman decrypts the bundle, and `cluster-restore` decrypts the snapshot with it.
 - `BACKUP_BUCKET_PREFIX`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`: the start of the backup
   buckets' names and the state key ([infrastructure.md](infrastructure.md#environment)), with which
-  `cluster-snapshot`, `cluster-snapshots` and `cluster-restore` reach the etcd bucket through
-  rclone, configured as the infrastructure recipes configure it
+  `cluster-snapshot`, both upgrade recipes, `cluster-snapshots` and `cluster-restore` reach the
+  etcd bucket through rclone, configured as the infrastructure recipes configure it
   ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)). `cluster-bootstrap`,
   `cluster-config` and `cluster-flux` need the prefix as well, which becomes `BACKUP_BUCKET_PREFIX`
   in `cluster-config`.
-- `TMPDIR`: where `cluster-snapshot` and `cluster-restore` make their private directory, `/tmp`
-  when unset. Inside the repository it is refused.
+- `TMPDIR`: where `cluster-snapshot`, both upgrade recipes and `cluster-restore` make their private
+  directory, `/tmp` when unset. Inside the repository it is refused.
 - `KUBE_API_ADDRESS`: the Kubernetes API load balancer's floating address, an IPv4 address, as
   the API's certificate names are addresses. The cluster stack renders it into the cluster's
   `talman.yaml` as `values.apiAddress`, and the recipes read it from there; set in `.env` or the

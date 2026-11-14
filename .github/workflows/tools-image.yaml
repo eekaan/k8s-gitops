@@ -1,0 +1,51 @@
+---
+# Publishes the tools container just ci runs the checks in as ghcr.io/eekaan/k8s-gitops/ci-tools,
+# tagged with the key of its inputs and signed keyless, and prints its digest; nothing is built when
+# the key's image is signed already. Recording the digest in versions.yaml is a pull request of its
+# own (just tools-image-pin). This file's path and the branch are the signing identity the pin
+# verifies: renaming the file needs scripts/tools-image changed in the same change.
+name: tools-image
+
+# Never for a pull request: one never gets packages: write or an identity token. It runs for a change
+# to any file the key or the image is made from: the inputs, the Dagger module among them, the script
+# that computes the key and publishes, and this file. versions.yaml holds more than the inputs; a run
+# for a change to the rest finds the key's image signed already.
+"on":
+  push:
+    branches: [main]
+    paths:
+      - mise.toml
+      - versions.yaml
+      - .dagger/modules/ci/main.dang
+      - scripts/tools-image
+      - .github/workflows/tools-image.yaml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+# Runs never overlap: one that starts while another is in progress waits for it.
+concurrency:
+  group: tools-image
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785  # v5.2.8
+        with:
+          version: 2026.11.4
+          # The checksum of that release's linux-x64 binary, and no cache entry, as in the publish
+          # job: this job signs too.
+          sha256: 0296d9cba9324106d4e0962bb94a2072902f3658813aeb3b09504947bb8ddc2b
+          cache: false
+          install_args: just http:dagger cosign jq
+      - run: just tools-image-publish
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
