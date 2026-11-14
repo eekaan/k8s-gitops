@@ -59,12 +59,27 @@ Feature: Cluster recipes
   Scenario: A Talos upgrade drains through the Kubernetes API one node at a time
     Given talman reporting cp-2 and worker-1 behind the Talos version and schematic talman.yaml gives them
     When cluster-upgrade runs, without the cluster's name typed back and then with it
-    Then the first shows talman's dry run and changes nothing; the second takes an etcd snapshot, then for cp-2 and then worker-1 only drains the node with kubectl through the kubeconfig served at KUBE_API_ADDRESS, upgrades it with talman with talosctl's own drain off, waits for it to be Ready and uncordons it before the next is drained; with the API not answering nothing is drained, and with every node on its version it exits zero without asking
+    Then the first shows talman's dry run and changes nothing; the second takes an etcd snapshot to the bucket, then for cp-2 and then worker-1 only drains the node with kubectl through the kubeconfig served at KUBE_API_ADDRESS, upgrades it with talman with talosctl's own drain off, waits for it to report Ready after the upgrade and uncordons it before the next is drained; with the API not answering nothing is drained, and with every node on its version it exits zero without asking
+
+  Scenario: An upgrade's etcd snapshot is uploaded encrypted and nothing is left on disk
+    Given talman reporting nodes behind the Talos version and Kubernetes behind kubernetesVersion, and the etcd backup bucket
+    When cluster-upgrade and cluster-upgrade-k8s run with the cluster's name typed back
+    Then each takes its snapshot as cluster-snapshot does, before it touches any node, and asks talman for no snapshot of its own: the bucket holds one new object per run, which the Talos age key decrypts to what talman wrote, and no etcd snapshot is left in the cluster's clusterconfig/ or anywhere else on disk
+
+  Scenario: A failed snapshot stops an upgrade before any node is touched
+    Given talman failing once it has started the etcd snapshot, and an upload that fails
+    When cluster-upgrade and cluster-upgrade-k8s run
+    Then each exits non-zero naming the step it failed in, without what the S3 client reported, drains, cordons, upgrades and uncordons nothing, and leaves nothing on disk
+
+  Scenario: An upgrade waits for a Ready the node reports after it was upgraded
+    Given a node whose Ready condition is the one from before its upgrade for some reads, and one whose kubelet never reports again
+    When cluster-upgrade runs
+    Then it uncordons the node only once its Ready condition is newer than the start of its upgrade, and for the node that never reports it exits non-zero naming it and uncordons nothing
 
   Scenario: A Kubernetes upgrade shows the change and asks before applying
     Given kubernetesVersion in talman.yaml ahead of what the kubelets run
     When cluster-upgrade-k8s runs, without the cluster's name typed back and then with it
-    Then the first shows talman's dry run and upgrades nothing; the second runs talman upgrade-k8s once, with an etcd snapshot first and the API reached at KUBE_API_ADDRESS, and then finds every node on the version; and with every node on it, it exits zero without asking or upgrading
+    Then the first shows talman's dry run and upgrades nothing; the second takes an etcd snapshot to the bucket and then runs talman upgrade-k8s once, with the API reached at KUBE_API_ADDRESS, and then finds every node on the version; and with every node on it, it exits zero without asking or upgrading
 
   Scenario: With CI set, talman's output stays out of the log
     Given a talman whose output names the nodes by address and shows configuration diffs

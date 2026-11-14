@@ -5,7 +5,9 @@
 # talosctl and sops, recorded on their way, with every key inside the test's temporary directory.
 # Everything that would reach a node or a cluster runs against recording fakes: talman, talosctl,
 # kubectl, install-cilium, cluster-config, install-app, and timeout, which carries the probe of the
-# Talos API port. tests/cluster-flux.bats runs the real cluster-config and install-app.
+# Talos API port. tests/cluster-flux.bats runs the real cluster-config and install-app. The upgrade
+# recipes take their etcd snapshot as cluster-snapshot does, so age runs for real, with a throwaway
+# key, and rclone is tests/fixtures/etcd-snapshots/rclone, whose buckets are directories.
 
 setup_file() {
   # The Talos check's fixture cluster: talos/talman.yaml.tftpl rendered from tests/fixtures/talos,
@@ -21,7 +23,10 @@ setup() {
   BIN="$BATS_TEST_TMPDIR/bin"
   RECORD="$BATS_TEST_TMPDIR/record"
   STATE="$BATS_TEST_TMPDIR/state"
-  mkdir -p "$BIN" "$RECORD" "$STATE" "$BATS_TEST_TMPDIR/repo/talos/lab-sto2" "$BATS_TEST_TMPDIR/keys"
+  STORE="$BATS_TEST_TMPDIR/store"
+  FAILS="$BATS_TEST_TMPDIR/store-fails"
+  mkdir -p "$BIN" "$RECORD" "$STATE" "$BATS_TEST_TMPDIR/repo/talos/lab-sto2" "$BATS_TEST_TMPDIR/keys" \
+    "$BATS_TEST_TMPDIR/repo/infra/openstack" "$STORE/marker-prefix-etcd" "$FAILS"
   REPO=$(cd "$BATS_TEST_TMPDIR/repo" && pwd)
   CLUSTER="$REPO/talos/lab-sto2"
   BUNDLE="$CLUSTER/secrets.sops.yaml"
@@ -49,6 +54,9 @@ setup() {
     KUBE_API_ADDRESS="$KUBE_API_ADDRESS"
     FLUX_AGE_KEY_FILE="$FLUX_KEY"
     CLUSTER_DOMAIN=example.com
+    BACKUP_BUCKET_PREFIX=marker-prefix
+    AWS_ACCESS_KEY_ID=marker-state-access-key-id
+    AWS_SECRET_ACCESS_KEY=marker-state-secret-key
     TMPDIR="$BATS_TEST_TMPDIR"
   )
   reset_environment
@@ -170,6 +178,13 @@ given() {
   [[ " ${args[*]} " == *" $1 "* ]]
 }
 args=("$@")
+# take_own_snapshot: what upgrade --snapshot and upgrade-k8s --snapshot do before they change
+# anything: a snapshot in the output directory, as the pinned talman writes it.
+take_own_snapshot() {
+  if given --snapshot; then
+    (umask 077 && cp "$STATE/content" "$dir/clusterconfig/etcd-lab-sto2-$(date -u +%Y%m%dT%H%M%SZ).db")
+  fi
+}
 case "$1" in
   apply)
     if given --bootstrap; then
@@ -271,8 +286,10 @@ KUBECONFIG
       echo "error: draining $node: dial tcp 192.0.2.5:6443: i/o timeout" >&2
       exit 1
     fi
+    take_own_snapshot
     grep -vx -- "$node" "$STATE/talos-behind" > "$STATE/talos-behind.next" || true
     mv "$STATE/talos-behind.next" "$STATE/talos-behind"
+    : > "$STATE/upgraded.$node"
     echo "== $node: upgraded to v1.14.6"
     ;;
   upgrade-k8s)
@@ -291,11 +308,26 @@ KUBECONFIG
       echo "error: dial tcp 192.0.2.5:6443: i/o timeout" >&2
       exit 1
     fi
+    take_own_snapshot
     rm -f "$STATE/k8s-behind"
     echo "== upgraded Kubernetes to v1.37.1"
     ;;
   etcd)
-    echo "wrote clusterconfig/etcd-example-20261114T000000Z.db"
+    # Without a path the snapshot lands in the output directory, as the pinned talman writes it, and
+    # nothing is written over an existing file.
+    path=${3-$dir/clusterconfig/etcd-lab-sto2-20261114T000000Z.db}
+    if [[ -e $path ]]; then
+      echo "error: refusing to write over $path" >&2
+      exit 1
+    fi
+    printf 'path %s\nmode %s\n' "$path" "$(stat -c %a "$(dirname "$path")")" >> "$RECORD/snapshot"
+    if [[ -e $STATE/snapshot-fails ]]; then
+      echo "error: etcd on cp-1 closed the stream" >&2
+      exit 1
+    fi
+    mkdir -p "$(dirname "$path")"
+    (umask 077 && cp "$STATE/content" "$path")
+    echo "wrote $path"
     ;;
 esac
 EOF
@@ -308,6 +340,29 @@ printf '%s\n' "${KUBECONFIG-}" > "$RECORD/kubeconfig"
 if [[ $* == *" /readyz"* && -e $STATE/api-down ]]; then
   echo "The connection to the server was refused" >&2
   exit 1
+fi
+if [[ $1 == get && $2 == nodes ]]; then
+  # A node's kubelet reports Ready again some polls after the node was upgraded, as many as its
+  # stale.<hostname> file says, and never when it says never; until then, and before the upgrade,
+  # its Ready condition is the one etcd kept from long ago.
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  items=()
+  for node in $(yq '.nodes[].hostname' "${TALMAN_CONFIG:?}/talman.yaml"); do
+    beat=2026-01-01T00:00:00Z
+    if [[ -e $STATE/upgraded.$node ]]; then
+      stale=$(cat "$STATE/stale.$node" 2> /dev/null || echo 0)
+      if [[ $stale == never ]]; then
+        :
+      elif ((stale > 0)); then
+        echo "$((stale - 1))" > "$STATE/stale.$node"
+      else
+        beat=$now
+      fi
+    fi
+    items+=("{\"metadata\": {\"name\": \"$node\"}, \"status\": {\"conditions\": [
+      {\"type\": \"Ready\", \"status\": \"True\", \"lastHeartbeatTime\": \"$beat\"}]}}")
+  done
+  printf '{"apiVersion": "v1", "kind": "List", "items": [%s]}\n' "$(IFS=,; echo "${items[*]}")"
 fi
 EOF
   # The nodes answer a connection to the Talos API port only.
@@ -332,6 +387,14 @@ EOF
 printf '%s\n' "install-app $* KUBECONFIG=${KUBECONFIG-}" >> "$RECORD/argv"
 EOF
   mv "$BIN/install-app" "$REPO/scripts/install-app"
+  # The etcd bucket, the endpoint's only source, and the Talos age key's recipient the snapshot is
+  # encrypted to, with its private half in SNAPSHOT_KEY for the tests to decrypt with.
+  sed -E 's#https://[^"]+#https://marker-endpoint.example.invalid#' "$ROOT/infra/openstack/backend.hcl" > "$REPO/infra/openstack/backend.hcl"
+  cp "$BATS_TEST_DIRNAME/fixtures/etcd-snapshots/rclone" "$BIN/rclone"
+  SNAPSHOT_KEY="$BATS_TEST_TMPDIR/keys/snapshot.agekey"
+  age-keygen -o "$SNAPSHOT_KEY" 2> /dev/null
+  RECIPIENT=$(age-keygen -y "$SNAPSHOT_KEY") yq -i '.creation_rules[].age = strenv(RECIPIENT)' "$REPO/talos/.sops.yaml"
+  printf 'marker-snapshot-content %s\n\001\002binary tail\n' "$RANDOM$RANDOM" > "$STATE/content"
   # The Flux age key, with its recipient in .sops.yaml, which cluster-bootstrap checks first.
   age-keygen -o "$FLUX_KEY" 2> /dev/null
   RECIPIENT=$(age-keygen -y "$FLUX_KEY") yq -i '.creation_rules[].age = strenv(RECIPIENT)' "$REPO/.sops.yaml"
@@ -347,9 +410,24 @@ call_line() {
   grep -n -m1 -E -- "$1" "$RECORD/argv" | cut -d: -f1
 }
 
+# last_call_line PATTERN: the line number in the record of the last call matching the extended regex.
+last_call_line() {
+  grep -n -E -- "$1" "$RECORD/argv" | tail -1 | cut -d: -f1
+}
+
 # calls PATTERN: the recorded calls matching the extended regex, one per line.
 calls() {
   grep -E -- "$1" "$RECORD/argv" || true
+}
+
+# next_second: waits until the UTC second changes, so that the next snapshot takes a name of its own;
+# one taken in the same second as another is refused.
+next_second() {
+  local now
+  now=$(date -u +%s)
+  while [[ $(date -u +%s) == "$now" ]]; do
+    command sleep 0.1
+  done
 }
 
 # applies: the recorded talman apply calls that are not dry runs, one per line.
@@ -848,8 +926,9 @@ applies() {
       awk -v after="$previous" '$1 > after' | head -1)
     drained=$(call_line "^kubectl drain $node( |\$)")
     upgraded=$(grep -nE "^talman upgrade -n $node( |\$)" "$RECORD/argv" | grep -v -- ' --dry-run' | head -1 | cut -d: -f1)
-    ready=$(call_line "^kubectl wait .*node/$node( |\$)")
     uncordoned=$(call_line "^kubectl uncordon $node( |\$)")
+    ready=$(grep -n '^kubectl get nodes ' "$RECORD/argv" | cut -d: -f1 |
+      awk -v after="$upgraded" -v before="$uncordoned" '$1 > after && $1 < before' | tail -1)
     for call in "$readyz" "$drained" "$upgraded" "$ready" "$uncordoned"; do
       [ -n "$call" ]
     done
@@ -913,7 +992,7 @@ applies() {
   [ "$status" -eq 0 ]
   [ ! -e "$STATE/k8s-behind" ]
   [ "$(upgrades | wc -l)" -eq 1 ]
-  [[ " $(upgrades) " == *" --snapshot "* ]]
+  [[ " $(upgrades) " != *" --snapshot "* ]]
   [[ " $(upgrades) " == *" --extra-flags=--endpoint=https://$KUBE_API_ADDRESS:6443 "* ]]
   [[ " $(upgrades) " != *" --to"* && " $(upgrades) " != *" --force "* ]]
   upgraded=$(call_line "^$(upgrades)\$")
@@ -928,6 +1007,149 @@ applies() {
   [ "$status" -eq 0 ]
   [[ $output != *"Type lab-sto2"* ]]
   [ -z "$(upgrades)" ]
+}
+
+@test "An upgrade's etcd snapshot is uploaded encrypted and nothing is left on disk" {
+  fake_cluster
+  printf '%s\n' cp-2 worker-1 > "$STATE/talos-behind"
+  : > "$STATE/k8s-behind"
+  bucket="$STORE/marker-prefix-etcd"
+
+  recipe cluster-upgrade --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  talos_snapshot=$(call_line '^talman etcd snapshot ')
+  [ -n "$talos_snapshot" ]
+  [ "$talos_snapshot" -lt "$(call_line '^kubectl drain ')" ]
+  [ "$talos_snapshot" -lt "$(grep -nE '^talman upgrade -n ' "$RECORD/argv" | grep -v -- ' --dry-run' | head -1 | cut -d: -f1)" ]
+  [[ $output =~ cluster-upgrade:\ lab-sto2:\ [0-9]{8}T[0-9]{6}Z\.snapshot\.age,\ [0-9]+\ bytes ]]
+  next_second
+
+  recipe cluster-upgrade-k8s --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  k8s_snapshot=$(last_call_line '^talman etcd snapshot ')
+  [ "$k8s_snapshot" -gt "$talos_snapshot" ]
+  [ "$k8s_snapshot" -lt "$(grep -n '^talman upgrade-k8s ' "$RECORD/argv" | grep -v -- ' --dry-run' | head -1 | cut -d: -f1)" ]
+  # Each run kept one object of its own in the bucket, which only the Talos age key opens.
+  mapfile -t objects < <(find "$bucket" -type f -printf '%P\n' | sort)
+  [ "${#objects[@]}" -eq 2 ]
+  for object in "${objects[@]}"; do
+    [[ $object =~ ^lab-sto2/[0-9]{8}T[0-9]{6}Z\.snapshot\.age$ ]]
+    [ "$(head -n 1 "$bucket/$object")" = age-encryption.org/v1 ]
+    age -d -i "$SNAPSHOT_KEY" "$bucket/$object" | cmp - "$STATE/content"
+  done
+  # talman wrote each snapshot into a private directory outside the repository, and none of its own.
+  [ "$(grep -c '^path ' "$RECORD/snapshot")" -eq 2 ]
+  while read -r _ written; do
+    [[ $written == "$BATS_TEST_TMPDIR"/cluster-upgrade*/etcd.db ]]
+  done < <(grep '^path ' "$RECORD/snapshot")
+  [ -z "$(calls '^talman .*--snapshot')" ]
+  [ -z "$(find "$CLUSTER" -name 'etcd-*')" ]
+  [ -z "$(find "$BATS_TEST_TMPDIR" -maxdepth 1 -type d -name 'cluster-upgrade*')" ]
+  # The snapshot's content is in the bucket, encrypted, and nowhere else on disk.
+  found=$(grep -rlaF marker-snapshot-content "$BATS_TEST_TMPDIR" --exclude-dir=state || true)
+  [ -z "$found" ]
+}
+
+@test "A failed snapshot stops an upgrade before any node is touched" {
+  fake_cluster
+  # changes: the recorded calls that drain, upgrade or uncordon a node, or ask talman for a snapshot.
+  changes() {
+    calls '^kubectl (drain|cordon|uncordon) |^talman (upgrade|upgrade-k8s)( .*)?$' |
+      grep -v -- ' --dry-run' || true
+  }
+  for recipe in cluster-upgrade cluster-upgrade-k8s; do
+    for failure in taking uploading; do
+      echo "$recipe $failure"
+      printf '%s\n' cp-2 worker-1 > "$STATE/talos-behind"
+      : > "$STATE/k8s-behind"
+      rm -rf "$RECORD" "$STATE/snapshot-fails" "$FAILS/upload"
+      mkdir -p "$RECORD"
+      if [[ $failure == taking ]]; then
+        : > "$STATE/snapshot-fails"
+        expected="failed while taking the etcd snapshot"
+      else
+        : > "$FAILS/upload"
+        expected="failed while uploading the encrypted snapshot to the etcd bucket"
+      fi
+      next_second
+
+      recipe "$recipe" --yes < /dev/null
+
+      [ "$status" -ne 0 ]
+      [[ $output == *"$recipe: $expected"* ]]
+      for shown in AccessDenied marker-endpoint marker-prefix; do
+        [[ $output != *"$shown"* ]]
+      done
+      [ -n "$(calls '^talman etcd snapshot ')" ]
+      [ -z "$(changes)" ]
+      [ -z "$(find "$STORE" -type f)" ]
+      [ -z "$(find "$CLUSTER" -name 'etcd-*')" ]
+      [ -z "$(find "$BATS_TEST_TMPDIR" -maxdepth 1 -type d -name 'cluster-upgrade*')" ]
+    done
+  done
+}
+
+@test "the upgrade recipes name the snapshot settings they lack before they ask" {
+  fake_cluster
+  printf '%s\n' cp-2 worker-1 > "$STATE/talos-behind"
+  : > "$STATE/k8s-behind"
+  for name in BACKUP_BUCKET_PREFIX AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
+    for recipe in cluster-upgrade cluster-upgrade-k8s; do
+      echo "$recipe $name"
+      reset_environment
+      without "$name"
+      : > "$RECORD/argv"
+
+      recipe "$recipe" <<< "lab-sto2"
+
+      [ "$status" -ne 0 ]
+      [[ $output == *"$name is not set"* ]]
+      [[ $output != *"Type lab-sto2"* ]]
+      [ -z "$(calls '^(kubectl|talman etcd)')" ]
+      if calls '^talman upgrade' | grep -qv -- ' --dry-run'; then
+        return 1
+      fi
+    done
+  done
+}
+
+@test "An upgrade waits for a Ready the node reports after it was upgraded" {
+  fake_cluster
+  printf '%s\n' cp-2 worker-1 > "$STATE/talos-behind"
+  # cp-2 reports Ready on the first poll after its upgrade; worker-1's kubelet reports Ready as of
+  # before the upgrade for two polls, as etcd keeps a node's last report while the node is away.
+  echo 0 > "$STATE/stale.cp-2"
+  echo 2 > "$STATE/stale.worker-1"
+  # polls NODE: how many times the nodes were read between NODE's upgrade and its uncordon.
+  polls() {
+    local upgraded uncordoned
+    upgraded=$(grep -nE "^talman upgrade -n $1( |\$)" "$RECORD/argv" | grep -v -- ' --dry-run' | head -1 | cut -d: -f1)
+    uncordoned=$(call_line "^kubectl uncordon $1( |\$)")
+    [ -n "$upgraded" ] && [ -n "$uncordoned" ]
+    grep -n '^kubectl get nodes ' "$RECORD/argv" | cut -d: -f1 |
+      awk -v after="$upgraded" -v before="$uncordoned" '$1 > after && $1 < before' | wc -l
+  }
+
+  recipe cluster-upgrade --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ "$(polls cp-2)" -eq 1 ]
+  [ "$(polls worker-1)" -eq 3 ]
+
+  # A kubelet that never reports again leaves the node cordoned and the recipe failing by its name.
+  printf '%s\n' cp-2 > "$STATE/talos-behind"
+  rm -f "$STATE"/upgraded.*
+  echo never > "$STATE/stale.cp-2"
+  : > "$RECORD/argv"
+  next_second
+
+  recipe cluster-upgrade --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"cp-2 did not report Ready after the upgrade"* ]]
+  [ -z "$(calls '^kubectl uncordon ')" ]
 }
 
 @test "With CI set, talman's output stays out of the log" {
@@ -966,9 +1188,11 @@ applies() {
 
   [ "$status" -eq 0 ]
   [[ $output == *"cluster-upgrade: talman upgrade succeeded; $(shown_in cluster-upgrade)"* ]]
-  [[ $output == *"cluster-upgrade: talman etcd succeeded; $(shown_in cluster-upgrade)"* ]]
+  [[ $output =~ cluster-upgrade:\ lab-sto2:\ [0-9]{8}T[0-9]{6}Z\.snapshot\.age,\ [0-9]+\ bytes ]]
   grep -q 'cp-2: upgraded' "$CLUSTER/clusterconfig/cluster-upgrade.log"
   printed+=("$output")
+
+  next_second
 
   recipe cluster-upgrade-k8s --yes < /dev/null
 
@@ -1063,6 +1287,7 @@ applies() {
   run_and_keep failed cluster-upgrade --yes < /dev/null
   rm "$STATE/api-down"
   run_and_keep ok cluster-upgrade --yes < /dev/null
+  next_second
   run_and_keep ok cluster-upgrade-k8s --yes < /dev/null
   run_and_keep ok cluster-upgrade < /dev/null
   run_and_keep ok cluster-upgrade-k8s < /dev/null
@@ -1086,7 +1311,9 @@ applies() {
   : > "$STATE/api-down"
   run_and_keep failed cluster-upgrade --yes < /dev/null
   rm "$STATE/api-down"
+  next_second
   run_and_keep ok cluster-upgrade --yes < /dev/null
+  next_second
   run_and_keep ok cluster-upgrade-k8s --yes < /dev/null
   reset_environment
   ci_printed=("${printed[@]:local_runs}")
@@ -1103,6 +1330,8 @@ applies() {
     marker-certificate-authority-data
     marker-client-certificate-data
     marker-client-key-data
+    marker-state-access-key-id
+    marker-state-secret-key
   )
   grep -q '^talman apply ' "$RECORD/argv"
   grep -q '^kubectl ' "$RECORD/argv"
