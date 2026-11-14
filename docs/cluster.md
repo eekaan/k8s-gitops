@@ -2,16 +2,18 @@
 
 The Talos cluster is created and changed by `just` recipes that check what they need before they
 run anything. Each recipe that works on one cluster takes its name, `lab-sto2` when none is given,
-and works in `talos/<cluster>/`: on `talman.yaml`, which `just infra-talman` renders from the
-cluster stack and git ignores; on `secrets.sops.yaml`, the cluster's encrypted secrets bundle,
-which is committed; and on talman's output directory `clusterconfig/`, which git ignores and which
-holds the machine configurations, the talosconfig and the kubeconfig.
+and works in `talos/<cluster>/`: on `talman.yaml`, which the cluster stack renders, `just
+infra-apply sto2/cluster` and `just infra-talman` write, and git ignores; on `secrets.sops.yaml`,
+the cluster's encrypted secrets bundle, which is committed; and on talman's output directory
+`clusterconfig/`, which git ignores and which holds the machine configurations, the talosconfig
+and the kubeconfig.
 
 ## From nothing to a Ready cluster
 
 1. `just infra-apply sto2/plumbing`, then `just infra-apply sto2/cluster`
    ([infrastructure.md](infrastructure.md)): the nodes boot and wait in maintenance mode, and
-   the cluster's `talman.yaml` is written. `just infra-talman` writes it again without applying.
+   the cluster's `talman.yaml` is written. `just infra-talman` writes it again from the stack's
+   state, without applying.
 2. `just cluster-age-key`, once: the Talos age key. Commit `talos/.sops.yaml`.
 3. `just cluster-secrets`, once per cluster: the secrets bundle. Commit it.
 4. `just cluster-flux-age-key`, once: the Flux age key. Commit `.sops.yaml`.
@@ -26,9 +28,16 @@ Later changes to a patch or to `talman.yaml`, and nodes OpenTofu adds, reach the
 ## Upgrades
 
 The Talos and Kubernetes versions are set in `versions.yaml` only, and reach the recipes through
-the cluster's `talman.yaml`; the upgrade recipes take no version. Once a version has changed there
-and `talman.yaml` has been rendered again, `just cluster-upgrade` moves the nodes to the Talos
-version, then `just cluster-upgrade-k8s` moves the cluster to the Kubernetes version.
+the cluster's `talman.yaml`; the upgrade recipes take no version. The cluster stack renders
+`talman.yaml` from `versions.yaml` when it is applied; `just infra-talman` writes what the stack's
+state holds, so it does not pick a new version up. After a version changes in `versions.yaml`:
+
+1. `just infra-apply sto2/plumbing`: the plumbing stack builds its Talos image, which nodes added
+   later boot, from the Talos version.
+2. `just infra-apply sto2/cluster`: its plan changes the output `talman_yaml` and no node, as a new
+   image does not replace a running one, and the apply writes the new `talman.yaml`.
+3. `just cluster-upgrade` moves the nodes to the Talos version, then `just cluster-upgrade-k8s`
+   moves the cluster to the Kubernetes version.
 
 ## The Talos age key
 

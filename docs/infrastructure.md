@@ -22,7 +22,9 @@ command that runs them is a `just` recipe.
   typed back, applies that saved plan; `just infra-apply sto2/plumbing --yes` does not ask. After
   the cluster stack it writes the cluster's `talman.yaml`, as `just infra-talman` does.
 - `just infra-talman` writes the cluster's `talman.yaml` from the `sto2/cluster` stack's state;
-  see [The generated talman.yaml](#the-generated-talmanyaml).
+  see [The generated talman.yaml](#the-generated-talmanyaml). It writes what the last apply left
+  there, so a change to what the stack renders, such as a version in `versions.yaml`, reaches the
+  file through `just infra-apply sto2/cluster` only.
 - `just infra-output sto2/plumbing talos_version` prints one output of a stack. It refuses a
   sensitive output, as those hold the deployment's addresses and IDs.
 - `just infra-destroy` destroys `sto2/cluster`, then `sto2/plumbing`. Each destroy is planned and
@@ -142,7 +144,8 @@ a time. Without `flock` on `PATH` (it comes with util-linux), the recipes stop a
 Plan output is public in CI, and a full plan holds addresses, IDs and attribute values. The
 recipes therefore show neither tofu's plan nor its apply report, only a summary that `jq` reads
 from `tofu show -json` of the saved plan: tofu's counts line, then each action with how many
-resources of each type it takes.
+resources of each type it takes, then each output the plan changes, by its action and name and
+never its value.
 
 ```text
 sto2/cluster:
@@ -152,11 +155,14 @@ Plan: 4 to add, 1 to change, 2 to destroy.
   update: 1 openstack_networking_router_v2
   replace: 1 openstack_networking_floatingip_v2
   delete: 1 openstack_blockstorage_volume_v3
+  update: output talman_yaml
 ```
 
 A replaced resource counts once to add and once to destroy, as in tofu's own counts line. Data
-sources and resources without changes are left out. The full plan stays encrypted in
-`.terraform/infra.tfplan` in the stack's directory.
+sources, and resources and outputs without changes, are left out. A plan that changes outputs
+only, as the cluster stack's does after `versions.yaml` changes, is not "No changes.": applying it
+writes the new outputs to the state. The full plan stays encrypted in `.terraform/infra.tfplan` in
+the stack's directory.
 
 When tofu fails, its errors can name resources and hold attribute values, API endpoints and the
 bucket. Without `CI` set they are shown as tofu prints them. With `CI` set they go to

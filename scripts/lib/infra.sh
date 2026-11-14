@@ -169,8 +169,11 @@ export_api_allowed_cidrs() {
 }
 
 # Reads a plan as tofu show -json prints it and prints tofu's counts line, then one line per action
-# and resource type with how many resources of that type the action takes. Addresses and
-# attribute values are never printed. Data sources and resources without changes are left out.
+# and resource type with how many resources of that type the action takes, then one line per output
+# the plan changes, with its action and its name. Addresses and the values of attributes and
+# outputs are never printed. Data sources, and resources and outputs without changes, are left out.
+# A plan that changes outputs only, such as the cluster stack's talman_yaml after versions.yaml
+# changes, is a change: applying it writes the new outputs to the state.
 plan_summary() {
   jq -r '
     def action: if sort == ["create", "delete"] then "replace" else join("+") end;
@@ -179,11 +182,15 @@ plan_summary() {
       | select(.mode == "managed")
       | {type, action: (.change.actions | action)}
       | select(.action != "no-op")] as $changes
+    | [.output_changes // {} | to_entries[]
+      | {name: .key, action: (.value.actions | action)}
+      | select(.action != "no-op")] as $outputs
     | def count($a): [$changes[] | select(.action == $a)] | length;
-    if ($changes | length) == 0 then
+    if ($changes | length) == 0 and ($outputs | length) == 0 then
       "No changes."
     else
       "Plan: \(count("create") + count("replace")) to add, \(count("update")) to change, \(count("delete") + count("replace")) to destroy\(if count("forget") > 0 then ", \(count("forget")) to forget" else "" end).",
-      ($changes | group_by([(.action | rank), .action, .type])[] | "  \(.[0].action): \(length) \(.[0].type)")
+      ($changes | group_by([(.action | rank), .action, .type])[] | "  \(.[0].action): \(length) \(.[0].type)"),
+      ($outputs | sort_by([(.action | rank), .action, .name])[] | "  \(.action): output \(.name)")
     end'
 }

@@ -334,6 +334,27 @@ absent() {
   done < <(jq -r '.resource_changes[] | .address, (.change.before, .change.after | .. | strings)' "$FIXTURES/plan.json")
 }
 
+@test "A plan that changes only outputs is not shown as no changes" {
+  recording_tofu "$FIXTURES/output-changes.json"
+
+  recipe infra-plan sto2/cluster
+
+  [ "$status" -eq 0 ]
+  summary='Plan: 0 to add, 0 to change, 0 to destroy.
+  create: output api_address
+  update: output talman_yaml
+  delete: output retired'
+  [[ $output == *"$summary"* ]]
+  [[ $output != *"No changes."* ]]
+  [[ $output != *schematic_id* && $output != *unchanged* ]]
+  while IFS= read -r shown; do
+    if [[ $output == *"$shown"* ]]; then
+      echo "the summary shows $shown" >&2
+      return 1
+    fi
+  done < <(jq -r '.output_changes[] | .before, .after | strings' "$FIXTURES/output-changes.json")
+}
+
 @test "Errors from tofu stay out of a public CI log" {
   recording_tofu "$FIXTURES/no-changes.json" plan
   with CI=true

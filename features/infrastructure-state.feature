@@ -66,6 +66,11 @@ Feature: Infrastructure state and stack recipes
     When infra-plan prints its summary
     Then it shows the number of resources per action and resource type and no resource address or attribute value
 
+  Scenario: A plan that changes only outputs is not shown as no changes
+    Given a saved plan that changes no resource and creates, updates and deletes outputs
+    When infra-plan prints its summary
+    Then it names each changed output with its action, and neither says "No changes." nor shows an output's value
+
   Scenario: Errors from tofu stay out of a public CI log
     Given tofu fails with errors that name a resource
     When infra-plan runs with CI set

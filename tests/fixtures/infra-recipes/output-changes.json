@@ -1,0 +1,51 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.13.9",
+  "resource_changes": [
+    {
+      "address": "module.fixture.openstack_networking_network_v2.unchanged",
+      "mode": "managed",
+      "type": "openstack_networking_network_v2",
+      "name": "unchanged",
+      "change": {
+        "actions": ["no-op"],
+        "before": { "name": "marker-unchanged-network" },
+        "after": { "name": "marker-unchanged-network" }
+      }
+    }
+  ],
+  "output_changes": {
+    "talman_yaml": {
+      "actions": ["update"],
+      "before": "talosVersion: marker-old-output-value",
+      "after": "talosVersion: marker-new-output-value",
+      "after_unknown": false,
+      "before_sensitive": true,
+      "after_sensitive": true
+    },
+    "api_address": {
+      "actions": ["create"],
+      "before": null,
+      "after": "203.0.113.9",
+      "after_unknown": false,
+      "before_sensitive": false,
+      "after_sensitive": true
+    },
+    "retired": {
+      "actions": ["delete"],
+      "before": "marker-deleted-output-value",
+      "after": null,
+      "after_unknown": false,
+      "before_sensitive": false,
+      "after_sensitive": false
+    },
+    "schematic_id": {
+      "actions": ["no-op"],
+      "before": "marker-unchanged-output-value",
+      "after": "marker-unchanged-output-value",
+      "after_unknown": false,
+      "before_sensitive": false,
+      "after_sensitive": false
+    }
+  }
+}

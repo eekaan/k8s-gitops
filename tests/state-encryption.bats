@@ -171,7 +171,8 @@ EOF
   [ "$status" -ne 0 ]
   encrypt_with passphrase-of-this-test
   [ "$(tofu -chdir="$STACK" show -json "$STACK/saved.tfplan" | plan_summary)" = 'Plan: 1 to add, 0 to change, 0 to destroy.
-  create: 1 terraform_data' ]
+  create: 1 terraform_data
+  create: output marker' ]
 }
 
 @test "another stack reads the plumbing stack's encrypted outputs with the same settings" {
