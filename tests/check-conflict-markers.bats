@@ -51,6 +51,32 @@ conflict() {
   [[ $output == *"windows.md:6:"* ]]
 }
 
+@test "Each file of an unresolved merge is reported once" {
+  local git=(git -c user.name=test -c user.email=test@example.invalid) file
+  local files=(one.md two.md three.yaml four.txt)
+  for file in "${files[@]}"; do echo base > "$file"; done
+  git add .
+  "${git[@]}" commit -q -m base
+  git switch -q -c feature
+  for file in "${files[@]}"; do echo theirs > "$file"; done
+  "${git[@]}" commit -q -am theirs
+  git switch -q -
+  for file in "${files[@]}"; do echo ours > "$file"; done
+  "${git[@]}" commit -q -am ours
+  # With a common base, the index holds each conflicted file three times, once per stage.
+  run "${git[@]}" merge feature
+  [ "$status" -ne 0 ]
+  [ "$(git ls-files --unmerged | wc -l)" -eq 12 ]
+
+  run "$SCRIPT"
+
+  [ "$status" -ne 0 ]
+  for file in "${files[@]}"; do
+    [ "$(grep -cF "check-conflict-markers: $file:1:" <<< "$output")" -eq 1 ] || { echo "$file not named exactly once"; return 1; }
+  done
+  [[ $output == *"check-conflict-markers: 4 file(s) hold a merge conflict marker"* ]]
+}
+
 @test "Text that only looks like a conflict marker passes the check" {
   # A Markdown heading underlined with equals signs, in the length of a marker and in others.
   printf '%s\n' 'Title' "$MID" '' 'Other' '===' '' 'Third' "$MID=" > headings.md

@@ -13,6 +13,7 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 failures=0
+# During an unresolved merge the index holds a conflicted file once per stage; each is scanned once.
 while IFS= read -r -d '' path; do
   [[ -f $path && ! -L $path ]] || continue
   if [[ ! -r $path ]]; then
@@ -46,7 +47,7 @@ while IFS= read -r -d '' path; do
     echo "$found" >&2
     failures=$((failures + 1))
   fi
-done < <(git ls-files -z --cached --others --exclude-standard)
+done < <(git ls-files -z --cached --others --exclude-standard --deduplicate)
 
 if ((failures)); then
   echo "check-conflict-markers: $failures file(s) hold a merge conflict marker; resolve the conflict and remove its lines" >&2

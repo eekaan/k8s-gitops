@@ -56,6 +56,11 @@ Feature: Repository checks
     When the conflict marker check runs
     Then it exits non-zero and names the file with the line of each of the three markers
 
+  Scenario: Each file of an unresolved merge is reported once
+    Given a repository in a merge that stopped on four files, each changed on both sides since the common base
+    When the conflict marker check runs
+    Then it exits non-zero, names the opening marker of each file once, and counts four files
+
   Scenario: Text that only looks like a conflict marker passes the check
     Given a Markdown heading underlined with seven equals signs, runs of six and of eight angle brackets, an indented marker, a marker in the middle of a line and a YAML value that is seven equals signs
     When the conflict marker check runs
