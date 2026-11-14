@@ -37,7 +37,7 @@ EOF
     CLUSTER_S3_ACCESS_KEY_ID CLUSTER_S3_SECRET_ACCESS_KEY SOPS_AGE_KEY SOPS_AGE_KEY_FILE
     SOPS_AGE_KEY_CMD FLUX_AGE_KEY FLUX_AGE_KEY_FILE OPERATOR_CIDRS OS_CLOUD OS_AUTH_URL
     OS_APPLICATION_CREDENTIAL_ID OS_APPLICATION_CREDENTIAL_SECRET TF_VAR_api_allowed_cidrs
-    TF_VAR_image_name TF_VAR_ci_host_number
+    TF_VAR_image_name TF_VAR_ci_host_number TF_TOKEN_registry_example_com
   )
   PLAIN_NAMES=(TF_STATE_BUCKET BACKUP_BUCKET_PREFIX KUBE_API_ADDRESS KUBECONFIG TALMAN_CONFIG)
   ENVIRONMENT=()
@@ -83,7 +83,7 @@ sorted() {
 @test "Each tool gets only the secrets it uses" {
   cloud=(OS_CLOUD OS_AUTH_URL OS_APPLICATION_CREDENTIAL_ID OS_APPLICATION_CREDENTIAL_SECRET)
   tofu=(AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_BACKUP_SECRET TF_ENCRYPTION "${cloud[@]}"
-    TF_VAR_api_allowed_cidrs TF_VAR_image_name TF_VAR_ci_host_number)
+    TF_VAR_api_allowed_cidrs TF_VAR_image_name TF_VAR_ci_host_number TF_TOKEN_registry_example_com)
   sops=(SOPS_AGE_KEY SOPS_AGE_KEY_FILE SOPS_AGE_KEY_CMD)
   declare -A expected=(
     [tofu]=$(sorted "${tofu[@]}")
@@ -135,25 +135,82 @@ wrapped_tools() {
   sed -nE 's/^([a-z-]+)\(\) \{ run_tool .*/\1/p' "$ROOT/scripts/lib/tools.sh"
 }
 
-# bypasses: the lines on standard input that run a wrapped tool around its wrapper, as the binary
-# with the whole environment: a tool after a command that starts another, past whatever its options
-# and arguments are, in the same command; a tool a path is looked up for by command -v or which; a
-# tool named in the body of bash -c or sh -c. Asking whether a tool is installed is type -P with its
-# output discarded, and the one path a script keeps is flux's in substitute, which runs it with an
-# environment of its own.
+# logical_lines FILE: FILE's commands, each as NUMBER:TEXT with NUMBER the line it starts on. A
+# command continued by a backslash is one command; so is the body of a shell's -c argument that
+# runs over lines, and a here-document fed to a shell, which are commands. A here-document fed to
+# anything else is data, and left out.
+logical_lines() {
+  awk '
+    function quotes(text, q,    copy) {
+      copy = text
+      return gsub(q, "", copy)
+    }
+    function emit() {
+      if (command != "") print start ":" command
+      command = ""
+    }
+    {
+      line = $0
+      if (heredoc != "") {
+        stripped = line
+        sub(/^[\t]+/, "", stripped)
+        if (shell) command = command " " line
+        if (stripped == heredoc) heredoc = ""
+        if (heredoc == "") { shell = 0; emit() }
+        next
+      }
+      if (command == "") start = NR
+      if (open != "") {
+        command = command " " line
+        if (quotes(line, open) % 2 == 1) open = ""
+        if (open == "") emit()
+        next
+      }
+      if (command == "" && line ~ /^[[:space:]]*#/) {
+        print NR ":" line
+        next
+      }
+      continued = (line ~ /\\$/)
+      if (continued) sub(/\\$/, "", line)
+      command = (command == "" ? line : command " " line)
+      if (continued) next
+      if (match(line, /(^|[^[:alnum:]_.-])(bash|sh|dash|zsh)[[:space:]]+(-[A-Za-z-]+[[:space:]]+)*-[A-Za-z]*c[[:space:]]+["\047]/)) {
+        rest = substr(line, RSTART + RLENGTH - 1)
+        q = substr(rest, 1, 1)
+        if (quotes(rest, q) % 2 == 1) { open = q; next }
+      }
+      if (match(line, /<<-?[[:space:]]*["\047]?[A-Za-z_][A-Za-z0-9_]*/)) {
+        word = substr(line, RSTART, RLENGTH)
+        gsub(/^<<-?[[:space:]]*["\047]?/, "", word)
+        heredoc = word
+        shell = (line ~ /(^|[^[:alnum:]_.-])(bash|sh|dash|zsh)[[:space:]]/ && line !~ /ssh/)
+        if (!shell) emit()
+        next
+      }
+      emit()
+    }
+    END { emit() }
+  ' "$1"
+}
+
+# bypasses: the commands on standard input that run a wrapped tool around its wrapper.
 bypasses() {
   local alternation runner shell found
   alternation=$(wrapped_tools | paste -sd'|' -)
-  runner='(command|env|exec|timeout|xargs|sudo|nice|nohup|setsid|stdbuf|which|ionice|chroot|su|doas)'
-  shell='(bash|sh|dash|zsh)[[:space:]]+(-[A-Za-z-]+[[:space:]]+)*-[A-Za-z]*c'
-  # A variable that happens to share a tool's name, "$flux", is not the tool. A shell's body is one
-  # argument that may hold ; | and &, so it is read to its end.
+  runner='(command|env|exec|timeout|xargs|sudo|nice|nohup|setsid|stdbuf|which|ionice|chroot|su|doas|flock|watch|parallel|mise[[:space:]]+(x|exec)|-exec|-execdir|-ok)'
+  shell='(bash|sh|dash|zsh)[[:space:]]+(-[A-Za-z-]+[[:space:]]+)*(-[A-Za-z]*c|<<)'
   tool='(^|[^[:alnum:]_.$-])('"$alternation"')([^[:alnum:]_.-]|$)'
   found='(^|[^[:alnum:]_.-])'"$runner"'[[:space:]]+([^;|&]*[^[:alnum:]_.$-])?('"$alternation"')([^[:alnum:]_.-]|$)'
-  found+='|(^|[^[:alnum:]_.-])'"$shell"'[[:space:]].*'"$tool"
-  found+='|\$\(type -P ('"$alternation"')\)'
+  found+='|(^|[^[:alnum:]_.-])'"$shell"'.*'"$tool"
+  found+='|(\$\(|`)[[:space:]]*type -a?P ('"$alternation"')[^[:alnum:]_.-]'
   # shellcheck disable=SC2016 # flux=$(type -P flux) is text to leave out, not an expansion
   grep -E "$found" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -vF 'flux=$(type -P flux)'
+}
+
+# scan_text TEXT: bypasses of the commands TEXT holds, as a script file would.
+scan_text() {
+  printf '%s\n' "$1" > "$BATS_TEST_TMPDIR/scanned"
+  logical_lines "$BATS_TEST_TMPDIR/scanned" | bypasses
 }
 
 @test "A sops run for the Flux key sees only that key, as the one age key it is given" {
@@ -186,41 +243,67 @@ EOF
 }
 
 @test "The scan for a wrapped tool run around its wrapper flags every way of doing it" {
-  while IFS= read -r line; do
-    echo "flagged: $line"
-    run bash -c "$(declare -f wrapped_tools bypasses); ROOT=$ROOT; grep -n '' <<< \"\$1\" | bypasses" _ "$line"
+  local case
+  # Each is one command, which may span lines, as text: nothing in them is to expand.
+  # shellcheck disable=SC2016
+  local -a flagged=(
+    'env -u KUBECTL_EXTERNAL_DIFF kubectl wait nodes'
+    'SOPS_AGE_KEY=$key env -u SOPS_AGE_KEY_FILE -u SOPS_AGE_KEY_CMD sops "$@"'
+    'timeout -s KILL 10m kubectl get nodes'
+    'sudo -u someone kubectl get nodes'
+    'nice -n 5 helm template'
+    'xargs -n1 -I{} kubectl delete {}'
+    'command kubectl get nodes'
+    'exec talman apply'
+    '"$(which kubectl)" uncordon "$node"'
+    '"$(command -v kubectl)" uncordon "$node"'
+    'helm=$(type -P helm)'
+    'helm=$(type -aP helm)'
+    'helm=`type -P helm`'
+    'helm=`which helm`'
+    "bash -c 'kubectl get nodes'"
+    'sh -c "echo; sops decrypt f"'
+    "bash -lc 'flux build'"
+    'flock /tmp/lock kubectl get nodes'
+    'watch -n 5 kubectl get nodes'
+    'parallel kubectl get node ::: a b'
+    'find . -name x -exec kubectl apply -f {} +'
+    'mise x -- helm template'
+    'mise exec -- helm template'
+    $'env -u KUBECTL_EXTERNAL_DIFF \\\n  kubectl wait nodes'
+    $'timeout 10m \\\n  -s KILL \\\n  kubectl wait nodes'
+    $'bash -c \'\n  echo start\n  kubectl wait nodes\n\''
+    $'sh -c "\n  echo start\n  helm template\n"'
+    $'bash <<EOS\necho start\nkubectl wait nodes\nEOS'
+    $'sh <<-\'EOS\'\n\tflux build\nEOS'
+  )
+  for case in "${flagged[@]}"; do
+    echo "flagged: $case"
+    run scan_text "$case"
     [ "$status" -eq 0 ]
-  done <<'LINES'
-env -u KUBECTL_EXTERNAL_DIFF kubectl wait nodes
-SOPS_AGE_KEY=$key env -u SOPS_AGE_KEY_FILE -u SOPS_AGE_KEY_CMD sops "$@"
-timeout -s KILL 10m kubectl get nodes
-sudo -u someone kubectl get nodes
-nice -n 5 helm template
-xargs -n1 -I{} kubectl delete {}
-command kubectl get nodes
-exec talman apply
-"$(which kubectl)" uncordon "$node"
-"$(command -v kubectl)" uncordon "$node"
-helm=$(type -P helm)
-bash -c 'kubectl get nodes'
-sh -c "echo; sops decrypt f"
-bash -lc 'flux build'
-LINES
-  while IFS= read -r line; do
-    echo "not flagged: $line"
-    run bash -c "$(declare -f wrapped_tools bypasses); ROOT=$ROOT; grep -n '' <<< \"\$1\" | bypasses" _ "$line"
+  done
+  # shellcheck disable=SC2016
+  local -a plain=(
+    'kubectl get nodes'
+    'kubectl wait nodes --all --for=condition=Ready'
+    'SOPS_AGE_KEY=$key sops "$@"'
+    'if ! type -P kubectl > /dev/null; then'
+    'require_commands kubectl jq'
+    'exec "$@"'
+    'exec "$flux" envsubst --strict < "$file"'
+    'env -u HELM_DEBUG jq -n 1'
+    'timeout 10 jq . file'
+    '# env -u X kubectl'
+    $'echo one \\\n  two\nkubectl get nodes'
+    $'bash -c \'\n  echo start\n\'\nkubectl get nodes'
+    $'cat <<EOS\nenv kubectl\nEOS'
+    $'bash <<EOS\necho start\nEOS\nkubectl get nodes'
+  )
+  for case in "${plain[@]}"; do
+    echo "not flagged: $case"
+    run scan_text "$case"
     [ "$status" -ne 0 ]
-  done <<'LINES'
-kubectl get nodes
-kubectl wait nodes --all --for=condition=Ready
-SOPS_AGE_KEY=$key sops "$@"
-if ! type -P kubectl > /dev/null; then
-require_commands kubectl jq
-exec "$@"
-env -u HELM_DEBUG jq -n 1
-timeout 10 jq . file
-# env -u X kubectl
-LINES
+  done
 }
 
 @test "No script runs a wrapped tool around its wrapper" {
@@ -228,7 +311,7 @@ LINES
   found=$(
     for file in "${files[@]}"; do
       [ -f "$file" ] && [ "${file##*/}" != tools.sh ] || continue
-      grep -n '' "$file" | bypasses | sed "s|^|${file#"$ROOT"/}:|" || true
+      logical_lines "$file" | bypasses | sed "s|^|${file#"$ROOT"/}:|" || true
     done
   )
   if [ -n "$found" ]; then

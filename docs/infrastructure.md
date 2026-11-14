@@ -288,22 +288,31 @@ prints what tofu and its providers send and receive. No recipe prints a value or
 on a command line; secrets reach tofu and rclone through their environment.
 
 The tools below get only the secrets they use. `scripts/lib/tools.sh` runs `tofu`, `openstack`,
-`talman`, `talosctl`, `kubectl`, `helm`, `flux`, `kustomize`, `sops`, `age`, `age-keygen`, `gh`,
-`ssh`, `ssh-keyscan` and `ssh-keygen` with the secrets they may not see unexported, and `s3_rclone`
-hands rclone the one key pair it is called with. `scripts/render` and `scripts/ci-comment` run
-their tools the same way. Every other tool, `jq`, `yq`, `git` and `flock` among them, gets the
-environment as it is: `jq` reads `OPERATOR_CIDRS` from it by design, and none of them sends it
+`talman`, `talosctl`, `kubectl`, `helm`, `flux`, `kustomize`, `docker`, `sops`, `age`,
+`age-keygen`, `gh`, `ssh`, `ssh-keyscan` and `ssh-keygen` with the secrets they may not see
+unexported, and `s3_rclone` hands rclone the one key pair it is called with. `scripts/render`,
+`scripts/vector-config`, `scripts/ci-comment` and `vector-check` run their tools the same way.
+Every other tool, `jq`, `yq`, `git` and `flock` among them, gets the environment as it is: `jq` reads `OPERATOR_CIDRS` from it by design, and none of them sends it
 anywhere. Every variable of `.env.example` is listed, either as a secret with the tools that may
 see it or as holding none, and a test fails for one that is not, whatever its prefix: a new
 variable is assigned before it passes. One set by hand that begins `OS_` or `AWS_` and is listed
 nowhere is a secret that only `tofu` sees.
 
-A script runs a wrapped tool by its name. A test fails for a script that names one after `command`,
-`env`, `exec`, `timeout`, `sudo`, `xargs`, `nice`, `nohup`, `setsid` or `stdbuf` (whatever options
-come between), after `which`, in the body of `bash -c` or `sh -c`, or in `$(type -P tool)`, as each
-reaches the binary with the whole environment. It reads each command line as text, so it does not
-see a tool run through a variable, a script file or a language's process call; those are caught
-only where a recipe's test records the tool's environment.
+A script runs a wrapped tool by its name. A test reads each script and justfile recipe as commands,
+a backslash continuation and a `bash -c` body or a here-document fed to a shell included, and fails
+for one that names a wrapped tool after `command`, `env`, `exec`, `timeout`, `sudo`, `xargs`,
+`nice`, `nohup`, `setsid`, `stdbuf`, `ionice`, `chroot`, `su`, `doas`, `flock`, `watch`,
+`parallel`, `mise x`, `mise exec`, `which` or `find -exec`, whatever options and lines come between,
+in a `bash -c`, `sh -c` or here-document body, or in `$(type -P tool)`, `$(type -aP tool)` or
+backticks, as each reaches the binary with the whole environment. A text scan cannot see a runner
+held in an array or a variable (`"${cmd[@]}" kubectl`), a tool run from a script file or a
+here-document fed to anything but a shell, or one run by another language's process call. Only the
+tests that record a tool's environment catch those: `tests/tool-secrets.bats` for every wrapped tool and the S3
+client, and for each of these recipes, the one that runs it: `tests/infra-recipes.bats` (tofu),
+`tests/cluster-recipes.bats` (the upgrade recipes' talman, kubectl and age), `tests/ci-host.bats`
+(gh, ssh), `tests/grafana.bats` (kubectl), `tests/render.bats` (flux, helm, kustomize),
+`tests/logs.bats` (`vector-config`'s flux and helm) and `tests/ci.bats` (gh in `ci-comment`). The
+docker of `vector-check` has only the scan.
 
 | Secret | Seen by |
 | --- | --- |
@@ -313,7 +322,7 @@ only where a recipe's test records the tool's environment.
 | `CLUSTER_S3_ACCESS_KEY_ID`, `CLUSTER_S3_SECRET_ACCESS_KEY` | rclone, as the cluster key set |
 | `OS_*`, the cloud credential | `tofu`, `openstack` |
 | `GH_TOKEN`, `GITHUB_TOKEN` | `gh` |
-| `TF_VAR_*`, the stacks' inputs, among them the allowlist | `tofu` |
+| `TF_VAR_*`, the stacks' inputs, among them the allowlist; `TF_TOKEN_*`, registry tokens | `tofu` |
 | `SOPS_AGE_KEY`, `SOPS_AGE_KEY_CMD` | `talman`, `sops` |
 | `SOPS_AGE_KEY_FILE` | `talman`, `sops`, `age` |
 | `FLUX_AGE_KEY`, `FLUX_AGE_KEY_FILE` | none; `flux_sops` gives sops the one it uses |
