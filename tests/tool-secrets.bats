@@ -12,7 +12,7 @@ setup() {
   mkdir -p "$BIN" "$RECORD" "$REPO/infra/openstack" "$REPO/talos"
   cp -R "$ROOT/scripts" "$REPO/scripts"
   cp "$ROOT/infra/openstack/backend.hcl" "$REPO/infra/openstack/backend.hcl"
-  for tool in tofu openstack talman talosctl kubectl helm flux kustomize sops age age-keygen gh ssh ssh-keyscan ssh-keygen; do
+  for tool in tofu openstack talman talosctl kubectl helm flux kustomize docker sops age age-keygen gh ssh ssh-keyscan ssh-keygen; do
     cat > "$BIN/$tool" <<EOF
 #!/usr/bin/env bash
 env | cut -d= -f1 | sort > "$RECORD/names.$tool"
@@ -96,6 +96,7 @@ sorted() {
     [helm]=""
     [flux]=""
     [kustomize]=""
+    [docker]=""
     [age-keygen]=""
     [gh]=""
     [ssh]=""

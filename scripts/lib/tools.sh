@@ -113,6 +113,7 @@ kubectl() { run_tool kubectl "$@"; }
 helm() { run_tool helm "$@"; }
 flux() { run_tool flux "$@"; }
 kustomize() { run_tool kustomize "$@"; }
+docker() { run_tool docker "$@"; }
 sops() { run_tool sops "$@"; }
 age() { run_tool age "$@"; }
 age-keygen() { run_tool age-keygen "$@"; }

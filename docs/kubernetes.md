@@ -307,7 +307,8 @@ check each of these.
 Alertmanager, kube-state-metrics and node-exporter in the namespace `monitoring`, from the
 prometheus-community `kube-prometheus-stack` chart. The namespace's Pod Security level is
 privileged, as node-exporter reads each node through the host's network and process namespaces and
-through host paths. The chart installs no resource definitions: `prometheus-operator-crds` does
+through host paths, and the log collector ([Logs](#logs)) reads the nodes' log files through a
+host path. The chart installs no resource definitions: `prometheus-operator-crds` does
 ([Resource definitions](#resource-definitions)), and the application names it in `dependsOn`. The
 two charts run the same operator version: Renovate moves them in one pull request, and
 `tests/monitoring.bats` fails when the pinned charts name different ones. The application installs
@@ -324,7 +325,8 @@ every namespace, and evaluates the chart's default alerting and recording rules.
   `talos/patches/controlplane/metrics.yaml` ([cluster.md](cluster.md#the-control-planes-metrics)).
   Talos runs etcd outside Kubernetes, so etcd's Service selects the API server's pods, which run on
   the control planes' host network, for their addresses, and Prometheus sends etcd no credential;
-- the monitors of the baseline applications ([The kube-system baseline](#the-kube-system-baseline)).
+- the monitors of the baseline applications ([The kube-system baseline](#the-kube-system-baseline))
+  and of the log store and collector ([Logs](#logs)).
 
 It does not scrape:
 
@@ -408,6 +410,95 @@ monitors, the version and replicas, the absence of volumes, Secrets and routes, 
 Service, that the dashboards are exactly those the monitoring chart renders for the cluster's
 monitoring values, and each setting that keeps Grafana off the internet against the defaults of the
 Grafana release it pins. It runs `just grafana` against a recording kubectl.
+
+## Logs
+
+Two applications in `apps/base/monitoring/` keep the cluster's logs (ADR 0014): `victoria-logs`
+runs VictoriaLogs, the store, from
+`oci://ghcr.io/victoriametrics/helm-charts/victoria-logs-single`, and `vector` runs Vector, the
+collector, from `oci://ghcr.io/vectordotdev/helm-charts/vector`, each its publisher's chart.
+Neither installs resource definitions. The store's ServiceMonitor and the collector's PodMonitor
+are on, and both applications name `prometheus-operator-crds` in `dependsOn`.
+
+What is collected, by a collector on every node, control planes included, from files only:
+
+- every pod's log lines, from the files under `/var/log/pods`, with the pod's namespace, name,
+  labels and node; the collector's own are left out;
+- the log of each of the node's Talos services, machined, the kubelet, etcd, containerd, apid and
+  the rest, and the kernel's, which Talos keeps as the service `kernel`: Talos writes each to
+  `/var/log/<service>.log` and renames it to `<service>.log.1` at 5 MiB, and the collector reads
+  both. Each line stays whole, with the node's name in `node` and its service's in
+  `talos_service`, and keeps its own time and level where its format has them: the kernel's
+  messages, the prefix Go's log package gives machined's, apid's and trustd's lines, JSON such as
+  etcd's, logfmt such as containerd's and the kubelet's klog. Any other line keeps the time it was
+  read.
+
+Talos flushes its files every 15 seconds, so its lines reach the store within about that. While the
+collector is not reading, such as during its own restart, lines wait in the files, and it goes on
+from its place in each file: a pod's lines as long as the kubelet has not rotated them away, and a
+Talos service's as long as the service has not written more than its two files hold, 5 MiB at
+least. From a node's boot, Talos keeps each service's lines and the kernel's in a ring of about 1
+MiB until `/var/log` is mounted, then writes the ring to the file from its oldest line, so early
+boot is collected as far as the ring held it; `talosctl logs` and `talosctl dmesg` read the rings on
+the node.
+
+The collector mounts all of `/var/log` read-only, as Talos renames the files it rotates, so it can
+read every file there. On a control plane that includes the API server's audit log in
+`/var/log/audit/kube`, which Talos's default audit policy, the one this cluster runs, writes at the
+`Metadata` level: who did what to which object, and when, without request or response bodies, so
+without Secret values. The collector does not ship it: its file source's patterns,
+`/var/log/*.log` and `/var/log/*.log.1`, match files at the top of `/var/log` only, and its pod-log
+source reads only `/var/log/pods`. It does ship the kernel's audit records, which Talos's `auditd`
+service writes on every node to its own log at the top, `/var/log/auditd.log`. What keeps the audit
+log out of the store is this reviewed configuration, which `tests/logs.bats` matches against
+Talos's layout of `/var/log`; who can read it through the collector is whoever may run commands in
+the pods of `monitoring`.
+
+The collector also mounts `/var/lib/vector`, where it keeps its place in each file and a disk buffer
+of 256 MiB. It runs as root, as Talos and the container runtime write their log files as root with
+mode 0640, with no capability and no privilege escalation, on the pod network; the namespace's Pod
+Security level, privileged, admits its host paths. Nothing on the node sends to it, and the machine
+configuration needs no change for it.
+
+The store runs one replica, without a disruption budget, as one would block every drain of its
+node. While it starts again on another worker, each collector keeps what it reads in its buffer;
+once the buffer is full, the collector stops reading on that node, pods' files and Talos's alike,
+until the store takes lines again, and lines whose file is rotated away meanwhile are lost. The
+store keeps logs 14 days and drops the oldest days before that once they take 15 GiB, but always
+keeps the last two days, on a 20 GiB claim on the cluster's default storage class, which LINSTOR
+replicates. Should the volume still fill, to less than 10 MB free, VictoriaLogs' default
+`-storage.minFreeDiskSpaceBytes`, the store turns read-only: it answers every insert with HTTP 429
+Too Many Requests, and its metric `vl_storage_is_read_only` is 1, while the collectors keep the
+lines in their buffers and retry.
+
+What listens, and where:
+
+- the store: port 9428 of its pod's address, plain HTTP, behind the headless Service
+  `victoria-logs`, for the collectors' inserts, queries and its web interface, and `/metrics`,
+  which Prometheus scrapes through the ServiceMonitor;
+- the collector: port 9598 of its pod's address, plain HTTP, its own metrics only, which Prometheus
+  scrapes through the PodMonitor. It uses neither the node's network nor a host port, so it reserves
+  no port on the nodes.
+
+Cilium carries pod addresses between the nodes in its VXLAN tunnel, so both ports answer the
+cluster's pods and nodes, and no host outside the cluster has a route to them. Neither application
+has an ingress, a route or a Service of type LoadBalancer or NodePort, and the nodes' security group
+admits from outside the cluster only the Talos and Kubernetes APIs.
+
+Grafana has no datasource for the logs. To query, forward the Service's port with
+`kubectl -n monitoring port-forward svc/victoria-logs 9428`, then open VictoriaLogs' web interface
+at `http://localhost:9428/select/vmui/`, or send LogsQL to
+`http://localhost:9428/select/logsql/query`, such as `query=_time:1h talos_service:kubelet` for the
+last hour of every node's kubelet, or `query=_time:1h kubernetes.pod_namespace:monitoring`.
+
+`tests/logs.bats` builds both applications as Flux applies them, renders their pinned charts and
+checks each of these. `just vector-check` renders the collector's configuration with
+`scripts/vector-config` and has Vector itself, in the image the collector runs, validate it and run
+its unit tests, `tests/vector/talos-lines.yaml`, which hold a line of each format above. The image
+is `vector_image` in the justfile, pinned by the digest of its image index under a
+`# renovate: datasource=docker depName=…` comment: Renovate's custom manager for the justfile moves
+its tag and digest, in the same pull request as the chart, and `tests/logs.bats` fails, saying what
+to set, while it is not the image the chart runs.
 
 ## cert-manager
 
@@ -988,12 +1079,19 @@ diff, collapsed. A pull request that changes nothing Flux applies says so.
 it (application `flux-system`), then every Kustomization that applies from the tree, the root
 (`cluster`), Flux's own applications and each application the overlay enables, built as
 `just kubernetes-check` builds them. Each HelmRelease is expanded to the objects its chart renders:
-the chart its OCIRepository names, pulled from its public registry, with the values of its
-ConfigMaps and its own values over them, the release name and namespace helm-controller gives it,
-the Kubernetes version in `versions.yaml`, every API version a definition in the render serves, its
-post-renderers and helm-controller's labels. A chart version bump therefore shows the objects that
-change. `RENDER_CHART_CACHE` names a directory to keep pulled charts in between renders. A tree that
-does not render fails, naming the application. `just render-diff <base> <head>` prints the comment
+the chart its OCIRepository names at its tag, or the one its `chart.spec` names in a `HelmRepository`
+(a classic `https://` repository or an OCI one) at an exact version, pulled from its public source at
+the version the tree pins, with the values of its ConfigMaps and its own values over them, the
+release name and namespace helm-controller gives it, the Kubernetes version in `versions.yaml`, every
+API version a definition in the render serves, its post-renderers and helm-controller's labels. A
+chart version bump therefore shows the objects that change. An application may take its chart only
+from an `OCIRepository` (at a tag) or a `HelmRepository` (at an exact version), from a source that
+names no credential (the render has no secrets), with values from ConfigMaps of the application; any
+other form (a version range, a `GitRepository` or `Bucket`, a `secretRef`, values from a Secret)
+fails the render, naming the release. `scripts/render --forms` checks that every release is of a form
+the render accepts, without pulling a chart, and `tests/render.bats` runs it on this tree.
+`RENDER_CHART_CACHE` names a directory to keep pulled charts in between renders. A tree that does
+not render fails, naming the application. `just render-diff <base> <head>` prints the comment
 comparing two renders.
 
 What it is rendered with, and what it never shows:
@@ -1027,7 +1125,8 @@ that can write:
   the Dagger module (ADR 0007): it renders the base, the first parent of the commit under test, and
   the commit itself, both with the base's `scripts/render` and `scripts/render-diff`, so that a pull
   request that changes only the tree is shown by the reviewed render code. A base without the render
-  code is rendered with the commit's. The job uploads the comment as the artifact `render-diff`.
+  code, or one its own render code does not render, is rendered with the commit's, and the job's
+  log says so. The job uploads the comment as the artifact `render-diff`.
 - `.github/workflows/render-comment.yaml` runs when the CI workflow completes for a pull request,
   unless that run was cancelled. GitHub runs it from the default branch, with this repository's
   token, whatever the run it follows had, so it checks out only the default branch and runs

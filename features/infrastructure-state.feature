@@ -94,7 +94,7 @@ Feature: Infrastructure state and stack recipes
   Scenario: Each tool gets only the secrets it uses
     Given every secret variable set to a marker, and a recording fake of each tool the recipes run
     When each tool is run as the recipes run it
-    Then each fake records the names, never the values, of the secret variables in its environment: tofu the object storage key, the encryption settings, the cloud credential and the stacks' inputs, the openstack client the cloud credential, talman and sops the age key variables, age the age key file's path, and talosctl, kubectl, helm, flux, kustomize, age-keygen, gh, ssh, ssh-keyscan and ssh-keygen none
+    Then each fake records the names, never the values, of the secret variables in its environment: tofu the object storage key, the encryption settings, the cloud credential and the stacks' inputs, the openstack client the cloud credential, talman and sops the age key variables, age the age key file's path, and talosctl, kubectl, helm, flux, kustomize, docker, age-keygen, gh, ssh, ssh-keyscan and ssh-keygen none
 
   Scenario: The S3 client gets the one key pair it is called with and no other secret
     Given the state key pair and the cluster key pair, and a recording S3 client

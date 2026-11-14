@@ -12,6 +12,21 @@ Feature: The render diff of a pull request
     When scripts/render renders a tree
     Then each tool's recorded environment holds none of the secrets, and holds the render's own settings
 
+  Scenario: A release whose chart comes from a Helm repository is rendered to the objects its chart renders at the pinned version
+    Given a tree whose cluster overlay enables an application whose HelmRelease takes its chart from a HelmRepository at an exact version
+    When just render runs
+    Then the chart is pulled by name from the repository at exactly that version, and the HelmRelease is expanded to the objects the chart renders at that version, with its values, labelled as helm-controller labels them
+
+  Scenario: A release whose chart version is not exact, or whose source needs a credential, is refused, and the refusal names it
+    Given trees whose HelmRelease pins a version range, a wildcard or no version, names a chart that is no chart name, takes its chart from a GitRepository, or whose HelmRepository has a URL that is not https, or names a secretRef or a certSecretRef, or is an OCI repository with a URL that is not oci://
+    When just render runs on each
+    Then each fails, naming the release and what is refused, and nothing is pulled
+
+  Scenario: Every release the cluster's overlay enables is one the render accepts
+    Given this repository's tree
+    When the render checks the form of every HelmRelease the cluster's overlay enables, without pulling a chart
+    Then each is accepted
+
   Scenario: A changed value shows as a changed object in that application's diff, and nowhere else
     Given renders of a tree before and after one value of its chart is changed
     When just render-diff compares them
@@ -36,3 +51,8 @@ Feature: The render diff of a pull request
     Given renders of a tree before and after a change whose diff is larger than a pull request comment holds
     When just render-diff compares them
     Then the comment stays within GitHub's limit, keeps the whole summary and the footer, closes every block it opens, and says the diff is truncated
+
+  Scenario: A base its own render code does not render is rendered with this checkout's
+    Given a pull request whose base commit holds render code that fails on the base's own tree, and a checkout whose render code renders both
+    When the CI render job's script renders the base and the checkout
+    Then it says the base's render code does not render the base, renders both with the checkout's, and writes the comment; a base neither renders fails the run and writes none
