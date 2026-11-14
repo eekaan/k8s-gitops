@@ -58,8 +58,12 @@ balancer service, the same design runs on other infrastructure, and BGP is learn
   configuration, the nftables rules and the kernel settings, and installs FRR and nftables from the
   distribution's repositories, once. Changing the rendered configuration replaces the instance. Both
   edges render from one template, so a change replaces both, which `just infra-apply` refuses and
-  `just edge-rollout` does one edge at a time, checking each before the next. The user data holds no
-  secret; the sessions carry no password (ADR 0013).
+  `just edge-rollout` does one edge at a time, checking each before the next. A new image replaces
+  nothing by itself, as the `vm` module the edges share with the Talos nodes leaves an instance's
+  boot device as it was created; `just edge-rollout --replace` replaces each edge's instance, and
+  with it the boot volume made from the image, one edge at a time with the same checks, and keeps
+  its port, so its address and floating IP stay. The user data holds no secret; the sessions carry
+  no password (ADR 0013).
 - **Not built:** a session between the two edges, which would add each edge's learned routes to the
   other and so a path through the other edge when a worker's session is down, at the cost of loops
   to avoid and a second policy to test; a proxy on the edges that keeps the client's address; and
@@ -90,14 +94,15 @@ balancer service, the same design runs on other infrastructure, and BGP is learn
   clients' attempts reach nothing until its address is removed from DNS. Health-checked DNS removes
   it, or the shared virtual address removes the half, each a later change.
 - **An edge is rebuilt, not patched.** Every change to its configuration, and every package update
-  that is to reach it, is a replacement, done one edge at a time. The release's packages are not
-  pinned beyond the release: a rebuild installs what the distribution's repositories hold for it
-  then.
+  that is to reach it, is a replacement, done one edge at a time. A changed configuration replaces
+  the edges by itself; a new image, or the release's updates alone, reach them only through
+  `just edge-rollout --replace`. The release's packages are not pinned beyond the release: a rebuild
+  installs what the distribution's repositories hold for it then.
 - **A flow moves when an edge, a worker or a route goes.** Kernel multipath is not resilient: when
   the set of next hops changes, flows are hashed again, and a connection whose path changes is
   reset. Graceful restart keeps a restarting worker's routes meanwhile.
 - **The cloud is still relied on for** the floating IPs, which carry the public addresses to the
   edges, and the router, which carries the traffic between the external network and the node subnet,
   and for nothing that is BGP.
-- **Two more VMs to run and patch.** They are rebuilt for a new release of the image, and
-  `just edge-check` reads their state.
+- **Two more VMs to run and patch.** They are rebuilt with `just edge-rollout --replace` for a new
+  image, and `just edge-check` reads their state.
