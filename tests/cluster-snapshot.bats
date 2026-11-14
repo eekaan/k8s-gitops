@@ -469,12 +469,78 @@ resets_or_bootstraps() {
 
   [ "$status" -ne 0 ]
   [[ $output == *"cluster-snapshot: failed while uploading the encrypted snapshot to the etcd bucket"* ]]
-  for shown in AccessDenied marker-endpoint marker-prefix; do
+  # The reason the S3 client gave is shown, and none of the places and keys it names.
+  [[ $output == *"AccessDenied"* ]]
+  for shown in marker-endpoint marker-prefix marker-state; do
     [[ $output != *"$shown"* ]]
   done
   [ -n "$(calls '^rclone copyto ')" ]
   [ -z "$(find "$STORE" -type f)" ]
   nothing_left
+}
+
+@test "A failed S3 request says why, without an address, a bucket or a key" {
+  # A repository with this repository's ignore rules, to see which files git ignores.
+  export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+  git init -q "$REPO"
+  cp "$ROOT/.gitignore" "$REPO/.gitignore"
+  put_snapshot 20261101T000000Z.snapshot.age
+  # Each way the store can fail: denied, on a listing, a download and an upload; a bucket that is
+  # not there; and an endpoint whose name does not resolve.
+  ways=(list-denied download-denied upload-denied no-bucket lookup)
+  for ci in '' true; do
+    for way in "${ways[@]}"; do
+      echo "ci=$ci $way"
+      reset_environment
+      [[ -z $ci ]] || with CI=true
+      rm -rf "${FAILS:?}"/*
+      mkdir -p "$STORE/$BUCKET"
+      put_snapshot 20261101T000000Z.snapshot.age
+      case $way in
+        list-denied) : > "$FAILS/list" && reason='AccessDenied' ;;
+        download-denied) : > "$FAILS/download" && reason='AccessDenied' ;;
+        upload-denied) : > "$FAILS/upload" && reason='AccessDenied' ;;
+        no-bucket) rm -r "${STORE:?}/$BUCKET" && reason='directory not found' ;;
+        lookup) : > "$FAILS/lookup" && reason='no such host' ;;
+      esac
+      rm -f "$CLUSTER"/clusterconfig/*.errors.log
+      next_second
+
+      case $way in
+        download-denied) recipe cluster-restore latest --yes < /dev/null ;;
+        list-denied | no-bucket | lookup)
+          recipe cluster-restore latest --yes < /dev/null
+          ;;
+        upload-denied) recipe cluster-snapshot ;;
+      esac
+
+      [ "$status" -ne 0 ]
+      for place in marker-endpoint marker-prefix marker-state 192.0.2.53 "$ENDPOINT"; do
+        [[ $output != *"$place"* ]]
+      done
+      if [[ -z $ci ]]; then
+        [[ $output == *"$reason"* ]]
+      else
+        # With CI set the reason is kept in a file git ignores, and only the file is named.
+        [[ $output != *"$reason"* ]]
+        [[ $output == *"errors are in talos/lab-sto2/clusterconfig/"*".errors.log"* ]]
+        grep -q "$reason" "$CLUSTER"/clusterconfig/*.errors.log
+        git -C "$REPO" check-ignore -q "$CLUSTER"/clusterconfig/*.errors.log
+      fi
+      nothing_left
+    done
+  done
+
+  # The listing that fails on its own, which cluster-snapshots shares with them.
+  reset_environment
+  rm -rf "${FAILS:?}"/*
+  : > "$FAILS/lookup"
+
+  recipe cluster-snapshots
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"no such host"* ]]
+  [[ $output != *marker-endpoint* && $output != *192.0.2.53* ]]
 }
 
 @test "A failed or interrupted snapshot leaves nothing on disk" {

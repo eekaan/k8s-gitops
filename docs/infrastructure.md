@@ -98,7 +98,14 @@ storage container or an S3 bucket.
   printed. Nothing is created while `.env` is a symlink or a file git does not ignore, or while one
   of the names there holds a value; a name that is empty or a placeholder is filled in, an absent
   one is appended after a comment, and every other line stays as it is. `.env` is written to a
-  temporary file beside it, mode 0600, and renamed into place.
+  temporary file beside it, mode 0600, and renamed into place. When the client fails, the recipe
+  shows the reason it gave, a few lines at most, after each line has passed through the filter
+  `redact_stream` in `scripts/lib/errors.sh`: the values of the variables that hold keys, the bucket
+  prefix, the endpoint and the cloud's address are replaced as written, and every URL, address, host
+  name with a dot in it and long token by pattern, so an unauthorized request and a name that does
+  not resolve read differently without naming the endpoint, a project or a request. With `CI` set
+  none of the client's words is shown: they go to `.env.infra-s3-key.errors` beside `.env`, which
+  git ignores, and only its name is printed.
 - `just infra-backup-buckets` creates the four buckets unless they exist, through the object
   storage's S3 API with the state key, and names each by its role, never by its name. A second run
   creates nothing. A name another project owns fails, naming the role.
@@ -116,7 +123,7 @@ storage with rclone, pinned in `mise.toml`, at the endpoint, region and addressi
 `infra/openstack/backend.hcl` gives OpenTofu's state. rclone is configured through its environment only and reads no config file; the
 operator's own rclone configuration, its `RCLONE_` and `AWS_` variables and every other variable
 but `PATH`, `HOME`, `TMPDIR` and the proxy variables stay out of its environment. What rclone
-prints names the buckets and the endpoint, so it is not shown.
+prints names the buckets and the endpoint, so it is not shown; of its errors the etcd recipes show the reason only, with places and keys replaced, as [cluster.md](cluster.md#what-the-recipes-print) says.
 
 ## The workers' data volumes
 

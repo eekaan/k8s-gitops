@@ -71,6 +71,11 @@ Feature: Cluster lifecycle
     When cluster-reboot runs for each, and for a node that was cordoned before and fails to reboot
     Then it exits non-zero, the node is not uncordoned, no pod is deleted, and the recipe's last line says the node is left cordoned and how to uncordon it, or that it stays cordoned as it was
 
+  Scenario: A failed drain says why without the API's address
+    Given a drain that fails because kubectl cannot reach the API, its error naming the API server's address, and an API address in the environment
+    When cluster-reboot runs for a node, without CI and with CI set
+    Then it exits non-zero showing the reason, connection refused, with neither the address nor the port, reboots nothing, and says the node is left cordoned
+
   Scenario: A cluster that still owns a load balancer or a volume is not destroyed, and they are named
     Given a Service of type LoadBalancer, a PersistentVolume of a CSI driver other than LINSTOR's, or both, beside Services and volumes of other kinds, LINSTOR's among them
     When cluster-destroy runs with --yes

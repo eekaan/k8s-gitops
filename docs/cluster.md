@@ -384,12 +384,22 @@ write it to `clusterconfig/<recipe>.log` in the cluster's directory, which git i
 afresh by each run, and print for each talman call only whether it succeeded or failed and that
 file's path.
 Of talman's output `cluster-snapshot` shows only the errors, and with `CI` set not those either.
-What rclone prints names the bucket and the endpoint, so the etcd recipes never show it. kubectl's
-and helm's output passes through, naming the objects they apply, except in `cluster-check`,
-`cluster-reboot` and `cluster-destroy`: they print node and object names only, and none of what
-kubectl prints, as the objects it reads and its errors hold the API server's, the nodes' and the
-pods' addresses; only `kubectl drain`'s passes through in `cluster-reboot`, as in
-`cluster-upgrade`, naming the pods it evicts and those it cannot.
+What rclone prints names the bucket and the endpoint, so the etcd recipes never show it. A failed
+S3 request does say why, though: of rclone's errors the recipes show only the reason, a few lines
+at most, after each line has passed through a filter that replaces the value of every variable
+that holds a key, the bucket prefix, the endpoint or the API address, matched literally, and every
+URL, IPv4 and IPv6 address, host name with a dot in it and long token by pattern (`<redacted>`,
+`<url>`, `<address>`, `<name>`, `<token>`; the filter is `redact_stream` in `scripts/lib/errors.sh`).
+A denied request, a missing bucket and a name that does not resolve therefore read differently
+without naming the place. With `CI` set nothing of rclone's words is shown: they go to
+`clusterconfig/<recipe>.errors.log` in the cluster's directory, which git ignores, started afresh
+by each run, and only that file's path is printed, as for talman's output. kubectl's and helm's
+output passes through, naming the objects they apply, except in `cluster-check`, `cluster-reboot`
+and `cluster-destroy`: they print node and object names only, and none of what kubectl prints, as
+the objects it reads and its errors hold the API server's, the nodes' and the pods' addresses; only
+`kubectl drain`'s passes through in `cluster-reboot`, as in `cluster-upgrade`, naming the pods it
+evicts and those it cannot, with its errors passed through the same filter line by line, so a
+connection error still says why, `connection refused`, and no longer where.
 
 ## Environment
 

@@ -16,6 +16,11 @@ Feature: etcd snapshots
     When cluster-snapshot runs
     Then it exits non-zero naming the upload as the step it failed in, without what the S3 client reported, and neither the snapshot nor its encrypted copy is left on disk
 
+  Scenario: A failed S3 request says why, without an address, a bucket or a key
+    Given an S3 client that fails a listing, a download or an upload as denied, a bucket that is not there, and an endpoint whose name does not resolve, each naming the endpoint, the bucket and an address
+    When cluster-snapshot, cluster-restore and cluster-snapshots run, without CI and with CI set
+    Then each exits non-zero, and without CI shows the reason the client gave, with no endpoint, bucket name, address or key; with CI set it shows none of the client's words and names the file git ignores that holds them
+
   Scenario: A failed or interrupted snapshot leaves nothing on disk
     Given talman failing once it has started writing the snapshot, or the run interrupted while talman writes it, whether talman dies of the interruption or handles it and finishes
     When cluster-snapshot runs

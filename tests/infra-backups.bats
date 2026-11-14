@@ -718,7 +718,7 @@ EOF
     if [[ $answer == fails ]]; then
       fake openstack <<EOF
 [[ \$1 == --version ]] && { echo 'openstack 10.5.0'; exit 0; }
-echo "Unauthorized at https://identity.example.invalid for fixture-project-id" >&2
+echo "Unauthorized at https://identity.example.invalid for 7f3c1d9a5b2e4c8f9a1b2c3d4e5f6a7b" >&2
 exit 1
 EOF
     else
@@ -738,5 +738,50 @@ EOF
     fi
     [ ! -e "$REPO/.env" ]
     [[ $output != *marker-new-* && $output != *fixture-project-id* && $output != *identity.example.invalid* ]]
+    [[ $output != *7f3c1d9a5b2e4c8f9a1b2c3d4e5f6a7b* ]]
+  done
+}
+
+@test "A failed credential request says why, without a project, an address or a key" {
+  for ci in '' true; do
+    for way in unauthorized lookup; do
+      echo "ci=$ci $way"
+      reset_environment
+      [[ -z $ci ]] || with CI=true
+      rm -f "$REPO"/.env.infra-s3-key.errors
+      case $way in
+        unauthorized)
+          reason='The request you have made requires authentication. (HTTP 401)'
+          detail="$reason (Request-ID: req-5d1c9a7e-3b2f-4a6d-8e0c-1f2a3b4c5d6e) for project 7f3c1d9a5b2e4c8f9a1b2c3d4e5f6a7b at https://identity.example.invalid/v3 from 192.0.2.53"
+          ;;
+        lookup)
+          reason='Name or service not known'
+          detail="Unable to establish connection to https://identity.example.invalid/v3: HTTPSConnectionPool(host='identity.example.invalid', port=443): Failed to resolve 'identity.example.invalid' ([Errno -2] $reason) via 192.0.2.53"
+          ;;
+      esac
+      fake openstack <<EOF
+[[ \$1 == --version ]] && { echo 'openstack 10.5.0'; exit 0; }
+echo "$detail" >&2
+exit 1
+EOF
+
+      recipe infra-s3-key cluster
+
+      [ "$status" -ne 0 ]
+      [[ $output == *"the openstack client cannot create an EC2 credential with these credentials"* ]]
+      [ ! -e "$REPO/.env" ]
+      for place in identity.example.invalid 192.0.2.53 7f3c1d9a5b2e4c8f9a1b2c3d4e5f6a7b req-5d1c9a7e fixture-cloud; do
+        [[ $output != *"$place"* ]]
+      done
+      if [[ -z $ci ]]; then
+        [[ $output == *"$reason"* ]]
+      else
+        # With CI set the client's words are kept in a file git ignores, and only the file is named.
+        [[ $output != *"$reason"* ]]
+        [[ $output == *"errors are in .env.infra-s3-key.errors"* ]]
+        grep -qF "$reason" "$REPO/.env.infra-s3-key.errors"
+        git -C "$REPO" check-ignore -q .env.infra-s3-key.errors
+      fi
+    done
   done
 }

@@ -630,6 +630,29 @@ kube-system/node-agent-cp-1' ]
   done
 }
 
+@test "A failed drain says why without the API's address" {
+  : > "$STATE/drain-unreachable"
+  for ci in '' true; do
+    echo "ci=$ci"
+    reset_cluster
+    : > "$STATE/drain-unreachable"
+    reset_environment
+    [[ -z $ci ]] || with CI=true
+
+    recipe cluster-reboot worker-2 --yes < /dev/null
+
+    [ "$status" -ne 0 ]
+    # The reason is shown, and where the API is is not.
+    [[ $output == *"connection refused"* ]]
+    for address in 198.51.100.66 "$KUBE_API_ADDRESS" 6443; do
+      [[ $output != *"$address"* ]]
+    done
+    # Nothing was rebooted, and the node is left cordoned and said to be.
+    [ -z "$(calls '^talman ')" ]
+    [[ $(script_lines | tail -1) == *"worker-2 is left cordoned"* ]]
+  done
+}
+
 @test "A cluster that still owns a load balancer or a volume is not destroyed, and they are named" {
   for owned in load-balancer csi-volume both; do
     echo "$owned"

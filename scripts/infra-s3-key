@@ -80,11 +80,18 @@ if ! openstack_client_recent; then
   exit 1
 fi
 
-# The client's answer holds the secret key, and its errors can name the project.
-if ! credential=$(openstack ec2 credentials create -f json 2> /dev/null); then
+# The client's answer holds the secret key and stays in a variable. Its errors can name the identity
+# endpoint, the project and request IDs, so only the reason is shown (scripts/lib/errors.sh), and
+# with CI set only the file that keeps them, beside .env, which git ignores as .env.*.
+start_errors_log "$infra_root/.env.infra-s3-key.errors"
+if ! run_keeping_errors openstack ec2 credentials create -f json; then
+  report_errors "the openstack client"
   infra_error "the openstack client cannot create an EC2 credential with these credentials"
   exit 1
 fi
+credential=$last_output
+unset last_output
+[[ -z ${CI:-} ]] || rm -f -- "$errors_log"
 access=$(printf '%s' "$credential" | jq -r '.access | strings' 2> /dev/null) || access=
 secret=$(printf '%s' "$credential" | jq -r '.secret | strings' 2> /dev/null) || secret=
 unset credential

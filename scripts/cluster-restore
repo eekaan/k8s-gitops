@@ -69,6 +69,7 @@ require_commands age kubectl jq || complete=0
 ((complete))
 s3_bucket_name_ok BACKUP_BUCKET_PREFIX prefix
 s3_require_client
+start_errors_log "$cluster_dir/clusterconfig/${0##*/}.errors.log"
 
 # decrypt ENCRYPTED PLAINTEXT: decrypts with the Talos age key: the file SOPS_AGE_KEY_FILE names, or
 # without one, as in CI, SOPS_AGE_KEY on age's standard input.
@@ -107,8 +108,9 @@ decrypted=$work_dir/etcd.db
 
 step="downloading $name"
 # rclone copies nothing, and succeeds, when the object is not there.
-if ! s3_rclone state copyto "store:$BACKUP_BUCKET_PREFIX-etcd/$cluster/$name" "$encrypted" \
-  > /dev/null 2>&1 || [[ ! -s $encrypted ]]; then
+if ! run_keeping_errors s3_rclone state copyto "store:$BACKUP_BUCKET_PREFIX-etcd/$cluster/$name" "$encrypted" ||
+  [[ ! -s $encrypted ]]; then
+  report_errors rclone
   infra_error "rclone cannot download $name with the state key; nothing was reset"
   exit 1
 fi

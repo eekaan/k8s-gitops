@@ -14,6 +14,8 @@
 
 # shellcheck source=scripts/lib/infra.sh
 . "$(dirname "${BASH_SOURCE[0]}")/infra.sh"
+# shellcheck source=scripts/lib/errors.sh
+. "$(dirname "${BASH_SOURCE[0]}")/errors.sh"
 
 sops_config=$infra_root/talos/.sops.yaml
 # The rule for the SOPS files under kubernetes/, which Flux decrypts with the Flux age key.
@@ -307,9 +309,14 @@ cluster_talman_drain_off() {
 
 # drain_node NODE: cordons NODE and evicts its pods with kubectl through the kubeconfig, which points
 # at the API load balancer, leaving DaemonSets' pods and dropping emptyDir data, for up to ten
-# minutes. kubectl's output names the node and the pods it evicts.
+# minutes. kubectl's output names the node and the pods it evicts and passes through. Its errors do
+# too, line by line as they come, through redact_stream (scripts/lib/errors.sh), as they can name the
+# API server's address when it cannot be reached; the reason stays.
 drain_node() {
-  kubectl drain "$1" --ignore-daemonsets --delete-emptydir-data --timeout=10m
+  local status
+  { kubectl drain "$1" --ignore-daemonsets --delete-emptydir-data --timeout=10m 2>&1 1>&3 3>&- |
+    redact_stream >&2; status=${PIPESTATUS[0]}; } 3>&1
+  return "$status"
 }
 
 # not_ready_since SINCE HOSTNAME...: the HOSTNAMEs that are not a Ready node whose kubelet has
