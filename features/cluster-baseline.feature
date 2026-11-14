@@ -41,6 +41,16 @@ Feature: Cluster baseline
     When it is built offline as Flux applies it
     Then it yields exactly two RuntimeClasses, without a namespace: gvisor with gVisor's handler runsc, and kata with Kata Containers' handler kata
 
+  Scenario: Spegel runs in the cluster and configures containerd where Talos reads its mirrors
+    Given the Spegel application, enabled in the cluster's overlay
+    When its pinned chart is rendered offline with the repository's values
+    Then the overlay applies its Kustomization, and both of its DaemonSet's containers take Talos' registry configuration path, /etc/cri/conf.d/hosts, which the one that writes it mounts from the same path on the host
+
+  Scenario: Spegel serves no debug page
+    Given the Spegel application's pinned chart and values
+    When it is rendered offline
+    Then its registry container runs with the debug web page turned off, which Spegel turns on unless told otherwise
+
   Scenario: The certificate controller runs in its own namespace with its resource definitions
     Given the cert-manager application and its namespace directory, enabled in the cluster's overlay
     When its pinned chart is rendered offline with the repository's values
