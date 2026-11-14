@@ -19,6 +19,17 @@ stack() {
 
 valid_stack() {
   stack "$1" <<'EOF'
+terraform {
+  encryption {
+    state {
+      enforced = true
+    }
+    plan {
+      enforced = true
+    }
+  }
+}
+
 variable "name" {
   type = string
 }
@@ -72,6 +83,38 @@ EOF
 
   [ "$status" -ne 0 ]
   [ "${lines[-1]}" = "infra-check: failed: infra/openstack/modules/unused" ]
+}
+
+@test "A stack that does not enforce state encryption fails the check" {
+  repository unenforced
+  valid_stack region/good
+  stack region/plan-unenforced <<'EOF'
+terraform {
+  encryption {
+    state {
+      enforced = true
+    }
+  }
+}
+
+output "name" {
+  value = "plans unenforced"
+}
+EOF
+  stack region/no-block <<'EOF'
+output "name" {
+  value = "no encryption block"
+}
+EOF
+
+  run "$SCRIPT"
+
+  [ "$status" -ne 0 ]
+  for dir in plan-unenforced no-block; do
+    [[ $output == *"infra-check: infra/openstack/stacks/region/$dir: does not enforce state and plan encryption"* ]]
+  done
+  [[ $output != *"region/good: does not enforce"* ]]
+  [ "${lines[-1]}" = "infra-check: failed: infra/openstack/stacks/region/no-block infra/openstack/stacks/region/plan-unenforced" ]
 }
 
 @test "A tree without stacks fails the check" {

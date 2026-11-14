@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Checks the OpenTofu code without cloud credentials or a state backend: formatting, then init and
-# validate for every stack, then tofu test in every stack or module that has a tests/ directory.
+# Checks the OpenTofu code without cloud credentials or a state backend: formatting, that every
+# stack enforces state and plan encryption, then init and validate for every stack, then tofu test
+# in every stack or module that has a tests/ directory.
 # Init downloads the locked providers from the public registry; the tests mock every provider.
 set -euo pipefail
 shopt -s nullglob
@@ -57,6 +58,25 @@ dirs=(infra/openstack/stacks/*/*/)
 if (( ${#dirs[@]} == 0 )); then
   fail infra/openstack/stacks "no stack found"
 fi
+
+# Every stack's terraform block enforces state and plan encryption, so tofu run by hand without
+# the TF_ENCRYPTION the recipes pass refuses to run instead of writing plaintext state.
+enforces_encryption() {
+  local file
+  for file in "$1"/*.tf; do
+    if yq -p hcl -e '.terraform.encryption.state.enforced == true and .terraform.encryption.plan.enforced == true' "$file" > /dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
+}
+for dir in "${dirs[@]}"; do
+  dir=${dir%/}
+  if ! enforces_encryption "$dir"; then
+    fail "$dir" "does not enforce state and plan encryption; its terraform block needs encryption { state { enforced = true } plan { enforced = true } }"
+  fi
+done
+
 for module in infra/openstack/modules/*/; do
   if [[ -d $module/tests ]]; then
     dirs+=("$module")

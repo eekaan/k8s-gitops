@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Plans a stack and prints the plan's summary as infra-plan does; once the stack's name is typed
+# back, or with --yes (CI), applies exactly that saved plan. Its state is written encrypted to the
+# object storage.
+# Usage: scripts/infra-apply <region>/<stack> [--yes], such as scripts/infra-apply sto2/plumbing
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/infra.sh
+. "$here/lib/infra.sh"
+
+confirmed=0
+case ${2-} in
+  --yes) confirmed=1 ;;
+  '') ;;
+  *)
+    infra_error "usage: infra-apply <region>/<stack> [--yes]"
+    exit 2
+    ;;
+esac
+
+# shellcheck source=scripts/stack-env
+. "$here/stack-env" "${1-}"
+lock_stack
+init_stack
+echo "$stack:"
+plan_stack
+((confirmed)) || confirm "$stack" apply applied
+apply_plan
+echo "$stack applied"

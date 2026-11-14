@@ -25,6 +25,8 @@ kubeconfig
 talosconfig
 .env
 .env.*
+# Variable names and placeholders only.
+!.env.example
 clouds.yaml
 secure.yaml
 

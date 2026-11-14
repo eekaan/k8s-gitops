@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Prints one output of a stack, such as the plumbing stack's talos_version, from its encrypted
+# state: a string as it is, anything else as JSON. Sensitive outputs are refused, as they hold the
+# deployment's addresses and IDs.
+# Usage: scripts/infra-output <region>/<stack> <name>
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/infra.sh
+. "$here/lib/infra.sh"
+
+name=${2-}
+if [[ -z $name ]]; then
+  infra_error "usage: infra-output <region>/<stack> <name>"
+  exit 2
+fi
+
+# shellcheck source=scripts/stack-env
+. "$here/stack-env" "${1-}"
+lock_stack
+init_stack
+# tofu's JSON holds every output's value, sensitive ones included; only jq reads it.
+outputs=$(stack_tofu output -json)
+kind=$(printf '%s' "$outputs" | jq -r --arg name "$name" '
+  if has($name) | not then "missing" elif .[$name].sensitive then "sensitive" else "shown" end')
+case $kind in
+  missing)
+    infra_error "$stack has no output $name"
+    exit 1
+    ;;
+  sensitive)
+    infra_error "$name is sensitive and is not printed"
+    exit 1
+    ;;
+esac
+printf '%s' "$outputs" | jq -r --arg name "$name" '.[$name].value | if type == "string" then . else tojson end'

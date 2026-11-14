@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Destroys the cluster stack and then the plumbing stack, whose network and image the cluster stack
+# builds on. Each stack's destroy is planned and summarised first, and runs only once the stack's
+# name is typed back, or with --yes (CI). The plumbing stack is left alone when the cluster stack
+# is not destroyed. State objects stay.
+# Usage: scripts/infra-destroy [--yes]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/infra.sh
+. "$here/lib/infra.sh"
+
+confirmed=0
+case ${1-} in
+  --yes) confirmed=1 ;;
+  '') ;;
+  *)
+    infra_error "usage: infra-destroy [--yes]"
+    exit 2
+    ;;
+esac
+
+stacks=(sto2/cluster sto2/plumbing)
+
+# Hook for removing the load balancers and volumes the cluster creates itself, outside OpenTofu,
+# which would keep the network from being deleted. It is not done; the hook says so.
+remove_cluster_made_load_balancers_and_volumes() {
+  infra_error "not implemented: removing the load balancers and volumes the cluster created outside OpenTofu; they are left in place"
+}
+
+for stack in "${stacks[@]}"; do
+  # One subshell per stack, so neither its inputs nor its lock carry over to the next.
+  (
+    # shellcheck source=scripts/stack-env
+    . "$here/stack-env" "$stack"
+    lock_stack
+    init_stack
+    echo "$stack:"
+    plan_destroy
+    ((confirmed)) || confirm "$stack" destroy destroyed
+    if [[ $stack == */cluster ]]; then
+      remove_cluster_made_load_balancers_and_volumes
+    fi
+    apply_plan
+    echo "$stack destroyed"
+  )
+done

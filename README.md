@@ -22,10 +22,14 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
 - `just tools` installs the pinned tools.
 - `just ci` runs every check that needs no credentials: tool versions, address literals,
   shellcheck and yamllint, scenario proofs, the OpenTofu check (`just infra-check`: formatting,
-  validation without a state backend and the mocked `tofu test` runs), the Talos check
+  that every stack enforces state encryption, validation without a state backend and the mocked
+  `tofu test` runs), the Talos check
   (`just talos-check`: every node's machine configuration rendered from the template, the
   patches and fixture node data, and validated, offline), the offline build of `kubernetes/`,
   gitleaks over the committable files and the git history, and the bats tests.
+
+`docs/infrastructure.md` covers the recipes that plan, apply and destroy the OpenTofu stacks: what
+they need in the environment, how state is stored and encrypted, and what they print.
 
 Behaviour is specified as Given/When/Then scenarios in `features/`, each proved by a bats
 `@test` with its title, an OpenTofu `run` named after its slug, or a `@by:<recipe>` tag naming

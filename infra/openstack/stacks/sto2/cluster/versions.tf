@@ -5,6 +5,17 @@ terraform {
 
   backend "s3" {}
 
+  # State and plans are encrypted with the key provider and method scripts/stack-env passes in
+  # TF_ENCRYPTION. Without them tofu refuses to run instead of writing either in plaintext.
+  encryption {
+    state {
+      enforced = true
+    }
+    plan {
+      enforced = true
+    }
+  }
+
   required_providers {
     openstack = {
       source  = "terraform-provider-openstack/openstack"
