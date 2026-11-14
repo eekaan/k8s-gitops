@@ -124,7 +124,10 @@ the volumes either way, and comes back with the key.
    External Secrets made it, and prints no key. A Secret that holds the same key is left alone. One
    that holds another key, which External Secrets makes only when both the Secret and the
    ExternalSecret's record of its sync are gone, is kept: once the members fail to unseal with it,
-   `just bao-seal-restore <file> --replace` deletes it and writes the file's key.
+   `just bao-seal-restore <file> --replace` deletes it and writes the file's key. It first writes
+   the key it replaces to a new file, `<file>.replaced-<time>.age`, encrypted to the Talos age key
+   and opened again with it, in case that key, not the file's, sealed the storage; when it cannot,
+   it deletes nothing. Keep that file with the other until the members unseal.
 2. Delete the members that do not start; each starts again and unseals. External Secrets leaves the
    Secret alone: it has synced the ExternalSecret already, and an ExternalSecret made again finds an
    immutable Secret and keeps its key.
@@ -137,10 +140,13 @@ Without the file, an etcd snapshot taken while the Secret existed holds it
 The initial configuration never runs again, so a role, policy or mount that has to change, or one
 that broke, is changed with a root token made from the recovery keys:
 `just bao-root <file> <command> [argument...]`. It logs in as `operator`, gives OpenBao's
-authenticated root token generation three shares from the file, and runs the command with the root
-token in `BAO_TOKEN` and OpenBao's address through the port-forward in `BAO_ADDR`, `BAO_CACERT` and
-`BAO_TLS_SERVER_NAME`, as OpenBao's CLI reads them; the token is revoked when the command ends, and
-nothing prints a share or the token. For example, with OpenBao's CLI on the operator's machine:
+authenticated root token generation three shares from the file, mints with the root token an orphan
+token of the root policy that lasts fifteen minutes at most, and revokes the root token. It runs the
+command with that token in `BAO_TOKEN` and OpenBao's address through the port-forward in
+`BAO_ADDR`, `BAO_CACERT` and `BAO_TLS_SERVER_NAME`, as OpenBao's CLI reads them; the token is
+revoked when the command ends, and nothing prints a share or a token. A command that needs longer
+than fifteen minutes is split into several runs. For example, with OpenBao's CLI on the operator's
+machine:
 
 ```sh
 just bao-root <file> bao policy write operator kubernetes/apps/base/openbao/openbao/app/initialize/operator-policy.json

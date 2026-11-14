@@ -629,14 +629,23 @@ covers() {
 }
 
 @test "The operator role allows every request its recipes and runbook make, and nothing more" {
-  local wanted granted
+  local wanted granted others
+  local scripts=(scripts/bao-put scripts/bao-recovery scripts/bao-root scripts/bao-seal-restore scripts/lib/openbao.sh)
   render
   statefulset
   initialize
+  # A request sent with another token than the operator's names it before bao_request. The one such
+  # is bao-root's, which mints the command's token with the root token; the operator may not.
+  # shellcheck disable=SC2016 # the dollars are the scripts' variable names.
+  others="$( (cd "$REPO" && grep -hoE '[a-z_]+=[^ ]+ bao_request (GET|POST|PUT|PATCH|DELETE) "?[^ ;]+' "${scripts[@]}") || true)"
+  echo "with another token: ${others:-none}"
+  # shellcheck disable=SC2016
+  [ "$others" = 'bao_token=$root_token bao_request POST auth/token/create-orphan' ]
   # The requests the recipes send with the operator's token, read from the scripts themselves: the
   # script names the mount and the path as $bao_mount and $path.
-  # shellcheck disable=SC2016 # the dollars are the scripts' variable names.
-  wanted="$( (cd "$REPO" && grep -hoE 'bao_request (GET|POST|PUT|PATCH|DELETE) "?[^ ]+' scripts/bao-put scripts/bao-recovery scripts/bao-root scripts/bao-seal-restore scripts/lib/openbao.sh) |
+  # shellcheck disable=SC2016
+  wanted="$( (cd "$REPO" && grep -hE 'bao_request (GET|POST|PUT|PATCH|DELETE) ' "${scripts[@]}") |
+    grep -vE '[a-z_]+=[^ ]+ bao_request ' | grep -oE 'bao_request (GET|POST|PUT|PATCH|DELETE) "?[^ ]+' |
     sed -E 's/^bao_request //; s/["]//g; s/[)]+$//; s#\$bao_mount#secrets#; s#\$path#demo/hello#' |
     grep -vE ' (auth/kubernetes/login|sys/seal-status|sys/decode-token)$')"
   # And those the runbook's CLI steps send, as OpenBao v2.7.2's api/sys_rotate.go and
@@ -823,12 +832,27 @@ case $MODE in
   timeout) echo "Unable to connect to the server: dial tcp: i/o timeout" >&2; exit 1 ;;
   refused) echo "The connection to the server was refused" >&2; exit 1 ;;
   forbidden) echo 'Error from server (Forbidden): persistentvolumeclaims "data-openbao-1" is forbidden' >&2; exit 1 ;;
-  one) echo persistentvolumeclaim/data-openbao-1 ;;
-  both) printf '%s\n' persistentvolumeclaim/data-openbao-1 persistentvolumeclaim/data-openbao-2 ;;
-  none) ;;
+  one) present=data-openbao-1 ;;
+  two) present=data-openbao-2 ;;
+  both) present="data-openbao-1 data-openbao-2" ;;
+  none) present="" ;;
 esac
+# As the API answers a get with --ignore-not-found: each claim asked for that exists, by name.
+for arg; do
+  for claim in $present; do
+    if [ "$arg" = "$claim" ]; then echo "persistentvolumeclaim/$claim"; fi
+  done
+done
 EOF
   chmod +x "$work/bin/kubectl"
+  # An ls that fails when $LS_FAILS is set, as for a directory it may not read, and otherwise lists.
+  real_ls="$(command -v ls)"
+  cat >"$work/bin/ls" <<EOF
+#!/usr/bin/env bash
+if [[ -n \${LS_FAILS:-} ]]; then echo "ls: cannot open directory: Permission denied" >&2; exit 2; fi
+exec "$real_ls" "\$@"
+EOF
+  chmod +x "$work/bin/ls"
   # guard_run MEMBER MODE CONTENT: runs the guard as MEMBER, its data directory holding CONTENT (a
   # file name, or nothing), against the fake API; sets status, flag (the decision) and claims (the
   # fake's record).
@@ -865,12 +889,16 @@ EOF
   [ "$status" -eq 0 ]
   [ -z "$flag" ]
   [ -z "$claims" ]
-  # The other members' claims, one or both, mean the store exists: openbao-0 joins it.
-  for mode in one both; do
+  # Either other member's claim, or both, means the store exists: openbao-0 joins it.
+  for mode in one two both; do
     guard_run openbao-0 "$mode" ''
     [ "$status" -eq 0 ]
     [ -z "$flag" ]
   done
+  # A data directory it cannot list is no evidence either: the guard fails and decides nothing.
+  LS_FAILS=1 guard_run openbao-0 none ''
+  [ "$status" -ne 0 ]
+  [ -z "$flag" ]
   # No answer from the API, whatever the reason, is no evidence: the guard fails, so the pod does
   # not start, and decides nothing.
   for mode in timeout refused forbidden; do
@@ -887,6 +915,28 @@ EOF
   [ -z "$(sh "$work/args.sh" "$work/decision")" ]
   : >"$work/decision"
   [ -z "$(sh "$work/args.sh" "$work/decision")" ]
+}
+
+@test "the guard runs the Flux CLI of the repository's pin, by a digest Renovate updates" {
+  local -a pin
+  local image repository tag flux
+  render
+  statefulset
+  image="$(jq -r '.spec.template.spec.initContainers[] | select(.name == "initialize-guard") | .image' "$STS")"
+  # The repository's custom manager reads the tag, and the digest after it, on the line under a
+  # '# renovate: datasource=… depName=…' comment of the file it reads.
+  mapfile -t pin < <(awk -v image="$image" '$1 == "image:" && $2 == image { print prev; print $2; exit } { prev = $0 }' \
+    "$TREE/kubernetes/apps/base/openbao/openbao/app/values.yaml")
+  echo "the guard's image: ${image:-none} under '${pin[0]:-nothing}'"
+  [ "${pin[1]:-}" = "$image" ]
+  [[ ${pin[0]} =~ ^\ *#\ renovate:\ datasource=docker\ depName=([^ ]+)$ ]]
+  repository="${BASH_REMATCH[1]}"
+  [ "$repository" = ghcr.io/fluxcd/flux-cli ]
+  [[ $image =~ ^"$repository":(v[^@]+)@sha256:[0-9a-f]{64}$ ]]
+  tag="${BASH_REMATCH[1]}"
+  flux="$(sed -nE 's/^flux2 = "([^"]+)"$/\1/p' "$REPO/mise.toml")"
+  echo "its tag: $tag; the repository's flux2 pin: ${flux:-none}"
+  [ "$tag" = "v$flux" ]
 }
 
 @test "every values key of openbao is one its pinned chart defines" {

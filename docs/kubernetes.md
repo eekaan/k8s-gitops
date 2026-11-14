@@ -973,11 +973,22 @@ server reads the stanzas (`app/initialize/initialize-guard.sh`). Only `openbao-0
 positive evidence of a first install: its own data directory is empty, and the Kubernetes API answers
 that neither `data-openbao-1` nor `data-openbao-2` exists. The StatefulSet makes those claims when it
 first starts the other members and keeps them for the cluster's life, so either one means the store
-exists. The guard reads them with kubectl, from the Flux CLI image at the Flux version the repository
-pins, as the servers' own account, which the Role `openbao-initialize-guard` lets get those two
-claims and nothing else. When the API gives no answer, whatever the reason, the guard fails, and the
-pod does not start; it never initialises on missing evidence. The server takes the decision through
+exists. The guard reads them with kubectl as the servers' own account, which the Role
+`openbao-initialize-guard` lets get those two claims and nothing else. When the API gives no answer,
+or the data directory cannot be listed, whatever the reason, the guard fails, and the pod does not
+start; it never initialises on missing evidence. The server takes the decision through
 `app/initialize/initialize-args.sh`, which passes the `-config` flag only as the guard wrote it.
+
+The guard holds the servers' account token, as every container of the pod does, so it may do all
+that account may: create TokenReviews and SubjectAccessReviews, through `system:auth-delegator`, for
+the Kubernetes auth method; get, list, watch, update and patch the pods in `openbao`, through the
+chart's discovery Role; and get those two claims. It mounts the member's data volume read-only,
+ciphertext without the seal key, the ConfigMap `openbao-initialize` and the directory of its
+decision, and not the seal Secret or the listener's certificate. Its image is the Flux CLI's,
+`ghcr.io/fluxcd/flux-cli`, which has the shell and kubectl the guard needs and comes from the
+registry Flux's controllers already run from, so it adds no publisher to trust. It is pinned by
+digest, at the version of the `flux2` pin in `mise.toml`; Renovate moves the two in one pull
+request, and `tests/openbao.bats` fails when they differ.
 
 An `openbao-0` whose volume is new while the other members' claims exist therefore never starts a
 second, empty store: it waits to join them. When they run, it joins and copies the store. When they
@@ -1014,10 +1025,10 @@ create `serviceaccounts/token` for it:
 No other chart the tree installs grants creating service account tokens; the Piraeus operator's
 one wildcard rule is confined to LINSTOR's own API group.
 
-The `operator` role reaches the recovery keys and, through them, a root token. While no recovery
-keys exist, the first caller of the recovery key rotation receives new ones, so `just bao-recovery`
-runs right after the first reconcile, before anything else uses the role; from then on a root token
-takes three of the shares, which only the operator's file holds. If `bao-recovery`'s first run finds
+The `operator` role reaches the recovery keys and, through them, a root token. Recovery keys are
+made once, by the first authenticated rotation, which `just bao-recovery` performs right after the
+first reconcile. From then on a root token takes three of the shares, which only the operator's file
+holds. If `bao-recovery`'s first run finds
 recovery keys already, someone else holds them, and the store is rebuilt
 ([runbook](runbooks/openbao.md#first-initialisation)). Who may mint an `operator` token holds
 cluster-admin, and with it the seal Secret and every Secret the store fills.
@@ -1054,14 +1065,19 @@ with the Talos age key from `SOPS_AGE_KEY_FILE`, or `SOPS_AGE_KEY`, into memory 
 - `just bao-recovery <file> [cluster]` makes the recovery keys once, as above; it also reads the
   Secret `openbao-seal-1`.
 - `just bao-root <file> <command> [argument...]` makes a root token from three shares of the file,
-  runs the command with it in `BAO_TOKEN`, and OpenBao's address through the port-forward, its CA
-  and its certificate's name in `BAO_ADDR`, `BAO_CACERT` and `BAO_TLS_SERVER_NAME`, as OpenBao's CLI
-  reads them, then revokes it, however the command ends. It prints no share and no token; a
-  generation it started and did not finish is cancelled.
+  mints with it an orphan token of the root policy that lasts fifteen minutes at most, and revokes
+  the root token before the command runs; if minting fails, it revokes the root token and runs
+  nothing. It runs the command with that token in `BAO_TOKEN`, and OpenBao's address through the
+  port-forward, its CA and its certificate's name in `BAO_ADDR`, `BAO_CACERT` and
+  `BAO_TLS_SERVER_NAME`, as OpenBao's CLI reads them, then revokes the token, however the command
+  ends; a recipe killed outright leaves it to expire. It prints no share and no token; a generation
+  it started and did not finish is cancelled.
 - `just bao-seal-restore <file> [--replace]` writes the seal key from the file back into the Secret
   `openbao-seal-1`, immutable; a Secret that holds the same key is left alone, and one that holds
-  another key is replaced only with `--replace`. It needs no port-forward, only to read, create and,
-  with `--replace`, delete that Secret.
+  another key is replaced only with `--replace`. Before deleting it, `--replace` keeps its key in a
+  new file `<file>.replaced-<time>.age` beside the file, encrypted to the same recipient and opened
+  again with the operator's key, and deletes nothing when it cannot. It needs no port-forward, only
+  to read, create and, with `--replace`, delete that Secret.
 
 ### How an application gets a secret out
 
@@ -1073,9 +1089,10 @@ and reads the key-value mount and nothing else. `demo/hello-secret` is the examp
 The store's reach is the whole mount, for every namespace: it sets no conditions, so an
 ExternalSecret in any namespace may name it and read any key. Whoever may create an ExternalSecret
 in a namespace, which External Secrets adds to Kubernetes' `edit` and `admin` roles, may therefore
-read every key into a Secret there. No RoleBinding in the tree grants either role to anyone, so today
-that is cluster administrators and Flux, which applies the ExternalSecrets in Git after review;
-giving someone a namespace gives them the mount with it.
+read every key into a Secret there. The store serves every namespace. Creating an ExternalSecret is
+reserved to cluster administrators and Flux, which applies those in Git after review; no RoleBinding
+grants `edit` or `admin`. A namespace delegated to anyone else first gets its own store restricted
+with `conditions`.
 
 ### When something is lost
 

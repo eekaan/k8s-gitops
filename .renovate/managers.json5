@@ -15,7 +15,8 @@
     {
       customType: "regex",
       // The version is the last value on that line after a ':' or '=', so the tag ending an image
-      // or OCI reference such as oci://host/path:v1.2.3 counts, not the whole reference.
+      // or OCI reference such as oci://host/path:v1.2.3 counts, not the whole reference; a digest
+      // after it, as in host/path:v1.2.3@sha256:…, is the digest Renovate moves with the tag.
       description: "A version on the line under a '# renovate: datasource=… depName=…' comment",
       managerFilePatterns: [
         // The one source of the Talos and Kubernetes versions.
@@ -25,7 +26,7 @@
         "/^\\.github/workflows/.+\\.ya?ml$/",
       ],
       matchStrings: [
-        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?\\n[^\\n]*?[:=][ \\t]*[\"']?(?<currentValue>[^\\s\"'/]+)[\"']?(?:\\s|$)",
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)(?: versioning=(?<versioning>\\S+))?\\n[^\\n]*?[:=][ \\t]*[\"']?(?<currentValue>[^\\s\"'/@]+)(?:@(?<currentDigest>sha256:[a-f0-9]+))?[\"']?(?:\\s|$)",
       ],
     },
   ],

@@ -34,6 +34,12 @@
       separateMajorMinor: false,
     },
     {
+      // tests/openbao.bats holds the image's tag to the pin, so neither moves without the other.
+      description: "Flux: the flux2 pin in mise.toml and the Flux CLI image OpenBao's initialise guard runs",
+      matchPackageNames: ["fluxcd/flux2", "ghcr.io/fluxcd/flux-cli"],
+      groupName: "Flux",
+    },
+    {
       description: "The Flux Operator: its image and its operator and instance charts",
       matchPackageNames: ["controlplaneio-fluxcd/**", "ghcr.io/controlplaneio-fluxcd/**"],
       groupName: "Flux Operator",

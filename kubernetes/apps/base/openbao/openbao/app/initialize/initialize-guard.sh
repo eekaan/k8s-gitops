@@ -18,8 +18,13 @@ if [ ! -d "$data" ]; then
   echo "initialize-guard: $data is not a directory; not initialising" >&2
   exit 1
 fi
-# A new XFS volume holds nothing; a new ext4 one holds lost+found.
-if [ -n "$(ls -A "$data" | grep -vx 'lost+found')" ]; then
+# A directory it cannot list is no evidence of anything. A new XFS volume holds nothing; a new ext4
+# one holds lost+found.
+if ! listing=$(ls -A "$data"); then
+  echo "initialize-guard: cannot list $data; not initialising" >&2
+  exit 1
+fi
+if [ -n "$(printf '%s\n' "$listing" | grep -vx 'lost+found')" ]; then
   exit 0
 fi
 if ! claims=$(kubectl get persistentvolumeclaim data-openbao-1 data-openbao-2 --namespace "${POD_NAMESPACE:-}" \

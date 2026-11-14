@@ -61,12 +61,13 @@ server:
   # openbao-0, with no data of its own, while the Kubernetes API answers that neither other member's
   # claim exists, which is a first install. It reads the claims as the servers' own account, which
   # rbac.yaml lets get those two claims and nothing else, and fails, so the pod does not start, when
-  # the API does not answer. The Flux CLI image carries kubectl, at the Flux version the repository
-  # pins; the guard runs as the servers' user under the pod's security context.
+  # the API does not answer. The Flux CLI image carries a shell and kubectl; its tag is the flux2 pin
+  # in mise.toml, which Renovate moves with it. The guard runs as the servers' user under the pod's
+  # security context.
   extraInitContainers:
     - name: initialize-guard
       # renovate: datasource=docker depName=ghcr.io/fluxcd/flux-cli
-      image: ghcr.io/fluxcd/flux-cli:v2.10.0
+      image: ghcr.io/fluxcd/flux-cli:v2.10.0@sha256:1a5178b1770052d6e88ab1c7c8434c5ac9bca8a8ab984dcaf6b9df31814ce9f2
       command:
         - /bin/sh
         - /openbao/userconfig/openbao-initialize/initialize-guard.sh

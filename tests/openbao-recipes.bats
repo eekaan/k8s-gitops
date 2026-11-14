@@ -226,11 +226,20 @@ respond() {
   if [[ -n $write_out ]]; then printf '\n%s' "$1"; fi
   exit 0
 }
+# envelope DATA: a response of OpenBao's logical backend, as its HTTP layer writes one: the
+# handler's fields under data, beside the request's metadata.
+envelope() {
+  printf '{"request_id":"fake","lease_id":"","renewable":false,"lease_duration":0,"data":%s,"wrap_info":null,"warnings":null,"auth":null}' "$1"
+}
 recovery=$(cat "$STATE/recovery-shares" 2> /dev/null || echo 0)
 case $path in
   sys/seal-status | sys/decode-token | auth/kubernetes/login) ;;
   auth/token/revoke-self)
-    [[ $token == marker-bao-token || $token == marker-root-token ]] || respond 403 '{"errors":["permission denied"]}'
+    [[ $token == marker-bao-token || $token == marker-root-token || $token == marker-orphan-token ]] ||
+      respond 403 '{"errors":["permission denied"]}'
+    ;;
+  auth/token/create-orphan)
+    [[ $token == marker-root-token ]] || respond 403 '{"errors":["permission denied"]}'
     ;;
   *) [[ $token == marker-bao-token ]] || respond 403 '{"errors":["permission denied"]}' ;;
 esac
@@ -238,20 +247,32 @@ case "$method $path" in
   "POST auth/kubernetes/login")
     [[ -e $STATE/login-refused ]] && respond 400 '{"errors":["permission denied"]}'
     if [[ $("$JQ" -r '.role + " " + .jwt' <<< "$body") == "operator marker-service-account-jwt" ]]; then
-      respond 200 '{"auth":{"client_token":"marker-bao-token","lease_duration":600}}'
+      # The auth method answers a login under auth (internal/builtin/credential/kubernetes/path_login.go).
+      respond 200 '{"request_id":"fake","lease_id":"","renewable":false,"lease_duration":0,"data":null,"wrap_info":null,"warnings":null,"auth":{"client_token":"marker-bao-token","accessor":"marker-accessor","policies":["operator"],"token_policies":["operator"],"lease_duration":600,"renewable":true}}'
     fi
     respond 400 '{"errors":["invalid role or service account"]}'
     ;;
   "POST auth/token/revoke-self")
-    if [[ $token == marker-root-token ]]; then : > "$STATE/root-revoked"; else : > "$STATE/revoked"; fi
+    case $token in
+      marker-root-token) : > "$STATE/root-revoked" && echo "revoked root" >> "$STATE/events" ;;
+      marker-orphan-token) : > "$STATE/orphan-revoked" && echo "revoked orphan" >> "$STATE/events" ;;
+      *) : > "$STATE/revoked" ;;
+    esac
     respond 204 ''
+    ;;
+  # The token store answers a new token under auth (internal/vault/token_store.go in OpenBao v2.7.2).
+  "POST auth/token/create-orphan")
+    [[ -e $STATE/orphan-refused ]] && respond 400 '{"errors":["permission denied"]}'
+    "$JQ" -c . <<< "$body" > "$STATE/orphan-request"
+    echo "minted orphan" >> "$STATE/events"
+    respond 200 '{"request_id":"fake","lease_id":"","renewable":false,"lease_duration":0,"data":null,"wrap_info":null,"warnings":null,"auth":{"client_token":"marker-orphan-token","accessor":"marker-orphan-accessor","policies":["root"],"token_policies":["root"],"lease_duration":900,"renewable":false,"orphan":true}}'
     ;;
   "PATCH secrets/data/"*)
     [[ -e $STATE/write-refused ]] && respond 403 '{"errors":["permission denied"]}'
     file=$STATE/kv/${path#secrets/data/}.json
     [[ -f $file ]] || respond 404 '{"errors":[]}'
     "$JQ" -c --argjson patch "$("$JQ" -c '.data' <<< "$body")" '. * $patch' "$file" > "$file.new" && mv "$file.new" "$file"
-    respond 200 '{"data":{"version":2}}'
+    respond 200 "$(envelope '{"created_time":"2026-11-14T00:00:00Z","custom_metadata":null,"deletion_time":"","destroyed":false,"version":2}')"
     ;;
   "POST secrets/data/"*)
     [[ -e $STATE/write-refused ]] && respond 403 '{"errors":["permission denied"]}'
@@ -261,30 +282,35 @@ case "$method $path" in
     fi
     mkdir -p "$(dirname "$file")"
     "$JQ" -c '.data' <<< "$body" > "$file"
-    respond 200 '{"data":{"version":1}}'
+    respond 200 "$(envelope '{"created_time":"2026-11-14T00:00:00Z","custom_metadata":null,"deletion_time":"","destroyed":false,"version":1}')"
     ;;
+  # The HTTP layer answers the seal status itself, its fields at the top level
+  # (internal/http/sys_seal.go in OpenBao v2.7.2).
   "GET sys/seal-status")
-    respond 200 "{\"type\":\"static\",\"initialized\":true,\"sealed\":false,\"recovery_seal\":true,\"t\":$((recovery > 0 ? 3 : 0)),\"n\":$recovery}"
+    respond 200 "{\"type\":\"static\",\"initialized\":true,\"sealed\":false,\"recovery_seal\":true,\"t\":$((recovery > 0 ? 3 : 0)),\"n\":$recovery,\"progress\":0,\"nonce\":\"\",\"version\":\"2.7.2\",\"storage_type\":\"raft\"}"
     ;;
+  # The rotation answers from the logical backend, its fields under data
+  # (internal/vault/logical_system_rotate.go in OpenBao v2.7.2).
   "GET sys/rotate/recovery/init")
     if [[ -e $STATE/stale-rotation || -e $STATE/pending ]]; then
-      respond 200 '{"data":{"started":true,"nonce":"marker-stale-nonce","t":3,"n":5,"progress":0,"required":0}}'
+      respond 200 "$(envelope '{"started":true,"t":3,"n":5,"required":0,"nonce":"marker-stale-nonce","progress":0,"verification_required":true,"verification_nonce":""}')"
     fi
-    respond 200 '{"data":{"started":false,"t":0,"n":0,"progress":0,"required":0}}'
+    respond 200 "$(envelope "{\"started\":false,\"t\":0,\"n\":0,\"required\":$((recovery > 0 ? 3 : 0))}")"
     ;;
   "POST sys/rotate/recovery/init")
     if [[ -e $STATE/stale-rotation || -e $STATE/pending ]]; then
       respond 400 '{"errors":["rotation already in progress"]}'
     fi
     if ((recovery > 0)); then
-      respond 200 '{"data":{"started":true,"nonce":"marker-rotation-nonce","t":3,"n":5,"progress":0,"required":3}}'
+      respond 200 "$(envelope '{"started":true,"t":3,"n":5,"required":3,"nonce":"marker-rotation-nonce","progress":0,"verification_required":false,"verification_nonce":""}')"
     fi
     if [[ -e $STATE/clobber ]]; then echo someone-else > "$(cat "$STATE/clobber")"; fi
     "$JQ" -c . <<< "$body" > "$STATE/pending"
-    respond 200 "$("$JQ" -c '{data: {complete: true, t: .secret_threshold, n: .secret_shares,
-      verification_required: .require_verification, verification_nonce: "marker-verification-nonce",
+    respond 200 "$(envelope "$("$JQ" -c '{complete: true, t: .secret_threshold, n: .secret_shares, backup: false,
+      pgp_fingerprints: null, verification_required: .require_verification,
+      verification_nonce: "marker-verification-nonce",
       keys: [range(.secret_shares) | "marker-recovery-share-\(. + 1)"],
-      keys_base64: [range(.secret_shares) | "marker-recovery-share-\(. + 1)" | @base64]}}' <<< "$body")"
+      keys_base64: [range(.secret_shares) | "marker-recovery-share-\(. + 1)" | @base64]}' <<< "$body")")"
     ;;
   "POST sys/rotate/recovery/verify")
     [[ -f $STATE/pending && $("$JQ" -r .nonce <<< "$body") == marker-verification-nonce ]] ||
@@ -295,27 +321,33 @@ case "$method $path" in
       if [[ -s $(cat "$STATE/outfile" 2> /dev/null) ]]; then : > "$STATE/committed-after-write"; fi
       "$JQ" -r .secret_shares "$STATE/pending" > "$STATE/recovery-shares"
       rm "$STATE/pending"
-      respond 200 '{"data":{"complete":true,"nonce":"marker-verification-nonce"}}'
+      respond 200 "$(envelope '{"complete":true,"nonce":"marker-verification-nonce"}')"
     fi
-    respond 200 "{\"data\":{\"complete\":false,\"progress\":$(sort -u "$STATE/verified" | wc -l)}}"
+    # Before the last share, the verification's progress, without complete.
+    respond 200 "$(envelope "{\"nonce\":\"marker-verification-nonce\",\"started\":true,\"t\":3,\"n\":5,\"progress\":$(sort -u "$STATE/verified" | wc -l)}")"
     ;;
   "DELETE sys/rotate/recovery/init")
     : > "$STATE/cancelled"
     rm -f "$STATE/pending" "$STATE/stale-rotation"
     respond 204 ''
     ;;
+  # OpenBao answers these from its logical backend, every field under data
+  # (internal/vault/logical_system_generate_root.go in OpenBao v2.7.2).
   "GET sys/generate-root-token/attempt")
     if [[ -e $STATE/stale-root || -e $STATE/root-attempt ]]; then
-      respond 200 '{"started":true,"nonce":"marker-stale-root-nonce","progress":0,"required":3,"otp_length":28,"complete":false}'
+      respond 200 "$(envelope '{"started":true,"complete":false,"progress":0,"required":3,"otp":"","otp_length":28,"nonce":"marker-stale-root-nonce","pgp_fingerprint":""}')"
     fi
-    respond 200 '{"started":false,"progress":0,"required":3,"otp_length":28,"complete":false}'
+    respond 200 "$(envelope '{"started":false,"complete":false,"progress":0,"required":3,"otp":"","otp_length":28}')"
     ;;
   "PUT sys/generate-root-token/attempt")
     if [[ -e $STATE/stale-root || -e $STATE/root-attempt ]]; then
       respond 400 '{"errors":["root generation already in progress"]}'
     fi
+    # With no otp and no pgp_key in the request, OpenBao makes the one-time password and returns it.
+    [[ $("$JQ" -r '(.otp // "") + (.pgp_key // "")' <<< "$body") == "" ]] ||
+      respond 400 '{"errors":["fake: the recipe sent its own otp or pgp_key"]}'
     : > "$STATE/root-attempt"
-    respond 200 '{"started":true,"nonce":"marker-root-nonce","progress":0,"required":3,"otp":"marker-otp","otp_length":28,"complete":false}'
+    respond 200 "$(envelope '{"started":true,"complete":false,"progress":0,"required":3,"otp":"marker-otp","otp_length":28,"nonce":"marker-root-nonce","pgp_fingerprint":""}')"
     ;;
   "PUT sys/generate-root-token/update")
     [[ -e $STATE/root-attempt && $("$JQ" -r .nonce <<< "$body") == marker-root-nonce ]] ||
@@ -326,9 +358,9 @@ case "$method $path" in
     fi
     if (($(sort -u "$STATE/root-shares" | wc -l) >= 3)); then
       rm "$STATE/root-attempt"
-      respond 200 '{"started":true,"nonce":"marker-root-nonce","progress":3,"required":3,"complete":true,"encoded_token":"marker-encoded-token"}'
+      respond 200 "$(envelope '{"started":true,"complete":true,"progress":3,"required":3,"nonce":"marker-root-nonce","encoded_token":"marker-encoded-token","pgp_fingerprint":""}')"
     fi
-    respond 200 "{\"started\":true,\"nonce\":\"marker-root-nonce\",\"progress\":$(sort -u "$STATE/root-shares" | wc -l),\"required\":3,\"complete\":false}"
+    respond 200 "$(envelope "{\"started\":true,\"complete\":false,\"progress\":$(sort -u "$STATE/root-shares" | wc -l),\"required\":3,\"nonce\":\"marker-root-nonce\",\"encoded_token\":\"\",\"pgp_fingerprint\":\"\"}")"
     ;;
   "DELETE sys/generate-root-token/attempt")
     : > "$STATE/root-cancelled"
@@ -337,7 +369,7 @@ case "$method $path" in
     ;;
   "POST sys/decode-token")
     if [[ $("$JQ" -r '.encoded_token + " " + .otp' <<< "$body") == "marker-encoded-token marker-otp" ]]; then
-      respond 200 '{"data":{"token":"marker-root-token"}}'
+      respond 200 "$(envelope '{"token":"marker-root-token"}')"
     fi
     respond 400 '{"errors":["invalid encoded token or otp"]}'
     ;;
@@ -589,45 +621,88 @@ requests_of() {
   done
 }
 
-@test "bao-root makes a root token from the recovery keys, runs one command with it and revokes it" {
+@test "bao-root runs one command with a fifteen-minute token made from the recovery keys, and revokes it" {
   local secret
   custody_file marker-seal-key
   echo 5 >"$STATE/recovery-shares"
-  # The command it runs: reports what reached its environment, without printing the token.
+  # The command it runs: reports what reached its environment, without printing the token, and
+  # records that it ran. With $MISBEHAVE it kills itself, or interrupts the recipe's script.
   fake report-env <<EOF
+echo "command ran" >> "$STATE/events"
 {
-  [[ \$BAO_TOKEN == marker-root-token ]] && echo token=root
+  [[ \$BAO_TOKEN == marker-orphan-token ]] && echo token=orphan
   echo "addr=\$BAO_ADDR server=\$BAO_TLS_SERVER_NAME args=\$*"
   grep -qx marker-ca "\$BAO_CACERT" && echo ca=verified
 } > "$STATE/command-env"
+case \$(cat "$STATE/misbehave" 2> /dev/null) in
+  killed) kill -KILL \$\$ ;;
+  interrupt) kill -INT \$PPID; sleep 1 ;;
+esac
 EOF
+  # reset: clears what one run leaves behind.
+  reset() {
+    rm -f "$STATE/command-env" "$STATE/events" "$STATE/root-revoked" "$STATE/orphan-revoked" "$STATE/revoked" \
+      "$STATE/root-cancelled" "$STATE/root-shares" "$STATE/orphan-request" "$STATE/misbehave"
+  }
+
   : >"$STATE/stale-root"
   recipe bao-root "$CUSTODY" report-env one two
   echo "$output"
   [ "$status" -eq 0 ]
-  [ "$(cat "$STATE/command-env")" = "$(printf '%s\n' token=root 'addr=https://localhost:41234 server=openbao-active.openbao.svc args=one two' ca=verified)" ]
+  [ "$(cat "$STATE/command-env")" = "$(printf '%s\n' token=orphan 'addr=https://localhost:41234 server=openbao-active.openbao.svc args=one two' ca=verified)" ]
+  # The root token mints a fifteen-minute orphan token with the root policy, which no renewal
+  # extends, and is revoked before the command runs; the orphan token is revoked after it.
+  [ "$("$JQ" -cS . "$STATE/orphan-request")" = '{"explicit_max_ttl":"15m","policies":["root"],"renewable":false,"ttl":"15m"}' ]
+  [ "$(cat "$STATE/events")" = "$(printf '%s\n' 'minted orphan' 'revoked root' 'command ran' 'revoked orphan')" ]
   # A generation left in progress is cancelled first; the shares travel only in request bodies.
   [ "$("$JQ" -r 'select(.path == "sys/generate-root-token/attempt") | .method' "$RECORD/requests" | paste -sd' ' -)" = "GET DELETE PUT" ]
   [ "$("$JQ" -r 'select(.body | contains("bWFya2VyLXJlY292ZXJ5")) | .method + " " + .path' "$RECORD/requests" | sort -u)" = \
     'PUT sys/generate-root-token/update' ]
-  for secret in marker-recovery-share- bWFya2VyLXJlY292ZXJ5 marker-root-token marker-encoded-token marker-otp \
-    marker-seal-key marker-bao-token marker-service-account-jwt; do
+  for secret in marker-recovery-share- bWFya2VyLXJlY292ZXJ5 marker-root-token marker-orphan-token marker-encoded-token \
+    marker-otp marker-seal-key marker-bao-token marker-service-account-jwt; do
     [[ $output != *"$secret"* ]] || { echo "$secret in the output"; return 1; }
     absent "$secret" "$RECORD/argv"
   done
-  [ -e "$STATE/root-revoked" ]
   [ -e "$STATE/revoked" ]
   forwards_closed
 
-  # Refused before the token is made: the generation is cancelled and no command runs.
-  rm -f "$STATE/command-env" "$STATE/root-revoked" "$STATE/root-cancelled" "$STATE/root-shares"
+  # The command killed: its token is revoked all the same, and the recipe fails.
+  reset
+  echo killed >"$STATE/misbehave"
+  recipe bao-root "$CUSTODY" report-env
+  echo "command killed: $output"
+  [ "$status" -ne 0 ]
+  [ "$(cat "$STATE/events")" = "$(printf '%s\n' 'minted orphan' 'revoked root' 'command ran' 'revoked orphan')" ]
+  forwards_closed
+  # The recipe interrupted while the command runs: the same.
+  reset
+  echo interrupt >"$STATE/misbehave"
+  recipe bao-root "$CUSTODY" report-env
+  echo "interrupted: $output"
+  [ "$status" -ne 0 ]
+  [ "$(cat "$STATE/events")" = "$(printf '%s\n' 'minted orphan' 'revoked root' 'command ran' 'revoked orphan')" ]
+  forwards_closed
+
+  # Minting refused: the root token is revoked at once, and no command runs.
+  reset
+  : >"$STATE/orphan-refused"
+  recipe bao-root "$CUSTODY" report-env
+  echo "minting refused: $output"
+  [ "$status" -ne 0 ]
+  [ "$(cat "$STATE/events")" = 'revoked root' ]
+  [ ! -e "$STATE/command-env" ]
+  forwards_closed
+  rm "$STATE/orphan-refused"
+
+  # A share refused before the token is made: the generation is cancelled and no command runs.
+  reset
   : >"$STATE/root-refused"
   recipe bao-root "$CUSTODY" report-env
   echo "refused: $output"
   [ "$status" -ne 0 ]
   [ ! -e "$STATE/command-env" ]
   [ -e "$STATE/root-cancelled" ]
-  [ ! -e "$STATE/root-revoked" ]
+  [ ! -e "$STATE/events" ]
   forwards_closed
   [[ $output != *marker-recovery-share-* ]]
   # Without a command, it refuses before reaching anything.
@@ -639,7 +714,7 @@ EOF
 
 # shellcheck disable=SC2016 # $key is a jq variable.
 @test "bao-seal-restore writes the seal key back from the custody file and never replaces a key unasked" {
-  local key=c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffee0001 other secret
+  local key=c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffee0001 other secret kept real_date
   other=${key%0001}0002
   custody_file "$key"
   # No Secret: it is made, immutable, with the file's key.
@@ -662,11 +737,64 @@ EOF
   [ "$status" -ne 0 ]
   [ ! -e "$STATE/seal-created" ]
   [ ! -e "$STATE/seal-deleted" ]
+  # Replacing it, when the key it holds cannot be kept first, opening with the operator's age key,
+  # deletes nothing: here the recipient in talos/.sops.yaml is another key's.
+  cp "$REPO/talos/.sops.yaml" "$BATS_TEST_TMPDIR/sops.yaml"
+  age-keygen -o "$BATS_TEST_TMPDIR/keys/other.agekey" 2>/dev/null
+  OTHER="$(age-keygen -y "$BATS_TEST_TMPDIR/keys/other.agekey")" yq -i '.creation_rules[].age = strenv(OTHER)' "$REPO/talos/.sops.yaml"
+  recipe bao-seal-restore "$CUSTODY" --replace
+  echo "unkept: $output"
+  [ "$status" -ne 0 ]
+  [ ! -e "$STATE/seal-deleted" ]
+  [ "$(find "$BATS_TEST_TMPDIR/custody" -mindepth 1 ! -name openbao.age | wc -l)" -eq 0 ]
+  cp "$BATS_TEST_TMPDIR/sops.yaml" "$REPO/talos/.sops.yaml"
+  # Replaced: the key it held is first kept in a new file beside the custody file, encrypted to the
+  # Talos age key, and the custody file is left as it was.
+  cp "$CUSTODY" "$BATS_TEST_TMPDIR/custody-before.age"
   recipe bao-seal-restore "$CUSTODY" --replace
   echo "replaced: $output"
   [ "$status" -eq 0 ]
   [ -e "$STATE/seal-deleted" ]
   [ "$("$JQ" -r '.data.key | @base64d' "$STATE/seal-created")" = "$key" ]
+  cmp "$CUSTODY" "$BATS_TEST_TMPDIR/custody-before.age"
+  kept="$(find "$BATS_TEST_TMPDIR/custody" -mindepth 1 -name 'openbao.age.replaced-*.age')"
+  echo "kept in: ${kept:-nothing}"
+  [ "$(grep -c . <<<"$kept")" -eq 1 ]
+  [ "$(stat -c %a "$kept")" = 600 ]
+  [ "$(age -d -i "$BATS_TEST_TMPDIR/keys/talos.agekey" "$kept" | "$JQ" -r '.seal.secret + " " + .seal.key')" = "openbao-seal-1 $other" ]
+  # A second replacement keeps the key it replaces in another new file, never over the first.
+  "$JQ" -n --arg key "$other" '{kind: "Secret", metadata: {name: "openbao-seal-1", namespace: "openbao"}, immutable: true, data: {key: ($key | @base64)}}' >"$STATE/seal-secret"
+  cp "$kept" "$BATS_TEST_TMPDIR/kept-before.age"
+  recipe bao-seal-restore "$CUSTODY" --replace
+  echo "replaced again: $output"
+  [ "$status" -eq 0 ]
+  cmp "$kept" "$BATS_TEST_TMPDIR/kept-before.age"
+  [ "$(find "$BATS_TEST_TMPDIR/custody" -mindepth 1 -name 'openbao.age.replaced-*.age' | wc -l)" -eq 2 ]
+  # A file where it would keep the key is never replaced, and nothing is deleted. With the clock
+  # standing still, a second run picks the very name of the file the first one kept the key in.
+  real_date="$(command -v date)"
+  fake_tool date <<EOF
+if [[ -f \$STATE/frozen-time ]]; then exec "$real_date" --date "@\$(<"\$STATE/frozen-time")" "\$@"; fi
+exec "$real_date" "\$@"
+EOF
+  echo 1767225600 >"$STATE/frozen-time"
+  find "$BATS_TEST_TMPDIR/custody" -mindepth 1 | sort >"$BATS_TEST_TMPDIR/custody-before"
+  "$JQ" -n --arg key "$other" '{kind: "Secret", metadata: {name: "openbao-seal-1", namespace: "openbao"}, immutable: true, data: {key: ($key | @base64)}}' >"$STATE/seal-secret"
+  recipe bao-seal-restore "$CUSTODY" --replace
+  echo "replaced at a standing clock: $output"
+  [ "$status" -eq 0 ]
+  kept="$(find "$BATS_TEST_TMPDIR/custody" -mindepth 1 | sort | comm -13 "$BATS_TEST_TMPDIR/custody-before" -)"
+  [ "$(grep -c . <<<"$kept")" -eq 1 ]
+  cp "$kept" "$BATS_TEST_TMPDIR/kept-before.age"
+  "$JQ" -n --arg key "$other" '{kind: "Secret", metadata: {name: "openbao-seal-1", namespace: "openbao"}, immutable: true, data: {key: ($key | @base64)}}' >"$STATE/seal-secret"
+  rm "$STATE/seal-deleted"
+  find "$BATS_TEST_TMPDIR/custody" -mindepth 1 | sort >"$BATS_TEST_TMPDIR/custody-before"
+  recipe bao-seal-restore "$CUSTODY" --replace
+  echo "a file in the way: $output"
+  [ "$status" -ne 0 ]
+  [ ! -e "$STATE/seal-deleted" ]
+  cmp "$kept" "$BATS_TEST_TMPDIR/kept-before.age"
+  [ "$(find "$BATS_TEST_TMPDIR/custody" -mindepth 1 | sort)" = "$(cat "$BATS_TEST_TMPDIR/custody-before")" ]
   for secret in "$key" "$other" "$(printf %s "$key" | base64 -w0)" "$(printf %s "$other" | base64 -w0)"; do
     [[ $output != *"$secret"* ]] || { echo "a key in the output"; return 1; }
     absent "$secret" "$RECORD/argv"

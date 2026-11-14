@@ -52,9 +52,9 @@ Feature: OpenBao
     Then external-secrets binds openbao-store, operator binds openbao-operator and snapshot binds openbao-snapshot, each with OpenBao's audience, one policy, no default policy and ten-minute tokens, the snapshot role may only take a raft snapshot, and no pod mounts the accounts' tokens
 
   Scenario: The operator role allows every request its recipes and runbook make, and nothing more
-    Given the operator role's policy, the recipes' requests read from their scripts, and the requests of the runbook's CLI steps
+    Given the operator role's policy, the requests the recipes send with the operator's token read from their scripts, and the requests of the runbook's CLI steps
     When each request is read as the capability OpenBao checks for it
-    Then the policy grants each of them and nothing beyond them
+    Then the policy grants each of them and nothing beyond them, and the one request a recipe sends with another token is bao-root's minting of the command's token with the root token
 
   Scenario: External Secrets mints tokens for the store's account and no other
     Given the external-secrets application's chart rendered with the repository's values, and the openbao-store application
@@ -101,12 +101,12 @@ Feature: OpenBao
     When bao-recovery is interrupted while the keys are verified, before and after OpenBao commits them, finds a rotation left in progress, finds its file made by someone else, or writes to a recipient the operator's age key does not open
     Then a rotation it did not complete is cancelled and its file removed, a file holding committed keys is kept, a rotation left in progress is cancelled before a new one starts, a file made by someone else is never replaced, and keys the operator's age key cannot read are never committed
 
-  Scenario: bao-root makes a root token from the recovery keys, runs one command with it and revokes it
-    Given a fake OpenBao holding recovery keys and the operator's custody file
-    When bao-root runs a command, and when it fails before the token is made
-    Then the shares reach OpenBao only in request bodies read from standard input, the command gets the token, the address and the CA in its environment, nothing prints a share or a token, the root token and the operator's token are revoked, an unfinished generation is cancelled, and the port-forward is closed
+  Scenario: bao-root runs one command with a fifteen-minute token made from the recovery keys, and revokes it
+    Given a fake OpenBao holding recovery keys, answering as OpenBao does, and the operator's custody file
+    When bao-root runs a command, the command is killed, the recipe is interrupted while it runs, minting the command's token is refused, and a share is refused
+    Then the shares reach OpenBao only in request bodies read from standard input, the root token made from them mints a fifteen-minute orphan token with the root policy and is revoked before the command runs, the command gets that token, the address and the CA in its environment, the token is revoked however the command ends, so is the operator's, nothing prints a share or a token, an unfinished generation is cancelled, and the port-forward is closed
 
   Scenario: bao-seal-restore writes the seal key back from the custody file and never replaces a key unasked
     Given a fake cluster without the seal Secret, with it holding the file's key, and with it holding another key
     When bao-seal-restore runs, and runs with --replace
-    Then a missing Secret is made immutable from the file's key, one holding the same key is left alone, one holding another key is kept unless --replace is given, and the key is never printed or passed on a command line
+    Then a missing Secret is made immutable from the file's key, one holding the same key is left alone, one holding another key is kept unless --replace is given, a key it replaces is first kept in a new file beside the custody file, encrypted to and opened with the operator's age key, never over another file, nothing is deleted when it cannot be kept, and no key is printed or passed on a command line
