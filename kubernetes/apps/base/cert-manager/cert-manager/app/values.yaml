@@ -1,0 +1,93 @@
+---
+# Values for the cert-manager chart, read by the HelmRelease through a ConfigMap generated without
+# substitution. Keys not set here keep the chart's defaults. The replicas, disruption budgets,
+# priority class and resource requests follow the publisher's best-practice guidance for
+# production, sized for three workers.
+
+crds:
+  # The release installs and upgrades cert-manager's resource definitions, as its publisher
+  # recommends under Flux, so they always match the controller that serves them.
+  enabled: true
+  # Deleting a definition deletes every certificate and issuer of its kind, so Helm leaves the
+  # definitions in place when the release is uninstalled, as it is when this application leaves
+  # the tree.
+  keep: true
+
+global:
+  # The controller's and the CA injector's leader election leases live in cert-manager's own
+  # namespace instead of kube-system, so cert-manager needs no permission there.
+  leaderElection:
+    namespace: cert-manager
+  # While the webhook is down, nothing can create or change a certificate or an issuer.
+  priorityClassName: system-cluster-critical
+
+config:
+  # Certificates for the listeners of Gateway API Gateways, and HTTPRoutes for HTTP-01 challenges.
+  # cert-manager looks for the Gateway API definitions once, when it starts; ks.yaml waits for them.
+  gatewayAPI:
+    enabled: true
+
+# Each component keeps a pod through a drain: a disruption budget that keeps one available, which
+# the chart sets when the budget gives no number, and more replicas than that, so a drain can still
+# evict one. The spread over nodes is a preference, never a reason to leave a pod unscheduled.
+# The chart sets no resources; the requests are the ones its values file gives as an example, and
+# no limits are set, as memory use grows with the number of certificates and secrets it watches.
+
+# The controller elects a leader; the second replica stands by.
+replicaCount: 2
+podDisruptionBudget:
+  enabled: true
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/instance: cert-manager
+        app.kubernetes.io/component: controller
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+
+webhook:
+  # Every replica answers the API server, so one per worker.
+  replicaCount: 3
+  podDisruptionBudget:
+    enabled: true
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/instance: cert-manager
+          app.kubernetes.io/component: webhook
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+
+cainjector:
+  # The CA injector elects a leader; the second replica stands by.
+  replicaCount: 2
+  podDisruptionBudget:
+    enabled: true
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/instance: cert-manager
+          app.kubernetes.io/component: cainjector
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+
+prometheus:
+  servicemonitor:
+    enabled: false
+  podmonitor:
+    enabled: false
