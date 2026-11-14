@@ -856,7 +856,7 @@ are deleted, which removes the instance, and the operator clones a new one from 
 three workers, the new one waits for a worker without an instance.
 
 No backup is configured: WAL archiving and base backups to object storage need the object store's
-credentials from the secret store, which does not run yet, and take their place in the component's
+credentials from the secret store, which holds none yet, and take their place in the component's
 `Cluster` then. Until then a cluster's data lives only on the workers' data volumes
 ([Where the data lives](#where-the-data-lives)).
 
@@ -1030,10 +1030,9 @@ one wildcard rule is confined to LINSTOR's own API group.
 The `operator` role reaches the recovery keys and, through them, a root token. Recovery keys are
 made once, by the first authenticated rotation, which `just bao-recovery` performs right after the
 first reconcile. From then on a root token takes three of the shares, which only the operator's file
-holds. If `bao-recovery`'s first run finds
-recovery keys already, someone else holds them, and the store is rebuilt
-([runbook](runbooks/openbao.md#first-initialisation)). Who may mint an `operator` token holds
-cluster-admin, and with it the seal Secret and every Secret the store fills.
+holds. If `bao-recovery`'s first run finds recovery keys already, someone else holds them, and the
+store is rebuilt ([runbook](runbooks/openbao.md#first-initialisation)). Who may mint an `operator`
+token holds cluster-admin, and with it the seal Secret and every Secret the store fills.
 
 ### What the operator keeps
 
