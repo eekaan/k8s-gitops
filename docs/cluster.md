@@ -492,8 +492,8 @@ What the rules and the checks rest on, read from the cluster before any node hel
   fresh requests through the load balancer reached all three, as check 7 needs.
 - No Service names an external address, so none is left that `DenyServiceExternalIPs`, which
   refuses only a new one, would let stay.
-- Cilium routes in tunnel mode on its default port, VXLAN's UDP 8472, with its host firewall off, so
-  no node address has a tunnel endpoint.
+- Cilium routes in tunnel mode on its default port, VXLAN's UDP 8472, and its host firewall is off,
+  one of the two things that would give a node's address a tunnel endpoint.
 
 ### The way back
 
