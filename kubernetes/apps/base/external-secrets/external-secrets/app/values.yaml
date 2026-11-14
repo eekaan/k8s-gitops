@@ -1,0 +1,67 @@
+---
+# Values for the External Secrets chart, read by the HelmRelease through a ConfigMap generated
+# without substitution. Keys not set here keep the chart's defaults: the chart installs and upgrades
+# the operator's resource definitions itself, and its certificate controller issues the webhook's
+# certificate and puts its CA into the webhook configurations, so nothing else issues one.
+#
+# Each of the three components, the controller, the webhook and the certificate controller, runs
+# twice, on two different nodes, and a disruption budget keeps one of each running while a node is
+# drained. The API server sends every change to a secret store or an ExternalSecret through the
+# webhook, and refuses the change when no webhook answers. Each requests the CPU and memory the
+# chart's own values suggest.
+
+crds:
+  # Deleting a definition deletes every object of its kind, and with each ExternalSecret the Secret
+  # it owns, so Helm leaves the definitions in place when the release is uninstalled, as it is when
+  # this application leaves the tree.
+  annotations:
+    helm.sh/resource-policy: keep
+
+# The controller.
+replicaCount: 2
+# Of the two controllers, and of the two certificate controllers, only one acts at a time.
+leaderElect: true
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+
+webhook:
+  replicaCount: 2
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+
+certController:
+  replicaCount: 2
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+
+global:
+  # The pods of one component's ReplicaSet go to different nodes, counting only the nodes they may
+  # run on. The chart adds each component's own pod labels as the selector.
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      nodeTaintsPolicy: Honor
+      matchLabelKeys:
+        - pod-template-hash
+
+# One switch for the ServiceMonitors of all three components.
+serviceMonitor:
+  enabled: false
+grafanaDashboard:
+  enabled: false
