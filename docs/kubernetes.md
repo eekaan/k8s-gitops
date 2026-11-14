@@ -940,16 +940,24 @@ write access to packages nor an identity token. Its one command is `just publish
 identity token (ADR 0007). The script refuses to run anywhere else: without GitHub Actions and the
 job's identity token it stops before calling anything, so nobody signs from a laptop. In order, it:
 
-1. logs in to ghcr.io with the job's token on standard input, into a Docker configuration of the
+1. runs `just kubernetes-check` on the commit it publishes, with the pinned tools the workflow
+   installs; a failure stops the run, with the check's own message, before the registry is touched;
+2. logs in to ghcr.io with the job's token on standard input, into a Docker configuration of the
    run's own, which flux and cosign both read and which is removed when the run ends;
-2. pushes `kubernetes/`, without any cluster's `secrets/`, with `flux push artifact`, tagged with the
+3. pushes `kubernetes/`, without any cluster's `secrets/`, with `flux push artifact`, tagged with the
    full commit SHA, with the repository as its source and `<branch>@sha1:<commit>` as its revision,
    reproducibly; a reported digest that is not `sha256:` and 64 hexadecimal digits stops the run;
-3. signs that digest keyless with cosign: a short-lived certificate for the job's identity, recorded
+4. signs that digest keyless with cosign: a short-lived certificate for the job's identity, recorded
    in Sigstore's public transparency log;
-4. verifies the signature against the identity of this workflow at the run's ref, which on `main`
+5. verifies the signature against the identity of this workflow at the run's ref, which on `main`
    is the identity the instance accepts; a failure stops the run;
-5. tags that digest `main`.
+6. tags that digest `main`.
+
+A pull request's checks run against its branch as it was pushed, and the branch rule does not
+require a branch to be up to date, so two passing pull requests can merge into a tree that fails.
+The first step makes the publish run judge the tree that is actually on `main`: when that tree does
+not build, the run fails, nothing is pushed, signed or tagged, and the cluster stays on the last
+artifact that passed until a later commit on `main` does.
 
 The tag moves last and by digest: `main` only ever names an artifact that is signed and verified,
 and signing, verifying and tagging all name it by its digest, so the tag ends on exactly the bytes

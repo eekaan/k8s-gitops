@@ -379,8 +379,15 @@ EOF
   [ "$(yq 'length' <<< "$output")" -eq 1 ]
   [ "$output" = "$(yq -o=json -I=0 "$select" "$WORKFLOW")" ]
   run yq '.jobs.publish.steps[] | select(.uses | test("^jdx/mise-action@")) | .with.install_args' "$publish"
-  [ "$(tr ' ' '\n' <<< "$output" | sort | paste -sd ' ')" = "cosign flux2 jq just" ]
+  [ "$(tr ' ' '\n' <<< "$output" | sort | paste -sd ' ')" = "cosign flux2 jq just kustomize yq" ]
   local tool
+  # just publish runs just kubernetes-check first, with the tools that script requires.
+  local required
+  required=$(sed -n 's/^for tool in \(.*\); do$/\1/p' "$REPO/scripts/kubernetes-check")
+  [ -n "$required" ]
+  for tool in ${required/flux/flux2}; do
+    grep -qw -- "$tool" <<< "$output" || { echo "not installed for the check: $tool"; return 1; }
+  done
   for tool in $output; do
     yq -p toml -o yaml -e ".tools | has(\"$tool\")" "$REPO/mise.toml" > /dev/null || { echo "not pinned in mise.toml: $tool"; return 1; }
   done

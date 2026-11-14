@@ -21,6 +21,16 @@ Feature: Publishing the cluster's artifact
     When just publish runs
     Then the artifact is pushed, signed and verified, the tag is not touched, the run names the newer commit and exits zero
 
+  Scenario: The artifact is published only after the Kubernetes check passes
+    Given a publish run on refs/heads/main whose tree passes just kubernetes-check
+    When just publish runs
+    Then the check runs first, before the registry login, and the login, the push, the signature, the verification and the tag follow it in that order
+
+  Scenario: A failing check publishes nothing, moves no tag and fails the run with the check's reason
+    Given a publish run, on refs/heads/main or on another branch, whose tree fails just kubernetes-check
+    When just publish runs
+    Then the registry is not logged in to, nothing is pushed, signed or tagged, and the run exits non-zero with the check's own message and the step it failed in
+
   Scenario: A failed verification leaves the tag alone and fails the run
     Given a publish run on refs/heads/main whose signature does not verify
     When just publish runs

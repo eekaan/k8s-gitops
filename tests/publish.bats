@@ -64,6 +64,7 @@ setup() {
     REGISTRY_TOKEN="$TOKEN"
   )
   fakes
+  check_stand_in
 }
 
 teardown() {
@@ -188,6 +189,22 @@ esac
 EOF
 }
 
+# check_stand_in: replaces the copy's scripts/kubernetes-check, which has its own tests, with a
+# recorded call that fails, saying why, while STATE/check-fails exists.
+check_stand_in() {
+  {
+    echo '#!/usr/bin/env bash'
+    printf 'RECORD=%q STATE=%q\n' "$RECORD" "$STATE"
+    cat <<'EOF'
+echo kubernetes-check >> "$RECORD/calls"
+if [[ -e $STATE/check-fails ]]; then
+  echo "kubernetes-check: kubernetes/apps/base/demo/hello/ks.yaml: a rule of the layout is broken" >&2
+  exit 1
+fi
+EOF
+  } > "$REPO/scripts/kubernetes-check"
+}
+
 # with NAME=VALUE...: sets NAME in the environment the run gets, in place of any value it had.
 with() {
   local entry
@@ -230,6 +247,12 @@ newer_commit() {
 steps() {
   [[ -e $RECORD/calls ]] || return 0
   awk '$1 == "docker" || $1 == "flux" || $1 == "cosign" { print $1, $2 }' "$RECORD/calls"
+}
+
+# flow: steps, with the tree's check in its place among them.
+flow() {
+  [[ -e $RECORD/calls ]] || return 0
+  awk '$1 == "kubernetes-check" { print $1 } $1 == "docker" || $1 == "flux" || $1 == "cosign" { print $1, $2 }' "$RECORD/calls"
 }
 
 # step_list STEP...: STEPs one per line, as steps prints them.
@@ -395,6 +418,32 @@ accepts() {
   [[ $output == *"tag main moved to $DIGEST"* ]]
   run steps
   [ "$output" = "$(step_list 'docker login' 'flux push' 'cosign sign' 'cosign verify' 'flux tag')" ]
+}
+
+@test "The artifact is published only after the Kubernetes check passes" {
+  publish
+
+  [ "$status" -eq 0 ]
+  run flow
+  [ "$output" = "$(step_list 'kubernetes-check' 'docker login' 'flux push' 'cosign sign' 'cosign verify' 'flux tag')" ]
+}
+
+@test "A failing check publishes nothing, moves no tag and fails the run with the check's reason" {
+  local ref
+  : > "$STATE/check-fails"
+  for ref in refs/heads/main refs/heads/feature/next; do
+    with GITHUB_REF="$ref"
+    rm -f "$RECORD/calls"
+
+    publish
+
+    [ "$status" -ne 0 ] || { echo "published on $ref"; return 1; }
+    [[ $output == *"a rule of the layout is broken"* ]]
+    [[ $output == *"failed while checking"* ]]
+    [[ $output != *"tag main moved"* ]]
+    run flow
+    [ "$output" = kubernetes-check ] || { echo "ran more than the check on $ref: $output"; return 1; }
+  done
 }
 
 @test "A failed verification leaves the tag alone and fails the run" {

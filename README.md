@@ -73,7 +73,8 @@ The repository checks:
 
 - `just tools-check` fails when a pinned tool is missing or its binary reports a different version.
 - `just kubernetes-check` builds `kubernetes/` offline with kustomize and Flux and fails when an
-  application, a `ks.yaml` or a variable breaks the layout in `docs/kubernetes.md`.
+  application, a `ks.yaml` or a variable breaks the layout in `docs/kubernetes.md`. The publish
+  run repeats it on the commit it publishes and publishes nothing when it fails.
 - `just check-literals` fails when a file git would commit, tracked or untracked and not ignored,
   holds an IPv4 literal outside the documentation ranges, loopback, `0.0.0.0`, the metadata
   address and netmasks, unless `.address-allowlist` declares it with a reason. It skips the

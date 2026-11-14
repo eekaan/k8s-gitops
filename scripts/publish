@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Publishes kubernetes/ as the OCI artifact Flux follows (ADR 0003), and runs only in the publish
-# workflow. In order: logs in to the registry; pushes the artifact tagged with the commit; signs the
+# workflow. In order: runs just kubernetes-check on the commit being published, and stops if it
+# fails; logs in to the registry; pushes the artifact tagged with the commit; signs the
 # digest the push reports, keyless, with the job's identity token; verifies that signature against
 # the identity of this workflow at the run's ref, which on main is the one the FluxInstance accepts;
 # and only then tags that digest main. The tag moves last and
@@ -61,6 +62,12 @@ begin() {
   step=$1
   say "$step"
 }
+
+# Nothing is pushed from a tree whose manifests do not build: a pull request's check ran against its
+# branch as it was pushed, and main can differ from it once other pull requests merged. A failure
+# stops the run here, with the check's own message, before the registry is touched.
+begin "checking that kubernetes/ builds"
+just kubernetes-check
 
 begin "logging in to ghcr.io"
 printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin > /dev/null
