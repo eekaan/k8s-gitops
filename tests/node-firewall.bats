@@ -254,6 +254,23 @@ overlapping() {
   done
 }
 
+@test "The API server refuses new external addresses on Services" {
+  # Cilium serves a Service's external addresses before the node's firewall sees the packets, and any
+  # Service may name one, so the API server refuses them. Talos merges enable-admission-plugins from
+  # the extra arguments into its own list instead of replacing it.
+  checked=0
+  for hostname in $(nodes controlplane); do
+    plugins=$(yq -N 'select(.kind == "KubeAPIServerConfig") | .extraArgs["enable-admission-plugins"] // ""' "$RENDERED/$hostname.yaml")
+    echo "$hostname enables: ${plugins:-none}"
+    grep -qx DenyServiceExternalIPs < <(tr ',' '\n' <<< "$plugins")
+    checked=$((checked + 1))
+  done
+  [ "$checked" -eq 3 ]
+  for hostname in $(nodes worker); do
+    [ -z "$(yq -N 'select(.kind == "KubeAPIServerConfig") | .extraArgs["enable-admission-plugins"] // ""' "$RENDERED/$hostname.yaml")" ]
+  done
+}
+
 @test "Workers carry no rule for a control-plane-only listener" {
   only=$(yq -N '.listeners[] | select(.nodes == "controlplane") | .name + " " + .protocol + " " + (.ports | map(tostring) | join(","))' "$INVENTORY")
   grep -q '^etcd ' <<< "$only"

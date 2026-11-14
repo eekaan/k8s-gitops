@@ -33,6 +33,11 @@ Feature: Nodes firewall themselves
     When every node's configuration is rendered
     Then every control plane's etcd rule accepts TCP 2379 and 2380 from exactly the three control planes' addresses on the node network, each as a single address
 
+  Scenario: The API server refuses new external addresses on Services
+    Given the template, the patches and fixture node data
+    When every node's configuration is rendered
+    Then every control plane's API server enables the DenyServiceExternalIPs admission plugin through its extra arguments, which Talos adds to the plugins it enables itself, and no worker's configuration sets the API server's admission plugins
+
   Scenario: Workers carry no rule for a control-plane-only listener
     Given the inventory's listeners that only control planes have
     When every worker's configuration is rendered

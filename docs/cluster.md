@@ -222,18 +222,33 @@ member.
 ### What the firewall does not see
 
 The firewall's chains are netfilter's input and prerouting hooks, for packets addressed to the node
-itself. What Cilium handles before netfilter, or delivers to a pod rather than to the node, never
-reaches them:
+itself. What Cilium serves before netfilter, or delivers to a pod rather than to the node, never
+reaches them, and neither does a node without machine configuration. Each, with what controls it:
 
-- Traffic to a pod's address, between pods or through a Service; Talos leaves it to network
-  policies.
-- NodePorts, host ports, and load balancer and external addresses of Services: Cilium, which
-  replaces kube-proxy, serves them from its eBPF datapath at the node's network device. The full
-  security group admits none of them from outside the nodes, and the reduced one keeps the NodePort
-  range closed ([infrastructure.md](infrastructure.md#the-nodes-security-group)).
+- Traffic to a pod's address, between pods or through a Service. No route from outside the node
+  network leads to the pod range, and each node's cloud port carries only its node's own address;
+  between pods, Talos leaves it to network policies.
+- NodePorts, which Cilium serves from its eBPF datapath at the node's network device as it replaces
+  kube-proxy. The security group keeps Kubernetes' NodePort range, 30000-32767, closed to everything
+  outside the nodes in both of its sets ([infrastructure.md](infrastructure.md#the-nodes-security-group)).
+- Host ports of pods, which Cilium serves the same way, outside the NodePort range. Pod Security
+  refuses them at the baseline level, which Talos enforces wherever a namespace sets no other; only
+  `kube-system`, `monitoring` and `piraeus-datastore` allow them, and the one pod there that
+  declares one, node-exporter, runs on the host network, where its port is the node's own and the
+  firewall filters it. The full security group also admits no host port from outside the nodes.
+- Services' external addresses, which Cilium serves the same way, and which any Service could name.
+  The API server refuses a new one: every control plane enables Kubernetes' `DenyServiceExternalIPs`
+  admission plugin (`talos/patches/controlplane/deny-service-external-ips.yaml`), which refuses a
+  Service that names an external address it did not have before
+  ([Kubernetes](https://kubernetes.io/docs/reference/access-authn-authz/admission-controllers/#denyserviceexternalips)),
+  and no Service names one.
+- Services' load-balancer addresses, which Cilium would serve the same way. None reaches a node:
+  there is no cloud controller to assign one, and Cilium's own address management, L2
+  announcements and BGP control plane are off in its values, so it neither assigns nor announces
+  any.
 - A node in maintenance mode, which has no machine configuration and so no firewall, and whose
   Talos API takes a configuration from anyone who reaches it. The security group admits that port
-  only from the allowlist, the nodes' floating addresses and the CI host, whichever set it holds.
+  only from the allowlist, the nodes' floating addresses and the CI host, in both of its sets.
 
 ### Rolling it out
 

@@ -1,0 +1,11 @@
+# The API server refuses a Service that names new external addresses: Cilium serves a Service's
+# external addresses from its eBPF datapath before the node's firewall sees the packets, and any
+# Service may name one. Kubernetes' DenyServiceExternalIPs admission plugin refuses a new Service
+# with externalIPs and an update that adds one, and leaves those already there, which may be
+# removed. Talos adds the plugins named here to those it enables itself, NodeRestriction among them,
+# rather than replacing them.
+---
+apiVersion: v1alpha1
+kind: KubeAPIServerConfig
+extraArgs:
+  enable-admission-plugins: DenyServiceExternalIPs
