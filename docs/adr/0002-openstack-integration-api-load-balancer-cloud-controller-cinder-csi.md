@@ -4,6 +4,9 @@
 - Date: 2026-11-14
 - Amended: 2026-11-14, volumes come from LINSTOR, not Cinder CSI
   ([ADR 0011](0011-persistent-volumes-from-linstor-on-a-data-volume-per-worker.md))
+- Amended: 2026-11-14, Services of type `LoadBalancer` are announced over BGP to edge routers the
+  deployment runs, not provided by the cloud controller
+  ([ADR 0013](0013-service-addresses-announced-over-bgp-to-edge-routers.md))
 
 ## Context
 
@@ -19,9 +22,10 @@ Talos, so both are verified on a running cluster before anything is built on the
   cluster endpoint is the load balancer's fixed private address, known at plan time; its
   floating IP and the control planes' floating IPs are certificate SANs. Inside the cluster,
   KubePrism balances API traffic on every node.
-- The OpenStack cloud controller manager provides `Service` objects of type `LoadBalancer`
-  through Octavia. A cluster that uses it is bootstrapped with its kubelets in external
-  cloud-provider mode.
+- This record chose the OpenStack cloud controller manager for `Service` objects of type
+  `LoadBalancer`, through Octavia. ADR 0013 replaces that part of it: their addresses come from a
+  pool in Cilium and are announced over BGP to edge routers the deployment runs, and the cluster
+  runs no cloud controller.
 - This record chose Cinder CSI for volumes. ADR 0011 replaces that part of it: volumes come from
   LINSTOR on a volume attached to each worker, and the cluster runs no Cinder CSI.
 
@@ -37,15 +41,8 @@ Talos, so both are verified on a running cluster before anything is built on the
 
 ## Consequences
 
-- The cloud-provider mode is fixed at bootstrap; changing it later means registering every
-  node again. The Talos patches do not set it while this record is proposed, so the cluster is
-  bootstrapped without it, and it is rebuilt from nothing in external mode when the cloud
-  controller is adopted. Nothing that must outlive that rebuild runs on it before then.
-- With a cloud controller, a node also reports its floating address. The kubelet then asks for
-  it in its serving certificate, so the certificate approver's allowed address ranges have to
-  include the floating addresses from that point on.
-- The cloud controller needs an OpenStack credential inside the cluster. It is separate from the
-  one OpenTofu uses and is delivered as SOPS-encrypted bootstrap material.
-- Load balancers created by the cluster are not in tofu state, so teardown removes them before
-  the stacks are destroyed.
-- This record becomes accepted, or is replaced, when the cloud controller's verification has run.
+- The cluster runs without a cloud controller, so its kubelets are not in external cloud-provider
+  mode, nodes report no floating address, and no OpenStack credential is inside the cluster.
+- The Kubernetes API's load balancer is what remains of this record, and the only use of the
+  cloud's load balancer service; ADR 0013 notes that it may follow the Services onto the edge
+  routers.
