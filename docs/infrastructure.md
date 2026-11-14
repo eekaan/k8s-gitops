@@ -120,10 +120,12 @@ why state and snapshots are encrypted before they are uploaded
 These recipes, `just infra-state-bucket` and the etcd snapshot recipes `just cluster-snapshot`,
 `cluster-snapshots` and `cluster-restore` ([cluster.md](cluster.md#recipes)) reach the object
 storage with rclone, pinned in `mise.toml`, at the endpoint, region and addressing that
-`infra/openstack/backend.hcl` gives OpenTofu's state. rclone is configured through its environment only and reads no config file; the
-operator's own rclone configuration, its `RCLONE_` and `AWS_` variables and every other variable
-but `PATH`, `HOME`, `TMPDIR` and the proxy variables stay out of its environment. What rclone
-prints names the buckets and the endpoint, so it is not shown; of its errors the etcd recipes show the reason only, with places and keys replaced, as [cluster.md](cluster.md#what-the-recipes-print) says.
+`infra/openstack/backend.hcl` gives OpenTofu's state. rclone is configured through its environment
+only and reads no config file; the operator's own rclone configuration, its `RCLONE_` and `AWS_`
+variables and every other variable but `PATH`, `HOME`, `TMPDIR` and the proxy variables stay out of
+its environment. What rclone prints names the buckets and the endpoint, so it is not shown; of its
+errors the etcd recipes show the reason only, with places and keys replaced, as
+[cluster.md](cluster.md#what-the-recipes-print) says.
 
 ## The workers' data volumes
 

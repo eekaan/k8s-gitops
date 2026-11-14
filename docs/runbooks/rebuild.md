@@ -39,13 +39,14 @@ step it failed in ([cluster.md](../cluster.md#recipes)).
    the etcd bucket, which the rebuild leaves alone.
 
 2. **`just cluster-destroy`**. It asks the cluster, through its kubeconfig, for every Service of
-   type LoadBalancer and every PersistentVolume of a CSI driver. The cloud's load balancers and
-   volumes behind them are the cluster's own and not in the cluster stack's state: its destroy would
-   leave them in the cloud, where they keep the network from being deleted. While there are any,
-   the recipe names each and destroys nothing; remove them first. LINSTOR's volumes do not count:
-   their data is on the workers' data volumes, which go with the stack, and the recipe says how
-   many of them the destroy takes before it asks. A cluster whose API does not
-   answer, or that has no kubeconfig, may still own some and is not destroyed either.
+   type LoadBalancer and every PersistentVolume of a CSI driver. A cloud load balancer or volume
+   behind one is the cluster's own and not in the cluster stack's state: its destroy would leave it
+   in the cloud, where it keeps the network from being deleted. A Service whose addresses all come
+   from the service range has none behind it and does not count. LINSTOR's volumes do not count
+   either: their data is on the workers' data volumes, which go with the stack, and the recipe says
+   how many of them the destroy takes before it asks. While there are any others, the recipe names
+   each and destroys nothing; remove them first. A cluster whose API does not answer, or that has no
+   kubeconfig, may still own some and is not destroyed either.
    `just cluster-destroy --unreachable` destroys it anyway; whatever it owned stays in the cloud
    until it is removed by hand.
 
@@ -59,7 +60,8 @@ step it failed in ([cluster.md](../cluster.md#recipes)).
    recipe looks for a resource, and while it finds one it plans and destroys nothing, naming the
    stack and the recipe that destroys it: `just infra-destroy sto2/ci` for the CI host, which also
    takes the runner away until [ci-host.md](ci-host.md) sets a new host up. Then it plans the
-   plumbing stack's destroy, prints the summary and destroys once `sto2/plumbing` is typed back. Images left from earlier Talos versions are removed by hand
+   plumbing stack's destroy, prints the summary and destroys once `sto2/plumbing` is typed back.
+   Images left from earlier Talos versions are removed by hand
    ([image-replacement.md](image-replacement.md#removing-old-images)).
 
 ## Building it again

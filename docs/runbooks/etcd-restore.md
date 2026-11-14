@@ -27,24 +27,24 @@ and the cluster's `secrets.sops.yaml` as it was when the snapshot was taken. A c
 new machines, or with a new secrets bundle, is a different procedure and is not covered here.
 
 A restore does not roll back the contents of volumes: a PersistentVolume's data is on the workers'
-data volumes, in LINSTOR's storage pool, not in etcd. LINSTOR's own records are in etcd, though:
-the controller keeps its database in the Kubernetes API, as Kubernetes objects
-([Piraeus operator, components](https://github.com/piraeusdatastore/piraeus-operator/blob/v2.12.1/docs/explanation/components.md),
-v2.12.1, which `kubernetes/apps/base/piraeus-datastore/piraeus-operator` pins; the `LinstorCluster`
-here sets no other database). A restore to an older snapshot rolls those records back together with
-the PersistentVolumes and PersistentVolumeClaims, while the data and the DRBD metadata on the
-workers stay as they are now. So:
+data volumes, in LINSTOR's storage pool, not in etcd. LINSTOR's own records are in etcd, though: the
+controller keeps its database in the Kubernetes API, as Kubernetes objects ([Piraeus operator,
+components](https://github.com/piraeusdatastore/piraeus-operator/blob/v2/docs/explanation/components.md);
+the `LinstorCluster` here sets no other database). A restore to an older snapshot rolls those
+records back together with the PersistentVolumes and PersistentVolumeClaims, while the data and the
+DRBD metadata on the workers stay as they are now. So:
 
 - A volume created since the snapshot has no record in LINSTOR and no PersistentVolume or claim
   after the restore, and its data stays on the workers: an orphan.
 - A volume deleted since the snapshot is back as a LINSTOR record, a PersistentVolume and a claim
-  that point at data the workers no longer hold.
+  for data the workers no longer hold; the satellites work towards the controller's records, so
+  the volume may also be created again, empty.
 
 Do not restore while volumes created or deleted since the snapshot matter more than what the
 restore brings back: when etcd can be repaired instead, when a control plane that still holds etcd
 can be brought back, or when the snapshot is older than the last volume change that has to be kept.
 Before a restore that goes ahead anyway, take a copy of the data of the volumes created since the
-snapshot with their own backups, as they are not in it.
+snapshot, from the workload's own backup where it has one, as they are not in it.
 
 ## Steps
 
@@ -60,20 +60,20 @@ snapshot with their own backups, as they are not in it.
    file, or one the key cannot decrypt stops it there. It then says what happens and asks for the
    cluster's name to be typed back; `--yes` does not ask. What it says includes how many
    PersistentVolumes of LINSTOR's driver the cluster has now, by number and not by name, or that its
-   API does not answer and they cannot be counted, and what a restore does to volumes
-   ([When to restore](#when-to-restore)); typing the name confirms that too. Then, in order, as Talos' disaster
-   recovery
-   ([Talos 1.14](https://docs.siderolabs.com/talos/v1.14/build-and-extend-talos/cluster-operations-and-maintenance/disaster-recovery))
+   API does not answer, or its kubeconfig is not allowed to list them, and they cannot be counted,
+   and what a restore does to volumes ([When to restore](#when-to-restore)); typing the name
+   confirms that too. Then, in order, as Talos' disaster recovery ([Talos
+   1.14](https://docs.siderolabs.com/talos/v1.14/build-and-extend-talos/cluster-operations-and-maintenance/disaster-recovery))
    and talman's `--recover-from` have it:
-   1. `talman reset --group controlplane --graceful=false --wipe-labels=EPHEMERAL --reboot=true --yes` wipes the
-      EPHEMERAL partition of each control plane, the nodes whose role is `controlplane`, one at a
-      time, and reboots it. The reboot is asked for, not left to the flag's default: a reset that
-      shut the nodes down would leave etcd wiped with nothing running to restore it into, and the
-      wait for the nodes to answer would fail. EPHEMERAL holds etcd's data. No member leaves etcd first, as every
-      member goes. STATE, with the node's machine configuration, stays: each control plane comes
-      back as itself and waits for etcd to be bootstrapped. The workers are not reset. While etcd
-      is down, the pods already scheduled on them might continue to run, but no new pods can be
-      scheduled
+   1. `talman reset --group controlplane --graceful=false --wipe-labels=EPHEMERAL --reboot=true
+      --yes` wipes the EPHEMERAL partition of each control plane, the nodes whose role is
+      `controlplane`, one at a time, and reboots it. The reboot is asked for, not left to the flag's
+      default: a reset that shut the nodes down would leave etcd wiped with nothing running to
+      restore it into, and the wait for the nodes to answer would fail. EPHEMERAL holds etcd's data.
+      No member leaves etcd first, as every member goes. STATE, with the node's machine
+      configuration, stays: each control plane comes back as itself and waits for etcd to be
+      bootstrapped. The workers are not reset. While etcd is down, the pods already scheduled on
+      them might continue to run, but no new pods can be scheduled
       ([Kubernetes](https://kubernetes.io/docs/tasks/administer-cluster/configure-upgrade-etcd/#restoring-an-etcd-cluster)).
    2. Once every node answers again, `talman apply --bootstrap --recover-from` bootstraps etcd on
       the first control plane from the snapshot. The other control planes join it.
@@ -134,9 +134,10 @@ resource-definition list`, `drbdsetup status`, `lvs`.
   stop the DRBD resource on each worker that has it and remove its logical volume there, replica
   by replica.
 - **Volumes deleted since the snapshot.** A PersistentVolume, a PersistentVolumeClaim and a
-  `ResourceDefinition` whose logical volumes no worker holds. A pod that uses the claim does not
-  start. Delete the claim, the PersistentVolume and the `ResourceDefinition`, and let the
-  workload's own manifest, or its backup, make a new volume.
+  `ResourceDefinition` whose logical volumes no worker holds. A pod that uses the claim
+  either does not start, or starts on a volume the satellites created again, empty. Delete the
+  claim, the PersistentVolume and the `ResourceDefinition`, and let the workload's own manifest,
+  or its backup, make a new volume.
 - Volumes that existed at the snapshot and still do are as they were; nothing is done for them.
 
 No recipe does this: each step removes data, and the operator looks at each object first.
