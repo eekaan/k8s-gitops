@@ -127,7 +127,7 @@ them with it, and what is on them is gone; backups are what keeps data
 
 The cluster stack's nodes share one security group (`infra/openstack/modules/talos-nodes`), an outer
 ring around the firewall every node keeps itself ([cluster.md](cluster.md#the-node-firewall), ADR
-0013). The variable `security_group_rules` selects its rules, through `TF_VAR_security_group_rules`
+0017). The variable `security_group_rules` selects its rules, through `TF_VAR_security_group_rules`
 in `.env` or the environment:
 
 - `full`, the default: everything between the nodes; TCP 50000 (Talos) and 6443 (Kubernetes) from
