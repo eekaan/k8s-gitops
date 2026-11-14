@@ -19,7 +19,7 @@ Feature: Cluster stack
   Scenario: The APIs are open only to the allowlist and the cluster's own floating addresses
     Given an operator allowlist of two networks
     When the cluster stack is planned against mocked providers
-    Then the only ingress from outside the group is TCP 50000 and 6443 from those two networks and from each node's own floating address
+    Then the only ingress from outside the group is TCP 50000 and 6443 from those two networks and from each node's own floating address, and TCP 6443 from the node subnet
 
   Scenario: An empty or malformed allowlist is rejected
     Given an allowlist that is empty or holds something that is not a CIDR

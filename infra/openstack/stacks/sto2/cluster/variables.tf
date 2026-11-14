@@ -10,7 +10,7 @@ variable "plumbing_state" {
 }
 
 variable "api_allowed_cidrs" {
-  description = "IPv4 networks, in CIDR form, that may reach the Talos API (TCP 50000) and the Kubernetes API (TCP 6443) on the nodes' floating IPs: the operator allowlist. Supplied at run time and never committed."
+  description = "IPv4 networks, in CIDR form, that may reach the Talos API (TCP 50000) and the Kubernetes API (TCP 6443) on the nodes' floating IPs, and the Kubernetes API on the load balancer: the operator allowlist. Supplied at run time and never committed."
   type        = list(string)
   sensitive   = true
 
@@ -42,4 +42,16 @@ variable "worker_flavor" {
   description = "Nova flavor of the workers."
   type        = string
   default     = "b.6c16gb"
+}
+
+variable "api_lb_provider" {
+  description = "Octavia provider of the Kubernetes API load balancer, or null for the cloud's default."
+  type        = string
+  default     = null
+}
+
+variable "api_lb_flavor_id" {
+  description = "Octavia flavor of the Kubernetes API load balancer, or null for the cloud's default."
+  type        = string
+  default     = null
 }

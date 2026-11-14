@@ -22,7 +22,7 @@ locals {
 
 resource "openstack_networking_secgroup_v2" "this" {
   name        = var.name
-  description = "Talos nodes of ${var.name}: everything between them, the Talos and Kubernetes APIs from the operator allowlist and the nodes' floating IPs."
+  description = "Talos nodes of ${var.name}: everything between them, the Talos and Kubernetes APIs from the operator allowlist and the nodes' floating IPs, the Kubernetes API from the node subnet."
   # Neutron's default rules allow all egress, and stay.
   delete_default_rules = false
   tags                 = var.tags
@@ -69,6 +69,18 @@ resource "openstack_networking_secgroup_rule_v2" "hairpin" {
   port_range_min    = each.value.port
   port_range_max    = each.value.port
   remote_ip_prefix  = "${openstack_networking_floatingip_v2.node[each.value.node].address}/32"
+}
+
+# A load balancer that proxies, as Octavia's amphora provider does, connects to the API servers
+# and health-checks them from its own address on the node subnet, not the client's.
+resource "openstack_networking_secgroup_rule_v2" "api_from_subnet" {
+  security_group_id = openstack_networking_secgroup_v2.this.id
+  direction         = "ingress"
+  ethertype         = "IPv4"
+  protocol          = "tcp"
+  port_range_min    = 6443
+  port_range_max    = 6443
+  remote_ip_prefix  = var.network.cidr
 }
 
 # Spreads the nodes over hypervisors where the cloud can, and still places them where it cannot.

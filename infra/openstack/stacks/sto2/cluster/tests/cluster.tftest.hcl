@@ -230,13 +230,20 @@ run "the_apis_are_open_only_to_the_allowlist_and_the_clusters_own_floating_addre
         ports     = "${pair[0]}-${pair[0]}"
         source    = pair[1]
       }],
+      [{
+        direction = "ingress"
+        ethertype = "IPv4"
+        protocol  = "tcp"
+        ports     = "6443-6443"
+        source    = "192.0.2.0/24"
+      }],
     ))
-    error_message = "Ingress must be everything from the group itself, and from outside it only TCP 50000 and 6443 from each allowlisted network and each node's floating address."
+    error_message = "Ingress must be everything from the group itself, and from outside it only TCP 50000 and 6443 from each allowlisted network and each node's floating address, and TCP 6443 from the node subnet."
   }
 
   assert {
-    condition     = length(output.security_group.ingress_rules) == 18
-    error_message = "There must be one rule per ethertype within the group and one per API port and source, none twice."
+    condition     = length(output.security_group.ingress_rules) == 19
+    error_message = "There must be one rule per ethertype within the group, one per API port and source, and one for the Kubernetes API from the node subnet, none twice."
   }
 
   assert {
