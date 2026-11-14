@@ -84,6 +84,30 @@ EOF
   [[ $output != *.claude* ]]
 }
 
+@test "A SOPS-encrypted file is linted for its syntax and not for its style" {
+  config="$BATS_TEST_DIRNAME/../.yamllint.yaml"
+  # What sops writes: no document start, and values far longer than a hand-written line.
+  printf 'secret: ENC[%s]\nsops:\n    version: 3.13.3\n' "$(printf 'a%.0s' {1..300})" > bundle.sops.yaml
+  cp bundle.sops.yaml hand-written.yaml
+
+  run yamllint --strict -c "$config" bundle.sops.yaml
+
+  [ "$status" -eq 0 ]
+
+  run yamllint --strict -c "$config" hand-written.yaml
+
+  [ "$status" -ne 0 ]
+  [[ $output == *document-start* ]]
+  [[ $output == *line-length* ]]
+
+  printf 'secret: [unclosed\n' > broken.sops.yaml
+
+  run yamllint --strict -c "$config" broken.sops.yaml
+
+  [ "$status" -ne 0 ]
+  [[ $output == *syntax* ]]
+}
+
 @test "A mise error stops the recipes" {
   fake_gitleaks
   fake mise <<'EOF'

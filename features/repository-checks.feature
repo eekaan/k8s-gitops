@@ -86,6 +86,11 @@ Feature: Repository checks
     When lint runs
     Then yamllint is given the tracked file and not the excluded one
 
+  Scenario: A SOPS-encrypted file is linted for its syntax and not for its style
+    Given a file as sops writes it, without a document start and with long encrypted values, and a hand-written copy of it
+    When yamllint runs with the repository's configuration
+    Then the SOPS file passes, the hand-written copy fails on its document start and line length, and a SOPS file that does not parse fails
+
   Scenario: A mise error stops the recipes
     Given mise fails to read the repository's pins
     When a recipe runs
