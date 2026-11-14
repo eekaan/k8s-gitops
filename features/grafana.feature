@@ -47,6 +47,11 @@ Feature: Grafana
     When it is built as Flux applies it and its dashboards chart is rendered offline
     Then nothing in it routes to Grafana from outside the cluster, its Service is of type ClusterIP, and its configuration turns anonymous access off and keeps the login form
 
+  Scenario: Grafana makes no call to the internet on its own
+    Given the grafana application and the defaults of the Grafana release it pins
+    When it is built as Flux applies it
+    Then its Grafana's configuration turns off usage reporting, the checks for Grafana and plugin updates, the news feed, the plugin catalogue, the plugins Grafana installs at every start, the download of plugin signing keys, Gravatar images and external snapshots, each by a key that release's defaults define with the setting that calls out
+
   Scenario: Grafana has its monitor on
     Given the grafana application
     When it is built as Flux applies it

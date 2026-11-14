@@ -298,7 +298,10 @@ without a disruption budget: a second replica would keep a database of its own. 
 that Git does not hold, so it claims no volume: its data directory is an emptyDir, and the operator
 applies the datasource and every dashboard again each minute, so a restarted Grafana has them back
 within one. The datasource is the Prometheus Service of the monitoring chart,
-`kube-prometheus-stack-prometheus`, port 9090.
+`kube-prometheus-stack-prometheus`, port 9090. Grafana makes no call to the internet on its own: its
+configuration turns off usage reporting, the checks for Grafana and plugin updates, the news feed,
+the plugin catalogue, the plugins Grafana would install at every start, the download of plugin
+signing keys, Gravatar images and external snapshots, so it runs only the plugins in its image.
 
 The dashboards come from the monitoring stack's own chart. The release `grafana-dashboards` installs
 `kube-prometheus-stack` at the version the monitoring application runs, with everything off but the

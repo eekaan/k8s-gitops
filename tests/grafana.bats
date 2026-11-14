@@ -1,7 +1,8 @@
 #!/usr/bin/env bats
 # Proves features/grafana.feature; each test carries its scenario's title.
-# Needs helm, kustomize, flux, yq and jq on PATH (the versions pinned for the repository). Each
-# chart is pulled once per run from its public registry; building and rendering are offline.
+# Needs helm, kustomize, flux, yq, jq and git on PATH (the versions pinned for the repository). Each
+# chart is pulled once per run from its public registry, and Grafana's defaults.ini once from its
+# public repository at the release tag the Grafana pins; building and rendering are offline.
 
 # The tests run one at a time even where bats runs a file's tests side by side: a test that starts
 # while another pulls a chart finds the chart's directory before the chart is in it.
@@ -15,6 +16,8 @@ setup_file() {
   export HELM_DATA_HOME="$BATS_FILE_TMPDIR/helm/data"
   export DOCKER_CONFIG="$BATS_FILE_TMPDIR/docker"
   mkdir -p "$DOCKER_CONFIG"
+  # Nor does git read the user's or the system's configuration, credential helpers included.
+  export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
   # flux build rewrites the kustomization.yaml of what it builds and puts it back afterwards, so it
   # builds a copy of the applications, never this checkout. The cluster directories stay behind.
   export TREE="$BATS_FILE_TMPDIR/tree"
@@ -166,6 +169,26 @@ dashboards() {
     while IFS= read -r entry; do
       printf '%s %s\n' "$(jq -r .key <<<"$entry")" "$(jq -r .value <<<"$entry" | sha256sum | cut -d' ' -f1)"
     done | sort
+}
+
+# grafana_defaults VERSION: Grafana's own conf/defaults.ini at the release tag vVERSION, from its
+# public repository, fetched once per run with only the objects that file needs. Sets DEFAULTS.
+grafana_defaults() {
+  local src="$BATS_FILE_TMPDIR/grafana-source/$1"
+  DEFAULTS="$BATS_FILE_TMPDIR/grafana-defaults-$1.ini"
+  if [ ! -s "$DEFAULTS" ]; then
+    rm -rf "$src"
+    git -c advice.detachedHead=false clone --quiet --depth 1 --branch "v$1" --filter=tree:0 --no-checkout \
+      https://github.com/grafana/grafana.git "$src"
+    git -C "$src" show HEAD:conf/defaults.ini >"$DEFAULTS"
+  fi
+}
+
+# ini_value FILE SECTION KEY: the value FILE gives KEY in [SECTION]; nothing when it gives none.
+ini_value() {
+  awk -v section="[$2]" -v key="$3" '
+    /^\[/ { inside = ($0 == section); next }
+    inside && $1 == key && $2 == "=" { sub(/^[^=]*=[ \t]*/, ""); print; exit }' "$1"
 }
 
 # seconds DURATION: DURATION, such as 30s, 1m or 2h, in seconds; fails on any other form.
@@ -412,6 +435,49 @@ seconds() {
   echo "anonymous access: $(jq -r '.spec.config["auth.anonymous"].enabled // "unset"' <<<"$grafana"); login form disabled: $(jq -r '.spec.config.auth.disable_login_form // "unset"' <<<"$grafana")"
   [ "$(jq -r '.spec.config["auth.anonymous"].enabled // "unset"' <<<"$grafana")" = false ]
   [ "$(jq -r '.spec.config.auth.disable_login_form // "false"' <<<"$grafana")" = false ]
+}
+
+@test "Grafana makes no call to the internet on its own" {
+  local grafana version key wanted section name ours default failed=""
+  built grafana
+  grafana="$(yq -N -o json -I0 'select(.kind == "Grafana")' "$BUILT")"
+  version="$(jq -r '.spec.version // ""' <<<"$grafana")"
+  [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+  grafana_defaults "$version"
+  # Each setting of grafana.ini that reaches the internet unless it is set to the value given here.
+  # A key Grafana does not know is ignored without a word, so each must be one the pinned release's
+  # defaults define, with the value that calls out.
+  while read -r key wanted; do
+    [[ -n $key && $key != \#* ]] || continue
+    section=${key%.*} name=${key##*.}
+    ours="$(SECTION="$section" NAME="$name" jq -r '.spec.config[env.SECTION][env.NAME] // "unset"' <<<"$grafana")"
+    default="$(ini_value "$DEFAULTS" "$section" "$name")"
+    echo "$key: $ours here; Grafana $version's default ${default:-none}"
+    if [[ -z $default || $default == "$wanted" ]]; then failed+=" $key(default)"; fi
+    if [[ $ours != "$wanted" ]]; then failed+=" $key"; fi
+  done <<'EOF'
+# Usage counters sent to stats.grafana.org every day.
+analytics.reporting_enabled false
+# A request to grafana.com for the newest Grafana release.
+analytics.check_for_updates false
+# Requests to grafana.com for the newest plugin releases.
+analytics.check_for_plugin_updates false
+# The news feed, read from grafana.com.
+news.news_feed_enabled false
+# The plugin catalogue, which installs and updates plugins from grafana.com.
+plugins.plugin_admin_enabled false
+# The plugins Grafana installs from grafana.com at every start, unpinned and updated, into a data
+# directory that starts empty each time.
+plugins.preinstall_disabled true
+# The public key for plugin signatures, fetched from grafana.com.
+plugins.public_key_retrieval_disabled true
+# Profile pictures, which browsers load from gravatar.com.
+security.disable_gravatar true
+# Publishing a dashboard snapshot to snapshots.raintank.io.
+snapshots.external_enabled false
+EOF
+  echo "failed:${failed:- none}"
+  [ -z "$failed" ]
 }
 
 @test "Grafana has its monitor on" {
