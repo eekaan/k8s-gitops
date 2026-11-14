@@ -1,0 +1,18 @@
+---
+# The storage cluster: the operator runs from it the LINSTOR controller, the CSI driver, the HA
+# controller and one satellite per node it selects, each configured by the
+# LinstorSatelliteConfigurations beside it.
+apiVersion: piraeus.io/v1
+kind: LinstorCluster
+metadata:
+  name: linstorcluster
+spec:
+  # Workers only: their data volumes hold LINSTOR's storage and the control planes have none. Talos
+  # labels every control plane with node-role.kubernetes.io/control-plane and no worker, so this
+  # takes every worker by its role, never by its name, a worker OpenTofu adds later included. A pod
+  # that uses a LINSTOR volume runs only on a node selected here.
+  nodeAffinity:
+    nodeSelectorTerms:
+      - matchExpressions:
+          - key: node-role.kubernetes.io/control-plane
+            operator: DoesNotExist

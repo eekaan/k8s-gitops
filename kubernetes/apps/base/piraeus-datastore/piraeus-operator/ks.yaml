@@ -1,0 +1,17 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: piraeus-operator
+  namespace: flux-system
+spec:
+  path: ./apps/base/piraeus-datastore/piraeus-operator/app
+  targetNamespace: piraeus-datastore
+  # Ready only once the release is installed and the operator is ready, so linstor-cluster, which
+  # names this one in dependsOn, finds the operator's resource definitions in place and its
+  # validating webhooks answering.
+  wait: true
+  sourceRef:
+    kind: ExternalArtifact
+    name: piraeus-operator

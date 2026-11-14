@@ -1,0 +1,49 @@
+---
+# The default class: a volume with two replicas, on two workers, kept in sync by DRBD. With three
+# workers LINSTOR adds a diskless tiebreaker on the third, so the volume has quorum and a worker that
+# loses touch with the other two stops writing rather than diverging. The volume is placed once its
+# first pod is scheduled, with a replica on that pod's node where it can be, and any node LINSTOR
+# runs on can reach it over the network, the tiebreaker's included.
+#
+# A StorageClass's parameters cannot change once it exists: a new parameter takes a new class, or
+# this one deleted and created again.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: linstor-replicated
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: linstor.csi.linbit.com
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+parameters:
+  linstor.csi.linbit.com/storagePool: data
+  linstor.csi.linbit.com/placementCount: "2"
+  linstor.csi.linbit.com/allowRemoteVolumeAccess: "true"
+  # XFS, as the driver's own and LINSTOR's guide's StorageClasses format their volumes.
+  csi.storage.k8s.io/fstype: xfs
+  # A replica that loses quorum suspends its I/O rather than failing it, so the file system on it is
+  # not remounted read-only; the HA controller then evicts the pod, which starts again on a node
+  # with quorum. LINSTOR's own default would fail the I/O. The operator already sets the other DRBD
+  # options LINSTOR's guide gives for the HA controller, on the LINSTOR controller, for every volume.
+  property.linstor.csi.linbit.com/DrbdOptions/auto-quorum: suspend-io
+---
+# The node-local class, for an application that replicates its own data: one replica, on the node
+# its first pod is scheduled to, reachable from that node only. The volume is a thin volume of the
+# node's pool alone, without DRBD: nothing else reaches it, so DRBD would only add its metadata, a
+# device in the I/O path and a port per volume. The cost is that LINSTOR cannot give it a second
+# replica or move it to another node; it lives on that node's data volume and the pod stays on that
+# node.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: linstor-node-local
+provisioner: linstor.csi.linbit.com
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+parameters:
+  linstor.csi.linbit.com/storagePool: data
+  linstor.csi.linbit.com/placementCount: "1"
+  linstor.csi.linbit.com/layerList: storage
+  linstor.csi.linbit.com/allowRemoteVolumeAccess: "false"
+  csi.storage.k8s.io/fstype: xfs

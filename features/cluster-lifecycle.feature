@@ -72,9 +72,14 @@ Feature: Cluster lifecycle
     Then it exits non-zero, the node is not uncordoned, no pod is deleted, and the recipe's last line says the node is left cordoned and how to uncordon it, or that it stays cordoned as it was
 
   Scenario: A cluster that still owns a load balancer or a volume is not destroyed, and they are named
-    Given a Service of type LoadBalancer, a PersistentVolume of a CSI driver, or both, beside Services and volumes of other kinds
+    Given a Service of type LoadBalancer, a PersistentVolume of a CSI driver other than LINSTOR's, or both, beside Services and volumes of other kinds, LINSTOR's among them
     When cluster-destroy runs with --yes
-    Then it exits non-zero naming each as namespace/name or by the volume's name, without an address or a volume handle, no tofu runs, and the generated files stay
+    Then it exits non-zero naming each as namespace/name or by the volume's name, and no volume of LINSTOR, without an address or a volume handle, no tofu runs, and the generated files stay
+
+  Scenario: LINSTOR's volumes go with the cluster stack once the destroy is confirmed, and are counted first
+    Given PersistentVolumes of LINSTOR's CSI driver, whose data is on the workers' data volumes in the cluster stack, and no other load balancer or volume the cluster made
+    When cluster-destroy runs and no answer, a wrong one or the stack's name is typed back, and with --yes
+    Then before it asks it says how many volumes of LINSTOR are destroyed with the stack, without a volume's name, an address or a volume handle; nothing is destroyed without the stack's name, and with it or with --yes the stack is destroyed
 
   Scenario: A cluster whose API does not answer is not destroyed unless asked
     Given an API that does not answer through the kubeconfig, or no kubeconfig at all
