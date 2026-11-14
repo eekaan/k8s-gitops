@@ -7,7 +7,8 @@
 # and only then tags that digest main. The tag moves last and
 # by digest, so main only ever names the bytes that were signed and verified, whatever becomes of the
 # commit's tag in between. It moves only on a run on refs/heads/main for which no newer commit on
-# main changes what is published, so a run that finishes late never moves it back; otherwise the run
+# main changes what is published and passes the same check, so a run that finishes late never moves
+# it back, and a newer commit that publishes nothing leaves the tag to this run; otherwise the run
 # says why the tag stayed, and exits 0.
 # Reads what GitHub Actions sets: GITHUB_ACTIONS, ACTIONS_ID_TOKEN_REQUEST_URL and
 # ACTIONS_ID_TOKEN_REQUEST_TOKEN (a job with id-token: write), GITHUB_REF and GITHUB_ACTOR; and
@@ -49,8 +50,9 @@ cd "$(dirname "$0")/.."
 DOCKER_CONFIG=$(mktemp -d)
 export DOCKER_CONFIG
 step="starting"
+newer_tree=
 finish() {
-  rm -rf "$DOCKER_CONFIG"
+  rm -rf "$DOCKER_CONFIG" ${newer_tree:+"$newer_tree"}
   if (($1)); then
     printf 'publish: failed while %s\n' "$step" >&2
   fi
@@ -63,11 +65,17 @@ begin() {
   say "$step"
 }
 
-# Nothing is pushed from a tree whose manifests do not build: a pull request's check ran against its
-# branch as it was pushed, and main can differ from it once other pull requests merged. A failure
+# without_tokens COMMAND...: runs COMMAND without the job's tokens. The Kubernetes check builds
+# manifests and needs no credential, so it gets none.
+without_tokens() {
+  env -u REGISTRY_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_ID_TOKEN_REQUEST_TOKEN "$@"
+}
+
+# Nothing is pushed from a tree whose manifests do not build: the check runs on the commit being
+# published, which can differ from the branch a pull request's own check ran against. A failure
 # stops the run here, with the check's own message, before the registry is touched.
 begin "checking that kubernetes/ builds"
-just kubernetes-check
+without_tokens just kubernetes-check
 
 begin "logging in to ghcr.io"
 printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin > /dev/null
@@ -101,10 +109,18 @@ if [[ $GITHUB_REF != refs/heads/main ]]; then
 fi
 begin "looking for a newer commit on main"
 git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main
-newer=$(git log -1 --format=%h "$sha..refs/remotes/origin/main" -- kubernetes .github/workflows/publish.yaml)
+newer=$(git log -1 --format=%H "$sha..refs/remotes/origin/main" -- kubernetes .github/workflows/publish.yaml)
 if [[ -n $newer ]]; then
-  say "tag main not moved: $newer on main changes what is published, and its own run moves the tag"
-  exit 0
+  # The newer commit's own run publishes it only when its tree passes the check; one that fails
+  # publishes nothing, and then this run's artifact is the last that passed.
+  begin "checking that kubernetes/ at ${newer:0:7} builds"
+  newer_tree=$(mktemp -d)
+  git archive "$newer" kubernetes | tar -x -C "$newer_tree"
+  if without_tokens scripts/kubernetes-check "$newer_tree"; then
+    say "tag main not moved: ${newer:0:7} on main changes what is published, and its own run moves the tag"
+    exit 0
+  fi
+  say "${newer:0:7} on main changes what is published but fails the check, so its run publishes nothing"
 fi
 
 begin "tagging $digest main"

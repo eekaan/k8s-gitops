@@ -190,14 +190,19 @@ EOF
 }
 
 # check_stand_in: replaces the copy's scripts/kubernetes-check, which has its own tests, with a
-# recorded call that fails, saying why, while STATE/check-fails exists.
+# recorded call that fails, saying why, for its own tree while STATE/check-fails exists and for any
+# tree that holds kubernetes/breaks-the-check. It records the credentials it can see.
 check_stand_in() {
   {
     echo '#!/usr/bin/env bash'
     printf 'RECORD=%q STATE=%q\n' "$RECORD" "$STATE"
     cat <<'EOF'
 echo kubernetes-check >> "$RECORD/calls"
-if [[ -e $STATE/check-fails ]]; then
+for name in REGISTRY_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN; do
+  [[ -z ${!name+x} ]] || echo "$name" >> "$RECORD/check-env"
+done
+dir=${1:-$(dirname "$0")/..}
+if [[ -e $STATE/check-fails && -z ${1:-} ]] || [[ -e $dir/kubernetes/breaks-the-check ]]; then
   echo "kubernetes-check: kubernetes/apps/base/demo/hello/ks.yaml: a rule of the layout is broken" >&2
   exit 1
 fi
@@ -426,6 +431,20 @@ accepts() {
   [ "$status" -eq 0 ]
   run flow
   [ "$output" = "$(step_list 'kubernetes-check' 'docker login' 'flux push' 'cosign sign' 'cosign verify' 'flux tag')" ]
+  # The check builds manifests and needs no credential, so it gets none.
+  [ ! -e "$RECORD/check-env" ] || { echo "the check saw: $(cat "$RECORD/check-env")"; return 1; }
+}
+
+@test "A run tags the artifact when the newer commit on main fails the check, as that commit publishes nothing" {
+  newer_commit kubernetes/breaks-the-check
+
+  publish
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"tag main moved to $DIGEST"* ]]
+  [[ $output == *"${NEWER:0:7}"*"fails"* ]]
+  run flow
+  [ "$output" = "$(step_list 'kubernetes-check' 'docker login' 'flux push' 'cosign sign' 'cosign verify' 'kubernetes-check' 'flux tag')" ]
 }
 
 @test "A failing check publishes nothing, moves no tag and fails the run with the check's reason" {

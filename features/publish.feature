@@ -17,14 +17,19 @@ Feature: Publishing the cluster's artifact
     Then the artifact is pushed, signed and verified, the tag is not touched, the run says why and exits zero
 
   Scenario: An older run does not move the tag back
-    Given a publish run on refs/heads/main, and a newer commit on origin/main that changes kubernetes/ or the publish workflow
+    Given a publish run on refs/heads/main, and a newer commit on origin/main that changes kubernetes/ or the publish workflow, whose tree passes just kubernetes-check
     When just publish runs
     Then the artifact is pushed, signed and verified, the tag is not touched, the run names the newer commit and exits zero
+
+  Scenario: A run tags the artifact when the newer commit on main fails the check, as that commit publishes nothing
+    Given a publish run on refs/heads/main whose tree passes just kubernetes-check, and a newer commit on origin/main that changes kubernetes/ and whose tree fails it
+    When just publish runs
+    Then the artifact is pushed, signed, verified and tagged main, and the run names the newer commit as failing the check
 
   Scenario: The artifact is published only after the Kubernetes check passes
     Given a publish run on refs/heads/main whose tree passes just kubernetes-check
     When just publish runs
-    Then the check runs first, before the registry login, and the login, the push, the signature, the verification and the tag follow it in that order
+    Then the check runs first, without the registry token or the job's identity token, before the registry login, and the login, the push, the signature, the verification and the tag follow it in that order
 
   Scenario: A failing check publishes nothing, moves no tag and fails the run with the check's reason
     Given a publish run, on refs/heads/main or on another branch, whose tree fails just kubernetes-check
