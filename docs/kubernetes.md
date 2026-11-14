@@ -315,13 +315,19 @@ the script reads it rather than a copy.
 `just app-install <application directory>` runs `scripts/install-app` against the cluster the
 `KUBECONFIG` environment variable names, for the directory that holds the application's `ks.yaml`
 and `app/`. It takes the chart location and version from the application's `ocirepository.yaml`
-and gives `values.yaml` to helm as it is. The release is the one helm-controller makes of the
-HelmRelease: its `releaseName`, `targetNamespace` and `storageNamespace` where it sets them, and
-otherwise the HelmRelease's name, after its `targetNamespace` and a dash when it has one, in the
-HelmRelease's own namespace, the `targetNamespace` of `ks.yaml`. A HelmRelease whose history would be
-kept in another namespace than the release is refused, as helm keeps both in one. The script waits
-for the API server first, and leaves a release that already runs that chart version with those
-values alone.
+and gives helm `values.yaml` as it is, then the values the HelmRelease sets itself, on standard
+input, which helm merges over the first as helm-controller does. Where those use a variable, they
+are what Flux makes of them: `install-app` reads the ConfigMap `cluster-config` from the cluster
+and substitutes from its data alone with `flux envsubst --strict`, Flux's own substitution, so a
+variable it does not hold and that has no default stops the install, named. The values reach
+`flux envsubst` in its environment and leave it on a pipe.
+
+The release is the one helm-controller makes of the HelmRelease: its `releaseName`,
+`targetNamespace` and `storageNamespace` where it sets them, and otherwise the HelmRelease's name,
+after its `targetNamespace` and a dash when it has one, in the HelmRelease's own namespace, the
+`targetNamespace` of `ks.yaml`. A HelmRelease whose history would be kept in another namespace than
+the release is refused, as helm keeps both in one. The script waits for the API server first, and
+leaves a release that already runs that chart version with those values alone.
 
 - `just cilium-install` runs `scripts/install-cilium`, which installs Cilium so and then waits for
   every node to be Ready.
@@ -337,8 +343,9 @@ such an application: until it runs, no kubelet has a serving certificate, so `ku
 `kubectl exec` fail. Its HelmRelease sets `releaseName`, `targetNamespace` and `storageNamespace`
 as Cilium's does, so Flux upgrades a release installed before it instead of installing a second
 one. Unlike Cilium, it takes values from `cluster-config`, the name pattern and the node network,
-through the HelmRelease's own values, so an install before Flux has to substitute them as Flux
-does.
+through the HelmRelease's own values, which `install-app` substitutes as Flux does.
+`just cluster-bootstrap` installs it so, after Cilium and once `cluster-config` is applied
+([cluster.md](cluster.md#recipes)).
 
 `kube-system` exists before Flux does: its `namespace.yaml` only sets the namespace's labels, and
 like every namespace it is never pruned.

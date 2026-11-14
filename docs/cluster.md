@@ -15,7 +15,8 @@ holds the machine configurations, the talosconfig and the kubeconfig.
 2. `just cluster-age-key`, once: the Talos age key. Commit `talos/.sops.yaml`.
 3. `just cluster-secrets`, once per cluster: the secrets bundle. Commit it.
 4. `just cluster-flux-age-key`, once: the Flux age key. Commit `.sops.yaml`.
-5. `just cluster-bootstrap`: every node configured, Cilium installed, every node Ready.
+5. `just cluster-bootstrap`: every node configured, Cilium installed, what Flux needs before it
+   starts applied, the kubelet serving-certificate approver installed, every node Ready.
 6. `just cluster-flux`: what Flux needs before it starts applied, and Flux installed
    ([kubernetes.md](kubernetes.md#installing-flux)).
 
@@ -52,13 +53,13 @@ The SOPS files under `kubernetes/`, such as a cluster's `cluster-secrets`
 holds it, CI gets it as a secret, and the cluster holds it as the Secret `sops-age`, which Flux
 decrypts with. The recipes refuse the Talos age key in its place.
 
-`.sops.yaml` at the repository root holds its recipient and a rule that matches `*.sops.yaml` under
-`kubernetes/` and nothing else, encrypting only `data` and `stringData`, so a Secret's kind, name and
-keys stay readable. sops reads the nearest `.sops.yaml` above the directory it runs in, and matches
-the rule against the file's path relative to that `.sops.yaml`. At the root it is found from
-anywhere in the repository but `talos/`, where `talos/.sops.yaml` is nearer and matches nothing
-under `kubernetes/`, so sops refuses rather than encrypt to the Talos age key; and it stays out of
-the artifact, which is built from `kubernetes/`.
+`.sops.yaml` at the repository root holds its recipient and a rule that matches `*.sops.yaml`
+under `kubernetes/` and nothing else, encrypting only `data` and `stringData`, so a Secret's kind,
+name and keys stay readable. sops reads the nearest `.sops.yaml` above the directory it runs in,
+and matches the rule against the file's path relative to that `.sops.yaml`. At the root it is
+found from anywhere in the repository but `talos/`, where `talos/.sops.yaml` is nearer and matches
+nothing under `kubernetes/`, so sops refuses rather than encrypt to the Talos age key; and it stays
+out of the artifact, which is built from `kubernetes/`.
 
 ## Recipes
 
@@ -85,22 +86,31 @@ the artifact, which is built from `kubernetes/`.
   there.
 - `just cluster-bootstrap [cluster]` builds the cluster from nodes waiting in maintenance mode.
   It refuses, naming each, when the cluster's `talman.yaml` or `secrets.sops.yaml`, the age key's
-  location or `KUBE_API_ADDRESS` is missing. Then, in order:
+  location or `KUBE_API_ADDRESS` is missing, or when `cluster-config` would refuse. Then, in order:
   1. It waits until every node in `talman.yaml` answers on the Talos API port, 50000, at the
      address talman reaches it on, for up to `TALOS_WAIT` seconds. It fails naming the nodes that
      did not answer; rebooting one is left to the operator.
   2. `talman apply --bootstrap --onboard-new-nodes` configures the first control plane, starts
      etcd on it, and configures the other nodes after it, one at a time.
   3. `just cluster-kubeconfig` fetches the kubeconfig.
-  4. `scripts/install-cilium` installs Cilium through it ([kubernetes.md](kubernetes.md)).
-  5. It waits until every node in `talman.yaml` is a Ready Kubernetes node.
+  4. `scripts/install-cilium` installs Cilium through it
+     ([kubernetes.md](kubernetes.md#applications-installed-before-flux)).
+  5. `just cluster-config` applies what Flux needs before it starts, the approver's values among
+     it.
+  6. `scripts/install-app` installs the kubelet serving-certificate approver with those values.
+     The kubelets request their serving certificates from the cluster
+     (`talos/patches/all/kubelet.yaml`), and until the approver approves them, `kubectl logs` and
+     `kubectl exec` fail.
+  7. It waits until every node in `talman.yaml` is a Ready Kubernetes node.
 
   A second run is refused by talman, which bootstraps only when every control plane answers and
   none runs etcd. A bootstrap that stopped once etcd was running is therefore not run again: the
   nodes it did not reach are configured with `just cluster-talos --onboard`, and the steps after
-  it are run by their own recipes. No health check runs: `talosctl health`, reaching the nodes
-  through their floating addresses, compares those with the addresses the nodes hold on the node
-  network, which differ by design, so it never passes.
+  it are run by their own recipes, the approver's by
+  `just app-install kubernetes/apps/base/kube-system/kubelet-csr-approver` with `KUBECONFIG` set to
+  the cluster's kubeconfig. No health check runs: `talosctl health`, reaching the nodes through
+  their floating addresses, compares those with the addresses the nodes hold on the node network,
+  which differ by design, so it never passes.
 - `just cluster-kubeconfig [cluster]` fetches the admin kubeconfig with `talman kubeconfig` into
   `clusterconfig/kubeconfig`, with mode 0600, and points it at `https://KUBE_API_ADDRESS:6443`:
   talman writes the cluster endpoint, the load balancer's address on the node network, which only
@@ -114,8 +124,8 @@ the artifact, which is built from `kubernetes/`.
   in maintenance mode, such as one OpenTofu has just added, is configured only with `--onboard`:
   the maintenance service authenticates nothing, and a node's configuration carries the cluster's
   keys. Without it, talman refuses a rollout while such a node is there. With nothing to change,
-  nothing is asked or applied. It needs all that `cluster-bootstrap` needs except
-  `KUBE_API_ADDRESS`.
+  nothing is asked or applied. It needs the cluster's `talman.yaml` and `secrets.sops.yaml` and
+  the age key's location.
 - `just cluster-upgrade [cluster] [--yes]` upgrades Talos on every node that does not run the
   version and schematic `talman.yaml` gives it. It shows which nodes `talman upgrade --dry-run`
   says are behind, and once the cluster's name is typed back, or with `--yes`, fetches the
@@ -136,7 +146,8 @@ the artifact, which is built from `kubernetes/`.
   version.
 
   Both upgrade recipes do nothing and ask nothing when every node runs its version, and need what
-  `cluster-bootstrap` needs. An etcd snapshot holds every Secret in the cluster; talman writes it
+  `cluster-talos` needs and `KUBE_API_ADDRESS`. An etcd snapshot holds every Secret in the cluster;
+  talman writes it
   into `clusterconfig/` with mode 0600, and it stays there.
 - `just cluster-config [cluster]` applies what Flux needs before it starts: the namespace
   `flux-system`, the ConfigMap `cluster-config`, the Secret `cluster-secrets` and the Secret
@@ -153,9 +164,6 @@ A failing recipe ends with a line naming the step it failed in.
 ## Not automated
 
 - Rebooting a node that does not answer on the Talos API port.
-- The kubelet serving-certificate approver. The kubelets request their serving certificates from
-  the cluster (`talos/patches/all/kubelet.yaml`), and until something approves them, `kubectl logs`
-  and `kubectl exec` fail. `just cluster-bootstrap` says so in a line of its own.
 - Copying an etcd snapshot anywhere else, encrypted or not.
 
 ## What the recipes print
@@ -183,10 +191,11 @@ age-keygen on standard input.
 - `TALOS_WAIT`: how many seconds `cluster-bootstrap` and `cluster-talos` wait for the nodes, 600
   when unset.
 - `FLUX_AGE_KEY_FILE`: the path of the Flux age key, outside the repository. In CI, `FLUX_AGE_KEY`
-  holds the key itself instead. `cluster-config` and `cluster-flux` need one of them.
+  holds the key itself instead. `cluster-bootstrap`, `cluster-config` and `cluster-flux` need one
+  of them.
 - `CLUSTER_DOMAIN`: the domain the cluster's applications are published under, a lower-case DNS
-  name, which becomes `CLUSTER_DOMAIN` in `cluster-config`; `cluster-config` and `cluster-flux`
-  need it.
+  name, which becomes `CLUSTER_DOMAIN` in `cluster-config`; `cluster-bootstrap`, `cluster-config`
+  and `cluster-flux` need it.
 
 The recipes, the check aside, refuse to run while `GODEBUG` sets `http2debug`: Go's HTTP/2 debug
 log prints the frames talosctl and kubectl send and receive, which carry machine configurations

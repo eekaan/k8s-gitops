@@ -36,7 +36,6 @@ Feature: Installing Flux
     When cluster-flux runs, and then runs with --reapply
     Then the first run exits non-zero without applying or installing anything, and the second applies the pre-Flux objects again and installs nothing
 
-  @pending #TAL-3
   Scenario: The certificate approver is installed during bootstrap with the cluster's own values
     Given nodes in maintenance mode, the cluster's talman.yaml and the Flux age key
     When cluster-bootstrap runs

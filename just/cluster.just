@@ -22,7 +22,7 @@ cluster-secrets cluster='lab-sto2':
 cluster-secrets-check:
     scripts/cluster-secrets-check
 
-# Build a cluster from nodes in maintenance mode: wait for every node, talman apply --bootstrap, fetch the kubeconfig, install Cilium, wait until every node is Ready
+# Build a cluster from nodes in maintenance mode: wait for every node, talman apply --bootstrap, fetch the kubeconfig, install Cilium, apply what Flux needs before it starts, install the kubelet serving-certificate approver, wait until every node is Ready
 cluster-bootstrap cluster='lab-sto2':
     scripts/cluster-bootstrap {{ quote(cluster) }}
 

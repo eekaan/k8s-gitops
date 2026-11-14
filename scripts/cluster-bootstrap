@@ -2,8 +2,10 @@
 # Builds a cluster from nodes waiting in maintenance mode, in this order: waits until every node in
 # its talman.yaml answers on the Talos API port; talman apply --bootstrap, which configures the
 # first control plane, starts etcd on it and then configures the others, onboarding every node;
-# fetches the kubeconfig with cluster-kubeconfig; installs Cilium with install-cilium; and waits
-# until every node in talman.yaml is a Ready Kubernetes node.
+# fetches the kubeconfig with cluster-kubeconfig; installs Cilium with install-cilium; applies what
+# Flux needs before it starts with cluster-config, the approver's values among it; installs the
+# kubelet serving-certificate approver with install-app, as the kubelets' serving certificates wait
+# for it; and waits until every node in talman.yaml is a Ready Kubernetes node.
 #
 # A cluster that is built already is refused by talman, which bootstraps only when every control
 # plane answers and none runs etcd, as a second bootstrap would split the cluster. No health check
@@ -15,7 +17,11 @@ set -euo pipefail
 here=$(dirname "$0")
 # shellcheck source=scripts/cluster-env
 . "$here/cluster-env" "${1-}"
-require_cluster talman secrets age-key api-address wait
+complete=1
+require_cluster talman secrets age-key api-address wait || complete=0
+# Once etcd runs, this cannot run again, so what cluster-config needs is checked before that too.
+require_pre_flux "$cluster" "$talman_file" || complete=0
+((complete))
 
 step="waiting for every node to answer on the Talos API port"
 wait_for_talos_api "$talman_file"
@@ -29,8 +35,11 @@ step="fetching the kubeconfig"
 step="installing Cilium"
 "$here/install-cilium"
 
+step="applying the objects Flux needs before it starts"
+"$here/cluster-config" "$cluster"
+
 step="installing the kubelet serving-certificate approver"
-echo "cluster-bootstrap: not implemented: installing the kubelet serving-certificate approver; until one runs, kubelets have no serving certificate, and kubectl logs and exec fail"
+"$here/install-app" "$infra_root/kubernetes/apps/base/kube-system/kubelet-csr-approver"
 
 step="waiting for every node to be Ready"
 hostnames=$(talman_nodes "$talman_file" | cut -d' ' -f1)

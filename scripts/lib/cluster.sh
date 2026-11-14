@@ -419,6 +419,53 @@ require_install_tools() {
   done
 }
 
+# substitute FILE: FILE as Flux's post-build substitution makes it, with the data of the ConfigMap
+# in JSON on standard input as the only variables, strictly, so a variable with neither a value nor
+# a default fails, named. flux envsubst is Flux's own substitution; the values reach it in its
+# environment, which holds nothing else, and leave it on standard output.
+substitute() {
+  local file=$1 flux name value i
+  local -a names=() values=()
+  flux=$(command -v flux) || {
+    infra_error "flux not found on PATH"
+    return 1
+  }
+  # Flux takes only names a shell variable could have; any other would not be exported.
+  while IFS= read -r -d '' name && IFS= read -r -d '' value; do
+    names+=("$name")
+    values+=("$value")
+  done < <(jq -j '.data // {} | to_entries[] | select(.key | test("^[A-Za-z_][A-Za-z0-9_]*$"))
+    | .key, "\u0000", .value, "\u0000"')
+  (
+    while IFS= read -r name; do
+      export -n "${name?}"
+    done < <(compgen -e)
+    for i in "${!names[@]}"; do
+      export "${names[i]}=${values[i]}"
+    done
+    exec "$flux" envsubst --strict < "$file"
+  )
+}
+
+# helmrelease_values FILE: the values the HelmRelease in FILE sets itself, which helm-controller
+# merges over those of its valuesFrom, as YAML, {} when it sets none. Where it uses a variable they
+# are what Flux makes of them: substituted from the ConfigMap cluster-config on the cluster, as the
+# root gives every application, read with kubectl and handed on through pipes only.
+helmrelease_values() {
+  local file=$1 config
+  # shellcheck disable=SC2016 # a literal ${, with which every Flux variable starts
+  if ! grep -qF '${' "$file"; then
+    yq '.spec.values // {}' "$file"
+    return
+  fi
+  config=$(kubectl get configmap cluster-config --namespace flux-system --ignore-not-found --output json) || return 1
+  if [[ -z $config ]]; then
+    infra_error "flux-system holds no ConfigMap cluster-config, which ${file#"$infra_root"/} takes variables from; just cluster-config applies it"
+    return 1
+  fi
+  printf '%s' "$config" | substitute "$file" | yq '.spec.values // {}'
+}
+
 # app_field FILE PATH: the value at PATH in FILE, which must be set.
 app_field() {
   if ! yq -e "$2" "$1" 2> /dev/null; then
@@ -429,14 +476,15 @@ app_field() {
 
 # install_app DIR: installs the application in DIR, a directory of kubernetes/ with the application's
 # ks.yaml beside its app/, on the cluster KUBECONFIG names, as the Helm release its HelmRelease adopts
-# once Flux runs. The chart location and version come from app/ocirepository.yaml, the values from
-# app/values.yaml as it is, and the release from app/helmrelease.yaml, with helm-controller's
-# defaults where it sets none: the name of the HelmRelease, after its targetNamespace and a dash
-# when it has one, and the HelmRelease's own namespace, which Flux takes from ks.yaml's
-# targetNamespace. Waits for the API server first. A release that runs that chart version with
-# those values already is left alone, so a second run changes nothing.
+# once Flux runs. The chart location and version come from app/ocirepository.yaml; the values from
+# app/values.yaml as it is, then the HelmRelease's own values as Flux substitutes them
+# (helmrelease_values), on helm's standard input; and the release from app/helmrelease.yaml, with
+# helm-controller's defaults where it sets none: the name of the HelmRelease, after its
+# targetNamespace and a dash when it has one, and the HelmRelease's own namespace, which Flux takes
+# from ks.yaml's targetNamespace. Waits for the API server first. A release that runs that chart
+# version with those values already is left alone, so a second run changes nothing.
 install_app() {
-  local dir=$1 app name namespace url version release target storage values chart installed attempts
+  local dir=$1 app name namespace url version release target storage values overrides wanted chart installed attempts
   step="reading the application"
   if [[ ! -f $dir/ks.yaml || ! -f $dir/app/helmrelease.yaml ]]; then
     infra_error "$dir is not an application directory: it has no ks.yaml beside app/helmrelease.yaml"
@@ -485,12 +533,19 @@ install_app() {
     sleep 5
   done
 
+  step="reading the HelmRelease's values"
+  overrides=$(helmrelease_values "$app/helmrelease.yaml") || return 1
+  # helm merges its values files in order, as helm-controller merges the HelmRelease's own values
+  # over those of its valuesFrom.
+  # shellcheck disable=SC2016 # $file is a yq variable.
+  wanted=$(printf '%s\n' "$overrides" |
+    yq ea -o json -I0 '. as $file ireduce ({}; . * $file) | sort_keys(..)' "$values" -) || return 1
+
   step="checking the installed release"
   installed=$(helm list --namespace "$namespace" --filter "^$release\$" --deployed --output json |
     yq -p json '.[0].chart // ""') || return 1
   if [[ $installed == "$chart-$version" ]] &&
-    [[ "$(helm get values "$release" --namespace "$namespace" --output json | yq -p json -o json -I0 'sort_keys(..)')" == \
-      "$(yq -o json -I0 'sort_keys(..)' "$values")" ]]; then
+    [[ "$(helm get values "$release" --namespace "$namespace" --output json | yq -p json -o json -I0 'sort_keys(..)')" == "$wanted" ]]; then
     printf '%s: release %s already runs %s %s with these values; nothing to install\n' "${0##*/}" "$release" "$chart" "$version"
     return 0
   fi
@@ -498,7 +553,13 @@ install_app() {
   step="installing the chart"
   printf '%s: installing %s %s from %s as release %s in %s\n' "${0##*/}" "$chart" "$version" "$url" "$release" "$namespace"
   # Helm's default of five minutes is short for a first install that pulls the images on every node.
-  helm upgrade --install "$release" "$url" --version "$version" --namespace "$namespace" \
-    --values "$values" --wait --timeout 15m || return 1
+  if [[ $overrides == '{}' ]]; then
+    helm upgrade --install "$release" "$url" --version "$version" --namespace "$namespace" \
+      --values "$values" --wait --timeout 15m || return 1
+  else
+    printf '%s\n' "$overrides" |
+      helm upgrade --install "$release" "$url" --version "$version" --namespace "$namespace" \
+        --values "$values" --values - --wait --timeout 15m || return 1
+  fi
   printf '%s: %s %s runs as release %s in %s\n' "${0##*/}" "$chart" "$version" "$release" "$namespace"
 }

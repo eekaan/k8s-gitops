@@ -1,10 +1,11 @@
 #!/usr/bin/env bats
 # Proves features/cluster-flux.feature; each test carries its scenario's title.
 # The recipes run from a copy of the repository. Making the Flux age key, encrypting and decrypting
-# with it, and rendering are local and offline, so those run the pinned age-keygen, sops, yq and
-# jq, recorded on their way, with every key inside the test's temporary directory. kubectl and
-# helm, which would reach the cluster, are recording fakes that keep what is applied and installed
-# in the test's directory and answer from it.
+# with it, rendering and substituting are local and offline, so those run the pinned age-keygen,
+# sops, yq, jq and flux, recorded on their way, with every key inside the test's temporary
+# directory. kubectl and helm, which would reach the cluster, are recording fakes that keep what is
+# applied and installed in the test's directory and answer from it; so are talman, timeout and
+# install-cilium where cluster-bootstrap would reach the nodes.
 
 setup_file() {
   # The Talos check's fixture cluster: talos/talman.yaml.tftpl rendered from tests/fixtures/talos,
@@ -45,7 +46,7 @@ setup() {
   )
   reset_environment
   fake_cluster
-  record age-keygen sops yq jq
+  record age-keygen sops yq jq flux
 }
 
 # fake NAME: a binary first on the recipe's PATH, its body read from stdin.
@@ -102,8 +103,10 @@ recipe() {
 #   objects/KIND.NS.NAME.json each applied object as last applied
 #   helm/RELEASE/args       the arguments of helm's last upgrade of RELEASE, one per line
 #   helm/RELEASE/values.N.yaml the Nth values file it got, standard input included
-#   RELEASE                 helm installed RELEASE; flux-operator brings the FluxInstance kind, and
-#                           flux-instance the FluxInstance flux
+#   helm/RELEASE/chart      the chart and version it installed, as helm list names them
+#   RELEASE                 helm installed RELEASE, and lists it with the values it got merged;
+#                           flux-operator brings the FluxInstance kind, and flux-instance the
+#                           FluxInstance flux
 #   apply-fails.NAME        kubectl apply fails on the object NAME
 #   instance-not-ready      the FluxInstance never becomes Ready
 fake_cluster() {
@@ -164,14 +167,35 @@ esac
 EOF
   fake_tool helm <<'EOF'
 printf '%s\n' "helm $*" >> "$RECORD/argv"
+args=("$@")
+# deployed RELEASE: whether helm installed RELEASE and it is still there.
+deployed() {
+  [[ -e $STATE/$1 && -e $STATE/helm/$1/chart ]]
+}
 case $1 in
-  list) echo '[]' ;;
+  list)
+    release=
+    for ((i = 1; i < ${#args[@]}; i++)); do
+      if [[ ${args[i]} == --filter ]]; then
+        release=${args[i + 1]#^}
+        release=${release%$}
+      fi
+    done
+    if deployed "$release"; then
+      printf '[{"name":"%s","status":"deployed","chart":"%s"}]\n' "$release" "$(cat "$STATE/helm/$release/chart")"
+    else
+      echo '[]'
+    fi
+    ;;
   get)
-    echo "Error: release: not found" >&2
-    exit 1
+    if ! deployed "$3"; then
+      echo "Error: release: not found" >&2
+      exit 1
+    fi
+    "$YQ" ea -o json '. as $file ireduce ({}; . * $file)' "$STATE/helm/$3"/values.*.yaml
     ;;
   upgrade)
-    args=("$@") operands=() values=()
+    operands=() values=() version=
     for ((i = 1; i < ${#args[@]}; i++)); do
       case ${args[i]} in
         -f | --values)
@@ -179,7 +203,11 @@ case $1 in
           values+=("${args[i]}")
           ;;
         --values=*) values+=("${args[i]#*=}") ;;
-        -n | --namespace | --version | --timeout | --kube-context | --set | --set-string | --set-file) i=$((i + 1)) ;;
+        --version)
+          i=$((i + 1))
+          version=${args[i]}
+          ;;
+        -n | --namespace | --timeout | --kube-context | --set | --set-string | --set-file) i=$((i + 1)) ;;
         -*) ;;
         *) operands+=("${args[i]}") ;;
       esac
@@ -196,6 +224,7 @@ case $1 in
         cp -- "${values[i]}" "$dir/values.$((i + 1)).yaml"
       fi
     done
+    echo "${operands[1]##*/}-$version" > "$dir/chart"
     : > "$STATE/$release"
     echo "Release \"$release\" has been upgraded. Happy Helming!"
     ;;
@@ -262,6 +291,35 @@ encrypted_secrets() {
     printf '%s: example\n' "${pair%%=*}" >> "$CLUSTER/cluster-secrets.example.yaml"
   done
   (cd "$REPO" && sops encrypt --in-place "$file")
+}
+
+# fake_nodes: nodes in maintenance mode that answer on the Talos API port, behind recording fakes of
+# talman, timeout and sleep; a recording install-cilium in place of the script; and the Talos age key
+# and secrets bundle cluster-bootstrap needs, which hold markers and which no fake reads.
+fake_nodes() {
+  TALOS_KEY="$BATS_TEST_TMPDIR/keys/talos.agekey"
+  echo 'AGE-SECRET-KEY-MARKER-TALOS-KEY' > "$TALOS_KEY"
+  printf 'cluster:\n  secret: marker-bundle-secret\n' > "$REPO/talos/lab-sto2/secrets.sops.yaml"
+  BASE_ENVIRONMENT+=(SOPS_AGE_KEY_FILE="$TALOS_KEY" KUBE_API_ADDRESS=203.0.113.80)
+  reset_environment
+  fake_tool talman <<'EOF'
+printf '%s\n' "talman $*" >> "$RECORD/argv"
+if [[ $1 == kubeconfig ]]; then
+  mkdir -p "$TALMAN_CONFIG/clusterconfig"
+  printf 'apiVersion: v1\nkind: Config\nclusters:\n  - name: example\n    cluster:\n      server: https://192.0.2.10:6443\n' \
+    > "$TALMAN_CONFIG/clusterconfig/kubeconfig"
+fi
+EOF
+  # The nodes answer a connection to the Talos API port only.
+  fake_tool timeout <<'EOF'
+printf '%s\n' "timeout $*" >> "$RECORD/argv"
+[[ $* == *"/dev/tcp/"*50000* ]]
+EOF
+  fake sleep < /dev/null
+  fake_tool install-cilium <<'EOF'
+printf '%s\n' "install-cilium $*" >> "$RECORD/argv"
+EOF
+  mv "$BIN/install-cilium" "$REPO/scripts/install-cilium"
 }
 
 # helm_operands RELEASE: the release and the chart helm's upgrade of RELEASE got, one per line.
@@ -333,6 +391,14 @@ helm_flag() {
   for name in other-1 worker- worker-1-x xworker-1 worker-1.example.com; do
     [[ ! $name =~ ^($regex)$ ]]
   done
+
+  # A dot in a node name matches a dot only.
+  yq -i '.nodes[0].hostname = "cp-1.lab"' "$TALMAN"
+  recipe cluster-config
+  [ "$status" -eq 0 ]
+  regex=$(object ConfigMap flux-system cluster-config | jq -r '.data.NODE_NAME_REGEX')
+  [[ cp-1.lab =~ ^($regex)$ ]]
+  [[ ! cp-1xlab =~ ^($regex)$ ]]
 }
 
 @test "cluster-config applies the same objects when it runs again" {
@@ -557,6 +623,40 @@ helm_flag() {
   [[ ${lines[-1]} == *"next:"* ]]
 }
 
+@test "install-app names the release as helm-controller does where the HelmRelease leaves it" {
+  cp -R "$BATS_TEST_DIRNAME/fixtures/install-app/example" "$BATS_TEST_TMPDIR/example"
+  with KUBECONFIG="$REPO/talos/lab-sto2/clusterconfig/kubeconfig"
+
+  recipe app-install "$BATS_TEST_TMPDIR/example"
+
+  [ "$status" -eq 0 ]
+  [ "$(helm_operands other-example)" = "other-example"$'\n'"oci://registry.example.com/charts/example" ]
+  [ "$(helm_flag other-example -n --namespace)" = other ]
+
+  # Without storageNamespace helm-controller keeps the history in the HelmRelease's own namespace,
+  # example, apart from the release, which helm cannot do.
+  yq -i 'del(.spec.storageNamespace)' "$BATS_TEST_TMPDIR/example/app/helmrelease.yaml"
+  : > "$RECORD/argv"
+
+  recipe app-install "$BATS_TEST_TMPDIR/example"
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"installs into other but keeps the history in example"* ]]
+  [ -z "$(calls '^helm ')" ]
+}
+
+@test "cluster-flux --reapply on a cluster without Flux installs it" {
+  flux_key
+
+  recipe cluster-flux --reapply
+
+  [ "$status" -eq 0 ]
+  [ "$(applied | sort)" = "$PRE_FLUX" ]
+  [ -n "$(calls '^helm upgrade .*/flux-operator( |$)')" ]
+  [ -n "$(calls '^helm upgrade .*/flux-instance( |$)')" ]
+  [ -n "$(calls '^kubectl wait .*fluxinstance')" ]
+}
+
 @test "a FluxInstance that never becomes Ready fails cluster-flux, naming the step" {
   flux_key
   : > "$STATE/instance-not-ready"
@@ -656,6 +756,129 @@ helm_flag() {
   [ -z "$(calls '^(kubectl|helm|sops) ')" ]
 }
 
+@test "The certificate approver is installed during bootstrap with the cluster's own values" {
+  flux_key
+  fake_nodes
+  app="$REPO/kubernetes/apps/base/kube-system/kubelet-csr-approver/app"
+
+  recipe cluster-bootstrap
+
+  [ "$status" -eq 0 ]
+  [[ $output != *"not implemented"* ]]
+  cilium=$(call_line '^install-cilium')
+  first_apply=$(call_line '^kubectl apply ')
+  last_apply=$(grep -n '^kubectl apply ' "$RECORD/argv" | tail -1 | cut -d: -f1)
+  read_config=$(call_line '^kubectl get .*cluster-config')
+  approver=$(call_line '^helm upgrade .*/kubelet-csr-approver( |$)')
+  ready=$(call_line '^kubectl wait .*node/')
+  for call in "$cilium" "$first_apply" "$last_apply" "$read_config" "$approver" "$ready"; do
+    [ -n "$call" ]
+  done
+  [ "$cilium" -lt "$first_apply" ]
+  [ "$last_apply" -lt "$read_config" ]
+  [ "$read_config" -lt "$approver" ]
+  [ "$approver" -lt "$ready" ]
+  [ "$(applied | sort)" = "$PRE_FLUX" ]
+
+  # The release Flux adopts, from the application's chart, with values.yaml as it is first.
+  [ "$(helm_operands kubelet-csr-approver)" = "kubelet-csr-approver"$'\n'"$(yq -e '.spec.url' "$app/ocirepository.yaml")" ]
+  [ "$(helm_flag kubelet-csr-approver --version)" = "$(yq -e '.spec.ref.tag' "$app/ocirepository.yaml")" ]
+  [ "$(helm_flag kubelet-csr-approver -n --namespace)" = kube-system ]
+  [ "$(find "$STATE/helm/kubelet-csr-approver" -name 'values.*' | wc -l)" -eq 2 ]
+  cmp "$STATE/helm/kubelet-csr-approver/values.1.yaml" "$app/values.yaml"
+  # Then the HelmRelease's own values, on standard input, substituted from the applied cluster-config.
+  [ "$(grep -A1 -xE -- '-f|--values' "$STATE/helm/kubelet-csr-approver/args" | grep -cx -- -)" -eq 1 ]
+  config=$(object ConfigMap flux-system cluster-config)
+  regex=$(jq -r '.data.NODE_NAME_REGEX' <<< "$config")
+  overrides="$STATE/helm/kubelet-csr-approver/values.2.yaml"
+  [ "$(yq '.providerRegex' "$overrides")" = "^($regex)\$" ]
+  [ "$(yq -o json -I0 '.providerIpPrefixes' "$overrides")" = "[\"$(jq -r '.data.NODE_CIDR' <<< "$config")\"]" ]
+  [ "$(yq 'keys | sort | join(" ")' "$overrides")" = "$(yq '.spec.values | keys | sort | join(" ")' "$app/helmrelease.yaml")" ]
+  for name in $(yq '.nodes[].hostname' "$TALMAN"); do
+    [[ $name =~ $(yq '.providerRegex' "$overrides") ]]
+  done
+}
+
+@test "the approver takes its values from the cluster-config on the cluster" {
+  flux_key
+  recipe cluster-config
+  [ "$status" -eq 0 ]
+  # A cluster-config that differs from what talman.yaml would give.
+  object=$STATE/objects/ConfigMap.flux-system.cluster-config.json
+  jq '.data.NODE_CIDR = "198.51.100.0/24" | .data.NODE_NAME_REGEX = "other-[0-9]+"' "$object" > "$object.next"
+  mv "$object.next" "$object"
+  with KUBECONFIG="$REPO/talos/lab-sto2/clusterconfig/kubeconfig"
+
+  recipe app-install kubernetes/apps/base/kube-system/kubelet-csr-approver
+
+  [ "$status" -eq 0 ]
+  overrides="$STATE/helm/kubelet-csr-approver/values.2.yaml"
+  [ "$(yq '.providerRegex' "$overrides")" = '^(other-[0-9]+)$' ]
+  [ "$(yq -o json -I0 '.providerIpPrefixes' "$overrides")" = '["198.51.100.0/24"]' ]
+}
+
+@test "a second install of the approver with the same cluster-config changes nothing" {
+  flux_key
+  recipe cluster-config
+  [ "$status" -eq 0 ]
+  with KUBECONFIG="$REPO/talos/lab-sto2/clusterconfig/kubeconfig"
+  recipe app-install kubernetes/apps/base/kube-system/kubelet-csr-approver
+  [ "$status" -eq 0 ]
+  : > "$RECORD/argv"
+
+  recipe app-install kubernetes/apps/base/kube-system/kubelet-csr-approver
+
+  [ "$status" -eq 0 ]
+  [ -z "$(calls '^helm upgrade ')" ]
+
+  # Another node network in cluster-config is another release.
+  object=$STATE/objects/ConfigMap.flux-system.cluster-config.json
+  jq '.data.NODE_CIDR = "198.51.100.0/24"' "$object" > "$object.next"
+  mv "$object.next" "$object"
+
+  recipe app-install kubernetes/apps/base/kube-system/kubelet-csr-approver
+
+  [ "$status" -eq 0 ]
+  [ "$(calls '^helm upgrade ' | wc -l)" -eq 1 ]
+}
+
+@test "the approver is not installed without cluster-config or a variable it needs" {
+  with KUBECONFIG="$REPO/talos/lab-sto2/clusterconfig/kubeconfig"
+
+  recipe app-install kubernetes/apps/base/kube-system/kubelet-csr-approver
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"no ConfigMap cluster-config"* ]]
+  [ -z "$(calls '^helm upgrade ')" ]
+
+  # NODE_NAME_REGEX has no default in the HelmRelease, and Flux takes it from cluster-config only,
+  # never from the environment the recipe runs in.
+  jq -n '{apiVersion: "v1", kind: "ConfigMap", metadata: {name: "cluster-config", namespace: "flux-system"},
+    data: {NODE_CIDR: "198.51.100.0/24"}}' > "$STATE/objects/ConfigMap.flux-system.cluster-config.json"
+  with NODE_NAME_REGEX='other-[0-9]+'
+
+  recipe app-install kubernetes/apps/base/kube-system/kubelet-csr-approver
+
+  [ "$status" -ne 0 ]
+  [[ $output == *NODE_NAME_REGEX* ]]
+  [[ $output == *"install-app: failed while reading the HelmRelease's values"* ]]
+  [ -z "$(calls '^helm upgrade ')" ]
+}
+
+@test "cluster-bootstrap names what cluster-config needs before it reaches a node" {
+  fake_nodes
+  without FLUX_AGE_KEY_FILE
+  printf 'EXTRA_SETTING: example\n' >> "$CLUSTER/cluster-config.example.yaml"
+
+  recipe cluster-bootstrap
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"neither FLUX_AGE_KEY_FILE nor FLUX_AGE_KEY is set"* ]]
+  [[ $output == *".sops.yaml holds no Flux age recipient yet"* ]]
+  [[ $output == *"EXTRA_SETTING"* ]]
+  [ -z "$(calls '^(timeout|talman|install-cilium|kubectl|helm) ')" ]
+}
+
 @test "No deployment value or secret reaches a command line or the output" {
   flux_key
   encrypted_secrets API_TOKEN=marker-api-token
@@ -695,6 +918,15 @@ helm_flag() {
   run_and_keep failed cluster-config
   run_and_keep failed cluster-flux --reapply
   cp "$ROOT/kubernetes/clusters/lab-sto2/cluster-config.example.yaml" "$CLUSTER/"
+  # The approver, during bootstrap and on its own, with its values from cluster-config.
+  fake_nodes
+  run_and_keep ok cluster-bootstrap
+  with KUBECONFIG="$REPO/talos/lab-sto2/clusterconfig/kubeconfig"
+  run_and_keep ok app-install kubernetes/apps/base/kube-system/kubelet-csr-approver
+  without KUBECONFIG
+  without FLUX_AGE_KEY_FILE
+  run_and_keep failed cluster-bootstrap
+  reset_environment
 
   config=$(object ConfigMap flux-system cluster-config)
   markers=(
@@ -706,7 +938,8 @@ helm_flag() {
   )
   grep -q '^sops decrypt ' "$RECORD/argv"
   grep -q '^kubectl apply ' "$RECORD/argv"
-  grep -q '^helm upgrade ' "$RECORD/argv"
+  grep -q '^helm upgrade .*/kubelet-csr-approver' "$RECORD/argv"
+  grep -q '^flux envsubst ' "$RECORD/argv"
   # talman.yaml holds the node subnet and the node names; nothing else may.
   rm "$TALMAN"
   for marker in "${markers[@]}"; do

@@ -4,7 +4,8 @@
 # and encrypting it are local and offline, so those tests run the pinned age-keygen, talman,
 # talosctl and sops, recorded on their way, with every key inside the test's temporary directory.
 # Everything that would reach a node or a cluster runs against recording fakes: talman, talosctl,
-# kubectl, install-cilium, and timeout, which carries the probe of the Talos API port.
+# kubectl, install-cilium, cluster-config, install-app, and timeout, which carries the probe of the
+# Talos API port. tests/cluster-flux.bats runs the real cluster-config and install-app.
 
 setup_file() {
   # The Talos check's fixture cluster: talos/talman.yaml.tftpl rendered from tests/fixtures/talos,
@@ -24,20 +25,26 @@ setup() {
   REPO=$(cd "$BATS_TEST_TMPDIR/repo" && pwd)
   CLUSTER="$REPO/talos/lab-sto2"
   BUNDLE="$CLUSTER/secrets.sops.yaml"
-  # The scripts and the Talos tree the recipes read, so no run touches this checkout.
+  # The scripts, the Talos tree and what cluster-bootstrap checks for cluster-config, so no run
+  # touches this checkout.
   cp -R "$ROOT/scripts" "$REPO/scripts"
   cp -R "$ROOT/talos/patches" "$REPO/talos/patches"
   cp "$ROOT/talos/schematic.yaml" "$ROOT/talos/.sops.yaml" "$REPO/talos/"
+  cp -R "$ROOT/kubernetes" "$REPO/kubernetes"
+  cp "$ROOT/.sops.yaml" "$REPO/.sops.yaml"
   cp "$ROOT/.gitignore" "$REPO/.gitignore"
   cp "$BATS_FILE_TMPDIR/talman.yaml" "$CLUSTER/talman.yaml"
   # A mise with nothing installed keeps the justfile from putting real tools in front of the fakes.
   fake mise < /dev/null
   KEY="$BATS_TEST_TMPDIR/keys/talos.agekey"
+  FLUX_KEY="$BATS_TEST_TMPDIR/keys/flux.agekey"
   KUBE_API_ADDRESS=203.0.113.80
   # TMPDIR keeps the plaintext bundle talman stages before encrypting it inside the test's directory.
   BASE_ENVIRONMENT=(
     SOPS_AGE_KEY_FILE="$KEY"
     KUBE_API_ADDRESS="$KUBE_API_ADDRESS"
+    FLUX_AGE_KEY_FILE="$FLUX_KEY"
+    CLUSTER_DOMAIN=example.com
     TMPDIR="$BATS_TEST_TMPDIR"
   )
   reset_environment
@@ -311,6 +318,17 @@ EOF
 printf '%s\n' "install-cilium KUBECONFIG=${KUBECONFIG-}" >> "$RECORD/argv"
 EOF
   mv "$BIN/install-cilium" "$REPO/scripts/install-cilium"
+  fake_tool cluster-config <<'EOF'
+printf '%s\n' "cluster-config $*" >> "$RECORD/argv"
+EOF
+  mv "$BIN/cluster-config" "$REPO/scripts/cluster-config"
+  fake_tool install-app <<'EOF'
+printf '%s\n' "install-app $* KUBECONFIG=${KUBECONFIG-}" >> "$RECORD/argv"
+EOF
+  mv "$BIN/install-app" "$REPO/scripts/install-app"
+  # The Flux age key, with its recipient in .sops.yaml, which cluster-bootstrap checks first.
+  age-keygen -o "$FLUX_KEY" 2> /dev/null
+  RECIPIENT=$(age-keygen -y "$FLUX_KEY") yq -i '.creation_rules[].age = strenv(RECIPIENT)' "$REPO/.sops.yaml"
 }
 
 # node_address HOSTNAME: the address talman reaches HOSTNAME on, from the cluster's talman.yaml.
@@ -630,7 +648,7 @@ applies() {
   for hostname in $(yq '.nodes[].hostname' "$CLUSTER/talman.yaml"); do
     [[ " $wait " == *" node/$hostname "* ]]
   done
-  [[ $output == *"not implemented: installing the kubelet serving-certificate approver"* ]]
+  [[ $output != *"not implemented"* ]]
 
   : > "$RECORD/argv"
 
@@ -639,7 +657,7 @@ applies() {
   [ "$status" -ne 0 ]
   [[ $output == *"failed while bootstrapping"* ]]
   [ -n "$(call_line '^talman apply .*--bootstrap')" ]
-  [ -z "$(call_line '^(talman kubeconfig|install-cilium|kubectl)')" ]
+  [ -z "$(call_line '^(talman kubeconfig|install-cilium|cluster-config|install-app|kubectl)')" ]
 }
 
 @test "The kubeconfig is private and points at the API address from the environment" {
