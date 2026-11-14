@@ -122,11 +122,62 @@ run_ci() {
   [ "$output" = 0 ]
 }
 
-@test "Every action is pinned to a commit" {
-  run yq '.. | select(tag == "!!map" and has("uses")) | .uses' "$WORKFLOW"
+@test "The publish workflow runs one recipe with only the permissions it needs, and runs queue" {
+  local publish="$REPO/.github/workflows/publish.yaml"
+  [ -f "$publish" ]
+  run yq -o=json -I=0 '.jobs | keys' "$publish"
   [ "$status" -eq 0 ]
+  [ "$output" = '["publish"]' ]
+  run yq -o=json -I=0 '[.jobs[].steps[] | select(has("run")) | .run]' "$publish"
+  [ "$output" = '["just publish"]' ]
+  run yq '.jobs.publish.steps[-1].run' "$publish"
+  [ "$output" = "just publish" ]
+  # A pull request, from a fork or not, never gets packages: write or an identity token.
+  run yq -o=json -I=0 '.on | keys' "$publish"
+  [ "$output" = '["push","workflow_dispatch"]' ]
+  run yq -o=json -I=0 '.on.push | keys' "$publish"
+  [ "$output" = '["branches","paths"]' ]
+  run yq -o=json -I=0 '.on.push.branches' "$publish"
+  [ "$output" = '["main"]' ]
+  run yq -o=json -I=0 '.on.push.paths | sort' "$publish"
+  [ "$output" = '[".github/workflows/publish.yaml","kubernetes/**"]' ]
+  run yq -o=json -I=0 '.permissions | to_entries | sort_by(.key) | from_entries' "$publish"
+  [ "$output" = '{"contents":"read","id-token":"write","packages":"write"}' ]
+  run yq '[.jobs[] | select(has("permissions") or has("concurrency"))] | length' "$publish"
+  [ "$output" = 0 ]
+  # One group for every run, whatever its ref, and a run in progress is never cancelled: a newer
+  # run waits for it.
+  run yq '.concurrency.group' "$publish"
   [ -n "$output" ]
-  while IFS= read -r ref; do
-    [[ $ref =~ ^[^@[:space:]]+@[0-9a-f]{40}$ ]] || { echo "not pinned to a commit: $ref"; return 1; }
-  done <<< "$output"
+  [[ $output != *"\${{"* ]]
+  run yq '.concurrency.cancel-in-progress' "$publish"
+  [ "$output" = false ]
+  # The newest-commit guard reads main's history; the job's token is not left in the checkout.
+  run yq -o=json -I=0 '[.jobs.publish.steps[] | select(.uses | test("^actions/checkout@")) | .with | to_entries | sort_by(.key) | from_entries]' "$publish"
+  [ "$output" = '[{"fetch-depth":0,"persist-credentials":false}]' ]
+  # The same pinned mise-action and mise as CI, installing the pinned tools the recipe runs and no others.
+  local select='[.jobs[].steps[] | select(.uses | test("^jdx/mise-action@")) | {"uses": .uses, "version": .with.version}]'
+  run yq -o=json -I=0 "$select" "$publish"
+  [ "$output" = "$(yq -o=json -I=0 "$select" "$WORKFLOW")" ]
+  run yq '.jobs.publish.steps[] | select(.uses | test("^jdx/mise-action@")) | .with.install_args' "$publish"
+  [ "$(tr ' ' '\n' <<< "$output" | sort | paste -sd ' ')" = "cosign flux2 jq just" ]
+  local tool
+  for tool in $output; do
+    yq -p toml -o yaml -e ".tools | has(\"$tool\")" "$REPO/mise.toml" > /dev/null || { echo "not pinned in mise.toml: $tool"; return 1; }
+  done
+}
+
+@test "Every action in every workflow is pinned to a commit" {
+  local workflow refs=0
+  shopt -s nullglob
+  for workflow in "$REPO"/.github/workflows/*.yaml "$REPO"/.github/workflows/*.yml; do
+    run yq '.. | select(tag == "!!map" and has("uses")) | .uses' "$workflow"
+    [ "$status" -eq 0 ]
+    while IFS= read -r ref; do
+      [ -n "$ref" ] || continue
+      refs=$((refs + 1))
+      [[ $ref =~ ^[^@[:space:]]+@[0-9a-f]{40}$ ]] || { echo "${workflow##*/}: not pinned to a commit: $ref"; return 1; }
+    done <<< "$output"
+  done
+  [ "$refs" -gt 0 ]
 }

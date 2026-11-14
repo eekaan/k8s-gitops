@@ -25,8 +25,3 @@ Feature: Continuous integration
     Given the CI workflow
     When its steps are read
     Then the only command it runs after installing tools is just ci, it has no path filter, and it requests read-only permissions
-
-  Scenario: Every action is pinned to a commit
-    Given the CI workflow
-    When its uses lines are read
-    Then each one references a full commit SHA

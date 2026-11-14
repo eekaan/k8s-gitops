@@ -39,7 +39,9 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
 
 `docs/infrastructure.md` covers the recipes that plan, apply and destroy the OpenTofu stacks: what
 they need in the environment, how state is stored and encrypted, and what they print.
-`docs/cluster.md` covers the recipes that create and change the Talos cluster. `docs/runbooks/`
+`docs/cluster.md` covers the recipes that create and change the Talos cluster. `docs/kubernetes.md`
+covers the tree Flux reconciles and how the publish workflow pushes, signs and verifies it before
+moving the `main` tag Flux follows, on every merge to `main` that changes it. `docs/runbooks/`
 holds the procedures that take more than one recipe, such as replacing the Talos image.
 
 Behaviour is specified as Given/When/Then scenarios in `features/`, each proved by a bats
