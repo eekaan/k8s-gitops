@@ -24,7 +24,7 @@ Feature: OpenBao
   Scenario: No root token and no recovery material is stored by anything the build renders
     Given the openbao application built as Flux applies it and its rendered chart
     When every object, the server configuration and the initial configuration are read
-    Then the build holds no Secret, no Job and no token, the initial configuration uses the root token only implicitly, generates no recovery key and writes nothing out of OpenBao, nothing names the recovery key or root token endpoints, and only the operator role may make a root token again, which takes a threshold of the recovery keys
+    Then the build holds no Secret, no Job and no token, the initial configuration uses the root token only implicitly, generates no recovery key and writes nothing out of OpenBao, nothing names the recovery key or root token endpoints, only the operator role may make a root token again, which takes a threshold of the recovery keys, nothing logs at trace or debug level, and no audit device writes values or accessors in the clear
 
   Scenario: OpenBao runs without its injector, its CSI provider or an exposed UI
     Given the rendered chart
@@ -44,7 +44,22 @@ Feature: OpenBao
   Scenario: The ClusterSecretStore reads one key-value mount and nothing else
     Given the openbao-store application and OpenBao's initial configuration
     When the store, the role it logs in with and that role's policy are read
-    Then the store logs in through the Kubernetes auth method as a service account of its own, with the audience OpenBao checks, and the role's only policy reads and lists the key-value mount the store names and grants nothing else
+    Then the store logs in through the Kubernetes auth method as a service account of its own, with the audience OpenBao checks, the role carries no default policy, its only policy reads and lists the key-value mount the store names and lets the token look itself up and revoke itself, as External Secrets does, and nothing writes the default policy or binds the store's account to another role
+
+  Scenario: Each OpenBao role binds one account to one policy, without OpenBao's default policy
+    Given OpenBao's initial configuration and the openbao application built as Flux applies it
+    When its roles, their policies and the application's service accounts are read
+    Then external-secrets binds openbao-store, operator binds openbao-operator and snapshot binds openbao-snapshot, each with OpenBao's audience, one policy, no default policy and ten-minute tokens, the snapshot role may only take a raft snapshot, and no pod mounts the accounts' tokens
+
+  Scenario: The operator role allows every request its recipes and runbook make, and nothing more
+    Given the operator role's policy, the recipes' requests read from their scripts, and the requests of the runbook's CLI steps
+    When each request is read as the capability OpenBao checks for it
+    Then the policy grants each of them and nothing beyond them
+
+  Scenario: External Secrets mints tokens for the store's account and no other
+    Given the external-secrets application's chart rendered with the repository's values, and the openbao-store application
+    When the roles that let a subject create service account tokens, and their bindings, are read
+    Then the chart grants that to no one, and the store's application lets External Secrets' controller create tokens for openbao-store alone, in the namespace where External Secrets requests a ClusterSecretStore's token
 
   Scenario: The demo ExternalSecret resolves through the store in the build
     Given the hello-secret application, the store and OpenBao's initial configuration
@@ -56,10 +71,10 @@ Feature: OpenBao
     When the namespace's labels and the pod templates are read
     Then the namespace enforces the restricted level, and no pod template uses a host namespace, port or path, allows privilege escalation, runs as root, runs without the runtime's seccomp profile or keeps a capability
 
-  Scenario: Only the first member initialises OpenBao, and only while no other member answers
-    Given the script that decides each server's arguments, from the built application, and a fake bao
-    When it runs as each member, with no other member answering, and with another member answering
-    Then only openbao-0 with no other member answering adds the initial configuration, and every other run adds nothing
+  Scenario: Only the first member initialises OpenBao, and only on a first install
+    Given the guard each member's init container runs, from the built application, the rendered StatefulSet and a fake Kubernetes API
+    When it runs as each member, with data of its own or none, while the API times out, refuses, errs, or answers with the other members' claims present or absent
+    Then only openbao-0, with no data of its own and neither data-openbao-1 nor data-openbao-2 existing, adds the initial configuration to the server's arguments; every other run adds nothing, a run without an answer fails so the pod does not start, and the guard may read those two claims and nothing else
 
   Scenario: bao-put never puts the value on a command line or in its output
     Given a fake cluster and a fake OpenBao behind a port-forward
@@ -79,4 +94,19 @@ Feature: OpenBao
   Scenario: bao-recovery hands out the recovery keys once, encrypted to the operator's age key
     Given a fake OpenBao that has no recovery keys yet, and the Talos age key's recipient
     When bao-recovery writes the recovery keys to a file outside the repository
-    Then the file decrypts with the Talos age key to the recovery key shares and the seal key, the rotation is committed only after the file is written, nothing of either is printed or passed on a command line, and a second run, a run against existing recovery keys, a path inside the repository or an existing file is refused
+    Then the file decrypts with the Talos age key to the recovery key shares and the seal key, the rotation is committed only after the file is written and proved to decrypt, nothing of either is printed or passed on a command line, and a second run, a run against existing recovery keys, a path inside the repository or an existing file is refused
+
+  Scenario: bao-recovery never commits recovery keys it did not keep
+    Given a fake OpenBao that has no recovery keys yet
+    When bao-recovery is interrupted while the keys are verified, before and after OpenBao commits them, finds a rotation left in progress, finds its file made by someone else, or writes to a recipient the operator's age key does not open
+    Then a rotation it did not complete is cancelled and its file removed, a file holding committed keys is kept, a rotation left in progress is cancelled before a new one starts, a file made by someone else is never replaced, and keys the operator's age key cannot read are never committed
+
+  Scenario: bao-root makes a root token from the recovery keys, runs one command with it and revokes it
+    Given a fake OpenBao holding recovery keys and the operator's custody file
+    When bao-root runs a command, and when it fails before the token is made
+    Then the shares reach OpenBao only in request bodies read from standard input, the command gets the token, the address and the CA in its environment, nothing prints a share or a token, the root token and the operator's token are revoked, an unfinished generation is cancelled, and the port-forward is closed
+
+  Scenario: bao-seal-restore writes the seal key back from the custody file and never replaces a key unasked
+    Given a fake cluster without the seal Secret, with it holding the file's key, and with it holding another key
+    When bao-seal-restore runs, and runs with --replace
+    Then a missing Secret is made immutable from the file's key, one holding the same key is left alone, one holding another key is kept unless --replace is given, and the key is never printed or passed on a command line

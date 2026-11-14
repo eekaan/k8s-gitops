@@ -1,10 +1,11 @@
 # shellcheck shell=bash
-# Shared by scripts/bao-put and scripts/bao-recovery, which source it with scripts/cluster-env: where
-# OpenBao answers and as whom an operator logs in to it, the names a key-value path may hold, and the
-# session a recipe works in: a private directory, a port-forward to OpenBao's active member, a
-# short-lived token, and requests to OpenBao's API through them. Nothing here prints a token, a value
-# or a key, or passes one as an argument: they reach kubectl, curl and jq on standard input or in a
-# header read from a file descriptor, and leave them on a pipe.
+# Shared by scripts/bao-put, bao-recovery, bao-root and bao-seal-restore, which source it with
+# scripts/cluster-env: where OpenBao answers and as whom an operator logs in to it, the names a
+# key-value path may hold, opening the operator's custody file, and the session a recipe works in: a
+# private directory, a port-forward to OpenBao's active member, a short-lived token, and requests to
+# OpenBao's API through them. Nothing here prints a token, a value or a key, or passes one as an
+# argument: they reach kubectl, curl, jq and age on standard input or through a file descriptor,
+# and leave them on a pipe.
 
 bao_namespace=openbao
 bao_service=openbao-active
@@ -33,6 +34,17 @@ bao_valid_path() {
 # bao_valid_key KEY: whether KEY is one name.
 bao_valid_key() {
   [[ $1 =~ ^$bao_name$ ]]
+}
+
+# bao_decrypt FILE: FILE decrypted with the Talos age key, the operator's, on standard output for a
+# pipe: from SOPS_AGE_KEY through a file descriptor when it holds the key, as in CI, and otherwise
+# from the file SOPS_AGE_KEY_FILE names, as require_age_key in scripts/lib/cluster.sh checks them.
+bao_decrypt() {
+  if [[ -n ${SOPS_AGE_KEY:-} ]]; then
+    age --decrypt --identity <(printf '%s\n' "$SOPS_AGE_KEY") -- "$1"
+  else
+    age --decrypt --identity "$SOPS_AGE_KEY_FILE" -- "$1"
+  fi
 }
 
 # bao_open: makes work_dir, a directory only this user can enter, opens a port-forward to OpenBao's

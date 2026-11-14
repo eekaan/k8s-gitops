@@ -7,3 +7,13 @@ bao-put *args:
 [positional-arguments]
 bao-recovery *args:
     scripts/bao-recovery "$@"
+
+# Make a root token from the recovery keys in bao-recovery's file, run one command with it in BAO_TOKEN and OpenBao's address in BAO_ADDR, then revoke it, as just bao-root <file> <command> [argument...]; prints no share or token
+[positional-arguments]
+bao-root *args:
+    scripts/bao-root "$@"
+
+# Write OpenBao's seal key back into its Secret from bao-recovery's file, as just bao-seal-restore <file> [--replace]; a Secret holding another key is replaced only with --replace
+[positional-arguments]
+bao-seal-restore *args:
+    scripts/bao-seal-restore "$@"

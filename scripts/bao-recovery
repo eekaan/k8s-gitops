@@ -4,9 +4,12 @@
 # threshold of the shares that exist. So this runs only while OpenBao holds none, and writes the
 # shares, with the seal key, to FILE outside the repository, encrypted with age to the Talos age
 # key's recipient in talos/.sops.yaml: a key the cluster does not hold. The rotation asks for
-# verification, so OpenBao commits the shares only once the script has written FILE and given a
-# threshold of them back. Nothing of them is printed, passed as an argument or written unencrypted;
-# they travel on pipes between curl, kubectl, jq and age. Works through the session of
+# verification, so OpenBao commits the shares only once the script has written FILE, opened it
+# again with the operator's Talos age key to what it wrote, and given a threshold of them back. A
+# rotation it started and did not complete is cancelled, and its file removed; a rotation left in
+# progress by an earlier run is cancelled first; a file someone makes at the path meanwhile is
+# never replaced. Nothing of the shares is printed, passed as an argument or written unencrypted;
+# they stay in memory and on pipes between curl, kubectl, jq and age. Works through the session of
 # scripts/lib/openbao.sh as the operator role.
 # Usage: scripts/bao-recovery <file> [cluster]
 set -euo pipefail
@@ -28,8 +31,10 @@ file=$1
 # shellcheck source=scripts/cluster-env
 . "$here/cluster-env" "${2-}"
 complete=1
-require_commands kubectl curl jq base64 age mktemp || complete=0
+require_commands kubectl curl jq base64 age mktemp sha256sum || complete=0
 require_kubeconfig || complete=0
+# The operator's Talos age key, which the file must open with before OpenBao commits the shares.
+require_age_key || complete=0
 recipient=$(sops_recipient)
 if is_placeholder "$recipient" || [[ ! $recipient =~ ^age1[0-9a-z]+$ ]]; then
   infra_error "talos/.sops.yaml holds no age recipient yet; just cluster-age-key writes it"
@@ -48,8 +53,8 @@ elif [[ ! -d $dir || ! -w $dir ]]; then
 fi
 ((complete))
 
-# pending is 1 from the moment OpenBao returned shares until it committed them; partial is the file
-# being written, placed whether it was moved to FILE.
+# pending is 1 from the request for shares until OpenBao committed them; partial is the file being
+# written, placed whether it was linked to FILE.
 pending=0 partial="" placed=0
 
 # bao_abort: on a failure while the shares are pending, cancels the rotation, so OpenBao keeps none
@@ -90,11 +95,19 @@ fi
 
 bao_login
 
+# With no shares held, a rotation in progress is one a run before this one started and lost
+# OpenBao's answer to: its shares were never committed, and it would refuse a new rotation.
+step="cancelling a rotation left in progress"
+if bao_request GET sys/rotate/recovery/init | jq -e '.data.started == true' > /dev/null; then
+  bao_request DELETE sys/rotate/recovery/init > /dev/null
+fi
+
 step="generating the recovery keys"
+# Pending before the request, so an answer lost on the way cancels the rotation too.
+pending=1
 rotation=$(jq -nc --argjson shares "$shares" --argjson threshold "$threshold" \
   '{secret_shares: $shares, secret_threshold: $threshold, require_verification: true}' |
   bao_request POST sys/rotate/recovery/init)
-pending=1
 if ! printf '%s' "$rotation" | jq -e --argjson shares "$shares" \
   '.data.keys_base64 | length == $shares' > /dev/null; then
   infra_error "OpenBao returned no recovery keys"
@@ -102,17 +115,32 @@ if ! printf '%s' "$rotation" | jq -e --argjson shares "$shares" \
 fi
 
 step="writing $file"
-partial=$(umask 077 && mktemp "$dir/.${file##*/}.XXXXXXXXXX")
-{
+custody=$({
   printf '%s\n' "$rotation"
   kubectl get secret "$bao_seal_secret" --namespace "$bao_namespace" --output json
 } | jq -sc --arg cluster "$cluster" --arg secret "$bao_seal_secret" --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
   {cluster: $cluster, created: $created,
    recovery: {shares: .[0].data.n, threshold: .[0].data.t, keys_base64: .[0].data.keys_base64},
-   seal: {secret: $secret, key_id: $secret, key: (.[1].data.key | @base64d)}}' |
-  age --encrypt --recipient "$recipient" --output "$partial"
-mv -- "$partial" "$file"
-partial="" placed=1
+   seal: {secret: $secret, key_id: $secret, key: (.[1].data.key | @base64d)}}')
+partial=$(mktemp "$dir/.${file##*/}.XXXXXXXXXX")
+printf '%s' "$custody" | age --encrypt --recipient "$recipient" --output "$partial"
+# The file opens with the operator's age key, to what was written, or nothing is committed: a
+# recipient in talos/.sops.yaml that is not the operator's key would make shares nobody can read.
+step="opening $file with the Talos age key"
+if [[ $(bao_decrypt "$partial" | sha256sum) != "$(printf '%s' "$custody" | sha256sum)" ]]; then
+  infra_error "$file does not open with the Talos age key to what was written; check the recipient in talos/.sops.yaml"
+  exit 1
+fi
+custody=
+# A hard link fails where a file exists, so one made after the check above is never replaced.
+step="putting $file in place"
+if ! ln -- "$partial" "$file"; then
+  infra_error "$file exists now; the recovery keys go into a new file"
+  exit 1
+fi
+placed=1
+rm -- "$partial"
+partial=""
 
 step="committing the recovery keys"
 for ((share = 0; share < threshold; share++)); do

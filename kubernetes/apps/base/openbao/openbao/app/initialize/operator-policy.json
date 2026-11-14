@@ -3,6 +3,9 @@
     "secrets/data/*": {
       "capabilities": ["create", "patch"]
     },
+    "auth/token/revoke-self": {
+      "capabilities": ["update"]
+    },
     "sys/rotate/recovery/init": {
       "capabilities": ["read", "update", "delete"]
     },
@@ -10,7 +13,7 @@
       "capabilities": ["update"]
     },
     "sys/rotate/recovery/verify": {
-      "capabilities": ["update"]
+      "capabilities": ["read", "update", "delete"]
     },
     "sys/generate-root-token/attempt": {
       "capabilities": ["read", "update", "delete"]

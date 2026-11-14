@@ -67,6 +67,7 @@
                 "bound_service_account_namespaces": ["external-secrets"],
                 "audience": "openbao",
                 "token_policies": ["external-secrets"],
+                "token_no_default_policy": true,
                 "token_ttl": "10m",
                 "token_max_ttl": "1h"
               }
@@ -100,6 +101,41 @@
                 "bound_service_account_namespaces": ["openbao"],
                 "audience": "openbao",
                 "token_policies": ["operator"],
+                "token_no_default_policy": true,
+                "token_ttl": "10m",
+                "token_max_ttl": "10m"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "snapshot": {
+        "request": [
+          {
+            "snapshot-policy": {
+              "operation": "update",
+              "path": "sys/policies/acl/snapshot",
+              "data": {
+                "policy": {
+                  "eval_type": "string",
+                  "eval_source": "file",
+                  "path": "/openbao/userconfig/openbao-initialize/snapshot-policy.json"
+                }
+              }
+            }
+          },
+          {
+            "snapshot-role": {
+              "operation": "update",
+              "path": "auth/kubernetes/role/snapshot",
+              "data": {
+                "bound_service_account_names": ["openbao-snapshot"],
+                "bound_service_account_namespaces": ["openbao"],
+                "audience": "openbao",
+                "token_policies": ["snapshot"],
+                "token_no_default_policy": true,
                 "token_ttl": "10m",
                 "token_max_ttl": "10m"
               }

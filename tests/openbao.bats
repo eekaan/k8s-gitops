@@ -71,7 +71,7 @@ render() {
   [ -s "$VALUES" ] || { echo "no values in the ConfigMap $name the HelmRelease reads"; return 1; }
   INLINE="$BATS_TEST_TMPDIR/inline.yaml"
   yq -N 'select(.kind == "HelmRelease") | .spec.values // {}' "$OPENBAO" >"$INLINE"
-  pulled="$BATS_FILE_TMPDIR/charts/$tag"
+  pulled="$BATS_FILE_TMPDIR/charts/openbao/$tag"
   if [ ! -d "$pulled" ]; then
     mkdir -p "$pulled"
     helm pull "$url" --version "$tag" --destination "$pulled"
@@ -86,6 +86,27 @@ render() {
   yq -N 'select(.kind == "ConfigMap" and .metadata.name == "openbao-config") | .data["extraconfig-from-values.hcl"]' \
     "$RENDERED" >"$CONFIG"
   [ -s "$CONFIG" ] || { echo "the chart renders no server configuration"; return 1; }
+}
+
+# render_external_secrets: the External Secrets chart, rendered from its application as Flux applies
+# it, with the repository's values. Sets ESO_RENDERED.
+render_external_secrets() {
+  local built url tag name values pulled
+  built external-secrets external-secrets
+  built=$BUILT
+  url="$(yq -N 'select(.kind == "OCIRepository") | .spec.url' "$built")"
+  tag="$(yq -N 'select(.kind == "OCIRepository") | .spec.ref.tag' "$built")"
+  name="$(yq -N 'select(.kind == "HelmRelease") | .spec.valuesFrom[0].name' "$built")"
+  values="$BATS_TEST_TMPDIR/eso-values.yaml"
+  yq -N "select(.kind == \"ConfigMap\" and .metadata.name == \"$name\") | .data[\"values.yaml\"]" "$built" >"$values"
+  pulled="$BATS_FILE_TMPDIR/charts/external-secrets/$tag"
+  if [ ! -d "$pulled" ]; then
+    mkdir -p "$pulled"
+    helm pull "$url" --version "$tag" --destination "$pulled"
+  fi
+  ESO_RENDERED="$BATS_TEST_TMPDIR/eso-rendered.yaml"
+  helm template external-secrets "$(echo "$pulled"/*.tgz)" --namespace external-secrets --kube-version "$KUBE" \
+    --values "$values" >"$ESO_RENDERED"
 }
 
 # statefulset: the rendered StatefulSet, as JSON in $BATS_TEST_TMPDIR/statefulset.json; sets STS.
@@ -111,15 +132,28 @@ setting() {
   sed -nE "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"?([^\"]*)\"?[[:space:]]*$/\\1/p" <<<"$text" | head -n 1
 }
 
-# mounted FILE: "KIND/NAME KEY" of the volume the openbao container mounts at FILE's directory, the
-# ConfigMap or Secret that holds FILE; nothing when no mount holds it.
+# mounted FILE [CONTAINER]: "KIND/NAME KEY" of the volume CONTAINER, openbao when not given, an init
+# container or not, mounts at FILE's directory, the ConfigMap or Secret that holds FILE; nothing when
+# no mount holds it.
 mounted() {
   local dir=${1%/*} key=${1##*/}
-  jq -r --arg dir "$dir" --arg key "$key" '.spec.template.spec as $pod
-    | ($pod.containers[] | select(.name == "openbao") | .volumeMounts[] | select(.mountPath == $dir) | .name) as $volume
+  jq -r --arg dir "$dir" --arg key "$key" --arg container "${2:-openbao}" '.spec.template.spec as $pod
+    | (($pod.initContainers // []) + $pod.containers | .[] | select(.name == $container)
+      | .volumeMounts[] | select(.mountPath == $dir) | .name) as $volume
     | $pod.volumes[] | select(.name == $volume)
     | if .secret then "Secret/" + .secret.secretName + " " + $key
       elif .configMap then "ConfigMap/" + .configMap.name + " " + $key else empty end' "$STS"
+}
+
+# volume_at DIR CONTAINER: "NAME KIND READONLY" of the volume CONTAINER mounts at DIR: KIND is the
+# volume's source, or claim for one of the StatefulSet's claim templates.
+volume_at() {
+  jq -r --arg dir "$1" --arg container "$2" '.spec as $set | .spec.template.spec as $pod
+    | (($pod.initContainers // []) + $pod.containers | .[] | select(.name == $container)
+      | .volumeMounts[] | select(.mountPath == $dir)) as $mount
+    | ([$pod.volumes[] | select(.name == $mount.name) | del(.name) | keys[0]]
+      + [$set.volumeClaimTemplates // [] | .[] | select(.metadata.name == $mount.name) | "claim"]) as $kinds
+    | $mount.name + " " + ($kinds[0] // "none") + " " + ($mount.readOnly // false | tostring)' "$STS"
 }
 
 # initialize: OpenBao's initial configuration, the initialize stanzas the first member reads, from
@@ -330,6 +364,12 @@ covers() {
   [ "$length" = 32 ]
   [ "$encoding" = hex ]
   [ "$(NAME="${generator#Password/}" yq -N 'select(.kind == "Password" and .metadata.name == strenv(NAME)) | .spec.secretKeys | join(",")' "$OPENBAO")" = "${file##*/}" ]
+  # Its characters: upper and lower case letters, digits and symbols in the generator's own default
+  # shares (a quarter digits, a quarter symbols) from its own symbol set, repeats allowed, which gives
+  # 32 characters about 190 bits.
+  [ "$(NAME="${generator#Password/}" yq ea -N -o json -I0 '[select(.kind == "Password" and .metadata.name == strenv(NAME))] | .[0].spec
+    | [.allowRepeat, .noUpper, .digits // "default", .symbols // "default", .symbolCharacters // "default"]' "$OPENBAO")" = \
+    '[true,false,"default","default","default"]' ]
 
   # Nothing git would commit holds a Secret of that name, encrypted or not. Each file is read on
   # its own, so one that yq cannot read does not hide the others.
@@ -346,7 +386,7 @@ covers() {
 }
 
 @test "No root token and no recovery material is stored by anything the build renders" {
-  local kinds paths tokens sources level roles sudo grants
+  local kinds paths tokens sources level roles sudo grants audit
   render
   statefulset
   initialize
@@ -389,10 +429,22 @@ covers() {
     'operator sys/generate-root-token/update update')" ]
   [ "$(jq -r 'select(.path | test("^auth/[^/]+/role/")) | select(.data.token_policies | index("operator")) | .path' "$REQUESTS")" = \
     auth/kubernetes/role/operator ]
-  # Self-initialisation logs its requests and responses, the root token among them, at trace level.
-  level="$(jq -r '.spec.template.spec.containers[] | select(.name == "openbao") | .env[] | select(.name == "BAO_LOG_LEVEL") | .value' "$STS")"
-  echo "log level: ${level:-default}"
-  [[ ${level,,} != trace ]]
+  # Self-initialisation logs its requests and responses, the root token among them, at trace level,
+  # and debug logging goes further than the default too: no level is set below info anywhere a
+  # server reads one, its configuration, its arguments or its environment.
+  level="$( {
+    setting log_level
+    jq -r '.spec.template.spec.containers[] | select(.name == "openbao")
+      | (.env[] | select(.name | test("^(BAO|VAULT)_LOG_LEVEL$")) | .value), (.args[] | scan("-log-level[= ]+[A-Za-z]+"))' "$STS"
+  } | paste -sd' ' -)"
+  echo "log levels set: ${level:-none}"
+  [[ ! ${level,,} =~ (trace|debug) ]]
+  # Every audit device hashes what it writes: none sets log_raw or turns off hmac_accessor.
+  audit="$(awk '/^audit /,/^}/' "$CONFIG")"
+  echo "audit devices: ${audit:-none}"
+  [ -n "$audit" ]
+  [ "$(grep -cE '^[[:space:]]*(log_raw|hmac_accessor|elide_list_responses)[[:space:]]*=' <<<"$audit")" -eq 0 ]
+  [ -z "$(jq -r 'select(.path | test("^/?sys/(audit|config/auditing)")) | .path' "$REQUESTS")" ]
 }
 
 @test "OpenBao runs without its injector, its CSI provider or an exposed UI" {
@@ -422,7 +474,9 @@ covers() {
   ca_secret="$(SS="$selfsigned" yq -N 'select(.kind == "Certificate" and .spec.isCA == true and .spec.issuerRef.name == strenv(SS) and .spec.issuerRef.kind == "Issuer") | .spec.secretName' "$OPENBAO")"
   ca_issuer="$(CA="$ca_secret" yq -N 'select(.kind == "Issuer" and .spec.ca.secretName == strenv(CA)) | .metadata.name' "$OPENBAO")"
   echo "self-signed issuer: ${selfsigned:-none}; CA Secret: ${ca_secret:-none}; CA issuer: ${ca_issuer:-none}"
-  [ -n "$selfsigned" ] && [ -n "$ca_secret" ] && [ -n "$ca_issuer" ]
+  [ -n "$selfsigned" ]
+  [ -n "$ca_secret" ]
+  [ -n "$ca_issuer" ]
   [ "$(yq -N 'select(.kind == "Issuer" or .kind == "Certificate") | .metadata.namespace' "$OPENBAO" | sort -u)" = openbao ]
   cert="$(CA="$ca_issuer" yq -N -o json -I0 'select(.kind == "Certificate" and .spec.issuerRef.kind == "Issuer" and .spec.issuerRef.name == strenv(CA))' "$OPENBAO")"
   [ -n "$cert" ]
@@ -524,16 +578,122 @@ covers() {
   [ "$(jq -r '.audience' <<<"$data")" = "$audiences" ]
   policies="$(jq -r '.token_policies | join(" ")' <<<"$data")"
   [ "$(wc -w <<<"$policies")" -eq 1 ]
+  # Without OpenBao's default policy, the role's policy is all its token may do.
+  [ "$(jq -r '.token_no_default_policy' <<<"$data")" = true ]
   policy="$(policy "$policies")"
   echo "policy $policies: $policy"
-  # Every path the policy names is in the mount, and every capability reads.
+  # Every path the policy names is in the mount, and every capability reads; beyond the mount only
+  # the two requests External Secrets' Vault provider makes about its own token, looking it up before
+  # reusing it and revoking it (providers/v1/vault/auth.go in External Secrets v2.15.0).
   others="$(jq -r --arg mount "$mount/" '.path | to_entries[]
+    | select(.key != "auth/token/lookup-self" and .key != "auth/token/revoke-self")
     | select((.key | startswith($mount) | not) or (.value.capabilities - ["read", "list"] | length) > 0) | .key' <<<"$policy")"
   echo "beyond reading $mount: ${others:-nothing}"
   [ -z "$others" ]
+  [ "$(jq -cS '.path["auth/token/lookup-self"], .path["auth/token/revoke-self"]' <<<"$policy" | paste -sd' ' -)" = \
+    '{"capabilities":["read"]} {"capabilities":["update"]}' ]
   [ "$(jq -r --arg path "$mount/data/*" '.path[$path].capabilities | index("read") != null' <<<"$policy")" = true ]
+  # Nothing widens that: no request writes OpenBao's default or root policy, and no other role takes
+  # the store's account.
+  [ -z "$(jq -r 'select(.path | test("^/?sys/(policies/acl|policy)/(default|root)$")) | .path' "$REQUESTS")" ]
+  [ "$(jq -r --arg sa "$sa" 'select(.path | test("^auth/[^/]+/role/")) | select(.data.bound_service_account_names // [] | index($sa)) | .path' "$REQUESTS")" = \
+    "auth/kubernetes/role/$role" ]
   # The store has no other way to log in.
   [ "$(jq -r '.auth | keys | join(",")' <<<"$store")" = kubernetes ]
+}
+
+@test "Each OpenBao role binds one account to one policy, without OpenBao's default policy" {
+  local roles policies accounts
+  render
+  statefulset
+  initialize
+  built openbao openbao
+  # Role, account, audience, policies, default policy, token lifetime.
+  roles="$(jq -r 'select(.path | test("^auth/kubernetes/role/")) | (.path | sub("^auth/kubernetes/role/"; "")) + " "
+    + (.data.bound_service_account_namespaces | join(",")) + "/" + (.data.bound_service_account_names | join(","))
+    + " " + .data.audience + " " + (.data.token_policies | join(",")) + " default=" + ((.data.token_no_default_policy // false) | not | tostring)
+    + " ttl=" + .data.token_ttl + "/" + .data.token_max_ttl' "$REQUESTS" | sort)"
+  echo "$roles"
+  [ "$roles" = "$(printf '%s\n' 'external-secrets external-secrets/openbao-store openbao external-secrets default=false ttl=10m/1h' \
+    'operator openbao/openbao-operator openbao operator default=false ttl=10m/10m' \
+    'snapshot openbao/openbao-snapshot openbao snapshot default=false ttl=10m/10m')" ]
+  # The snapshot role's policy takes a snapshot of the raft storage and nothing else.
+  [ "$(policy snapshot | jq -cS '.path')" = '{"sys/storage/raft/snapshot":{"capabilities":["read"]}}' ]
+  # The accounts in openbao are the application's own, and no pod mounts their tokens.
+  accounts="$(yq -N 'select(.kind == "ServiceAccount") | .metadata.namespace + "/" + .metadata.name + " " + (.automountServiceAccountToken | tostring)' "$BUILT" | sort)"
+  echo "accounts: $accounts"
+  [ "$accounts" = "$(printf '%s\n' 'openbao/openbao-operator false' 'openbao/openbao-snapshot false')" ]
+  # Every policy the roles name is written, and nothing else is.
+  policies="$(jq -r 'select(.path | startswith("sys/policies/acl/")) | .path | sub("^sys/policies/acl/"; "")' "$REQUESTS" | sort | paste -sd' ' -)"
+  [ "$policies" = "external-secrets operator snapshot" ]
+}
+
+@test "The operator role allows every request its recipes and runbook make, and nothing more" {
+  local wanted granted
+  render
+  statefulset
+  initialize
+  # The requests the recipes send with the operator's token, read from the scripts themselves: the
+  # script names the mount and the path as $bao_mount and $path.
+  # shellcheck disable=SC2016 # the dollars are the scripts' variable names.
+  wanted="$( (cd "$REPO" && grep -hoE 'bao_request (GET|POST|PUT|PATCH|DELETE) "?[^ ]+' scripts/bao-put scripts/bao-recovery scripts/bao-root scripts/bao-seal-restore scripts/lib/openbao.sh) |
+    sed -E 's/^bao_request //; s/["]//g; s/[)]+$//; s#\$bao_mount#secrets#; s#\$path#demo/hello#' |
+    grep -vE ' (auth/kubernetes/login|sys/seal-status|sys/decode-token)$')"
+  # And those the runbook's CLI steps send, as OpenBao v2.7.2's api/sys_rotate.go and
+  # api/sys_generate_root.go make them: rotating the recovery keys with verification, and making a
+  # root token from them.
+  wanted+=$'\n'"$(printf '%s\n' 'GET sys/rotate/recovery/init' 'POST sys/rotate/recovery/init' 'PUT sys/rotate/recovery/update' \
+    'GET sys/rotate/recovery/verify' 'PUT sys/rotate/recovery/verify' 'DELETE sys/rotate/recovery/verify' \
+    'DELETE sys/rotate/recovery/init' 'GET sys/generate-root-token/attempt' 'PUT sys/generate-root-token/attempt' \
+    'PUT sys/generate-root-token/update' 'DELETE sys/generate-root-token/attempt' 'POST auth/token/revoke-self')"
+  wanted="$(sort -u <<<"$wanted")"
+  echo "requests: $(paste -sd';' - <<<"$wanted")"
+  # Each as the capability OpenBao checks: GET read, POST and PUT update, or create for a write to a
+  # key-value path that does not exist yet, PATCH patch, DELETE delete.
+  granted="$(while read -r method path; do
+    case $method in
+      GET) echo "$path read" ;;
+      PATCH) echo "$path patch" ;;
+      DELETE) echo "$path delete" ;;
+      *) if [[ $path == secrets/data/* ]]; then echo "$path create"; else echo "$path update"; fi ;;
+    esac
+  done <<<"$wanted" | sort -u)"
+  # The policy allows each, and grants nothing none of them needs.
+  # shellcheck disable=SC2016 # $grant is a jq variable.
+  [ "$(policy operator | jq -r '.path | to_entries[] | .key as $path | .value.capabilities[] | $path + " " + .' | sort)" = \
+    "$(sed -E 's#^secrets/data/demo/hello #secrets/data/* #' <<<"$granted" | sort -u)" ]
+}
+
+@test "External Secrets mints tokens for the store's account and no other" {
+  local chart controller ref sa ns grants
+  render_external_secrets
+  # Nothing the chart renders lets any subject create a service account's token. jq, not yq, as yq
+  # reads a * in a compared string as a wildcard.
+  # shellcheck disable=SC2016 # $role is a jq variable.
+  chart="$(yq -N -o json -I0 'select(.kind == "ClusterRole" or .kind == "Role")' "$ESO_RENDERED" | jq -r '. as $role
+    | .rules // [] | .[] | select((.resources // []) - ["serviceaccounts/token", "serviceaccounts/*", "*"] != (.resources // []))
+    | select((.verbs // []) - ["create", "*"] != (.verbs // [])) | $role.kind + "/" + $role.metadata.name')"
+  echo "token grants in the chart: ${chart:-none}"
+  [ -z "$chart" ]
+  controller="$(yq -N 'select(.kind == "Deployment" and .metadata.name == "external-secrets") | .spec.template.spec.serviceAccountName' "$ESO_RENDERED")"
+  [ -n "$controller" ]
+  # The store's application lets the controller create tokens for the store's account alone, in the
+  # namespace External Secrets requests a ClusterSecretStore's token in: the serviceAccountRef's.
+  built external-secrets openbao-store
+  ref="$(yq -N -o json -I0 'select(.kind == "ClusterSecretStore") | .spec.provider.vault.auth.kubernetes.serviceAccountRef' "$BUILT")"
+  sa="$(jq -r '.name' <<<"$ref")"
+  ns="$(jq -r '.namespace' <<<"$ref")"
+  # shellcheck disable=SC2016 # $role and $bindings are jq variables.
+  grants="$(yq -N -o json -I0 'select(. != null)' "$BUILT" | jq -rs '[.[] | select(.kind == "RoleBinding")] as $bindings
+    | .[] | select(.kind == "Role" or .kind == "ClusterRole") | . as $role | .rules // [] | .[]
+    | select((.resources // []) - ["serviceaccounts/token", "serviceaccounts/*", "*"] != (.resources // []))
+    | select((.verbs // []) - ["create", "*"] != (.verbs // []))
+    | $role.kind + "/" + ($role.metadata.namespace // "") + "/" + $role.metadata.name + " " + (.resourceNames // [] | join(","))
+      + " to " + ([$bindings[] | select(.roleRef.kind == $role.kind and .roleRef.name == $role.metadata.name
+          and .metadata.namespace == $role.metadata.namespace) | .subjects[]
+        | .kind + "/" + .namespace + "/" + .name] | join(","))')"
+  echo "token grants in the store's application: ${grants:-none}"
+  [ "$grants" = "Role/$ns/openbao-store-token $sa to ServiceAccount/external-secrets/$controller" ]
 }
 
 @test "The demo ExternalSecret resolves through the store in the build" {
@@ -611,52 +771,122 @@ covers() {
   done <<<"$containers"
 }
 
-@test "Only the first member initialises OpenBao, and only while no other member answers" {
-  local args script flag hostname answering out
+@test "Only the first member initialises OpenBao, and only on a first install" {
+  local command guard data decision args script raft claims role account names member mode flag status
+  local work="$BATS_TEST_TMPDIR/guard"
   render
   statefulset
   initialize
-  # The server's arguments come from the script, which reads the ConfigMap's copy.
+  # The init container initialize-guard runs the guard from the ConfigMap, with the member's own data
+  # directory, read-only, and a decision file in a directory it shares with the server.
+  command="$(jq -c '[.spec.template.spec.initContainers // [] | .[] | select(.name == "initialize-guard") | .command] | .[0]' "$STS")"
+  echo "guard: $command"
+  [ "$(jq -r '.[0]' <<<"$command")" = /bin/sh ]
+  guard="$(jq -r '.[1]' <<<"$command")"
+  data="$(jq -r '.[2]' <<<"$command")"
+  decision="$(jq -r '.[3]' <<<"$command")"
+  [ "$(mounted "$guard" initialize-guard)" = "ConfigMap/openbao-initialize ${guard##*/}" ]
+  raft="$(block storage raft | sed -nE 's/^[[:space:]]*path[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p')"
+  [ "$data" = "$raft" ]
+  [ "$(volume_at "$data" initialize-guard)" = "data claim true" ]
+  [ "$(volume_at "$data" openbao | cut -d' ' -f1-2)" = "data claim" ]
+  [ "$(volume_at "${decision%/*}" initialize-guard | cut -d' ' -f2-)" = "emptyDir false" ]
+  [ "$(volume_at "${decision%/*}" openbao | cut -d' ' -f1)" = "$(volume_at "${decision%/*}" initialize-guard | cut -d' ' -f1)" ]
+  # The server's arguments take the decision through initialize-args.sh.
   args="$(jq -r '.spec.template.spec.containers[] | select(.name == "openbao") | .args | join("\n")' "$STS")"
   script="$(grep -oE '\$\(sh [^)]+\)' <<<"$args" | sed -E 's/^\$\(sh //; s/\)$//')"
   echo "argument script: ${script:-none}"
-  [ -n "$script" ]
+  [ "${script#* }" = "$decision" ]
+  script="${script%% *}"
   [ "$(mounted "$script")" = "ConfigMap/openbao-initialize ${script##*/}" ]
-  yq -N "select(.kind == \"ConfigMap\" and .metadata.name == \"openbao-initialize\") | .data[\"${script##*/}\"]" \
-    "$OPENBAO" >"$BATS_TEST_TMPDIR/args.sh"
-  mkdir -p "$BATS_TEST_TMPDIR/bin"
-  # A bao whose status exits as OpenBao's does: 0 unsealed, 2 sealed, 1 when nothing answers. A
-  # member answers when its address is listed in $ANSWERING, with its exit status.
-  cat >"$BATS_TEST_TMPDIR/bin/bao" <<'EOF'
+
+  # The guard may read the other members' claims and nothing else, as the servers' own account.
+  account="$(jq -r '.spec.template.spec.serviceAccountName' "$STS")"
+  names="$(jq -r '.metadata.name as $set | .spec.volumeClaimTemplates[0].metadata.name as $claim
+    | [range(1; .spec.replicas) | "\($claim)-\($set)-\(.)"] | join(" ")' "$STS")"
+  # shellcheck disable=SC2016 # $role is a yq variable.
+  role="$(ACCOUNT="$account" yq ea -N -o json -I0 '[select(.kind == "RoleBinding" and .roleRef.kind == "Role"
+      and (.subjects | any_c(.kind == "ServiceAccount" and .name == strenv(ACCOUNT))))] as $bindings
+    | select(.kind == "Role") | select(.metadata.name as $role | $bindings | any_c(.roleRef.name == $role)) | .rules' "$OPENBAO")"
+  echo "the guard's rules: $role; the other members' claims: $names"
+  [ "$(jq -cS '.' <<<"$role")" = "$(jq -ncS --arg names "$names" '[{apiGroups: [""], resources: ["persistentvolumeclaims"],
+    verbs: ["get"], resourceNames: ($names | split(" "))}]')" ]
+
+  # The guard's behaviour, from its own script, with a fake kubectl that answers as $MODE says.
+  mkdir -p "$work/bin"
+  yq -N "select(.kind == \"ConfigMap\" and .metadata.name == \"openbao-initialize\") | .data[\"${guard##*/}\"]" "$OPENBAO" >"$work/guard.sh"
+  yq -N "select(.kind == \"ConfigMap\" and .metadata.name == \"openbao-initialize\") | .data[\"${script##*/}\"]" "$OPENBAO" >"$work/args.sh"
+  cat >"$work/bin/kubectl" <<'EOF'
 #!/usr/bin/env bash
-for arg; do
-  [[ $arg == -address=* ]] && address=${arg#-address=}
-done
-for entry in $ANSWERING; do
-  [[ $address == *"//${entry%=*}."* ]] && exit "${entry#*=}"
-done
-exit 1
+printf '%s\n' "$*" >> "$KUBECTL_RECORD"
+case $MODE in
+  timeout) echo "Unable to connect to the server: dial tcp: i/o timeout" >&2; exit 1 ;;
+  refused) echo "The connection to the server was refused" >&2; exit 1 ;;
+  forbidden) echo 'Error from server (Forbidden): persistentvolumeclaims "data-openbao-1" is forbidden' >&2; exit 1 ;;
+  one) echo persistentvolumeclaim/data-openbao-1 ;;
+  both) printf '%s\n' persistentvolumeclaim/data-openbao-1 persistentvolumeclaim/data-openbao-2 ;;
+  none) ;;
+esac
 EOF
-  chmod +x "$BATS_TEST_TMPDIR/bin/bao"
-  # run_args HOSTNAME ANSWERING: what the script adds to the server's arguments.
-  run_args() {
-    HOSTNAME=$1 ANSWERING=$2 PATH="$BATS_TEST_TMPDIR/bin:$PATH" sh "$BATS_TEST_TMPDIR/args.sh"
+  chmod +x "$work/bin/kubectl"
+  # guard_run MEMBER MODE CONTENT: runs the guard as MEMBER, its data directory holding CONTENT (a
+  # file name, or nothing), against the fake API; sets status, flag (the decision) and claims (the
+  # fake's record).
+  guard_run() {
+    rm -rf "$work/data" "$work/decision" "$work/record"
+    mkdir -p "$work/data"
+    [ -z "$3" ] || : >"$work/data/$3"
+    : >"$work/record"
+    status=0
+    POD_NAME=$1 POD_NAMESPACE=openbao MODE=$2 KUBECTL_RECORD="$work/record" PATH="$work/bin:$PATH" \
+      sh "$work/guard.sh" "$work/data" "$work/decision" 2>/dev/null || status=$?
+    flag="$(cat "$work/decision" 2>/dev/null || true)"
+    claims="$(cat "$work/record")"
+    echo "$1 ($2, data: ${3:-empty}): status $status, decision ${flag:-none}, asked: ${claims:-nothing}"
   }
-  out="$(run_args openbao-0 '')"
-  echo "openbao-0 alone: ${out:-nothing}"
-  flag="${out#-config=}"
-  [ "$out" = "-config=$flag" ]
-  [ "$(mounted "$flag")" = "ConfigMap/openbao-initialize initialize.json" ]
-  for hostname in openbao-1 openbao-2; do
-    out="$(run_args "$hostname" '')"
-    echo "$hostname alone: ${out:-nothing}"
-    [ -z "$out" ]
+  # Only on a first install: openbao-0, with no data of its own, and neither other claim.
+  guard_run openbao-0 none ''
+  [ "$status" -eq 0 ]
+  [ "$(mounted "${flag#-config=}")" = "ConfigMap/openbao-initialize initialize.json" ]
+  [ "$flag" = "-config=${flag#-config=}" ]
+  [[ " $claims " == *" get persistentvolumeclaim $names "* && $claims == *" --ignore-not-found"* && $claims == *"--namespace openbao"* ]]
+  # A directory holding only what a new file system makes counts as empty.
+  guard_run openbao-0 none lost+found
+  [ "$status" -eq 0 ]
+  [ -n "$flag" ]
+  # Every other member, and openbao-0 with data of its own, adds nothing and asks nothing.
+  for member in openbao-1 openbao-2; do
+    guard_run "$member" none ''
+    [ "$status" -eq 0 ]
+    [ -z "$flag" ]
+    [ -z "$claims" ]
   done
-  for answering in openbao-1=0 openbao-1=2 openbao-2=0 openbao-2=2; do
-    out="$(run_args openbao-0 "$answering")"
-    echo "openbao-0 while $answering answers: ${out:-nothing}"
-    [ -z "$out" ]
+  guard_run openbao-0 none raft.db
+  [ "$status" -eq 0 ]
+  [ -z "$flag" ]
+  [ -z "$claims" ]
+  # The other members' claims, one or both, mean the store exists: openbao-0 joins it.
+  for mode in one both; do
+    guard_run openbao-0 "$mode" ''
+    [ "$status" -eq 0 ]
+    [ -z "$flag" ]
   done
+  # No answer from the API, whatever the reason, is no evidence: the guard fails, so the pod does
+  # not start, and decides nothing.
+  for mode in timeout refused forbidden; do
+    guard_run openbao-0 "$mode" ''
+    [ "$status" -ne 0 ]
+    [ -z "$flag" ]
+  done
+
+  # The server takes the flag only as the guard writes it, and nothing from a missing or other file.
+  guard_run openbao-0 none ''
+  [ "$(sh "$work/args.sh" "$work/decision")" = "$flag" ]
+  [ -z "$(sh "$work/args.sh" "$work/missing")" ]
+  echo "-config=/etc/elsewhere.json" >"$work/decision"
+  [ -z "$(sh "$work/args.sh" "$work/decision")" ]
+  : >"$work/decision"
+  [ -z "$(sh "$work/args.sh" "$work/decision")" ]
 }
 
 @test "every values key of openbao is one its pinned chart defines" {

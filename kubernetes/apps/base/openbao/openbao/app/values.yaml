@@ -57,9 +57,49 @@ server:
               component: server
           topologyKey: kubernetes.io/hostname
 
-  # Only openbao-0 reads the initial configuration, and only while neither other member answers;
-  # the script prints the -config flag for it, or nothing.
-  extraArgs: "$(sh /openbao/userconfig/openbao-initialize/initialize-args.sh)"
+  # Before every start, the guard decides whether this server reads the initial configuration: only
+  # openbao-0, with no data of its own, while the Kubernetes API answers that neither other member's
+  # claim exists, which is a first install. It reads the claims as the servers' own account, which
+  # rbac.yaml lets get those two claims and nothing else, and fails, so the pod does not start, when
+  # the API does not answer. The Flux CLI image carries kubectl, at the Flux version the repository
+  # pins; the guard runs as the servers' user under the pod's security context.
+  extraInitContainers:
+    - name: initialize-guard
+      # renovate: datasource=docker depName=ghcr.io/fluxcd/flux-cli
+      image: ghcr.io/fluxcd/flux-cli:v2.10.0
+      command:
+        - /bin/sh
+        - /openbao/userconfig/openbao-initialize/initialize-guard.sh
+        - /openbao/data
+        - /openbao/initialize/decision
+      env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        # kubectl keeps its discovery cache under HOME.
+        - name: HOME
+          value: /tmp
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+      volumeMounts:
+        - name: data
+          mountPath: /openbao/data
+          readOnly: true
+        - name: userconfig-openbao-initialize
+          mountPath: /openbao/userconfig/openbao-initialize
+          readOnly: true
+        - name: initialize
+          mountPath: /openbao/initialize
+  # The server reads the guard's decision: the -config flag of the initial configuration, or nothing.
+  extraArgs: "$(sh /openbao/userconfig/openbao-initialize/initialize-args.sh /openbao/initialize/decision)"
 
   # The CA the servers' own CLI verifies the listener with.
   extraEnvironmentVars:
@@ -67,7 +107,8 @@ server:
 
   # Mounted into the servers only, each under /openbao/userconfig/<name>: the seal key, the
   # listener's key and certificate, and the initial configuration. The chart's test pod also mounts
-  # what `volumes` lists, so only the CA is there. tests/openbao.bats fails if a chart drops this key.
+  # what `volumes` lists, so only the CA and the guard's empty decision directory are there.
+  # tests/openbao.bats fails if a chart drops this key.
   extraVolumes:
     - type: secret
       name: openbao-seal-1
@@ -82,9 +123,14 @@ server:
         items:
           - key: ca.crt
             path: ca.crt
+    - name: initialize
+      emptyDir: {}
   volumeMounts:
     - name: ca
       mountPath: /openbao/ca
+      readOnly: true
+    - name: initialize
+      mountPath: /openbao/initialize
       readOnly: true
 
   # Each member's raft data, on a claim of the default StorageClass, which is not named. The store

@@ -229,9 +229,15 @@ store is the ClusterSecretStore `openbao`, in its own application beside the ope
   change when no webhook answers.
 - The namespace enforces the restricted Pod Security level, which the chart's pods meet. No
   ServiceMonitor or dashboard is enabled.
+- The controller creates a service account's token, for a store that names one, only where a Role
+  allows it for that account by name: the chart's own grant to create every account's token is off
+  (`rbac.serviceAccountTokenCreate`), and `openbao-store`'s application holds the one Role, for its
+  own account ([OpenBao](#openbao)).
+- The chart adds creating and changing `ExternalSecret`s and secret stores to Kubernetes' `edit` and
+  `admin` roles, so whoever may edit a namespace may make an `ExternalSecret` there.
 
 `tests/external-secrets.bats` builds the application as Flux applies it and renders the chart to
-check each of these.
+check the first three of these, and `tests/openbao.bats` the token grant.
 
 ## Monitoring
 
@@ -281,8 +287,10 @@ each values key is one the chart or a subchart reads.
 ## cert-manager
 
 `apps/base/cert-manager/cert-manager/` installs cert-manager, which issues and renews the TLS
-certificates applications and gateways ask for, from the issuers they name (ADR 0006). No issuer is
-configured yet, so it issues nothing.
+certificates applications and gateways ask for, from the issuers they name (ADR 0006). Its only
+issuers are OpenBao's own, which are namespaced and sign OpenBao's listener certificate alone
+([OpenBao](#openbao)); no ClusterIssuer exists yet, so it issues nothing for an application or a
+gateway.
 
 It runs in its own namespace, `cert-manager`, at the restricted Pod Security level, from the
 publisher's chart in `oci://quay.io/jetstack/charts`; its leader election leases are there too, so
@@ -420,9 +428,10 @@ Gateway API therefore waits for `gateway-api-crds` to move first. The tests also
 and build both applications offline to check the rest of this section.
 
 No Gateway exists yet. A Gateway's proxies are reached through a Service of type LoadBalancer,
-which needs the cloud controller, and its HTTPS listener needs a certificate from an issuer, which
-cert-manager has none of yet. Until both are in place the controller accepts the GatewayClass and
-runs no proxy.
+which needs the cloud controller, and its HTTPS listener needs a certificate from an issuer that
+serves its namespace, which no issuer does yet: cert-manager's only issuers are OpenBao's, in the
+`openbao` namespace. Until both are in place the controller accepts the GatewayClass and runs no
+proxy.
 
 ## PostgreSQL
 
@@ -512,13 +521,13 @@ the operator keeps its recovery keys (ADR 0016). Three applications hold it:
 
 - `openbao/openbao` runs OpenBao in the namespace `openbao`. It names `external-secrets`,
   `cert-manager`, `linstor-cluster` and `prometheus-operator-crds` in `dependsOn`, for the seal key's
-  generator, its certificates, its volumes and its monitor; and sets `wait`, so it is Ready once every
-  member is unsealed. The first install starts three members one after another and can outlast the
-  three-minute timeout; the Kustomization then tries again every minute, while helm-controller's
-  own ten-minute install goes on, until the release is Ready.
-- `external-secrets/openbao-store` holds the ClusterSecretStore `openbao` and its service account. It
-  names `external-secrets` and `openbao` in `dependsOn`, and is Ready once the store reports Ready,
-  which a health check expression reads, as kstatus does not.
+  generator, its certificates, its volumes and its monitor; sets `wait`, so it is Ready once every
+  member is unsealed; and has the long timeout, as the first install starts three members one after
+  another.
+- `external-secrets/openbao-store` holds the ClusterSecretStore `openbao`, its service account and
+  the Role that lets External Secrets mint that account's tokens. It names `external-secrets` and
+  `openbao` in `dependsOn`, and is Ready once the store reports Ready, which a health check
+  expression reads, as kstatus does not.
 - `demo/hello-secret` holds one ExternalSecret that reads `demo/hello` through the store. It names
   `openbao-store` in `dependsOn` and does not wait, as the key exists once an operator writes it.
 
@@ -533,11 +542,19 @@ configuration and has no Service. Every Service is internal to the cluster.
 
 Three members run as a StatefulSet with OpenBao's integrated raft storage; each lists all three
 in `retry_join`, so a member that starts joins whichever leads. A member runs only on a worker, a
-node without the role label Talos gives every control plane, and never beside another member. Its
-raft data is on a 2 GiB claim of the default StorageClass, which the claim does not name: a few
-hundred small secrets, their versions, raft's log and the snapshots raft keeps beside it stay far
-below 100 MiB, and a thin volume uses only what is written. A member is Ready only while it is
-unsealed. A new release replaces one member at a time, each once the one before is Ready again.
+node without the role label Talos gives every control plane, and never beside another member. A
+member is Ready only while it is unsealed. A new release replaces one member at a time, each once
+the one before is Ready again.
+
+Each member's raft data is on a 2 GiB claim of the default StorageClass, which the claim does not
+name: a few hundred small secrets, their versions, raft's log and the snapshots raft keeps beside it
+stay far below 100 MiB, and a thin volume uses only what is written. The class keeps two copies of
+the volume on two workers, beside the three copies raft keeps itself, where the
+[Storage](#storageclasses) advice for an application that keeps its own copies is the node-local
+class. OpenBao takes the replicated one on purpose: a member whose worker loses its data volume
+comes back as itself, from LINSTOR's other copy, and rejoins as the same raft member, so a member
+starting empty, which takes the steps in [the runbook](runbooks/openbao.md#a-member-that-does-not-rejoin),
+stays an exception rather than what every lost disk causes.
 
 A drain evicts one member at a time: the disruption budget lets one of the three be unavailable,
 which leaves two, a majority. The evicted member keeps its claim, starts again once a node without
@@ -545,31 +562,44 @@ another member takes it, which on three workers is its own node once it is back,
 and unseals itself. Autopilot never removes a member for being away (`cleanup_dead_servers` is
 false), so it comes back as the same raft member.
 
-The namespace enforces the restricted Pod Security level, which the servers and the chart's test pod
-meet: they run as a non-root user with every capability dropped, no privilege escalation and the
-runtime's seccomp profile.
+The namespace enforces the restricted Pod Security level, which the servers, their init container
+and the chart's test pod meet: they run as a non-root user with every capability dropped, no
+privilege escalation and the runtime's seccomp profile.
 
 The listener serves TLS from a CA of OpenBao's own: in the `openbao` namespace a self-signed Issuer
 signs the CA `openbao-ca`, whose Issuer signs `openbao-tls`, the certificate for the Services, every
 member under `openbao-internal` and the loopback address. cert-manager renews it before it expires
 and the listener reloads it within 30 seconds. The store, the members joining each other, the
-servers' own CLI and the monitor all verify it against the CA.
+servers' own CLI and the monitor verify it against the CA. The chart's readiness probe does not: it
+asks the server in its own pod, over the loopback address, whether it is unsealed, where no other
+party can answer, and a certificate problem there would mark every member unready at once, which
+the clients that do verify report instead.
 
-OpenBao audits every request and response to its log, with each secret value in them hashed. The
-chart's ServiceMonitor scrapes the active member's `/v1/sys/metrics` without a token, which the
-listener allows for that path alone: metrics name no secret, and only the cluster's network reaches
-the listener.
+The chart's ServiceMonitor scrapes the active member's `/v1/sys/metrics` without a token, which the
+listener allows for that path alone. Anything that reaches the listener on the cluster's network
+can read it: request counts and timings by operation, the names of mounts, auth methods and
+policies, token counts, and raft's and the runtime's statistics; never a secret value, a token or
+a key. No Service exposes it outside the cluster.
+
+Every server logs at its default level, info, and audits every request and response to its log,
+with each value in them, every token and every share among them, hashed: no audit device writes
+anything in the clear. Self-initialisation logs its requests and responses, the root token among
+them, only at trace level, which nothing sets.
+
+No snapshot of the raft storage is taken yet. The role `snapshot` exists for the job that will take
+them, which needs the object storage's key, a secret this store will hold.
 
 ### How it unseals
 
 OpenBao's static seal unseals each member at every start with a 32-byte key from a file, without a
 person. The key is in the Secret `openbao-seal-1` in `openbao`, mounted into the servers alone, not
 into the chart's test pod. External Secrets makes it, once: its `Password` generator gives 32
-characters, hex-encoded into the 64 hexadecimal digits the seal reads, and the ExternalSecret
-`openbao-seal-1` writes them into the Secret when it is first synced and never again
-(`refreshPolicy: CreatedOnce`). The Secret has no owner, so deleting the ExternalSecret or the
-application leaves it, and it is immutable, so nothing changes the key; an ExternalSecret made again
-later finds it and keeps its key. Nothing in the repository holds it, encrypted or not.
+characters of letters, digits and symbols, about 190 bits, hex-encoded into the 64 hexadecimal
+digits the seal reads, and the ExternalSecret `openbao-seal-1` writes them into the Secret when it is
+first synced and never again (`refreshPolicy: CreatedOnce`). The Secret has no owner, so deleting the
+ExternalSecret or the application leaves it, and it is immutable, so nothing changes the key; an
+ExternalSecret made again later finds it and keeps its key. Nothing in the repository holds it,
+encrypted or not.
 
 The key protects OpenBao's storage and every copy of it, such as a volume or its snapshot, read
 outside the cluster: without the key it is ciphertext. It does not protect against whoever can read
@@ -581,75 +611,141 @@ review, and whoever holds the Talos age key, which opens the etcd snapshots
 
 ### How it initialises
 
-On empty storage, `openbao-0` initialises OpenBao once from the initialize stanzas in
+OpenBao initialises once, on a first install, from the initialize stanzas in
 `app/initialize/initialize.json`, OpenBao's self-initialisation: it enables the Kubernetes auth
 method, which checks a token with the API server's TokenReview as the servers' own service account;
-mounts the key-value store, version 2, at `secrets/`; writes the policies and roles below; and turns
-autopilot's dead-server cleanup off. OpenBao runs them with the root token it initialised with, then
-revokes it, and never returns it; no root token exists after the first start. It logs the requests
-and responses at trace level only, which the servers do not run at.
+mounts the key-value store, version 2, at `secrets/`; writes the three policies and roles below; and
+turns autopilot's dead-server cleanup off. OpenBao runs them with the root token it initialised
+with, then revokes it, and never returns it; no root token exists after the first start.
 
-| Role | Logs in as | Policy |
-|------|------------|--------|
-| `external-secrets` | the service account `openbao-store` in `external-secrets`, audience `openbao` | read `secrets/data/*`, read and list `secrets/metadata/*` |
-| `operator` | the service account `openbao-operator` in `openbao`, audience `openbao` | create and patch `secrets/data/*`; make the recovery keys |
+Before every start of every member, the init container `initialize-guard` decides whether that
+server reads the stanzas (`app/initialize/initialize-guard.sh`). Only `openbao-0` may, and only on
+positive evidence of a first install: its own data directory is empty, and the Kubernetes API answers
+that neither `data-openbao-1` nor `data-openbao-2` exists. The StatefulSet makes those claims when it
+first starts the other members and keeps them for the cluster's life, so either one means the store
+exists. The guard reads them with kubectl, from the Flux CLI image at the Flux version the repository
+pins, as the servers' own account, which the Role `openbao-initialize-guard` lets get those two
+claims and nothing else. When the API gives no answer, whatever the reason, the guard fails, and the
+pod does not start; it never initialises on missing evidence. The server takes the decision through
+`app/initialize/initialize-args.sh`, which passes the `-config` flag only as the guard wrote it.
 
-Only `openbao-0` reads the stanzas, and only while neither other member answers:
-`app/initialize/initialize-args.sh` gives the server its arguments. On the first install the others
-do not exist yet, as each member starts once the one before is Ready; later, an `openbao-0` whose
-volume is new joins the members that answer instead of starting a second store. The stanzas never
-run again on initialised storage, so a role, policy or mount changes afterwards through OpenBao's API
-([runbook](runbooks/openbao.md)).
+An `openbao-0` whose volume is new while the other members' claims exist therefore never starts a
+second, empty store: it waits to join them. When they run, it joins and copies the store. When they
+do not, as after a full restart, the StatefulSet starts `openbao-0` first and the others only once it
+is Ready, which an empty `openbao-0` never becomes alone, so the store stays down until the
+[runbook](runbooks/openbao.md#a-member-that-does-not-rejoin) brings the others up first. That is the
+price of never running two stores behind the active Service.
+
+Self-initialisation marks storage as started before it runs and clears the mark when it completes;
+a server that finds the mark refuses to unseal. A first install whose initialisation failed or was
+cut short is therefore started again from nothing, as the
+[runbook](runbooks/openbao.md#a-first-initialisation-that-failed) says. The stanzas never run again on
+initialised storage, so a role, policy or mount changes afterwards with a root token from the
+recovery keys (`just bao-root`).
+
+### Who may do what
+
+| Role | Logs in as | May |
+|------|------------|-----|
+| `external-secrets` | `openbao-store` in `external-secrets` | read and list every key of `secrets/`; look up and revoke its own token |
+| `operator` | `openbao-operator` in `openbao` | create keys of `secrets/` and change them, never read them; make the recovery keys while none exist, and rotate them with three of the current shares; start a root token generation, which completes only with three shares; revoke its own token |
+| `snapshot` | `openbao-snapshot` in `openbao` | take a snapshot of the raft storage; no job logs in as it yet |
+
+Each role checks the audience `openbao`, carries one policy and not OpenBao's `default` policy, and
+gives ten-minute tokens, which `external-secrets` may renew for up to an hour. No pod mounts a token
+of the three accounts; a token for one is minted through the Kubernetes API by a subject allowed to
+create `serviceaccounts/token` for it:
+
+- `openbao-store`: External Secrets' controller, through the Role `openbao-store-token`, for this
+  account alone; its chart's grant to create every account's token is off.
+- `openbao-operator` and `openbao-snapshot`: cluster administrators, as the operator's kubeconfig
+  is, and the Flux Operator and Flux's controllers, which hold cluster-admin to apply the tree.
+
+No other chart the tree installs grants creating service account tokens; the Piraeus operator's
+one wildcard rule is confined to LINSTOR's own API group.
+
+The `operator` role reaches the recovery keys and, through them, a root token. While no recovery
+keys exist, the first caller of the recovery key rotation receives new ones, so `just bao-recovery`
+runs right after the first reconcile, before anything else uses the role; from then on a root token
+takes three of the shares, which only the operator's file holds. If `bao-recovery`'s first run finds
+recovery keys already, someone else holds them, and the store is rebuilt
+([runbook](runbooks/openbao.md#first-initialisation)). Who may mint an `operator` token holds
+cluster-admin, and with it the seal Secret and every Secret the store fills.
 
 ### What the operator keeps
 
-Self-initialisation makes no recovery keys. Once OpenBao first runs, `just bao-recovery <file>` makes
-them, through OpenBao's authenticated rotation as the role `operator`: five shares, any three of which
-make a short-lived root token when the roles no longer reach what has to be fixed. It writes them,
-with the seal key, to `<file>`, a new file outside the repository, encrypted with age to the Talos
-age key's recipient in `talos/.sops.yaml`, a key the cluster does not hold, and has OpenBao commit the
-shares only once the file is written. Nothing of either is printed or passed as an argument. OpenBao
-makes recovery keys only while none exist, so the recipe refuses once they do: the file holds the
-only copy. The operator keeps it outside the cluster, with the Talos age key.
+Self-initialisation makes no recovery keys. Right after the first reconcile, `just bao-recovery <file>`
+makes them, through OpenBao's authenticated rotation as the role `operator`: five shares, any three
+of which make a short-lived root token when the roles no longer reach what has to be fixed. It writes
+them, with the seal key, to `<file>`, a new file outside the repository, encrypted with age to the
+Talos age key's recipient in `talos/.sops.yaml`, a key the cluster does not hold; opens it again with
+the operator's Talos age key and compares it with what it wrote; and has OpenBao commit the shares
+only then. A rotation it starts and does not complete is cancelled and its file removed; one left in
+progress by an earlier run is cancelled first; a file made at the path meanwhile is never replaced.
+Nothing of the shares or the key is printed or passed as an argument. OpenBao makes recovery keys
+only while none exist, so the recipe refuses once they do: the file holds the only copy. The operator
+keeps it outside the cluster, with the Talos age key.
 
-### How a secret gets in, and how an application gets it out
+### The recipes
 
-`just bao-put <path> <key>` writes one value, read from standard input, typed without echo at a
-terminal or piped in without the newlines that end it, as the key `<key>` of the secret at
-`secrets/<path>` in `lab-sto2`. The secret keeps its other keys, or is created. It takes exactly the
-two arguments, and a refusal repeats none of them, so a value typed where an argument goes is not
-printed. The recipe opens a port-forward to
-`openbao-active` and closes it on every exit; verifies OpenBao's certificate against the CA; mints a
-ten-minute token for `openbao-operator` with the audience `openbao`, logs in as `operator`, and
-revokes OpenBao's token when it is done. The value travels only in the body of the write; the recipe
-prints the path and the key. Through the cluster's kubeconfig it needs to create
-`serviceaccounts/token` for `openbao-operator`, to port-forward to the pods of `openbao-active`, and
-to read the Secret `openbao-ca`; `bao-recovery` also reads `openbao-seal-1`.
+Each recipe opens a port-forward to `openbao-active` and closes it on every exit; verifies OpenBao's
+certificate against the CA; mints a ten-minute token for `openbao-operator` with the audience
+`openbao`, logs in as `operator`, and revokes OpenBao's token when it is done. Through the cluster's
+kubeconfig it needs to create `serviceaccounts/token` for `openbao-operator`, to port-forward to the
+pods of `openbao-active`, and to read the Secret `openbao-ca`. A file it reads, the operator's, opens
+with the Talos age key from `SOPS_AGE_KEY_FILE`, or `SOPS_AGE_KEY`, into memory only.
 
-An application reads it with an ExternalSecret that names the ClusterSecretStore `openbao`, the path
-as `remoteRef.key` and the key as `remoteRef.property`. The store logs in as `external-secrets`, with
-a token External Secrets mints for `openbao-store`, and reads the key-value mount and nothing else.
-`demo/hello-secret` is the example: after `just bao-put demo/hello greeting`, the Secret `hello` in
-`demo` holds the key `greeting`. Every namespace may name the store, and the store reads the whole
-mount, so what an application gets is decided by the ExternalSecrets in Git, which Flux alone
-applies.
+- `just bao-put <path> <key>` writes one value, read from standard input, typed without echo at a
+  terminal or piped in without the newlines that end it, as the key `<key>` of the secret at
+  `secrets/<path>` in `lab-sto2`. The secret keeps its other keys, or is created. It takes exactly
+  the two arguments, and a refusal repeats none of them, so a value typed where an argument goes is
+  not printed. The value travels only in the body of the write; the recipe prints the path and the
+  key.
+- `just bao-recovery <file> [cluster]` makes the recovery keys once, as above; it also reads the
+  Secret `openbao-seal-1`.
+- `just bao-root <file> <command> [argument...]` makes a root token from three shares of the file,
+  runs the command with it in `BAO_TOKEN`, and OpenBao's address through the port-forward, its CA
+  and its certificate's name in `BAO_ADDR`, `BAO_CACERT` and `BAO_TLS_SERVER_NAME`, as OpenBao's CLI
+  reads them, then revokes it, however the command ends. It prints no share and no token; a
+  generation it started and did not finish is cancelled.
+- `just bao-seal-restore <file> [--replace]` writes the seal key from the file back into the Secret
+  `openbao-seal-1`, immutable; a Secret that holds the same key is left alone, and one that holds
+  another key is replaced only with `--replace`. It needs no port-forward, only to read, create and,
+  with `--replace`, delete that Secret.
+
+### How an application gets a secret out
+
+An application reads a key with an ExternalSecret that names the ClusterSecretStore `openbao`, the
+path as `remoteRef.key` and the key as `remoteRef.property`. The store logs in as `external-secrets`
+and reads the key-value mount and nothing else. `demo/hello-secret` is the example: after
+`just bao-put demo/hello greeting`, the Secret `hello` in `demo` holds the key `greeting`.
+
+The store's reach is the whole mount, for every namespace: it sets no conditions, so an
+ExternalSecret in any namespace may name it and read any key. Whoever may create an ExternalSecret
+in a namespace, which External Secrets adds to Kubernetes' `edit` and `admin` roles, may therefore
+read every key into a Secret there. No RoleBinding in the tree grants either role to anyone, so today
+that is cluster administrators and Flux, which applies the ExternalSecrets in Git after review;
+giving someone a namespace gives them the mount with it.
 
 ### When something is lost
 
 - **The seal Secret, with the volumes intact**: the members that run keep serving, unsealed; one that
   restarts cannot start, as the Secret it mounts is missing, and the data stays sealed on its volume.
-  Writing the key back from the operator's file, or from an etcd snapshot, brings it back
-  ([runbook](runbooks/openbao.md)).
+  `just bao-seal-restore` writes the key back from the operator's file; an etcd snapshot also holds
+  it ([runbook](runbooks/openbao.md#bringing-the-seal-key-back)).
 - **The seal Secret and every copy of it**: every runtime secret is lost. OpenBao starts again empty
-  only once its claims are deleted, and every secret is written again.
+  only once its three claims, the Secret and the ExternalSecret `openbao-seal-1` are deleted: the
+  ExternalSecret has synced once and never makes a missing Secret again, so Flux makes it anew, it
+  makes a new key, and every secret is written again.
 - **The operator's file**: nothing is lost while the roles work. If a role or policy breaks, the way
   back to privileged access is gone, and new recovery keys need a threshold of the old ones; what is
   left is a new OpenBao with every secret written again.
 - **One member's volume**: the member starts empty, does not initialise, and joins the others, which
-  hold every secret; the runbook says what to do when it does not rejoin.
+  hold every secret; [the runbook](runbooks/openbao.md#a-member-that-does-not-rejoin) says what to do
+  when it does not rejoin.
 
-Snapshots of the raft storage to object storage are not taken yet; a restore of one will need the
-seal key it was taken under, which the operator's file holds.
+A restore of a snapshot of the raft storage, once they are taken, will need the seal key it was
+taken under, which the operator's file holds.
 
 ## Flux itself
 

@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Makes a short-lived root token for OpenBao from the recovery keys in the operator's custody file,
+# runs one command with it and revokes it: the way back to privileged access when a role, a policy
+# or a mount has to change after the first start, as the initial configuration never runs again
+# (docs/runbooks/openbao.md). As the role operator, through the session of scripts/lib/openbao.sh,
+# it starts OpenBao's authenticated root token generation, gives it a threshold of the shares,
+# decrypted from FILE with the Talos age key into memory only, and has OpenBao decode the result.
+# The command runs with the token in BAO_TOKEN, and OpenBao's address through the port-forward, its
+# CA and its certificate's name in BAO_ADDR, BAO_CACERT and BAO_TLS_SERVER_NAME, as OpenBao's CLI
+# reads them; it prints what it prints, and nothing here prints a share or a token. A generation it
+# started and did not finish is cancelled, and the token is revoked however the command ends.
+# Usage: scripts/bao-root <file> <command> [argument...]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/openbao.sh
+. "$here/lib/openbao.sh"
+
+if (($# < 2)); then
+  echo "bao-root: give the custody file bao-recovery wrote and the command to run: just bao-root <file> <command> [argument...]" >&2
+  exit 1
+fi
+file=$1
+shift
+
+# An empty argument, so cluster-env takes lab-sto2 and not this script's own arguments.
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" ""
+complete=1
+require_commands kubectl curl jq base64 age || complete=0
+require_kubeconfig || complete=0
+require_age_key || complete=0
+if [[ ! -f $file ]]; then
+  infra_error "$file is not a file; give the custody file bao-recovery wrote"
+  complete=0
+fi
+((complete))
+
+# generating is 1 from the request that starts a generation until OpenBao has the last share.
+generating=0 root_token=""
+
+# bao_abort: revokes the root token while it exists, and cancels a generation this run started and
+# did not finish, so OpenBao takes a new one later.
+bao_abort() {
+  local operator=${bao_token-}
+  if [[ -n $root_token ]]; then
+    bao_token=$root_token
+    bao_request POST auth/token/revoke-self < /dev/null > /dev/null ||
+      infra_error "could not revoke the root token; revoke it with the next run of this recipe"
+    bao_token=$operator root_token=""
+  fi
+  if ((generating)); then
+    bao_request DELETE sys/generate-root-token/attempt > /dev/null 2>&1 || true
+  fi
+}
+
+step="opening $file with the Talos age key"
+custody=$(bao_decrypt "$file")
+if ! printf '%s' "$custody" | jq -e '.recovery.keys_base64 | length > 0' > /dev/null; then
+  infra_error "$file holds no recovery keys"
+  exit 1
+fi
+
+bao_open
+bao_login
+
+# One generation runs at a time; one left by a run that was cut short is cancelled.
+step="cancelling a root token generation left in progress"
+if bao_request GET sys/generate-root-token/attempt | jq -e '.started == true' > /dev/null; then
+  bao_request DELETE sys/generate-root-token/attempt > /dev/null
+fi
+
+step="starting a root token generation"
+generating=1
+attempt=$(printf '{}' | bao_request PUT sys/generate-root-token/attempt)
+required=$(printf '%s' "$attempt" | jq -r '.required')
+step="giving OpenBao $required recovery key shares"
+for ((share = 0; share < required; share++)); do
+  progress=$({
+    printf '%s\n' "$attempt"
+    printf '%s\n' "$custody"
+  } | jq -sc --argjson share "$share" '{key: .[1].recovery.keys_base64[$share], nonce: .[0].nonce}' |
+    bao_request PUT sys/generate-root-token/update)
+done
+custody=
+if ! printf '%s' "$progress" | jq -e '.complete == true' > /dev/null; then
+  infra_error "OpenBao did not complete the root token generation"
+  exit 1
+fi
+generating=0
+
+step="decoding the root token"
+root_token=$({
+  printf '%s\n' "$attempt"
+  printf '%s\n' "$progress"
+} | jq -sc '{encoded_token: .[1].encoded_token, otp: .[0].otp}' | bao_request POST sys/decode-token |
+  jq -r '.data.token // empty')
+attempt="" progress=""
+if [[ -z $root_token ]]; then
+  infra_error "OpenBao decoded no root token"
+  exit 1
+fi
+
+step="running $1 with the root token"
+ran=0
+BAO_TOKEN=$root_token BAO_ADDR="https://localhost:$bao_local_port" BAO_CACERT="$work_dir/ca.crt" \
+  BAO_TLS_SERVER_NAME=$bao_host "$@" || ran=$?
+step="revoking the root token"
+bao_abort
+if ((ran != 0)); then
+  infra_error "$1 exited $ran; the root token is revoked"
+  exit "$ran"
+fi
+echo "bao-root: $1 ran with a root token, which is revoked"
