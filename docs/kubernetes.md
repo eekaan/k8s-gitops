@@ -390,7 +390,7 @@ to check that its definitions are kept.
 
 VolSync backs an application's volume up to the VolSync bucket
 ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)) with its restic mover, and
-fills the volume from the latest backup when it is created (ADR 0013).
+fills the volume from the latest backup when it is created (ADR 0015).
 
 `apps/base/volsync-system/volsync/` installs the operator in its own namespace, `volsync-system`,
 at the restricted Pod Security level. Its publisher releases the chart only to a classic Helm

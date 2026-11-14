@@ -4,7 +4,7 @@ apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 
 # Backs an application's volume up on a schedule to a restic repository of its own in the VolSync
-# bucket, and fills the volume from the latest backup when it is created (ADR 0013). The component
+# bucket, and fills the volume from the latest backup when it is created (ADR 0015). The component
 # makes the volume, a PersistentVolumeClaim on the default StorageClass. An application adds it in
 # its ks.yaml:
 #

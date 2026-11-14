@@ -1,4 +1,4 @@
-# 0013 — Volume backups with VolSync's restic mover
+# 0015 — Volume backups with VolSync's restic mover
 
 - Status: accepted
 - Date: 2026-11-14

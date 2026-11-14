@@ -1,5 +1,5 @@
 Feature: Volume backups
-  An application's volume is backed up on a schedule to its own restic repository in the VolSync bucket, and restored from the latest backup when the volume is created: the VolSync operator under Flux, and the volsync component an application opts into (ADR 0013). No secret store holds the repository's credentials yet, so no backup runs.
+  An application's volume is backed up on a schedule to its own restic repository in the VolSync bucket, and restored from the latest backup when the volume is created: the VolSync operator under Flux, and the volsync component an application opts into (ADR 0015). No secret store holds the repository's credentials yet, so no backup runs.
 
   Scenario: The VolSync operator runs in its own namespace with its resource definitions
     Given the volsync application and its namespace directory, enabled in the cluster's overlay

@@ -3,7 +3,7 @@
 - Status: accepted
 - Date: 2026-11-14
 - Amended: 2026-11-14, application volumes are backed up by VolSync's restic mover, as upstream
-  VolSync has no Kopia mover ([ADR 0013](0013-volume-backups-with-volsyncs-restic-mover.md))
+  VolSync has no Kopia mover ([ADR 0015](0015-volume-backups-with-volsyncs-restic-mover.md))
 
 ## Context
 
@@ -18,7 +18,7 @@ managed keys.
   apply. Each stack has its own state object.
 - etcd snapshots are encrypted with age before upload.
 - Application volumes are backed up by VolSync, and Postgres by its operator's object-store
-  backups; both encrypt client-side. This record chose VolSync's Kopia mover. ADR 0013 replaces
+  backups; both encrypt client-side. This record chose VolSync's Kopia mover. ADR 0015 replaces
   that part of it: volumes are backed up with VolSync's restic mover.
 - Workloads in the cluster use an S3 credential separate from the one that holds state.
 
