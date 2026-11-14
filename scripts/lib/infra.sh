@@ -173,11 +173,12 @@ allowlist_shortest_prefix=16
 # one, from OPERATOR_CIDRS (CI) or operator-cidrs.json at the repository root: a non-empty JSON list
 # of IPv4 CIDRs, none wider than allowlist_shortest_prefix and none with bits set below its prefix.
 # A wrong entry is named by its position and the rule it breaks, as the list is the operator's own
-# and is never printed. jq's own errors would quote the list, so they are dropped.
+# and is never printed. jq's own errors would quote the list, so they are dropped; a list jq cannot
+# check is refused, never passed.
 export_api_allowed_cidrs() {
-  local variable=TF_VAR_${1:-api_allowed_cidrs} from cidrs position problem refused=0
+  local variable=TF_VAR_${1:-api_allowed_cidrs} from cidrs position problem problems refused=0
   local valid='select(type == "array" and length > 0 and all(.[]; type == "string"
-    and test("^([0-9]{1,3}[.]){3}[0-9]{1,3}/[0-9]{1,2}$|^[0-9A-Fa-f:]+/[0-9]{1,3}$")))'
+    and test("^([0-9]{1,3}[.]){3}[0-9]{1,3}/[0-9]{1,2}\\z|^[0-9A-Fa-f:]+/[0-9]{1,3}\\z")))'
   if [[ -n ${OPERATOR_CIDRS:-} ]]; then
     from=OPERATOR_CIDRS
     cidrs=$(jq -nce "env.OPERATOR_CIDRS | fromjson | $valid" 2> /dev/null) || cidrs=
@@ -196,16 +197,7 @@ export_api_allowed_cidrs() {
   # variables of the cluster and ci stacks check it, so a run outside the recipes is held to the
   # same rule: written as tofu's cidrsubnet gives it back, no bit set below the prefix, and no wider
   # than the shortest prefix.
-  while read -r position problem; do
-    case $problem in
-      ipv6) infra_error "$from entry $position is an IPv6 network; the stacks take IPv4 networks only" ;;
-      form) infra_error "$from entry $position is not an IPv4 network written as in 192.0.2.0/24, without leading zeros" ;;
-      all) infra_error "$from entry $position covers every address; the allowlist names the operator's own networks" ;;
-      wide) infra_error "$from entry $position is wider than /$allowlist_shortest_prefix; the allowlist names the operator's own networks" ;;
-      bits) infra_error "$from entry $position has bits set below its prefix; a network is written by its own address, as in 192.0.2.0/24" ;;
-    esac
-    refused=1
-  done < <(jq -r --argjson shortest "$allowlist_shortest_prefix" '
+  problems=$(jq -r --argjson shortest "$allowlist_shortest_prefix" '
     def octet: test("^(0|[1-9][0-9]{0,2})$") and tonumber <= 255;
     def problem:
       if test(":") then "ipv6"
@@ -220,7 +212,20 @@ export_api_allowed_cidrs() {
             % pow(2; 32 - ($length | tonumber))) != 0) then "bits"
           else empty end
       end;
-    to_entries[] | .key as $i | (.value | problem) as $problem | "\($i + 1) \($problem)"' <<< "$cidrs")
+    to_entries[] | .key as $i | (.value | problem) as $problem | "\($i + 1) \($problem)"' <<< "$cidrs" 2> /dev/null) || {
+    infra_error "$from could not be checked"
+    return 1
+  }
+  while read -r position problem; do
+    case $problem in
+      ipv6) infra_error "$from entry $position is an IPv6 network; the stacks take IPv4 networks only" ;;
+      form) infra_error "$from entry $position is not an IPv4 network written as in 192.0.2.0/24, without leading zeros" ;;
+      all) infra_error "$from entry $position covers every address; the allowlist names the operator's own networks" ;;
+      wide) infra_error "$from entry $position is wider than /$allowlist_shortest_prefix; the allowlist names the operator's own networks" ;;
+      bits) infra_error "$from entry $position has bits set below its prefix; a network is written by its own address, as in 192.0.2.0/24" ;;
+    esac
+    refused=1
+  done <<< "$problems"
   ((!refused)) || return 1
   export "$variable=$cidrs"
 }

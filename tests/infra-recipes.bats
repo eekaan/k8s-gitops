@@ -412,8 +412,8 @@ absent() {
   done
 }
 
-# stack_accepts STACK VARIABLE ENTRY: whether the variable of the stack, given the allowlist of the
-# one ENTRY, passes its validation. The variable's block is planned alone, as tofu does with a
+# stack_accepts STACK VARIABLE ENTRY...: whether the variable of the stack, given the allowlist of
+# the ENTRYs, passes its validation. The variable's block is planned alone, as tofu does with a
 # variable it is given outside the recipes.
 stack_accepts() {
   local dir="$BATS_TEST_TMPDIR/validation/$1"
@@ -421,12 +421,12 @@ stack_accepts() {
   awk -v name="$2" '$0 == "variable \"" name "\" {" {p = 1} p {print} p && /^}/ {exit}' \
     "$REPO/infra/openstack/stacks/sto2/$1/variables.tf" > "$dir/main.tf"
   [ -s "$dir/main.tf" ]
-  (cd "$dir" && tofu plan -input=false -no-color -var="$2=$(jq -cn --arg entry "$3" '[$entry]')" > /dev/null 2>&1)
+  (cd "$dir" && tofu plan -input=false -no-color -var="$2=$(jq -cn '$ARGS.positional' --args "${@:3}")" > /dev/null 2>&1)
 }
 
-# shell_accepts ENTRY: whether the recipes' check passes the allowlist of the one ENTRY.
+# shell_accepts ENTRY...: whether the recipes' check passes the allowlist of the ENTRYs.
 shell_accepts() {
-  OPERATOR_CIDRS=$(jq -cn --arg entry "$1" '[$entry]') \
+  OPERATOR_CIDRS=$(jq -cn '$ARGS.positional' --args "$@") \
     bash -c '. "$1/scripts/lib/infra.sh" && export_api_allowed_cidrs' _ "$REPO" > /dev/null 2>&1
 }
 
@@ -452,6 +452,20 @@ shell_accepts() {
       return 1
     fi
   done
+  # An entry that ends in a newline, alone and ahead of an entry no check may let through: a
+  # check that stops at the first entry it cannot read must not let the rest pass unchecked.
+  echo "refused: an entry ending in a newline"
+  if shell_accepts $'192.0.2.0/24\n' || stack_accepts cluster api_allowed_cidrs $'192.0.2.0/24\n' ||
+    stack_accepts ci ssh_allowed_cidrs $'192.0.2.0/24\n'; then
+    echo "accepted by a check that should refuse it" >&2
+    return 1
+  fi
+  echo "refused: an entry ending in a newline, then 0.0.0.0/1"
+  if shell_accepts $'192.0.2.0/24\n' 0.0.0.0/1 || stack_accepts cluster api_allowed_cidrs $'192.0.2.0/24\n' 0.0.0.0/1 ||
+    stack_accepts ci ssh_allowed_cidrs $'192.0.2.0/24\n' 0.0.0.0/1; then
+    echo "accepted by a check that should refuse it" >&2
+    return 1
+  fi
 }
 
 @test "The infrastructure recipes run tofu with only the secrets it uses" {
