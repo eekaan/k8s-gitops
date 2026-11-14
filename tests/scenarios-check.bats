@@ -30,15 +30,16 @@ has_line() {
   return 1
 }
 
-@test "Every recipe that proves a scenario runs in just ci" {
+@test "Every recipe that proves a scenario runs in the hermetic run" {
   root=$(cd "$BATS_TEST_DIRNAME/.." && pwd)
   mapfile -t proving < <(grep -rhoE '(^|[[:blank:]])@by:[^[:blank:]]+' "$root/features" | sed 's/.*@by://' | sort -u)
   [ "${#proving[@]}" -gt 0 ]
-  # The recipes just ci runs: its dependencies and theirs, as just reads the justfile and its imports.
+  # The recipes just ci runs: the checks recipe's dependencies and theirs, as just reads the
+  # justfile and its imports; the Dagger module reads the same list.
   ran=$(just --justfile "$root/justfile" --dump --dump-format json | jq -r '
     .recipes as $recipes
     | def runs($name): $recipes[$name].dependencies[]?.recipe | (., runs(.));
-    [runs("ci")] | unique[]')
+    [runs("checks")] | unique[]')
   [ -n "$ran" ]
   for recipe in "${proving[@]}"; do
     if ! grep -qxF -- "$recipe" <<< "$ran"; then

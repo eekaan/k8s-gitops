@@ -2,10 +2,11 @@
 # Fails when a file git would commit, tracked or untracked and not ignored, holds an IPv4 literal
 # that is not known to be safe to publish. The address check's own fixtures, which exist to be
 # flagged, are skipped. With --commit-messages it checks the messages of the commits between the
-# default branch and HEAD instead, by the same rules: the remote's default branch, or a local main,
-# when either exists.
+# default branch and HEAD instead, by the same rules: the remote's default branch, the remote's main
+# as a CI checkout fetches it, or a local main, when one exists. With --base it prints the commit
+# where HEAD's history leaves that branch, or nothing without one.
 # IPv6 literals are out of scope: nothing here matches them.
-# Usage: scripts/check-address-literals [--commit-messages]
+# Usage: scripts/check-address-literals [--commit-messages | --base]
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -76,14 +77,27 @@ scan() {
 
 advice="Use a documentation range (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24), read the value at run time, or declare it in .address-allowlist with the reason it is safe to publish."
 
-if [[ ${1-} == --commit-messages ]]; then
-  base=
-  for ref in refs/remotes/origin/HEAD refs/heads/main; do
+# Prints the default branch's ref, or nothing. A clone names the remote's default branch in
+# origin/HEAD; a CI checkout fetches the remote's branches without naming one.
+default_branch() {
+  local ref
+  for ref in refs/remotes/origin/HEAD refs/remotes/origin/main refs/heads/main; do
     if git rev-parse --verify -q "$ref^{commit}" > /dev/null; then
-      base=$ref
-      break
+      echo "$ref"
+      return
     fi
   done
+}
+
+if [[ ${1-} == --base ]]; then
+  # A copy of HEAD's history alone, as the hermetic run gets, holds this commit but no other ref.
+  base=$(default_branch)
+  if [[ -n $base ]]; then
+    git merge-base HEAD "$base"
+  fi
+  exit 0
+elif [[ ${1-} == --commit-messages ]]; then
+  base=$(default_branch)
   if [[ -z $base ]]; then
     echo "No default branch to compare HEAD with; no commit messages to check."
     exit 0
@@ -103,7 +117,7 @@ if [[ ${1-} == --commit-messages ]]; then
   echo "No undeclared address literals in the $count commit messages after $(git rev-parse --abbrev-ref "$base")."
   exit 0
 elif (( $# > 0 )); then
-  echo "usage: check-address-literals [--commit-messages]" >&2
+  echo "usage: check-address-literals [--commit-messages | --base]" >&2
   exit 2
 fi
 

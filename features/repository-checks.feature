@@ -26,6 +26,11 @@ Feature: Repository checks
     When the commit message check runs
     Then it exits non-zero naming the commit, the line and the literal after the default branch, and nothing else; without a default branch it exits zero saying so
 
+  Scenario: The commit message check finds the default branch in a CI checkout
+    Given a checkout as a CI job makes it: remote branches fetched, no default branch named for the remote, no local main, and a commit after the remote's main whose message holds an IPv4 address outside the allowed ranges
+    When the commit message check runs
+    Then it exits non-zero naming the commit and the literal
+
   Scenario: The secrets scan exempts only the address check's fixtures
     Given a key in the shape of a cloud access key under tests/fixtures/check-address-literals/ and under another fixtures directory
     When the secrets scan runs

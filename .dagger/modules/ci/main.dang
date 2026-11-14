@@ -1,0 +1,75 @@
+"""
+Runs the repository's checks in containers built from its pins.
+"""
+type Ci {
+  """
+  The files git would commit; ignored files such as a local kubeconfig stay on the host.
+  """
+  let source: Directory!
+
+  """
+  Git metadata with the full history of HEAD, self-contained even when the checkout is a linked worktree.
+  """
+  let git: Directory!
+
+  new(ws: Workspace!) {
+    self.source = ws.directory("/", exclude: [".git"], gitignore: true)
+    self.git = ws.git.directory
+    self
+  }
+
+  """
+  Run every dependency of the justfile's checks recipe once and return the output: renovate-check as Renovate's validator in its own image, the others with just in a container built from the tools pinned in mise.toml.
+  """
+  pub checks(
+    """
+    The image renovate-check runs Renovate's validator from.
+    """
+    renovateImage: String!,
+
+    """
+    The commit where HEAD's history leaves the default branch, or empty without one; the messages of the commits after it are checked.
+    """
+    base: String! = "",
+  ): String! {
+    let renovate = container
+      .from(renovateImage)
+      .withMountedDirectory("/usr/src/app", source.filter(include: ["renovate.json5", ".renovate/"]))
+      .withWorkdir("/usr/src/app")
+      .withExec(["sh", "-c", "renovate-config-validator --strict --no-global renovate.json5 .renovate/*.json5"])
+      .combinedOutput
+    let others = tools
+      .withDirectory("/src", source)
+      .withDirectory("/src/.git", git)
+      # The snapshot's index matches HEAD, so a file staged here but not yet committed would look untracked.
+      .withExec(["git", "add", "--all"])
+      # The snapshot holds HEAD's history and no other ref, so the default branch is named where it
+      # leaves that history, under the name a CI checkout gives the remote's main.
+      .withExec(["sh", "-c", """if [ -n "$1" ]; then git update-ref refs/remotes/origin/main "$1"; fi""", "sh", base])
+      .withExec(["sh", "-c", """
+        set -eu
+        # renovate-check runs the validator through docker, which this container lacks; it ran in its own image above.
+        recipes=$(just --dump --dump-format json | jq -r '.recipes.checks.dependencies[].recipe | select(. != "renovate-check")')
+        # Without a recipe, just would run its default and pass having checked nothing.
+        test -n "$recipes"
+        # One just run, so a recipe that several others depend on runs once.
+        just $recipes
+      """])
+      .combinedOutput
+    renovate + others
+  }
+
+  """
+  The pinned tools, in a layer that depends on mise.toml alone, so changes to other files reuse it.
+  """
+  let tools: Container! {
+    container
+      .from("jdxcode/mise:2026.11.4-debian@sha256:7769fb680659f7730db5b9c0d245c00ba517dfec9c720f6679248cb32e124095")
+      # mise installs yamllint through its pypi backend, which needs pipx and Python.
+      .withExec(["sh", "-c", "apt-get update && apt-get install -y --no-install-recommends pipx && rm -rf /var/lib/apt/lists/*"])
+      .withWorkdir("/src")
+      .withEnvVariable("MISE_TRUSTED_CONFIG_PATHS", "/src")
+      .withFile("/src/mise.toml", source.file("mise.toml"))
+      .withExec(["mise", "install"])
+  }
+}

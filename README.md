@@ -20,17 +20,22 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
 [just](https://just.systems) installed:
 
 - `just tools` installs the pinned tools.
-- `just ci` runs every check that needs no credentials: tool versions, address literals in the
-  files and the commit messages, that every Talos secrets bundle is encrypted, shellcheck and
-  yamllint, the Renovate configuration (`just renovate-check`: Renovate's own validator, run from
-  its pinned container image, so `just ci` needs a container runtime, Docker), scenario proofs,
-  the OpenTofu check (`just infra-check`: formatting, that the Talos schematic lists no QEMU guest
-  agent extension, that every stack enforces state encryption, that no stack or module declares a
-  bucket, validation without a state backend and the mocked
-  `tofu test` runs), the Talos check
-  (`just talos-check`: every node's machine configuration rendered from the template, the
-  patches and fixture node data, and validated, offline), the offline build of `kubernetes/`,
-  gitleaks over the committable files and the git history, and the bats tests.
+- `just checks` runs every check that needs no credentials, with the tools on this machine: tool
+  versions, address literals in the files and the commit messages, that every Talos secrets
+  bundle is encrypted, shellcheck and yamllint, the Renovate configuration
+  (`just renovate-check`: Renovate's own validator, run from its pinned container image, so it
+  needs a container runtime, Docker), scenario proofs, the OpenTofu check (`just infra-check`:
+  formatting, that the Talos schematic lists no QEMU guest agent extension, that every stack
+  enforces state encryption, that no stack or module declares a bucket, validation without a
+  state backend and the mocked `tofu test` runs), the Talos check (`just talos-check`: every node's machine
+  configuration rendered from the template, the patches and fixture node data, and validated,
+  offline), the offline build of `kubernetes/`, gitleaks over the committable files and the git
+  history, and the bats tests.
+- `just ci` runs the same checks through the Dagger module in `.dagger/modules/ci`: Renovate's
+  validator in its own image, every other check in a container built from the pins. It needs only
+  `just`, the pinned `dagger` and a container runtime such as Docker, and it is what CI runs on
+  every pull request.
+- `just test-hermetic` runs the bats tests that drive `just ci` itself.
 
 `docs/infrastructure.md` covers the recipes that plan, apply and destroy the OpenTofu stacks: what
 they need in the environment, how state is stored and encrypted, and what they print.
@@ -52,7 +57,8 @@ The repository checks:
   address check's own fixtures in `tests/fixtures/check-address-literals/`, which exist to be
   flagged; so does gitleaks.
 - `just check-commit-literals` applies the same rules to the messages of the commits between the
-  default branch, the remote's or a local `main`, and `HEAD`, and passes when neither exists.
+  default branch (the remote's, the remote's `main` as a CI checkout fetches it, or a local
+  `main`) and `HEAD`, and passes when there is none.
 - `just scenarios-check` fails when a scenario has no proof or more than one, when a `@pending`
   scenario has no issue key or already has a proof, when a `@by:` tag names a recipe that does
   not exist, when two scenarios share a title, or when a test claims a scenario that does not

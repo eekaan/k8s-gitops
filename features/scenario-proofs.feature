@@ -36,9 +36,9 @@ Feature: Scenario proofs
     When the scenarios check runs
     Then it exits zero and counts the scenario as proved
 
-  Scenario: Every recipe that proves a scenario runs in just ci
+  Scenario: Every recipe that proves a scenario runs in the hermetic run
     Given the recipes the scenarios in features/ name in @by: tags
-    When the ci recipe's dependencies are read, and theirs in turn
+    When the checks recipe's dependencies are read, and theirs in turn, which are what just ci runs in its containers
     Then each of those recipes is among them
 
   Scenario: A recipe proof naming an unknown recipe fails

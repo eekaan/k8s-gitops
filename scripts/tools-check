@@ -9,9 +9,12 @@ pins=${1:-${BASH_SOURCE[0]%/*}/../mise.toml}
 # The first x.y.z in the output, with any pre-release suffix; build metadata such as +gabc123 is dropped.
 version_re='[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?'
 pin_re='^[[:space:]]*"?([^"=[:space:]]+)"?[[:space:]]*=[[:space:]]*"([^"]+)"[[:space:]]*(#.*)?$'
+# A pin that needs backend options is an inline table on one line that carries its version.
+table_re='^[[:space:]]*"?([^"=[:space:]]+)"?[[:space:]]*=[[:space:]]*\{(.*[{,[:space:]])?version[[:space:]]*=[[:space:]]*"([^"]+)"'
 
 version_command() {
   case $1 in
+    dagger) cmd=(dagger version) ;;
     opentofu) cmd=(tofu version) ;;
     talosctl) cmd=(talosctl version --client) ;;
     kubectl) cmd=(kubectl version --client) ;;
@@ -36,13 +39,17 @@ while IFS= read -r line || [[ -n $line ]]; do
   fi
   [[ $section == tools ]] || continue
   [[ $line =~ ^[[:space:]]*(#.*)?$ ]] && continue
-  if ! [[ $line =~ $pin_re ]]; then
+  if [[ $line =~ $pin_re ]]; then
+    key=${BASH_REMATCH[1]}
+    pinned=${BASH_REMATCH[2]}
+  elif [[ $line =~ $table_re ]]; then
+    key=${BASH_REMATCH[1]}
+    pinned=${BASH_REMATCH[3]}
+  else
     echo "$pins: cannot read a pinned version from: $line" >&2
     failed=1
     continue
   fi
-  key=${BASH_REMATCH[1]}
-  pinned=${BASH_REMATCH[2]}
   # Backend keys such as github:owner/name or pypi:name name the tool after the last segment.
   tool=${key##*:}
   tool=${tool##*/}
@@ -67,7 +74,7 @@ done < "$pins"
 
 # A pin written in a form this check does not read must not pass as nothing to check.
 if (( checked == 0 )); then
-  echo "$pins: no pinned tools found; pins are name = \"version\" lines under [tools]" >&2
+  echo "$pins: no pinned tools found; pins are name = \"version\" or name = { version = \"version\", ... } lines under [tools]" >&2
   exit 1
 fi
 if (( failed )); then

@@ -23,8 +23,10 @@ EOF
   cat > "$PINS" <<'EOF'
 [tools]
 kubectl = "1.37.1"
+"http:dagger" = { version = "1.0.0-beta.27", url = "https://dl.dagger.io/dagger/releases/{{ version }}/dagger_v{{ version }}_linux_amd64.tar.gz" }
 EOF
   fake kubectl "version --client" $'Client Version: v1.36.0\nKustomize Version: v5.7.1'
+  fake dagger "version" $'version:     v1.0.0-beta.26\nplatform:    linux/amd64'
 
   run env PATH="$BIN" "$SCRIPT" "$PINS"
 
@@ -32,6 +34,7 @@ EOF
   [[ $output == *kubectl* ]]
   [[ $output == *1.37.1* ]]
   [[ $output == *1.36.0* ]]
+  [[ $output == *"dagger: pinned 1.0.0-beta.27, found 1.0.0-beta.26"* ]]
 }
 
 @test "A missing pinned tool fails the tools check" {
@@ -57,17 +60,20 @@ flux2 = "2.10.0"
 
 helm = "4.3.1"
 jq = "1.8.2"
+# A pin with backend options is an inline table that carries its version.
+"http:dagger" = { version = "1.0.0-beta.27", url = "https://dl.dagger.io/dagger/releases/{{ version }}/dagger_v{{ version }}_linux_amd64.tar.gz" }
 EOF
   fake kubectl "version --client" $'Client Version: v1.37.1\nKustomize Version: v5.8.1'
   fake flux "version --client" "flux: v2.10.0"
   fake talman "--version" "talman version 1.0.0-beta.10"
   fake helm "version --short" "v4.3.1+gbec5b06"
   fake jq "--version" "jq-1.8.2"
+  fake dagger "version" $'version:     v1.0.0-beta.27\nplatform:    linux/amd64'
 
   run env PATH="$BIN" "$SCRIPT" "$PINS"
 
   [ "$status" -eq 0 ]
-  [[ $output == *"All 5 pinned tools match"* ]]
+  [[ $output == *"All 6 pinned tools match"* ]]
 }
 
 @test "A mise.toml with no readable pins fails the tools check" {

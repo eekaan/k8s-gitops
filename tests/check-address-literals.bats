@@ -109,6 +109,46 @@ It answers at $CLASS_E.3 on the node network."
   [[ $output == *"No default branch to compare HEAD with"* ]]
 }
 
+@test "The commit message check finds the default branch in a CI checkout" {
+  # As actions/checkout with fetch-depth: 0 leaves it: every remote branch under refs/remotes/origin/,
+  # no refs/remotes/origin/HEAD and no local main.
+  git symbolic-ref HEAD refs/heads/topic
+  commit "start"
+  git update-ref refs/remotes/origin/main HEAD
+  commit "add a resolver at $CLASS_E.3"
+  flagged=$(git rev-parse --short HEAD)
+  git checkout -q --detach
+
+  run "$SCRIPT" --commit-messages
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"commit $flagged:1: $CLASS_E.3"* ]]
+}
+
+@test "the commit-message base is where HEAD's history leaves the default branch" {
+  git symbolic-ref HEAD refs/heads/main
+  commit "start"
+  start=$(git rev-parse HEAD)
+  git checkout -q -b feature
+  commit "on the feature"
+  git checkout -q main
+  commit "main moves on"
+  git checkout -q feature
+
+  run "$SCRIPT" --base
+
+  [ "$status" -eq 0 ]
+  [ "$output" = "$start" ]
+
+  # Without a default branch there is no base to print.
+  git branch -q -m main old-main
+
+  run "$SCRIPT" --base
+
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
 @test "A version string is not an address" {
   cat > versions.txt <<'EOF'
 talosctl v1.14.6

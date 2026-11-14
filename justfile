@@ -60,13 +60,25 @@ check-commit-literals:
 scenarios-check:
     scripts/scenarios-check
 
-# Run the bats tests
+# Run the bats tests, except those tagged hermetic: they run just ci, which needs a container runtime
 test:
-    bats tests
+    bats --filter-tags '!hermetic' tests
 
-# Run every check that needs no credentials, the cheapest and most basic first
-ci: tools-check check-literals check-commit-literals cluster-secrets-check lint renovate-check scenarios-check infra-check talos-check kubernetes-check secrets-scan test
+# Run the bats tests that run just ci
+test-hermetic:
+    bats --filter-tags hermetic tests
+
+# Run every check that needs no credentials with the tools on this machine, the cheapest and most basic first
+checks: tools-check check-literals check-commit-literals cluster-secrets-check lint renovate-check scenarios-check infra-check talos-check kubernetes-check secrets-scan test
+
+# Dagger's trace names the checkout's local path, so --silent leaves only the checks' own output.
+# Run the checks inside containers built from the pins, as CI does: renovate-check's validator in its own image, the others in a container with the tools pinned in mise.toml
+ci:
+    base=$(scripts/check-address-literals --base); dagger api call --silent ci checks --base="$base" --renovate-image='{{ renovate_image }}'
+
+# The image of Renovate's validator, for renovate-check here and for just ci's Dagger module
+renovate_image := "ghcr.io/renovatebot/renovate:44.227.4@sha256:fe058db9710840a4821f20190b3769e3ce709a049b8640aa2bf5f044969fe702"
 
 # Validate the Renovate configuration with Renovate's own validator, in its container image
 renovate-check:
-    docker run --rm --network none -v "$PWD":/usr/src/app:ro -w /usr/src/app ghcr.io/renovatebot/renovate:44.227.4@sha256:fe058db9710840a4821f20190b3769e3ce709a049b8640aa2bf5f044969fe702 renovate-config-validator --strict --no-global renovate.json5 .renovate/*.json5
+    docker run --rm --network none -v "$PWD":/usr/src/app:ro -w /usr/src/app {{ renovate_image }} renovate-config-validator --strict --no-global renovate.json5 .renovate/*.json5
