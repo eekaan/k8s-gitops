@@ -50,11 +50,20 @@ extensions:
   scripts disabled, its TCP transport `drbd_transport_tcp`, `dm-thin-pool` for LVM-thin pools and
   `dm-snapshot` for snapshots, which the Talos kernel has built in.
 - `siderolabs/gvisor`: gVisor, which registers the containerd runtime handler `runsc`; the
-  RuntimeClass `gvisor` selects it ([kubernetes.md](kubernetes.md#runtime-classes)). The
-  extension's README says gVisor requires unprivileged user namespace creation
-  ([gVisor extension](https://github.com/siderolabs/extensions/blob/main/container-runtime/gvisor/README.md)),
-  which Talos turns off as the KSPP recommends (`user.max_user_namespaces` is 0), and no patch here
-  turns it on.
+  RuntimeClass `gvisor` selects it ([kubernetes.md](kubernetes.md#runtime-classes)). gVisor
+  requires unprivileged user namespace creation
+  ([gVisor extension](https://github.com/siderolabs/extensions/blob/release-1.14/container-runtime/gvisor/README.md)),
+  which Talos turns off with its kernel hardening defaults
+  ([Talos](https://docs.siderolabs.com/talos/v1.14/security/talos-default-hardening-and-cis-compliance)):
+  as the KSPP recommends ([KSPP](https://kspp.github.io/Recommended_Settings#sysctls)), it sets
+  `user.max_user_namespaces` to 0. `talos/patches/all/user-namespaces.yaml` overrides that default
+  on every node with the limit the README and Talos' guide to user namespaces give, 11255
+  ([Talos](https://docs.siderolabs.com/kubernetes-guides/security/usernamespace)), so a pod that
+  selects `gvisor` can start. The cost is that unprivileged user namespaces widen the kernel's
+  attack surface for every workload on the node, not only gVisor's, which is why Talos leaves them
+  off. `just cluster-talos` applies the setting to running nodes, where a sysctl takes effect
+  without a reboot
+  ([Talos](https://docs.siderolabs.com/talos/v1.14/configure-your-talos-cluster/system-configuration/editing-machine-configuration)).
 - `siderolabs/kata-containers`: Kata Containers, which registers the containerd runtime handlers
   `kata`, on Cloud Hypervisor, and `kata-qemu`; the RuntimeClass `kata` selects the first. Kata
   runs each pod in a virtual machine of its own and needs hardware virtualisation on the node, which

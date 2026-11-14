@@ -198,6 +198,29 @@ whatever image the nodes run, and a pod that selects one on a node whose image l
 does not start. `tests/baseline.bats` builds the application as Flux applies it and checks the two
 classes and their handlers.
 
+## External Secrets
+
+`apps/base/external-secrets/external-secrets/` runs the External Secrets operator in its own
+namespace, `external-secrets`. It is how runtime secrets reach workloads (ADR 0005): an
+`ExternalSecret` names a key in a secret store, and the operator writes it into a Secret. No secret
+store is configured yet, and nothing in the tree creates an `ExternalSecret`.
+
+- The chart comes from its publisher's OCI registry and installs and upgrades the operator's
+  resource definitions itself, as the publisher documents. No other chart in the tree ships them,
+  so they are not an application of their own. Each carries `helm.sh/resource-policy: keep`, so
+  uninstalling the release leaves them in place, and with them every `ExternalSecret` and the
+  Secret it owns.
+- The controller, the webhook and the certificate controller each run two replicas on different
+  nodes, the controllers with leader election, and a disruption budget keeps one of each running
+  while a node is drained. The certificate controller issues the webhook's certificate. The webhook
+  validates every change to a secret store or an `ExternalSecret`, and the API server refuses the
+  change when no webhook answers.
+- The namespace enforces the restricted Pod Security level, which the chart's pods meet. No
+  ServiceMonitor or dashboard is enabled.
+
+`tests/external-secrets.bats` builds the application as Flux applies it and renders the chart to
+check each of these.
+
 ## Storage
 
 Persistent volumes come from LINSTOR, run by the Piraeus operator, on the workers' data volumes
