@@ -12,6 +12,11 @@ command that runs them is a `just` recipe.
   up; and that the flavors and the external network the stacks' variables name exist. Quota left
   is not compared with what the stacks need. It prints pass or FAIL per item and no figures. The
   client is not pinned in `mise.toml`; it is installed separately.
+- `just infra-state-bucket` creates the bucket `TF_STATE_BUCKET` names unless it exists, as an
+  object storage container of that name, with the `openstack` client on the OpenStack credentials:
+  no tool pinned in `mise.toml` speaks the S3 API. It needs the client version `os-smoke` needs,
+  prints neither the bucket's name nor what the client reports, which names the project, and
+  creates nothing on a second run.
 - `just infra-plan sto2/plumbing` plans a stack and prints the plan's summary.
 - `just infra-apply sto2/plumbing` plans a stack, prints the summary and, once the stack's name is
   typed back, applies that saved plan; `just infra-apply sto2/plumbing --yes` does not ask. After
@@ -28,6 +33,20 @@ command that runs them is a `just` recipe.
 
 Apply `plumbing` before `cluster`, as the cluster stack reads the plumbing stack's state. Destroy
 goes the other way round. State objects stay in the bucket after a destroy.
+
+## Before the first plan
+
+Once per deployment, before the first `just infra-plan`, in this order:
+
+1. Create S3 credentials for the OpenStack project, an access key and its secret key: OpenStack's
+   EC2 credentials, which `openstack ec2 credentials create` makes. It prints the secret key, so it
+   is run by hand and its output kept out of any log.
+2. Put them in `.env` as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, beside the bucket's
+   name as `TF_STATE_BUCKET` and the OpenStack authentication ([Environment](#environment)).
+3. `just infra-state-bucket` creates the bucket.
+4. Choose the passphrase state and plans are encrypted with, 16 characters or more, put it in
+   `.env` as `TF_STATE_PASSPHRASE`, and keep a copy outside the repository and the cluster
+   ([State](#state)).
 
 ## The generated talman.yaml
 
@@ -76,7 +95,8 @@ or passes a secret on a command line; secrets reach tofu through its environment
   credentials.
 - `OS_CLOUD`, naming a `clouds.yaml` entry outside the repository, or `OS_AUTH_URL` with the
   application-credential variables: OpenStack authentication, which tofu's provider and the
-  `openstack` client read themselves. `os-smoke` needs only this.
+  `openstack` client read themselves. `os-smoke` needs only this, and `infra-state-bucket` this
+  and `TF_STATE_BUCKET`.
 - `OPERATOR_CIDRS`, or else `operator-cidrs.json` at the repository root (gitignored): the
   operator allowlist of the cluster stack, a JSON list of CIDRs. It reaches tofu only as
   `TF_VAR_api_allowed_cidrs` in its environment, as given: the address of the machine the recipes

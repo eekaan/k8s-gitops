@@ -72,6 +72,14 @@ require_openstack_auth() {
   fi
 }
 
+# openstack_client_recent: whether the openstack client on PATH is python-openstackclient 7.0.0 or
+# newer, which os-smoke's quota with usage needs and which the recipes that use the client require.
+openstack_client_recent() {
+  local client
+  client=$(openstack --version 2>&1) || return 1
+  [[ $client =~ ([0-9]+)\.[0-9]+\.[0-9]+ ]] && ((BASH_REMATCH[1] >= 7))
+}
+
 # tofu's logs hold resource addresses and decrypted attribute values, on screen or in a file, and
 # TF_WORKSPACE would move a stack's state to another key, so the recipes run without them.
 refuse_tofu_overrides() {

@@ -21,6 +21,11 @@ Feature: Infrastructure state and stack recipes
     When the infrastructure check runs
     Then it exits non-zero naming the stack
 
+  Scenario: The state bucket is created once and no credential is shown
+    Given OpenStack credentials, S3 credentials and TF_STATE_BUCKET naming a bucket that does not exist
+    When infra-state-bucket runs, and then runs again
+    Then the first run creates that bucket with the openstack client and the second creates nothing, and no credential and not the bucket's name is printed, and no credential reaches a command line or the openstack client's environment
+
   Scenario: A missing required variable is named and nothing runs
     Given an environment without the state bucket
     When infra-plan runs for a stack

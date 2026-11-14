@@ -78,8 +78,7 @@ report_quota() {
 
 # Quota with usage needs python-openstackclient 7.0.0 or newer, and the load-balancer commands
 # need its Octavia plugin installed beside it.
-client=$(openstack --version 2>&1) || client=
-if [[ ! $client =~ ([0-9]+)\.[0-9]+\.[0-9]+ ]] || ((BASH_REMATCH[1] < 7)); then
+if ! openstack_client_recent; then
   fail "openstack client" "python-openstackclient 7.0.0 or newer is needed"
   exit 1
 fi

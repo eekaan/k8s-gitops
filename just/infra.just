@@ -27,3 +27,7 @@ infra-destroy *flags:
 # Check the OpenStack credential, quota, flavors and external network; pass or FAIL per item, no figures
 os-smoke:
     scripts/os-smoke
+
+# Create the state bucket TF_STATE_BUCKET names, as an object storage container, unless it exists; prints neither its name nor a credential
+infra-state-bucket:
+    scripts/infra-state-bucket

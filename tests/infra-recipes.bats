@@ -729,3 +729,106 @@ no_figures_in() {
     fi
   done
 }
+
+# fake_object_storage [VERSION]: an openstack client, reporting VERSION (10.5.0 by default), whose
+# object storage holds the containers listed in the file CONTAINERS, one per line, and fails a list
+# while the file LIST_FAILS exists; records its arguments and its environment.
+fake_object_storage() {
+  CONTAINERS="$BATS_TEST_TMPDIR/containers"
+  LIST_FAILS="$BATS_TEST_TMPDIR/list-fails"
+  touch "$CONTAINERS"
+  fake openstack <<EOF
+printf '%s\n' "openstack \$*" >> "$RECORD/argv"
+env -0 > "$RECORD/env.openstack"
+case "\$1 \${2-}" in
+  '--version ') echo 'openstack ${1:-10.5.0}' ;;
+  'container list')
+    if [[ -e "$LIST_FAILS" ]]; then
+      echo "Unauthorized: fixture-project-id at https://object-store.example.invalid" >&2
+      exit 1
+    fi
+    cat "$CONTAINERS"
+    ;;
+  'container create')
+    echo "| fixture-account-id | \$3 | fixture-transaction-id |"
+    echo "\$3" >> "$CONTAINERS"
+    ;;
+  *) echo "unexpected call: openstack \$*" >&2; exit 1 ;;
+esac
+EOF
+}
+
+# creates: the recorded calls that create a container, one per line.
+creates() {
+  grep '^openstack container create' "$RECORD/argv" 2> /dev/null || true
+}
+
+@test "The state bucket is created once and no credential is shown" {
+  fake_object_storage
+  # A bucket whose name starts with the state bucket's is another bucket.
+  echo fixture-state-bucket-other > "$CONTAINERS"
+
+  recipe infra-state-bucket
+
+  [ "$status" -eq 0 ]
+  [ "$(creates)" = "openstack container create fixture-state-bucket" ]
+  [ "$(grep -cx fixture-state-bucket "$CONTAINERS")" -eq 1 ]
+  [[ $output == *"created the bucket TF_STATE_BUCKET names"* ]]
+  printed=("$output")
+
+  recipe infra-state-bucket
+
+  [ "$status" -eq 0 ]
+  [ "$(creates | wc -l)" -eq 1 ]
+  [ "$(grep -cx fixture-state-bucket "$CONTAINERS")" -eq 1 ]
+  [[ $output == *"the bucket TF_STATE_BUCKET names exists; nothing to create"* ]]
+  printed+=("$output")
+
+  for shown in fixture-state-bucket fixture-account-id fixture-transaction-id "${MARKERS[@]}"; do
+    [[ ${printed[*]} != *"$shown"* ]]
+  done
+  for marker in "${MARKERS[@]}"; do
+    absent "$marker" "$RECORD/argv"
+  done
+  for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY TF_STATE_PASSPHRASE; do
+    if tr '\0' '\n' < "$RECORD/env.openstack" | grep -q "^$name="; then
+      echo "the openstack client got $name" >&2
+      return 1
+    fi
+  done
+}
+
+@test "infra-state-bucket names what it needs before it calls the openstack client" {
+  fake_object_storage
+  only
+
+  recipe infra-state-bucket
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"TF_STATE_BUCKET is not set"* ]]
+  [[ $output == *"OS_CLOUD or OS_AUTH_URL is not set"* ]]
+  [ ! -e "$RECORD/argv" ]
+}
+
+@test "infra-state-bucket needs the openstack client os-smoke needs" {
+  fake_object_storage 6.2.0
+
+  recipe infra-state-bucket
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"python-openstackclient 7.0.0 or newer is needed"* ]]
+  run grep -c '^openstack container' "$RECORD/argv"
+  [ "$output" -eq 0 ]
+}
+
+@test "infra-state-bucket creates nothing when it cannot list the buckets, and shows no error detail" {
+  fake_object_storage
+  : > "$LIST_FAILS"
+
+  recipe infra-state-bucket
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"cannot list"* ]]
+  [[ $output != *fixture-project-id* && $output != *object-store.example.invalid* ]]
+  [ -z "$(creates)" ]
+}

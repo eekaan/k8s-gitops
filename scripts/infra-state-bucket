@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Creates the bucket TF_STATE_BUCKET names, which holds every stack's state, unless it exists. No
+# tool pinned in mise.toml speaks the S3 API, so the bucket is made as an object storage container
+# of that name with the openstack client os-smoke uses, on the OpenStack credentials; OpenTofu's s3
+# backend then reaches it through the S3 API with the S3 credentials. Prints neither the bucket's
+# name nor anything the client reports, which names the project, so its output can be shared. A
+# second run finds the bucket and creates nothing.
+# Usage: scripts/infra-state-bucket
+set -euo pipefail
+
+# shellcheck source=scripts/lib/infra.sh
+. "$(dirname "$0")/lib/infra.sh"
+load_env
+# The openstack client needs none of the state's secrets.
+export -n AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY TF_STATE_PASSPHRASE
+complete=1
+require_env TF_STATE_BUCKET || complete=0
+require_openstack_auth || complete=0
+((complete))
+if ! command -v openstack > /dev/null; then
+  infra_error "the openstack client is not on PATH; infra-state-bucket needs python-openstackclient 7.0.0 or newer"
+  exit 1
+fi
+if ! openstack_client_recent; then
+  infra_error "python-openstackclient 7.0.0 or newer is needed"
+  exit 1
+fi
+
+# The client's errors can name the project and the object storage's endpoint.
+if ! containers=$(openstack container list --all --prefix "$TF_STATE_BUCKET" -f value -c Name 2> /dev/null); then
+  infra_error "the openstack client cannot list the object storage's buckets with these credentials"
+  exit 1
+fi
+if grep -qxF -- "$TF_STATE_BUCKET" <<< "$containers"; then
+  echo "infra-state-bucket: the bucket TF_STATE_BUCKET names exists; nothing to create"
+  exit 0
+fi
+if ! openstack container create "$TF_STATE_BUCKET" > /dev/null 2>&1; then
+  infra_error "the openstack client cannot create the bucket TF_STATE_BUCKET names"
+  exit 1
+fi
+echo "infra-state-bucket: created the bucket TF_STATE_BUCKET names"
