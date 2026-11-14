@@ -525,6 +525,15 @@ run "with_the_reduced_security_groups_selected_an_unconfigured_nodes_talos_api_i
     error_message = "With the reduced set, no rule open to all may cover a port of the NodePort range."
   }
 
+  # In the nodes' group, which the workers carry too, a rule open to all would open the service range.
+  assert {
+    condition = (
+      output.controlplane_security_group.id == "controlplanes-group" &&
+      alltrue([for rule in output.controlplane_security_group.ingress_rules : rule.security_group_id == "controlplanes-group"])
+    )
+    error_message = "With the reduced set, every rule open to all must belong to the control planes' own group, never the nodes'."
+  }
+
   assert {
     condition = (
       length(output.security_group.ingress_rules) == 21 &&
