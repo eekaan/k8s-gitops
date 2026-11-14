@@ -169,6 +169,8 @@ cluster_files() {
 #   health-cut.NODE    Cilium's health probes of NODE's host, on its health port, fail
 #   notready.NODE      NODE's Ready condition is Unknown
 #   etcd-cut.NODE      NODE's etcd member has no leader
+#   etcd-unlisted.NODE no control plane's etcd member lists NODE's
+#   reverts-late.NODE  NODE's configuration in try mode reverts while scripts/cluster-check runs
 #   clock              the time date +%s gives, which sleep and a slow cluster-check move on
 #   talos-behind       the hostnames of nodes whose Talos is behind their configured version
 #   k8s-behind         the kubelets run a Kubernetes behind kubernetesVersion
@@ -206,6 +208,7 @@ if [[ $1 == talosctl ]]; then
   elif given members; then
     printf 'NODE   ID   HOSTNAME   PEER URLS   CLIENT URLS   LEARNER\n'
     for node in $(yq '.nodes[] | select(.role == "controlplane") | .hostname' "$dir/talman.yaml"); do
+      [[ ! -e $STATE/etcd-unlisted.$node ]] || continue
       printf '192.0.2.211   %s   %s   https://192.0.2.20:2380   https://192.0.2.20:2379   false\n' "id-$node" "$node"
     done
   fi
@@ -476,6 +479,11 @@ printf '%s\n' "cluster-check $*" >> "$RECORD/argv"
 if [[ -e $STATE/slow-check ]]; then
   echo $(($(cat "$STATE/clock" 2> /dev/null || echo 1800000000) + $(cat "$STATE/slow-check"))) > "$STATE/clock"
 fi
+for late in "$STATE"/reverts-late.*; do
+  if [[ -e $late ]] && grep -qx "${late##*.}" "$STATE/tried" 2> /dev/null; then
+    echo "${late##*.}" >> "$STATE/pending"
+  fi
+done
 if [[ -e $STATE/unhealthy ]] || [[ -e $STATE/unhealthy-tried && -s $STATE/tried ]]; then
   echo "FAIL  nodes Ready: not Ready: worker-2"
   echo "cluster-check: 1 of 7 checks failed" >&2
@@ -1074,7 +1082,8 @@ keeps() {
 
   # Each check stops the rollout when it fails: the tried node is not kept and nothing follows it.
   for failing in kubelet-cut.worker-2 exporter-cut.worker-2 overlay-cut.worker-2 overlay-cut.cp-1 \
-    health-cut.worker-2 notready.worker-2 "silent-tried.$(node_address worker-3)" unhealthy-tried slow-check; do
+    health-cut.worker-2 notready.worker-2 "silent-tried.$(node_address worker-3)" unhealthy-tried slow-check \
+    reverts-late.worker-2; do
     rm -f "$STATE"/* "$RECORD/argv"
     printf '%s\n' cp-1 worker-2 > "$STATE/pending"
     if [[ $failing == slow-check ]]; then
@@ -1091,7 +1100,7 @@ keeps() {
     [ "$(applies)" = "$(tries worker-2)" ]
     [[ $output == *"worker-2 is not kept"* ]]
   done
-  for failing in etcd-cut.cp-1 etcd-cut.cp-2; do
+  for failing in etcd-cut.cp-1 etcd-cut.cp-2 etcd-unlisted.cp-1; do
     rm -f "$STATE"/* "$RECORD/argv"
     printf '%s\n' cp-1 worker-2 > "$STATE/pending"
     : > "$STATE/$failing"
