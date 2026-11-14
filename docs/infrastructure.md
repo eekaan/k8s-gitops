@@ -28,6 +28,13 @@ command that runs them is a `just` recipe.
   file through `just infra-apply sto2/cluster` only.
 - `just infra-output sto2/plumbing talos_version` prints one output of a stack. It refuses a
   sensitive output, as those hold the deployment's addresses and IDs.
+- `just infra-forget-image` removes the Talos image from the `sto2/plumbing` stack's state with
+  `tofu state rm` and leaves the image in the cloud, so that after a new Talos version or schematic
+  the next apply uploads the new image and deletes nothing;
+  [runbooks/image-replacement.md](runbooks/image-replacement.md) gives the steps around it. It first
+  says in one line that only the state forgets the image, and acts once the stack's name is typed
+  back; `just infra-forget-image --yes` does not ask. When the state holds no image it says so, asks
+  nothing and changes nothing. It prints neither the state's list nor tofu's report.
 - `just infra-destroy` destroys `sto2/cluster`, then `sto2/plumbing`. Each destroy is planned and
   summarised first, and runs once the stack's name is typed back; `just infra-destroy --yes` does
   not ask. When the cluster stack is not destroyed, the plumbing stack is left as it is. The load

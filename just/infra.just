@@ -11,6 +11,11 @@ infra-plan stack:
 infra-apply stack *flags:
     scripts/infra-apply "$@"
 
+# Remove the Talos image from the plumbing stack's state, leaving it in the cloud, once the stack's name is typed back (--yes: without asking); see docs/runbooks/image-replacement.md
+[positional-arguments]
+infra-forget-image *flags:
+    scripts/infra-forget-image "$@"
+
 # Write talos/<cluster>/talman.yaml from the cluster stack's output, mode 0600 and never printed, once talman computes the image's schematic and validates it
 infra-talman stack='sto2/cluster':
     scripts/infra-talman {{ quote(stack) }}

@@ -1,0 +1,4 @@
+---
+# The versions file the plumbing stack's image replacement test plans with after its first apply:
+# a Talos version no release has, other than the one in the stack's tests/versions.yaml.
+talos: v0.0.1-fixture

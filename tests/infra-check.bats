@@ -117,6 +117,50 @@ EOF
   [ "${lines[-1]}" = "infra-check: failed: infra/openstack/stacks/region/no-block infra/openstack/stacks/region/plan-unenforced" ]
 }
 
+@test "A schematic with the guest agent extension fails the infrastructure check, naming it" {
+  repository guest-agent
+  valid_stack region/good
+  mkdir talos
+  cat > talos/schematic.yaml <<'EOF'
+customization:
+  systemExtensions:
+    officialExtensions:
+      - siderolabs/gvisor
+EOF
+
+  run "$SCRIPT"
+
+  [ "$status" -eq 0 ]
+
+  cat > talos/schematic.yaml <<'EOF'
+customization:
+  systemExtensions:
+    officialExtensions:
+      - siderolabs/gvisor
+      - siderolabs/qemu-guest-agent
+EOF
+
+  run "$SCRIPT"
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"infra-check: talos/schematic.yaml: lists the system extension siderolabs/qemu-guest-agent"* ]]
+  [[ $output != *"system extension siderolabs/gvisor"* ]]
+  [ "${lines[-1]}" = "infra-check: failed: talos/schematic.yaml" ]
+}
+
+@test "a schematic that does not parse fails the check, naming it" {
+  repository unparsable-schematic
+  valid_stack region/good
+  mkdir talos
+  printf 'customization: [unterminated\n' > talos/schematic.yaml
+
+  run "$SCRIPT"
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"infra-check: talos/schematic.yaml: does not parse"* ]]
+  [ "${lines[-1]}" = "infra-check: failed: talos/schematic.yaml" ]
+}
+
 @test "A tree without stacks fails the check" {
   repository stackless
   mkdir -p infra/openstack/modules/network

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Checks the OpenTofu code without cloud credentials or a state backend: formatting, that every
-# stack enforces state and plan encryption, then init and validate for every stack, then tofu test
-# in every stack or module that has a tests/ directory.
+# Checks the OpenTofu code without cloud credentials or a state backend: formatting, that the Talos
+# schematic the image is built from lists no QEMU guest agent extension, that every stack enforces
+# state and plan encryption, then init and validate for every stack, then tofu test in every stack
+# or module that has a tests/ directory.
 # Init downloads the locked providers from the public registry; the tests mock every provider.
 set -euo pipefail
 shopt -s nullglob
@@ -51,6 +52,23 @@ if ! unformatted=$(tofu fmt -check -recursive -no-color infra/ 2>&1); then
   if (( ! named )); then
     printf '%s\n' "$unformatted" >&2
     fail infra "tofu fmt -check failed"
+  fi
+fi
+
+# Nova enables QEMU guest agent support, a socket between the compute host and the guest, only for
+# instances created from an image whose hw_qemu_guest_agent property is yes (Nova's libvirt guide,
+# Glance's useful image properties). The plumbing stack uploads the Talos image without that
+# property, so the schematic leaves the guest agent extension out.
+schematic=talos/schematic.yaml
+if [[ -f $schematic ]]; then
+  if ! extensions=$(yq '(.customization.systemExtensions.officialExtensions // [])[]' "$schematic" 2> /dev/null); then
+    fail "$schematic" "does not parse as YAML"
+  else
+    while IFS= read -r extension; do
+      if [[ $extension =~ (^|/)qemu-guest-agent$ ]]; then
+        fail "$schematic" "lists the system extension $extension; Nova gives instances guest agent support only when their image has hw_qemu_guest_agent=yes, and the plumbing stack uploads the image without it"
+      fi
+    done <<< "$extensions"
   fi
 fi
 

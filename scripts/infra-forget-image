@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Removes the Talos image from the plumbing stack's state with tofu state rm, and leaves the image
+# itself in the cloud. A new Talos version or schematic changes the image's download URL, and the
+# provider replaces an image whose URL changes, deleting the old one, from which the running nodes'
+# boot volumes were made. Once the state has forgotten it, the next apply uploads the new image and
+# deletes nothing. A removed block cannot do this: OpenTofu refuses one while the resource it names
+# is still in the configuration, and the stack keeps the resource for the new image.
+# Says in one line what it will do, and acts once the stack's name is typed back, or with --yes
+# (CI). When the state holds no image it says so and changes nothing.
+# docs/runbooks/image-replacement.md gives the steps around it.
+# Usage: scripts/infra-forget-image [--yes]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/infra.sh
+. "$here/lib/infra.sh"
+
+confirmed=0
+for arg; do
+  if [[ $arg != --yes ]] || ((confirmed)); then
+    infra_error "usage: infra-forget-image [--yes]"
+    exit 2
+  fi
+  confirmed=1
+done
+
+# The image's address in the plumbing stack: the stack's module "image" (modules/talos-image)
+# uploads it through its own module "image" (modules/image). tests/infra-forget-image.bats fails
+# when the stack's mocked plan holds no resource at this address.
+image=module.image.module.image.openstack_images_image_v2.this
+
+# shellcheck source=scripts/stack-env
+. "$here/stack-env" sto2/plumbing
+lock_stack
+init_stack
+# The list names every resource in the state, with keys that can carry values, so it is searched
+# and never printed.
+listed=$(stack_tofu state list)
+if ! grep -qxF -- "$image" <<< "$listed"; then
+  echo "$stack: the state holds no Talos image; nothing to forget"
+  exit 0
+fi
+echo "$stack: only the state forgets the Talos image; the image itself stays in the cloud, unmanaged, and the next apply uploads a new one"
+((confirmed)) || confirm "$stack" change changed
+# tofu's report names what it removed; the line below says it instead.
+stack_tofu state rm "$image" > /dev/null
+echo "$stack: the state no longer holds the Talos image"

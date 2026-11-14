@@ -30,14 +30,16 @@ Later changes to a patch or to `talman.yaml`, and nodes OpenTofu adds, reach the
 The Talos and Kubernetes versions are set in `versions.yaml` only, and reach the recipes through
 the cluster's `talman.yaml`; the upgrade recipes take no version. The cluster stack renders
 `talman.yaml` from `versions.yaml` when it is applied; `just infra-talman` writes what the stack's
-state holds, so it does not pick a new version up. After a version changes in `versions.yaml`:
+state holds, so it does not pick a new version up.
 
-1. `just infra-apply sto2/plumbing`: the plumbing stack builds its Talos image, which nodes added
-   later boot, from the Talos version.
-2. `just infra-apply sto2/cluster`: its plan changes the output `talman_yaml` and no node, as a new
-   image does not replace a running one, and the apply writes the new `talman.yaml`.
-3. `just cluster-upgrade` moves the nodes to the Talos version, then `just cluster-upgrade-k8s`
-   moves the cluster to the Kubernetes version.
+A new Talos version, like a change to `talos/schematic.yaml`, gives the plumbing stack a new image.
+[runbooks/image-replacement.md](runbooks/image-replacement.md) takes it from
+`just infra-forget-image` to `just cluster-upgrade`, and a new Kubernetes version in the same
+change on to `just cluster-upgrade-k8s`. After a new Kubernetes version alone:
+
+1. `just infra-apply sto2/cluster`: its plan changes the output `talman_yaml` and no node, and the
+   apply writes the new `talman.yaml`.
+2. `just cluster-upgrade-k8s` moves the cluster to the Kubernetes version.
 
 ## The Talos age key
 
