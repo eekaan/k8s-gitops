@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# Creates an S3 key pair for the state or the cluster key set, an EC2 credential made with the
+# openstack client, and writes it to .env at the repository root under the set's two names, in the
+# form load_env reads. Neither value is printed, passed as an argument or written anywhere but
+# .env: they are held in variables and passed through a pipe only. Nothing is created while .env
+# cannot take the pair: a symlink, a file git does not ignore, or one of the names already holding a
+# value. An empty name or a placeholder is filled in, an absent one appended after a comment, and
+# every other line is kept as it is. .env is written to a temporary file beside it, mode 0600, and
+# renamed into place.
+# Usage: scripts/infra-s3-key state|cluster
+set -euo pipefail
+
+# shellcheck source=scripts/lib/s3.sh
+. "$(dirname "$0")/lib/s3.sh"
+if (($# != 1)) || [[ $1 != state && $1 != cluster ]]; then
+  echo "usage: infra-s3-key state|cluster" >&2
+  exit 2
+fi
+keyset=$1
+s3_key_names "$keyset"
+names=("$s3_key_id" "$s3_secret")
+
+load_env
+complete=1
+refuse_http2_debug || complete=0
+require_openstack_auth || complete=0
+((complete))
+# The openstack client needs none of the S3 keys or the state's passphrase.
+export -n AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY CLUSTER_S3_ACCESS_KEY_ID \
+  CLUSTER_S3_SECRET_ACCESS_KEY TF_STATE_PASSPHRASE
+
+env_file=$infra_root/.env
+if [[ -L $env_file ]]; then
+  infra_error ".env is a symlink; the key pair is written to a regular file only"
+  exit 1
+fi
+if [[ -e $env_file && ! -f $env_file ]]; then
+  infra_error ".env is not a regular file"
+  exit 1
+fi
+# git would publish a key in a .env it does not ignore.
+if ! git -C "$infra_root" check-ignore -q -- .env 2> /dev/null; then
+  infra_error ".env is not ignored by git; the key pair is written only where git ignores it"
+  exit 1
+fi
+
+# holds_key LINE: whether a .env line gives its name a value that is neither empty nor a placeholder,
+# read as load_env reads it.
+holds_key() {
+  local value=${1#*=}
+  if ((${#value} >= 2)) && [[ ${value:0:1} == [\"\'] && ${value:0:1} == "${value: -1}" ]]; then
+    value=${value:1:${#value}-2}
+  fi
+  [[ -n $value ]] && ! is_placeholder "$value"
+}
+
+# refuse_held: fails naming each of the pair's names that already holds a key in .env.
+refuse_held() {
+  local line name refused=0
+  [[ -f $env_file ]] || return 0
+  while IFS= read -r line || [[ -n $line ]]; do
+    line=${line%$'\r'}
+    for name in "${names[@]}"; do
+      if [[ $line == "$name="* ]] && holds_key "$line"; then
+        infra_error "$name already holds a value in .env; empty it, and revoke the key it held, before creating another"
+        refused=1
+      fi
+    done
+  done < "$env_file"
+  return "$refused"
+}
+
+refuse_held
+if ! command -v openstack > /dev/null; then
+  infra_error "the openstack client is not on PATH; infra-s3-key needs python-openstackclient 7.0.0 or newer"
+  exit 1
+fi
+if ! openstack_client_recent; then
+  infra_error "python-openstackclient 7.0.0 or newer is needed"
+  exit 1
+fi
+
+# The client's answer holds the secret key, and its errors can name the project.
+if ! credential=$(openstack ec2 credentials create -f json 2> /dev/null); then
+  infra_error "the openstack client cannot create an EC2 credential with these credentials"
+  exit 1
+fi
+access=$(printf '%s' "$credential" | jq -r '.access | strings' 2> /dev/null) || access=
+secret=$(printf '%s' "$credential" | jq -r '.secret | strings' 2> /dev/null) || secret=
+unset credential
+# A value .env holds literally, without quotes.
+key_re='^[A-Za-z0-9+/=_.-]+$'
+if [[ ! $access =~ $key_re || ! $secret =~ $key_re ]]; then
+  infra_error "the openstack client's answer holds no access key and secret key; .env was not written, and a credential it created stays in the project"
+  exit 1
+fi
+declare -A value=(["${names[0]}"]=$access ["${names[1]}"]=$secret)
+declare -A comment=(
+  ["${names[0]}"]="S3 access key ID of the $keyset key set, from just infra-s3-key $keyset."
+  ["${names[1]}"]="S3 secret key of the $keyset key set, from just infra-s3-key $keyset."
+)
+
+# mktemp makes the file mode 0600, in the same directory, so the rename replaces .env in one step.
+tmp=$(mktemp "$infra_root/.env.XXXXXX")
+trap 'rm -f -- "$tmp"' EXIT
+declare -A written=()
+ending=$'\n'
+if [[ -f $env_file ]]; then
+  while :; do
+    if IFS= read -r line; then
+      ending=$'\n'
+    elif [[ -n $line ]]; then
+      ending=
+    else
+      break
+    fi
+    for name in "${names[@]}"; do
+      if [[ ${line%$'\r'} == "$name="* ]]; then
+        if holds_key "${line%$'\r'}"; then
+          infra_error "$name was given a value in .env meanwhile; .env was not written, and the credential the openstack client created stays in the project"
+          exit 1
+        fi
+        cr=
+        [[ $line == *$'\r' ]] && cr=$'\r'
+        line=$name=${value[$name]}$cr
+        written[$name]=1
+      fi
+    done
+    printf '%s%s' "$line" "$ending"
+    [[ -n $ending ]] || break
+  done < "$env_file" > "$tmp"
+fi
+missing=()
+for name in "${names[@]}"; do
+  [[ -n ${written[$name]-} ]] || missing+=("$name")
+done
+if ((${#missing[@]} > 0)); then
+  {
+    # The last line had no newline of its own.
+    [[ -n $ending ]] || printf '\n'
+    for name in "${missing[@]}"; do
+      printf '# %s\n%s=%s\n' "${comment[$name]}" "$name" "${value[$name]}"
+    done
+  } >> "$tmp"
+fi
+if ! mv -f -- "$tmp" "$env_file"; then
+  infra_error ".env was not written; the credential the openstack client created stays in the project"
+  exit 1
+fi
+echo "infra-s3-key: wrote a new $keyset key pair to .env as ${names[0]} and ${names[1]}"

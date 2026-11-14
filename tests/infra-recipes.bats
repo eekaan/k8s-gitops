@@ -262,8 +262,13 @@ absent() {
 
 @test "The infrastructure recipes refuse Go's HTTP/2 debug log" {
   fake_object_storage
+  fake rclone <<EOF
+printf '%s\n' "rclone \$*" >> "$RECORD/argv"
+EOF
   for where in environment .env; do
     reset_environment
+    with BACKUP_BUCKET_PREFIX=fixture-backup CLUSTER_S3_ACCESS_KEY_ID=marker-cluster-access-key-id \
+      CLUSTER_S3_SECRET_ACCESS_KEY=marker-cluster-secret-key
     rm -f "$REPO/.env"
     if [[ $where == environment ]]; then
       with GODEBUG=x509sha1=1,http2debug=2
@@ -271,7 +276,8 @@ absent() {
       echo 'GODEBUG=http2debug=1' > "$REPO/.env"
     fi
     runs=('infra-plan sto2/plumbing' 'infra-apply sto2/plumbing --yes' 'infra-destroy --yes'
-      'infra-output sto2/plumbing talos_version' 'infra-talman' os-smoke infra-state-bucket)
+      'infra-output sto2/plumbing talos_version' 'infra-talman' os-smoke infra-state-bucket
+      infra-backup-buckets infra-backup-check 'infra-s3-key cluster')
     # install-cilium reads the process environment only, not .env.
     if [[ $where == environment ]]; then
       runs+=(cilium-install)
@@ -286,7 +292,8 @@ absent() {
       [ "$status" -ne 0 ]
       [[ $output == *"GODEBUG sets http2debug"* ]]
       [ ! -e "$RECORD/tofu" ]
-      ! grep -qE '^(openstack|talman|kubectl|helm) ' "$RECORD/argv" 2> /dev/null
+      run grep -qE '^(openstack|rclone|talman|kubectl|helm) ' "$RECORD/argv"
+      [ "$status" -ne 0 ]
     done
   done
 }

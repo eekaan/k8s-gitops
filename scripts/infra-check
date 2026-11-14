@@ -95,6 +95,22 @@ for dir in "${dirs[@]}"; do
   fi
 done
 
+# The state bucket and the backup buckets outlive the stacks, so no stack, nor a module of this
+# repository it may call, owns a bucket: a destroy would remove it. An object storage container is
+# a bucket of the same store.
+bucket_types='^openstack_objectstorage_container_v[0-9]+$|_s3_bucket$'
+for file in infra/openstack/stacks/*/*/*.tf infra/openstack/modules/*/*.tf; do
+  if ! addresses=$(yq -p hcl -o json "$file" 2> /dev/null | jq -r --arg types "$bucket_types" \
+    '.resource // {} | to_entries[] | select(.key | test($types)) | .key + "." + (.value | keys[])'); then
+    fail "${file%/*}" "$file cannot be read for the resources it declares"
+    continue
+  fi
+  while IFS= read -r address; do
+    [[ -n $address ]] || continue
+    fail "${file%/*}" "declares the bucket $address; buckets outlive the stacks, made by just infra-state-bucket and just infra-backup-buckets"
+  done <<< "$addresses"
+done
+
 for module in infra/openstack/modules/*/; do
   if [[ -d $module/tests ]]; then
     dirs+=("$module")

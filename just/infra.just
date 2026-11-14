@@ -36,3 +36,15 @@ os-smoke:
 # Create the state bucket TF_STATE_BUCKET names, as an object storage container, unless it exists; prints neither its name nor a credential
 infra-state-bucket:
     scripts/infra-state-bucket
+
+# Create an S3 key pair for the state or the cluster key set and write it to .env, unless a name there already holds one; never shows either value
+infra-s3-key keyset:
+    scripts/infra-s3-key {{ quote(keyset) }}
+
+# Create the etcd, openbao, volsync and postgres buckets under BACKUP_BUCKET_PREFIX through the S3 API with the state key, unless they exist; names them by role only
+infra-backup-buckets:
+    scripts/infra-backup-buckets
+
+# Check that the cluster's S3 key is not the state key and lists each backup bucket; pass or FAIL per item, no names or keys
+infra-backup-check:
+    scripts/infra-backup-check

@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Creates the backup buckets, <BACKUP_BUCKET_PREFIX>-etcd, -openbao, -volsync and -postgres, unless
+# they exist, through the object storage's S3 API with the state key, the API the cluster later
+# reads them through. No stack owns them, so no infra-destroy removes them. Names each bucket by
+# its role only, and prints nothing rclone reports, which names the buckets and the endpoint. A
+# second run creates nothing.
+# Usage: scripts/infra-backup-buckets
+set -euo pipefail
+
+# shellcheck source=scripts/lib/s3.sh
+. "$(dirname "$0")/lib/s3.sh"
+load_env
+complete=1
+refuse_http2_debug || complete=0
+require_env BACKUP_BUCKET_PREFIX AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY || complete=0
+((complete))
+s3_bucket_name_ok BACKUP_BUCKET_PREFIX prefix
+s3_require_client
+
+buckets=()
+for role in "${s3_backup_roles[@]}"; do
+  buckets+=("$BACKUP_BUCKET_PREFIX-$role")
+done
+if ! s3_create_buckets state "${buckets[@]}"; then
+  infra_error "the state key cannot list the object storage's buckets; nothing was created"
+  exit 1
+fi
+
+failed=0
+for role in "${s3_backup_roles[@]}"; do
+  case ${s3_bucket_state[$BACKUP_BUCKET_PREFIX-$role]} in
+    exists) echo "infra-backup-buckets: the $role bucket exists; nothing to create" ;;
+    created) echo "infra-backup-buckets: created the $role bucket" ;;
+    taken)
+      infra_error "the $role bucket's name is taken; choose another BACKUP_BUCKET_PREFIX"
+      failed=1
+      ;;
+    unconfirmed)
+      infra_error "the $role bucket may have been created, but the buckets could not be listed to confirm it"
+      failed=1
+      ;;
+    *)
+      infra_error "the $role bucket could not be created"
+      failed=1
+      ;;
+  esac
+done
+exit "$failed"

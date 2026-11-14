@@ -52,15 +52,49 @@ goes the other way round. State objects stay in the bucket after a destroy.
 
 Once per deployment, before the first `just infra-plan`, in this order:
 
-1. Create S3 credentials for the OpenStack project, an access key and its secret key: OpenStack's
-   EC2 credentials, which `openstack ec2 credentials create` makes. It prints the secret key, so it
-   is run by hand and its output kept out of any log.
-2. Put them in `.env` as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, beside the bucket's
-   name as `TF_STATE_BUCKET` and the OpenStack authentication ([Environment](#environment)).
-3. `just infra-state-bucket` creates the bucket.
-4. Choose the passphrase state and plans are encrypted with, 16 characters or more, put it in
+1. With the OpenStack authentication in `.env` ([Environment](#environment)),
+   `just infra-s3-key state` creates the state key, S3 credentials for the project, and writes it
+   to `.env` as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
+   ([S3 keys and backup buckets](#s3-keys-and-backup-buckets)).
+2. Put the state bucket's name in `.env` as `TF_STATE_BUCKET`; `just infra-state-bucket` creates
+   the bucket.
+3. Choose the passphrase state and plans are encrypted with, 16 characters or more, put it in
    `.env` as `TF_STATE_PASSPHRASE`, and keep a copy outside the repository and the cluster
    ([State](#state)).
+
+## S3 keys and backup buckets
+
+etcd snapshots, OpenBao snapshots, VolSync repositories and Postgres backups go to four buckets in
+the object storage: `BACKUP_BUCKET_PREFIX` followed by `-etcd`, `-openbao`, `-volsync` and
+`-postgres`. No stack owns them, so `just infra-destroy` leaves them and their data:
+`just infra-check` fails on a stack, or a module of this repository, that declares an object
+storage container or an S3 bucket.
+
+- `just infra-s3-key state` and `just infra-s3-key cluster` create an S3 key pair, an EC2
+  credential, with the `openstack` client, in the version `os-smoke` needs, and write it to `.env`
+  under the key set's names: `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` for the state key,
+  `CLUSTER_S3_ACCESS_KEY_ID` and `CLUSTER_S3_SECRET_ACCESS_KEY` for the cluster's. Neither value is
+  printed. Nothing is created while `.env` is a symlink or a file git does not ignore, or while one
+  of the names there holds a value; a name that is empty or a placeholder is filled in, an absent
+  one is appended after a comment, and every other line stays as it is. `.env` is written to a
+  temporary file beside it, mode 0600, and renamed into place.
+- `just infra-backup-buckets` creates the four buckets unless they exist, through the object
+  storage's S3 API with the state key, and names each by its role, never by its name. A second run
+  creates nothing. A name another project owns fails, naming the role.
+- `just infra-backup-check` checks, reading only, that the cluster's key is not the state key and
+  that it lists each of the four buckets. It prints pass or FAIL per item.
+
+The cluster's key exists so that it can be revoked on its own, without touching the state. Both
+keys belong to the same project and reach every bucket in it, the state bucket included, which is
+why state and snapshots are encrypted before they are uploaded
+([ADR 0008](adr/0008-state-and-backups-are-encrypted-before-they-leave.md)).
+
+These recipes reach the object storage with rclone, pinned in `mise.toml`, at the endpoint, region
+and addressing that `infra/openstack/backend.hcl` gives OpenTofu's state. rclone is configured
+through its environment only and reads no config file; the operator's own rclone configuration,
+its `RCLONE_` and `AWS_` variables and every other variable but `PATH`, `HOME`, `TMPDIR` and the
+proxy variables stay out of its environment. What rclone prints names the buckets and the
+endpoint, so it is not shown.
 
 ## The generated talman.yaml
 
@@ -104,17 +138,21 @@ empty or still a placeholder. It refuses to run while `TF_LOG`, `TF_LOG_PATH`, `
 `TF_DATA_DIR` is set, as it would move a stack's working directory, with the saved plan and the
 lock, out of its `.terraform/`; and while `GODEBUG` sets `http2debug`, as Go's HTTP/2 debug log
 prints what tofu and its providers send and receive. No recipe prints a value or passes a secret
-on a command line; secrets reach tofu through its environment.
+on a command line; secrets reach tofu and rclone through their environment.
 
 - `TF_STATE_BUCKET`: the bucket that holds state.
-- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`: S3 credentials for that bucket.
+- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`: the state key, S3 credentials for that bucket,
+  which also create the backup buckets.
+- `BACKUP_BUCKET_PREFIX`: the start of the backup buckets' names, lower-case letters, digits and
+  hyphens.
+- `CLUSTER_S3_ACCESS_KEY_ID` and `CLUSTER_S3_SECRET_ACCESS_KEY`: the cluster's S3 key.
 - `TF_STATE_PASSPHRASE`: the passphrase state and plans are encrypted with, 16 characters or more.
   tofu gets it inside `TF_ENCRYPTION` only, and the `openstack` client gets neither it nor the S3
   credentials.
 - `OS_CLOUD`, naming a `clouds.yaml` entry outside the repository, or `OS_AUTH_URL` with the
   application-credential variables: OpenStack authentication, which tofu's provider and the
-  `openstack` client read themselves. `os-smoke` needs only this, and `infra-state-bucket` this
-  and `TF_STATE_BUCKET`.
+  `openstack` client read themselves. `os-smoke` and `infra-s3-key` need only this, and
+  `infra-state-bucket` this and `TF_STATE_BUCKET`.
 - `OPERATOR_CIDRS`, or else `operator-cidrs.json` at the repository root (gitignored): the
   operator allowlist of the cluster stack, a JSON list of IPv4 CIDRs. An entry that is IPv6, or
   whose prefix is 0 and so covers every address, is refused, named by its position in the list and

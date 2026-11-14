@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# A stand-in for rclone against the object storage, installed by the tests as <tmp>/bin/rclone.
+# The recipes give rclone nothing but its own settings, so it finds its files from its own path:
+#   <tmp>/store/ours          the buckets the project owns, one per line
+#   <tmp>/store/theirs        the buckets another project owns
+#   <tmp>/store/list-fails    while it exists, listing the buckets fails
+#   <tmp>/store/mkdir-fails   while it exists, creating a bucket fails
+# It records "rclone ARGS" in <tmp>/record/argv and each call's environment, as it was started,
+# in <tmp>/record/env.rclone.<n>. Like rclone, it prints the buckets' names and the endpoint, which
+# the recipes must keep to themselves.
+set -uo pipefail
+
+root=${0%/bin/*}
+store=$root/store
+record=$root/record
+printf '%s\n' "rclone $*" >> "$record/argv"
+call=1
+while [[ -e $record/env.rclone.$call ]]; do
+  call=$((call + 1))
+done
+while IFS= read -r -d '' entry; do
+  printf '%s\0' "$entry"
+done < "/proc/$$/environ" > "$record/env.rclone.$call"
+
+endpoint=${RCLONE_CONFIG_STORE_ENDPOINT-}
+if [[ ${RCLONE_CONFIG_STORE_TYPE-} != s3 || -z ${RCLONE_CONFIG_STORE_ACCESS_KEY_ID-} ]]; then
+  echo "Failed to create file system for store: didn't find section in config file" >&2
+  exit 1
+fi
+
+# owned BUCKET / taken BUCKET: whether the project, or another one, owns BUCKET.
+listed() {
+  local name
+  [[ -f $1 ]] || return 1
+  while IFS= read -r name; do
+    [[ $name == "$2" ]] && return 0
+  done < "$1"
+  return 1
+}
+owned() { listed "$store/ours" "$1"; }
+taken() { listed "$store/theirs" "$1"; }
+
+target=${!#}
+bucket=${target#store:}
+case $1 in
+  lsf)
+    if [[ $target == store: ]]; then
+      if [[ -e $store/list-fails ]]; then
+        echo "ERROR : AccessDenied listing the buckets at $endpoint" >&2
+        exit 1
+      fi
+      while IFS= read -r name; do
+        printf '%s/\n' "$name"
+      done < "$store/ours"
+    elif owned "$bucket"; then
+      echo "object-in-$bucket"
+    elif taken "$bucket"; then
+      echo "ERROR : $bucket: AccessDenied at $endpoint" >&2
+      exit 1
+    else
+      echo "ERROR : $bucket: directory not found at $endpoint" >&2
+      exit 3
+    fi
+    ;;
+  mkdir)
+    if [[ -e $store/mkdir-fails ]]; then
+      echo "ERROR : $bucket: TooManyBuckets at $endpoint" >&2
+      exit 1
+    fi
+    # Under the provider Other, rclone ignores BucketAlreadyExists: a name another project owns
+    # passes without an error, and the project still does not own it.
+    if ! owned "$bucket" && ! taken "$bucket"; then
+      echo "$bucket" >> "$store/ours"
+      echo "INFO  : $bucket: Bucket created at $endpoint" >&2
+    fi
+    ;;
+  *)
+    echo "unexpected call: rclone $*" >&2
+    exit 2
+    ;;
+esac

@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Checks, reading only, that the cluster's S3 key is not the state key and that it lists each
+# backup bucket through the object storage's S3 API. Prints pass or FAIL per item, naming buckets
+# by their role, and never a key, a bucket's name or what rclone reports, so its output can be
+# shared.
+# Usage: scripts/infra-backup-check
+set -euo pipefail
+
+# shellcheck source=scripts/lib/s3.sh
+. "$(dirname "$0")/lib/s3.sh"
+load_env
+complete=1
+refuse_http2_debug || complete=0
+require_env BACKUP_BUCKET_PREFIX AWS_ACCESS_KEY_ID CLUSTER_S3_ACCESS_KEY_ID CLUSTER_S3_SECRET_ACCESS_KEY || complete=0
+((complete))
+s3_bucket_name_ok BACKUP_BUCKET_PREFIX prefix
+s3_require_client
+
+failed=0
+pass() {
+  printf 'pass  %s\n' "$1"
+}
+fail() {
+  printf 'FAIL  %s: %s\n' "$1" "$2"
+  failed=1
+}
+
+# Revoking the cluster's key leaves the state reachable only while the two keys differ.
+if [[ $CLUSTER_S3_ACCESS_KEY_ID == "$AWS_ACCESS_KEY_ID" ]]; then
+  fail "the cluster's key is not the state key" "both have the same access key ID"
+else
+  pass "the cluster's key is not the state key"
+fi
+
+for role in "${s3_backup_roles[@]}"; do
+  if s3_rclone cluster lsf --max-depth 1 "store:$BACKUP_BUCKET_PREFIX-$role" > /dev/null 2>&1; then
+    pass "the cluster's key lists the $role bucket"
+  else
+    fail "the cluster's key lists the $role bucket" "it cannot, or the bucket does not exist"
+  fi
+done
+
+if ((failed)); then
+  infra_error "the backup buckets are not ready for the cluster; see the FAIL lines"
+  exit 1
+fi
