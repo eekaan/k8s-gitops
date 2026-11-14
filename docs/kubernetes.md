@@ -329,7 +329,8 @@ Nothing routes to Grafana from outside the cluster. `just grafana [cluster]` for
 `GRAFANA_PORT` or 3000, on 127.0.0.1 only, to port 3000 of the Service `grafana-service` in
 `monitoring` through the cluster's kubeconfig, until Ctrl-C; it prints the local URL, and the
 forward ends with the recipe however it ends ([cluster.md](cluster.md#recipes)). Sign in as
-`admin`. The password is under `GF_SECURITY_ADMIN_PASSWORD` in the Secret `grafana-admin-credentials` in `monitoring`, which the
+`admin`. The password is under `GF_SECURITY_ADMIN_PASSWORD` in the Secret
+`grafana-admin-credentials` in `monitoring`, which the
 operator generates when it first creates the Secret and keeps while the `Grafana` exists; nothing in
 Git holds it. Deleting the `Grafana` deletes the Secret, and a new one gets a new password. It is
 the kind of credential ADR 0005 keeps out of OpenBao: one a controller generates in the cluster for
