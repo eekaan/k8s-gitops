@@ -17,7 +17,6 @@ setup_file() {
   export RENDER_CHART_CACHE="$BATS_FILE_TMPDIR/charts"
   helm package "$BATS_TEST_DIRNAME/fixtures/render/charts/greeter" \
     --destination "$RENDER_CHART_CACHE/charts.example.invalid/greeter/1.0.0" >/dev/null
-  export PULL_LOG="$BATS_FILE_TMPDIR/pull.log"
   export REAL_HELM LEDGER_CHART="$BATS_TEST_DIRNAME/fixtures/render/charts/ledger"
   REAL_HELM="$(command -v helm)"
   mkdir -p "$BATS_FILE_TMPDIR/bin"
@@ -50,6 +49,8 @@ setup() {
   export KUBECONFIG="$BATS_TEST_TMPDIR/no-kubeconfig"
   unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
   export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+  # Each test has its own log of what the stand-in for helm pull was asked for.
+  export PULL_LOG="$BATS_TEST_TMPDIR/pull.log"
 }
 
 # tree NAME: a copy of the fixture tree in $BATS_TEST_TMPDIR/NAME, for the test to change.
