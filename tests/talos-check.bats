@@ -43,6 +43,11 @@ in_subnet() {
   (((($(ipv4 "$1") ^ $(ipv4 "${2%/*}")) & mask) == 0))
 }
 
+# overlap A B: whether the IPv4 networks A and B share an address.
+overlap() {
+  in_subnet "${1%/*}" "$2" || in_subnet "${2%/*}" "$1"
+}
+
 # missing WANTED HAVE: the lines of WANTED that HAVE lacks.
 missing() {
   comm -23 <(sort -u <<< "$1") <(sort -u <<< "$2")
@@ -51,6 +56,37 @@ missing() {
 # shared A B: the lines A and B have in common.
 shared() {
   comm -12 <(sort -u <<< "$1") <(sort -u <<< "$2")
+}
+
+@test "The fixture node data has the shape the cluster stack renders" {
+  node_subnet=$(yq '.node_subnet' "$FIXTURE")
+  pod_subnet=$(yq '.pod_subnet' "$FIXTURE")
+  service_subnet=$(yq '.service_subnet' "$FIXTURE")
+  sans=$(yq '.api_sans[]' "$FIXTURE")
+  # talman runs outside the node network and reaches every node at its floating address.
+  checked=0
+  while IFS=' ' read -r address floating_ip; do
+    [ "$address" = "$floating_ip" ]
+    run in_subnet "$floating_ip" "$node_subnet"
+    [ "$status" -ne 0 ]
+    checked=$((checked + 1))
+  done < <(yq '.nodes[] | .address + " " + .floating_ip' "$FIXTURE")
+  [ "$checked" -eq 6 ]
+  # The endpoint is the load balancer's address on the node network, a certificate name like the
+  # floating address the recipes reach the API on.
+  endpoint=$(yq '.endpoint' "$FIXTURE")
+  [[ $endpoint =~ ^https://([0-9.]+):6443$ ]]
+  in_subnet "${BASH_REMATCH[1]}" "$node_subnet"
+  grep -qxF "${BASH_REMATCH[1]}" <<< "$sans"
+  grep -qxF "$(yq '.api_address' "$FIXTURE")" <<< "$sans"
+  # The cluster stack's checks of pod_subnet and service_subnet.
+  run overlap "$pod_subnet" "$node_subnet"
+  [ "$status" -ne 0 ]
+  run overlap "$service_subnet" "$node_subnet"
+  [ "$status" -ne 0 ]
+  run overlap "$service_subnet" "$pod_subnet"
+  [ "$status" -ne 0 ]
+  (((1 << (24 - ${pod_subnet#*/})) >= checked))
 }
 
 @test "Every node's configuration renders and validates offline" {
@@ -189,9 +225,11 @@ EOF
 @test "Kubernetes and etcd use the node network, not the floating address" {
   node_subnet=$(yq '.node_subnet' "$FIXTURE")
   [ "$node_subnet" != null ]
+  # talman reaches each node at its floating address, outside the node network, so a patch that took
+  # the node's address from talman would leave the node network.
   checked=0
   while IFS=' ' read -r address floating_ip; do
-    in_subnet "$address" "$node_subnet"
+    [ "$address" = "$floating_ip" ]
     run in_subnet "$floating_ip" "$node_subnet"
     [ "$status" -ne 0 ]
     checked=$((checked + 1))

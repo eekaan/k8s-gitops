@@ -1,6 +1,11 @@
 Feature: Talos machine configuration
   Machine configuration is rendered and validated from the repository alone.
 
+  Scenario: The fixture node data has the shape the cluster stack renders
+    Given tests/fixtures/talos/inputs.yaml
+    When it is read
+    Then each node's address is its floating address, outside the node network; the endpoint's address and the API address are among the API certificate names; and the pod and service subnets pass the cluster stack's own checks, the pod subnet holding a /24 for every node
+
   Scenario: Every node's configuration renders and validates offline
     Given the template, the patches, the schematic and fixture node data
     When the Talos check runs
@@ -27,7 +32,7 @@ Feature: Talos machine configuration
     Then each node's configuration has a dummy link with that node's own floating address as a /32
 
   Scenario: Kubernetes and etcd use the node network, not the floating address
-    Given fixture node data with a node network that holds each node's address and none of the floating addresses
+    Given fixture node data whose node network holds none of the floating addresses talman reaches the nodes on
     When the configuration is rendered
     Then every node's kubelet takes its node IP from the node network only, and every control plane's etcd advertises and listens on the node network only
 
