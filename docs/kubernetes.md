@@ -390,7 +390,8 @@ to check that its definitions are kept.
 
 VolSync backs an application's volume up to the VolSync bucket
 ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)) with its restic mover, and
-fills the volume from the latest backup when it is created (ADR 0015).
+fills the volume from the latest backup when the volume and its restore are created together
+(ADR 0015).
 
 `apps/base/volsync-system/volsync/` installs the operator in its own namespace, `volsync-system`,
 at the restricted Pod Security level. Its publisher releases the chart only to a classic Helm
@@ -401,6 +402,8 @@ the chart's requests and limits; the application's own disruption budget keeps o
 The chart's ServiceMonitor sends no credential, so the metrics are served without authorization.
 The application names `snapshot-controller`, which VolSync needs installed, and
 `prometheus-operator-crds` in `dependsOn`, and sets `wait`.
+
+### Backing up a volume
 
 An application opts in from its `ks.yaml`, before its volume exists, and names `volsync`,
 `external-secrets` and `linstor-cluster` in `dependsOn`:
@@ -416,37 +419,95 @@ spec:
       VOLSYNC_SCHEDULE: "17 3 * * *"
 ```
 
+The component backs up one volume per application. `APP` is the application's own name, the
+`metadata.name` of its Kustomization: `just kubernetes-check` fails on a `ks.yaml` that adds the
+component with any other `APP`, as two applications with one `APP` would share a repository.
 `VOLSYNC_CLAIM` names the volume, `APP` when unset; `VOLSYNC_UID` and `VOLSYNC_GID`, 1000 when
 unset, are the user and group the movers run as, which must be able to read and write its files.
 The component makes:
 
 - the volume, a claim of `VOLSYNC_CAPACITY` on the default StorageClass, whose data source is the
-  ReplicationDestination `<app>-restore`. That restores the latest backup once, as soon as it
-  exists, and keeps a snapshot of it, and VolSync makes the claim from the snapshot: the volume
-  starts with the latest backup, or empty when there is none. A claim's data source cannot be added
-  once the claim exists, so a volume that exists keeps its data;
+  ReplicationDestination `<app>-restore` ([Restoring](#restoring)). A claim's data source cannot be
+  added once the claim exists, so a volume that exists keeps its data;
 - the ReplicationSource `<app>`, which backs the volume up on the cron schedule `VOLSYNC_SCHEDULE`:
   it takes a snapshot through the default VolumeSnapshotClass, so the backup is of one moment, and
   restic uploads the files of a volume made from it. An empty volume is not backed up. Each run keeps
   the newest backup of each of the last 7 days, 4 weeks and 3 months, and every 7 days the
   repository is pruned. Each application takes its own minute, so backups do not start together;
-- the ExternalSecret `<app>-volsync`, which writes the Secret the movers read: `RESTIC_REPOSITORY`,
-  the application's own repository, `s3:<S3_ENDPOINT>/<BACKUP_BUCKET_PREFIX>-volsync/<app>`, from
-  `cluster-config`; and `RESTIC_PASSWORD`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, the
-  properties of the key `volsync` in the ClusterSecretStore `openbao`: the password every
-  repository is encrypted with and the cluster's S3 key. restic creates the repository the first
-  time a mover reaches it.
+- the ExternalSecret `<app>-volsync`, which writes the Secret the movers read
+  ([The repository and its password](#the-repository-and-its-password)).
 
 The movers run in the application's namespace, unprivileged: VolSync drops their capabilities and
 forbids privilege escalation, and the component gives them a non-root user and group and the
 runtime's seccomp profile, as the restricted level requires.
 
+### Restoring
+
+The ReplicationDestination `<app>-restore` restores the latest backup once, when it is created, as
+its trigger is manual, and keeps a snapshot of what it restored; VolSync makes the claim from that
+snapshot whenever the claim is created.
+
+- When the claim and the ReplicationDestination are created together, on the application's first
+  deployment, or after both were deleted, as when the application leaves the tree and comes back or
+  the cluster is rebuilt, the volume starts with the latest backup, or empty when there is none.
+- A claim deleted and created again while the ReplicationDestination stays gets the snapshot kept
+  from that one restore, which after a first deployment is of an empty volume, not the latest
+  backup.
+- To restore the latest backup into an application that runs: suspend its Kustomization, stop the
+  pods that use the claim, delete the claim and the ReplicationDestination `<app>-restore`, and
+  resume the Kustomization. Flux creates both again, the ReplicationDestination restores the latest
+  backup, and the claim is made from it. What was written to the volume after that backup is lost.
+
+`APP` and `BACKUP_BUCKET_PREFIX` name the repository, so neither changes once an application has
+backups: under a path that holds no repository, restic creates an empty one and the restore
+succeeds with an empty volume, without an error.
+
+A claim stays Pending, with the pods that use it, until a pod uses it, as LINSTOR's classes make a
+volume once its first pod is scheduled, and until the ReplicationDestination's first restore has
+completed and recorded its snapshot in `status.latestImage`; that needs the Secret, so without the
+secret store it never completes. A claim whose ReplicationDestination is gone, or whose recorded
+snapshot is gone, stays Pending until the ReplicationDestination is created again. The claim's
+events say which: `VolSyncPopulatorReplicationDestinationMissing`,
+`VolSyncPopulatorReplicationDestinationNoLatestImage`, or `VolSyncPopulatorPVCCreated` once the
+volume is being made; a missing snapshot shows in the VolSync controller's log. An application whose
+Kustomization sets `wait` is not Ready while its claim is Pending, so it holds up every application
+that names it in `dependsOn` until its first restore completes.
+
+### The repository and its password
+
+Each application has a restic repository of its own, `s3:<S3_ENDPOINT>/<BACKUP_BUCKET_PREFIX>-volsync/<app>`,
+encrypted with a password of its own. restic creates the repository the first time a mover reaches
+it. The ExternalSecret reads the key `volsync` of the ClusterSecretStore `openbao`, whose properties
+are `RESTIC_MASTER_PASSWORD`, the master password, and the cluster's S3 key, `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY`. The Secret it writes holds only what its template renders:
+
+- `RESTIC_REPOSITORY`: the repository, from `cluster-config`;
+- `RESTIC_PASSWORD`: the application's password, derived from the master;
+- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`: the cluster's S3 key;
+- `AWS_DEFAULT_REGION`: `S3_REGION`, from `cluster-config`.
+
+An application's password is the SHA-256 digest of the master, a slash and the application's name,
+with nothing after it, written as 64 lower-case hexadecimal digits. The master never reaches a
+namespace, so one application's Secret opens no other application's repository, and only the master
+is kept outside the cluster. To open a repository with restic by hand, compute its password from the
+master that way, with a tool that reads the master from a file or its standard input and never
+from its command line, and give the password to restic in a file or from a command
+(`RESTIC_PASSWORD_FILE`, `RESTIC_PASSWORD_COMMAND`), never as an argument. Every namespace that
+takes the component holds the cluster's S3 key, which reaches every bucket of the project: whoever
+can read Secrets there can read, replace or delete any application's backups, though not decrypt
+them (ADR 0015).
+
+### What is still needed
+
 No ClusterSecretStore exists yet, so the Secret is never written and VolSync starts no mover. The
 test application `apps/base/demo/volsync-demo/`, a pod that holds a 1 GiB volume and writes the
-time it first found it empty, is disabled in the overlay. Before the first backup runs, the store
-`openbao` holds the key `volsync` with its three properties, the password also kept outside the
-cluster; `just cluster-config` has applied `BACKUP_BUCKET_PREFIX` and `S3_ENDPOINT`; and
-`volsync-demo` is enabled, with the store's application in its `dependsOn`.
+time it first found it empty, is disabled in the overlay. Before the first backup runs:
+
+1. the ClusterSecretStore `openbao` holds the key `volsync` with `RESTIC_MASTER_PASSWORD`, also
+   kept outside the cluster, and the cluster's S3 key as `AWS_ACCESS_KEY_ID` and
+   `AWS_SECRET_ACCESS_KEY`;
+2. `just cluster-config` has applied `BACKUP_BUCKET_PREFIX`, `S3_ENDPOINT` and `S3_REGION`;
+3. `volsync-demo` is enabled in the overlay, with the store's application in its `dependsOn`.
 
 `tests/volume-backups.bats` builds the applications as Flux applies them and renders the VolSync
 and External Secrets charts to check this section.
@@ -634,8 +695,10 @@ starts to use is listed in the example and given its source in `fill_cluster_con
   published under, a lower-case DNS name.
 - `BACKUP_BUCKET_PREFIX`: the environment variable of that name, the start of the backup buckets'
   names ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)).
-- `S3_ENDPOINT`: the object storage's S3 endpoint, `endpoints.s3` in `infra/openstack/backend.hcl`,
-  where OpenTofu's state backend reads it.
+- `S3_ENDPOINT` and `S3_REGION`: the object storage's S3 endpoint and region, `endpoints.s3` and
+  `region` in `infra/openstack/backend.hcl`, where OpenTofu's state backend reads them. The endpoint
+  is `https://`, a host name and an optional port, with nothing after them, as an S3 client reads a
+  path there as the bucket.
 - `NODE_CIDR`: `values.nodeSubnet` in `talos/<cluster>/talman.yaml`, which the cluster stack renders
   from the plumbing stack's node subnet and which the kubelets take their node addresses from.
 - `NODE_NAME_REGEX`: the hostnames in that `talman.yaml`, joined with `|`, with a trailing number

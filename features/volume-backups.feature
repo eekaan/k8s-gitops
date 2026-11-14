@@ -1,5 +1,5 @@
 Feature: Volume backups
-  An application's volume is backed up on a schedule to its own restic repository in the VolSync bucket, and restored from the latest backup when the volume is created: the VolSync operator under Flux, and the volsync component an application opts into (ADR 0015). No secret store holds the repository's credentials yet, so no backup runs.
+  An application's volume is backed up on a schedule to its own restic repository in the VolSync bucket, and restored from the latest backup when the volume and its restore are created together: the VolSync operator under Flux, and the volsync component an application opts into (ADR 0015). No secret store holds the repository's credentials yet, so no backup runs.
 
   Scenario: The VolSync operator runs in its own namespace with its resource definitions
     Given the volsync application and its namespace directory, enabled in the cluster's overlay
@@ -34,7 +34,12 @@ Feature: Volume backups
   Scenario: The repository and its credentials come from cluster-config and the secret store
     Given the test application built as Flux applies it, with known values for cluster-config's variables
     When its ExternalSecret is read
-    Then it reads one key of the ClusterSecretStore openbao into the Secret the movers read, which holds exactly the repository, its password and the S3 key, the repository being the application's own path in the VolSync bucket at the object storage's endpoint, both from cluster-config, and the component holds no Secret
+    Then it reads one key of the ClusterSecretStore openbao into the Secret the movers read, which holds only what its template renders: the repository, its password, the S3 key and the region, the repository being the application's own path in the VolSync bucket at the object storage's endpoint, and the bucket's prefix, the endpoint and the region coming from cluster-config, and the component holds no Secret
+
+  Scenario: Each repository has a password of its own, and the master password never leaves the store
+    Given the test application built as Flux applies it, under its own name and under another
+    When the template of its Secret is executed offline against a known master password
+    Then no value of the Secret holds the master, and the password is the SHA-256 digest of the master, a slash and the application's name, the same each time, different for the other application and for another master
 
   Scenario: The movers meet the restricted Pod Security level of the application's namespace
     Given the test application built as Flux applies it, and the demo namespace
@@ -47,6 +52,6 @@ Feature: Volume backups
     Then its kind and version are served, and every field it sets is in the definition's schema, of the type and among the values the schema allows
 
   Scenario: No backup runs until the secret store holds the repository's credentials
-    Given the cluster's overlay
-    When it is built as Flux applies it
-    Then it applies the volsync application and its namespace, and no application that includes components/volsync, and it lists the test application commented out with the reason
+    Given the test application and the cluster's overlay, built as Flux applies them
+    When the Secret the movers read, the secret stores in the tree and the enabled applications are read
+    Then only the component's ExternalSecret makes that Secret, which VolSync requires before it starts a mover, nothing in the tree defines a secret store, and the overlay applies the volsync application and its namespace and no application that includes components/volsync, and lists the test application commented out with the reason

@@ -8,8 +8,10 @@ CLUSTER_DOMAIN: example.com
 # The start of the backup buckets' names: each bucket is this, a hyphen and its role, such as
 # example-backups-volsync.
 BACKUP_BUCKET_PREFIX: example-backups
-# The object storage's S3 endpoint, an https URL.
+# The object storage's S3 endpoint: https, a host name and an optional port, nothing after them.
 S3_ENDPOINT: https://s3.example.com
+# The region the object storage's S3 clients name.
+S3_REGION: example-region
 # The node network, as an address prefix.
 NODE_CIDR: 192.0.2.0/24
 # A regular expression (Go RE2 syntax) that every node name matches in full.

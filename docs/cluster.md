@@ -283,7 +283,7 @@ out of the artifact, which is built from `kubernetes/`.
   `flux-system`, the ConfigMap `cluster-config`, the Secret `cluster-secrets` and the Secret
   `sops-age` ([kubernetes.md](kubernetes.md#before-flux-starts)). It refuses, naming each, when the
   cluster's `talman.yaml` or kubeconfig, `CLUSTER_DOMAIN`, `BACKUP_BUCKET_PREFIX`, the object
-  storage's endpoint in `infra/openstack/backend.hcl`, the Flux age key or its recipient in
+  storage's endpoint or region in `infra/openstack/backend.hcl`, the Flux age key or its recipient in
   `.sops.yaml` is missing, when the Flux age key is not the key of that recipient or is the Talos
   age key, and when a key of `cluster-config` or `cluster-secrets` cannot be filled or is not
   listed. A second run changes nothing.

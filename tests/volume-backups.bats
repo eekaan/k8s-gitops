@@ -112,6 +112,26 @@ render() {
     --values "$VALUES" --values "$INLINE" >"$RENDERED"
 }
 
+# secret_data MASTER: the data of the Secret the ExternalSecret that built yielded writes, as a YAML
+# map, when the store's key holds MASTER as RESTIC_MASTER_PASSWORD and a marker S3 key. External
+# Secrets' v2 engine runs each value as a Go template with the sprig functions; helm's tpl runs it
+# the same way, with the same sha256sum and printf, so the template is executed offline as written.
+secret_data() {
+  local chart="$BATS_TEST_TMPDIR/secret-data" values="$BATS_TEST_TMPDIR/secret-data-values.yaml"
+  mkdir -p "$chart/templates"
+  printf 'apiVersion: v2\nname: secret-data\nversion: 0.0.0\n' >"$chart/Chart.yaml"
+  cat >"$chart/templates/data.yaml" <<'EOF'
+{{- range $key, $text := .Values.templates }}
+{{ $key }}: {{ tpl $text $.Values.store | toJson }}
+{{- end }}
+EOF
+  # shellcheck disable=SC2016 # $templates is a yq variable.
+  MASTER="$1" yq -N 'select(.kind == "ExternalSecret") | .spec.target.template.data as $templates
+    | {"store": {"RESTIC_MASTER_PASSWORD": strenv(MASTER), "AWS_ACCESS_KEY_ID": "marker-access-key-id",
+       "AWS_SECRET_ACCESS_KEY": "marker-secret-access-key"}, "templates": $templates}' "$BUILT" >"$values"
+  helm template secret-data "$chart" --values "$values" | yq 'select(. != null)'
+}
+
 # object KIND: the one object of KIND that built yielded, as JSON on one line; fails unless there is
 # exactly one.
 object() {
@@ -381,12 +401,13 @@ unknown_fields() {
 
 @test "The repository and its credentials come from cluster-config and the secret store" {
   local declared var external source keys repository
-  # The bucket's prefix and the endpoint are cluster-config's, which the example declares.
+  # The bucket's prefix, the endpoint and the region are cluster-config's, which the example
+  # declares.
   declared="$(yq 'keys | .[]' "$CLUSTER/cluster-config.example.yaml")"
-  for var in BACKUP_BUCKET_PREFIX S3_ENDPOINT; do
+  for var in BACKUP_BUCKET_PREFIX S3_ENDPOINT S3_REGION; do
     grep -qxF -- "$var" <<<"$declared" || { echo "$var is not in cluster-config.example.yaml"; return 1; }
   done
-  built "$DEMO" BACKUP_BUCKET_PREFIX=marker-prefix S3_ENDPOINT=https://s3.marker.example
+  built "$DEMO" BACKUP_BUCKET_PREFIX=marker-prefix S3_ENDPOINT=https://s3.marker.example S3_REGION=marker-region
   external="$(object ExternalSecret)"
   source="$(object ReplicationSource)"
   echo "$external"
@@ -396,21 +417,52 @@ unknown_fields() {
   [ "$(jq -r '.spec.target.name' <<<"$external")" = "$(jq -r '.spec.restic.repository' <<<"$source")" ]
   [ "$(jq -r '[.spec.dataFrom[]?.extract.key] | length' <<<"$external")" -eq 1 ]
   [ "$(jq -r '.spec.data // [] | length' <<<"$external")" -eq 0 ]
-  # The Secret holds exactly what the restic mover reads for an S3 repository.
+  # The Secret holds what the template renders and nothing else of the store's key, and exactly
+  # what the restic mover reads for an S3 repository.
+  [ "$(jq -r '.spec.target.template | .engineVersion + " " + .mergePolicy' <<<"$external")" = "v2 Replace" ]
   keys="$(jq -r '.spec.target.template.data | keys | join(" ")' <<<"$external")"
   echo "the Secret's keys: $keys"
-  [ "$keys" = "AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY RESTIC_PASSWORD RESTIC_REPOSITORY" ]
-  for var in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY RESTIC_PASSWORD; do
+  [ "$keys" = "AWS_ACCESS_KEY_ID AWS_DEFAULT_REGION AWS_SECRET_ACCESS_KEY RESTIC_PASSWORD RESTIC_REPOSITORY" ]
+  for var in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
     [ "$(VAR="$var" jq -r '.spec.target.template.data[env.VAR]' <<<"$external")" = "{{ .$var }}" ]
   done
-  # The application's own path in the VolSync bucket, at the endpoint, both from cluster-config.
+  # The application's own path in the VolSync bucket, at the endpoint, in the region, all from
+  # cluster-config.
   repository="$(jq -r '.spec.target.template.data.RESTIC_REPOSITORY' <<<"$external")"
   echo "repository: $repository"
   [ "$repository" = "s3:https://s3.marker.example/marker-prefix-volsync/$(var APP)" ]
   [ "$(var APP)" = "$DEMO" ]
+  [ "$(jq -r '.spec.target.template.data.AWS_DEFAULT_REGION' <<<"$external")" = marker-region ]
   # Nothing in the component is a Secret.
   [ -z "$(yq -N 'select(.kind == "Secret") | .metadata.name' "$BUILT")" ]
   [ -z "$(grep -rlE '^kind: Secret$' "$TREE/kubernetes/components/volsync" || true)" ]
+}
+
+@test "Each repository has a password of its own, and the master password never leaves the store" {
+  local master=marker-master-password other=other-application first second third fourth digest
+  built "$DEMO"
+  secret_data "$master" >"$BATS_TEST_TMPDIR/first.yaml"
+  first="$(yq '.RESTIC_PASSWORD' "$BATS_TEST_TMPDIR/first.yaml")"
+  secret_data "$master" >"$BATS_TEST_TMPDIR/second.yaml"
+  second="$(yq '.RESTIC_PASSWORD' "$BATS_TEST_TMPDIR/second.yaml")"
+  echo "the Secret, rendered: $(yq -o json -I0 '.' "$BATS_TEST_TMPDIR/first.yaml")"
+  # No value of the Secret holds the master.
+  [ -z "$(grep -F -- "$master" "$BATS_TEST_TMPDIR/first.yaml" || true)" ]
+  # The password is the SHA-256 digest of the master, a slash and the application's name, as hex,
+  # the same each time the template runs.
+  digest="$(printf '%s/%s' "$master" "$(var APP)" | sha256sum | cut -d' ' -f1)"
+  echo "password: $first; again: $second; digest of the master and $(var APP): $digest"
+  [[ $first =~ ^[0-9a-f]{64}$ ]]
+  [ "$first" = "$digest" ]
+  [ "$second" = "$first" ]
+  # Another application's differs, and so does the password from another master.
+  built "$DEMO" "APP=$other"
+  third="$(secret_data "$master" | yq '.RESTIC_PASSWORD')"
+  fourth="$(secret_data other-master | yq '.RESTIC_PASSWORD')"
+  echo "$other's password: $third; with another master: $fourth"
+  [ "$third" = "$(printf '%s/%s' "$master" "$other" | sha256sum | cut -d' ' -f1)" ]
+  [ "$third" != "$first" ]
+  [ "$fourth" != "$third" ]
 }
 
 @test "The movers meet the restricted Pod Security level of the application's namespace" {
@@ -459,7 +511,27 @@ unknown_fields() {
 }
 
 @test "No backup runs until the secret store holds the repository's credentials" {
-  local overlay enabled namespace opted listed
+  local overlay enabled namespace opted listed stores repositories target
+  # What the tree holds is checked here; what VolSync does without the Secret is its own code's:
+  # the restic mover's Synchronize, in internal/controller/mover/restic/mover.go at v0.17.0,
+  # returns before it creates the mover's Job while validateRepository finds no Secret named in
+  # spec.restic.repository with RESTIC_REPOSITORY and RESTIC_PASSWORD.
+  #
+  # The movers read one Secret, which only the component's ExternalSecret makes: nothing it builds
+  # is a Secret, and the ReplicationSource and ReplicationDestination name the ExternalSecret's
+  # target.
+  built "$DEMO"
+  repositories="$(yq -N 'select(.kind == "ReplicationSource" or .kind == "ReplicationDestination") | .spec.restic.repository' "$BUILT" | sort -u)"
+  target="$(yq -N 'select(.kind == "ExternalSecret") | .spec.target.name' "$BUILT")"
+  echo "the movers read: $repositories; the ExternalSecret writes: $target"
+  [ -n "$target" ]
+  [ "$repositories" = "$target" ]
+  [ -z "$(yq -N 'select(.kind == "Secret") | .metadata.name' "$BUILT")" ]
+  # Nothing in the tree defines a secret store for it to read from.
+  stores="$(grep -rlE '^kind: (Cluster)?SecretStore$' "$TREE/kubernetes" || true)"
+  echo "secret stores defined: ${stores:-none}"
+  [ -z "$stores" ]
+
   overlay="$BATS_TEST_TMPDIR/overlay.yaml"
   kustomize build --load-restrictor LoadRestrictionsNone "$TREE/kubernetes/apps/overlays/lab-sto2" >"$overlay"
   enabled="$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "volsync") | .spec.path' "$overlay")"

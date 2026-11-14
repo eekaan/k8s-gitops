@@ -1,7 +1,9 @@
 ---
 # Restores the latest backup once, as soon as it is created, into a volume of its own, and keeps a
-# snapshot of it, which the application's claim is made from. Its temporary volume and restic's
-# cache are deleted once the restore is done.
+# snapshot of it, which the application's claim is made from whenever the claim is created: a claim
+# made again later gets that snapshot, not a newer backup, unless this object is made again with it
+# (docs/kubernetes.md). Its temporary volume and restic's cache are deleted once the restore is
+# done.
 apiVersion: volsync.backube/v1alpha1
 kind: ReplicationDestination
 metadata:
