@@ -7,6 +7,9 @@
   ([ADR 0011](0011-persistent-volumes-from-linstor-on-a-data-volume-per-worker.md))
 - Amended: 2026-11-14, a credential a controller generates in the cluster for its own workload
   stays in the Secret that controller writes
+- Amended: 2026-11-14, OpenBao's seal key is generated once in the cluster and its recovery keys
+  are the operator's, outside it
+  ([ADR 0016](0016-openbao-unseals-itself-and-the-operator-keeps-the-recovery-keys.md))
 
 ## Context
 
@@ -26,7 +29,9 @@ application secrets that change over the cluster's life.
   Secret that controller writes, and is neither committed nor copied into OpenBao. The Grafana
   operator's admin password for its Grafana is one.
 - External Secrets is installed before OpenBao; OpenBao's own seal material is produced through
-  it.
+  it, once, and stays in the cluster; the recovery keys OpenBao makes are kept by the operator
+  outside the cluster
+  ([ADR 0016](0016-openbao-unseals-itself-and-the-operator-keeps-the-recovery-keys.md)).
 
 ## Alternatives considered
 
@@ -38,7 +43,8 @@ application secrets that change over the cluster's life.
 ## Consequences
 
 - OpenBao's storage, unsealing and recovery material need their own backup and a restore that
-  is exercised, since every runtime secret depends on it.
+  is exercised, since every runtime secret depends on it. The seal key and the recovery keys are
+  in the operator's encrypted file (ADR 0016); snapshots of the storage are still to come.
 - Secrets that controllers need before OpenBao is running come from bootstrap material.
 - A generated credential lives only in its Secret: deleting the Secret, or the object that owns
   it, makes the controller generate a new one, and nothing restores the old.

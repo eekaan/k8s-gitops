@@ -1,6 +1,7 @@
 Feature: External Secrets
   The External Secrets operator, which brings runtime secrets from the secret store into the cluster
-  (ADR 0005). No secret store is configured yet.
+  (ADR 0005). Its one store, the ClusterSecretStore openbao, is an application of its own
+  (openbao.feature).
 
   Scenario: The External Secrets operator is installed with its resource definitions
     Given the external-secrets application and its namespace, enabled in the cluster's overlay

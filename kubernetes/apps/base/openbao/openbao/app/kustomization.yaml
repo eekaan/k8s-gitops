@@ -1,0 +1,37 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ocirepository.yaml
+  - helmrelease.yaml
+  - seal.yaml
+  - tls.yaml
+  - serviceaccount.yaml
+  - rbac.yaml
+
+configMapGenerator:
+  - name: openbao-values
+    files:
+      - values.yaml
+  # The initial configuration only openbao-0 reads, on a first install (initialize-guard.sh): the
+  # initialize stanzas in JSON, as OpenBao's self-initialisation reads them, and the policies they
+  # read from files, in JSON as OpenBao reads policies; and the two scripts that decide whether a
+  # server reads it. values.yaml mounts it by name, which kustomize cannot rewrite inside the
+  # values, so its name has no hash.
+  - name: openbao-initialize
+    files:
+      - initialize/initialize.json
+      - initialize/external-secrets-policy.json
+      - initialize/operator-policy.json
+      - initialize/snapshot-policy.json
+      - initialize/initialize-guard.sh
+      - initialize/initialize-args.sh
+    options:
+      disableNameSuffixHash: true
+generatorOptions:
+  annotations:
+    kustomize.toolkit.fluxcd.io/substitute: disabled
+
+configurations:
+  - kustomizeconfig.yaml
