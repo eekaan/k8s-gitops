@@ -1072,7 +1072,10 @@ with the Talos age key from `SOPS_AGE_KEY_FILE`, or `SOPS_AGE_KEY`, into memory 
   port-forward, its CA and its certificate's name in `BAO_ADDR`, `BAO_CACERT` and
   `BAO_TLS_SERVER_NAME`, as OpenBao's CLI reads them, then revokes the token, however the command
   ends; a recipe killed outright leaves it to expire. It prints no share and no token; a generation
-  it started and did not finish is cancelled.
+  it started and did not finish is cancelled. It reads the root token's accessor before anything
+  else; when OpenBao does not revoke a token, it names the token by its accessor, which serves to
+  look up, renew or revoke a token but not to act as it, prints the step that revokes it by that
+  accessor, and fails even when the command succeeded. No command runs while the root token lives.
 - `just bao-seal-restore <file> [--replace]` writes the seal key from the file back into the Secret
   `openbao-seal-1`, immutable; a Secret that holds the same key is left alone, and one that holds
   another key is replaced only with `--replace`. Before deleting it, `--replace` keeps its key in a

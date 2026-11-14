@@ -634,13 +634,15 @@ covers() {
   render
   statefulset
   initialize
-  # A request sent with another token than the operator's names it before bao_request. The one such
-  # is bao-root's, which mints the command's token with the root token; the operator may not.
+  # A request sent with another token than the operator's names it before bao_request. The only such
+  # are bao-root's with the root token, which looks the root token up for its accessor and mints the
+  # command's token; the operator may do neither.
   # shellcheck disable=SC2016 # the dollars are the scripts' variable names.
   others="$( (cd "$REPO" && grep -hoE '[a-z_]+=[^ ]+ bao_request (GET|POST|PUT|PATCH|DELETE) "?[^ ;]+' "${scripts[@]}") || true)"
   echo "with another token: ${others:-none}"
   # shellcheck disable=SC2016
-  [ "$others" = 'bao_token=$root_token bao_request POST auth/token/create-orphan' ]
+  [ "$others" = "$(printf '%s\n' 'bao_token=$root_token bao_request GET auth/token/lookup-self' \
+    'bao_token=$root_token bao_request POST auth/token/create-orphan')" ]
   # The requests the recipes send with the operator's token, read from the scripts themselves: the
   # script names the mount and the path as $bao_mount and $path.
   # shellcheck disable=SC2016

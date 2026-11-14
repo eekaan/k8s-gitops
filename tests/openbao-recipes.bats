@@ -122,6 +122,11 @@ forwards_closed() {
 #   clobber           curl writes that file, as someone else would, when the rotation starts
 #   root-refused      OpenBao refuses the second recovery key share for a root token
 #   stale-root        a root token generation is in progress already
+#   lookup-refused    OpenBao fails every token lookup
+#   orphan-refused    OpenBao refuses to make an orphan token
+#   root-revoke-fails, orphan-revoke-fails
+#                     OpenBao fails to revoke the root token, or the orphan token
+#   events            what happened to the root and orphan tokens, and the command, in order
 #   seal-secret       the Secret openbao-seal-1 as JSON; absent when the file is
 #   kv/<path>.json    the data of a secret at <path> in the key-value mount
 #   outfile           the custody file, which must exist when the rotation is verified
@@ -234,7 +239,7 @@ envelope() {
 recovery=$(cat "$STATE/recovery-shares" 2> /dev/null || echo 0)
 case $path in
   sys/seal-status | sys/decode-token | auth/kubernetes/login) ;;
-  auth/token/revoke-self)
+  auth/token/revoke-self | auth/token/lookup-self)
     [[ $token == marker-bao-token || $token == marker-root-token || $token == marker-orphan-token ]] ||
       respond 403 '{"errors":["permission denied"]}'
     ;;
@@ -254,11 +259,28 @@ case "$method $path" in
     ;;
   "POST auth/token/revoke-self")
     case $token in
-      marker-root-token) : > "$STATE/root-revoked" && echo "revoked root" >> "$STATE/events" ;;
-      marker-orphan-token) : > "$STATE/orphan-revoked" && echo "revoked orphan" >> "$STATE/events" ;;
+      marker-root-token)
+        [[ -e $STATE/root-revoke-fails ]] && respond 500 '{"errors":["failed to revoke token"]}'
+        : > "$STATE/root-revoked" && echo "revoked root" >> "$STATE/events"
+        ;;
+      marker-orphan-token)
+        [[ -e $STATE/orphan-revoke-fails ]] && respond 500 '{"errors":["failed to revoke token"]}'
+        : > "$STATE/orphan-revoked" && echo "revoked orphan" >> "$STATE/events"
+        ;;
       *) : > "$STATE/revoked" ;;
     esac
     respond 204 ''
+    ;;
+  # The token store answers a lookup under data, the token's own ID among its fields
+  # (handleLookup in internal/vault/token_store.go in OpenBao v2.7.2).
+  "GET auth/token/lookup-self")
+    [[ -e $STATE/lookup-refused ]] && respond 500 '{"errors":["internal error"]}'
+    case $token in
+      marker-root-token) accessor=marker-root-accessor policies='["root"]' orphan=true ttl=0 && echo "looked up root" >> "$STATE/events" ;;
+      marker-orphan-token) accessor=marker-orphan-accessor policies='["root"]' orphan=true ttl=900 ;;
+      *) accessor=marker-accessor policies='["operator"]' orphan=true ttl=600 ;;
+    esac
+    respond 200 "$(envelope "{\"id\":\"$token\",\"accessor\":\"$accessor\",\"policies\":$policies,\"path\":\"auth/token/create\",\"meta\":null,\"display_name\":\"token\",\"num_uses\":0,\"orphan\":$orphan,\"creation_time\":1763078400,\"creation_ttl\":$ttl,\"expire_time\":null,\"ttl\":$ttl,\"explicit_max_ttl\":0,\"entity_id\":\"\",\"type\":\"service\"}")"
     ;;
   # The token store answers a new token under auth (internal/vault/token_store.go in OpenBao v2.7.2).
   "POST auth/token/create-orphan")
@@ -644,25 +666,30 @@ EOF
     rm -f "$STATE/command-env" "$STATE/events" "$STATE/root-revoked" "$STATE/orphan-revoked" "$STATE/revoked" \
       "$STATE/root-cancelled" "$STATE/root-shares" "$STATE/orphan-request" "$STATE/misbehave"
   }
+  # no_secrets: neither the output nor any command line holds a share, a token or the seal key.
+  no_secrets() {
+    for secret in marker-recovery-share- bWFya2VyLXJlY292ZXJ5 marker-root-token marker-orphan-token marker-encoded-token \
+      marker-otp marker-seal-key marker-bao-token marker-service-account-jwt; do
+      [[ $output != *"$secret"* ]] || { echo "$secret in the output"; return 1; }
+      absent "$secret" "$RECORD/argv"
+    done
+  }
 
   : >"$STATE/stale-root"
   recipe bao-root "$CUSTODY" report-env one two
   echo "$output"
   [ "$status" -eq 0 ]
   [ "$(cat "$STATE/command-env")" = "$(printf '%s\n' token=orphan 'addr=https://localhost:41234 server=openbao-active.openbao.svc args=one two' ca=verified)" ]
-  # The root token mints a fifteen-minute orphan token with the root policy, which no renewal
-  # extends, and is revoked before the command runs; the orphan token is revoked after it.
+  # The root token is first looked up for its accessor, then mints a fifteen-minute orphan token
+  # with the root policy, which no renewal extends, and is revoked before the command runs; the
+  # orphan token is revoked after it.
   [ "$("$JQ" -cS . "$STATE/orphan-request")" = '{"explicit_max_ttl":"15m","policies":["root"],"renewable":false,"ttl":"15m"}' ]
-  [ "$(cat "$STATE/events")" = "$(printf '%s\n' 'minted orphan' 'revoked root' 'command ran' 'revoked orphan')" ]
+  [ "$(cat "$STATE/events")" = "$(printf '%s\n' 'looked up root' 'minted orphan' 'revoked root' 'command ran' 'revoked orphan')" ]
   # A generation left in progress is cancelled first; the shares travel only in request bodies.
   [ "$("$JQ" -r 'select(.path == "sys/generate-root-token/attempt") | .method' "$RECORD/requests" | paste -sd' ' -)" = "GET DELETE PUT" ]
   [ "$("$JQ" -r 'select(.body | contains("bWFya2VyLXJlY292ZXJ5")) | .method + " " + .path' "$RECORD/requests" | sort -u)" = \
     'PUT sys/generate-root-token/update' ]
-  for secret in marker-recovery-share- bWFya2VyLXJlY292ZXJ5 marker-root-token marker-orphan-token marker-encoded-token \
-    marker-otp marker-seal-key marker-bao-token marker-service-account-jwt; do
-    [[ $output != *"$secret"* ]] || { echo "$secret in the output"; return 1; }
-    absent "$secret" "$RECORD/argv"
-  done
+  no_secrets
   [ -e "$STATE/revoked" ]
   forwards_closed
 
@@ -672,7 +699,7 @@ EOF
   recipe bao-root "$CUSTODY" report-env
   echo "command killed: $output"
   [ "$status" -ne 0 ]
-  [ "$(cat "$STATE/events")" = "$(printf '%s\n' 'minted orphan' 'revoked root' 'command ran' 'revoked orphan')" ]
+  [ "$(cat "$STATE/events")" = "$(printf '%s\n' 'looked up root' 'minted orphan' 'revoked root' 'command ran' 'revoked orphan')" ]
   forwards_closed
   # The recipe interrupted while the command runs: the same.
   reset
@@ -680,7 +707,7 @@ EOF
   recipe bao-root "$CUSTODY" report-env
   echo "interrupted: $output"
   [ "$status" -ne 0 ]
-  [ "$(cat "$STATE/events")" = "$(printf '%s\n' 'minted orphan' 'revoked root' 'command ran' 'revoked orphan')" ]
+  [ "$(cat "$STATE/events")" = "$(printf '%s\n' 'looked up root' 'minted orphan' 'revoked root' 'command ran' 'revoked orphan')" ]
   forwards_closed
 
   # Minting refused: the root token is revoked at once, and no command runs.
@@ -689,10 +716,49 @@ EOF
   recipe bao-root "$CUSTODY" report-env
   echo "minting refused: $output"
   [ "$status" -ne 0 ]
-  [ "$(cat "$STATE/events")" = 'revoked root' ]
+  [ "$(cat "$STATE/events")" = "$(printf '%s\n' 'looked up root' 'revoked root')" ]
   [ ! -e "$STATE/command-env" ]
   forwards_closed
   rm "$STATE/orphan-refused"
+  # The root token's accessor unknown: the root token is revoked and used for nothing else.
+  reset
+  : >"$STATE/lookup-refused"
+  recipe bao-root "$CUSTODY" report-env
+  echo "no accessor: $output"
+  [ "$status" -ne 0 ]
+  [ "$(cat "$STATE/events")" = 'revoked root' ]
+  [ ! -e "$STATE/orphan-request" ]
+  [ ! -e "$STATE/command-env" ]
+  forwards_closed
+  rm "$STATE/lookup-refused"
+
+  # The root token's revocation fails: no command runs while it lives, the command's token is
+  # revoked, and the recipe fails naming the root token by its accessor, which is no credential,
+  # with the step that revokes it by that accessor; no token is printed.
+  reset
+  : >"$STATE/root-revoke-fails"
+  recipe bao-root "$CUSTODY" report-env
+  echo "root not revoked: $output"
+  [ "$status" -ne 0 ]
+  [ ! -e "$STATE/command-env" ]
+  [ "$(cat "$STATE/events")" = "$(printf '%s\n' 'looked up root' 'minted orphan' 'revoked orphan')" ]
+  [[ $output == *"just bao-root $CUSTODY bao token revoke -accessor marker-root-accessor"* ]]
+  no_secrets
+  forwards_closed
+  rm "$STATE/root-revoke-fails"
+  # The command's token's revocation fails after the command succeeded: the recipe fails all the
+  # same, naming that token by its accessor with the step that revokes it.
+  reset
+  : >"$STATE/orphan-revoke-fails"
+  recipe bao-root "$CUSTODY" report-env
+  echo "command's token not revoked: $output"
+  [ "$status" -ne 0 ]
+  [ -e "$STATE/command-env" ]
+  [ "$(cat "$STATE/events")" = "$(printf '%s\n' 'looked up root' 'minted orphan' 'revoked root' 'command ran')" ]
+  [[ $output == *"just bao-root $CUSTODY bao token revoke -accessor marker-orphan-accessor"* ]]
+  no_secrets
+  forwards_closed
+  rm "$STATE/orphan-revoke-fails"
 
   # A share refused before the token is made: the generation is cancelled and no command runs.
   reset

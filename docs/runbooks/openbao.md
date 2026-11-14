@@ -145,7 +145,10 @@ token of the root policy that lasts fifteen minutes at most, and revokes the roo
 command with that token in `BAO_TOKEN` and OpenBao's address through the port-forward in
 `BAO_ADDR`, `BAO_CACERT` and `BAO_TLS_SERVER_NAME`, as OpenBao's CLI reads them; the token is
 revoked when the command ends, and nothing prints a share or a token. A command that needs longer
-than fifteen minutes is split into several runs. For example, with OpenBao's CLI on the operator's
+than fifteen minutes is split into several runs. If OpenBao does not revoke the root token or the
+command's token, the recipe fails and prints the token's accessor and the step that revokes it by
+that accessor, `just bao-root <file> bao token revoke -accessor <accessor>`; run it as soon as
+OpenBao answers, as a root token never expires. For example, with OpenBao's CLI on the operator's
 machine:
 
 ```sh
