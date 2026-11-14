@@ -114,7 +114,7 @@ type Ci {
   }
 
   """
-  The tools pinned in mise.toml, in a layer that depends on base, packages and mise.toml alone, so changes to other files reuse it: the checks' tools container when no tools image is given, and the image the tools image workflow publishes. A tools image's key covers those three inputs only: a change to the steps here must come with a change to one of them, or the checks go on running in an image built without it.
+  The tools pinned in mise.toml, in a layer that depends on base, packages, mise.toml and the steps here alone, so changes to other files reuse it: the checks' tools container when no tools image is given, and the image the tools image workflow publishes. A tools image's key covers these steps too: scripts/tools-image reads this definition from its first line to the line that closes it, two spaces and a brace, which stays its last.
   """
   pub toolsLayer(
     """

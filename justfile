@@ -168,7 +168,7 @@ renovate-check:
 publish:
     scripts/publish
 
-# Print the key of the tools image's inputs: ci_tools_base and ci_tools_packages in versions.yaml, and mise.toml
+# Print the key of the tools image's inputs: ci_tools_base and ci_tools_packages in versions.yaml, the Dagger module's toolsLayer, and mise.toml
 tools-image-key:
     scripts/tools-image key
 
@@ -176,6 +176,6 @@ tools-image-key:
 tools-image-publish:
     scripts/tools-image publish
 
-# Record the tools image at digest in versions.yaml, with the key of these inputs, once its signature verifies without credentials as the tools image workflow's on main for that key
+# Record the tools image at digest in versions.yaml, with the key of these inputs, once its signature verifies without credentials as the tools image workflow's on main in this repository for that key
 tools-image-pin digest:
     scripts/tools-image pin {{ quote(digest) }}

@@ -89,28 +89,35 @@ The repository checks:
 The container with the pinned tools is built once for each change of its inputs and published as
 `ghcr.io/eekaan/k8s-gitops/ci-tools`, so a CI job pulls it instead of installing the tools. Its
 inputs are `ci_tools_base` (the image it starts from) and `ci_tools_packages` (the package step) in
-`versions.yaml`, and `mise.toml`.
+`versions.yaml`, the steps of `toolsLayer` in the Dagger module, read from its first line to the
+line that closes it, two spaces and a brace, and `mise.toml`. `versions.yaml` holds each value on one line, with no
+quotes, tabs, comment or indented line under it, as the script that reads them has no YAML parser;
+`just ci` refuses any other form.
 
 - `just tools-image-key` prints the key of those inputs. It names the image: its tag, the
   annotation its signature carries, and `ci_tools_inputs` in `versions.yaml`, recorded beside the
   image's digest in `ci_tools_image`.
 - `just ci` hands the module the recorded image, by digest, when the recorded key is the key of the
   checkout's inputs; the module uses it when the engine runs the image's platform, `linux/amd64`.
-  Otherwise the module builds the tools from the pins, as before, so a pull request that changes a
-  pin, the base image or the package step works before any image exists for it, on another
-  platform too. Either way the same checks run and give the same result. A recorded image that is
-  not named by its digest alone stops `just ci`.
+  Otherwise the module builds the tools from the pins, as before, so a pull request that changes an
+  input works before any image exists for it, on another platform too. Either way the same checks
+  run and give the same result. A record of any image but `ghcr.io/eekaan/k8s-gitops/ci-tools`
+  named by its digest alone stops `just ci`: a merged record is what every later run executes in.
 - `just tools-image-publish` is the one step of `.github/workflows/tools-image.yaml`, which runs on
-  hosted runners on every push to `main` that changes `mise.toml`, `versions.yaml` or the workflow,
-  and by hand. It logs in with the job's token on standard input, builds the tools with the pinned
-  Dagger, pushes them tagged with the key, signs the digest keyless with the key as an annotation,
-  verifies the signature against this workflow on `main`, and prints the digest last. When an image
-  signed for the key is there already, it prints that digest and builds nothing. It refuses outside
-  the workflow and on any branch but `main`, and it commits nothing.
+  hosted runners on every push to `main` that changes `mise.toml`, `versions.yaml`, the Dagger
+  module, `scripts/tools-image` or the workflow, and by hand. It logs in with the job's token on
+  standard input, the one command that gets it, builds the tools with the pinned Dagger, pushes them
+  tagged with the key, signs the digest keyless with the key as an annotation, verifies the
+  signature against this workflow on `main` in this repository, and prints the digest last. When an
+  image signed that way for the key is there already, it prints that digest and builds nothing;
+  otherwise it says why it found none, such as no tag or an unreachable transparency log. It refuses
+  outside the workflow and on any branch but `main`, and it commits nothing.
 - `just tools-image-pin <digest>` records the image in `versions.yaml`, with the key of the
-  checkout's inputs, once its signature verifies as the tools image workflow's on `main` for that
-  key; any other digest leaves the file as it is. It verifies without credentials, so it also
-  proves that the checks can pull the image.
+  checkout's inputs, once its signature verifies as the tools image workflow's on `main` in this
+  repository for that key; any other digest leaves the file as it is. It verifies without
+  credentials, through a Docker configuration of its own with no login in it, which cosign then
+  reads in place of the machine's Docker or podman logins, so it also proves that the checks can
+  pull the image.
 
 Who does what, once a change to the inputs is merged:
 

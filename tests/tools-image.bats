@@ -1,14 +1,17 @@
 #!/usr/bin/env bats
-# Proves features/tools-image.feature; each test carries its scenario's title.
+# Proves features/tools-image.feature; each test that proves a scenario carries its title, and those
+# named in lower case prove none.
 # The recipes run in a copy of the repository: a git repository on main holding, committed, what git
 # would commit from this one. For just tools-image-publish and just tools-image-pin, docker, dagger
 # and cosign are recording fakes, so nothing logs in, builds, pushes or signs; the fake cosign keeps
 # the signatures a test gives it or the fake sign makes, and verifies against them as cosign does:
-# the identity, the issuer and every annotation asked for. For just ci without a container, dagger is
-# a fake that records its arguments. kubectl, openstack, gh and talosctl are fakes that fail, so a
-# call to any of them shows. The tests tagged hermetic run the real just ci and serve a tools image
-# from a registry of their own in the network of the engine the pinned dagger starts in Docker; they
-# push nothing anywhere else.
+# the identity, the issuer, the workflow's repository and every annotation asked for. It looks for
+# registry credentials where cosign's default keychain does, and records where it found them. For
+# just ci without a container, dagger is a fake that records its arguments. kubectl, openstack, gh
+# and talosctl are fakes that fail, so a call to any of them shows. The tests tagged hermetic run the
+# real just ci and serve a tools image from a registry of their own in the network of the engine the
+# pinned dagger starts in Docker, under a name their checkout's scripts/tools-image is changed to
+# accept; they push nothing anywhere else.
 
 setup() {
   ROOT=$(cd "$BATS_TEST_DIRNAME/.." && pwd)
@@ -35,6 +38,7 @@ setup() {
     GITHUB_ACTIONS=true
     GITHUB_REF=refs/heads/main
     GITHUB_ACTOR=example-actor
+    GITHUB_REPOSITORY=eekaan/k8s-gitops
     GITHUB_WORKFLOW_REF=eekaan/k8s-gitops/.github/workflows/tools-image.yaml@refs/heads/main
     # A host that never resolves: even a real cosign would get no identity token from it.
     ACTIONS_ID_TOKEN_REQUEST_URL=https://token.example.invalid/request
@@ -83,12 +87,14 @@ stub() {
 }
 
 # fake NAME: a stub that first records its call in RECORD/calls, one line of its name and its
-# arguments quoted as printf %q quotes them, and has RECORD and STATE set for its body.
+# arguments quoted as printf %q quotes them, and its name in RECORD/token-in-environment when the
+# registry token is in its environment; RECORD and STATE are set for its body.
 fake() {
   {
     printf 'RECORD=%q STATE=%q\n' "$RECORD" "$STATE"
     cat <<'EOF'
 { printf '%q ' "${0##*/}" "$@"; echo; } >> "$RECORD/calls"
+[[ -z ${REGISTRY_TOKEN-} ]] || echo "${0##*/}" >> "$RECORD/token-in-environment"
 EOF
     cat
   } | stub "$1"
@@ -151,21 +157,37 @@ if ((publish)); then
   printf '%s@%s\n' "$address" "$digest"
 fi
 EOF
-  # A keyless signature carries the identity of the job's workflow, as GitHub's token names it; cosign
-  # verify fails while STATE/verify-fails exists, and otherwise passes only for a signature of the
-  # digest named, or of the one a tag names, with the identity and issuer asked for and every
-  # annotation asked for.
+  # cosign looks for registry credentials as its default keychain does: in the Docker configuration
+  # when $HOME/.docker/config.json or $DOCKER_CONFIG/config.json exists, and otherwise in
+  # $REGISTRY_AUTH_FILE or podman's containers/auth.json; it records the file it read, or anonymous.
+  # A keyless signature carries the identity of the job's workflow and the run's repository, as
+  # GitHub's token names them. A lookup of a tag fails with the text of STATE/lookup-fails while it
+  # exists; verify fails while STATE/verify-fails exists, and otherwise passes only for a signature
+  # of the digest named, or of the one a tag names, with the identity, issuer and repository asked
+  # for and every annotation asked for.
   fake cosign <<'EOF'
 config=${DOCKER_CONFIG:-$HOME/.docker}
 printf '%s\n' "$config" >> "$RECORD/docker-config.cosign"
-if [[ -e $config/config.json || -n ${GITHUB_TOKEN-}${GH_TOKEN-} ]]; then
-  echo "${1-} with credentials" >> "$RECORD/cosign-credentials"
+found=
+if [[ -f $HOME/.docker/config.json || ( -n ${DOCKER_CONFIG-} && -f $DOCKER_CONFIG/config.json ) ]]; then
+  found=$config/config.json
+elif [[ -n ${REGISTRY_AUTH_FILE-} && -f $REGISTRY_AUTH_FILE ]]; then
+  found=$REGISTRY_AUTH_FILE
+else
+  podman=${XDG_RUNTIME_DIR-}/containers/auth.json
+  if [[ -z ${XDG_RUNTIME_DIR-} || ! -f $podman ]]; then
+    podman=${XDG_CONFIG_HOME:-$HOME/.config}/containers/auth.json
+  fi
+  [[ ! -f $podman ]] || found=$podman
+fi
+if [[ -n $found ]] && grep -q '"auth"' "$found" 2> /dev/null; then
+  echo "${1-} with credentials from $found" >> "$RECORD/cosign-credentials"
 else
   echo "${1-} anonymous" >> "$RECORD/cosign-credentials"
 fi
 command=${1-}
 shift || true
-identity= issuer= ref=
+identity= issuer= repository= ref=
 annotations=()
 while (($#)); do
   case $1 in
@@ -173,6 +195,8 @@ while (($#)); do
     --certificate-identity=*) identity=${1#*=} ;;
     --certificate-oidc-issuer) issuer=$2; shift ;;
     --certificate-oidc-issuer=*) issuer=${1#*=} ;;
+    --certificate-github-workflow-repository) repository=$2; shift ;;
+    --certificate-github-workflow-repository=*) repository=${1#*=} ;;
     -a | --annotations) annotations+=("$2"); shift ;;
     --annotations=*) annotations+=("${1#*=}") ;;
     --oidc-provider | --output | --output-file | -o) shift ;;
@@ -183,14 +207,18 @@ while (($#)); do
 done
 if [[ $ref == *@* ]]; then
   digest=${ref##*@}
+elif [[ -e $STATE/lookup-fails ]]; then
+  cat "$STATE/lookup-fails" >&2
+  exit 1
 elif ! digest=$(cat "$STATE/tags/${ref##*:}" 2> /dev/null); then
   echo "Error: GET ${ref%%/*}: MANIFEST_UNKNOWN: manifest unknown" >&2
   exit 1
 fi
 case $command in
   sign)
-    { printf 'https://github.com/%s\nhttps://token.actions.githubusercontent.com\n' "$GITHUB_WORKFLOW_REF"
-      printf '%s\n' "${annotations[@]}"; } > "$STATE/signatures/$digest"
+    { printf 'identity=https://github.com/%s\nissuer=https://token.actions.githubusercontent.com\nrepository=%s\n' \
+        "$GITHUB_WORKFLOW_REF" "$GITHUB_REPOSITORY"
+      printf 'annotation=%s\n' "${annotations[@]}"; } > "$STATE/signatures/$digest"
     ;;
   verify)
     signature=$STATE/signatures/$digest
@@ -198,12 +226,16 @@ case $command in
       echo "Error: no signatures found" >&2
       exit 1
     fi
-    if [[ $(sed -n 1p "$signature") != "$identity" || $(sed -n 2p "$signature") != "$issuer" ]]; then
+    if ! grep -qxF "identity=$identity" "$signature" || ! grep -qxF "issuer=$issuer" "$signature"; then
       echo "Error: no matching signatures: none of the expected identities matched" >&2
       exit 1
     fi
+    if [[ -n $repository ]] && ! grep -qxF "repository=$repository" "$signature"; then
+      echo "Error: no matching signatures: expected GitHub Workflow Repository not found in certificate" >&2
+      exit 1
+    fi
     for annotation in "${annotations[@]}"; do
-      if ! tail -n +3 "$signature" | grep -qxF -- "$annotation"; then
+      if ! grep -qxF -- "annotation=$annotation" "$signature"; then
         echo "Error: no matching attestations: missing or incorrect annotation" >&2
         exit 1
       fi
@@ -215,10 +247,12 @@ esac
 EOF
 }
 
-# signed DIGEST IDENTITY KEY: a signature of DIGEST, as cosign would find one, by IDENTITY from GitHub's
-# token issuer, with KEY as its tools-key annotation.
+# signed DIGEST IDENTITY KEY [REPOSITORY]: a signature of DIGEST, as cosign would find one, by IDENTITY
+# from GitHub's token issuer, in a run of REPOSITORY, this one unless given, with KEY as its tools-key
+# annotation.
 signed() {
-  printf '%s\n%s\ntools-key=%s\n' "$2" "$ISSUER" "$3" > "$STATE/signatures/$1"
+  printf 'identity=%s\nissuer=%s\nrepository=%s\nannotation=tools-key=%s\n' "$2" "$ISSUER" "${4:-eekaan/k8s-gitops}" "$3" \
+    > "$STATE/signatures/$1"
 }
 
 # with NAME=VALUE...: sets NAME in the environment the run gets, in place of any value it had.
@@ -262,18 +296,21 @@ record() {
 }
 
 # change INPUT: changes one input of the tools in the checkout: pin (a tool's version in mise.toml),
-# base (the base image's digest) or packages (the package step); fails unless the file changed.
+# base (the base image's digest), packages (the package step) or layer (a step of the module's
+# toolsLayer); fails unless the file changed.
 change() {
   local file before
   case $1 in
     pin) file=mise.toml ;;
     base | packages) file=versions.yaml ;;
+    layer) file=.dagger/modules/ci/main.dang ;;
   esac
   before=$(cat "$WORK/$file")
   case $1 in
     pin) sed -i -E 's/^jq = "[^"]+"/jq = "0.0.1"/' "$WORK/$file" ;;
     base) sed -i -E "s/^(ci_tools_base: [^@]+@sha256:)[0-9a-f]{64}$/\\1$(printf 'other base' | sha256sum | cut -d' ' -f1)/" "$WORK/$file" ;;
     packages) sed -i -E 's/^(ci_tools_packages: .*)pipx/\1pipx ca-certificates/' "$WORK/$file" ;;
+    layer) sed -i -E 's/^( *)\.withExec\(\["mise", "install"\]\)$/\1.withEnvVariable("MISE_JOBS", "1")\n&/' "$WORK/$file" ;;
   esac
   [ "$(cat "$WORK/$file")" != "$before" ] || { echo "the change of $1 changed nothing in $file"; return 1; }
 }
@@ -355,8 +392,10 @@ run_ci() {
 }
 
 # registry: starts a registry that listens on the loopback address of the engine the pinned dagger
-# starts in Docker, which reaches it there as a registry on localhost, over HTTP. Sets REGISTRY to
-# the container, which teardown stops, and SERVED to the address images are served from.
+# starts in Docker, which reaches it there as a registry on localhost, over HTTP, and makes the
+# checkout's scripts/tools-image take SERVED/ci-tools for this repository's tools image, as just ci
+# accepts no other. Sets REGISTRY to the container, which teardown stops, and SERVED to the address
+# images are served from.
 registry() {
   local version engine port
   if [[ -n ${DAGGER_ENGINE-}${_EXPERIMENTAL_DAGGER_RUNNER_HOST-} ]]; then
@@ -377,6 +416,8 @@ registry() {
   for _ in {1..50}; do
     if docker logs "$REGISTRY" 2>&1 | grep -q 'listening on'; then
       SERVED=localhost:$port
+      sed -i "s|^image=.*$|image=$SERVED/ci-tools|" "$WORK/scripts/tools-image"
+      grep -qxF "image=$SERVED/ci-tools" "$WORK/scripts/tools-image"
       return 0
     fi
     sleep 0.2
@@ -411,7 +452,7 @@ verdicts() {
   grep -oE '== [a-z0-9-]+: (passed|failed) \([^)]*\)|recipe `[a-z0-9-]+` failed|(failed|passed): [a-z0-9 -]+$' <<< "$output" | sort -u
 }
 
-@test "The key changes when a pinned tool, the base image or the package step changes, and not otherwise" {
+@test "The key changes when a pinned tool, the base image, the package step or a step of the tools layer changes, and not otherwise" {
   local key input variant
   checkout
   key=$(key_of "$WORK")
@@ -424,7 +465,7 @@ verdicts() {
   cp -R "$WORK" "$pristine"
 
   local -a keys=("$key")
-  for input in pin base packages; do
+  for input in pin base packages layer; do
     rm -rf "$WORK"
     cp -R "$pristine" "$WORK"
     change "$input"
@@ -434,16 +475,21 @@ verdicts() {
     keys+=("$variant")
   done
   # Each input changes it its own way.
-  [ "$(printf '%s\n' "${keys[@]}" | sort -u | wc -l)" -eq 4 ]
+  [ "$(printf '%s\n' "${keys[@]}" | sort -u | wc -l)" -eq 5 ]
 
   # Nothing else does: another line of versions.yaml, the recorded image and its key among them, the
-  # module, the justfile, the docs, the comments around the inputs, or a new file.
+  # module outside its tools layer, the justfile, the docs, the comments around the inputs, or a new
+  # file.
   rm -rf "$WORK"
   cp -R "$pristine" "$WORK"
   sed -i -E 's/^talos: .*/talos: v0.0.1/' "$WORK/versions.yaml"
   record "$(printf 'other inputs' | sha256sum | cut -d' ' -f1)" "$IMAGE@$DIGEST"
   sed -i '1a # a comment that is not an input' "$WORK/versions.yaml"
   printf '\n# a comment\n' >> "$WORK/.dagger/modules/ci/main.dang"
+  sed -i 's/Run the justfile.s groups of checks side by side/Run the groups of checks side by side/' "$WORK/.dagger/modules/ci/main.dang"
+  sed -i 's/^  The tools pinned in mise.toml/  The tools mise.toml pins/' "$WORK/.dagger/modules/ci/main.dang"
+  run diff "$pristine/.dagger/modules/ci/main.dang" "$WORK/.dagger/modules/ci/main.dang"
+  [ "$(grep -c '^>' <<< "$output")" -eq 4 ]
   printf '\n# a comment\n' >> "$WORK/justfile"
   printf '\nmore words\n' >> "$WORK/README.md"
   printf 'new\n' > "$WORK/new-file"
@@ -465,7 +511,7 @@ verdicts() {
   [ "$(handed tools-image)" = "$IMAGE@$DIGEST" ]
   [[ $stderr == *"$IMAGE@$DIGEST"* ]]
 
-  for input in pin base packages; do
+  for input in pin base packages layer; do
     rm -rf "$WORK"
     cp -R "$pristine" "$WORK"
     change "$input"
@@ -495,18 +541,27 @@ verdicts() {
   [ "$output" = 0 ]
 }
 
-@test "just ci refuses a recorded image that is not named by its digest, and a record that is not whole" {
+@test "just ci refuses a recorded image other than this repository's tools image by its digest, and a record that is not whole" {
   local key bad
   checkout
   key=$(key_of "$WORK")
   local pristine="$BATS_TEST_TMPDIR/pristine"
   cp -R "$WORK" "$pristine"
+  # A merged record is what every later run on main executes in, the self-hosted runner's among them:
+  # only the image this repository's workflow publishes, by its digest, with the key it was built for.
   local -a records=(
     "$key|$IMAGE:$key"
     "$key|$IMAGE"
     "$key|$IMAGE:$key@$DIGEST"
     "$key|$IMAGE@sha256:${DIGEST:7:63}"
     "$key|$IMAGE@sha256:$(tr a-f A-F <<< "${DIGEST#sha256:}")"
+    "$key|evil.example/eekaan/k8s-gitops/ci-tools@$DIGEST"
+    "$key|ghcr.io/eekaan-k8s/k8s-gitops/ci-tools@$DIGEST"
+    "$key|$IMAGE/extra@$DIGEST"
+    "$key|${IMAGE}2@$DIGEST"
+    "$key|ghcr.io/eekaan/k8s-gitops/manifests@$DIGEST"
+    "$key|docker.io/library/busybox@$DIGEST"
+    "$key|localhost:5000/ci-tools@$DIGEST"
     "${key:1}|$IMAGE@$DIGEST"
     '""|'"$IMAGE@$DIGEST"
     "$key|\"\""
@@ -522,6 +577,48 @@ verdicts() {
     [ ! -e "$RECORD/dagger.args" ] || { echo "called dagger with the record $bad"; return 1; }
     [[ $stderr == *versions.yaml* ]]
   done
+}
+
+@test "just ci refuses a versions.yaml it would read otherwise than YAML does, and a module without one tools layer" {
+  local form
+  checkout
+  local pristine="$BATS_TEST_TMPDIR/pristine"
+  cp -R "$WORK" "$pristine"
+  # Each form, as an awk program that rewrites versions.yaml: YAML reads a tab before # as a
+  # comment, and an indented line under a value as more of it.
+  # shellcheck disable=SC2016 # awk programs, as awk reads them
+  local -a forms=(
+    '/^ci_tools_base: / { $0 = $0 "\t# a note" } 1'
+    '/^ci_tools_packages: / { $0 = $0 "\t# a note" } 1'
+    '/^ci_tools_packages: / { sub(/pipx/, "pipx\tcurl") } 1'
+    '/^ci_tools_packages: / { print; print "  && apt-get install -y curl"; next } 1'
+    '/^ci_tools_packages: / { print; print ""; print "  && apt-get install -y curl"; next } 1'
+    '/^ci_tools_base: / { print; print "  -extra"; next } 1'
+    '/^ci_tools_inputs: / { print; print "  more"; next } 1'
+    '/^ci_tools_packages: / { $0 = $0 " # a note" } 1'
+    '/^ci_tools_base: / { sub(/: /, ": \"") ; $0 = $0 "\"" } 1'
+  )
+  for form in "${forms[@]}"; do
+    rm -rf "$WORK"
+    cp -R "$pristine" "$WORK"
+    awk "$form" "$pristine/versions.yaml" > "$WORK/versions.yaml"
+    [ "$(cat "$WORK/versions.yaml")" != "$(cat "$pristine/versions.yaml")" ] || { echo "the form changed nothing: $form"; return 1; }
+
+    fake_ci
+
+    [ "$status" -ne 0 ] || { echo "read $form"; return 1; }
+    [ ! -e "$RECORD/dagger.args" ] || { echo "called dagger with $form"; return 1; }
+    [[ $stderr == *versions.yaml* ]]
+  done
+
+  # The tools layer is read from the module as the block its definition opens; without one, no key.
+  rm -rf "$WORK"
+  cp -R "$pristine" "$WORK"
+  sed -i 's/^  pub toolsLayer(/  pub toolsContainer(/' "$WORK/.dagger/modules/ci/main.dang"
+  fake_ci
+  [ "$status" -ne 0 ]
+  [ ! -e "$RECORD/dagger.args" ]
+  [[ $stderr == *main.dang* ]]
 }
 
 @test "a recorded tools image passes the secrets scan" {
@@ -619,8 +716,17 @@ verdicts() {
   [ "$status" -eq 0 ]
   # The digest is the one line on standard output, printed last.
   [ "$output" = "$DIGEST" ]
+  # The lookup says why it found no image to reuse.
+  [[ $stderr == *MANIFEST_UNKNOWN* ]]
   run steps
   [ "$output" = "$(step_list 'docker login' 'cosign verify' 'dagger api' 'cosign sign' 'cosign verify')" ]
+  # The lookup asks for the key's tag signed by this workflow on main, in this repository, for the key.
+  run argv "$(calls_of 'cosign verify' | head -n 1)"
+  [ "$(grep -cxF -- "$IMAGE:$key" <<< "$output")" -eq 1 ]
+  [ "$(value --certificate-identity <<< "$output")" = "$IDENTITY" ]
+  [ "$(value --certificate-oidc-issuer <<< "$output")" = "$ISSUER" ]
+  [ "$(value --certificate-github-workflow-repository <<< "$output")" = eekaan/k8s-gitops ]
+  [ "$(values -a <<< "$output"; values --annotations <<< "$output")" = "tools-key=$key" ]
   # The push builds the tools from the checkout's inputs and tags them with their key.
   run argv "$(calls_of 'dagger api')"
   [ "$(value --base <<< "$output")" = "$(yq '.ci_tools_base' "$WORK/versions.yaml")" ]
@@ -636,15 +742,18 @@ verdicts() {
   [ "$(grep -cxF -- "$IMAGE@$DIGEST" <<< "$output")" -eq 1 ]
   [ "$(value --certificate-identity <<< "$output")" = "$IDENTITY" ]
   [ "$(value --certificate-oidc-issuer <<< "$output")" = "$ISSUER" ]
+  [ "$(value --certificate-github-workflow-repository <<< "$output")" = eekaan/k8s-gitops ]
   [ "$(values -a <<< "$output"; values --annotations <<< "$output")" = "tools-key=$key" ]
 
-  # A failed verification prints no digest and fails the run, naming the step.
+  # A failed verification prints no digest and fails the run, naming the step, and the run's Docker
+  # configuration with the login is gone all the same.
   rm -f "$RECORD/calls" "$STATE"/tags/* "$STATE"/signatures/*
   : > "$STATE/verify-fails"
   recipe tools-image-publish
   [ "$status" -ne 0 ]
   [ -z "$output" ]
   [[ $stderr == *"failed while verifying $DIGEST"* ]]
+  [ ! -e "$(tail -n 1 "$RECORD/docker-config.docker")" ] || { echo "the login is left after a failed run"; return 1; }
   rm "$STATE/verify-fails"
 
   # Outside the workflow, or on another branch, it refuses and calls nothing.
@@ -679,8 +788,42 @@ verdicts() {
 
     [ "$status" -ne 0 ] || { echo "accepted the digest $digest"; return 1; }
     [ -z "$output" ]
+    [ ! -e "$(tail -n 1 "$RECORD/docker-config.docker")" ] || { echo "the login is left after the digest $digest"; return 1; }
     run steps
     [ "$output" = "$(step_list 'docker login' 'cosign verify' 'dagger api')" ] || { echo "with the digest $digest"; return 1; }
+  done
+}
+
+@test "a tag for the key signed otherwise than by this workflow on main for the key is built and signed again" {
+  local key old variant
+  checkout
+  key=$(key_of "$WORK")
+  old="sha256:$(printf 'pushed before' | sha256sum | cut -d' ' -f1)"
+  # A branch's run, a run elsewhere that called this workflow, a run for other inputs, a lookup that
+  # cannot reach the transparency log, and no signature at all.
+  local -a variants=(branch repository inputs unreachable unsigned)
+  for variant in "${variants[@]}"; do
+    rm -f "$RECORD/calls" "$STATE"/signatures/* "$STATE/lookup-fails"
+    printf '%s' "$old" > "$STATE/tags/$key"
+    case $variant in
+      branch) signed "$old" https://github.com/eekaan/k8s-gitops/.github/workflows/tools-image.yaml@refs/heads/feature "$key" ;;
+      repository) signed "$old" "$IDENTITY" "$key" someone-else/other-repo ;;
+      inputs) signed "$old" "$IDENTITY" "$(printf 'other inputs' | sha256sum | cut -d' ' -f1)" ;;
+      unreachable)
+        signed "$old" "$IDENTITY" "$key"
+        echo "Error: getting Rekor public keys: transparency log unreachable" > "$STATE/lookup-fails"
+        ;;
+      unsigned) ;;
+    esac
+
+    recipe tools-image-publish
+
+    [ "$status" -eq 0 ] || { echo "with $variant"; return 1; }
+    [ "$output" = "$DIGEST" ] || { echo "with $variant: $output"; return 1; }
+    # The lookup says why it built.
+    [[ $variant != unreachable || $stderr == *"transparency log unreachable"* ]]
+    run steps
+    [ "$output" = "$(step_list 'docker login' 'cosign verify' 'dagger api' 'cosign sign' 'cosign verify')" ] || { echo "with $variant"; return 1; }
   done
 }
 
@@ -711,6 +854,8 @@ verdicts() {
   grep -qxF -- --password-stdin <<< "$output"
   run grep -F -- "$TOKEN" "$RECORD/calls"
   [ "$status" -eq 1 ]
+  # Nor any command's environment, so nothing it prints, such as why a lookup failed, can hold it.
+  [ ! -e "$RECORD/token-in-environment" ] || { echo "in the environment of: $(sort -u "$RECORD/token-in-environment" | paste -sd ' ')"; return 1; }
   # dagger and cosign get no credentials of their own: they read the login docker wrote.
   run grep -E -- '--(creds|registry-username|registry-password|registry-token|password|token)( |=|$)' "$RECORD/calls"
   [ "$status" -eq 1 ]
@@ -722,7 +867,7 @@ verdicts() {
 }
 
 @test "Only a digest whose signature verifies against this repository's workflow can be pinned" {
-  local key good stale foreign branch unsigned before digest workflow
+  local key good stale foreign branch elsewhere unsigned before digest workflow login file
   checkout
   # Whatever this checkout records, the copy records another key's image, so a pin changes both lines.
   record "$(printf 'other inputs' | sha256sum | cut -d' ' -f1)" "$IMAGE@sha256:$(printf 'recorded before' | sha256sum | cut -d' ' -f1)"
@@ -731,19 +876,26 @@ verdicts() {
   stale="sha256:$(printf 'built on main for other inputs' | sha256sum | cut -d' ' -f1)"
   foreign="sha256:$(printf 'built by another workflow' | sha256sum | cut -d' ' -f1)"
   branch="sha256:$(printf 'built on a branch' | sha256sum | cut -d' ' -f1)"
+  elsewhere="sha256:$(printf 'built by a run elsewhere that called this workflow' | sha256sum | cut -d' ' -f1)"
   unsigned="sha256:$(printf 'never signed' | sha256sum | cut -d' ' -f1)"
   signed "$good" "$IDENTITY" "$key"
   signed "$stale" "$IDENTITY" "$(printf 'other inputs' | sha256sum | cut -d' ' -f1)"
   signed "$foreign" https://github.com/eekaan/k8s-gitops/.github/workflows/publish.yaml@refs/heads/main "$key"
   signed "$branch" https://github.com/eekaan/k8s-gitops/.github/workflows/tools-image.yaml@refs/heads/feature "$key"
-  # On a laptop, with credentials at hand that the pin must not use.
+  signed "$elsewhere" "$IDENTITY" "$key" someone-else/other-repo
+  # On a laptop with no Docker login but podman's, where cosign looks for one when it finds no Docker
+  # configuration: logins the pin must not use.
   without GITHUB_ACTIONS
-  with GITHUB_TOKEN=a-token-the-pin-does-not-use
-  mkdir -p "$BATS_TEST_TMPDIR/home/.docker"
-  printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' "$(printf 'laptop-user:laptop-login' | base64 -w0)" > "$BATS_TEST_TMPDIR/home/.docker/config.json"
+  login=$(printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "$(printf 'laptop-user:laptop-login' | base64 -w0)")
+  for file in auth/registry-auth.json run/containers/auth.json config/containers/auth.json; do
+    mkdir -p "$BATS_TEST_TMPDIR/$(dirname "$file")"
+    printf '%s\n' "$login" > "$BATS_TEST_TMPDIR/$file"
+  done
+  with REGISTRY_AUTH_FILE="$BATS_TEST_TMPDIR/auth/registry-auth.json" XDG_RUNTIME_DIR="$BATS_TEST_TMPDIR/run" \
+    XDG_CONFIG_HOME="$BATS_TEST_TMPDIR/config"
   before=$(cat "$WORK/versions.yaml")
 
-  for digest in "$stale" "$foreign" "$branch" "$unsigned" '' latest "$IMAGE@$good" "${good#sha256:}" "sha256:$(tr a-f A-F <<< "${good#sha256:}")" "$good "; do
+  for digest in "$stale" "$foreign" "$branch" "$elsewhere" "$unsigned" '' latest "$IMAGE@$good" "${good#sha256:}" "sha256:$(tr a-f A-F <<< "${good#sha256:}")" "$good "; do
     rm -f "$RECORD/calls"
 
     recipe tools-image-pin "$digest"
@@ -770,10 +922,19 @@ verdicts() {
   [ "$(grep -cxF -- "$IMAGE@$good" <<< "$output")" -eq 1 ]
   [ "$(value --certificate-identity <<< "$output")" = "$IDENTITY" ]
   [ "$(value --certificate-oidc-issuer <<< "$output")" = "$ISSUER" ]
+  [ "$(value --certificate-github-workflow-repository <<< "$output")" = eekaan/k8s-gitops ]
   [ "$(values -a <<< "$output"; values --annotations <<< "$output")" = "tools-key=$key" ]
-  run grep -xE -- '--(key|insecure-ignore-tlog|insecure-ignore-sct|certificate-chain|trusted-root|allow-insecure-registry|allow-http-registry|certificate-identity-regexp|certificate-oidc-issuer-regexp)' <<< "$output"
+  run grep -xE -- '--(key|insecure-ignore-tlog|insecure-ignore-sct|certificate-chain|trusted-root|allow-insecure-registry|allow-http-registry|certificate-identity-regexp|certificate-oidc-issuer-regexp|k8s-keychain)' <<< "$output"
   [ "$status" -eq 1 ]
-  [ "$(cat "$RECORD/cosign-credentials")" = 'verify anonymous' ]
+  [ "$(cat "$RECORD/cosign-credentials")" = 'verify anonymous' ] || { cat "$RECORD/cosign-credentials"; return 1; }
+  # With a Docker login at hand as well, the same.
+  record "$(printf 'other inputs' | sha256sum | cut -d' ' -f1)" "$IMAGE@sha256:$(printf 'recorded before' | sha256sum | cut -d' ' -f1)"
+  mkdir -p "$BATS_TEST_TMPDIR/home/.docker"
+  printf '%s\n' "$login" > "$BATS_TEST_TMPDIR/home/.docker/config.json"
+  rm -f "$RECORD/cosign-credentials"
+  recipe tools-image-pin "$good"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$RECORD/cosign-credentials")" = 'verify anonymous' ] || { cat "$RECORD/cosign-credentials"; return 1; }
   # The identity is this repository's tools image workflow on main, and that file runs the publish.
   [[ $IDENTITY =~ ^https://github\.com/eekaan/k8s-gitops/(\.github/workflows/[^/@]+)@refs/heads/main$ ]]
   workflow="$ROOT/${BASH_REMATCH[1]}"
@@ -803,7 +964,9 @@ verdicts() {
   [ "$(yq -o=json -I=0 '.on | keys' "$WORKFLOW")" = '["push","workflow_dispatch"]' ]
   [ "$(yq -o=json -I=0 '.on.push | keys' "$WORKFLOW")" = '["branches","paths"]' ]
   [ "$(yq -o=json -I=0 '.on.push.branches' "$WORKFLOW")" = '["main"]' ]
-  [ "$(yq -o=json -I=0 '.on.push.paths | sort' "$WORKFLOW")" = '[".github/workflows/tools-image.yaml","mise.toml","versions.yaml"]' ]
+  # Every file the key or the image is made from: the inputs, the module whose tools layer is one of
+  # them, the script that computes the key and publishes, and the workflow itself.
+  [ "$(yq -o=json -I=0 '.on.push.paths | sort' "$WORKFLOW")" = '[".dagger/modules/ci/main.dang",".github/workflows/tools-image.yaml","mise.toml","scripts/tools-image","versions.yaml"]' ]
   [ "$(yq -o=json -I=0 '.permissions | to_entries | sort_by(.key) | from_entries' "$WORKFLOW")" = '{"contents":"read","id-token":"write","packages":"write"}' ]
   [ "$(yq '[.jobs[] | select(has("permissions") or has("concurrency"))] | length' "$WORKFLOW")" = 0 ]
   # One group for every run, and a run in progress is never cancelled: a newer run waits for it.

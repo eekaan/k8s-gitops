@@ -6,15 +6,18 @@
 # verifies: renaming the file needs scripts/tools-image changed in the same change.
 name: tools-image
 
-# Never for a pull request: one never gets packages: write or an identity token. versions.yaml holds
-# two of the three inputs among other versions; a run for a change to the others finds the key's
-# image signed already.
+# Never for a pull request: one never gets packages: write or an identity token. It runs for a change
+# to any file the key or the image is made from: the inputs, the module whose toolsLayer is one of
+# them, the script that computes the key and publishes, and this file. versions.yaml and the module
+# hold more than the inputs; a run for a change to the rest finds the key's image signed already.
 "on":
   push:
     branches: [main]
     paths:
       - mise.toml
       - versions.yaml
+      - .dagger/modules/ci/main.dang
+      - scripts/tools-image
       - .github/workflows/tools-image.yaml
   workflow_dispatch:
 
