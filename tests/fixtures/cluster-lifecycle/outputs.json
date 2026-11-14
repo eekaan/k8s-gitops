@@ -1,0 +1,12 @@
+{
+  "talman_yaml": {
+    "sensitive": true,
+    "type": "string",
+    "value": "clusterName: lab-sto2\nnodes:\n  - hostname: cp-1\n    ipAddress: 198.51.100.84\n"
+  },
+  "schematic_id": {
+    "sensitive": false,
+    "type": "string",
+    "value": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.13.9",
+  "resource_changes": [
+    {
+      "address": "module.nodes.openstack_compute_instance_v2.node[\"fixture-cp-1\"]",
+      "mode": "managed",
+      "type": "openstack_compute_instance_v2",
+      "name": "node",
+      "change": {
+        "actions": ["delete"],
+        "before": { "name": "fixture-cp-1", "access_ip_v4": "198.51.100.81" },
+        "after": null
+      }
+    },
+    {
+      "address": "module.nodes.openstack_networking_port_v2.node[\"fixture-cp-1\"]",
+      "mode": "managed",
+      "type": "openstack_networking_port_v2",
+      "name": "node",
+      "change": {
+        "actions": ["delete"],
+        "before": { "fixed_ip": [{ "ip_address": "198.51.100.81", "subnet_id": "marker-subnet-id" }] },
+        "after": null
+      }
+    },
+    {
+      "address": "openstack_networking_floatingip_v2.api",
+      "mode": "managed",
+      "type": "openstack_networking_floatingip_v2",
+      "name": "api",
+      "change": {
+        "actions": ["delete"],
+        "before": { "address": "198.51.100.82" },
+        "after": null
+      }
+    },
+    {
+      "address": "data.terraform_remote_state.plumbing",
+      "mode": "data",
+      "type": "terraform_remote_state",
+      "name": "plumbing",
+      "change": { "actions": ["read"], "before": null, "after": { "outputs": "198.51.100.83" } }
+    }
+  ],
+  "output_changes": {
+    "talman_yaml": { "actions": ["delete"], "before": "clusterName: lab-sto2\n", "after": null }
+  }
+}

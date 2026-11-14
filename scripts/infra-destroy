@@ -4,25 +4,36 @@
 # name is typed back, or with --yes (CI). The plumbing stack is left alone when the cluster stack
 # is not destroyed. State objects stay. Once the cluster stack is destroyed, the files generated for
 # its cluster that hold the nodes' and the API's addresses are removed, as the cloud may give those
-# addresses to someone else.
-# Usage: scripts/infra-destroy [--yes]
+# addresses to someone else. Given one of the two stacks, it destroys that one only, the same way,
+# as cluster-destroy does with the cluster stack.
+# Usage: scripts/infra-destroy [stack] [--yes]
 set -euo pipefail
 
 here=$(dirname "$0")
 # shellcheck source=scripts/lib/infra.sh
 . "$here/lib/infra.sh"
 
-confirmed=0
-case ${1-} in
-  --yes) confirmed=1 ;;
-  '') ;;
-  *)
-    infra_error "usage: infra-destroy [--yes]"
-    exit 2
-    ;;
-esac
-
 stacks=(sto2/cluster sto2/plumbing)
+
+usage() {
+  infra_error "usage: infra-destroy [stack] [--yes]; the stack is one of ${stacks[*]}"
+  exit 2
+}
+
+confirmed=0 only=''
+for arg; do
+  case $arg in
+    --yes) confirmed=1 ;;
+    -*) usage ;;
+    *)
+      [[ -z $only && " ${stacks[*]} " == *" $arg "* ]] || usage
+      only=$arg
+      ;;
+  esac
+done
+if [[ -n $only ]]; then
+  stacks=("$only")
+fi
 
 # Hook for removing the load balancers and volumes the cluster creates itself, outside OpenTofu,
 # which would keep the network from being deleted. It is not done; the hook says so.

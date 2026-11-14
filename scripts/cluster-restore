@@ -76,20 +76,6 @@ decrypt() {
   fi
 }
 
-# not_ready_since SINCE HOSTNAME...: the HOSTNAMEs that are not a Ready node whose kubelet has
-# reported since SINCE, a UTC time as Kubernetes writes it, comma-separated; nothing when every one
-# is. Fails when the API does not answer through the kubeconfig.
-not_ready_since() {
-  local since=$1 nodes
-  shift
-  nodes=$(kubectl get nodes --output json --request-timeout=10s 2> /dev/null) || return 1
-  jq -r --arg since "$since" '
-    [.items[] | select(any(.status.conditions[]?;
-        .type == "Ready" and .status == "True" and .lastHeartbeatTime >= $since))
-      | .metadata.name] as $ready
-    | [$ARGS.positional[] | select(IN($ready[]) | not)] | join(", ")' --args "$@" <<< "$nodes"
-}
-
 step="finding the snapshot in the etcd bucket"
 if ! listing=$(s3_etcd_snapshots "$cluster"); then
   infra_error "rclone cannot list the etcd bucket with the state key, or it does not exist; nothing was reset"
