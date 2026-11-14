@@ -6,6 +6,8 @@
 #   <tmp>/store-fails/download   while it exists, a download fails
 #   <tmp>/store-fails/list       while it exists, listing fails
 #   <tmp>/store-fails/lookup     while it exists, every call fails on the endpoint's name lookup
+#   <tmp>/store-fails/noisy      while it exists, listing fails with a line of 350 letters z and then
+#                                eleven more lines of errors
 # It answers as the pinned rclone answers an S3 API: an upload into a bucket that does not exist
 # creates the bucket first, unless the no-check-bucket option is set, when the store refuses it
 # (NoSuchBucket); listing a bucket that does not exist exits 3, directory not found, after a partial
@@ -101,6 +103,14 @@ case $command in
   lsjson)
     key=${paths[0]#store:}
     bucket=${key%%/*}
+    if [[ -e $fails/noisy ]]; then
+      printf 'z%.0s' {1..350} >&2
+      echo >&2
+      for letter in a b c d e f g h i j k; do
+        echo "ERROR : failure marker $letter" >&2
+      done
+      exit 1
+    fi
     if [[ -e $fails/list ]]; then
       echo "ERROR : $key: AccessDenied listing at $endpoint" >&2
       exit 1

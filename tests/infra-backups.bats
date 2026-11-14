@@ -713,12 +713,14 @@ EOF
 }
 
 @test "infra-s3-key writes nothing when the openstack client fails or answers without a key pair" {
+  # The project's name, which no pattern of the filter matches, so only its value withholds it.
+  with OS_PROJECT_ID=fixture-project-id
   for answer in fails '{"access": "marker-new-access-key", "secret": ""}' 'not json marker-new-secret-key'; do
     echo "$answer"
     if [[ $answer == fails ]]; then
       fake openstack <<EOF
 [[ \$1 == --version ]] && { echo 'openstack 10.5.0'; exit 0; }
-echo "Unauthorized at https://identity.example.invalid for 7f3c1d9a5b2e4c8f9a1b2c3d4e5f6a7b" >&2
+echo "Unauthorized at https://identity.example.invalid for fixture-project-id and 7f3c1d9a5b2e4c8f9a1b2c3d4e5f6a7b" >&2
 exit 1
 EOF
     else
@@ -743,20 +745,23 @@ EOF
 }
 
 @test "A failed credential request says why, without a project, an address or a key" {
+  # The cloud's and the project's names carry no digit and no dot, which no pattern of the filter
+  # matches, so only their values withhold them.
   for ci in '' true; do
     for way in unauthorized lookup; do
       echo "ci=$ci $way"
       reset_environment
+      with OS_PROJECT_ID=fixture-project-id
       [[ -z $ci ]] || with CI=true
       rm -f "$REPO"/.env.infra-s3-key.errors
       case $way in
         unauthorized)
           reason='The request you have made requires authentication. (HTTP 401)'
-          detail="$reason (Request-ID: req-5d1c9a7e-3b2f-4a6d-8e0c-1f2a3b4c5d6e) for project 7f3c1d9a5b2e4c8f9a1b2c3d4e5f6a7b at https://identity.example.invalid/v3 from 192.0.2.53"
+          detail="$reason (Request-ID: req-5d1c9a7e-3b2f-4a6d-8e0c-1f2a3b4c5d6e) for project 7f3c1d9a5b2e4c8f9a1b2c3d4e5f6a7b, fixture-project-id, in cloud fixture-cloud at https://identity.example.invalid/v3 from 192.0.2.53"
           ;;
         lookup)
           reason='Name or service not known'
-          detail="Unable to establish connection to https://identity.example.invalid/v3: HTTPSConnectionPool(host='identity.example.invalid', port=443): Failed to resolve 'identity.example.invalid' ([Errno -2] $reason) via 192.0.2.53"
+          detail="Unable to establish connection to https://identity.example.invalid/v3: HTTPSConnectionPool(host='identity.example.invalid', port=443): Failed to resolve 'identity.example.invalid' ([Errno -2] $reason) via 192.0.2.53, cloud fixture-cloud"
           ;;
       esac
       fake openstack <<EOF
@@ -770,7 +775,7 @@ EOF
       [ "$status" -ne 0 ]
       [[ $output == *"the openstack client cannot create an EC2 credential with these credentials"* ]]
       [ ! -e "$REPO/.env" ]
-      for place in identity.example.invalid 192.0.2.53 7f3c1d9a5b2e4c8f9a1b2c3d4e5f6a7b req-5d1c9a7e fixture-cloud; do
+      for place in identity.example.invalid 192.0.2.53 7f3c1d9a5b2e4c8f9a1b2c3d4e5f6a7b req-5d1c9a7e fixture-cloud fixture-project-id; do
         [[ $output != *"$place"* ]]
       done
       if [[ -z $ci ]]; then

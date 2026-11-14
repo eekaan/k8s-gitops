@@ -134,6 +134,7 @@ recipe() {
 #   linstor-volumes how many PersistentVolumes of LINSTOR's CSI driver kubectl lists, beside two of
 #                   other kinds
 #   api-down        kubectl cannot reach the API, and its error names the API server's address
+#   forbidden       kubectl reaches the API, which refuses it: Forbidden to list volumes
 #   down            addresses of the nodes that do not answer on the Talos API port: those talman
 #                   reset with --reboot=false, which shuts a node down instead of rebooting it
 # talman records what it bootstraps from: the file's path in recovered-from and, as it was at that
@@ -271,6 +272,10 @@ EOF
 printf '%s\n' "kubectl $*" >> "$RECORD/argv"
 if [[ -e $STATE/api-down ]]; then
   echo "Unable to connect to the server: dial tcp 198.51.100.66:6443: connect: connection refused" >&2
+  exit 1
+fi
+if [[ -e $STATE/forbidden && "${1-} ${2-}" == "get persistentvolumes" ]]; then
+  echo 'Error from server (Forbidden): persistentvolumes is forbidden: User "admin" cannot list resource "persistentvolumes" at the cluster scope' >&2
   exit 1
 fi
 if [[ "${1-} ${2-}" == "get persistentvolumes" ]]; then
@@ -531,16 +536,42 @@ resets_or_bootstraps() {
     done
   done
 
-  # The listing that fails on its own, which cluster-snapshots shares with them.
+  # The listing that fails on its own, which cluster-snapshots shares with them, shows its reason
+  # and with CI set keeps it in the file.
+  for ci in '' true; do
+    reset_environment
+    [[ -z $ci ]] || with CI=true
+    rm -rf "${FAILS:?}"/*
+    rm -f "$CLUSTER"/clusterconfig/*.errors.log
+    : > "$FAILS/lookup"
+
+    recipe cluster-snapshots
+
+    [ "$status" -ne 0 ]
+    [[ $output != *marker-endpoint* && $output != *192.0.2.53* ]]
+    if [[ -z $ci ]]; then
+      [[ $output == *"no such host"* ]]
+    else
+      [[ $output != *"no such host"* ]]
+      [[ $output == *"errors are in talos/lab-sto2/clusterconfig/cluster-snapshots.errors.log"* ]]
+      grep -q "no such host" "$CLUSTER/clusterconfig/cluster-snapshots.errors.log"
+      git -C "$REPO" check-ignore -q "$CLUSTER/clusterconfig/cluster-snapshots.errors.log"
+    fi
+  done
+}
+
+@test "A failed S3 request shows at most eight lines of the client's errors, each cut at 300 characters" {
   reset_environment
   rm -rf "${FAILS:?}"/*
-  : > "$FAILS/lookup"
+  : > "$FAILS/noisy"
 
-  recipe cluster-snapshots
+  recipe cluster-restore latest --yes < /dev/null
 
   [ "$status" -ne 0 ]
-  [[ $output == *"no such host"* ]]
-  [[ $output != *marker-endpoint* && $output != *192.0.2.53* ]]
+  [ "$(grep -c '^cluster-restore: rclone: ' <<< "$output")" -eq 8 ]
+  [[ $output == *"failure marker a"* && $output != *"failure marker h"* ]]
+  long=$(printf 'z%.0s' {1..300})
+  [[ $output == *"$long"* && $output != *"${long}z"* ]]
 }
 
 @test "A failed or interrupted snapshot leaves nothing on disk" {
@@ -851,6 +882,20 @@ resets_or_bootstraps() {
   [[ $output != *198.51.100.66* ]]
   [ -z "$(resets_or_bootstraps)" ]
   rm "$STATE/api-down"
+
+  # An API that answers and refuses is not one that does not answer.
+  : > "$STATE/forbidden"
+  clear_record
+
+  recipe cluster-restore latest <<< no
+
+  [ "$status" -ne 0 ]
+  asked=${output%%"Type lab-sto2 to reset and restore it"*}
+  [[ $asked == *"cannot be counted"*"not allowed to list them"* ]]
+  [[ $asked != *"does not answer"* ]]
+  [[ $asked == *"LINSTOR keeps its database in the Kubernetes API"* ]]
+  [ -z "$(resets_or_bootstraps)" ]
+  rm "$STATE/forbidden"
 
   # Without a kubeconfig it cannot be asked either, and kubectl is not run.
   rm "$CLUSTER/clusterconfig/kubeconfig"

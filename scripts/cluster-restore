@@ -129,18 +129,26 @@ step="waiting for every node to answer on the Talos API port"
 wait_for_talos_api "$talman_file"
 
 # LINSTOR keeps its database in the Kubernetes API (the Piraeus operator's LinstorCluster sets no
-# other: https://github.com/piraeusdatastore/piraeus-operator/blob/v2.12.1/docs/explanation/components.md
+# other: https://github.com/piraeusdatastore/piraeus-operator/blob/v2/docs/explanation/components.md
 # says the controller's database is stored as Kubernetes objects). A restore rolls it back with the
 # PersistentVolumes and claims, while the data and DRBD metadata on the workers stay as they are.
 step="counting the PersistentVolumes of LINSTOR the cluster has now"
 linstor_driver=linstor.csi.linbit.com
+why="its API does not answer through its kubeconfig"
 if [[ ! -f $KUBECONFIG ]]; then
   volumes=
-elif ! volumes=$(kubectl get persistentvolumes --output json --request-timeout=30s 2> /dev/null); then
+elif ! run_keeping_errors kubectl get persistentvolumes --output json --request-timeout=30s; then
   volumes=
+  # An API that answers and refuses is told from one that does not answer; nothing else of
+  # kubectl's errors is shown, as they can hold the API's address.
+  if [[ $last_errors == *Forbidden* || $last_errors == *Unauthorized* ]]; then
+    why="its kubeconfig is not allowed to list them"
+  fi
+else
+  volumes=$last_output
 fi
 if [[ -z $volumes ]]; then
-  echo "cluster-restore: the PersistentVolumes of LINSTOR ($linstor_driver) that $cluster has now cannot be counted, as its API does not answer through its kubeconfig."
+  echo "cluster-restore: the PersistentVolumes of LINSTOR ($linstor_driver) that $cluster has now cannot be counted, as $why."
 else
   linstor_volumes=$(jq --arg driver "$linstor_driver" '[.items[] | select(.spec.csi.driver? == $driver)] | length' <<< "$volumes")
   case $linstor_volumes in
@@ -149,7 +157,7 @@ else
     *) echo "cluster-restore: $cluster has $linstor_volumes PersistentVolumes of LINSTOR ($linstor_driver) now." ;;
   esac
 fi
-echo "cluster-restore: LINSTOR keeps its database in the Kubernetes API, so the restore rolls its records and the PersistentVolumes and claims back to the snapshot's, while the volumes' data and DRBD metadata on the workers stay as they are: a volume created after the snapshot is orphaned on the workers, and a volume deleted after it comes back pointing at nothing. docs/runbooks/etcd-restore.md says how to find and remove them, and when not to restore; confirming the restore confirms this."
+echo "cluster-restore: LINSTOR keeps its database in the Kubernetes API, so the restore rolls its records and the PersistentVolumes and claims back to the snapshot's, while the volumes' data and DRBD metadata on the workers stay as they are: a volume created after the snapshot is orphaned on the workers, and a volume deleted after it comes back without its data, missing or created again empty. docs/runbooks/etcd-restore.md says how to find and remove them, and when not to restore; confirming the restore confirms this."
 echo "cluster-restore: the control planes of $cluster are reset, and the cluster's state is replaced by the one in $name: everything written to the cluster after the snapshot was taken is lost."
 echo "cluster-restore: talman reset wipes each control plane's EPHEMERAL partition, with etcd's data, and reboots it; the workers are not reset. Then talman apply --bootstrap restores etcd from the snapshot."
 step="waiting for $cluster to be typed back"

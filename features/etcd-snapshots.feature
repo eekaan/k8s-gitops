@@ -21,6 +21,11 @@ Feature: etcd snapshots
     When cluster-snapshot, cluster-restore and cluster-snapshots run, without CI and with CI set
     Then each exits non-zero, and without CI shows the reason the client gave, with no endpoint, bucket name, address or key; with CI set it shows none of the client's words and names the file git ignores that holds them
 
+  Scenario: A failed S3 request shows at most eight lines of the client's errors, each cut at 300 characters
+    Given an S3 client whose listing fails with a line of 350 characters and eleven more lines
+    When cluster-restore runs without CI
+    Then it exits non-zero showing eight lines of the client's errors, the first cut at 300 characters
+
   Scenario: A failed or interrupted snapshot leaves nothing on disk
     Given talman failing once it has started writing the snapshot, or the run interrupted while talman writes it, whether talman dies of the interruption or handles it and finishes
     When cluster-snapshot runs
@@ -57,9 +62,9 @@ Feature: etcd snapshots
     Then talman reset is told to reboot, the nodes it reset answer on the Talos API port again, and etcd is bootstrapped from the snapshot, where a reset told not to reboot would leave them silent and fail the wait
 
   Scenario: A restore counts the volumes first and says what it does to them
-    Given a cluster with PersistentVolumes of LINSTOR's CSI driver beside others, or none, an API that does not answer, and no kubeconfig
+    Given a cluster with PersistentVolumes of LINSTOR's CSI driver beside others, or none, an API that does not answer or refuses the kubeconfig, and no kubeconfig
     When cluster-restore runs for a snapshot and the cluster's name is not typed back, and with --yes
-    Then before it asks it says by number, without a volume's name, how many PersistentVolumes of LINSTOR the cluster has, or that they cannot be counted, and that LINSTOR keeps its database in the Kubernetes API, so a volume created after the snapshot is orphaned on the workers and one deleted after it comes back pointing at nothing, and where the runbook says what to do; nothing is reset without the name
+    Then before it asks it says by number, without a volume's name, how many PersistentVolumes of LINSTOR the cluster has, or that they cannot be counted, because the API does not answer or the kubeconfig may not list them, and that LINSTOR keeps its database in the Kubernetes API, so a volume created after the snapshot is orphaned on the workers and one deleted after it comes back without its data, and where the runbook says what to do; nothing is reset without the name
 
   Scenario: A snapshot this key cannot decrypt stops the restore before anything is reset
     Given an object encrypted to another age key, and one that is not an age file
