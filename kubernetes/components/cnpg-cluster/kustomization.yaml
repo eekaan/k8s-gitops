@@ -1,0 +1,11 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# A PostgreSQL cluster for one application, run by the CloudNativePG operator, and the PodMonitor
+# that scrapes it. An application takes it by naming this component in its ks.yaml's
+# spec.components and the cluster in its postBuild.substitute (docs/kubernetes.md, PostgreSQL).
+resources:
+  - cluster.yaml
+  - podmonitor.yaml
