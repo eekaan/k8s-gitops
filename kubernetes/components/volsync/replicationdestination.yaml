@@ -1,0 +1,29 @@
+---
+# Restores the latest backup once, as soon as it is created, into a volume of its own, and keeps a
+# snapshot of it, which the application's claim is made from. Its temporary volume and restic's
+# cache are deleted once the restore is done.
+apiVersion: volsync.backube/v1alpha1
+kind: ReplicationDestination
+metadata:
+  name: ${APP}-restore
+spec:
+  trigger:
+    manual: restore-once
+  restic:
+    repository: ${APP}-volsync
+    copyMethod: Snapshot
+    capacity: ${VOLSYNC_CAPACITY}
+    accessModes:
+      - ReadWriteOnce
+    cleanupTempPVC: true
+    cleanupCachePVC: true
+    # Unprivileged, as the restricted Pod Security level requires: VolSync drops every capability
+    # of the mover's container and forbids privilege escalation itself.
+    moverSecurityContext:
+      runAsNonRoot: true
+      runAsUser: ${VOLSYNC_UID:=1000}
+      runAsGroup: ${VOLSYNC_GID:=1000}
+      fsGroup: ${VOLSYNC_GID:=1000}
+      fsGroupChangePolicy: OnRootMismatch
+      seccompProfile:
+        type: RuntimeDefault

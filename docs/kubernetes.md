@@ -20,7 +20,8 @@ the rules below.
   manifests in `app/`.
 - `apps/base/flux-system/artifact-generator/`: publishes one artifact per application.
 - `components/`: Kustomize components. `common` adds the `app-template-defaults` ConfigMap, which
-  an app-template HelmRelease opts into through `valuesFrom`.
+  an app-template HelmRelease opts into through `valuesFrom`; `volsync` backs an application's
+  volume up ([Volume backups](#volume-backups)).
 
 ## Adding an application
 
@@ -143,7 +144,8 @@ and `snapshot-controller` once its controller runs as well. An application that 
 these groups, or whose chart does, names the matching one in `dependsOn` and turns off any copy of
 the same definitions its own chart would install. `linstor-cluster` names `snapshot-controller` for
 its VolumeSnapshotClass ([Storage](#storage)); the monitoring stack ([Monitoring](#monitoring)) and
-the baseline applications with a monitor name `prometheus-operator-crds`; cert-manager
+the baseline applications with a monitor name `prometheus-operator-crds`; `volsync` names both
+([Volume backups](#volume-backups)); cert-manager
 ([cert-manager](#cert-manager)) and `envoy-gateway` ([Envoy Gateway](#envoy-gateway)) name
 `gateway-api-crds`, and `envoy-gateway` turns off its chart's copy of the Gateway API. No dashboard
 or route is enabled anywhere.
@@ -213,7 +215,8 @@ classes and their handlers.
 `apps/base/external-secrets/external-secrets/` runs the External Secrets operator in its own
 namespace, `external-secrets`. It is how runtime secrets reach workloads (ADR 0005): an
 `ExternalSecret` names a key in a secret store, and the operator writes it into a Secret. No secret
-store is configured yet, and nothing in the tree creates an `ExternalSecret`.
+store is configured yet. The `volsync` component makes an `ExternalSecret` of the ClusterSecretStore
+`openbao` ([Volume backups](#volume-backups)), and no enabled application includes it.
 
 - The chart comes from its publisher's OCI registry and installs and upgrades the operator's
   resource definitions itself, as the publisher documents. No other chart in the tree ships them,
@@ -382,6 +385,71 @@ configuration to the operator's own satellite DaemonSet at the version the pinne
 the nodes' machine configurations offline to check which nodes LINSTOR selects and which device the
 pool takes; reads the StorageClasses and the VolumeSnapshotClass; and renders the operator's chart
 to check that its definitions are kept.
+
+## Volume backups
+
+VolSync backs an application's volume up to the VolSync bucket
+([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)) with its restic mover, and
+fills the volume from the latest backup when it is created (ADR 0013).
+
+`apps/base/volsync-system/volsync/` installs the operator in its own namespace, `volsync-system`,
+at the restricted Pod Security level. Its publisher releases the chart only to a classic Helm
+repository, so it comes from the public OCI mirror metrics-server's comes from. The release
+installs and upgrades the ReplicationSource and ReplicationDestination definitions, each kept when
+it is uninstalled. The controller runs two replicas on different nodes, one acting at a time, with
+the chart's requests and limits; the application's own disruption budget keeps one through a drain.
+The chart's ServiceMonitor sends no credential, so the metrics are served without authorization.
+The application names `snapshot-controller`, which VolSync needs installed, and
+`prometheus-operator-crds` in `dependsOn`, and sets `wait`.
+
+An application opts in from its `ks.yaml`, before its volume exists, and names `volsync`,
+`external-secrets` and `linstor-cluster` in `dependsOn`:
+
+```yaml
+spec:
+  components:
+    - ../../../../../components/volsync
+  postBuild:
+    substitute:
+      APP: <app>
+      VOLSYNC_CAPACITY: 1Gi
+      VOLSYNC_SCHEDULE: "17 3 * * *"
+```
+
+`VOLSYNC_CLAIM` names the volume, `APP` when unset; `VOLSYNC_UID` and `VOLSYNC_GID`, 1000 when
+unset, are the user and group the movers run as, which must be able to read and write its files.
+The component makes:
+
+- the volume, a claim of `VOLSYNC_CAPACITY` on the default StorageClass, whose data source is the
+  ReplicationDestination `<app>-restore`. That restores the latest backup once, as soon as it
+  exists, and keeps a snapshot of it, and VolSync makes the claim from the snapshot: the volume
+  starts with the latest backup, or empty when there is none. A claim's data source cannot be added
+  once the claim exists, so a volume that exists keeps its data;
+- the ReplicationSource `<app>`, which backs the volume up on the cron schedule `VOLSYNC_SCHEDULE`:
+  it takes a snapshot through the default VolumeSnapshotClass, so the backup is of one moment, and
+  restic uploads the files of a volume made from it. An empty volume is not backed up. Each run keeps
+  the newest backup of each of the last 7 days, 4 weeks and 3 months, and every 7 days the
+  repository is pruned. Each application takes its own minute, so backups do not start together;
+- the ExternalSecret `<app>-volsync`, which writes the Secret the movers read: `RESTIC_REPOSITORY`,
+  the application's own repository, `s3:<S3_ENDPOINT>/<BACKUP_BUCKET_PREFIX>-volsync/<app>`, from
+  `cluster-config`; and `RESTIC_PASSWORD`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, the
+  properties of the key `volsync` in the ClusterSecretStore `openbao`: the password every
+  repository is encrypted with and the cluster's S3 key. restic creates the repository the first
+  time a mover reaches it.
+
+The movers run in the application's namespace, unprivileged: VolSync drops their capabilities and
+forbids privilege escalation, and the component gives them a non-root user and group and the
+runtime's seccomp profile, as the restricted level requires.
+
+No ClusterSecretStore exists yet, so the Secret is never written and VolSync starts no mover. The
+test application `apps/base/demo/volsync-demo/`, a pod that holds a 1 GiB volume and writes the
+time it first found it empty, is disabled in the overlay. Before the first backup runs, the store
+`openbao` holds the key `volsync` with its three properties, the password also kept outside the
+cluster; `just cluster-config` has applied `BACKUP_BUCKET_PREFIX` and `S3_ENDPOINT`; and
+`volsync-demo` is enabled, with the store's application in its `dependsOn`.
+
+`tests/volume-backups.bats` builds the applications as Flux applies them and renders the VolSync
+and External Secrets charts to check this section.
 
 ## Envoy Gateway
 
@@ -561,6 +629,10 @@ starts to use is listed in the example and given its source in `fill_cluster_con
 
 - `CLUSTER_DOMAIN`: the environment variable of that name, the domain the cluster's applications are
   published under, a lower-case DNS name.
+- `BACKUP_BUCKET_PREFIX`: the environment variable of that name, the start of the backup buckets'
+  names ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)).
+- `S3_ENDPOINT`: the object storage's S3 endpoint, `endpoints.s3` in `infra/openstack/backend.hcl`,
+  where OpenTofu's state backend reads it.
 - `NODE_CIDR`: `values.nodeSubnet` in `talos/<cluster>/talman.yaml`, which the cluster stack renders
   from the plumbing stack's node subnet and which the kubelets take their node addresses from.
 - `NODE_NAME_REGEX`: the hostnames in that `talman.yaml`, joined with `|`, with a trailing number

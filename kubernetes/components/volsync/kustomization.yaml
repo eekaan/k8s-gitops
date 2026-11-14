@@ -1,0 +1,37 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# Backs an application's volume up on a schedule to a restic repository of its own in the VolSync
+# bucket, and fills the volume from the latest backup when it is created (ADR 0013). The component
+# makes the volume, a PersistentVolumeClaim on the default StorageClass. An application adds it in
+# its ks.yaml:
+#
+#   components:
+#     - ../../../../../components/volsync
+#   postBuild:
+#     substitute:
+#       APP: <app>
+#       VOLSYNC_CAPACITY: 1Gi
+#       VOLSYNC_SCHEDULE: "17 3 * * *"
+#
+#   APP               the application's name, unique across the cluster: it names the
+#                     ReplicationSource, the ReplicationDestination <app>-restore, the Secret
+#                     <app>-volsync and the repository's path in the bucket
+#   VOLSYNC_CAPACITY  the volume's size
+#   VOLSYNC_SCHEDULE  when the volume is backed up, in cron syntax; give each application its own
+#                     minute, so backups do not all start at once
+#   VOLSYNC_CLAIM     the volume's name; APP when unset
+#   VOLSYNC_UID,      the user and group the movers run as, which must be able to read and write the
+#   VOLSYNC_GID       volume's files; 1000 when unset, as for the pods of components/common
+#
+# A claim's data source cannot be added once the claim exists, so an application adds the component
+# before its volume exists. The repository's bucket and endpoint come from cluster-config, and its
+# password and S3 key from the secret store; until the store holds them, the Secret the movers read
+# does not exist and no mover runs.
+resources:
+  - externalsecret.yaml
+  - persistentvolumeclaim.yaml
+  - replicationdestination.yaml
+  - replicationsource.yaml

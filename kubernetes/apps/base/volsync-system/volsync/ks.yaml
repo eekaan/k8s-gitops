@@ -1,0 +1,22 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: volsync
+  namespace: flux-system
+spec:
+  path: ./apps/base/volsync-system/volsync/app
+  targetNamespace: volsync-system
+  # VolSync needs the snapshot controller's definitions installed whether or not a mover takes
+  # snapshots, as its documentation says; its chart makes a ServiceMonitor, a kind that exists once
+  # prometheus-operator-crds is Ready.
+  dependsOn:
+    - name: snapshot-controller
+    - name: prometheus-operator-crds
+  # Ready only once the release is installed and the controller runs, so an application that names
+  # this one in dependsOn finds the ReplicationSource and ReplicationDestination definitions.
+  wait: true
+  sourceRef:
+    kind: ExternalArtifact
+    name: volsync

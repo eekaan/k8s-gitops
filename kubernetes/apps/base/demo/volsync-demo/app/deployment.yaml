@@ -1,0 +1,58 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/deployment-apps-v1.json
+# A pod that holds the volume, so it is made and backed up, and writes the time it first found the
+# volume empty into created, once; a volume restored from a backup keeps that time.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: volsync-demo
+spec:
+  replicas: 1
+  # The volume is ReadWriteOnce: the old pod lets go of it before the new one starts.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: volsync-demo
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: volsync-demo
+    spec:
+      # The user and group the component's movers run as by default.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: canary
+          image: docker.io/library/busybox:1.38.0
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              [ -e /data/created ] || date -u +%Y-%m-%dT%H:%M:%SZ > /data/created
+              trap 'exit 0' TERM
+              while :; do sleep 3600 & wait $!; done
+          resources:
+            requests:
+              cpu: 1m
+              memory: 8Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: volsync-demo

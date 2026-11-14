@@ -52,15 +52,21 @@ s3_bucket_name_ok() {
   fi
 }
 
-# s3_require_client: fails unless rclone is on PATH, then reads the object storage's S3 endpoint,
-# region and addressing into s3_endpoint, s3_region and s3_path_style from
-# infra/openstack/backend.hcl, where OpenTofu's s3 backend reads them. The values are not printed.
+# s3_require_client: fails unless rclone is on PATH, then reads the store's settings with
+# s3_read_backend.
 s3_require_client() {
-  local backend=infra/openstack/backend.hcl settings
   if ! command -v rclone > /dev/null; then
     infra_error "rclone is not on PATH; install the pinned tools with: just tools"
     return 1
   fi
+  s3_read_backend
+}
+
+# s3_read_backend: reads the object storage's S3 endpoint, region and addressing into s3_endpoint,
+# s3_region and s3_path_style from infra/openstack/backend.hcl, where OpenTofu's s3 backend reads
+# them. The values are not printed.
+s3_read_backend() {
+  local backend=infra/openstack/backend.hcl settings
   if ! settings=$(yq -p hcl -o json "$infra_root/$backend" 2> /dev/null | jq -er '
     [.endpoints.s3, .region, .use_path_style]
     | select((.[0] | type == "string" and test("^https://[^[:space:]]+$"))
