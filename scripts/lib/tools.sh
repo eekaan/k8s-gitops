@@ -114,6 +114,8 @@ helm() { run_tool helm "$@"; }
 flux() { run_tool flux "$@"; }
 kustomize() { run_tool kustomize "$@"; }
 docker() { run_tool docker "$@"; }
+# OpenBao's requests carry its tokens and need none of the secrets of the environment.
+curl() { run_tool curl "$@"; }
 sops() { run_tool sops "$@"; }
 age() { run_tool age "$@"; }
 age-keygen() { run_tool age-keygen "$@"; }

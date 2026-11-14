@@ -288,15 +288,18 @@ prints what tofu and its providers send and receive. No recipe prints a value or
 on a command line; secrets reach tofu and rclone through their environment.
 
 The tools below get only the secrets they use. `scripts/lib/tools.sh` runs `tofu`, `openstack`,
-`talman`, `talosctl`, `kubectl`, `helm`, `flux`, `kustomize`, `docker`, `sops`, `age`,
+`talman`, `talosctl`, `kubectl`, `helm`, `flux`, `kustomize`, `docker`, `curl`, `sops`, `age`,
 `age-keygen`, `gh`, `ssh`, `ssh-keyscan` and `ssh-keygen` with the secrets they may not see
 unexported, and `s3_rclone` hands rclone the one key pair it is called with. `scripts/render`,
 `scripts/vector-config`, `scripts/ci-comment` and `vector-check` run their tools the same way.
-Every other tool, `jq`, `yq`, `git` and `flock` among them, gets the environment as it is: `jq` reads `OPERATOR_CIDRS` from it by design, and none of them sends it
-anywhere. Every variable of `.env.example` is listed, either as a secret with the tools that may
-see it or as holding none, and a test fails for one that is not, whatever its prefix: a new
-variable is assigned before it passes. One set by hand that begins `OS_` or `AWS_` and is listed
-nowhere is a secret that only `tofu` sees.
+Every other tool, `jq`, `yq`, `git` and `flock` among them, gets the environment as it is: `jq`
+reads `OPERATOR_CIDRS` from it by design, and none of them sends it anywhere. A wrapped tool a
+script starts in the background, such as a port-forward, is started as `( exec_tool kubectl … ) &`,
+so that the process id the script holds is the tool's and ending it ends the tool; the test fails
+for the bare `kubectl … &`. Every variable of `.env.example` is listed, either as a secret with the
+tools that may see it or as holding none, and a test fails for one that is not, whatever its prefix:
+a new variable is assigned before it passes. One set by hand that begins `OS_` or `AWS_` and is
+listed nowhere is a secret that only `tofu` sees.
 
 A script runs a wrapped tool by its name. A test reads each script and justfile recipe as commands,
 a backslash continuation and a `bash -c` body or a here-document fed to a shell included, and fails

@@ -12,7 +12,7 @@ setup() {
   mkdir -p "$BIN" "$RECORD" "$REPO/infra/openstack" "$REPO/talos"
   cp -R "$ROOT/scripts" "$REPO/scripts"
   cp "$ROOT/infra/openstack/backend.hcl" "$REPO/infra/openstack/backend.hcl"
-  for tool in tofu openstack talman talosctl kubectl helm flux kustomize docker sops age age-keygen gh ssh ssh-keyscan ssh-keygen; do
+  for tool in tofu openstack talman talosctl kubectl helm flux kustomize docker curl sops age age-keygen gh ssh ssh-keyscan ssh-keygen; do
     cat > "$BIN/$tool" <<EOF
 #!/usr/bin/env bash
 env | cut -d= -f1 | sort > "$RECORD/names.$tool"
@@ -97,6 +97,7 @@ sorted() {
     [flux]=""
     [kustomize]=""
     [docker]=""
+    [curl]=""
     [age-keygen]=""
     [gh]=""
     [ssh]=""
@@ -203,6 +204,9 @@ bypasses() {
   found='(^|[^[:alnum:]_.-])'"$runner"'[[:space:]]+([^;|&]*[^[:alnum:]_.$-])?('"$alternation"')([^[:alnum:]_.-]|$)'
   found+='|(^|[^[:alnum:]_.-])'"$shell"'.*'"$tool"
   found+='|(\$\(|`)[[:space:]]*type -a?P ('"$alternation"')[^[:alnum:]_.-]'
+  # A tool started in the background by name is a function's subshell, not the process its pid
+  # names: the caller holds the pid it kills, so it starts one with ( exec_tool TOOL ... ) &.
+  found+='|^[0-9]+:[[:space:]]*('"$alternation"')[[:space:]].*[^&]&[[:space:]]*$'
   # shellcheck disable=SC2016 # flux=$(type -P flux) is text to leave out, not an expansion
   grep -E "$found" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -vF 'flux=$(type -P flux)'
 }
@@ -242,6 +246,29 @@ EOF
   [ "$(cat "$RECORD/holds.sops")" = flux-key-file ]
 }
 
+@test "A wrapped tool started in the background is the process the caller holds, with only its secrets" {
+  # This kubectl says its own process id, then keeps running until it is ended.
+  cat > "$BIN/kubectl" <<EOF
+#!/usr/bin/env bash
+env | cut -d= -f1 | sort > "$RECORD/names.kubectl"
+echo \$\$ > "$RECORD/pid.kubectl"
+exec sleep 60
+EOF
+  chmod +x "$BIN/kubectl"
+
+  # eval runs it in the shell that has sourced the libraries.
+  in_recipe eval "(exec_tool kubectl port-forward x) > /dev/null 2>&1 &
+    pid=\$!
+    for _ in \$(seq 100); do [ -s '$RECORD/pid.kubectl' ] && break; sleep 0.1; done
+    [ \"\$(cat '$RECORD/pid.kubectl')\" = \"\$pid\" ] || exit 3
+    kill \"\$pid\"
+    wait \"\$pid\" 2> /dev/null || true
+    ! kill -0 \"\$pid\" 2> /dev/null"
+
+  [ "$status" -eq 0 ]
+  [ -z "$(seen kubectl)" ]
+}
+
 @test "The scan for a wrapped tool run around its wrapper flags every way of doing it" {
   local case
   # Each is one command, which may span lines, as text: nothing in them is to expand.
@@ -270,6 +297,9 @@ EOF
     'find . -name x -exec kubectl apply -f {} +'
     'mise x -- helm template'
     'mise exec -- helm template'
+    'kubectl port-forward service/x :8200 > "$log" 2>&1 &'
+    'kubectl get --raw /readyz &'
+    $'kubectl port-forward \\\n  service/x :8200 &'
     $'env -u KUBECTL_EXTERNAL_DIFF \\\n  kubectl wait nodes'
     $'timeout 10m \\\n  -s KILL \\\n  kubectl wait nodes'
     $'bash -c \'\n  echo start\n  kubectl wait nodes\n\''
@@ -293,6 +323,9 @@ EOF
     'exec "$flux" envsubst --strict < "$file"'
     'env -u HELM_DEBUG jq -n 1'
     'timeout 10 jq . file'
+    '(exec_tool kubectl port-forward service/x :8200) > "$log" 2>&1 &'
+    'kubectl get nodes && echo done'
+    'sleep 1 &'
     '# env -u X kubectl'
     $'echo one \\\n  two\nkubectl get nodes'
     $'bash -c \'\n  echo start\n\'\nkubectl get nodes'

@@ -94,12 +94,17 @@ Feature: Infrastructure state and stack recipes
   Scenario: Each tool gets only the secrets it uses
     Given every secret variable set to a marker, and a recording fake of each tool the recipes run
     When each tool is run as the recipes run it
-    Then each fake records the names, never the values, of the secret variables in its environment: tofu the object storage key, the encryption settings, the cloud credential and the stacks' inputs, the openstack client the cloud credential, talman and sops the age key variables, age the age key file's path, and talosctl, kubectl, helm, flux, kustomize, docker, age-keygen, gh, ssh, ssh-keyscan and ssh-keygen none
+    Then each fake records the names, never the values, of the secret variables in its environment: tofu the object storage key, the encryption settings, the cloud credential and the stacks' inputs, the openstack client the cloud credential, talman and sops the age key variables, age the age key file's path, and talosctl, kubectl, helm, flux, kustomize, docker, curl, age-keygen, gh, ssh, ssh-keyscan and ssh-keygen none
 
   Scenario: The S3 client gets the one key pair it is called with and no other secret
     Given the state key pair and the cluster key pair, and a recording S3 client
     When the S3 client is called with each key set
     Then it gets that key pair, and no other secret variable
+
+  Scenario: A wrapped tool started in the background is the process the caller holds, with only its secrets
+    Given every secret variable set to a marker, and a recording kubectl that runs until it is ended
+    When the tool is started in the background as ( exec_tool kubectl ... ) & and the process id the caller got is ended
+    Then that id was the tool's own, the tool is gone, and it saw none of the secrets
 
   Scenario: A sops run for the Flux key sees only that key, as the one age key it is given
     Given the Flux age key and the Talos age key's variables set to markers, and a sops that records which of its age variables holds the Flux key
@@ -108,7 +113,7 @@ Feature: Infrastructure state and stack recipes
 
   Scenario: No script runs a wrapped tool around its wrapper
     Given the scripts and the justfiles of the repository
-    When each is searched for a wrapped tool after command, env, exec, timeout, xargs, sudo and the like, whatever options and arguments come between, after which, in the body of bash -c or sh -c, or by a path from type -P
+    When each is searched for a wrapped tool after command, env, exec, timeout, xargs, sudo and the like, whatever options and arguments come between, after which, in the body of bash -c or sh -c, or by a path from type -P, or started in the background by name
     Then none is found, as each would give the tool the whole environment
 
   Scenario: The scan for a wrapped tool run around its wrapper flags every way of doing it

@@ -62,7 +62,8 @@ bao_open() {
   log=$work_dir/port-forward
   # Made first, so it can be read before kubectl writes to it.
   : > "$log"
-  kubectl port-forward --namespace "$bao_namespace" "service/$bao_service" ":$bao_port" > "$log" 2>&1 &
+  # kubectl is the process whose id forward_pid holds, which a function would put one process below.
+  (exec_tool kubectl port-forward --namespace "$bao_namespace" "service/$bao_service" ":$bao_port") > "$log" 2>&1 &
   forward_pid=$!
   for ((attempt = 0; attempt < 150; attempt++)); do
     if [[ $(< "$log") =~ $forwarded ]]; then
