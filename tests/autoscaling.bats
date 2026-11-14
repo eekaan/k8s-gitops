@@ -33,12 +33,11 @@ setup() {
 }
 
 # app_dir APP: sets APP_DIR to the directory of the application APP, in whichever namespace
-# directory it is, relative to the tree, and NAMESPACE_DIR to that namespace directory.
+# directory it is, relative to the tree.
 app_dir() {
   local -a dirs=("$TREE"/kubernetes/apps/base/*/"$1")
   [ -f "${dirs[0]}/ks.yaml" ] || { echo "$1: no application directory with a ks.yaml"; return 1; }
   APP_DIR="${dirs[0]#"$TREE"/}"
-  NAMESPACE_DIR="${APP_DIR%/*}"
 }
 
 # built APP: the application as Flux applies it: its app/ built with its ks.yaml, substituting
@@ -320,6 +319,7 @@ pod_templates() {
   [[ $bindings == 'ClusterRoleBinding '*' <- ServiceAccount/reflector/kube-system' ]]
   # The docs state the right and the control on it.
   grep -qF 'Reflector can read and write every Secret and ConfigMap in every namespace, and list and watch' "$REPO/docs/kubernetes.md"
+  # shellcheck disable=SC2016 # The backticks are the docs' own.
   grep -qF 'only an object carrying `reflection-allowed` is copied' "$REPO/docs/kubernetes.md"
   # Nothing in the tree is reflected: a copy needs an annotation of Reflector's on its source. The
   # whole kubernetes directory is searched, the cluster directories with their secrets included;
