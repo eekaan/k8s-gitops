@@ -7,11 +7,13 @@ kind: Kustomization
 # enabled application. A disabled application stays listed, commented out with the reason.
 resources:
   - ../../base/flux-system/artifact-generator
+  - ../../base/cert-manager
   - ../../base/demo
   - ../../base/external-secrets
   - ../../base/kube-system
   - ../../base/monitoring
   - ../../base/piraeus-datastore
+  - ../../base/cert-manager/cert-manager/ks.yaml
   - ../../base/demo/hello/ks.yaml
   - ../../base/external-secrets/external-secrets/ks.yaml
   - ../../base/kube-system/cilium/ks.yaml
