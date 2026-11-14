@@ -1,0 +1,10 @@
+{
+  "format_version": "1.0",
+  "values": {
+    "root_module": {
+      "resources": [
+        { "address": "data.terraform_remote_state.plumbing", "mode": "data", "type": "terraform_remote_state", "name": "plumbing" }
+      ]
+    }
+  }
+}

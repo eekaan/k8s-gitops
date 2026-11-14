@@ -53,9 +53,13 @@ step it failed in ([cluster.md](../cluster.md#recipes)).
    typed back, and removes the cluster's `talman.yaml`, talosconfig and kubeconfig. The plumbing
    stack, the secrets bundle and the buckets stay.
 
-3. **`just infra-destroy sto2/plumbing`**, when the network and the Talos image should go too. It
-   plans the plumbing stack's destroy, prints the summary and destroys once `sto2/plumbing` is typed
-   back. Images left from earlier Talos versions are removed by hand
+3. **`just infra-destroy sto2/plumbing`**, when the network and the Talos image should go too. The
+   CI host, the `sto2/ci` stack, is on the plumbing stack's network, and the network cannot be
+   removed while its port and floating IP exist. So first, in the state of every other stack, the
+   recipe looks for a resource, and while it finds one it plans and destroys nothing, naming the
+   stack and the recipe that destroys it: `just infra-destroy sto2/ci` for the CI host, which also
+   takes the runner away until [ci-host.md](ci-host.md) sets a new host up. Then it plans the
+   plumbing stack's destroy, prints the summary and destroys once `sto2/plumbing` is typed back. Images left from earlier Talos versions are removed by hand
    ([image-replacement.md](image-replacement.md#removing-old-images)).
 
 ## Building it again

@@ -8,6 +8,11 @@
 # only, the same way, as cluster-destroy does with the cluster stack. The ci stack is destroyed by
 # name only: the CI host outlives the cluster, and is destroyed before the plumbing stack, whose
 # network it is on.
+# The plumbing stack's subnet and router interface cannot be removed while a port or a floating IP
+# of another stack uses them, so before anything is changed, a run that would destroy the plumbing
+# stack reads the state of every other stack of its region that the run does not destroy first, and
+# refuses while one holds a resource, naming the recipe that destroys that stack. Neither a
+# resource's address nor any value of the state is printed.
 # Usage: scripts/infra-destroy [stack] [--yes]
 set -euo pipefail
 
@@ -80,6 +85,61 @@ remove_generated() {
     echo "removed what held the destroyed cluster's addresses: ${removed[*]}"
   fi
 }
+
+# holds_resources STACK: whether STACK's state holds a managed resource: 0 when it does, 1 when it
+# holds none, 2 when the state cannot be read. A stack never applied has no state and holds none;
+# data sources are not resources. Run in a subshell, so STACK's inputs and lock do not carry over.
+# Reading state evaluates no variable, but stack-env requires every input the stack declares, so the
+# ones the ci stack takes from the environment are filled in for it.
+holds_resources() {
+  (
+    export CI_HOST_IMAGE=${CI_HOST_IMAGE:-state-read-only}
+    export CI_HOST_SSH_PUBLIC_KEY=${CI_HOST_SSH_PUBLIC_KEY:-state-read-only}
+    # shellcheck source=scripts/stack-env
+    . "$here/stack-env" "$1" || exit 2
+    lock_stack || exit 2
+    init_stack || exit 2
+    state=$(stack_tofu show -json) || exit 2
+    jq -e '[.values.root_module? // empty | .. | objects | select(.mode? == "managed")] | length > 0' \
+      <<< "$state" > /dev/null || exit 1
+  )
+}
+
+# require_nothing_on_plumbing: fails, naming the recipe that destroys it, for each stack beside a
+# plumbing stack this run destroys whose state holds a resource, except the stacks this run
+# destroys before it.
+require_nothing_on_plumbing() {
+  local plumbing other region status refused=0 recipe
+  for plumbing in "${stacks[@]}"; do
+    [[ $plumbing == */plumbing ]] || continue
+    region=${plumbing%%/*}
+    # shellcheck disable=SC2031 # lib/infra.sh sets infra_root once; stack-env only sources it again
+    for other in "$infra_root/infra/openstack/stacks/$region"/*/; do
+      other=$region/$(basename "$other")
+      if [[ $other == "$plumbing" || " ${stacks[*]} " == *" $other "* ]]; then
+        continue
+      fi
+      status=0
+      holds_resources "$other" || status=$?
+      case $status in
+        0)
+          recipe="just infra-destroy $other"
+          [[ $other != */cluster ]] || recipe="just cluster-destroy"
+          infra_error "$other still holds resources on the network of $plumbing, which cannot be destroyed while a port or a floating IP uses it; destroy $other first with: $recipe"
+          refused=1
+          ;;
+        1) ;;
+        *)
+          infra_error "cannot read the state of $other, which may hold resources on the network of $plumbing; nothing was destroyed"
+          refused=1
+          ;;
+      esac
+    done
+  done
+  ((!refused))
+}
+
+require_nothing_on_plumbing
 
 for stack in "${stacks[@]}"; do
   # One subshell per stack, so neither its inputs nor its lock carry over to the next.

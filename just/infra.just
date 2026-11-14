@@ -24,7 +24,7 @@ infra-talman stack='sto2/cluster':
 infra-output stack name:
     scripts/infra-output {{ quote(stack) }} {{ quote(name) }}
 
-# Destroy the cluster stack, then the plumbing stack, each once its name is typed back (--yes: without asking); given one of them, or sto2/ci, which only its name destroys, that one only
+# Destroy the cluster stack, then the plumbing stack, each once its name is typed back (--yes: without asking); given one of them, or sto2/ci, which only its name destroys, that one only; the plumbing stack is not destroyed while another stack still holds a resource
 [positional-arguments]
 infra-destroy *args:
     scripts/infra-destroy "$@"

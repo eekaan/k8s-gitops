@@ -50,11 +50,19 @@ them is a `just` recipe.
   `just cluster-destroy` ([cluster.md](cluster.md#recipes)) destroys the cluster stack so, once the
   cluster owns none of those load balancers and volumes. The `ci` stack is destroyed by its name
   only, `just infra-destroy sto2/ci`, the same way; `just infra-destroy` without a stack leaves it.
+  The plumbing stack's subnet and router interface cannot be removed while a port or a floating IP
+  of another stack uses them, so a run that would destroy the plumbing stack, with no stack or with
+  `sto2/plumbing`, first reads the state of every other stack of its region that the run does not
+  destroy before it, and plans and destroys nothing while one holds a resource: it exits non-zero
+  naming that stack and the recipe that destroys it, `just infra-destroy sto2/ci` or
+  `just cluster-destroy`, and prints no resource's address. A stack that was never applied, or holds
+  data sources only, holds nothing; a state that cannot be read refuses the run too.
 - `just ci-host-setup` and `just ci-host-remove` set up and deregister the CI host's runner
   ([runbooks/ci-host.md](runbooks/ci-host.md)).
 
 Apply `plumbing` before `cluster` and `ci`, as both read the plumbing stack's state. Destroy goes
-the other way round: `ci` by name, before `plumbing`, whose network its port is on. State objects
+the other way round: `ci` by name, before `plumbing`, whose network its port is on, and which the
+recipe refuses to destroy while the `ci` stack holds anything. State objects
 stay in the bucket after a destroy.
 
 ## Before the first plan
