@@ -343,14 +343,25 @@ if [[ $* == *" /readyz"* && -e $STATE/api-down ]]; then
   echo "The connection to the server was refused" >&2
   exit 1
 fi
+if [[ $1 == drain ]]; then
+  # The node's kubelet reported Ready as the drain began, inside the run and before the upgrade, so
+  # a Ready that counts is one reported after the upgrade began, not after the run did. The next
+  # second begins before the drain returns, as heartbeats are told to the second.
+  date -u +%Y-%m-%dT%H:%M:%SZ > "$STATE/drained.$2"
+  now=$(date -u +%s)
+  while [[ $(date -u +%s) == "$now" ]]; do
+    command sleep 0.1
+  done
+fi
 if [[ $1 == get && $2 == nodes ]]; then
   # A node's kubelet reports Ready again some polls after the node was upgraded, as many as its
   # stale.<hostname> file says, and never when it says never; until then, and before the upgrade,
-  # its Ready condition is the one etcd kept from long ago.
+  # its Ready condition is the last one it reported before its upgrade: the drain's time, or an old
+  # one for a node never drained.
   now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   items=()
   for node in $(yq '.nodes[].hostname' "${TALMAN_CONFIG:?}/talman.yaml"); do
-    beat=2026-01-01T00:00:00Z
+    beat=$(cat "$STATE/drained.$node" 2> /dev/null || echo 2026-01-01T00:00:00Z)
     if [[ -e $STATE/upgraded.$node ]]; then
       stale=$(cat "$STATE/stale.$node" 2> /dev/null || echo 0)
       if [[ $stale == never ]]; then
