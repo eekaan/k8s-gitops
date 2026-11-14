@@ -1,0 +1,107 @@
+---
+# Values for the Cilium chart. Flux's HelmRelease reads them through a ConfigMap generated without
+# substitution, and scripts/install-cilium passes this file to helm as it is, so both install the
+# same thing. Keys not set here keep the chart's defaults.
+#
+# ServiceMonitors and Grafana dashboards are off wherever the chart has them, until the
+# prometheus-operator CRDs and a Grafana exist.
+
+# Talos runs without kube-proxy, so Cilium serves Services itself.
+kubeProxyReplacement: true
+# KubePrism serves the API server on every node at localhost:7445, so Cilium reaches it before any
+# Service works and without depending on the cluster's external endpoint.
+k8sServiceHost: localhost
+k8sServicePort: 7445
+
+# The cloud's ports accept only a node's own address, so pod traffic between nodes is encapsulated.
+routingMode: tunnel
+tunnelProtocol: vxlan
+
+# Each node's pod range comes from its Node object, which Talos's cluster network settings fill.
+ipam:
+  mode: kubernetes
+
+# Talos mounts the cgroup v2 hierarchy at /sys/fs/cgroup itself; Cilium uses that mount.
+cgroup:
+  autoMount:
+    enabled: false
+  hostRoot: /sys/fs/cgroup
+
+# The capability sets Talos's documentation gives for Cilium. They leave out SYS_MODULE, as Talos
+# does not let workloads load kernel modules.
+securityContext:
+  capabilities:
+    ciliumAgent:
+      - CHOWN
+      - KILL
+      - NET_ADMIN
+      - NET_RAW
+      - IPC_LOCK
+      - SYS_ADMIN
+      - SYS_RESOURCE
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    cleanCiliumState:
+      - NET_ADMIN
+      - SYS_ADMIN
+      - SYS_RESOURCE
+
+# A changed configuration takes effect only when the pods restart, so the chart rolls them.
+rollOutCiliumPods: true
+prometheus:
+  serviceMonitor:
+    enabled: false
+dashboards:
+  enabled: false
+envoy:
+  prometheus:
+    serviceMonitor:
+      enabled: false
+
+operator:
+  # Two replicas, on different nodes, so losing a node does not stop the operator.
+  replicas: 2
+  rollOutPods: true
+  prometheus:
+    serviceMonitor:
+      enabled: false
+  dashboards:
+    enabled: false
+
+hubble:
+  # Relay gathers the flows of every node in one place; the UI waits until something exposes it.
+  relay:
+    enabled: true
+    prometheus:
+      serviceMonitor:
+        enabled: false
+  ui:
+    enabled: false
+  metrics:
+    serviceMonitor:
+      enabled: false
+    dashboards:
+      enabled: false
+
+# Pod traffic between nodes stays on the project's private node network and is not encrypted.
+encryption:
+  enabled: false
+
+# Load balancers and their addresses come from the cloud, so Cilium neither assigns nor announces
+# any.
+enableLBIPAM: false
+l2announcements:
+  enabled: false
+
+# Off until something uses them: Gateway API also needs its CRDs, BGP needs peers and a cluster
+# mesh needs a second cluster.
+gatewayAPI:
+  enabled: false
+ingressController:
+  enabled: false
+bgpControlPlane:
+  enabled: false
+clustermesh:
+  useAPIServer: false

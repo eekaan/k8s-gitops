@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Plans a stack against its encrypted state in the object storage and prints only a summary: the
+# counts line and how many resources of each type every action takes. The full plan is saved,
+# encrypted like state, under the stack's .terraform/.
+# Usage: scripts/infra-plan <region>/<stack>, such as scripts/infra-plan sto2/plumbing
+set -euo pipefail
+
+# shellcheck source=scripts/stack-env
+. "$(dirname "$0")/stack-env" "${1-}"
+lock_stack
+init_stack
+echo "$stack:"
+plan_stack

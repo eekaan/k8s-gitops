@@ -1,0 +1,6 @@
+# IPv4 literals that may appear in tracked files although scripts/check-address-literals would
+# otherwise reject them. One literal per line, written exactly as it appears in the file (with its
+# /prefix if it has one), followed by a comment saying why it is public and safe to publish.
+10.10.0.0/24  # default node subnet of the plumbing stack: a private RFC 1918 design range, routed nowhere outside the project's network
+10.244.0.0/16  # default pod subnet of the cluster stack: Kubernetes' conventional private RFC 1918 pod range, used only inside the cluster and routed nowhere outside it
+10.96.0.0/12  # default service subnet of the cluster stack: Kubernetes' conventional private RFC 1918 service range, virtual addresses that exist only inside the cluster

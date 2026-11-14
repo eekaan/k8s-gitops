@@ -1,0 +1,14 @@
+---
+# Values for the Spegel chart, read by the HelmRelease through a ConfigMap generated without
+# substitution. Keys not set here keep the chart's defaults, which mirror every registry.
+#
+# Spegel serves image layers from containerd's content store, which Talos empties of unpacked
+# layers unless its machine configuration sets containerd's discard_unpacked_layers to false;
+# until it does, the application stays disabled in the cluster overlays.
+
+spegel:
+  # Talos keeps containerd's registry mirror configuration here, not in /etc/containerd/certs.d.
+  containerdRegistryConfigPath: /etc/cri/conf.d/hosts
+
+serviceMonitor:
+  enabled: false

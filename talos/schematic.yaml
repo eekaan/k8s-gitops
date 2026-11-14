@@ -1,0 +1,7 @@
+---
+# Image Factory schematic of the node image. The plumbing stack registers it and builds the image
+# from it; the same schematic gives the same ID wherever it is computed.
+# No system extensions.
+customization:
+  systemExtensions:
+    officialExtensions: []

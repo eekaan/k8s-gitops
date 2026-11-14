@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Writes the cluster's talman.yaml, talos/<cluster>/talman.yaml, from a cluster stack's talman_yaml
+# output, then checks that talman computes the schematic the stack's image was built from and that
+# talman validates the file. The file holds the nodes' addresses, so it gets mode 0600 and is never
+# printed. It is written to a temporary file beside it and checked there, and renamed into place
+# only once both checks pass: no partial or unchecked file is left, and a failed check leaves an
+# earlier talman.yaml as it was. infra-apply does the same after it applies a cluster stack.
+# Usage: scripts/infra-talman <region>/<stack>, such as scripts/infra-talman sto2/cluster
+set -euo pipefail
+
+# talman_on FILE SUBCOMMAND [ARG...]: talman on the configuration FILE. Its errors can quote the
+# file, node addresses included, and CI logs are public, so with CI set they go to errors_file as
+# tofu's do, and only the failure and that file are named.
+talman_on() {
+  local file=$1
+  shift
+  if [[ -z ${CI:-} ]]; then
+    talman -c "$file" "$@"
+    return
+  fi
+  if ! talman -c "$file" "$@" 2>> "$errors_file"; then
+    infra_error "talman $1 failed for $stack; its errors are in ${errors_file#"$infra_root"/}"
+    return 1
+  fi
+}
+
+# write_talman: writes and checks the talman.yaml of the stack scripts/stack-env was sourced with,
+# once the stack is locked and initialised.
+write_talman() {
+  local outputs cluster cluster_dir want got
+  # tofu's JSON holds every output's value, sensitive ones included; only jq and yq read it.
+  outputs=$(stack_tofu output -json)
+  if ! jq -e '(.talman_yaml.value | type) == "string" and (.schematic_id.value | type) == "string"' \
+    <<< "$outputs" > /dev/null; then
+    infra_error "$stack has no talman_yaml and schematic_id outputs: it is not a cluster stack, or it is not applied"
+    return 1
+  fi
+  cluster=$(jq -r .talman_yaml.value <<< "$outputs" | yq '.clusterName // ""')
+  # The name becomes a directory under talos/, so it is a plain name that cannot lead out of it.
+  if [[ ! $cluster =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
+    infra_error "the clusterName in $stack's talman_yaml is not a name of lower-case letters, digits and hyphens"
+    return 1
+  fi
+  cluster_dir=$infra_root/talos/$cluster
+  mkdir -p "$cluster_dir"
+  # Beside the file it replaces: the paths in it to the schematic and the patches are relative to
+  # its directory, and a rename within one directory replaces the file in one step. mktemp creates
+  # it with mode 0600.
+  talman_tmp=$(mktemp "$cluster_dir/.talman.yaml.XXXXXX")
+  trap 'rm -f -- "$talman_tmp"' EXIT
+  jq -j .talman_yaml.value <<< "$outputs" > "$talman_tmp"
+
+  # OpenTofu built the image the nodes boot from talos/schematic.yaml, and talman computes the
+  # installer image from that file on its own. Were the two to disagree, an upgrade would install
+  # another image than the one the nodes booted.
+  want=$(jq -r .schematic_id.value <<< "$outputs")
+  got=$(talman_on "$talman_tmp" schematic id -o json | jq -r '[.nodes[].schematicID] | unique | join(" ")')
+  if [[ $got != "$want" ]]; then
+    infra_error "talman computes the schematic $got from talos/schematic.yaml, but the image was built from the schematic $want; talos/$cluster/talman.yaml is not written"
+    return 1
+  fi
+  talman_on "$talman_tmp" validate > /dev/null
+  mv -f -- "$talman_tmp" "$cluster_dir/talman.yaml"
+  trap - EXIT
+  echo "talos/$cluster/talman.yaml written: talman computes the image's schematic, $want, and validates it"
+}
+
+# infra-apply sources this file for write_talman and runs it under the lock it holds.
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  # shellcheck source=scripts/stack-env
+  . "$(dirname "$0")/stack-env" "${1-}"
+  lock_stack
+  init_stack
+  write_talman
+fi

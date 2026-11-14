@@ -1,0 +1,18 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/gitrepository-source-v1.json
+# The Gateway API's own repository at a release tag. Only config/crd is checked out: the upstream
+# kustomization of the standard channel, from which the release's standard-install.yaml is built,
+# and the experimental channel beside it, which nothing applies.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: gateway-api
+spec:
+  # The tag is pinned: a new release arrives by a change to this file, which Flux applies at once.
+  interval: 12h
+  url: https://github.com/kubernetes-sigs/gateway-api
+  ref:
+    # renovate: datasource=github-releases depName=kubernetes-sigs/gateway-api
+    tag: v1.7.0
+  sparseCheckout:
+    - config/crd

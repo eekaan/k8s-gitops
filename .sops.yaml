@@ -1,0 +1,16 @@
+---
+# How SOPS encrypts the files Flux decrypts: *.sops.yaml under kubernetes/, such as
+# kubernetes/clusters/<cluster>/secrets/cluster-secrets.sops.yaml. sops reads the nearest .sops.yaml
+# above the directory it runs in, and matches a rule against the file's path relative to the
+# directory of that .sops.yaml. Kept here rather than in kubernetes/, so sops finds it from the
+# repository root and anywhere below it, and it stays out of the artifact CI publishes from
+# kubernetes/. Below talos/, talos/.sops.yaml is nearer, and its rule matches no file here, so sops
+# refuses rather than encrypt to the Talos age key; a Talos secrets bundle matches no rule here.
+# Only data and stringData are encrypted, so a Secret's kind and name, and its keys, stay readable.
+# The recipient is the public half of the Flux age key, which just cluster-flux-age-key writes here
+# in place of the placeholder; sops refuses the placeholder. The private half is held by the
+# operator and, as the Secret sops-age, by the cluster (ADR 0005).
+creation_rules:
+  - path_regex: ^kubernetes/(.*/)?[^/]+\.sops\.yaml$
+    encrypted_regex: ^(data|stringData)$
+    age: age1hy4qcevmxt3x5ddzy9qape8rpv5zdk3rww0rql6jrnugm3f7eywsefteq0

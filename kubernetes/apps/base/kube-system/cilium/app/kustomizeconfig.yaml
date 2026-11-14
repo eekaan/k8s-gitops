@@ -1,0 +1,9 @@
+---
+# Lets kustomize write the generated ConfigMap's hashed name into the HelmRelease's valuesFrom, so
+# a change to values.yaml produces a new ConfigMap and a new release.
+nameReference:
+  - kind: ConfigMap
+    version: v1
+    fieldSpecs:
+      - path: spec/valuesFrom/name
+        kind: HelmRelease

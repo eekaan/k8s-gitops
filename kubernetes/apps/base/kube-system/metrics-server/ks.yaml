@@ -1,0 +1,17 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: metrics-server
+  namespace: flux-system
+spec:
+  path: ./apps/base/kube-system/metrics-server/app
+  targetNamespace: kube-system
+  # metrics-server reads each kubelet over its serving certificate, which exists only once the
+  # approver has approved the kubelet's request.
+  dependsOn:
+    - name: kubelet-csr-approver
+  sourceRef:
+    kind: ExternalArtifact
+    name: metrics-server

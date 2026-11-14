@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# Checks, reading only, that the OpenStack credential works against the project: the client is
+# recent enough and has its load-balancer plugin, a token issues, quota for compute, volumes,
+# network, load balancers, floating IPs and security-group rules is not used up, and the flavors
+# and the external network the stacks' variables name exist. Quota left is not shown to be enough
+# for the stacks. Prints pass or FAIL per item and never a figure or an ID, so its output can be
+# shared.
+# Usage: scripts/os-smoke
+set -euo pipefail
+
+# shellcheck source=scripts/lib/infra.sh
+. "$(dirname "$0")/lib/infra.sh"
+load_env
+refuse_http2_debug
+# The openstack client needs none of the state's secrets.
+export -n AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY TF_STATE_PASSPHRASE
+require_openstack_auth
+if ! command -v openstack > /dev/null; then
+  infra_error "the openstack client is not on PATH; os-smoke needs python-openstackclient 7.0.0 or newer with python-octaviaclient"
+  exit 1
+fi
+
+failed=0
+pass() {
+  printf 'pass  %s\n' "$1"
+}
+fail() {
+  printf 'FAIL  %s: %s\n' "$1" "$2"
+  failed=1
+}
+
+# stack_defaults PATTERN: the string defaults of the stacks' variables whose names match PATTERN.
+stack_defaults() {
+  local file json
+  for file in "$infra_root"/infra/openstack/stacks/*/*/*.tf; do
+    if ! json=$(yq -p hcl -o json "$file" 2> /dev/null); then
+      infra_error "cannot read the variables in ${file#"$infra_root"/}"
+      return 1
+    fi
+    printf '%s' "$json" | jq -r --arg name "$1" \
+      '.variable // {} | to_entries[] | select(.key | test($name)) | .value.default | .. | strings'
+  done
+}
+
+# Figures from the API are compared in jq, as numbers or not at all: bash arithmetic would evaluate
+# a string as an expression.
+
+# quota_state SERVICE RESOURCE: left, used up or missing, from SERVICE's quota with usage, which
+# quota holds.
+quota_state() {
+  printf '%s' "${quota[$1]}" | jq -r --arg resource "$2" '
+    [.[]? | select(.Resource == $resource)][0]
+    | ((.Limit? | tonumber?) // null) as $limit
+    | ((."In Use"? | tonumber?) // null) as $used
+    | if $limit == null or $used == null then "missing"
+      elif $limit == -1 or $used < $limit then "left"
+      else "used up" end' 2> /dev/null || echo missing
+}
+
+# Load-balancer quota comes from Octavia, which reports limits but not usage.
+load_balancer_state() {
+  local limits used
+  limits=$(openstack loadbalancer quota show "$project" -f json 2> /dev/null) || limits=
+  used=$(openstack loadbalancer list -f json 2> /dev/null | jq length 2> /dev/null) || used=
+  printf '%s' "$limits" | jq -r --arg used "$used" '
+    ((.load_balancer? | tonumber?) // null) as $limit
+    | (($used | tonumber?) // null) as $used
+    | if $limit == null or $used == null then "missing"
+      elif $limit == -1 or $used < $limit then "left"
+      else "used up" end' 2> /dev/null || echo missing
+}
+
+report_quota() {
+  case $2 in
+    left) pass "quota $1" ;;
+    "used up") fail "quota $1" "used up" ;;
+    *) fail "quota $1" "not reported" ;;
+  esac
+}
+
+# Quota with usage needs python-openstackclient 7.0.0 or newer, and the load-balancer commands
+# need its Octavia plugin installed beside it.
+if ! openstack_client_recent; then
+  fail "openstack client" "python-openstackclient 7.0.0 or newer is needed"
+  exit 1
+fi
+if ! openstack loadbalancer quota show --help > /dev/null 2>&1; then
+  fail "openstack client" "its load-balancer plugin, python-octaviaclient, is needed"
+  exit 1
+fi
+pass "openstack client"
+
+if ! project=$(openstack token issue -f value -c project_id 2> /dev/null) || [[ -z $project ]]; then
+  fail token "no token issues for these credentials"
+  exit 1
+fi
+pass token
+
+# Each service is asked for its own quota: the compute quota still lists floating IPs, networks and
+# security-group rules under the names the network service uses, and the network service is the
+# one that enforces them.
+declare -A quota=()
+for service in compute volume network; do
+  quota[$service]=$(openstack quota show --usage "--$service" -f json 2> /dev/null) || quota[$service]='[]'
+done
+# The item as it is reported, the service that holds its quota, and the service's name for it.
+for item in instances:compute:instances cores:compute:cores ram:compute:ram \
+  volumes:volume:volumes gigabytes:volume:gigabytes \
+  networks:network:networks subnets:network:subnets routers:network:routers \
+  floating-ips:network:floating_ips secgroup-rules:network:security_group_rules; do
+  IFS=: read -r name service resource <<< "$item"
+  report_quota "$name" "$(quota_state "$service" "$resource")"
+done
+report_quota load-balancers "$(load_balancer_state)"
+
+flavors=$(stack_defaults 'flavors?$' | sort -u)
+while IFS= read -r flavor; do
+  [[ -n $flavor ]] || continue
+  if openstack flavor show "$flavor" -f value -c name > /dev/null 2>&1; then
+    pass "flavor $flavor"
+  else
+    fail "flavor $flavor" "not found"
+  fi
+done <<< "$flavors"
+
+networks=$(stack_defaults '^external_network$' | sort -u)
+while IFS= read -r network; do
+  [[ -n $network ]] || continue
+  if openstack network show "$network" -f json 2> /dev/null | jq -e '."router:external" == true' > /dev/null; then
+    pass "external network $network"
+  else
+    fail "external network $network" "not found, or not external"
+  fi
+done <<< "$networks"
+
+if ((failed)); then
+  infra_error "the project is not ready for the stacks; see the FAIL lines"
+  exit 1
+fi

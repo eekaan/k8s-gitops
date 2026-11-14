@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# Checks the OpenTofu code without cloud credentials or a state backend: formatting, that the Talos
+# schematic the image is built from lists no QEMU guest agent extension, that every stack enforces
+# state and plan encryption, then init and validate for every stack, then tofu test in every stack
+# or module that has a tests/ directory.
+# Init downloads the locked providers from the public registry; the tests mock every provider.
+set -euo pipefail
+shopt -s nullglob
+
+cd "$(git rev-parse --show-toplevel)"
+
+failed=()
+declare -A seen=()
+
+fail() {
+  echo "infra-check: $1: $2" >&2
+  if [[ -z ${seen[$1]:-} ]]; then
+    seen[$1]=1
+    failed+=("$1")
+  fi
+}
+
+# Shows a command's output only when it fails, so a passing check stays short.
+quietly() {
+  local output
+  if ! output=$("$@" 2>&1); then
+    printf '%s\n' "$output" >&2
+    return 1
+  fi
+}
+
+# fmt lists each file it would rewrite. A file it cannot parse is not listed; its diagnostics
+# name it in an "on <file> line <n>" line instead.
+if ! unformatted=$(tofu fmt -check -recursive -no-color infra/ 2>&1); then
+  named=0
+  declare -A unparsable=()
+  while IFS= read -r line; do
+    if [[ -f $line ]]; then
+      fail "${line%/*}" "not formatted, tofu fmt -recursive infra/ fixes it"
+      named=1
+    elif [[ $line =~ ^[[:space:]]*on\ (.+)\ line\ [0-9]+ && -f ${BASH_REMATCH[1]} ]]; then
+      unparsable[${BASH_REMATCH[1]%/*}]=1
+    fi
+  done <<< "$unformatted"
+  if (( ${#unparsable[@]} > 0 )); then
+    printf '%s\n' "$unformatted" >&2
+    for dir in "${!unparsable[@]}"; do
+      fail "$dir" "a file does not parse"
+    done
+    named=1
+  fi
+  if (( ! named )); then
+    printf '%s\n' "$unformatted" >&2
+    fail infra "tofu fmt -check failed"
+  fi
+fi
+
+# Nova enables QEMU guest agent support, a socket between the compute host and the guest, only for
+# instances created from an image whose hw_qemu_guest_agent property is yes (Nova's libvirt guide,
+# Glance's useful image properties). The plumbing stack uploads the Talos image without that
+# property, so the schematic leaves the guest agent extension out.
+schematic=talos/schematic.yaml
+if [[ -f $schematic ]]; then
+  if ! extensions=$(yq '(.customization.systemExtensions.officialExtensions // [])[]' "$schematic" 2> /dev/null); then
+    fail "$schematic" "does not parse as YAML"
+  else
+    while IFS= read -r extension; do
+      if [[ $extension =~ (^|/)qemu-guest-agent$ ]]; then
+        fail "$schematic" "lists the system extension $extension; Nova gives instances guest agent support only when their image has hw_qemu_guest_agent=yes, and the plumbing stack uploads the image without it"
+      fi
+    done <<< "$extensions"
+  fi
+fi
+
+dirs=(infra/openstack/stacks/*/*/)
+if (( ${#dirs[@]} == 0 )); then
+  fail infra/openstack/stacks "no stack found"
+fi
+
+# Every stack's terraform block enforces state and plan encryption, so tofu run by hand without
+# the TF_ENCRYPTION the recipes pass refuses to run instead of writing plaintext state.
+enforces_encryption() {
+  local file
+  for file in "$1"/*.tf; do
+    if yq -p hcl -e '.terraform.encryption.state.enforced == true and .terraform.encryption.plan.enforced == true' "$file" > /dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
+}
+for dir in "${dirs[@]}"; do
+  dir=${dir%/}
+  if ! enforces_encryption "$dir"; then
+    fail "$dir" "does not enforce state and plan encryption; its terraform block needs encryption { state { enforced = true } plan { enforced = true } }"
+  fi
+done
+
+# The state bucket and the backup buckets outlive the stacks, so no stack, nor a module of this
+# repository it may call, owns a bucket: a destroy would remove it. An object storage container is
+# a bucket of the same store.
+bucket_types='^openstack_objectstorage_container_v[0-9]+$|_s3_bucket$'
+for file in infra/openstack/stacks/*/*/*.tf infra/openstack/modules/*/*.tf; do
+  if ! addresses=$(yq -p hcl -o json "$file" 2> /dev/null | jq -r --arg types "$bucket_types" \
+    '.resource // {} | to_entries[] | select(.key | test($types)) | .key + "." + (.value | keys[])'); then
+    fail "${file%/*}" "$file cannot be read for the resources it declares"
+    continue
+  fi
+  while IFS= read -r address; do
+    [[ -n $address ]] || continue
+    fail "${file%/*}" "declares the bucket $address; buckets outlive the stacks, made by just infra-state-bucket and just infra-backup-buckets"
+  done <<< "$addresses"
+done
+
+for module in infra/openstack/modules/*/; do
+  if [[ -d $module/tests ]]; then
+    dirs+=("$module")
+  fi
+done
+
+for dir in "${dirs[@]}"; do
+  dir=${dir%/}
+  if ! quietly tofu -chdir="$dir" init -backend=false -input=false -no-color; then
+    fail "$dir" "tofu init failed"
+    continue
+  fi
+  if ! quietly tofu -chdir="$dir" validate -no-color; then
+    fail "$dir" "tofu validate failed"
+    continue
+  fi
+  steps="init and validate"
+  if [[ -d $dir/tests ]]; then
+    if ! tofu -chdir="$dir" test -no-color; then
+      fail "$dir" "tofu test failed"
+      continue
+    fi
+    steps="init, validate and test"
+  fi
+  echo "infra-check: $dir: $steps passed"
+done
+
+if (( ${#failed[@]} > 0 )); then
+  echo "infra-check: failed: ${failed[*]}" >&2
+  exit 1
+fi
+echo "infra-check: every stack is formatted, valid and passes its tests"

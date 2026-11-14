@@ -1,0 +1,14 @@
+---
+# Installs into another namespace than its own and keeps the history there, and leaves the release
+# name to helm-controller, which makes it <targetNamespace>-<name>.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: example
+spec:
+  interval: 30m
+  targetNamespace: other
+  storageNamespace: other
+  chartRef:
+    kind: OCIRepository
+    name: example

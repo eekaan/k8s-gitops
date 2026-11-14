@@ -1,0 +1,34 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+# The FluxInstance Flux runs from. Like flux-operator, it is applied by the instance's own sync
+# Kustomization rather than the root, and sets its own fields.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: flux-instance
+  namespace: flux-system
+spec:
+  # The FluxInstance kind is defined by the operator's chart.
+  dependsOn:
+    - name: flux-operator
+  interval: 30m
+  # A failed reconcile is retried after a minute instead of waiting out the interval.
+  retryInterval: 1m
+  # Ready only once the release is; an upgrade of the instance rolls the controllers.
+  wait: true
+  timeout: 10m
+  path: ./clusters/lab-sto2/flux-system/flux-instance/app
+  prune: true
+  targetNamespace: flux-system
+  sourceRef:
+    kind: OCIRepository
+    name: flux-system
+  # The decryption and substitution the root gives its children.
+  decryption:
+    provider: sops
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: cluster-config
+      - kind: Secret
+        name: cluster-secrets

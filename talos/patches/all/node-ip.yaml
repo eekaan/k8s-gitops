@@ -1,0 +1,9 @@
+# A node holds two addresses: its own on the node network, and its floating address on the dummy
+# link. The kubelet registers the node with the one on the node network, so traffic between nodes
+# stays on that network instead of going out through the router to a floating address.
+---
+apiVersion: v1alpha1
+kind: KubeNodeConfig
+nodeIP:
+  validSubnets:
+    - "{{ .Values.nodeSubnet }}"

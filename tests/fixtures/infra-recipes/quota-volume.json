@@ -1,0 +1,5 @@
+[
+  { "Resource": "volumes", "Limit": 4474, "In Use": 3304, "Reserved": 0 },
+  { "Resource": "gigabytes", "Limit": 4475, "In Use": 3305, "Reserved": 0 },
+  { "Resource": "snapshots", "Limit": 4493, "In Use": 3312, "Reserved": 0 }
+]

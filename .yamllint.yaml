@@ -1,0 +1,20 @@
+---
+extends: default
+
+# sops writes its files itself, without a document start and with encrypted values on one line
+# each, so the two rules about hand-written style leave them alone; the others still apply.
+rules:
+  line-length:
+    max: 240
+    level: warning
+    ignore: |
+      *.sops.yaml
+  document-start:
+    present: true
+    level: error
+    ignore: |
+      *.sops.yaml
+  indentation:
+    spaces: consistent
+  comments:
+    min-spaces-from-content: 1

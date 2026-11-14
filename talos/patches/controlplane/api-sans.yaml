@@ -1,0 +1,17 @@
+# Extra names on the Talos API's and the Kubernetes API server's certificates: the addresses the
+# APIs are reached on from outside the node network. Talos adds each node's own addresses itself,
+# and the cluster endpoint to the API server's.
+# The range actions sit in comments so the file is YAML before it is rendered as well.
+---
+machine:
+  certSANs:
+    # {{- range .Values.apiSANs }}
+    - "{{ . }}"
+    # {{- end }}
+---
+apiVersion: v1alpha1
+kind: KubeAPIServerConfig
+certExtraSANs:
+  # {{- range .Values.apiSANs }}
+  - "{{ . }}"
+  # {{- end }}

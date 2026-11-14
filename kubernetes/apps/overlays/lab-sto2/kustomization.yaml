@@ -1,0 +1,20 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# What this cluster runs: the shared pieces and namespace directories first, then one ks.yaml per
+# enabled application. A disabled application stays listed, commented out with the reason.
+resources:
+  - ../../base/flux-system/artifact-generator
+  - ../../base/demo
+  - ../../base/kube-system
+  - ../../base/demo/hello/ks.yaml
+  - ../../base/kube-system/cilium/ks.yaml
+  - ../../base/kube-system/descheduler/ks.yaml
+  - ../../base/kube-system/gateway-api-crds/ks.yaml
+  - ../../base/kube-system/kubelet-csr-approver/ks.yaml
+  - ../../base/kube-system/metrics-server/ks.yaml
+  - ../../base/kube-system/prometheus-operator-crds/ks.yaml
+  - ../../base/kube-system/reloader/ks.yaml
+  # - ../../base/kube-system/spegel/ks.yaml  # Disabled: Talos discards unpacked image layers, which Spegel serves, until its machine configuration sets containerd's discard_unpacked_layers to false

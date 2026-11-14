@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Takes an etcd snapshot of a cluster and keeps it, encrypted, in the etcd backup bucket,
+# <BACKUP_BUCKET_PREFIX>-etcd. An etcd snapshot holds every Kubernetes Secret, and every S3 key of
+# the project reaches the bucket (ADR 0008), so only the Talos age key opens what is uploaded:
+#   1. talman etcd snapshot writes the snapshot into a private temporary directory outside the
+#      repository;
+#   2. age encrypts it to the Talos age key's recipient in talos/.sops.yaml, which needs no private
+#      key, and the plaintext is removed;
+#   3. the encrypted file alone is uploaded with the state key as <cluster>/<UTC time>.snapshot.age,
+#      without rclone checking for the bucket, which would create a bucket that is not there; an
+#      object of that name, from a snapshot taken in the same second, is refused, not overwritten;
+#   4. once the bucket lists the object at the size uploaded, prints one line: the cluster, the
+#      object's name and its size.
+# Nothing is left on disk, whether the run succeeds, fails or is interrupted. Neither talman's nor
+# rclone's output is printed: they name the control plane's address, the bucket and the endpoint.
+# Usage: scripts/cluster-snapshot [cluster]
+set -euo pipefail
+umask 077
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/s3.sh
+. "$here/lib/s3.sh"
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "${1-}"
+complete=1
+require_cluster talman secrets age-key recipient || complete=0
+require_env BACKUP_BUCKET_PREFIX AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY || complete=0
+require_commands age || complete=0
+((complete))
+s3_bucket_name_ok BACKUP_BUCKET_PREFIX prefix
+s3_require_client
+recipient=$(sops_recipient)
+if [[ ! $recipient =~ ^age1[0-9a-z]+$ ]]; then
+  infra_error "talos/.sops.yaml does not name exactly one age recipient"
+  exit 1
+fi
+
+step="making a private directory for the snapshot"
+make_private_dir
+snapshot=$work_dir/etcd.db
+name=$(date -u +%Y%m%dT%H%M%SZ).snapshot.age
+encrypted=$work_dir/$name
+
+step="taking the etcd snapshot"
+cluster_talman etcd snapshot "$snapshot" > /dev/null
+if [[ ! -s $snapshot ]]; then
+  infra_error "talman etcd snapshot wrote no snapshot"
+  exit 1
+fi
+
+step="encrypting the snapshot to the Talos age key's recipient"
+age --encrypt --recipient "$recipient" --output "$encrypted" "$snapshot"
+rm -f -- "$snapshot"
+
+step="checking that the etcd bucket holds no $name of $cluster yet"
+# Two snapshots taken in the same second share a name, and an upload replaces an object. Without
+# the bucket there is nothing to replace, and the upload below fails without making one.
+list_status=0
+listing=$(s3_etcd_snapshots "$cluster") || list_status=$?
+if ((list_status != 0 && list_status != 3)); then
+  infra_error "rclone cannot list the etcd bucket with the state key"
+  exit 1
+fi
+while read -r taken _; do
+  if [[ $taken == "$name" ]]; then
+    infra_error "the etcd bucket holds $cluster/$name already; it is not overwritten"
+    exit 1
+  fi
+done <<< "$listing"
+
+step="uploading the encrypted snapshot to the etcd bucket"
+if ! s3_rclone state copyto --s3-no-check-bucket "$encrypted" \
+  "store:$BACKUP_BUCKET_PREFIX-etcd/$cluster/$name" > /dev/null 2>&1; then
+  infra_error "rclone cannot upload the snapshot with the state key; the etcd bucket must exist; just infra-backup-buckets creates it"
+  exit 1
+fi
+
+step="checking that the etcd bucket lists the snapshot"
+if ! listing=$(s3_etcd_snapshots "$cluster"); then
+  infra_error "rclone cannot list the etcd bucket with the state key"
+  exit 1
+fi
+size=
+while read -r listed listed_size; do
+  if [[ $listed == "$name" ]]; then
+    size=$listed_size
+  fi
+done <<< "$listing"
+if [[ ! $size =~ ^[0-9]+$ ]] || ((size != $(wc -c < "$encrypted"))); then
+  infra_error "the etcd bucket does not list $name at the size uploaded"
+  exit 1
+fi
+echo "cluster-snapshot: $cluster: $name, $size bytes"

@@ -1,0 +1,12 @@
+---
+# Values for the Reloader chart, read by the HelmRelease through a ConfigMap generated without
+# substitution. Keys not set here keep the chart's defaults: one replica, watching every namespace.
+
+reloader:
+  # Only a workload annotated for it is restarted when a ConfigMap or Secret it uses changes;
+  # nothing else is.
+  autoReloadAll: false
+  serviceMonitor:
+    enabled: false
+  podMonitor:
+    enabled: false

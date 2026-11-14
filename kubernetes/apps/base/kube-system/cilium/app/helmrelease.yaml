@@ -1,0 +1,38 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/helmrelease-helm-v2.json
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: cilium
+spec:
+  interval: 30m
+  # A new version rolls the agents node by node.
+  timeout: 10m
+  # The release scripts/install-cilium installs before Flux runs, which reads these three fields:
+  # the same name, in the same namespace, with its history kept there, so Flux upgrades that
+  # release instead of installing a second one.
+  releaseName: cilium
+  targetNamespace: kube-system
+  storageNamespace: kube-system
+  chartRef:
+    kind: OCIRepository
+    name: cilium
+  valuesFrom:
+    - kind: ConfigMap
+      name: cilium-values
+  driftDetection:
+    # The chart generates Hubble's CA and certificates anew each time it renders, so the copies in
+    # the cluster need not match a render; drift detection leaves their data alone.
+    ignore:
+      - paths: ["/data"]
+        target:
+          kind: Secret
+          name: cilium-ca
+      - paths: ["/data"]
+        target:
+          kind: Secret
+          name: hubble-server-certs
+      - paths: ["/data"]
+        target:
+          kind: Secret
+          name: hubble-relay-client-certs

@@ -1,0 +1,25 @@
+---
+# Released as flux-operator in flux-system, named after this object.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: flux-operator
+  annotations:
+    # Pruning this release would uninstall the operator that runs Flux, so removing or renaming it
+    # in the tree leaves it in place instead.
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  interval: 30m
+  chartRef:
+    kind: OCIRepository
+    name: flux-operator
+  # Not a child of the root, so none of its release defaults apply. A failed upgrade is retried a
+  # few times, then rolled back to the release that worked.
+  upgrade:
+    remediation:
+      retries: 3
+      strategy: rollback
+      remediateLastFailure: true
+  valuesFrom:
+    - kind: ConfigMap
+      name: flux-operator-values

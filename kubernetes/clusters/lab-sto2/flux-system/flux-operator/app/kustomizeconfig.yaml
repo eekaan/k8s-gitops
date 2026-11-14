@@ -1,0 +1,9 @@
+---
+# Kustomize renames a generated ConfigMap after its content; this rewrites the HelmRelease's
+# reference to it to match.
+nameReference:
+  - kind: ConfigMap
+    version: v1
+    fieldSpecs:
+      - path: spec/valuesFrom/name
+        kind: HelmRelease

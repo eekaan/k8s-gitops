@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Renders every node's Talos machine configuration from the repository alone and validates it:
+# talos/talman.yaml.tftpl rendered by tofu from the fixture in tests/fixtures/talos, talman
+# validate, a throwaway plaintext secrets bundle, talman render, and talosctl validate in cloud
+# mode, strict, on each node's configuration. Needs tofu, talman, talosctl and yq; no network, no
+# cluster and no real secrets.
+#
+# Everything is written to a temporary directory that is removed on every exit. With a directory
+# argument, each node's configuration is also copied there as <hostname>.yaml for reading. It holds
+# the throwaway bundle's keys, so a directory inside the repository is refused.
+#
+# Prints one line per node on success. On failure it exits non-zero with the failing tool's own
+# message: tofu's for a template it cannot render; talman's, naming the node and the patch, for a
+# patch rejected while rendering; talosctl's, followed by a line naming the node, for a
+# configuration only the strict validation rejects.
+# Usage: scripts/talos-check [output-directory]
+set -euo pipefail
+
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+output=${1-}
+if [[ -n $output ]]; then
+  resolved=$(realpath -m -- "$output")
+  if [[ $resolved == "$root" || $resolved == "$root"/* ]]; then
+    echo "talos-check: $output is inside the repository; the configurations hold key material, so write them elsewhere" >&2
+    exit 1
+  fi
+fi
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+# A tool that stages files in a temporary directory of its own, as talman does with the secrets
+# bundle, then does so inside this one.
+export TMPDIR=$tmp
+
+# Shows a command's output only when it fails, so a passing check stays short.
+quietly() {
+  local out
+  if ! out=$("$@" 2>&1); then
+    printf '%s\n' "$out" >&2
+    return 1
+  fi
+}
+
+# talman.yaml sits one directory below the patches and the schematic, as in the repository, so its
+# relative paths resolve.
+cluster=$tmp/talos/fixture
+mkdir -p "$cluster"
+ln -s "$root/talos/patches" "$tmp/talos/patches"
+ln -s "$root/talos/schematic.yaml" "$tmp/talos/schematic.yaml"
+
+# Base64, so the console's display of a string cannot change any of its characters. tofu console
+# exits zero when it cannot render the template and prints a placeholder instead, so only a quoted
+# base64 string counts as the rendered file.
+quoted_base64='^"[A-Za-z0-9+/]+=*"$'
+if ! encoded=$(tofu -chdir="$root/tests/fixtures/talos" console -no-color <<< 'base64encode(local.talman_yaml)' 2> "$tmp/tofu.log") ||
+  [[ ! $encoded =~ $quoted_base64 ]]; then
+  cat "$tmp/tofu.log" >&2
+  printf '%s\n' "$encoded" >&2
+  echo "talos-check: tofu could not render talos/talman.yaml.tftpl" >&2
+  exit 1
+fi
+base64 -d <<< "${encoded//\"/}" > "$cluster/talman.yaml"
+
+quietly talman -c "$cluster" validate
+quietly talman -c "$cluster" secrets generate --plaintext
+quietly talman -c "$cluster" render --no-talosconfig
+
+hostnames=$(yq '.nodes[].hostname' "$cluster/talman.yaml")
+if [[ -n $output ]]; then
+  mkdir -p "$output"
+fi
+failed=0
+while IFS= read -r hostname; do
+  config=$cluster/clusterconfig/$hostname.yaml
+  if ! quietly talosctl validate --mode cloud --strict --config "$config"; then
+    echo "talos-check: $hostname: not valid for the cloud platform" >&2
+    failed=1
+    continue
+  fi
+  if [[ -n $output ]]; then
+    cp "$config" "$output/$hostname.yaml"
+  fi
+  echo "talos-check: $hostname: rendered and valid for the cloud platform"
+done <<< "$hostnames"
+exit "$failed"

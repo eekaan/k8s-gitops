@@ -1,0 +1,21 @@
+---
+# Objects of the release installed before Flux, trimmed, as helm get manifest prints them: no
+# helm-controller labels. tests/app-adoption.bats adds a Secret whose data is a marker, and fails
+# when that reaches what app-adoption prints.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cilium
+  namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: cilium
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/managed-by: Helm
+spec:
+  selector:
+    matchLabels:
+      k8s-app: cilium

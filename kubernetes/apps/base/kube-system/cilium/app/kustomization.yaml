@@ -1,0 +1,19 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ocirepository.yaml
+  - helmrelease.yaml
+
+# values.yaml reaches the chart as it is, the same file scripts/install-cilium passes to helm.
+configMapGenerator:
+  - name: cilium-values
+    files:
+      - values.yaml
+generatorOptions:
+  annotations:
+    kustomize.toolkit.fluxcd.io/substitute: disabled
+
+configurations:
+  - kustomizeconfig.yaml

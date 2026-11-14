@@ -1,0 +1,7 @@
+# The node's hostname is its name in the node list. Talos's generated configuration names nodes
+# automatically, which excludes a static hostname, so automatic naming is turned off.
+---
+apiVersion: v1alpha1
+kind: HostnameConfig
+auto: "off"
+hostname: "{{ .Node.Hostname }}"

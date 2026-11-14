@@ -1,0 +1,19 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/ocirepository-source-v1.json
+# The Cilium chart from its public OCI registry. scripts/install-cilium reads url and ref.tag from
+# here, so a version change in this file moves the bootstrap install and Flux's release together.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: cilium
+spec:
+  # The tag is pinned: a new chart arrives by a change to this file, which Flux applies at once.
+  interval: 12h
+  # The chart's packaged layer, which helm-controller reads as it is.
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy
+  url: oci://quay.io/cilium/charts/cilium
+  ref:
+    # renovate: datasource=docker depName=quay.io/cilium/charts/cilium
+    tag: 1.20.4

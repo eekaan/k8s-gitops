@@ -1,0 +1,30 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  description: "Dependencies that move together in one pull request.",
+  packageRules: [
+    {
+      description: "Talos: versions.yaml and the talosctl pin in mise.toml",
+      matchPackageNames: ["siderolabs/talos"],
+      groupName: "Talos",
+      // A patch gets its own pull request, so the running minor can reach its latest patch
+      // before the next minor is taken.
+      separateMinorPatch: true,
+    },
+    {
+      description: "Kubernetes: versions.yaml and the kubectl pin in mise.toml",
+      matchPackageNames: ["kubernetes/kubernetes"],
+      groupName: "Kubernetes",
+      separateMinorPatch: true,
+    },
+    {
+      description: "The CNI: Cilium's chart and images",
+      matchPackageNames: ["cilium", "quay.io/cilium/**"],
+      groupName: "Cilium",
+    },
+    {
+      description: "The Flux Operator: its image and its operator and instance charts",
+      matchPackageNames: ["controlplaneio-fluxcd/**", "ghcr.io/controlplaneio-fluxcd/**"],
+      groupName: "Flux Operator",
+    },
+  ],
+}

@@ -1,0 +1,9 @@
+---
+# How SOPS encrypts each cluster's Talos secrets bundle, talos/<cluster>/secrets.sops.yaml. talman
+# hands sops this file and the bundle's path, which the rule matches relative to this directory, so
+# it matches nothing outside talos/. The recipient is the public half of the Talos age key, which
+# just cluster-age-key writes here in place of the placeholder; sops refuses the placeholder, so no
+# bundle is encrypted before that. The private half never enters the repository (ADR 0005).
+creation_rules:
+  - path_regex: ^[^/]+/secrets\.sops\.yaml$
+    age: age1pklkf3zmxckt2xv2anwljpylrlkzkzv2tuwn2eurcht8jhu36ququnulxj

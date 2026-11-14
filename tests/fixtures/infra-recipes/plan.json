@@ -1,0 +1,121 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.13.9",
+  "resource_changes": [
+    {
+      "address": "module.nodes.openstack_compute_instance_v2.node[\"fixture-cp-1\"]",
+      "module_address": "module.nodes",
+      "mode": "managed",
+      "type": "openstack_compute_instance_v2",
+      "name": "node",
+      "index": "fixture-cp-1",
+      "provider_name": "registry.opentofu.org/terraform-provider-openstack/openstack",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "fixture-cp-1",
+          "flavor_name": "fixture.flavor-a",
+          "access_ip_v4": "192.0.2.11"
+        }
+      }
+    },
+    {
+      "address": "module.nodes.openstack_networking_port_v2.node[\"fixture-cp-1\"]",
+      "module_address": "module.nodes",
+      "mode": "managed",
+      "type": "openstack_networking_port_v2",
+      "name": "node",
+      "index": "fixture-cp-1",
+      "provider_name": "registry.opentofu.org/terraform-provider-openstack/openstack",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "fixture-port-cp-1",
+          "fixed_ip": [{ "ip_address": "192.0.2.11", "subnet_id": "fixture-subnet-id" }]
+        }
+      }
+    },
+    {
+      "address": "module.nodes.openstack_networking_port_v2.node[\"fixture-cp-2\"]",
+      "module_address": "module.nodes",
+      "mode": "managed",
+      "type": "openstack_networking_port_v2",
+      "name": "node",
+      "index": "fixture-cp-2",
+      "provider_name": "registry.opentofu.org/terraform-provider-openstack/openstack",
+      "change": {
+        "actions": ["create"],
+        "before": null,
+        "after": {
+          "name": "fixture-port-cp-2",
+          "fixed_ip": [{ "ip_address": "192.0.2.12", "subnet_id": "fixture-subnet-id" }]
+        }
+      }
+    },
+    {
+      "address": "module.router.openstack_networking_router_v2.this",
+      "module_address": "module.router",
+      "mode": "managed",
+      "type": "openstack_networking_router_v2",
+      "name": "this",
+      "provider_name": "registry.opentofu.org/terraform-provider-openstack/openstack",
+      "change": {
+        "actions": ["update"],
+        "before": { "id": "fixture-router-id", "name": "fixture-router-before" },
+        "after": { "id": "fixture-router-id", "name": "fixture-router-after" }
+      }
+    },
+    {
+      "address": "openstack_networking_floatingip_v2.api",
+      "mode": "managed",
+      "type": "openstack_networking_floatingip_v2",
+      "name": "api",
+      "provider_name": "registry.opentofu.org/terraform-provider-openstack/openstack",
+      "change": {
+        "actions": ["delete", "create"],
+        "before": { "id": "fixture-floating-ip-id", "address": "198.51.100.21" },
+        "after": { "pool": "fixture-external-network" }
+      }
+    },
+    {
+      "address": "openstack_blockstorage_volume_v3.scratch",
+      "mode": "managed",
+      "type": "openstack_blockstorage_volume_v3",
+      "name": "scratch",
+      "provider_name": "registry.opentofu.org/terraform-provider-openstack/openstack",
+      "change": {
+        "actions": ["delete"],
+        "before": { "id": "fixture-volume-id", "name": "fixture-volume-name" },
+        "after": null
+      }
+    },
+    {
+      "address": "module.network.openstack_networking_network_v2.this",
+      "module_address": "module.network",
+      "mode": "managed",
+      "type": "openstack_networking_network_v2",
+      "name": "this",
+      "provider_name": "registry.opentofu.org/terraform-provider-openstack/openstack",
+      "change": {
+        "actions": ["no-op"],
+        "before": { "id": "fixture-network-id", "name": "fixture-network-name" },
+        "after": { "id": "fixture-network-id", "name": "fixture-network-name" }
+      }
+    },
+    {
+      "address": "module.router.data.openstack_networking_network_v2.external",
+      "module_address": "module.router",
+      "mode": "data",
+      "type": "openstack_networking_network_v2",
+      "name": "external",
+      "provider_name": "registry.opentofu.org/terraform-provider-openstack/openstack",
+      "change": {
+        "actions": ["read"],
+        "before": null,
+        "after": { "name": "fixture-external-network" }
+      }
+    }
+  ]
+}

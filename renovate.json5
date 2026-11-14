@@ -1,0 +1,40 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: [
+    "config:recommended",
+    // GitHub Actions are pinned to a commit SHA, with the release it points at in a comment.
+    "helpers:pinGitHubActionDigestsToSemver",
+    // Presets in this repository, read from main. The order matters: automerge.json5 comes last
+    // so that its rules decide what may merge itself.
+    "local>eekaan/k8s-gitops//.renovate/managers.json5",
+    "local>eekaan/k8s-gitops//.renovate/groups.json5",
+    "local>eekaan/k8s-gitops//.renovate/automerge.json5",
+  ],
+  // Work is tracked outside this repository, so there is no dashboard issue to keep.
+  dependencyDashboard: false,
+  // A broken or compromised release is usually withdrawn or fixed within days, so an update waits
+  // until its release is three days old: outside kubernetes/ before its pull request opens, under
+  // kubernetes/ before it may merge (automerge.json5).
+  minimumReleaseAge: "3 days",
+  // Renovate reads publish dates for container images from Docker Hub only. Outside kubernetes/,
+  // an update without a date is proposed without waiting rather than never; under kubernetes/ it
+  // is proposed but never merges itself (automerge.json5).
+  minimumReleaseAgeBehaviour: "timestamp-optional",
+  // Every merged update rolls out to the cluster. A few at a time keeps each rollout small enough
+  // to tell which update broke something.
+  prConcurrentLimit: 5,
+  prHourlyLimit: 3,
+  ignorePaths: [
+    // SOPS-encrypted: rewriting a value breaks the file's integrity check.
+    "**/*.sops.*",
+    // Generated or downloaded, never edited: tofu's working directories and the rendered
+    // talman.yaml.
+    "**/.terraform/**",
+    "**/talman.yaml",
+    // Renovate's defaults for vendored code and test fixtures, which this list replaces.
+    "**/node_modules/**",
+    "**/vendor/**",
+    "**/test/**",
+    "**/tests/**",
+  ],
+}

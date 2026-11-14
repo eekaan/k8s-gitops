@@ -1,0 +1,83 @@
+---
+# Values of the flux-instance chart, which renders the FluxInstance the operator installs and runs
+# Flux from. Every key here is one the chart's own values define.
+
+# Helm leaves the FluxInstance in place when the release is uninstalled, so Flux keeps running.
+# The chart puts these annotations on every object it renders, which with these values is the
+# FluxInstance alone.
+commonAnnotations:
+  helm.sh/resource-policy: keep
+
+instance:
+  # Upstream Flux from the chart's default registry. The operator installs the newest 2.x release
+  # that the manifests artifact holds, and that artifact is pinned to the operator's own version,
+  # so Flux moves only with a change here, together with the operator's charts.
+  distribution:
+    version: 2.x
+    registry: ghcr.io/fluxcd
+    # renovate: datasource=docker depName=ghcr.io/controlplaneio-fluxcd/flux-operator-manifests
+    artifact: oci://ghcr.io/controlplaneio-fluxcd/flux-operator-manifests:v0.62.1
+  components:
+    - source-controller
+    - kustomize-controller
+    - helm-controller
+    - notification-controller
+    # Turns the ArtifactGenerator into the per-application ExternalArtifacts the applications read.
+    # With it among the components, the operator also turns on the ExternalArtifact feature gate
+    # that kustomize-controller and helm-controller need to read them.
+    - source-watcher
+  cluster:
+    # Flux's own network policies in flux-system.
+    networkPolicy: true
+  # The instance generates an OCIRepository and a Kustomization, both named flux-system after its
+  # namespace, which apply this cluster's directory from the artifact CI publishes from main.
+  sync:
+    kind: OCIRepository
+    url: oci://ghcr.io/eekaan/k8s-gitops/manifests
+    ref: main
+    path: ./clusters/lab-sto2
+    interval: 1m
+  kustomize:
+    patches:
+      # The synced artifact is applied only when it was signed keyless by this repository's publish
+      # workflow running on main; a run on any other branch or tag has another subject. Flux reads
+      # the patterns as Go regular expressions; they keep to syntax POSIX extended expressions
+      # read the same way (anchors, escaped dots, no \d), which tests/flux.bats checks them with.
+      - target:
+          kind: OCIRepository
+          name: flux-system
+        patch: |
+          - op: add
+            path: /spec/verify
+            value:
+              provider: cosign
+              matchOIDCIdentity:
+                - issuer: '^https://token\.actions\.githubusercontent\.com$'
+                  subject: '^https://github\.com/eekaan/k8s-gitops/\.github/workflows/publish\.yaml@refs/heads/main$'
+      # The sync Kustomization applies the root and Flux's own two Kustomizations from the cluster
+      # directory, with the same decryption and substitution the root gives its children.
+      - target:
+          kind: Kustomization
+          name: flux-system
+        patch: |
+          - op: add
+            path: /spec/decryption
+            value:
+              provider: sops
+          - op: add
+            path: /spec/postBuild
+            value:
+              substituteFrom:
+                - kind: ConfigMap
+                  name: cluster-config
+                - kind: Secret
+                  name: cluster-secrets
+      # SOPS decryption reads the age key from the Secret sops-age in flux-system for every
+      # Kustomization that names no key of its own.
+      - target:
+          kind: Deployment
+          name: kustomize-controller
+        patch: |
+          - op: add
+            path: /spec/template/spec/containers/0/args/-
+            value: --sops-age-secret=sops-age

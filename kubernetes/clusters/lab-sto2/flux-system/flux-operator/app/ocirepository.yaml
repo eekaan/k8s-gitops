@@ -1,0 +1,26 @@
+---
+# The Flux Operator's chart from its publisher's registry. Flux refuses a chart that was not signed
+# keyless by the publisher's release workflow on a version tag.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: flux-operator
+  annotations:
+    # Kept with the release that reads it, which is never pruned either.
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  interval: 1h
+  url: oci://ghcr.io/controlplaneio-fluxcd/charts/flux-operator
+  ref:
+    # renovate: datasource=docker depName=ghcr.io/controlplaneio-fluxcd/charts/flux-operator
+    tag: 0.62.1
+  # The chart archive as published, which is what a HelmRelease reads through chartRef.
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy
+  # Go regular expressions, kept to syntax POSIX extended expressions read the same way (no \d).
+  verify:
+    provider: cosign
+    matchOIDCIdentity:
+      - issuer: '^https://token\.actions\.githubusercontent\.com$'
+        subject: '^https://github\.com/controlplaneio-fluxcd/charts/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'

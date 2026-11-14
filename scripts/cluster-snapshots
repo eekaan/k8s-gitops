@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Lists a cluster's etcd snapshots in the etcd backup bucket, <BACKUP_BUCKET_PREFIX>-etcd, with the
+# state key, reading only: one per line, newest first, by the name cluster-restore takes and the
+# size in bytes, and nothing else, neither the bucket's name nor what rclone reports. A cluster
+# without snapshots lists nothing and says so on standard error.
+# Usage: scripts/cluster-snapshots [cluster]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/s3.sh
+. "$here/lib/s3.sh"
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "${1-}"
+require_env BACKUP_BUCKET_PREFIX AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+s3_bucket_name_ok BACKUP_BUCKET_PREFIX prefix
+s3_require_client
+
+step="listing the etcd bucket"
+if ! listing=$(s3_etcd_snapshots "$cluster"); then
+  infra_error "rclone cannot list the etcd bucket with the state key, or it does not exist; just infra-backup-buckets creates it"
+  exit 1
+fi
+if [[ -z $listing ]]; then
+  printf '%s: the etcd bucket holds no snapshot of %s\n' "${0##*/}" "$cluster" >&2
+  exit 0
+fi
+printf '%s\n' "$listing"

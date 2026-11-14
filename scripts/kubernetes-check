@@ -1,0 +1,278 @@
+#!/usr/bin/env bash
+# Offline check of the kubernetes/ tree: every kustomization builds, Flux builds each cluster's
+# root Kustomization and each application with strict substitution, and the layout rules in
+# docs/kubernetes.md hold. Reports every failure, naming the file and the rule, then exits
+# non-zero. Never contacts a cluster.
+#
+# Usage: scripts/kubernetes-check [DIR]   (DIR holds kubernetes/; defaults to this repository)
+set -euo pipefail
+shopt -s nullglob
+
+cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}"
+
+# No kubeconfig and no in-cluster address: a tool that tried to reach a cluster fails instead.
+export KUBECONFIG=/dev/null
+unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
+
+for tool in kustomize yq flux; do
+  command -v "$tool" >/dev/null || { echo "kubernetes-check: $tool not found on PATH" >&2; exit 1; }
+done
+[[ -d kubernetes ]] || { echo "kubernetes-check: no kubernetes/ directory in $PWD" >&2; exit 1; }
+
+failures=0
+fail() {
+  echo "kubernetes-check: $*" >&2
+  failures=$((failures + 1))
+}
+
+# Every ks.yaml is a Flux Kustomization in flux-system with a sourceRef: substituteFrom has no
+# namespace field, so a Kustomization anywhere else cannot read cluster-config or cluster-secrets.
+# An application's Kustomization also names the namespace it deploys into.
+ks_files=0
+ks_list="$(find kubernetes -name ks.yaml | sort)"
+while IFS= read -r ks; do
+  [[ -n $ks ]] || continue
+  ks_files=$((ks_files + 1))
+  # Empty documents, such as one after a trailing ---, hold nothing to check.
+  if ! docs="$(yq -N 'select(. != null) | [document_index, .apiVersion // "", .kind // "",
+    .metadata.name // "", .metadata.namespace // "", .spec.targetNamespace // "",
+    .spec.sourceRef.kind // "", .spec.sourceRef.name // "", .spec.path // "",
+    .metadata.labels["k8s-gitops/defaults"] // "",
+    ([((.spec // {}) | keys | .[] | select(. == "interval" or . == "retryInterval" or
+        . == "timeout" or . == "prune" or . == "deletionPolicy" or . == "decryption" or
+        . == "patches")),
+      ((.spec.postBuild // {}) | keys | .[] | select(. == "substituteFrom") | "postBuild." + .)]
+      | join(","))] | join("|")' "$ks" 2>&1)"; then
+    fail "$ks: not valid YAML: $docs"
+    continue
+  fi
+  while IFS='|' read -r doc api kind name ns target src_kind src_name ks_path defaults overridden; do
+    [[ -n $doc ]] || continue
+    if [[ $api != kustomize.toolkit.fluxcd.io/* || $kind != Kustomization ]]; then
+      fail "$ks: document $doc must be a Flux Kustomization (kustomize.toolkit.fluxcd.io), found ${api:-no apiVersion} ${kind:-no kind}"
+      continue
+    fi
+    [[ $ns == flux-system ]] ||
+      fail "$ks: Kustomization $name must be in namespace flux-system, found ${ns:-none} (substituteFrom reads cluster-config from the Kustomization's own namespace)"
+    [[ -n $src_kind && -n $src_name ]] ||
+      fail "$ks: Kustomization $name must have a sourceRef with kind and name"
+    if [[ $ks =~ ^kubernetes/apps/base/([^/]+)/([^/]+)/ks\.yaml$ ]]; then
+      # The artifact generator names each artifact after the application directory and publishes
+      # its app/ at the same path; the Kustomization finds it only under those names.
+      app_ns="${BASH_REMATCH[1]}" app="${BASH_REMATCH[2]}"
+      [[ $name == "$app" ]] ||
+        fail "$ks: metadata.name must be $app, the application directory's name, found ${name:-none}"
+      [[ $src_name == "$app" ]] ||
+        fail "$ks: sourceRef.name must be $app, the artifact published for this directory, found ${src_name:-none}"
+      [[ $target == "$app_ns" ]] ||
+        fail "$ks: targetNamespace must be $app_ns, the namespace directory, found ${target:-none}"
+      app_path="${ks_path#./}"
+      [[ ${app_path%/} == "apps/base/$app_ns/$app/app" ]] ||
+        fail "$ks: spec.path must be ./apps/base/$app_ns/$app/app, the application's own app/ directory, found ${ks_path:-none}"
+      # The root's defaults replace these fields on every child that has not opted out, so a value
+      # set here would be lost without a word.
+      if [[ $defaults != disabled && -n $overridden ]]; then
+        IFS=, read -ra fields <<<"$overridden"
+        for field in "${fields[@]}"; do
+          fail "$ks: spec.$field is overwritten by the root Kustomization's defaults; remove it, or opt the application out with the label k8s-gitops/defaults: disabled"
+        done
+      fi
+    elif [[ $ks =~ ^kubernetes/(clusters/[^/]+)/([^/]+)/([^/]+)/ks\.yaml$ ]]; then
+      # Flux's own applications in a cluster directory. The artifact generator publishes only
+      # apps/base, so these read their app/ from the cluster's sync source.
+      cluster_path="${BASH_REMATCH[1]}" app_ns="${BASH_REMATCH[2]}" app="${BASH_REMATCH[3]}"
+      [[ $name == "$app" ]] ||
+        fail "$ks: metadata.name must be $app, the application directory's name, found ${name:-none}"
+      [[ $src_kind == OCIRepository && $src_name == flux-system ]] ||
+        fail "$ks: sourceRef must be OCIRepository flux-system, the cluster's sync source, found ${src_kind:-none} ${src_name:-none}"
+      [[ $target == "$app_ns" ]] ||
+        fail "$ks: targetNamespace must be $app_ns, the namespace directory, found ${target:-none}"
+      app_path="${ks_path#./}"
+      [[ ${app_path%/} == "$cluster_path/$app_ns/$app/app" ]] ||
+        fail "$ks: spec.path must be ./$cluster_path/$app_ns/$app/app, the application's own app/ directory, found ${ks_path:-none}"
+      # Not a child of the root, so it decrypts and substitutes only with what it sets itself; the
+      # check builds it with the cluster's variables, as it does the root's children.
+      for field in decryption postBuild.substituteFrom; do
+        want="$(yq ea -o json -I0 "[select(. != null)] | .[0].spec.$field" "kubernetes/$cluster_path/ks.yaml" 2>/dev/null)" ||
+          continue
+        got="$(yq -o json -I0 "select(document_index == $doc) | .spec.$field" "$ks")"
+        [[ $got == "$want" ]] ||
+          fail "$ks: spec.$field must be $want, as the root ks.yaml sets it, found $got; Flux applies this Kustomization from the cluster directory, not as a child of the root"
+      done
+    elif [[ $ks == kubernetes/apps/* && -z $target ]]; then
+      fail "$ks: Kustomization $name must set targetNamespace for what it deploys"
+    fi
+  done <<<"$docs"
+done <<<"$ks_list"
+
+# An application directory holds its Flux Kustomization in ks.yaml and its manifests in app/,
+# which is also what the artifact generator publishes. Flux's own applications in a cluster
+# directory have the same shape.
+apps=0
+declare -A app_dirs=()
+for dir in kubernetes/apps/base/*/*/ kubernetes/clusters/*/*/*/; do
+  dir="${dir%/}"
+  [[ -f $dir/ks.yaml || -d $dir/app ]] || continue
+  apps=$((apps + 1))
+  [[ -f $dir/ks.yaml && -d $dir/app ]] ||
+    fail "$dir: an application directory needs both ks.yaml and app/"
+  # The directory name becomes the name of the application's Kustomization and artifact, which
+  # all live in flux-system, enabled or not. A cluster's own applications share that namespace
+  # with every application in apps/base, but not with another cluster's.
+  app="${dir##*/}"
+  [[ ${#app} -le 63 && $app =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] ||
+    fail "$dir: application name $app must be a DNS label: lowercase letters, digits and '-', at most 63 characters"
+  key="$app"
+  if [[ $dir =~ ^kubernetes/clusters/([^/]+)/ ]]; then
+    key="${BASH_REMATCH[1]}/$app"
+    [[ -z ${app_dirs[$app]:-} ]] ||
+      fail "$dir: application name $app is also used by ${app_dirs[$app]}; the cluster's own applications share the flux-system namespace with every application"
+  fi
+  if [[ -n ${app_dirs[$key]:-} ]]; then
+    fail "$dir: application name $app is also used by ${app_dirs[$key]}; every application's Kustomization and artifact share the flux-system namespace"
+  else
+    app_dirs[$key]="$dir"
+  fi
+done
+
+# A cluster directory builds to its root Kustomization and the Kustomizations of Flux's own two
+# applications, flux-operator and flux-instance, and nothing else. Without a kustomization.yaml
+# Flux generates one from every YAML file there, the example key lists included.
+for dir in kubernetes/clusters/*/; do
+  dir="${dir%/}"
+  if [[ ! -f $dir/kustomization.yaml ]]; then
+    fail "$dir: needs a kustomization.yaml that lists ks.yaml and Flux's own ks.yaml files; without one Flux builds every YAML file in the directory, the example key lists included"
+    continue
+  fi
+  # A build that fails is reported with the other kustomize builds below, and a ks.yaml that
+  # cannot be read with the ks.yaml rules above.
+  built="$(kustomize build --load-restrictor LoadRestrictionsNone "$dir" 2>/dev/null)" || continue
+  # Compared by API group, so a new Kustomization API version still counts.
+  if ! found="$(yq -N '(.apiVersion | sub("/[^/]*$"; "")) + " " + .kind + "/" + .metadata.name' <<<"$built" 2>&1)"; then
+    fail "$dir: cannot read what kustomize build yields: $found"
+    continue
+  fi
+  root="$(yq '.metadata.name' "$dir/ks.yaml" 2>/dev/null)" || root=""
+  wanted="$(printf 'kustomize.toolkit.fluxcd.io Kustomization/%s\n' "$root" flux-operator flux-instance | sort)"
+  while IFS= read -r object; do
+    fail "$dir: kustomize build yields $object; a cluster directory builds only its root Kustomization from ks.yaml and the Kustomizations flux-operator and flux-instance"
+  done < <(comm -13 <(echo "$wanted") <(sort <<<"$found"))
+  while IFS= read -r object; do
+    fail "$dir: does not build ${object#* }; a cluster directory builds its root Kustomization from ks.yaml and the Kustomizations flux-operator and flux-instance, which describe Flux itself"
+  done < <(comm -23 <(echo "$wanted") <(sort <<<"$found"))
+done
+
+# Without load restrictions, as Flux builds: the overlay lists ks.yaml files outside its own root.
+kustomize_builds=0
+declare -A broken=()
+build_list="$(find kubernetes -name kustomization.yaml -exec dirname {} \; | sort)"
+while IFS= read -r dir; do
+  [[ -n $dir ]] || continue
+  kustomize_builds=$((kustomize_builds + 1))
+  if err="$(kustomize build --load-restrictor LoadRestrictionsNone "$dir" 2>&1 >/dev/null)"; then
+    echo "built $dir"
+  else
+    broken[$dir]=1
+    fail "$dir/kustomization.yaml: kustomize build failed: $err"
+  fi
+done <<<"$build_list"
+
+# Flux decides what a variable is: it substitutes after the build, so generator inputs count, and
+# it leaves comments, $${VAR} and objects marked kustomize.toolkit.fluxcd.io/substitute: disabled
+# alone. The example key lists stand in for cluster-config and cluster-secrets, which --dry-run
+# cannot read; an application's own postBuild.substitute is added to them.
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+values="$tmp/values.yaml"
+examples=(kubernetes/clusters/*/cluster-config.example.yaml kubernetes/clusters/*/cluster-secrets.example.yaml)
+echo '{}' >"$values"
+if ((${#examples[@]} > 0)); then
+  # shellcheck disable=SC2016 # $list is a yq variable.
+  if merged="$(yq ea '. as $list ireduce ({}; . * ($list // {})) | with_entries(.value |= tostring)' \
+    "${examples[@]}" 2>&1)"; then
+    printf '%s\n' "$merged" >"$values"
+  else
+    fail "${examples[*]}: must be plain key lists: $merged"
+  fi
+fi
+
+# hint VAR [GREP_OPTION...] PATH...: "file:line" of the first mention of ${VAR} under PATH, for the
+# message. Every PATH starts with kubernetes/, so none is taken for an option.
+hint() {
+  local var=$1 hits file line
+  shift
+  hits="$(grep -rlE -e '\$\{#?'"$var"'([^A-Za-z0-9_]|$)' "$@" 2>/dev/null)" || return 0
+  file="${hits%%$'\n'*}"
+  line="$(grep -nE -m1 -e '\$\{#?'"$var"'([^A-Za-z0-9_]|$)' -- "$file" | cut -d: -f1)"
+  echo "$file:$line"
+}
+
+flux_builds=0
+# flux_build KS PATH LABEL HINT_ARG...: builds the Kustomization in KS from PATH as Flux does, with
+# strict substitution, and names where an unset variable is used, passing HINT_ARG to hint. LABEL
+# is what the output calls the build.
+flux_build() {
+  local ks=$1 path=$2 label=$3 name err var where
+  shift 3
+  # A ks.yaml that cannot be read is reported with the ks.yaml rules above.
+  name="$(yq ea '[select(. != null)] | .[0].metadata.name' "$ks" 2>/dev/null)" || return 0
+  # shellcheck disable=SC2016 # $values is a yq variable.
+  yq ea 'select(fileIndex == 0) as $values | select(fileIndex == 1 and . != null)
+    | .spec.postBuild.substitute = ($values * (.spec.postBuild.substitute // {}))' \
+    "$values" "$ks" >"$tmp/ks.yaml" 2>/dev/null || return 0
+  flux_builds=$((flux_builds + 1))
+  if err="$(flux build kustomization "$name" --path "$path" --kustomization-file "$tmp/ks.yaml" \
+    --dry-run --strict-substitute --in-memory-build 2>&1 >/dev/null)"; then
+    echo "built $label"
+  elif [[ $err =~ variable\ not\ set\ \(strict\ mode\):\ \"([A-Za-z_][A-Za-z0-9_]*)\" ]]; then
+    var="${BASH_REMATCH[1]}"
+    where="$(hint "$var" "$@")"
+    fail "${where:-$label}: variable $var is not set: list it in a cluster's cluster-config.example.yaml or cluster-secrets.example.yaml, set it in the application's postBuild.substitute, or give it a default (\${$var:=value})"
+  else
+    fail "$label: flux build of $path failed: $err"
+  fi
+}
+
+# The instance's sync Kustomization applies each cluster directory with the root's decryption and
+# substitution (tests/flux.bats proves they match), so the root's and Flux's own ks.yaml files are
+# substituted as well. A stand-in named after the namespace, as the instance names its sync
+# objects, builds the directory the same way.
+for dir in kubernetes/clusters/*/; do
+  dir="${dir%/}"
+  [[ -f $dir/kustomization.yaml && -f $dir/ks.yaml && -z ${broken[$dir]:-} ]] || continue
+  sync_path="./${dir#kubernetes/}" yq ea '[select(. != null)] | .[0]
+    | {"apiVersion": .apiVersion, "kind": .kind,
+       "metadata": {"name": "flux-system", "namespace": "flux-system"},
+       "spec": {"path": strenv(sync_path), "sourceRef": {"kind": "OCIRepository", "name": "flux-system"},
+         "decryption": .spec.decryption, "postBuild": {"substituteFrom": .spec.postBuild.substituteFrom}}}' \
+    "$dir/ks.yaml" >"$tmp/sync.yaml" 2>/dev/null || continue
+  flux_build "$tmp/sync.yaml" "$dir" "$dir as the instance's sync Kustomization" --exclude-dir=app "$dir"
+done
+
+# The root applies its patches to the children; only a Flux build shows they still apply. It also
+# substitutes into the ks.yaml files and namespace directories it lists.
+for ks in kubernetes/clusters/*/ks.yaml; do
+  path="$(yq ea '[select(. != null)] | .[0].spec.path' "$ks" 2>/dev/null)" || continue
+  path="kubernetes/${path#./}"
+  [[ -z ${broken[$path]:-} ]] || continue
+  hints=()
+  for dir in kubernetes/apps kubernetes/components; do
+    [[ -d $dir ]] && hints+=("$dir")
+  done
+  flux_build "$ks" "$path" "$ks" --exclude-dir=app "${hints[@]}"
+done
+
+# Every application, enabled or not, and Flux's own, with its own substitution.
+for dir in kubernetes/apps/base/*/*/ kubernetes/clusters/*/*/*/; do
+  dir="${dir%/}"
+  [[ -f $dir/ks.yaml && -d $dir/app && -z ${broken[$dir/app]:-} ]] || continue
+  hints=("$dir/app")
+  [[ -d kubernetes/components ]] && hints+=(kubernetes/components)
+  flux_build "$dir/ks.yaml" "$dir/app" "$dir/ks.yaml" "${hints[@]}"
+done
+
+if ((failures > 0)); then
+  echo "kubernetes-check: $failures failure(s)" >&2
+  exit 1
+fi
+echo "kubernetes-check: passed ($kustomize_builds kustomize builds, $flux_builds flux builds, $ks_files ks.yaml, $apps applications)"

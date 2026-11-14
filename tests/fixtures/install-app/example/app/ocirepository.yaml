@@ -1,0 +1,10 @@
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: example
+spec:
+  interval: 12h
+  url: oci://registry.example.com/charts/example
+  ref:
+    tag: 1.0.0

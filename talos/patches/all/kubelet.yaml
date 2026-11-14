@@ -1,0 +1,12 @@
+# The kubelet requests its serving certificate from the cluster instead of signing its own, so
+# clients that verify it against the cluster CA, such as metrics-server, can trust it; Kubernetes
+# leaves these requests for something in the cluster to approve. Unused images are collected from
+# 75% use of the image filesystem down to 65%: the kubelet's default of 85% is the point where its
+# default hard eviction threshold (15% free) puts the node under disk pressure.
+---
+apiVersion: v1alpha1
+kind: KubeletConfig
+config:
+  serverTLSBootstrap: true
+  imageGCHighThresholdPercent: 75
+  imageGCLowThresholdPercent: 65

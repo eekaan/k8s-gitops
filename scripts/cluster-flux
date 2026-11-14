@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Installs Flux on a cluster that has nodes and Cilium but no Flux yet, in this order: applies what
+# Flux needs before it starts with cluster-config; installs the Flux Operator, then the
+# FluxInstance, with install-app from their applications in kubernetes/clusters/<cluster>/flux-system/,
+# as the Helm releases flux-operator and flux-instance in flux-system that Flux adopts once it runs;
+# and waits until the FluxInstance reports Ready. From then on Flux manages both from the artifact
+# published from main, so a cluster that runs a FluxInstance already is refused; with --reapply,
+# only the objects applied before Flux are applied again there, and nothing is installed.
+# Usage: scripts/cluster-flux [cluster] [--reapply]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/cluster.sh
+. "$here/lib/cluster.sh"
+
+cluster='' reapply=0
+for arg; do
+  case $arg in
+    --reapply) reapply=1 ;;
+    *)
+      if [[ $arg == -* || -n $cluster ]]; then
+        infra_error "usage: cluster-flux [cluster] [--reapply]"
+        exit 2
+      fi
+      cluster=$arg
+      ;;
+  esac
+done
+
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "$cluster"
+complete=1
+require_cluster talman || complete=0
+require_kubeconfig || complete=0
+require_pre_flux "$cluster" "$talman_file" || complete=0
+((complete))
+apps=$infra_root/kubernetes/clusters/$cluster/flux-system
+
+step="looking for a FluxInstance"
+# Without the operator's resource definition, the cluster has no FluxInstance.
+instances=
+if [[ -n $(kubectl get customresourcedefinitions fluxinstances.fluxcd.controlplane.io --ignore-not-found --output name) ]]; then
+  instances=$(kubectl get fluxinstances.fluxcd.controlplane.io --all-namespaces --output name)
+fi
+if [[ -n $instances ]]; then
+  if ((!reapply)); then
+    infra_error "$cluster runs a FluxInstance already, and Flux manages it from the artifact; --reapply applies the objects Flux needs before it starts again, and installs nothing"
+    exit 1
+  fi
+  step="applying the objects Flux needs before it starts"
+  "$here/cluster-config" "$cluster"
+  echo "cluster-flux: the objects Flux needs before it starts are applied again on $cluster; nothing is installed"
+  exit 0
+fi
+
+step="applying the objects Flux needs before it starts"
+"$here/cluster-config" "$cluster"
+
+step="installing the Flux Operator"
+"$here/install-app" "$apps/flux-operator"
+
+step="installing the FluxInstance"
+"$here/install-app" "$apps/flux-instance"
+
+step="waiting for the FluxInstance to be Ready"
+# The instance chart names the FluxInstance flux, in its release's namespace.
+kubectl wait fluxinstance.fluxcd.controlplane.io/flux --namespace flux-system --for=condition=Ready --timeout=10m
+echo "cluster-flux: Flux runs on $cluster and applies kubernetes/clusters/$cluster from the artifact published from main"
+echo "cluster-flux: next: follow it with KUBECONFIG=${KUBECONFIG#"$infra_root"/} flux get kustomizations --watch"

@@ -1,0 +1,6 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "The address check's own fixtures exist to be flagged; scripts/check-address-literals skips the same files."
+paths = ['''^tests/fixtures/check-address-literals/''']

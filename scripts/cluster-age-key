@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Creates the Talos age key, which every cluster's Talos secrets bundle is encrypted to, at the path
+# SOPS_AGE_KEY_FILE names unless a file is there already, and writes its recipient into
+# talos/.sops.yaml in place of the placeholder. Prints the recipient, which is public, and nothing
+# else. The key is never read here: age-keygen writes it, with mode 0600 and never over a file, and
+# derives the recipient from it. When talos/.sops.yaml names another recipient, nothing is changed
+# and the run fails, as the bundles already encrypted to that recipient need its key.
+# Usage: scripts/cluster-age-key
+set -euo pipefail
+
+# shellcheck source=scripts/lib/cluster.sh
+. "$(dirname "$0")/lib/cluster.sh"
+report_failed_step
+
+load_env
+refuse_http2_debug
+require_env SOPS_AGE_KEY_FILE
+key=$SOPS_AGE_KEY_FILE
+if inside_repository "$key"; then
+  infra_error "SOPS_AGE_KEY_FILE names a path inside the repository; the Talos age key is kept outside it"
+  exit 1
+fi
+
+step="reading talos/.sops.yaml"
+written=$(sops_recipient)
+if [[ ! -e $key ]] && ! is_placeholder "$written"; then
+  infra_error "talos/.sops.yaml names another recipient, and SOPS_AGE_KEY_FILE names no key; point it at that recipient's key"
+  exit 1
+fi
+
+if [[ ! -e $key ]]; then
+  step="creating the key"
+  mkdir -p "$(dirname "$key")"
+  # age-keygen prints the public key it made; it is printed once, below.
+  if ! out=$(age-keygen -o "$key" 2>&1); then
+    printf '%s\n' "$out" >&2
+    exit 1
+  fi
+fi
+
+step="reading the key's recipient"
+recipient=$(age-keygen -y "$key")
+if [[ ! $recipient =~ ^age1[0-9a-z]+$ ]]; then
+  infra_error "SOPS_AGE_KEY_FILE does not hold exactly one age key"
+  exit 1
+fi
+
+if [[ $written != "$recipient" ]]; then
+  if ! is_placeholder "$written"; then
+    infra_error "talos/.sops.yaml names another recipient than the key SOPS_AGE_KEY_FILE names; it is left as it is"
+    exit 1
+  fi
+  step="writing the recipient into talos/.sops.yaml"
+  RECIPIENT=$recipient yq -i '.creation_rules[].age = strenv(RECIPIENT)' "$sops_config"
+fi
+echo "$recipient"

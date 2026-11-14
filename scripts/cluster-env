@@ -1,0 +1,97 @@
+# shellcheck shell=bash
+# Sourced with a cluster's name, lab-sto2 when none is given, by the scripts that work on it:
+#   . scripts/cluster-env lab-sto2
+# Resolves the cluster's directory under talos/, reads .env when there is one, refuses Go's HTTP/2
+# debug log, and exports what talman and kubectl need: TALMAN_CONFIG, the cluster's directory, and
+# KUBECONFIG, the kubeconfig talman fetches into its output directory there. SOPS_AGE_KEY_FILE or
+# SOPS_AGE_KEY reach sops as they are. Sets cluster, cluster_dir, talman_file, secrets_file and
+# talman_log, where cluster_talman keeps talman's output with CI set, and from here on a failing
+# script names the step it failed in. require_cluster then checks what a script needs before it
+# runs anything.
+
+# shellcheck source=scripts/lib/cluster.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/cluster.sh"
+
+# require_cluster NEED...: fails naming each NEED that is missing, all of them before returning:
+#   talman      the cluster's talman.yaml
+#   recipient   an age recipient in talos/.sops.yaml rather than its placeholder
+#   secrets     the cluster's secrets.sops.yaml
+#   age-key     the Talos age key's location
+#   api-address the API load balancer's floating address, exported as KUBE_API_ADDRESS: from the
+#               environment when it sets one, and otherwise values.apiAddress in the cluster's
+#               talman.yaml, which the cluster stack renders. yq reads it; it is never printed.
+#   wait        TALOS_WAIT, when set, as a number of seconds
+require_cluster() {
+  local need from complete=1
+  for need; do
+    case $need in
+      talman)
+        if [[ ! -f $talman_file ]]; then
+          infra_error "talos/$cluster/talman.yaml does not exist; just infra-talman writes it"
+          complete=0
+        fi
+        ;;
+      recipient)
+        if is_placeholder "$(sops_recipient)"; then
+          infra_error "talos/.sops.yaml holds no age recipient yet; just cluster-age-key writes it"
+          complete=0
+        fi
+        ;;
+      secrets)
+        if [[ ! -f $secrets_file ]]; then
+          infra_error "talos/$cluster/secrets.sops.yaml does not exist; just cluster-secrets writes it"
+          complete=0
+        fi
+        ;;
+      age-key) require_age_key || complete=0 ;;
+      api-address)
+        from=KUBE_API_ADDRESS
+        if [[ -z ${KUBE_API_ADDRESS:-} && -f $talman_file ]]; then
+          from="values.apiAddress in talos/$cluster/talman.yaml"
+          KUBE_API_ADDRESS=$(yq '.values.apiAddress // ""' "$talman_file" 2> /dev/null) || KUBE_API_ADDRESS=
+          export KUBE_API_ADDRESS
+        fi
+        if [[ -z ${KUBE_API_ADDRESS:-} ]]; then
+          infra_error "KUBE_API_ADDRESS is not set, and talos/$cluster/talman.yaml gives no values.apiAddress; just infra-talman writes talman.yaml with it"
+          complete=0
+        elif is_placeholder "$KUBE_API_ADDRESS"; then
+          infra_error "KUBE_API_ADDRESS still holds the placeholder from .env.example"
+          complete=0
+        # The API's certificate names are addresses, so a host name would fail verification.
+        elif [[ ! $KUBE_API_ADDRESS =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+          infra_error "$from is not an IPv4 address; it holds the API load balancer's floating address"
+          complete=0
+        fi
+        ;;
+      wait)
+        if [[ ! ${TALOS_WAIT:-600} =~ ^[0-9]+$ ]]; then
+          infra_error "TALOS_WAIT is not a whole number of seconds"
+          complete=0
+        fi
+        ;;
+    esac
+  done
+  ((complete))
+}
+
+cluster_env() {
+  report_failed_step
+  cluster=${1:-lab-sto2}
+  if [[ ! $cluster =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
+    infra_error "$cluster is not a cluster: name a directory under talos/, such as lab-sto2"
+    return 1
+  fi
+  cluster_dir=$infra_root/talos/$cluster
+  talman_file=$cluster_dir/talman.yaml
+  secrets_file=$cluster_dir/secrets.sops.yaml
+  # One file per recipe: cluster-bootstrap runs cluster-kubeconfig, which keeps its own.
+  talman_log=$cluster_dir/clusterconfig/${0##*/}.log
+
+  load_env || return 1
+  refuse_http2_debug || return 1
+  # Whatever the caller's TALMAN_CONFIG names, talman works on this cluster.
+  export TALMAN_CONFIG=$cluster_dir
+  export KUBECONFIG=$cluster_dir/clusterconfig/kubeconfig
+}
+
+cluster_env "$@"

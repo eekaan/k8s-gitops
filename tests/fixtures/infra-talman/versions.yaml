@@ -1,0 +1,5 @@
+---
+# The versions file the cluster stack's talman.yaml test reads: Talos and Kubernetes versions no
+# release has, each different from the other.
+talos: v0.0.0-talos-fixture
+kubernetes: v0.0.0-kubernetes-fixture
