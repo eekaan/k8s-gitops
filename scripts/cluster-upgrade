@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# Upgrades Talos on a cluster's nodes to the version and schematic their talman.yaml gives them,
+# which come from versions.yaml through the cluster stack; it takes no version of its own. Shows
+# which nodes talman upgrade would reach, and once the cluster's name is typed back, or with --yes,
+# takes an etcd snapshot and goes through the nodes one at a time in talman.yaml's order. Each node
+# that is behind is drained with kubectl, upgraded with talman, and uncordoned once it is a Ready
+# node again, before the next is drained. A node already on its version is not drained.
+#
+# kubectl reaches the API through the kubeconfig cluster-kubeconfig fetches, served at
+# KUBE_API_ADDRESS, and the run stops before a drain when the API does not answer there. talosctl's
+# own drain is turned off: it reaches the API at the cluster endpoint, the load balancer's address
+# on the node network, which only the nodes reach. When a run stops after draining a node, the node
+# stays cordoned until it is uncordoned by hand; a second run skips it once it is on its version.
+# Usage: scripts/cluster-upgrade [cluster] [--yes]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/cluster.sh
+. "$here/lib/cluster.sh"
+
+cluster='' confirmed=0
+for arg; do
+  case $arg in
+    --yes) confirmed=1 ;;
+    *)
+      if [[ $arg == -* || -n $cluster ]]; then
+        infra_error "usage: cluster-upgrade [cluster] [--yes]"
+        exit 2
+      fi
+      cluster=$arg
+      ;;
+  esac
+done
+
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "$cluster"
+require_cluster talman secrets age-key api-address
+
+# api_answers: whether the API answers /readyz through the kubeconfig, tried for five minutes, as a
+# control plane just upgraded may still be on its way back into the load balancer's pool.
+api_answers() {
+  local tries
+  for ((tries = 0; tries < 30; tries++)); do
+    if kubectl get --raw /readyz --request-timeout=10s > /dev/null 2>&1; then
+      return 0
+    fi
+    sleep 10
+  done
+  infra_error "the Kubernetes API does not answer /readyz at KUBE_API_ADDRESS"
+  return 1
+}
+
+step="asking each node whether its Talos is behind"
+behind=0
+talman upgrade --dry-run --detailed-exit-code || behind=$?
+case $behind in
+  0)
+    echo "cluster-upgrade: every node of $cluster runs its configured Talos"
+    exit 0
+    ;;
+  2) ;;
+  *) exit "$behind" ;;
+esac
+
+step="waiting for $cluster to be typed back"
+((confirmed)) || confirm "$cluster" "upgrade Talos on" upgraded
+
+step="fetching the kubeconfig"
+"$here/cluster-kubeconfig" "$cluster" > /dev/null
+
+step="checking that the Kubernetes API answers"
+api_answers
+
+step="taking an etcd snapshot"
+talman etcd snapshot
+
+hostnames=$(talman_nodes "$talman_file" | cut -d' ' -f1)
+mapfile -t nodes <<< "$hostnames"
+for node in "${nodes[@]}"; do
+  step="asking $node whether its Talos is behind"
+  behind=0
+  talman upgrade -n "$node" --dry-run --detailed-exit-code > /dev/null || behind=$?
+  case $behind in
+    0) continue ;;
+    2) ;;
+    *) exit "$behind" ;;
+  esac
+
+  step="checking that the Kubernetes API answers before draining $node"
+  api_answers
+  step="draining $node"
+  kubectl drain "$node" --ignore-daemonsets --delete-emptydir-data --timeout=10m
+  step="upgrading $node, which is drained"
+  talman upgrade -n "$node" --extra-flags=--drain=false
+  step="waiting for $node, which is drained, to be Ready"
+  kubectl wait --for=condition=Ready "node/$node" --timeout=10m
+  step="uncordoning $node"
+  kubectl uncordon "$node"
+done
+
+step="checking that every node runs its configured Talos"
+talman upgrade --dry-run --detailed-exit-code > /dev/null
+echo "cluster-upgrade: every node of $cluster runs its configured Talos"

@@ -5,8 +5,7 @@ run anything. Each recipe that works on one cluster takes its name, `lab-sto2` w
 and works in `talos/<cluster>/`: on `talman.yaml`, which `just infra-talman` renders from the
 cluster stack and git ignores; on `secrets.sops.yaml`, the cluster's encrypted secrets bundle,
 which is committed; and on talman's output directory `clusterconfig/`, which git ignores and which
-holds the machine configurations, the talosconfig and the kubeconfig. Nothing reaches the nodes
-except through talman, and the cluster except through the kubeconfig.
+holds the machine configurations, the talosconfig and the kubeconfig.
 
 ## From nothing to a Ready cluster
 
@@ -20,12 +19,19 @@ except through talman, and the cluster except through the kubeconfig.
 Later changes to a patch or to `talman.yaml`, and nodes OpenTofu adds, reach the nodes with
 `just cluster-talos`.
 
+## Upgrades
+
+The Talos and Kubernetes versions are set in `versions.yaml` only, and reach the recipes through
+the cluster's `talman.yaml`; the upgrade recipes take no version. Once a version has changed there
+and `talman.yaml` has been rendered again, `just cluster-upgrade` moves the nodes to the Talos
+version, then `just cluster-upgrade-k8s` moves the cluster to the Kubernetes version.
+
 ## The Talos age key
 
 The secrets bundle holds the cluster's certificate authorities and keys. It is encrypted with sops
 to one age key, the Talos age key, which the operator holds and CI gets as a secret; it never
-enters the repository or the cluster (ADR 0005). Flux decrypts `kubernetes/` with a key of its own,
-so the key in the cluster does not open the bundle.
+enters the repository or the cluster (ADR 0005). The key Flux decrypts `kubernetes/` with is
+another one, so a key held in the cluster does not open the bundle.
 
 Without the key the bundle cannot be decrypted, and no machine configuration, talosconfig or
 kubeconfig can be made for the running cluster. Keep a copy of it away from the machine it was
@@ -84,7 +90,30 @@ the bundle's path itself, so the rule applies wherever talman runs from.
   in maintenance mode, such as one OpenTofu has just added, is configured only with `--onboard`:
   the maintenance service authenticates nothing, and a node's configuration carries the cluster's
   keys. Without it, talman refuses a rollout while such a node is there. With nothing to change,
-  nothing is asked or applied. It needs what `cluster-bootstrap` needs but `KUBE_API_ADDRESS`.
+  nothing is asked or applied. It needs all that `cluster-bootstrap` needs except
+  `KUBE_API_ADDRESS`.
+- `just cluster-upgrade [cluster] [--yes]` upgrades Talos on every node that does not run the
+  version and schematic `talman.yaml` gives it. It shows which nodes `talman upgrade --dry-run`
+  says are behind, and once the cluster's name is typed back, or with `--yes`, fetches the
+  kubeconfig as `cluster-kubeconfig` does, takes an etcd snapshot with `talman etcd snapshot`, and
+  goes through the nodes in `talman.yaml`'s order, one at a time. A node that is behind is drained
+  with `kubectl drain`, upgraded with `talman upgrade`, and uncordoned once it is Ready, before the
+  next is drained; a node on its version is left alone. Before each drain the API must answer
+  `/readyz` through the kubeconfig within five minutes, or nothing more is drained. talosctl's own
+  drain is turned off, as it reaches the API at the cluster endpoint, which only the nodes reach.
+  At the end every node must run its version. A run that stops after draining a node leaves that
+  node cordoned: uncordon it with kubectl once it is back; a second run skips it once it is on its
+  version.
+- `just cluster-upgrade-k8s [cluster] [--yes]` upgrades Kubernetes to the version `talman.yaml`
+  gives. It shows what `talman upgrade-k8s --dry-run` says, and once the cluster's name is typed
+  back, or with `--yes`, runs `talman upgrade-k8s` with an etcd snapshot first; talosctl moves the
+  control plane components and the kubelets node by node. It reaches the API at
+  `KUBE_API_ADDRESS`, given to talosctl as its endpoint. At the end every node must run the
+  version.
+
+  Both upgrade recipes do nothing and ask nothing when every node runs its version, and need what
+  `cluster-bootstrap` needs. An etcd snapshot holds every Secret in the cluster; talman writes it
+  into `clusterconfig/` with mode 0600, and it stays there.
 
 A failing recipe ends with a line naming the step it failed in.
 
@@ -94,11 +123,12 @@ A failing recipe ends with a line naming the step it failed in.
 - The kubelet serving-certificate approver. The kubelets request their serving certificates from
   the cluster (`talos/patches/all/kubelet.yaml`), and until something approves them, `kubectl logs`
   and `kubectl exec` fail. `just cluster-bootstrap` says so in a line of its own.
+- Copying an etcd snapshot anywhere else, encrypted or not.
 
 ## What the recipes print
 
-The recipes' own lines name nodes by hostname, never by address, and print neither the age key, the
-bundle, the kubeconfig nor `KUBE_API_ADDRESS`. talman's and talosctl's output passes through as
+The recipes' own lines name nodes by hostname, never by address, and print none of the age key, the
+bundle, the kubeconfig and `KUBE_API_ADDRESS`. talman's and talosctl's output passes through as
 they print it, and names each node with the address talman reaches it on.
 
 ## Environment
@@ -112,7 +142,8 @@ their environment.
   `SOPS_AGE_KEY` holds the key itself instead. Every recipe that reaches the nodes needs one of
   them, as talman decrypts the bundle.
 - `KUBE_API_ADDRESS`: the Kubernetes API load balancer's floating address, an IPv4 address or host
-  name; `cluster-bootstrap` and `cluster-kubeconfig` need it.
+  name; `cluster-bootstrap`, `cluster-kubeconfig` and the upgrade recipes need it. It reaches a
+  command line in one place: `cluster-upgrade-k8s` hands it to talosctl as its endpoint.
 - `TALOS_WAIT`: how many seconds `cluster-bootstrap` and `cluster-talos` wait for the nodes, 600
   when unset.
 

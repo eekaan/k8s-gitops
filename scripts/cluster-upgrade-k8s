@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Upgrades Kubernetes on a cluster to the kubernetesVersion its talman.yaml gives, which comes from
+# versions.yaml through the cluster stack; it takes no version of its own. Shows what talman's dry
+# run reports, and once the cluster's name is typed back, or with --yes, runs talman upgrade-k8s
+# with an etcd snapshot first; talosctl upgrade-k8s then moves the control plane components and the
+# kubelets node by node. It reaches the API at KUBE_API_ADDRESS: left to itself it would use the
+# cluster endpoint, the load balancer's address on the node network, which only the nodes reach.
+# Afterwards checks that every node runs the version. With every node on it already, nothing is
+# asked or upgraded.
+# Usage: scripts/cluster-upgrade-k8s [cluster] [--yes]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/cluster.sh
+. "$here/lib/cluster.sh"
+
+cluster='' confirmed=0
+for arg; do
+  case $arg in
+    --yes) confirmed=1 ;;
+    *)
+      if [[ $arg == -* || -n $cluster ]]; then
+        infra_error "usage: cluster-upgrade-k8s [cluster] [--yes]"
+        exit 2
+      fi
+      cluster=$arg
+      ;;
+  esac
+done
+
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "$cluster"
+require_cluster talman secrets age-key api-address
+
+step="asking each node which Kubernetes it runs"
+behind=0
+talman upgrade-k8s --dry-run --detailed-exit-code || behind=$?
+case $behind in
+  0)
+    echo "cluster-upgrade-k8s: every node of $cluster runs the configured Kubernetes"
+    exit 0
+    ;;
+  2) ;;
+  *) exit "$behind" ;;
+esac
+
+step="waiting for $cluster to be typed back"
+((confirmed)) || confirm "$cluster" "upgrade Kubernetes on" upgraded
+
+step="upgrading Kubernetes"
+talman upgrade-k8s --snapshot --extra-flags="--endpoint=https://$KUBE_API_ADDRESS:6443"
+
+step="checking that every node runs the configured Kubernetes"
+talman upgrade-k8s --dry-run --detailed-exit-code > /dev/null
+echo "cluster-upgrade-k8s: every node of $cluster runs the configured Kubernetes"

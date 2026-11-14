@@ -143,6 +143,11 @@ cluster_files() {
 #   new-nodes          the hostnames of nodes in maintenance mode, which talman apply refuses to
 #                      configure, and which a dry run does not count as a change, unless onboarding
 #   unreachable        talman apply's dry run cannot reach cp-2 and fails
+#   talos-behind       the hostnames of nodes whose Talos is behind their configured version
+#   k8s-behind         the kubelets run a Kubernetes behind kubernetesVersion
+#   api-down           the Kubernetes API does not answer /readyz
+# talosctl's own drain and upgrade-k8s reach the API at the cluster endpoint, the load balancer's
+# address on the node network, so the fake talman fails them unless told otherwise.
 fake_cluster() {
   cluster_files
   fake_tool talman <<'EOF'
@@ -228,6 +233,57 @@ KUBECONFIG
     chmod 644 "$dir/clusterconfig/kubeconfig"
     echo "wrote clusterconfig/kubeconfig"
     ;;
+  upgrade)
+    node=
+    for ((i = 0; i < ${#args[@]}; i++)); do
+      if [[ ${args[i]} == -n ]]; then
+        node=${args[i + 1]-}
+      fi
+    done
+    behind=$(cat "$STATE/talos-behind" 2> /dev/null || true)
+    if given --dry-run; then
+      changed=0
+      for each in $behind; do
+        if [[ -z $node || $each == "$node" ]]; then
+          echo "== $each: v1.14.5 -> v1.14.6"
+          changed=1
+        fi
+      done
+      if given --detailed-exit-code && ((changed)); then
+        exit 2
+      fi
+      exit 0
+    fi
+    if ! given --extra-flags=--drain=false; then
+      echo "error: draining $node: dial tcp 192.0.2.5:6443: i/o timeout" >&2
+      exit 1
+    fi
+    grep -vx -- "$node" "$STATE/talos-behind" > "$STATE/talos-behind.next" || true
+    mv "$STATE/talos-behind.next" "$STATE/talos-behind"
+    echo "== $node: upgraded to v1.14.6"
+    ;;
+  upgrade-k8s)
+    if given --dry-run; then
+      if [[ -e $STATE/k8s-behind ]]; then
+        echo "== cp-1 runs Kubernetes v1.37.0 -> v1.37.1"
+        if given --detailed-exit-code; then
+          exit 2
+        fi
+      else
+        echo "nothing to upgrade: every node already runs Kubernetes v1.37.1"
+      fi
+      exit 0
+    fi
+    if [[ " ${args[*]} " != *" --extra-flags=--endpoint=https://"* ]]; then
+      echo "error: dial tcp 192.0.2.5:6443: i/o timeout" >&2
+      exit 1
+    fi
+    rm -f "$STATE/k8s-behind"
+    echo "== upgraded Kubernetes to v1.37.1"
+    ;;
+  etcd)
+    echo "wrote clusterconfig/etcd-example-20261114T000000Z.db"
+    ;;
 esac
 EOF
   fake_tool talosctl <<'EOF'
@@ -236,6 +292,10 @@ EOF
   fake_tool kubectl <<'EOF'
 printf '%s\n' "kubectl $*" >> "$RECORD/argv"
 printf '%s\n' "${KUBECONFIG-}" > "$RECORD/kubeconfig"
+if [[ $* == *" /readyz"* && -e $STATE/api-down ]]; then
+  echo "The connection to the server was refused" >&2
+  exit 1
+fi
 EOF
   # The nodes answer a connection to the Talos API port only.
   fake_tool timeout <<'EOF'
@@ -445,7 +505,8 @@ applies() {
   record age-keygen
   with GODEBUG=x509sha1=1,http2debug=2
 
-  for name in cluster-age-key cluster-secrets cluster-bootstrap cluster-kubeconfig cluster-talos; do
+  for name in cluster-age-key cluster-secrets cluster-bootstrap cluster-kubeconfig cluster-talos \
+    cluster-upgrade cluster-upgrade-k8s; do
     recipe "$name"
 
     [ "$status" -ne 0 ]
@@ -703,6 +764,118 @@ applies() {
   [ ! -e "$RECORD/argv" ]
 }
 
+@test "A Talos upgrade drains through the Kubernetes API one node at a time" {
+  fake_cluster
+  printf '%s\n' cp-2 worker-1 > "$STATE/talos-behind"
+  # upgrades: the recorded talman upgrade calls that are not dry runs.
+  upgrades() {
+    calls '^talman upgrade( |$)' | grep -v -- ' --dry-run' || true
+  }
+
+  recipe cluster-upgrade <<< "no"
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"cp-2: v1.14.5 -> v1.14.6"* && $output == *"worker-1: v1.14.5 -> v1.14.6"* ]]
+  [[ $output == *"lab-sto2 was not confirmed"* ]]
+  [ -z "$(upgrades)" ]
+  [ -z "$(calls '^(kubectl drain|talman etcd)')" ]
+
+  : > "$RECORD/argv"
+  recipe cluster-upgrade <<< "lab-sto2"
+
+  [ "$status" -eq 0 ]
+  [ ! -s "$STATE/talos-behind" ]
+  [ "$(calls '^kubectl drain ' | wc -l)" -eq 2 ]
+  [ "$(upgrades | wc -l)" -eq 2 ]
+  previous=$(call_line '^talman etcd snapshot')
+  [ -n "$previous" ]
+  for node in cp-2 worker-1; do
+    readyz=$(grep -n '^kubectl get --raw /readyz' "$RECORD/argv" | cut -d: -f1 |
+      awk -v after="$previous" '$1 > after' | head -1)
+    drained=$(call_line "^kubectl drain $node( |\$)")
+    upgraded=$(grep -nE "^talman upgrade -n $node( |\$)" "$RECORD/argv" | grep -v -- ' --dry-run' | head -1 | cut -d: -f1)
+    ready=$(call_line "^kubectl wait .*node/$node( |\$)")
+    uncordoned=$(call_line "^kubectl uncordon $node( |\$)")
+    for call in "$readyz" "$drained" "$upgraded" "$ready" "$uncordoned"; do
+      [ -n "$call" ]
+    done
+    [ "$previous" -lt "$readyz" ]
+    [ "$readyz" -lt "$drained" ]
+    [ "$drained" -lt "$upgraded" ]
+    [ "$upgraded" -lt "$ready" ]
+    [ "$ready" -lt "$uncordoned" ]
+    [[ " $(upgrades | grep -E "^talman upgrade -n $node( |\$)") " == *" --extra-flags=--drain=false "* ]]
+    previous=$uncordoned
+  done
+  checked=$(grep -n '^talman upgrade --dry-run' "$RECORD/argv" | tail -1 | cut -d: -f1)
+  [ "$checked" -gt "$previous" ]
+  [ "$(cat "$RECORD/kubeconfig")" = "$CLUSTER/clusterconfig/kubeconfig" ]
+  [ "$(yq '.clusters[0].cluster.server' "$CLUSTER/clusterconfig/kubeconfig")" = "https://$KUBE_API_ADDRESS:6443" ]
+  [ -z "$(calls '^talman .*( --to| --force)')" ]
+  [ -z "$(calls '^talosctl |health')" ]
+
+  # The API does not answer: no node is drained.
+  printf '%s\n' cp-2 worker-1 > "$STATE/talos-behind"
+  : > "$STATE/api-down"
+  : > "$RECORD/argv"
+  recipe cluster-upgrade --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"the Kubernetes API does not answer"* ]]
+  [ -z "$(calls '^kubectl drain ')" ]
+  [ -z "$(upgrades)" ]
+
+  # Every node on its version: nothing is asked, drained or upgraded.
+  rm "$STATE/api-down"
+  : > "$STATE/talos-behind"
+  : > "$RECORD/argv"
+  recipe cluster-upgrade < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output != *"Type lab-sto2"* ]]
+  [ -z "$(calls '^(kubectl drain|talman etcd)')" ]
+  [ -z "$(upgrades)" ]
+}
+
+@test "A Kubernetes upgrade shows the change and asks before applying" {
+  fake_cluster
+  : > "$STATE/k8s-behind"
+  # upgrades: the recorded talman upgrade-k8s calls that are not dry runs.
+  upgrades() {
+    calls '^talman upgrade-k8s( |$)' | grep -v -- ' --dry-run' || true
+  }
+
+  recipe cluster-upgrade-k8s <<< "no"
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"v1.37.0 -> v1.37.1"* ]]
+  [[ $output == *"lab-sto2 was not confirmed"* ]]
+  [ -z "$(upgrades)" ]
+  [ -e "$STATE/k8s-behind" ]
+
+  : > "$RECORD/argv"
+  recipe cluster-upgrade-k8s <<< "lab-sto2"
+
+  [ "$status" -eq 0 ]
+  [ ! -e "$STATE/k8s-behind" ]
+  [ "$(upgrades | wc -l)" -eq 1 ]
+  [[ " $(upgrades) " == *" --snapshot "* ]]
+  [[ " $(upgrades) " == *" --extra-flags=--endpoint=https://$KUBE_API_ADDRESS:6443 "* ]]
+  [[ " $(upgrades) " != *" --to"* && " $(upgrades) " != *" --force "* ]]
+  upgraded=$(call_line "^$(upgrades)\$")
+  [ "$(call_line '^talman upgrade-k8s .*--dry-run')" -lt "$upgraded" ]
+  checked=$(grep -n '^talman upgrade-k8s .*--dry-run' "$RECORD/argv" | tail -1 | cut -d: -f1)
+  [ "$checked" -gt "$upgraded" ]
+  [[ $output != *"$KUBE_API_ADDRESS"* ]]
+
+  : > "$RECORD/argv"
+  recipe cluster-upgrade-k8s < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output != *"Type lab-sto2"* ]]
+  [ -z "$(upgrades)" ]
+}
+
 @test "No cluster secret reaches a command line or the output" {
   git_repository
   record talman talosctl sops age-keygen yq jq git
@@ -760,6 +933,17 @@ applies() {
   run_and_keep failed cluster-talos --yes < /dev/null
   run_and_keep ok cluster-talos --onboard --yes < /dev/null
   run_and_keep ok cluster-talos < /dev/null
+  printf '%s\n' cp-2 worker-1 > "$STATE/talos-behind"
+  : > "$STATE/k8s-behind"
+  run_and_keep failed cluster-upgrade <<< no
+  run_and_keep failed cluster-upgrade-k8s <<< no
+  : > "$STATE/api-down"
+  run_and_keep failed cluster-upgrade --yes < /dev/null
+  rm "$STATE/api-down"
+  run_and_keep ok cluster-upgrade --yes < /dev/null
+  run_and_keep ok cluster-upgrade-k8s --yes < /dev/null
+  run_and_keep ok cluster-upgrade < /dev/null
+  run_and_keep ok cluster-upgrade-k8s < /dev/null
 
   markers+=(
     AGE-SECRET-KEY-MARKER-AGE-KEY-FILE

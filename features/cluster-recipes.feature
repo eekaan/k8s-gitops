@@ -51,6 +51,16 @@ Feature: Cluster recipes
     When cluster-talos runs, and then runs with --onboard
     Then without --onboard no talman call onboards new nodes and the node stays new, and with --onboard both the dry run and the apply onboard it
 
+  Scenario: A Talos upgrade drains through the Kubernetes API one node at a time
+    Given talman reporting cp-2 and worker-1 behind the Talos version and schematic talman.yaml gives them
+    When cluster-upgrade runs, without the cluster's name typed back and then with it
+    Then the first shows talman's dry run and changes nothing; the second takes an etcd snapshot, then for cp-2 and then worker-1 only drains the node with kubectl through the kubeconfig served at KUBE_API_ADDRESS, upgrades it with talman with talosctl's own drain off, waits for it to be Ready and uncordons it before the next is drained; with the API not answering nothing is drained, and with every node on its version it exits zero without asking
+
+  Scenario: A Kubernetes upgrade shows the change and asks before applying
+    Given kubernetesVersion in talman.yaml ahead of what the kubelets run
+    When cluster-upgrade-k8s runs, without the cluster's name typed back and then with it
+    Then the first shows talman's dry run and upgrades nothing; the second runs talman upgrade-k8s once, with an etcd snapshot first and the API reached at KUBE_API_ADDRESS, and then finds every node on the version; and with every node on it, it exits zero without asking or upgrading
+
   Scenario: No cluster secret reaches a command line or the output
     Given an age key, a secrets bundle and a kubeconfig whose secrets are known
     When every cluster recipe runs against recording tools, and in the ways each one stops

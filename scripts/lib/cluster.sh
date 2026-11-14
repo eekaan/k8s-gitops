@@ -113,7 +113,7 @@ wait_for_talos_api() {
   local -a waiting silent
   nodes=$(talman_nodes "$1") || return 1
   mapfile -t waiting <<< "$nodes"
-  deadline=$((SECONDS + wait))
+  deadline=$((SECONDS + 10#$wait))
   while :; do
     silent=()
     for node in "${waiting[@]}"; do

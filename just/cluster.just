@@ -30,3 +30,13 @@ cluster-kubeconfig cluster='lab-sto2':
 [positional-arguments]
 cluster-talos *args:
     scripts/cluster-talos "$@"
+
+# Upgrade Talos to the version talman.yaml gives: show which nodes are behind, then snapshot etcd and drain, upgrade and uncordon each in turn once the cluster's name is typed back (--yes: without asking)
+[positional-arguments]
+cluster-upgrade *args:
+    scripts/cluster-upgrade "$@"
+
+# Upgrade Kubernetes to the version talman.yaml gives: show what would change, then snapshot etcd and upgrade once the cluster's name is typed back (--yes: without asking)
+[positional-arguments]
+cluster-upgrade-k8s *args:
+    scripts/cluster-upgrade-k8s "$@"
