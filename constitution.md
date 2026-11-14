@@ -22,6 +22,8 @@
 ## Done means
 - Every scenario of the change passes under `just ci`.
 - Docs are updated in the same change and describe the present state.
+- A second, read-only review of the change against its scenarios and this file has no blocking
+  finding left open when its pull request opens.
 - CI is green on the pull request, and a change with a live effect is proved on the cluster
   after merge.
 
@@ -33,7 +35,8 @@
 - No machine configuration in instance user data.
 - Flux reconciles only from the signed artifact built from `main`. Nothing Flux owns is applied
   by hand, except the documented bootstrap set.
-- `main` changes only through pull requests. Agents never push to it or merge.
+- `main` changes only through pull requests whose required checks pass. Agents never push to it;
+  they may merge such a pull request.
 - A recipe that changes live state is idempotent, shows a plan or diff first where the tool has
   one, and exits non-zero with the reason when it fails.
 - Deployment-specific values (addresses, IDs, allowlists) come from gitignored files, CI

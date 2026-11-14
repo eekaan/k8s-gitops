@@ -1,0 +1,10 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# The definitions themselves are not here: crds.yaml applies them from the Envoy Gateway chart at
+# the tag ocirepository.yaml pins.
+resources:
+  - ocirepository.yaml
+  - crds.yaml

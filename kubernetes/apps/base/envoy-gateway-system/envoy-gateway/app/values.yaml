@@ -1,0 +1,35 @@
+---
+# Values for the Envoy Gateway chart, read by the HelmRelease through a ConfigMap generated without
+# substitution. Keys not set here keep the chart's defaults: the controller's resource requests and
+# memory limit, leader election, the controller name the GatewayClass names, the certgen job that
+# makes the controller's own certificates, the topology injector webhook, and Envoy proxies created
+# in this namespace.
+
+crds:
+  # The Gateway API definitions come from the gateway-api-crds application and Envoy Gateway's own
+  # from envoy-gateway-crds, so the chart installs neither, nor the Gateway API's safe-upgrades
+  # admission policy.
+  enabled: false
+
+deployment:
+  # Leader election lets one replica act at a time; two, never on one node, keep the controller
+  # running through a node drain.
+  replicas: 2
+  pod:
+    topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule
+        # Only nodes the pods may run on count, so tainted control planes do not.
+        nodeTaintsPolicy: Honor
+        labelSelector:
+          matchLabels:
+            control-plane: envoy-gateway
+            app.kubernetes.io/instance: envoy-gateway
+        # Spread each rollout's pods, not old and new together.
+        matchLabelKeys:
+          - pod-template-hash
+
+# A drain evicts a replica only while the other keeps running.
+podDisruptionBudget:
+  minAvailable: 1
