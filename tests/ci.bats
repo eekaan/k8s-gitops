@@ -1110,4 +1110,25 @@ grammar_cases() {
   [ "$status" -ne 0 ]
   [[ $output == *"demo/greeter"* ]]
   [ -z "$(ls -A "$scratch")" ]
+
+@test "The tool installer is pinned to an exact version in every workflow, and the publish job verifies it and keeps no cache" {
+  local workflow uses=0 version
+  shopt -s nullglob
+  for workflow in "$REPO"/.github/workflows/*.yaml "$REPO"/.github/workflows/*.yml; do
+    run yq '.jobs[].steps[] | select(.uses | test("^jdx/mise-action@")) | .with.version' "$workflow"
+    [ "$status" -eq 0 ]
+    while IFS= read -r version; do
+      [ -n "$version" ] || continue
+      uses=$((uses + 1))
+      [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "${workflow##*/}: mise is not pinned to an exact version: $version"; return 1; }
+    done <<< "$output"
+  done
+  [ "$uses" -gt 0 ]
+  # The job that signs checks the mise binary against the checksum of the pinned release, and never
+  # restores a tool cache: a cache entry is chosen by key, and the job's identity token can sign.
+  local publish="$REPO/.github/workflows/publish.yaml"
+  run yq '.jobs.publish.steps[] | select(.uses | test("^jdx/mise-action@")) | .with.sha256' "$publish"
+  [[ $output =~ ^[0-9a-f]{64}$ ]]
+  run yq '.jobs.publish.steps[] | select(.uses | test("^jdx/mise-action@")) | .with.cache' "$publish"
+  [ "$output" = false ]
 }

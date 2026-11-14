@@ -959,6 +959,11 @@ The first step makes the publish run judge the tree that is actually on `main`: 
 not build, the run fails, nothing is pushed, signed or tagged, and the cluster stays on the last
 artifact that passed until a later commit on `main` does.
 
+Every workflow installs its tools with the same pinned `mise-action` at an exact mise release. The
+publish job, which signs, also gives the action the checksum of that release's binary and turns its
+cache off, so the tools that run beside the identity token are the pinned ones, downloaded, never
+restored from an entry another job saved.
+
 The tag moves last and by digest: `main` only ever names an artifact that is signed and verified,
 and signing, verifying and tagging all name it by its digest, so the tag ends on exactly the bytes
 that were signed and verified; a tag can change between two steps, a digest cannot. It moves only on
