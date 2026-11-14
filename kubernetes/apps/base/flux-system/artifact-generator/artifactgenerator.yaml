@@ -1,0 +1,33 @@
+---
+# No $schema line: the published ArtifactGenerator schema predates spec.pathPattern and rejects it.
+apiVersion: source.extensions.fluxcd.io/v1beta1
+kind: ArtifactGenerator
+metadata:
+  name: apps
+  namespace: flux-system
+spec:
+  sources:
+    - alias: kubernetes
+      kind: OCIRepository
+      name: flux-system
+  # Matches every application's app/ directory and captures its namespace and name, so a new
+  # application needs no change here. The generated artifacts share flux-system with the child
+  # Kustomizations, so an application's name must be unique across namespaces;
+  # scripts/kubernetes-check fails on a duplicate.
+  pathPattern: "@kubernetes/apps/base/{ns}/{app}/app"
+  artifacts:
+    # Without a revision field, an artifact's revision is the digest of its own content, so a
+    # merge reconciles only the applications whose files it changed.
+    - name: "{app}"
+      # Records the source artifact's revision on each generated one.
+      originRevision: "@kubernetes"
+      copy:
+        # The application's files keep the path they have in the tree, so its ks.yaml reads the
+        # same path from this artifact or from the shared OCIRepository, and falling back to the
+        # latter is a sourceRef change. "/**" copies the directory's contents to that path.
+        - from: "@kubernetes/apps/base/{ns}/{app}/app/**"
+          to: "@artifact/apps/base/{ns}/{app}/app/"
+        # Components go into every artifact, for a ks.yaml that names one in spec.components;
+        # changing a component therefore changes every application's artifact.
+        - from: "@kubernetes/components/**"
+          to: "@artifact/components/"

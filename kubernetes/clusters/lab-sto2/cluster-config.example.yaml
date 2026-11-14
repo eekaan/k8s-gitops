@@ -1,0 +1,7 @@
+---
+# Key names of the cluster-config ConfigMap, with placeholder values. The real values depend on the
+# deployment and are applied to the cluster, never committed. scripts/kubernetes-check substitutes
+# these placeholders, with those of cluster-secrets.example.yaml, when it builds the tree with
+# Flux, so a variable listed in neither fails the check unless the application sets it or it has a
+# default. A plain map rather than a ConfigMap, so it cannot be applied over the real one.
+CLUSTER_DOMAIN: example.com

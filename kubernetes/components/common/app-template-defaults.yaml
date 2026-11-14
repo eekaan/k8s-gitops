@@ -1,0 +1,25 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/configmap-v1.json
+# Pod defaults for releases of the app-template chart, in every namespace whose directory
+# includes components/common. A release uses them by listing this ConfigMap in valuesFrom:
+#   valuesFrom:
+#     - kind: ConfigMap
+#       name: app-template-defaults
+# Pods run as a non-root user and group with the runtime's default seccomp profile, both of which
+# the restricted Pod Security level requires, and a volume is re-owned only when its root
+# directory does not already match, so a large volume does not slow every start.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-template-defaults
+data:
+  values.yaml: |
+    defaultPodOptions:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault

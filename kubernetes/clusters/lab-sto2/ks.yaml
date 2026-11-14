@@ -1,0 +1,124 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: cluster
+  namespace: flux-system
+spec:
+  decryption:
+    provider: sops
+  deletionPolicy: WaitForTermination
+  interval: 30m
+  timeout: 30m
+  path: ./apps/overlays/lab-sto2
+  prune: true
+  wait: false
+  sourceRef:
+    kind: OCIRepository
+    name: flux-system
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: cluster-config
+      - kind: Secret
+        name: cluster-secrets
+  patches:
+    # Every child Kustomization without the label k8s-gitops/defaults: disabled gets:
+    # - SOPS decryption, so an application can carry encrypted Secrets;
+    # - a 30m interval, a 1m retry after a failure instead of waiting out the interval, and a 3m
+    #   timeout instead of one as long as the interval, so a child that cannot become ready
+    #   fails within minutes;
+    # - pruning, and on deletion of the child its objects deleted and waited for;
+    # - substitution from cluster-config and cluster-secrets. substituteFrom has no namespace
+    #   field and reads from the child's own namespace, which is why every child lives in
+    #   flux-system beside them and sets targetNamespace for what it deploys;
+    # - the nested patch for the HelmReleases it applies, unless a release carries the same
+    #   opt-out label: three retries for a failed install and a failed upgrade, where Flux
+    #   retries neither, with a failed upgrade rolled back and the last failure remediated too;
+    #   the chart's CRDs created and updated on install and upgrade, where Flux only creates them
+    #   on install; the chart's Helm tests after each install and upgrade; drift detection, so a
+    #   change made outside Helm is corrected; three revisions of history instead of five; and a
+    #   10m install timeout, a missing namespace created, the name of an uninstalled release
+    #   reused, new resources cleaned up when an upgrade or rollback fails, rollbacks forced past
+    #   merge conflicts and no history kept after an uninstall.
+    #
+    # These overwrite the child's own interval, retryInterval, timeout, prune, deletionPolicy,
+    # decryption, patches and postBuild.substituteFrom. Lists are replaced whole: a strategic
+    # merge patch on a custom resource has no merge keys, and a JSON patch that appends fails on a
+    # child without the list. scripts/kubernetes-check fails on a child that sets any of these
+    # fields without opting out. Values local to one application go in its postBuild.substitute,
+    # a map, which merges.
+    - patch: |-
+        apiVersion: kustomize.toolkit.fluxcd.io/v1
+        kind: Kustomization
+        metadata:
+          name: _
+        spec:
+          decryption:
+            provider: sops
+          deletionPolicy: WaitForTermination
+          interval: 30m
+          retryInterval: 1m
+          timeout: 3m
+          prune: true
+          postBuild:
+            substituteFrom:
+              - kind: ConfigMap
+                name: cluster-config
+              - kind: Secret
+                name: cluster-secrets
+          patches:
+            - patch: |-
+                apiVersion: helm.toolkit.fluxcd.io/v2
+                kind: HelmRelease
+                metadata:
+                  name: _
+                spec:
+                  install:
+                    timeout: 10m
+                    replace: true
+                    crds: CreateReplace
+                    createNamespace: true
+                    remediation:
+                      retries: 3
+                  upgrade:
+                    remediation:
+                      remediateLastFailure: true
+                      retries: 3
+                      strategy: rollback
+                    cleanupOnFail: true
+                    crds: CreateReplace
+                  test:
+                    enable: true
+                  rollback:
+                    force: true
+                    cleanupOnFail: true
+                  uninstall:
+                    keepHistory: false
+                  driftDetection:
+                    mode: enabled
+                  maxHistory: 3
+              target:
+                group: helm.toolkit.fluxcd.io
+                kind: HelmRelease
+                labelSelector: k8s-gitops/defaults!=disabled
+      target:
+        group: kustomize.toolkit.fluxcd.io
+        kind: Kustomization
+        labelSelector: k8s-gitops/defaults!=disabled
+    # Children labelled k8s-gitops/timeout: long get a 10m timeout and keep every other default.
+    # It is a patch of its own, after the defaults, because patches apply in order and the 3m
+    # default would overwrite a timeout set in the child. Children that opted out are not
+    # selected, so their own timeout stands.
+    - patch: |-
+        apiVersion: kustomize.toolkit.fluxcd.io/v1
+        kind: Kustomization
+        metadata:
+          name: _
+        spec:
+          timeout: 10m
+      target:
+        group: kustomize.toolkit.fluxcd.io
+        kind: Kustomization
+        labelSelector: k8s-gitops/timeout=long,k8s-gitops/defaults!=disabled

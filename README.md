@@ -22,16 +22,18 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
 - `just tools` installs the pinned tools.
 - `just ci` runs every check that needs no credentials: tool versions, address literals,
   shellcheck and yamllint, scenario proofs, the OpenTofu check (`just infra-check`: formatting,
-  validation without a state backend and the mocked `tofu test` runs), gitleaks over the
-  committable files and the git history, and the bats tests.
+  validation without a state backend and the mocked `tofu test` runs), the offline build of
+  `kubernetes/`, gitleaks over the committable files and the git history, and the bats tests.
 
 Behaviour is specified as Given/When/Then scenarios in `features/`, each proved by a bats
 `@test` with its title, an OpenTofu `run` named after its slug, or a `@by:<recipe>` tag naming
 the `just` recipe whose tool run verifies it, or tagged `@pending` with its issue key.
 
-The three repository checks:
+The repository checks:
 
 - `just tools-check` fails when a pinned tool is missing or its binary reports a different version.
+- `just kubernetes-check` builds `kubernetes/` offline with kustomize and Flux and fails when an
+  application, a `ks.yaml` or a variable breaks the layout in `docs/kubernetes.md`.
 - `just check-literals` fails when a tracked file holds an IPv4 literal outside the documentation
   ranges, loopback, `0.0.0.0`, the metadata address and netmasks, unless `.address-allowlist`
   declares it with a reason.

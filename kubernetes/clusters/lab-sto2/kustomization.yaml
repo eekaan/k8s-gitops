@@ -1,0 +1,9 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Explicit, so the example key lists beside it are never applied: without this file Flux
+# generates one from every YAML file in the directory.
+resources:
+  - ks.yaml

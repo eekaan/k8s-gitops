@@ -1,0 +1,11 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# What this cluster runs: the shared pieces and namespace directories first, then one ks.yaml per
+# enabled application. A disabled application stays listed, commented out with the reason.
+resources:
+  - ../../base/flux-system/artifact-generator
+  - ../../base/demo
+  - ../../base/demo/hello/ks.yaml
