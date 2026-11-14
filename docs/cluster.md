@@ -127,23 +127,99 @@ the patch out later leaves the partition and its data on the disk.
 Spegel shares images between the nodes ([kubernetes.md](kubernetes.md#the-kube-system-baseline)),
 serving the layers of each node's images from containerd's content store. Talos has containerd
 discard a layer from the content store once it is unpacked, to save disk space
-([Talos](https://docs.siderolabs.com/kubernetes-guides/advanced-guides/spegel)), so
+([Talos](https://docs.siderolabs.com/kubernetes-guides/advanced-guides/spegel)): its own CRI
+configuration sets `discard_unpacked_layers = true`
+([Talos](https://github.com/siderolabs/talos/blob/v1.14.6/hack/cri-plugin.part#L3-L4)).
 `talos/patches/all/spegel.yaml` has every node keep them: a `CRICustomizationConfig` named `spegel`
 sets `discard_unpacked_layers` to false in containerd's images plugin, as that guide gives it for
-Talos 1.14 and later.
+Talos 1.14 and later. Talos merges it as `20-spegel.part`, after its own `00-base.part`
+([Talos](https://github.com/siderolabs/talos/blob/v1.14.6/internal/app/machined/pkg/controllers/files/cri_config.go#L154-L161)).
 
-The cost is disk: the setting lets containerd's garbage collection remove a layer from the content
-store once it is unpacked into the snapshotter
-([containerd](https://github.com/containerd/containerd/blob/v2.3.7/docs/cri/config.md)), so with it
-off every image the node pulls is held twice on the node's disk, its layers as pulled in the
-content store and unpacked in the snapshotter, until the image is removed. Both are under
-`/var/lib/containerd`, which stays a directory of the system disk's EPHEMERAL volume unless a
-`VolumeConfig` gives it a partition of its own
+This is not a combination Talos supports: its maintainers support neither Spegel nor a changed
+`discard_unpacked_layers` "in a way it should work fully"
+([siderolabs/talos#14784](https://github.com/siderolabs/talos/issues/14784), open, reported on
+Talos 1.14.5 with Spegel 0.8.1). The setting reaches the images the kubelet pulls, and no others:
+
+- An image the kubelet pulls once the patch is live on the node keeps its layers, and Spegel serves
+  them to the other nodes.
+- An image pulled before that lost its layers when it was unpacked, and the setting does not bring
+  them back, so Spegel cannot serve it from that node until it is removed and pulled again
+  (inferred from containerd's documentation, not yet seen on a cluster).
+- An image pulled through the Talos API, such as by `talosctl image pull`, loses its layers
+  whatever the setting: Talos pulls it with containerd's `ChildGCLabelsFilterLayers`, which leaves
+  the layers unreferenced for garbage collection
+  ([Talos](https://github.com/siderolabs/talos/blob/v1.14.6/internal/pkg/containers/image/pull.go#L186-L190)),
+  as the issue above shows.
+
+### What it costs
+
+The setting lets containerd's garbage collection remove a layer from the content store once it is
+unpacked into the snapshotter
+([containerd](https://github.com/containerd/containerd/blob/v2.3.7/docs/cri/config.md)). With it
+off, an image the kubelet pulls keeps its layers as the registry served them, usually compressed,
+in the content store, beside their unpacked copy in the snapshotter, until the image is removed.
+Both are under `/var/lib/containerd`, which stays a directory of the system disk's EPHEMERAL volume
+unless a `VolumeConfig` gives it a partition of its own, as does `/var/lib/kubelet`
 ([Talos](https://github.com/siderolabs/talos/releases/tag/v1.14.0)), and none does.
 
-`just cluster-talos` applies the patch to running nodes. Applying, changing or removing a
-`CRICustomizationConfig` restarts containerd's CRI instance and needs no reboot
+Spegel collects nothing itself and leaves it to the kubelet's image garbage collection
+([Spegel](https://spegel.dev/docs/faq/#why-is-my-node-running-out-of-disk-space)), which bounds
+it: from 75% use of that filesystem the kubelet deletes unused images, least recently used first,
+down to 65% (`talos/patches/all/kubelet.yaml`,
+[Kubernetes](https://kubernetes.io/docs/concepts/architecture/garbage-collection/#containers-images)).
+Below the kubelet's default hard eviction thresholds, 15% free for images and 10% for the node,
+which neither Talos nor the patches change, it reports disk pressure, collects dead containers and
+unused images, and then evicts pods
+([Kubernetes](https://kubernetes.io/docs/concepts/scheduling-eviction/node-pressure-eviction/#hard-eviction-thresholds)).
+
+### Rolling it out
+
+The patch reaches the nodes before Spegel runs: `just cluster-talos` applies it from the pull
+request's branch, and the merge that has Flux start Spegel comes after. Applying, changing or
+removing a `CRICustomizationConfig` restarts containerd's CRI instance and needs no reboot
 ([Talos](https://docs.siderolabs.com/talos/v1.14/configure-your-talos-cluster/images-container-runtime/containerd)).
+Talos' Spegel guide still has a reboot step, which Talos 1.14 made unnecessary ("a machine reboot is
+no longer required to apply changes to CRI configuration",
+[Talos](https://github.com/siderolabs/talos/releases/tag/v1.14.0)); this follows the 1.14
+documentation. Talos stops CRI by signalling the containerd process alone, whether or not it runs
+in the workload sandbox
+([Talos](https://github.com/siderolabs/talos/blob/v1.14.6/internal/app/machined/pkg/system/runner/process/process.go#L475-L496),
+[Talos](https://github.com/siderolabs/talos/blob/v1.14.6/internal/app/machined/pkg/system/runner/process/process.go#L575-L592)),
+and runc's shims, which hold the containers, run in a cgroup apart from containerd's
+([Talos](https://github.com/siderolabs/talos/blob/v1.14.6/hack/cri-plugin.part#L14-L15),
+[Talos](https://github.com/siderolabs/talos/blob/v1.14.6/internal/app/machined/pkg/system/services/cri.go#L184)),
+so running containers keep running while the kubelet loses the CRI for the restart (inferred from
+source, not yet seen on a cluster).
+
+Once Flux starts it, each Spegel pod's init container writes the mirror configuration that sends
+the node's pulls to Spegel first, `_default/hosts.toml` under `/etc/cri/conf.d/hosts`
+([Spegel](https://github.com/spegel-org/spegel/blob/v0.8.1/pkg/oci/containerd/mirror.go#L121-L134)).
+Talos rewrites that directory whenever the node's registry configuration or a CRI customization
+changes
+([Talos](https://github.com/siderolabs/talos/blob/v1.14.6/internal/app/machined/pkg/controllers/files/cri_config.go#L43-L58)),
+and removes from it every directory its own registry configuration does not name
+([Talos](https://github.com/siderolabs/talos/blob/v1.14.6/internal/app/machined/pkg/controllers/files/cri_config.go#L260-L280)),
+which is all of Spegel's, as no machine configuration here sets a registry mirror. A CRI restart
+recreates no pod, so nothing writes it back, and the nodes pull from the upstream registries, with
+nothing reporting it, until Spegel's pods start again (inferred from source, not yet seen on a
+cluster). So while Spegel runs, its DaemonSet is restarted after any `just cluster-talos` that
+changes the nodes' CRI customizations or registry mirrors, this patch included, and its init
+containers write the configuration again.
+
+### Checking it on a node
+
+- The merged CRI configuration, `/etc/cri/conf.d/cri.toml`, which containerd imports, names
+  `in-memory customization "spegel"` in its header, and its `plugins."io.containerd.cri.v1.images"`
+  table holds `discard_unpacked_layers = false`
+  ([Talos](https://github.com/siderolabs/talos/blob/v1.14.6/hack/cri-containerd.toml#L12-L14),
+  [Talos](https://github.com/siderolabs/talos/blob/v1.14.6/internal/pkg/toml/merge.go#L44-L50)).
+- Once `just cluster-talos` has run and Spegel's pods have started again,
+  `/etc/cri/conf.d/hosts/_default/hosts.toml` is there and names the node's Spegel, on port 30020.
+- A layer of an image the kubelet pulled after the rollout is still in containerd's content store,
+  under `/var/lib/containerd/io.containerd.content.v1.content/blobs/sha256/`, minutes later.
+- Spegel's `spegel_mirror_requests_total` with `cache="hit"` rises in Prometheus as nodes pull
+  images another node holds
+  ([Spegel](https://github.com/spegel-org/spegel/blob/v0.8.1/pkg/registry/registry.go#L239-L247)).
 
 ## The control planes' metrics
 
@@ -397,6 +473,8 @@ A failing recipe ends with a line naming the step it failed in.
 ## Not automated
 
 - Rebooting a node that does not answer on the Talos API port.
+- Restarting Spegel's DaemonSet after `just cluster-talos` changes the nodes' CRI customizations or
+  registry mirrors ([Rolling it out](#rolling-it-out)); the recipe does not say when a change does.
 
 ## What the recipes print
 

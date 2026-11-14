@@ -415,6 +415,17 @@ envoy_gateway_config() {
   [ "$mounted" = /etc/cri/conf.d/hosts ]
 }
 
+@test "Spegel serves no debug page" {
+  local flags
+  # The page, on the metrics port every pod reaches, lists the node's images and peers and pulls
+  # an image on request. Spegel serves it when the flag is absent.
+  render spegel
+  flags="$(yq -N 'select(.kind == "DaemonSet" and .metadata.name == "spegel") | .spec.template.spec.containers[]
+    | select(.name == "registry") | .args[] | select(test("^--debug-web-enabled"))' "$RENDERED")"
+  echo "registry: ${flags:-no debug flag}"
+  [ "$flags" = --debug-web-enabled=false ]
+}
+
 @test "The certificate controller runs in its own namespace with its resource definitions" {
   local overlay enabled namespace deployments elsewhere crds group
   # The cluster runs the application and its namespace directory: its overlay applies both.

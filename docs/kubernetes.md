@@ -181,9 +181,27 @@ does not define itself.
   `dependsOn`. Its own `/metrics` is served without authorization, as its chart's ServiceMonitor
   carries no credential.
 - `spegel` shares images between nodes, serving the image layers containerd keeps on each node,
-  which every node's machine configuration has it keep
-  ([cluster.md](cluster.md#image-layers-for-spegel)). It writes containerd's registry mirror
-  configuration to `/etc/cri/conf.d/hosts`, where Talos' containerd reads it.
+  which every node's machine configuration has it keep;
+  [cluster.md](cluster.md#image-layers-for-spegel) says which images that is, and how a change to
+  the nodes is rolled out while it runs. It writes containerd's registry mirror configuration to
+  `/etc/cri/conf.d/hosts`, where Talos' containerd reads it.
+
+  It serves any image a node holds, one pulled with credentials included, to anything that reaches
+  its registry, on every node's port 30020 or on its pod: a pull through a mirror carries no
+  credentials, and Spegel has none to check
+  ([Spegel](https://spegel.dev/docs/faq/#why-am-i-able-to-pull-private-images-without-image-pull-secrets)).
+  What keeps the port from everything outside the node network is the nodes' security group
+  (`infra/openstack/modules/talos-nodes`), which admits from elsewhere only the Talos and Kubernetes
+  APIs ([cluster.md](cluster.md#the-control-planes-metrics)); every pod reaches it, as the tree has
+  no network policy. The chart can have the registry require basic authentication
+  (`basicAuthSecretName`); it is not set.
+
+  Its metrics port, which every pod reaches too, serves Go's profiler, pprof, whatever the values
+  say
+  ([Spegel](https://github.com/spegel-org/spegel/blob/v0.8.1/main.go#L278-L305)); the values turn
+  off the debug page beside it, which lists the node's images and peers and pulls an image on
+  request. Keeping pprof from other pods would take a network policy admitting only Prometheus to
+  that port, or a Spegel release that can turn it off.
 - `reloader` restarts a workload annotated for it when a ConfigMap or Secret it uses changes, and
   nothing else.
 - `descheduler` runs the chart's default policy every five minutes, with two changes: a pod is
@@ -191,7 +209,8 @@ does not define itself.
 
 `tests/baseline.bats` renders every baseline chart with the repository's values, checks that each
 values key is one the pinned chart defines and that each monitor selects a Service or pods the
-chart makes, and reads the approver's, metrics-server's and Spegel's rendered configuration.
+chart makes, and reads the approver's, metrics-server's and Spegel's rendered configuration,
+Spegel's debug page included.
 
 The approver's chart makes its ServiceMonitor only once the kind exists, so the release installed
 before Flux has none, and Flux's first upgrade, which waits for `prometheus-operator-crds`, adds

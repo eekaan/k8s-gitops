@@ -9,6 +9,9 @@
 spegel:
   # Talos keeps containerd's registry mirror configuration here, not in /etc/containerd/certs.d.
   containerdRegistryConfigPath: /etc/cri/conf.d/hosts
+  # The debug page on the metrics port lists the node's images and peers and pulls an image on
+  # request, for any pod that reaches the port. Spegel 0.8.1 serves pprof there whatever this says.
+  debugWebEnabled: false
 
 serviceMonitor:
   enabled: true
