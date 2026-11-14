@@ -27,6 +27,11 @@ Feature: Cluster stack
     When the cluster stack is planned
     Then planning fails with a message naming the variable
 
+  Scenario: An allowlist network wider than /16, or with host bits set, is rejected
+    Given an allowlist with a network whose prefix is shorter than 16, two halves of the address space, or an address with bits set below its prefix
+    When the cluster stack is planned
+    Then planning fails with a message naming the variable
+
   Scenario: Every node has its own floating IP
     Given the planned nodes
     When the cluster stack is planned against mocked providers

@@ -159,6 +159,41 @@ object_diff() {
   [ -n "$(object "$out/greeter" Secret greeter)" ]
 }
 
+@test "The render runs flux, helm and kustomize with none of the secrets" {
+  tree base
+  # Each tool is recorded, by the names of its environment, and then runs as itself.
+  local bin="$BATS_TEST_TMPDIR/bin" tool real
+  mkdir -p "$bin"
+  for tool in flux helm kustomize; do
+    real=$(command -v "$tool")
+    printf '#!/usr/bin/env bash\nenv | cut -d= -f1 >> %q\nexec %q "$@"\n' \
+      "$BATS_TEST_TMPDIR/names.$tool" "$real" > "$bin/$tool"
+    chmod +x "$bin/$tool"
+  done
+  local names=(AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY CLUSTER_S3_ACCESS_KEY_ID CLUSTER_S3_SECRET_ACCESS_KEY
+    OS_CLOUD OS_APPLICATION_CREDENTIAL_ID OS_APPLICATION_CREDENTIAL_SECRET TF_STATE_PASSPHRASE
+    TF_ENCRYPTION SOPS_AGE_KEY SOPS_AGE_KEY_FILE FLUX_AGE_KEY FLUX_AGE_KEY_FILE OPERATOR_CIDRS)
+  local settings=() name
+  for name in "${names[@]}"; do settings+=("$name=marker-$name"); done
+
+  # The script itself, as just puts the pinned tools before any fake on PATH.
+  run env PATH="$bin:$PATH" "${settings[@]}" \
+    "$REPO/scripts/render" "$BATS_TEST_TMPDIR/base.out" "$BATS_TEST_TMPDIR/base"
+
+  [ "$status" -eq 0 ]
+  for tool in flux helm kustomize; do
+    echo "$tool"
+    [ -s "$BATS_TEST_TMPDIR/names.$tool" ]
+    grep -qx RENDER_CHART_CACHE "$BATS_TEST_TMPDIR/names.$tool"
+    for name in "${names[@]}"; do
+      if grep -qx "$name" "$BATS_TEST_TMPDIR/names.$tool"; then
+        echo "$tool got $name"
+        return 1
+      fi
+    done
+  done
+}
+
 @test "A changed value shows as a changed object in that application's diff, and nowhere else" {
   tree base
   tree head
@@ -323,7 +358,7 @@ commit() {
 render_code() {
   mkdir -p "$WORK/scripts/lib"
   cp "$REPO/scripts/render" "$REPO/scripts/render-diff" "$REPO/scripts/render-pr" "$WORK/scripts/"
-  cp "$REPO/scripts/lib/render-comment.sh" "$WORK/scripts/lib/"
+  cp "$REPO/scripts/lib/render-comment.sh" "$REPO/scripts/lib/tools.sh" "$WORK/scripts/lib/"
 }
 
 @test "render-pr renders both commits with the base's render code, or this checkout's when the base has none" {

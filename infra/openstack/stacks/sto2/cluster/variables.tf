@@ -95,6 +95,14 @@ variable "api_allowed_cidrs" {
     condition     = length(var.api_allowed_cidrs) > 0 && alltrue([for cidr in var.api_allowed_cidrs : can(cidrnetmask(cidr))])
     error_message = "api_allowed_cidrs must hold at least one IPv4 network in CIDR form, such as 192.0.2.0/24, and nothing else."
   }
+
+  # The same rule as export_api_allowed_cidrs in scripts/lib/infra.sh: a /16 is the widest network
+  # an operator's own allowlist reasonably holds, 65,536 addresses, and a network is written by its
+  # own address, which cidrsubnet gives back only when no bit is set below the prefix.
+  validation {
+    condition     = alltrue([for cidr in var.api_allowed_cidrs : can(cidrnetmask(cidr)) ? tonumber(split("/", cidr)[1]) >= 16 && cidrsubnet(cidr, 0, 0) == cidr : true])
+    error_message = "api_allowed_cidrs must hold no network wider than /16, and each network must be written by its own address, with no bits set below the prefix."
+  }
 }
 
 variable "security_group_rules" {

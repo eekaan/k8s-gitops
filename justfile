@@ -196,6 +196,8 @@ vector-check:
     set -o pipefail
     dir=$(mktemp -d)
     trap 'rm -rf "$dir"' EXIT
+    # docker is run with none of the secrets a recipe's environment may hold.
+    . scripts/lib/tools.sh
     scripts/vector-config "$dir"
     docker run --rm --network none -e VECTOR_SELF_NODE_NAME=node-1 -v "$dir":/check:ro {{ vector_image }} validate --no-environment /check/vector.yaml
     docker run --rm --network none -e VECTOR_SELF_NODE_NAME=node-1 -v "$dir":/check:ro {{ vector_image }} test /check/vector.yaml /check/tests.yaml

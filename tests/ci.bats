@@ -535,6 +535,260 @@ the_jobs() {
   [ "$refs" -gt 0 ]
 }
 
+# dagger_call: whether the commands on stdin run dagger with any subcommand, on a line that is not a
+# comment.
+dagger_call() {
+  grep -vE '^[[:space:]]*#' | grep -qE '(^|[^[:alnum:]_./$-])dagger[[:space:]]+[-a-z]'
+}
+
+# just_recipes: the recipe each just on stdin runs, a line that is not a comment, one per line: the
+# first word after just that is neither one of its options nor an option's argument, wherever just
+# stands, after a prefix such as mise exec -- or VAR=value included.
+just_recipes() {
+  awk '
+    /^[[:space:]]*#/ { next }
+    {
+      n = split($0, w, /[[:space:];&|()]+/)
+      for (i = 1; i <= n; i++) {
+        word = w[i]
+        gsub(/["\047]/, "", word)
+        if (word != "just" && word !~ /\/just$/) continue
+        for (j = i + 1; j <= n; j++) {
+          arg = w[j]
+          gsub(/["\047]/, "", arg)
+          if (arg == "") continue
+          if (arg ~ /^-/) {
+            if (arg !~ /=/ && arg ~ /^(-f|--justfile|-d|--working-directory|--set|--dotenv-filename|--dotenv-path|--shell|--shell-arg|--color|--dump-format|--command|-c)$/) j++
+            continue
+          }
+          print arg
+          break
+        }
+      }
+    }'
+}
+
+# script_paths ROOT: the scripts under ROOT/scripts the commands on stdin run or source, a line that
+# is not a comment, one per line, as paths below ROOT: a path that starts with scripts/, or one
+# after a slash, as in "$here/lib/ci-host.sh", that names a file under scripts/.
+script_paths() {
+  local root=$1 path
+  grep -vE '^[[:space:]]*#' | grep -oE '(scripts/|/)[A-Za-z0-9_][A-Za-z0-9_./-]*' | sort -u |
+    while IFS= read -r path; do
+      path=${path#/}
+      [[ $path == scripts/* ]] || path=scripts/$path
+      [[ -f $root/$path ]] && printf '%s\n' "$path"
+    done
+  return 0
+}
+
+# reaches_module JUSTFILE: whether the commands on stdin call the Dagger module: run dagger, or run a
+# recipe of JUSTFILE or a script beside it that does. A recipe reaches it through its body, the
+# recipes it depends on and those its body runs with just; a script through the scripts it runs or
+# sources; as far as they go.
+reaches_module() {
+  local justfile=$1 root dump item kind name text
+  root=$(cd "$(dirname "$justfile")" && pwd)
+  dump=$(just --justfile "$justfile" --dump --dump-format json)
+  local -A seen=()
+  local -a queue=("text:$(cat)")
+  while ((${#queue[@]})); do
+    item=${queue[0]}
+    queue=("${queue[@]:1}")
+    kind=${item%%:*}
+    name=${item#*:}
+    if [[ $kind != text ]]; then
+      [[ -z ${seen[$item]-} ]] || continue
+      seen[$item]=1
+    fi
+    case $kind in
+      text) text=$name ;;
+      recipe)
+        jq -e --arg recipe "$name" '.recipes | has($recipe)' <<< "$dump" > /dev/null || continue
+        text=$(just --justfile "$justfile" --show "$name")
+        while IFS= read -r name; do
+          queue+=("recipe:$name")
+        done < <(jq -r --arg recipe "${item#*:}" '.recipes[$recipe].dependencies[].recipe' <<< "$dump")
+        ;;
+      script) text=$(cat "$root/$name") ;;
+    esac
+    if dagger_call <<< "$text"; then
+      return 0
+    fi
+    while IFS= read -r name; do
+      queue+=("recipe:$name")
+    done < <(just_recipes <<< "$text")
+    while IFS= read -r name; do
+      queue+=("script:$name")
+    done < <(script_paths "$root" <<< "$text")
+  done
+  return 1
+}
+
+# module_jobs WORKFLOWS JUSTFILE: the jobs of the workflow files in the directory WORKFLOWS whose
+# commands call the Dagger module, as the file's name and the job's, one per line.
+module_jobs() {
+  local workflow json job
+  shopt -s nullglob
+  for workflow in "$1"/*.yaml "$1"/*.yml; do
+    json=$(yq -o=json '.' "$workflow")
+    while IFS= read -r job; do
+      if jq -r --arg job "$job" '[.jobs[$job].steps[]? | .run // empty] | join("\n")' <<< "$json" | reaches_module "$2"; then
+        printf '%s %s\n' "${workflow##*/}" "$job"
+      fi
+    done < <(jq -r '.jobs | keys[]' <<< "$json")
+  done
+}
+
+# shallow_jobs WORKFLOWS JUSTFILE: those of the module jobs that do not check this repository out to
+# the workspace root with its whole history: with actions/checkout and neither repository nor path,
+# every such step with fetch-depth 0, written as a number or a string, and at least one such step.
+# A checkout of another repository or to another path, alongside it, is not the module's workspace.
+shallow_jobs() {
+  local file job depths
+  while read -r file job; do
+    depths=$(JOB=$job yq -r '[.jobs[strenv(JOB)].steps[] | select(.uses // "" | test("^actions/checkout@"))
+      | select((.with.repository // "") == "" and (.with.path // "") == "") | .with["fetch-depth"] // "none" | tostring] | .[]' "$1/$file")
+    if [[ -z $depths ]] || grep -qvx 0 <<< "$depths"; then
+      printf '%s %s\n' "$file" "$job"
+    fi
+  done < <(module_jobs "$1" "$2")
+}
+
+@test "Every workflow job that calls the Dagger module checks out the whole history" {
+  # These jobs call it, through the recipes and scripts they run; one that drops out of the list, or
+  # joins it, fails here first.
+  run module_jobs "$REPO/.github/workflows" "$REPO/justfile"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf '%s\n' 'ci.yaml check' 'ci.yaml render' 'tools-image.yaml publish')" ] || { echo "found: $output"; return 1; }
+  # The module reads the workspace's Git history, which a shallow clone of a commit with parents
+  # cannot give.
+  run shallow_jobs "$REPO/.github/workflows" "$REPO/justfile"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ] || { echo "without the whole history: $output"; return 1; }
+}
+
+# checkout_fixture DEPTH: a repository in FIXTURE with a justfile, scripts and one workflow,
+# ways.yaml, with a job for each way of reaching the Dagger module and two that do not, each checking
+# out with fetch-depth DEPTH, as written into the YAML.
+checkout_fixture() {
+  FIXTURE="$BATS_TEST_TMPDIR/fixture"
+  rm -rf "$FIXTURE"
+  mkdir -p "$FIXTURE/scripts/lib" "$FIXTURE/workflows"
+  cat > "$FIXTURE/justfile" <<'EOF'
+direct:
+    dagger api call ci checks
+
+# A dependency reaches it.
+by-dependency: direct
+
+by-just:
+    echo before
+    just direct
+
+by-script:
+    scripts/outer
+
+by-dagger-call:
+    dagger call ci checks
+
+by-dagger-c:
+    dagger -c 'ci | checks'
+
+# Mentions dagger api call only in a comment, and runs a script that does nothing with it.
+none:
+    # dagger api call ci checks
+    scripts/plain
+EOF
+  # shellcheck disable=SC2016 # the scripts' own expansions, as written
+  printf '#!/usr/bin/env bash\nhere=$(dirname "$0")\n"$here/lib/inner" "$@"\n' > "$FIXTURE/scripts/outer"
+  # shellcheck disable=SC2016 # the scripts' own expansions, as written
+  printf '#!/usr/bin/env bash\npushed=$(dagger api call ci tools-layer)\n' > "$FIXTURE/scripts/lib/inner"
+  printf '#!/usr/bin/env bash\n# dagger api call ci checks\necho dagger-engine is a name\n' > "$FIXTURE/scripts/plain"
+  {
+    printf 'name: ways\n"on": push\njobs:\n'
+    local job command
+    while IFS='|' read -r job command; do
+      printf '  %s:\n    runs-on: ubuntu-latest\n    steps:\n' "$job"
+      printf '      - uses: actions/checkout@0000000000000000000000000000000000000000\n        with:\n          fetch-depth: %s\n' "$1"
+      printf '      - run: %b\n' "$command"
+    done <<'EOF'
+direct|just direct "$GROUP"
+dependency|just by-dependency
+body|just by-just
+script|just by-script
+dagger-call|just by-dagger-call
+dagger-c|just by-dagger-c
+mise-exec|mise exec -- just direct
+variable|GROUP=x just direct
+option|just --justfile justfile direct
+run-dagger|dagger api call ci checks
+multi-line||\n          echo start\n          just direct
+not-module|just none
+not-just|echo just a word
+EOF
+  } > "$FIXTURE/workflows/ways.yaml"
+}
+
+@test "the whole-history rule finds every way a job reaches the Dagger module" {
+  local -a reaching=(body dagger-c dagger-call dependency direct mise-exec multi-line option run-dagger script variable)
+  checkout_fixture 1
+  run module_jobs "$FIXTURE/workflows" "$FIXTURE/justfile"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'ways.yaml %s\n' "${reaching[@]}" | LC_ALL=C sort)" ] || { echo "found: $output"; return 1; }
+  # Shallow, every one of them is refused; with the whole history, written as a number or a string,
+  # none is.
+  run shallow_jobs "$FIXTURE/workflows" "$FIXTURE/justfile"
+  [ "$output" = "$(printf 'ways.yaml %s\n' "${reaching[@]}" | LC_ALL=C sort)" ]
+  checkout_fixture 0
+  run shallow_jobs "$FIXTURE/workflows" "$FIXTURE/justfile"
+  [ -z "$output" ]
+  checkout_fixture "'0'"
+  run shallow_jobs "$FIXTURE/workflows" "$FIXTURE/justfile"
+  [ -z "$output" ]
+
+  # Of two checkouts, the one to the workspace root is the module's: another repository or another
+  # path alongside it is not, whatever its depth.
+  cat > "$FIXTURE/workflows/two.yaml" <<'EOF'
+name: two
+"on": push
+jobs:
+  root-whole:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@0000000000000000000000000000000000000000
+        with:
+          repository: someone/else
+          path: else
+      - uses: actions/checkout@0000000000000000000000000000000000000000
+        with:
+          fetch-depth: 0
+      - run: just direct
+  root-shallow:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@0000000000000000000000000000000000000000
+        with:
+          path: elsewhere
+          fetch-depth: 0
+      - uses: actions/checkout@0000000000000000000000000000000000000000
+      - run: just direct
+  no-checkout:
+    runs-on: ubuntu-latest
+    steps:
+      - run: just direct
+EOF
+  run shallow_jobs "$FIXTURE/workflows" "$FIXTURE/justfile"
+  [ "$output" = "$(printf 'two.yaml %s\n' no-checkout root-shallow)" ] || { echo "refused: $output"; return 1; }
+
+  # This repository's CI jobs that call the module, made shallow, are refused.
+  mkdir -p "$BATS_TEST_TMPDIR/workflows"
+  cp "$REPO"/.github/workflows/*.yaml "$BATS_TEST_TMPDIR/workflows/"
+  yq -i '.jobs.check.steps[0].with["fetch-depth"] = 1 | .jobs.render.steps[0].with["fetch-depth"] = 1' "$BATS_TEST_TMPDIR/workflows/ci.yaml"
+  run shallow_jobs "$BATS_TEST_TMPDIR/workflows" "$REPO/justfile"
+  [ "$output" = "$(printf 'ci.yaml %s\n' check render)" ] || { echo "refused: $output"; return 1; }
+}
+
 # render_job: sets RENDER, exported, to the CI workflow's one job that runs just ci-render.
 render_job() {
   RENDER=$(yq '[.jobs | to_entries[] | select(.value.steps[] | .run // "" | test("^just ci-render( |$)")) | .key] | .[]' "$WORKFLOW")
@@ -626,6 +880,7 @@ fake_gh() {
   cat > "$BIN/gh" << 'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FAKE/calls"
+env | cut -d= -f1 >> "$FAKE/names"
 if [[ $1 == run && $2 == download ]]; then
   while (($#)); do
     [[ $1 == --dir ]] && dir=$2
@@ -1063,6 +1318,28 @@ grammar_cases() {
   post
   [ "$status" -eq 0 ]
   [ ! -e "$FAKE/writes" ]
+}
+
+@test "The comment job runs gh with its own token and none of the other secrets" {
+  fake_gh
+  comment unchanged
+  cp "$BATS_TEST_TMPDIR/unchanged.md" "$BATS_TEST_TMPDIR/comment.md"
+  artifact comment.md
+  local names=(AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY CLUSTER_S3_ACCESS_KEY_ID CLUSTER_S3_SECRET_ACCESS_KEY
+    OS_CLOUD OS_APPLICATION_CREDENTIAL_ID OS_APPLICATION_CREDENTIAL_SECRET TF_STATE_PASSPHRASE
+    TF_ENCRYPTION SOPS_AGE_KEY SOPS_AGE_KEY_FILE FLUX_AGE_KEY FLUX_AGE_KEY_FILE OPERATOR_CIDRS)
+  local name
+  for name in "${names[@]}"; do export "$name=marker-$name"; done
+
+  post
+
+  [ "$status" -eq 0 ]
+  [ -s "$FAKE/names" ]
+  grep -qx GH_TOKEN "$FAKE/names"
+  for name in "${names[@]}"; do
+    echo "$name"
+    if grep -qx "$name" "$FAKE/names"; then return 1; fi
+  done
 }
 
 @test "The render is part of the required result, and the comment is not" {

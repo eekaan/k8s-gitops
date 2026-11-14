@@ -349,6 +349,50 @@ lock, out of its `.terraform/`; and while `GODEBUG` sets `http2debug`, as Go's H
 prints what tofu and its providers send and receive. No recipe prints a value or passes a secret
 on a command line; secrets reach tofu and rclone through their environment.
 
+The tools below get only the secrets they use. `scripts/lib/tools.sh` runs `tofu`, `openstack`,
+`talman`, `talosctl`, `kubectl`, `helm`, `flux`, `kustomize`, `docker`, `curl`, `sops`, `age`,
+`age-keygen`, `gh`, `ssh`, `ssh-keyscan` and `ssh-keygen` with the secrets they may not see
+unexported, and `s3_rclone` hands rclone the one key pair it is called with. `scripts/render`,
+`scripts/vector-config`, `scripts/ci-comment` and `vector-check` run their tools the same way.
+Every other tool, `jq`, `yq`, `git` and `flock` among them, gets the environment as it is: `jq`
+reads `OPERATOR_CIDRS` from it by design, and none of them sends it anywhere. A wrapped tool a
+script starts in the background, such as a port-forward, is started as `( exec_tool kubectl … ) &`,
+so that the process id the script holds is the tool's and ending it ends the tool; the test fails
+for the bare `kubectl … &`. Every variable of `.env.example` is listed, either as a secret with the
+tools that may see it or as holding none, and a test fails for one that is not, whatever its prefix:
+a new variable is assigned before it passes. One set by hand that begins `OS_` or `AWS_` and is
+listed nowhere is a secret that only `tofu` sees.
+
+A script runs a wrapped tool by its name. A test reads each script and justfile recipe as commands,
+a backslash continuation and a `bash -c` body or a here-document fed to a shell included, and fails
+for one that names a wrapped tool after `command`, `env`, `exec`, `timeout`, `sudo`, `xargs`,
+`nice`, `nohup`, `setsid`, `stdbuf`, `ionice`, `chroot`, `su`, `doas`, `flock`, `watch`,
+`parallel`, `mise x`, `mise exec`, `which` or `find -exec`, whatever options and lines come between,
+in a `bash -c`, `sh -c` or here-document body, or in `$(type -P tool)`, `$(type -aP tool)` or
+backticks, as each reaches the binary with the whole environment. A text scan cannot see a runner
+held in an array or a variable (`"${cmd[@]}" kubectl`), a tool run from a script file or a
+here-document fed to anything but a shell, or one run by another language's process call. Only the
+tests that record a tool's environment catch those: `tests/tool-secrets.bats` for every wrapped tool and the S3
+client, and for each of these recipes, the one that runs it: `tests/infra-recipes.bats` (tofu),
+`tests/cluster-recipes.bats` (the upgrade recipes' talman, kubectl and age), `tests/ci-host.bats`
+(gh, ssh), `tests/grafana.bats` (kubectl), `tests/render.bats` (flux, helm, kustomize),
+`tests/logs.bats` (`vector-config`'s flux and helm) and `tests/ci.bats` (gh in `ci-comment`). The
+docker of `vector-check` has only the scan.
+
+| Secret | Seen by |
+| --- | --- |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | `tofu`; rclone, as the state key set |
+| `TF_ENCRYPTION` | `tofu` |
+| `TF_STATE_PASSPHRASE` | none, as `TF_ENCRYPTION` carries the key derived from it |
+| `CLUSTER_S3_ACCESS_KEY_ID`, `CLUSTER_S3_SECRET_ACCESS_KEY` | rclone, as the cluster key set |
+| `OS_*`, the cloud credential | `tofu`, `openstack` |
+| `GH_TOKEN`, `GITHUB_TOKEN` | `gh` |
+| `TF_VAR_*`, the stacks' inputs, among them the allowlist; `TF_TOKEN_*`, registry tokens | `tofu` |
+| `SOPS_AGE_KEY`, `SOPS_AGE_KEY_CMD` | `talman`, `sops` |
+| `SOPS_AGE_KEY_FILE` | `talman`, `sops`, `age` |
+| `FLUX_AGE_KEY`, `FLUX_AGE_KEY_FILE` | none; `flux_sops` gives sops the one it uses |
+| `OPERATOR_CIDRS` | none; it reaches tofu as `TF_VAR_api_allowed_cidrs` and `TF_VAR_ssh_allowed_cidrs` |
+
 - `TF_STATE_BUCKET`: the bucket that holds state.
 - `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`: the state key, S3 credentials for that bucket,
   which also create the backup buckets.
@@ -356,17 +400,21 @@ on a command line; secrets reach tofu and rclone through their environment.
   hyphens.
 - `CLUSTER_S3_ACCESS_KEY_ID` and `CLUSTER_S3_SECRET_ACCESS_KEY`: the cluster's S3 key.
 - `TF_STATE_PASSPHRASE`: the passphrase state and plans are encrypted with, 16 characters or more.
-  tofu gets it inside `TF_ENCRYPTION` only, and the `openstack` client gets neither it nor the S3
-  credentials.
+  tofu gets it inside `TF_ENCRYPTION` only.
 - `OS_CLOUD`, naming a `clouds.yaml` entry outside the repository, or `OS_AUTH_URL` with the
   application-credential variables: OpenStack authentication, which tofu's provider and the
   `openstack` client read themselves. `os-smoke` and `infra-s3-key` need only this.
 - `OPERATOR_CIDRS`, or else `operator-cidrs.json` at the repository root (gitignored): the
   operator allowlist of the cluster stack's APIs and the CI host's SSH, a JSON list of IPv4 CIDRs.
-  An entry that is IPv6, or whose prefix is 0 and so covers every address, is refused, named by its
-  position in the list and not by its value. It reaches tofu only in its environment, as
-  `TF_VAR_api_allowed_cidrs` for the cluster stack and `TF_VAR_ssh_allowed_cidrs` for the ci stack,
-  as given: the address of the machine the recipes run on is not added, and the recipe says so.
+  A network is no wider than `/16`, 65,536 addresses, the widest an operator's own allowlist
+  reasonably holds, and is written by its own address, as `192.0.2.0/24` and not `192.0.2.5/24`.
+  IPv6 networks are refused, as the stacks' rules and the load balancer's listener take IPv4 only,
+  so no IPv6 prefix limit applies. An entry that breaks a rule is refused, named by its position in
+  the list and the rule, not by its value. The `api_allowed_cidrs` variable of the cluster stack and
+  the `ssh_allowed_cidrs` variable of the ci stack hold the same rule, so a `tofu` run outside the
+  recipes cannot open the APIs or SSH wider either. The list reaches tofu only in its environment,
+  as `TF_VAR_api_allowed_cidrs` for the cluster stack and `TF_VAR_ssh_allowed_cidrs` for the ci
+  stack, as given: nothing is added to it, such as the address of the machine the recipes run on.
 - `CI_HOST_IMAGE` and `CI_HOST_SSH_PUBLIC_KEY`: the ci stack's image name and the operator's SSH
   public key, which reach tofu as `TF_VAR_image_name` and `TF_VAR_ssh_public_key`; only the ci stack
   needs them. `CI_HOST_SSH_USER`: the image's default user, whom `just ci-host-setup` and

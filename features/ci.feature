@@ -97,7 +97,17 @@ Feature: Continuous integration
     When the checks of just ci's groups are read
     Then one group renders this checkout's tree with scripts/render and keeps nothing, so a tree that does not render fails just ci as it fails the required check
 
+  Scenario: The comment job runs gh with its own token and none of the other secrets
+    Given every secret variable the recipes read set to a marker, and a recording gh
+    When the comment job runs
+    Then gh's recorded environment holds the job's token and none of those secrets
+
   Scenario: The render is part of the required result, and the comment is not
     Given the CI workflow and the comment workflow
     When the jobs the required job waits for and the comment workflow's jobs are read
     Then the required job waits for the render job, which nothing skips, and the comment workflow is a workflow of its own with no job named ci
+
+  Scenario: Every workflow job that calls the Dagger module checks out the whole history
+    Given every workflow file under .github/workflows/ and the recipes its jobs run
+    When a job runs a recipe that, itself or in the script it runs, calls the Dagger module
+    Then that job checks out the whole history, as the module reads the workspace's Git history, which a shallow clone of a commit with parents cannot give
