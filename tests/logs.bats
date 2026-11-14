@@ -417,6 +417,38 @@ defined_keys() {
   [ "$status" -eq 1 ]
 }
 
+@test "The collector's configuration is rendered with flux and helm given none of the secrets" {
+  local bin="$BATS_TEST_TMPDIR/bin" tool real name
+  mkdir -p "$bin"
+  # Each tool is recorded, by the names of its environment, and then runs as itself.
+  for tool in flux helm; do
+    real=$(command -v "$tool")
+    printf '#!/usr/bin/env bash\nenv | cut -d= -f1 >> %q\nexec %q "$@"\n' \
+      "$BATS_TEST_TMPDIR/names.$tool" "$real" > "$bin/$tool"
+    chmod +x "$bin/$tool"
+  done
+  local names=(AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY CLUSTER_S3_ACCESS_KEY_ID CLUSTER_S3_SECRET_ACCESS_KEY
+    OS_CLOUD OS_APPLICATION_CREDENTIAL_ID OS_APPLICATION_CREDENTIAL_SECRET TF_STATE_PASSPHRASE
+    TF_ENCRYPTION SOPS_AGE_KEY SOPS_AGE_KEY_FILE FLUX_AGE_KEY FLUX_AGE_KEY_FILE OPERATOR_CIDRS)
+  local settings=()
+  for name in "${names[@]}"; do settings+=("$name=marker-$name"); done
+
+  run env PATH="$bin:$PATH" "${settings[@]}" "$REPO/scripts/vector-config" "$BATS_TEST_TMPDIR/vector-out"
+
+  [ "$status" -eq 0 ]
+  for tool in flux helm; do
+    echo "$tool"
+    [ -s "$BATS_TEST_TMPDIR/names.$tool" ]
+    grep -qx HELM_CACHE_HOME "$BATS_TEST_TMPDIR/names.$tool"
+    for name in "${names[@]}"; do
+      if grep -qx "$name" "$BATS_TEST_TMPDIR/names.$tool"; then
+        echo "$tool got $name"
+        return 1
+      fi
+    done
+  done
+}
+
 @test "The collector has the host access it needs and no more" {
   local pod data mounts hostpaths user level escalations
   render "$COLLECTOR"

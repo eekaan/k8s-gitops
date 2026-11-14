@@ -353,6 +353,152 @@ absent() {
   done
 }
 
+@test "The allowlist is used as given and no recipe says otherwise" {
+  with CI_HOST_IMAGE=fixture-image 'CI_HOST_SSH_PUBLIC_KEY=ssh-ed25519 AAAAfixture operator'
+  for stack in sto2/cluster sto2/ci; do
+    for flags in '' --yes; do
+      echo "$stack $flags"
+      rm -f "$RECORD/tofu"
+
+      if [[ -n $flags ]]; then
+        recipe infra-apply "$flags" "$stack" < /dev/null
+      else
+        recipe infra-plan "$stack"
+      fi
+
+      [ "$status" -eq 0 ]
+      [[ $output != *"public address"* && $output != *"not implemented"* ]]
+      [[ $(tofu_calls plan) == *"-chdir=$REPO/infra/openstack/stacks/$stack plan "* ]]
+      [ "$(tofu_env plan "TF_VAR_$([[ $stack == */ci ]] && echo ssh || echo api)_allowed_cidrs")" = '["203.0.113.77/32"]' ]
+    done
+  done
+
+  recipe infra-destroy --yes < /dev/null
+
+  [[ $output != *"public address"* ]]
+}
+
+@test "An allowlist entry wider than /16 or with host bits set is refused by its position" {
+  # Each list and the messages naming each of its wrong entries, in order.
+  lists=('["198.51.100.0/24", "255.254.0.0/15"]' '["255.0.0.1/1", "0.0.0.0/1", "128.0.0.0/1"]'
+    '["198.51.100.7/24", "203.0.113.0/24", "255.1.0.1/16"]' '["192.0.2.0/24", "255.01.0.0/24", "256.0.0.0/24"]')
+  messages=('entry 2 is wider than /16' 'entry 1 is wider than /16|entry 2 is wider than /16|entry 3 is wider than /16'
+    'entry 1 has bits set below its prefix|entry 3 has bits set below its prefix'
+    'entry 2 is not an IPv4 network|entry 3 is not an IPv4 network')
+  for i in "${!lists[@]}"; do
+    for from in OPERATOR_CIDRS operator-cidrs.json; do
+      echo "$from: ${lists[i]}"
+      reset_environment
+      without OPERATOR_CIDRS
+      rm -f "$RECORD/tofu" "$REPO/operator-cidrs.json"
+      if [[ $from == OPERATOR_CIDRS ]]; then
+        with "OPERATOR_CIDRS=${lists[i]}"
+      else
+        printf '%s\n' "${lists[i]}" > "$REPO/operator-cidrs.json"
+      fi
+
+      recipe infra-plan sto2/cluster
+
+      [ "$status" -ne 0 ]
+      IFS="|" read -ra rules <<< "${messages[i]}"
+      for message in "${rules[@]}"; do
+        [[ $output == *"$from $message"* ]]
+      done
+      for shown in 255.254.0.0 255.0.0.1 198.51.100.7 203.0.113.0 255.1.0.1 255.01.0.0 256.0.0.0; do
+        [[ $output != *"$shown"* ]]
+      done
+      [ ! -e "$RECORD/tofu" ]
+    done
+  done
+}
+
+# stack_accepts STACK VARIABLE ENTRY...: whether the variable of the stack, given the allowlist of
+# the ENTRYs, passes its validation. The variable's block is planned alone, as tofu does with a
+# variable it is given outside the recipes.
+stack_accepts() {
+  local dir="$BATS_TEST_TMPDIR/validation/$1"
+  mkdir -p "$dir"
+  awk -v name="$2" '$0 == "variable \"" name "\" {" {p = 1} p {print} p && /^}/ {exit}' \
+    "$REPO/infra/openstack/stacks/sto2/$1/variables.tf" > "$dir/main.tf"
+  [ -s "$dir/main.tf" ]
+  (cd "$dir" && tofu plan -input=false -no-color -var="$2=$(jq -cn '$ARGS.positional' --args "${@:3}")" > /dev/null 2>&1)
+}
+
+# shell_accepts ENTRY...: whether the recipes' check passes the allowlist of the ENTRYs.
+shell_accepts() {
+  OPERATOR_CIDRS=$(jq -cn '$ARGS.positional' --args "$@") \
+    bash -c '. "$1/scripts/lib/infra.sh" && export_api_allowed_cidrs' _ "$REPO" > /dev/null 2>&1
+}
+
+@test "The recipes and the stacks accept and refuse the same allowlist entries" {
+  accepted=(192.0.2.0/24 198.51.100.0/24 203.0.113.77/32 255.0.0.0/16 255.1.0.0/17 255.2.0.0/16
+    203.0.113.192/26 255.255.255.255/32 255.0.0.0/32)
+  refused=(0.0.0.0/0 0.0.0.0/1 128.0.0.0/1 255.0.0.1/1 255.0.0.0/8 255.254.0.0/15 255.2.0.0/15 192.0.2.5/24
+    255.0.0.1/16 203.0.113.64/25x 192.0.2.0/33 192.0.2.0/-1 192.0.2.0/2a 256.0.0.0/24 192.0.2.0/024
+    192.0.2.0/00 255.01.0.0/24 192.0.2.0 192.0.2.0/ 2001:db8::/32 not-a-cidr '' ' 192.0.2.0/24'
+    '192.0.2.0/24 ' 1.2.3/24 1.2.3.4.5/24)
+  for entry in "${accepted[@]}"; do
+    echo "accepted: $entry"
+    shell_accepts "$entry"
+    stack_accepts cluster api_allowed_cidrs "$entry"
+    stack_accepts ci ssh_allowed_cidrs "$entry"
+  done
+  for entry in "${refused[@]}"; do
+    echo "refused: $entry"
+    # A negated command never fails a test, so each is run to see its status.
+    if shell_accepts "$entry" || stack_accepts cluster api_allowed_cidrs "$entry" ||
+      stack_accepts ci ssh_allowed_cidrs "$entry"; then
+      echo "accepted by a check that should refuse it" >&2
+      return 1
+    fi
+  done
+  # An entry that ends in a newline, alone and ahead of an entry no check may let through: a
+  # check that stops at the first entry it cannot read must not let the rest pass unchecked.
+  echo "refused: an entry ending in a newline"
+  if shell_accepts $'192.0.2.0/24\n' || stack_accepts cluster api_allowed_cidrs $'192.0.2.0/24\n' ||
+    stack_accepts ci ssh_allowed_cidrs $'192.0.2.0/24\n'; then
+    echo "accepted by a check that should refuse it" >&2
+    return 1
+  fi
+  echo "refused: an entry ending in a newline, then 0.0.0.0/1"
+  if shell_accepts $'192.0.2.0/24\n' 0.0.0.0/1 || stack_accepts cluster api_allowed_cidrs $'192.0.2.0/24\n' 0.0.0.0/1 ||
+    stack_accepts ci ssh_allowed_cidrs $'192.0.2.0/24\n' 0.0.0.0/1; then
+    echo "accepted by a check that should refuse it" >&2
+    return 1
+  fi
+}
+
+@test "The infrastructure recipes run tofu with only the secrets it uses" {
+  with CLUSTER_S3_ACCESS_KEY_ID=marker-cluster-key-id CLUSTER_S3_SECRET_ACCESS_KEY=marker-cluster-secret \
+    SOPS_AGE_KEY_FILE="$BATS_TEST_TMPDIR/talos.agekey" SOPS_AGE_KEY=marker-talos-age-key \
+    FLUX_AGE_KEY_FILE="$BATS_TEST_TMPDIR/flux.agekey" FLUX_AGE_KEY=marker-flux-age-key
+  for run in 'infra-plan sto2/cluster' 'infra-apply --yes sto2/cluster' 'infra-destroy --yes'; do
+    echo "$run"
+    rm -f "$RECORD"/env.*
+    # shellcheck disable=SC2086 # the recipe and its arguments as an operator types them
+    recipe $run < /dev/null
+
+    [ "$status" -eq 0 ]
+    for env in "$RECORD"/env.*; do
+      subcommand=${env##*/env.}
+      # What tofu reads: the state key, the encryption settings, the cloud credential and the inputs.
+      [ "$(tofu_env "$subcommand" AWS_ACCESS_KEY_ID)" = marker-access-key-id ]
+      [ "$(tofu_env "$subcommand" AWS_SECRET_ACCESS_KEY)" = marker-secret-access-key ]
+      [ -n "$(tofu_env "$subcommand" TF_ENCRYPTION)" ]
+      [ "$(tofu_env "$subcommand" OS_APPLICATION_CREDENTIAL_SECRET)" = marker-application-credential-secret ]
+      # The destroy ends with the plumbing stack, which takes no allowlist.
+      if [[ $run == *sto2/cluster ]]; then
+        [ "$(tofu_env "$subcommand" TF_VAR_api_allowed_cidrs | jq -c .)" = '["203.0.113.77/32"]' ]
+      fi
+      # What it does not: the cluster's key, the age keys, the passphrase's own variable, the allowlist.
+      for name in CLUSTER_S3_ACCESS_KEY_ID CLUSTER_S3_SECRET_ACCESS_KEY SOPS_AGE_KEY_FILE SOPS_AGE_KEY \
+        FLUX_AGE_KEY_FILE FLUX_AGE_KEY TF_STATE_PASSPHRASE OPERATOR_CIDRS; do
+        [ -z "$(tofu_env "$subcommand" "$name")" ]
+      done
+    done
+  done
+}
+
 @test "The backend is configured from the environment" {
   recipe infra-plan sto2/plumbing
 
@@ -871,11 +1017,6 @@ EOF
 }
 
 @test "the unimplemented hooks say so when they are reached" {
-  recipe infra-plan sto2/cluster
-
-  [ "$status" -eq 0 ]
-  [[ $output == *"not implemented: adding this machine's public address to the allowlist"* ]]
-
   recipe infra-destroy --yes < /dev/null
 
   [ "$status" -eq 0 ]

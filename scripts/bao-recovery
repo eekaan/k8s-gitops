@@ -155,5 +155,5 @@ if ! printf '%s' "$verified" | jq -e '.data.complete == true' > /dev/null; then
 fi
 pending=0
 
-echo "bao-recovery: wrote $file: OpenBao's $shares recovery key shares, any $threshold of which restore access, and its seal key, encrypted to the Talos age key's recipient $recipient"
+echo "bao-recovery: wrote $file: OpenBao's $shares recovery key shares and its seal key, encrypted to the Talos age key's recipient $recipient; any $threshold of the shares restore access"
 echo "bao-recovery: keep it outside the cluster; it holds the only copy of the shares (docs/runbooks/openbao.md)"

@@ -37,7 +37,7 @@ failed_step() {
 require_commands() {
   local name complete=1
   for name; do
-    if ! command -v "$name" > /dev/null; then
+    if ! type -P "$name" > /dev/null; then
       infra_error "$name is not on PATH; install the pinned tools with: just tools"
       complete=0
     fi
@@ -296,11 +296,15 @@ require_flux_age_key() {
 # flux_sops ARG...: sops with the Flux age key as its only age key, whichever key the environment
 # gives sops for the Talos secrets bundles. The key reaches sops in its environment.
 flux_sops() {
-  if [[ -n ${FLUX_AGE_KEY:-} ]]; then
-    SOPS_AGE_KEY=$FLUX_AGE_KEY env -u SOPS_AGE_KEY_FILE -u SOPS_AGE_KEY_CMD sops "$@"
-  else
-    SOPS_AGE_KEY_FILE=$FLUX_AGE_KEY_FILE env -u SOPS_AGE_KEY -u SOPS_AGE_KEY_CMD sops "$@"
-  fi
+  local key=${FLUX_AGE_KEY:-} file=${FLUX_AGE_KEY_FILE:-}
+  (
+    export -n SOPS_AGE_KEY SOPS_AGE_KEY_FILE SOPS_AGE_KEY_CMD
+    if [[ -n $key ]]; then
+      SOPS_AGE_KEY=$key sops "$@"
+    else
+      SOPS_AGE_KEY_FILE=$file sops "$@"
+    fi
+  )
 }
 
 # node_name_regex: from the node names on standard input, one per line, a regular expression (Go RE2
@@ -559,7 +563,7 @@ require_install_tools() {
     fi
   done
   for tool in yq helm kubectl; do
-    if ! command -v "$tool" > /dev/null; then
+    if ! type -P "$tool" > /dev/null; then
       infra_error "$tool not found on PATH"
       return 1
     fi
@@ -573,7 +577,7 @@ require_install_tools() {
 substitute() {
   local file=$1 flux name value i
   local -a names=() values=()
-  flux=$(command -v flux) || {
+  flux=$(type -P flux) || {
     infra_error "flux not found on PATH"
     return 1
   }

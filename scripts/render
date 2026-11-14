@@ -38,6 +38,10 @@
 set -euo pipefail
 shopt -s nullglob
 
+# flux, helm and kustomize are run with none of the secrets a recipe's environment may hold.
+# shellcheck source=scripts/lib/tools.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/tools.sh"
+
 die() {
   echo "render: $*" >&2
   exit 1
@@ -58,7 +62,7 @@ if ((!forms_only)) && [[ -e $out ]]; then
   [[ -d $out && -z $(find "$out" -mindepth 1 -print -quit) ]] || die "$out exists and is not an empty directory"
 fi
 for tool in flux helm kustomize yq jq; do
-  command -v "$tool" >/dev/null || die "$tool not found on PATH"
+  type -P "$tool" >/dev/null || die "$tool not found on PATH"
 done
 if ((!forms_only)); then
   mkdir -p "$out"

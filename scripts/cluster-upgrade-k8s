@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
 # Upgrades Kubernetes on a cluster to the kubernetesVersion its talman.yaml gives, which comes from
 # versions.yaml through the cluster stack; it takes no version of its own. Shows what talman's dry
-# run reports, and once the cluster's name is typed back, or with --yes, runs talman upgrade-k8s
-# with an etcd snapshot first; talosctl upgrade-k8s then moves the control plane components and the
-# kubelets node by node. It reaches the API at KUBE_API_ADDRESS: left to itself it would use the
-# cluster endpoint, the load balancer's address on the node network, which only the nodes reach.
+# run reports, and once the cluster's name is typed back, or with --yes, takes an etcd snapshot,
+# encrypted and kept in the etcd backup bucket as cluster-snapshot keeps it, and runs talman
+# upgrade-k8s; a snapshot that cannot be taken stops the run before anything is upgraded. talman is
+# not given --snapshot, which would leave an unencrypted snapshot in the cluster's clusterconfig/.
+# talosctl upgrade-k8s moves the control plane components and the kubelets node by node. It reaches
+# the API at KUBE_API_ADDRESS: left to itself it would use the cluster endpoint, the load
+# balancer's address on the node network, which only the nodes reach.
 # Afterwards checks that every node runs the version. With every node on it already, nothing is
 # asked or upgraded.
 # Usage: scripts/cluster-upgrade-k8s [cluster] [--yes]
 set -euo pipefail
 
 here=$(dirname "$0")
-# shellcheck source=scripts/lib/cluster.sh
-. "$here/lib/cluster.sh"
+# shellcheck source=scripts/lib/snapshot.sh
+. "$here/lib/snapshot.sh"
 
 cluster='' confirmed=0
 for arg; do
@@ -44,11 +47,20 @@ case $behind in
   *) exit "$behind" ;;
 esac
 
+step="checking what the etcd snapshot needs"
+complete=1
+require_cluster recipient || complete=0
+require_snapshot || complete=0
+((complete))
+prepare_snapshot
+
 step="waiting for $cluster to be typed back"
 ((confirmed)) || confirm "$cluster" "upgrade Kubernetes on" upgraded
 
+take_etcd_snapshot
+
 step="upgrading Kubernetes"
-cluster_talman upgrade-k8s --snapshot --extra-flags="--endpoint=https://$KUBE_API_ADDRESS:6443"
+cluster_talman upgrade-k8s --extra-flags="--endpoint=https://$KUBE_API_ADDRESS:6443"
 
 step="checking that every node runs the configured Kubernetes"
 cluster_talman upgrade-k8s --dry-run --detailed-exit-code > /dev/null

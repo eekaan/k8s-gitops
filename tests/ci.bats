@@ -626,6 +626,7 @@ fake_gh() {
   cat > "$BIN/gh" << 'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FAKE/calls"
+env | cut -d= -f1 >> "$FAKE/names"
 if [[ $1 == run && $2 == download ]]; then
   while (($#)); do
     [[ $1 == --dir ]] && dir=$2
@@ -1063,6 +1064,28 @@ grammar_cases() {
   post
   [ "$status" -eq 0 ]
   [ ! -e "$FAKE/writes" ]
+}
+
+@test "The comment job runs gh with its own token and none of the other secrets" {
+  fake_gh
+  comment unchanged
+  cp "$BATS_TEST_TMPDIR/unchanged.md" "$BATS_TEST_TMPDIR/comment.md"
+  artifact comment.md
+  local names=(AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY CLUSTER_S3_ACCESS_KEY_ID CLUSTER_S3_SECRET_ACCESS_KEY
+    OS_CLOUD OS_APPLICATION_CREDENTIAL_ID OS_APPLICATION_CREDENTIAL_SECRET TF_STATE_PASSPHRASE
+    TF_ENCRYPTION SOPS_AGE_KEY SOPS_AGE_KEY_FILE FLUX_AGE_KEY FLUX_AGE_KEY_FILE OPERATOR_CIDRS)
+  local name
+  for name in "${names[@]}"; do export "$name=marker-$name"; done
+
+  post
+
+  [ "$status" -eq 0 ]
+  [ -s "$FAKE/names" ]
+  grep -qx GH_TOKEN "$FAKE/names"
+  for name in "${names[@]}"; do
+    echo "$name"
+    if grep -qx "$name" "$FAKE/names"; then return 1; fi
+  done
 }
 
 @test "The render is part of the required result, and the comment is not" {
