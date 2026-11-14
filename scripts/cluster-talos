@@ -75,7 +75,7 @@ require_cluster talman secrets age-key wait || complete=0
 if [[ -n $first ]]; then
   require_kubeconfig || complete=0
   require_commands kubectl jq yq || complete=0
-  if [[ -f $talman_file ]] && ! talman_nodes "$talman_file" | cut -d' ' -f1 | grep -qxF -- "$first"; then
+  if [[ -f $talman_file ]] && ! grep -qxF -- "$first" <<< "$(talman_nodes "$talman_file" | cut -d' ' -f1)"; then
     infra_error "$first is not a node of talos/$cluster/talman.yaml; name one by its hostname"
     complete=0
   fi
@@ -107,9 +107,57 @@ if [[ -z $first ]]; then
   exit 0
 fi
 
+# Under pipefail a pipeline fails with the status of any command in it, so no check pipes a tool into
+# a reader that stops at its match, such as grep -q or head: the reader would close the pipe while a
+# tool with a long answer, such as metrics, is still writing it, and the tool, killed by SIGPIPE, would
+# fail the check whatever the reader found. A check's reader takes captured output or reads to the
+# end.
+
+# on_exit STATUS: removes said; then, when STATUS is a failure, names the step the rollout failed in,
+# as report_failed_step has it do.
+on_exit() {
+  local status=$1
+  rm -f -- "$said"
+  failed_step "$status"
+  exit "$status"
+}
+
 # now: the time, in seconds since the epoch.
 now() {
   date +%s
+}
+
+# quietly TOOL ARG...: TOOL ARG..., its standard output as it is and its standard error, which names
+# addresses, out of the output. When TOOL fails, said holds its last line of error, every address in
+# it masked, or its status when it said nothing; when TOOL succeeds, said is emptied. Returns TOOL's
+# status.
+quietly() {
+  local status=0 line
+  # Standard error goes down the pipe, standard output to descriptor 3, which is where it was. An
+  # IPv6 address is a run of hex digits and colons with :: in it or three colons or more, which a
+  # port between colons, as in "<address>:9100: i/o timeout", is not.
+  { "$@" 2>&1 1>&3 3>&- | awk 'NF { line = $0 } END {
+      gsub(/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/, "<address>", line)
+      gsub(/[0-9A-Fa-f]*(::|:[0-9A-Fa-f]*:[0-9A-Fa-f]*:)[0-9A-Fa-f:]*/, "<address>", line)
+      print line
+    }' > "$said"; } 3>&1 || status=$?
+  line=$(< "$said")
+  if ((status == 0)); then
+    : > "$said"
+  elif [[ -n $line ]]; then
+    printf '%s said: %s\n' "$1" "$line" > "$said"
+  else
+    printf '%s failed with status %s and said nothing\n' "$1" "$status" > "$said"
+  fi
+  return "$status"
+}
+
+# metric NAME: the value of the first sample of the metric NAME in the Prometheus text on standard
+# input; fails when there is none. It reads its input to the end, so the command writing it is never
+# cut off, and a pipeline into it fails only when that command fails or the sample is missing.
+metric() {
+  awk -v name="$1" '!found && ($1 == name || index($1, name "{") == 1) { value = $NF; found = 1 }
+    END { if (found) print value; exit !found }'
 }
 
 # joined: the lines on standard input, joined with commas.
@@ -148,23 +196,22 @@ address_of() {
 }
 
 # get_through NODE ARG...: kubectl get ARG... through the API server on the control plane NODE rather
-# than the load balancer, so what that API server reaches comes from NODE's address. kubectl's errors
-# name addresses and stay out of the output.
+# than the load balancer, so what that API server reaches comes from NODE's address.
 get_through() {
   local via=$1
   shift
-  kubectl --server "https://$(address_of "$via"):6443" get "$@" --request-timeout=10s 2> /dev/null
+  quietly kubectl --server "https://$(address_of "$via"):6443" get "$@" --request-timeout=10s
 }
 
 # cilium_health NODE TARGET: whether the Cilium agent on NODE, probing now, reaches TARGET's host on
 # Cilium's health port and TARGET's health endpoint through the overlay.
 cilium_health() {
   local pod health
-  pod=$(kubectl --namespace kube-system get pods --selector k8s-app=cilium --field-selector "spec.nodeName=$1" \
-    --output 'jsonpath={.items[0].metadata.name}' --request-timeout=10s 2> /dev/null) || return 1
+  pod=$(quietly kubectl --namespace kube-system get pods --selector k8s-app=cilium --field-selector "spec.nodeName=$1" \
+    --output 'jsonpath={.items[0].metadata.name}' --request-timeout=10s) || return 1
   [[ -n $pod ]] || return 1
-  health=$(kubectl --namespace kube-system exec "$pod" --container cilium-agent --request-timeout=90s -- \
-    cilium-health status --probe --output json 2> /dev/null) || return 1
+  health=$(quietly kubectl --namespace kube-system exec "$pod" --container cilium-agent --request-timeout=90s -- \
+    cilium-health status --probe --output json) || return 1
   jq -e --arg target "$2" '[.nodes[]? | select(.name == $target or (.name | endswith("/" + $target)))]
     | length == 1 and all(.[];
       (.host["primary-address"].http != null and (.host["primary-address"].http.status // "") == "")
@@ -177,14 +224,14 @@ cilium_health() {
 # no error, such as having no leader, and whether OTHER's member lists NODE's.
 etcd_healthy() {
   local status members
-  status=$(talman talosctl -n "$1" -n "$2" etcd status 2> /dev/null) || return 1
+  status=$(quietly talman talosctl -n "$1" -n "$2" etcd status) || return 1
   # Columns are padded with three spaces or more; a value holds single spaces only. The columns are
   # read by position, so the table must be the one talosctl 1.14 prints: twelve columns, ERRORS last.
   awk -F '   +' 'NR == 1 { if (NF != 12 || $1 != "NODE" || $5 != "LEADER" || $NF != "ERRORS") { unknown = 1; exit } next }
     { rows++; leader[rows] = $5; term[rows] = $7
       if ($5 ~ /^0+$/ || $9 != "false" || $12 != "") bad = 1 }
     END { exit unknown || !(rows == 2 && !bad && leader[1] == leader[2] && term[1] == term[2]) }' <<< "$status" || return 1
-  members=$(talman talosctl -n "$2" etcd members 2> /dev/null) || return 1
+  members=$(quietly talman talosctl -n "$2" etcd members) || return 1
   awk -F '   +' -v node="$1" 'NR > 1 && $3 == node { found = 1 } END { exit !found }' <<< "$members"
 }
 
@@ -193,13 +240,11 @@ etcd_healthy() {
 # without VIA. Each API server process has its own, so it tells which control plane answered: Talos
 # turns the API server's profiling off, and nothing else it serves names its member.
 apiserver_started() {
-  local metrics
   if (($# > 0)); then
-    metrics=$(get_through "$1" --raw /metrics) || return 1
+    get_through "$1" --raw /metrics
   else
-    metrics=$(kubectl get --raw /metrics --request-timeout=10s 2> /dev/null) || return 1
-  fi
-  awk '$1 == "process_start_time_seconds" { print $2; found = 1; exit } END { exit !found }' <<< "$metrics"
+    quietly kubectl get --raw /metrics --request-timeout=10s
+  fi | metric process_start_time_seconds
 }
 
 # behind_load_balancer NODE: whether the load balancer sends fresh connections to NODE's API server:
@@ -217,7 +262,7 @@ behind_load_balancer() {
 
 # node_ready NODE: whether NODE's Ready condition is True.
 node_ready() {
-  kubectl get node "$1" --output json --request-timeout=10s 2> /dev/null |
+  quietly kubectl get node "$1" --output json --request-timeout=10s |
     jq -e 'any(.status.conditions[]?; .type == "Ready" and .status == "True")' > /dev/null
 }
 
@@ -228,8 +273,8 @@ node_ready() {
 # arrives as a pod on that control plane would.
 check_tried() {
   local node=$1 tried_at=$2 other via status wait unanswered
-  other=$(talman_nodes "$talman_file" | cut -d' ' -f1 | grep -vxF -- "$node" | head -1)
-  via=$(yq ".nodes[] | select(.role == \"controlplane\" and .hostname != \"$node\") | .hostname" "$talman_file" | head -1)
+  other=$(yq "[.nodes[] | select(.hostname != \"$node\") | .hostname] | .[0] // \"\"" "$talman_file")
+  via=$(yq "[.nodes[] | select(.role == \"controlplane\" and .hostname != \"$node\") | .hostname] | .[0] // \"\"" "$talman_file")
   if [[ -z $other || -z $via ]]; then
     failure="talos/$cluster/talman.yaml holds no other node, or no other control plane, to check $node from"
     return 1
@@ -255,7 +300,7 @@ check_tried() {
     failure="the API server on $via does not reach $node's kubelet"
     return 1
   fi
-  if ! get_through "$via" --raw "/api/v1/nodes/http:$node:9100/proxy/metrics" | grep -q '^node_exporter_build_info'; then
+  if ! get_through "$via" --raw "/api/v1/nodes/http:$node:9100/proxy/metrics" | metric node_exporter_build_info > /dev/null; then
     failure="$via does not reach node-exporter on $node, as a pod on $via would"
     return 1
   fi
@@ -316,10 +361,16 @@ progress() {
 # NODE reverts and which nodes it leaves as they were.
 stop() {
   infra_error "$2"
+  [[ ! -s $said ]] || infra_error "$(< "$said")"
   infra_error "$1 is not kept: Talos applied its configuration in try mode, so $1 reverts by itself to the configuration it had $try_minutes minutes after it was applied, without a reboot; just cluster-talos $cluster then shows the change again"
   progress
   exit 1
 }
+
+# said: what the tool of the last check said when it failed, its addresses masked, for stop to print.
+step="making a file for what the checks' tools say"
+said=$(mktemp -t cluster-talos.XXXXXXXXXX)
+trap 'on_exit $?' EXIT
 
 step="checking $cluster before anything is applied"
 if ! "$here/cluster-check" "$cluster"; then

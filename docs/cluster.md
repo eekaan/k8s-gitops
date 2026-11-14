@@ -429,7 +429,14 @@ machine, each of these must pass, in this order:
 Only then, and only while more than a minute of the window is left, is the same configuration
 applied again, which keeps it. A failed check stops the rollout: the node reverts by itself, the
 nodes before it keep theirs and those after it are untouched, and the recipe says which are which,
-as it does when a later node cannot say what the configuration would change.
+as it does when a later node cannot say what the configuration would change. It names the check
+that failed and, when the tool the check ran failed, that tool's last line of error, with every
+address in it masked, or its exit status when it printed none. A check reads a tool's whole answer,
+however early the line it looks for comes: a reader that stopped at it, such as `grep -q`, would
+leave a tool with a long answer, such as metrics, to die of SIGPIPE, which fails the check under
+`pipefail` whatever the answer held. `tests/cluster-recipes.bats` answers the checks' requests for
+metrics and for a node with hundreds of kilobytes, and fails on a pipe written into such a reader
+in the rollout's scripts.
 
 ### What the checks prove, and what to watch afterwards
 
@@ -468,6 +475,25 @@ makes it do. Until each has been, watch:
 6. trustd and the CI host stay unproved until a worker joins and the CI host connects; the paths
    from pods on a node to the node itself, until a pod there, such as Prometheus on a control
    plane, uses one.
+
+### Checked on the running cluster
+
+What the rules and the checks rest on, read from the cluster before any node held a rule:
+
+- Every node's own address, as Kubernetes reports it, is the one its `members` entry holds, for all
+  six nodes.
+- Connections to TCP 6443 on the control planes come only from the nodes' own addresses, from the
+  load balancer's addresses, which lie in the DHCP pool, from the nodes' floating addresses and over
+  the loopback interface: each is a source of `kube-apiserver`.
+- Scrapes of the controller manager, the scheduler and node-exporter on a control plane, TCP 10257,
+  10259 and 9100, arrive from a worker's own address, masqueraded as `members` describes, not from
+  the pod range.
+- Each control plane's API server reports a `process_start_time_seconds` of its own, and fifteen
+  fresh requests through the load balancer reached all three, as check 7 needs.
+- No Service names an external address, so none is left that `DenyServiceExternalIPs`, which
+  refuses only a new one, would let stay.
+- Cilium routes in tunnel mode on its default port, VXLAN's UDP 8472, with its host firewall off, so
+  no node address has a tunnel endpoint.
 
 ### The way back
 
@@ -796,7 +822,10 @@ and helm's output passes through, naming the objects they apply, except in `clus
 `cluster-reboot`, `cluster-destroy` and `grafana`: they print node and object names only, and none
 of what kubectl prints, as the objects it reads and its errors hold the API server's, the nodes' and
 the pods' addresses; only `kubectl drain`'s passes through in `cluster-reboot`, as in
-`cluster-upgrade`, naming the pods it evicts and those it cannot.
+`cluster-upgrade`, naming the pods it evicts and those it cannot. The checks of
+`cluster-talos --first` print none of what kubectl, or talosctl through `talman talosctl`, prints
+either, but for a check whose tool failed, its last line of error with every IPv4 and IPv6 address
+in it masked as `<address>`; their `talman apply` dry runs print as talman's output does above.
 
 ## Environment
 

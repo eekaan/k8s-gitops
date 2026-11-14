@@ -414,9 +414,26 @@ if [[ $line == *" --server https://"* ]]; then
   server=${line#* --server https://}
   server=$(yq ".nodes[] | select(.ipAddress == \"${server%%:6443 *}\") | .hostname" "$TALMAN_CONFIG/talman.yaml")
 fi
+# long LINE...: each LINE, then several hundred kilobytes more, as a real API server's or exporter's
+# metrics run to, far more than a pipe holds: a reader that stops at its match closes the pipe while
+# this is still writing, which, under pipefail, fails the command as it would kubectl.
+long() {
+  printf '%s\n' "$@"
+  printf '# HELP filler_metric_total A metric that is only there to make the answer long.\nfiller_metric_total{n="%s"} 0\n' $(seq 4000)
+}
+# address NODE: NODE's address in talman.yaml.
+address() {
+  yq ".nodes[] | select(.hostname == \"$1\") | .ipAddress" "$TALMAN_CONFIG/talman.yaml"
+}
+# unanswered ADDRESS PORT: fails as kubectl does when nothing answers at ADDRESS on PORT, with an
+# error that names the address.
+unanswered() {
+  printf 'Error from server: error dialing backend: dial tcp %s:%s: i/o timeout\n' "$1" "$2" >&2
+  exit 1
+}
 case $line in
   *" get --raw /readyz "*)
-    [[ -z $server || ! -e $STATE/api-cut.$server ]] || exit 1
+    [[ -z $server || ! -e $STATE/api-cut.$server ]] || unanswered "$(address "$server")" 6443
     echo ok
     ;;
   *" get --raw /metrics "*)
@@ -435,20 +452,21 @@ case $line in
       echo $((turn + i + 1)) > "$STATE/lb-turn"
       [[ -n $server ]] || exit 1
     elif [[ -e $STATE/api-cut.$server ]]; then
-      exit 1
+      unanswered "$(address "$server")" 6443
     fi
-    printf '%s\n' '# TYPE process_start_time_seconds gauge' "process_start_time_seconds 1.8000000${server##*-}5e+09"
+    long '# TYPE process_start_time_seconds gauge' "process_start_time_seconds 1.8000000${server##*-}5e+09"
     ;;
   *" get --raw /api/v1/nodes/http:"*":9100/proxy/metrics "*)
     node=${line#* /api/v1/nodes/http:}
     node=${node%%:9100/*}
-    [[ ! -e $STATE/exporter-cut.$node ]] || exit 1
-    printf '%s\n' '# TYPE node_exporter_build_info gauge' 'node_exporter_build_info{version="1.9.1"} 1'
+    [[ ! -e $STATE/exporter-cut.$node ]] || unanswered "$(address "$node")" 9100
+    long '# TYPE node_exporter_build_info gauge' 'node_exporter_build_info{version="1.9.1"} 1'
     ;;
   *" get --raw /api/v1/nodes/"*"/proxy/healthz "*)
     node=${line#* /api/v1/nodes/}
     node=${node%%/proxy/healthz *}
-    [[ ! -e $STATE/kubelet-cut.$node ]] || exit 1
+    # The API server dials a kubelet at the node's InternalIP, which may be an IPv6 one.
+    [[ ! -e $STATE/kubelet-cut.$node ]] || unanswered '[2001:db8::22]' 10250
     echo ok
     ;;
   *" get pods --selector k8s-app=cilium --field-selector spec.nodeName="*)
@@ -479,7 +497,11 @@ case $line in
     node=${node%% *}
     ready=True
     [[ ! -e $STATE/notready.$node ]] || ready=Unknown
-    printf '{"status":{"conditions":[{"type":"Ready","status":"%s"}]}}\n' "$ready"
+    # A warning the API server attaches to an answer, which kubectl prints and still succeeds.
+    echo "Warning: node $node is answered from 192.0.2.211" >&2
+    # The images a node holds are part of its status, which they make longer than a pipe holds.
+    images=$(printf '{"names":["registry.example.com/filler/image-%s:v1"],"sizeBytes":1},' $(seq 3000))
+    printf '{"status":{"conditions":[{"type":"Ready","status":"%s"}],"images":[%s]}}\n' "$ready" "${images%,}"
     ;;
 esac
 EOF
@@ -559,6 +581,110 @@ calls() {
 # applies: the recorded talman apply calls that are not dry runs, one per line.
 applies() {
   calls '^talman apply( |$)' | grep -v -- ' --dry-run' || true
+}
+
+# early_readers FILE...: FILE:LINE for each pipeline in the bash scripts FILE... that feeds a reader
+# which may stop before its input ends. Such a reader closes the pipe while the command before it is
+# still writing, as soon as that writes more than the pipe holds, and the writer dies of SIGPIPE;
+# under pipefail the pipeline then fails, whatever the reader found. The readers it knows: grep that
+# stops at a match (-q, -l, -L, -m, or its output sent to /dev/null, which GNU grep takes as -q),
+# head, read, sed with a q command, awk with an exit before its END, and jq that reads its input
+# itself or halts. Commands are split at each | outside quotes and comments, and a pipeline is
+# followed onto the next line after a trailing | or \ and while a quote is open.
+early_readers() {
+  awk -v q="'" '
+    # program(command): the text of the first quoted program in command.
+    function program(command,    from, rest, to) {
+      from = index(command, q)
+      if (!from) return ""
+      rest = substr(command, from + 1)
+      to = index(rest, q)
+      return to ? substr(rest, 1, to - 1) : rest
+    }
+    function early(command,    text, end) {
+      sub(/^[[:space:]]+/, "", command)
+      if (command ~ /^(\{[[:space:]]*)?([A-Za-z_][A-Za-z_0-9]*=[^[:space:]]*[[:space:]]+)*read([[:space:]]|$)/) return 1
+      if (command ~ /^head([[:space:]]|$)/) return 1
+      if (command ~ /^grep[[:space:]]/)
+        return command ~ /[[:space:]]-[A-Za-z]*[qlLm]/ || command ~ /--(quiet|silent|max-count|files-with)/ ||
+          command ~ />[[:space:]]*\/dev\/null/
+      if (command ~ /^sed[[:space:]]/) return program(command) ~ /(^|[;{}[:space:]0-9$\/])q([;}[:space:]]|$)/
+      if (command ~ /^awk[[:space:]]/) {
+        text = program(command)
+        end = index(text, "END")
+        if (end) text = substr(text, 1, end - 1)
+        return text ~ /(^|[^A-Za-z_])exit([^A-Za-z_]|$)/
+      }
+      if (command ~ /^jq[[:space:]]/) return program(command) ~ /(^|[^A-Za-z_.$])(input|inputs|halt|halt_error)([^A-Za-z_]|$)/
+      return 0
+    }
+    # split_commands(text): text cut into part[1..n] at each | outside quotes and comments that is
+    # not part of ||; returns n, and sets open when text ends inside a quote.
+    function split_commands(text,    i, c, n, single, double, comment) {
+      n = 1
+      part[1] = ""
+      single = double = comment = 0
+      for (i = 1; i <= length(text); i++) {
+        c = substr(text, i, 1)
+        if (comment) {
+          if (c == "\n") comment = 0
+          continue
+        }
+        if (single) {
+          if (c == q) single = 0
+        } else if (c == "\\") {
+          part[n] = part[n] substr(text, i, 2)
+          i++
+          continue
+        } else if (double) {
+          if (c == "\"") double = 0
+        } else if (c == q) {
+          single = 1
+        } else if (c == "\"") {
+          double = 1
+        } else if (c == "#" && (i == 1 || substr(text, i - 1, 1) ~ /[[:space:]]/)) {
+          comment = 1
+          continue
+        } else if (c == "|") {
+          if (substr(text, i + 1, 1) == "|") {
+            part[n] = part[n] "||"
+            i++
+            continue
+          }
+          part[++n] = ""
+          continue
+        }
+        part[n] = part[n] c
+      }
+      open = single || double
+      return n
+    }
+    # A file that ends inside a pipeline or a quote was not split as bash would split it.
+    FNR == 1 && held != "" {
+      print file ":" start ": not read to its end"
+      held = ""
+    }
+    { file = FILENAME }
+    END {
+      if (held != "") print file ":" start ": not read to its end"
+    }
+    held == "" && /^[[:space:]]*#/ { next }
+    {
+      if (held == "") start = FNR
+      text = held $0
+      held = ""
+      n = split_commands(text)
+      if (open || text ~ /(\||\\)[[:space:]]*$/) {
+        held = text "\n"
+        next
+      }
+      for (i = 2; i <= n; i++) {
+        if (early(part[i])) {
+          print FILENAME ":" start
+          break
+        }
+      }
+    }' "$@"
 }
 
 @test "The age key is created once and never printed" {
@@ -1256,6 +1382,114 @@ keeps() {
     [[ ${printed[1]} != *"$address"* ]]
     [[ ${printed[0]} != *"no answer on the Talos API port from $address"* ]]
   done
+}
+
+@test "cluster-talos --first says what the tool of a failed check said, its addresses masked" {
+  fake_cluster
+  mkdir -p "$CLUSTER/clusterconfig"
+  : > "$CLUSTER/clusterconfig/kubeconfig"
+  # With CI set, talman's own output, which names nodes by address, stays in its log.
+  with CI=true
+  for failing in exporter-cut.worker-2 kubelet-cut.worker-2 notready.worker-2; do
+    rm -f "$STATE"/* "$RECORD/argv"
+    printf '%s\n' cp-1 worker-2 > "$STATE/pending"
+    : > "$STATE/$failing"
+
+    recipe cluster-talos --first worker-2 --yes < /dev/null
+
+    echo "$failing: $status"
+    [ "$status" -ne 0 ]
+    [ "$(applies)" = "$(tries worker-2)" ]
+    case $failing in
+      exporter-cut.*)
+        [[ $output == *"cp-1 does not reach node-exporter on worker-2, as a pod on cp-1 would"* ]]
+        [[ $output == *"kubectl said: Error from server: error dialing backend: dial tcp <address>:9100: i/o timeout"* ]]
+        ;;
+      kubelet-cut.*)
+        [[ $output == *"the API server on cp-1 does not reach worker-2's kubelet"* ]]
+        [[ $output == *"kubectl said: Error from server: error dialing backend: dial tcp [<address>]:10250: i/o timeout"* ]]
+        [[ $output != *2001:db8* ]]
+        ;;
+      notready.*)
+        # A check whose tool answered, with an answer that fails it, has nothing of the tool's to add,
+        # not even a warning it printed.
+        [[ $output == *"worker-2 is not Ready"* ]]
+        [[ $output != *" said: "* ]]
+        [[ $output != *Warning* ]]
+        ;;
+    esac
+    for address in $(yq '.nodes[].ipAddress' "$CLUSTER/talman.yaml"); do
+      [[ $output != *"$address"* ]]
+    done
+    # The file that held it is gone.
+    [ -z "$(find "$BATS_TEST_TMPDIR" -maxdepth 1 -name 'cluster-talos.*')" ]
+  done
+
+  rm -f "$STATE"/* "$RECORD/argv"
+  printf '%s\n' cp-1 worker-2 > "$STATE/pending"
+  : > "$STATE/api-cut.cp-1"
+
+  recipe cluster-talos --first cp-1 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"cp-1's Kubernetes API does not answer at its own address"* ]]
+  [[ $output == *"kubectl said: Error from server: error dialing backend: dial tcp <address>:6443: i/o timeout"* ]]
+  for address in $(yq '.nodes[].ipAddress' "$CLUSTER/talman.yaml"); do
+    [[ $output != *"$address"* ]]
+  done
+
+  # A tool that fails without a word is named with its status.
+  rm -f "$STATE"/* "$RECORD/argv"
+  printf '%s\n' cp-1 worker-2 > "$STATE/pending"
+  : > "$STATE/lb-cut.cp-1"
+  : > "$STATE/lb-cut.cp-2"
+  : > "$STATE/lb-cut.cp-3"
+
+  recipe cluster-talos --first cp-1 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"none of 15 fresh requests through the load balancer reached cp-1's API server"* ]]
+  [[ $output == *"kubectl failed with status 1 and said nothing"* ]]
+}
+
+@test "the rollout's scripts feed no command's output to a reader that may stop before it ends" {
+  # The scan sees the pipelines that failed or could fail a check, and passes those that read on.
+  cat > "$BATS_TEST_TMPDIR/early.sh" <<'EOF'
+get_through "$via" --raw "/api/v1/nodes/http:$node:9100/proxy/metrics" | grep -q '^node_exporter_build_info'
+talman_nodes "$file" | cut -d' ' -f1 |
+  grep -qxF -- "$first"
+via=$(yq ".nodes[] | select(.role == \"controlplane\") | .hostname" "$file" | head -1)
+kubectl get --raw /metrics | awk '$1 == "process_start_time_seconds" { print $2; exit }'
+kubectl get --raw /metrics | awk -v name=x '$1 == name {
+    print $2; exit
+  } END { exit !found }'
+kubectl get --raw /metrics | grep '^x' > /dev/null
+kubectl get pods --output name | IFS= read -r pod
+kubectl get pods --output json | jq -n 'first(inputs | .items[])'
+kubectl get --raw /metrics | sed -n '/^x/{p;q}'
+EOF
+  cat > "$BATS_TEST_TMPDIR/reading-on.sh" <<'EOF'
+# A comment that says | head -1 is no pipeline.
+kubectl get --raw /metrics | awk '$1 == "x" && !found { value = $2; found = 1 } END { if (found) print value; exit !found }'
+kubectl get node x --output json | jq -e 'any(.status.conditions[]?; .type == "Ready")' > /dev/null
+failure="$node's metrics | head do not count, quoted"
+grep -qxF -- "$first" <<< "$names" || echo "it's | head in a string"
+printf '%s\n' "${kept[@]}" | paste -sd, - | sed 's/,/, /g'
+kubectl get pods | while read -r pod; do echo "$pod"; done
+EOF
+
+  run early_readers "$BATS_TEST_TMPDIR/early.sh"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf "$BATS_TEST_TMPDIR/early.sh:%s\n" 1 2 4 5 6 9 10 11 12)" ]
+  run early_readers "$BATS_TEST_TMPDIR/reading-on.sh"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+
+  # cluster-talos, what it sources and the cluster-check it runs.
+  run early_readers "$ROOT/scripts/cluster-talos" "$ROOT/scripts/cluster-env" "$ROOT/scripts/cluster-check" \
+    "$ROOT/scripts/lib/cluster.sh" "$ROOT/scripts/lib/s3.sh" "$ROOT/scripts/lib/infra.sh"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
 }
 
 @test "cluster-talos --first says which nodes kept the configuration when a later node cannot say what would change" {
