@@ -380,6 +380,13 @@ settings, `sysctl.conf`, are written once at first boot:
   belongs to. Pods therefore see an edge's address, not the client's; ADR 0018 names the two ways to
   restore the client's address later and what each costs.
 - ICMP redirects are off, as the edge forwards between hosts of one subnet.
+- **What an edge can reach.** An edge is internet-facing on the public ports and sits on the node
+  subnet, so the nodes' group rule for TCP 6443 from that subnet admits it to the Kubernetes API of
+  every node, as [Services announced over BGP](#services-announced-over-bgp) states. The control is the API's own
+  authentication and authorisation: an edge holds no kubeconfig, token or client certificate, its
+  first boot is given none, and its only inbound path from the internet is the two public ports,
+  forwarded to the Gateway, and SSH from the operator allowlist. The group rule is not narrowed to
+  exclude the edges' addresses.
 
 The security group `<prefix>-edge` holds the rules the cloud enforces, and the cloud's default rules
 are deleted. It admits TCP on each public port from each network of `public_allowed_cidrs`, which is
@@ -412,15 +419,24 @@ edges render from one template, so a change to it replaces both.
 
 ### Rolling out a change
 
-`just infra-apply sto2/edge` refuses a plan that replaces both edges' instances, saying so, as both
-would be down until the new ones answered. `just edge-rollout` rolls such a change out. It plans and
+`just infra-apply sto2/edge` refuses a plan that replaces or deletes both edges' instances, saying
+so, as both would be down until the new ones answered. `just edge-rollout` rolls such a change out. It plans and
 summarises the stack, and once the stack's name is typed back (`--yes`: without asking) it checks
 that edge 2 passes `just edge-check`, replaces edge 1 and its floating IP association alone
-(`-target`), and waits until `just edge-check --edge 1` passes, trying every `EDGE_ROLLOUT_INTERVAL`
+(`-target`), records the new instance's SSH host keys, and waits until `just edge-check --edge 1`
+passes, trying every `EDGE_ROLLOUT_INTERVAL`
 seconds, 15 by default, for `EDGE_ROLLOUT_WAIT`, 900 by default. Then it does the same for edge 2
 and plans the whole stack once more. An edge whose check does not pass in time stops the rollout
 there, and the edge after it is not touched; an edge is never replaced while the other fails its
 check.
+
+A replacement has SSH host keys of its own at the floating address the old instance had, and the
+connection checks them strictly against the recorded ones. The recorded keys of an edge that is
+about to be replaced are therefore dropped, by the rollout and by `just infra-apply sto2/edge` alike
+(`ssh-keygen -R` on the edges' `known_hosts` file), and the new ones are recorded the way the first
+build's were: their fingerprints are shown and `yes` is typed. The rollout does it once the new
+instance answers on SSH, before the edge's check; after `just infra-apply sto2/edge` the next
+`just edge-check` does.
 
 ### Checking and reading
 
