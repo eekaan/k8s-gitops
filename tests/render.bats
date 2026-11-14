@@ -22,10 +22,15 @@ setup_file() {
   mkdir -p "$BATS_FILE_TMPDIR/bin"
   cat >"$BATS_FILE_TMPDIR/bin/helm" <<'EOF'
 #!/usr/bin/env bash
-# Stands in for helm pull from a repository (--repo); anything else is the real helm.
+# Stands in for helm pull from a repository: by --repo, or from an OCI one whose chart is named
+# in the URL; anything else is the real helm.
 args=("$@")
-if [[ ${1:-} == pull && " $* " == *" --repo "* ]]; then
+if [[ ${1:-} == pull && ( " $* " == *" --repo "* || ${2:-} == oci://charts.example.invalid/* ) ]]; then
   chart=${2:-}
+  if [[ $chart == oci://* ]]; then
+    repo=${chart%/*}
+    chart=${chart##*/}
+  fi
   for ((i = 0; i < ${#args[@]}; i++)); do
     case ${args[i]} in
       --repo) repo=${args[i + 1]} ;;
@@ -398,6 +403,26 @@ refused() {
   [ "$(yq '.metadata.namespace' <<<"$config")" = web ]
   [ "$(yq '.metadata.labels["helm.toolkit.fluxcd.io/name"]' <<<"$config")" = ledger ]
   [ -n "$(object "$out" HelmRepository ledger)" ]
+
+  # A bump of the version, the cache kept, renders the chart at the new version.
+  : >"$PULL_LOG"
+  yq -i '.spec.chart.spec.version = "2.3.5"' "$LEDGER/helmrelease.yaml"
+  rm -rf "$BATS_TEST_TMPDIR/base.out"
+  render_direct base
+
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(cat "$PULL_LOG")" = "chart=ledger repo=https://charts.example.invalid/stable version=2.3.5" ]
+  [ "$(yq '.data["chart-version"]' <<<"$(object "$out" ConfigMap ledger)")" = 2.3.5 ]
+
+  # The same through a repository of type oci: the chart is named under the repository's URL.
+  ledger oci
+  yq -i '.spec.type = "oci" | .spec.url = "oci://charts.example.invalid/stable"' "$LEDGER/helmrepository.yaml"
+  : >"$PULL_LOG"
+  render_direct oci
+
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(cat "$PULL_LOG")" = "chart=ledger repo=oci://charts.example.invalid/stable version=2.3.4" ]
+  [ "$(yq '.data["chart-version"]' <<<"$(object "$BATS_TEST_TMPDIR/oci.out/demo/ledger" ConfigMap ledger)")" = 2.3.4 ]
 }
 
 @test "A release whose chart version is not exact, or whose source needs a credential, is refused, and the refusal names it" {
@@ -414,6 +439,7 @@ refused() {
   refused helmrepository.yaml '.spec.secretRef.name = "registry-login"' "secretRef"
   refused helmrepository.yaml '.spec.certSecretRef.name = "registry-ca"' "certSecretRef"
   refused helmrepository.yaml '.spec.type = "oci"' "not an oci://"
+  refused helmrepository.yaml '.spec.provider = "aws"' "cloud provider"
   # Nothing was pulled for any of them.
   [ ! -e "$PULL_LOG" ]
 }
