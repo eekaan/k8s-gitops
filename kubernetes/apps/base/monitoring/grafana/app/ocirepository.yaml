@@ -1,0 +1,21 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/ocirepository-source-v1.json
+# The monitoring stack's own chart, at the version the kube-prometheus-stack application runs, for
+# its dashboards only. Renovate knows both pins as one package and moves them in one pull request,
+# so the dashboards always match the recording rules and job names of the Prometheus they query;
+# tests/grafana.bats fails when the two differ.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: grafana-dashboards
+spec:
+  # The tag is pinned: a new chart arrives by a change to this file, which Flux applies at once.
+  interval: 12h
+  # The chart's packaged layer, which helm-controller reads as it is.
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy
+  url: oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack
+  ref:
+    # renovate: datasource=docker depName=ghcr.io/prometheus-community/charts/kube-prometheus-stack
+    tag: 93.3.0

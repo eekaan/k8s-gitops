@@ -1,0 +1,31 @@
+---
+# Backs the claim up on the application's schedule: VolSync snapshots the claim through the default
+# VolumeSnapshotClass, so the copy is of one moment, and restic uploads a volume made from that
+# snapshot, encrypted with the repository's password. Each run keeps the newest backup of each of
+# the last 7 days, 4 weeks and 3 months and forgets the rest; every 7 days, VolSync's default, it
+# also prunes the repository. An empty volume is not backed up.
+apiVersion: volsync.backube/v1alpha1
+kind: ReplicationSource
+metadata:
+  name: ${APP}
+spec:
+  sourcePVC: ${VOLSYNC_CLAIM:=${APP}}
+  trigger:
+    schedule: "${VOLSYNC_SCHEDULE}"
+  restic:
+    repository: ${APP}-volsync
+    copyMethod: Snapshot
+    retain:
+      daily: 7
+      weekly: 4
+      monthly: 3
+    # Unprivileged, as the restricted Pod Security level requires: VolSync drops every capability
+    # of the mover's container and forbids privilege escalation itself.
+    moverSecurityContext:
+      runAsNonRoot: true
+      runAsUser: ${VOLSYNC_UID:=1000}
+      runAsGroup: ${VOLSYNC_GID:=1000}
+      fsGroup: ${VOLSYNC_GID:=1000}
+      fsGroupChangePolicy: OnRootMismatch
+      seccompProfile:
+        type: RuntimeDefault

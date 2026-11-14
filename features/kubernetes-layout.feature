@@ -175,3 +175,8 @@ Feature: Kubernetes tree layout
     Given a namespace manifest, which the root Kustomization substitutes, using an undeclared variable
     When the kubernetes check runs
     Then it exits non-zero and names the file and the variable
+
+  Scenario: An application that backs up its volume under another application's name fails the check
+    Given an application whose ks.yaml adds components/volsync with APP set to another name, or not set
+    When the kubernetes check runs
+    Then it exits non-zero and names the file and the rule, and the same application with APP set to its own name passes

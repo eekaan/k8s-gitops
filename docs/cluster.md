@@ -397,7 +397,8 @@ out of the artifact, which is built from `kubernetes/`.
 - `just cluster-config [cluster]` applies what Flux needs before it starts: the namespace
   `flux-system`, the ConfigMap `cluster-config`, the Secret `cluster-secrets` and the Secret
   `sops-age` ([kubernetes.md](kubernetes.md#before-flux-starts)). It refuses, naming each, when the
-  cluster's `talman.yaml` or kubeconfig, `CLUSTER_DOMAIN`, the Flux age key or its recipient in
+  cluster's `talman.yaml` or kubeconfig, `CLUSTER_DOMAIN`, `BACKUP_BUCKET_PREFIX`, the object
+  storage's endpoint or region in `infra/openstack/backend.hcl`, the Flux age key or its recipient in
   `.sops.yaml` is missing, when the Flux age key is not the key of that recipient or is the Talos
   age key, and when a key of `cluster-config` or `cluster-secrets` cannot be filled or is not
   listed. A second run changes nothing.
@@ -417,6 +418,14 @@ out of the artifact, which is built from `kubernetes/`.
   certificate. While the namespace `flux-system` does not exist, as before `just cluster-config`
   has run, the check of its pods is skipped, and its line and the last line say so. It runs
   `kubectl get` and `kubectl logs` only. It needs the cluster's `talman.yaml` and kubeconfig.
+- `just grafana [cluster]` forwards a local port to Grafana through the cluster's kubeconfig until
+  Ctrl-C ([kubernetes.md](kubernetes.md#grafana)): `kubectl port-forward`, listening on 127.0.0.1
+  only, from `GRAFANA_PORT` to port 3000 of the Service `grafana-service` in `monitoring`. Once
+  kubectl reports the forward it prints the local URL and where the admin password is kept, never
+  the password, and reads no Secret. It ends the forward on every way out: Ctrl-C, SIGTERM or
+  SIGHUP, kubectl not reporting the forward within `GRAFANA_WAIT` seconds, kubectl stopping, or a
+  failure, each but an interruption naming its cause. It changes nothing on the cluster and needs
+  the cluster's kubeconfig.
 - `just cluster-reboot <node> [cluster] [--yes] [--tolerate <seconds>]` reboots one node, named by
   its hostname in the cluster's `talman.yaml`, while it watches the Kubernetes API through its load
   balancer; for a control plane, that is the check that the API does not go away with one. Any
@@ -495,9 +504,9 @@ file's path.
 Of talman's output `cluster-snapshot` shows only the errors, and with `CI` set not those either.
 What rclone prints names the bucket and the endpoint, so the etcd recipes never show it. kubectl's
 and helm's output passes through, naming the objects they apply, except in `cluster-check`,
-`cluster-reboot` and `cluster-destroy`: they print node and object names only, and none of what
-kubectl prints, as the objects it reads and its errors hold the API server's, the nodes' and the
-pods' addresses; only `kubectl drain`'s passes through in `cluster-reboot`, as in
+`cluster-reboot`, `cluster-destroy` and `grafana`: they print node and object names only, and none
+of what kubectl prints, as the objects it reads and its errors hold the API server's, the nodes' and
+the pods' addresses; only `kubectl drain`'s passes through in `cluster-reboot`, as in
 `cluster-upgrade`, naming the pods it evicts and those it cannot.
 
 ## Environment
@@ -516,7 +525,9 @@ to hand it to kubectl and age-keygen on standard input.
   buckets' names and the state key ([infrastructure.md](infrastructure.md#environment)), with which
   `cluster-snapshot`, `cluster-snapshots` and `cluster-restore` reach the etcd bucket through
   rclone, configured as the infrastructure recipes configure it
-  ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)).
+  ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)). `cluster-bootstrap`,
+  `cluster-config` and `cluster-flux` need the prefix as well, which becomes `BACKUP_BUCKET_PREFIX`
+  in `cluster-config`.
 - `TMPDIR`: where `cluster-snapshot` and `cluster-restore` make their private directory, `/tmp`
   when unset. Inside the repository it is refused.
 - `KUBE_API_ADDRESS`: the Kubernetes API load balancer's floating address, an IPv4 address, as
@@ -537,6 +548,8 @@ to hand it to kubectl and age-keygen on standard input.
   and `cluster-flux` need it.
 - `ADOPTION_INTERVAL` and `ADOPTION_WAIT`: how many seconds `app-adoption` waits between two
   polls, 10 when unset, and in all, 900 when unset.
+- `GRAFANA_PORT` and `GRAFANA_WAIT`: the local port `grafana` forwards from, 3000 when unset, and how
+  many seconds it waits for kubectl to report the forward, 20 when unset.
 - `CI`: when set, talman's output goes to a file instead of the output; see
   [What the recipes print](#what-the-recipes-print).
 
