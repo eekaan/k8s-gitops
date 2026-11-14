@@ -9,9 +9,11 @@ resources:
   - ../../base/flux-system/artifact-generator
   - ../../base/cert-manager
   - ../../base/demo
+  - ../../base/external-secrets
   - ../../base/kube-system
   - ../../base/cert-manager/cert-manager/ks.yaml
   - ../../base/demo/hello/ks.yaml
+  - ../../base/external-secrets/external-secrets/ks.yaml
   - ../../base/kube-system/cilium/ks.yaml
   - ../../base/kube-system/descheduler/ks.yaml
   - ../../base/kube-system/gateway-api-crds/ks.yaml
