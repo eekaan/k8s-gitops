@@ -1,0 +1,22 @@
+{
+  "address": {
+    "sensitive": true,
+    "type": "string",
+    "value": "203.0.113.50"
+  },
+  "cache_mountpoint": {
+    "sensitive": false,
+    "type": "string",
+    "value": "/var/lib/dagger"
+  },
+  "runner_name": {
+    "sensitive": false,
+    "type": "string",
+    "value": "lab-ci"
+  },
+  "runner_user": {
+    "sensitive": false,
+    "type": "string",
+    "value": "ci-runner"
+  }
+}

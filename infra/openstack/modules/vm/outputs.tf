@@ -14,8 +14,13 @@ output "flavor" {
 }
 
 output "user_data" {
-  description = "User data of the instance, which this module never sets."
+  description = "User data of the instance, null unless it was given some."
   value       = openstack_compute_instance_v2.this.user_data
+}
+
+output "key_pair" {
+  description = "Name of the instance's key pair, null unless it was given one."
+  value       = openstack_compute_instance_v2.this.key_pair
 }
 
 output "boot_volume" {

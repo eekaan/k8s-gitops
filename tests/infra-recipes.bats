@@ -7,16 +7,19 @@ setup() {
   BIN="$BATS_TEST_TMPDIR/bin"
   RECORD="$BATS_TEST_TMPDIR/record"
   mkdir -p "$BIN" "$RECORD" "$BATS_TEST_TMPDIR/repo/infra/openstack/stacks/sto2/plumbing" \
-    "$BATS_TEST_TMPDIR/repo/infra/openstack/stacks/sto2/cluster"
+    "$BATS_TEST_TMPDIR/repo/infra/openstack/stacks/sto2/cluster" \
+    "$BATS_TEST_TMPDIR/repo/infra/openstack/stacks/sto2/ci"
   REPO=$(cd "$BATS_TEST_TMPDIR/repo" && pwd)
-  # A copy of the scripts, the backend file and both stacks' configuration, so no run touches this
+  # A copy of the scripts, the backend file and the stacks' configuration, so no run touches this
   # checkout and a renamed stack input fails here.
   cp -R "$ROOT/scripts" "$REPO/scripts"
   cp "$ROOT/infra/openstack/backend.hcl" "$REPO/infra/openstack/backend.hcl"
   PLUMBING="$REPO/infra/openstack/stacks/sto2/plumbing"
   CLUSTER="$REPO/infra/openstack/stacks/sto2/cluster"
+  CI_STACK="$REPO/infra/openstack/stacks/sto2/ci"
   cp "$ROOT"/infra/openstack/stacks/sto2/plumbing/*.tf "$PLUMBING/"
   cp "$ROOT"/infra/openstack/stacks/sto2/cluster/*.tf "$CLUSTER/"
+  cp "$ROOT"/infra/openstack/stacks/sto2/ci/*.tf "$CI_STACK/"
   # What tofu itself prints: a resource address on stdout, and on stderr when it fails.
   STDOUT_MARKER='module.fixture.openstack_networking_port_v2.stdout_marker'
   ERROR_MARKER='module.fixture.openstack_networking_port_v2.error_marker'
@@ -700,6 +703,78 @@ EOF
     [[ $output == *"usage: infra-destroy"* ]]
     [ ! -e "$RECORD/tofu" ]
   done
+}
+
+@test "The CI host survives a destroy of the cluster stack and is destroyed only by name" {
+  with CI_HOST_IMAGE=fixture-image 'CI_HOST_SSH_PUBLIC_KEY=ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOperatorKey fixture'
+  # The ci stack reads the plumbing stack's state and no other.
+  [ "$(yq -p hcl -o json "$CI_STACK"/*.tf | jq -sc '[.[].data.terraform_remote_state // {} | keys[]]')" = '["plumbing"]' ]
+
+  for args in '--yes' 'sto2/cluster --yes'; do
+    rm -f "$RECORD/tofu"
+    # shellcheck disable=SC2086 # the arguments as an operator types them
+    recipe infra-destroy $args < /dev/null
+
+    [ "$status" -eq 0 ]
+    [ -n "$(tofu_calls apply)" ]
+    absent "-chdir=$CI_STACK " "$RECORD/tofu"
+  done
+
+  rm -f "$RECORD/tofu"
+  recipe infra-destroy sto2/ci <<< "no"
+
+  [ "$status" -ne 0 ]
+  [ -z "$(tofu_calls apply)" ]
+
+  rm -f "$RECORD/tofu"
+  recipe infra-destroy sto2/ci <<< "sto2/ci"
+
+  [ "$status" -eq 0 ]
+  [ "$(tofu_calls plan | awk '{ print $1 }')" = "-chdir=$CI_STACK" ]
+  [[ $(tofu_calls plan) == *" -destroy "* ]]
+  [ "$(tofu_calls apply | awk '{ print $1 }')" = "-chdir=$CI_STACK" ]
+  [[ " $(tofu_calls init) " == *" -backend-config=key=sto2/ci.tfstate "* ]]
+  absent "-chdir=$CLUSTER " "$RECORD/tofu"
+  absent "-chdir=$PLUMBING " "$RECORD/tofu"
+}
+
+@test "the ci stack takes the allowlist, the image and the public key from the environment" {
+  with CI_HOST_IMAGE=fixture-image 'CI_HOST_SSH_PUBLIC_KEY=ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOperatorKey fixture'
+
+  recipe infra-plan sto2/ci
+
+  [ "$status" -eq 0 ]
+  [ "$(tofu_env plan TF_VAR_ssh_allowed_cidrs | jq -c .)" = '["203.0.113.77/32"]' ]
+  [ "$(tofu_env plan TF_VAR_image_name)" = fixture-image ]
+  [ "$(tofu_env plan TF_VAR_ssh_public_key)" = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOperatorKey fixture' ]
+  [ "$(jq -r .key <<< "$(tofu_env plan TF_VAR_plumbing_state)")" = sto2/plumbing.tfstate ]
+  [ -z "$(tofu_env plan TF_VAR_api_allowed_cidrs)" ]
+  absent 203.0.113.77 "$RECORD/argv"
+  [[ $output != *203.0.113.77* && $output != *FixtureOperatorKey* ]]
+
+  # Without them it names each and runs nothing.
+  for name in CI_HOST_IMAGE CI_HOST_SSH_PUBLIC_KEY OPERATOR_CIDRS; do
+    reset_environment
+    with CI_HOST_IMAGE=fixture-image 'CI_HOST_SSH_PUBLIC_KEY=ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOperatorKey fixture'
+    without "$name"
+    rm -f "$RECORD/tofu"
+
+    recipe infra-plan sto2/ci
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"$name is not set"* ]]
+    [ ! -e "$RECORD/tofu" ]
+  done
+
+  # The other stacks need none of them.
+  reset_environment
+  rm -f "$RECORD/tofu"
+
+  recipe infra-plan sto2/cluster
+
+  [ "$status" -eq 0 ]
+  [ -z "$(tofu_env plan TF_VAR_image_name)" ]
+  [ -z "$(tofu_env plan TF_VAR_ssh_allowed_cidrs)" ]
 }
 
 @test "infra-apply --yes applies the plan it saved under the stack's .terraform without asking" {

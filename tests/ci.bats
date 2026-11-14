@@ -262,7 +262,10 @@ runs_of() {
   [ "$(yq -o=json -I=0 ".jobs.$runner.strategy.matrix | keys" "$WORKFLOW")" = '["group"]' ]
   [ "$(yq ".jobs.$runner.strategy.matrix.group | tag" "$WORKFLOW")" = '!!str' ]
   [ "$(yq ".jobs.$runner.strategy.matrix.group" "$WORKFLOW")" = "\${{ fromJSON(needs.$lister.outputs.groups) }}" ]
-  [ "$(yq -o=json -I=0 "[.jobs.$runner.needs] | flatten" "$WORKFLOW")" = "[\"$lister\"]" ]
+  # It waits for the list and for the job that picks the runner the groups run on, and nothing else.
+  chooser=$(yq '[.jobs | to_entries[] | select(.value.steps[] | .run == "just ci-runner") | .key] | .[]' "$WORKFLOW")
+  [ -n "$chooser" ]
+  [ "$(yq -o=json -I=0 "[.jobs.$runner.needs] | flatten | sort" "$WORKFLOW")" = "$(jq -cn --arg a "$lister" --arg b "$chooser" '[$a, $b] | sort')" ]
   # Each runs just ci with its group, and every group reports its own result, whichever fails first.
   [ "$(yq ".jobs.$runner.strategy.fail-fast" "$WORKFLOW")" = false ]
   run yq -o=json -I=0 "[.jobs.$runner.steps[] | select(has(\"run\"))]" "$WORKFLOW"
@@ -380,6 +383,134 @@ EOF
   for tool in $output; do
     yq -p toml -o yaml -e ".tools | has(\"$tool\")" "$REPO/mise.toml" > /dev/null || { echo "not pinned in mise.toml: $tool"; return 1; }
   done
+}
+
+# event KIND: sets EVENT to the variables GitHub Actions gives a job of the CI workflow of
+# fixture-owner/fixture-repo, with the event's payload: push (to main), branch (a pull request from
+# a branch of the repository) or fork (a pull request from a fork). WORKFLOW_FILE, ci.yaml unless
+# set, is the workflow the job belongs to.
+event() {
+  local payload="$BATS_TEST_TMPDIR/event-$1.json" ref
+  case $1 in
+    push)
+      ref=refs/heads/main
+      jq -n '{ref: "refs/heads/main", repository: {full_name: "fixture-owner/fixture-repo"}}' > "$payload"
+      EVENT=(GITHUB_EVENT_NAME=push)
+      ;;
+    branch | fork)
+      ref=refs/pull/7/merge
+      jq -n --arg head "$([[ $1 == branch ]] && echo fixture-owner || echo someone-else)/fixture-repo" '{
+        number: 7,
+        pull_request: {number: 7, head: {ref: "feature", repo: {full_name: $head, fork: ($head != "fixture-owner/fixture-repo")}},
+          base: {ref: "main", repo: {full_name: "fixture-owner/fixture-repo"}}},
+        repository: {full_name: "fixture-owner/fixture-repo"}}' > "$payload"
+      EVENT=(GITHUB_EVENT_NAME=pull_request)
+      ;;
+  esac
+  EVENT+=(GITHUB_REF="$ref" GITHUB_REPOSITORY=fixture-owner/fixture-repo GITHUB_EVENT_PATH="$payload"
+    GITHUB_WORKFLOW_REF="fixture-owner/fixture-repo/.github/workflows/${WORKFLOW_FILE:-ci.yaml}@$ref")
+}
+
+# pick KIND [LABEL]: runs just ci-runner for the event KIND, with CI_RUNNER_LABEL set to LABEL when
+# given, as the CI workflow's step does.
+pick() {
+  event "$1"
+  local label=()
+  if (($# > 1)); then
+    label=(CI_RUNNER_LABEL="$2")
+  fi
+  : > "$BATS_TEST_TMPDIR/github-output"
+  run env -u CI_RUNNER_LABEL "${EVENT[@]}" "${label[@]}" GITHUB_OUTPUT="$BATS_TEST_TMPDIR/github-output" \
+    just --justfile "$REPO/justfile" ci-runner
+}
+
+# hook KIND: runs the CI host's job-started hook, as scripts/lib/ci-host.sh writes it, for a job of
+# the event KIND.
+hook() {
+  event "$1"
+  (. "$REPO/scripts/lib/ci-host.sh" && ci_host_hook) > "$BATS_TEST_TMPDIR/job-started"
+  chmod +x "$BATS_TEST_TMPDIR/job-started"
+  run env -i PATH="$PATH" "${EVENT[@]}" "$BATS_TEST_TMPDIR/job-started"
+}
+
+# the_jobs: sets chooser to the CI workflow's job that runs just ci-runner, and checker to the one
+# that runs a job per group.
+the_jobs() {
+  chooser=$(yq '[.jobs | to_entries[] | select(.value.steps[] | .run == "just ci-runner") | .key] | .[]' "$WORKFLOW")
+  [ -n "$chooser" ]
+  [ "$(wc -l <<< "$chooser")" -eq 1 ]
+  checker=$(yq '[.jobs | to_entries[] | select(.value | has("strategy")) | .key] | .[]' "$WORKFLOW")
+  [ -n "$checker" ]
+  [ "$(wc -l <<< "$checker")" -eq 1 ]
+}
+
+@test "A pull request from a fork never runs on the self-hosted runner" {
+  the_jobs
+  # The check jobs run where the job that runs just ci-runner says, which runs on a hosted runner
+  # itself and hands the recipe the repository's label variable.
+  [ "$(yq ".jobs.$checker.runs-on" "$WORKFLOW")" = "\${{ fromJSON(needs.$chooser.outputs.runner) }}" ]
+  [ "$(yq ".jobs.$chooser.runs-on" "$WORKFLOW")" = ubuntu-latest ]
+  step=$(yq ".jobs.$chooser.steps[] | select(.run == \"just ci-runner\") | .id" "$WORKFLOW")
+  [ "$(yq ".jobs.$chooser.outputs.runner" "$WORKFLOW")" = "\${{ steps.$step.outputs.runner }}" ]
+  # shellcheck disable=SC2016 # the workflow's expression, as written
+  [ "$(yq ".jobs.$chooser.steps[] | select(.run == \"just ci-runner\") | .env | @json" "$WORKFLOW")" = '{"CI_RUNNER_LABEL":"${{ vars.CI_RUNNER_LABEL }}"}' ]
+
+  # The label goes to a push to main and a pull request from a branch of the repository only.
+  for kind in push branch; do
+    pick "$kind" lab-ci
+    [ "$status" -eq 0 ]
+    [ "${lines[-1]}" = '"lab-ci"' ]
+    [ "$(cat "$BATS_TEST_TMPDIR/github-output")" = 'runner="lab-ci"' ]
+  done
+  pick fork lab-ci
+  [ "$status" -eq 0 ]
+  [ "${lines[-1]}" = '"ubuntu-latest"' ]
+  [ "$(cat "$BATS_TEST_TMPDIR/github-output")" = 'runner="ubuntu-latest"' ]
+
+  # A fork's pull request runs the fork's workflow file, which can ask for the host's label itself:
+  # the host's job-started hook fails the job before any of its steps runs.
+  for kind in push branch; do
+    hook "$kind"
+    [ "$status" -eq 0 ]
+  done
+  hook fork
+  [ "$status" -ne 0 ]
+  [[ $output == *"pull requests from other repositories"* ]]
+}
+
+@test "Without a self-hosted runner configured, every job runs on a hosted runner" {
+  the_jobs
+  for kind in push branch fork; do
+    for label in unset empty; do
+      if [[ $label == unset ]]; then
+        pick "$kind"
+      else
+        pick "$kind" ''
+      fi
+      [ "$status" -eq 0 ]
+      [ "${lines[-1]}" = '"ubuntu-latest"' ]
+      [ "$(cat "$BATS_TEST_TMPDIR/github-output")" = 'runner="ubuntu-latest"' ]
+    done
+  done
+  # Every other job names ubuntu-latest itself.
+  run yq -o=json -I=0 "[.jobs | to_entries[] | select(.key != \"$checker\") | .value.runs-on] | unique" "$WORKFLOW"
+  [ "$output" = '["ubuntu-latest"]' ]
+  # A label that is not one stops the run instead of naming a runner.
+  pick push 'lab-ci, ubuntu-latest'
+  [ "$status" -ne 0 ]
+  [[ $output == *"CI_RUNNER_LABEL is not a runner label"* ]]
+}
+
+@test "The publish workflow never runs on the self-hosted runner" {
+  local publish="$REPO/.github/workflows/publish.yaml"
+  run yq -o=json -I=0 '[.jobs[].runs-on]' "$publish"
+  [ "$status" -eq 0 ]
+  [ "$output" = '["ubuntu-latest"]' ]
+
+  WORKFLOW_FILE=publish.yaml hook push
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"jobs of workflows other than .github/workflows/ci.yaml"* ]]
 }
 
 @test "Every action in every workflow is pinned to a commit" {

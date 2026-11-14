@@ -3,7 +3,7 @@
 #   . scripts/stack-env sto2/plumbing
 # Resolves the stack's directory, reads .env when there is one, checks by name every variable the
 # stack needs, and exports the state encryption settings and the inputs the stack takes from the
-# environment. Sets stack, stack_dir, plan_file, errors_file and backend_config, the
+# environment: the operator allowlist, and the ci stack's image and public key. Sets stack, stack_dir, plan_file, errors_file and backend_config, the
 # -backend-config arguments of tofu init: the committed backend file, the bucket and a state key
 # from the stack's path. Returns non-zero, naming what is missing or refused, before anything else
 # happens. The functions below then lock, initialise, plan and apply that stack.
@@ -14,6 +14,14 @@
 # stack_takes NAME: whether the stack declares the input variable NAME.
 stack_takes() {
   grep -qsE "^variable \"$1\" \\{" "$stack_dir"/*.tf
+}
+
+# export_input VARIABLE NAME: when the stack declares the input VARIABLE, which has no default in
+# the repository, requires NAME and exports its value as TF_VAR_<VARIABLE>.
+export_input() {
+  stack_takes "$1" || return 0
+  require_env "$2" || return 1
+  export "TF_VAR_$1=${!2}"
 }
 
 # Exports TF_VAR_plumbing_state: where the plumbing stack of the stack's region keeps its state,
@@ -96,9 +104,16 @@ infra_stack_env() {
   refuse_http2_debug || complete=0
   require_env TF_STATE_BUCKET AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY TF_STATE_PASSPHRASE || complete=0
   require_openstack_auth || complete=0
-  if stack_takes api_allowed_cidrs; then
-    export_api_allowed_cidrs || complete=0
-  fi
+  # The operator allowlist: the cluster stack's APIs and the CI host's SSH.
+  local input
+  for input in api_allowed_cidrs ssh_allowed_cidrs; do
+    if stack_takes "$input"; then
+      export_api_allowed_cidrs "$input" || complete=0
+    fi
+  done
+  # The CI host's image and the operator's public key, the ci stack's deployment values.
+  export_input image_name CI_HOST_IMAGE || complete=0
+  export_input ssh_public_key CI_HOST_SSH_PUBLIC_KEY || complete=0
   ((complete)) || return 1
 
   export_state_encryption || return 1

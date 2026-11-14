@@ -1,0 +1,36 @@
+#cloud-config
+packages:
+  - docker.io
+users:
+  - default
+  - name: ${runner_user}
+    gecos: GitHub Actions runner
+    shell: /bin/bash
+    lock_passwd: true
+runcmd:
+  - - sh
+    - -c
+    - |
+      set -eu
+      dev=
+      tries=0
+      while [ -z "$dev" ]; do
+        for link in /dev/disk/by-id/*${cache_serial}*; do
+          case $link in
+            *-part*) ;;
+            *) if [ -e "$link" ]; then dev=$link; fi ;;
+          esac
+        done
+        if [ -z "$dev" ]; then
+          tries=$((tries + 1))
+          if [ "$tries" -gt 120 ]; then
+            echo "the cache volume did not appear" >&2
+            exit 1
+          fi
+          sleep 5
+        fi
+      done
+      blkid "$dev" > /dev/null || mkfs.ext4 -q -L dagger-cache "$dev"
+      mkdir -p ${cache_mountpoint}
+      grep -qs " ${cache_mountpoint} " /etc/fstab || echo "$dev ${cache_mountpoint} ext4 defaults,nofail,x-systemd.required-by=docker.service 0 2" >> /etc/fstab
+      mountpoint -q ${cache_mountpoint} || mount ${cache_mountpoint}
