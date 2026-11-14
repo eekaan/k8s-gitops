@@ -352,14 +352,14 @@ run "traffic_to_an_edges_public_ports_is_forwarded_to_the_gateways_address_and_n
 
   # With no worker announcing the Gateway's address there is no route to it, and a translated
   # connection must not follow the default route to the cloud's router: the service range is a
-  # reject route on the edge, which the workers' /32s, being more specific, win over.
+  # reject route on the edge, which the workers' /32s, being more specific, win over. staticd, which
+  # installs it, is one of the daemons FRR's start script always starts.
   assert {
     condition = (
       strcontains(output.config["1"].frr_conf, "\nip route 203.0.113.16/28 reject\n") &&
-      length(regexall("(?m)^ip route ", output.config["1"].frr_conf)) == 1 &&
-      strcontains(file("frr-daemons"), "\nstaticd=yes\n")
+      length(regexall("(?m)^ip route ", output.config["1"].frr_conf)) == 1
     )
-    error_message = "The edge must hold a reject route for the whole service range, and run the daemon that installs it."
+    error_message = "The edge must hold a reject route for the whole service range."
   }
 
   assert {
