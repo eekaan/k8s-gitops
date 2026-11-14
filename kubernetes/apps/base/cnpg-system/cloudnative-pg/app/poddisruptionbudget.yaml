@@ -1,0 +1,14 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/poddisruptionbudget-policy-v1.json
+# Keeps one of the operator's two pods running while a node is drained; the chart makes no budget.
+# The selector is the chart's selector labels for the release cloudnative-pg.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cloudnative-pg
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cloudnative-pg
+      app.kubernetes.io/instance: cloudnative-pg

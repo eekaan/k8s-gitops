@@ -20,7 +20,8 @@ the rules below.
   manifests in `app/`.
 - `apps/base/flux-system/artifact-generator/`: publishes one artifact per application.
 - `components/`: Kustomize components. `common` adds the `app-template-defaults` ConfigMap, which
-  an app-template HelmRelease opts into through `valuesFrom`.
+  an app-template HelmRelease opts into through `valuesFrom`; `cnpg-cluster` adds an application's
+  PostgreSQL cluster ([PostgreSQL](#postgresql)).
 
 ## Adding an application
 
@@ -142,10 +143,11 @@ The three `ks.yaml` files set `wait`, so each is Ready only once its definitions
 and `snapshot-controller` once its controller runs as well. An application that creates objects of
 these groups, or whose chart does, names the matching one in `dependsOn` and turns off any copy of
 the same definitions its own chart would install. `linstor-cluster` names `snapshot-controller` for
-its VolumeSnapshotClass ([Storage](#storage)); the monitoring stack ([Monitoring](#monitoring)),
-the baseline applications with a monitor and OpenBao ([OpenBao](#openbao)) name
-`prometheus-operator-crds`; and cert-manager names
-`gateway-api-crds` ([cert-manager](#cert-manager)). No dashboard or route is enabled anywhere.
+its VolumeSnapshotClass ([Storage](#storage)); the monitoring stack ([Monitoring](#monitoring)), the
+baseline applications with a monitor, `cloudnative-pg` ([PostgreSQL](#postgresql)) and OpenBao
+([OpenBao](#openbao)) name `prometheus-operator-crds`; cert-manager ([cert-manager](#cert-manager))
+and `envoy-gateway` ([Envoy Gateway](#envoy-gateway)) name `gateway-api-crds`, and `envoy-gateway`
+turns off its chart's copy of the Gateway API. No dashboard or route is enabled anywhere.
 
 Deleting a definition deletes every object of its kind, so none of these applications ever deletes
 one, also not when it leaves the tree. None applies a definition itself. The monitoring chart's
@@ -383,6 +385,125 @@ configuration to the operator's own satellite DaemonSet at the version the pinne
 the nodes' machine configurations offline to check which nodes LINSTOR selects and which device the
 pool takes; reads the StorageClasses and the VolumeSnapshotClass; and renders the operator's chart
 to check that its definitions are kept.
+
+## Envoy Gateway
+
+Envoy Gateway implements the Gateway API: for each Gateway that names its GatewayClass it runs
+Envoy proxies, which route traffic as the routes attached to the Gateway say. Two applications in
+`apps/base/envoy-gateway-system/` install it:
+
+- `envoy-gateway` installs the controller from its publisher's chart,
+  `oci://docker.io/envoyproxy/gateway-helm`: two replicas, never on one node, with leader election,
+  the chart's default, so one acts at a time; a disruption budget that keeps one running through a
+  drain; the chart's resource requests. It also applies the GatewayClass `envoy-gateway` with the
+  controller name the chart configures. A GatewayClass is cluster-scoped; the API server drops the
+  namespace the application's `targetNamespace` gives it. The namespace enforces the restricted Pod
+  Security level, which the controller, its certificate job and the proxies it creates meet. The
+  chart makes no ServiceMonitor or PodMonitor, and the application adds none.
+- `envoy-gateway-crds` applies Envoy Gateway's own resource definitions (`gateway.envoyproxy.io`)
+  from the same chart at the same tag: an `OCIRepository` unpacks the chart, and an inner
+  `Kustomization` applies its `charts/crds/crds/generated` directory, never pruning, as the Gateway
+  API's inner `Kustomization` does. The publisher's chart of definitions alone keeps them in
+  templates, too large for a Helm release to store.
+
+The chart installs no definitions (`crds.enabled: false`): the Gateway API's come from
+`gateway-api-crds`, so there is one copy, and it leaves out the Gateway API's admission policy as
+that application does. The controller watches only the kinds whose definitions exist when it
+starts, so `envoy-gateway` names both definition applications in `dependsOn`.
+
+The two tags name one package, which Renovate updates in one pull request. Envoy Gateway is built
+against one Gateway API release, the one its chart's own copy is of, and works with a newer
+release's standard channel while that still serves the versions it reads. `tests/baseline.bats`
+fails unless the release `gateway-api-crds` pins has the same major version, is no older, and
+serves every stable kind and version of the chart's copy; an Envoy Gateway update that needs a newer
+Gateway API therefore waits for `gateway-api-crds` to move first. The tests also render the chart
+and build both applications offline to check the rest of this section.
+
+No Gateway exists yet. A Gateway's proxies are reached through a Service of type LoadBalancer,
+which needs the cloud controller, and its HTTPS listener needs a certificate from an issuer, which
+cert-manager has none of yet. Until both are in place the controller accepts the GatewayClass and
+runs no proxy.
+
+## PostgreSQL
+
+Applications get PostgreSQL from the CloudNativePG operator, which runs each database as a
+`Cluster`: a primary and streaming replicas, a replica promoted when the primary fails, and the
+Services and credentials an application connects with.
+
+`apps/base/cnpg-system/cloudnative-pg/` installs the operator in its own namespace, `cnpg-system`, at
+the restricted Pod Security level, from the publisher's chart in
+`oci://ghcr.io/cloudnative-pg/charts`; it watches every namespace. The chart ships the
+`postgresql.cnpg.io` definitions as templates of the release, so each chart upgrade upgrades them
+with the operator, and marks each `helm.sh/resource-policy: keep`, so removing the application
+leaves them, and every cluster, in place.
+Two replicas run on different workers: the leader reconciles, both answer the webhook through which
+the API server admits every change to a CloudNativePG object, and a disruption budget keeps one
+through a drain. Its chart's PodMonitor is on, so it names `prometheus-operator-crds` in `dependsOn`,
+and its `ks.yaml` sets `wait`.
+
+An application takes a cluster from the component `components/cnpg-cluster`, in its `ks.yaml`:
+
+```yaml
+spec:
+  dependsOn:
+    - name: cloudnative-pg
+    - name: prometheus-operator-crds
+  components:
+    - ../../../../../components/cnpg-cluster
+  postBuild:
+    substitute:
+      CNPG_CLUSTER_NAME: <app>-db
+      CNPG_STORAGE_SIZE: 10Gi  # each instance's volume; 5Gi when unset
+```
+
+The cluster has three instances of PostgreSQL 18, from the operator's standard image, whose tag names
+a minor version that Renovate moves. The publisher rebuilds the image under that tag and a node keeps
+the build it pulled first, so instances can run different builds of one minor version. Each instance
+must run on a different worker, and requests and is limited to 500m CPU and 512Mi memory. The
+operator's disruption budgets move the primary away by switchover before its worker is drained, and
+let drains take one replica at a time. A PodMonitor scrapes every instance. Without
+`CNPG_CLUSTER_NAME` the build fails. The operator creates the database `app`, owned by the user
+`app`, whose password and connection URI are in the Secret `<name>-app`; the Services `<name>-rw`,
+`<name>-ro` and `<name>-r` reach the primary, the replicas and any instance.
+
+A patch in the application's own `kustomization.yaml` changes anything else, as it applies after the
+component. It targets the Cluster by kind alone: Flux substitutes after the build, so when the patch
+applies the Cluster is still named `${CNPG_CLUSTER_NAME}`, and a target by the name the application
+gives it matches nothing and is skipped without an error.
+
+```yaml
+patches:
+  - target:
+      kind: Cluster
+    patch: |-
+      - op: replace
+        path: /spec/resources/requests/memory
+        value: 1Gi
+      - op: replace
+        path: /spec/resources/limits/memory
+        value: 1Gi
+```
+
+Each instance's volume is on `linstor-node-local` ([StorageClasses](#storageclasses)), one copy on
+the instance's own worker without DRBD. The three instances already are three copies on three
+workers, kept in step by PostgreSQL's replication; the replicated default would keep each of them
+twice, six copies of every write. The operator's documentation advises one replica at the storage
+level, with no storage host holding two instances of a cluster, which the placement rule guarantees.
+The cost is that an instance cannot move: while its worker is down the cluster runs on two. When the
+worker or its data volume is lost for good, the instance's PersistentVolumeClaim and then its pod
+are deleted, which removes the instance, and the operator clones a new one from the primary. With
+three workers, the new one waits for a worker without an instance.
+
+No backup is configured: WAL archiving and base backups to object storage need the object store's
+credentials from the secret store, which does not run yet, and take their place in the component's
+`Cluster` then. Until then a cluster's data lives only on the workers' data volumes
+([Where the data lives](#where-the-data-lives)).
+
+`tests/postgresql.bats` renders the operator's chart and checks its namespace, definitions,
+replicas, budget, monitor and pods; builds applications that take a cluster from the component, one
+that does not name it and two that patch it, by kind and by name, as Flux applies them; and checks
+each field of the `Cluster` against the pinned chart's definition and its StorageClass against
+LINSTOR's.
 
 ## OpenBao
 
@@ -623,7 +744,8 @@ job's identity token it stops before calling anything, so nobody signs from a la
    reproducibly; a reported digest that is not `sha256:` and 64 hexadecimal digits stops the run;
 3. signs that digest keyless with cosign: a short-lived certificate for the job's identity, recorded
    in Sigstore's public transparency log;
-4. verifies the signature against the identity the instance accepts; a failure stops the run;
+4. verifies the signature against the identity of this workflow at the run's ref, which on `main`
+   is the identity the instance accepts; a failure stops the run;
 5. tags that digest `main`.
 
 The tag moves last and by digest: `main` only ever names an artifact that is signed and verified,
@@ -633,7 +755,9 @@ a run on `refs/heads/main`, and only when no newer commit on `main` changes `kub
 workflow. Runs share one concurrency group that never cancels a run in progress, so they never
 overlap: a run that starts while another is in progress waits for it, and GitHub replaces a waiting
 run with a newer one. A run on another branch, or one a newer commit overtook, such as a re-run of an
-old one, still pushes and signs, says why the tag stayed where it is, and succeeds. The run prints
+old one, still pushes, signs and verifies, says why the tag stayed where it is, and succeeds. An
+artifact signed by a run on another branch carries that branch's identity, which the instance
+refuses. The run prints
 its steps, the digest and whether the tag moved.
 
 The signing identity is this workflow file on that branch: the subject
