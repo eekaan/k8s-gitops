@@ -33,11 +33,24 @@ try_minutes=5 answer_timeout=2m keep_margin=60
 # not Ready, and looks every node-monitor-period, 5 seconds; the kubelet renews its lease every 10
 # seconds, a quarter of its 40-second lease. Talos sets none of them.
 ready_after=65
-# How many fresh requests through the load balancer may go to other control planes before one must
-# reach the tried one: it gives each new connection to the next member in turn, so with three
-# members and other clients' connections between ours, fifteen leave a reachable member unseen only
-# by a rare chance, which fails safe, as the node then reverts.
-lb_attempts=15
+# How long a tried control plane's API server has to become ready at its own address, asked every
+# readyz_poll seconds: a configuration that changes the API server's own settings, such as its
+# admission plugins, makes Talos restart it, and a server that has just started answers /readyz with
+# an error until its post-start hooks are done, which can take a minute.
+readyz_wait=90 readyz_poll=5
+# How many fresh requests through the load balancer, in one round, may go to other control planes
+# before one must reach the tried one: it gives each new connection to the next member in turn, so
+# with three members and other clients' connections between ours, fifteen leave a member in rotation
+# unseen only by a rare chance, which fails safe, as the node then reverts. A round is repeated every
+# lb_poll seconds for lb_wait: the load balancer's TCP health monitor takes out a member that fails
+# three checks five seconds apart, as a restarting API server can, and takes it back after two that
+# pass, five seconds apart, within ten seconds of the server listening again (the defaults of
+# infra/openstack/modules/api-lb, which the cluster stack keeps).
+lb_attempts=15 lb_wait=20 lb_poll=5
+# The checks of a node end, and it is kept, by 240 seconds after the try, while more than keep_margin
+# of its window is left. They reach the Ready wait at ready_after at the earliest; a control plane's
+# API server then has up to readyz_wait to become ready and the load balancer up to lb_wait to take it
+# back, 175 seconds in all, which leaves 65 for cluster-check and the last dry run, which take a few.
 
 usage() {
   infra_error "usage: cluster-talos [cluster] [--onboard] [--yes] [--first <node>]"
@@ -127,28 +140,37 @@ now() {
   date +%s
 }
 
-# quietly TOOL ARG...: TOOL ARG..., its standard output as it is and its standard error, which names
-# addresses, out of the output. When TOOL fails, said holds its last line of error, every address in
-# it masked, or its status when it said nothing; when TOOL succeeds, said is emptied. Returns TOOL's
-# status.
-quietly() {
-  local status=0 line
-  # Standard error goes down the pipe, standard output to descriptor 3, which is where it was. An
-  # IPv6 address is a run of hex digits and colons with :: in it or three colons or more, which a
-  # port between colons, as in "<address>:9100: i/o timeout", is not.
-  { "$@" 2>&1 1>&3 3>&- | awk 'NF { line = $0 } END {
-      gsub(/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/, "<address>", line)
-      gsub(/[0-9A-Fa-f]*(::|:[0-9A-Fa-f]*:[0-9A-Fa-f]*:)[0-9A-Fa-f:]*/, "<address>", line)
-      print line
-    }' > "$said"; } 3>&1 || status=$?
-  line=$(< "$said")
-  if ((status == 0)); then
+# masked: the last line on standard input that is not blank, with every address in it masked; it
+# reads all of its input. An IPv6 address is a run of hex digits and colons with :: in it or three
+# colons or more, which a port between colons, as in "<address>:9100: i/o timeout", is not.
+masked() {
+  awk 'NF { line = $0 } END {
+    gsub(/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/, "<address>", line)
+    gsub(/[0-9A-Fa-f]*(::|:[0-9A-Fa-f]*:[0-9A-Fa-f]*:)[0-9A-Fa-f:]*/, "<address>", line)
+    print line
+  }'
+}
+
+# tool_said TOOL STATUS LINE: puts in said what TOOL, ended with STATUS, said: nothing when it
+# succeeded, otherwise LINE, its last line of error with addresses masked, or its status when LINE
+# is empty.
+tool_said() {
+  if (($2 == 0)); then
     : > "$said"
-  elif [[ -n $line ]]; then
-    printf '%s said: %s\n' "$1" "$line" > "$said"
+  elif [[ -n $3 ]]; then
+    printf '%s said: %s\n' "$1" "$3" > "$said"
   else
-    printf '%s failed with status %s and said nothing\n' "$1" "$status" > "$said"
+    printf '%s failed with status %s and said nothing\n' "$1" "$2" > "$said"
   fi
+}
+
+# quietly TOOL ARG...: TOOL ARG..., its standard output as it is and its standard error, which names
+# addresses, out of the output, and in said as tool_said puts it. Returns TOOL's status.
+quietly() {
+  local status=0
+  # Standard error goes down the pipe, standard output to descriptor 3, which is where it was.
+  { "$@" 2>&1 1>&3 3>&- | masked > "$said"; } 3>&1 || status=$?
+  tool_said "$1" "$status" "$(< "$said")"
   return "$status"
 }
 
@@ -247,17 +269,61 @@ apiserver_started() {
   fi | metric process_start_time_seconds
 }
 
-# behind_load_balancer NODE: whether the load balancer sends fresh connections to NODE's API server:
-# one of lb_attempts requests through its address, each on a connection of its own, which the load
-# balancer gives the control planes in turn, is answered by NODE's.
-behind_load_balancer() {
-  local own seen attempt
-  own=$(apiserver_started "$1") || return 1
-  for ((attempt = 0; attempt < lb_attempts; attempt++)); do
-    seen=$(apiserver_started) || continue
-    [[ $seen != "$own" ]] || return 0
+# apiserver_ready NODE: whether the API server on the control plane NODE, at NODE's own address,
+# answers /readyz with ok within readyz_wait seconds. When it does not, failure says whether it never
+# answered, as when a firewall drops or refuses the connection, with kubectl's own line in said, or
+# which of its checks it still failed when it last answered.
+apiserver_ready() {
+  local node=$1 deadline errors status answered=0 failing=''
+  deadline=$(($(now) + readyz_wait))
+  while :; do
+    status=0
+    errors=$(kubectl --server "https://$(address_of "$node"):6443" get --raw /readyz --request-timeout=10s 2>&1 > /dev/null) ||
+      status=$?
+    if ((status == 0)); then
+      : > "$said"
+      return 0
+    fi
+    # kubectl quotes an answer the server sent, such as /readyz's list of its checks, the failed ones
+    # marked [-]; any other error is its own, about the connection.
+    failing=''
+    if [[ $errors == *"Error from server"* ]]; then
+      answered=1
+      failing=$(awk '{ while (match($0, /\[-\][^ ]+/)) { print substr($0, RSTART + 3, RLENGTH - 3); $0 = substr($0, RSTART + RLENGTH) } }' \
+        <<< "$errors" | joined)
+    fi
+    if [[ -n $failing ]]; then
+      : > "$said"
+    else
+      tool_said kubectl "$status" "$(masked <<< "$errors")"
+    fi
+    (($(now) + readyz_poll <= deadline)) || break
+    sleep "$readyz_poll"
   done
+  if ((!answered)); then
+    failure="$node's Kubernetes API did not answer at its own address within ${readyz_wait}s"
+  else
+    failure="$node's Kubernetes API answered at its own address but was not ready within ${readyz_wait}s${failing:+; still failing: $failing}"
+  fi
   return 1
+}
+
+# behind_load_balancer NODE: whether the load balancer sends fresh connections to NODE's API server
+# within lb_wait seconds: one of a round of lb_attempts requests through its address, each on a
+# connection of its own, which the load balancer gives the control planes in its rotation in turn, is
+# answered by NODE's.
+behind_load_balancer() {
+  local own seen attempt deadline
+  own=$(apiserver_started "$1") || return 1
+  deadline=$(($(now) + lb_wait))
+  while :; do
+    for ((attempt = 0; attempt < lb_attempts; attempt++)); do
+      seen=$(apiserver_started) || continue
+      [[ $seen != "$own" ]] || return 0
+    done
+    (($(now) + lb_poll <= deadline)) || return 1
+    sleep "$lb_poll"
+  done
 }
 
 # node_ready NODE: whether NODE's Ready condition is True.
@@ -324,14 +390,12 @@ check_tried() {
   # A control plane's own API server, at its own address and behind the load balancer, whose health
   # monitor has by now taken out a member it cannot reach: the load balancer connects from its own
   # addresses, which only this node's firewall judges, and routes around a member it cannot reach,
-  # which a check through it alone would not see.
+  # which a check through it alone would not see. Both are given the time a restarted API server
+  # takes to become ready and to be taken back.
   if [[ $(role_of "$node") == controlplane ]]; then
-    if [[ $(get_through "$node" --raw /readyz) != ok ]]; then
-      failure="$node's Kubernetes API does not answer at its own address"
-      return 1
-    fi
+    apiserver_ready "$node" || return 1
     if ! behind_load_balancer "$node"; then
-      failure="none of $lb_attempts fresh requests through the load balancer reached $node's API server, so the load balancer does not reach it"
+      failure="no fresh request through the load balancer reached $node's API server within ${lb_wait}s, $lb_attempts every ${lb_poll}s, so the load balancer does not reach it"
       return 1
     fi
   fi

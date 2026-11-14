@@ -420,7 +420,13 @@ machine, each of these must pass, in this order:
    else it serves names its member. The load balancer gives each new connection to the next member
    in turn, and its health monitor, which checks every member every five seconds and takes one out
    after three failures, has by then taken out one it cannot reach; a check through the load
-   balancer alone would not see that, as it routes around such a member.
+   balancer alone would not see that, as it routes around such a member. A configuration that
+   changes the API server's own settings makes Talos restart it, so `/readyz` is asked every 5
+   seconds for up to 90, as a server that has just started is not ready until its post-start hooks
+   are done, and the fifteen requests are repeated every 5 seconds for up to 20, the time the
+   monitor takes to put a member back after two checks that pass; a failure says whether the API
+   server never answered, as it does not when the firewall drops it, or which of its checks were
+   still failing.
 8. `just cluster-check` passes: the Kubernetes API through the load balancer, every node Ready, the
    pods of `kube-system` running and a pod's logs fetched through its kubelet.
 9. The node's Talos API still reports the configuration in effect. Talos reverts a tried
