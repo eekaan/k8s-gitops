@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Writes the configuration the log collector runs with to DIR/vector.yaml, and Vector's unit tests
+# of it, tests/vector/talos-lines.yaml, to DIR/tests.yaml, for vector-check. The configuration is
+# the one the vector application's HelmRelease gives its pinned chart: the application built in
+# memory as Flux applies it, with the cluster's example key lists for its variables, and the chart,
+# pulled from the URL and tag of its OCIRepository, rendered offline with the values helm-controller
+# gives it. Never contacts a cluster, and reads no registry login.
+# Usage: scripts/vector-config DIR
+set -euo pipefail
+
+[[ $# -eq 1 && -n $1 ]] || { echo "usage: scripts/vector-config DIR" >&2; exit 2; }
+out=$1
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+app=kubernetes/apps/base/monitoring/vector
+cluster=kubernetes/clusters/lab-sto2
+
+for tool in flux helm yq; do
+  command -v "$tool" >/dev/null || { echo "vector-config: $tool not found on PATH" >&2; exit 1; }
+done
+
+# No kubeconfig and no in-cluster address: a tool that tried to reach a cluster fails instead.
+export KUBECONFIG=/dev/null
+unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+# Helm's cache and registry settings, and the Docker configuration helm falls back to for
+# credentials, stay in the run's own directory.
+export HELM_CACHE_HOME="$tmp/helm/cache" HELM_CONFIG_HOME="$tmp/helm/config" HELM_DATA_HOME="$tmp/helm/data"
+export DOCKER_CONFIG="$tmp/docker"
+mkdir -p "$DOCKER_CONFIG"
+
+# shellcheck disable=SC2016 # $list and $vars are yq variables.
+yq ea '. as $list ireduce ({}; . * ($list // {}))' \
+  "$cluster/cluster-config.example.yaml" "$cluster/cluster-secrets.example.yaml" >"$tmp/vars.yaml"
+# shellcheck disable=SC2016 # $vars is a yq variable.
+yq ea 'select(fileIndex == 0) as $vars | select(fileIndex == 1 and . != null)
+  | .spec.postBuild.substitute = $vars' "$tmp/vars.yaml" "$app/ks.yaml" >"$tmp/ks.yaml"
+flux build kustomization vector --path "./$app/app" --kustomization-file "$tmp/ks.yaml" \
+  --dry-run --strict-substitute --in-memory-build >"$tmp/built.yaml"
+
+url=$(yq -N 'select(.kind == "OCIRepository") | .spec.url' "$tmp/built.yaml")
+tag=$(yq -N 'select(.kind == "OCIRepository") | .spec.ref.tag' "$tmp/built.yaml")
+values=$(yq -N 'select(.kind == "HelmRelease") | .spec.valuesFrom[0].name' "$tmp/built.yaml")
+release=$(yq -N 'select(.kind == "HelmRelease") | .spec.releaseName // .metadata.name' "$tmp/built.yaml")
+namespace=$(yq -N 'select(.kind == "HelmRelease") | .spec.targetNamespace // .metadata.namespace' "$tmp/built.yaml")
+yq -N "select(.kind == \"ConfigMap\" and .metadata.name == \"$values\") | .data[\"values.yaml\"]" "$tmp/built.yaml" >"$tmp/values.yaml"
+[[ -s $tmp/values.yaml ]] || { echo "vector-config: no values in the ConfigMap $values" >&2; exit 1; }
+yq -N 'select(.kind == "HelmRelease") | .spec.values // {}' "$tmp/built.yaml" >"$tmp/inline.yaml"
+
+mkdir -p "$tmp/chart"
+helm pull "$url" --version "$tag" --destination "$tmp/chart" >/dev/null
+helm template "$release" "$tmp"/chart/*.tgz --namespace "$namespace" \
+  --values "$tmp/values.yaml" --values "$tmp/inline.yaml" >"$tmp/rendered.yaml"
+
+# The ConfigMap the DaemonSet mounts as its configuration.
+map=$(yq -N 'select(.kind == "DaemonSet") | .spec.template.spec.volumes[] | select(.name == "config")
+  | [.configMap.name // "", (.projected.sources // [] | .[] | .configMap.name // "")] | .[]' "$tmp/rendered.yaml" | grep . || true)
+[[ $(grep -c . <<<"$map") -eq 1 ]] || { echo "vector-config: the DaemonSet mounts as config: ${map:-nothing}" >&2; exit 1; }
+mkdir -p "$out"
+yq -N "select(.kind == \"ConfigMap\" and .metadata.name == \"$map\") | .data[\"vector.yaml\"]" "$tmp/rendered.yaml" >"$out/vector.yaml"
+[[ -s $out/vector.yaml ]] || { echo "vector-config: no vector.yaml in the ConfigMap $map" >&2; exit 1; }
+cp tests/vector/talos-lines.yaml "$out/tests.yaml"
+echo "vector-config: wrote the configuration of $url:$tag and its tests to $out"

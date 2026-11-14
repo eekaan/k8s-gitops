@@ -1,0 +1,173 @@
+---
+# Values for the Vector chart, read by the HelmRelease through a ConfigMap generated without
+# substitution. Keys not set here keep the chart's defaults: the cluster role that lets Vector read
+# pods, namespaces and nodes for the metadata it attaches to each line, and the label that keeps its
+# own pods' logs out of what it collects.
+#
+# Vector runs as an agent, one pod on every node, and sends to the VictoriaLogs store
+# (victoria-logs) every pod's log lines and the log of each of the node's Talos services, the
+# kernel's included, which Talos writes to /var/log (ADR 0014). It reads files only: nothing on the
+# node sends to it, and it listens only for Prometheus.
+role: Agent
+
+# Every node, control planes included: a toleration without a key tolerates every taint. At the
+# priority Kubernetes gives node agents, the scheduler makes room for it on a full node.
+tolerations:
+  - operator: Exists
+podPriorityClassName: system-node-critical
+
+# /var/log holds the pods' log files under pods/, which kubernetes_logs reads, and Talos's own,
+# <service>.log and the rotated <service>.log.1, beside it; Talos renames a file it rotates, so the
+# directory is mounted, read-only, and the file source names the files it reads. The chart's own
+# default also mounts /var/lib, /proc and /sys. The state directory, /var/lib/vector on the node,
+# keeps Vector's place in each file and its buffer across restarts.
+defaultVolumes:
+  - name: var-log
+    hostPath:
+      path: /var/log
+defaultVolumeMounts:
+  - name: var-log
+    mountPath: /var/log
+    readOnly: true
+persistence:
+  hostPath:
+    enabled: true
+    path: /var/lib/vector
+
+# Root: Talos writes its log files, and the container runtime the pods', as root with mode 0640, so
+# only root reads them without a capability. Set here rather than left to the image.
+podSecurityContext:
+  runAsUser: 0
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# Vector's sizing guide is for dedicated throughput, two CPUs an agent; these requests are sized for
+# the lab's small volume of logs. No limit is set, so a burst can use spare CPU.
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+
+# The metrics exporter's port, on the pod's own address, the one port the pod declares.
+containerPorts:
+  - name: prom-exporter
+    containerPort: 9598
+    protocol: TCP
+# Nothing connects to Vector through a Service: Prometheus scrapes each pod through the PodMonitor.
+service:
+  enabled: false
+serviceHeadless:
+  enabled: false
+podMonitor:
+  enabled: true
+  port: prom-exporter
+
+customConfig:
+  data_dir: /vector-data-dir
+  api:
+    enabled: false
+  sources:
+    # Every pod's log files, with the pod's namespace, name, labels and node attached.
+    pods:
+      type: kubernetes_logs
+    # The log Talos writes for each of its services, the kernel's included, and the one it rotated
+    # at 5 MiB; nothing below /var/log, where the pods' and the API server's audit logs are.
+    talos:
+      type: file
+      include:
+        - /var/log/*.log
+        - /var/log/*.log.1
+    vector_metrics:
+      type: internal_metrics
+  transforms:
+    # The node's name, from the pod's environment, and the service's, from the file's name. Each
+    # line stays whole; its own time and level, where its format has them, replace the time it was
+    # read: the kernel's messages, the prefix Go's log package gives machined's, apid's and trustd's
+    # lines, JSON such as etcd's, logfmt such as containerd's, and the kubelet's klog.
+    # tests/vector/talos-lines.yaml holds a line of each.
+    talos_files:
+      type: remap
+      inputs:
+        - talos
+      source: |
+        .node = get_env_var!("VECTOR_SELF_NODE_NAME")
+        .talos_service = parse_regex!(.file, r'^/var/log/(?P<service>[^/]+)\.log(\.1)?$').service
+        line = string!(.message)
+        kernel, err = parse_regex(line, r'^(?P<facility>[a-z0-9]+):\s*(?P<priority>[a-z]+): \[(?P<time>[^\]]+)\]: ')
+        if err == null {
+          .facility = kernel.facility
+          .level = kernel.priority
+          .timestamp = parse_timestamp(kernel.time, format: "%+") ?? .timestamp
+        } else {
+          stdlog, err = parse_regex(line, r'^(?P<time>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\.\d+) ')
+          if err == null {
+            .timestamp = parse_timestamp(stdlog.time, format: "%Y/%m/%d %H:%M:%S%.f") ?? .timestamp
+          } else if starts_with(line, "{") {
+            fields, err = parse_json(line)
+            if err == null && is_object(fields) {
+              .timestamp = parse_timestamp(string(fields.ts) ?? string(fields.time) ?? "", format: "%+") ?? .timestamp
+              if is_string(fields.level) { .level = downcase!(fields.level) }
+            }
+          } else if starts_with(line, "time=") {
+            fields, err = parse_logfmt(line)
+            if err == null {
+              .timestamp = parse_timestamp(string(fields.time) ?? "", format: "%+") ?? .timestamp
+              if is_string(fields.level) { .level = downcase!(fields.level) }
+            }
+          } else {
+            klog, err = parse_klog(line)
+            if err == null {
+              .level = klog.level
+              # klog writes no year and parse_klog takes the current one, so a line from 31
+              # December read on 1 January would be dated a year ahead, and the store refuses lines
+              # more than two days ahead. A line dated more than a day after it was read is from
+              # the year before; one still ahead then keeps the time it was read.
+              read = timestamp(.timestamp) ?? now()
+              written = timestamp(klog.timestamp) ?? read
+              if to_unix_timestamp(written) > to_unix_timestamp(read) + 86400 {
+                year = to_int!(format_timestamp!(written, "%Y")) - 1
+                written = parse_timestamp(to_string(year) + format_timestamp!(written, "-%m-%dT%H:%M:%S%.fZ"), format: "%+") ?? read
+              }
+              if to_unix_timestamp(written) <= to_unix_timestamp(read) + 86400 {
+                .timestamp = written
+              }
+            }
+          }
+        }
+        # The pod's name, which the file source records as the host.
+        del(.host)
+  sinks:
+    # VictoriaLogs' Elasticsearch-compatible bulk API, as its documentation sets Vector up. Each
+    # container's lines are one stream, and each Talos service's on each node.
+    victoria_logs:
+      type: elasticsearch
+      inputs:
+        - pods
+        - talos_files
+      endpoints:
+        - http://victoria-logs.monitoring.svc.cluster.local:9428/insert/elasticsearch/
+      api_version: v8
+      compression: gzip
+      healthcheck:
+        enabled: false
+      query:
+        _msg_field: message
+        _time_field: timestamp
+        _stream_fields: kubernetes.pod_namespace,kubernetes.pod_name,kubernetes.container_name,node,talos_service
+      # While the store is away, as when it moves to another worker, lines wait on the node's disk,
+      # up to the smallest disk buffer Vector takes, 256 MiB. Once it is full, both sources stop
+      # reading on that node until the store takes lines again.
+      buffer:
+        type: disk
+        max_size: 268435488
+        when_full: block
+    prometheus:
+      type: prometheus_exporter
+      inputs:
+        - vector_metrics
+      address: 0.0.0.0:9598

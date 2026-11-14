@@ -9,5 +9,6 @@ metadata:
     kustomize.toolkit.fluxcd.io/prune: disabled
   labels:
     # node-exporter reads each node through the host's network and process namespaces and its
-    # filesystems through host paths, which only the privileged level admits.
+    # filesystems through host paths, and Vector, the log collector, reads each node's log files
+    # through a host path, which only the privileged level admits.
     pod-security.kubernetes.io/enforce: privileged
