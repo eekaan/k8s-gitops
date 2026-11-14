@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Checks the OpenTofu code without cloud credentials or a state backend: formatting, that the Talos
 # schematic the image is built from lists no QEMU guest agent extension, that every stack enforces
-# state and plan encryption, then init and validate for every stack, then tofu test in every stack
-# or module that has a tests/ directory.
+# state and plan encryption, that no stack or module declares a bucket, that a region's default
+# service range overlaps none of its default node, pod and service subnets, then init and validate
+# for every stack, then tofu test in every stack or module that has a tests/ directory.
 # Init downloads the locked providers from the public registry; the tests mock every provider.
 set -euo pipefail
 shopt -s nullglob
@@ -109,6 +110,58 @@ for file in infra/openstack/stacks/*/*/*.tf infra/openstack/modules/*/*.tf; do
     [[ -n $address ]] || continue
     fail "${file%/*}" "declares the bucket $address; buckets outlive the stacks, made by just infra-state-bucket and just infra-backup-buckets"
   done <<< "$addresses"
+done
+
+# The cluster stack refuses a pod or service subnet that overlaps the plumbing stack's service range,
+# and the plumbing stack a node subnet that does, but each only in a plan. The defaults a deployment
+# plans with first are compared here, offline, from the variables files of a region's two stacks.
+default_of() {
+  local file value
+  for file in "$1"/*.tf; do
+    value=$(yq -p hcl -oy ".variable.\"$2\".default // \"\"" "$file" 2> /dev/null) || continue
+    if [[ -n $value ]]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  done
+}
+ipv4_number() {
+  local -a octets
+  IFS=. read -r -a octets <<< "$1"
+  echo $(((octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3]))
+}
+ipv4_network() {
+  local octet
+  [[ $1 =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})/([0-9]{1,2})$ ]] || return 1
+  for octet in "${BASH_REMATCH[@]:1:4}"; do
+    ((10#$octet <= 255)) || return 1
+  done
+  ((10#${BASH_REMATCH[5]} >= 1 && 10#${BASH_REMATCH[5]} <= 32))
+}
+# contains NETWORK ADDRESS: whether the IPv4 network holds the address.
+contains() {
+  local mask=$(((0xffffffff << (32 - ${1#*/})) & 0xffffffff))
+  ((($(ipv4_number "${1%/*}") & mask) == ($(ipv4_number "$2") & mask)))
+}
+for plumbing in infra/openstack/stacks/*/plumbing; do
+  region=${plumbing%/plumbing}
+  range=$(default_of "$plumbing" service_range)
+  [[ -n $range ]] || continue
+  if ! ipv4_network "$range"; then
+    fail "$region" "the default service_range is not an IPv4 network"
+    continue
+  fi
+  for pair in "$plumbing node_cidr" "$region/cluster pod_subnet" "$region/cluster service_subnet"; do
+    read -r stack name <<< "$pair"
+    [[ -d $stack ]] || continue
+    other=$(default_of "$stack" "$name")
+    [[ -n $other ]] || continue
+    if ! ipv4_network "$other"; then
+      fail "$region" "the default $name is not an IPv4 network"
+    elif contains "$range" "${other%/*}" || contains "$other" "${range%/*}"; then
+      fail "$region" "the plumbing stack's default service_range overlaps the default $name of ${stack##*/}; LoadBalancer addresses would collide with it"
+    fi
+  done
 done
 
 for module in infra/openstack/modules/*/; do

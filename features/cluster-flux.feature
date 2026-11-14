@@ -7,12 +7,12 @@ Feature: Installing Flux
     Then the namespace flux-system, the ConfigMap cluster-config, the Secret cluster-secrets and the Secret sops-age are each applied in flux-system through standard input before the Flux Operator is installed
 
   Scenario: cluster-config holds exactly the keys the repository declares
-    Given the cluster's talman.yaml, CLUSTER_DOMAIN in the environment and the cluster's cluster-config.example.yaml
+    Given the cluster's talman.yaml, CLUSTER_DOMAIN and BACKUP_BUCKET_PREFIX in the environment, OpenTofu's S3 backend settings and the cluster's cluster-config.example.yaml
     When cluster-config runs
-    Then the applied ConfigMap cluster-config has exactly the keys the example lists: CLUSTER_DOMAIN from the environment, NODE_CIDR the node subnet in talman.yaml, and NODE_NAME_REGEX a pattern every node name in talman.yaml matches in full
+    Then the applied ConfigMap cluster-config has exactly the keys the example lists: CLUSTER_DOMAIN and BACKUP_BUCKET_PREFIX from the environment, S3_ENDPOINT and S3_REGION the object storage's endpoint, a scheme and a host with an optional port, and its region in the backend settings, NODE_CIDR the node subnet in talman.yaml, and NODE_NAME_REGEX a pattern every node name in talman.yaml matches in full
 
   Scenario: A key that cannot be filled fails the recipe by name
-    Given a cluster-config.example.yaml that lists a key cluster-config has no source for, or that leaves out one it fills
+    Given a cluster-config.example.yaml that lists a key cluster-config has no source for, or that leaves out one it fills, or a source that gives no value or one that is not valid
     When cluster-config runs
     Then it exits non-zero naming that key, and applies nothing
 

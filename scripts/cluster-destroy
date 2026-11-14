@@ -4,17 +4,22 @@
 # --yes, and then removes the files generated for the cluster that hold its addresses. The plumbing
 # stack, the secrets bundle and the buckets stay.
 #
-# The load balancers that Services of type LoadBalancer get and the volumes behind PersistentVolumes
-# of a CSI driver are made by the cluster, not by OpenTofu, so the stack's destroy would leave them
-# in the cloud, where they also keep the network from being deleted. So first, through the cluster's
-# kubeconfig, it lists every such Service and PersistentVolume, and while there are any, it names
-# them and destroys nothing. LINSTOR's volumes are the exception: their data is on the workers' data
-# volumes, which the stack holds and destroys, so nothing of them stays in the cloud. They do not
-# hold the destroy up; it says how many there are before it asks, and confirming the destroy
-# confirms that they go with it. A cluster whose API does not answer, or that has no kubeconfig,
-# cannot be asked and may still own some, so it is not destroyed either, unless --unreachable is
-# given, with which the operator takes on what may be left. Neither kubectl's errors nor anything of
-# the objects but their names are printed, as they can hold addresses.
+# A load balancer a cloud controller makes for a Service of type LoadBalancer, and the volume behind
+# a PersistentVolume of a CSI driver, are made by the cluster, not by OpenTofu, so the stack's
+# destroy would leave them in the cloud, where they also keep the network from being deleted. So
+# first, through the cluster's kubeconfig, it lists every such Service and PersistentVolume, and
+# while there are any, it names them and destroys nothing. A Service whose every load-balancer
+# address lies in the service range of the cluster's talman.yaml is left out: Cilium gave it that
+# address from its pool, the workers announce it over BGP, and nothing in the cloud stands behind it
+# (ADR 0013). A Service with no address yet, or one outside the range, still counts, as does every
+# such Service when talman.yaml names no service range. LINSTOR's volumes are the other exception:
+# their data is on the workers' data volumes, which the stack holds and destroys, so nothing of
+# them stays in the cloud. They do not hold the destroy up; it says how many there are before it
+# asks, and confirming the destroy confirms that they go with it. A cluster whose API does not
+# answer, or that has no kubeconfig, cannot be asked and may still own some, so it is not destroyed
+# either, unless --unreachable is given, with which the operator takes on what may be left. Neither
+# kubectl's errors nor anything of the objects but their names are printed, as they can hold
+# addresses.
 # Usage: scripts/cluster-destroy [cluster] [--yes] [--unreachable]
 set -euo pipefail
 
@@ -45,7 +50,7 @@ linstor_driver=linstor.csi.linbit.com
 
 # shellcheck source=scripts/cluster-env
 . "$here/cluster-env" "$cluster"
-require_commands kubectl jq
+require_commands kubectl jq yq
 
 # stack_env: reads and checks what infra-destroy needs for the stack, as infra-destroy does, naming
 # what is missing. Run in a subshell, it leaves this script's environment as it is.
@@ -76,7 +81,26 @@ else
 fi
 
 if ((asked)); then
-  balancers=$(jq -r '.items[] | select(.spec.type == "LoadBalancer")
+  # The service range the cluster stack rendered into talman.yaml; without one, no address counts as
+  # the pool's.
+  service_range=
+  if [[ -f $talman_file ]]; then
+    service_range=$(yq '.values.serviceRange // ""' "$talman_file" 2> /dev/null) || service_range=
+  fi
+  # A range is known only as an IPv4 network with octets 0 to 255 and a prefix of 1 to 32, and an
+  # address is the pool's only as an IPv4 address with octets 0 to 255 inside it: anything else
+  # could pass the arithmetic without being in the range.
+  balancers=$(jq -r --arg range "$service_range" '
+    def ipv4: type == "string" and test("^[0-9]{1,3}(\\.[0-9]{1,3}){3}$")
+      and (split(".") | all(tonumber <= 255));
+    def ip4: split(".") | map(tonumber) | .[0] * 16777216 + .[1] * 65536 + .[2] * 256 + .[3];
+    def in_range($cidr): ($cidr | split("/")) as $net | pow(2; 32 - ($net[1] | tonumber)) as $size
+      | ((ip4 / $size) | floor) == (($net[0] | ip4) / $size | floor);
+    def from_pool: if .hostname == null and (.ip | ipv4) then .ip | in_range($range) else false end;
+    ($range | test("^[^/]+/[0-9]{1,2}$") and (split("/") | (.[0] | ipv4) and (.[1] | tonumber | . >= 1 and . <= 32))) as $known
+    | .items[] | select(.spec.type == "LoadBalancer")
+    | (.status.loadBalancer.ingress // []) as $ingress
+    | select(if $known and ($ingress | length) > 0 then ($ingress | all(from_pool)) | not else true end)
     | "\(.metadata.namespace)/\(.metadata.name)"' <<< "$services")
   csi_volumes=$(jq -r --arg linstor "$linstor_driver" '.items[]
     | select(.spec.csi != null and .spec.csi.driver != $linstor)
@@ -84,7 +108,7 @@ if ((asked)); then
   linstor_volumes=$(jq --arg linstor "$linstor_driver" '[.items[] | select(.spec.csi.driver? == $linstor)] | length' <<< "$volumes")
   if [[ -n $balancers || -n $csi_volumes ]]; then
     while read -r name; do
-      [[ -z $name ]] || infra_error "the Service $name is of type LoadBalancer"
+      [[ -z $name ]] || infra_error "the Service $name is of type LoadBalancer, with an address outside the service range, or none yet"
     done <<< "$balancers"
     while read -r name driver; do
       [[ -z $name ]] || infra_error "the PersistentVolume $name is a volume of the CSI driver $driver"
@@ -93,9 +117,9 @@ if ((asked)); then
     exit 1
   fi
   if ((linstor_volumes == 0)); then
-    say "$cluster owns no Service of type LoadBalancer and no PersistentVolume of a CSI driver"
+    say "$cluster owns no Service of type LoadBalancer outside its service range and no PersistentVolume of a CSI driver"
   else
-    say "$cluster owns no Service of type LoadBalancer and no PersistentVolume of a CSI driver other than LINSTOR's"
+    say "$cluster owns no Service of type LoadBalancer outside its service range and no PersistentVolume of a CSI driver other than LINSTOR's"
     if ((linstor_volumes == 1)); then
       counted="1 PersistentVolume of LINSTOR ($linstor_driver), whose data is on the workers' data volumes in $stack: it is"
     else

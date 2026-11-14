@@ -1,0 +1,16 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/helmrelease-helm-v2.json
+# The monitoring chart's dashboards, as ConfigMaps and the GrafanaDashboards that load them into the
+# Grafana, and nothing else of that chart.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: grafana-dashboards
+spec:
+  interval: 30m
+  chartRef:
+    kind: OCIRepository
+    name: grafana-dashboards
+  valuesFrom:
+    - kind: ConfigMap
+      name: grafana-dashboards-values

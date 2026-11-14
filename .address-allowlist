@@ -6,3 +6,7 @@
 10.96.0.0/12  # default service subnet of the cluster stack: Kubernetes' conventional private RFC 1918 service range, virtual addresses that exist only inside the cluster
 0.0.0.0/1  # the lower half of the address space: a fixture the allowlist rule must refuse
 128.0.0.0/1  # the upper half of the address space: a fixture the allowlist rule must refuse
+10.20.0.0/28  # default service range of the plumbing stack: a private RFC 1918 design range LoadBalancer Services take their addresses from, routed only by BGP between the workers and the deployment's own edge routers inside the project's network
+10.0.0.0/8  # RFC 1918's first private range, which the plumbing stack checks its service range against: a published standard, not an address of the deployment
+172.16.0.0/12  # RFC 1918's second private range, which the plumbing stack checks its service range against: a published standard, not an address of the deployment
+192.168.0.0/16  # RFC 1918's third private range, which the plumbing stack checks its service range against: a published standard, not an address of the deployment

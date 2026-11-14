@@ -1,0 +1,14 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Services of type LoadBalancer announced over BGP (ADR 0013): the pool their addresses come from,
+# and the BGP sessions from the workers to the two edge routers that advertise them. Every object is
+# cluster-scoped; the API server drops the namespace the application's targetNamespace gives it. The
+# numbers come from cluster-config, which just cluster-config fills from the cluster stack's
+# talman.yaml.
+resources:
+  - pool.yaml
+  - bgp-cluster.yaml
+  - bgp-peer.yaml
+  - bgp-advertisement.yaml

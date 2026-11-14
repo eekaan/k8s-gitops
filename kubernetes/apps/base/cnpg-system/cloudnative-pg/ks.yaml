@@ -1,0 +1,20 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: cloudnative-pg
+  namespace: flux-system
+spec:
+  path: ./apps/base/cnpg-system/cloudnative-pg/app
+  targetNamespace: cnpg-system
+  # Its chart makes a PodMonitor, a kind that exists once prometheus-operator-crds is Ready.
+  dependsOn:
+    - name: prometheus-operator-crds
+  # Ready only once the release is installed and the operator's pods are ready, so an application
+  # that names this one in dependsOn finds the Cluster definition in place and the webhook, which
+  # admits every Cluster, answering.
+  wait: true
+  sourceRef:
+    kind: ExternalArtifact
+    name: cloudnative-pg

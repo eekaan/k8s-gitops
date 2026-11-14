@@ -9,6 +9,11 @@
 # on GitHub's hosted runners. A fork's pull request runs the fork's copy of this file, which could
 # name the host's label itself, so this file alone cannot keep a fork off the host: the host's own
 # job-started hook fails every job the same rule does not admit (scripts/lib/ci-host.sh, ADR 0012).
+#
+# The render job renders what Flux would apply from the base and from this commit and leaves the
+# comment comparing them as the artifact render-diff, which the render-comment workflow posts. A
+# pull request's run, a fork's included, runs this file as the pull request has it, with a read-only
+# token and no secrets: the job holds nothing worth taking, and nothing it leaves is trusted.
 name: ci
 
 "on":
@@ -83,10 +88,32 @@ jobs:
         env:
           GROUP: ${{ matrix.group }}
 
+  render:
+    # Always a hosted runner: the CI host's cache would gain it nothing.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The base, the first parent of the commit under test, is rendered from the history.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785  # v5.2.8
+        with:
+          version: 2026.11.4
+          install_args: just http:dagger
+      - run: just ci-render "$RUNNER_TEMP/render-diff/comment.md"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: render-diff
+          path: ${{ runner.temp }}/render-diff/comment.md
+          if-no-files-found: error
+          # The comment workflow reads it as soon as this run completes.
+          retention-days: 7
+
   ci:
     # Runs whatever became of the others: a required check that is skipped counts as passed.
     if: always()
-    needs: [groups, runner, check]
+    needs: [groups, runner, check, render]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

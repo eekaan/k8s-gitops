@@ -34,6 +34,12 @@ override_data {
         external_network    = "external-network-fixture"
         attached_subnet_ids = { nodes = "node-subnet-fixture" }
       }
+      bgp = {
+        cluster_asn    = 64496
+        edge_asn       = 64497
+        edge_addresses = ["192.0.2.7", "192.0.2.8"]
+        service_range  = "203.0.113.16/28"
+      }
     }
   }
 }
@@ -249,6 +255,17 @@ run "_a_host_number_in_the_dhcp_pool_or_among_the_nodes_is_rejected" {
 
   variables {
     host_number = 10
+  }
+
+  expect_failures = [var.host_number]
+}
+
+# The edge routers' fixed addresses, which the plumbing stack reserves, are never the CI host's.
+run "_a_host_number_on_an_edge_router_is_rejected" {
+  command = plan
+
+  variables {
+    host_number = 8
   }
 
   expect_failures = [var.host_number]
