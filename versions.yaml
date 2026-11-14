@@ -21,7 +21,7 @@ dagger_engine: registry.dagger.io/engine:v1.0.0-beta.27@sha256:ad121f720ed9bfb8e
 # The container just ci runs the checks in (.dagger/modules/ci): Dagger starts from ci_tools_base,
 # runs the package step ci_tools_packages in it, then the module's toolsLayer installs mise.toml's
 # pins. mise installs yamllint through its pypi backend, which needs pipx and Python. These two
-# values, the module's toolsLayer and mise.toml are the inputs whose key just tools-image-key prints.
+# values, the whole module and mise.toml are the inputs whose key just tools-image-key prints.
 # scripts/tools-image reads each value from its one line, without quotes, tabs, a comment or an
 # indented line under it, as just ci runs it where no YAML parser is installed.
 ci_tools_base: jdxcode/mise:2026.11.4-debian@sha256:7769fb680659f7730db5b9c0d245c00ba517dfec9c720f6679248cb32e124095

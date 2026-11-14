@@ -95,8 +95,9 @@ The repository checks:
 The container with the pinned tools is built once for each change of its inputs and published as
 `ghcr.io/eekaan/k8s-gitops/ci-tools`, so a CI job pulls it instead of installing the tools. Its
 inputs are `ci_tools_base` (the image it starts from) and `ci_tools_packages` (the package step) in
-`versions.yaml`, the steps of `toolsLayer` in the Dagger module, read from its first line to the
-line that closes it, two spaces and a brace, and `mise.toml`. `versions.yaml` holds each value on one line, with no
+`versions.yaml`, the whole Dagger module, `.dagger/modules/ci/main.dang`, as what the layer holds
+can depend on any of it, and `mise.toml`. Any change to the module, a comment included, so gets an
+image of its own, at the cost of one build. `versions.yaml` holds each value on one line, with no
 quotes, tabs, comment or indented line under it, as the script that reads them has no YAML parser;
 `just ci` refuses any other form.
 
@@ -135,6 +136,12 @@ Who does what, once a change to the inputs is merged:
    refuses the digest, and the checks could not pull it.
 3. A person runs `just tools-image-pin <digest>` on a branch from `main` and opens a pull request
    with the change to `versions.yaml`. Its checks already run in the image.
+
+If the recorded image can no longer be pulled, because the package was made private or the image
+deleted, every check job and the render job fail, so the required check `ci` fails for every pull
+request. The way out is a pull request that sets both `ci_tools_inputs` and `ci_tools_image` to
+`""`: its own run builds the tools from the pins, as every run does without a record, and once it is
+merged the pin can follow a new publish run.
 
 Renovate cannot propose the pin. The tag is a key, not a version, so its Docker datasource has no
 order to update along; it can neither compute the key of the checkout's inputs nor verify the

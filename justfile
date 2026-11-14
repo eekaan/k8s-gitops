@@ -183,7 +183,7 @@ renovate-check:
 publish:
     scripts/publish
 
-# Print the key of the tools image's inputs: ci_tools_base and ci_tools_packages in versions.yaml, the Dagger module's toolsLayer, and mise.toml
+# Print the key of the tools image's inputs: ci_tools_base and ci_tools_packages in versions.yaml, the whole Dagger module, and mise.toml
 tools-image-key:
     scripts/tools-image key
 

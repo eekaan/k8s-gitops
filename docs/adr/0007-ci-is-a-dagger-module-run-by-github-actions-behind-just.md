@@ -30,8 +30,8 @@ artifact as text only. No function of the module takes any of these tokens, so t
 hermetic and need no credentials, and nothing the checks run can sign, publish or comment.
 
 The container the checks and the render job run in is built from the pins once for each change of
-its inputs (the base image, the package step, `mise.toml` and the steps of the module's tools
-layer), by the tools image workflow on `main`, pushed to this repository's registry, signed, and
+its inputs (the base image, the package step, `mise.toml` and the whole Dagger module), by the
+tools image workflow on `main`, pushed to this repository's registry, signed, and
 recorded by digest in `versions.yaml` with the key of those inputs. `just ci` and `just ci-render`
 hand the module that image while the key matches the checkout's inputs, and the module builds the
 same layer itself otherwise.

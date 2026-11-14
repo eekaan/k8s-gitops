@@ -2,7 +2,7 @@
 # The tools image: the container with the tools pinned in mise.toml that just ci runs the checks in
 # (.dagger/modules/ci), built once for each change of its inputs, published to this repository's
 # container registry and signed, so a CI job pulls it instead of installing the tools. Its inputs
-# are ci_tools_base and ci_tools_packages in versions.yaml, the steps of the module's toolsLayer,
+# are ci_tools_base and ci_tools_packages in versions.yaml, the Dagger module that builds it, whole,
 # and mise.toml; their key names it: the image's tag, the annotation its signature carries, and what
 # versions.yaml records beside its digest. Bash, coreutils and awk only, as just ci runs it on a host
 # without the pinned tools.
@@ -30,6 +30,10 @@
 set -euo pipefail
 # A failure inside $(...) stops the run too, not only the substitution.
 shopt -s inherit_errexit
+# The registry token leaves the environment before any command starts, so it reaches docker login on
+# standard input and nothing else, and nothing a command prints can hold it.
+registry_token=${REGISTRY_TOKEN-}
+unset REGISTRY_TOKEN
 
 # The image, and the signature a pin accepts: the tools image workflow of this repository on main, as
 # GitHub's token issuer names it, in a run of this repository, so a run elsewhere that called the
@@ -90,29 +94,22 @@ inputs() {
   fi
 }
 
-# layer: the module's toolsLayer as written, the steps that build the tools container: from the line
-# that opens its definition, "  pub toolsLayer(", to the first line after it that is "  }". Refuses
-# a module without exactly one, as the key would then miss a change to those steps.
-layer() {
-  awk '
-    /^  pub toolsLayer\(/ { found++; inside = 1 }
-    inside { print }
-    inside && /^  }$/ { inside = 0 }
-    END { exit (found != 1 || inside) }
-  ' "$root/$module" || fail "$module must define toolsLayer once, from a line \"  pub toolsLayer(\" to a line \"  }\""
+# sha256: the SHA-256 of standard input, in hexadecimal.
+sha256() {
+  if command -v sha256sum > /dev/null; then sha256sum; else shasum -a 256; fi | cut -d' ' -f1
 }
 
-# key: the SHA-256 of the inputs: each value on its own line after its name, the module's toolsLayer,
-# which ends at its first line "  }", then mise.toml as it is. A value holds no newline, so no two
-# sets of inputs hash the same text.
+# key: the SHA-256 of the inputs, one line each: the two values after their names, then the SHA-256 of
+# the Dagger module and of mise.toml after their paths. The whole module counts, as what the layer
+# holds can depend on any of it; a change to it costs one build. A value holds no newline, so no
+# two sets of inputs hash the same text.
 key() {
-  local base packages steps
+  local base packages
   inputs
-  steps=$(layer)
   {
-    printf 'ci_tools_base: %s\nci_tools_packages: %s\n%s\n' "$base" "$packages" "$steps"
-    cat "$root/mise.toml"
-  } | if command -v sha256sum > /dev/null; then sha256sum; else shasum -a 256; fi | cut -d' ' -f1
+    printf 'ci_tools_base: %s\nci_tools_packages: %s\n' "$base" "$packages"
+    printf '%s: %s\n' "$module" "$(sha256 < "$root/$module")" mise.toml "$(sha256 < "$root/mise.toml")"
+  } | sha256
 }
 
 # recorded: sets recorded_key and recorded_image from versions.yaml: both empty, or a key and this
@@ -160,15 +157,16 @@ check_digest() {
 }
 
 publish() {
-  local name base packages key token verified reason digest pushed
+  local name base packages key verified reason digest pushed
   # Keyless signing needs the job's identity token, which only a workflow run can request; nobody
   # publishes from a laptop.
   if [[ ${GITHUB_ACTIONS:-} != true || -z ${ACTIONS_ID_TOKEN_REQUEST_URL:-} || -z ${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-} ]]; then
     fail "refusing to publish outside the tools image workflow: it needs GitHub Actions and the job's identity token"
   fi
-  for name in GITHUB_REF GITHUB_ACTOR REGISTRY_TOKEN; do
+  for name in GITHUB_REF GITHUB_ACTOR; do
     [[ -n ${!name:-} ]] || fail "$name is not set; the tools image workflow sets it"
   done
+  [[ -n $registry_token ]] || fail "REGISTRY_TOKEN is not set; the tools image workflow sets it"
   # A pin accepts only main's signature, and a branch's run would move the key's tag.
   if [[ $GITHUB_REF != refs/heads/main ]]; then
     fail "refusing to publish from $GITHUB_REF: only a run on refs/heads/main publishes"
@@ -181,13 +179,9 @@ publish() {
   step="starting"
   trap 'finish $?' EXIT
 
-  # The token leaves the environment before any command starts, so it reaches docker login on standard
-  # input and nothing else, and nothing a command prints can hold it.
-  token=$REGISTRY_TOKEN
-  unset REGISTRY_TOKEN
   begin "logging in to ghcr.io"
-  printf '%s' "$token" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin > /dev/null
-  token=
+  printf '%s' "$registry_token" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin > /dev/null
+  registry_token=
 
   begin "looking for $image:$key, signed for these inputs"
   if verified=$(cosign verify --certificate-identity "$identity" --certificate-oidc-issuer "$issuer" \

@@ -136,7 +136,7 @@ type Ci {
   }
 
   """
-  The tools container checks and renderDiff run in, chosen here alone so the two cannot differ, and a line that says where it came from: image, the tools image published for base, packages and mise.toml, when it is given and runs on the engine's platform, as one of another platform would run under emulation, if at all; otherwise the layer toolsLayer builds from them. Which container is used does not change what the layer holds, so the key of a tools image does not cover this choice.
+  The tools container checks and renderDiff run in, chosen here alone so the two cannot differ, and a line that says where it came from: image, the tools image published for base, packages and mise.toml, when it is given and runs on the engine's platform, as one of another platform would run under emulation, if at all; otherwise the layer toolsLayer builds from them.
   """
   let tools(base: String!, packages: String!, image: String!): Tools! {
     let engine = toString(defaultPlatform)
@@ -151,7 +151,7 @@ type Ci {
   }
 
   """
-  The tools pinned in mise.toml, in a layer that depends on base, packages, mise.toml and the steps here alone, so changes to other files reuse it: the tools container of the checks and the render when no tools image fits (tools), and the image the tools image workflow publishes. A tools image's key covers these steps too: scripts/tools-image reads this definition from its first line to the line that closes it, two spaces and a brace, which stays its last.
+  The tools pinned in mise.toml, in a layer that depends on base, packages, mise.toml and the steps here alone, so changes to other files reuse it: the tools container of the checks and the render when no tools image fits (tools), and the image the tools image workflow publishes. A tools image's key covers this whole module, so a change anywhere in it gets an image of its own.
   """
   pub toolsLayer(
     """

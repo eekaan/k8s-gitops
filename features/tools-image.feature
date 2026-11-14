@@ -5,10 +5,10 @@ Feature: The prebuilt tools image
   inputs, and builds the tools itself otherwise, so a pull request that changes a pin works before
   any image exists for it.
 
-  The inputs are the base image and the package step in versions.yaml, the steps of the Dagger
-  module's toolsLayer, and mise.toml. Their key, just tools-image-key, names the image: it is the
-  image's tag, the annotation its signature carries, and what versions.yaml records beside the
-  digest.
+  The inputs are the base image and the package step in versions.yaml, the whole Dagger module, as
+  what the layer holds can depend on any of it, and mise.toml. Their key, just tools-image-key,
+  names the image: it is the image's tag, the annotation its signature carries, and what
+  versions.yaml records beside the digest.
 
   Two scenarios need a Dagger engine, as only the module running in one chooses the container the
   checks run in: "With a recorded image for the current inputs, the checks run in that image, by
@@ -18,10 +18,10 @@ Feature: The prebuilt tools image
   can tell a module that runs the checks in the image it is given from one that builds the tools and
   only names the image.
 
-  Scenario: The key changes when a pinned tool, the base image, the package step or a step of the tools layer changes, and not otherwise
+  Scenario: The key changes when a pinned tool, the base image, the package step or the Dagger module changes, and not otherwise
     Given a checkout and its key
-    When a pin in mise.toml, the base image, the package step or a step of the module's toolsLayer changes, or any other file or line does, the recorded image and the rest of the module among them
-    Then the key differs from the checkout's for each of the first four, and is the same for every other change
+    When a pin in mise.toml, the base image or the package step changes, or anything in the Dagger module does, a step of its tools layer, of the render or of the choice of the tools container or a comment, or any other file or line changes, the recorded image among them
+    Then the key differs from the checkout's for each change to the first four, and is the same for every other change
 
   Scenario: With a recorded image for the current inputs, the checks run in that image, by digest
     Given versions.yaml records, with the checkout's key, an image that a registry the engine reaches serves by its digest only
@@ -30,7 +30,7 @@ Feature: The prebuilt tools image
 
   Scenario: With changed inputs, the recorded image is not used and the tools are built from the pins
     Given versions.yaml records an image for the checkout's inputs
-    When a pinned tool, the base image, the package step or a step of the tools layer changes and just ci runs
+    When a pinned tool, the base image, the package step or the Dagger module changes and just ci runs
     Then the module is given no image, only the changed inputs to build the tools from, and the run says why
 
   Scenario: The checks give the same result in the recorded image as in the tools built from the pins

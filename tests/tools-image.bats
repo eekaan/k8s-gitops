@@ -248,6 +248,16 @@ esac
 EOF
 }
 
+# wrap NAME...: puts each NAME found on PATH first on the run's PATH as a fake that runs the real one,
+# so its calls, and the registry token in its environment, are recorded as a fake's are.
+wrap() {
+  local tool real
+  for tool; do
+    real=$(command -v "$tool") || continue
+    printf 'exec %q "$@"\n' "$real" | fake "$tool"
+  done
+}
+
 # signed DIGEST IDENTITY KEY [REPOSITORY]: a signature of DIGEST, as cosign would find one, by IDENTITY
 # from GitHub's token issuer, in a run of REPOSITORY, this one unless given, with KEY as its tools-key
 # annotation.
@@ -297,14 +307,15 @@ record() {
 }
 
 # change INPUT: changes one input of the tools in the checkout: pin (a tool's version in mise.toml),
-# base (the base image's digest), packages (the package step) or layer (a step of the module's
-# toolsLayer); fails unless the file changed.
+# base (the base image's digest), packages (the package step), or the Dagger module: layer (a step of
+# its toolsLayer), render (a step of renderDiff), choice (a step after toolsLayer in the choice of
+# the tools container) or comment (a comment at its end); fails unless the file changed.
 change() {
   local file before
   case $1 in
     pin) file=mise.toml ;;
     base | packages) file=versions.yaml ;;
-    layer) file=.dagger/modules/ci/main.dang ;;
+    layer | render | choice | comment) file=.dagger/modules/ci/main.dang ;;
   esac
   before=$(cat "$WORK/$file")
   case $1 in
@@ -312,6 +323,9 @@ change() {
     base) sed -i -E "s/^(ci_tools_base: [^@]+@sha256:)[0-9a-f]{64}$/\\1$(printf 'other base' | sha256sum | cut -d' ' -f1)/" "$WORK/$file" ;;
     packages) sed -i -E 's/^(ci_tools_packages: .*)pipx/\1pipx ca-certificates/' "$WORK/$file" ;;
     layer) sed -i -E 's/^( *)\.withExec\(\["mise", "install"\]\)$/\1.withEnvVariable("MISE_JOBS", "1")\n&/' "$WORK/$file" ;;
+    render) sed -i 's|"/tmp/render-diff/comment.md"\])$|"/tmp/render-diff/comment.md"]).withEnvVariable("RENDER", "1")|' "$WORK/$file" ;;
+    choice) sed -i 's/Tools(ctr: toolsLayer(base, packages), origin: "tools: built from the pins, as no tools image is given")/Tools(ctr: toolsLayer(base, packages).withEnvVariable("EXTRA", "1"), origin: "tools: built from the pins, as no tools image is given")/' "$WORK/$file" ;;
+    comment) printf '\n# a comment\n' >> "$WORK/$file" ;;
   esac
   [ "$(cat "$WORK/$file")" != "$before" ] || { echo "the change of $1 changed nothing in $file"; return 1; }
 }
@@ -484,7 +498,7 @@ verdicts() {
   grep -oE '== [a-z0-9-]+: (passed|failed) \([^)]*\)|recipe `[a-z0-9-]+` failed|(failed|passed): [a-z0-9 -]+$' <<< "$output" | sort -u
 }
 
-@test "The key changes when a pinned tool, the base image, the package step or a step of the tools layer changes, and not otherwise" {
+@test "The key changes when a pinned tool, the base image, the package step or the Dagger module changes, and not otherwise" {
   local key input variant
   checkout
   key=$(key_of "$WORK")
@@ -496,8 +510,10 @@ verdicts() {
   local pristine="$BATS_TEST_TMPDIR/pristine"
   cp -R "$WORK" "$pristine"
 
+  # The module counts whole: what the layer holds can depend on any of it, so a change anywhere in
+  # it, a comment included, makes a new key, and so a new image.
   local -a keys=("$key")
-  for input in pin base packages layer; do
+  for input in pin base packages layer render choice comment; do
     rm -rf "$WORK"
     cp -R "$pristine" "$WORK"
     change "$input"
@@ -507,27 +523,15 @@ verdicts() {
     keys+=("$variant")
   done
   # Each input changes it its own way.
-  [ "$(printf '%s\n' "${keys[@]}" | sort -u | wc -l)" -eq 5 ]
+  [ "$(printf '%s\n' "${keys[@]}" | sort -u | wc -l)" -eq 8 ]
 
   # Nothing else does: another line of versions.yaml, the recorded image and its key among them, the
-  # module outside its tools layer, the justfile, the docs, the comments around the inputs, or a new
-  # file.
+  # justfile, the docs, the comments around the inputs, or a new file.
   rm -rf "$WORK"
   cp -R "$pristine" "$WORK"
   sed -i -E 's/^talos: .*/talos: v0.0.1/' "$WORK/versions.yaml"
   record "$(printf 'other inputs' | sha256sum | cut -d' ' -f1)" "$IMAGE@$DIGEST"
   sed -i '1a # a comment that is not an input' "$WORK/versions.yaml"
-  # The rest of the module: another function, the render's among them, the choice between the image and
-  # the layer, which decides where the layer is used and not what it holds, the layer's docstring above
-  # it and the type below it.
-  printf '\n# a comment\n' >> "$WORK/.dagger/modules/ci/main.dang"
-  sed -i 's/Run the justfile.s groups of checks side by side/Run the groups of checks side by side/' "$WORK/.dagger/modules/ci/main.dang"
-  sed -i 's/^  The tools pinned in mise.toml/  The tools mise.toml pins/' "$WORK/.dagger/modules/ci/main.dang"
-  sed -i 's|"/tmp/render-diff/comment.md"\])$|"/tmp/render-diff/comment.md"]).withEnvVariable("RENDER", "1")|' "$WORK/.dagger/modules/ci/main.dang"
-  sed -i 's/as no tools image is given")/as none is given")/' "$WORK/.dagger/modules/ci/main.dang"
-  sed -i 's/^The tools container, and where it came from\.$/The tools container and its origin./' "$WORK/.dagger/modules/ci/main.dang"
-  run diff "$pristine/.dagger/modules/ci/main.dang" "$WORK/.dagger/modules/ci/main.dang"
-  [ "$(grep -c '^>' <<< "$output")" -eq 7 ] || { echo "$output"; return 1; }
   printf '\n# a comment\n' >> "$WORK/justfile"
   printf '\nmore words\n' >> "$WORK/README.md"
   printf 'new\n' > "$WORK/new-file"
@@ -568,13 +572,16 @@ verdicts() {
     [[ $stderr == *"built from the pins"*"other inputs"* ]]
   done
 
-  # And without a recorded image, it builds from the pins too.
+  # And without a recorded image, both lines empty, as a pull request sets them when the recorded image
+  # can no longer be pulled, it builds from the pins too.
   rm -rf "$WORK"
   cp -R "$pristine" "$WORK"
   record '' ''
   fake_ci
   [ "$status" -eq 0 ]
   [[ $stderr == *"built from the pins"*"no tools image"* ]]
+  [ "$(handed tools-base)" = "$(yq '.ci_tools_base' "$WORK/versions.yaml")" ]
+  [ "$(handed tools-packages)" = "$(yq '.ci_tools_packages' "$WORK/versions.yaml")" ]
   run grep -c '^--tools-image' "$RECORD/dagger.args"
   [ "$output" = 0 ]
 }
@@ -592,6 +599,7 @@ verdicts() {
     "$key|$IMAGE"
     "$key|$IMAGE:$key@$DIGEST"
     "$key|$IMAGE@sha256:${DIGEST:7:63}"
+    "$key|$IMAGE@${DIGEST}0"
     "$key|$IMAGE@sha256:$(tr a-f A-F <<< "${DIGEST#sha256:}")"
     "$key|evil.example/eekaan/k8s-gitops/ci-tools@$DIGEST"
     "$key|ghcr.io/eekaan-k8s/k8s-gitops/ci-tools@$DIGEST"
@@ -654,7 +662,7 @@ verdicts() {
   done
 }
 
-@test "just ci refuses a versions.yaml it would read otherwise than YAML does, and a module without one tools layer" {
+@test "just ci refuses a versions.yaml it would read otherwise than YAML does" {
   local form
   checkout
   local pristine="$BATS_TEST_TMPDIR/pristine"
@@ -685,15 +693,6 @@ verdicts() {
     [ ! -e "$RECORD/dagger.args" ] || { echo "called dagger with $form"; return 1; }
     [[ $stderr == *versions.yaml* ]]
   done
-
-  # The tools layer is read from the module as the block its definition opens; without one, no key.
-  rm -rf "$WORK"
-  cp -R "$pristine" "$WORK"
-  sed -i 's/^  pub toolsLayer(/  pub toolsContainer(/' "$WORK/.dagger/modules/ci/main.dang"
-  fake_ci
-  [ "$status" -ne 0 ]
-  [ ! -e "$RECORD/dagger.args" ]
-  [[ $stderr == *main.dang* ]]
 }
 
 @test "a recorded tools image passes the secrets scan" {
@@ -919,6 +918,9 @@ verdicts() {
 
 @test "The tools image's registry token reaches no command line and no output" {
   checkout
+  # Every command the run can start, docker, dagger and cosign as above and these through the real
+  # ones, records the token when it reaches its environment.
+  wrap dirname basename grep awk sed cat cut tr head tail wc sha256sum shasum mktemp rm mkdir jq yq base64 env
 
   recipe tools-image-publish
 
@@ -1039,8 +1041,8 @@ verdicts() {
   [ "$(yq -o=json -I=0 '.on | keys' "$WORKFLOW")" = '["push","workflow_dispatch"]' ]
   [ "$(yq -o=json -I=0 '.on.push | keys' "$WORKFLOW")" = '["branches","paths"]' ]
   [ "$(yq -o=json -I=0 '.on.push.branches' "$WORKFLOW")" = '["main"]' ]
-  # Every file the key or the image is made from: the inputs, the module whose tools layer is one of
-  # them, the script that computes the key and publishes, and the workflow itself.
+  # Every file the key or the image is made from: the inputs, the Dagger module among them, the script
+  # that computes the key and publishes, and the workflow itself.
   [ "$(yq -o=json -I=0 '.on.push.paths | sort' "$WORKFLOW")" = '[".dagger/modules/ci/main.dang",".github/workflows/tools-image.yaml","mise.toml","scripts/tools-image","versions.yaml"]' ]
   [ "$(yq -o=json -I=0 '.permissions | to_entries | sort_by(.key) | from_entries' "$WORKFLOW")" = '{"contents":"read","id-token":"write","packages":"write"}' ]
   [ "$(yq '[.jobs[] | select(has("permissions") or has("concurrency"))] | length' "$WORKFLOW")" = 0 ]
