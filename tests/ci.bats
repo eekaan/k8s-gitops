@@ -85,6 +85,25 @@ run_ci() {
   [[ $output == *"commit $flagged"*":1: $literal"* ]]
 }
 
+@test "just ci shows every step where there is no terminal" {
+  checkout
+  bin="$BATS_TEST_TMPDIR/shown"
+  mkdir -p "$bin"
+  printf '#!/usr/bin/env bash\n' > "$bin/mise"
+  # Records how Dagger is called; a run of several minutes that prints nothing looks hung.
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "%s"\n' "$BATS_TEST_TMPDIR/dagger.args" > "$bin/dagger"
+  chmod +x "$bin/mise" "$bin/dagger"
+
+  run env PATH="$bin:/usr/bin:/bin" "$(command -v just)" --justfile "$WORK/justfile" --working-directory "$WORK" ci
+
+  [ "$status" -eq 0 ]
+  grep -qx 'checks' "$BATS_TEST_TMPDIR/dagger.args"
+  # This run has no terminal, like a CI job, where only plain progress prints each step as it happens.
+  grep -qx -- '--progress=plain' "$BATS_TEST_TMPDIR/dagger.args"
+  run grep -xE -- '--silent|-s|--quiet|-q+' "$BATS_TEST_TMPDIR/dagger.args"
+  [ "$status" -ne 0 ]
+}
+
 @test "The hermetic run validates the Renovate configuration with the image renovate-check uses" {
   # What each recipe would run, with the justfile's variables filled in.
   run just --justfile "$REPO/justfile" --dry-run renovate-check
