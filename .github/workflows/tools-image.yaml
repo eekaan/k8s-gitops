@@ -41,6 +41,10 @@ jobs:
       - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785  # v5.2.8
         with:
           version: 2026.11.4
+          # The checksum of that release's linux-x64 binary, and no cache entry, as in the publish
+          # job: this job signs too.
+          sha256: 0296d9cba9324106d4e0962bb94a2072902f3658813aeb3b09504947bb8ddc2b
+          cache: false
           install_args: just http:dagger cosign jq
       - run: just tools-image-publish
         env:

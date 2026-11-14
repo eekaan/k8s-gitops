@@ -22,21 +22,21 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
 - `just tools` installs the pinned tools.
 - `just checks` runs every check that needs no credentials, with the tools on this machine, group
   by group. The group `static` holds tool versions, address literals in the files and the commit
-  messages, that every Talos secrets bundle is encrypted, shellcheck and yamllint, the Renovate
-  configuration (`just renovate-check`: Renovate's own validator, run from its pinned container
-  image, so it needs a container runtime, Docker), scenario proofs, the OpenTofu check
-  (`just infra-check`: formatting, that the Talos schematic lists no QEMU guest agent extension,
-  that every stack enforces state encryption, that no stack or module declares a bucket, that the
-  default service range overlaps no default node, pod or service subnet, validation without a
-  state backend and the mocked `tofu test` runs), the Talos check
+  messages, merge conflict markers, that every Talos secrets bundle is encrypted, shellcheck and
+  yamllint, the Renovate configuration (`just renovate-check`: Renovate's own validator, run from
+  its pinned container image, so it needs a container runtime, Docker), scenario proofs, the
+  OpenTofu check (`just infra-check`: formatting, that the Talos schematic lists no QEMU guest
+  agent extension, that every stack enforces state encryption, that no stack or module declares a
+  bucket, that the default service range overlaps no default node, pod or service subnet,
+  validation without a state backend and the mocked `tofu test` runs), the Talos check
   (`just talos-check`: every node's machine configuration rendered from the template, the patches
   and fixture node data, and validated, offline), the offline build of `kubernetes/`, its render
   with every chart expanded (`just render-check`, which pulls the charts from their public
   registries), the log collector's configuration (`just vector-check`: Vector itself validates it
   and runs its unit tests, in the image the collector runs, pinned by digest, so it needs Docker
-  too), and gitleaks over the committable files and the git history. The groups `tests-1` to
-  `tests-3` each run a
-  third of the bats tests.
+  too), and gitleaks over the committable files and the git history reachable from `HEAD`, so a
+  clone and a CI checkout are judged on the same commits. The groups `tests-1` to `tests-3` each
+  run a third of the bats tests.
 - The groups are the dependencies of the `checks` recipe, and a group's checks are its own
   dependencies; a new check goes into exactly one group, and then runs in `just checks`, in
   `just ci` and in CI.
@@ -79,7 +79,8 @@ The repository checks:
 
 - `just tools-check` fails when a pinned tool is missing or its binary reports a different version.
 - `just kubernetes-check` builds `kubernetes/` offline with kustomize and Flux and fails when an
-  application, a `ks.yaml` or a variable breaks the layout in `docs/kubernetes.md`.
+  application, a `ks.yaml` or a variable breaks the layout in `docs/kubernetes.md`. The publish
+  run repeats it on the commit it publishes and publishes nothing when it fails.
 - `just check-literals` fails when a file git would commit, tracked or untracked and not ignored,
   holds an IPv4 literal outside the documentation ranges, loopback, `0.0.0.0`, the metadata
   address and netmasks, unless `.address-allowlist` declares it with a reason. It skips the
@@ -88,6 +89,10 @@ The repository checks:
 - `just check-commit-literals` applies the same rules to the messages of the commits between the
   default branch (the remote's, the remote's `main` as a CI checkout fetches it, or a local
   `main`) and `HEAD`, and passes when there is none.
+- `just check-conflict-markers` fails, naming the file and the line, when a file git would commit
+  holds a merge conflict marker as git writes it: a line starting with seven `<` or seven `>`
+  and then a space or the end of the line, or a line of seven `=` after an opening marker. A
+  Markdown heading underlined with seven `=` is not one.
 - `just scenarios-check` fails when a scenario has no proof or more than one, when a `@pending`
   scenario has no issue key or already has a proof, when a `@by:` tag names a recipe that does
   not exist, when two scenarios share a title, or when a test claims a scenario that does not
