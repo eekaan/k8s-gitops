@@ -954,28 +954,36 @@ job's identity token it stops before calling anything, so nobody signs from a la
 6. tags that digest `main`.
 
 A pull request's checks run against its branch as it was pushed; the publish run judges the tree
-that is on `main`. When that tree does not build, the run fails, nothing is pushed, signed or
-tagged, and the cluster stays on the last artifact that passed until a run for a later commit that
-changes `kubernetes/` or the workflow, or a manual run, publishes a tree that does. The gate is the
-offline build: `just render-check` is not part of it, as it pulls charts from their public
-registries and needs helm, which the publish job does not install.
+that is on `main`, and only its own: the check runs on the commit the run publishes and on no other.
+When that tree does not build, the run fails, nothing is pushed, signed or tagged, and the cluster
+stays on the last tagged artifact until a run for a later commit that changes `kubernetes/` or the
+workflow, or a manual run, publishes a tree that does. The gate is `just kubernetes-check`, the
+offline build, and no more: `just render-check` pulls charts from the network and needs helm in the
+job that signs, so it stays out of that job.
 
 Every workflow installs its tools with the same pinned `mise-action` at an exact mise release. A
 workflow whose token can write, `publish` and `render-comment`, also gives the action the checksum
 of that release's linux-x64 binary, so the tools that run beside the token are the pinned ones; the
 action fails the job when the binary differs. A bump of the mise version changes the checksum with it,
-in every workflow that has one. The publish job also turns the action's cache off, so nothing runs
-from an entry another job saved.
+in every workflow that has one, and the checksum is the `linux-x64` line of the release's
+`SHASUMS256.txt`. Renovate does not track either input: it can raise a version but cannot carry the
+checksum with it, so a version alone would fail the signing job's check, and the bump is by hand.
+The publish job also turns the action's cache off, so nothing runs from an entry another job saved.
 
 The tag moves last and by digest: `main` only ever names an artifact that is signed and verified,
 and signing, verifying and tagging all name it by its digest, so the tag ends on exactly the bytes
 that were signed and verified; a tag can change between two steps, a digest cannot. It moves only on
-a run on `refs/heads/main`, and only when no newer commit on `main` that changes `kubernetes/` or
-the workflow has a tree that passes the check; the run runs the check on that commit's `kubernetes/`
-too. A newer commit whose tree fails it publishes nothing, so the run tags its own artifact, which
-is then the last that passed. Runs share one concurrency group that never cancels a run in progress,
-so they never overlap: a run that starts while another is in progress waits for it, and GitHub replaces a waiting
-run with a newer one. A run on another branch, or one a newer commit overtook, such as a re-run of an
+a run on `refs/heads/main` for which no newer commit on `main` changes `kubernetes/` or the
+workflow, so an older run, a re-run of one included, never moves it back; the newest such commit's
+own run decides, and a run does not judge a newer commit's tree. That leaves one case in which the
+tag stays on an older artifact than the last commit that passed: a commit passes, a newer one that
+changes `kubernetes/` arrives before the passing commit's run reaches the tag, and the newer one
+fails its check. The passing commit's run then leaves the tag alone and the failing one publishes
+nothing, and the same happens when GitHub replaces the passing commit's waiting run with the
+failing one's. The tag stays where it was until the next commit that passes, which publishes. Runs
+share one concurrency group that never cancels a run in progress, so they never overlap: a run that
+starts while another is in progress waits for it, and GitHub replaces a waiting run with a newer one.
+A run on another branch, or one a newer commit overtook, such as a re-run of an
 old one, still pushes, signs and verifies, says why the tag stayed where it is, and succeeds. An
 artifact signed by a run on another branch carries that branch's identity, which the instance
 refuses. The run prints

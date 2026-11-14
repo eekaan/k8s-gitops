@@ -19,6 +19,9 @@ conflict() {
 @test "A merge conflict marker in a file git would commit fails the check" {
   mkdir docs config
   conflict docs/guide.md
+  # A heading underlined with equals signs after the block: the closing marker ends the conflict,
+  # so the underline is not the middle of another.
+  printf '%s\n' 'Heading' "$MID" >> docs/guide.md
   conflict config/values.yaml
   conflict untracked.txt
   git add docs config
@@ -34,6 +37,7 @@ conflict() {
     [[ $output == *"$file:6:"* ]] || { echo "closing line of $file not named"; return 1; }
   done
   [[ $output != *ignored.txt* ]]
+  [[ $output != *"docs/guide.md:9:"* ]]
 }
 
 @test "A marker in a file with CRLF line endings fails the check" {

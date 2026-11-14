@@ -22,13 +22,13 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
 - `just tools` installs the pinned tools.
 - `just checks` runs every check that needs no credentials, with the tools on this machine, group
   by group. The group `static` holds tool versions, address literals in the files and the commit
-  messages, merge conflict markers, that every Talos secrets bundle is encrypted, shellcheck and yamllint, the Renovate
-  configuration (`just renovate-check`: Renovate's own validator, run from its pinned container
-  image, so it needs a container runtime, Docker), scenario proofs, the OpenTofu check
-  (`just infra-check`: formatting, that the Talos schematic lists no QEMU guest agent extension,
-  that every stack enforces state encryption, that no stack or module declares a bucket, that the
-  default service range overlaps no default node, pod or service subnet, validation without a
-  state backend and the mocked `tofu test` runs), the Talos check
+  messages, merge conflict markers, that every Talos secrets bundle is encrypted, shellcheck and
+  yamllint, the Renovate configuration (`just renovate-check`: Renovate's own validator, run from
+  its pinned container image, so it needs a container runtime, Docker), scenario proofs, the
+  OpenTofu check (`just infra-check`: formatting, that the Talos schematic lists no QEMU guest
+  agent extension, that every stack enforces state encryption, that no stack or module declares a
+  bucket, that the default service range overlaps no default node, pod or service subnet,
+  validation without a state backend and the mocked `tofu test` runs), the Talos check
   (`just talos-check`: every node's machine configuration rendered from the template, the patches
   and fixture node data, and validated, offline), the offline build of `kubernetes/`, its render
   with every chart expanded (`just render-check`, which pulls the charts from their public

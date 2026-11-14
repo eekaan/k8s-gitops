@@ -191,7 +191,7 @@ EOF
 
 # check_stand_in: replaces the copy's scripts/kubernetes-check, which has its own tests, with a
 # recorded call that fails, saying why, for its own tree while STATE/check-fails exists and for any
-# tree that holds kubernetes/breaks-the-check. It records the credentials it can see.
+# tree that holds kubernetes/breaks-the-check. It records the credentials it can see, the registry login included.
 check_stand_in() {
   {
     echo '#!/usr/bin/env bash'
@@ -201,6 +201,8 @@ echo kubernetes-check >> "$RECORD/calls"
 for name in REGISTRY_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN; do
   [[ -z ${!name+x} ]] || echo "$name" >> "$RECORD/check-env"
 done
+# The registry login is written to the Docker configuration by docker login.
+[[ ! -e ${DOCKER_CONFIG:-$HOME/.docker}/config.json ]] || echo "the registry login" >> "$RECORD/check-env"
 dir=${1:-$(dirname "$0")/..}
 if [[ -e $STATE/check-fails && -z ${1:-} ]] || [[ -e $dir/kubernetes/breaks-the-check ]]; then
   echo "kubernetes-check: kubernetes/apps/base/demo/hello/ks.yaml: a rule of the layout is broken" >&2
@@ -435,16 +437,145 @@ accepts() {
   [ ! -e "$RECORD/check-env" ] || { echo "the check saw: $(cat "$RECORD/check-env")"; return 1; }
 }
 
-@test "A run tags the artifact when the newer commit on main fails the check, as that commit publishes nothing" {
+@test "A newer commit on main whose tree fails the check still keeps the tag where it is" {
   newer_commit kubernetes/breaks-the-check
 
   publish
 
   [ "$status" -eq 0 ]
-  [[ $output == *"tag main moved to $DIGEST"* ]]
-  [[ $output == *"${NEWER:0:7}"*"fails"* ]]
+  [[ $output == *"tag main not moved"*"${NEWER:0:7}"* ]]
+  # The run judges its own tree only: what a newer commit's tree does is for that commit's run.
   run flow
-  [ "$output" = "$(step_list 'kubernetes-check' 'docker login' 'flux push' 'cosign sign' 'cosign verify' 'kubernetes-check' 'flux tag')" ]
+  [ "$output" = "$(step_list 'kubernetes-check' 'docker login' 'flux push' 'cosign sign' 'cosign verify')" ]
+}
+
+# The ordering tests replay a history: A is the checkout under test, and B and C are commits that
+# arrive on origin's main after it. COMMIT maps a name to its commit, and TAGGED is the artifact the
+# tag main names, by the name of its commit. A run's artifact has the digest of its commit's name,
+# and a run that tags says which one.
+declare -gA COMMIT=()
+
+# world N: a copy of the repository on A, with an origin of its own, for the Nth history.
+world() {
+  ORIGIN="$BATS_TEST_TMPDIR/origin-$1.git"
+  REPO="$BATS_TEST_TMPDIR/repo-$1"
+  OTHER="$BATS_TEST_TMPDIR/other-$1"
+  cp -R "$BATS_FILE_TMPDIR/template/repo" "$REPO"
+  cp -R "$BATS_FILE_TMPDIR/template/origin.git" "$ORIGIN"
+  git -C "$REPO" remote add origin "$ORIGIN"
+  git -C "$REPO" fetch -q origin
+  git clone -q "$ORIGIN" "$OTHER"
+  check_stand_in
+  COMMIT=([A]=$SHA)
+  TAGGED=
+}
+
+# arrive NAME PATH: commits a change to PATH on origin's main as NAME.
+arrive() {
+  mkdir -p "$OTHER/$(dirname "$2")"
+  echo "# $1" >> "$OTHER/$2"
+  git -C "$OTHER" add -A
+  git -C "$OTHER" -c user.name=test -c user.email=test@example.invalid commit -q -m "$1 changes $2"
+  git -C "$OTHER" push -q origin main
+  COMMIT[$1]=$(git -C "$OTHER" rev-parse HEAD)
+}
+
+# run_at NAME: a publish run for NAME's commit, as a late run or GitHub's "Re-run jobs" has it: the
+# checkout is that commit and origin's main is wherever it is now. Moves TAGGED when the run tags.
+run_at() {
+  git -C "$REPO" fetch -q origin
+  git -C "$REPO" checkout -q --detach "${COMMIT[$1]}"
+  printf 'sha256:%s' "$(printf '%s' "$1" | sha256sum | cut -d' ' -f1)" > "$STATE/digest"
+  rm -f "$RECORD/calls"
+  publish
+  MOVED=0
+  if [[ -e $RECORD/calls ]] && grep -q '^flux tag ' "$RECORD/calls"; then
+    TAGGED=$1 MOVED=1
+  fi
+}
+
+# every_run N C_PATH [passes]: a history in which B passes and C changes C_PATH, and at each state of
+# main (A alone, then B, then C arrived) a run for every commit that exists. A run's outcome depends
+# on its commit and on what main holds, and on nothing else, so these runs cover every order that
+# runs and re-runs can come in. A run must tag exactly when its commit is the newest on main and its
+# tree passes: with that, a run for an older commit never tags once a newer one has arrived, so the
+# tag cannot go back.
+every_run() {
+  local latest name expect
+  world "$1"
+  for latest in A B C; do
+    case $latest in
+      B) arrive B kubernetes/apps/base/demo/hello/app/configmap.yaml ;;
+      C) arrive C "$2" ;;
+    esac
+    for name in A B C; do
+      [[ -n ${COMMIT[$name]:-} && $name < "$latest" || $name == "$latest" ]] || continue
+      run_at "$name"
+      expect=0
+      [[ $name == "$latest" && ( $name != C || ${3-} == passes ) ]] && expect=1
+      [ "$MOVED" -eq "$expect" ] || { echo "the run for $name with $latest the newest: tag moved $MOVED, want $expect"; return 1; }
+    done
+  done
+}
+
+# replay NAME=PATH... -- EVENT...: arrivals are +NAME, which commits a change to NAME's PATH on
+# main, and runs are rNAME. Fails when a run moves the tag from an artifact to an older one, older
+# meaning that its commit arrived earlier.
+replay() {
+  local -A path=()
+  local event name before order=ABC
+  while [[ $1 != -- ]]; do
+    path[${1%%=*}]=${1#*=}
+    shift
+  done
+  shift
+  for event; do
+    name=${event:1}
+    before=$TAGGED
+    case $event in
+      +*) arrive "$name" "${path[$name]}" ;;
+      r*) run_at "$name" ;;
+    esac
+    if [[ -n $before && $TAGGED != "$before" && ${order%%"$before"*} == *"$TAGGED"* ]]; then
+      echo "after $event the tag went from $before back to $TAGGED"
+      return 1
+    fi
+  done
+}
+
+@test "The tag only ever moves forward, in every order of runs and re-runs, when the newest commit fails the check" {
+  local passes=kubernetes/apps/base/demo/hello/app/configmap.yaml fails=kubernetes/breaks-the-check
+
+  every_run 0 "$fails"
+
+  # Runs as commits arrive, then old runs again: the tag ends on B, the last commit that passed.
+  world 1
+  replay B=$passes C=$fails -- rA +B rB +C rC rA rB rC
+  [ "$TAGGED" = B ]
+  # B's run came after C arrived, and C's run before it ran: no run tags, the tag stays on A.
+  world 2
+  replay B=$passes C=$fails -- rA +B +C rB rC rA rB
+  [ "$TAGGED" = A ]
+  # Both arrive before A's run, and the runs come newest first: nothing moves the tag.
+  world 3
+  replay B=$passes C=$fails -- +B +C rC rB rA
+  [ -z "$TAGGED" ]
+}
+
+@test "The tag only ever moves forward, in every order of runs and re-runs, when every commit passes" {
+  local passes=kubernetes/apps/base/demo/hello/app/configmap.yaml
+
+  every_run 0 "$passes" passes
+
+  world 1
+  replay B=$passes C=$passes -- rA +B +C rB rC rA rB rC
+  [ "$TAGGED" = C ]
+  world 2
+  replay B=$passes C=$passes -- +B rA rB +C rC rB rA rC
+  [ "$TAGGED" = C ]
+  world 3
+  replay B=$passes C=$passes -- +B +C rC rB rA rC
+  [ "$TAGGED" = C ]
 }
 
 @test "A failing check publishes nothing, moves no tag and fails the run with the check's reason" {

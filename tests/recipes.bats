@@ -201,3 +201,30 @@ EOF
   [ "$status" -ne 0 ]
   [[ $output == *key.txt* ]]
 }
+
+@test "The secrets scan reads a commit that HEAD reaches only through a merge's second parent" {
+  local commit=(git -c user.name=fixture -c user.email=fixture@example.invalid commit -q)
+  cp "$BATS_TEST_DIRNAME/../.gitleaks.toml" .gitleaks.toml
+  git add .gitleaks.toml
+  "${commit[@]}" -m "clean history"
+  git switch -q -c feature
+  # In the shape of an AWS access key ID, put together here so this file holds none.
+  echo "aws_access_key_id = AKIA$(printf '%s' QZ7XK2M4B6N3P5R7)" > key.txt
+  git add key.txt
+  "${commit[@]}" -m "a commit with a key"
+  rm key.txt
+  git add -A
+  "${commit[@]}" -m "remove the key"
+  git switch -q -
+  echo unrelated > notes.txt
+  git add notes.txt
+  "${commit[@]}" -m "a commit on the first parent's side"
+  git -c user.name=fixture -c user.email=fixture@example.invalid merge -q --no-ff -m "merge feature" feature
+  # The merged tree holds no key; only the second parent's history does.
+  [ ! -e key.txt ]
+
+  recipe secrets-scan
+
+  [ "$status" -ne 0 ]
+  [[ $output == *key.txt* ]]
+}

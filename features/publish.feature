@@ -17,14 +17,24 @@ Feature: Publishing the cluster's artifact
     Then the artifact is pushed, signed and verified, the tag is not touched, the run says why and exits zero
 
   Scenario: An older run does not move the tag back
-    Given a publish run on refs/heads/main, and a newer commit on origin/main that changes kubernetes/ or the publish workflow, whose tree passes just kubernetes-check
+    Given a publish run on refs/heads/main, and a newer commit on origin/main that changes kubernetes/ or the publish workflow
     When just publish runs
     Then the artifact is pushed, signed and verified, the tag is not touched, the run names the newer commit and exits zero
 
-  Scenario: A run tags the artifact when the newer commit on main fails the check, as that commit publishes nothing
+  Scenario: A newer commit on main whose tree fails the check still keeps the tag where it is
     Given a publish run on refs/heads/main whose tree passes just kubernetes-check, and a newer commit on origin/main that changes kubernetes/ and whose tree fails it
     When just publish runs
-    Then the artifact is pushed, signed, verified and tagged main, and the run names the newer commit as failing the check
+    Then the check runs once, on the run's own tree, the artifact is pushed, signed and verified, the tag is not touched, and the run names the newer commit and exits zero
+
+  Scenario: The tag only ever moves forward, in every order of runs and re-runs, when the newest commit fails the check
+    Given commits A, B and C on main that each change kubernetes/, B passing just kubernetes-check and C failing it, and a publish run for each commit at each point at which the commits have arrived
+    When the runs and their re-runs happen in any order
+    Then a run tags exactly when its commit is the newest on main and passes, so the tag never moves to an older artifact, and when C arrives before B's run the tag stays where it was
+
+  Scenario: The tag only ever moves forward, in every order of runs and re-runs, when every commit passes
+    Given commits A, B and C on main that each change kubernetes/ and all pass just kubernetes-check, and a publish run for each commit at each point at which the commits have arrived
+    When the runs and their re-runs happen in any order
+    Then a run tags exactly when its commit is the newest on main, so the tag never moves to an older artifact and ends on C
 
   Scenario: The artifact is published only after the Kubernetes check passes
     Given a publish run on refs/heads/main whose tree passes just kubernetes-check

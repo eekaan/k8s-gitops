@@ -41,10 +41,15 @@ Feature: Repository checks
     When the secrets scan runs on a branch without that commit, and then on the branch with it
     Then the first run exits zero and the second exits non-zero naming the file
 
+  Scenario: The secrets scan reads a commit that HEAD reaches only through a merge's second parent
+    Given a branch with a commit holding a key in the shape of a cloud access key and a commit that removes it, merged into the branch under scan with a merge commit
+    When the secrets scan runs on the merged branch
+    Then it exits non-zero naming the file
+
   Scenario: A merge conflict marker in a file git would commit fails the check
-    Given a tracked Markdown file, a tracked YAML file and an untracked file, each holding a block as git writes a conflict, and an ignored file holding one too
+    Given a tracked Markdown file, a tracked YAML file and an untracked file, each holding a block as git writes a conflict, the Markdown file ending in a heading underlined with seven equals signs, and an ignored file holding a block too
     When the conflict marker check runs
-    Then it exits non-zero and names each of the three files with the line of the opening, the middle and the closing marker, and does not name the ignored file
+    Then it exits non-zero and names each of the three files with the line of the opening, the middle and the closing marker, does not name the heading's underline, and does not name the ignored file
 
   Scenario: A marker in a file with CRLF line endings fails the check
     Given a Markdown file with CRLF line endings holding a block as git writes a conflict

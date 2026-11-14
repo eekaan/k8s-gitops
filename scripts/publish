@@ -7,9 +7,10 @@
 # and only then tags that digest main. The tag moves last and
 # by digest, so main only ever names the bytes that were signed and verified, whatever becomes of the
 # commit's tag in between. It moves only on a run on refs/heads/main for which no newer commit on
-# main changes what is published and passes the same check, so a run that finishes late never moves
-# it back, and a newer commit that publishes nothing leaves the tag to this run; otherwise the run
-# says why the tag stayed, and exits 0.
+# main changes what is published, so a run that finishes late never moves it back; otherwise the
+# run says why the tag stayed, and exits 0. The check is run on this run's own commit only: what a
+# newer commit's tree does is for that commit's run, so a newer commit that fails publishes nothing
+# and the tag stays where it is until a later commit passes.
 # Reads what GitHub Actions sets: GITHUB_ACTIONS, ACTIONS_ID_TOKEN_REQUEST_URL and
 # ACTIONS_ID_TOKEN_REQUEST_TOKEN (a job with id-token: write), GITHUB_REF and GITHUB_ACTOR; and
 # REGISTRY_TOKEN, the job's token with packages: write. The token reaches docker login on standard
@@ -50,9 +51,8 @@ cd "$(dirname "$0")/.."
 DOCKER_CONFIG=$(mktemp -d)
 export DOCKER_CONFIG
 step="starting"
-newer_tree=
 finish() {
-  rm -rf "$DOCKER_CONFIG" ${newer_tree:+"$newer_tree"}
+  rm -rf "$DOCKER_CONFIG"
   if (($1)); then
     printf 'publish: failed while %s\n' "$step" >&2
   fi
@@ -109,18 +109,10 @@ if [[ $GITHUB_REF != refs/heads/main ]]; then
 fi
 begin "looking for a newer commit on main"
 git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main
-newer=$(git log -1 --format=%H "$sha..refs/remotes/origin/main" -- kubernetes .github/workflows/publish.yaml)
+newer=$(git log -1 --format=%h "$sha..refs/remotes/origin/main" -- kubernetes .github/workflows/publish.yaml)
 if [[ -n $newer ]]; then
-  # The newer commit's own run publishes it only when its tree passes the check; one that fails
-  # publishes nothing, and then this run's artifact is the last that passed.
-  begin "checking that kubernetes/ at ${newer:0:7} builds"
-  newer_tree=$(mktemp -d)
-  git archive "$newer" kubernetes | tar -x -C "$newer_tree"
-  if without_tokens scripts/kubernetes-check "$newer_tree"; then
-    say "tag main not moved: ${newer:0:7} on main changes what is published, and its own run moves the tag"
-    exit 0
-  fi
-  say "${newer:0:7} on main changes what is published but fails the check, so its run publishes nothing"
+  say "tag main not moved: $newer on main changes what is published, and its own run moves the tag"
+  exit 0
 fi
 
 begin "tagging $digest main"

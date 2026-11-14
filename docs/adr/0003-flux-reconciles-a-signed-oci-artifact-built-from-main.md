@@ -2,6 +2,9 @@
 
 - Status: accepted
 - Date: 2026-11-14
+- Amended: 2026-11-14, the publishing run first runs the Kubernetes check on the commit it
+  publishes and publishes nothing when it fails, so the `main` tag only names an artifact built
+  from a tree that passed
 
 ## Context
 
@@ -35,8 +38,3 @@ branch; manifests reach the cluster only by merging.
   rendered diff instead.
 - The artifact must exist and be public before the cluster can be bootstrapped.
 - Flux manages its own operator and instance from the same artifact after bootstrap.
-
-## Amendment
-
-The publishing run first runs the Kubernetes check on the commit it publishes, and publishes
-nothing when it fails, so the `main` tag only ever names an artifact built from a tree that passed.
