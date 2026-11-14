@@ -310,10 +310,15 @@ out of the artifact, which is built from `kubernetes/`.
   every Service of type LoadBalancer and every PersistentVolume of a CSI driver: the cloud's load
   balancers and volumes behind them are made by the cluster, not by OpenTofu, so the destroy would
   leave them in the cloud, where they keep the network from being deleted. While there are any, it
-  names each, by namespace and name or by the volume's name, and destroys nothing. A cluster whose
-  API does not answer, or that has no kubeconfig, cannot be asked and is not destroyed either,
-  unless `--unreachable` is given: the operator then takes on whatever it owned, which stays in the
-  cloud. Before it asks the cluster it checks what `infra-destroy` needs for the stack.
+  names each, by namespace and name or by the volume's name, and destroys nothing. Volumes of
+  LINSTOR's driver, `linstor.csi.linbit.com`, are the exception: their data is on the workers' data
+  volumes ([above](#the-workers-data-device)), which the stack holds and deletes, so none of
+  them stays in the cloud. They do not hold the destroy up; it says how many there are, by number
+  and not by name, before it shows the plan, and the one confirmation, the stack's name typed back
+  or `--yes`, destroys them with the stack. A cluster whose API does not answer, or that has no
+  kubeconfig, cannot be asked and is not destroyed either, unless `--unreachable` is given: the
+  operator then takes on whatever it owned, which stays in the cloud. Before it asks the cluster it
+  checks what `infra-destroy` needs for the stack.
   [runbooks/rebuild.md](runbooks/rebuild.md) has it in the procedure around it.
 
 A failing recipe ends with a line naming the step it failed in.

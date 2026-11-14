@@ -19,6 +19,7 @@
 #                     approved, with an error naming the node's address
 #   load-balancer     a Service of type LoadBalancer exists
 #   csi-volume        a PersistentVolume of a CSI driver exists
+#   linstor-volumes   as many PersistentVolumes of LINSTOR's CSI driver as the file's number
 # Every object it answers with holds addresses from the documentation ranges, as do its errors and the
 # log line, which the recipes must never print. It records "kubectl ARGS" in <tmp>/record/argv, and
 # "drain of <hostname> finished" there when a drain has evicted every pod, a
@@ -161,6 +162,14 @@ volumes() {
   jq -n '{metadata: {name: "local-volume-1"}, spec: {local: {path: "/var/mnt/local"}, nodeAffinity: {}}}'
   if listed csi-volume; then
     jq -n '{metadata: {name: "pvc-0a1b2c3d"}, spec: {csi: {driver: "cinder.csi.openstack.org", volumeHandle: "marker-volume-handle"}}}'
+  fi
+  local i
+  if listed linstor-volumes; then
+    for ((i = 1; i <= $(< "$state/linstor-volumes"); i++)); do
+      jq -n --arg name "pvc-linstor-$i" '{metadata: {name: $name}, spec: {csi: {driver: "linstor.csi.linbit.com",
+        volumeHandle: "marker-volume-handle"}, nodeAffinity: {required: {nodeSelectorTerms: [{matchExpressions: [
+        {key: "kubernetes.io/hostname", operator: "In", values: ["worker-1", "198.51.100.84"]}]}]}}}}'
+    done
   fi
 }
 
