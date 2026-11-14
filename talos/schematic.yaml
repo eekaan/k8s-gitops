@@ -1,0 +1,9 @@
+---
+# Image Factory schematic of the node image. The plumbing stack registers it and builds the image
+# from it; the same schematic gives the same ID wherever it is computed.
+# No system extensions. In particular no QEMU guest agent: the agent waits for a virtio serial
+# channel that Nova adds only to instances whose image sets the hw_qemu_guest_agent property. This
+# image does not set it, so the service never becomes healthy and Talos reboots the node.
+customization:
+  systemExtensions:
+    officialExtensions: []

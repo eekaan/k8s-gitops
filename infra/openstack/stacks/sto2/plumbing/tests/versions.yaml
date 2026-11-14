@@ -1,0 +1,3 @@
+---
+# The versions file the image test reads: a Talos version no release has.
+talos: v0.0.0-fixture

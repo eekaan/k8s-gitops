@@ -9,8 +9,9 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
 
 - `just tools` installs the pinned tools.
 - `just ci` runs every check that needs no credentials: tool versions, address literals,
-  shellcheck and yamllint, gitleaks over the committable files and the git history, and the
-  bats tests.
+  shellcheck and yamllint, the OpenTofu check (`just infra-check`: formatting, validation
+  without a state backend and the mocked `tofu test` runs), gitleaks over the committable files
+  and the git history, and the bats tests.
 
 The two repository checks:
 

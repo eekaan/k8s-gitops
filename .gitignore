@@ -1,4 +1,5 @@
-# OpenTofu state and variables hold real addresses and secrets; .terraform.lock.hcl stays tracked.
+# OpenTofu state and variables hold real addresses and secrets; a stack's .terraform.lock.hcl
+# stays tracked.
 .terraform/
 *.tfstate
 *.tfstate.*
@@ -6,6 +7,10 @@
 *.tfvars.json
 crash.log
 .terraform.tfstate.lock.info
+
+# The stacks that use a module pin its providers, not the module. tofu init in a module directory,
+# which its tests need, would otherwise leave a lock file there.
+infra/openstack/modules/*/.terraform.lock.hcl
 
 # talman's per-cluster config and generated machine configs carry cluster secrets.
 talos/*/talman.yaml

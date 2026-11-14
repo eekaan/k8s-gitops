@@ -1,3 +1,4 @@
 # IPv4 literals that may appear in tracked files although scripts/check-address-literals would
 # otherwise reject them. One literal per line, written exactly as it appears in the file (with its
 # /prefix if it has one), followed by a comment saying why it is public and safe to publish.
+10.10.0.0/24  # default node subnet of the plumbing stack: a private RFC 1918 design range, routed nowhere outside the project's network

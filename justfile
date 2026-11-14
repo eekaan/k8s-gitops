@@ -57,7 +57,7 @@ test:
     bats tests
 
 # Run every check that needs no credentials, the cheapest and most basic first
-ci: tools-check check-literals lint secrets-scan test
+ci: tools-check check-literals lint infra-check secrets-scan test
 
 # Validate the Renovate configuration with Renovate's own validator, in its container image
 renovate-check:

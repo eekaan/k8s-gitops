@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Checks the OpenTofu code without cloud credentials or a state backend: formatting, then init and
+# validate for every stack, then tofu test in every stack or module that has a tests/ directory.
+# Init downloads the locked providers from the public registry; the tests mock every provider.
+set -euo pipefail
+shopt -s nullglob
+
+cd "$(git rev-parse --show-toplevel)"
+
+failed=()
+declare -A seen=()
+
+fail() {
+  echo "infra-check: $1: $2" >&2
+  if [[ -z ${seen[$1]:-} ]]; then
+    seen[$1]=1
+    failed+=("$1")
+  fi
+}
+
+# Shows a command's output only when it fails, so a passing check stays short.
+quietly() {
+  local output
+  if ! output=$("$@" 2>&1); then
+    printf '%s\n' "$output" >&2
+    return 1
+  fi
+}
+
+# fmt lists each file it would rewrite. A file it cannot parse is not listed; its diagnostics
+# name it in an "on <file> line <n>" line instead.
+if ! unformatted=$(tofu fmt -check -recursive -no-color infra/ 2>&1); then
+  named=0
+  declare -A unparsable=()
+  while IFS= read -r line; do
+    if [[ -f $line ]]; then
+      fail "${line%/*}" "not formatted, tofu fmt -recursive infra/ fixes it"
+      named=1
+    elif [[ $line =~ ^[[:space:]]*on\ (.+)\ line\ [0-9]+ && -f ${BASH_REMATCH[1]} ]]; then
+      unparsable[${BASH_REMATCH[1]%/*}]=1
+    fi
+  done <<< "$unformatted"
+  if (( ${#unparsable[@]} > 0 )); then
+    printf '%s\n' "$unformatted" >&2
+    for dir in "${!unparsable[@]}"; do
+      fail "$dir" "a file does not parse"
+    done
+    named=1
+  fi
+  if (( ! named )); then
+    printf '%s\n' "$unformatted" >&2
+    fail infra "tofu fmt -check failed"
+  fi
+fi
+
+dirs=(infra/openstack/stacks/*/*/)
+if (( ${#dirs[@]} == 0 )); then
+  fail infra/openstack/stacks "no stack found"
+fi
+for module in infra/openstack/modules/*/; do
+  if [[ -d $module/tests ]]; then
+    dirs+=("$module")
+  fi
+done
+
+for dir in "${dirs[@]}"; do
+  dir=${dir%/}
+  if ! quietly tofu -chdir="$dir" init -backend=false -input=false -no-color; then
+    fail "$dir" "tofu init failed"
+    continue
+  fi
+  if ! quietly tofu -chdir="$dir" validate -no-color; then
+    fail "$dir" "tofu validate failed"
+    continue
+  fi
+  steps="init and validate"
+  if [[ -d $dir/tests ]]; then
+    if ! tofu -chdir="$dir" test -no-color; then
+      fail "$dir" "tofu test failed"
+      continue
+    fi
+    steps="init, validate and test"
+  fi
+  echo "infra-check: $dir: $steps passed"
+done
+
+if (( ${#failed[@]} > 0 )); then
+  echo "infra-check: failed: ${failed[*]}" >&2
+  exit 1
+fi
+echo "infra-check: every stack is formatted, valid and passes its tests"
