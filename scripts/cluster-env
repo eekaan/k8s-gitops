@@ -16,6 +16,8 @@
 #   recipient   an age recipient in talos/.sops.yaml rather than its placeholder
 #   secrets     the cluster's secrets.sops.yaml
 #   age-key     the Talos age key's location
+#   api-address KUBE_API_ADDRESS, the API load balancer's floating address
+#   wait        TALOS_WAIT, when set, as a number of seconds
 require_cluster() {
   local need complete=1
   for need; do
@@ -39,6 +41,20 @@ require_cluster() {
         fi
         ;;
       age-key) require_age_key || complete=0 ;;
+      api-address)
+        if ! require_env KUBE_API_ADDRESS; then
+          complete=0
+        elif [[ ! $KUBE_API_ADDRESS =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+          infra_error "KUBE_API_ADDRESS is not an IPv4 address or a host name; it holds the API load balancer's floating address"
+          complete=0
+        fi
+        ;;
+      wait)
+        if [[ ! ${TALOS_WAIT:-600} =~ ^[0-9]+$ ]]; then
+          infra_error "TALOS_WAIT is not a whole number of seconds"
+          complete=0
+        fi
+        ;;
     esac
   done
   ((complete))

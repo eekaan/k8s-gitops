@@ -1,9 +1,9 @@
 # shellcheck shell=bash
 # Shared by scripts/cluster-env, the cluster-* scripts and the secrets bundle check: the Talos age
-# key's location, talos/.sops.yaml's recipient, the check that a secrets bundle is encrypted, and the
-# line that names the step a recipe failed in. Builds on scripts/lib/infra.sh, which reads the
-# environment. Nothing here reads the age key or prints a secret: sops and talman get the key's
-# location from their environment.
+# key's location, talos/.sops.yaml's recipient, the check that a secrets bundle is encrypted, a
+# cluster's nodes and the wait for their Talos API, and the line that names the step a recipe
+# failed in. Builds on scripts/lib/infra.sh, which reads the environment. Nothing here reads the
+# age key or prints a secret: sops and talman get the key's location from their environment.
 
 # shellcheck source=scripts/lib/infra.sh
 . "$(dirname "${BASH_SOURCE[0]}")/infra.sh"
@@ -76,4 +76,58 @@ bundle_encrypted() {
     | [length, (map(select(tag != "!!str" or (test("^ENC\\[") | not))) | length)] | join(" ")' "$1" 2> /dev/null) || return 1
   read -r values plaintext <<< "$counts"
   [[ $values =~ ^[0-9]+$ && $plaintext == 0 ]] && ((values > 0))
+}
+
+# talman_nodes TALMAN_FILE: each node in TALMAN_FILE as its hostname and the address talman reaches
+# it on, one node per line, in the file's order. Fails, naming the file, when a node lacks either or
+# the file lists none.
+talman_nodes() {
+  local nodes line
+  nodes=$(yq '.nodes[] | (.hostname // "") + " " + (.ipAddress // "")' "$1") || return 1
+  if [[ -z $nodes ]]; then
+    infra_error "${1#"$infra_root"/} lists no nodes"
+    return 1
+  fi
+  while IFS= read -r line; do
+    if [[ ! $line =~ ^[a-z0-9][a-z0-9.-]*\ [A-Za-z0-9.:-]+$ ]]; then
+      infra_error "${1#"$infra_root"/} has a node without a hostname or an address"
+      return 1
+    fi
+  done <<< "$nodes"
+  printf '%s\n' "$nodes"
+}
+
+# talos_api_answers ADDRESS: whether ADDRESS accepts a connection on the Talos API port, 50000,
+# within three seconds. A node in maintenance mode answers on the same port.
+talos_api_answers() {
+  # shellcheck disable=SC2016 # the inner bash expands $1, its own argument, so no address is code
+  timeout 3 bash -c ': < "/dev/tcp/$1/50000"' talos-api "$1" 2> /dev/null
+}
+
+# wait_for_talos_api TALMAN_FILE: waits until every node in TALMAN_FILE answers on the Talos API
+# port, trying those still silent every ten seconds, for up to TALOS_WAIT seconds (600 when unset).
+# Fails naming the nodes that never answered, by hostname only, as their addresses belong to the
+# deployment. A node that never answers is the operator's to reboot; nothing here reboots it.
+wait_for_talos_api() {
+  local wait=${TALOS_WAIT:-600} nodes node address deadline names
+  local -a waiting silent
+  nodes=$(talman_nodes "$1") || return 1
+  mapfile -t waiting <<< "$nodes"
+  deadline=$((SECONDS + wait))
+  while :; do
+    silent=()
+    for node in "${waiting[@]}"; do
+      address=${node#* }
+      talos_api_answers "$address" || silent+=("$node")
+    done
+    ((${#silent[@]} > 0)) || return 0
+    names=$(printf '%s\n' "${silent[@]%% *}" | paste -sd, - | sed 's/,/, /g')
+    if ((SECONDS >= deadline)); then
+      infra_error "no answer on the Talos API port after ${wait}s from $names; reboot a node that does not answer, and run this again"
+      return 1
+    fi
+    echo "waiting for the Talos API to answer on $names"
+    waiting=("${silent[@]}")
+    sleep 10
+  done
 }

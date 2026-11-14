@@ -3,6 +3,8 @@
 # The recipes run from a copy of the repository. Creating an age key, generating a secrets bundle
 # and encrypting it are local and offline, so those tests run the pinned age-keygen, talman,
 # talosctl and sops, recorded on their way, with every key inside the test's temporary directory.
+# Everything that would reach a node or a cluster runs against recording fakes: talman, talosctl,
+# kubectl, install-cilium, and timeout, which carries the probe of the Talos API port.
 
 setup_file() {
   # The Talos check's fixture cluster: talos/talman.yaml.tftpl rendered from tests/fixtures/talos,
@@ -17,7 +19,8 @@ setup() {
   JUST=$(command -v just)
   BIN="$BATS_TEST_TMPDIR/bin"
   RECORD="$BATS_TEST_TMPDIR/record"
-  mkdir -p "$BIN" "$RECORD" "$BATS_TEST_TMPDIR/repo/talos/lab-sto2" "$BATS_TEST_TMPDIR/keys"
+  STATE="$BATS_TEST_TMPDIR/state"
+  mkdir -p "$BIN" "$RECORD" "$STATE" "$BATS_TEST_TMPDIR/repo/talos/lab-sto2" "$BATS_TEST_TMPDIR/keys"
   REPO=$(cd "$BATS_TEST_TMPDIR/repo" && pwd)
   CLUSTER="$REPO/talos/lab-sto2"
   BUNDLE="$CLUSTER/secrets.sops.yaml"
@@ -30,9 +33,11 @@ setup() {
   # A mise with nothing installed keeps the justfile from putting real tools in front of the fakes.
   fake mise < /dev/null
   KEY="$BATS_TEST_TMPDIR/keys/talos.agekey"
+  KUBE_API_ADDRESS=203.0.113.80
   # TMPDIR keeps the plaintext bundle talman stages before encrypting it inside the test's directory.
   BASE_ENVIRONMENT=(
     SOPS_AGE_KEY_FILE="$KEY"
+    KUBE_API_ADDRESS="$KUBE_API_ADDRESS"
     TMPDIR="$BATS_TEST_TMPDIR"
   )
   reset_environment
@@ -114,6 +119,100 @@ EOF
 git_repository() {
   export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
   git init -q "$REPO"
+}
+
+# fake_tool NAME: like fake, with RECORD and STATE set in the fake for its body to use.
+fake_tool() {
+  { printf 'RECORD=%q STATE=%q\n' "$RECORD" "$STATE"; cat; } | fake "$1"
+}
+
+# cluster_files: the age key and the secrets bundle the fakes are run with, each holding a secret
+# that must never be seen.
+cluster_files() {
+  echo 'AGE-SECRET-KEY-MARKER-AGE-KEY-FILE' > "$KEY"
+  printf 'cluster:\n  secret: marker-bundle-secret\n' > "$BUNDLE"
+}
+
+# fake_cluster: a cluster whose nodes wait in maintenance mode and answer on the Talos API port,
+# behind recording fakes of talman, talosctl, kubectl, install-cilium, timeout and sleep. What a
+# fake does is set by files in STATE:
+#   bootstrapped       etcd runs, so talman refuses to bootstrap again
+#   answers-on.ADDRESS the node at ADDRESS answers the probe at that try (the first by default)
+#   silent.ADDRESS     the node at ADDRESS never answers
+fake_cluster() {
+  cluster_files
+  fake_tool talman <<'EOF'
+printf '%s\n' "talman $*" >> "$RECORD/argv"
+dir=$TALMAN_CONFIG
+case "$1" in
+  apply)
+    if [[ " $* " == *" --bootstrap "* ]]; then
+      if [[ -e $STATE/bootstrapped ]]; then
+        echo "error: cp-1 runs etcd: a cluster is here already, and bootstrapping it again would split it" >&2
+        exit 1
+      fi
+      : > "$STATE/bootstrapped"
+      echo "== bootstrapping etcd on cp-1"
+    fi
+    ;;
+  kubeconfig)
+    mkdir -p "$dir/clusterconfig"
+    cat > "$dir/clusterconfig/kubeconfig" <<'KUBECONFIG'
+apiVersion: v1
+kind: Config
+clusters:
+  - name: example
+    cluster:
+      server: https://192.0.2.10:6443
+      certificate-authority-data: marker-certificate-authority-data
+users:
+  - name: admin@example
+    user:
+      client-certificate-data: marker-client-certificate-data
+      client-key-data: marker-client-key-data
+contexts:
+  - name: admin@example
+    context:
+      cluster: example
+      user: admin@example
+current-context: admin@example
+KUBECONFIG
+    chmod 644 "$dir/clusterconfig/kubeconfig"
+    echo "wrote clusterconfig/kubeconfig"
+    ;;
+esac
+EOF
+  fake_tool talosctl <<'EOF'
+printf '%s\n' "talosctl $*" >> "$RECORD/argv"
+EOF
+  fake_tool kubectl <<'EOF'
+printf '%s\n' "kubectl $*" >> "$RECORD/argv"
+printf '%s\n' "${KUBECONFIG-}" > "$RECORD/kubeconfig"
+EOF
+  # The nodes answer a connection to the Talos API port only.
+  fake_tool timeout <<'EOF'
+printf '%s\n' "timeout $*" >> "$RECORD/argv"
+[[ $* == *"/dev/tcp/"*50000* ]] || exit 1
+address=${*: -1}
+tries=$(($(cat "$STATE/tries.$address" 2> /dev/null || echo 0) + 1))
+echo "$tries" > "$STATE/tries.$address"
+[[ ! -e $STATE/silent.$address ]] && ((tries >= $(cat "$STATE/answers-on.$address" 2> /dev/null || echo 1)))
+EOF
+  fake sleep < /dev/null
+  fake_tool install-cilium <<'EOF'
+printf '%s\n' "install-cilium KUBECONFIG=${KUBECONFIG-}" >> "$RECORD/argv"
+EOF
+  mv "$BIN/install-cilium" "$REPO/scripts/install-cilium"
+}
+
+# node_address HOSTNAME: the address talman reaches HOSTNAME on, from the cluster's talman.yaml.
+node_address() {
+  yq ".nodes[] | select(.hostname == \"$1\") | .ipAddress" "$CLUSTER/talman.yaml"
+}
+
+# call_line PATTERN: the line number in the record of the first call matching the extended regex.
+call_line() {
+  grep -n -m1 -E -- "$1" "$RECORD/argv" | cut -d: -f1
 }
 
 @test "The age key is created once and never printed" {
@@ -283,10 +382,12 @@ git_repository() {
 }
 
 @test "the cluster recipes refuse Go's HTTP/2 debug log" {
-  record age-keygen talman
+  fake_cluster
+  rm "$KEY"
+  record age-keygen
   with GODEBUG=x509sha1=1,http2debug=2
 
-  for name in cluster-age-key cluster-secrets; do
+  for name in cluster-age-key cluster-secrets cluster-bootstrap cluster-kubeconfig; do
     recipe "$name"
 
     [ "$status" -ne 0 ]
@@ -304,6 +405,157 @@ git_repository() {
   for path in talos/lab-sto2/talman.yaml talos/lab-sto2/clusterconfig/kubeconfig talos/lab-sto2/clusterconfig/talosconfig; do
     git check-ignore --no-index -q "$path"
   done
+}
+
+@test "Bootstrap refuses without its preconditions" {
+  fake_cluster
+  # Each case takes one precondition away, or all of them, and collects the messages it expects.
+  for case in talman secrets age-key api-address all wait; do
+    echo "$case"
+    reset_environment
+    cluster_files
+    cp "$BATS_FILE_TMPDIR/talman.yaml" "$CLUSTER/talman.yaml"
+    rm -f "$RECORD/argv"
+    messages=()
+    if [[ $case == talman || $case == all ]]; then
+      rm "$CLUSTER/talman.yaml"
+      messages+=("talos/lab-sto2/talman.yaml does not exist")
+    fi
+    if [[ $case == secrets || $case == all ]]; then
+      rm "$BUNDLE"
+      messages+=("talos/lab-sto2/secrets.sops.yaml does not exist")
+    fi
+    if [[ $case == age-key || $case == all ]]; then
+      without SOPS_AGE_KEY_FILE
+      messages+=("neither SOPS_AGE_KEY_FILE nor SOPS_AGE_KEY is set")
+    fi
+    if [[ $case == api-address || $case == all ]]; then
+      without KUBE_API_ADDRESS
+      messages+=("KUBE_API_ADDRESS is not set")
+    fi
+    if [[ $case == wait ]]; then
+      with TALOS_WAIT=soon
+      messages+=("TALOS_WAIT is not a whole number of seconds")
+    fi
+
+    recipe cluster-bootstrap
+
+    [ "$status" -ne 0 ]
+    for message in "${messages[@]}"; do
+      [[ $output == *"$message"* ]]
+    done
+    [ ! -e "$RECORD/argv" ]
+  done
+}
+
+@test "Bootstrap waits for every node and names the ones that do not answer" {
+  fake_cluster
+  slow=$(node_address cp-2)
+  echo 3 > "$STATE/answers-on.$slow"
+
+  recipe cluster-bootstrap
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$STATE/tries.$slow")" -eq 3 ]
+  for hostname in $(yq '.nodes[].hostname' "$CLUSTER/talman.yaml"); do
+    [ -e "$STATE/tries.$(node_address "$hostname")" ]
+  done
+  answered=$(grep -n "^timeout .*/dev/tcp/.* $slow\$" "$RECORD/argv" | tail -1 | cut -d: -f1)
+  [ "$answered" -lt "$(call_line '^talman ')" ]
+
+  rm -f "$STATE"/* "$RECORD/argv"
+  : > "$STATE/silent.$(node_address cp-3)"
+  : > "$STATE/silent.$(node_address worker-2)"
+  with TALOS_WAIT=0
+
+  recipe cluster-bootstrap
+
+  [ "$status" -ne 0 ]
+  silent=$(grep 'no answer on the Talos API port' <<< "$output")
+  [[ $silent == *cp-3* && $silent == *worker-2* ]]
+  for hostname in cp-1 cp-2 worker-1 worker-3; do
+    [[ $silent != *"$hostname"* ]]
+  done
+  for hostname in $(yq '.nodes[].hostname' "$CLUSTER/talman.yaml"); do
+    [[ $output != *"$(node_address "$hostname")"* ]]
+  done
+  [ -z "$(call_line '^talman ')" ]
+}
+
+@test "Bootstrap applies, fetches the kubeconfig and installs Cilium in that order" {
+  fake_cluster
+
+  recipe cluster-bootstrap
+
+  [ "$status" -eq 0 ]
+  probed=$(grep -n '^timeout .*/dev/tcp/' "$RECORD/argv" | tail -1 | cut -d: -f1)
+  applied=$(call_line '^talman apply ')
+  fetched=$(call_line '^talman kubeconfig')
+  installed=$(call_line '^install-cilium ')
+  ready=$(call_line '^kubectl wait ')
+  [ -n "$probed" ] && [ -n "$applied" ] && [ -n "$fetched" ] && [ -n "$installed" ] && [ -n "$ready" ]
+  [ "$probed" -lt "$applied" ]
+  [ "$applied" -lt "$fetched" ]
+  [ "$fetched" -lt "$installed" ]
+  [ "$installed" -lt "$ready" ]
+  apply=$(grep '^talman apply ' "$RECORD/argv")
+  [ "$(wc -l <<< "$apply")" -eq 1 ]
+  [[ " $apply " == *" --bootstrap "* && " $apply " == *" --onboard-new-nodes "* ]]
+  [ "$(grep -c health "$RECORD/argv")" -eq 0 ]
+  [ "$(grep -c '^talosctl ' "$RECORD/argv")" -eq 0 ]
+  [ "$(grep '^install-cilium ' "$RECORD/argv")" = "install-cilium KUBECONFIG=$CLUSTER/clusterconfig/kubeconfig" ]
+  wait=$(grep '^kubectl wait ' "$RECORD/argv")
+  [[ " $wait " == *" --for=condition=Ready "* ]]
+  for hostname in $(yq '.nodes[].hostname' "$CLUSTER/talman.yaml"); do
+    [[ " $wait " == *" node/$hostname "* ]]
+  done
+  [[ $output == *"not implemented: installing the kubelet serving-certificate approver"* ]]
+
+  : > "$RECORD/argv"
+
+  recipe cluster-bootstrap
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"failed while bootstrapping"* ]]
+  [ -n "$(call_line '^talman apply .*--bootstrap')" ]
+  [ -z "$(call_line '^(talman kubeconfig|install-cilium|kubectl)')" ]
+}
+
+@test "The kubeconfig is private and points at the API address from the environment" {
+  fake_cluster
+  record yq
+  kubeconfig="$CLUSTER/clusterconfig/kubeconfig"
+
+  recipe cluster-kubeconfig
+
+  [ "$status" -eq 0 ]
+  [ "${lines[-1]}" = "$kubeconfig" ]
+  [ "$(stat -c %a "$kubeconfig")" = 600 ]
+  [ "$(yq '[.clusters[].cluster.server] | unique | join(" ")' "$kubeconfig")" = "https://$KUBE_API_ADDRESS:6443" ]
+  [ "$(yq '.users[0].user["client-key-data"]' "$kubeconfig")" = marker-client-key-data ]
+  [[ $output != *marker-* ]]
+  [[ $output != *"$KUBE_API_ADDRESS"* ]]
+  absent "$KUBE_API_ADDRESS" "$RECORD/argv"
+
+  # A second run fetches it again, with the same result.
+  recipe cluster-kubeconfig
+
+  [ "$status" -eq 0 ]
+  [ "$(stat -c %a "$kubeconfig")" = 600 ]
+  [ "$(yq '.clusters[0].cluster.server' "$kubeconfig")" = "https://$KUBE_API_ADDRESS:6443" ]
+}
+
+@test "cluster-kubeconfig refuses an API address it cannot put in a URL, without printing it" {
+  fake_cluster
+  without KUBE_API_ADDRESS
+  with 'KUBE_API_ADDRESS=https://marker-not-an-address:6443'
+
+  recipe cluster-kubeconfig
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"KUBE_API_ADDRESS is not an IPv4 address or a host name"* ]]
+  [[ $output != *marker-not-an-address* ]]
+  [ ! -e "$RECORD/argv" ]
 }
 
 @test "No cluster secret reaches a command line or the output" {
@@ -333,14 +585,44 @@ git_repository() {
   run_and_keep failed cluster-secrets
   run_and_keep failed cluster-secrets-check
 
-  # The secrets: the age key, and every value of both bundles.
+  # The secrets so far: the age key, and every value of both bundles.
   markers=("$(grep '^AGE-SECRET-KEY-' "$KEY")")
   mapfile -t -O 1 markers < <(bundle_values "$BUNDLE"; SOPS_AGE_KEY_FILE="$KEY" sops decrypt "$BATS_TEST_TMPDIR/encrypted.yaml" | bundle_values /dev/stdin)
   [ "${#markers[@]}" -gt 20 ]
   grep -q '^talman secrets generate' "$RECORD/argv"
   grep -q '^sops ' "$RECORD/argv"
   grep -q '^talosctl ' "$RECORD/argv"
-  rm "$BUNDLE"
+
+  # The recipes that reach the cluster, against the fakes, with a key and a bundle of markers.
+  fake_cluster
+  run_and_keep ok cluster-bootstrap
+  run_and_keep failed cluster-bootstrap
+  run_and_keep ok cluster-kubeconfig
+  without SOPS_AGE_KEY_FILE
+  with SOPS_AGE_KEY=marker-sops-age-key
+  run_and_keep ok cluster-kubeconfig
+  reset_environment
+  rm "$STATE/bootstrapped"
+  : > "$STATE/silent.$(node_address worker-3)"
+  with TALOS_WAIT=0
+  run_and_keep failed cluster-bootstrap
+  reset_environment
+
+  markers+=(
+    AGE-SECRET-KEY-MARKER-AGE-KEY-FILE
+    marker-bundle-secret
+    marker-sops-age-key
+    marker-certificate-authority-data
+    marker-client-certificate-data
+    marker-client-key-data
+  )
+  grep -q '^talman apply ' "$RECORD/argv"
+  grep -q '^kubectl ' "$RECORD/argv"
+  grep -q '^yq ' "$RECORD/argv"
+  [[ ${printed[*]} == *"no answer on the Talos API port"* ]]
+  [[ ${printed[*]} != *"$KUBE_API_ADDRESS"* ]]
+  # The kubeconfig and the bundle hold their own secrets; nothing else may.
+  rm -r "$BUNDLE" "$CLUSTER/clusterconfig"
   for marker in "${markers[@]}"; do
     absent "$marker" "$RECORD/argv"
     [[ ${printed[*]} != *"$marker"* ]]

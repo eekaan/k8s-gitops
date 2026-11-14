@@ -17,3 +17,11 @@ cluster-secrets cluster='lab-sto2':
 # Fail on a secrets.sops.yaml under talos/ that git would commit without SOPS encryption
 cluster-secrets-check:
     scripts/cluster-secrets-check
+
+# Build a cluster from nodes in maintenance mode: wait for every node, talman apply --bootstrap, fetch the kubeconfig, install Cilium, wait until every node is Ready
+cluster-bootstrap cluster='lab-sto2':
+    scripts/cluster-bootstrap {{ quote(cluster) }}
+
+# Fetch a cluster's admin kubeconfig into talos/<cluster>/clusterconfig/kubeconfig, mode 0600, served at KUBE_API_ADDRESS; prints its path
+cluster-kubeconfig cluster='lab-sto2':
+    scripts/cluster-kubeconfig {{ quote(cluster) }}
