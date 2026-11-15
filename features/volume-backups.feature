@@ -59,4 +59,4 @@ Feature: Volume backups
   Scenario: The demo volume's backup and restore objects are in what Flux applies for the cluster
     Given the cluster's overlay, built as Flux applies it, and the application volsync-demo
     When the Kustomizations the overlay applies and the objects volsync-demo builds are read
-    Then the overlay applies the volsync application and its namespace and volsync-demo, which adds components/volsync and names volsync, external-secrets, linstor-cluster and the secret store's application in dependsOn, and volsync-demo builds its claim, the ReplicationDestination that restores it and the ReplicationSource that backs it up
+    Then the overlay applies the volsync application and its namespace, volsync-demo and n8n are the only applications that add components/volsync, volsync-demo names volsync, external-secrets, linstor-cluster and the secret store's application in dependsOn, and volsync-demo builds its claim, the ReplicationDestination that restores it and the ReplicationSource that backs it up

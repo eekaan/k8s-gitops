@@ -1,0 +1,46 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: n8n
+  namespace: flux-system
+  labels:
+    # The volume is made from a restore of its repository before the pod starts, and the database's
+    # three instances start one after another, so the first rollout takes longer than the default.
+    k8s-gitops/timeout: long
+spec:
+  path: ./apps/base/ai-system/n8n/app
+  targetNamespace: ai-system
+  # The database, from the cnpg-cluster component, and the volume and its backup, from the volsync
+  # component: n8n's own state is those two (docs/kubernetes.md, Applications).
+  components:
+    - ../../../../../components/cnpg-cluster
+    - ../../../../../components/volsync
+  postBuild:
+    substitute:
+      CNPG_CLUSTER_NAME: n8n-db
+      CNPG_STORAGE_SIZE: 5Gi
+      APP: n8n
+      VOLSYNC_CAPACITY: 5Gi
+      VOLSYNC_SCHEDULE: "23 3 * * *"
+  # The Cluster and its PodMonitor are of the operator's and Prometheus Operator's kinds; the
+  # ExternalSecrets and the Password generator are External Secrets', and the encryption key's and
+  # the backups' read the store, which openbao-store makes and is Ready once the store is; the
+  # volume and its snapshots come from LINSTOR's default classes and the backups from VolSync; the
+  # route names the public Gateway.
+  dependsOn:
+    - name: cloudnative-pg
+    - name: prometheus-operator-crds
+    - name: external-secrets
+    - name: openbao-store
+    - name: volsync
+    - name: linstor-cluster
+    - name: gateway-public
+  # Ready once the release is, which is once n8n answers its readiness endpoint with the database,
+  # the volume and the encryption key in place: until an operator has written the key to the store
+  # (just bao-put ai-system/n8n encryption-key), the pod waits for its Secret.
+  wait: true
+  sourceRef:
+    kind: ExternalArtifact
+    name: n8n

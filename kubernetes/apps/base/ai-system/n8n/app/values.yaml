@@ -1,0 +1,248 @@
+---
+# Values for the app-template chart, read by the HelmRelease through a ConfigMap generated without
+# substitution. The settings that name the cluster's domain are in the HelmRelease's own values. Keys
+# not set here keep the chart's defaults.
+
+# The user both images run as, 1000, node in n8n's and runner in the runners', with the group and
+# the seccomp profile the restricted Pod Security level requires. A volume is re-owned only when its
+# root directory does not already match, so a large volume does not slow every start. The values of
+# the namespace's app-template-defaults ConfigMap (components/common), written out.
+defaultPodOptions:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+
+controllers:
+  n8n:
+    # One replica: n8n's main process is single, and running it twice takes queue mode with Redis
+    # and workers, which this application does not use. No PodDisruptionBudget either: a budget of
+    # one available out of one pod would make a drain wait for ever, and a budget that allowed the
+    # eviction is the absence of one. A drain evicts the pod, and it starts again on another node.
+    replicas: 1
+    # The data directory is a ReadWriteOnce volume: the old pod lets go of it before the new one
+    # starts, where a rolling update would wait for a second pod to mount it.
+    strategy: Recreate
+    containers:
+      main:
+        image:
+          repository: docker.io/n8nio/n8n
+          # renovate: datasource=docker depName=docker.io/n8nio/n8n
+          tag: 2.47.7@sha256:b4b90747b81fcda7e76550c0d3aa7f0f64917a1e9573cff40d6834eaf2e0f8ea
+        env:
+          N8N_PORT: "5678"
+          # One proxy in front of n8n: the Gateway's Envoy, which adds the forwarding headers. The
+          # edge routers in front of it translate the source address and add nothing (ADR 0018), so
+          # they are not a proxy n8n has to trust.
+          N8N_PROXY_HOPS: "1"
+
+          # PostgreSQL, through the keys of the Secret the operator makes for the cluster
+          # n8n-db; no credential is written here.
+          DB_TYPE: postgresdb
+          DB_POSTGRESDB_HOST:
+            valueFrom:
+              secretKeyRef:
+                name: n8n-db-app
+                key: host
+          DB_POSTGRESDB_PORT:
+            valueFrom:
+              secretKeyRef:
+                name: n8n-db-app
+                key: port
+          DB_POSTGRESDB_DATABASE:
+            valueFrom:
+              secretKeyRef:
+                name: n8n-db-app
+                key: dbname
+          DB_POSTGRESDB_USER:
+            valueFrom:
+              secretKeyRef:
+                name: n8n-db-app
+                key: username
+          DB_POSTGRESDB_PASSWORD:
+            valueFrom:
+              secretKeyRef:
+                name: n8n-db-app
+                key: password
+
+          # The key that encrypts the credentials stored in the database, from the Secret
+          # External Secrets fills from the secret store (encryption-key.yaml).
+          N8N_ENCRYPTION_KEY:
+            valueFrom:
+              secretKeyRef:
+                name: n8n-encryption-key
+                key: encryption-key
+
+          # The one directory the Read/Write Files nodes may use, the claim's directory files,
+          # which the persistence below mounts there. n8n refuses those nodes its own directory.
+          N8N_RESTRICT_FILE_ACCESS_TO: /home/node/.n8n-files
+
+          # Nothing calls n8n's services: no telemetry, no check for new versions, no workflow
+          # templates or banners fetched from its API, no community packages or list of verified
+          # ones, and not the MCP server registry, a module that would refresh its list from n8n's
+          # API at start and every eight hours. n8n's licence server is called only once someone
+          # activates a licence in the settings (docs/kubernetes.md, n8n). Also off: the public
+          # API, the questions n8n asks a new user and the banner it prints at start.
+          N8N_DIAGNOSTICS_ENABLED: "false"
+          N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+          N8N_TEMPLATES_ENABLED: "false"
+          N8N_DYNAMIC_BANNERS_ENABLED: "false"
+          N8N_COMMUNITY_PACKAGES_ENABLED: "false"
+          N8N_VERIFIED_PACKAGES_ENABLED: "false"
+          N8N_DISABLED_MODULES: mcp-registry
+          N8N_PUBLIC_API_DISABLED: "true"
+          N8N_PERSONALIZATION_ENABLED: "false"
+          N8N_HIRING_BANNER_ENABLED: "false"
+
+          # Code nodes run in the task runners of the container runners below, n8n's external
+          # mode. The broker listens on the pod's loopback, which the two containers share, so
+          # nothing outside the pod reaches it; the Service does not name its port.
+          N8N_RUNNERS_MODE: external
+          N8N_RUNNERS_BROKER_LISTEN_ADDRESS: 127.0.0.1
+          N8N_RUNNERS_BROKER_PORT: "5679"
+          N8N_RUNNERS_AUTH_TOKEN:
+            valueFrom:
+              secretKeyRef:
+                name: n8n-runners
+                key: token
+        # n8n's own endpoints: the process is up, and the database answers. A start that has to
+        # migrate the database takes minutes, which the startup probe gives it before the other two
+        # count.
+        probes:
+          liveness:
+            enabled: true
+            custom: true
+            spec:
+              httpGet:
+                path: /healthz
+                port: 5678
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 3
+          readiness:
+            enabled: true
+            custom: true
+            spec:
+              httpGet:
+                path: /healthz/readiness
+                port: 5678
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 3
+          startup:
+            enabled: true
+            custom: true
+            spec:
+              httpGet:
+                path: /healthz
+                port: 5678
+              periodSeconds: 5
+              timeoutSeconds: 5
+              failureThreshold: 60
+        resources:
+          requests:
+            cpu: 100m
+            memory: 512Mi
+          limits:
+            memory: 1Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
+      # n8n's task runners, JavaScript and Python, which run the code of Code nodes apart from n8n:
+      # the launcher of n8n's runners image registers with the broker and starts a runner when a
+      # task comes. The image's version is n8n's, as n8n's documentation requires and
+      # tests/applications.bats holds; Renovate moves both in one pull request.
+      runners:
+        image:
+          repository: docker.io/n8nio/runners
+          # renovate: datasource=docker depName=docker.io/n8nio/runners
+          tag: 2.47.7@sha256:c6215e7626277e194e39f1dfe768fbdda718b61c759875ddb4fc9f9f21ee08ad
+        env:
+          N8N_RUNNERS_TASK_BROKER_URI: http://127.0.0.1:5679
+          N8N_RUNNERS_AUTH_TOKEN:
+            valueFrom:
+              secretKeyRef:
+                name: n8n-runners
+                key: token
+        # The launcher's own health endpoint, which answers while it runs, the broker reached or
+        # not. Not a readiness check: the pod serves n8n, and a runner that is down fails the code
+        # it was given, not the editor.
+        probes:
+          liveness:
+            enabled: true
+            custom: true
+            spec:
+              httpGet:
+                path: /healthz
+                port: 5680
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 3
+          readiness:
+            enabled: false
+          startup:
+            enabled: false
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            memory: 512Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
+
+service:
+  n8n:
+    controller: n8n
+    ports:
+      http:
+        port: 5678
+
+persistence:
+  # The claim, the volsync component's, which ks.yaml adds and names after the application. At
+  # /home/node/.n8n n8n keeps its settings file, which holds the encryption key, the binary data of
+  # executions it keeps on disk, and its event log; the claim's directory files, at
+  # /home/node/.n8n-files, holds what workflows write with the Read/Write Files nodes. Both are
+  # backed up and restored with the claim.
+  data:
+    type: persistentVolumeClaim
+    existingClaim: n8n
+    advancedMounts:
+      n8n:
+        main:
+          - path: /home/node/.n8n
+          - path: /home/node/.n8n-files
+            subPath: files
+  # The root filesystems are read-only. n8n writes the editor's pages, with its settings filled in,
+  # to its cache at every start and stops when it cannot; nothing needs them kept.
+  cache:
+    type: emptyDir
+    advancedMounts:
+      n8n:
+        main:
+          - path: /home/node/.cache
+  # Temporary files: n8n's, and apart from them the runners', where Python's runner keeps the socket
+  # of its process server, so code a runner runs cannot read n8n's.
+  tmp:
+    type: emptyDir
+    advancedMounts:
+      n8n:
+        main:
+          - path: /tmp
+  runners-tmp:
+    type: emptyDir
+    advancedMounts:
+      n8n:
+        runners:
+          - path: /tmp

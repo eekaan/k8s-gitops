@@ -24,7 +24,8 @@ the rules below, or when a dependency the cluster would never reconcile passes t
   lists, as a patch or as a generator's file), is never applied, and the check refuses it.
 - `apps/base/flux-system/artifact-generator/`: publishes one artifact per application.
 - `components/`: Kustomize components. `common` adds the `app-template-defaults` ConfigMap, which
-  an app-template HelmRelease opts into through `valuesFrom`; `cnpg-cluster` adds an application's
+  an app-template HelmRelease can opt into through `valuesFrom`, though `scripts/render` reads only an
+  application's own ConfigMaps ([n8n](#n8n) writes the defaults out); `cnpg-cluster` adds an application's
   PostgreSQL cluster ([PostgreSQL](#postgresql)); `volsync` backs an application's volume up
   ([Volume backups](#volume-backups)).
 
@@ -1758,7 +1759,7 @@ cannot be listed without it: `just kubernetes-check` refuses the dependency.
   label and name the one kind. A route in a namespace without it is not accepted, which is the
   Gateway API's rule and the controller's to apply; it shows in the route's status, which
   `just gateway-check` reads, and `tests/gateway.bats` proves the selector on the objects. `demo`
-  is the one namespace that carries the label.
+  and `ai-system` are the namespaces that carry the label, and `tests/gateway.bats` pins that set.
 - **The certificate.** The `Certificate` `public-wildcard` asks the `ClusterIssuer` the cluster
   chose, `cluster-ca` by default, for an ECDSA P-256 certificate for `*.${CLUSTER_DOMAIN}` and
   `${CLUSTER_DOMAIN}`, with a new private key at each renewal and the same Secret, so the listener
@@ -1861,8 +1862,10 @@ kubectl, curl and the edge stack, every answer holding addresses.
 2. Add an `HTTPRoute` whose `parentRefs` name the Gateway `public` of `envoy-gateway-system` and its
    `https` listener, and whose `hostnames` are under the domain: `<name>.${CLUSTER_DOMAIN}`. The
    listener and the certificate cover that domain only, so a name outside it is not served.
-3. Keep the route in an application of its own that names `gateway-public` in `dependsOn`, as
-   `apps/base/demo/hello-route/` does, so a cluster without the Gateway cannot enable it.
+3. Name `gateway-public` in the `dependsOn` of the application that holds the route, so a cluster
+   without the Gateway cannot enable it: an application of its own, as `apps/base/demo/hello-route/`
+   is, or the application that owns the Service, as `ai-system/n8n` does
+   ([Applications](#applications)).
 
 `hello`, the demo's workload, answers this way at `hello.${CLUSTER_DOMAIN}`: two replicas of
 busybox's web server, spread over the workers and held by a disruption budget of one, as an
@@ -2223,6 +2226,208 @@ namespace delegated to anyone else first gets its own store restricted with `con
 
 A restore of a snapshot of the raft storage, once they are taken, will need the seal key it was
 taken under, which the operator's file holds.
+
+## Applications
+
+An application that is not part of the platform has a namespace directory under `apps/base/`, as
+[Adding an application](#adding-an-application) sets out, and takes what it needs from the pieces
+above: its database from [PostgreSQL](#postgresql), its volume and the volume's backup from
+[Volume backups](#volume-backups), a secret from [External Secrets](#external-secrets) and a public
+name from [the public Gateway](#giving-an-application-a-public-hostname). A cluster runs it with two
+entries in its overlay, the namespace directory and the application's `ks.yaml`. With only the
+namespace directory's, it gets the namespace and the `app-template-defaults` ConfigMap of
+`components/common` and nothing of the application; with neither, nothing of the namespace.
+`tests/applications.bats` proves each of these for n8n on the objects the overlay builds and the
+chart renders (`features/applications.feature`).
+
+### n8n
+
+n8n, the workflow automation tool, runs in `ai-system` (`apps/base/ai-system/n8n/`). The namespace
+enforces the restricted Pod Security level and carries the Gateway label. n8n's `ks.yaml` names the
+operator, the Prometheus Operator definitions, External Secrets, the store's application, VolSync,
+LINSTOR and the public Gateway in `dependsOn`, and sets `wait` with the long timeout, so a cluster
+that lacks one of them is refused by `just kubernetes-check`, the encryption key's ExternalSecret
+is applied once the store is Ready, and the application is Ready once n8n answers its readiness
+endpoint.
+
+- **The chart** is app-template, from its publisher's OCI registry, pinned by tag and tracked by
+  Renovate, with the images `docker.io/n8nio/n8n` and `docker.io/n8nio/runners` pinned by tag and
+  digest in `values.yaml`. It is the chart `components/common` has defaults for, and it puts n8n's
+  environment, probes, security context and volumes in values this tree reads in full. A chart made
+  for n8n alone would add keys of its own between those values and the pod. The pod's user and
+  security context are written out in the values rather than taken from `app-template-defaults`
+  through `valuesFrom`, as `scripts/render` reads only the ConfigMaps an application builds itself
+  and refuses a release whose values come from one it does not find; `app-template-defaults` is not
+  used until the render reads the namespace's ConfigMaps too.
+- **The database** is a PostgreSQL cluster named `n8n-db` from `components/cnpg-cluster`, with the
+  component's three instances and 5Gi each. n8n reads its host, port, database, user and password
+  from the keys `host`, `port`, `dbname`, `username` and `password` of the Secret `n8n-db-app`, which
+  the operator makes; no credential is in a values file, and the connection is without TLS, inside
+  the cluster. The component has no backup yet, so the database lives on the three workers' data
+  volumes alone ([PostgreSQL](#postgresql)).
+- **The encryption key** `N8N_ENCRYPTION_KEY` encrypts the credentials n8n stores in its database.
+  It comes from the secret store, as [How an application gets a secret out](#how-an-application-gets-a-secret-out)
+  describes: the ExternalSecret `n8n-encryption-key` reads the property `encryption-key` at
+  `ai-system/n8n` through the ClusterSecretStore `openbao` into the Secret `n8n-encryption-key`,
+  every 15 minutes. The operator writes it once, with a random value that is never displayed: 32
+  bytes from the kernel as 64 hexadecimal digits, the way `just bao-seed-volsync` makes its master,
+  piped into the recipe:
+
+  ```sh
+  head -c 32 /dev/urandom | od -An -vtx1 | tr -d ' \n' | just bao-put ai-system/n8n encryption-key
+  ```
+
+  Until the store holds it, the ExternalSecret reports the key missing, the pod waits for its
+  Secret, and the application is not Ready. Where the key then lives:
+  - in OpenBao, at `secrets/ai-system/n8n`, on its members' volumes;
+  - in the Secret `n8n-encryption-key`, and so in etcd and its snapshots, encrypted to the Talos age
+    key ([etcd-restore.md](runbooks/etcd-restore.md));
+  - in n8n's settings file, `/home/node/.n8n/config` on the claim, where n8n copies it at its first
+    start; and so in every backup of the volume, in the application's restic repository, encrypted
+    with the repository's password.
+
+  n8n refuses to start when its settings file holds another key than the one it is given
+  ("Mismatching encryption keys"). A restored volume holds the key it was backed up with, so the
+  store must hold that same key before n8n starts on it. On a rebuilt cluster OpenBao starts empty,
+  as its data does not survive a rebuild ([rebuild.md](runbooks/rebuild.md)), so the order is: the
+  store's recovery keys and the backups' key, as for every application
+  ([the runbook](runbooks/volume-backups.md#the-stores-key-is-lost-and-the-file-is-kept)), which lets
+  the claim be restored; then the encryption key, before n8n starts. n8n's pod waits for its Secret
+  meanwhile, so n8n does not start without the key. When the operator keeps no copy of the
+  key, it is read back from the latest backup of the volume, by hand, into a directory only the
+  operator can read, and written to the store without being displayed:
+
+  ```sh
+  install -d -m 700 <directory>
+  just bao-volsync-password <file> n8n restic restore latest --target <directory>
+  jq -j .encryptionKey <directory>/config | just bao-put ai-system/n8n encryption-key
+  rm -rf <directory>
+  ```
+
+  `<file>` is the backups' custody file ([Volume backups](#volume-backups)); a backup holds the
+  volume's files at its root. Should the store be given another key by mistake, n8n stops at its
+  next start with that message, and nothing is lost: writing the right key and letting the
+  ExternalSecret refresh starts it again.
+- **The volume** is the claim `n8n` of `components/volsync`, 5Gi on the default StorageClass,
+  mounted at `/home/node/.n8n`, backed up every night at 03:23 with the component's retention (the
+  newest of each of the last 7 days, 4 weeks and 3 months) and filled from the latest backup when it
+  is created ([Restoring](#restoring)). It holds n8n's own files: its settings file, with the
+  encryption key, the binary data of executions that n8n keeps on disk and its event log; and, in
+  its directory `files`, mounted at `/home/node/.n8n-files`, the files workflows write and read
+  with the Read/Write Files nodes, the one directory `N8N_RESTRICT_FILE_ACCESS_TO` lets them use.
+  It holds no workflow, credential, user or execution record: those are rows of the database. So
+  restoring the volume brings back files and none of the work, and restoring the database brings
+  back the work and not the files that executions refer to. Steps to restore the claim are in
+  [the runbook](runbooks/volume-backups.md#restoring-a-claim-from-its-repository); the database has
+  nothing to restore from yet.
+- **The hostname** is `n8n.${CLUSTER_DOMAIN}`, an `HTTPRoute` on the public Gateway's `https`
+  listener to the Service `n8n` on 5678. `N8N_HOST`, `N8N_PROTOCOL`, `N8N_EDITOR_BASE_URL` and
+  `N8N_WEBHOOK_URL` are that name over https, set from the variable, and `N8N_PROXY_HOPS` is 1: the
+  Gateway's proxy adds the forwarding headers, and the edge routers in front of it translate the
+  source address and add none ([ADR 0018](adr/0018-own-edge-routers-translate-public-traffic-to-the-gateway.md)),
+  so n8n trusts one proxy. n8n sees the address of an edge router or a worker as the client's.
+- **The task runners.** Code nodes run in n8n's external mode, as n8n's documentation recommends:
+  the container `runners`, from n8n's runners image of n8n's own version, which
+  `tests/applications.bats` holds, runs the launcher that starts a JavaScript or Python runner when
+  a task comes. n8n's task broker listens on the pod's loopback, `127.0.0.1:5679`, which the two
+  containers share, so nothing outside the pod reaches it and the Service names only 5678; n8n's
+  documentation gives `0.0.0.0` for runners in another container, which here would open the broker
+  to the pod network for nothing. Both containers read the token the runners authenticate with
+  from the Secret `n8n-runners`, which External Secrets makes once with its `Password` generator
+  (`runners-token.yaml`): it is read only through the cluster's API and nothing keeps it, so a new
+  one costs a restart of the pod.
+- **Hardening.** The pod runs as user and group 1000, `node` in n8n's image and `runner` in the
+  runners', with the runtime's seccomp profile; both containers have a read-only root filesystem,
+  no capability and no privilege escalation. n8n writes to the claim, at `/home/node/.n8n` and
+  `/home/node/.n8n-files`, and to an `emptyDir` each at `/home/node/.cache`, where it writes the
+  editor's pages at every start and stops when it cannot, and `/tmp`; the runners write only to a
+  `/tmp` of their own, where Python's runner keeps the socket of its process server, so code a
+  runner runs cannot read n8n's temporary files. That is every path the pinned n8n writes with
+  this configuration: the image, run read-only with those mounts alone, starts, serves the editor
+  and runs a JavaScript and a Python Code node through the runners. n8n requests 100m of CPU and
+  512Mi of memory and is limited to 1Gi; the runners request 50m and 128Mi and are limited to
+  512Mi. n8n's startup, liveness and readiness probes ask `/healthz`, `/healthz` and
+  `/healthz/readiness`, which answers once the database does; the runners' liveness probe asks the
+  launcher's `/healthz` on 5680, and they have no readiness probe, as a runner that is down fails
+  the code given to it, not the editor.
+- **Nothing calls n8n's services.** Off, each by its variable: telemetry and the product analytics
+  of the editor (`N8N_DIAGNOSTICS_ENABLED`), the check for new versions and their notes
+  (`N8N_VERSION_NOTIFICATIONS_ENABLED`), workflow templates (`N8N_TEMPLATES_ENABLED`), the banners
+  the editor fetches from n8n's API (`N8N_DYNAMIC_BANNERS_ENABLED`), community packages and the list
+  of verified ones (`N8N_COMMUNITY_PACKAGES_ENABLED`, `N8N_VERIFIED_PACKAGES_ENABLED`), and the MCP
+  server registry, a module that refreshes its list from n8n's API at start and every eight hours,
+  unloaded by `N8N_DISABLED_MODULES` as n8n's documentation unloads a module. Also off are the
+  public API, the questions n8n asks a new user and the banner it prints at start. What still can
+  call n8n's services needs a person to act first: n8n's licence server is called only once someone
+  activates a licence in the settings, and then renews it there with usage figures; the enterprise
+  trial and the free registration forms in the settings send what is typed in them; and the AI
+  assistant and n8n's AI credits work only under a licence that includes them.
+- **Updates.** Renovate proposes n8n's and the runners' images together, and only patches of the
+  minor the tree runs (`.renovate/managers.json5`): Docker Hub tags n8n's betas and its next major
+  as plain versions, which only n8n's GitHub releases mark as pre-releases, and Renovate moves an
+  image's digest only from its registry. When such a pull request opens, a person checks on n8n's
+  releases page that its version is not marked as a pre-release, as n8n has marked a few patches of
+  a minor already stable; n8n never merges itself. A newer minor is moved by hand once n8n releases it as
+  stable: both images' tags and digests in one change.
+- **One replica**, with the strategy `Recreate`. n8n's main process is single unless it runs in
+  queue mode, with Redis and workers, which this application does not; and the volume is
+  ReadWriteOnce, which a rolling update's second pod could not mount. There is no
+  PodDisruptionBudget: one that keeps the only pod available would make every drain wait for ever,
+  and one that lets it be evicted does nothing. A drain evicts the pod, which starts again on
+  another node once the volume follows.
+
+**The first visit.** n8n lets whoever opens it first create the owner account, and no owner
+credential is in the tree. The control is the edge: the edge routers admit only the operator
+allowlist on the public ports until `public_allowed_cidrs` widens it
+([The edge routers](infrastructure.md#the-edge-routers)). So the step right after the first rollout
+is to open `https://n8n.<domain>` from an allowed network and create the owner, before the allowlist
+is widened. A cluster whose allowlist is open must not enable the application until someone is ready
+to do it. Until the names are in DNS, `n8n.<domain>` resolves nowhere: `just gateway-check` proves
+the path through each edge router to the Gateway, and a browser reaches n8n once the operator's
+machine resolves the name to an edge router's public address, which the edge stack's outputs give.
+While the certificate comes from the cluster's own authority or Let's Encrypt's staging issuer, as
+lab-sto2's does, the browser warns about it unless it is given the root of that chain; with the
+production issuer it does not ([What a client outside sees](#the-public-gateway)).
+
+### Porting an application from the reference catalogue
+
+The steps n8n took, in order; the next port does the same and says where it differs.
+
+1. **Layout.** A namespace directory with `namespace.yaml` (the strictest Pod Security level the
+   workload passes, the prune annotation, and `k8s-gitops/gateway: public` if it has a route) and a
+   `kustomization.yaml` that includes `components/common`; the application's `ks.yaml` and `app/`
+   beside it. List both in the overlay.
+2. **Pins.** The chart as an `OCIRepository` with its tag under a `# renovate:` comment, each image
+   by tag and digest under one. `just renovate-record`, then the form of the tags in
+   `.renovate/tag-forms.tsv`, read from the registry's own listing; `just renovate-pins` passes.
+   Where the registry tags betas as plain versions, as n8n's does, a rule in
+   `.renovate/managers.json5` keeps Renovate to the line the tree runs.
+3. **Database.** `components/cnpg-cluster` in `ks.yaml` with `CNPG_CLUSTER_NAME`, and the connection
+   from the keys of `<name>-app`; `prometheus-operator-crds` and `cloudnative-pg` in `dependsOn`.
+4. **Secrets.** A secret the application keeps a copy of, or that must outlive the cluster, such as
+   n8n's encryption key, in the store: an ExternalSecret that reads `<namespace>/<application>`,
+   `openbao-store` in `dependsOn`, and the one `just bao-put` command in the docs, with every place
+   the secret lives and the order on a rebuild. A generator and a `CreatedOnce` ExternalSecret only
+   for a secret nothing keeps, such as the runners' token. Nothing secret in a values file, and no
+   SOPS file for an application.
+5. **Volume.** `components/volsync` with `APP`, a capacity and a minute of its own for the schedule;
+   the claim named in `existingClaim`; say what is in the volume and what is in the database.
+6. **Route.** An `HTTPRoute` on `https` of `public`, the application's own settings for its
+   host, protocol and proxies agreeing with it, and `gateway-public` in `dependsOn`.
+7. **Hardening.** Restricted: a user the image runs as, a read-only root filesystem with every path
+   the application writes as a volume, found by running the pinned image read-only with those
+   mounts alone, no capability, requests and a memory limit, probes on the application's health
+   endpoints, everything that calls its publisher's services turned off by its documented variable
+   or named as still on, replicas and an update strategy that fit the volume.
+8. **Tests.** Scenarios in `features/applications.feature`, each proved by a test of
+   `tests/applications.bats` under its title, written and seen failing before the manifests, and
+   mutated afterwards: remove the line each assertion guards and see the test fail. Two tests pin
+   sets a port extends: the namespaces that carry the Gateway label in `tests/gateway.bats`, where a
+   port with a route also adds its application to the `tree_without` list of the test that leaves
+   the Gateway out, and the applications that take the volsync component in
+   `tests/volume-backups.bats`.
+9. **Docs.** The application's paragraph here: what it is, where its state lives, how its secret
+   is made, its hostname, any first-visit step, how it is backed up and restored.
 
 ## Flux itself
 

@@ -1,6 +1,6 @@
 {
   $schema: "https://docs.renovatebot.com/renovate-schema.json",
-  description: "Where this repository keeps versions beyond Renovate's default file patterns, and the one it reads but must not propose.",
+  description: "Where this repository keeps versions beyond Renovate's default file patterns, the one it reads but must not propose, and the ones it may propose only within the line the tree runs.",
   // HelmRelease, OCIRepository, GitRepository and Flux Kustomization images. Helm values files,
   // kustomization.yaml, mise.toml, GitHub Actions workflows and OpenTofu files are found by their
   // managers' default patterns.
@@ -61,6 +61,17 @@
       matchDepNames: ["jdx/mise"],
       matchCurrentValue: "/^[0-9]/",
       enabled: false,
+    },
+    {
+      // n8n tags its betas, the next minor and the next major, on Docker Hub as plain versions
+      // beside the stable release. Its GitHub releases mark them as pre-releases, but Renovate
+      // moves an image's digest only from the image's own registry, which does not, so a newer
+      // minor or major cannot be told from a beta here. Renovate therefore proposes only patches
+      // of the minor the tree runs, with their digests; a newer minor is moved by hand once n8n
+      // releases it as stable (docs/kubernetes.md, n8n).
+      description: "n8n and its task runners: patches of the minor the tree runs",
+      matchPackageNames: ["docker.io/n8nio/n8n", "docker.io/n8nio/runners"],
+      allowedVersions: "/^{{major}}\\.{{minor}}\\.[0-9]+$/",
     },
   ],
 }

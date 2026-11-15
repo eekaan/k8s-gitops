@@ -1,0 +1,22 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/ocirepository-source-v1.json
+# The app-template chart from its publisher's public OCI registry. It is the chart the tree's
+# namespaces have defaults for (components/common), one publisher maintains it for any application
+# that is a container and its Services, and it leaves the environment, the probes, the security
+# context and the volumes to values this tree reads in full, where a chart made for n8n alone would
+# put keys of its own between them and the pod.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: app-template
+spec:
+  # The tag is pinned: a new chart arrives by a change to this file, which Flux applies at once.
+  interval: 12h
+  # The chart's packaged layer, which helm-controller reads as it is.
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy
+  url: oci://ghcr.io/bjw-s-labs/helm/app-template
+  ref:
+    # renovate: datasource=docker depName=ghcr.io/bjw-s-labs/helm/app-template
+    tag: 5.3.0
