@@ -1240,10 +1240,11 @@ with the Talos age key from `SOPS_AGE_KEY_FILE`, or `SOPS_AGE_KEY`, into memory 
   new file `<file>.replaced-<time>.age` beside the file, encrypted to the same recipient and opened
   again with the operator's key, and deletes nothing when it cannot. It needs no port-forward, only
   to read, create and, with `--replace`, delete that Secret.
-- `just bao-seed-volsync <file> [cluster]` seeds the key `volsync` the volume backups read, once, and
-  keeps its master password in `<file>`; `just bao-seed-volsync --rotate-s3 [cluster]` replaces only
-  the S3 key in it. `just bao-volsync-password <file> <app> <command> [argument...]` runs a command
-  with one application's repository and password. Both are described under
+- `just bao-seed-volsync <file> [cluster]` seeds the key `volsync` the volume backups read, once for
+  each store, with the master password in `<file>`, which its first run makes;
+  `just bao-seed-volsync --rotate-s3 [cluster]` replaces only the S3 key in it.
+  `just bao-volsync-password <file> <app> <command> [argument...]` runs a command with one
+  application's repository and password. Both are described under
   [Volume backups](#what-an-operator-does-once-and-what-then-happens-by-itself). The first creates
   the key and never reads one, as the `operator` role may only create and patch keys.
 
