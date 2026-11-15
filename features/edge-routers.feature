@@ -10,10 +10,10 @@ Feature: Edge routers
     When the edge stack is planned against mocked providers
     Then there are two instances, one at each reserved edge address, each with a floating IP of its own, both in one server group, and the plan needs nothing the cluster stack holds
 
-  Scenario: An edge accepts sessions from the node subnet in the cluster's AS and from nowhere else
-    Given the node subnet, the cluster's AS and the edge's AS
-    When an edge's FRR configuration is rendered
-    Then it listens for dynamic neighbours in the node subnet only, in one peer group whose remote AS is the cluster's, and in its own AS
+  Scenario: An edge accepts sessions from the workers' addresses in the cluster's AS and from nowhere else
+    Given the node subnet, the host number the cluster stack gives its first worker, the most workers there can be, the cluster's AS and the edge's AS
+    When an edge's FRR configuration, its firewall rules and its security group are rendered
+    Then each admits BGP only from the workers' block of host numbers, as the fewest networks that hold it, the FRR configuration in one peer group whose remote AS is the cluster's, and in its own AS
 
   Scenario: An edge installs a /32 inside the service range and refuses anything else
     Given the service range
@@ -33,7 +33,7 @@ Feature: Edge routers
   Scenario: Traffic to an edge's public ports is forwarded to the Gateway's address and nothing else is forwarded
     Given the public ports and the Gateway's address
     When an edge's nftables rules are rendered
-    Then connections to the edge's own address on those ports are translated to the Gateway's address, from the edge's own address, the forward chain drops everything else, and the input chain admits only SSH, BGP from the node subnet and the ICMP path MTU needs
+    Then connections to the edge's own address on those ports are translated to the Gateway's address, from the edge's own address, the forward chain drops everything else, and the input chain admits only SSH, BGP from the workers' addresses and the ICMP path MTU needs
 
   Scenario: The public ports admit only the operator allowlist by default, and SSH admits only the operator allowlist
     Given an operator allowlist and no public source networks set

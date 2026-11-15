@@ -5,9 +5,10 @@
 # daemon with the configuration the edge stack renders, and three speakers that open sessions to it,
 # with no routing table of their own to install into (-Z). Each speaker offers five prefixes: one
 # /32 inside the service range, one outside it, a /30 and the /28 range itself, and a default route.
-#   a  the cluster's AS, from an address inside the edge's listen range: accepted
-#   b  another AS, from an address inside the range: refused by the peer group's remote AS
-#   c  the cluster's AS, from an address outside the range: not a dynamic neighbour
+#   a  the cluster's AS, from a worker's address: accepted
+#   b  another AS, from a worker's address: refused by the peer group's remote AS
+#   c  the cluster's AS, from an address of the node subnet outside the workers' block, as a control
+#      plane's, the CI host's or the other edge's: not a dynamic neighbour
 # Each speaker announces its prefixes with a next hop that is not its own address, which the edge
 # must replace with the speaker's. Prints what FRR's dry run says of the edge's file, then what the
 # edge and the first speaker report, as FRR's JSON, the first speaker's table and its view of the
@@ -54,9 +55,9 @@ speaker() {
   sed "s/@NAME@/$1/; s/@AS@/$2/; s/@ADDRESS@/$3/g; s|@INSIDE@|$4|" "$dir/speaker.conf.in" > "$vty/$1.conf"
   /usr/lib/frr/bgpd -d -S -Z -f "$vty/$1.conf" -i "$vty/$1.pid" --vty_socket "$vty/$1" -A 127.0.0.1 -P "$5" -p 0 2> /dev/null
 }
-speaker a 64496 127.0.0.2 203.0.113.17 2616
-speaker b 64511 127.0.0.3 203.0.113.18 2617
-speaker c 64496 127.0.1.1 203.0.113.18 2618
+speaker a 64496 127.0.0.20 203.0.113.17 2616
+speaker b 64511 127.0.0.21 203.0.113.18 2617
+speaker c 64496 127.0.0.3 203.0.113.18 2618
 
 # Until the first speaker has offered everything, then a while more for the others' attempts.
 tries=0
@@ -74,7 +75,7 @@ section() {
 }
 section sessions edge 'show bgp ipv4 unicast summary json'
 section table edge 'show bgp ipv4 unicast json'
-section advertised edge 'show bgp ipv4 unicast neighbors 127.0.0.2 advertised-routes json'
+section advertised edge 'show bgp ipv4 unicast neighbors 127.0.0.20 advertised-routes json'
 section offered a 'show bgp ipv4 unicast summary json'
 section learned a 'show bgp ipv4 unicast json'
 section capability a 'show bgp neighbors 127.0.0.1 json'

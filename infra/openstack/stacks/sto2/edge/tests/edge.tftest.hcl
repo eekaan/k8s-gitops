@@ -140,7 +140,7 @@ run "the_stack_makes_two_edges_at_the_reserved_addresses_apart_from_each_other_e
   }
 }
 
-run "an_edge_accepts_sessions_from_the_node_subnet_in_the_clusters_as_and_from_nowhere_else" {
+run "an_edge_accepts_sessions_from_the_workers_addresses_in_the_clusters_as_and_from_nowhere_else" {
   command = plan
 
   assert {
@@ -148,9 +148,26 @@ run "an_edge_accepts_sessions_from_the_node_subnet_in_the_clusters_as_and_from_n
     error_message = "The edge must run in its own AS, the plumbing stack's edge_asn."
   }
 
+  # The workers are at host numbers 20 to 99 of the node subnet, as the cluster stack numbers them,
+  # for at most 80 of them: the fewest networks that hold exactly those addresses, in address order.
   assert {
-    condition     = length(regexall("(?m)^ bgp listen range ", output.config["1"].frr_conf)) == 1 && strcontains(output.config["1"].frr_conf, "\n bgp listen range 192.0.2.0/24 peer-group workers\n")
-    error_message = "The edge must listen for dynamic neighbours in the node subnet, once, and nowhere else."
+    condition = regexall("(?m)^ bgp listen range .*$", output.config["1"].frr_conf) == tolist([
+      " bgp listen range 192.0.2.20/30 peer-group workers",
+      " bgp listen range 192.0.2.24/29 peer-group workers",
+      " bgp listen range 192.0.2.32/27 peer-group workers",
+      " bgp listen range 192.0.2.64/27 peer-group workers",
+      " bgp listen range 192.0.2.96/30 peer-group workers",
+    ])
+    error_message = "The edge must listen for dynamic neighbours at the workers' addresses, host numbers 20 to 99 of the node subnet, and nowhere else."
+  }
+
+  # The firewall and the security group hold to the same block.
+  assert {
+    condition = (
+      regexall("(?m)^.*tcp dport 179.*$", output.config["1"].nftables_conf) == tolist(["    ip saddr { 192.0.2.20/30, 192.0.2.24/29, 192.0.2.32/27, 192.0.2.64/27, 192.0.2.96/30 } tcp dport 179 accept"]) &&
+      [for rule in output.security_group.rules : rule.remote_ip_prefix if rule.protocol == "tcp" && rule.port_range_min == 179] == ["192.0.2.20/30", "192.0.2.24/29", "192.0.2.32/27", "192.0.2.64/27", "192.0.2.96/30"]
+    )
+    error_message = "The firewall's BGP rule and the security group's BGP rules must admit the workers' block only."
   }
 
   assert {
@@ -173,9 +190,13 @@ run "an_edge_accepts_sessions_from_the_node_subnet_in_the_clusters_as_and_from_n
       " neighbor workers peer-group",
       " neighbor workers remote-as 64496",
       " bgp listen limit 80",
-      " bgp listen range 192.0.2.0/24 peer-group workers",
+      " bgp listen range 192.0.2.20/30 peer-group workers",
+      " bgp listen range 192.0.2.24/29 peer-group workers",
+      " bgp listen range 192.0.2.32/27 peer-group workers",
+      " bgp listen range 192.0.2.64/27 peer-group workers",
+      " bgp listen range 192.0.2.96/30 peer-group workers",
     ]
-    error_message = "The router must declare exactly the one peer group, its remote AS, the listen limit and the one listen range, and no other neighbour."
+    error_message = "The router must declare exactly the one peer group, its remote AS, the listen limit and the workers' listen ranges, and no other neighbour."
   }
 }
 
@@ -322,7 +343,7 @@ run "traffic_to_an_edges_public_ports_is_forwarded_to_the_gateways_address_and_n
       "    ct state invalid drop\n",
       "    iif \"lo\" accept\n",
       "    tcp dport 22 accept\n",
-      "    ip saddr 192.0.2.0/24 tcp dport 179 accept\n",
+      "    ip saddr { 192.0.2.20/30, 192.0.2.24/29, 192.0.2.32/27, 192.0.2.64/27, 192.0.2.96/30 } tcp dport 179 accept\n",
       "    icmp type destination-unreachable icmp code frag-needed accept\n",
       "    icmpv6 type { packet-too-big, nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert } accept\n",
     ])
@@ -400,8 +421,8 @@ run "the_public_ports_admit_only_the_operator_allowlist_by_default_and_ssh_admit
   }
 
   assert {
-    condition     = toset([for rule in output.security_group.rules : rule.remote_ip_prefix if rule.protocol == "tcp" && rule.port_range_min == 179]) == toset(["192.0.2.0/24"])
-    error_message = "BGP must be admitted from the node subnet only."
+    condition     = [for rule in output.security_group.rules : rule.remote_ip_prefix if rule.protocol == "tcp" && rule.port_range_min == 179] == ["192.0.2.20/30", "192.0.2.24/29", "192.0.2.32/27", "192.0.2.64/27", "192.0.2.96/30"]
+    error_message = "BGP must be admitted from the workers' addresses only."
   }
 }
 
@@ -495,6 +516,44 @@ run "_an_ssh_allowlist_address_with_bits_set_below_its_prefix_is_rejected" {
   }
 
   expect_failures = [var.ssh_allowed_cidrs]
+}
+
+# The workers' block is read from where the cluster stack starts numbering them and how many there
+# can be, not from defaults written here.
+run "_the_workers_block_follows_the_first_worker_host_and_the_most_workers" {
+  command = plan
+
+  variables {
+    worker_first_host = 32
+    max_workers       = 32
+  }
+
+  assert {
+    condition     = regexall("(?m)^ bgp listen range .*$", output.config["1"].frr_conf) == tolist([" bgp listen range 192.0.2.32/27 peer-group workers"])
+    error_message = "Workers at host numbers 32 to 63 must be the one network 192.0.2.32/27."
+  }
+}
+
+# The workers' block holds neither an edge's address nor one of the DHCP pool, which Neutron hands to
+# other ports.
+run "_a_workers_block_that_reaches_the_dhcp_pool_is_rejected" {
+  command = plan
+
+  variables {
+    max_workers = 81
+  }
+
+  expect_failures = [var.worker_first_host]
+}
+
+run "_a_workers_block_that_holds_an_edge_is_rejected" {
+  command = plan
+
+  variables {
+    worker_first_host = 8
+  }
+
+  expect_failures = [var.worker_first_host]
 }
 
 run "_a_public_port_that_is_not_a_port_is_rejected" {

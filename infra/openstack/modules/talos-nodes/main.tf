@@ -9,10 +9,10 @@
 
 locals {
   # Fixed addresses below the node subnet's DHCP pool: control planes from host number 10,
-  # workers from host number 20.
+  # workers from worker_first_host, 20 by default.
   nodes = merge(
     { for i in range(var.controlplane_count) : "${var.name}-cp-${i + 1}" => { role = "controlplane", host = 10 + i } },
-    { for i in range(var.worker_count) : "${var.name}-w-${i + 1}" => { role = "worker", host = 20 + i } },
+    { for i in range(var.worker_count) : "${var.name}-w-${i + 1}" => { role = "worker", host = var.worker_first_host + i } },
   )
   flavors = { controlplane = var.controlplane_flavor, worker = var.worker_flavor }
 

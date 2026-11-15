@@ -1,10 +1,10 @@
 flush ruleset
 
-# Filtering. What is addressed to the edge is dropped except SSH, BGP from the node subnet and the
-# ICMP that path MTU discovery needs. The public ports never reach the input chain: the translation
-# below moves their destination to the Gateway first, so they are forwarded, and only to it. The
-# source networks are the security group's to hold; these rules go by port only, as they are in the
-# user data, which holds no operator allowlist.
+# Filtering. What is addressed to the edge is dropped except SSH, BGP from the workers' addresses
+# and the ICMP that path MTU discovery needs. The public ports never reach the input chain: the
+# translation below moves their destination to the Gateway first, so they are forwarded, and only to
+# it. The networks the public ports and SSH admit are the security group's to hold; these rules take
+# those by port only, as they are in the user data, which holds no operator allowlist.
 table inet edge {
   chain input {
     type filter hook input priority filter; policy drop;
@@ -12,7 +12,7 @@ table inet edge {
     ct state invalid drop
     iif "lo" accept
     tcp dport 22 accept
-    ip saddr ${node_cidr} tcp dport 179 accept
+    ip saddr { ${workers} } tcp dport 179 accept
     icmp type destination-unreachable icmp code frag-needed accept
     icmpv6 type { packet-too-big, nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert } accept
   }

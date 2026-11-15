@@ -90,8 +90,26 @@ variable "volume_type" {
   default     = null
 }
 
+variable "worker_first_host" {
+  description = "Host number on the node subnet of the first worker, where the cluster stack's nodes module starts numbering them, with the same default, which a test holds equal. The edges take BGP sessions from the block of max_workers host numbers that starts here, and from nowhere else."
+  type        = number
+  default     = 20
+
+  # Neither an edge's address nor one Neutron hands out from the DHCP pool may be in the block.
+  validation {
+    condition = floor(var.worker_first_host) == var.worker_first_host && var.worker_first_host >= 2 && try(
+      local.node_first + var.worker_first_host + var.max_workers - 1 < local.dhcp_first &&
+      alltrue([
+        for address in local.edge_numbers : address < local.node_first + var.worker_first_host ||
+        address > local.node_first + var.worker_first_host + var.max_workers - 1
+      ]),
+    false)
+    error_message = "worker_first_host and max_workers must make a block of host numbers from 2 up, below the node subnet's DHCP pool, that holds neither edge's address."
+  }
+}
+
 variable "max_workers" {
-  description = "The most workers there can be: how many dynamic BGP neighbours an edge accepts and how many equal-cost paths it takes to one address. The cluster stack's numbering leaves room for 80 workers (host numbers 20 to 99); FRR takes at most 128 paths."
+  description = "The most workers there can be: how many dynamic BGP neighbours an edge accepts and how many equal-cost paths it takes to one address, and how many host numbers from worker_first_host it takes sessions from. The cluster stack's numbering leaves room for 80 workers (host numbers 20 to 99, below the DHCP pool); FRR takes at most 128 paths."
   type        = number
   default     = 80
 

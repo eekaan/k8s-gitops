@@ -56,7 +56,8 @@ output "security_group" {
       for rule in concat(
         values(openstack_networking_secgroup_rule_v2.ssh),
         values(openstack_networking_secgroup_rule_v2.public),
-        [openstack_networking_secgroup_rule_v2.bgp, openstack_networking_secgroup_rule_v2.path_mtu],
+        [for key in sort(keys(openstack_networking_secgroup_rule_v2.bgp)) : openstack_networking_secgroup_rule_v2.bgp[key]],
+        [openstack_networking_secgroup_rule_v2.path_mtu],
         values(openstack_networking_secgroup_rule_v2.egress),
         ) : {
         security_group_id = rule.security_group_id

@@ -3,9 +3,9 @@ hostname ${hostname}
 log syslog informational
 service integrated-vtysh-config
 !
-! The workers open the sessions and never listen, so the edge takes dynamic neighbours: any host of
-! the node subnet that opens a session in the cluster's AS joins the one peer group. The peer group
-! is declared before the listen range that names it. Graceful restart is on without the notification
+! The workers open the sessions and never listen, so the edge takes dynamic neighbours: a worker's
+! address that opens a session in the cluster's AS joins the one peer group, and no other address
+! does. The peer group is declared before the listen ranges that name it. Graceful restart is on without the notification
 ! bit (RFC 8538), which FRR sets by default: a session that ends on a NOTIFICATION or an expired hold
 ! timer, as a dead worker's does, then withdraws the worker's paths at once instead of keeping them
 ! for the restart time.
@@ -18,7 +18,9 @@ router bgp ${edge_asn}
  neighbor workers peer-group
  neighbor workers remote-as ${cluster_asn}
  bgp listen limit ${max_workers}
- bgp listen range ${node_cidr} peer-group workers
+%{ for block in worker_blocks ~}
+ bgp listen range ${block} peer-group workers
+%{ endfor ~}
  neighbor workers timers ${keepalive} ${hold}
  neighbor workers timers connect ${connect}
  !

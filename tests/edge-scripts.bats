@@ -774,6 +774,15 @@ EOF
   [ "$edge" = "$cluster" ]
 }
 
+@test "the edge stack's workers' block starts where the cluster stack numbers its workers" {
+  # The edges take BGP sessions from the block that starts at the first worker's host number; the
+  # cluster stack's nodes module puts its workers there.
+  edge=$(yq -p hcl -o json "$ROOT/infra/openstack/stacks/sto2/edge/variables.tf" | jq -c '.variable.worker_first_host.default')
+  cluster=$(yq -p hcl -o json "$ROOT/infra/openstack/modules/talos-nodes/variables.tf" | jq -c '.variable.worker_first_host.default')
+  [[ $cluster =~ ^[0-9]+$ ]]
+  [ "$edge" = "$cluster" ]
+}
+
 # first_boot: the edge stack's first-boot script, run here with the edge's file system under
 # EDGE_ROOT, a directory of the test's, and fakes of the system's commands first on PATH. The fake
 # vtysh's dry run refuses a file with a command FRR does not have, as FRR's does
