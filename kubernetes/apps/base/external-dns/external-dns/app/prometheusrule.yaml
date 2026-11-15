@@ -1,0 +1,39 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/prometheusrule-monitoring-v1.json
+# An alert on external-dns' own metrics, which the chart's ServiceMonitor scrapes:
+# external_dns_controller_last_sync_timestamp_seconds, the time of the last successful sync with
+# the DNS provider, which the controller sets after every pass that ended without an error, whether
+# or not it changed a record, so it is renewed every minute while the provider answers
+# (https://github.com/kubernetes-sigs/external-dns/blob/v0.23.0/docs/monitoring/metrics.md).
+# A pass fails one of two ways. An error the controller retries, the provider's 429 or 5xx or a
+# connection cut mid-answer, leaves it running with the gauge at its last value, which ages. Any
+# other error, such as the provider refusing the token with a 4xx or a connection that cannot be
+# made, ends the process, which then crash-loops: its target is gone, and the series with it. A pod
+# that never starts, as without its Secret, and a release that is not installed have no series
+# either. So the alert fires on a last sync ten minutes old and on no series at all.
+# Tests: tests/rules/external-dns.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: external-dns-alerts
+  namespace: external-dns
+spec:
+  groups:
+    - name: external-dns
+      rules:
+        # A sync is due every minute, so a last success ten minutes old means the provider has
+        # refused or not answered for ten passes; no series means no external-dns is running. The
+        # 5 minutes of `for` keep a restart or a short outage of the provider's API from alerting.
+        # absent() gives the alert the namespace of its selector as its label, as the first branch
+        # keeps it.
+        - alert: ExternalDNSSyncStale
+          expr: >-
+            time() - max by (namespace) (external_dns_controller_last_sync_timestamp_seconds{namespace="external-dns"}) > 600
+            or absent(external_dns_controller_last_sync_timestamp_seconds{namespace="external-dns"})
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: external-dns has not synced with the DNS provider for 10 minutes, or is not running
+            description: external-dns in {{ $labels.namespace }} reports no successful sync with the DNS provider in the last 10 minutes, or is not running to report one, so new routes get no records and removed ones keep theirs.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#externaldnssyncstale

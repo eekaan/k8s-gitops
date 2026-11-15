@@ -116,3 +116,15 @@ Feature: Alerts
     Given the snapshot CronJob whose latest scheduled run ended without success, and one whose latest run succeeded
     When the rule is evaluated over time
     Then the alert fires after its time for the first and never for the second
+
+  @by:rules-check
+  Scenario: The alert ExternalDNSSyncStale fires after its time in the failing case and stays quiet in the healthy one
+    Given external-dns that syncs with the DNS provider for ten minutes, then has no series for ten minutes, as when it exits at a refused pass and crash-loops, then syncs again and then runs on without a successful sync
+    When the rule is evaluated over time
+    Then the alert is quiet while the last sync is recent, fires once the series has been gone for its time, is quiet again once external-dns syncs, and fires once the last sync is ten minutes old and has stayed so for its time
+
+  @by:rules-check
+  Scenario: The alert ExternalDNSSyncStale stays quiet while external-dns restarts
+    Given external-dns that syncs every minute and whose pod is replaced: two scrapes find no pod, and the new pod's first scrape finds the gauge at 0, before its first sync
+    When the rule is evaluated over time
+    Then the alert never fires

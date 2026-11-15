@@ -184,3 +184,35 @@ nothing is lost yet; [EtcdSnapshotStale](#etcdsnapshotstale) fires when it is 13
 Look at first, and usually: as for [EtcdSnapshotStale](#etcdsnapshotstale). A snapshot that has
 outgrown the memory-backed volume it is written to (1 GiB) fails the `snapshot` step with a write
 error: the volume's `sizeLimit` and the step's memory limit in the CronJob then grow together.
+
+## ExternalDNSSyncStale
+
+external-dns has reported no successful sync with the DNS provider for 5 minutes past its due:
+either its last successful sync is more than 10 minutes old, or there is no series of it at all. A
+sync is due every minute and counts as successful whenever the pass ended without an error, whether
+or not it changed a record. Records already in the zone keep serving; a new route gets none, and a
+removed route keeps its records until the next successful sync
+([DNS records](../kubernetes.md#dns-records)).
+
+What fires it:
+
+- **An old last sync**: external-dns runs, and its passes fail with errors it retries, the
+  provider's 429 or 5xx or a connection cut mid-answer, for ten passes.
+- **No series**: no external-dns runs to report one. A pass that fails with any other error ends
+  the process: the provider refusing the token with a 4xx (revoked, expired, rewritten with another
+  scope), a connection to the provider that cannot be made, or the Kubernetes API failing the
+  source. The pod then crash-loops, its target goes, and its series with it. A pod that never
+  starts, as when its Secret is missing, and a release that is not installed have none either.
+
+Look at first: `kubectl --namespace external-dns get pods`, which shows a crash loop or a pod that
+does not start, and the controller's log, `just logs 'kubernetes.pod_namespace:external-dns' --since
+15m` or `kubectl --namespace external-dns logs deployment/external-dns --previous`, whose last line
+names the provider's error. `kubectl --namespace external-dns get externalsecret` says whether the
+token's Secret exists, and `kubectl --namespace external-dns get helmrelease external-dns` whether
+the release is installed.
+
+Usually: the API token was revoked, expired or rewritten with another scope, so the provider
+answers 403 at the first pass ([the token](../kubernetes.md#dns-records) is written with
+`just bao-put cert-manager/cloudflare api-token`); the Secret is missing because the key is not in
+the store, in which case the pod does not start; or the provider's API is unreachable or
+throttling, which clears by itself.

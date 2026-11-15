@@ -498,9 +498,9 @@ tree_without() {
     [ "$(yq '.resources[] | select(test("/'"$app"'/ks.yaml$"))' "$REPO/kubernetes/apps/overlays/lab-sto2/kustomization.yaml")" ] \
       || { echo "the lab-sto2 overlay does not list $app"; return 1; }
   done
-  # Leaving the Gateway and the applications that have a route on it out builds: nothing else names
-  # them.
-  tree_without gateway-public hello-route n8n
+  # Leaving the Gateway, the applications that have a route on it and the DNS records of their
+  # routes out builds: nothing else names them.
+  tree_without gateway-public hello-route n8n external-dns
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]

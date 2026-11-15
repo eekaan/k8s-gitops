@@ -15,6 +15,8 @@
 
 # shellcheck source=scripts/lib/s3.sh
 . "$(dirname "${BASH_SOURCE[0]}")/s3.sh"
+# shellcheck source=scripts/lib/edge.sh
+. "$(dirname "${BASH_SOURCE[0]}")/edge.sh"
 
 sops_config=$infra_root/talos/.sops.yaml
 # The rule for the SOPS files under kubernetes/, which Flux decrypts with the Flux age key.
@@ -1104,6 +1106,9 @@ declare -A cluster_config=()
 # reads them from.
 #   CLUSTER_DOMAIN        the domain the cluster's applications are published under, from the
 #                         environment
+#   CLUSTER_DNS_ZONE      the zone at the DNS provider that holds the domain, which external-dns
+#                         selects by its name: CLUSTER_DNS_ZONE from the environment, the domain or
+#                         a name it is under, and the domain itself when that is unset or empty
 #   BACKUP_BUCKET_PREFIX  the start of the backup buckets' names, from the environment
 #                         (s3_bucket_name_ok)
 #   S3_ENDPOINT,          the object storage's S3 endpoint and region, from
@@ -1119,16 +1124,20 @@ declare -A cluster_config=()
 #   BGP_EDGE_ADDRESS_2
 #   GATEWAY_ADDRESS       the public Gateway's address, a host of the service range, which the edge
 #                         routers forward public traffic to, values.bgp.gatewayAddress
-# The last six the cluster stack renders from the plumbing stack's numbers for BGP (ADR 0013).
+#   EDGE_PUBLIC_ADDRESS_1,  the edge routers' two public (floating) addresses, in the order of the
+#   EDGE_PUBLIC_ADDRESS_2   edge stack's addresses output, which is sensitive: read as gateway-check
+#                           reads it (edge_listing), and refused, naming the stack, while it has none
+# The six before them the cluster stack renders from the plumbing stack's numbers for BGP (ADR 0013).
 # A missing talman.yaml leaves its keys to the caller's require_cluster, which names the file.
 fill_cluster_config() {
-  local cluster=$1 talman=$2 example value keys key complete=1 i
+  local cluster=$1 talman=$2 example value keys key complete=1 i listing errors_log reason edge_status=0
   local dns_name='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
   local ipv4='([0-9]{1,3}\.){3}[0-9]{1,3}'
   local -a listed=() edges=()
-  local -A sources=([CLUSTER_DOMAIN]=1 [BACKUP_BUCKET_PREFIX]=1 [S3_ENDPOINT]=1 [S3_REGION]=1
+  local -A sources=([CLUSTER_DOMAIN]=1 [CLUSTER_DNS_ZONE]=1 [BACKUP_BUCKET_PREFIX]=1 [S3_ENDPOINT]=1 [S3_REGION]=1
     [NODE_CIDR]=1 [NODE_NAME_REGEX]=1 [SERVICE_RANGE]=1 [BGP_CLUSTER_ASN]=1 [BGP_EDGE_ASN]=1
-    [BGP_EDGE_ADDRESS_1]=1 [BGP_EDGE_ADDRESS_2]=1 [GATEWAY_ADDRESS]=1) wanted=()
+    [BGP_EDGE_ADDRESS_1]=1 [BGP_EDGE_ADDRESS_2]=1 [GATEWAY_ADDRESS]=1 [EDGE_PUBLIC_ADDRESS_1]=1
+    [EDGE_PUBLIC_ADDRESS_2]=1) wanted=()
   example=$infra_root/kubernetes/clusters/$cluster/cluster-config.example.yaml
   cluster_config=()
   if [[ ! -f $example ]]; then
@@ -1145,6 +1154,19 @@ fill_cluster_config() {
     fi
   else
     complete=0
+  fi
+  value=${CLUSTER_DNS_ZONE:-${cluster_config[CLUSTER_DOMAIN]-}}
+  if [[ -z ${cluster_config[CLUSTER_DOMAIN]-} ]]; then
+    infra_error "cannot fill CLUSTER_DNS_ZONE of cluster-config without a CLUSTER_DOMAIN to check it against"
+    complete=0
+  elif [[ ! $value =~ $dns_name ]]; then
+    infra_error "cannot fill CLUSTER_DNS_ZONE of cluster-config: CLUSTER_DNS_ZONE is not a lower-case DNS name"
+    complete=0
+  elif [[ $CLUSTER_DOMAIN != "$value" && $CLUSTER_DOMAIN != *".$value" ]]; then
+    infra_error "cannot fill CLUSTER_DNS_ZONE of cluster-config: CLUSTER_DOMAIN is neither the zone CLUSTER_DNS_ZONE names nor a name under it"
+    complete=0
+  else
+    cluster_config[CLUSTER_DNS_ZONE]=$value
   fi
   if require_env BACKUP_BUCKET_PREFIX && s3_bucket_name_ok BACKUP_BUCKET_PREFIX prefix; then
     cluster_config[BACKUP_BUCKET_PREFIX]=$BACKUP_BUCKET_PREFIX
@@ -1205,6 +1227,31 @@ fill_cluster_config() {
       infra_error "cannot fill GATEWAY_ADDRESS of cluster-config: ${talman#"$infra_root"/} gives no IPv4 address in values.bgp.gatewayAddress"
       complete=0
     fi
+  fi
+
+  # The edges' public addresses are in no talman.yaml: only the edge stack knows them. A cluster
+  # whose edge stack is not applied is refused, as one without BGP numbers is, since nothing could
+  # fill the DNS records' targets.
+  listing=$(edge_listing) || edge_status=$?
+  errors_log=$(sed -n '1s/^errors //p' <<< "$listing")
+  reason=
+  case $edge_status in
+    0)
+      mapfile -t edges < <(sed '1d' <<< "$listing" | cut -d' ' -f2)
+      for i in 0 1; do
+        cluster_config[EDGE_PUBLIC_ADDRESS_$((i + 1))]=${edges[i]}
+      done
+      ;;
+    1) reason="its environment or its lock is not ready, as said above" ;;
+    2) reason="the edge stack sto2/edge has no outputs: it is not applied" ;;
+    3) reason="tofu init failed on sto2/edge, and its errors are in $errors_log; just infra-plan sto2/edge shows them" ;;
+    4) reason="tofu output failed on sto2/edge, and its errors are in $errors_log; just infra-plan sto2/edge shows them" ;;
+    5) reason="the outputs of sto2/edge are not two edges' names and addresses, as $errors_log says" ;;
+    *) reason="the outputs of sto2/edge are not JSON" ;;
+  esac
+  if [[ -n $reason ]]; then
+    infra_error "cannot fill EDGE_PUBLIC_ADDRESS_1 and EDGE_PUBLIC_ADDRESS_2 of cluster-config: $reason"
+    complete=0
   fi
 
   keys=$(read_keys "$example" 'keys | .[]') || return 1

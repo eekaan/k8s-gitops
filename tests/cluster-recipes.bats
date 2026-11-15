@@ -9,6 +9,8 @@
 # recipes take their etcd snapshot as cluster-snapshot does, so age runs for real, with a throwaway
 # key, and rclone is tests/fixtures/etcd-snapshots/rclone, whose buckets are directories.
 
+load fixtures/edge-stack
+
 setup_file() {
   # The tests that run the real talman and sops use whichever is first on PATH: the pinned installs
   # go first, as the justfile puts them, so that an older talman earlier on PATH does not answer.
@@ -55,11 +57,15 @@ setup() {
     > "$REPO/infra/openstack/backend.hcl"
   # A mise with nothing installed keeps the justfile from putting real tools in front of the fakes.
   fake mise < /dev/null
+  # The edges' public addresses in cluster-config come from the edge stack's outputs, which a fake
+  # of tofu answers.
+  edge_stack_fixture "$REPO" "$BIN" "$BATS_TEST_TMPDIR/edge-state"
   KEY="$BATS_TEST_TMPDIR/keys/talos.agekey"
   FLUX_KEY="$BATS_TEST_TMPDIR/keys/flux.agekey"
   KUBE_API_ADDRESS=203.0.113.80
   # TMPDIR keeps the plaintext bundle talman stages before encrypting it inside the test's directory.
   BASE_ENVIRONMENT=(
+    "${EDGE_STACK_ENVIRONMENT[@]}"
     SOPS_AGE_KEY_FILE="$KEY"
     KUBE_API_ADDRESS="$KUBE_API_ADDRESS"
     FLUX_AGE_KEY_FILE="$FLUX_KEY"

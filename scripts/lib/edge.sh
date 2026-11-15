@@ -38,6 +38,33 @@ edge_load() {
   edge_known_hosts=${XDG_STATE_HOME:-$HOME/.local/state}/k8s-gitops/edge.known_hosts
 }
 
+# edge_listing: each edge router's name and floating address, "NAME ADDRESS" per line, from the edge
+# stack's outputs (edge_load), after a first line "errors FILE", the stack's errors file as stack-env
+# names it, relative to the repository. Returns 2 when the stack has none, as before it is applied; 1
+# when its environment or lock is not ready, which stack-env and lock_stack say in the repository's
+# own words; 3 when tofu init fails, 4 when tofu output does, 6 when what it gives is not JSON, and 5
+# when the outputs are not two edges.
+# tofu's errors can name the state backend's endpoint, its bucket or an address, so they go to the
+# stack's errors file, which git ignores, and never to the output. Run in a subshell, as command
+# substitution does, so the stack's environment and lock stay in it, and the addresses go to the
+# caller only.
+edge_listing() {
+  local outputs i
+  # shellcheck source=scripts/stack-env
+  . "$(dirname "${BASH_SOURCE[0]}")/../stack-env" sto2/edge || return 1
+  # shellcheck disable=SC2154 # scripts/stack-env sets errors_file
+  printf 'errors %s\n' "${errors_file#"$infra_root"/}"
+  lock_stack || return 1
+  init_stack 2>> "$errors_file" || return 3
+  outputs=$(stack_tofu output -json 2>> "$errors_file") || return 4
+  jq -e 'type == "object"' <<< "$outputs" > /dev/null || return 6
+  jq -e '(.addresses.value // []) | length > 0' <<< "$outputs" > /dev/null || return 2
+  edge_load 2>> "$errors_file" || return 5
+  for i in 0 1; do
+    printf '%s %s\n' "${edge_names[i]}" "${edge_addresses[i]}"
+  done
+}
+
 # edge_connect [NUMBER]: edge_load, and makes sure the SSH host key of edge NUMBER, or of both
 # edges, is recorded, as for the CI host: checked against the console of the edge's instance, for up
 # to HOST_CONSOLE_WAIT seconds, 30 when unset.

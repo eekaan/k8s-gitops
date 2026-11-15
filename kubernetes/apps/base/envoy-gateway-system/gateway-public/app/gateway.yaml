@@ -7,6 +7,11 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
   name: public
+  annotations:
+    # Where external-dns points the records of every route on this Gateway: the edge routers'
+    # public addresses. Without it external-dns would publish the Gateway's own address, from its
+    # status, which is private: the edge routers translate public traffic to it.
+    external-dns.kubernetes.io/target: "${EDGE_PUBLIC_ADDRESS_1},${EDGE_PUBLIC_ADDRESS_2}"
 spec:
   gatewayClassName: envoy-gateway
   infrastructure:

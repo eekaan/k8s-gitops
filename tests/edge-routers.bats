@@ -3,6 +3,8 @@
 # against recording fakes of tofu, ssh, openstack and the rest, so nothing here reaches a cloud, a
 # host or a cluster, and no test reads or writes a key at a real path.
 
+load fixtures/edge-stack
+
 setup() {
   ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   BIN="$BATS_TEST_TMPDIR/bin"
@@ -38,8 +40,11 @@ ipv4_number() {
   talman="$BATS_TEST_TMPDIR/talman.yaml"
   base64 -d <<< "${encoded//\"/}" > "$talman"
   config="$BATS_TEST_TMPDIR/cluster-config.json"
+  # The edges' public addresses come from the edge stack's outputs, which a fake of tofu answers.
+  edge_stack_fixture "$BATS_TEST_TMPDIR/unused" "$BATS_TEST_TMPDIR/edge-bin" "$BATS_TEST_TMPDIR/edge-state"
   # shellcheck disable=SC2016 # $1 and $2 are the inner shell's.
-  env -i PATH="$PATH" HOME="$BATS_TEST_TMPDIR" CLUSTER_DOMAIN=example.com BACKUP_BUCKET_PREFIX=marker-backups bash -c \
+  env -i PATH="$BATS_TEST_TMPDIR/edge-bin:$PATH" HOME="$BATS_TEST_TMPDIR" "${EDGE_STACK_ENVIRONMENT[@]}" \
+    CLUSTER_DOMAIN=example.com BACKUP_BUCKET_PREFIX=marker-backups bash -c \
     '. "$1/scripts/lib/cluster.sh" && fill_cluster_config lab-sto2 "$2" && cluster_config_manifest' _ "$ROOT" "$talman" |
     jq '.data' > "$config"
 
