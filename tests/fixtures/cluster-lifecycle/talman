@@ -6,10 +6,14 @@
 #   never-back    the node's kubelet never reports again
 #   interrupt     the recipe is sent this signal, INT or TERM, while talman reboots, and talman ends
 #   clean-shutdown  the shutdown leaves no pod behind
-#   etcd-down.NODE  the etcd member of the control plane NODE does not come back
-#   etcd-late.NODE  it comes back once etcd status has been asked that many more times
+#   etcd-down.NODE  the etcd member of the control plane NODE does not come back once NODE is
+#                   rebooted
+#   etcd-late.NODE  it comes back once etcd status has been asked that many more times after that
+#   etcd-away.NODE  NODE's etcd member is down already, before anything is rebooted
+#   etcd-extra      etcd still holds a member of the hostname this file names, which is no control
+#                   plane of talman.yaml; with "after" after the hostname, only once a node is back
 # talman talosctl etcd status and etcd members answer as talosctl 1.14 prints them, one row for each
-# node -n names, and every control plane of talman.yaml a member; a member that is not back fails
+# node -n names, and every control plane of talman.yaml a member; a member that is down fails
 # its node's row, as talosctl does, with an error that names an address.
 # A reboot takes three seconds. It selects the nodes as talman does: those -n/--node names by
 # hostname or address and those -g/--group names by role, every node with neither, and writes their
@@ -31,9 +35,11 @@ record=$root/record
 printf '%s\n' "talman $*" >> "$record/argv"
 config=${TALMAN_CONFIG:?}/talman.yaml
 
-# away NODE: whether NODE's etcd member is not back, counting down etcd-late.NODE.
+# away NODE: whether NODE's etcd member is down, counting down etcd-late.NODE once NODE is back.
 away() {
   local late
+  [[ ! -e $state/etcd-away.$1 ]] || return 0
+  [[ -e $state/back.$1 ]] || return 1
   [[ ! -e $state/etcd-down.$1 ]] || return 0
   [[ -e $state/etcd-late.$1 ]] || return 1
   late=$(< "$state/etcd-late.$1")
@@ -56,12 +62,19 @@ if [[ ${1-} == talosctl ]]; then
       printf '198.51.100.91   %s   41 MB   18 MB (43.90%%)   1a2b3c4d5e6f7a8b   1234   7   1234   false   3.6.0   3.6.0   \n' "member-$node"
     done
   elif [[ " $* " == *" etcd members "* ]]; then
-    if [[ -e $state/etcd-down.${asked[0]} ]]; then
+    if [[ -e $state/etcd-away.${asked[0]} ]] || [[ -e $state/back.${asked[0]} && -e $state/etcd-down.${asked[0]} ]]; then
       echo "error getting members from 198.51.100.91: rpc error: code = Unavailable desc = connection refused" >&2
       exit 1
     fi
     printf 'NODE   ID   HOSTNAME   PEER URLS   CLIENT URLS   LEARNER\n'
-    for node in $(yq '.nodes[] | select(.role == "controlplane") | .hostname' "$config"); do
+    members=$(yq '.nodes[] | select(.role == "controlplane") | .hostname' "$config")
+    if [[ -e $state/etcd-extra ]]; then
+      read -r extra when < "$state/etcd-extra"
+      if [[ $when != after ]] || compgen -G "$state/back.*" > /dev/null; then
+        members+=$'\n'$extra
+      fi
+    fi
+    for node in $members; do
       printf '198.51.100.91   %s   %s   https://198.51.100.92:2380   https://198.51.100.92:2379   false\n' "id-$node" "$node"
     done
   else

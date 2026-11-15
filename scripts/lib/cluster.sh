@@ -428,12 +428,22 @@ etcd_status_healthy() {
     END { exit unknown || !(rows == count && !bad) }'
 }
 
-# etcd_lists HOSTNAME...: whether the table talosctl etcd members prints on standard input lists a
-# member for each HOSTNAME.
-etcd_lists() {
-  awk -F '   +' 'BEGIN { for (i = 1; i < ARGC; i++) want[ARGV[i]] = 1; ARGC = 1 }
-    NR > 1 { delete want[$3] }
-    END { for (name in want) exit 1 }' "$@"
+# etcd_members_are HOSTNAME...: whether the members in the table talosctl etcd members prints on
+# standard input are exactly the HOSTNAMEs, the control planes of talman.yaml: a member etcd holds
+# besides them, as of a control plane removed without its member, counts toward its quorum. When
+# they are not, it says why, naming members by hostname, never by address.
+etcd_members_are() {
+  awk -F '   +' '
+    BEGIN { for (i = 1; i < ARGC; i++) { want[ARGV[i]] = 1; names[i] = ARGV[i] } count = ARGC - 1; ARGC = 1 }
+    NR == 1 { if ($3 != "HOSTNAME") unknown = 1; next }
+    { if ($3 in want) seen[$3] = 1; else extra = extra (extra == "" ? "" : ", ") $3 }
+    END {
+      if (unknown || NR == 0) { print "etcd members printed a table this does not read"; exit 1 }
+      for (i = 1; i <= count; i++) if (!(names[i] in seen)) missing = missing (missing == "" ? "" : ", ") names[i]
+      if (extra != "") said = "etcd holds " extra ", no control plane of talman.yaml"
+      if (missing != "") said = said (said == "" ? "" : "; ") "etcd does not list " missing " as a member"
+      if (said != "") { print said; exit 1 }
+    }' "$@"
 }
 
 # Where the monitoring application's Prometheus runs, and the jobs that scrape the cluster's own
@@ -477,7 +487,7 @@ scrape_jobs=(apiserver kube-controller-manager kube-scheduler kube-etcd kubelet 
 # shellcheck disable=SC2016 # a jq program
 reboot_only_program='
   .[0] as $before | .[1] as $after
-  | (if $before.etcd != $after.etcd then "etcd with the arguments it had" else empty end),
+  | (if $before.etcd != $after.etcd then "etcd as it was started" else empty end),
     (if any($before.modules | to_entries[]; ($after.modules[.key] // null) as $now
         | $now == null or ($now | sort) != (.value | sort))
       then "its kernel modules as they were loaded" else empty end)'
@@ -516,6 +526,12 @@ reboot_state() {
 # held before; nothing when they agree.
 reboot_pending() {
   printf '%s\n%s\n' "$1" "$2" | jq -rs "$reboot_only_program"
+}
+
+# new_nodes DRY_RUN: the hostnames of the nodes whose block of the dry run DRY_RUN, as changed_nodes
+# reads it, is a new node's, one per line.
+new_nodes() {
+  awk '/^== \[[0-9?]+\/[0-9]+\] / && /\) ·/ { print $3 }' <<< "$1"
 }
 
 # changed_nodes DRY_RUN: the hostnames of the nodes whose block of the dry run DRY_RUN, as talman

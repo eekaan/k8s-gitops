@@ -59,7 +59,7 @@ Feature: Cluster recipes
   Scenario: A rollout that changes etcd's arguments says which control planes need a reboot
     Given talman's dry run showing a change to cluster.etcd's extraArgs on cp-1 and cp-2, which etcd's configuration in Talos holds once each runs it, and one to machine.network only on worker-2
     When cluster-talos runs with --yes, and with --yes --first worker-2
-    Then once the nodes keep the configuration it says that cp-1 and cp-2 run etcd with the arguments they had until they reboot, names just cluster-reboot for each, one at a time, says nothing of worker-2, and reboots nothing
+    Then once the nodes keep the configuration it says that cp-1 and cp-2 run etcd as it was started until they reboot, names just cluster-reboot for each, one at a time, says nothing of worker-2, and reboots nothing
 
   Scenario: A rollout that changes only what applies at once says nothing about a reboot
     Given talman's dry run showing changes to machine.network only, and then to nothing in a reboot-only section

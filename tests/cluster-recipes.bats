@@ -186,6 +186,7 @@ cluster_files() {
 #   unreadable.NODE    NODE's Talos API answers no talosctl get
 #   unreadable-after.NODE  likewise, once NODE runs the configuration
 #   withheld           talman cannot hide the cluster's secrets, so its dry run shows no diff
+#   header-drift       talman's dry run heads each node's block in a format of another version
 #   apply-fails.NODE   talman apply of every node fails at NODE, the nodes before it having taken
 #                      the configuration
 #   reboot-fails.NODE  scripts/cluster-reboot NODE does not bring the node back
@@ -198,7 +199,10 @@ cluster_files() {
 #   health-cut.NODE    Cilium's health probes of NODE's host, on its health port, fail
 #   notready.NODE      NODE's Ready condition is Unknown
 #   etcd-cut.NODE      NODE's etcd member has no leader
+#   etcd-lost.NODE     NODE's etcd member has no leader once NODE has been rebooted
 #   etcd-unlisted.NODE no control plane's etcd member lists NODE's
+#   etcd-extra         etcd holds a member of the hostname this file names, no control plane of
+#                      talman.yaml
 #   etcd-old-table     talosctl's etcd status prints the older table of ten columns
 #   api-cut.NODE       the Kubernetes API at NODE's own address does not answer
 #   api-refused.NODE   the Kubernetes API at NODE's own address refuses connections; with a number
@@ -307,14 +311,17 @@ diff_of() {
   local node=$1 shown=0
   if [[ $node == cp-1 && -e $STATE/changes ]]; then
     echo "     @@ -80,6 +80,7 @@"
-    echo "           secret: [redacted]"
     if given --redact-secrets=false; then
+      echo "           secret: marker-cluster-secret"
       echo "     +    token: marker-machine-token"
+      echo "           ca:"
+      echo "             crt: marker-machine-ca-certificate"
     else
+      echo "           secret: [redacted]"
       echo "     +    token: [redacted]"
+      echo "           ca:"
+      echo "             crt: [redacted]"
     fi
-    echo "           ca:"
-    echo "             crt: [redacted]"
     shown=1
   fi
   if [[ -e $STATE/etcd.$node ]]; then
@@ -435,7 +442,7 @@ if [[ $1 == talosctl ]]; then
     printf 'NODE   MEMBER   DB SIZE   IN USE   LEADER   RAFT INDEX   RAFT TERM   RAFT APPLIED INDEX   LEARNER   PROTOCOL   STORAGE   ERRORS\n'
     for node in "${asked[@]}"; do
       leader=1a2b3c4d5e6f7a8b errors=
-      if [[ -e $STATE/etcd-cut.$node ]]; then
+      if [[ -e $STATE/etcd-cut.$node ]] || [[ -e $STATE/etcd-lost.$node && -e $STATE/rebooted.$node ]]; then
         leader=0000000000000000 errors='etcdserver: no leader'
       fi
       printf '192.0.2.211   %s   41 MB   18 MB (43.90%%)   %s   1234   7   1234   false   3.6.0   3.6.0   %s\n' \
@@ -447,6 +454,9 @@ if [[ $1 == talosctl ]]; then
       [[ ! -e $STATE/etcd-unlisted.$node ]] || continue
       printf '192.0.2.211   %s   %s   https://192.0.2.20:2380   https://192.0.2.20:2379   false\n' "id-$node" "$node"
     done
+    if [[ -e $STATE/etcd-extra ]]; then
+      printf '198.51.100.212   id-old   %s   https://198.51.100.213:2380   https://198.51.100.213:2379   false\n' "$(< "$STATE/etcd-extra")"
+    fi
   fi
   exit 0
 fi
@@ -506,6 +516,7 @@ case "$1" in
         [[ -z $target || $node == "$target" ]] || continue
         address=$(yq ".nodes[] | select(.hostname == \"$node\") | .ipAddress" "$dir/talman.yaml")
         header="== [$position/${#nodes[@]}] $node ($address)"
+        [[ ! -e $STATE/header-drift ]] || header="--- node $node at $address ($position of ${#nodes[@]})"
         if [[ " $new " == *" $node "* ]]; then
           continue
         fi
@@ -1548,8 +1559,8 @@ early_readers() {
   recipe cluster-talos --yes < /dev/null
 
   [ "$status" -eq 0 ]
-  [[ $output == *"cp-1 runs etcd with the arguments it had until it reboots"* ]]
-  [[ $output == *"cp-2 runs etcd with the arguments it had until it reboots"* ]]
+  [[ $output == *"cp-1 runs etcd as it was started until it reboots"* ]]
+  [[ $output == *"cp-2 runs etcd as it was started until it reboots"* ]]
   [[ $output == *"just cluster-reboot cp-1"* && $output == *"just cluster-reboot cp-2"* ]]
   [[ $output == *"one at a time"* ]]
   # The node whose change applies at once is not named, and nothing is rebooted unasked.
@@ -1572,8 +1583,8 @@ early_readers() {
   recipe cluster-talos --first worker-2 --yes < /dev/null
 
   [ "$status" -eq 0 ]
-  [[ $output == *"cp-1 runs etcd with the arguments it had until it reboots"* ]]
-  [[ $output == *"cp-2 runs etcd with the arguments it had until it reboots"* ]]
+  [[ $output == *"cp-1 runs etcd as it was started until it reboots"* ]]
+  [[ $output == *"cp-2 runs etcd as it was started until it reboots"* ]]
   [[ $output != *"worker-2 runs"* ]]
   [ -z "$(calls '^cluster-reboot ')" ]
   applied=$(grep -n 'Applied configuration' <<< "$output" | tail -1 | cut -d: -f1)
@@ -1624,6 +1635,10 @@ early_readers() {
   [ "$(call_line "^$(applies | head -1)\$")" -lt "$(call_line '^cluster-reboot cp-1 ')" ]
   [[ $output == *"cp-1 is rebooted"* && $output == *"cp-3 is rebooted"* ]]
   [[ $output != *"until it reboots"* ]]
+  # Before anything is applied it names the nodes it may reboot: each the dry run shows a change on.
+  announced=$(grep -nxF 'cluster-talos: once every node keeps the configuration, those of cp-1, cp-2, cp-3, worker-2 that then run a setting only a reboot takes up are rebooted, one at a time' <<< "$output" | cut -d: -f1)
+  applied=$(grep -n 'Applied configuration without a reboot$' <<< "$output" | head -1 | cut -d: -f1)
+  [ -n "$announced" ] && [ -n "$applied" ] && [ "$announced" -lt "$applied" ]
 
   # A reboot is not the default: the operator says so with --reboot.
   : > "$RECORD/argv"
@@ -1646,14 +1661,15 @@ early_readers() {
   [[ $output == *"not rebooted: cp-3"* ]]
 
   # A control plane that is Ready again while its etcd member is not back did not come back either:
-  # with scripts/cluster-reboot itself rebooting cp-1, which comes back Ready with its member
-  # reporting no leader, cp-2 and cp-3 are not rebooted. The waits are real ones.
+  # with scripts/cluster-reboot itself rebooting cp-1, whose member is healthy before the reboot and
+  # reports no leader once cp-1 is Ready again, cp-2 and cp-3 are not rebooted. The waits are real
+  # ones.
   cp "$ROOT/scripts/cluster-reboot" "$REPO/scripts/cluster-reboot"
   fake sleep <<'EOF'
 exec "$(command -v -p sleep)" "$@"
 EOF
   rm "$STATE/reboot-fails.cp-2"
-  : > "$STATE/etcd-cut.cp-1"
+  : > "$STATE/etcd-lost.cp-1"
   : > "$RECORD/argv"
   printf '%s\n' cp-1 cp-2 cp-3 > "$STATE/pending"
   with REBOOT_WAIT=1
@@ -1661,7 +1677,7 @@ EOF
 
   [ "$status" -ne 0 ]
   [ "$(calls '^talman reboot ' | paste -sd'|')" = 'talman reboot -n cp-1 --yes --extra-flags=--drain=false' ]
-  [[ $output == *"cp-1 is Ready again, but its etcd member did not come back"* ]]
+  [[ $output == *"cp-1 is Ready again, but etcd was not whole within 1s"* ]]
   [[ $output == *"cp-1 did not come back"* && $output == *"not rebooted: cp-2, cp-3"* ]]
 }
 
@@ -1697,7 +1713,7 @@ EOF
 
   [ "$status" -eq 0 ]
   [[ $output == *"cp-1 runs its kernel modules as they were loaded until it reboots"* ]]
-  [[ $output == *"cp-2 runs etcd with the arguments it had until it reboots"* ]]
+  [[ $output == *"cp-2 runs etcd as it was started until it reboots"* ]]
   [[ $output == *"cp-3 runs its kernel modules as they were loaded until it reboots"* ]]
   [[ $output == *"worker-1 runs its kernel modules as they were loaded until it reboots"* ]]
   [[ $output != *"cp-1 runs etcd"* && $output != *"cp-2 runs its kernel"* && $output != *"worker-2 runs"* ]]
@@ -1729,6 +1745,45 @@ EOF
   [ "$(calls '^cluster-reboot ' | paste -sd'|')" = "cluster-reboot cp-1 lab-sto2 --yes" ]
 }
 
+@test "cluster-talos says when it cannot tell from talman's dry run which nodes change, and then reboots nothing" {
+  fake_cluster
+  mkdir -p "$CLUSTER/clusterconfig"
+  : > "$CLUSTER/clusterconfig/kubeconfig"
+  printf '%s\n' cp-1 cp-2 > "$STATE/pending"
+  : > "$STATE/etcd.cp-1"
+  : > "$STATE/etcd.cp-2"
+  : > "$STATE/header-drift"
+
+  recipe cluster-talos --yes < /dev/null
+
+  # The configuration is applied as asked; whether a node needs a reboot is left open, and said so.
+  [ "$status" -eq 0 ]
+  [[ $output == *"cannot tell from talman's dry run which nodes the configuration changes, so it cannot say whether any needs a reboot"* ]]
+  [ -n "$(applies)" ]
+  [[ $output != *"until it reboots"* ]]
+
+  # With --reboot it does not go on to reboot blind: nothing is applied or rebooted.
+  printf '%s\n' cp-1 cp-2 > "$STATE/pending"
+  : > "$RECORD/argv"
+
+  recipe cluster-talos --yes --reboot < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"cannot tell from talman's dry run which nodes the configuration changes"* ]]
+  [[ $output == *"nothing is applied; without --reboot the configuration is applied and the nodes are not rebooted"* ]]
+  [ -z "$(applies)" ]
+  [ -z "$(calls '^cluster-reboot ')" ]
+
+  # A dry run whose only change is a new node to onboard reads as such.
+  rm "$STATE/header-drift" "$STATE/pending"
+  echo worker-3 > "$STATE/new-nodes"
+
+  recipe cluster-talos --onboard --yes --reboot < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output != *"cannot tell"* ]]
+}
+
 @test "cluster-talos compares a changed node whose diff talman does not show" {
   fake_cluster
   printf '%s\n' cp-1 cp-2 > "$STATE/pending"
@@ -1740,7 +1795,7 @@ EOF
 
   [ "$status" -eq 0 ]
   [[ $output == *"changes; diff not shown"* ]]
-  [[ $output == *"cp-1 runs etcd with the arguments it had until it reboots"* ]]
+  [[ $output == *"cp-1 runs etcd as it was started until it reboots"* ]]
   [[ $output != *"cp-2 runs"* ]]
 }
 
@@ -1760,7 +1815,7 @@ EOF
   # on cp-1, so this one says what it runs. Nothing of a rollout that is not done is rebooted.
   [ "$status" -ne 0 ]
   [[ $output == *"failed while applying the configuration"* ]]
-  [[ $output == *"cp-1 runs etcd with the arguments it had until it reboots; reboot it with: just cluster-reboot cp-1"* ]]
+  [[ $output == *"cp-1 runs etcd as it was started until it reboots; reboot it with: just cluster-reboot cp-1"* ]]
   [[ $output != *"cp-2 runs"* && $output != *"cp-3 runs"* ]]
   [ -z "$(calls '^cluster-reboot ')" ]
 }
@@ -1803,7 +1858,7 @@ EOF
   # of a rollout that is not done.
   [ "$status" -ne 0 ]
   [[ $output == *"kept before it: cp-1"* ]]
-  [[ $output == *"cp-1 runs etcd with the arguments it had until it reboots; reboot it with: just cluster-reboot cp-1"* ]]
+  [[ $output == *"cp-1 runs etcd as it was started until it reboots; reboot it with: just cluster-reboot cp-1"* ]]
   [[ $output != *"cp-2 runs"* ]]
   [ -z "$(calls '^cluster-reboot ')" ]
 }
@@ -1819,8 +1874,8 @@ EOF
   recipe cluster-talos --yes < /dev/null
 
   [ "$status" -eq 0 ]
-  [[ $output == *"cp-1 runs etcd with the arguments it had until it reboots"* ]]
-  [[ $output == *"cp-2 runs etcd with the arguments it had until it reboots"* ]]
+  [[ $output == *"cp-1 runs etcd as it was started until it reboots"* ]]
+  [[ $output == *"cp-2 runs etcd as it was started until it reboots"* ]]
   [[ $output != *"worker-2 runs"* ]]
   if grep -qE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' <<< "$output"; then false; fi
 }
@@ -2029,6 +2084,17 @@ keeps() {
     [ "$(applies)" = "$(tries cp-1)" ]
     [[ $output == *"cp-1's etcd member is not healthy"* ]]
   done
+  # A member etcd still holds that is no control plane of talman.yaml counts toward its quorum.
+  rm -f "$STATE"/* "$RECORD/argv"
+  printf '%s\n' cp-1 worker-2 > "$STATE/pending"
+  echo cp-old > "$STATE/etcd-extra"
+
+  recipe cluster-talos --first cp-1 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [ "$(applies)" = "$(tries cp-1)" ]
+  [[ $output == *"cp-1's etcd member is not healthy as cp-1 and cp-2 see it: etcd holds cp-old, no control plane of talman.yaml"* ]]
+  [[ $output != *198.51.100.21* ]]
   rm -f "$STATE"/* "$RECORD/argv"
 
   # An unhealthy cluster gets no apply at all.
@@ -2905,7 +2971,7 @@ EOF
   reset_environment
   ci_printed=("${printed[@]:local_runs}")
   [ "${#ci_printed[@]}" -eq 14 ]
-  [[ ${ci_printed[*]} == *"cp-1 runs etcd with the arguments it had until it reboots"* ]]
+  [[ ${ci_printed[*]} == *"cp-1 runs etcd as it was started until it reboots"* ]]
   [[ ${ci_printed[*]} == *"its output is in talos/lab-sto2/clusterconfig/"* ]]
   for address in $(yq '.nodes[].ipAddress' "$CLUSTER/talman.yaml"); do
     [[ ${ci_printed[*]} != *"$address"* ]]
@@ -2921,6 +2987,8 @@ EOF
     marker-state-access-key-id
     marker-state-secret-key
     marker-machine-token
+    marker-cluster-secret
+    marker-machine-ca-certificate
     marker-etcd-certificate
     marker-etcd-key
   )

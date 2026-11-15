@@ -569,7 +569,7 @@ no_tofu() {
 
   [ "$status" -ne 0 ]
   [ -e "$STATE/back.cp-2" ]
-  [[ $output == *"cp-2 is Ready again, but its etcd member did not come back"* ]]
+  [[ $output == *"cp-2 is Ready again, but etcd was not whole within 4s: not every control plane's etcd member answered etcd status"* ]]
   [[ $output != *"has not reported Ready"* ]]
   [[ $output == *"cp-2 is left cordoned"* ]]
   [ -z "$(calls '^kubectl uncordon ')" ]
@@ -593,6 +593,17 @@ no_tofu() {
   [ "$(calls '^talman talosctl .* etcd status$' | wc -l)" -ge 2 ]
   [ -n "$(calls '^talman talosctl -n cp-2 etcd members$')" ]
 
+  # A member etcd holds besides the control planes of talman.yaml, as of a control plane removed
+  # without its member, counts toward etcd's quorum: the wait fails on it, naming it.
+  reset_cluster
+  echo 'cp-old after' > "$STATE/etcd-extra"
+
+  recipe cluster-reboot cp-2 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"cp-2 is Ready again, but etcd was not whole within 4s: etcd holds cp-old, no control plane of talman.yaml"* ]]
+  [[ $output != *198.51.100.9* ]]
+
   # A worker runs no etcd member.
   reset_cluster
 
@@ -600,6 +611,74 @@ no_tofu() {
 
   [ "$status" -eq 0 ]
   [ -z "$(calls '^talman talosctl ')" ]
+}
+
+@test "A control plane is not rebooted while etcd lacks a healthy member or holds one that is no control plane" {
+  # cp-1's member is down before anything is rebooted: rebooting cp-2 as well would leave one
+  # healthy member of three.
+  : > "$STATE/etcd-away.cp-1"
+
+  recipe cluster-reboot cp-2 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"etcd is not whole, so cp-2 is not rebooted and nothing was changed: not every control plane's etcd member answered etcd status"* ]]
+  [ -n "$(calls '^talman talosctl -n cp-1 -n cp-2 -n cp-3 etcd status$')" ]
+  [ -z "$(calls '^kubectl (cordon|drain|uncordon) ')" ]
+  [ -z "$(calls '^talman reboot ')" ]
+  [ ! -e "$STATE/rebooted" ]
+  [[ $output != *198.51.100.9* ]]
+
+  # A member that is no control plane of talman.yaml, named by its hostname.
+  reset_cluster
+  echo cp-old > "$STATE/etcd-extra"
+
+  recipe cluster-reboot cp-3 <<< cp-3
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"etcd is not whole, so cp-3 is not rebooted and nothing was changed: etcd holds cp-old, no control plane of talman.yaml"* ]]
+  [[ $output != *"Type cp-3"* ]]
+  [ -z "$(calls '^kubectl (cordon|drain|uncordon) ')" ]
+  [ -z "$(calls '^talman reboot ')" ]
+  [[ $output != *198.51.100.9* ]]
+
+  # A worker is rebooted whatever etcd's state, which it is not part of.
+  reset_cluster
+  echo cp-old > "$STATE/etcd-extra"
+
+  recipe cluster-reboot worker-2 --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ -z "$(calls '^talman talosctl ')" ]
+}
+
+@test "cluster-reboot reboots nothing when it cannot read which nodes are control planes" {
+  # talman.yaml gives a node a role that is neither controlplane nor worker.
+  yq -i '(.nodes[] | select(.hostname == "cp-2") | .role) = "control-plane"' "$CLUSTER/talman.yaml"
+
+  recipe cluster-reboot cp-1 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"talos/lab-sto2/talman.yaml gives cp-2 the role control-plane, neither controlplane nor worker"* ]]
+  [[ $output == *"nothing was changed"* ]]
+  [ -z "$(calls '^(kubectl (cordon|drain)|talman reboot) ')" ]
+
+  # yq fails to read the roles.
+  reset_cluster
+  restore_generated
+  real_yq=$(command -v yq)
+  fake yq <<EOF
+if [[ \$* == *.role* ]]; then
+  echo "Error: bad file" >&2
+  exit 1
+fi
+exec "$real_yq" "\$@"
+EOF
+
+  recipe cluster-reboot cp-1 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"cannot read the roles of the nodes in talos/lab-sto2/talman.yaml"* ]]
+  [ -z "$(calls '^(kubectl (cordon|drain)|talman reboot) ')" ]
 }
 
 @test "A node that is not in the cluster is refused before anything is rebooted" {

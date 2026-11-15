@@ -248,6 +248,16 @@ esac
 
 # With CI set the diff went to talman's log, which only this reads, and prints nothing of.
 [[ -z ${CI:-} ]] || dry_run=$(< "$talman_log")
+# A dry run that shows changes in no block of a changed or a new node is in a format this does not
+# read, such as another talman version's: nothing can say which nodes need a reboot.
+step="reading which nodes talman's dry run shows a change on"
+if [[ -z $(changed_nodes "$dry_run") && -z $(new_nodes "$dry_run") ]]; then
+  if ((reboot)); then
+    infra_error "cannot tell from talman's dry run which nodes the configuration changes, so it cannot say whether any needs a reboot, and --reboot does not reboot blind: nothing is applied; without --reboot the configuration is applied and the nodes are not rebooted"
+    exit 1
+  fi
+  echo "cluster-talos: cannot tell from talman's dry run which nodes the configuration changes, so it cannot say whether any needs a reboot: no node's block in it reads as the pinned talman prints one"
+fi
 step="reading the nodes of talos/$cluster/talman.yaml"
 mapfile -t ordered < <(talman_nodes "$talman_file" | cut -d' ' -f1)
 step="reading what the changed nodes hold of the settings that take effect only at a reboot"
@@ -385,13 +395,18 @@ cilium_health() {
 
 # etcd_healthy NODE OTHER: whether the etcd members of the control planes NODE and OTHER, each asked
 # through its own Talos API, follow the same leader in the same term, are voting members and report
-# no error, such as having no leader, and whether OTHER's member lists NODE's.
+# no error, such as having no leader, and whether OTHER's member lists exactly the control planes of
+# talman.yaml, NODE's among them; when it does not, etcd_off says why.
 etcd_healthy() {
-  local status members
+  local status members planes
+  local -a control_planes
+  etcd_off=''
   status=$(quietly talman talosctl -n "$1" -n "$2" etcd status) || return 1
   etcd_status_healthy 2 <<< "$status" || return 1
   members=$(quietly talman talosctl -n "$2" etcd members) || return 1
-  etcd_lists "$1" <<< "$members"
+  planes=$(yq '.nodes[] | select(.role == "controlplane") | .hostname' "$talman_file") || return 1
+  mapfile -t control_planes <<< "$planes"
+  etcd_off=$(etcd_members_are "${control_planes[@]}" <<< "$members")
 }
 
 # apiserver_started VIA...: the start time of the API server that answers a fresh request for
@@ -513,7 +528,7 @@ check_tried() {
     return 1
   fi
   if [[ $(role_of "$node") == controlplane ]] && ! etcd_healthy "$node" "$via"; then
-    failure="$node's etcd member is not healthy as $node and $via see it"
+    failure="$node's etcd member is not healthy as $node and $via see it${etcd_off:+: $etcd_off}"
     return 1
   fi
   wait=$((tried_at + ready_after - $(now)))

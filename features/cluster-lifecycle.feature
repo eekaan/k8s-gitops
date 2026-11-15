@@ -53,8 +53,13 @@ Feature: Cluster lifecycle
 
   Scenario: A control plane that is Ready again without its etcd member fails the reboot
     Given a control plane whose etcd member does not come back after talman reboots it, while its kubelet reports Ready
-    When cluster-reboot runs for it with a short REBOOT_WAIT, then for one whose member comes back a few seconds late, and for a worker
-    Then the first asks etcd status of every control plane through the Talos API more than once, exits non-zero naming the node and saying its etcd member did not come back, leaves it cordoned and prints no address; the second waits for the member and passes; the worker's reboot asks etcd nothing
+    When cluster-reboot runs for it with a short REBOOT_WAIT, then for one whose member comes back a few seconds late, for one after whose reboot etcd holds a member that is no control plane of talman.yaml, and for a worker
+    Then the first asks etcd status of every control plane through the Talos API more than once, exits non-zero naming the node and saying not every control plane's member answered, leaves it cordoned and prints no address; the second waits for the member and passes; the third fails naming the other member by its hostname; the worker's reboot asks etcd nothing
+
+  Scenario: A control plane is not rebooted while etcd lacks a healthy member or holds one that is no control plane
+    Given etcd whose member on another control plane is down before anything is rebooted, and then etcd holding a member, by the hostname cp-old, that talman.yaml does not list
+    When cluster-reboot runs for a control plane, with --yes and with its name to be typed back, and then for a worker
+    Then for the control plane it exits non-zero before it asks for the name, saying etcd is not whole and why, naming cp-old by its hostname and printing no address, and nothing is cordoned, drained or rebooted; the worker is rebooted, and etcd is not asked
 
   Scenario: A node that is not in the cluster is refused before anything is rebooted
     Given a hostname talman.yaml does not list, a node's address, two nodes in one argument and a prefix of a hostname
