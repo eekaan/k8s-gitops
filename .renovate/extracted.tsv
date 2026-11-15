@@ -61,6 +61,10 @@ kubernetes/apps/base/external-secrets/external-secrets/app/ocirepository.yaml	fl
 kubernetes/apps/base/external-secrets/external-secrets/app/ocirepository.yaml	regex	ghcr.io/external-secrets/charts/external-secrets	tag
 kubernetes/apps/base/keda/keda/app/ocirepository.yaml	flux	ghcr.io/home-operations/charts-mirror/keda	tag
 kubernetes/apps/base/keda/keda/app/ocirepository.yaml	regex	ghcr.io/home-operations/charts-mirror/keda	tag
+kubernetes/apps/base/kromgo/kromgo/app/ocirepository.yaml	flux	ghcr.io/bjw-s-labs/helm/app-template	tag
+kubernetes/apps/base/kromgo/kromgo/app/ocirepository.yaml	regex	ghcr.io/bjw-s-labs/helm/app-template	tag
+kubernetes/apps/base/kromgo/kromgo/app/values.yaml	helm-values	ghcr.io/home-operations/kromgo	-
+kubernetes/apps/base/kromgo/kromgo/app/values.yaml	regex	ghcr.io/home-operations/kromgo	tag
 kubernetes/apps/base/kube-system/cilium/app/ocirepository.yaml	flux	quay.io/cilium/charts/cilium	tag
 kubernetes/apps/base/kube-system/cilium/app/ocirepository.yaml	regex	quay.io/cilium/charts/cilium	tag
 kubernetes/apps/base/kube-system/descheduler/app/ocirepository.yaml	flux	ghcr.io/home-operations/charts-mirror/descheduler	tag

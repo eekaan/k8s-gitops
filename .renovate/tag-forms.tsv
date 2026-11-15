@@ -47,4 +47,5 @@ github-releases	VictoriaMetrics/victorialogs-datasource	^[0-9]+\.[0-9]+\.[0-9]+$
 github-release-attachments	jdx/mise	^v[0-9]+\.[0-9]+\.[0-9]+$	release list, whose tags are v2026.11.4: to move a checksum, Renovate first fetches the current release by the tag the version input is written as (datasource/github-release-attachments/index.js, getDigest), which fails for a version without the v
 github-tags	siderolabs/talos	^v[0-9]+\.[0-9]+\.[0-9]+$	tag list
 github-tags	kubernetes/kubernetes	^v[0-9]+\.[0-9]+\.[0-9]+$	tag list
+docker	ghcr.io/home-operations/kromgo	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list, which holds latest, rolling and main-* tags besides the releases
 docker	ghcr.io/home-operations/charts-mirror/external-dns	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list

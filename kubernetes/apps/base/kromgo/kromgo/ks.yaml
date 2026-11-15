@@ -1,0 +1,26 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: kromgo
+  namespace: flux-system
+spec:
+  path: ./apps/base/kromgo/kromgo/app
+  targetNamespace: kromgo
+  # The release's ServiceMonitor is of the Prometheus Operator's kind, which exists once
+  # prometheus-operator-crds is Ready, and its route names the public Gateway. It queries the
+  # stack's Prometheus by its Service at each request, not at start: a badge answers with an error
+  # until the Prometheus does, so the stack's application is not waited for. Its
+  # CiliumNetworkPolicy is a kind Cilium's operator defines.
+  dependsOn:
+    - name: prometheus-operator-crds
+    - name: gateway-public
+    - name: cilium
+  # Ready once the release is, which is once both pods answer their readiness endpoint: kromgo
+  # listens only after it has read its configuration and compiled every expression in it, so a
+  # configuration it refuses keeps this from Ready.
+  wait: true
+  sourceRef:
+    kind: ExternalArtifact
+    name: kromgo

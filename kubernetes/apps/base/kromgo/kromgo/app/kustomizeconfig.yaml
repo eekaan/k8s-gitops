@@ -1,0 +1,11 @@
+---
+# Lets kustomize write each generated ConfigMap's hashed name where the HelmRelease names it: the
+# values it reads, and the configuration it mounts.
+nameReference:
+  - kind: ConfigMap
+    version: v1
+    fieldSpecs:
+      - path: spec/valuesFrom/name
+        kind: HelmRelease
+      - path: spec/values/persistence/config/name
+        kind: HelmRelease

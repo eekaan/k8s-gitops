@@ -399,7 +399,7 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
     echo "namespace $name: k8s-gitops/gateway=$labels"
     if [ "$labels" = "$label" ]; then attached+=("$name"); fi
   done < <(yq -N 'select(.kind == "Namespace") | .metadata.name + "\t" + (.metadata.labels["k8s-gitops/gateway"] // "none")' "$OVERLAY")
-  [ "${attached[*]}" = "ai-system demo" ]
+  [ "${attached[*]}" = "ai-system demo kromgo" ]
   # Every route that names the Gateway from another namespace is in one that attached.
   built hello-route
   [ "$(yq -N 'select(.kind == "HTTPRoute") | .spec.parentRefs[].name' "$BUILT")" = "$gateway" ]
@@ -407,6 +407,9 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   built n8n
   [ "$(yq -N 'select(.kind == "HTTPRoute") | .spec.parentRefs[].name' "$BUILT")" = "$gateway" ]
   [ "$(yq -N 'select(.kind == "HTTPRoute") | .metadata.namespace' "$BUILT")" = ai-system ]
+  built kromgo
+  [ "$(yq -N 'select(.kind == "HTTPRoute") | .spec.parentRefs[].name' "$BUILT")" = "$gateway" ]
+  [ "$(yq -N 'select(.kind == "HTTPRoute") | .metadata.namespace' "$BUILT")" = kromgo ]
 }
 
 @test "The Gateway listens on exactly the ports the edge routers translate" {
@@ -500,7 +503,7 @@ tree_without() {
   done
   # Leaving the Gateway, the applications that have a route on it and the DNS records of their
   # routes out builds: nothing else names them.
-  tree_without gateway-public hello-route n8n external-dns
+  tree_without gateway-public hello-route n8n kromgo external-dns
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]

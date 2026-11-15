@@ -1,0 +1,78 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What kromgo lets through, on top of the namespace's default deny: the public Gateway's proxies and
+# the kubelet's probes on the port it serves badges on, and Prometheus' scrape of its metrics port;
+# it resolves the name of the stack's Prometheus and queries it. It opens no other connection: it
+# calls no API and reads its configuration from its mount.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kromgo
+spec:
+  # The pods the chart's Service selects.
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/controller: kromgo
+      app.kubernetes.io/instance: kromgo
+      app.kubernetes.io/name: kromgo
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    # The routed backend: only the pods Envoy Gateway runs for the public Gateway, selected by their
+    # labels and not by their namespace, whose controller and certificate job are no proxies. The
+    # route sends to the Service's port 8080, which targets the container's 8080.
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": envoy-gateway-system
+            app.kubernetes.io/name: envoy
+            app.kubernetes.io/component: proxy
+            app.kubernetes.io/managed-by: envoy-gateway
+            gateway.envoyproxy.io/owning-gateway-name: public
+            gateway.envoyproxy.io/owning-gateway-namespace: envoy-gateway-system
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+    # The stack's Prometheus, scraping kromgo's own metrics through the chart's monitor, which names
+    # the Service's port metrics, the container's 8081.
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": monitoring
+            app.kubernetes.io/name: prometheus
+      toPorts:
+        - ports:
+            - port: "8081"
+              protocol: TCP
+    # The kubelet's liveness and readiness probes, which arrive from the node the pod runs on.
+    - fromEntities:
+        - host
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+  egress:
+    # The cluster's resolver, for the name of Prometheus' Service.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    # The Prometheus kromgo queries, KROMGO_PROMETHEUS_URL in its values: the pods the Service
+    # kube-prometheus-stack-prometheus selects, on the container port its port 9090 targets. A
+    # Service's address is translated to a pod's before policy applies, so the rule names the pods.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": monitoring
+            app.kubernetes.io/name: prometheus
+            operator.prometheus.io/name: kube-prometheus-stack-prometheus
+      toPorts:
+        - ports:
+            - port: "9090"
+              protocol: TCP
