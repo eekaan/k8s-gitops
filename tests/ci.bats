@@ -234,9 +234,10 @@ runs_of() {
 
   handed=$(grep -E '^tests/[^/]+\.bats$' "$BATS_TEST_TMPDIR/bats.args" | sort)
   [ "$handed" = "$(cd "$REPO" && printf '%s\n' tests/*.bats | sort)" ]
-  # Every call leaves out the tests that run just ci, which need a container runtime.
+  # Every call leaves out the tests that run just ci, which need a container runtime, and those that
+  # need unprivileged user namespaces, which the CI containers refuse.
   calls=$(grep -cx '' "$BATS_TEST_TMPDIR/bats.args")
-  [ "$(grep -cx -- '!hermetic' "$BATS_TEST_TMPDIR/bats.args")" -eq "$calls" ]
+  [ "$(grep -cx -- '!hermetic,!namespace' "$BATS_TEST_TMPDIR/bats.args")" -eq "$calls" ]
   # A file's tests run side by side, wherever bats has the lock it needs and there is more than one
   # processor; files never run side by side in one call, as the files' tests are not written for it.
   if env PATH="$bin:/usr/bin:/bin" bash -c 'command -v flock || command -v shlock' > /dev/null && (($(getconf _NPROCESSORS_ONLN) > 1)); then
