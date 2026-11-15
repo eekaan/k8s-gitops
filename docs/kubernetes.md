@@ -619,6 +619,18 @@ from `cluster-config` ([Before Flux starts](#before-flux-starts)). `tests/instal
 renders the chart and the nodes' machine configurations and builds every application as Flux
 applies it to check each of these.
 
+**The cluster audits network policy.** Cilium's values set `policyAuditMode: true`, which the chart
+renders into the key `policy-audit-mode` of the ConfigMap `cilium-config`; read it from the cluster
+with `kubectl -n kube-system get configmap cilium-config -o jsonpath='{.data.policy-audit-mode}'`,
+which prints `true`. The mode is the agent's, so it holds for the whole cluster at once, not for a
+namespace: an agent evaluates every policy, reports each flow a policy would drop with the verdict
+`AUDIT`, and drops nothing. The NetworkPolicies that exist today, Flux's own in `flux-system` and
+the operator's, are therefore audited and no longer enforced until the value is removed; that
+loosens Flux's own policies for as long as the mode is on. `rollOutCiliumPods` restarts the agents
+into a change of their configuration, and `scripts/install-cilium` passes the same values file to
+helm, so a cluster built from nothing comes up in audit mode too. `tests/install-cilium.bats`
+fails when this sentence, the value and the agents' rendered configuration disagree.
+
 ## External Secrets
 
 `apps/base/external-secrets/external-secrets/` runs the External Secrets operator in its own
