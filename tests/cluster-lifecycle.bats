@@ -115,7 +115,7 @@ EOF
   )
   reset_environment
   CHECKS=('/readyz' 'nodes Ready' 'node count' 'no kube-proxy' 'pods in kube-system' 'pods in flux-system'
-    'certificate requests' 'pod logs')
+    'certificate requests' 'pod logs' 'scrape targets')
 }
 
 teardown() {
@@ -387,6 +387,94 @@ no_tofu() {
   [[ $(line_of 'pods in flux-system') == "skip  "* ]]
 }
 
+@test "cluster-check fails, naming job and node, while a component's scrape target is down" {
+  printf '%s\n' 'kube-etcd cp-1' 'kube-etcd cp-2' 'node-exporter worker-3' > "$STATE/targets-down"
+
+  recipe cluster-check
+
+  [ "$status" -ne 0 ]
+  [[ $(line_of 'scrape targets') == "FAIL  scrape targets: "* ]]
+  line=$(line_of 'scrape targets')
+  [[ $line == *"kube-etcd on cp-1, cp-2"* && $line == *"node-exporter on worker-3"* ]]
+  [[ $line != *kube-scheduler* && $line != *kubelet* ]]
+  [[ $output != *198.51.100.* ]]
+  for other in "${CHECKS[@]}"; do
+    if [[ $other != 'scrape targets' ]]; then
+      [[ $(line_of "$other") == "pass  $other: "* ]]
+    fi
+  done
+  [[ $output == *"cluster-check: 1 of ${#CHECKS[@]} checks failed"* ]]
+  # Prometheus is asked through the API server's service proxy, by kubectl get.
+  [ -n "$(calls '^kubectl get --raw /api/v1/namespaces/monitoring/services/kube-prometheus-stack-prometheus:9090/proxy/api/v1/targets')" ]
+
+  # A component without a node, and each of the components the check names, by its node whichever
+  # label gives it: the kubelet's only in its label node, node-exporter's (above) only as its pod's
+  # node, etcd's (above) only as its endpoint's.
+  for job in apiserver kube-controller-manager kube-scheduler kubelet; do
+    node=cp-1
+    [[ $job == apiserver ]] && node=''
+    echo "$job${node:+ $node}" > "$STATE/targets-down"
+    recipe cluster-check
+    [ "$status" -ne 0 ]
+    if [[ -n $node ]]; then
+      [[ $(line_of 'scrape targets') == "FAIL  scrape targets: down: $job on $node" ]]
+    else
+      [[ $(line_of 'scrape targets') == "FAIL  scrape targets: down: $job" ]]
+    fi
+  done
+
+  # A target of anything else that is down is not this check's concern; all up passes.
+  : > "$STATE/targets-down"
+  : > "$STATE/other-down"
+  recipe cluster-check
+  [ "$status" -eq 0 ]
+  [[ $(line_of 'scrape targets') == "pass  scrape targets: "* ]]
+  rm "$STATE/other-down"
+  recipe cluster-check
+  [ "$status" -eq 0 ]
+  [[ $(line_of 'scrape targets') == "pass  scrape targets: "* ]]
+  # The pass says how many targets of the jobs it saw: 1 + 3 * 3 + 2 * 6.
+  [[ $(line_of 'scrape targets') == *"22 targets"* ]]
+
+  # An answer too large for a pipe to hold, read to the end, is still read right.
+  echo 3000 > "$STATE/many-targets"
+  recipe cluster-check
+  [ "$status" -eq 0 ]
+  [[ $(line_of 'scrape targets') == "pass  scrape targets: "*"22 targets"* ]]
+  echo 'kube-etcd cp-1' > "$STATE/targets-down"
+  recipe cluster-check
+  [ "$status" -ne 0 ]
+  [[ $(line_of 'scrape targets') == "FAIL  scrape targets: "*"kube-etcd on cp-1"* ]]
+}
+
+@test "cluster-check skips the scrape check, saying why, without the monitoring stack or without an answer from Prometheus" {
+  for condition in no-monitoring prometheus-silent prometheus-error targets-none etcd-unscraped; do
+    reset_cluster
+    if [[ $condition == etcd-unscraped ]]; then
+      echo kube-etcd > "$STATE/unscraped"
+    else
+      : > "$STATE/$condition"
+    fi
+    # What a skip must not hide: a target down is not seen, but nothing is passed either.
+    echo 'kube-etcd cp-1' > "$STATE/targets-down"
+
+    recipe cluster-check
+
+    [ "$status" -eq 0 ]
+    line=$(line_of 'scrape targets')
+    [[ $line == "skip  scrape targets: "* ]]
+    case $condition in
+      no-monitoring) [[ $line == *"monitoring stack is not installed"* ]] ;;
+      # An answer without a target of a job names the job: nothing scrapes it, which is no pass.
+      targets-none) [[ $line == *"no active target"* && $line == *apiserver* && $line == *kube-etcd* && $line == *node-exporter* ]] ;;
+      etcd-unscraped) [[ $line == *"no active target"* && $line == *kube-etcd* && $line != *kubelet* ]] ;;
+      *) [[ $line == *"Prometheus did not answer"* ]] ;;
+    esac
+    [[ ${output##*$'\n'} == *"skipped: scrape targets"* ]]
+    [[ $output != *198.51.100.* ]]
+  done
+}
+
 @test "A reboot that the API rides out passes" {
   recipe cluster-reboot cp-2 <<< cp-2
 
@@ -471,6 +559,126 @@ no_tofu() {
   asked=$(awk -v from="$finished" 'NR > from && /^kubectl get nodes /' "$RECORD/argv" | wc -l)
   [ "$asked" -ge 2 ]
   reported > /dev/null
+}
+
+@test "A control plane that is Ready again without its etcd member fails the reboot" {
+  : > "$STATE/etcd-down.cp-2"
+  with REBOOT_WAIT=4
+
+  recipe cluster-reboot cp-2 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [ -e "$STATE/back.cp-2" ]
+  [[ $output == *"cp-2 is Ready again, but etcd was not whole within 4s: not every control plane's etcd member answered etcd status"* ]]
+  [[ $output != *"has not reported Ready"* ]]
+  [[ $output == *"cp-2 is left cordoned"* ]]
+  [ -z "$(calls '^kubectl uncordon ')" ]
+  # Every control plane's member was asked, through the Talos API, after the reboot, until the wait
+  # ran out.
+  finished=$(call_line '^talman reboot finished')
+  asked=$(awk -v from="$finished" 'NR > from && /^talman talosctl -n cp-1 -n cp-2 -n cp-3 etcd status$/' "$RECORD/argv" | wc -l)
+  [ "$asked" -ge 2 ]
+  [[ $output != *198.51.100.9* ]]
+  reported > /dev/null
+
+  # A member that comes back a few seconds after the node is Ready is waited for.
+  reset_cluster
+  echo 1 > "$STATE/etcd-late.cp-2"
+
+  recipe cluster-reboot cp-2 --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"cp-2 is Ready again"* ]]
+  [ -n "$(calls '^kubectl uncordon cp-2$')" ]
+  [ "$(calls '^talman talosctl .* etcd status$' | wc -l)" -ge 2 ]
+  [ -n "$(calls '^talman talosctl -n cp-2 etcd members$')" ]
+
+  # A member etcd holds besides the control planes of talman.yaml, as of a control plane removed
+  # without its member, counts toward etcd's quorum: the wait fails on it, naming it.
+  reset_cluster
+  echo 'cp-old after' > "$STATE/etcd-extra"
+
+  recipe cluster-reboot cp-2 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"cp-2 is Ready again, but etcd was not whole within 4s: etcd holds cp-old, no control plane of talman.yaml"* ]]
+  [[ $output != *198.51.100.9* ]]
+
+  # A worker runs no etcd member.
+  reset_cluster
+
+  recipe cluster-reboot worker-2 --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ -z "$(calls '^talman talosctl ')" ]
+}
+
+@test "A control plane is not rebooted while etcd lacks a healthy member or holds one that is no control plane" {
+  # cp-1's member is down before anything is rebooted: rebooting cp-2 as well would leave one
+  # healthy member of three.
+  : > "$STATE/etcd-away.cp-1"
+
+  recipe cluster-reboot cp-2 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"etcd is not whole, so cp-2 is not rebooted and nothing was changed: not every control plane's etcd member answered etcd status"* ]]
+  [ -n "$(calls '^talman talosctl -n cp-1 -n cp-2 -n cp-3 etcd status$')" ]
+  [ -z "$(calls '^kubectl (cordon|drain|uncordon) ')" ]
+  [ -z "$(calls '^talman reboot ')" ]
+  [ ! -e "$STATE/rebooted" ]
+  [[ $output != *198.51.100.9* ]]
+
+  # A member that is no control plane of talman.yaml, named by its hostname.
+  reset_cluster
+  echo cp-old > "$STATE/etcd-extra"
+
+  recipe cluster-reboot cp-3 <<< cp-3
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"etcd is not whole, so cp-3 is not rebooted and nothing was changed: etcd holds cp-old, no control plane of talman.yaml"* ]]
+  [[ $output != *"Type cp-3"* ]]
+  [ -z "$(calls '^kubectl (cordon|drain|uncordon) ')" ]
+  [ -z "$(calls '^talman reboot ')" ]
+  [[ $output != *198.51.100.9* ]]
+
+  # A worker is rebooted whatever etcd's state, which it is not part of.
+  reset_cluster
+  echo cp-old > "$STATE/etcd-extra"
+
+  recipe cluster-reboot worker-2 --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ -z "$(calls '^talman talosctl ')" ]
+}
+
+@test "cluster-reboot reboots nothing when it cannot read which nodes are control planes" {
+  # talman.yaml gives a node a role that is neither controlplane nor worker.
+  yq -i '(.nodes[] | select(.hostname == "cp-2") | .role) = "control-plane"' "$CLUSTER/talman.yaml"
+
+  recipe cluster-reboot cp-1 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"talos/lab-sto2/talman.yaml gives cp-2 the role control-plane, neither controlplane nor worker"* ]]
+  [[ $output == *"nothing was changed"* ]]
+  [ -z "$(calls '^(kubectl (cordon|drain)|talman reboot) ')" ]
+
+  # yq fails to read the roles.
+  reset_cluster
+  restore_generated
+  real_yq=$(command -v yq)
+  fake yq <<EOF
+if [[ \$* == *.role* ]]; then
+  echo "Error: bad file" >&2
+  exit 1
+fi
+exec "$real_yq" "\$@"
+EOF
+
+  recipe cluster-reboot cp-1 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"cannot read the roles of the nodes in talos/lab-sto2/talman.yaml"* ]]
+  [ -z "$(calls '^(kubectl (cordon|drain)|talman reboot) ')" ]
 }
 
 @test "A node that is not in the cluster is refused before anything is rebooted" {
