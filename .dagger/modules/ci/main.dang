@@ -13,9 +13,7 @@ type Ci {
   let git: Directory!
 
   new(ws: Workspace!) {
-    # dagger.lock is not part of the directory a workspace hands over, and the tests read it: the
-    # digest Dagger records for the image promtool comes from.
-    self.source = ws.directory("/", exclude: [".git"], gitignore: true).withFile("dagger.lock", ws.file("dagger.lock"))
+    self.source = ws.directory("/", exclude: [".git"], gitignore: true)
     self.git = ws.git.directory
     self
   }
@@ -274,11 +272,13 @@ type Group {
       []
     }
     # The alert rules the tree renders, and promtool's checks and unit tests of them. promtool comes
-    # from the image of the Prometheus the monitoring chart deploys, which scripts/rules-image reads
-    # from the chart, so no image is pinned for it. The tools container runs it, as it has the
-    # network the render needs, with the pinned installs first on PATH as the justfile puts them: the
-    # render works in a directory of its own, where mise's shims find no version. The check fails
-    # when the render names another image.
+    # from the image of the Prometheus the monitoring chart deploys, by the tag the chart names,
+    # which scripts/rules-image reads from the chart: no image is pinned for it and dagger.lock holds
+    # no entry for it, so Dagger resolves the tag as it pulls the image, and a chart update that
+    # moves the tag needs no other change. The tools container runs it, as it has the network the
+    # render needs, with the pinned installs first on PATH as the justfile puts them: the render
+    # works in a directory of its own, where mise's shims find no version. The check fails when the
+    # render names another image.
     let rules: [Run!]! = if (checks.contains("rules-check")) {
       let image = checkout.withExec(["scripts/rules-image"]).stdout.trimSpace
       [Run(label: "rules-check", ctr: checkout

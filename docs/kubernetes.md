@@ -610,17 +610,22 @@ file per application, `tests/rules/<application>.yaml`, which loads the applicat
 
 `just rules-check`, in the `static` group of `just ci`, collects every `PrometheusRule` the tree
 renders for each cluster, those of the charts too, so a chart update that ships a rule promtool
-refuses fails it, and runs promtool's `check rules` and `test rules` on them, from the image of the
-Prometheus the rendered chart deploys. `just rules-check` runs promtool in that image in a container
-with no network; `just ci` copies promtool out of the image into the tools container, which has the
-network the render needs. The image is the chart's: the tree holds no pin of it, and Renovate
-moves it with the chart, by its tag. The one record of its digest is the entry Dagger writes into
-`dagger.lock` when it pulls the image, which `dagger lock update` refreshes after the chart's tag
-moves; `tests/rules-check.bats` fails while that entry names another tag than the render does. Each run also breaks
-the expression of one own alert and requires promtool to refuse it, naming the alert, so the check
-is seen to fail where it runs. A lint finding in a chart's
-rules is printed and does not fail the check; the chart's rules stay as they are. For each of the
-tree's own alerts the check also fails, naming the alert, unless:
+refuses fails it, and runs promtool's `check rules` on every rule file and `test rules` on the unit
+tests, from the image of the Prometheus the rendered chart deploys. `just rules-check` runs promtool
+in that image in a container with no network; `just ci` copies promtool out of the image into the
+tools container, which has the network the render needs. The image is the chart's, by the tag the
+chart names, which Renovate moves with the chart; nothing else in the tree pins it. `dagger.lock`
+holds no entry for it, so Dagger resolves the tag when it pulls the image, and a chart update that
+moves the tag needs no other change. A local `just ci` records the digest it resolved in
+`dagger.lock`, as Dagger does for any lookup without an entry, and reuses it while the render names
+that tag; that line is not committed, and one for a tag the render no longer names is never read.
+
+Each run also proves that the check refuses what only `check rules` reads: in rule files no unit
+test loads, a chart's rule and an own alert with an expression promtool cannot parse, and an own
+alert defined twice, which promtool's lint finds; each must fail the check, with `check rules`
+naming the rule. A lint finding in a chart's rules is printed and does not fail the check; the
+chart's rules stay as they are. For each of the tree's own alerts the check also fails, naming the
+alert, unless:
 
 - its `severity` label is `critical`, `warning` or `info`: `critical` is a loss of service or of
   data in progress that an operator acts on at once, `warning` is a failure that needs action
@@ -630,8 +635,9 @@ tree's own alerts the check also fails, naming the alert, unless:
 - its `runbook_url` is `https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/<file>.md#<heading>`
   and the heading exists in that file of this tree;
 - a unit test of the alert expects it to fire after exactly its `for`, and another expects it
-  quiet: an `alert_rule_test` of its name with `exp_alerts`, and one without, in a test group that
-  has `input_series`, at a time before the alert fires in that group.
+  quiet: an `alert_rule_test` of its name with `exp_alerts`, and one without at a time before the
+  alert fires in the same test group, when every one of the group's `input_series` has a sample no
+  older than the 5 minutes Prometheus looks back.
 
 The own alerts, each with its runbook section in [docs/runbooks/alerts.md](runbooks/alerts.md):
 

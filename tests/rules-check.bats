@@ -124,6 +124,51 @@ own_file() {
   [[ $output == *"tests/rules/openbao.yaml"* ]]
 }
 
+# promtool_calls LOG ARGS: the files of each call in LOG whose arguments are ARGS and then files,
+# one per line, sorted.
+promtool_calls() {
+  grep "^$2 [^-]" "$1" | sed "s|^$2 ||" | tr ' ' '\n' | sort
+}
+
+@test "rules-promtool runs promtool's check on every rule file, the charts' and the tree's own, and its unit tests on every test file" {
+  local fake log cluster clusters=0
+  fixture
+  collect
+  [ "$status" -eq 0 ]
+  # A promtool that records each call, and fails the call whose arguments start with FAIL.
+  fake="$BATS_TEST_TMPDIR/promtool"
+  log="$BATS_TEST_TMPDIR/promtool.log"
+  # shellcheck disable=SC2016 # expanded when the fake runs
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$*" >> "$PROMTOOL_LOG"' \
+    '[[ -n ${FAIL-} && "$*" == "$FAIL"* ]] && exit 1' 'exit 0' > "$fake"
+  chmod +x "$fake"
+  run env PROMTOOL_LOG="$log" "$REPO/scripts/rules-promtool" "$FX/out" "$fake"
+  echo "$output"
+  cat "$log"
+  [ "$status" -eq 0 ]
+  for cluster in "$FX/out"/*/; do
+    cluster="$(basename "$cluster")"
+    clusters=$((clusters + 1))
+    # Every chart's rules, with promtool's lint printed but not fatal; every own rule, with lint
+    # fatal; every unit test file.
+    compgen -G "$FX/out/$cluster/stock.*.rules.yaml" > /dev/null
+    compgen -G "$FX/out/$cluster/*.test.yaml" > /dev/null
+    [ "$(promtool_calls "$log" "check rules" | grep "^$cluster/")" = "$(cd "$FX/out" && printf '%s\n' "$cluster"/stock.*.rules.yaml | sort)" ]
+    [ "$(promtool_calls "$log" "check rules --lint-fatal" | grep "^$cluster/")" = "$(cd "$FX/out" && printf '%s\n' "$cluster"/*.rules.yaml | grep -v "^$cluster/stock\." | sort)" ]
+    [ "$(promtool_calls "$log" "test rules" | grep "^$cluster/")" = "$(cd "$FX/out" && printf '%s\n' "$cluster"/*.test.yaml | sort)" ]
+  done
+  # A step promtool fails fails the run, and the other steps still run, so one report holds every
+  # failure.
+  for fail in "check rules $CLUSTER/stock." "check rules --lint-fatal" "test rules"; do
+    rm -f "$log"
+    run env PROMTOOL_LOG="$log" FAIL="$fail" "$REPO/scripts/rules-promtool" "$FX/out" "$fake"
+    echo "failing $fail: status $status: $output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"promtool refused a rule or a test"* ]]
+    [ "$(grep -c "^check rules [^-]\|^check rules --lint-fatal \|^test rules " "$log")" -eq $((3 * clusters)) ]
+  done
+}
+
 @test "An alert without a test in which it fires, or without one in which it stays quiet, fails the check" {
   local app alert lacking tests
   [ "$(own_alerts "$RENDER" | wc -l)" -ge 1 ]
@@ -147,14 +192,29 @@ own_file() {
       fi
     done
   done < <(own_alerts "$RENDER")
-  # A quiet test needs series to be quiet about: with the group's input_series gone, or with no test
-  # of the alert at a time before it fires, an expectation of nothing proves nothing.
+  # A quiet test needs series to be quiet about: with the group's input_series gone, with series that
+  # start only after the group's tests or are gone before them, or with no test of the alert at a
+  # time before it fires, an expectation of nothing proves nothing.
   while read -r app alert; do
     fixture
     tests="$FX/repo/tests/rules/$app.yaml"
     ALERT="$alert" yq -i '(.tests[] | select(.alert_rule_test | map(.alertname) | contains([strenv(ALERT)])) | .input_series) = []' "$tests"
     collect
     echo "$app $alert, no series: status $status: $output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"alert $alert: no test in which it stays quiet"* ]]
+    fixture
+    tests="$FX/repo/tests/rules/$app.yaml"
+    ALERT="$alert" yq -i '(.tests[] | select(.alert_rule_test | map(.alertname) | contains([strenv(ALERT)])) | .input_series[].values) |= "_x10000 " + .' "$tests"
+    collect
+    echo "$app $alert, series that start later: status $status: $output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"alert $alert: no test in which it stays quiet"* ]]
+    fixture
+    tests="$FX/repo/tests/rules/$app.yaml"
+    ALERT="$alert" yq -i '(.tests[] | select(.alert_rule_test | map(.alertname) | contains([strenv(ALERT)])) | .input_series[].values) = "1 stale"' "$tests"
+    collect
+    echo "$app $alert, series gone before: status $status: $output"
     [ "$status" -ne 0 ]
     [[ $output == *"alert $alert: no test in which it stays quiet"* ]]
     fixture
@@ -219,7 +279,7 @@ own_file() {
 }
 
 @test "The rules are checked with the Prometheus image the chart deploys, in the static group of just ci" {
-  local image rendered
+  local image rendered named moved tag other moved_image line
   rendered="$(yq -N 'select(.kind == "Prometheus") | .spec.image' "$RENDER/$CLUSTER/kube-prometheus-stack"/Prometheus.*.yaml)"
   echo "the rendered Prometheus runs: $rendered"
   [[ $rendered =~ ^quay\.io/prometheus/prometheus:v[0-9.]+ ]]
@@ -237,20 +297,47 @@ own_file() {
   [ "$(just --justfile "$REPO/justfile" --dump --dump-format json | jq -r '.recipes.static.dependencies[].recipe | select(. == "rules-check")')" = rules-check ]
   grep -q 'rules-check' "$REPO/.dagger/modules/ci/main.dang"
   grep -q 'scripts/rules-image' "$REPO/.dagger/modules/ci/main.dang"
-  # The image is the chart's: no pin of it in the justfile, the module or the tools, so no pin for
-  # Renovate to miss. Dagger itself records the digest of the image it pulls in dagger.lock, and
-  # that is the one entry the tree holds: for the tag the render names, so that a chart update that
-  # moves the tag leaves a stale entry, which fails here until dagger lock update refreshes it.
-  run grep -rIl 'prometheus/prometheus' "$REPO/justfile" "$REPO/just" "$REPO/.dagger" "$REPO/mise.toml" "$REPO/renovate.json5" "$REPO/versions.yaml"
+  # The image is the chart's, by the tag the chart names, which Renovate moves with the chart:
+  # nothing else git would commit names it, so there is no pin for Renovate to miss. The docs, tests
+  # and features name it as text. dagger.lock is Dagger's record of the lookups it made: a local
+  # just ci writes there the digest it resolved for the tag, which the tree does not commit and
+  # nothing reads once the tag moves.
+  named="$(cd "$REPO" && git ls-files -z --cached --others --exclude-standard -- . ':!docs/' ':!tests/' ':!features/' ':!dagger.lock' |
+    while IFS= read -r -d '' file; do [ ! -f "$file" ] || grep -Il -- 'prometheus/prometheus' "$file" || true; done)"
+  echo "files that name the image: $named"
+  [ -z "$named" ]
+  # A chart update that moves the tag moves the image with it: a copy of the tree whose chart names
+  # another tag gives the module that tag, with nothing else changed.
+  moved="$BATS_TEST_TMPDIR/moved"
+  mkdir -p "$moved"
+  cp -R "$REPO/scripts" "$REPO/kubernetes" "$REPO/versions.yaml" "$moved/"
+  tag=${rendered##*:}
+  other=${tag%-distroless}
+  [[ $other != "$tag" ]] || other=$tag-distroless
+  TAG=$other yq -i '.prometheus.prometheusSpec.image.tag = strenv(TAG)' "$moved/kubernetes/apps/base/monitoring/kube-prometheus-stack/app/values.yaml"
+  image="$("$moved/scripts/rules-image")"
+  echo "with the tag moved: $image"
+  [ "$image" = "${rendered%:*}:$other" ]
+  # just rules-check runs promtool in the image the render names, with no network: with a render
+  # whose Prometheus names another image, every container it starts is of that image. A docker that
+  # runs nothing accepts every rule, which the refusal then fails.
+  fixture
+  moved_image=example.invalid/prometheus/prometheus:v0.0.0-moved
+  IMAGE=$moved_image yq -i '.spec.image = strenv(IMAGE)' "$FX/render/$CLUSTER/kube-prometheus-stack"/Prometheus.*.yaml
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  # shellcheck disable=SC2016 # expanded when the fake runs
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$*" >> "$DOCKER_LOG"' > "$BATS_TEST_TMPDIR/bin/docker"
+  chmod +x "$BATS_TEST_TMPDIR/bin/docker"
+  run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" DOCKER_LOG="$BATS_TEST_TMPDIR/docker.log" RULES_RENDER="$FX/render" \
+    just --justfile "$REPO/justfile" rules-check
   echo "$output"
-  [ "$status" -eq 1 ]
-  run grep -c 'prometheus/prometheus' "$REPO/dagger.lock"
-  echo "dagger.lock entries of the Prometheus image: $output"
-  [ "$output" = 1 ]
-  grep 'prometheus/prometheus' "$REPO/dagger.lock" | grep -qF "[\"$rendered\"]"
-  run grep -rIl 'prometheus/prometheus' "$REPO" --exclude-dir=.git --exclude-dir=.dagger --exclude-dir=docs --exclude-dir=tests --exclude-dir=features --exclude=dagger.lock --exclude=justfile
-  echo "$output"
-  [ "$status" -eq 1 ]
+  [ "$status" -ne 0 ]
+  [[ $output == *"rules-refusal: promtool accepted"* ]]
+  cat "$BATS_TEST_TMPDIR/docker.log"
+  [ "$(grep -c . "$BATS_TEST_TMPDIR/docker.log")" -ge 3 ]
+  while read -r line; do
+    [[ $line == "run --rm --network none "*" --entrypoint promtool $moved_image "* ]]
+  done < "$BATS_TEST_TMPDIR/docker.log"
 }
 
 @test "The documentation lists every alert the tree defines" {
@@ -266,9 +353,11 @@ own_file() {
     [[ $row == *"($url) |" ]]
     grep -q "^## $alert\$" "$REPO/docs/runbooks/alerts.md"
   done < <(own_alerts "$RENDER")
-  # Nothing in the table or the runbook is for an alert the tree does not define.
-  # shellcheck disable=SC2016 # the backticks are the table's, not a command substitution
-  rows="$(sed -n 's/^| `\([A-Za-z0-9_]*\)` | .*| \(critical\|warning\|info\) |.*$/\1/p' "$REPO/docs/kubernetes.md" | sort)"
+  # Nothing in the table or the runbook is for an alert the tree does not define: every row of the
+  # table, whatever its cells hold.
+  rows="$(awk '/^\| Alert \| What it means \| Severity \| Runbook \|$/ { table = 1; next }
+    table && !/^\|/ { exit }
+    table && !/^\| -/ { split($0, cell, "|"); gsub(/[` ]/, "", cell[2]); print cell[2] }' "$REPO/docs/kubernetes.md" | sort)"
   headings="$(sed -n 's/^## //p' "$REPO/docs/runbooks/alerts.md" | sort)"
   echo "table: $rows"
   echo "runbook: $headings"

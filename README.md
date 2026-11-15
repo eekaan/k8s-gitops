@@ -51,7 +51,8 @@ current. A new version alone leaves the record as it is. With [mise](https://mis
   every rule and runs the unit tests in `tests/rules`, and each alert of the tree's own has its
   severity, runbook and a test that fires and one that stays quiet; Docker as well), and gitleaks
   over the committable files and the git history reachable from `HEAD`, so a clone and a CI
-  checkout are judged on the same commits. The groups `tests-1` to `tests-3` each run a third of the bats tests.
+  checkout are judged on the same commits. The groups `tests-1` to `tests-3` each run a third of
+  the bats tests.
 - The groups are the dependencies of the `checks` recipe, and a group's checks are its own
   dependencies; a new check goes into exactly one group, and then runs in `just checks`, in
   `just ci` and in CI.

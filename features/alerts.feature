@@ -4,9 +4,9 @@ Feature: Alerts
   every rule the tree renders and runs the rules' unit tests, one file per application in
   tests/rules/.
 
-  A rule promtool refuses is proved by rules-check itself, which runs promtool on an own alert whose
-  expression it has broken and requires the refusal to name the alert, in just rules-check and in
-  just ci alike.
+  A rule promtool refuses is proved by rules-check itself, in just rules-check and in just ci alike:
+  it breaks, one at a time, a chart's rule and an own alert in rule files no unit test loads, so
+  that only promtool's check rules reads them, and requires check rules to refuse each, naming it.
 
   Scenarios whose title starts with "The alert" are proved by a promtool unit test: the test
   group's name in tests/rules/<application>.yaml is the scenario's title, and the scenario's
@@ -21,12 +21,12 @@ Feature: Alerts
 
   @by:rules-check
   Scenario: A rule promtool refuses fails the check, naming the rule
-    Given a rendered tree whose own rule has an expression promtool cannot parse
+    Given a rendered tree with, in a rule file no unit test loads, a chart's rule or an own alert whose expression promtool cannot parse, or an own alert defined twice
     When the rules are checked with promtool
-    Then the check fails and its output names the alert
+    Then the check fails, and promtool's check rules of the charts' or of the tree's own rules names the rule
 
   Scenario: An alert without a test in which it fires, or without one in which it stays quiet, fails the check
-    Given the tree's own rules and a unit test file that lacks, for one alert, a test with an alert expected, or a test with none expected
+    Given the tree's own rules and a unit test file that lacks, for one alert, a test with an alert expected, or a test with none expected at a time before it fires when every series of its test group has a sample
     When the rules are collected for the check
     Then the check fails, naming the alert and which of the two tests it lacks
 
@@ -37,8 +37,8 @@ Feature: Alerts
 
   Scenario: The rules are checked with the Prometheus image the chart deploys, in the static group of just ci
     Given the justfile, the Dagger module and the kube-prometheus-stack application's pinned chart
-    When the image rules-check runs and the image the rendered Prometheus names are read
-    Then rules-check runs in the static group of just ci with promtool taken from that image, which no pin in the tree names but the digest Dagger records for it in dagger.lock, the one entry there for that image's tag
+    When the image rules-check runs and the image the rendered Prometheus names are read, and again with the chart naming another tag
+    Then rules-check runs in the static group of just ci, and just rules-check with no network, with promtool taken from that image, which no pin in the tree names, and the chart naming another tag gives the check that tag's image
 
   Scenario: The documentation lists every alert the tree defines
     Given the tree's own rules, docs/kubernetes.md and docs/runbooks/alerts.md
