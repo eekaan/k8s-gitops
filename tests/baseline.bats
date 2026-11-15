@@ -485,6 +485,30 @@ envoy_gateway_config() {
   grep -q '^volume ' <<<"$args"
 }
 
+@test "The certificate controller's metrics are scraped, and the controller waits for the monitoring definitions" {
+  local depends monitor
+  render cert-manager
+  # One monitor and no pod monitor, so nothing is scraped twice. Its selector is expressions over
+  # the three components' labels, which monitor_targets does not resolve, so it is matched here:
+  # the controller's Service, which holds the certificate metrics, carries a label each expression
+  # accepts, and the port the monitor scrapes is the one that Service exposes.
+  [ "$(yq -N 'select(.kind == "ServiceMonitor") | .metadata.name' "$RENDERED")" = cert-manager ]
+  [ -z "$(yq -N 'select(.kind == "PodMonitor") | .metadata.name' "$RENDERED")" ]
+  monitor="$(yq -N -o json -I0 'select(.kind == "ServiceMonitor")' "$RENDERED")"
+  echo "monitor: $monitor"
+  [ "$(yq -N -o json -I0 'select(.kind == "Service" and .metadata.name == "cert-manager") | .metadata.labels' "$RENDERED" |
+    jq -r --argjson monitor "$monitor" '. as $labels | $monitor.spec.selector.matchExpressions
+      | all(. as $e | $e.operator == "In" and ($labels[$e.key] | IN($e.values[])))')" = true ]
+  [ "$(jq -r '.spec.endpoints | length' <<<"$monitor")" -eq 1 ]
+  [ "$(jq -r '.spec.endpoints[0].targetPort' <<<"$monitor")" = http-metrics ]
+  [ "$(yq -N 'select(.kind == "Service" and .metadata.name == "cert-manager") | .spec.ports[] | select(.name == "http-metrics") | .port' "$RENDERED")" -eq 9402 ]
+  # The monitor's kind exists only once the definitions are installed.
+  app_dir cert-manager
+  depends="$(yq '.spec.dependsOn // [] | .[].name' "$REPO/$APP_DIR/ks.yaml")"
+  echo "cert-manager depends on: ${depends:-nothing}"
+  grep -qx prometheus-operator-crds <<<"$depends"
+}
+
 @test "The certificate controller keeps running while a node is drained" {
   local component deployment labels replicas spread budget min max failed=""
   render cert-manager

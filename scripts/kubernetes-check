@@ -483,6 +483,35 @@ for dir in kubernetes/clusters/*/; do
         ;;
     esac
   done <"$tmp/dependency-verdicts"
+
+  # A Kustomization that chooses, with PUBLIC_ISSUER, an issuer other than the cluster's own CA
+  # chooses one of acme-issuers, so it names that application in dependsOn, and the check above then
+  # requires the cluster to enable it: otherwise its certificate is requested from an issuer that
+  # does not exist, or before it does. The name is one of the ClusterIssuers that application
+  # defines, so a mistyped name is refused here and not left to a Certificate that is never Ready.
+  acme_issuers=$(yq -N 'select(.kind == "ClusterIssuer") | .metadata.name' kubernetes/apps/base/*/acme-issuers/app/*.yaml | jq -R . | jq -sc .) ||
+    fail "$dir/ks.yaml: cannot read the ClusterIssuers of acme-issuers, so the issuer choices were not checked"
+  if ! jq -r --argjson known "${acme_issuers:-[]}" 'def clean: tostring | gsub("[^A-Za-z0-9._-]"; "?");
+    select((.spec.postBuild.substitute.PUBLIC_ISSUER // "cluster-ca") != "cluster-ca") as $k
+    | ($k.spec.postBuild.substitute.PUBLIC_ISSUER) as $issuer
+    | (if (($k.spec.dependsOn // []) | map(.name) | index("acme-issuers")) == null then "dependency" else empty end,
+       if ($known | index($issuer)) == null then "unknown" else empty end)
+    | . + "|" + ($k.metadata.name | clean) + "|" + ($issuer | clean)' \
+    "$tmp/dependents.jsonl" >"$tmp/issuer-choices"; then
+    fail "$dir/ks.yaml: cannot read the Kustomizations built for $overlay, so their issuer choices were not checked"
+    continue
+  fi
+  while IFS='|' read -r verdict dependent issuer; do
+    file="${ks_name_file[$dependent]:-$dir/ks.yaml}"
+    case $verdict in
+      dependency)
+        fail "$file: Kustomization $dependent chooses the issuer $issuer, which the application acme-issuers makes, but does not name acme-issuers in dependsOn, so its certificate can be requested before the issuer exists; name acme-issuers in dependsOn, in the same patch that chooses the issuer in $overlay/kustomization.yaml"
+        ;;
+      unknown)
+        fail "$file: Kustomization $dependent chooses the issuer $issuer, but the application acme-issuers makes no issuer of that name, so its certificate would never be issued; choose one the application defines, or leave the choice out for the cluster's own CA"
+        ;;
+    esac
+  done <"$tmp/issuer-choices"
 done
 
 if ((failures > 0)); then

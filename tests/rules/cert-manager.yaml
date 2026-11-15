@@ -1,0 +1,126 @@
+---
+# Unit tests of the cert-manager application's own alerts, run by just rules-check with promtool. The
+# series are shaped as the controller writes its certificate metrics, one series per Certificate and
+# condition for the ready status and one per Certificate for the expiry, with the job, instance,
+# service and endpoint of the ServiceMonitor's scrape. Each group's name is the title of its scenario
+# in features/alerts.feature.
+rule_files:
+  - cert-manager.rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: The alert CertManagerCertificateNotReady fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # public-wildcard is Ready for 10 minutes and then is not; cluster-ca is Ready throughout.
+      - series: >-
+          certmanager_certificate_ready_status{name="public-wildcard",
+          namespace="envoy-gateway-system", condition="True", issuer_name="letsencrypt-staging",
+          issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", job="cert-manager",
+          instance="192.0.2.5:9402", service="cert-manager",
+          endpoint="tcp-prometheus-servicemonitor"}
+        values: '1x9 0x130'
+      - series: >-
+          certmanager_certificate_ready_status{name="public-wildcard",
+          namespace="envoy-gateway-system", condition="False", issuer_name="letsencrypt-staging",
+          issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", job="cert-manager",
+          instance="192.0.2.5:9402", service="cert-manager",
+          endpoint="tcp-prometheus-servicemonitor"}
+        values: '0x9 1x130'
+      - series: >-
+          certmanager_certificate_ready_status{name="public-wildcard",
+          namespace="envoy-gateway-system", condition="Unknown", issuer_name="letsencrypt-staging",
+          issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", job="cert-manager",
+          instance="192.0.2.5:9402", service="cert-manager",
+          endpoint="tcp-prometheus-servicemonitor"}
+        values: '0x139'
+      - series: >-
+          certmanager_certificate_ready_status{name="cluster-ca", namespace="cert-manager",
+          condition="True", issuer_name="letsencrypt-staging", issuer_kind="ClusterIssuer",
+          issuer_group="cert-manager.io", job="cert-manager", instance="192.0.2.5:9402",
+          service="cert-manager", endpoint="tcp-prometheus-servicemonitor"}
+        values: '1x139'
+      - series: >-
+          certmanager_certificate_ready_status{name="cluster-ca", namespace="cert-manager",
+          condition="False", issuer_name="letsencrypt-staging", issuer_kind="ClusterIssuer",
+          issuer_group="cert-manager.io", job="cert-manager", instance="192.0.2.5:9402",
+          service="cert-manager", endpoint="tcp-prometheus-servicemonitor"}
+        values: '0x139'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: CertManagerCertificateNotReady
+        exp_alerts: []
+      # Not Ready from minute 10, so the alert is pending until minute 70.
+      - eval_time: 69m
+        alertname: CertManagerCertificateNotReady
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: CertManagerCertificateNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              name: public-wildcard
+              namespace: envoy-gateway-system
+              condition: "False"
+              issuer_name: letsencrypt-staging
+              issuer_kind: ClusterIssuer
+              issuer_group: cert-manager.io
+              job: cert-manager
+              instance: 192.0.2.5:9402
+              service: cert-manager
+              endpoint: tcp-prometheus-servicemonitor
+            exp_annotations:
+              summary: A Certificate has not been Ready for an hour
+              description: The Certificate public-wildcard in envoy-gateway-system has not been Ready for an hour, so it is not issued or not renewed.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#certmanagercertificatenotready
+  - name: The alert CertManagerCertificateExpiringSoon fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # public-wildcard ends 14 days and 10 minutes after the start of the test, so it is within 14
+      # days from minute 11; cluster-ca ends in 60 days; not-issued has never been issued, which the
+      # controller exports as 0, so it is not a certificate about to end.
+      - series: >-
+          certmanager_certificate_expiration_timestamp_seconds{name="public-wildcard",
+          namespace="envoy-gateway-system", issuer_name="letsencrypt-staging",
+          issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", job="cert-manager",
+          instance="192.0.2.5:9402", service="cert-manager",
+          endpoint="tcp-prometheus-servicemonitor"}
+        values: '1210200x60'
+      - series: >-
+          certmanager_certificate_expiration_timestamp_seconds{name="cluster-ca",
+          namespace="cert-manager", issuer_name="letsencrypt-staging", issuer_kind="ClusterIssuer",
+          issuer_group="cert-manager.io", job="cert-manager", instance="192.0.2.5:9402",
+          service="cert-manager", endpoint="tcp-prometheus-servicemonitor"}
+        values: '5184000x60'
+      - series: >-
+          certmanager_certificate_expiration_timestamp_seconds{name="not-issued",
+          namespace="envoy-gateway-system", issuer_name="letsencrypt-staging",
+          issuer_kind="ClusterIssuer", issuer_group="cert-manager.io", job="cert-manager",
+          instance="192.0.2.5:9402", service="cert-manager",
+          endpoint="tcp-prometheus-servicemonitor"}
+        values: '0x60'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CertManagerCertificateExpiringSoon
+        exp_alerts: []
+      # Within 14 days from minute 11, so the alert is pending until minute 26.
+      - eval_time: 25m
+        alertname: CertManagerCertificateExpiringSoon
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: CertManagerCertificateExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              name: public-wildcard
+              namespace: envoy-gateway-system
+              issuer_name: letsencrypt-staging
+              issuer_kind: ClusterIssuer
+              issuer_group: cert-manager.io
+              job: cert-manager
+              instance: 192.0.2.5:9402
+              service: cert-manager
+              endpoint: tcp-prometheus-servicemonitor
+            exp_annotations:
+              summary: A Certificate ends within 14 days
+              description: The certificate of public-wildcard in envoy-gateway-system ends within 14 days and has not been renewed, though cert-manager renews well before that.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#certmanagercertificateexpiringsoon

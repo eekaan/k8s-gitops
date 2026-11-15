@@ -681,7 +681,9 @@ every namespace, and evaluates the chart's default alerting and recording rules.
   the control planes' host network, for their addresses, and Prometheus sends etcd no credential;
 - the monitors of the baseline applications ([The kube-system baseline](#the-kube-system-baseline))
   and of the log store and collector ([Logs](#logs));
-- OpenBao's active member, through its chart's ServiceMonitor ([OpenBao](#openbao)).
+- OpenBao's active member, through its chart's ServiceMonitor ([OpenBao](#openbao));
+- cert-manager's controller, webhook and CA injector, through its chart's ServiceMonitor
+  ([cert-manager](#cert-manager)).
 
 It does not scrape:
 
@@ -756,14 +758,16 @@ The own alerts, each with its runbook section in [docs/runbooks/alerts.md](runbo
 | `OpenBaoNoActiveMember` | No target answers for the Service that selects OpenBao's active member for 5 minutes. | critical | [OpenBaoNoActiveMember](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#openbaonoactivemember) |
 | `VolSyncSourceOutOfSync` | A ReplicationSource's volume has been out of sync for 30 minutes. | warning | [VolSyncSourceOutOfSync](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#volsyncsourceoutofsync) |
 | `VolSyncSourceMissedIntervals` | A ReplicationSource missed a scheduled interval within the last hour. | warning | [VolSyncSourceMissedIntervals](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#volsyncsourcemissedintervals) |
+| `CertManagerCertificateNotReady` | A Certificate has not been Ready for an hour. | warning | [CertManagerCertificateNotReady](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#certmanagercertificatenotready) |
+| `CertManagerCertificateExpiringSoon` | A Certificate's certificate ends within 14 days, for 15 minutes. | warning | [CertManagerCertificateExpiringSoon](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#certmanagercertificateexpiringsoon) |
 | `LogCollectorOutsizedShare` | One node's collector sends at least ten times the median node's rate of events, and at least 10 a second, for 30 minutes. | info | [LogCollectorOutsizedShare](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectoroutsizedshare) |
 | `LogCollectorDiscardingEvents` | A collector's component discards events it was not set to drop, for 15 minutes. | warning | [LogCollectorDiscardingEvents](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectordiscardingevents) |
 | `LogCollectorSendFailing` | A collector's sink to the store reports errors for 15 minutes. | warning | [LogCollectorSendFailing](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectorsendfailing) |
 
 The alerts read only what Prometheus scrapes: kube-state-metrics' pod readiness for OpenBao's
 members, Prometheus' own `up` for OpenBao's active Service, VolSync's controller metrics and
-Vector's internal metrics. Nothing reads Flux, Cilium's BGP sessions, cert-manager or the storage
-operator, as none of them is scraped ([Monitoring](#monitoring)). The alerts have no destination
+Vector's internal metrics, and cert-manager's certificate metrics. Nothing reads Flux, Cilium's BGP
+sessions or the storage operator, as none of them is scraped ([Monitoring](#monitoring)). The alerts have no destination
 yet: Alertmanager sends them nowhere, so they show in Prometheus and Alertmanager only.
 
 ## Grafana
@@ -1063,8 +1067,14 @@ starts once cert-manager runs.
 Following the publisher's production guidance, the controller and the CA injector run two replicas
 each, one leading, and the webhook three, one per worker, spread over the nodes where the scheduler
 can; each has a disruption budget that keeps one pod available, so a drain never takes the last
-one. They run at `system-cluster-critical` with small requests and no limits. No ServiceMonitor or
-PodMonitor is enabled. `tests/baseline.bats` renders the chart with these values and checks the
+one. They run at `system-cluster-critical` with small requests and no limits. The chart's
+ServiceMonitor scrapes the three components' metrics, which the alerts on certificates read
+([Alerts](#alerts)), so the application names `prometheus-operator-crds` in `dependsOn` as well.
+The DNS-01 self-check asks one public resolver over DNS-over-HTTPS, by name, and nothing else: the
+cluster's own resolver may not see the zone and caches what it was asked before the record
+existed. With the nameservers-only setting the controller asks every resolver listed and fails the
+check when any one does not answer or lacks the record, so a second resolver would be a second
+dependency, not a fallback. `tests/baseline.bats` renders the chart with these values and checks the
 namespace, the definitions and their policy, the Gateway API configuration and dependency, and the
 replicas, spreads and budgets.
 
@@ -1079,15 +1089,100 @@ kind CA, that signs with that Secret. The application names `cert-manager` in `d
 `dependsOn` finds an issuer that signs. The bootstrap issuer is namespaced, so no other namespace
 can ask it for a certificate.
 
-This is an interim authority: it is made in the cluster, its private key is in a Secret in
+This authority is the default and a cluster's choice of the public Gateway's issuer ([The ACME
+issuers](#the-acme-issuers)); it is made in the cluster, its private key is in a Secret in
 `cert-manager`, and no tree file holds a key; nothing outside the cluster trusts it; and it is lost
 with the cluster, as a rebuilt cluster makes a new one, which a client that had been given the old
-one must be given again. It is not the decision of ADR 0006, which stands unamended: the public
-certificate comes from the Let's Encrypt DNS-01 issuer of that record when its story lands, and each
-`Certificate` that names `cluster-ca` then changes its `issuerRef`, one place for the Gateway's
-([The public Gateway](#the-public-gateway)). `tests/gateway.bats` checks the three objects, the
+one must be given again. It is not the public certificate of ADR 0006, which comes from the ACME
+issuers below. `tests/gateway.bats` checks the three objects, the
 Gateway's certificate against them, and that neither application's build holds a Secret nor its
 directory a private key; `secrets-scan` covers the rest of the tree.
+
+### The ACME issuers
+
+`apps/base/cert-manager/acme-issuers/` applies, in `cert-manager`, what ADR 0006 decided: two
+`ClusterIssuer`s of Let's Encrypt, `letsencrypt-staging` and `letsencrypt-production`, each with the
+account key it makes in its own Secret, and the `ExternalSecret` `cloudflare-api-token` that brings
+the DNS provider's API token from the secret store ([External Secrets](#external-secrets)) into the
+Secret both issuers name. Let's Encrypt asks for no contact address for an account, so none is set.
+A `ClusterIssuer` reads its Secrets from the controller's cluster resource namespace, which is
+`cert-manager`, so the token's Secret is there and in no other namespace.
+
+- **The token.** The key `cert-manager/cloudflare` of the store, property `api-token`, which an
+  operator writes once with `just bao-put cert-manager/cloudflare api-token` (the value from
+  standard input). The tree holds no token, no Secret and no other way to authenticate to the
+  provider: the solvers name `apiTokenSecretRef` and nothing else. The token must be one the
+  operator scopes to the one DNS zone that holds the cluster's domain, with the permissions to edit
+  DNS records in it and to read the zone, and to nothing else: it can then change the zone's records
+  and nothing outside it. Which ServiceAccounts can read the Secret is not a short list and is not
+  claimed to be complete: the controller (`cert-manager`) reads Secrets cluster-wide to issue, the
+  CA injector (`cert-manager-cainjector`) cluster-wide to inject CA bundles, External Secrets'
+  operator writes it, Flux's controllers and a cluster administrator can read any, and so can every
+  other controller whose chart grants Secrets cluster-wide, as the reflector's and the reloader's
+  do. The token's scope is what bounds the harm of a read. The `ExternalSecret` refreshes every 15
+  minutes, so a token the operator replaces in the store reaches the cluster without a change here.
+- **The solver.** DNS-01 through the provider's API, the only solver, for names under
+  `${CLUSTER_DOMAIN}` only: the `dnsZones` selector means a Certificate for any other name finds no
+  solver and is refused. HTTP-01 is not used, which is also what lets one certificate cover a
+  wildcard. The controller checks the challenge's record against public resolvers alone, as above.
+- **Staging and production.** Both issuers exist whenever the application is enabled, so that moving
+  from one to the other is a change of the choice below and nothing else. Staging's certificates are
+  signed by a chain no client trusts, and its rate limits are far above production's: a setup that is
+  broken spends staging's. Production's are trusted by every client and are the limits a broken
+  setup can exhaust, so a cluster chooses production once staging has issued its certificate. Both
+  issuers register their account with the CA as soon as they exist.
+- **Ready.** The application waits for `cert-manager` and `openbao-store`, and is Ready only once the
+  `ExternalSecret` and both issuers report Ready, which kstatus does not read from these kinds by
+  itself. Until the operator has written the token, the `ExternalSecret` reports the missing key and
+  the application is not Ready, which holds back the Gateway that waits for it.
+
+#### Choosing the public Gateway's issuer
+
+The `Certificate` `public-wildcard` of `gateway-public` names the `ClusterIssuer` the variable
+`PUBLIC_ISSUER` gives, `cluster-ca` when it is not set, so a cluster that says nothing keeps the
+cluster's own authority. A cluster sets it in one place, a patch in its overlay
+(`apps/overlays/<cluster>/kustomization.yaml`) on the Kustomization `gateway-public`, which in
+`lab-sto2` reads:
+
+```yaml
+patches:
+  - target: {group: kustomize.toolkit.fluxcd.io, version: v1, kind: Kustomization, name: gateway-public}
+    patch: |-
+      - op: add
+        path: /spec/dependsOn/-
+        value: {name: acme-issuers}
+      - op: add
+        path: /spec/postBuild
+        value: {substitute: {PUBLIC_ISSUER: letsencrypt-staging}}
+```
+
+It is a patch and not a `cluster-config` key because the choice is part of the tree and reviewed in
+a pull request, not a value of the deployment, and because the tree's check can see it: a cluster-config
+value exists only in the cluster. The patch names `acme-issuers` in `dependsOn` too, so the
+Gateway's certificate is requested only once the issuer exists, and `just kubernetes-check` refuses
+a cluster that chooses an issuer other than `cluster-ca` without that dependency, and one whose
+overlay names the dependency without listing the application.
+
+`lab-sto2` chooses staging. To move to production, once the staging certificate is Ready and
+`just gateway-check` passes, change the one line `PUBLIC_ISSUER: letsencrypt-staging` to
+`PUBLIC_ISSUER: letsencrypt-production` in a pull request of its own. cert-manager then issues the
+certificate again from production, with a new private key, into the same Secret, and the listener
+serves the new certificate when it is Ready; the old one is served until then.
+
+- **What a client sees.** With the cluster's own CA or staging, a client outside refuses the
+  certificate: no store trusts either chain. With production, every client trusts it, with nothing
+  to hand it.
+- **When it fails.** A wrong or missing token, a zone the token cannot edit, or a challenge whose
+  record never becomes visible leaves the `Certificate` not Ready with cert-manager's own reason,
+  and the Gateway keeps serving the Secret it has, the previous certificate or none. Look down the
+  chain cert-manager makes: `kubectl --namespace envoy-gateway-system describe certificate
+  public-wildcard`, then `get certificaterequest,order,challenge` in the same namespace; the
+  Challenge's `status.reason` says what the provider or the CA refused. `kubectl --namespace
+  cert-manager get externalsecret cloudflare-api-token` says whether the token came through, and
+  `kubectl describe clusterissuer letsencrypt-staging` whether the account registered. A DNS-01
+  challenge usually takes a minute or two to be visible and verified, and cert-manager retries
+  with a growing delay after a failure. `just gateway-check` fails its `certificate` line with the
+  Ready condition's reason.
 
 ## Autoscaling and reflection
 
@@ -1507,7 +1602,9 @@ and build both applications offline to check the rest of this section.
 `gateway-public`, an application of the same namespace, runs the one Gateway, `public`, of the
 GatewayClass `envoy-gateway`. It names `envoy-gateway`, `cluster-ca` (the issuer,
 [cert-manager](#cert-manager)) and `cilium-bgp` in `dependsOn`, so it starts once the controller
-runs, an issuer signs and the pool and the BGP objects exist. It is Ready, with the 10 minute
+runs, an issuer signs and the pool and the BGP objects exist; a cluster that chooses an ACME issuer
+for its certificate adds `acme-issuers` ([Choosing the public Gateway's
+issuer](#choosing-the-public-gateways-issuer)). It is Ready, with the 10 minute
 timeout, once its certificate is issued and the controller reports the Gateway programmed, which it
 does once the proxies' Service holds an address and the proxies are available. A cluster whose
 overlay does not list it runs no Gateway, and `hello-route`, the application that has a route on it,
@@ -1554,19 +1651,22 @@ cannot be listed without it: `just kubernetes-check` refuses the dependency.
   Gateway API's rule and the controller's to apply; it shows in the route's status, which
   `just gateway-check` reads, and `tests/gateway.bats` proves the selector on the objects. `demo`
   is the one namespace that carries the label.
-- **The certificate.** The `Certificate` `public-wildcard` asks the `ClusterIssuer` `cluster-ca`
-  for an ECDSA P-256 certificate for `*.${CLUSTER_DOMAIN}` and `${CLUSTER_DOMAIN}`, valid for 90
-  days and renewed 30 days before it ends. A `Certificate` rather than the Gateway annotation
-  cert-manager reads, as the annotation makes a certificate for each listener's hostname only, so
-  it would leave out the domain itself. Its `issuerRef` is the one place that changes when the
-  public issuer of ADR 0006 exists.
+- **The certificate.** The `Certificate` `public-wildcard` asks the `ClusterIssuer` the cluster
+  chose, `cluster-ca` by default, for an ECDSA P-256 certificate for `*.${CLUSTER_DOMAIN}` and
+  `${CLUSTER_DOMAIN}`, with a new private key at each renewal and the same Secret, so the listener
+  does not move. It asks for 90 days, which the cluster's own CA gives and an ACME CA decides for
+  itself, and is renewed with two fifths of the lifetime left (`renewBeforePercentage: 40`), which
+  holds for any lifetime, and which is more than the third `just gateway-check` treats as too
+  little. A `Certificate` rather than the Gateway annotation cert-manager reads, as the annotation
+  makes a certificate for each listener's hostname only, so it would leave out the domain itself.
 - **TLS.** A `ClientTrafficPolicy` sets 1.2 as the least version a client may use, the
   controller's default stated rather than relied on.
-- **What a client outside sees.** The certificate is signed by the cluster's own authority, which
-  nothing outside trusts, until the public issuer exists, so a client refuses it unless it is given
-  the authority's certificate. The hostnames are not in DNS yet, so `just gateway-check` connects
-  to each edge router's public address with the name the route has, and verifies against the
-  authority's certificate, which is public material (below). Only the networks the edge stack
+- **What a client outside sees.** With the cluster's own authority or the staging issuer the
+  certificate is signed by a chain nothing outside trusts, so a client refuses it unless it is
+  given the authority's certificate; with the production issuer every client trusts it. The
+  hostnames are not in DNS yet, so `just gateway-check` connects to each edge router's public
+  address with the name the route has, and verifies against the trust the issuer implies, which is
+  public material (below). Only the networks the edge stack
   admits reach the edge's public ports ([The edge routers](infrastructure.md#the-edge-routers)), so
   it is run from one of them.
 
@@ -1596,8 +1696,25 @@ the step it happened in, and so does Ctrl-C or SIGTERM, which stops the run ther
 - `proxy Service address`: that Service holds the `GATEWAY_ADDRESS`. While another Service holds
   the address, Cilium gives this one none.
 - `proxies`: two proxies or more are Ready, on different nodes; a FAIL names the nodes.
-- `certificate`: the `Certificate` whose Secret the `https` listener serves is Ready.
-- `cluster CA`: the authority's certificate is read: `tls.crt` of the Secret the `ClusterIssuer`
+- `certificate`: the `Certificate` whose Secret the `https` listener serves is Ready; a FAIL gives
+  the Ready condition's reason, as cert-manager sets it, cut and made printable as every reason is.
+- `certificate lifetime`: at least a third of the certificate's lifetime is left, from the
+  `Certificate`'s `notBefore` and `notAfter`; a FAIL gives the hours left of the hours it lasts, or
+  how long ago it ended. cert-manager renews well above that, so less means a renewal that has been
+  failing. The line is skipped for a `Certificate` that has not been issued.
+- `issuer trust`: for a Let's Encrypt issuer, what the answers through the edges are verified
+  against, and the line says which. For production, the system's public trust store as curl has it,
+  nothing added and nothing set aside, the variables that add trust (`CURL_CA_BUNDLE`,
+  `SSL_CERT_FILE`, `SSL_CERT_DIR`) not passed on, and no Secret is read. For staging, whose chain no public
+  store holds, the issuing certificates of the `Certificate`'s own Secret: `tls.crt` holds the leaf
+  and the chain as cert-manager stores them, and the recipe gives curl the certificates after the
+  leaf, never the leaf, as the only trust; curl accepts an intermediate as an anchor through its
+  partial-chain verification, which is its default with the OpenSSL backend from curl 7.68, so the
+  check needs that backend and version. That proves the answer is signed by the issuer
+  cert-manager stored, with the names and validity curl checks, and not public trust: the chain
+  comes from the cluster, not from the CA, and the check fetches nothing from the network beyond
+  its requests to the edges. A directory that is neither Let's Encrypt's fails the line.
+- `cluster CA`: for an issuer of kind CA, the authority's certificate is read: `tls.crt` of the Secret the `ClusterIssuer`
   the `Certificate` names signs with, in `cert-manager`. kubectl receives the whole Secret from the
   API server and prints only that key, through a jsonpath that names it; the recipe never prints
   or writes the private key. cert-manager's own documentation calls the `ca.crt` of an issued
@@ -1615,10 +1732,11 @@ says they are skipped, and it fails when they cannot be read:
 - `<edge> http`: plain HTTP on 80 for `hello.${CLUSTER_DOMAIN}/gateway-check` answers 301, and its
   `Location` is `https://hello.${CLUSTER_DOMAIN}/gateway-check`: the same host and path, the
   default port. Any other status or place fails.
-- `<edge> TLS`: HTTPS on 443 for `hello.${CLUSTER_DOMAIN}` verifies against the authority's
-  certificate alone, the chain and the name, as curl verifies them. curl trusts what is in its CA
-  path as well as the file `--cacert` names, and some builds come with one, so the recipe also
-  gives it `--capath`, an empty directory of the run.
+- `<edge> TLS`: HTTPS on 443 for `hello.${CLUSTER_DOMAIN}` verifies against the trust the issuer
+  implies and nothing else, the chain and the name, as curl verifies them. For a CA and for
+  staging that is the file `--cacert` names; curl trusts what is in its CA path as well, and some
+  builds come with one, so the recipe also gives it `--capath`, an empty directory of the run. For
+  production it is curl's own trust store, given nothing.
 - `<edge> certificate names`: the certificate served names `hello.${CLUSTER_DOMAIN}`, read from
   what curl shows of it. When TLS fails, this line says whether the names are the cause or the
   chain is.

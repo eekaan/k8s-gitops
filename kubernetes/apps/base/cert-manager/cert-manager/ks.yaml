@@ -9,9 +9,11 @@ spec:
   path: ./apps/base/cert-manager/cert-manager/app
   targetNamespace: cert-manager
   # cert-manager looks for the Gateway API definitions once, when it starts, so it starts only once
-  # their application has established them.
+  # their application has established them; its chart makes a ServiceMonitor, a kind that exists
+  # once prometheus-operator-crds is Ready.
   dependsOn:
     - name: gateway-api-crds
+    - name: prometheus-operator-crds
   # Ready only once the release is installed and its pods are ready, so an application that names
   # this one in dependsOn finds cert-manager's definitions and webhook in place.
   wait: true

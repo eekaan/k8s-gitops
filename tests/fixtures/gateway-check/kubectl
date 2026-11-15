@@ -20,8 +20,17 @@
 #   one-proxy                one of the two proxy pods is not Ready
 #   proxies-one-node         both proxy pods run on one node
 #   certificate-not-ready    the Gateway's Certificate is not Ready
+#   certificate-reason       the reason of the Certificate's Ready condition, the word the file holds
+#   validity                 "BEFORE AHEAD": the hours since the Certificate's notBefore and until its
+#                            notAfter, 720 and 1440 without it
+#   no-validity              the Certificate's status holds neither notBefore nor notAfter
 #   no-ca                    the Secret of the cluster's CA cannot be read
-#   issuer-name              the Certificate's issuerRef.name, the JSON string the file holds
+#   no-tls-secret            the Secret the Gateway's Certificate makes cannot be read
+#   non-acme-issuer          an ACME issuer names a directory that is neither Let's Encrypt's, the one the
+#                            file holds, https://acme.example.net/directory when it is empty
+#   issuer-name              the Certificate's issuerRef.name, the JSON string the file holds; the
+#                            ClusterIssuers cluster-ca (a CA), letsencrypt-production and
+#                            letsencrypt-staging (ACME) exist
 #   ca-secret-name           the ClusterIssuer's spec.ca.secretName, the JSON string the file holds
 #   service-name             the name of the proxies' Service, the JSON string the file holds
 #   tls-secret-name          the Secret the https listener names, the JSON string the file holds
@@ -176,14 +185,21 @@ pods() {
 }
 
 certificates() {
-  local ready=True
+  local ready=True reason='' before=720 ahead=1440 times='{}'
   listed certificate-not-ready && ready=False
-  jq -n --argjson ready "$(condition Ready "$ready")" --argjson issuer "$(json_name issuer-name cluster-ca)" '{items: [{
+  listed certificate-reason && reason=$(< "$state/certificate-reason")
+  listed validity && read -r before ahead < "$state/validity"
+  if ! listed no-validity; then
+    times=$(jq -nc --arg before "$(date -u -d "$before hours ago" +%Y-%m-%dT%H:%M:%SZ)" \
+      --arg after "$(date -u -d "$ahead hours" +%Y-%m-%dT%H:%M:%SZ)" '{notBefore: $before, notAfter: $after}')
+  fi
+  jq -n --argjson ready "$(condition Ready "$ready" "$reason")" --argjson issuer "$(json_name issuer-name cluster-ca)" \
+    --argjson times "$times" '{items: [{
     apiVersion: "cert-manager.io/v1", kind: "Certificate",
     metadata: {name: "public-wildcard", namespace: "envoy-gateway-system"},
     spec: {secretName: "public-wildcard-tls", dnsNames: ["*.example.com", "example.com"],
       issuerRef: {group: "cert-manager.io", kind: "ClusterIssuer", name: $issuer}},
-    status: {conditions: [$ready]}}]}'
+    status: ({conditions: [$ready]} + $times)}]}'
 }
 
 routes() {
@@ -222,6 +238,24 @@ secret() {
     jq -n --arg crt "$crt" --arg key "$key" '{apiVersion: "v1", kind: "Secret",
       metadata: {name: "cluster-ca", namespace: "cert-manager"}, type: "kubernetes.io/tls",
       data: {"tls.crt": $crt, "tls.key": $key, "ca.crt": $crt}}'
+  fi
+}
+
+# tls_secret: the Secret the Gateway's Certificate makes: the leaf and the issuing chain in tls.crt, as
+# cert-manager stores an ACME certificate, and a private key.
+tls_secret() {
+  local crt key
+  listed no-tls-secret && { echo "Error from server (Forbidden): secrets is forbidden: 198.51.100.66" >&2; exit 1; }
+  crt=$(base64 -w0 < "$fixtures/acme-chain.crt")
+  key=$(printf 'MARKER-LEAF-PRIVATE-KEY\n' | base64 -w0)
+  if has '--output=jsonpath={.data.tls\.crt}'; then
+    printf '%s' "$crt"
+  elif [[ $args == *jsonpath* ]]; then
+    jq -nr --arg crt "$crt" --arg key "$key" '{"tls.crt": $crt, "tls.key": $key} | to_entries | map(.value) | join(" ")'
+  else
+    jq -n --arg crt "$crt" --arg key "$key" '{apiVersion: "v1", kind: "Secret",
+      metadata: {name: "public-wildcard-tls", namespace: "envoy-gateway-system"}, type: "kubernetes.io/tls",
+      data: {"tls.crt": $crt, "tls.key": $key}}'
   fi
 }
 
@@ -271,13 +305,33 @@ case $kind in
     certificates
     ;;
   clusterissuers.cert-manager.io)
-    [[ $object == cluster-ca ]] || not_found "clusterissuers.cert-manager.io \"$object\""
-    jq -n --argjson secret "$(json_name ca-secret-name cluster-ca)" '{apiVersion: "cert-manager.io/v1", kind: "ClusterIssuer", metadata: {name: "cluster-ca"},
-      spec: {ca: {secretName: $secret}}, status: {conditions: [{type: "Ready", status: "True"}]}}'
+    case $object in
+      cluster-ca)
+        jq -n --argjson secret "$(json_name ca-secret-name cluster-ca)" '{apiVersion: "cert-manager.io/v1", kind: "ClusterIssuer", metadata: {name: "cluster-ca"},
+          spec: {ca: {secretName: $secret}}, status: {conditions: [{type: "Ready", status: "True"}]}}'
+        ;;
+      letsencrypt-production | letsencrypt-staging)
+        server=https://acme-v02.api.letsencrypt.org/directory
+        [[ $object == letsencrypt-staging ]] && server=https://acme-staging-v02.api.letsencrypt.org/directory
+        if listed non-acme-issuer; then
+          server=$(< "$state/non-acme-issuer")
+          [[ -n $server ]] || server=https://acme.example.net/directory
+        fi
+        jq -n --arg name "$object" --arg server "$server" '{apiVersion: "cert-manager.io/v1", kind: "ClusterIssuer", metadata: {name: $name},
+          spec: {acme: {server: $server, privateKeySecretRef: {name: ($name + "-account")},
+            solvers: [{selector: {dnsZones: ["example.com"]}, dns01: {cloudflare: {apiTokenSecretRef: {name: "cloudflare-api-token", key: "api-token"}}}}]}},
+          status: {conditions: [{type: "Ready", status: "True"}]}}'
+        ;;
+      *) not_found "clusterissuers.cert-manager.io \"$object\"" ;;
+    esac
     ;;
   secret)
-    [[ $object == cluster-ca ]] && has --namespace=cert-manager || not_found "secrets \"$object\""
-    secret
+    if [[ $object == public-wildcard-tls ]] && has --namespace=$namespace; then
+      tls_secret
+    else
+      [[ $object == cluster-ca ]] && has --namespace=cert-manager || not_found "secrets \"$object\""
+      secret
+    fi
     ;;
   namespaces)
     has --selector=k8s-gitops/gateway=public || { echo "fake kubectl: unexpected flags$flags" >&2; exit 1; }

@@ -21,6 +21,11 @@ Feature: Cluster baseline
     When each is rendered offline
     Then kubelet-csr-approver, metrics-server, descheduler and spegel each yield a ServiceMonitor and reloader a PodMonitor, each selected by the Service or pods the chart yields, and each of the five names prometheus-operator-crds in dependsOn
 
+  Scenario: The certificate controller's metrics are scraped, and the controller waits for the monitoring definitions
+    Given the cert-manager application's pinned chart and values, with the monitoring API present
+    When it is rendered offline
+    Then it yields one ServiceMonitor selecting the controller's Service and no PodMonitor, and the application names prometheus-operator-crds in dependsOn
+
   Scenario: Serving certificates are approved only for this cluster's nodes
     Given the certificate approver's values
     When they are read

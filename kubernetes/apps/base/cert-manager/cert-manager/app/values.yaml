@@ -27,6 +27,15 @@ config:
   gatewayAPI:
     enabled: true
 
+# The DNS-01 self-check, which asks whether a challenge's TXT record is visible before cert-manager
+# asks the CA to look, goes to public resolvers alone: the cluster's own resolver may not see the
+# zone, and caches an answer for a record that was not there yet. Each is a DNS-over-HTTPS endpoint
+# by name, so the tree holds no address. With the nameservers-only flag the self-check asks every
+# listed resolver and fails when any one does not answer or lacks the record, so a second resolver
+# would add a dependency, not redundancy: one is listed.
+dns01RecursiveNameserversOnly: true
+dns01RecursiveNameservers: https://cloudflare-dns.com/dns-query
+
 # Each component keeps a pod through a drain: a disruption budget that keeps one available, which
 # the chart sets when the budget gives no number, and more replicas than that, so a drain can still
 # evict one. The spread over nodes is a preference, never a reason to leave a pod unscheduled.
@@ -86,8 +95,9 @@ cainjector:
       cpu: 10m
       memory: 32Mi
 
+# The controller's metrics, which the alerts on certificates read (docs/kubernetes.md, Alerts).
 prometheus:
   servicemonitor:
-    enabled: false
+    enabled: true
   podmonitor:
     enabled: false

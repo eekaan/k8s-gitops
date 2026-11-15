@@ -2,6 +2,8 @@
 
 - Status: accepted
 - Date: 2026-11-14
+- Amended: 2026-11-15, two ACME issuers, Let's Encrypt's staging and production, and each cluster chooses
+  which signs its gateway's certificate, the cluster's own CA when it chooses none
 
 ## Context
 
