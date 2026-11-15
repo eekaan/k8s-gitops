@@ -41,7 +41,8 @@ jobs:
         with:
           version: 2026.11.4
           # The checksum of that release's linux-x64 binary, which the hosted runner this job
-          # names runs: the job holds a token that can write to pull requests.
+          # names runs: the job holds a token that can write to pull requests. It moves with the
+          # version, by hand (.renovate/by-hand.tsv).
           sha256: 0296d9cba9324106d4e0962bb94a2072902f3658813aeb3b09504947bb8ddc2b
           install_args: just gh jq
           # Not the job's token, which can write to pull requests: mise installs without one.

@@ -10,5 +10,14 @@ metadata:
   labels:
     # node-exporter reads each node through the host's network and process namespaces and its
     # filesystems through host paths, and Vector, the log collector, reads each node's log files
-    # through a host path, which only the privileged level admits.
+    # through a host path, which only the privileged level admits; pod-security-exceptions.yaml
+    # lists those two workloads, and the check that reads it (docs/kubernetes.md, Pod Security)
+    # requires every other pod here that the render holds to pass restricted, and audit and warn at
+    # restricted at the cluster's Kubernetes minor, which records and reports any pod that fails
+    # restricted, those the operators create from the Prometheus, Alertmanager and Grafana resources
+    # included.
     pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: v1.37
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: v1.37

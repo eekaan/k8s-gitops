@@ -21,3 +21,9 @@ recommender:
   replicaCount: 1
   podMonitor:
     enabled: true
+tests:
+  # The chart's test pods take this container context, whose defaults set no seccomp profile; the
+  # runtime's default is what the restricted Pod Security level requires.
+  securityContext:
+    seccompProfile:
+      type: RuntimeDefault

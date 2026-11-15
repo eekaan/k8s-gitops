@@ -1,0 +1,15 @@
+---
+exceptions:
+  - namespace: agents
+    workload: DaemonSet/collector
+    level: privileged
+    reason: reads each node's log files through a host path and runs on the host's network
+  - namespace: agents
+    workload: DaemonSet/scanner
+    created-by: Scanner/main
+    level: privileged
+    reason: the scanner's operator runs a privileged pod on every node to read the node's devices
+  - namespace: legacy
+    workload: Deployment/ledger
+    level: baseline
+    reason: the image runs as root and is not built for a read-only or unprivileged start

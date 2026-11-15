@@ -115,6 +115,7 @@ kubectl() { run_tool kubectl "$@"; }
 helm() { run_tool helm "$@"; }
 flux() { run_tool flux "$@"; }
 kustomize() { run_tool kustomize "$@"; }
+kyverno() { run_tool kyverno "$@"; }
 docker() { run_tool docker "$@"; }
 # OpenBao's requests carry its tokens and need none of the secrets of the environment, and neither
 # do kubernetes-validate's fetches of public schemas, with curl and kubeconform.

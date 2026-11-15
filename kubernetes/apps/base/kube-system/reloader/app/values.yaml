@@ -12,3 +12,12 @@ reloader:
     enabled: false
   podMonitor:
     enabled: true
+  deployment:
+    # The chart's pod context already holds the non-root user and the runtime's seccomp profile; its
+    # container context is empty, which leaves capabilities and privilege escalation to the image,
+    # and the restricted Pod Security level requires them dropped and off.
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL

@@ -16,21 +16,30 @@ deployment: [`CLAUDE.md`](CLAUDE.md) lists what it never contains.
 
 ## Working on it
 
-Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mise.jdx.dev) and
+Every tool is pinned to an exact version in `mise.toml`. A change that adds or removes a pin, a
+tool or any other, or moves one to another file or key, runs `just renovate-record` and commits
+`.renovate/extracted.tsv` with it, and so does a branch after merging `main` when `main` brought
+another change's pins: `just renovate-check` fails, naming the recipe, until the record is
+current. A new version alone leaves the record as it is. With [mise](https://mise.jdx.dev) and
 [just](https://just.systems) installed:
 
 - `just tools` installs the pinned tools.
 - `just checks` runs every check that needs no credentials, with the tools on this machine, group
   by group. The group `static` holds tool versions, address literals in the files and the commit
   messages, merge conflict markers, that every Talos secrets bundle is encrypted, shellcheck and
-  yamllint, the Renovate configuration (`just renovate-check`: Renovate's own validator, run from
-  its pinned container image, so it needs a container runtime, Docker), the edge routers' routing
-  policy (`just edge-policy-check`: their rendered FRR configuration against real BGP speakers in
-  FRR's pinned container image, which needs Docker as well), scenario proofs, the OpenTofu check
-  (`just infra-check`: formatting, that the Talos schematic lists no QEMU guest agent extension,
-  that every stack enforces state encryption, that no stack or module declares a bucket, that the
-  default service range overlaps no default node, pod or service subnet, validation without a
-  state backend and the mocked `tofu test` runs), the Talos check
+  yamllint, the Renovate configuration (`just renovate-check`: Renovate's own validator and,
+  offline, its own extraction of the dependencies from the files, which `.renovate/extracted.tsv`
+  records, run from its pinned container image, so it needs a container runtime, Docker; `just
+  renovate-record` rewrites the record after a change to the pins or the configuration), that
+  every version pin the check finds is extracted by Renovate or listed in `.renovate/by-hand.tsv`
+  as moved by hand, with where, why and how (`just renovate-pins`; the header of
+  `scripts/check-renovate-pins` says which forms it finds and which it does not), the edge routers'
+  routing policy (`just edge-policy-check`: their rendered FRR configuration against real BGP
+  speakers in FRR's pinned container image, which needs Docker as well), scenario proofs, the
+  OpenTofu check (`just infra-check`: formatting, that the Talos schematic lists no QEMU guest agent
+  extension, that every stack enforces state encryption, that no stack or module declares a bucket,
+  that the default service range overlaps no default node, pod or service subnet, validation
+  without a state backend and the mocked `tofu test` runs), the Talos check
   (`just talos-check`: every node's machine configuration rendered from the template, the patches
   and fixture node data, and validated, offline), the offline build of `kubernetes/`, its render
   with every chart expanded (`just render-check`, which pulls the charts from their public
@@ -47,11 +56,15 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
   side by side (a file whose tests share state runs them one at a time, and says why);
   `just test 2/3` runs the second of three parts of the test files, which are split by their number
   of tests.
+- `just pod-security-check` renders the tree, charts pulled from their public registries, and checks
+  that every namespace enforces the strictest Pod Security level its workloads pass
+  ([docs/kubernetes.md](docs/kubernetes.md#pod-security)); `tests/pod-security.bats` runs it as part
+  of the bats tests.
 - `just ci` runs the same groups through the Dagger module in `.dagger/modules/ci`, side by side,
-  each in containers of its own: Renovate's validator in its own image, Vector in the log
-  collector's image, the speakers of the edge routers' routing policy in FRR's image, every other
-  check in a container with the pinned tools, the tools image `versions.yaml` records when it was
-  built for these pins and one built from them otherwise
+  each in containers of its own: Renovate in its own image, Vector in the log collector's image,
+  the speakers of the edge routers' routing policy in FRR's image, every other check in a container
+  with the pinned tools, the tools image `versions.yaml` records when it was built for these pins
+  and one built from them otherwise
   ([The tools image](#the-tools-image)); the run's first line says which. `just ci tests-2` runs
   one group, as each CI job does. It needs
   only `just`, the pinned `dagger` and a container runtime such as Docker. Every group runs to its

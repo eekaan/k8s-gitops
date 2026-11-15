@@ -13,6 +13,61 @@ Feature: Dependency updates
     Then it exits 0
     And it reports no errors, no warnings and no migration
 
+  @by:renovate-check
+  Scenario: What Renovate extracts is what the extraction record holds
+    Given renovate.json5, the presets under .renovate/ and the repository's files
+    When renovate-check runs Renovate's own extraction on them, offline, with the presets inlined
+    Then the dependencies it extracts are those .renovate/extracted.tsv records
+
+  @by:renovate-check
+  Scenario: A change to what Renovate extracts is refused with the difference
+    Given a manager's file patterns narrowed, or a "# renovate:" comment moved one line up
+    When renovate-check runs Renovate's own extraction
+    Then it exits 1
+    And it prints the dependencies that were added or dropped
+
+  @test
+  Scenario: Every pin in the tree is extracted by a Renovate manager or listed as moved by hand
+    Given .renovate/extracted.tsv, what Renovate extracts, and .renovate/by-hand.tsv, the pins moved by hand
+    When the check looks for image references, OCI artifact tags, action pins and their inputs, tool versions, provider constraints and version values in the repository's files
+    Then every pin it finds is extracted by a manager, under the name and at the place Renovate reads it, in a form Renovate can move, or listed
+    And every pin that Renovate's custom managers read has the form of its datasource's tags
+
+  @test
+  Scenario: A finder that cannot run fails the check instead of finding no pins
+    Given a grep that cannot read the patterns that find pins, or a yq that cannot read the files their names come from
+    When the check runs
+    Then it exits non-zero
+    And it does not report that it found no pins
+
+  @test
+  Scenario: A pin added where no manager looks, and not listed, is refused, naming the file and line
+    Given a file that holds an image reference, an OCI artifact tag, a digest, an action pin, a tool version, a provider version, a mise version or checksum, an action's input or a matrix value with a version's shape, a label whose key ends in version, a record in a comment line of its own, or a tag that no manager extracts
+    And a file that Renovate extracts other pins from holds an image reference, a chart's tag, a provider's version, another action's input or a values file's tag that it does not extract
+    And the pin is not in .renovate/by-hand.tsv
+    When the check runs
+    Then it exits 1
+    And it names each pin's file and line
+    And a pin that a manager reads, in block or flow style, passes once recorded, named as that manager names it: a values file's image by its repository, a HelmRelease's values image, a kustomization's chart, a module, a provider block, a helm_release, a tool with options and an action with a path
+
+  @test
+  Scenario: A listed pin that a manager now extracts is refused
+    Given .renovate/by-hand.tsv lists a pin that .renovate/extracted.tsv holds in a form Renovate can move, a checksum or a tag that moves with an extracted pin, or a name that its file holds only in ordinary comment text
+    When the check runs
+    Then it exits 1
+    And it names the entry's line in .renovate/by-hand.tsv
+    And an entry for a "# name: <version>" record that the check finds on a comment line of its own is not refused
+
+  @test
+  Scenario: A custom-manager pin whose value cannot match its datasource's tag form is refused
+    Given a pin under a "# renovate: datasource=… depName=…" comment whose value is not the form .renovate/tag-forms.tsv records for its datasource's tags
+    When the check runs
+    Then it exits 1
+    And it names the pin's file and line
+    And a pin whose package has no recorded tag form is refused too
+    And a recorded tag form that no pin reads is refused
+    And an action's input that Renovate reads, whose version is not the form recorded for its tags, is refused unless .renovate/by-hand.tsv lists it, as is that dependency's version in a workflow without a checksum, which Renovate would move alone
+
   @test @pending #FND-7
   Scenario: A Renovate configuration with an unknown option is refused
     Given renovate.json5 with the top-level option "automergeEverything" added

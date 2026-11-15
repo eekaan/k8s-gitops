@@ -20,6 +20,19 @@ spec:
   valuesFrom:
     - kind: ConfigMap
       name: cilium-values
+  # The chart creates the namespace cilium-secrets, for the roles that read the secrets of TLS
+  # interception, and gives it no Pod Security label. Nothing runs there, so the restricted level is
+  # the one it enforces, which this post-renderer labels it with.
+  postRenderers:
+    - kustomize:
+        patches:
+          - target:
+              kind: Namespace
+              name: cilium-secrets
+            patch: |
+              - op: add
+                path: /metadata/labels/pod-security.kubernetes.io~1enforce
+                value: restricted
   driftDetection:
     # The chart generates Hubble's CA and certificates anew each time it renders, so the copies in
     # the cluster need not match a render; drift detection leaves their data alone.

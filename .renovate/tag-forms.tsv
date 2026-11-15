@@ -1,0 +1,46 @@
+# The form of the tags that the datasource of each custom-manager pin (a "# renovate: datasource=...
+# depName=..." comment) lists, as the pinned value has to be written for Renovate to match it. Read
+# the datasource's public listing of the repository before adding an entry. scripts/check-renovate-pins
+# fails for a pin whose value is not of the form, for a pin with no entry and for an entry with no pin.
+# An entry for a dependency that Renovate reads from an action's inputs (jdx/mise) gives the form its
+# version must have for Renovate to look its checksum up. A version of another form is held: where the
+# step has a checksum Renovate moves nothing, and where it has none Renovate would move the version
+# alone; both are moved by hand (.renovate/by-hand.tsv).
+# Columns, separated by tabs: datasource, name, extended regular expression for the pinned value,
+# where the tags were read.
+docker	quay.io/jetstack/charts/cert-manager	^v[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	docker.io/envoyproxy/gateway-helm	^v[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/controlplaneio-fluxcd/flux-operator-manifests	^v[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/fluxcd/flux-cli	^v[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/cloudnative-pg/charts/cloudnative-pg	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/external-secrets/charts/external-secrets	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/home-operations/charts-mirror/keda	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	quay.io/cilium/charts/cilium	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/home-operations/charts-mirror/descheduler	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/postfinance/charts/kubelet-csr-approver	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/home-operations/charts-mirror/metrics-server	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/prometheus-community/charts/prometheus-operator-crds	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/emberstack/helm-charts/reflector	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/stakater/charts/reloader	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/spegel-org/helm-charts/spegel	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/grafana/helm-charts/grafana-operator	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/prometheus-community/charts/kube-prometheus-stack	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/vectordotdev/helm-charts/vector	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/victoriametrics/helm-charts/victoria-logs-single	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/openbao/charts/openbao	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/piraeusdatastore/piraeus-operator/piraeus	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/home-operations/charts-mirror/volsync	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/controlplaneio-fluxcd/charts/flux-instance	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/controlplaneio-fluxcd/charts/flux-operator	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	docker.io/grafana/grafana	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/renovatebot/renovate	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/cloudnative-pg/postgresql	^[0-9]+\.[0-9]+-standard-trixie$	registry tag list
+docker	docker.io/timberio/vector	^[0-9]+\.[0-9]+\.[0-9]+-distroless-libc$	registry tag list
+docker	jdxcode/mise	^[0-9]+\.[0-9]+\.[0-9]+-debian$	registry tag list
+github-releases	kubernetes-sigs/gateway-api	^v[0-9]+\.[0-9]+\.[0-9]+$	release list
+github-releases	kubernetes-csi/external-snapshotter	^v[0-9]+\.[0-9]+\.[0-9]+$	release list
+github-releases	actions/runner	^[0-9]+\.[0-9]+\.[0-9]+$	release list, whose tags are v2.338.2: a pin without the v matches through Renovate's semver-coerced versioning, which writes the new value without it too
+github-releases	VictoriaMetrics/victorialogs-datasource	^[0-9]+\.[0-9]+\.[0-9]+$	release list, whose tags are v0.34.0: a pin without the v matches through Renovate's semver-coerced versioning, which writes the new value without it too, the form Grafana installs the plugin by and tests/logs.bats requires
+github-release-attachments	jdx/mise	^v[0-9]+\.[0-9]+\.[0-9]+$	release list, whose tags are v2026.11.4: to move a checksum, Renovate first fetches the current release by the tag the version input is written as (datasource/github-release-attachments/index.js, getDigest), which fails for a version without the v
+github-tags	siderolabs/talos	^v[0-9]+\.[0-9]+\.[0-9]+$	tag list
+github-tags	kubernetes/kubernetes	^v[0-9]+\.[0-9]+\.[0-9]+$	tag list
