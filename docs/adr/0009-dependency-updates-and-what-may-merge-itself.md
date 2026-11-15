@@ -2,6 +2,8 @@
 
 - Status: accepted
 - Date: 2026-11-14
+- Note: 2026-11-15, the switch that lets Renovate merge application updates is off in
+  `.renovate/automerge.json5`, so every update waits for a person
 
 ## Context
 

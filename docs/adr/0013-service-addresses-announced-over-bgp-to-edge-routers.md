@@ -1,7 +1,10 @@
 # 0013 — Service addresses announced over BGP to edge routers the deployment runs
 
-- Status: accepted
+- Status: accepted, amended by 0018
 - Date: 2026-11-14
+- Amended: 2026-11-14, in the three places ADR 0018 lists: how the edge routers translate, when a
+  failed worker stops receiving traffic, and which addresses the edges take sessions from
+  ([ADR 0018](0018-own-edge-routers-translate-public-traffic-to-the-gateway.md#context))
 
 ## Context
 

@@ -1,7 +1,10 @@
 # 0004 — Application layout and variable substitution
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-11-14
+- Note: 2026-11-15, every application is reconciled from its own artifact, so the fallback to one
+  shared source is not taken
+  ([Per-application artifacts](../kubernetes.md#per-application-artifacts))
 
 ## Context
 
