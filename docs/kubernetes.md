@@ -203,9 +203,13 @@ On what Flux builds:
   empty, so Go's HTTP client, with which kustomize fetches a remote file, sends a request for any
   other host there and fails. `ALL_PROXY`, in both cases, names the same port for git and libcurl,
   which read it; Go does not. The layer does not cover a plain HTTP request to the loopback of the
-  machine that runs a check, which Go never sends to a proxy. The processes that fetch are
-  `helm pull` in the render, for the charts, and `kubernetes-validate`'s `curl` and `kubeconform`,
-  for the schemas.
+  machine that runs a check, which Go never sends to a proxy, so what a check builds is held to the
+  grammar first: the tree, and each source `kubernetes-validate` builds definitions from
+  ([Schemas](#what-the-checks-refuse)). The processes that fetch are
+  `helm pull` in the render, for the charts; `kubernetes-validate`'s own `helm pull`, for the chart
+  an `OCIRepository` it reads definitions from pins, when the render has not pulled it; its `curl`,
+  for Flux's schemas and for the archive of each GitHub repository it reads definitions from; and
+  `kubeconform`, for Kubernetes' schemas.
 
   The `spec.path` of an application's `ks.yaml` is compared with the one its directory fixes, and
   what is built is that directory's `app/`. The render builds a copy of `kubernetes/` alone and
@@ -216,59 +220,166 @@ On what Flux builds:
   `HelmRepository` it names, from which helm gets a chart's URL, name and version as arguments and
   values files the render writes, and kustomize a kustomization the render writes from the
   release's post-renderers; the Pod Security check a `FluxInstance`, from whose patches it writes a
-  kustomization. The API server drops a field of a custom resource that its schema does not name,
-  by exact name, so the cluster ignores the same spellings the checks do not read; a key that is not
-  ASCII, or that folds to a field they read without being it, is refused
-  (`tests/fixtures/read-fields`). What they hand kustomize, a post-renderer's or the instance's
-  patches and a post-renderer's images, holds a patch, its target and an image's fields by their
-  exact names alone: any other key there, such as a `path` kustomize would read or fetch, is
-  refused.
+  kustomization; `kubernetes-validate` a Kustomization of an application that applies from a
+  `GitRepository` or an `OCIRepository` (its `path` and `sourceRef`), that source (a
+  `GitRepository`'s `url`, `ref` and `sparseCheckout`, an `OCIRepository`'s `url`, `ref` and
+  `layerSelector`), and the source object `operator-definitions.yaml` names (its `ref`) or the
+  version of `versions.yaml` it names, from which
+  curl gets the URL of a repository's archive at a tag, tar the directories to unpack, helm a
+  chart's URL and version, and kustomize a directory of what was unpacked to build, the
+  Kustomization's `path` or the one `operator-definitions.yaml` names. The API server drops a field
+  of a custom resource that its schema does not name, by exact name, so the cluster ignores the same
+  spellings the checks do not read; a key that is not ASCII, or that folds to a field they read
+  without being it, is refused (`tests/fixtures/read-fields`). What they hand kustomize, a
+  post-renderer's or the instance's patches and a post-renderer's images, holds a patch, its target
+  and an image's fields by their exact names alone: any other key there, such as a `path` kustomize
+  would read or fetch, is refused.
 - **Schemas** (`kubernetes-validate`). Everything Flux builds as `kubernetes-check` builds it,
   each application from its own `ks.yaml` (enabled or not), each cluster's root and each cluster
   directory, is validated by kubeconform with unknown fields refused, against the first schema
   that has its kind: Flux's for the Flux release pinned in `mise.toml`, one made from a
-  CustomResourceDefinition the render holds, or Kubernetes' for the Kubernetes version in
-  `versions.yaml`. The HelmReleases of an application a cluster enables are validated as the
-  render builds them, with the patches the root gives each child, the release defaults among them;
-  those of an application no cluster enables, as its own `ks.yaml` builds them. A misspelt field
-  fails, naming the file, the object and the field. A definition's schema is its version's
-  `openAPIV3Schema`, made as strict as Kubernetes' own: wherever it lists the fields of an object,
-  it refuses any other, unless that object keeps unknown fields
-  (`x-kubernetes-preserve-unknown-fields`) or says what other fields may be; a field the
-  definition defaults is not required, as the API server fills it in before it validates; at the
-  top it also lists `apiVersion`, `kind` and `metadata`, which the API server adds to every
-  definition; OpenAPI's `nullable` becomes JSON Schema's null type. Each schema made is compiled
-  once, by kubeconform on an object of its kind: one that does not compile fails the check, naming
-  the definition, as kubeconform would otherwise take it for no schema. Two different definitions
-  of one kind and version in the render fail the check, and neither is used. Objects of a kind
-  that no schema describes, those whose definition is not in the render (one an operator creates
-  at run time, as Cilium's does, or one applied from a source outside the tree, which the render
-  does not fetch), are counted: the check prints each kind with the number of objects it could not
-  validate (`no schema for GatewayClass (gateway.networking.k8s.io/v1): 1 object`), so a pass
-  never silently means a skip. A kind of a group Kubernetes serves itself (the core group, `apps`,
-  `batch`, `policy`, `autoscaling`, and the `*.k8s.io` groups `rbac.authorization`, `networking`,
+  CustomResourceDefinition (below), or Kubernetes' for the Kubernetes version in `versions.yaml`.
+  The HelmReleases of an application a cluster enables are validated as the render builds them,
+  with the patches the root gives each child, the release defaults among them; those of an
+  application no cluster enables, as its own `ks.yaml` builds them. A misspelt field, a field of
+  the wrong type and a missing required field fail, naming the file, the object and the field. A
+  definition's schema is its version's `openAPIV3Schema`, made as strict as Kubernetes' own:
+  wherever it lists the fields of an object, it refuses any other, unless that object keeps
+  unknown fields (`x-kubernetes-preserve-unknown-fields`, wherever it is set) or says what other
+  fields may be; the conditions of `allOf`, `anyOf`, `oneOf` and `not` state what a value must
+  satisfy and list no fields an object has, so they refuse none; a field the definition defaults is
+  not required, as the API server fills it in before it validates; at the top it also lists
+  `apiVersion`, `kind` and `metadata`, which the API server adds to every definition; OpenAPI's
+  `nullable` becomes JSON Schema's null type. Each schema made is compiled once, by kubeconform on
+  an object of its kind: one that does not compile fails the check, naming the definition, as
+  kubeconform would otherwise take it for no schema. Two different definitions of one kind and
+  version fail the check, and neither is used. A definition of one of Kubernetes' own groups or
+  Flux's (listed below) fails the check, naming it and its file, whether a chart, a source or an
+  operator's published files bring it, and no schema is made of it: the API server serves
+  Kubernetes' kinds itself and Flux's definitions come with its release, so those kinds are
+  validated against Kubernetes' schemas and the pinned Flux release's alone. So does a definition
+  whose group has no dot and is not one of Kubernetes' own, which the API server refuses of a
+  definition's group.
+
+  Where a kind's definition comes from is the pin the cluster gets it from:
+  - A chart's, at the version the HelmRelease pins: the render holds them, templates and `crds/`
+    alike (`helm template --include-crds`), as the cluster's Helm release installs them.
+  - A Kustomization applied from a `GitRepository` or an `OCIRepository` of the application
+    (`gateway-api-crds`, `snapshot-controller` and `envoy-gateway-crds`; [Resource
+    definitions](#resource-definitions)): these reach the cluster by a path the render does not
+    follow, so the check reads them itself. It takes the source object in the same build, its
+    `ref.tag` and, for a `GitRepository`, its `sparseCheckout`; fetches the source at that tag;
+    holds what it unpacked to the rules above for the tree's links and kustomization files, with
+    the source in place of `kubernetes/`, so that no link leads out of it and none of its
+    kustomization files holds what those rules refuse, a URL or a path out of it among them;
+    builds the Kustomization's `spec.path` of it as Flux does, with the directory's
+    `kustomization.yaml` or, with none, from every YAML file in it; and keeps its
+    CustomResourceDefinitions. A `GitRepository` is read from `github.com` only, its `url`
+    `https://github.com/<owner>/<repository>` without `.git`, as GitHub serves a repository's
+    archive under its name alone; an `OCIRepository` only when its `layerSelector` unpacks a Helm
+    chart. A source that names a ref other than a tag, cannot be had, holds what the rules refuse
+    or does not build fails the check, naming the Kustomization, as the definitions it brings
+    would otherwise go unvalidated unseen. The Kustomization's own
+    patches are not applied: the Gateway API's delete an admission policy, which is no
+    definition.
+  - An operator's, when the operator installs its definitions itself when it starts and its chart
+    ships none, and Talos', which installs its own on the control planes:
+    `operator-definitions.yaml` at the repository root says where the files of them are. An entry
+    has a `group`; a `repository`, `https://github.com/<owner>/<repository>` without `.git`; a
+    `path`, a plain path of a directory in it; a `tagPrefix`; and what pins the version, either a
+    `sourceRef`, the `kind` (`OCIRepository` or `GitRepository`), `namespace` and `name` of the
+    source object that pins the operator's chart, as its application builds it, or, for what no
+    source object pins, a `versionsKey`, the key of `versions.yaml` that holds the version; and no
+    other field. The check takes that object's `ref.tag`, which must be its one ref, or that
+    version, puts the prefix before it, fetches the repository at that tag as it fetches a
+    `GitRepository`, unpacked at the path alone, reads the directory as it reads a source's, and
+    keeps the definitions of the group. So the definitions follow the version the tree pins, with
+    no version of their own to move. An entry is refused, before anything is fetched for it, when
+    a field is wrong, when it names both a `sourceRef` and a `versionsKey`, when its group is one
+    of Kubernetes' own or Flux's, when it declares a group and path twice, when its source object
+    names another ref or has a key that folds to a field the check reads, or when the tag it
+    derives has not the shape of one; one whose source object is not in the tree, whose key
+    `versions.yaml` holds no version under, or whose definitions no object of the tree is of, fails
+    the check as having no use. The entries:
+    - Cilium's: its operator installs the definitions it embeds, the files of
+      `pkg/k8s/apis/cilium.io/client/crds/v2` in `github.com/cilium/cilium`
+      (`pkg/k8s/apis/cilium.io/client/register.go`), at `v` followed by the tag of the
+      `OCIRepository` `cilium`: Cilium tags its chart with the version it runs, and the chart runs
+      the operator image of that version after a `v`, which the tree's values leave alone.
+      `tests/kubernetes-validate.bats` renders the pinned chart with the tree's values and fails
+      when the operator's image is tagged otherwise.
+    - Talos': the `ServiceAccount` kind of `talos.dev`, which the snapshot job's grant uses
+      ([Scheduled etcd snapshots](cluster.md#scheduled-etcd-snapshots)). Talos builds the
+      definition in code (`internal/app/machined/pkg/controllers/k8s/internal/k8stemplates/crds.go`
+      in `github.com/siderolabs/talos`) and applies it on the control planes once a
+      `KubeTalosAPIAccessConfig` document is in their machine configuration, and publishes no file
+      of it. The one file of it in the repository at the release the tree pins is the golden file
+      of that package's unit test, in its `testdata`, which the test requires to equal what the code
+      builds; the entry reads that directory at the tag that is `versions.yaml`'s `talos`, the
+      version the nodes run. A Talos release that moves the file fails the check, naming the entry,
+      until its `path` follows.
+
+  An object of a kind that none of these describes fails the check, naming the object, its kind
+  and its file, unless `schema-exceptions.yaml` at the repository root lists the kind. An entry
+  has a `group`, a `kind` and a `reason`: why no schema can be made at the version the tree pins,
+  and what proves the kind's objects instead, or that nothing does. The group is never one of
+  Kubernetes' own or Flux's, whose kinds always have a schema (the core group, `apps`, `batch`,
+  `policy`, `autoscaling`, and the `*.k8s.io` groups `rbac.authorization`, `networking`,
   `storage`, `admissionregistration`, `apiextensions`, `scheduling`, `node`, `coordination`,
   `certificates`, `discovery`, `events`, `apiregistration`, `flowcontrol.apiserver`, `resource`,
-  `authentication`, `authorization`, `storagemigration`, `internal.apiserver`) or of Flux's with
-  no schema is an error; the kinds of any other group are counted.
+  `authentication`, `authorization`, `storagemigration`, `internal.apiserver`; Flux's
+  `*.toolkit.fluxcd.io` and `source.extensions.fluxcd.io`): an object of one of those with no schema
+  is an error, the apiVersion or kind being wrong or the schemas older than this API. An entry is
+  added in the same change as the first object of its kind, and removed in the change that gives the
+  kind a definition or removes its last object: an entry whose kind has a schema, or that no object
+  of the tree is of, fails the check, as the other lists of the tree do. The check prints each
+  listed kind with the number of its objects
+  (`listed without a schema: <kind> (<group>/<version>): <n> objects`) and ends with how many
+  objects it validated and how many are of listed kinds, so a pass never silently means a skip. The
+  list is empty, as every kind of the tree has a schema: the check prints no listed kind, and
+  `0 of listed kinds`.
+
+  What the check does not evaluate: the rules a definition states in CEL
+  (`x-kubernetes-validations`), which are the API server's; admission webhooks and policies;
+  defaulting, which it only allows for (a field a definition defaults may be left out, and the
+  default is not applied); and anything an operator checks when it reconciles an object. The
+  definitions read from a source or for an operator are used by `kubernetes-validate` alone: the
+  render, and so the Pod Security check, still holds only what a HelmRelease's chart renders, and
+  does not gain the objects or kinds of those sources.
 
   The schemas are fetched at exact versions, never from a moving reference: Flux's from the
   release asset `crd-schemas.tar.gz` of the pinned Flux release, Kubernetes' a kind at a time from
   the public `yannh/kubernetes-json-schema` repository at the commit `kubernetes_schemas` in
-  `versions.yaml` names. A `kubernetes` version that commit holds no schemas for fails the check
-  until the commit moves. Renovate's git-refs datasource reads the commit through the
-  `# renovate-ref:` comment above it and proposes the newest commit of that repository's branch
-  whenever the branch moves, whatever the Kubernetes version, in the Kubernetes group with
-  `kubernetes` and the `kubectl` pin. The group keeps patch releases apart from the rest
-  (`separateMinorPatch`), so the schemas commit arrives in the group's pull request with a minor
-  release, and alone otherwise: a patch release of Kubernetes comes in a pull request of its own,
-  whose check fails, when the pinned commit lacks that version's schemas, until the schemas pull
-  request has merged and the patch's runs again. The requests are plain GETs that carry nothing
-  from the tree beyond the kind, group and version of each object whose kind no rendered
-  definition describes, which name the schema file asked for, whether or not it exists. curl and
-  kubeconform run with none of the secrets of the caller's environment (`scripts/lib/tools.sh`).
-  `KUBERNETES_VALIDATE_SCHEMAS`, a directory with `kubernetes/<version>-standalone-strict/` and
-  `flux/`, replaces both sources, as the tests do with their fixtures.
+  `versions.yaml` names, the definitions of a `GitRepository` source from the archive GitHub
+  serves for its tag (`https://github.com/<owner>/<repository>/archive/refs/tags/<tag>.tar.gz`,
+  unpacked only where the `sparseCheckout` says), those of an `OCIRepository` source by
+  `helm pull` of the chart at its tag, from the chart the render has already pulled when it is the
+  same one (`envoy-gateway` and `envoy-gateway-crds` name one), and an operator's from the same
+  archive of the repository `operator-definitions.yaml` names, at the tag it derives, unpacked only
+  at its path (Cilium's archive is about 55 MB, Talos' about 6 MB). Each source is pulled once a
+  run, into the run's own temporary directory, which nothing outlives; nothing is cached beyond it
+  except in the `RENDER_CHART_CACHE` a person sets by hand. Nothing verifies a source beyond its
+  tag, as Flux's own checkout and unpack verify none. A `kubernetes` version that commit holds no
+  schemas for fails the check until the commit moves. Renovate's git-refs datasource reads the
+  commit through the `# renovate-ref:` comment above it and proposes the newest commit of that
+  repository's branch whenever the branch moves, whatever the Kubernetes version, in the
+  Kubernetes group with `kubernetes` and the `kubectl` pin. The group keeps patch releases apart
+  from the rest (`separateMinorPatch`), so the schemas commit arrives in the group's pull request
+  with a minor release, and alone otherwise: a patch release of Kubernetes comes in a pull request
+  of its own, whose check fails, when the pinned commit lacks that version's schemas, until the
+  schemas pull request has merged and the patch's runs again. The sources' tags are the ones
+  Renovate already moves in the applications' own files, an operator's definitions move with
+  the tag of its chart, and Talos' with `versions.yaml`'s `talos`, which Renovate moves with the
+  `talosctl` pin. The requests are plain GETs that carry nothing from the tree beyond the
+  kind, group and version of each object whose kind no definition describes, which name the schema
+  file asked for, whether or not it exists, and the repository, tag and chart the tree's own
+  sources, `operator-definitions.yaml` and `versions.yaml` name. curl, helm and kubeconform run with
+  none of the secrets of the caller's environment (`scripts/lib/tools.sh`).
+  `KUBERNETES_VALIDATE_SCHEMAS`, a
+  directory with `kubernetes/<version>-standalone-strict/` and `flux/`, replaces those sources, as
+  the tests do with their fixtures, and `sources/github.com/<owner>/<repository>/<tag>/` and
+  `sources/<registry>/<repository>/<tag>/` replace the checkouts, an operator's repository
+  included, and the unpacked charts.
 - **Images** (`kubernetes-validate`). In what `scripts/render` writes, which builds each
   application as the root patches it, the Helm hooks of the enabled releases included, every image
   of a container, init container or ephemeral container of a pod spec, wherever an object holds
@@ -620,7 +731,11 @@ the change that turns the BGP control plane on. The objects are cluster-scoped; 
 API server drops the namespace the application's `targetNamespace` gives them. Their numbers come
 from `cluster-config` ([Before Flux starts](#before-flux-starts)). `tests/install-cilium.bats`
 renders the chart and the nodes' machine configurations and builds every application as Flux
-applies it to check each of these.
+applies it to check each of these. The chart ships none of the definitions; the operator installs
+the ones it embeds, which Cilium publishes in its repository, so `operator-definitions.yaml` has
+`kubernetes-validate` read them there at the release the chart's tag pins, and validate the pool and
+the BGP objects against them, unknown fields refused ([Schemas](#what-the-checks-refuse)). A Cilium
+upgrade moves the definitions with the chart's tag.
 
 **The cluster audits network policy.** Cilium's values set `policyAuditMode: true`, which the chart
 renders into the key `policy-audit-mode` of the ConfigMap `cilium-config`; read it from the cluster
@@ -2952,7 +3067,7 @@ stays on the last tagged artifact until a run for a later commit that changes `k
 workflow, or a manual run, publishes a tree that does. The gate is `just kubernetes-check`, the
 offline build, and no more: `just render-check` pulls charts from the network and needs helm in the
 job that signs, so it stays out of that job, and so does `just kubernetes-validate`, which pulls the
-charts and fetches schemas as well ([What the checks refuse](#what-the-checks-refuse)).
+charts and fetches schemas and definitions as well ([What the checks refuse](#what-the-checks-refuse)).
 
 Every workflow installs its tools with the same pinned `mise-action` at an exact mise release. A
 workflow whose token can write, `publish`, `tools-image` and `render-comment`, also gives the action the

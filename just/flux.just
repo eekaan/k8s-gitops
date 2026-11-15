@@ -2,7 +2,7 @@
 kubernetes-check:
     scripts/kubernetes-check
 
-# On top of kubernetes-check, which it runs first: validate what Flux builds against its schemas, with unknown fields refused, and fail on an image of the render without a tag other than latest or a digest; fetches the charts and the schemas from their public sources, so the publish run does not run it
+# On top of kubernetes-check, which it runs first: validate what Flux builds against its schemas, with unknown fields refused, and fail on an image of the render without a tag other than latest or a digest; fetches the charts, the schemas and the definitions the tree's sources and its operators publish from their public sources, so the publish run does not run it
 kubernetes-validate:
     scripts/kubernetes-validate
 

@@ -1,10 +1,14 @@
 # The fields the checks read from documents that no tool decodes: a HelmRelease and the sources it
-# names, as scripts/render reads them, and a FluxInstance, as scripts/pod-security-check reads it.
-# Each reads them with jq, by exact name, and hands a tool only what it derives from them: helm a
-# chart's URL, name and version as arguments and values files it writes, kustomize a kustomization
-# it writes from a release's post-renderers or the instance's patches.
+# names, as scripts/render reads them; a FluxInstance, as scripts/pod-security-check reads it; and a
+# Kustomization of an application that applies from a GitRepository or an OCIRepository, that
+# source, and the source object operator-definitions.yaml names, as scripts/kubernetes-validate
+# reads them. Each reads them with jq, by exact name, and hands a tool only what it derives from
+# them: helm a chart's URL, name and version as arguments and values files it writes, kustomize a
+# kustomization it writes from a release's post-renderers or the instance's patches, curl the URL of
+# a repository's archive at a tag, tar the directories to unpack, and kustomize a directory of what
+# it unpacked.
 #
-# roots: HelmRelease OCIRepository HelmRepository FluxInstance
+# roots: HelmRelease OCIRepository HelmRepository FluxInstance GitRepository Kustomization
 #
 # The API server drops a field of a custom resource that its schema does not name, by exact name,
 # so the cluster ignores a key that only differs from one of these by case, as the checks would;
@@ -81,8 +85,12 @@ OCIRepository spec OCIRepositorySpec
 OCIRepositorySpec * open
 OCIRepositorySpec url value
 OCIRepositorySpec ref OCIRepositoryRef
+OCIRepositorySpec layerSelector LayerSelector
 OCIRepositoryRef * open
 OCIRepositoryRef tag value
+LayerSelector * open
+LayerSelector mediaType value
+LayerSelector operation value
 HelmRepository * open
 HelmRepository apiVersion value
 HelmRepository kind value
@@ -104,3 +112,22 @@ FluxInstanceSpec components value
 FluxInstanceSpec kustomize FluxInstanceKustomize
 FluxInstanceKustomize * open
 FluxInstanceKustomize patches []Patch
+GitRepository * open
+GitRepository apiVersion value
+GitRepository kind value
+GitRepository metadata Metadata
+GitRepository spec GitRepositorySpec
+GitRepositorySpec * open
+GitRepositorySpec url value
+GitRepositorySpec ref GitRepositoryRef
+GitRepositorySpec sparseCheckout value
+GitRepositoryRef * open
+GitRepositoryRef tag value
+Kustomization * open
+Kustomization apiVersion value
+Kustomization kind value
+Kustomization metadata Metadata
+Kustomization spec KustomizationSpec
+KustomizationSpec * open
+KustomizationSpec path value
+KustomizationSpec sourceRef SourceReference

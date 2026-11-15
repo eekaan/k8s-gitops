@@ -128,7 +128,8 @@ current. A new version alone leaves the record as it is. With [mise](https://mis
   and fixture node data, and validated, offline), the offline build of `kubernetes/`, its render
   with every chart expanded (`just render-check`, which pulls the charts from their public
   registries), the schemas and images of what it builds and renders (`just kubernetes-validate`,
-  which pulls the charts as well and fetches the schemas), the log collector's configuration
+  which pulls the charts as well and fetches the schemas and the definitions the tree's sources and
+  its operators publish), the log collector's configuration
   (`just vector-check`: Vector itself validates it and runs its unit tests, in the image the
   collector runs, pinned by digest, so it needs Docker too), the alert rules the tree renders
   (`just rules-check`: promtool, in the image of the Prometheus the rendered chart deploys, checks
@@ -215,9 +216,12 @@ The repository checks:
   a closed proxy, a second layer under that rule. The publish run repeats it on the commit it
   publishes and publishes nothing when it fails.
 - `just kubernetes-validate` runs `just kubernetes-check`'s builds and the render, and fails when an
-  object Flux builds has a field its schema lacks or an image of the render has no tag other than
-  `latest` and no digest. It fetches the charts and the schemas, so the publish run does not run
-  it (`docs/kubernetes.md`, What the checks refuse).
+  object Flux builds has a field its schema lacks, is of a kind with no schema that
+  `schema-exceptions.yaml` does not list, or an image of the render has no tag other than `latest`
+  and no digest. It fetches the charts, the schemas, the sources the definitions applications
+  apply definitions from, and the definitions of an operator or of Talos where
+  `operator-definitions.yaml` says their files are, so the publish run does not run it
+  (`docs/kubernetes.md`, What the checks refuse).
 - `just check-literals` fails when a file git would commit, tracked or untracked and not ignored,
   holds an IPv4 literal outside the documentation ranges, loopback, `0.0.0.0`, the metadata
   address and netmasks, unless `.address-allowlist` declares it with a reason. It skips the

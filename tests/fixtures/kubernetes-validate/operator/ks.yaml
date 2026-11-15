@@ -1,0 +1,12 @@
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: operator
+  namespace: flux-system
+spec:
+  path: ./apps/base/demo/operator/app
+  targetNamespace: demo
+  sourceRef:
+    kind: ExternalArtifact
+    name: operator

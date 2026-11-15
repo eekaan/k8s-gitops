@@ -1,0 +1,15 @@
+---
+# The kinds whose objects the tree applies and that scripts/kubernetes-validate (just
+# kubernetes-validate; tests/kubernetes-validate.bats runs it on the tree) has no schema to validate
+# against. A kind of an object the tree applies must have a schema made from a definition the render
+# holds, a definitions application's source pins or operator-definitions.yaml says its operator
+# publishes, or Flux's or Kubernetes' own; an object of a kind that has none fails the check unless
+# the kind is listed here. docs/kubernetes.md, What the checks refuse (Schemas), says how the check reads this file.
+#
+# An entry that has a schema, or that no object of the tree is of, fails the check as well: remove it.
+# An entry has:
+#   group   the API group of the kind, never one of Kubernetes' own or Flux's
+#   kind    the kind
+#   reason  a sentence: why no schema can be made at the version the tree pins, and what proves the
+#           kind's objects instead, or that nothing does
+exceptions: []
