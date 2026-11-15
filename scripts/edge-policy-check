@@ -26,9 +26,9 @@ chmod -R a+rX "$work/in"
 # which check failed and what the proof saw; a container that failed says so as well.
 status=0
 # With no capability, no new privileges and the image's own files read-only: the daemons write only
-# under the proof's own directory in /tmp, and need nothing a stricter runtime than Docker's could
-# withhold.
-docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp \
+# under the proof's own directory in /tmp, and run from a copy of the image's bgpd there, which is
+# why /tmp lets a file run; they need nothing a stricter runtime than Docker's could withhold.
+docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp:exec \
   --entrypoint sh --volume "$work/in:/work:ro" "$image" /work/proof.sh /work > "$work/out" || status=$?
 if ((status != 0)); then
   printf '== container\nended with status %s\n' "$status" >> "$work/out"

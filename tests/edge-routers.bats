@@ -119,14 +119,15 @@ EOF
 }
 
 @test "the routing policy's proof runs with no capability, no new privileges and a read-only root" {
-  # The proof's daemons write only under a directory of the proof's own in /tmp, and need no
-  # privilege, so a runtime that grants less than Docker's defaults cannot stop them unseen.
+  # The proof's daemons write only under a directory of the proof's own in /tmp, and run from a copy
+  # of the image's bgpd there, which /tmp must let run; they need no privilege, so a runtime that
+  # grants less than Docker's defaults cannot stop them unseen.
   fake docker << EOF
 printf '%s\n' "\$@" > "$RECORD/docker.args"
 printf '%s\n' '== proof' 'ran to its end'
 EOF
   run env PATH="$BIN:$PATH" "$ROOT/scripts/edge-policy-check" fixture-image
-  for flag in --cap-drop=ALL --security-opt=no-new-privileges --read-only --tmpfs=/tmp --network=none; do
+  for flag in --cap-drop=ALL --security-opt=no-new-privileges --read-only --tmpfs=/tmp:exec --network=none; do
     echo "$flag"
     grep -qx -- "${flag%%=*}" "$RECORD/docker.args"
     [[ $flag != *=* ]] || grep -A1 -x -- "${flag%%=*}" "$RECORD/docker.args" | grep -qx -- "${flag#*=}"

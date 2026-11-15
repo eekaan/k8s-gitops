@@ -53,6 +53,7 @@ met() {
   fi
 }
 
+says "the daemons run from the proof's own copy of the image's bgpd" binary "the image's bgpd, byte for byte"
 if [[ $(section places | grep -c ': takes a new file$') -eq 5 ]] && ! section places | grep -q ': takes no new file$'; then
   printf 'pass  every place a daemon writes takes a new file from the user the daemons run as\n'
 else

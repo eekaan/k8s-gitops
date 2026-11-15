@@ -5,8 +5,11 @@
 # defaults and whose speakers bind and dial loopback addresses only (edge-policy-check gives it no
 # other network; the Dagger module's exec has the engine's default one). Starts the edge's BGP
 # daemon with the configuration the edge stack renders, and three speakers that open sessions to it,
-# with no routing table of their own to install into (-Z). Each speaker offers five prefixes: one
-# /32 inside the service range, one outside it, a /30 and the /28 range itself, and a default route.
+# with no routing table of their own to install into (-Z). The daemons run the image's bgpd from a
+# copy in the proof's own directory, the same binary with the same rendered policy, so a security
+# profile a host attaches to FRR's installed path does not decide where a test instance may write.
+# Each speaker offers five prefixes: one /32 inside the service range, one outside it, a /30 and the
+# /28 range itself, and a default route.
 #   a  the cluster's AS, from a worker's address: accepted
 #   b  another AS, from a worker's address: refused by the peer group's remote AS
 #   c  the cluster's AS, from an address of the node subnet outside the workers' block, as a control
@@ -73,15 +76,54 @@ else
   echo "a file with an unknown command is refused"
 fi
 
-# bgpd NAME ARG...: starts a BGP daemon as NAME from its configuration in its own directory, with
-# its pid file, log and vty socket there, and what it prints on starting kept beside them.
+# The image's bgpd, copied under a name of its own into the proof's directory: it finds its libraries
+# through the loader, by their own paths, and needs nothing beside it.
+original=/usr/lib/frr/bgpd
+copy=$vty/bin/frr-proof-bgpd
+mkdir -p "$vty/bin"
+cp "$original" "$copy"
+echo "== binary"
+if cmp -s "$original" "$copy" && [ -x "$copy" ]; then
+  echo "the image's bgpd, byte for byte"
+else
+  echo "the copy of the image's bgpd is not the image's bgpd, or cannot be run"
+fi
+
+# label NAME PID BINARY: the security label process PID runs under once it runs BINARY, read as soon
+# as it does, under == labels; or that it exited first.
+label() {
+  tries=0
+  while [ "$(readlink "/proc/$2/exe" 2> /dev/null)" != "$3" ] && [ "$tries" -lt 100 ]; do
+    tries=$((tries + 1))
+    sleep 0.02
+  done
+  if [ "$(readlink "/proc/$2/exe" 2> /dev/null)" = "$3" ]; then
+    echo "$1 ($3): $(cat "/proc/$2/attr/current" 2> /dev/null || echo "no label: no security module")" >> "$vty/labels"
+  else
+    echo "$1 ($3): exited before its label could be read" >> "$vty/labels"
+  fi
+}
+
+# bgpd NAME ARG...: starts a BGP daemon as NAME from the copy, in the background, with its
+# configuration in its own directory and its pid file, log and vty socket there, and what it prints
+# kept beside them; and records the label it runs under.
 bgpd() {
   name=$1
   shift
-  /usr/lib/frr/bgpd -d -S -Z -f "$vty/$name/bgpd.conf" -i "$vty/$name/bgpd.pid" --vty_socket "$vty/$name" \
-    --log "file:$vty/$name/bgpd.log" --log-level informational "$@" > "$vty/$name/start.out" 2>&1 ||
-    echo "bgpd exited with status $? as it started" >> "$vty/$name/start.out"
+  "$copy" -S -Z -f "$vty/$name/bgpd.conf" -i "$vty/$name/bgpd.pid" --vty_socket "$vty/$name" \
+    --log "file:$vty/$name/bgpd.log" --log-level informational "$@" > "$vty/$name/start.out" 2>&1 &
+  label "$name" $! "$copy"
 }
+
+# Once, the image's bgpd from its own path, as a profile attached to that path would confine it: its
+# label, read as it starts, and then it is stopped. It does not listen, and has a file of its own.
+mkdir -p "$vty/original"
+echo "hostname original" > "$vty/original/bgpd.conf"
+: > "$vty/labels"
+"$original" -S -Z -f "$vty/original/bgpd.conf" -i "$vty/original/bgpd.pid" --vty_socket "$vty/original" \
+  -A 127.0.0.1 -P 2699 -p 0 > "$vty/original/start.out" 2>&1 &
+label original $! "$original"
+kill $! 2> /dev/null
 
 # The edge's own file, unchanged but for what the BGP daemon started on its own does not know: the
 # one line only vtysh reads, and the static route, which staticd installs (here there is no zebra).
@@ -196,7 +238,10 @@ else
 fi
 echo "== waits"
 cat "$vty/waits"
-# Whether each daemon still runs once the waits are over, with its own log when it does not.
+# The label each daemon ran under, and whether each still runs once the waits are over, with its
+# own log when it does not.
+echo "== labels"
+cat "$vty/labels"
 echo "== daemons"
 for name in edge a b c; do
   if running "$name"; then

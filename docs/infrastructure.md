@@ -490,12 +490,15 @@ daemons keep the proof's own user, as FRR's own change to its `frr` user needs c
 container is not given, and write only under one directory the proof makes in `/tmp`, a directory of
 its own per daemon for its configuration, pid file, log and vty socket; the proof checks first that
 each takes a new file, and nothing is written under `/etc/frr`, `/run/frr` or `/var/lib/frr`.
-`just edge-policy-check` runs it with no capability, no new privileges and the image's files
-read-only, and a failed proof's report starts with the user it ran as, its capabilities, its
-security label and its user namespace. Each speaker announces its prefixes with a next hop that is
-not its own address, and the check asserts that the accepted /32's path has the speaker's address as
-next hop instead; and that the edge offers graceful restart without the notification bit, as the
-speaker sees its capabilities. Before any of that, FRR's dry run (`vtysh -C -f`) reads the edge's
+The daemons run the image's bgpd from a copy in that directory, the same binary byte for byte, so a
+security profile a host attaches to FRR's installed path does not decide where a test instance may
+write. `just edge-policy-check` runs it with no capability, no new privileges and the image's files
+read-only, its `/tmp` letting the copy run, and a failed proof's report starts with the user it ran
+as, its capabilities, its security label and its user namespace, and gives the label each daemon
+ran under and, once, the label of FRR's installed bgpd. Each speaker announces its prefixes with a
+next hop that is not its own address, and the check asserts that the accepted /32's path has the
+speaker's address as next hop instead; and that the edge offers graceful restart without the
+notification bit, as the speaker sees its capabilities. Before any of that, FRR's dry run (`vtysh -C -f`) reads the edge's
 file as rendered, whole, and must accept it, and must refuse a copy with a command FRR does not
 have, so the check is known to catch one. The static route is taken out of the file the proof's BGP
 daemon reads, which has no `zebra` or `staticd` beside it; the stack's tests check it. The speakers
