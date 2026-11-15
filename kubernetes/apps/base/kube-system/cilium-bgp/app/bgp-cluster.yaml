@@ -10,9 +10,11 @@
 # then shuts its sessions down with a Cease, so the edge routers withdraw its paths at once instead
 # of keeping them as stale for the graceful restart time. The recipes that drain or reboot a worker
 # set it first and remove it when the node is Ready. The NodeRestriction admission plugin keeps a
-# kubelet from setting or removing a label under node-restriction.kubernetes.io/ on its own Node,
-# so only an operator's credentials take a node out or put it back; scripts/lib/cluster.sh names
-# the same key.
+# kubelet from setting or removing a label under node-restriction.kubernetes.io/ on its own Node.
+# The node's Cilium agent copies its Node's labels to its CiliumNode, whose labels the operator
+# matches this selector against, so a node whose agent is not running does not stop matching.
+# docs/infrastructure.md cites Cilium's source for each step; scripts/lib/cluster.sh names the same
+# key.
 apiVersion: cilium.io/v2
 kind: CiliumBGPClusterConfig
 metadata:

@@ -27,10 +27,10 @@
 # reboots the nodes itself, one at a time, through scripts/cluster-reboot, which takes a worker out
 # of BGP first, drains each and waits for it to be Ready again, a control plane with its etcd member,
 # and stops at the first that does not come back, saying last which worker is out of BGP and the
-# command that puts it back; --tolerate <seconds> is passed on to it. A reboot is not the default: a
-# control plane leaves its etcd and the API load balancer for the time it takes, which the operator,
-# not the recipe, decides to accept.
-# Usage: scripts/cluster-talos [cluster] [--onboard] [--yes] [--reboot [--tolerate <seconds>]] [--first <node>]
+# command that puts it back; --tolerate <seconds> and --no-bgp-wait are passed on to it. A reboot is
+# not the default: a control plane leaves its etcd and the API load balancer for the time it takes,
+# which the operator, not the recipe, decides to accept.
+# Usage: scripts/cluster-talos [cluster] [--onboard] [--yes] [--reboot [--tolerate <seconds>] [--no-bgp-wait]] [--first <node>]
 set -euo pipefail
 
 here=$(dirname "$0")
@@ -70,11 +70,11 @@ lb_attempts=15 lb_wait=20 lb_poll=5
 # than 240 seconds after the try, as when earlier ones ran long, keep nothing: the node reverts.
 
 usage() {
-  infra_error "usage: cluster-talos [cluster] [--onboard] [--yes] [--reboot [--tolerate <seconds>]] [--first <node>]"
+  infra_error "usage: cluster-talos [cluster] [--onboard] [--yes] [--reboot [--tolerate <seconds>] [--no-bgp-wait]] [--first <node>]"
   exit 2
 }
 
-cluster='' confirmed=0 onboard=() first='' reboot=0 tolerate=()
+cluster='' confirmed=0 onboard=() first='' reboot=0 tolerate=() bgp_wait=()
 while (($#)); do
   case $1 in
     --yes) confirmed=1 ;;
@@ -84,6 +84,7 @@ while (($#)); do
       tolerate=(--tolerate "$2")
       shift
       ;;
+    --no-bgp-wait) bgp_wait=(--no-bgp-wait) ;;
     --onboard) onboard=(--onboard-new-nodes) ;;
     --first)
       (($# > 1)) && [[ $2 != -* ]] || usage
@@ -101,6 +102,10 @@ while (($#)); do
 done
 if ((${#tolerate[@]} > 0 && !reboot)); then
   infra_error "--tolerate is for the reboots --reboot makes: it is passed to scripts/cluster-reboot"
+  exit 2
+fi
+if ((${#bgp_wait[@]} > 0 && !reboot)); then
+  infra_error "--no-bgp-wait is for the reboots --reboot makes: it is passed to scripts/cluster-reboot"
   exit 2
 fi
 if [[ -n $first && ${#onboard[@]} -gt 0 ]]; then
@@ -175,7 +180,7 @@ reboot_nodes() {
     step="rebooting $node"
     echo "cluster-talos: rebooting $node"
     rest=("${rest[@]:1}")
-    if ! "$here/cluster-reboot" "$node" "$cluster" --yes "${tolerate[@]}"; then
+    if ! "$here/cluster-reboot" "$node" "$cluster" --yes "${tolerate[@]}" "${bgp_wait[@]}"; then
       infra_error "$node did not come back, Ready with its etcd member if it is a control plane, or the API did not ride it out: cluster-reboot $node failed, as its output above says, so nothing else is rebooted"
       infra_error "not rebooted: $( ((${#rest[@]} > 0)) && printf '%s\n' "${rest[@]}" | joined || echo 'no other node')"
       exit 1

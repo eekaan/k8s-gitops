@@ -13,7 +13,9 @@
 #      its CiliumBGPNodeConfig is gone, after which the agent closes its sessions and the edge routers
 #      withdraw its paths at once; it first records which of the node's sessions are established,
 #      and stops, changing nothing, while another worker is out of BGP or when the configuration
-#      cannot be read; a control plane has no BGP, and nothing here changes for it;
+#      cannot be read. --no-bgp-wait, for a worker whose Cilium agent is not running to take the
+#      label up, sets it without reading the configuration or waiting, and says what that can cost;
+#      a control plane has no BGP, and nothing here changes for it;
 #   1. cordons the node and drains it with kubectl, as cluster-upgrade drains, so that nothing new
 #      is placed on it while it goes down: a kubelet that is shutting down rejects every pod it is
 #      given, and the scheduler would go on giving it the same replica. talosctl's own drain, which
@@ -29,7 +31,7 @@
 # Then it prints how many probes it made, how many failed and the longest run of failures, in
 # seconds; uncordons the node, unless it was unschedulable before the recipe ran, which it says;
 # puts a worker back in BGP, waiting until its CiliumBGPNodeConfig is back and the sessions that were
-# established before are again;
+# established before are again, or only until it is back when they are not known;
 # and deletes the pods the shutdown left in phase Failed on it, rejected (NodeShutdown) or
 # terminated (Terminated) as the node went down, which nothing else removes, saying how many. It
 # exits 0 only when the node is Ready again, a control plane with its etcd member, and no probe
@@ -43,7 +45,7 @@
 # it then stops the kubectl or sleep it is waiting for, so nothing of it keeps running. Of kubectl's
 # output only the drain's passes through, as in cluster-upgrade: it names the pods it evicts and
 # those it cannot. The rest is not printed, as it can name the API server's or the nodes' addresses.
-# Usage: scripts/cluster-reboot <node> [cluster] [--yes] [--tolerate <seconds>]
+# Usage: scripts/cluster-reboot <node> [cluster] [--yes] [--tolerate <seconds>] [--no-bgp-wait]
 set -euo pipefail
 
 here=$(dirname "$0")
@@ -51,14 +53,15 @@ here=$(dirname "$0")
 . "$here/lib/cluster.sh"
 
 usage() {
-  infra_error "usage: cluster-reboot <node> [cluster] [--yes] [--tolerate <seconds>]"
+  infra_error "usage: cluster-reboot <node> [cluster] [--yes] [--tolerate <seconds>] [--no-bgp-wait]"
   exit 2
 }
 
-node='' cluster='' confirmed=0 tolerate=0
+node='' cluster='' confirmed=0 tolerate=0 bgp_wait=1
 while (($#)); do
   case $1 in
     --yes) confirmed=1 ;;
+    --no-bgp-wait) bgp_wait=0 ;;
     --tolerate)
       (($# > 1)) || usage
       tolerate=$2
@@ -320,7 +323,7 @@ start_probe
 # A worker leaves BGP first, so the edge routers withdraw its paths before the drain and the reboot
 # rather than keeping them as stale while it is away. A control plane has no BGP.
 if ((!member)); then
-  leave_bgp "$node"
+  leave_bgp "$node" "$bgp_wait"
 fi
 
 step="cordoning $node"

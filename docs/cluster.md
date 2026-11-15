@@ -709,20 +709,21 @@ out of the artifact, which is built from `kubernetes/`.
   `clusterconfig/kubeconfig`, with mode 0600, and points it at `https://KUBE_API_ADDRESS:6443`:
   talman writes the cluster endpoint, the load balancer's address on the node network, which only
   the nodes reach. It prints the file's path. The recipes that use the cluster read it from there.
-- `just cluster-talos [cluster] [--onboard] [--yes] [--reboot [--tolerate <seconds>]]` rolls the
-  configuration out: the cluster's `talman.yaml` and the patches it lists, as they are now. It
-  waits for every node as `cluster-bootstrap` does, then shows what `talman apply --dry-run` says
-  would change on each node, with the cluster's secrets redacted, and applies once the cluster's
-  name is typed back; `--yes` does not ask. talman applies one node at a time, control planes
-  always alone, rebooting a node only when the change needs it and waiting for each to come back
-  before the next. A node in maintenance mode, such as one OpenTofu has just added, is configured
-  only with `--onboard`: the maintenance service authenticates nothing, and a node's configuration
-  carries the cluster's keys. Without it, talman refuses a rollout while such a node is there. With
-  nothing to change, nothing is asked or applied. Once the nodes keep the configuration, or when it
-  stops after some took it, it names those that run an old setting until they reboot, as
-  [A change that needs a reboot](#a-change-that-needs-a-reboot) says, and with `--reboot` reboots
-  them one at a time, as `just cluster-reboot` does, which needs the kubeconfig. It needs the
-  cluster's `talman.yaml` and `secrets.sops.yaml` and the age key's location.
+- `just cluster-talos [cluster] [--onboard] [--yes] [--reboot [--tolerate <seconds>]
+  [--no-bgp-wait]]` rolls the configuration out: the cluster's `talman.yaml` and the patches it
+  lists, as they are now. It waits for every node as `cluster-bootstrap` does, then shows what
+  `talman apply --dry-run` says would change on each node, with the cluster's secrets redacted, and
+  applies once the cluster's name is typed back; `--yes` does not ask. talman applies one node at a
+  time, control planes always alone, rebooting a node only when the change needs it and waiting for
+  each to come back before the next. A node in maintenance mode, such as one OpenTofu has just
+  added, is configured only with `--onboard`: the maintenance service authenticates nothing, and a
+  node's configuration carries the cluster's keys. Without it, talman refuses a rollout while such a
+  node is there. With nothing to change, nothing is asked or applied. Once the nodes keep the
+  configuration, or when it stops after some took it, it names those that run an old setting until
+  they reboot, as [A change that needs a reboot](#a-change-that-needs-a-reboot) says, and with
+  `--reboot` reboots them one at a time, as `just cluster-reboot` does, which needs the kubeconfig;
+  `--tolerate` and `--no-bgp-wait` are passed to each reboot. It needs the cluster's `talman.yaml`
+  and `secrets.sops.yaml` and the age key's location.
 
   `just cluster-talos [cluster] --first <node>` tries the configuration on each node before it keeps
   it, the named node first ([Rolling it out](#rolling-it-out)): it checks the cluster with
@@ -736,24 +737,32 @@ out of the artifact, which is built from `kubernetes/`.
   and node-exporter and Cilium running; it refuses a node `talman.yaml` does not list before it runs
   anything, and does not onboard. It prints node names only: what kubectl and talosctl print about
   the checks names addresses and stays out of the output.
-- `just cluster-upgrade [cluster] [--yes]` upgrades Talos on every node that does not run the
-  version and schematic `talman.yaml` gives it. It shows which nodes `talman upgrade --dry-run`
-  says are behind, and once the cluster's name is typed back, or with `--yes`, fetches the
-  kubeconfig as `cluster-kubeconfig` does, takes an etcd snapshot as `cluster-snapshot` does, and
-  goes through the nodes in `talman.yaml`'s order, one at a time. A node that is behind is drained
-  with `kubectl drain`, upgraded with `talman upgrade`, and uncordoned once its kubelet has
+- `just cluster-upgrade [cluster] [--yes] [--no-bgp-wait]` upgrades Talos on every node that does
+  not run the version and schematic `talman.yaml` gives it. It shows which nodes `talman upgrade
+  --dry-run` says are behind, and once the cluster's name is typed back, or with `--yes`, fetches
+  the kubeconfig as `cluster-kubeconfig` does, takes an etcd snapshot as `cluster-snapshot` does,
+  and goes through the nodes in `talman.yaml`'s order, one at a time. A node that is behind is
+  drained with `kubectl drain`, upgraded with `talman upgrade`, and uncordoned once its kubelet has
   reported Ready since `talman upgrade` returned for it, within ten minutes, before the next is
   drained; a Ready condition from before then, including one posted after the drain, does not
   count. A node on its version is left alone. A worker is taken out of BGP before its drain and put
-  back once it is uncordoned, as `cluster-reboot` does it below, so at most one worker is out at a
-  time and the edge routers withdraw its paths at once; a control plane has no BGP, and a node
-  whose role in `talman.yaml` is neither `controlplane` nor `worker` is not drained. A worker an
-  earlier run left out of BGP is put back first when it is Ready and schedulable, and a run that
-  ends with one still out fails, saying so last. Before each drain the API must answer `/readyz`
-  through the kubeconfig within five minutes, or nothing more is drained. talosctl's own drain is
-  turned off, as it reaches the API at the cluster endpoint, which only the nodes reach. At the end
-  every node must run its version. A run that stops after draining a node leaves that node
-  cordoned: uncordon it with kubectl once it is back; a second run skips it once it is on its
+  back once it is uncordoned, as `cluster-reboot` does it below, `--no-bgp-wait` included, so at
+  most one worker is out at a time and the edge routers withdraw its paths at once; a control plane
+  has no BGP, and a node whose role in `talman.yaml` is neither `controlplane` nor `worker` is not
+  drained. Nothing records which run set a worker's label or whether that run is still working on
+  it, so the recipes cannot tell a worker a stopped run left out from one another run is taking
+  out, and a recipe removes a label it did not set only once the operator has confirmed the run.
+  So, once the cluster's name is typed back, or with `--yes`, a worker out of BGP by a label this
+  run did not set is put back before the first node is upgraded when it is Ready and schedulable;
+  one that is not stops the run before another worker is taken out, or, when none is behind, fails
+  it at the end, saying why it is not put back. With nothing behind, nothing is asked, so a worker
+  that is out is only reported, and the run fails. Either way the last line names the worker and
+  the `kubectl label` command that puts it back; run one of these recipes at a time, as a confirmed
+  run puts back a worker another run is still taking out. Before each drain the API must answer
+  `/readyz` through the kubeconfig within five minutes, or nothing more is drained. talosctl's own
+  drain is turned off, as it reaches the API at the cluster endpoint, which only the nodes reach.
+  At the end every node must run its version. A run that stops after draining a node leaves that
+  node cordoned: uncordon it with kubectl once it is back; a second run skips it once it is on its
   version.
 - `just cluster-upgrade-k8s [cluster] [--yes]` upgrades Kubernetes to the version `talman.yaml`
   gives. It shows what `talman upgrade-k8s --dry-run` says, and once the cluster's name is typed
@@ -862,18 +871,19 @@ out of the artifact, which is built from `kubernetes/`.
   fails, the message of the error the API server or the store answered with, the store's own for a
   query it refuses, or that the API did not answer, without an address and none of kubectl's other
   output. It changes nothing on the cluster and needs the cluster's kubeconfig.
-- `just cluster-reboot <node> [cluster] [--yes] [--tolerate <seconds>]` reboots one node, named by
-  its hostname in the cluster's `talman.yaml`, while it watches the Kubernetes API through its load
-  balancer; for a control plane, that is the check that the API does not go away with one. Any
-  other name, an address among them, is refused before anything runs; a node kubectl cannot read
-  through the kubeconfig, and a `talman.yaml` whose roles cannot be read or name anything but
-  `controlplane` and `worker`, before anything changes. A control plane is rebooted only while etcd
-  is whole, as step 3 checks it: rebooting one while another's member is down, or while etcd holds
-  a member that is no control plane, can leave etcd without a quorum, so the recipe stops before it
-  asks for the name, says why, naming such a member by its hostname, and changes nothing.
-  `cluster-upgrade` drains and upgrades the nodes with code of its own and does not check this.
-  Once the node's name is typed back, or with `--yes`, a probe in the background asks `/readyz`
-  through the kubeconfig once a second, giving each try two seconds, while the recipe, in order:
+- `just cluster-reboot <node> [cluster] [--yes] [--tolerate <seconds>] [--no-bgp-wait]` reboots one
+  node, named by its hostname in the cluster's `talman.yaml`, while it watches the Kubernetes API
+  through its load balancer; for a control plane, that is the check that the API does not go away
+  with one. Any other name, an address among them, is refused before anything runs; a node kubectl
+  cannot read through the kubeconfig, and a `talman.yaml` whose roles cannot be read or name
+  anything but `controlplane` and `worker`, before anything changes. A control plane is rebooted
+  only while etcd is whole, as step 3 checks it: rebooting one while another's member is down, or
+  while etcd holds a member that is no control plane, can leave etcd without a quorum, so the recipe
+  stops before it asks for the name, says why, naming such a member by its hostname, and changes
+  nothing. `cluster-upgrade` drains and upgrades the nodes with code of its own and does not check
+  this. Once the node's name is typed back, or with `--yes`, a probe in the background asks
+  `/readyz` through the kubeconfig once a second, giving each try two seconds, while the recipe, in
+  order:
   0. for a worker, takes it out of BGP: labels it `node-restriction.kubernetes.io/bgp-out`, which
      the `CiliumBGPClusterConfig`'s node selector excludes and a kubelet cannot set or remove, and
      waits, up to `BGP_WAIT` seconds (120), until its `CiliumBGPNodeConfig` is gone. The operator
@@ -883,8 +893,16 @@ out of the artifact, which is built from `kubernetes/`.
      the sessions, and `just edge-routes` shows the edges' side. It first records which of the
      node's sessions are established, and stops, changing nothing, when it cannot read the
      configuration or while another worker is out of BGP. A node that is out already, as after a run
-     that stopped, is recognised and waited for. A control plane has no BGP, and nothing here
-     changes for it;
+     that stopped, is recognised and waited for, and put back after the reboot. A node's Cilium
+     agent is what takes up the label, copying its Node's labels to its `CiliumNode`, so a worker
+     whose agent is not running keeps its `CiliumBGPNodeConfig`, and the wait runs out, saying the
+     configuration is still there and leaving the worker labelled. Then find out why the agent does
+     not run (`just cluster-check` names a pod in `kube-system` that is not Running); when the
+     reboot is still wanted, run the recipe again with `--no-bgp-wait`, which sets the label where
+     it is not set yet, neither reads the configuration nor waits, says so, and goes on as usual.
+     The edge routers may then keep the worker's paths as stale for up to the restart time, 120
+     seconds, from when its agent went down. A control plane has no BGP, and nothing here changes
+     for it;
   1. cordons the node and drains it with `kubectl drain`, as `cluster-upgrade` drains, so nothing
      new is placed on it while it goes down: a kubelet that is shutting down rejects every pod it
      is given, and the scheduler would go on giving it the same replica, each rejected pod left in
@@ -910,7 +928,9 @@ out of the artifact, which is built from `kubernetes/`.
   waits, up to `BGP_WAIT` seconds, until the node's `CiliumBGPNodeConfig` is back and the sessions
   that were established before it was taken out are established again; a node with none before, as
   while the edge stack is not applied or an edge is stopped, is put back all the same, and the
-  recipe says it does not wait for one. It deletes, by namespace and name, the pods the shutdown
+  recipe says it does not wait for one; for a node whose sessions before are not known, one out
+  already or taken out with `--no-bgp-wait`, it waits only until the configuration is back, and
+  says so. It deletes, by namespace and name, the pods the shutdown
   left in phase Failed on the node, with the reason `NodeShutdown` (rejected while it shut down) or
   `Terminated` (terminated as it went down), which stay until they are deleted and on which
   `cluster-check` fails, and says how many, none included; every other pod stays. It exits 0 only

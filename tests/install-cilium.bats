@@ -573,7 +573,7 @@ chart_config() {
   key=$(env -i PATH="$PATH" bash -c '. "$1/scripts/lib/cluster.sh" && echo "$bgp_out_label"' _ "$COPY")
   [ -n "$key" ]
   # The NodeRestriction admission plugin stops a kubelet from setting, changing or removing a label
-  # under this prefix on its own Node, so only an operator's credentials move a node in or out
+  # under this prefix on its own Node
   # (https://kubernetes.io/docs/reference/access-authn-authz/admission-controllers/#noderestriction).
   [[ $key == node-restriction.kubernetes.io/* ]]
 

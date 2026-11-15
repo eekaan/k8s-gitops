@@ -21,6 +21,8 @@
 #   bgp-peers-down    no worker's BGP session is ever established, as with no edge stack to peer with
 #   bgp-peer-late     with bgp-slow, only the second peer is established late after the label is
 #                     removed: the first is established at once
+#   bgp-back-late     with bgp-slow, a worker's CiliumBGPNodeConfig is not there for that many reads
+#                     after its label is removed, as the operator takes a moment to make it again
 #   bgp-unreadable    reading a CiliumBGPNodeConfig fails, as when the API does not answer it
 #   bgp-unreadable-out  the same, but only while the worker carries the label
 #   kube-proxy        a kube-proxy pod runs in kube-system
@@ -125,21 +127,31 @@ bgp_reads() {
 }
 
 # announcing NODE: whether NODE's CiliumBGPNodeConfig exists, which the operator makes for each node
-# the cluster configuration selects: never for a control plane, for a worker without the label, and
-# for one with it only until bgp-slow reads have passed.
+# the cluster configuration selects: never for a control plane; for a worker with the label only
+# until bgp-slow reads have passed, or always with bgp-stays; for one without it, unless bgp-not-back
+# keeps it away once the label was set, or bgp-back-late for bgp-slow reads after it was removed.
 announcing() {
+  local reads slow
   [[ $1 != cp-* ]] || return 1
+  reads=$(cat "$state/bgp-reads.$1" 2> /dev/null || echo 0)
+  slow=$(cat "$state/bgp-slow" 2> /dev/null || echo 0)
   if listed "bgp-out.$1"; then
     listed bgp-stays && return 0
-    (($(cat "$state/bgp-reads.$1" 2> /dev/null || echo 0) < $(cat "$state/bgp-slow" 2> /dev/null || echo 0)))
+    ((reads < slow))
     return
+  fi
+  if listed bgp-back-late && listed "bgp-put-back.$1" && ((reads < slow)); then
+    return 1
   fi
   ! listed bgp-not-back || ! listed "bgp-was-out.$1"
 }
 
-# bgp_node_config NODE: what kubectl get ciliumbgpnodeconfig NODE --ignore-not-found prints: nothing
-# when there is no such object, else the object, its peers established unless the node's label was
-# removed fewer than bgp-slow reads ago.
+# bgp_node_config NODE: what kubectl get ciliumbgpnodeconfig NODE --ignore-not-found prints: an
+# error, and a failure, with bgp-unreadable, or with bgp-unreadable-out while NODE carries the label;
+# otherwise nothing while announcing says there is no such object, else the object, its two peers
+# active with bgp-peers-down, else established, unless the label has been set on NODE and last
+# changed fewer than bgp-slow reads ago, which leaves the second active, and the first too without
+# bgp-peer-late.
 bgp_node_config() {
   local first=established second=established present=0
   if listed bgp-unreadable || { listed bgp-unreadable-out && listed "bgp-out.$1"; }; then
@@ -364,6 +376,7 @@ case $args in
           ;;
         node-restriction.kubernetes.io/bgp-out-)
           rm -f "$state/bgp-out.$node"
+          : > "$state/bgp-put-back.$node"
           echo 0 > "$state/bgp-reads.$node"
           echo "node/$node unlabeled"
           ;;

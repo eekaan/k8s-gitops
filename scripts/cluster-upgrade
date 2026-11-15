@@ -7,31 +7,34 @@
 # stops the run before any node is touched. Each node that is behind is drained with kubectl,
 # upgraded with talman, and uncordoned once its kubelet has reported Ready since the upgrade began,
 # before the next is drained. A node already on its version is not drained. A worker is taken out of
-# BGP before its drain, waiting for up to BGP_WAIT seconds (120) until Cilium has it announce
-# nothing, so the edge routers withdraw its paths at once, and put back once it is uncordoned, so no
-# more than one worker is out at a time. A worker that an earlier run left out is put back first when
-# it is Ready and schedulable, and otherwise stops the run before another is taken out; a run that
-# stops with a worker out says so last, with the command that puts it back.
+# BGP before its drain, waiting for up to BGP_WAIT seconds (120) until its CiliumBGPNodeConfig is
+# gone, so the edge routers withdraw its paths at once, and put back once it is uncordoned, so no
+# more than one worker is out at a time; --no-bgp-wait skips the first wait, for a worker whose
+# Cilium agent is not running. A worker out of BGP by a label this run did not set is put back, once
+# the run is confirmed, when it is Ready and schedulable, and otherwise stops the run before another
+# is taken out and fails it at the end; with nothing behind it is only reported, and the run fails.
+# A run that stops with a worker out says so last, with the command that puts it back.
 #
 # kubectl reaches the API through the kubeconfig cluster-kubeconfig fetches, served at
 # KUBE_API_ADDRESS, and the run stops before a drain when the API does not answer there. talosctl's
 # own drain is turned off: it reaches the API at the cluster endpoint, the load balancer's address
 # on the node network, which only the nodes reach. When a run stops after draining a node, the node
 # stays cordoned until it is uncordoned by hand; a second run skips it once it is on its version.
-# Usage: scripts/cluster-upgrade [cluster] [--yes]
+# Usage: scripts/cluster-upgrade [cluster] [--yes] [--no-bgp-wait]
 set -euo pipefail
 
 here=$(dirname "$0")
 # shellcheck source=scripts/lib/snapshot.sh
 . "$here/lib/snapshot.sh"
 
-cluster='' confirmed=0
+cluster='' confirmed=0 bgp_wait=1
 for arg; do
   case $arg in
     --yes) confirmed=1 ;;
+    --no-bgp-wait) bgp_wait=0 ;;
     *)
       if [[ $arg == -* || -n $cluster ]]; then
-        infra_error "usage: cluster-upgrade [cluster] [--yes]"
+        infra_error "usage: cluster-upgrade [cluster] [--yes] [--no-bgp-wait]"
         exit 2
       fi
       cluster=$arg
@@ -94,11 +97,11 @@ behind=0
 cluster_talman upgrade --dry-run --detailed-exit-code || behind=$?
 case $behind in
   0)
-    # A worker an earlier run left out of BGP, which only the kubeconfig that run fetched can tell;
-    # without one no run of this checkout took a worker out.
+    # A worker another run left out of BGP, which only the kubeconfig such a run fetched can tell;
+    # without one no run of this checkout took a worker out. Nothing is asked here, so it is only
+    # reported.
     if [[ -f $KUBECONFIG ]]; then
-      bgp_settle_left_out
-      ((${#bgp_left_out[@]} == 0)) || exit 1
+      bgp_check_left_out "with nothing behind nothing is asked, so it is not put back" || exit 1
     fi
     echo "cluster-upgrade: every node of $cluster runs its configured Talos"
     exit 0
@@ -146,7 +149,7 @@ for node in "${nodes[@]}"; do
   step="reading the role of $node in talman.yaml"
   role=$(NODE=$node yq '.nodes[] | select(.hostname == strenv(NODE)) | .role // ""' "$talman_file")
   case $role in
-    worker) leave_bgp "$node" ;;
+    worker) leave_bgp "$node" "$bgp_wait" ;;
     controlplane) ;;
     *)
       infra_error "talos/$cluster/talman.yaml gives $node the role ${role:-none}, neither controlplane nor worker, so it is not known whether it announces over BGP; $node is not drained"
@@ -169,8 +172,12 @@ for node in "${nodes[@]}"; do
   fi
 done
 
-# A worker the loop skipped as it runs its version may still be out from a run that stopped.
-bgp_settle_left_out
+# A worker that was out of BGP before the loop and not put back, as it was not both Ready and
+# schedulable, is still out once the loop has skipped it as it runs its version.
+step="checking that no worker is out of BGP"
+for node in "${bgp_left_out[@]}"; do
+  infra_error "$node is out of BGP and was not both Ready and schedulable when the run began, so it is not put back"
+done
 ((${#bgp_left_out[@]} == 0)) || exit 1
 
 step="checking that every node runs its configured Talos"
