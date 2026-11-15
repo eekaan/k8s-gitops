@@ -1,0 +1,29 @@
+---
+# Values for the silence operator's chart, read by the HelmRelease through a ConfigMap generated
+# without substitution. Keys not set here keep the chart's defaults: one replica, leader election,
+# the restricted security contexts, the probes and the PodMonitor.
+
+# The cluster's Alertmanager by the name of its Service, which the monitoring chart makes from the
+# release name kube-prometheus-stack, on the port it serves: no address that a rebuilt cluster
+# could give to something else. Alertmanager listens in plain HTTP.
+alertmanagerAddress: http://kube-prometheus-stack-alertmanager.monitoring.svc.cluster.local:9093
+# With this on, the operator sends its service account's token to Alertmanager as a bearer token.
+# This Alertmanager asks for none, so the token stays with the Kubernetes API, which the operator
+# reads its Silence objects from.
+alertmanagerAuthentication: false
+
+# The chart's policy would allow ingress on the metrics port only and egress everywhere. No other
+# application of the tree has a network policy, and this one adds none of its own.
+networkPolicy:
+  enabled: false
+
+# The chart's requests with a memory limit and no CPU limit, which would only throttle a
+# reconcile: the operator holds the few Silence objects of the tree and one connection to
+# Alertmanager.
+resources:
+  requests:
+    cpu: 20m
+    memory: 50Mi
+  limits:
+    cpu: null
+    memory: 100Mi

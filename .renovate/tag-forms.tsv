@@ -49,3 +49,4 @@ github-tags	siderolabs/talos	^v[0-9]+\.[0-9]+\.[0-9]+$	tag list
 github-tags	kubernetes/kubernetes	^v[0-9]+\.[0-9]+\.[0-9]+$	tag list
 docker	ghcr.io/home-operations/kromgo	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list, which holds latest, rolling and main-* tags besides the releases
 docker	ghcr.io/home-operations/charts-mirror/external-dns	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	gsoci.azurecr.io/charts/giantswarm/silence-operator	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
