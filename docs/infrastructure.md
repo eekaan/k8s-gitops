@@ -216,9 +216,9 @@ output `bgp`:
   network address nor its last, and the plan fails naming the variable otherwise. The output `bgp`
   carries the address as `gateway_address`, and the cluster stack hands it on in `talman.yaml` as
   `values.bgp.gatewayAddress`, from which `just cluster-config` fills `GATEWAY_ADDRESS`. The
-  LoadBalancer pool holds the whole range and does not set the address aside: keeping another
-  Service from being given it first is for the change that adds the Gateway, which asks the pool
-  for it by annotation.
+  LoadBalancer pool holds the whole range and does not set the address aside; the public Gateway's
+  Service asks the pool for it by annotation
+  ([kubernetes.md](kubernetes.md#the-public-gateway)).
 
 The cluster stack hands them on in `talman.yaml` ([below](#the-generated-talmanyaml)) and makes
 the node network carry the range:

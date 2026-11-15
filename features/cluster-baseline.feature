@@ -91,7 +91,7 @@ Feature: Cluster baseline
     When they are read
     Then the namespace enforces the restricted level and every pod template the chart renders meets it
 
-  Scenario: Envoy Gateway has a GatewayClass and no Gateway
+  Scenario: Envoy Gateway has a GatewayClass and no Gateway of its own
     Given the Envoy Gateway applications, enabled in the cluster's overlay
     When they are built offline as Flux applies them
-    Then the controller waits for both definition applications and yields one GatewayClass for the controller name the chart configures, and no Gateway
+    Then the controller waits for both definition applications and yields one GatewayClass for the controller name the chart configures, and no Gateway among what either application makes

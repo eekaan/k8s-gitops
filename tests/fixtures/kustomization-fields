@@ -1,0 +1,153 @@
+# The fields of kustomize's Kustomization type and of every type it holds, by the names kustomize
+# reads them under: sigs.k8s.io/kustomize/api, types/*.go (Kustomization, ObjectMeta, Label, Patch,
+# PatchArgs, Selector, Image, ReplacementField, Replacement, SourceSelector, TargetSelector,
+# FieldOptions, Replica, Var, Target, FieldSelector, SortOptions, LegacySortOptions, ConfigMapArgs,
+# SecretArgs, GeneratorArgs, KvPairSources, GeneratorOptions), with kyaml's resid.Gvk and
+# resid.ResId inline where a type embeds them, and the keys of Kustomization.OpenAPI that
+# kustomize reads (krusty/kustomizer.go). The two versions below hold the same types:
+#
+# flux: sigs.k8s.io/kustomize/api v0.21.2
+# kustomize: v5.8.3 (sigs.k8s.io/kustomize/api v0.21.3)
+# root: Kustomization
+#
+# flux builds with the api version its binary records; the kustomize binary records none, and its
+# release names the version in kustomize/go.mod. tests/kubernetes-check.bats fails when either
+# pinned tool moves to another version, until the fields are read again at the new one.
+#
+# Both read a kustomization with encoding/json, which matches a key to a field without regard to
+# case, so the checks accept each field by exactly this name and refuse any other key at a typed
+# position. One field a line: the type, the field, and what it holds:
+#   value    a scalar, or a list of scalars, that names no file;
+#   map      a map of strings, whose keys are data, not fields;
+#   path     a file kustomize reads, or fetches;
+#   paths    a list of files or directories kustomize reads, or remote sources it fetches;
+#   dirs     a list of directories (Components) kustomize reads, or remote sources;
+#   files    a list of KEY=FILE or FILE kustomize reads;
+#   refused  generators, transformers and validators name plugin configurations, whose own fields
+#            name more files, and Helm charts are inflated only with --enable-helm, which neither
+#            Flux nor the checks give: the checks refuse a kustomization that sets one;
+#   TYPE, []TYPE  an object of that type, or a list of them.
+Kustomization apiVersion value
+Kustomization kind value
+Kustomization metadata ObjectMeta
+Kustomization openapi OpenAPI
+Kustomization namePrefix value
+Kustomization nameSuffix value
+Kustomization namespace value
+Kustomization commonLabels map
+Kustomization labels []Label
+Kustomization commonAnnotations map
+Kustomization patchesStrategicMerge paths
+Kustomization patchesJson6902 []Patch
+Kustomization patches []Patch
+Kustomization images []Image
+Kustomization imageTags []Image
+Kustomization replacements []ReplacementField
+Kustomization replicas []Replica
+Kustomization vars []Var
+Kustomization sortOptions SortOptions
+Kustomization resources paths
+Kustomization components dirs
+Kustomization crds paths
+Kustomization bases paths
+Kustomization configMapGenerator []ConfigMapArgs
+Kustomization secretGenerator []SecretArgs
+Kustomization helmGlobals refused
+Kustomization helmCharts refused
+Kustomization helmChartInflationGenerator refused
+Kustomization generatorOptions GeneratorOptions
+Kustomization configurations paths
+Kustomization generators refused
+Kustomization transformers refused
+Kustomization validators refused
+Kustomization buildMetadata value
+ObjectMeta name value
+ObjectMeta namespace value
+ObjectMeta labels map
+ObjectMeta annotations map
+OpenAPI path path
+OpenAPI version value
+Label pairs map
+Label includeSelectors value
+Label includeTemplates value
+Label includeVolumeClaimTemplates value
+Label fields []FieldSpec
+FieldSpec group value
+FieldSpec version value
+FieldSpec kind value
+FieldSpec path value
+FieldSpec create value
+Patch path path
+Patch patch value
+Patch target Selector
+Patch options PatchArgs
+PatchArgs allowNameChange value
+PatchArgs allowKindChange value
+Selector group value
+Selector version value
+Selector kind value
+Selector name value
+Selector namespace value
+Selector annotationSelector value
+Selector labelSelector value
+Image name value
+Image newName value
+Image tagSuffix value
+Image newTag value
+Image digest value
+ReplacementField path path
+ReplacementField source SourceSelector
+ReplacementField targets []TargetSelector
+ReplacementField sourceValue value
+SourceSelector group value
+SourceSelector version value
+SourceSelector kind value
+SourceSelector name value
+SourceSelector namespace value
+SourceSelector fieldPath value
+SourceSelector options FieldOptions
+TargetSelector select Selector
+TargetSelector reject []Selector
+TargetSelector fieldPaths value
+TargetSelector options FieldOptions
+FieldOptions delimiter value
+FieldOptions index value
+FieldOptions encoding value
+FieldOptions create value
+Replica name value
+Replica count value
+Var name value
+Var objref Target
+Var fieldref FieldSelector
+Target apiVersion value
+Target group value
+Target version value
+Target kind value
+Target name value
+Target namespace value
+FieldSelector fieldPath value
+SortOptions order value
+SortOptions legacySortOptions LegacySortOptions
+LegacySortOptions orderFirst value
+LegacySortOptions orderLast value
+ConfigMapArgs namespace value
+ConfigMapArgs name value
+ConfigMapArgs behavior value
+ConfigMapArgs literals value
+ConfigMapArgs files files
+ConfigMapArgs envs paths
+ConfigMapArgs env path
+ConfigMapArgs options GeneratorOptions
+SecretArgs namespace value
+SecretArgs name value
+SecretArgs behavior value
+SecretArgs literals value
+SecretArgs files files
+SecretArgs envs paths
+SecretArgs env path
+SecretArgs options GeneratorOptions
+SecretArgs type value
+GeneratorOptions labels map
+GeneratorOptions annotations map
+GeneratorOptions disableNameSuffixHash value
+GeneratorOptions immutable value

@@ -12,7 +12,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: probe
-          image: {{ .Values.testImage }}
+          image: {{ .Values.testImage | toJson }}
 {{- end }}
 {{- if .Values.upgradeImage }}
 ---

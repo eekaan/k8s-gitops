@@ -137,6 +137,91 @@ On what Flux builds:
   patches: `wait: true`, `healthChecks` or `healthCheckExprs`. Otherwise the dependent never
   reconciles, or starts before its dependency's objects are ready. The message names both
   Kustomizations and the overlay.
+- **Paths** (`kubernetes-check` and `scripts/render`). `flux build` reads with kustomize's load
+  restrictions off (`LoadRestrictionsNone`, its own setting), and so does `kubernetes-check`'s
+  `kustomize`, as an overlay lists `ks.yaml` files outside its own directory: either reads any path
+  a kustomization names and follows any link. Both read a kustomization, and `flux build` the Flux
+  Kustomization it is given, with Go's `encoding/json`, which reads a key into a field when the key
+  is the field's name or folds to it, so `spec.Components` is `spec.components` to `flux build`.
+  Before they read or build anything else, both checks refuse a tree from which a build would read
+  outside `kubernetes/`, or that a tool would read otherwise than they do, naming each file and the
+  key or entry, and build nothing (`scripts/lib/tree-paths.sh`):
+  - a link in the tree that resolves outside it, or to nothing;
+  - a kustomization file (`kustomization.yaml`, `kustomization.yml` or `Kustomization`, a
+    Component's included, used or not) that is not one mapping (empty, a list, text, or more than
+    one document), or that holds a key twice, an anchor, an alias, a merge key, a tag outside YAML's
+    core schema or a NUL character, which kustomize's decoder may read otherwise than the checks;
+  - a kustomization file with a key, at any position kustomize decodes into a type, that is not
+    ASCII or not exactly one of that type's fields, or with a field the checks refuse
+    (`generators`, `transformers` and `validators`, whose plugin configurations name files of their
+    own, and the Helm chart fields, as neither Flux nor the checks inflate a chart);
+  - an entry of a field that names a file or a directory that is not a plain path, or that leaves
+    the tree, read as text or with every link on it resolved;
+  - a root whose `spec.path` is not a plain path of a directory of the tree under `kubernetes/`, as
+    it resolves;
+  - a Flux Kustomization with a key, at any position `flux build` decodes into a type, that is not
+    ASCII, or that folds to one of that type's fields without being it, or whose `spec.components`
+    names anything but a plain path of the tree. `kubernetes-check` checks each `ks.yaml` it builds
+    before it builds any, and the file it hands `flux build` as it builds; the render checks each
+    cluster's root before it builds anything and each Kustomization as it hands it to
+    `flux build`. `flux build` reads no key that matches no field, and the schema check below
+    refuses one.
+
+  A plain path is relative, and made of segments of the ASCII letters, digits, `.`, `_` and `-`
+  alone, separated by single `/`: none empty and none that starts with `-`. A segment that is
+  exactly `..` climbs, and is allowed only while the resolved path stays inside the tree; dots
+  inside a longer segment, as in `a..b` or `...`, are part of a name. A generator's `KEY=PATH` has a
+  key of the same characters. So no entry holds `:`, `@`, `?`, `#`, `%`, `\`, `~`, a space, a
+  control character or a byte outside ASCII, and none is a URL, an scp-style address or a `git::`
+  form. kustomize reads one remote form without those, a path whose first segment is `github.com` in
+  any case (`isStandardGithubHost` in its `api/internal/git/repospec.go`), and the checks refuse
+  that too. The checks judge the tree's text with `jq`, which reads it as Unicode code points, and
+  run their scripts and every function of the guard in the C locale, so the caller's locale changes
+  nothing they decide; a value of the tree in a message shows each byte outside printable ASCII as
+  `\xHH`.
+
+  The free-form positions are not checked by key: labels, annotations, `commonLabels`,
+  `commonAnnotations`, a label's `pairs`, generator options' labels and annotations,
+  `postBuild.substitute`, the text of a patch, generator literals, a release's `values` and a
+  ConfigMap's data are maps or text, which the decoders read by exact key or not at all and never
+  as a path, a host or a field. The fields the checks know are recorded with the types they come
+  from: `tests/fixtures/kustomization-fields` (kustomize's `Kustomization` and every type it holds),
+  `flux-kustomization-fields` (Flux's `Kustomization` and every type it holds) and `read-fields`.
+  `tests/kubernetes-check.bats` fails when either pinned tool moves to another version of these
+  types until they are read again, and when the checks and a list disagree; it writes every case
+  and `encoding/json` fold of every field at every position, and every kind of character a plain
+  path holds none of in every field that names a file, into a tree, and requires each to be
+  refused, naming the file and the key or entry, by every check that reads it, in the C locale and
+  in C.UTF-8.
+
+  The grammar is what refuses every URL: no entry with a `:` passes. The builds of the checks run
+  in a second layer under it: `kustomize`, `flux build`, `helm template` and the Pod Security
+  check's `flux install` see a `git` first on their path that refuses, which is what kustomize runs
+  for a remote base (`exec.LookPath("git")`), git's protocols and prompts off; `HTTP_PROXY` and
+  `HTTPS_PROXY`, in both cases, name port 0 of the loopback, where nothing listens, with `NO_PROXY`
+  empty, so Go's HTTP client, with which kustomize fetches a remote file, sends a request for any
+  other host there and fails. `ALL_PROXY`, in both cases, names the same port for git and libcurl,
+  which read it; Go does not. The layer does not cover a plain HTTP request to the loopback of the
+  machine that runs a check, which Go never sends to a proxy. The processes that fetch are
+  `helm pull` in the render, for the charts, and `kubernetes-validate`'s `curl` and `kubeconform`,
+  for the schemas.
+
+  The `spec.path` of an application's `ks.yaml` is compared with the one its directory fixes, and
+  what is built is that directory's `app/`. The render builds a copy of `kubernetes/` alone and
+  reads `versions.yaml` beside it, neither of them a link.
+
+  A document no tool decodes is read by the checks by its fields' exact names, and they hand a tool
+  only what they derive from it: the render a HelmRelease and the `OCIRepository` or
+  `HelmRepository` it names, from which helm gets a chart's URL, name and version as arguments and
+  values files the render writes, and kustomize a kustomization the render writes from the
+  release's post-renderers; the Pod Security check a `FluxInstance`, from whose patches it writes a
+  kustomization. The API server drops a field of a custom resource that its schema does not name,
+  by exact name, so the cluster ignores the same spellings the checks do not read; a key that is not
+  ASCII, or that folds to a field they read without being it, is refused
+  (`tests/fixtures/read-fields`). What they hand kustomize, a post-renderer's or the instance's
+  patches and a post-renderer's images, holds a patch, its target and an image's fields by their
+  exact names alone: any other key there, such as a `path` kustomize would read or fetch, is
+  refused.
 - **Schemas** (`kubernetes-validate`). Everything Flux builds as `kubernetes-check` builds it,
   each application from its own `ks.yaml` (enabled or not), each cluster's root and each cluster
   directory, is validated by kubeconform with unknown fields refused, against the first schema
@@ -211,7 +296,11 @@ What the tree and the charts hold is data to the validation, a chart's definitio
 pull request that bumps a chart's version does not show. A group, version or kind reaches a path or
 a schema location only once it has the shape the API server requires of it (a group a DNS subdomain,
 a version a DNS-1035 label, a kind a letter followed by letters and digits); a definition or an
-object without that shape is refused, naming its file, and nothing is made of it. Every record the
+object without that shape is refused, naming its file, and nothing is made of it. The shapes
+(`scripts/lib/shapes.sh`, which `scripts/render` uses as well) are anchored at the true end of the
+string, so a value that ends in a line break does not pass, and a control character fails them. A
+definition for which no schema can be written is an error naming it, never one left out, and an
+image that ends in a line break after its tag or digest is not pinned. Every record the
 validation reads from a tool's output has each field cleaned of control characters, so no value
 starts another field or record, and an index in it is checked to be a number before it is used.
 `kubernetes-check` hands its builds on as records ended by a NUL byte, which no path or label holds,
@@ -266,11 +355,12 @@ level is declared in the tree, never left to the API server's default.
   less than `restricted` does not audit and warn at `restricted` at the cluster's minor.
   `tests/pod-security.bats` proves each rule on a small render and runs the check on the tree.
 - **The Flux install it evaluates.** The pinned Flux CLI's `flux install --export` for the
-  components the FluxInstance names, with the instance's patches applied: the controllers of the
-  `flux2` release pinned in `mise.toml`. The operator installs the newest Flux 2.x release in its
-  manifests artifact ([Flux itself](#flux-itself)). Renovate moves the CLI pin and the artifact in
-  separate pull requests, so once one has merged and until the other does, the check evaluates
-  another Flux release than the one the cluster runs.
+  components the FluxInstance names, with the instance's patches applied, each a patch and its
+  target by their exact fields (any other key is refused, [Paths](#what-the-checks-refuse)): the
+  controllers of the `flux2` release pinned in `mise.toml`. The operator installs the newest Flux
+  2.x release in its manifests artifact ([Flux itself](#flux-itself)). Renovate moves the CLI pin
+  and the artifact in separate pull requests, so once one has merged and until the other does, the
+  check evaluates another Flux release than the one the cluster runs.
 - **The evaluator.** Kyverno's `podSecurity` rule, pinned in `mise.toml` with the release's
   checksums, which runs Kyverno's fork of the Pod Security admission policy library at the 1.36
   check set, at the library's latest policy version. The rule is of Kyverno's legacy policy type,
@@ -299,6 +389,15 @@ level is declared in the tree, never left to the API server's default.
     `spec.csiController` and `spec.affinityController`, each naming every container of the
     operator's template at its pinned version. Its satellites, CSI node plugin, NFS server and HA
     controller run privileged and are entries of the exceptions file, `created-by` it.
+  - `EnvoyProxy/public` in `envoy-gateway-system`: the pod's non-root user and seccomp profile in
+    `spec.provider.kubernetes.envoyDeployment.pod.securityContext`, and the proxy container's
+    non-root user, seccomp profile, no privilege escalation and no capabilities in
+    `envoyDeployment.container.securityContext`; the controller adds its shutdown manager container
+    with the same hardened defaults. `tests/gateway.bats` requires these fields in the built
+    `EnvoyProxy`, and this list's check of the paths cannot: the render holds no definition of
+    `EnvoyProxy` to read them against, as `envoy-gateway-crds` applies Envoy Gateway's definitions
+    from the chart through an inner `Kustomization`, outside the render
+    ([The public Gateway](#the-public-gateway)).
   - The ReplicationSource `<app>` and ReplicationDestination `<app>-restore` of each application
     with a backed-up volume, `volsync-demo` in `demo` among them: the movers' non-root user and
     seccomp profile, in `spec.restic.moverSecurityContext`, from `components/volsync`; VolSync
@@ -486,10 +585,16 @@ restarts every agent, node by node, and the operator.
   the sessions stay down: a labelled Service gets an address, but nothing outside the cluster
   reaches it.
 - **The Gateway's address.** The edge routers forward public traffic to one address of the service
-  range, `GATEWAY_ADDRESS` in `cluster-config`, a host the plumbing stack picks. Nothing in the tree
-  uses it yet: the public Gateway is to ask the pool for it with the `lbipam.cilium.io/ips`
-  annotation. The pool does not set it aside, so any other labelled Service may be given it first;
-  keeping that from happening is for the change that adds the Gateway.
+  range, `GATEWAY_ADDRESS` in `cluster-config`, a host the plumbing stack picks. The public Gateway's
+  proxies' Service asks the pool for it with the `lbipam.cilium.io/ips` annotation and carries the
+  label ([The public Gateway](#the-public-gateway)). The pool does not set it aside, so any other
+  labelled Service may be given it first, and the Gateway's Service would then stay pending.
+  `tests/gateway.bats` holds that, of every object the overlay's applications apply, built offline,
+  only the `EnvoyProxy` `public` carries the label outside a selector, sets an LB-IPAM annotation or
+  names the address; that no text among them, the values a chart takes from a ConfigMap included,
+  holds the label's key or an LB-IPAM key; and that only the Gateway `public` names that
+  `EnvoyProxy`. A chart's own defaults are not read, so a chart that labels a Service by default
+  would go unseen.
 - **`externalTrafficPolicy`.** With `Cluster`, the default, every worker announces every labelled
   address, the edge routers spread connections over all of them, and a worker forwards each to an
   endpoint on any node, translating the source to its own address when the endpoint is elsewhere.
@@ -877,10 +982,9 @@ to set, while it is not the image the chart runs.
 ## cert-manager
 
 `apps/base/cert-manager/cert-manager/` installs cert-manager, which issues and renews the TLS
-certificates applications and gateways ask for, from the issuers they name (ADR 0006). Its only
-issuers are OpenBao's own, which are namespaced and sign OpenBao's listener certificate alone
-([OpenBao](#openbao)); no ClusterIssuer exists yet, so it issues nothing for an application or a
-gateway.
+certificates applications and gateways ask for, from the issuers they name (ADR 0006). OpenBao's own
+issuers are namespaced and sign OpenBao's listener certificate alone ([OpenBao](#openbao)); the one
+issuer any namespace may name is the `ClusterIssuer` `cluster-ca`, below.
 
 It runs in its own namespace, `cert-manager`, at the restricted Pod Security level, from the
 publisher's chart in `oci://quay.io/jetstack/charts`; its leader election leases are there too, so
@@ -900,6 +1004,27 @@ one. They run at `system-cluster-critical` with small requests and no limits. No
 PodMonitor is enabled. `tests/baseline.bats` renders the chart with these values and checks the
 namespace, the definitions and their policy, the Gateway API configuration and dependency, and the
 replicas, spreads and budgets.
+
+### The cluster's own CA
+
+`apps/base/cert-manager/cluster-ca/` applies three objects in `cert-manager`: a SelfSigned `Issuer`,
+`cluster-ca-bootstrap`; the `Certificate` `cluster-ca`, a CA (`isCA`) of ECDSA P-384, valid for ten
+years and renewed in the last one, with the key kept on renewal, which the bootstrap issuer signs
+and which cert-manager keeps in the Secret `cluster-ca`; and the `ClusterIssuer` `cluster-ca`, of
+kind CA, that signs with that Secret. The application names `cert-manager` in `dependsOn` and sets
+`wait`, so it is Ready only once the authority is issued and the issuer is, and what names it in
+`dependsOn` finds an issuer that signs. The bootstrap issuer is namespaced, so no other namespace
+can ask it for a certificate.
+
+This is an interim authority: it is made in the cluster, its private key is in a Secret in
+`cert-manager`, and no tree file holds a key; nothing outside the cluster trusts it; and it is lost
+with the cluster, as a rebuilt cluster makes a new one, which a client that had been given the old
+one must be given again. It is not the decision of ADR 0006, which stands unamended: the public
+certificate comes from the Let's Encrypt DNS-01 issuer of that record when its story lands, and each
+`Certificate` that names `cluster-ca` then changes its `issuerRef`, one place for the Gateway's
+([The public Gateway](#the-public-gateway)). `tests/gateway.bats` checks the three objects, the
+Gateway's certificate against them, and that neither application's build holds a Secret nor its
+directory a private key; `secrets-scan` covers the rest of the tree.
 
 ## Autoscaling and reflection
 
@@ -1019,7 +1144,10 @@ restricted requires ([Pod Security](#pod-security)).
   each at the generation the object holds. That is what the applications that name it in
   `dependsOn` wait for. It does not wait for every satellite to run, so a node down does not hold
   them back; a satellite that never starts shows as the storage cluster's `Configured` condition,
-  which the check leaves out, and in the satellite counts of its status.
+  which the check leaves out, and in the satellite counts of its status. It carries
+  `k8s-gitops/timeout: long`: on a first install the storage controller can take longer than the
+  root's default 3m to report `Available`, and the health check would fail every minute until it
+  does.
 
 ### What runs
 
@@ -1311,11 +1439,145 @@ serves every stable kind and version of the chart's copy; an Envoy Gateway updat
 Gateway API therefore waits for `gateway-api-crds` to move first. The tests also render the chart
 and build both applications offline to check the rest of this section.
 
-No Gateway exists yet. A Gateway's proxies are reached through a Service of type LoadBalancer,
-which needs the cloud controller, and its HTTPS listener needs a certificate from an issuer that
-serves its namespace, which no issuer does yet: cert-manager's only issuers are OpenBao's, in the
-`openbao` namespace. Until both are in place the controller accepts the GatewayClass and runs no
-proxy.
+### The public Gateway
+
+`gateway-public`, an application of the same namespace, runs the one Gateway, `public`, of the
+GatewayClass `envoy-gateway`. It names `envoy-gateway`, `cluster-ca` (the issuer,
+[cert-manager](#cert-manager)) and `cilium-bgp` in `dependsOn`, so it starts once the controller
+runs, an issuer signs and the pool and the BGP objects exist. It is Ready, with the 10 minute
+timeout, once its certificate is issued and the controller reports the Gateway programmed, which it
+does once the proxies' Service holds an address and the proxies are available. A cluster whose
+overlay does not list it runs no Gateway, and `hello-route`, the application that has a route on it,
+cannot be listed without it: `just kubernetes-check` refuses the dependency.
+
+- **Its address.** The Gateway names the `EnvoyProxy` `public` in `infrastructure.parametersRef`.
+  That gives the Service the controller makes for the proxies type `LoadBalancer`, the label
+  `k8s-gitops/announce: bgp` and the annotation `lbipam.cilium.io/ips: ${GATEWAY_ADDRESS}`, so
+  Cilium gives it the one address of the service range the edge routers forward public traffic to,
+  and the workers announce that address ([Service addresses](#service-addresses)). No address is
+  written in the tree.
+- **`externalTrafficPolicy: Cluster`**, where the controller's default is `Local`. Every worker
+  announces the address and forwards a connection to a proxy on any node, so a proxy that is
+  replaced, drained or moved changes no route an edge router holds, and no connection is reset by a
+  route that went away; with `Local` only the workers that run a proxy would announce it, and each
+  rollout would withdraw and add routes. `Local` would keep the source of a connection, but the edge
+  routers translate every client's address to their own (ADR 0018), so there is no client address to
+  keep. A proxy therefore sees as the client the address of an edge router, or of the worker that
+  forwarded the connection from another node, never the client's, and its access logs carry that
+  address.
+- **The proxies.** Two replicas, spread over the workers with a skew of one and never scheduled
+  where that fails, under a disruption budget that keeps one running, with requests of 100m of CPU
+  and 128Mi of memory and no limits. They run as a non-root user with the runtime's default seccomp
+  profile, no privilege escalation and no capabilities, which the namespace's restricted level
+  requires. The controller makes their Deployment at run time, so no render holds it and
+  `just pod-security-check` does not evaluate it; admission enforces the namespace's level when the
+  controller creates it. `tests/gateway.bats` asserts the fields of the `EnvoyProxy` that produce
+  its pods, and the controller adds its shutdown manager container with the same hardened defaults.
+- **Listeners.** `http` on 80 for every hostname, and `https` on 443 for `*.${CLUSTER_DOMAIN}`,
+  terminating TLS with the Secret `public-wildcard-tls`. They are the ports the edge routers
+  translate ([The edge routers](infrastructure.md#the-edge-routers)): `tests/gateway.bats` fails,
+  naming both files, when the Gateway's listeners and the edge stack's `public_ports` differ.
+- **Redirect.** The `HTTPRoute` `https-redirect`, in the Gateway's namespace, is the only route
+  that attaches to `http`, whose `allowedRoutes` admit that namespace alone and `HTTPRoute`s only:
+  an HTTP listener that names no kinds takes `GRPCRoute`s too. It has one rule, for every path,
+  that sends the request to `https` on the same host and the scheme's default port with status 301,
+  and no backend: plain HTTP is never forwarded. `tests/gateway.bats` builds every application the
+  overlay enables and fails when a route of any kind other than the redirect names `http`, by its
+  section or its port, when a route in the Gateway's namespace names the Gateway without a section,
+  which would attach it to `http` as well, or when the redirect is anything but that rule.
+- **Who may attach.** To `https`, `HTTPRoute`s of the namespaces that carry the label
+  `k8s-gitops/gateway: public`, and of no other: the listener's `allowedRoutes` select them by that
+  label and name the one kind. A route in a namespace without it is not accepted, which is the
+  Gateway API's rule and the controller's to apply; it shows in the route's status, which
+  `just gateway-check` reads, and `tests/gateway.bats` proves the selector on the objects. `demo`
+  is the one namespace that carries the label.
+- **The certificate.** The `Certificate` `public-wildcard` asks the `ClusterIssuer` `cluster-ca`
+  for an ECDSA P-256 certificate for `*.${CLUSTER_DOMAIN}` and `${CLUSTER_DOMAIN}`, valid for 90
+  days and renewed 30 days before it ends. A `Certificate` rather than the Gateway annotation
+  cert-manager reads, as the annotation makes a certificate for each listener's hostname only, so
+  it would leave out the domain itself. Its `issuerRef` is the one place that changes when the
+  public issuer of ADR 0006 exists.
+- **TLS.** A `ClientTrafficPolicy` sets 1.2 as the least version a client may use, the
+  controller's default stated rather than relied on.
+- **What a client outside sees.** The certificate is signed by the cluster's own authority, which
+  nothing outside trusts, until the public issuer exists, so a client refuses it unless it is given
+  the authority's certificate. The hostnames are not in DNS yet, so `just gateway-check` connects
+  to each edge router's public address with the name the route has, and verifies against the
+  authority's certificate, which is public material (below). Only the networks the edge stack
+  admits reach the edge's public ports ([The edge routers](infrastructure.md#the-edge-routers)), so
+  it is run from one of them.
+
+#### Checking the public Gateway
+
+`just gateway-check [cluster]` reads, and changes nothing: the objects through the cluster's
+kubeconfig with `kubectl get`, then the edge stack's outputs for the edge routers' names and
+floating addresses, then requests through each edge with `curl --resolve`, as a client outside
+would make them once the names are in DNS. It prints pass, FAIL or skip and one line of why for
+each check, and exits 0 only when none fails. It never prints an address, a host name under the
+domain or a tool's own errors: kubectl's and jq's go nowhere, and tofu's to the edge stack's
+errors file, `.terraform/tofu-errors.log` in its directory, which the line about the edges names.
+A name it reads from the cluster is printed, or handed to kubectl, only once it is a valid name of
+its kind, and always after `--`, so it cannot become a flag; any other text it shows from the
+cluster or an answer has its control characters replaced. kubectl waits at most 10 seconds for an
+answer and curl 15, and curl reads no `.curlrc`, uses no proxy and follows no redirect. It needs
+curl 7.88 or newer. A failure that is none of the checks, such as an answer it cannot read, names
+the step it happened in, and so does Ctrl-C or SIGTERM, which stops the run there.
+
+- `cluster-config`: the ConfigMap holds `CLUSTER_DOMAIN` and `GATEWAY_ADDRESS`, which the lines
+  below compare with. Without it, those lines are skipped.
+- `Gateway`: `public` is Accepted and Programmed; a FAIL gives the condition's reason.
+- `Gateway address`: the Gateway's status gives the `GATEWAY_ADDRESS`.
+- `proxy Service`: the Service Envoy Gateway makes for the proxies, selected by its labels for the
+  Gateway, is of type `LoadBalancer` and carries `k8s-gitops/announce: bgp`, without which no
+  worker announces it.
+- `proxy Service address`: that Service holds the `GATEWAY_ADDRESS`. While another Service holds
+  the address, Cilium gives this one none.
+- `proxies`: two proxies or more are Ready, on different nodes; a FAIL names the nodes.
+- `certificate`: the `Certificate` whose Secret the `https` listener serves is Ready.
+- `cluster CA`: the authority's certificate is read: `tls.crt` of the Secret the `ClusterIssuer`
+  the `Certificate` names signs with, in `cert-manager`. kubectl receives the whole Secret from the
+  API server and prints only that key, through a jsonpath that names it; the recipe never prints
+  or writes the private key. cert-manager's own documentation calls the `ca.crt` of an issued
+  Secret a best guess, while the issuer's `tls.crt` is the authority's certificate itself. The
+  certificate is kept in a file of the run, never printed, and removed at its end.
+- `routes`: no `HTTPRoute` is Accepted on `public` from a namespace without
+  `k8s-gitops/gateway: public`, but for the redirect in the Gateway's own namespace; a FAIL names
+  the routes. A route in such a namespace is reported by the controller as not accepted, which is
+  the Gateway API's rule; this line reads that status for every route.
+- `http listener`: the Gateway reports one route on `http`, the redirect.
+
+Then, for each edge router, by its name; while the edge stack has no outputs, one line, `edges`,
+says they are skipped, and it fails when they cannot be read:
+
+- `<edge> http`: plain HTTP on 80 for `hello.${CLUSTER_DOMAIN}/gateway-check` answers 301, and its
+  `Location` is `https://hello.${CLUSTER_DOMAIN}/gateway-check`: the same host and path, the
+  default port. Any other status or place fails.
+- `<edge> TLS`: HTTPS on 443 for `hello.${CLUSTER_DOMAIN}` verifies against the authority's
+  certificate alone, the chain and the name, as curl verifies them. curl trusts what is in its CA
+  path as well as the file `--cacert` names, and some builds come with one, so the recipe also
+  gives it `--capath`, an empty directory of the run.
+- `<edge> certificate names`: the certificate served names `hello.${CLUSTER_DOMAIN}`, read from
+  what curl shows of it. When TLS fails, this line says whether the names are the cause or the
+  chain is.
+- `<edge> hello`: the demo answers 200 with the page of its ConfigMap `demo/hello`.
+- `<edge> unrouted host`: a host under the domain that no route serves,
+  `gateway-check-unrouted.${CLUSTER_DOMAIN}`, answers 404.
+
+The last two are skipped when TLS fails. `tests/gateway-check.bats` runs the recipe against fakes of
+kubectl, curl and the edge stack, every answer holding addresses.
+
+#### Giving an application a public hostname
+
+1. Label the application's namespace in its `namespace.yaml` with `k8s-gitops/gateway: public`.
+2. Add an `HTTPRoute` whose `parentRefs` name the Gateway `public` of `envoy-gateway-system` and its
+   `https` listener, and whose `hostnames` are under the domain: `<name>.${CLUSTER_DOMAIN}`. The
+   listener and the certificate cover that domain only, so a name outside it is not served.
+3. Keep the route in an application of its own that names `gateway-public` in `dependsOn`, as
+   `apps/base/demo/hello-route/` does, so a cluster without the Gateway cannot enable it.
+
+`hello`, the demo's workload, answers this way at `hello.${CLUSTER_DOMAIN}`: two replicas of
+busybox's web server, spread over the workers and held by a disruption budget of one, as an
+unprivileged user, serving a page from its ConfigMap.
 
 ## PostgreSQL
 
@@ -1852,12 +2114,25 @@ the chart its OCIRepository names at its tag, or the one its `chart.spec` names 
 the version the tree pins, with the values of its ConfigMaps and its own values over them, the
 release name and namespace helm-controller gives it, the Kubernetes version in `versions.yaml`, every
 API version a definition in the render serves, its post-renderers and helm-controller's labels. A
-chart version bump therefore shows the objects that change. An application may take its chart only
+chart version bump therefore shows the objects that change. A definition is an
+`apiextensions.k8s.io/v1` `CustomResourceDefinition` whose group, kind and versions have the shapes
+the API server requires, and only its served versions count; an object that is only called one
+names no API. A well-shaped definition in the tree, or in a chart, does name its versions, which is
+what the cluster would serve once it is applied. Objects are selected by their exact name and
+namespace, as the controllers look them up: a `valuesFrom` or chart source named `x-*` selects
+nothing that is not called `x-*`. A HelmRelease whose name is not a DNS subdomain or whose
+namespace is not a DNS label is refused, naming its file (or its application's directory), before
+anything is read from it. The render reads the tree's `kubernetes/` and `versions.yaml` alone, and
+refuses a tree from which a build would read outside it, or a document a tool would read otherwise
+than the render, naming the file and the key ([What the checks refuse](#what-the-checks-refuse),
+Paths). An application may take its chart only
 from an `OCIRepository` (at a tag) or a `HelmRepository` (at an exact version), from a source that
 names no credential (the render has no secrets), with values from ConfigMaps of the application; any
-other form (a version range, a `GitRepository` or `Bucket`, a `secretRef`, values from a Secret)
-fails the render, naming the release. `scripts/render --forms` checks that every release is of a form
-the render accepts, without pulling a chart, and `tests/render.bats` runs it on this tree.
+other form (a version range, a `GitRepository` or `Bucket`, a `secretRef`, values from a Secret, a
+post-renderer patch that names a file, a key that folds to a field the render reads) fails the
+render, naming the release.
+`scripts/render --forms` checks that every release is of a form the render accepts, without pulling
+a chart, and `tests/render.bats` runs it on this tree.
 `RENDER_CHART_CACHE` names a directory to keep pulled charts in between renders. A tree that does
 not render fails, naming the application. `just render-diff <base> <head>` prints the comment
 comparing two renders.

@@ -69,6 +69,11 @@ render() {
   run just --justfile "$REPO/justfile" render "$BATS_TEST_TMPDIR/$1.out" "$BATS_TEST_TMPDIR/$1"
 }
 
+# render_locale NAME: just render for the tree NAME, as render does, in the locale LOCALE.
+render_locale() {
+  run env LC_ALL="${LOCALE:-C}" just --justfile "$REPO/justfile" render "$BATS_TEST_TMPDIR/$1.out" "$BATS_TEST_TMPDIR/$1"
+}
+
 # render_direct NAME: the same without just, which puts the pinned tools ahead of the stand-in for
 # helm's pull from a repository on PATH.
 render_direct() {
@@ -116,6 +121,135 @@ object_diff() {
     index($0, "+++ ") == 1 { inside = (index($0, want) == 1 && $0 ~ pattern); next }
     index($0, "--- ") == 1 || /^```/ { inside = 0 }
     inside' "$BODY"
+}
+
+# outside_marker: a ConfigMap beside the fixture trees, at OUTSIDE, whose data holds MARKER, a text
+# nothing else holds: a build that read the file shows MARKER in what it yields. CLIMB names the
+# same file by a path that climbs out of any directory: twenty ../ and then the path from /.
+outside_marker() {
+  MARKER="marker-outside-the-tree-$RANDOM$RANDOM"
+  OUTSIDE="$BATS_TEST_TMPDIR/outside/marker.yaml"
+  mkdir -p "${OUTSIDE%/*}"
+  printf '%s\n' '---' 'apiVersion: v1' 'kind: ConfigMap' 'metadata:' '  name: outside' 'data:' "  marker: $MARKER" >"$OUTSIDE"
+  CLIMB="$(printf '../%.0s' {1..20})${OUTSIDE#/}"
+}
+
+# reads_outside NAME WHAT ENTRY: just render refuses the tree NAME before it builds anything: it
+# fails, a line names WHAT and ENTRY, nothing is pulled, and MARKER is neither in its output nor in
+# anything it wrote.
+reads_outside() {
+  rm -f "$PULL_LOG"
+  render_locale "$1"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  grep -F -- "$2" <<<"$output" | grep -qF -- "$3" || { echo "no line names $2 and $3"; return 1; }
+  [[ $output != *"$MARKER"* ]]
+  [ -z "$(find "$BATS_TEST_TMPDIR/$1.out" -mindepth 1 -print -quit 2>/dev/null)" ]
+  [ ! -e "$PULL_LOG" ]
+}
+
+# shown TEXT: TEXT as the render shows a value of the tree: each byte that is not printable ASCII
+# as \xHH, read from od, whatever the locale.
+shown() {
+  local LC_ALL=C byte char out=""
+  if [[ $1 != *[!\ -~]* ]]; then
+    printf '%s' "$1"
+    return
+  fi
+  for byte in $(printf '%s' "$1" | od -An -v -tx1); do
+    if ((16#$byte >= 32 && 16#$byte < 127)); then
+      printf -v char '%b' "\\x$byte"
+      out+=$char
+    else
+      out+="\\x$byte"
+    fi
+  done
+  printf '%s' "$out"
+}
+
+# outside_cases: the cases of the scenario of a tree from which a build would read outside it, in
+# the locale LOCALE.
+outside_cases() {
+  rm -rf "${BATS_TEST_TMPDIR:?}"/*
+  outside_marker
+  local kfile=kubernetes/apps/base/web/greeter/app/kustomization.yaml expression entry n=0
+  # A generator's file, a resource, a patch and an env file, each by an absolute path and by a path
+  # that climbs out of the tree.
+  for expression in '.configMapGenerator += [{"name": "leak", "files": ["leak=" + strenv(P)]}]' \
+    '.resources += [strenv(P)]' '.patches += [{"path": strenv(P)}]' \
+    '.configMapGenerator += [{"name": "leak", "envs": [strenv(P)]}]'; do
+    for entry in "$OUTSIDE" "$CLIMB"; do
+      greeter_app "outside-$((++n))"
+      P="$entry" yq -i "$expression" "$GREETER/kustomization.yaml"
+      reads_outside "outside-$n" "$kfile" "$entry"
+    done
+  done
+
+  # A generator's file that is a link in the tree to the file outside: the link and the entry are
+  # each refused.
+  greeter_app linked-file
+  ln -s "$OUTSIDE" "$GREETER/linked.yaml"
+  yq -i '.configMapGenerator += [{"name": "leak", "files": ["leak=linked.yaml"]}]' "$GREETER/kustomization.yaml"
+  reads_outside linked-file "$kfile" "leak=linked.yaml"
+  grep -F -- kubernetes/apps/base/web/greeter/app/linked.yaml <<<"$output" | grep -qF link
+
+  # A kustomization file that is itself a link to one outside the tree, which names the file.
+  greeter_app linked-kustomization
+  printf '%s\n' 'apiVersion: kustomize.config.k8s.io/v1beta1' 'kind: Kustomization' 'resources:' "  - $OUTSIDE" \
+    >"$BATS_TEST_TMPDIR/outside/kustomization.yaml"
+  rm "$GREETER/kustomization.yaml"
+  ln -s "$BATS_TEST_TMPDIR/outside/kustomization.yaml" "$GREETER/kustomization.yaml"
+  reads_outside linked-kustomization "$kfile" link
+
+  # A Component that names it, which the application takes.
+  greeter_app component
+  mkdir -p "$BATS_TEST_TMPDIR/component/kubernetes/components/leaky"
+  cat >"$BATS_TEST_TMPDIR/component/kubernetes/components/leaky/kustomization.yaml" <<EOF
+---
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+configMapGenerator:
+  - name: leak
+    files:
+      - leak=$OUTSIDE
+EOF
+  yq -i '.components += ["../../../../../components/leaky"]' "$GREETER/kustomization.yaml"
+  reads_outside component kubernetes/components/leaky/kustomization.yaml "leak=$OUTSIDE"
+
+  # A remote source, which the render does not fetch.
+  for entry in https://example.invalid/leak.yaml git::https://example.invalid/leak.git file:///leak; do
+    greeter_app "remote-$((++n))"
+    P="$entry" yq -i '.resources += [strenv(P)]' "$GREETER/kustomization.yaml"
+    reads_outside "remote-$n" "$kfile" "$entry"
+  done
+
+  # The application's Kustomization takes a component outside the tree, which names the file.
+  greeter_app flux-component
+  mkdir -p "$BATS_TEST_TMPDIR/outside/component"
+  printf '%s\n' 'apiVersion: kustomize.config.k8s.io/v1alpha1' 'kind: Component' 'resources:' '  - ../marker.yaml' \
+    >"$BATS_TEST_TMPDIR/outside/component/kustomization.yaml"
+  entry="$(printf '../%.0s' {1..20})${BATS_TEST_TMPDIR#/}/outside/component"
+  P="$entry" yq -i '.spec.components = [strenv(P)]' "$GREETER/../ks.yaml"
+  render_locale flux-component
+  echo "$output"
+  [ "$status" -ne 0 ]
+  grep -F -- "demo/greeter" <<<"$output" | grep -F -- "spec.components" | grep -qF -- "$entry"
+  [[ $output != *"$MARKER"* ]]
+  [ -z "$(find "$BATS_TEST_TMPDIR/flux-component.out" -mindepth 1 -print -quit)" ]
+
+  # A release's post-renderer patch that names a file, by its path or a URL, which helm-controller's
+  # post-renderer, a patch and its target, does not have: refused by the key, before anything is
+  # pulled.
+  for entry in "$OUTSIDE" https://example.invalid/patch.yaml; do
+    greeter_app "post-render-$((++n))"
+    P="$entry" yq -i '.spec.postRenderers[0].kustomize.patches += [{"path": strenv(P)}]' "$GREETER/helmrelease.yaml"
+    render_locale "post-render-$n"
+    echo "$output"
+    [ "$status" -ne 0 ]
+    grep -F -- "demo/greeter: kubernetes/apps/base/web/greeter/app/helmrelease.yaml: spec.postRenderers[0].kustomize.patches[1].path " <<<"$output" |
+      grep -qF -- "is not one of the fields kustomize"
+    [[ $output != *"$MARKER"* ]]
+  done
 }
 
 @test "Every enabled application is rendered to the objects Flux would apply, charts expanded" {
@@ -358,7 +492,8 @@ commit() {
 render_code() {
   mkdir -p "$WORK/scripts/lib"
   cp "$REPO/scripts/render" "$REPO/scripts/render-diff" "$REPO/scripts/render-pr" "$WORK/scripts/"
-  cp "$REPO/scripts/lib/render-comment.sh" "$REPO/scripts/lib/tools.sh" "$WORK/scripts/lib/"
+  cp "$REPO/scripts/lib/render-comment.sh" "$REPO/scripts/lib/shapes.sh" "$REPO/scripts/lib/tools.sh" \
+    "$REPO/scripts/lib/tree-paths.sh" "$WORK/scripts/lib/"
 }
 
 @test "render-pr renders both commits with the base's render code, or this checkout's when the base has none" {
@@ -535,4 +670,400 @@ refused() {
   [ "$status" -ne 0 ]
   [[ $output == *"demo/ledger: HelmRelease web/ledger: chart version ~2.3.0 is not an exact version"* ]]
   [ ! -e "$PULL_LOG" ]
+}
+
+# greeter_app NAME: a copy of the fixture tree in $BATS_TEST_TMPDIR/NAME; sets GREETER to the
+# greeter's application directory.
+greeter_app() {
+  tree "$1"
+  GREETER="$BATS_TEST_TMPDIR/$1/kubernetes/apps/base/web/greeter/app"
+}
+
+# add_object FILE: writes stdin to FILE in the greeter's application directory and lists it in the
+# application's kustomization.
+add_object() {
+  cat >"$GREETER/$1"
+  yq -i ".resources += [\"$1\"]" "$GREETER/kustomization.yaml"
+}
+
+# values_from NAME ENTRY: the greeter of the tree NAME, which has a plain ConfigMap x-extra that
+# sets replicas to 7 and takes values also from the valuesFrom entry ENTRY (a JSON map).
+values_from() {
+  greeter_app "$1"
+  add_object extra.yaml <<'YAML'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: x-extra
+data:
+  values.yaml: |
+    replicas: 7
+YAML
+  yq -i ".spec.valuesFrom += [$2]" "$GREETER/helmrelease.yaml"
+}
+
+# replicas NAME: the replicas of the greeter's Deployment in the render of the tree NAME.
+replicas() {
+  object "$BATS_TEST_TMPDIR/$1.out/demo/greeter" Deployment greeter | yq '.spec.replicas'
+}
+
+@test "A values source named by a pattern selects nothing the cluster would not select" {
+  local name pattern i=0
+  # helm-controller looks a ConfigMap up by its exact name and skips an optional one it does not
+  # find: the chart renders with the values it has left, not with those of a ConfigMap whose name
+  # the pattern would match.
+  for pattern in 'x-*' 'x-extr?' 'x-[e]xtra' '*' 'X-EXTRA' 'x-extra\n'; do
+    name="pattern-$((++i))"
+    values_from "$name" "{\"kind\": \"ConfigMap\", \"name\": \"$pattern\", \"optional\": true}"
+    render "$name"
+    [ "$status" -eq 0 ] || { echo "$pattern: $output"; return 1; }
+    echo "$pattern: replicas $(replicas "$name")"
+    [ "$(replicas "$name")" = 1 ]
+  done
+
+  # One that is not optional is a ConfigMap the application does not hold.
+  values_from required '{"kind": "ConfigMap", "name": "x-*"}'
+  render required
+  [ "$status" -ne 0 ]
+  [[ $output == *"demo/greeter: HelmRelease web/greeter: values from ConfigMap x-* are not in the application"* ]]
+
+  # The exact name selects it.
+  values_from exact '{"kind": "ConfigMap", "name": "x-extra", "optional": true}'
+  render exact
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(replicas exact)" = 7 ]
+
+  # So does a chart source: a pattern names no OCIRepository and no HelmRepository.
+  greeter_app source
+  yq -i '.spec.chartRef.name = "gree*"' "$GREETER/helmrelease.yaml"
+  render source
+  [ "$status" -ne 0 ]
+  [[ $output == *"demo/greeter: HelmRelease web/greeter: its OCIRepository is not one object of the application"* ]]
+  refused helmrelease.yaml '.spec.chart.spec.sourceRef.name = "ledg?r"' "its HelmRepository is not one object of the application"
+  refused helmrelease.yaml '.spec.chart.spec.sourceRef.namespace = "w*"' "its HelmRepository is not one object of the application"
+}
+
+# decoy: the tree decoy, which has no definition of the monitoring API, whose servicemonitors the
+# greeter's chart renders a monitor for only where it is served, and the object on stdin added to
+# the greeter's application; renders it into $BATS_TEST_TMPDIR/decoy.out.
+decoy() {
+  greeter_app decoy
+  sed -i 's|^  - \(../../base/web/monitoring-crds/ks.yaml\)|  # - \1|' "$BATS_TEST_TMPDIR/decoy/kubernetes/apps/overlays/demo/kustomization.yaml"
+  add_object decoy.yaml
+  rm -rf "$BATS_TEST_TMPDIR/decoy.out"
+  "$REPO/scripts/render" "$BATS_TEST_TMPDIR/decoy.out" "$BATS_TEST_TMPDIR/decoy" >"$BATS_TEST_TMPDIR/decoy.log" 2>&1 ||
+    { cat "$BATS_TEST_TMPDIR/decoy.log"; return 1; }
+}
+
+# monitor: the greeter's ServiceMonitor in the render of the tree decoy.
+monitor() {
+  object "$BATS_TEST_TMPDIR/decoy.out/demo/greeter" ServiceMonitor greeter
+}
+
+@test "An object that only claims to be a definition does not change what a chart renders" {
+  # Without a definition of the monitoring API anywhere in the tree the chart renders no monitor.
+  decoy </dev/null
+  [ -z "$(monitor)" ]
+
+  # An object of another API group, or of an API version that is not apiextensions.k8s.io/v1,
+  # that is called a CustomResourceDefinition and names that API is no definition of it.
+  decoy <<'EOF'
+---
+apiVersion: example.invalid/v1
+kind: CustomResourceDefinition
+metadata:
+  name: servicemonitors.monitoring.coreos.com
+spec:
+  group: monitoring.coreos.com
+  names:
+    kind: ServiceMonitor
+  versions:
+    - name: v1
+      served: true
+EOF
+  [ -z "$(monitor)" ]
+  decoy <<'EOF'
+---
+apiVersion: apiextensions.k8s.io/v1beta1
+kind: CustomResourceDefinition
+metadata:
+  name: servicemonitors.monitoring.coreos.com
+spec:
+  group: monitoring.coreos.com
+  names:
+    kind: ServiceMonitor
+  versions:
+    - name: v1
+      served: true
+EOF
+  [ -z "$(monitor)" ]
+
+  # A version the definition does not serve is not served.
+  decoy <<'EOF'
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: servicemonitors.monitoring.coreos.com
+spec:
+  group: monitoring.coreos.com
+  names:
+    kind: ServiceMonitor
+  versions:
+    - name: v1
+      served: false
+EOF
+  [ -z "$(monitor)" ]
+
+  # A group the API server would refuse names nothing.
+  decoy <<'EOF'
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: servicemonitors.monitoring.coreos.com
+spec:
+  group: "monitoring.coreos.com\n"
+  names:
+    kind: ServiceMonitor
+  versions:
+    - name: v1
+      served: true
+EOF
+  [ -z "$(monitor)" ]
+
+  # So does a kind that would carry a second API version into the comma-separated list helm is given.
+  decoy <<'EOF'
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: carriers.example.invalid
+spec:
+  group: example.invalid
+  names:
+    kind: "Carrier,monitoring.coreos.com/v1/ServiceMonitor"
+  versions:
+    - name: v1
+      served: true
+EOF
+  [ -z "$(monitor)" ]
+
+  # So does a group or a version name that would carry the monitoring API into that list.
+  decoy <<'EOF'
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: carriers.example.invalid
+spec:
+  group: "x,monitoring.coreos.com"
+  names:
+    kind: ServiceMonitor
+  versions:
+    - name: v1
+      served: true
+EOF
+  [ -z "$(monitor)" ]
+  decoy <<'EOF'
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: carriers.example.invalid
+spec:
+  group: example.invalid
+  names:
+    kind: Carrier
+  versions:
+    - name: "v1,monitoring.coreos.com/v1/ServiceMonitor"
+      served: true
+EOF
+  [ -z "$(monitor)" ]
+
+  # A real definition of it, of the shape the API server requires, is what the cluster would serve.
+  decoy <<'EOF'
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: servicemonitors.monitoring.coreos.com
+spec:
+  group: monitoring.coreos.com
+  names:
+    kind: ServiceMonitor
+  versions:
+    - name: v1
+      served: true
+EOF
+  [ -n "$(monitor)" ]
+}
+
+# release_refused EXPRESSION WORDS: the ledger with the yq EXPRESSION applied to its HelmRelease is
+# refused before anything is pulled, in one line that names the file of the release and holds WORDS.
+# A Kustomization with a targetNamespace sets the namespace of what it builds, so the ledger's has
+# none.
+release_refused() {
+  n=$((${n:-0} + 1))
+  ledger "named-$n"
+  yq -i 'del(.spec.targetNamespace)' "$LEDGER/../ks.yaml"
+  yq -i "$1" "$LEDGER/helmrelease.yaml"
+  rm -f "$PULL_LOG"
+
+  if message="$("$REPO/scripts/render" "$BATS_TEST_TMPDIR/named-$n.out" "$BATS_TEST_TMPDIR/named-$n" 2>&1)"; then
+    echo "$1: rendered"
+    return 1
+  fi
+
+  echo "$1: $message"
+  [[ $message == *"kubernetes/apps/base/web/ledger/app/helmrelease.yaml"* ]]
+  [[ $message == *"$2"* ]]
+  [ "$(wc -l <<<"$message")" -eq 1 ]
+  [ ! -e "$PULL_LOG" ]
+}
+
+@test "A release whose name the API server would refuse is refused by the render" {
+  # A line break in a name would shift the values the render reads on from the lines it keeps them
+  # on; a name no Kubernetes object may have is no HelmRelease the cluster would hold.
+  release_refused '.metadata.name = "ledger\nweb"' "not a name the API server accepts"
+  release_refused '.metadata.name = "Ledger"' "not a name the API server accepts"
+  release_refused '.metadata.name = "ledger_2"' "not a name the API server accepts"
+  release_refused '.metadata.name = "ledger\n"' "not a name the API server accepts"
+  release_refused '.metadata.namespace = "web\nledger"' "not a namespace the API server accepts"
+  release_refused '.metadata.namespace = "Web"' "not a namespace the API server accepts"
+  release_refused '.metadata.namespace = "web\n"' "not a namespace the API server accepts"
+  release_refused '.metadata.namespace = "web_2"' "not a namespace the API server accepts"
+  # The longest a name may be is 253 characters and a namespace 63.
+  release_refused ".metadata.name = \"$(printf 'a%.0s' {1..254})\"" "not a name the API server accepts"
+  release_refused ".metadata.namespace = \"$(printf 'a%.0s' {1..64})\"" "not a namespace the API server accepts"
+}
+
+@test "the file a refusal of a release names is the one that holds a release of its name and namespace" {
+  # Another release of the same name, in another namespace, in a file that sorts before the
+  # release's own.
+  ledger twins
+  yq -i 'del(.spec.targetNamespace)' "$LEDGER/../ks.yaml"
+  yq '.metadata.namespace = "other" | .spec.chart.spec.sourceRef.namespace = "default"' "$LEDGER/helmrelease.yaml" >"$LEDGER/a-twin.yaml"
+  yq -i '.resources += ["a-twin.yaml"]' "$LEDGER/kustomization.yaml"
+  yq -i '.metadata.namespace = "web" | .spec.releaseName = "ledger\nweb"' "$LEDGER/helmrelease.yaml"
+
+  render_direct twins
+
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"kubernetes/apps/base/web/ledger/app/helmrelease.yaml: its releaseName or targetNamespace is not one line of text"* ]]
+}
+
+@test "a path of a Kustomization that is the tree itself is refused as no directory of it" {
+  greeter_app itself
+  yq -i '.spec.path = "./."' "$GREETER/../ks.yaml"
+
+  render itself
+
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"demo/greeter: spec.path . is not a directory of the tree"* ]]
+}
+
+@test "a path of a Kustomization that leaves the tree through a link is refused by the render" {
+  tree linked
+  mkdir -p "$BATS_TEST_TMPDIR/outside"
+  printf '%s\n' '---' 'apiVersion: v1' 'kind: ConfigMap' 'metadata:' '  name: outside' >"$BATS_TEST_TMPDIR/outside/configmap.yaml"
+  ln -s "$BATS_TEST_TMPDIR/outside" "$BATS_TEST_TMPDIR/linked/kubernetes/apps/overlays/linked"
+  yq -i '.spec.path = "./apps/overlays/linked"' "$BATS_TEST_TMPDIR/linked/kubernetes/clusters/demo/ks.yaml"
+
+  render linked
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"spec.path apps/overlays/linked leaves the tree through a link"* ]]
+}
+
+@test "a path through a relative link in its middle that leaves the tree is refused by the render" {
+  tree midlink
+  # The render builds a copy of kubernetes/ alone, so a relative link reaches outside it by what the
+  # copy sits beside: the render's own working directory, which holds a directory values.
+  ln -s ../../../.. "$BATS_TEST_TMPDIR/midlink/kubernetes/apps/overlays/linkdir"
+  yq -i '.spec.path = "./apps/overlays/linkdir/values"' "$BATS_TEST_TMPDIR/midlink/kubernetes/clusters/demo/ks.yaml"
+
+  render midlink
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"spec.path apps/overlays/linkdir/values leaves the tree through a link"* ]]
+}
+
+@test "an object whose name ends in a line break is refused by the render, naming it" {
+  greeter_app linebreak
+  add_object odd.yaml <<'YAML'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: "aaa\n"
+YAML
+
+  render linebreak
+
+  [ "$status" -ne 0 ]
+  echo "$output"
+  [[ $output == *"ConfigMap"*"aaa"* ]]
+  [[ $output != *"did not split"* ]]
+  # The name is shown with its line break read as '?', as every value the render shows.
+  grep -qF 'ConfigMap v1 web aaa?' <<<"$output"
+}
+
+@test "A tree from which a build would read outside it is refused, and nothing of what it names is rendered" {
+  local text
+  text="$(printf '\xc4\xb0')"
+  [ "$(LC_ALL=C.UTF-8 bash -c 'printf %s "${#1}"' bash "$text" 2>/dev/null)" = 1 ]
+  for LOCALE in C C.UTF-8; do
+    outside_cases
+  done
+}
+
+@test "a component the greeter's Kustomization names under another spelling is refused by the render" {
+  # The review's reproduction: spec.Components, which flux build reads as components, naming a
+  # Component beside the tree whose generator reads the marker.
+  outside_marker
+  mkdir -p "$BATS_TEST_TMPDIR/outside/evil"
+  printf '%s\n' 'apiVersion: kustomize.config.k8s.io/v1alpha1' 'kind: Component' 'configMapGenerator:' \
+    '  - name: leak' '    files:' "      - leak=$OUTSIDE" >"$BATS_TEST_TMPDIR/outside/evil/kustomization.yaml"
+  greeter_app spelled
+  P="$(printf '../%.0s' {1..20})${BATS_TEST_TMPDIR#/}/outside/evil" yq -i '.spec.Components = [strenv(P)]' "$GREETER/../ks.yaml"
+
+  render spelled
+
+  echo "$output"
+  [ "$status" -ne 0 ]
+  grep -F kubernetes/apps/base/web/greeter/ks.yaml <<<"$output" | grep -qF ' spec.Components '
+  [[ $output != *"$MARKER"* ]]
+  [ -z "$(find "$BATS_TEST_TMPDIR/spelled.out" -mindepth 1 -print -quit)" ]
+}
+
+@test "a path that names a remote source in any case or letter is refused by the render under every locale" {
+  # The review's reproduction and the forms of a scheme and an scp-style address, in the C locale and
+  # in C.UTF-8. git, first on the path and fetching nothing, records any run.
+  local text locale entry log="$BATS_TEST_TMPDIR/git.log"
+  text="$(printf '\xc4\xb0')"
+  [ "$(LC_ALL=C.UTF-8 bash -c 'printf %s "${#1}"' bash "$text" 2>/dev/null)" = 1 ]
+  mkdir -p "$BATS_TEST_TMPDIR/recording"
+  printf '#!/bin/sh\necho "$*" >>%q\nexit 1\n' "$log" >"$BATS_TEST_TMPDIR/recording/git"
+  chmod +x "$BATS_TEST_TMPDIR/recording/git"
+  for locale in C C.UTF-8; do
+    for entry in "g${text}thub.com/example/none" "f${text}le:///leak" HTTPS://example.invalid/x.yaml \
+      Git@example.invalid:example/none GitHub.com/example/none; do
+      greeter_app remote
+      P="$entry" yq -i '.resources += [strenv(P)]' "$GREETER/kustomization.yaml"
+      rm -rf "$BATS_TEST_TMPDIR/remote.out" "$log"
+      run env LC_ALL="$locale" PATH="$BATS_TEST_TMPDIR/recording:$PATH" HTTP_PROXY=http://127.0.0.1:0 \
+        HTTPS_PROXY=http://127.0.0.1:0 NO_PROXY= no_proxy= "$REPO/scripts/render" "$BATS_TEST_TMPDIR/remote.out" "$BATS_TEST_TMPDIR/remote"
+      echo "$locale $entry: $output"
+      [ "$status" -ne 0 ]
+      grep -F -- kubernetes/apps/base/web/greeter/app/kustomization.yaml <<<"$output" | grep -F -- ' resources ' |
+        grep -qF -- "\"$(shown "$entry")\""
+      [ -z "$(find "$BATS_TEST_TMPDIR/remote.out" -mindepth 1 -print -quit)" ]
+      [ ! -e "$log" ] || { echo "git ran: $(cat "$log")"; return 1; }
+      rm -rf "$BATS_TEST_TMPDIR/remote"
+    done
+  done
 }

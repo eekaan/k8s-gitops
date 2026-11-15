@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# A stand-in for curl reaching the public Gateway through the edge routers' floating addresses,
+# installed by tests/gateway-check.bats as <tmp>/bin/curl. It finds its files from its own path. A
+# host is reached only through an address --resolve gives for its port, and only an edge's address
+# answers. The Gateway behind it answers as a healthy one does unless a file in <tmp>/state says
+# otherwise:
+#   edge-down.ADDRESS   nothing answers at ADDRESS; curl's error names it
+#   redirect-status     the status plain HTTP is answered with, 301 without it
+#   redirect-location   the Location plain HTTP is sent to, https on the same host and path without it
+#   untrusted           the certificate served is signed by another authority than the cluster's CA,
+#                       one in the CA path this curl was built with, as a public authority would be
+#   wrong-names         the certificate served names another domain
+#   hello-status        the status the demo answers with, 200 without it
+#   hello-page          the page the demo answers with, the one of its ConfigMap without it
+#   unrouted-status     the status a host no route serves is answered with, 404 without it
+# Verification is curl's: the chain against the --cacert file, which must be the cluster CA's
+# certificate in <tmp>/fixtures/ca.crt, and against the CA path, the one it was built with unless
+# --capath names another, and the host against the certificate's names, both skipped with -k or
+# --insecure. A --cacert does not set the CA path aside: only an empty --capath does. It writes out
+# %{http_code}, %{ssl_verify_result}, %header{location} and %{certs}, also when it fails, as curl
+# does, and records "curl ARGS" in <tmp>/record/argv.
+set -uo pipefail
+
+root=${0%/bin/*}
+state=$root/state
+fixtures=$root/fixtures
+printf '%s\n' "curl $*" >> "$root/record/argv"
+
+listed() {
+  [[ -e $state/$1 ]]
+}
+
+edges=(203.0.113.51 203.0.113.52)
+domain=example.com
+
+insecure=0 cacert='' capath=built-in output=/dev/stdout format='' url=''
+resolve=()
+while (($#)); do
+  case $1 in
+    -k | --insecure) insecure=1; shift ;;
+    --cacert) cacert=$2; shift 2 ;;
+    --capath) capath=$2; shift 2 ;;
+    --resolve) resolve+=("$2"); shift 2 ;;
+    -o | --output) output=$2; shift 2 ;;
+    -w | --write-out) format=$2; shift 2 ;;
+    --connect-timeout | --max-time | --noproxy) shift 2 ;;
+    -q | --disable | -s | --silent) shift ;;
+    -*) echo "fake curl: unexpected option $1" >&2; exit 2 ;;
+    *) url=$1; shift ;;
+  esac
+done
+
+code=000 location='' certs='' verify=0
+# write_out: what curl writes out after a request, whether it succeeded or not.
+write_out() {
+  local text=${format//\\n/$'\n'}
+  text=${text//'%{http_code}'/$code}
+  text=${text//'%{ssl_verify_result}'/$verify}
+  text=${text//'%header{location}'/$location}
+  text=${text//'%{certs}'/$certs}
+  printf '%s' "$text"
+}
+
+[[ $url =~ ^(https?)://([^/:]+)(/.*)?$ ]] || { echo "fake curl: unexpected URL $url" >&2; exit 3; }
+scheme=${BASH_REMATCH[1]} host=${BASH_REMATCH[2]} path=${BASH_REMATCH[3]:-/}
+port=80
+[[ $scheme == https ]] && port=443
+address=''
+for entry in "${resolve[@]}"; do
+  if [[ $entry == "$host:$port:"* ]]; then
+    address=${entry#"$host:$port:"}
+  fi
+done
+if [[ -z $address ]]; then
+  write_out
+  echo "curl: (6) Could not resolve host: $host" >&2
+  exit 6
+fi
+if [[ " ${edges[*]} " != *" $address "* ]] || listed "edge-down.$address"; then
+  write_out
+  echo "curl: (7) Failed to connect to $host port $port via $address after 3 ms: Could not connect to server" >&2
+  exit 7
+fi
+
+if [[ $scheme == http ]]; then
+  code=301
+  listed redirect-status && code=$(< "$state/redirect-status")
+  location="https://$host$path"
+  listed redirect-location && location=$(< "$state/redirect-location")
+  printf '<html>moved</html>\n' > "$output"
+  write_out
+  exit 0
+fi
+
+issuer=cluster-ca names="DNS:*.$domain, DNS:$domain"
+listed untrusted && issuer=another-ca
+listed wrong-names && names="DNS:*.other.example.org, DNS:other.example.org"
+certs="Subject:CN = public-wildcard
+Issuer:CN = $issuer
+X509v3 Subject Alternative Name:$names
+Cert:-----BEGIN CERTIFICATE-----
+MIIfixtureLeaf
+-----END CERTIFICATE-----
+Subject:CN = $issuer
+Issuer:CN = $issuer
+Cert:-----BEGIN CERTIFICATE-----
+MIIfixtureAuthority
+-----END CERTIFICATE-----
+"
+# covered: whether the certificate's names cover the host, a wildcard for one label only.
+covered() {
+  local name
+  while IFS= read -r name; do
+    name=${name#DNS:}
+    if [[ $name == "$host" ]] || [[ $name == '*.'* && ${host#*.} == "${name#*.}" && $host == *.*.* ]]; then
+      return 0
+    fi
+  done <<< "${names//, /$'\n'}"
+  return 1
+}
+# trusted: whether the authority that signed the certificate served is trusted.
+trusted() {
+  if [[ $issuer == cluster-ca ]]; then
+    [[ -n $cacert && $(< "$cacert") == "$(< "$fixtures/ca.crt")" ]]
+  else
+    [[ $capath == built-in || -n $(ls -A "$capath" 2> /dev/null) ]]
+  fi
+}
+if ((!insecure)); then
+  if ! trusted; then
+    verify=20
+    write_out
+    echo "curl: (60) SSL certificate problem: unable to get local issuer certificate" >&2
+    exit 60
+  fi
+  if ! covered; then
+    verify=1
+    write_out
+    echo "curl: (60) SSL: no alternative certificate subject name matches target hostname '$host'" >&2
+    exit 60
+  fi
+fi
+
+if [[ $host == "hello.$domain" ]]; then
+  code=200
+  listed hello-status && code=$(< "$state/hello-status")
+  if listed hello-page; then cat "$state/hello-page"; else cat "$fixtures/page.html"; fi > "$output"
+else
+  code=404
+  listed unrouted-status && code=$(< "$state/unrouted-status")
+  printf '' > "$output"
+fi
+write_out
+exit 0

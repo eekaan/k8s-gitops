@@ -1,0 +1,15 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/gateway.envoyproxy.io/clienttrafficpolicy_v1alpha1.json
+# TLS 1.2 at least for the clients of the Gateway's HTTPS listener. The controller's default is the
+# same; the policy states it, so a change of the default does not change what the Gateway accepts.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: public
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: public
+  tls:
+    minVersion: "1.2"
