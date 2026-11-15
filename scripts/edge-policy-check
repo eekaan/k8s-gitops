@@ -3,8 +3,9 @@
 # FRR configuration the edge stack renders (scripts/edge-policy-render) runs in IMAGE, a container
 # with no network but its loopback and none of the capabilities beyond the runtime's defaults, with
 # speakers that open sessions to it and offer prefixes (tests/fixtures/edge-policy/proof.sh), and
-# scripts/edge-policy-assert checks what it reports. just ci does the same inside its Dagger
-# module, with no docker on the runner; see ADR 0007 for what that module may use.
+# scripts/edge-policy-assert checks what it reports, and prints it when a check fails. just ci does
+# the same inside its Dagger module, with no docker on the runner; see ADR 0007 for what that
+# module may use.
 # Usage: scripts/edge-policy-check IMAGE
 set -euo pipefail
 
@@ -21,5 +22,11 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 "$root/scripts/edge-policy-render" "$work/in"
 chmod -R a+rX "$work/in"
-docker run --rm --network none --entrypoint sh --volume "$work/in:/work:ro" "$image" /work/proof.sh /work > "$work/out"
+# What the proof printed is checked whether its container ended well or not, so a failure says
+# which check failed and what the proof saw; a container that failed says so as well.
+status=0
+docker run --rm --network none --entrypoint sh --volume "$work/in:/work:ro" "$image" /work/proof.sh /work > "$work/out" || status=$?
+if ((status != 0)); then
+  printf '== container\nended with status %s\n' "$status" >> "$work/out"
+fi
 "$root/scripts/edge-policy-assert" "$work/out"

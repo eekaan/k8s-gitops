@@ -95,3 +95,26 @@ EOF
   [ "$(grep -c . "$RECORD/argv")" -eq 2 ]
   absent -E 'create|delete|set|unset|save|add|remove' "$RECORD/argv"
 }
+
+@test "a proof of the routing policy that fails says why" {
+  # A container that prints part of the proof's report, a wait that ran out among it, and fails.
+  fake docker << EOF
+printf '%s\n' "docker \$*" >> "$RECORD/argv"
+printf '%s\n' '== syntax' "the edge's file is accepted" 'a file with an unknown command is refused'
+printf '%s\n' '== daemons' 'edge: running' 'a: running' 'b: running' 'c: running'
+printf '%s\n' '== waits' 'met: every daemon answers, after 1 s'
+printf '%s\n' "not met: the speaker in the cluster's AS has its session established and has offered its five prefixes, after 120 s; last seen: state Active, pfxSnt None"
+exit 1
+EOF
+  run env PATH="$BIN:$PATH" "$ROOT/scripts/edge-policy-check" fixture-image
+  echo "$output"
+  [ "$status" -ne 0 ]
+  grep -q '^docker run ' "$RECORD/argv"
+  # The verdicts, the failing ones among them, then everything the proof printed.
+  [[ $output == *"pass  every BGP daemon of the proof is running"* ]]
+  [[ $output == *"FAIL  the speaker in the cluster's AS has its session established and has offered its five prefixes, within the bound"* ]]
+  [[ $output == *"FAIL  the proof ran to its end"* ]]
+  [[ $output == *"not met: the speaker in the cluster's AS has its session established and has offered its five prefixes, after 120 s; last seen: state Active, pfxSnt None"* ]]
+  [[ $output == *"ended with status 1"* ]]
+}
+

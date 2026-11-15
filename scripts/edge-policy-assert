@@ -6,7 +6,10 @@
 # no session; the edge advertised nothing back, the speaker holds no path learned from it, and the
 # sessions never dropped; the edge offers graceful restart without the notification bit; and FRR's
 # dry run accepts the edge's file and refuses one with an unknown command.
-# Prints pass or FAIL per item and exits non-zero on any FAIL.
+# Before those: every daemon ran, each wait for a state of the sessions was met within its bound,
+# and the proof ran to its end. Prints pass or FAIL per item, then, after any FAIL, everything the
+# proof printed, its waits with what they last saw and a stopped daemon's log among it, and exits
+# non-zero on any FAIL.
 # Usage: scripts/edge-policy-assert FILE, FILE being the proof's output
 set -euo pipefail
 
@@ -40,6 +43,28 @@ expect() {
   fi
 }
 
+# met DESCRIPTION: passes when the proof's wait for DESCRIPTION was met within its bound.
+met() {
+  if section waits | grep -q -- "^met: $1, after "; then
+    printf 'pass  %s, within the bound\n' "$1"
+  else
+    printf 'FAIL  %s, within the bound\n' "$1"
+    failed=1
+  fi
+}
+
+if [[ $(section daemons | grep -cE '^(edge|a|b|c): running$') -eq 4 ]]; then
+  printf 'pass  every BGP daemon of the proof is running\n'
+else
+  printf 'FAIL  every BGP daemon of the proof is running\n'
+  failed=1
+fi
+met "every daemon answers"
+met "the speaker in the cluster's AS has its session established and has offered its five prefixes"
+met "the edge has accepted a prefix from it"
+met "the speaker in another AS has been refused for its AS"
+met "the speaker outside the workers' block has reached the edge and not been taken"
+says "the proof ran to its end" proof "ran to its end"
 says "FRR's dry run accepts the edge's file as rendered" syntax "the edge's file is accepted"
 says "FRR's dry run refuses a file with a command FRR does not have" syntax "a file with an unknown command is refused"
 expect "the speaker offered all five prefixes" offered '.peers["127.0.0.1"].pfxSnt == 5'
@@ -71,4 +96,8 @@ expect "the session between the edge and the speaker was established once and ne
   '.peers["127.0.0.20"] | .connectionsEstablished == 1 and .connectionsDropped == 0'
 expect "the speaker's session to the edge is established and was never dropped" offered \
   '.peers["127.0.0.1"] | .state == "Established" and .connectionsEstablished == 1 and .connectionsDropped == 0'
+if ((failed)); then
+  echo "-- what the proof printed:"
+  cat "$out"
+fi
 exit "$failed"

@@ -479,21 +479,28 @@ range is in the edge's table, that the speaker in another AS and the one of the 
 the workers' block have no session, that the edge advertised nothing back, that the speaker holds no
 path learned from the edge (which a `default-originate` would add and no count of advertised routes
 shows), and that both ends' session was established once and never dropped, so the readings are not
-of a session that is reset over and over. Each speaker announces its prefixes with a next hop that
-is not its own address, and the check asserts that the accepted /32's path has the speaker's address
-as next hop instead; and that the edge offers graceful restart without the notification bit, as the
-speaker sees its capabilities. Before any of that, FRR's dry run (`vtysh -C -f`) reads the edge's
-file as rendered, whole, and must accept it, and must refuse a copy with a command FRR does not
-have, so the check is known to catch one. The static route is taken out of the file the proof's BGP
-daemon reads, which has no `zebra` or `staticd` beside it; the stack's tests check it. The speakers
-sit on loopback addresses, which FRR refuses as next hops (martian next hops), so the proof's copy
-of the file also has `bgp allow-martian-nexthop`, and the routing policy alone decides what is
-accepted; the workers' addresses on the node subnet are no martians. The proof does not show the
-routes reaching the kernel, equal-cost paths across several workers, graceful restart across a
-restart or the nftables rules, which the stack's tests compare as text and `nft --check` reads for
-syntax at first boot: `nft` is in neither of the proof's containers, and `unshare` is not permitted
-in either, so no network namespace of its own could hold the rules. The container's FRR takes 64
-equal-cost paths where Debian's takes 256, so the proof renders with 64.
+of a session that is reset over and over. The proof reads nothing before it holds: it polls, once a
+second, until every daemon answers (30 seconds at most), the accepted speaker's session is
+established with its five prefixes offered (120), the edge has accepted one (60), and each refused
+speaker has been refused (60 each); a wait that runs out is a FAIL that names it and what it last
+saw, and a daemon that has stopped by then is shown with its own log. The proof runs to its end
+whatever it finds, and when any check fails, the check prints everything the proof printed, in
+`just edge-policy-check` as in `just ci`, whether the proof's container ended well or not. Each
+speaker announces its prefixes with a next hop that is not its own address, and the check asserts
+that the accepted /32's path has the speaker's address as next hop instead; and that the edge offers
+graceful restart without the notification bit, as the speaker sees its capabilities. Before any of
+that, FRR's dry run (`vtysh -C -f`) reads the edge's file as rendered, whole, and must accept it,
+and must refuse a copy with a command FRR does not have, so the check is known to catch one. The
+static route is taken out of the file the proof's BGP daemon reads, which has no `zebra` or
+`staticd` beside it; the stack's tests check it. The speakers sit on loopback addresses, which FRR
+refuses as next hops (martian next hops), so the proof's copy of the file also has
+`bgp allow-martian-nexthop`, and the routing policy alone decides what is accepted; the workers'
+addresses on the node subnet are no martians. The proof does not show the routes reaching the
+kernel, equal-cost paths across several workers, graceful restart across a restart or the nftables
+rules, which the stack's tests compare as text and `nft --check` reads for syntax at first boot:
+`nft` is in neither of the proof's containers, and `unshare` is not permitted in either, so no
+network namespace of its own could hold the rules. The container's FRR takes 64 equal-cost paths
+where Debian's takes 256, so the proof renders with 64.
 
 ### The data path
 
@@ -516,10 +523,10 @@ settings, `sysctl.conf`, are written once at first boot:
   ([nftables](https://wiki.nftables.org/wiki-nftables/index.php/Matching_routing_information); the
   kernel takes `rt nexthop` in any hook, the forward hook among them,
   [nft_rt.c](https://github.com/torvalds/linux/blob/v6.12/net/netfilter/nft_rt.c#L173-L178)).
-  Replies come from the Gateway to the edge's own address, are translated back to the client's,
-  and leave by the default route, the one way to a client, whatever FRR does. Nothing of IPv6 is
-  forwarded: the kernel's IPv6 forwarding stays off, as `sysctl.conf` turns on IPv4's alone, and
-  no rule admits it. `just edge-forward-check` proves this with the rendered rules in network
+  Replies come from the Gateway to the edge's own address, are translated back to the client's, and
+  leave by the default route, the one way to a client, whatever FRR does. Nothing of IPv6 is
+  forwarded: the kernel's IPv6 forwarding stays off, as `sysctl.conf` turns on IPv4's alone, and no
+  rule admits it. `just edge-forward-check` proves this with the rendered rules in network
   namespaces on a developer's machine; the CI containers refuse the user namespaces it needs, and
   the stack's tests compare the chain's rules as text.
 - zebra runs without `-r` (FRR's [zebra](https://docs.frrouting.org/en/stable-10.3/zebra.html):

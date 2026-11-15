@@ -245,15 +245,15 @@ type Group {
   outcome: Outcome! {
     let others = checks.reject { _ == "renovate-check" }.reject { _ == "vector-check" }.reject { _ == "edge-policy-check" }
     # The edge routers' routing policy against real BGP speakers: the checkout renders the edge's
-    # configuration, FRR's container runs the speakers, which bind and dial loopback addresses only, and the
-    # checkout checks what they printed. No docker, no privileges.
+    # configuration, FRR's container runs the speakers, which bind and dial loopback addresses only,
+    # and the checkout checks what they printed. No docker, no privileges. What the proof printed is
+    # kept as a failed check's output is, so the check reads it, and prints it when a check fails,
+    # whether the proof's container ended well or not.
     let policyInputs = checkout.withExec(["just", "edge-policy-render", "/tmp/edge-policy"]).directory("/tmp/edge-policy")
-    let policyPrinted = frr
-      .withMountedDirectory("/work", policyInputs)
-      .withExec(["sh", "-c", "sh /work/proof.sh /work > /tmp/proof.out"])
-      .file("/tmp/proof.out")
+    let proof = Run(label: "", ctr: frr.withMountedDirectory("/work", policyInputs).withExec(["sh", "-c", `exec 2>&1; sh /work/proof.sh /work`])).outcome
+    let policyPrinted = if (proof.passed) { proof.output } else { proof.output + "\n== container\nended with an error\n" }
     let edgePolicy: [Run!]! = if (checks.contains("edge-policy-check")) {
-      [Run(label: "edge-policy-check", ctr: checkout.withFile("/tmp/proof.out", policyPrinted).withExec(["bash", "-c", `exec 2>&1; just edge-policy-assert /tmp/proof.out`]))]
+      [Run(label: "edge-policy-check", ctr: checkout.withNewFile("/tmp/proof.out", policyPrinted).withExec(["bash", "-c", `exec 2>&1; just edge-policy-assert /tmp/proof.out`]))]
     } else {
       []
     }
