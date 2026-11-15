@@ -76,7 +76,7 @@ cluster-check cluster='lab-sto2':
 grafana cluster='lab-sto2':
     scripts/grafana {{ quote(cluster) }}
 
-# Reboot one node, by its hostname in talman.yaml, once its name is typed back (--yes: without asking), asking /readyz through the kubeconfig once a second until the node is Ready again; fails when a probe failed (--tolerate <seconds>: accept a gap that long)
+# Reboot one node, by its hostname in talman.yaml, once its name is typed back (--yes: without asking), asking /readyz through the kubeconfig once a second until the node is Ready again, a control plane with its etcd member; fails when a probe failed (--tolerate <seconds>: accept a gap that long)
 [positional-arguments]
 cluster-reboot node *args:
     scripts/cluster-reboot "$@"

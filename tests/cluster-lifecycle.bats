@@ -407,14 +407,20 @@ no_tofu() {
   # Prometheus is asked through the API server's service proxy, by kubectl get.
   [ -n "$(calls '^kubectl get --raw /api/v1/namespaces/monitoring/services/kube-prometheus-stack-prometheus:9090/proxy/api/v1/targets')" ]
 
-  # A component without a node, and each of the components the check names.
+  # A component without a node, and each of the components the check names, by its node whichever
+  # label gives it: the kubelet's only in its label node, node-exporter's (above) only as its pod's
+  # node, etcd's (above) only as its endpoint's.
   for job in apiserver kube-controller-manager kube-scheduler kubelet; do
     node=cp-1
     [[ $job == apiserver ]] && node=''
     echo "$job${node:+ $node}" > "$STATE/targets-down"
     recipe cluster-check
     [ "$status" -ne 0 ]
-    [[ $(line_of 'scrape targets') == "FAIL  scrape targets: "*"$job"* ]]
+    if [[ -n $node ]]; then
+      [[ $(line_of 'scrape targets') == "FAIL  scrape targets: down: $job on $node" ]]
+    else
+      [[ $(line_of 'scrape targets') == "FAIL  scrape targets: down: $job" ]]
+    fi
   done
 
   # A target of anything else that is down is not this check's concern; all up passes.
@@ -553,6 +559,47 @@ no_tofu() {
   asked=$(awk -v from="$finished" 'NR > from && /^kubectl get nodes /' "$RECORD/argv" | wc -l)
   [ "$asked" -ge 2 ]
   reported > /dev/null
+}
+
+@test "A control plane that is Ready again without its etcd member fails the reboot" {
+  : > "$STATE/etcd-down.cp-2"
+  with REBOOT_WAIT=4
+
+  recipe cluster-reboot cp-2 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [ -e "$STATE/back.cp-2" ]
+  [[ $output == *"cp-2 is Ready again, but its etcd member did not come back"* ]]
+  [[ $output != *"has not reported Ready"* ]]
+  [[ $output == *"cp-2 is left cordoned"* ]]
+  [ -z "$(calls '^kubectl uncordon ')" ]
+  # Every control plane's member was asked, through the Talos API, after the reboot, until the wait
+  # ran out.
+  finished=$(call_line '^talman reboot finished')
+  asked=$(awk -v from="$finished" 'NR > from && /^talman talosctl -n cp-1 -n cp-2 -n cp-3 etcd status$/' "$RECORD/argv" | wc -l)
+  [ "$asked" -ge 2 ]
+  [[ $output != *198.51.100.9* ]]
+  reported > /dev/null
+
+  # A member that comes back a few seconds after the node is Ready is waited for.
+  reset_cluster
+  echo 1 > "$STATE/etcd-late.cp-2"
+
+  recipe cluster-reboot cp-2 --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"cp-2 is Ready again"* ]]
+  [ -n "$(calls '^kubectl uncordon cp-2$')" ]
+  [ "$(calls '^talman talosctl .* etcd status$' | wc -l)" -ge 2 ]
+  [ -n "$(calls '^talman talosctl -n cp-2 etcd members$')" ]
+
+  # A worker runs no etcd member.
+  reset_cluster
+
+  recipe cluster-reboot worker-2 --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ -z "$(calls '^talman talosctl ')" ]
 }
 
 @test "A node that is not in the cluster is refused before anything is rebooted" {

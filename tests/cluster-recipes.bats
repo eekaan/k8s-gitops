@@ -178,10 +178,16 @@ cluster_files() {
 #                      without try mode keeps it, as kept
 #   reverts.NODE       NODE's configuration in try mode reverts before anything else can ask it
 #   unreachable.NODE   talman apply's dry run of NODE alone fails
-#   etcd.NODE, network.NODE, scheduler.NODE, env.NODE, module-add.NODE, module-remove.NODE,
-#   module-params.NODE, etcd-args.NODE
-#                      what the change to NODE, one of pending, is; see config below
-#   unreadable.NODE    talosctl cannot read the machine configuration NODE runs
+#   etcd.NODE, etcd-subnets.NODE, etcd-args.NODE, network.NODE, scheduler.NODE, module-add.NODE,
+#   module-remove.NODE, module-params.NODE
+#                      what the change to NODE, one of pending, is: its diff (diff_of) and what
+#                      Talos holds for NODE before and after NODE takes it (held)
+#   taken.NODE         NODE has been applied the configuration; it runs it while it is not pending
+#   unreadable.NODE    NODE's Talos API answers no talosctl get
+#   unreadable-after.NODE  likewise, once NODE runs the configuration
+#   withheld           talman cannot hide the cluster's secrets, so its dry run shows no diff
+#   apply-fails.NODE   talman apply of every node fails at NODE, the nodes before it having taken
+#                      the configuration
 #   reboot-fails.NODE  scripts/cluster-reboot NODE does not bring the node back
 #   unhealthy          scripts/cluster-check fails
 #   unhealthy-tried    scripts/cluster-check fails once a node has been applied in try mode
@@ -226,80 +232,71 @@ dir=$TALMAN_CONFIG
 given() {
   [[ " ${args[*]} " == *" $1 "* ]]
 }
-# config WHICH NODE: the machine configuration of NODE, a v1alpha1 document and others as Talos
-# keeps them, as the node runs it (running) or as talman renders it now (rendered). What differs is
-# set by STATE files named for the node:
-#   etcd.NODE            rendered adds extraArgs to cluster.etcd
-#   etcd-args.NODE       both have those extraArgs, so cluster.etcd does not change
-#   scheduler.NODE       rendered adds extraArgs to cluster.scheduler
-#   network.NODE         rendered sets machine.network's hostname
-#   module-add.NODE      rendered adds a KernelModuleConfig
-#   module-remove.NODE   rendered drops one
-#   module-params.NODE   rendered changes a module's parameters
-#   env.NODE             rendered adds a variable to machine.env
-# With none of them, rendered adds a NetworkRuleConfig.
-config() {
-  local which=$1 node=$2 role=worker
-  [[ $node != cp-* ]] || role=controlplane
-  echo "version: v1alpha1"
-  echo "machine:"
-  echo "  type: $role"
-  echo "  network:"
-  if [[ $which == rendered && -e $STATE/network.$node ]]; then
-    echo "    hostname: $node"
-  else
-    echo "    interfaces: []"
+# runs NODE: whether NODE runs the configuration it was applied, as it is not pending any more.
+runs() {
+  [[ -e $STATE/taken.$1 ]] && ! grep -qx -- "$1" "$STATE/pending" 2> /dev/null
+}
+# held NODE TYPE: what talosctl get TYPE --output json prints of NODE, one JSON object per resource,
+# for the two resource types Talos derives from the settings that take effect only at a reboot: etcd's
+# configuration, which only a control plane has, and the kernel modules it loads, one resource each.
+# Before NODE runs the configuration they hold what the patches set; once it does, what the change
+# to NODE makes of them (STATE files named for the node):
+#   etcd.NODE            etcd gains extraArgs
+#   etcd-subnets.NODE    etcd's listen subnets change
+#   etcd-args.NODE       etcd has those extraArgs before as after
+#   module-add.NODE      a module is added
+#   module-remove.NODE   a module is removed
+#   module-params.NODE   a module's parameters change
+# The resources' version moves on as Talos rewrites them, whether or not their spec changes.
+held() {
+  local node=$1 type=$2 after=0 version=1 args='{}' listen='["198.51.100.0/24"]' modules
+  if runs "$node"; then
+    after=1 version=2
   fi
-  if [[ $which == rendered && -e $STATE/env.$node ]]; then
-    echo "  env:"
-    echo "    GRPC_GO_LOG_SEVERITY_LEVEL: info"
+  if [[ -e $STATE/unreadable.$node ]] || { ((after)) && [[ -e $STATE/unreadable-after.$node ]]; }; then
+    echo "error getting resources from 198.51.100.12: rpc error: code = Unavailable desc = connection refused" >&2
+    exit 1
   fi
-  echo "cluster:"
-  echo "  etcd:"
-  echo "    ca:"
-  echo "      crt: marker-etcd-certificate"
-  echo "      key: marker-etcd-key"
-  if [[ -e $STATE/etcd-args.$node || ( $which == rendered && -e $STATE/etcd.$node ) ]]; then
-    echo "    extraArgs:"
-    echo "      listen-metrics-urls: http://0.0.0.0:2381"
-  fi
-  echo "  scheduler:"
-  if [[ $which == rendered && -e $STATE/scheduler.$node ]]; then
-    echo "    extraArgs:"
-    echo "      bind-address: 0.0.0.0"
-  else
-    echo "    {}"
-  fi
-  echo "---"
-  echo "apiVersion: v1alpha1"
-  echo "kind: KernelModuleConfig"
-  echo "name: drbd"
-  if [[ $which == rendered && -e $STATE/module-params.$node ]]; then
-    echo "parameters:"
-    echo "  - usermode_helper=enabled"
-  else
-    echo "parameters:"
-    echo "  - usermode_helper=disabled"
-  fi
-  if [[ $which == running && -e $STATE/module-remove.$node ]] || [[ $which == rendered && ! -e $STATE/module-remove.$node ]]; then
-    echo "---"
-    echo "apiVersion: v1alpha1"
-    echo "kind: KernelModuleConfig"
-    echo "name: dm-snapshot"
-  fi
-  if [[ $which == rendered && -e $STATE/module-add.$node ]]; then
-    echo "---"
-    echo "apiVersion: v1alpha1"
-    echo "kind: KernelModuleConfig"
-    echo "name: zfs"
-  fi
-  if [[ $which == rendered ]] && [[ ! -e $STATE/etcd.$node && ! -e $STATE/network.$node && ! -e $STATE/scheduler.$node &&
-    ! -e $STATE/module-add.$node && ! -e $STATE/module-remove.$node && ! -e $STATE/module-params.$node && ! -e $STATE/env.$node ]]; then
-    echo "---"
-    echo "apiVersion: v1alpha1"
-    echo "kind: NetworkRuleConfig"
-    echo "name: ingress"
-  fi
+  case $type in
+    EtcdConfigs.etcd.talos.dev)
+      if [[ $node != cp-* ]]; then
+        echo "error: rpc error: code = NotFound desc = resource EtcdConfigs.etcd.talos.dev(etcd/etcd@undefined) doesn't exist" >&2
+        exit 1
+      fi
+      if [[ -e $STATE/etcd-args.$node ]] || { ((after)) && [[ -e $STATE/etcd.$node ]]; }; then
+        args='{"listen-metrics-urls": {"values": ["http://0.0.0.0:2381"]}}'
+      fi
+      if ((after)) && [[ -e $STATE/etcd-subnets.$node ]]; then
+        listen='["198.51.100.0/25"]'
+      fi
+      jq -n --arg node "$node" --argjson version "$version" --argjson args "$args" --argjson listen "$listen" '{
+        node: "198.51.100.12",
+        metadata: {namespace: "etcd", type: "EtcdConfigs.etcd.talos.dev", id: "etcd", version: $version, owner: "etcd.ConfigController", phase: "running"},
+        spec: {advertiseValidSubnets: ["198.51.100.0/24"], advertiseExcludeSubnets: null, listenValidSubnets: $listen,
+          listenExcludeSubnets: null, image: "registry.k8s.io/etcd:v3.6.5", extraArgs: $args}}'
+      ;;
+    KernelModuleSpecs.runtime.talos.dev)
+      modules='drbd usermode_helper=disabled
+drbd_transport_tcp
+dm-thin-pool
+dm-snapshot'
+      if ((after)); then
+        [[ ! -e $STATE/module-params.$node ]] || modules=${modules/usermode_helper=disabled/usermode_helper=enabled}
+        [[ ! -e $STATE/module-remove.$node ]] || modules=${modules%$'\n'dm-snapshot}
+        [[ ! -e $STATE/module-add.$node ]] || modules+=$'\nzfs'
+      fi
+      while read -r name parameters; do
+        jq -n --arg name "$name" --arg parameters "$parameters" --argjson version "$version" '{
+          node: "198.51.100.12",
+          metadata: {namespace: "runtime", type: "KernelModuleSpecs.runtime.talos.dev", id: $name, version: $version, owner: "runtime.KernelModuleConfigController", phase: "running"},
+          spec: {string: $name, parameters: ($parameters | split(" ") | map(select(. != "")))}}'
+      done <<< "$modules"
+      ;;
+    *)
+      echo "error: unexpected resource type $type" >&2
+      exit 1
+      ;;
+  esac
 }
 
 # diff_of NODE: the hunks of the unified diff talosctl prints of NODE's configuration, from the one it
@@ -311,7 +308,11 @@ diff_of() {
   if [[ $node == cp-1 && -e $STATE/changes ]]; then
     echo "     @@ -80,6 +80,7 @@"
     echo "           secret: [redacted]"
-    echo "     +    token: [redacted]"
+    if given --redact-secrets=false; then
+      echo "     +    token: marker-machine-token"
+    else
+      echo "     +    token: [redacted]"
+    fi
     echo "           ca:"
     echo "             crt: [redacted]"
     shown=1
@@ -319,13 +320,28 @@ diff_of() {
   if [[ -e $STATE/etcd.$node ]]; then
     echo "     @@ -52,6 +52,8 @@"
     echo "             ca:"
-    echo "               crt: marker-etcd-certificate"
-    echo "               key: marker-etcd-key"
+    if given --redact-secrets=false; then
+      echo "               crt: marker-etcd-certificate"
+      echo "               key: marker-etcd-key"
+    else
+      echo "               crt: [redacted]"
+      echo "               key: [redacted]"
+    fi
     echo "     +      extraArgs:"
     echo "     +        listen-metrics-urls: http://0.0.0.0:2381"
     echo "           scheduler: {}"
     echo "           discovery:"
     echo "             enabled: true"
+    shown=1
+  fi
+  if [[ -e $STATE/etcd-subnets.$node ]]; then
+    echo "     @@ -46,7 +46,7 @@"
+    echo "             advertisedSubnets:"
+    echo "               - 198.51.100.0/24"
+    echo "             listenSubnets:"
+    echo "     -        - 198.51.100.0/24"
+    echo "     +        - 198.51.100.0/25"
+    echo "             ca:"
     shown=1
   fi
   if [[ -e $STATE/scheduler.$node ]]; then
@@ -350,15 +366,6 @@ diff_of() {
     echo "     +        hostname: $node"
     echo "           install:"
     echo "             disk: /dev/vda"
-    shown=1
-  fi
-  if [[ -e $STATE/env.$node ]]; then
-    echo "     @@ -14,6 +14,8 @@"
-    echo "           network:"
-    echo "             interfaces: []"
-    echo "     +    env:"
-    echo "     +      GRPC_GO_LOG_SEVERITY_LEVEL: info"
-    echo "           install:"
     shown=1
   fi
   if [[ -e $STATE/module-add.$node ]]; then
@@ -413,16 +420,12 @@ if [[ $1 == talosctl ]]; then
       asked+=("${args[i + 1]}")
     fi
   done
-  if given get && given machineconfig; then
-    # What a node runs, as talosctl get prints the resource: the address of the node, then the
-    # configuration as a block of text.
-    node=${asked[0]}
-    if [[ -e $STATE/unreadable.$node ]]; then
-      echo "error: reading the machine configuration of $node (198.51.100.12): connection refused" >&2
-      exit 1
-    fi
-    printf 'node: 198.51.100.12\nmetadata:\n    namespace: config\n    type: MachineConfigs.config.talos.dev\n    id: v1alpha1\nspec: |\n'
-    config running "$node" | sed 's/^/    /'
+  if given get; then
+    # talosctl get TYPE [ID] --output json of one node; only these types are asked.
+    for ((i = 1; i < ${#args[@]}; i++)); do
+      [[ ${args[i]} != get ]] || type=${args[i + 1]}
+    done
+    held "${asked[0]}" "$type"
   elif given status && [[ -e $STATE/etcd-old-table ]]; then
     printf 'NODE   MEMBER   DB SIZE   IN USE   LEADER   RAFT INDEX   RAFT TERM   RAFT APPLIED INDEX   LEARNER   ERRORS\n'
     for node in "${asked[@]}"; do
@@ -487,15 +490,16 @@ case "$1" in
         exit 1
       fi
       changed=0
-      # Like talman, it renders every node's configuration into the output directory, and prints,
-      # to standard error, each node's block in the order of talman.yaml: a header, then what
-      # talosctl's dry run printed, indented, ending with the unified diff of the whole document,
-      # three lines of context around each change.
-      mkdir -p "$dir/clusterconfig"
+      # Like talman, it prints, to standard error, each node's block in the order of talman.yaml: a
+      # header, then what talosctl's dry run printed, indented, ending with the unified diff of the
+      # whole document, three lines of context around each change. A talman that cannot hide the
+      # cluster's secrets in a diff, without --redact-secrets=false, shows only whether there is one.
+      withheld=0
+      if [[ -e $STATE/withheld ]] && ! given --redact-secrets=false; then
+        withheld=1
+        printf '%s\n' "cannot hide this cluster's secrets in the diff: no SOPS key" '  diffs are not shown' >&2
+      fi
       mapfile -t nodes < <(yq '.nodes[].hostname' "$dir/talman.yaml")
-      for node in "${nodes[@]}"; do
-        config rendered "$node" > "$dir/clusterconfig/$node.yaml"
-      done
       position=0
       for node in "${nodes[@]}"; do
         position=$((position + 1))
@@ -505,17 +509,28 @@ case "$1" in
         if [[ " $new " == *" $node "* ]]; then
           continue
         fi
+        node_changed=0
+        if [[ " $pending " == *" $node "* || ( -z $target && $node == cp-1 && -e $STATE/changes ) ]]; then
+          node_changed=1 changed=1
+        fi
         {
           echo "$header"
+          if ((withheld)); then
+            if ((node_changed)); then
+              echo "     changes; diff not shown"
+            else
+              echo "     no changes"
+            fi
+            continue
+          fi
           echo "     Dry run summary:"
           echo "     Applied configuration without a reboot (skipped in dry-run)"
           echo "     Config diff:"
           echo "     "
-          if [[ " $pending " == *" $node "* || ( $node == cp-1 && -e $STATE/changes ) ]]; then
+          if ((node_changed)); then
             echo "     --- a"
             echo "     +++ b"
             diff_of "$node"
-            changed=1
           else
             echo "     No changes."
           fi
@@ -537,6 +552,7 @@ case "$1" in
     if [[ -n $target ]]; then
       grep -vx -- "$target" "$STATE/pending" > "$STATE/pending.next" || true
       mv "$STATE/pending.next" "$STATE/pending"
+      : > "$STATE/taken.$target"
       echo "     Applied configuration without a reboot"
       if [[ $mode == try ]]; then
         echo "$target" >> "$STATE/tried"
@@ -556,6 +572,18 @@ case "$1" in
     if given --onboard-new-nodes; then
       : > "$STATE/new-nodes"
     fi
+    # One node after the other, in talman.yaml's order, until one fails.
+    for node in $(yq '.nodes[].hostname' "$dir/talman.yaml"); do
+      if [[ -e $STATE/apply-fails.$node ]]; then
+        echo "error: applying the configuration to $node at 198.51.100.12: connection reset" >&2
+        exit 1
+      fi
+      if [[ " $pending " == *" $node "* ]]; then
+        : > "$STATE/taken.$node"
+        grep -vx -- "$node" "$STATE/pending" > "$STATE/pending.next" || true
+        mv "$STATE/pending.next" "$STATE/pending"
+      fi
+    done
     rm -f "$STATE/changes" "$STATE/pending"
     echo "     Applied configuration without a reboot"
     ;;
@@ -642,6 +670,11 @@ KUBECONFIG
     take_own_snapshot
     rm -f "$STATE/k8s-behind"
     echo "== upgraded Kubernetes to v1.37.1"
+    ;;
+  reboot)
+    # The node goes down and comes back, its kubelet reporting Ready again.
+    : > "$STATE/rebooted.$target"
+    echo "== $target: rebooted"
     ;;
   etcd)
     # Without a path the snapshot lands in the output directory, as the pinned talman writes it, and
@@ -824,15 +857,15 @@ if [[ $1 == drain ]]; then
   done
 fi
 if [[ $1 == get && $2 == nodes ]]; then
-  # A node's kubelet reports Ready again some polls after the node was upgraded, as many as its
-  # stale.<hostname> file says, and never when it says never; until then, and before the upgrade,
-  # its Ready condition is the last one it reported before its upgrade: the drain's time, or an old
-  # one for a node never drained.
+  # A node's kubelet reports Ready again some polls after the node was upgraded or rebooted, as many
+  # as its stale.<hostname> file says, and never when it says never; until then, and before the
+  # upgrade, its Ready condition is the last one it reported before its upgrade: the drain's time, or
+  # an old one for a node never drained.
   now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   items=()
   for node in $(yq '.nodes[].hostname' "${TALMAN_CONFIG:?}/talman.yaml"); do
     beat=$(cat "$STATE/drained.$node" 2> /dev/null || echo 2026-01-01T00:00:00Z)
-    if [[ -e $STATE/upgraded.$node ]]; then
+    if [[ -e $STATE/upgraded.$node || -e $STATE/rebooted.$node ]]; then
       stale=$(cat "$STATE/stale.$node" 2> /dev/null || echo 0)
       if [[ $stale == never ]]; then
         :
@@ -1611,6 +1644,25 @@ early_readers() {
   [ "$(calls '^cluster-reboot ' | awk '{ print $2 }' | paste -sd' ')" = "cp-1 cp-2" ]
   [[ $output == *"cp-2 did not come back"* ]]
   [[ $output == *"not rebooted: cp-3"* ]]
+
+  # A control plane that is Ready again while its etcd member is not back did not come back either:
+  # with scripts/cluster-reboot itself rebooting cp-1, which comes back Ready with its member
+  # reporting no leader, cp-2 and cp-3 are not rebooted. The waits are real ones.
+  cp "$ROOT/scripts/cluster-reboot" "$REPO/scripts/cluster-reboot"
+  fake sleep <<'EOF'
+exec "$(command -v -p sleep)" "$@"
+EOF
+  rm "$STATE/reboot-fails.cp-2"
+  : > "$STATE/etcd-cut.cp-1"
+  : > "$RECORD/argv"
+  printf '%s\n' cp-1 cp-2 cp-3 > "$STATE/pending"
+  with REBOOT_WAIT=1
+  recipe cluster-talos --yes --reboot < /dev/null
+
+  [ "$status" -ne 0 ]
+  [ "$(calls '^talman reboot ' | paste -sd'|')" = 'talman reboot -n cp-1 --yes --extra-flags=--drain=false' ]
+  [[ $output == *"cp-1 is Ready again, but its etcd member did not come back"* ]]
+  [[ $output == *"cp-1 did not come back"* && $output == *"not rebooted: cp-2, cp-3"* ]]
 }
 
 @test "cluster-talos names a node by what its configuration changes, not by the lines around the change" {
@@ -1628,39 +1680,89 @@ early_readers() {
   [[ $output == *"+      scheduler:"* ]]
   [[ $output != *"until it reboots"* && $output != *"cluster-reboot"* ]]
 
-  # What a node does not take up until a reboot, besides etcd's arguments: a kernel module removed or
-  # given other parameters, and an environment variable; none of them shows as such in a diff.
+  # What a node does not take up until a reboot, besides etcd's arguments: etcd's listen subnets,
+  # and a kernel module removed or given other parameters, on a control plane as on a worker; none of
+  # them shows as such in a diff.
   mkdir -p "$CLUSTER/clusterconfig"
   : > "$CLUSTER/clusterconfig/kubeconfig"
-  printf '%s\n' cp-1 cp-3 worker-1 worker-2 > "$STATE/pending"
+  printf '%s\n' cp-1 cp-2 cp-3 worker-1 worker-2 > "$STATE/pending"
+  rm "$STATE/scheduler.cp-2" "$STATE/module-add.cp-3"
   : > "$STATE/module-remove.cp-1"
+  : > "$STATE/etcd-subnets.cp-2"
   : > "$STATE/module-params.cp-3"
-  : > "$STATE/env.worker-1"
+  : > "$STATE/module-remove.worker-1"
   : > "$STATE/network.worker-2"
 
   recipe cluster-talos --yes < /dev/null
 
   [ "$status" -eq 0 ]
   [[ $output == *"cp-1 runs its kernel modules as they were loaded until it reboots"* ]]
+  [[ $output == *"cp-2 runs etcd with the arguments it had until it reboots"* ]]
   [[ $output == *"cp-3 runs its kernel modules as they were loaded until it reboots"* ]]
-  [[ $output == *"worker-1 runs its services with the environment they had until it reboots"* ]]
-  [[ $output != *"worker-2 runs"* ]]
+  [[ $output == *"worker-1 runs its kernel modules as they were loaded until it reboots"* ]]
+  [[ $output != *"cp-1 runs etcd"* && $output != *"cp-2 runs its kernel"* && $output != *"worker-2 runs"* ]]
+  # A worker runs no etcd, so its etcd configuration is not asked for; nothing asked holds a secret.
+  [ -z "$(calls '^talman talosctl -n worker-[0-9]+ get EtcdConfigs')" ]
+  [ -n "$(calls '^talman talosctl -n cp-2 get EtcdConfigs.etcd.talos.dev etcd --output json$')" ]
+  [ -n "$(calls '^talman talosctl -n worker-1 get KernelModuleSpecs.runtime.talos.dev --output json$')" ]
+  [ -z "$(calls 'machineconfig')" ]
 }
 
 @test "cluster-talos says when it cannot tell whether a changed node needs a reboot" {
   fake_cluster
-  printf '%s\n' cp-1 cp-2 > "$STATE/pending"
+  mkdir -p "$CLUSTER/clusterconfig"
+  : > "$CLUSTER/clusterconfig/kubeconfig"
+  printf '%s\n' cp-1 cp-2 cp-3 > "$STATE/pending"
   : > "$STATE/etcd.cp-1"
   : > "$STATE/etcd.cp-2"
+  : > "$STATE/etcd.cp-3"
   : > "$STATE/unreadable.cp-2"
+  : > "$STATE/unreadable-after.cp-3"
+
+  recipe cluster-talos --yes --reboot < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"could not read cp-2's settings that take effect only at a reboot from its Talos API before the configuration was applied, so it is not said whether it needs a reboot"* ]]
+  [[ $output == *"could not read cp-3's settings that take effect only at a reboot from its Talos API after the configuration was applied, so it is not said whether it needs a reboot"* ]]
+  [[ $output != *"198.51.100.12"* ]]
+  # Only the node known to need one is rebooted; the others are named for the operator to look at.
+  [ "$(calls '^cluster-reboot ' | paste -sd'|')" = "cluster-reboot cp-1 lab-sto2 --yes" ]
+}
+
+@test "cluster-talos compares a changed node whose diff talman does not show" {
+  fake_cluster
+  printf '%s\n' cp-1 cp-2 > "$STATE/pending"
+  : > "$STATE/etcd.cp-1"
+  : > "$STATE/network.cp-2"
+  : > "$STATE/withheld"
 
   recipe cluster-talos --yes < /dev/null
 
   [ "$status" -eq 0 ]
+  [[ $output == *"changes; diff not shown"* ]]
   [[ $output == *"cp-1 runs etcd with the arguments it had until it reboots"* ]]
-  [[ $output == *"could not compare what cp-2 runs with its configuration"* ]]
-  [[ $output != *"cp-2 runs etcd"* ]]
-  [[ $output != *"198.51.100.12"* ]]
+  [[ $output != *"cp-2 runs"* ]]
+}
+
+@test "cluster-talos names the nodes that took a change needing a reboot when talman apply stops partway" {
+  fake_cluster
+  mkdir -p "$CLUSTER/clusterconfig"
+  : > "$CLUSTER/clusterconfig/kubeconfig"
+  printf '%s\n' cp-1 cp-2 cp-3 > "$STATE/pending"
+  : > "$STATE/etcd.cp-1"
+  : > "$STATE/etcd.cp-2"
+  : > "$STATE/etcd.cp-3"
+  : > "$STATE/apply-fails.cp-2"
+
+  recipe cluster-talos --yes --reboot < /dev/null
+
+  # cp-1 took the configuration before talman stopped at cp-2; a later run finds nothing to change
+  # on cp-1, so this one says what it runs. Nothing of a rollout that is not done is rebooted.
+  [ "$status" -ne 0 ]
+  [[ $output == *"failed while applying the configuration"* ]]
+  [[ $output == *"cp-1 runs etcd with the arguments it had until it reboots; reboot it with: just cluster-reboot cp-1"* ]]
+  [[ $output != *"cp-2 runs"* && $output != *"cp-3 runs"* ]]
+  [ -z "$(calls '^cluster-reboot ')" ]
 }
 
 @test "cluster-talos --first --reboot reboots only once every node keeps the configuration" {
@@ -1721,6 +1823,28 @@ early_readers() {
   [[ $output == *"cp-2 runs etcd with the arguments it had until it reboots"* ]]
   [[ $output != *"worker-2 runs"* ]]
   if grep -qE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' <<< "$output"; then false; fi
+}
+
+@test "no patch sets a setting that takes effect only at a reboot and that the rollout does not read back" {
+  expression=$(bash -c ". '$ROOT/scripts/lib/cluster.sh' && printf '%s' \"\$reboot_unwatched\"")
+  [ -n "$expression" ]
+  mapfile -t patches < <(find "$ROOT/talos/patches" -name '*.yaml')
+  [ "${#patches[@]}" -gt 10 ]
+  found=$(yq ea "$expression" "${patches[@]}")
+  echo "set by a patch: $found"
+  [ -z "$found" ]
+
+  # Each such setting, in a patch, is named.
+  printf '%s\n' 'machine:' '  env:' '    HTTP_PROXY: http://proxy.example.com' > "$BATS_TEST_TMPDIR/env.yaml"
+  printf '%s\n' 'apiVersion: v1alpha1' 'kind: EnvironmentConfig' 'variables:' '  HTTP_PROXY: http://proxy.example.com' > "$BATS_TEST_TMPDIR/environment.yaml"
+  printf '%s\n' 'apiVersion: v1alpha1' 'kind: SecurityProfileConfig' 'workloadIsolation: true' > "$BATS_TEST_TMPDIR/sandbox.yaml"
+  printf '%s\n' 'apiVersion: v1alpha1' 'kind: RawVolumeConfig' 'name: data' 'encryption:' '  provider: luks2' > "$BATS_TEST_TMPDIR/volume.yaml"
+  printf '%s\n' 'machine:' '  systemDiskEncryption:' '    state:' '      provider: luks2' > "$BATS_TEST_TMPDIR/system-disk.yaml"
+  for patch in env environment sandbox volume system-disk; do
+    named=$(yq ea "$expression" "$BATS_TEST_TMPDIR/$patch.yaml")
+    echo "$patch: $named"
+    [ -n "$named" ]
+  done
 }
 
 @test "the Talos documentation the reboot list cites is the minor version versions.yaml pins" {
@@ -2724,6 +2848,23 @@ EOF
   run_and_keep failed cluster-talos --yes < /dev/null
   run_and_keep ok cluster-talos --onboard --yes < /dev/null
   run_and_keep ok cluster-talos < /dev/null
+  # A rollout whose diff, unredacted, would show the cluster's tokens and etcd's CA key, and which
+  # reads back what needs a reboot, names it, reboots it, and stops partway.
+  reboot_rollout() {
+    : > "$STATE/changes"
+    printf '%s\n' cp-1 cp-2 > "$STATE/pending"
+    : > "$STATE/etcd.cp-1"
+    : > "$STATE/etcd.cp-2"
+    run_and_keep ok cluster-talos --yes < /dev/null
+    : > "$STATE/changes"
+    printf '%s\n' cp-1 cp-2 > "$STATE/pending"
+    run_and_keep ok cluster-talos --yes --reboot < /dev/null
+    printf '%s\n' cp-1 cp-2 > "$STATE/pending"
+    : > "$STATE/apply-fails.cp-2"
+    run_and_keep failed cluster-talos --yes < /dev/null
+    rm "$STATE/apply-fails.cp-2" "$STATE/pending"
+  }
+  reboot_rollout
   printf '%s\n' cp-2 worker-1 > "$STATE/talos-behind"
   : > "$STATE/k8s-behind"
   run_and_keep failed cluster-upgrade <<< no
@@ -2749,6 +2890,7 @@ EOF
   run_and_keep failed cluster-talos <<< no
   run_and_keep failed cluster-talos --yes < /dev/null
   run_and_keep ok cluster-talos --onboard --yes < /dev/null
+  reboot_rollout
   printf '%s\n' cp-2 worker-1 > "$STATE/talos-behind"
   : > "$STATE/k8s-behind"
   run_and_keep failed cluster-upgrade <<< no
@@ -2762,7 +2904,8 @@ EOF
   run_and_keep ok cluster-upgrade-k8s --yes < /dev/null
   reset_environment
   ci_printed=("${printed[@]:local_runs}")
-  [ "${#ci_printed[@]}" -eq 11 ]
+  [ "${#ci_printed[@]}" -eq 14 ]
+  [[ ${ci_printed[*]} == *"cp-1 runs etcd with the arguments it had until it reboots"* ]]
   [[ ${ci_printed[*]} == *"its output is in talos/lab-sto2/clusterconfig/"* ]]
   for address in $(yq '.nodes[].ipAddress' "$CLUSTER/talman.yaml"); do
     [[ ${ci_printed[*]} != *"$address"* ]]
@@ -2777,12 +2920,23 @@ EOF
     marker-client-key-data
     marker-state-access-key-id
     marker-state-secret-key
+    marker-machine-token
+    marker-etcd-certificate
+    marker-etcd-key
   )
   grep -q '^talman apply ' "$RECORD/argv"
   grep -q '^kubectl ' "$RECORD/argv"
   grep -q '^yq ' "$RECORD/argv"
+  grep -q '^talman talosctl -n cp-1 get EtcdConfigs.etcd.talos.dev ' "$RECORD/argv"
+  [ -z "$(calls 'machineconfig')" ]
   [[ ${printed[*]} == *"no answer on the Talos API port"* ]]
   [[ ${printed[*]} != *"$KUBE_API_ADDRESS"* ]]
+  # talman's output in CI, in the recipes' logs, holds no secret either.
+  mapfile -t logs < <(find "$CLUSTER/clusterconfig" -name '*.log')
+  [ "${#logs[@]}" -ge 4 ]
+  for marker in "${markers[@]}"; do
+    absent "$marker" "${logs[@]}"
+  done
   # The kubeconfig and the bundle hold their own secrets; nothing else may.
   rm -r "$BUNDLE" "$CLUSTER/clusterconfig"
   for marker in "${markers[@]}"; do

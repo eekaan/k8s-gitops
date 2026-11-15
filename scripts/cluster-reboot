@@ -10,15 +10,20 @@
 #      given, and the scheduler would go on giving it the same replica. talosctl's own drain, which
 #      reaches the API where only the nodes reach it, stays off;
 #   2. reboots it with talman;
-#   3. waits until it is a Ready Kubernetes node with a heartbeat from after the reboot, for up to
-#      REBOOT_WAIT seconds (600).
+#   3. waits until it is a Ready Kubernetes node with a heartbeat from after the reboot and, for a
+#      control plane, until etcd has its member back, for up to REBOOT_WAIT seconds (600) in all. A
+#      Talos control plane reports Ready without its etcd member, as its kubelet reaches the API
+#      through the others, so one rebooted in with an etcd setting its member cannot start with is
+#      Ready all the same, and another control plane rebooted after it would leave etcd without a
+#      quorum.
 # Then it prints how many probes it made, how many failed and the longest run of failures, in
 # seconds; uncordons the node, unless it was unschedulable before the recipe ran, which it says;
 # and deletes the pods the shutdown left in phase Failed on it, rejected (NodeShutdown) or
 # terminated (Terminated) as the node went down, which nothing else removes, saying how many. It
-# exits 0 only when the node is Ready again and no probe failed; --tolerate <seconds> accepts runs of
-# failures up to that long, for the operator to say what counts as an interruption. A run that stops
-# once the node is cordoned leaves it cordoned and says so last.
+# exits 0 only when the node is Ready again, a control plane with its etcd member, and no probe
+# failed; --tolerate <seconds> accepts runs of failures up to that long, for the operator to say
+# what counts as an interruption. A run that stops once the node is cordoned leaves it cordoned and
+# says so last.
 #
 # The probe runs in the background and keeps its counts in memory, so it writes no file. It is
 # stopped on every exit: at the end, when a step fails, and when SIGINT or SIGTERM ends the recipe;
@@ -67,7 +72,7 @@ done
 complete=1
 require_cluster talman secrets age-key || complete=0
 require_kubeconfig || complete=0
-require_commands talman kubectl jq || complete=0
+require_commands talman kubectl jq yq || complete=0
 if [[ ! $tolerate =~ ^[0-9]+$ ]]; then
   infra_error "--tolerate takes a whole number of seconds"
   complete=0
@@ -92,9 +97,26 @@ if ! grep -qxF -- "$node" <<< "$hostnames"; then
   fi
   exit 1
 fi
+mapfile -t control_planes < <(yq '.nodes[] | select(.role == "controlplane") | .hostname' "$talman_file")
 
 say() {
   printf '%s: %s\n' "${0##*/}" "$1"
+}
+
+# etcd_back: whether etcd has every control plane of talman.yaml as a member again, the node's among
+# them: each member, asked through its own control plane's Talos API, follows the same leader in the
+# same term as a voting member and reports no error, and the node's own member lists all of them.
+# What talosctl prints names addresses, so nothing of it is printed.
+etcd_back() {
+  local member status members
+  local -a asked=()
+  for member in "${control_planes[@]}"; do
+    asked+=(-n "$member")
+  done
+  status=$(talman talosctl "${asked[@]}" etcd status 2> /dev/null) || return 1
+  etcd_status_healthy "${#control_planes[@]}" <<< "$status" || return 1
+  members=$(talman talosctl -n "$node" etcd members 2> /dev/null) || return 1
+  etcd_lists "${control_planes[@]}" <<< "$members"
 }
 
 # probe_api: runs in the background until SIGTERM: asks /readyz through the kubeconfig once a
@@ -250,13 +272,23 @@ since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 rebooted=0
 cluster_talman_drain_off reboot -n "$node" --yes || rebooted=$?
 
-back=0
+back=0 ready=0 member=0
+for each in "${control_planes[@]}"; do
+  [[ $each != "$node" ]] || member=1
+done
 if ((rebooted == 0)); then
   step="waiting for $node to be Ready"
-  say "talman has rebooted $node; waiting up to ${ready_wait}s for it to report Ready"
+  if ((member)); then
+    say "talman has rebooted $node; waiting up to ${ready_wait}s for it to report Ready and for etcd to have its member back"
+  else
+    say "talman has rebooted $node; waiting up to ${ready_wait}s for it to report Ready"
+  fi
   deadline=$((SECONDS + ready_wait))
   while :; do
-    if not_ready=$(not_ready_since "$since" "$node") && [[ -z $not_ready ]]; then
+    if ((!ready)) && not_ready=$(not_ready_since "$since" "$node") && [[ -z $not_ready ]]; then
+      ready=1
+    fi
+    if ((ready)) && { ((!member)) || etcd_back; }; then
       back=1
       break
     fi
@@ -275,8 +307,13 @@ if ((rebooted != 0)); then
   step="rebooting $node with talman"
   exit "$rebooted"
 fi
-if ((!back)); then
+if ((!ready)); then
   infra_error "$node has not reported Ready since its reboot, after ${ready_wait}s; REBOOT_WAIT sets how long to wait"
+  exit 1
+fi
+if ((!back)); then
+  step="waiting for etcd to have $node's member back"
+  infra_error "$node is Ready again, but its etcd member did not come back within ${ready_wait}s: etcd status, asked of every control plane, does not show each following one leader as a voting member without error, or $node's member does not list them all. Reboot no other control plane until it does: etcd keeps its quorum only while a majority of members are up. REBOOT_WAIT sets how long to wait"
   exit 1
 fi
 

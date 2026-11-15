@@ -219,7 +219,11 @@ list() {
 
 # targets: Prometheus's answer to a request for its active targets: each of the cluster's own
 # components, on every node that runs it, up unless targets-down names it, with the addresses a real
-# answer holds in its labels, which the recipes must never print.
+# answer holds in its labels, which the recipes must never print. A target names its node as the
+# monitor that finds it does: etcd's by its endpoint's node alone; the controller manager's and the
+# scheduler's by their endpoint's node and their pod's; node-exporter's by its pod's node alone; a
+# kubelet's, whose endpoint the Prometheus Operator points at the Node, only in the label node the
+# Operator gives it; the API server's not at all.
 targets() {
   local job node
   {
@@ -241,9 +245,16 @@ targets() {
     ($down | split("\n") | map(select(. != ""))) as $down
     | ($unscraped | split("\n") | map(select(. != ""))) as $unscraped
     | {status: "success", data: {activeTargets: [split("\n")[] | select(. != "") | split(" ") as $t | select($t[0] | IN($unscraped[]) | not)
+      | (if ($t | length) > 1 and $t[0] != "my-app" then $t[1] else null end) as $node
       | {discoveredLabels: ({"__address__": "198.51.100.31:9100"}
-          + (if ($t | length) > 1 and $t[0] != "my-app" then {"__meta_kubernetes_endpoint_node_name": $t[1]} else {} end)),
-        labels: {job: $t[0], instance: "198.51.100.31:9100"},
+          + (if $node == null then {}
+            elif $t[0] == "kube-etcd" then {"__meta_kubernetes_endpoint_node_name": $node}
+            elif $t[0] == "node-exporter" then {"__meta_kubernetes_pod_node_name": $node}
+            elif $t[0] == "kubelet" then {"__meta_kubernetes_endpoint_address_target_kind": "Node",
+              "__meta_kubernetes_endpoint_address_target_name": $node}
+            else {"__meta_kubernetes_endpoint_node_name": $node, "__meta_kubernetes_pod_node_name": $node} end)),
+        labels: ({job: $t[0], instance: "198.51.100.31:9100"}
+          + (if $t[0] == "kubelet" and $node != null then {node: $node} else {} end)),
         scrapeUrl: "http://198.51.100.31:9100/metrics",
         health: (if ($down | index($t | join(" "))) != null or ($t[0] == "my-app") then "down" else "up" end)}]}}'
 }

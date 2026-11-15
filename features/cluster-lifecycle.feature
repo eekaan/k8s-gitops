@@ -51,6 +51,11 @@ Feature: Cluster lifecycle
     When cluster-reboot runs with a short REBOOT_WAIT
     Then it asks for the node more than once, stops when the wait runs out, reports the probes and exits non-zero saying the node has not reported Ready since its reboot
 
+  Scenario: A control plane that is Ready again without its etcd member fails the reboot
+    Given a control plane whose etcd member does not come back after talman reboots it, while its kubelet reports Ready
+    When cluster-reboot runs for it with a short REBOOT_WAIT, then for one whose member comes back a few seconds late, and for a worker
+    Then the first asks etcd status of every control plane through the Talos API more than once, exits non-zero naming the node and saying its etcd member did not come back, leaves it cordoned and prints no address; the second waits for the member and passes; the worker's reboot asks etcd nothing
+
   Scenario: A node that is not in the cluster is refused before anything is rebooted
     Given a hostname talman.yaml does not list, a node's address, two nodes in one argument and a prefix of a hostname
     When cluster-reboot runs for each
