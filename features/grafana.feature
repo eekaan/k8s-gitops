@@ -1,6 +1,7 @@
 Feature: Grafana
   One Grafana in the namespace monitoring, run by the Grafana operator, with the cluster's Prometheus
-  as its datasource and the monitoring chart's dashboards, all of it from Git.
+  and VictoriaLogs as its datasources, the monitoring chart's dashboards and one of logs, all of it
+  from Git.
 
   Scenario: The Grafana operator installs and upgrades its resource definitions
     Given the grafana-operator application, enabled in the cluster's overlay
@@ -30,7 +31,7 @@ Feature: Grafana
   Scenario: Grafana reads the cluster's Prometheus
     Given the grafana application and the kube-prometheus-stack application
     When the first is built as Flux applies it and the monitoring chart is rendered offline with its values
-    Then the one datasource selects the Grafana, is its default and of type prometheus, and its URL names the Prometheus Service the monitoring chart renders, in that Service's namespace, on a port the Service serves
+    Then the one datasource of type prometheus selects the Grafana, is its default, and its URL names the Prometheus Service the monitoring chart renders, in that Service's namespace, on a port the Service serves
 
   Scenario: Grafana shows the monitoring chart's dashboards for what the cluster runs
     Given the grafana application's dashboards release and the kube-prometheus-stack application
@@ -40,7 +41,7 @@ Feature: Grafana
   Scenario: No dashboard is fetched from the network at run time
     Given the grafana application
     When it is built as Flux applies it and its dashboards chart is rendered offline
-    Then no GrafanaDashboard loads its JSON from a URL, grafana.com, a registry or Jsonnet, and no dashboard or datasource asks for a plugin
+    Then no GrafanaDashboard loads its JSON from a URL, grafana.com, a registry or Jsonnet, and no dashboard asks for a plugin and only the VictoriaLogs datasource does, for its own plugin once
 
   Scenario: Grafana's admin credential is generated in the cluster
     Given the grafana application
