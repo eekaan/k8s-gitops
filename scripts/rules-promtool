@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Runs promtool on what scripts/rules-config wrote to DIR: `promtool check rules` on every rule file
+# of a cluster, the chart's and the tree's own, then `promtool test rules` on its unit tests, for each
+# cluster. PROMTOOL... is the command that runs promtool with DIR as its working directory, which the
+# file names are relative to: promtool itself, started in DIR, or a container's entrypoint, such as
+#   docker run --rm --network none -v DIR:/check:ro -w /check --entrypoint promtool IMAGE
+# Runs every step, so one report holds every failure, and exits non-zero when any step failed.
+# Usage: scripts/rules-promtool DIR PROMTOOL...
+set -euo pipefail
+shopt -s nullglob
+
+# docker is run with none of the secrets a recipe's environment may hold.
+# shellcheck source=scripts/lib/tools.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/tools.sh"
+
+[[ $# -ge 2 && -d $1 ]] || { echo "usage: scripts/rules-promtool DIR PROMTOOL..." >&2; exit 2; }
+dir=$1
+shift
+cd "$dir"
+
+failed=0
+for cluster in */; do
+  cluster=${cluster%/}
+  rules=("$cluster"/*.rules.yaml)
+  stock=("$cluster"/stock.*.rules.yaml)
+  own=()
+  for file in "${rules[@]}"; do
+    [[ $file == "$cluster"/stock.* ]] || own+=("$file")
+  done
+  tests=("$cluster"/*.test.yaml)
+  # A lint finding in a chart's rules, such as a recording rule two of its files define, is
+  # printed and does not fail the check: the chart's rules stay as they are. In the tree's own, a
+  # finding fails it.
+  echo "== $cluster: promtool check rules, ${#stock[@]} files of charts"
+  if ((${#stock[@]})); then
+    "$@" check rules "${stock[@]}" || failed=1
+  fi
+  echo "== $cluster: promtool check rules --lint-fatal, ${#own[@]} files of the tree's own"
+  if ((${#own[@]})); then
+    "$@" check rules --lint-fatal "${own[@]}" || failed=1
+  fi
+  if ((${#tests[@]})); then
+    echo "== $cluster: promtool test rules, ${#tests[@]} files"
+    "$@" test rules "${tests[@]}" || failed=1
+  fi
+done
+if ((failed)); then
+  echo "rules-promtool: promtool refused a rule or a test, above" >&2
+  exit 1
+fi
+echo "rules-promtool: every rule is valid and every unit test passes"

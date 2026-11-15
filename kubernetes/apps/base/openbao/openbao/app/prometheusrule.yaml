@@ -1,0 +1,38 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/prometheusrule-monitoring-v1.json
+# Alerts on the three members. A member's readiness probe is bao status, which fails while the
+# member is sealed, so a member that is not Ready is sealed or still starting: the metric is
+# kube-state-metrics' kube_pod_status_ready
+# (https://github.com/kubernetes/kube-state-metrics/blob/main/docs/metrics/workload/pod-metrics.md).
+# The chart's ServiceMonitor scrapes the Service openbao-active, which selects the member that
+# holds the lead, and names the job after the Service, so up{job="openbao-active"} is absent while
+# no member leads. A sealed standby is never scraped, which is why its alert reads readiness.
+# Tests: tests/rules/openbao.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: openbao-alerts
+  namespace: openbao
+spec:
+  groups:
+    - name: openbao
+      rules:
+        - alert: OpenBaoMemberSealed
+          expr: kube_pod_status_ready{namespace="openbao", pod=~"openbao-[0-9]+", condition="false"} == 1
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: An OpenBao member is not Ready, which means sealed
+            description: The OpenBao member {{ $labels.pod }} in {{ $labels.namespace }} has not been Ready for 5 minutes; its readiness probe fails while it is sealed.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#openbaomembersealed
+        # absent() gives the alert the job and namespace of its selector as labels.
+        - alert: OpenBaoNoActiveMember
+          expr: absent(up{job="openbao-active", namespace="openbao"})
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: OpenBao has no active member
+            description: Nothing answers for the Service {{ $labels.job }} in {{ $labels.namespace }} that selects the active member, so no member leads and no secret can be read or written.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#openbaonoactivemember
