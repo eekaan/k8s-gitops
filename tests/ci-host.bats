@@ -47,10 +47,12 @@ setup() {
   for tool in jq yq grep flock cat; do
     record "$tool"
   done
+  # The stack's outputs, the fixture's, in a copy a test may change.
+  cp "$FIXTURES/outputs.json" "$BATS_TEST_TMPDIR/outputs.json"
   fake tofu <<EOF
 printf '%s\n' "tofu \$*" >> "$RECORD/argv"
 if [[ \${2-} == output ]]; then
-  cat "$FIXTURES/outputs.json"
+  cat "$BATS_TEST_TMPDIR/outputs.json"
 fi
 EOF
   fake gh <<EOF
@@ -519,7 +521,7 @@ console() {
 }
 
 @test "A CI host whose offered keys are on its console is trusted without a prompt, and one that offers another is refused" {
-  # The host offers the key whose fingerprint the fake ssh-keygen prints, and its instance printed it.
+  # The host offers the key whose fingerprint the fake ssh-keygen prints; its instance printed that.
   console SHA256:FixtureFingerprintOfTheCiHost0123456789abcd
 
   recipe ci-host-setup < /dev/null
@@ -545,6 +547,25 @@ console() {
   [[ $output != *"$ADDRESS"* ]]
   [ ! -s "$KNOWN_HOSTS" ]
   run grep -c '^ssh ' "$RECORD/argv"
+  [ "$output" = 0 ]
+}
+
+@test "the CI host's console is read only by an identifier that is a UUID" {
+  # An identifier the cloud would take as a name or a prefix, or the client as an option, is not the
+  # instance the stack created, whatever its console holds: no console is read, and the operator is
+  # asked, told why.
+  jq '.instance.value.id = "--lines"' "$FIXTURES/outputs.json" > "$BATS_TEST_TMPDIR/outputs.json"
+  INSTANCE=--lines
+  console SHA256:FixtureFingerprintOfTheCiHost0123456789abcd
+
+  recipe ci-host-setup <<< no
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"The console of the CI host's instance was not read: the stack's outputs name no instance for it."* ]]
+  [[ $output == *"Type yes to record them and connect"* ]]
+  [[ $output == *"not accepted"* ]]
+  [ ! -s "$KNOWN_HOSTS" ]
+  run grep -c '^openstack console' "$RECORD/argv"
   [ "$output" = 0 ]
 }
 

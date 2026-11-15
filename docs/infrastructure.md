@@ -698,8 +698,11 @@ its instance printed, refused when one is not, and shown for the operator's `yes
 console holds no fingerprints by the end of the wait. The rollout does it once the new instance
 answers on SSH, before the edge's check, reading the console within `EDGE_ROLLOUT_WAIT`, and stops
 at once when a key is refused or not accepted; after `just infra-apply sto2/edge` the next
-`just edge-check` does. An edge whose part of the plan does not create its instance keeps its
-recorded keys.
+`just edge-check` does. The new instance is a new server with an identifier of its own, so the
+rollout reads the stack's outputs again after each edge's apply and reads the console that
+identifier names; outputs that still give the identifier of the instance before it do not
+describe what the apply made, and the rollout stops there, with nothing read or recorded. An edge
+whose part of the plan does not create its instance keeps its recorded keys.
 
 ### Checking and reading
 
@@ -804,14 +807,25 @@ host's instance's console. The recipe scans the address once, hashed (`ssh-keysc
 the console, `openstack console log show --lines 1000`, by the instance identifier the stack's
 outputs give (`instances` for the edges, by number, `instance` for the CI host), for the `SHA256:`
 fingerprints in the latest complete block cloud-init's `keys_to_console` module printed between
-`BEGIN SSH HOST KEY FINGERPRINTS` and `END SSH HOST KEY FINGERPRINTS`. cloud-init's
-`tools/write-ssh-key-fingerprints` sends each line of the block through
-`logger -s -p user.info -t cloud-init --`, so each starts with logger's header
-(`<14>Nov 15 09:42:08 cloud-init: `, tag `ec2` in older releases), which the recipe takes off in
-exactly that form, and a line without it is not read. The console is the
-instance's word, read through the cloud's API with the operator's credentials and not through the
-address being verified; a cloud whose API lies is outside what this defends against. With F the
-fingerprints the scan offers and C the console's:
+`BEGIN SSH HOST KEY FINGERPRINTS` and `END SSH HOST KEY FINGERPRINTS`. The module writes what
+cloud-init's `tools/write-ssh-key-fingerprints` prints to the console
+([cc_keys_to_console.py](https://github.com/canonical/cloud-init/blob/25.1/cloudinit/config/cc_keys_to_console.py#L66-L69)),
+and the tool sends each line of the block through util-linux's `logger -s -p user.info`, tagged
+`cloud-init` from cloud-init 21.2
+([write-ssh-key-fingerprints](https://github.com/canonical/cloud-init/blob/25.1/tools/write-ssh-key-fingerprints#L14),
+changed in [#817](https://github.com/canonical/cloud-init/commit/13606a12054f)) and `ec2` up to
+21.1 ([21.1](https://github.com/canonical/cloud-init/blob/21.1/tools/write-ssh-key-fingerprints#L4)).
+So each line starts with logger's header as logger writes it for `user.info`
+([logger.c](https://github.com/util-linux/util-linux/blob/v2.41/misc-utils/logger.c#L415-L434),
+[L920-L931](https://github.com/util-linux/util-linux/blob/v2.41/misc-utils/logger.c#L920-L931)):
+`<14>`, the month, the day padded with a space below 10, the time and the tag, as in
+`<14>Nov  5 09:42:08 cloud-init: `. The recipe takes that header off in exactly that form, under
+either tag, and reads no other line: not one without it, not the copy of a line the journal
+forwards to the console, `[   74.767670] cloud-init[519]: ...`, and not a line a process on the
+instance printed. A line may end in CR LF, as a serial console's terminal writes it; the CR is
+dropped. The console is the instance's word, read through the cloud's API with the operator's
+credentials and not through the address being verified; a cloud whose API lies is outside what
+this defends against. With F the fingerprints the scan offers and C the console's:
 
 - F is not empty and every member of F is in C: the scanned keys are recorded, with no prompt, and
   one line says how many and that they match.
@@ -819,9 +833,12 @@ fingerprints the scan offers and C the console's:
   `--yes` and a typed `yes` change nothing, and the recipe exits non-zero. No flag overrides it.
   [The runbook](runbooks/edge.md#a-new-hosts-ssh-key) lists what to check.
 - C is empty, or the client failed, the instance is not found or the block is not there yet: the
-  recipe tries again for `EDGE_ROLLOUT_WAIT` seconds in `just edge-rollout`, `HOST_CONSOLE_WAIT`,
-  30 by default, elsewhere, and then says why and asks as it always did: the fingerprints are
-  shown and the keys recorded only once `yes` is typed.
+  recipe reads the console again every `EDGE_ROLLOUT_INTERVAL` seconds within what is left of
+  `EDGE_ROLLOUT_WAIT` in `just edge-rollout`, and every 5 seconds for `HOST_CONSOLE_WAIT` seconds,
+  30 by default, elsewhere, then says why and asks: the fingerprints are shown, and the keys are
+  recorded only once `yes` is typed. A client that cannot be run (no `OS_CLOUD` or `OS_AUTH_URL`,
+  a client older than 7.0.0) is not tried again, and the operator is asked at once. The waits are
+  timed with `date +%s`.
 
 What is compared is what is recorded: there is no second scan between. The CI host is covered the
 same way, by the `instance` output of the ci stack.

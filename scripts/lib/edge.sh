@@ -10,8 +10,9 @@
 . "$(dirname "${BASH_SOURCE[0]}")/host-keys.sh"
 
 # edge_load: reads the edges' names, floating addresses and instance identifiers from the stack's
-# outputs. Sets edge_names, edge_addresses, edge_instances (an element is empty when the outputs hold
-# no identifier for the edge) and edge_known_hosts. The addresses are never printed.
+# outputs. Sets edge_names, edge_addresses, edge_instances (an element is empty when the outputs
+# hold no identifier for the edge, or one that is not a UUID) and edge_known_hosts. The addresses
+# are never printed.
 edge_load() {
   local outputs i
   outputs=$(stack_tofu output -json) || return 1

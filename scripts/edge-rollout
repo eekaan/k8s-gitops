@@ -12,10 +12,12 @@
 # replaced while the other is not serving. A replaced edge has SSH host keys of its own at the same
 # address, so the recorded keys are dropped before it is replaced, and the new ones are recorded
 # before its check runs: without a prompt when every key the address offers is one its instance
-# printed on its console, which is read through the OpenStack client within the wait below; a key
-# the console does not hold stops the rollout at once, nothing recorded, --yes or not; and when the
-# console holds no fingerprints by the end of the wait the fingerprints are shown and yes typed, and
-# keys that are not accepted stop the rollout at once. A check that does not pass within
+# printed on its console, which is read through the OpenStack client within the wait below, by
+# the identifier the stack's outputs give once the edge is applied; outputs that still give the
+# replaced instance's stop the rollout; a key the console does not hold stops it at once, nothing
+# recorded, --yes or not; and when the console holds no fingerprints by the end of the wait the
+# fingerprints are shown and yes typed, and keys that are not accepted stop the rollout at once.
+# The waits are timed with date +%s. A check that does not pass within
 # EDGE_ROLLOUT_WAIT seconds (900 when unset), tried every EDGE_ROLLOUT_INTERVAL seconds (15), stops
 # the rollout there: an edge after it is not touched. The last step plans the whole stack again and
 # prints what is left, which only scripts/infra-apply applies: each edge's plan holds that edge's
@@ -94,39 +96,41 @@ other_down_typed() {
 }
 
 # records_new_keys NUMBER: records the host keys edge NUMBER offers, which ssh_host_trust compares
-# with the console of the edge's instance and, when that holds no fingerprints, shows and records
-# once yes is typed. It tries again while the new instance does not answer until the wait is over,
-# and reads the console within what is left of the same wait. Returns ssh_host_trust's status: 2,
-# keys that were not accepted, and 3, a key the instance did not print, stop the rollout at once.
+# with the console of the edge's instance, by the identifier edge_load read after the apply, and,
+# when that holds no fingerprints, shows and records once yes is typed. It tries again while the
+# new instance does not answer until the wait is over, and reads the console within what is left
+# of the same wait. Returns ssh_host_trust's status: 2, keys that were not accepted, and 3, a key
+# the instance did not print, stop the rollout at once. The waits here are timed with host_clock.
 records_new_keys() {
-  local deadline=$((SECONDS + wait_seconds)) status left
+  local now deadline status
+  now=$(host_clock) || now=0
+  deadline=$((now + wait_seconds))
   while :; do
     status=0
-    left=$((deadline - SECONDS))
-    ((left >= 0)) || left=0
     ssh_host_trust "${edge_addresses[$1 - 1]}" "$edge_known_hosts" "edge router ${edge_names[$1 - 1]}" \
-      "${edge_instances[$1 - 1]}" "$left" "$interval" || status=$?
-    if ((status == 0)); then
-      return 0
-    fi
-    # Declined, refused, or the wait is over.
-    if ((status != 1 || SECONDS >= deadline)); then
+      "${edge_instances[$1 - 1]}" "$((deadline > now ? deadline - now : 0))" "$interval" || status=$?
+    # Recorded, declined or refused.
+    if ((status != 1)); then
       return "$status"
     fi
+    now=$(host_clock) || return 1
+    ((now < deadline)) || return 1
     sleep "$interval"
+    now=$(host_clock) || return 1
   done
 }
 
 # passes NUMBER: whether edge-check passes for edge NUMBER, tried until the wait is over.
 passes() {
-  local deadline=$((SECONDS + wait_seconds))
+  local now deadline
+  now=$(host_clock) || now=0
+  deadline=$((now + wait_seconds))
   while :; do
     if check "$1"; then
       return 0
     fi
-    if ((SECONDS >= deadline)); then
-      return 1
-    fi
+    now=$(host_clock) || return 1
+    ((now < deadline)) || return 1
     sleep "$interval"
   done
 }
@@ -165,9 +169,19 @@ for number in "${numbers[@]}"; do
   created=$(edge_created)
   if [[ $'\n'$created$'\n' == *$'\n'$number$'\n'* ]]; then
     edge_forget_keys "$number"
+    before=${edge_instances[number - 1]}
     apply_plan
     replaced_numbers+=("$number")
     echo "edge $number: applied; its SSH host keys are new"
+    # The apply made a new server, with a new identifier, and deleted the one before it: its
+    # console is read by the identifier the outputs give now. The same identifier as before the
+    # apply means the outputs do not describe what the apply made, and that console is not the
+    # new instance's word.
+    edge_load
+    if [[ -n $before && ${edge_instances[number - 1]} == "$before" ]]; then
+      infra_error "edge $number's instance was created again, but the stack's outputs still give the identifier of the one before it, so they are stale and its console is not read; nothing was recorded, the rollout stops here and no later edge was touched"
+      exit 1
+    fi
     status=0
     records_new_keys "$number" || status=$?
     if ((status == 3)); then

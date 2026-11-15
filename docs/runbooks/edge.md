@@ -122,9 +122,12 @@ as a rule of the security group, is left; the last plan it prints says what is l
 A replacement has SSH host keys of its own at the same floating address, and the connection holds
 to the recorded keys, so the replaced edge's recorded keys are dropped before it is replaced and
 the new ones are recorded once its first boot is far enough along for SSH, as
-[a new host key](#a-new-hosts-ssh-key) says: from the instance's console, with no prompt when it
-agrees. A key the console does not hold, or an answer to the prompt that is not `yes`, stops the
-rollout at once, before the edge's check and before the other edge is touched. After
+[a new host key](#a-new-hosts-ssh-key) says: from the new instance's console, with no prompt when
+it agrees. The new instance has an identifier of its own, which the rollout reads from the stack's
+outputs after the edge's apply; outputs that still give the old instance's stop the rollout there,
+with nothing read or recorded. A key the console does not hold, or an answer to the prompt that is
+not `yes`, stops the rollout at once, before the edge's check and before the other edge is touched.
+After
 `just infra-apply sto2/edge` has created an edge's instance again, its keys are dropped the same
 way, and the next `just edge-check` records the new ones; `just infra-destroy sto2/edge` drops both
 edges' keys.
@@ -145,16 +148,19 @@ of the host keys on the console at the end of the first boot, between
 `BEGIN SSH HOST KEY FINGERPRINTS` and `END SSH HOST KEY FINGERPRINTS`
 ([the module's documentation](https://cloudinit.readthedocs.io/en/latest/reference/modules.html#keys-to-console)).
 It does so with cloud-init's `tools/write-ssh-key-fingerprints`, which sends every line, markers
-included, through `logger -s -p user.info -t cloud-init --`, so each line on the console starts with
-logger's header, such as `<14>Nov 15 09:42:08 cloud-init: ` (older releases tag it `ec2`). The
-recipe reads the last 1000 lines, takes that header, in exactly that form, off each line, and takes
-the `SHA256:` fingerprints in the latest complete block between the markers; a line without the
-header or under another tag, a line anywhere else, or a block cut off by the line limit, does not
-count, and a console that holds several boots counts only the latest block, which a reboot does not
-add to (the module runs once per instance) and a new instance, with a console of its own, does not
-inherit. The console is read through the cloud's API with the credentials the recipes hold, not
-through the address being verified. It is the instance's word, and a cloud whose API lies is
-outside what this defends against.
+included, through `logger -s -p user.info`, tagged `cloud-init` (`ec2` up to cloud-init 21.1), so
+each line on the console starts with logger's header, such as `<14>Nov  5 09:42:08 cloud-init: `,
+the day padded with a space below 10 ([the details](../infrastructure.md#ssh-and-host-keys)). The
+recipe reads the last 1000 lines, drops the CR of a line that ends in CR LF, as a serial console
+writes it, takes that header, in exactly that form, off each line, and takes the `SHA256:`
+fingerprints in the latest complete block between the markers. A line without the header or under
+another tag (the journal's copy on the console, `[   74.767670] cloud-init[519]: ...`, among them),
+a line anywhere else, or a block cut off by the line limit, does not count, and a console that
+holds several boots counts only the latest block, which a reboot does not add to (the module runs
+once per instance) and a new instance, with a console of its own, does not inherit. The console is
+read through the cloud's API with the credentials the recipes hold, not through the address being
+verified. It is the instance's word, and a cloud whose API lies is outside what this defends
+against.
 
 It then does one of three things with the keys it scanned, and records those keys, not a second
 scan:
@@ -169,13 +175,14 @@ scan:
   and last update in the cloud show; and when both are as they should be, treat it as someone else
   answering on that address: do not connect, and report it.
 - **The console holds none, or cannot be read** (the client fails, the instance is not found, the
-  first boot has not printed its keys yet): the recipe tries again within the wait the rollout has,
-  `EDGE_ROLLOUT_WAIT`, or for `HOST_CONSOLE_WAIT` seconds, 30 by default, outside a rollout, then
-  says why and shows the fingerprints the address offers as it did before: compare them with the
+  first boot has not printed its keys yet): the recipe tries again within what is left of the wait
+  the rollout has, `EDGE_ROLLOUT_WAIT`, or for `HOST_CONSOLE_WAIT` seconds, 30 by default, outside
+  a rollout, then says why and shows the fingerprints the address offers: compare them with the
   console by eye, and type `yes` to record them. Anything else declines, and the rollout stops.
 
 The recipes need `OS_CLOUD` or the `OS_*` credential in `.env`, and the `openstack` client on
-`PATH`, as `just os-smoke` does; without them the console is not read and the operator is asked.
+`PATH`, 7.0.0 or newer, as `just os-smoke` does; without them the console is not read, the recipe
+says why, and the operator is asked at once.
 
 ## A dead edge
 

@@ -4,9 +4,9 @@
 # recorded, so what is recorded decides who the operator's key-based session talks to.
 #
 # cloud-init's keys_to_console module runs tools/write-ssh-key-fingerprints at the end of the first
-# boot, which sends each line of its output through `logger -s -p user.info -t cloud-init --` to the
-# console, so each line carries logger's header, `<14>Nov 15 09:42:08 cloud-init: ` (older releases tag
-# them ec2), and the fingerprints stand between the lines
+# boot and writes what it prints to the console. The tool sends each line through util-linux's
+# `logger -s -p user.info`, tagged cloud-init from cloud-init 21.2 and ec2 up to 21.1, so each line
+# carries logger's header, `<14>Nov 15 09:42:08 cloud-init: `, and the fingerprints stand between
 #   -----BEGIN SSH HOST KEY FINGERPRINTS-----
 #   -----END SSH HOST KEY FINGERPRINTS-----
 # one per line, as `256 SHA256:<43 characters> root@host (ED25519)`. The console is readable through
@@ -23,9 +23,10 @@
 # is, with room for the boot's own output after it. A block the limit cuts off is not read.
 host_console_lines=1000
 
-# logger's header on a line cloud-init printed: <PRI>Mmm dd hh:mm:ss TAG: , the day padded with a
-# space. Capture 2 is the line itself.
-console_header='^<[0-9]{1,3}>[A-Z][a-z]{2} [ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2} (cloud-init|ec2): (.*)$'
+# logger's header on a line cloud-init printed, as logger writes it for user.info: <14>, the month's
+# English abbreviation, the day of the month padded with a space below 10 (`Nov  5`), the time, and
+# the tag with no process id. The last capture is the line itself.
+console_header='^<14>(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) ( [1-9]|[12][0-9]|3[01]) [0-9]{2}:[0-9]{2}:[0-9]{2} (cloud-init|ec2): (.*)$'
 
 # console_fingerprints INSTANCE_ID: prints the SHA256 fingerprints cloud-init printed on the console
 # of the instance INSTANCE_ID, sorted, one per line, and returns
@@ -39,10 +40,11 @@ console_header='^<[0-9]{1,3}>[A-Z][a-z]{2} [ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2
 # a first boot (its keys_to_console module runs once per instance, so a reboot adds none, and a
 # new instance, with a new identifier, has a console of its own). A block cut off by the line limit,
 # at its start or at its end, is not a block, and the earlier boot's block does not stand in for the
-# latest boot's. Only lines with logger's header in exactly the form above, under the tag cloud-init
-# or ec2, are cloud-init's: the header is taken off, and a line without it, or under another tag,
-# is ignored, as is a line inside the markers that is not a fingerprint of that form and every line
-# outside them: a line a process on the instance printed is not cloud-init's.
+# latest boot's. A line ends in LF or, as a serial console's terminal writes it, CR LF. Only lines
+# that start with logger's header in exactly the form above are cloud-init's: the header is taken
+# off, and a line without it is ignored, as is a line inside the markers that is not a fingerprint
+# of that form and every line outside them. So is the copy of a line the journal forwards to the
+# console, `[   74.767670] cloud-init[519]: ...`, and a line a process on the instance printed.
 console_fingerprints() {
   local id=$1 log line inside=0 block='' latest=''
   refuse_http2_debug || return 4
@@ -60,7 +62,7 @@ console_fingerprints() {
   while IFS= read -r line || [[ -n $line ]]; do
     line=${line%$'\r'}
     [[ $line =~ $console_header ]] || continue
-    line=${BASH_REMATCH[2]}
+    line=${BASH_REMATCH[4]}
     case $line in
       '-----BEGIN SSH HOST KEY FINGERPRINTS-----')
         inside=1 block=''
@@ -86,23 +88,36 @@ console_fingerprints() {
   printf '%s' "$latest" | sort -u
 }
 
+# host_clock: the time in seconds since the epoch, from date +%s; fails, saying so, when date gives
+# anything but a whole number, which arithmetic could not be trusted with. The waits below and in
+# scripts/edge-rollout are timed with it.
+host_clock() {
+  local now
+  if ! now=$(date +%s) || [[ ! $now =~ ^[0-9]+$ ]]; then
+    infra_error "date +%s does not give the time, so the wait for the console cannot be timed"
+    return 1
+  fi
+  printf '%s' "$now"
+}
+
 # ssh_host_trust ADDRESS KNOWN_HOSTS LABEL [INSTANCE_ID [WAIT [INTERVAL]]]: when the host's key is
 # not in KNOWN_HOSTS, scans the host once for the keys it offers and decides, with those keys alone,
 # what is recorded. LABEL names the host in what it prints, such as "CI host". With the host's
 # INSTANCE_ID it reads the instance's console (console_fingerprints), trying again every INTERVAL
 # seconds, 5 when unset, for at most WAIT seconds, 0 when unset, while the client fails or the
-# console holds no block yet, which a first boot prints late. Then:
+# console holds no block yet, which a first boot prints late; a client that cannot be run, or a
+# clock that gives no time, leaves one read. Then:
 #   every key offered is on the console: they are recorded, with no prompt;
 #   the console holds fingerprints and one offered is not among them: nothing is recorded, no prompt
 #     is offered, and nothing overrides that;
 #   the console holds none or cannot be read: the fingerprints the host offers are shown, and the
 #     keys are recorded only once yes is typed, as the comparison with the console is the
 #     operator's.
-# Returns 2 when the keys were not accepted, 3 when the host offers a key its instance did not print,
-# 1 when the host does not answer. Never prints an address. Shared with scripts/lib/edge.sh.
+# Returns 2 when the keys were not accepted, 3 when the host offers a key its instance did not
+# print, 1 when the host does not answer. Never prints an address. Shared with scripts/lib/edge.sh.
 ssh_host_trust() {
   local address=$1 known_hosts=$2 label=$3 instance=${4-} wait=${5-0} interval=${6-5}
-  local scanned offered console='' console_read=0 deadline fingerprint count=0 unprinted=() answer='' why=''
+  local scanned offered console='' console_read=0 now deadline fingerprint count=0 unprinted=() answer='' why=''
   if [[ -s $known_hosts ]] && ssh-keygen -F "$address" -f "$known_hosts" > /dev/null 2>&1; then
     return 0
   fi
@@ -124,14 +139,19 @@ ssh_host_trust() {
     why="the stack's outputs name no instance for it"
     console_read=5
   else
-    deadline=$((SECONDS + wait))
+    if ! now=$(host_clock); then
+      now=0 wait=0
+    fi
+    deadline=$((now + wait))
     while :; do
       console_read=0
       console=$(console_fingerprints "$instance") || console_read=$?
-      # An answer, or a client that cannot be run, which waiting does not change.
-      if ((console_read == 0 || console_read == 4 || SECONDS >= deadline)); then
+      # An answer, a client that cannot be run, which waiting does not change, or no wait at all.
+      if ((console_read == 0 || console_read == 4 || wait == 0)); then
         break
       fi
+      now=$(host_clock) || break
+      ((now < deadline)) || break
       sleep "$interval"
     done
     case $console_read in

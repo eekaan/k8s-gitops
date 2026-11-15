@@ -10,7 +10,9 @@
 # The registration token comes from gh and reaches the runner's configuration on standard input,
 # never as an argument; it is never printed or written to a file. Every connection checks the host's
 # key strictly against the one recorded in ~/.local/state/k8s-gitops/ci-host.known_hosts; a host
-# whose key is not recorded is refused until the fingerprints shown here are accepted with yes.
+# whose key is not recorded is checked against its instance's console (scripts/lib/host-keys.sh),
+# and its keys are recorded without a prompt when the console holds every one, refused when it
+# holds others, and otherwise recorded only once the fingerprints shown here are accepted with yes.
 # Prints neither the host's address nor anything that holds it.
 # Usage: scripts/ci-host-setup
 set -euo pipefail
