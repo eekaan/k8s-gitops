@@ -174,21 +174,34 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   # It is applied after what it needs: the controller, the issuer and the BGP objects.
   [ "$(depends_on gateway-public | sort | paste -sd' ' -)" = "cilium-bgp cluster-ca envoy-gateway" ]
   # Nothing else can take the address first: of everything the cluster applies, built with an
-  # address of its own, only this EnvoyProxy carries the label outside a selector, asks Cilium for
-  # an address by annotation, or names the Gateway's address anywhere.
-  local holders
+  # address of its own, only this EnvoyProxy carries the label outside a selector, sets an LB-IPAM
+  # annotation or names the Gateway's address anywhere, and no text, such as the values a chart
+  # takes from a ConfigMap, holds the label's key or an LB-IPAM key.
+  local holders references namespace
+  namespace="$(object "$BUILT" Gateway "$gateway" | yq '.metadata.namespace')"
   VARS="$OTHER" everything
-  # shellcheck disable=SC2016 # $address, $o and $p are jq variables.
+  # shellcheck disable=SC2016 # $address, $pattern, $o, $p, $v and $key are jq variables.
   holders="$(yq -N -o json -I0 '.' "$EVERYTHING" | jq -rs --arg address "$(VARS="$OTHER" var GATEWAY_ADDRESS)" '
     ($address | gsub("\\."; "\\.")) as $pattern
-    | .[] | objects | . as $o | paths as $p
-    | select(($p[-1] == "k8s-gitops/announce" and ([$p[] | tostring | test("[sS]elector|matchLabels")] | any | not))
-        or $p[-1] == "lbipam.cilium.io/ips"
-        or (($o | getpath($p) | type) == "string" and ($o | getpath($p) | test("(^|[^0-9.])" + $pattern + "([^0-9]|$)"))))
+    | .[] | objects | . as $o | paths as $p | ($o | getpath($p)) as $v | ($p[-1] | tostring) as $key
+    | select(($key == "k8s-gitops/announce" and ([$p[] | tostring | test("[sS]elector|matchLabels")] | any | not))
+        or ($key | startswith("lbipam.cilium.io/")) or ($key | startswith("io.cilium/lb-ipam"))
+        or (($v | type) == "string" and (($v | test("(^|[^0-9.])" + $pattern + "([^0-9]|$)"))
+          or ($v | test("k8s-gitops/announce|lbipam\\.cilium\\.io/|io\\.cilium/lb-ipam")))))
     | "\($o.kind)/\($o.metadata.name): \($p | map(tostring) | join("."))"' | sort -u)"
   echo "what carries the label or names the address: $holders"
   [ "$holders" = "$(printf '%s\n' "EnvoyProxy/$proxy: spec.provider.kubernetes.envoyService.annotations.lbipam.cilium.io/ips" \
     "EnvoyProxy/$proxy: spec.provider.kubernetes.envoyService.labels.k8s-gitops/announce")" ]
+  # And only this Gateway makes the controller apply that EnvoyProxy: no other Gateway, and no
+  # GatewayClass, names it in a parametersRef, so no second Service asks for the address.
+  # shellcheck disable=SC2016 # $proxy, $namespace, $o, $own and $p are jq variables.
+  references="$(yq -N -o json -I0 '.' "$EVERYTHING" | jq -rs --arg proxy "$proxy" --arg namespace "$namespace" '
+    .[] | objects | . as $o | ($o.metadata.namespace // "") as $own
+    | select(any(paths | select(.[-1] == "parametersRef") as $p | $o | getpath($p) | objects;
+        .kind == "EnvoyProxy" and .name == $proxy and (.namespace // $own) == $namespace))
+    | "\($o.kind)/\($own)/\($o.metadata.name)"')"
+  echo "what names the EnvoyProxy: $references"
+  [ "$references" = "Gateway/$namespace/$gateway" ]
 }
 
 @test "Plain HTTP is answered only with a redirect to HTTPS" {
