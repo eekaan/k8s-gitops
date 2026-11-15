@@ -1,6 +1,7 @@
 # 0002 — OpenStack integration: API load balancer, cloud controller, Cinder CSI
 
-- Status: proposed
+- Status: accepted for the Kubernetes API load balancer; superseded for volumes by 0011 and for
+  Service load balancers by 0013 and 0018
 - Date: 2026-11-14
 - Amended: 2026-11-14, volumes come from LINSTOR, not Cinder CSI
   ([ADR 0011](0011-persistent-volumes-from-linstor-on-a-data-volume-per-worker.md))

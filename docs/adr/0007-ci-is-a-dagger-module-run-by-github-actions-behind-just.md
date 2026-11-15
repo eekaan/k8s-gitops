@@ -1,7 +1,10 @@
 # 0007 — CI is a Dagger module run by GitHub Actions, behind just
 
-- Status: accepted
+- Status: accepted, amended by 0012
 - Date: 2026-11-14
+- Amended: 2026-11-14, checks may run on a self-hosted runner with a persistent engine, the shared
+  engine this record rejected
+  ([ADR 0012](0012-ci-runs-on-a-self-hosted-runner-for-trusted-events.md))
 - Amended: 2026-11-14, a second job runs its recipe on the runner with a token of its own: the
   render diff's comment, which runs from the default branch after a fork's CI run as well
 - Amended: 2026-11-14, the publish job also runs the Kubernetes check on the runner, from the same

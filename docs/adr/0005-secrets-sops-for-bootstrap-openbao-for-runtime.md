@@ -1,6 +1,6 @@
 # 0005 — Secrets: SOPS for bootstrap, OpenBao for runtime
 
-- Status: accepted
+- Status: accepted, amended by 0011, 0013 and 0016
 - Date: 2026-11-14
 - Amended: 2026-11-14, the OpenStack credential is the cloud controller's only, as volumes come
   from LINSTOR, which needs none
@@ -10,6 +10,19 @@
 - Amended: 2026-11-14, OpenBao's seal key is generated once in the cluster and its recovery keys
   are the operator's, outside it
   ([ADR 0016](0016-openbao-unseals-itself-and-the-operator-keeps-the-recovery-keys.md))
+- Amended: 2026-11-14, bootstrap material is encrypted to two age keys: the Talos secrets bundle to
+  the Talos age key, which never enters the cluster, and SOPS files under `kubernetes/`, of which
+  the tree has none, to the Flux age key, which the cluster holds as the Secret Flux decrypts with
+  ([The Talos age key](../cluster.md#the-talos-age-key),
+  [The Flux age key](../cluster.md#the-flux-age-key))
+- Amended: 2026-11-14, no cloud controller runs, so the bootstrap material holds no OpenStack
+  credential ([ADR 0013](0013-service-addresses-announced-over-bgp-to-edge-routers.md))
+- Note: 2026-11-15, the cluster's S3 key, a cloud credential for the project's object storage, is
+  a runtime secret: the operator writes it into the secret store, and the volume backups' movers
+  and the etcd snapshot job get it through External Secrets
+  ([S3 keys and backup buckets](../infrastructure.md#s3-keys-and-backup-buckets),
+  [The repository and its password](../kubernetes.md#the-repository-and-its-password),
+  [Scheduled etcd snapshots](../cluster.md#scheduled-etcd-snapshots))
 
 ## Context
 

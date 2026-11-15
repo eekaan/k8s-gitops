@@ -1993,10 +1993,10 @@ worker or its data volume is lost for good, the instance's PersistentVolumeClaim
 are deleted, which removes the instance, and the operator clones a new one from the primary. With
 three workers, the new one waits for a worker without an instance.
 
-No backup is configured: WAL archiving and base backups to object storage need the object store's
-credentials from the secret store, which holds none yet, and take their place in the component's
-`Cluster` then. Until then a cluster's data lives only on the workers' data volumes
-([Where the data lives](#where-the-data-lives)).
+No backup is configured: the component's `Cluster` archives no WAL and takes no base backup to
+object storage, though the secret store holds the cluster's S3 key, which the volume backups read
+([The repository and its password](#the-repository-and-its-password)). Until then a cluster's data
+lives only on the workers' data volumes ([Where the data lives](#where-the-data-lives)).
 
 `tests/postgresql.bats` renders the operator's chart and checks its namespace, definitions,
 replicas, budget, monitor and pods; builds applications that take a cluster from the component, one

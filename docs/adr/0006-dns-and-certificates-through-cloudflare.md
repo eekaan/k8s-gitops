@@ -4,6 +4,9 @@
 - Date: 2026-11-14
 - Amended: 2026-11-15, two ACME issuers, Let's Encrypt's staging and production, and each cluster chooses
   which signs its gateway's certificate, the cluster's own CA when it chooses none
+- Note: 2026-11-15, the tree has no external-dns, so no DNS record follows the routes, and
+  `lab-sto2` chooses the staging issuer, whose certificates no client outside the cluster trusts
+  ([The ACME issuers](../kubernetes.md#the-acme-issuers))
 
 ## Context
 

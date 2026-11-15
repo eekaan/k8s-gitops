@@ -1,18 +1,101 @@
 # k8s-gitops
 
-Talos Kubernetes on OpenStack, provisioned with OpenTofu and reconciled by Flux.
+A Kubernetes cluster of Talos Linux nodes on OpenStack virtual machines. OpenTofu makes the
+machines, [talman](https://github.com/ludwighansson/talman) configures the nodes, and Flux
+reconciles everything above them from a signed artifact built from `main`. The repository is
+public and describes a real deployment: [`CLAUDE.md`](CLAUDE.md) lists what it never contains.
+[`docs/roadmap.md`](docs/roadmap.md) says which parts are built, the decisions are recorded in
+[`docs/adr/`](docs/adr/) and the standing rules are in [`constitution.md`](constitution.md).
 
-- **Infrastructure** (`infra/`): OpenTofu creates the network, the Talos image, the virtual
-  machines and their floating IPs. Nodes boot without machine configuration.
-- **Talos** (`talos/`): [talman](https://github.com/ludwighansson/talman) renders each node's
-  machine configuration from patches and applies it over the Talos API.
-- **Cluster state** (`kubernetes/`): Flux reconciles the cluster from a signed OCI artifact
-  built from `main`.
+- **Infrastructure** (`infra/`): OpenTofu stacks for the node network and the Talos image, the
+  three control planes and three workers with a data volume each, the two edge routers and the
+  CI host. Nodes boot without machine configuration
+  ([docs/infrastructure.md](docs/infrastructure.md)).
+- **Talos** (`talos/`): talman renders each node's machine configuration from patches and applies
+  it over the Talos API; each node also firewalls itself ([docs/cluster.md](docs/cluster.md)).
+- **Cluster state** (`kubernetes/`): the applications Flux reconciles, one directory each: the
+  platform's, the `demo` ones that prove it, and n8n, the workflow automation tool
+  ([docs/kubernetes.md](docs/kubernetes.md), [Applications](docs/kubernetes.md#applications)).
 
-That is the design; [`docs/roadmap.md`](docs/roadmap.md) says how much of it is built.
-Decisions are recorded in [`docs/adr/`](docs/adr/) and the standing rules in
-[`constitution.md`](constitution.md). The repository is public and describes a real
-deployment: [`CLAUDE.md`](CLAUDE.md) lists what it never contains.
+## How a request gets in
+
+A client reaches one of two floating addresses, each an edge router: a small VM the deployment
+runs, which translates the connection and forwards it to the public Gateway's address. The workers
+announce that address to both edges over BGP, so the edge sends it to a worker, Cilium carries it
+to an Envoy Gateway proxy, and the proxy routes it by hostname to a pod
+([the edge routers](docs/infrastructure.md#the-edge-routers),
+[Service addresses](docs/kubernetes.md#service-addresses),
+[the public Gateway](docs/kubernetes.md#the-public-gateway)). The tree has no external-dns, so no
+DNS record follows the routes. The Gateway's certificate comes from the issuer the cluster's overlay
+chooses: the cluster's own CA by default, or Let's Encrypt through a DNS-01 challenge against
+Cloudflare. `lab-sto2` chooses Let's Encrypt's staging issuer, whose chain no client outside the
+cluster trusts ([the ACME issuers](docs/kubernetes.md#the-acme-issuers)).
+
+## Where state lives
+
+- **Volumes** come from LINSTOR, which replicates them between workers on each worker's data
+  volume, except a PostgreSQL instance's, which is one copy on the instance's own worker
+  ([Storage](docs/kubernetes.md#storage)). VolSync backs up the volume of each application that
+  opts in from its `ks.yaml`, with restic to object storage, encrypted before upload; in the
+  cluster's overlay, n8n and `volsync-demo`, one of the applications in the `demo` namespace, do
+  ([Volume backups](docs/kubernetes.md#volume-backups)). The secret store's, Prometheus's,
+  Alertmanager's and VictoriaLogs's volumes are not backed up.
+- **etcd** is snapshotted to object storage, encrypted with age before upload, every six hours by
+  a CronJob in the cluster, whose two alerts fire when its runs stop succeeding, and whenever the
+  operator runs `just cluster-snapshot`; `just cluster-restore` puts one back
+  ([Scheduled etcd snapshots](docs/cluster.md#scheduled-etcd-snapshots),
+  [restore](docs/runbooks/etcd-restore.md)).
+- **PostgreSQL**: the CloudNativePG operator runs, and an application gets a database of three
+  instances by including the cluster template `components/cnpg-cluster` from its `ks.yaml`, as n8n
+  does, the one application in the cluster's overlay that includes it. The template configures no
+  backup, so n8n's database lives only on the workers' data volumes
+  ([PostgreSQL](docs/kubernetes.md#postgresql), [n8n](docs/kubernetes.md#n8n)).
+- **OpenTofu state** is in object storage, encrypted by OpenTofu
+  ([State](docs/infrastructure.md#state)).
+
+## Where secrets live
+
+Secrets needed before the cluster exists are encrypted with SOPS and age. The Talos secrets bundle,
+which is committed, is encrypted to the Talos age key, which never enters the cluster
+([the Talos age key](docs/cluster.md#the-talos-age-key)). A SOPS file under `kubernetes/` is
+encrypted to a second key, the Flux age key, which `just cluster-config` decrypts with and applies
+to the cluster as the Secret Flux decrypts with; the tree has no such file
+([the Flux age key](docs/cluster.md#the-flux-age-key)). The operator holds both keys and CI gets
+them as secrets; neither is in the repository. Runtime secrets live in OpenBao in the
+cluster and reach pods through External Secrets; OpenBao unseals itself, and its recovery keys are
+the operator's, outside the cluster ([OpenBao](docs/kubernetes.md#openbao),
+[External Secrets](docs/kubernetes.md#external-secrets), [runbook](docs/runbooks/openbao.md)).
+
+## How a change gets in
+
+A change is a pull request. The required check `ci` runs the checks that need no credentials and
+run in CI (below), and the pull request gets a comment with the rendered diff of what Flux would
+change ([the render diff](docs/kubernetes.md#the-render-diff)). Once it is merged, the publish
+workflow checks `kubernetes/` again, pushes it as an OCI artifact, signs it keyless and verifies the
+signature before it moves the `main` tag; Flux follows that tag and refuses an artifact not signed
+by that workflow on `main` ([Publishing](docs/kubernetes.md#publishing),
+[Flux itself](docs/kubernetes.md#flux-itself)). Nothing Flux owns is applied by hand, except the
+[applications installed before Flux](docs/kubernetes.md#applications-installed-before-flux), which
+Flux then takes over.
+
+## Where an operator starts
+
+Recipes need the pinned tools (`just tools`) and the environment
+[docs/infrastructure.md](docs/infrastructure.md#environment) and
+[docs/cluster.md](docs/cluster.md#environment) describe:
+
+- `just infra-plan <stack>` and `just infra-apply <stack>` for `sto2/plumbing`, `sto2/cluster`,
+  `sto2/edge` and `sto2/ci` ([Recipes](docs/infrastructure.md#recipes)).
+- `just cluster-age-key`, `just cluster-secrets` and `just cluster-flux-age-key` make the age keys
+  and the Talos secrets bundle, once each
+  ([From nothing to a Ready cluster](docs/cluster.md#from-nothing-to-a-ready-cluster)).
+- `just cluster-bootstrap` builds the cluster from nodes waiting for configuration, and
+  `just cluster-flux` installs Flux
+  ([From nothing to a Ready cluster](docs/cluster.md#from-nothing-to-a-ready-cluster)).
+- `just cluster-check` and `just gateway-check` check it, reading only.
+- `just cluster-talos`, `just cluster-reboot` and `just cluster-upgrade` change it, and
+  `just cluster-destroy` and [the rebuild runbook](docs/runbooks/rebuild.md) take it down.
+- `just grafana` and `just logs` look inside it.
 
 ## Working on it
 

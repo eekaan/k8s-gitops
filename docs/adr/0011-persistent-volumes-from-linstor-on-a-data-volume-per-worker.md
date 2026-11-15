@@ -1,7 +1,10 @@
 # 0011 — Persistent volumes from LINSTOR on a data volume per worker
 
-- Status: accepted
+- Status: accepted, amended by 0013
 - Date: 2026-11-14
+- Amended: 2026-11-14, the cloud controller this record leaves planned is not: no cloud controller
+  runs, and Services of type `LoadBalancer` are announced over BGP to edge routers the deployment
+  runs ([ADR 0013](0013-service-addresses-announced-over-bgp-to-edge-routers.md))
 
 ## Context
 
