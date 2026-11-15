@@ -27,13 +27,19 @@ config:
   gatewayAPI:
     enabled: true
 
-# The DNS-01 self-check, which asks whether a challenge's TXT record is visible before cert-manager
-# asks the CA to look, goes to public resolvers alone: the cluster's own resolver may not see the
-# zone, and caches an answer for a record that was not there yet. Each is a DNS-over-HTTPS endpoint
-# by name, so the tree holds no address. With the nameservers-only flag the self-check asks every
-# listed resolver and fails when any one does not answer or lacks the record, so a second resolver
-# would add a dependency, not redundancy: one is listed.
-dns01RecursiveNameserversOnly: true
+# The DNS-01 self-check asks whether a challenge's TXT record is visible before cert-manager asks
+# the CA to look. It asks the zone's own authoritative nameservers, never a recursive resolver, so a
+# negative answer that a resolver cached (RFC 2308) for the zone's SOA time cannot hold a challenge
+# whose record is already published. Each is asked over UDP port 53, and again over TCP port 53 when
+# the UDP answer is truncated or does not arrive before the query times out. That is the
+# controller's default; the nameservers-only setting, which sends the TXT lookup to the resolver
+# listed below, stays off, as an argument and in the controller's config.
+# The resolver below is asked for the zone, its nameservers and whether the challenge's name is a
+# CNAME: answers a cache cannot get wrong, except in a zone whose wildcard record is a CNAME
+# (docs/kubernetes.md, cert-manager). It is a DNS-over-HTTPS endpoint by name, so the tree holds no
+# address and the zone is not looked up through the cluster's own resolver, which may not see it. A
+# second would be asked only when the first fails to answer, and would be one more destination for
+# the controller's egress to allow.
 dns01RecursiveNameservers: https://cloudflare-dns.com/dns-query
 
 # Each component keeps a pod through a drain: a disruption budget that keeps one available, which

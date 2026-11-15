@@ -130,7 +130,8 @@ DNS-01 challenge the Challenge's `status.reason` says what the provider or the C
 Usually: the DNS provider's token is missing, wrong or cannot edit the zone, so the Challenge is
 refused (`kubectl --namespace cert-manager get externalsecret cloudflare-api-token` says whether the
 token came through, and `just bao-put cert-manager/cloudflare api-token` writes it); the TXT record
-is not yet visible to the public resolvers the self-check asks; or the CA's rate limits are spent.
+is not yet visible at every one of the zone's own nameservers, which the self-check asks on port
+53, or one of them cannot be reached from the controller; or the CA's rate limits are spent.
 
 ## CertManagerCertificateExpiringSoon
 
