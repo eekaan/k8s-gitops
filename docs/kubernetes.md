@@ -282,8 +282,8 @@ namespace, `external-secrets`. It is how runtime secrets reach workloads (ADR 00
 exception is a credential a controller generates in the cluster for its own workload, which stays
 in the Secret that controller writes, such as Grafana's admin password ([Grafana](#grafana)). The
 one store is the ClusterSecretStore `openbao`, in its own application beside the operator
-([OpenBao](#openbao)). The `volsync` component makes an `ExternalSecret` of it
-([Volume backups](#volume-backups)), and no enabled application includes that component.
+([OpenBao](#openbao)). The `volsync` component makes an `ExternalSecret` of it for each application
+that includes it ([Volume backups](#volume-backups)).
 
 - The chart comes from its publisher's OCI registry and installs and upgrades the operator's
   resource definitions itself, as the publisher documents. No other chart in the tree ships them,
@@ -379,17 +379,32 @@ them:
 - `grafana` holds the `Grafana`, its `GrafanaDatasource`, a ServiceMonitor for Grafana's own
   metrics and the dashboards release, and names `grafana-operator` in `dependsOn`.
 
-The Grafana runs the version its `grafana.yaml` pins, which Renovate updates, as one replica
-without a disruption budget: a second replica would keep a database of its own. It keeps nothing
-that Git does not hold, so it claims no volume: its data directory is an emptyDir, and the operator
-applies the datasource and every dashboard again every minute. One it cannot apply, as while a
-restarted Grafana starts, it retries after 10 seconds, doubling the wait up to two minutes, so a
-restarted Grafana has them all back within a few minutes. The datasource is the Prometheus Service
-of the monitoring chart, `kube-prometheus-stack-prometheus`, port 9090. Grafana makes no call to the
-internet on its own: its
-configuration turns off usage reporting, the checks for Grafana and plugin updates, the news feed,
-the plugin catalogue, the plugins Grafana would install at every start, the download of plugin
-signing keys, Gravatar images and external snapshots, so it runs only the plugins in its image.
+The Grafana runs the version its `grafana.yaml` pins, which Renovate updates, as one replica without
+a disruption budget: a second replica would keep a database of its own. It keeps nothing that Git
+does not hold, so it claims no volume: its data directory is an emptyDir, and the operator applies
+the datasource and every dashboard again every minute. One it cannot apply, as while a restarted
+Grafana starts, it retries after 10 seconds, doubling the wait up to two minutes, so a restarted
+Grafana has them all back within a few minutes. The datasource is the Prometheus Service of the
+monitoring chart, `kube-prometheus-stack-prometheus`, port 9090. Grafana makes no call to the
+internet on its own: its configuration turns off usage reporting, the checks for Grafana and plugin
+updates, the news feed, the plugin catalogue, the plugins Grafana would install at every start, the
+download of plugin signing keys, Gravatar images and external snapshots. The one exception is the
+plugin of the VictoriaLogs datasource ([Logs](#logs)): Grafana does not ship it. The operator hands
+it to Grafana's container as `GF_INSTALL_PLUGINS`, `victoriametrics-logs-datasource` at the exact
+version in `grafanadatasource-victoria-logs.yaml`, which Renovate moves, and `grafana.yaml` sets
+`GF_INSTALL_PLUGINS_FORCE=true` on the container. With that set the Grafana image's entrypoint runs
+`grafana cli plugins install victoriametrics-logs-datasource <version>` at every start, into a data
+directory that starts empty. That makes two requests to grafana.com's plugin API
+(`pkg/plugins/repo/service.go` in Grafana v13.1.3): `GET
+https://grafana.com/api/plugins/victoriametrics-logs-datasource/versions`, the plugin's versions, of
+which it takes the one asked for, and `GET
+https://grafana.com/api/plugins/victoriametrics-logs-datasource/versions/<version>/download`, which
+grafana.com redirects to that version's archive in its catalogue's storage on
+`storage.googleapis.com`. Grafana's own server would install the plugin only with its
+preinstalled-plugins list on, which stays off. The entrypoint runs under `set -e`, so a failed
+request stops Grafana from starting until grafana.com answers. Grafana loads the plugin only if its
+signature verifies against the public key Grafana ships. Nothing else is fetched, and
+`tests/grafana.bats` fails when any other datasource or dashboard asks for a plugin.
 
 The dashboards come from the monitoring stack's own chart. The release `grafana-dashboards` installs
 `kube-prometheus-stack` at the version the monitoring application runs, with everything off but the
@@ -415,8 +430,8 @@ its own workload, which stays in the Secret that controller writes. Anonymous ac
 monitoring application's, and checks the definitions, the operator's namespace and rights, the
 monitors, the version and replicas, the absence of volumes, Secrets and routes, the datasource's
 Service, that the dashboards are exactly those the monitoring chart renders for the cluster's
-monitoring values, and each setting that keeps Grafana off the internet against the defaults of the
-Grafana release it pins. It runs `just grafana` against a recording kubectl.
+monitoring values, and each setting that keeps Grafana from calling the internet on its own against
+the defaults of the Grafana release it pins. It runs `just grafana` against a recording kubectl.
 
 ## Logs
 
@@ -429,8 +444,9 @@ are on, and both applications name `prometheus-operator-crds` in `dependsOn`.
 
 What is collected, by a collector on every node, control planes included, from files only:
 
-- every pod's log lines, from the files under `/var/log/pods`, with the pod's namespace, name,
-  labels and node; the collector's own are left out;
+- every pod's log lines, from the files under `/var/log/pods`, with what the collector attaches:
+  the pod's namespace, name, labels, annotations and node, the node's labels and the namespace's
+  labels and annotations; the collector's own lines are left out;
 - the log of each of the node's Talos services, machined, the kubelet, etcd, containerd, apid and
   the rest, and the kernel's, which Talos keeps as the service `kernel`: Talos writes each to
   `/var/log/<service>.log` and renames it to `<service>.log.1` at 5 MiB, and the collector reads
@@ -439,6 +455,36 @@ What is collected, by a collector on every node, control planes included, from f
   messages, the prefix Go's log package gives machined's, apid's and trustd's lines, JSON such as
   etcd's, logfmt such as containerd's and the kubelet's klog. Any other line keeps the time it was
   read.
+
+Two kinds of record are made smaller before they are sent:
+
+- the kernel's audit records, the lines of the service `kernel` that the kernel prints as `audit:`
+  or `auditd:`, which the kernel's audit subsystem writes, are dropped by the filter
+  transform `drop_audit`. Vector counts what a filter drops in
+  `vector_component_discarded_events_total` of its own metrics, which Prometheus scrapes from the
+  PodMonitor, so the drop is visible as the series with `component_id="drop_audit"`. The log of
+  Talos's `auditd` service, `/var/log/auditd.log`, is another file and is still shipped;
+- a pod's labels and annotations, its node's labels and its namespace's labels and annotations are
+  not stored one field each: VictoriaLogs makes a field of every name, these maps hold dozens of
+  names that say nothing about a line, and labels such as `pod-template-hash` and
+  `controller-revision-hash` take a new value with every rollout. The transform `pod_fields` keeps
+  three of the pod's labels, the Kubernetes recommended labels that name the application,
+  `app.kubernetes.io/name`, `app.kubernetes.io/instance` and `app.kubernetes.io/component`, in
+  `kubernetes.pod_labels`, and no other; a pod without them has no such field. It drops
+  `kubernetes.pod_annotations`, `kubernetes.node_labels`, `kubernetes.namespace_labels` and
+  `kubernetes.namespace_annotations`, and sets `node` on a pod's record to the node's name, as
+  Talos's lines have it. The store's sink takes a pod's records only from `pod_fields` and Talos's
+  lines only from `drop_audit`.
+
+A record has the fields `_time`, `_msg` and `_stream`. A pod's also has `node`,
+`kubernetes.pod_namespace`, `kubernetes.pod_name`, `kubernetes.pod_node_name`,
+`kubernetes.pod_labels` as above, and the source's single fields, which say which run of which
+workload wrote the line: `kubernetes.container_name`, `kubernetes.container_id`,
+`kubernetes.container_image`, `kubernetes.container_image_id`, `kubernetes.pod_uid`,
+`kubernetes.pod_owner`, the pod's addresses in `kubernetes.pod_ip` and `kubernetes.pod_ips`, and
+`file`, `stream` and `source_type`. A Talos service's has `node`, `talos_service`, `file`, `level`
+and, for the kernel, `facility`. The stream is the namespace, pod, container and node of a pod, or
+the node and service of a Talos service.
 
 Talos flushes its files every 15 seconds, so its lines reach the store within about that. While the
 collector is not reading, such as during its own restart, lines wait in the files, and it goes on
@@ -453,13 +499,12 @@ The collector mounts all of `/var/log` read-only, as Talos renames the files it 
 read every file there. On a control plane that includes the API server's audit log in
 `/var/log/audit/kube`, which Talos's default audit policy, the one this cluster runs, writes at the
 `Metadata` level: who did what to which object, and when, without request or response bodies, so
-without Secret values. The collector does not ship it: its file source's patterns,
-`/var/log/*.log` and `/var/log/*.log.1`, match files at the top of `/var/log` only, and its pod-log
-source reads only `/var/log/pods`. It does ship the kernel's audit records, which Talos's `auditd`
-service writes on every node to its own log at the top, `/var/log/auditd.log`. What keeps the audit
-log out of the store is this reviewed configuration, which `tests/logs.bats` matches against
-Talos's layout of `/var/log`; who can read it through the collector is whoever may run commands in
-the pods of `monitoring`.
+without Secret values. The collector does not ship it: its file source's patterns, `/var/log/*.log`
+and `/var/log/*.log.1`, match files at the top of `/var/log` only, and its pod-log source reads only
+`/var/log/pods`. It does ship the log of Talos's `auditd` service, which every node writes at the
+top, `/var/log/auditd.log`. What keeps the audit log out of the store is this reviewed
+configuration, which `tests/logs.bats` matches against Talos's layout of `/var/log`; who can read it
+through the collector is whoever may run commands in the pods of `monitoring`.
 
 The collector also mounts `/var/lib/vector`, where it keeps its place in each file and a disk buffer
 of 256 MiB. It runs as root, as Talos and the container runtime write their log files as root with
@@ -492,16 +537,46 @@ cluster's pods and nodes, and no host outside the cluster has a route to them. N
 has an ingress, a route or a Service of type LoadBalancer or NodePort, and the nodes' security group
 admits from outside the cluster only the Talos and Kubernetes APIs.
 
-Grafana has no datasource for the logs. To query, forward the Service's port with
-`kubectl -n monitoring port-forward svc/victoria-logs 9428`, then open VictoriaLogs' web interface
-at `http://localhost:9428/select/vmui/`, or send LogsQL to
-`http://localhost:9428/select/logsql/query`, such as `query=_time:1h talos_service:kubelet` for the
-last hour of every node's kubelet, or `query=_time:1h kubernetes.pod_namespace:monitoring`.
+Reading the logs, with the cluster's kubeconfig:
+
+- `just logs '<LogsQL query>' [--since 15m] [--limit 200] [cluster]` prints the records the query
+  matches, from the last 15 minutes and at most 200 unless told otherwise (`--since` is a whole
+  number with `s`, `m`, `h`, `d` or `w`), one line each, the oldest first: the time, the namespace
+  and pod, or the node for a Talos service's record, and the message, with its newlines made spaces
+  and its control characters, C0 and C1, left out. It asks the Kubernetes API for VictoriaLogs'
+  `/select/logsql/query` through the API's service proxy to the Service `victoria-logs`, so no port
+  is forwarded and none is left behind. Of what kubectl prints it shows only the message of an error
+  the API server or the store answered with, without an address; its warnings and the error of a
+  connection that failed can name the API server's address and are never shown. A query the store
+  refuses fails with the store's own message: kubectl keeps the body of a 400 out of its error, so
+  the recipe asks again with `-v=4` and reads the body from the Status kubectl logs, in a file it
+  never shows. kubectl keeps only a body's first 2048 bytes, and the recipe says so after a message
+  that long. Any other error the store or the API answers with, a store that is away or not ready,
+  a request the cluster's access rules deny or a Status without a reason, shows kubectl's message
+  for it; credentials the API server refuses also point to `just cluster-kubeconfig`. An API that
+  does not answer fails with that said. The query is LogsQL, such as `talos_service:kubelet`,
+  `kubernetes.pod_namespace:monitoring error` or `node:node-1 talos_service:kernel`; a query that
+  ends in a `stats` pipe prints its records as JSON. With the limit, VictoriaLogs answers with the
+  newest records, newest first, unless the query's pipes change the records' order, as `sort` and
+  `stats` do: then with the first the pipes give, in their order. The recipe sorts what it gets by
+  time, oldest first.
+- In Grafana, behind `just grafana`, the datasource VictoriaLogs and the dashboard Logs, in the
+  folder Logs: the volume of logs by namespace and by node, and a logs panel for the namespaces and
+  pods chosen in the two variables above it. The datasource is the `GrafanaDatasource`
+  `victoria-logs`, of the plugin's type, to the Service's port 9428 through Grafana's server, with
+  the plugin pinned as [Grafana](#grafana) says. The dashboard's JSON is
+  `grafana/app/dashboards/logs.json`, which kustomize makes the ConfigMap the `GrafanaDashboard`
+  `logs` loads.
 
 `tests/logs.bats` builds both applications as Flux applies them, renders their pinned charts and
 checks each of these. `just vector-check` renders the collector's configuration with
 `scripts/vector-config` and has Vector itself, in the image the collector runs, validate it and run
-its unit tests, `tests/vector/talos-lines.yaml`, which hold a line of each format above. The image
+its unit tests, `tests/vector/talos-lines.yaml`, which hold a line of each format above, an audit
+line and a pod's record with many labels, and many of its node's. Vector's unit tests cannot see a
+sink, so `tests/logs.bats` checks that each source reaches a sink along one path only, the store's
+through the transforms the unit tests run, and that each scenario's unit test starts at the first
+transform on its path and watches the last. `just logs` runs in `tests/logs.bats` against a
+recording kubectl shaped like kubectl v1.37's output. The image
 is `vector_image` in the justfile, pinned by the digest of its image index under a
 `# renovate: datasource=docker depName=…` comment: Renovate's custom manager for the justfile moves
 its tag and digest, in the same pull request as the chart, and `tests/logs.bats` fails, saying what
@@ -771,7 +846,10 @@ snapshot whenever the claim is created.
 
 - When the claim and the ReplicationDestination are created together, on the application's first
   deployment, or after both were deleted, as when the application leaves the tree and comes back or
-  the cluster is rebuilt, the volume starts with the latest backup, or empty when there is none.
+  the cluster is rebuilt, the volume starts with the latest backup, or empty when there is none,
+  once the secret store holds the key `volsync`: on a rebuilt cluster, once the operator has seeded
+  it again from the master's file
+  ([below](#what-an-operator-does-once-and-what-then-happens-by-itself)).
 - A claim deleted and created again while the ReplicationDestination stays gets the snapshot kept
   from that one restore, which after a first deployment is of an empty volume, not the latest
   backup.
@@ -812,30 +890,91 @@ are `RESTIC_MASTER_PASSWORD`, the master password, and the cluster's S3 key, `AW
 An application's password is the SHA-256 digest of the master, a slash and the application's name,
 with nothing after it, written as 64 lower-case hexadecimal digits. The component writes the master
 into no Secret, so one application's Secret opens no other application's repository, and only the
-master is kept outside the cluster. To open a repository with restic by hand, compute its password from the
-master that way, with a tool that reads the master from a file or its standard input and never
-from its command line, and give the password to restic in a file or from a command
-(`RESTIC_PASSWORD_FILE`, `RESTIC_PASSWORD_COMMAND`), never as an argument. Every namespace that
+master is kept outside the cluster. To open a repository with restic, `just bao-volsync-password
+<file> <app> restic ...` derives the application's password that way from the master in the custody
+file and runs the command with the repository, the password and the cluster's S3 key in its
+environment, printing none of them: nobody computes a digest at a prompt. Every namespace that
 takes the component holds the cluster's S3 key, which reaches every bucket of the project: whoever
 can read Secrets there can read, replace or delete any application's backups, though not decrypt
 them (ADR 0015).
 
-### What is still needed
+### What an operator does once, and what then happens by itself
 
-The ClusterSecretStore `openbao` exists, but nothing in the tree writes the key `volsync` into it:
-OpenBao starts with its key-value mount empty, and only an operator fills it, with `just bao-put`.
-Until then the Secret is never written and VolSync starts no mover. The test application
-`apps/base/demo/volsync-demo/`, a pod that holds a 1 GiB volume and writes the time it first found
-it empty, is disabled in the overlay. Before the first backup runs:
+OpenBao starts with its key-value mount empty and nothing Flux applies writes the key `volsync`, so
+the operator seeds it, once for each store, after `just bao-recovery`, with the cluster's S3 key in
+`.env` (`CLUSTER_S3_ACCESS_KEY_ID` and `CLUSTER_S3_SECRET_ACCESS_KEY`, which
+`just infra-s3-key cluster` makes) and `just cluster-config` applied, so the repository's prefix,
+endpoint and region are in `cluster-config`:
 
-1. the ClusterSecretStore `openbao` holds the key `volsync` with `RESTIC_MASTER_PASSWORD`, also
-   kept outside the cluster, and the cluster's S3 key as `AWS_ACCESS_KEY_ID` and
-   `AWS_SECRET_ACCESS_KEY`;
-2. `just cluster-config` has applied `BACKUP_BUCKET_PREFIX`, `S3_ENDPOINT` and `S3_REGION`;
-3. `volsync-demo` is enabled in the overlay, with the store's application in its `dependsOn`.
+```sh
+just bao-seed-volsync <file>
+```
+
+`<file>` is outside the repository, beside the Talos age key: a new file the first time, and the
+existing one whenever the store holds no key again, as on a rebuilt cluster (below). The recipe:
+
+- stops before it makes anything when either variable is empty, still a placeholder or the state
+  key's, naming the variable;
+- with a new `<file>`, makes the master, 32 random bytes from the kernel written as 64 hexadecimal
+  digits, which restic and the template's digest take as they are, and writes it to `<file>`
+  encrypted with age to the Talos age key's recipient; opens the file again with the operator's
+  Talos age key and compares it with what it wrote; and only then creates the key, with the master
+  and the cluster's S3 key. The operator role may create and patch keys, and never read or update
+  them, so before it makes anything the recipe asks whether the key exists with an empty patch and
+  check-and-set 0, which writes nothing: OpenBao answers 404 where there is no key and refuses on
+  check-and-set where there is one. A store that holds one is refused before a master is made, no
+  `<file>` is made, and the master in the store is never replaced: a master that changes orphans
+  every repository, so no flag replaces it. An existing `<file>` is never replaced either, nor one
+  made at its path while the recipe runs, as the file goes in place by a hard link: where the
+  filesystem makes none, the recipe stops with `ln`'s error and writes nothing to the store;
+- given an existing `<file>` that opens with the Talos age key to this cluster's master, while the
+  store holds no key, reads the master back from it, makes no other, and creates the key with it,
+  leaving the file as it was. That is how a run goes on after a failure between writing `<file>` and
+  the store holding the key, as when OpenBao refuses the write or the run is interrupted, which says
+  which state it left; and how a rebuilt cluster's store is seeded. A store that already holds the
+  key says so and changes nothing, and the file is kept;
+- prints what it did and where the file is, never the master or the key, which travel on pipes and
+  in the body of the write.
+
+`just bao-seed-volsync --rotate-s3` replaces the S3 key properties of the key with the current
+`.env` values and keeps the master, after the cluster's S3 key is replaced. The master's file is its
+own and not the recovery keys' file: the two open different things and are needed at different
+times, the recovery keys when OpenBao has to be reached with a root token and the master when a
+repository has to be opened, and `just bao-recovery` writes its file once and never again, so a
+second secret could not be added to it. `<file>` holds the only copy of the master that outlives the
+cluster: [the runbook](runbooks/volume-backups.md) says what losing it, or the store's key, means,
+and how the store is seeded again from it.
+
+`just bao-volsync-password <file> <app> <command> [argument...]` opens one application's repository
+by hand without computing a digest at a prompt: it derives the application's password from the master
+in `<file>` as above and runs the command with `RESTIC_REPOSITORY`, `RESTIC_PASSWORD` and the cluster's
+S3 key as `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_DEFAULT_REGION` in its environment
+and no other secret of the recipe's, so `just bao-volsync-password <file> volsync-demo restic snapshots`
+lists the demo's backups. It prints no password and reaches neither the cluster nor OpenBao. restic is
+not one of the pinned tools: no recipe or check runs it, and it is the operator's to install for the
+rare restore by hand.
+
+After that Flux does the rest, for as long as the store holds the key. `volsync-demo`, in the
+overlay, is applied once `volsync`, `external-secrets`, `openbao-store` and `linstor-cluster` are
+Ready. The test application
+`apps/base/demo/volsync-demo/` is a pod that holds a 1 GiB volume and writes the time it first found
+it empty. Its ExternalSecret writes the Secret the movers read as soon as the store holds the key,
+the ReplicationDestination restores the repository's latest backup, which is empty on the first
+deployment, the claim is made from that snapshot and the pod starts, and the ReplicationSource
+backs the volume up at 03:17 each night. A claim and its restore therefore need no manual step once
+the recipe has run.
+
+OpenBao keeps its data on volumes that do not survive a rebuild ([rebuild.md](runbooks/rebuild.md)),
+so a rebuilt cluster's store is new and holds no key `volsync`, and every ExternalSecret of the
+component, and with it every restore, waits for it. Once `just bao-recovery` has made the new
+store's recovery keys, the operator runs `just bao-seed-volsync <file>` with the existing custody
+file, never a new one: the recipe writes the master the file holds, which opens the existing
+repositories, where a new file would make a master that opens none of them
+([runbook](runbooks/volume-backups.md#the-stores-key-is-lost-and-the-file-is-kept)).
 
 `tests/volume-backups.bats` builds the applications as Flux applies them and renders the VolSync
-and External Secrets charts to check this section.
+and External Secrets charts to check this section, and `tests/openbao-recipes.bats` runs the
+recipes against fakes of the cluster and of OpenBao.
 
 ## Envoy Gateway
 
@@ -1151,6 +1290,20 @@ kubeconfig it needs to create `serviceaccounts/token` for `openbao-operator`, to
 pods of `openbao-active`, and to read the Secret `openbao-ca`. A file it reads, the operator's, opens
 with the Talos age key from `SOPS_AGE_KEY_FILE`, or `SOPS_AGE_KEY`, into memory only.
 
+- A custody file is read only where no one but the operator can have written it, as age does not say
+  who wrote a file and the recipient is public: the file is the operator's and writable by no one
+  else, and each directory above it, on its path and as it resolves, is the operator's or root's and
+  writable by no one else unless its sticky bit is set. A recipe that writes one, `bao-recovery` or
+  `bao-seed-volsync`, writes it only to such a place, which is a directory only the operator can
+  write, beside the Talos age key.
+- A recipe refuses to run while the shell traces its commands, as bash would print every secret it
+  reads: under `bash -x`, with `SHELLOPTS=xtrace` or a `BASH_ENV` that sets `-x`. A command it
+  starts, such as the one `bao-root` or `bao-volsync-password` runs, gets no `BASH_ENV` or `ENV`.
+- OpenBao's error messages are printed with each byte that is not printable ASCII as a question
+  mark, so no control character reaches the terminal, and kubectl's errors through the same
+  redaction as the other recipes', without the API server's address
+  ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)).
+
 - `just bao-put <path> <key>` writes one value, read from standard input, typed without echo at a
   terminal or piped in without the newlines that end it, as the key `<key>` of the secret at
   `secrets/<path>` in `lab-sto2`. The secret keeps its other keys, or is created. It takes exactly
@@ -1176,6 +1329,13 @@ with the Talos age key from `SOPS_AGE_KEY_FILE`, or `SOPS_AGE_KEY`, into memory 
   new file `<file>.replaced-<time>.age` beside the file, encrypted to the same recipient and opened
   again with the operator's key, and deletes nothing when it cannot. It needs no port-forward, only
   to read, create and, with `--replace`, delete that Secret.
+- `just bao-seed-volsync <file> [cluster]` seeds the key `volsync` the volume backups read, once for
+  each store, with the master password in `<file>`, which its first run makes;
+  `just bao-seed-volsync --rotate-s3 [cluster]` replaces only the S3 key in it.
+  `just bao-volsync-password <file> <app> <command> [argument...]` runs a command with one
+  application's repository and password. Both are described under
+  [Volume backups](#what-an-operator-does-once-and-what-then-happens-by-itself). The first creates
+  the key and never reads one, as the `operator` role may only create and patch keys.
 
 ### How an application gets a secret out
 
@@ -1194,6 +1354,9 @@ namespace delegated to anyone else first gets its own store restricted with `con
   restarts cannot start, as the Secret it mounts is missing, and the data stays sealed on its volume.
   `just bao-seal-restore` writes the key back from the operator's file; an etcd snapshot also holds
   it ([runbook](runbooks/openbao.md#bringing-the-seal-key-back)).
+- **The volume backups' key `volsync`, or the master's file**:
+  [the runbook](runbooks/volume-backups.md) says what each loss means, and how the key is seeded
+  again from the file.
 - **The seal Secret and every copy of it**: every runtime secret is lost. OpenBao starts again empty
   only once its three claims, the Secret and the ExternalSecret `openbao-seal-1` are deleted: the
   ExternalSecret has synced once and never makes a missing Secret again, so Flux makes it anew, it

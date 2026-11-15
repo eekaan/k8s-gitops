@@ -76,6 +76,11 @@ cluster-check cluster='lab-sto2':
 grafana cluster='lab-sto2':
     scripts/grafana {{ quote(cluster) }}
 
+# Print the logs a LogsQL query matches, one line per record, the oldest first, through the Kubernetes API's service proxy to VictoriaLogs: just logs 'kubernetes.pod_namespace:monitoring error' [--since 15m] [--limit 200] [cluster]; --since is a number with s, m, h, d or w; fails with the reason when the API does not answer or the store refuses the query
+[positional-arguments]
+logs *args:
+    scripts/logs "$@"
+
 # Reboot one node, by its hostname in talman.yaml, once its name is typed back (--yes: without asking), asking /readyz through the kubeconfig once a second until the node is Ready again, a control plane with its etcd member; fails when a probe failed (--tolerate <seconds>: accept a gap that long)
 [positional-arguments]
 cluster-reboot node *args:

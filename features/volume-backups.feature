@@ -1,5 +1,5 @@
 Feature: Volume backups
-  An application's volume is backed up on a schedule to its own restic repository in the VolSync bucket, and restored from the latest backup when the volume and its restore are created together: the VolSync operator under Flux, and the volsync component an application opts into (ADR 0015). No secret store holds the repository's credentials yet, so no backup runs.
+  An application's volume is backed up on a schedule to its own restic repository in the VolSync bucket, and restored from the latest backup when the volume and its restore are created together: the VolSync operator under Flux, and the volsync component an application opts into (ADR 0015). An operator seeds the repository's credentials into the secret store once, with a recipe, and the backups run by themselves from then on.
 
   Scenario: The VolSync operator runs in its own namespace with its resource definitions
     Given the volsync application and its namespace directory, enabled in the cluster's overlay
@@ -51,7 +51,12 @@ Feature: Volume backups
     When each of its VolSync and External Secrets objects is compared with the definitions
     Then its kind and version are served, and every field it sets is in the definition's schema, of the type and among the values the schema allows
 
-  Scenario: No backup runs until the secret store holds the repository's credentials
-    Given the test application and the cluster's overlay, built as Flux applies them, OpenBao's initial configuration, and the manifests, scripts and recipes in the tree
-    When the Secret the movers read, the secret stores in the tree, what writes into the store and the enabled applications are read
-    Then only the component's ExternalSecret makes that Secret, which VolSync requires before it starts a mover, the only secret store the tree defines is the ClusterSecretStore that ExternalSecret names, nothing in the tree writes the key it reads into that store, as OpenBao's initial configuration makes no request under the store's mount and no manifest, script or recipe pushes a Secret, names the key's path or hands the key to bao-put, and the overlay applies the volsync application and its namespace and no application that includes components/volsync, and lists the test application commented out with the reason
+  Scenario: Only the seeding recipe writes the repository's credentials into the secret store
+    Given the test application built as Flux applies it, OpenBao's initial configuration, and the manifests, scripts and recipes in the tree
+    When the Secret the movers read, the secret stores in the tree and what writes into the store are read
+    Then only the component's ExternalSecret makes that Secret, which VolSync requires before it starts a mover, the only secret store the tree defines is the ClusterSecretStore that ExternalSecret names, OpenBao's initial configuration makes no request under the store's mount, no manifest pushes a Secret, the only file that names the key's path is bao-seed-volsync, which binds that key to its write, and the only scripts that write under the store's data path are it and bao-put, which takes its key as an argument
+
+  Scenario: The demo volume's backup and restore objects are in what Flux applies for the cluster
+    Given the cluster's overlay, built as Flux applies it, and the application volsync-demo
+    When the Kustomizations the overlay applies and the objects volsync-demo builds are read
+    Then the overlay applies the volsync application and its namespace and volsync-demo, which adds components/volsync and names volsync, external-secrets, linstor-cluster and the secret store's application in dependsOn, and volsync-demo builds its claim, the ReplicationDestination that restores it and the ReplicationSource that backs it up
