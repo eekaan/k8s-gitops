@@ -1,6 +1,7 @@
 # IDs and addresses depend on the deployment and an apply in CI prints outputs to a public log, so
 # every output that carries them is sensitive. scripts/edge-check and scripts/edge-routes read
-# addresses.
+# addresses and, from instances, each edge's instance id, which names the console its SSH host key
+# is checked against.
 
 output "names" {
   description = "The edges' names, in order."
@@ -20,7 +21,7 @@ output "private_addresses" {
 }
 
 output "instances" {
-  description = "Each edge as the vm module describes it, by number: its name, flavor, boot volume, user data, key pair, server group and port."
+  description = "Each edge as the vm module describes it, by number: its id, name, flavor, boot volume, user data, key pair, server group and port."
   sensitive   = true
   value       = module.edge
 }

@@ -30,6 +30,7 @@ setup() {
 
   KNOWN_HOSTS="$HOME_DIR/.local/state/k8s-gitops/ci-host.known_hosts"
   ADDRESS=$(jq -r .address.value "$FIXTURES/outputs.json")
+  INSTANCE=$(jq -r .instance.value.id "$FIXTURES/outputs.json")
   HOST_KEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOfTheCiHostFixtureFixture'
   TOKEN=MARKERREGISTRATIONTOKEN0123456789
   REMOVE_TOKEN=MARKERREMOVETOKEN0123456789
@@ -46,10 +47,12 @@ setup() {
   for tool in jq yq grep flock cat; do
     record "$tool"
   done
+  # The stack's outputs, the fixture's, in a copy a test may change.
+  cp "$FIXTURES/outputs.json" "$BATS_TEST_TMPDIR/outputs.json"
   fake tofu <<EOF
 printf '%s\n' "tofu \$*" >> "$RECORD/argv"
 if [[ \${2-} == output ]]; then
-  cat "$FIXTURES/outputs.json"
+  cat "$BATS_TEST_TMPDIR/outputs.json"
 fi
 EOF
   fake gh <<EOF
@@ -74,18 +77,29 @@ EOF
 printf '%s\n' "ssh-keygen \$*" >> "$RECORD/argv"
 case \$1 in
   -F) [[ -s \$4 ]] ;;
-  -l) while read -r line; do [[ -z \$line ]] || echo "256 SHA256:FixtureFingerprintOfTheCiHost0123456789abcdefgh \${line%% *} (ED25519)"; done < "\$3" ;;
+  -l) while read -r line; do [[ -z \$line ]] || echo "256 SHA256:FixtureFingerprintOfTheCiHost0123456789abcd \${line%% *} (ED25519)"; done < "\$3" ;;
   *) echo "unexpected call: ssh-keygen \$*" >&2; exit 1 ;;
 esac
 EOF
   # Nothing else may reach a host, a cloud or a container runtime from this machine.
-  for tool in scp sftp openstack curl docker; do
+  for tool in scp sftp curl docker; do
     fake "$tool" <<EOF
 printf '%s\n' "$tool \$*" >> "$RECORD/argv"
 echo "unexpected call: $tool \$*" >&2
 exit 1
 EOF
   done
+  # The OpenStack client: its version, and an instance's console log, from the file console-ID in
+  # the record's directory; an instance without a file is not found, as the client says it.
+  fake openstack <<EOF
+printf '%s\n' "openstack \$*" >> "$RECORD/argv"
+if [[ \$* == --version ]]; then echo "openstack 7.1.0"; exit 0; fi
+if [[ "\$1 \$2 \$3 \$4" == 'console log show --lines' && \$# -eq 6 && -f "$RECORD/console-\$6" ]]; then
+  exec cat "$RECORD/console-\$6"
+fi
+echo "No server with a name or ID of '\${*: -1}' exists." >&2
+exit 1
+EOF
   fake_host
 
   ENVIRONMENT=(
@@ -98,6 +112,7 @@ EOF
     CI_HOST_IMAGE=fixture-image
     'CI_HOST_SSH_PUBLIC_KEY=ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOperatorKey fixture'
     CI_HOST_SSH_USER=fixture-admin
+    HOST_CONSOLE_WAIT=0
     # Secrets of the other stacks and the cluster, which neither gh nor ssh may be given.
     OS_APPLICATION_CREDENTIAL_SECRET=marker-credential
     TF_ENCRYPTION=marker-encryption
@@ -446,11 +461,13 @@ absent() {
   done
 }
 
-@test "A host whose key is not known is refused until its fingerprint has been accepted" {
+@test "A host whose key is not known and whose console cannot be read is refused until its fingerprint has been accepted" {
+  # No console is there for the instance: the client finds none.
   recipe ci-host-setup <<< no
 
   [ "$status" -ne 0 ]
-  [[ $output == *"SHA256:FixtureFingerprintOfTheCiHost0123456789abcdefgh"* ]]
+  [[ $output == *"The console of the CI host's instance could not be read, so the comparison is yours."* ]]
+  [[ $output == *"SHA256:FixtureFingerprintOfTheCiHost0123456789abcd"* ]]
   [[ $output == *"not accepted"* ]]
   [[ $output != *"$ADDRESS"* ]]
   [ ! -s "$KNOWN_HOSTS" ]
@@ -490,6 +507,98 @@ absent() {
   [ "$status" -ne 0 ]
   [[ $output == *"Host key verification failed"* ]]
   [ ! -s "$RECORD/host" ]
+}
+
+# console FINGERPRINT: the CI host's console, as cloud-init leaves it after the first boot, holding
+# FINGERPRINT.
+console() {
+  {
+    echo "Cloud-init v. 22.4.2 running 'modules:final' at Mon, 01 Jan 2024 00:00:09 +0000. Up 9.9 seconds."
+    # Through `logger -s -p user.info -t cloud-init --`, as cloud-init's write-ssh-key-fingerprints
+    # sends each line of the block, which puts a syslog header on it.
+    echo '<14>Nov 15 09:42:08 cloud-init: -----BEGIN SSH HOST KEY FINGERPRINTS-----'
+    echo "<14>Nov 15 09:42:08 cloud-init: 256 $1 root@lab-ci (ED25519)"
+    echo '<14>Nov 15 09:42:08 cloud-init: -----END SSH HOST KEY FINGERPRINTS-----'
+  } > "$RECORD/console-$INSTANCE"
+}
+
+@test "A CI host whose offered keys are on its console is trusted without a prompt, and one that offers another is refused" {
+  # The host offers the key whose fingerprint the fake ssh-keygen prints; its instance printed that.
+  console SHA256:FixtureFingerprintOfTheCiHost0123456789abcd
+
+  recipe ci-host-setup < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output != *"Type yes"* ]]
+  [[ $output == *"CI host: the 1 SSH host key it offers matches its instance's console; recorded in "* ]]
+  grep -qF -- "${HOST_KEY#* }" "$KNOWN_HOSTS"
+  grep -qx "openstack console log show --lines 1000 $INSTANCE" "$RECORD/argv"
+  [[ $output != *"$ADDRESS"* ]]
+
+  # Its instance printed another key's fingerprint: refused, whatever is typed, and the host is
+  # never connected to.
+  rm "$KNOWN_HOSTS"
+  console SHA256:SomeoneElsesFingerprint0123456789abcdefghij
+  : > "$RECORD/argv"
+
+  recipe ci-host-setup <<< yes
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"offers a key its instance did not print"* ]]
+  [[ $output != *"Type yes"* ]]
+  [[ $output != *"$ADDRESS"* ]]
+  [ ! -s "$KNOWN_HOSTS" ]
+  run grep -c '^ssh ' "$RECORD/argv"
+  [ "$output" = 0 ]
+}
+
+@test "the CI host's console is read only by an identifier that is a UUID" {
+  # An identifier the cloud would take as a name or a prefix, or the client as an option, is not the
+  # instance the stack created, whatever its console holds: no console is read, and the operator is
+  # asked, told why.
+  jq '.instance.value.id = "--lines"' "$FIXTURES/outputs.json" > "$BATS_TEST_TMPDIR/outputs.json"
+  INSTANCE=--lines
+  console SHA256:FixtureFingerprintOfTheCiHost0123456789abcd
+
+  recipe ci-host-setup <<< no
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"The console of the CI host's instance was not read: the stack's outputs name no instance for it."* ]]
+  [[ $output == *"Type yes to record them and connect"* ]]
+  [[ $output == *"not accepted"* ]]
+  [ ! -s "$KNOWN_HOSTS" ]
+  run grep -c '^openstack console' "$RECORD/argv"
+  [ "$output" = 0 ]
+}
+
+@test "the CI host's HOST_CONSOLE_WAIT is read in base 10, and refused, named, before anything runs when it is not a whole number of at most 9 digits" {
+  local value recipe_name
+  # recipe_with NAME VALUE: the recipe NAME as recipe runs it, with HOST_CONSOLE_WAIT=VALUE.
+  recipe_with() {
+    run timeout 60 env -i HOME="$HOME_DIR" TMPDIR="$TEMP_DIR" PATH="$BIN:$PATH" "${ENVIRONMENT[@]}" \
+      "HOST_CONSOLE_WAIT=$2" "$JUST" --justfile "$ROOT/justfile" --working-directory "$REPO" "$1"
+  }
+  console SHA256:FixtureFingerprintOfTheCiHost0123456789abcd
+
+  recipe_with ci-host-setup 08 < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"CI host: the 1 SSH host key it offers matches its instance's console"* ]]
+
+  for recipe_name in ci-host-setup ci-host-remove; do
+    for value in 12345678901234567890 1000000000 30s; do
+      rm -f "$KNOWN_HOSTS"
+      : > "$RECORD/argv"
+
+      recipe_with "$recipe_name" "$value" < /dev/null
+
+      echo "$recipe_name, HOST_CONSOLE_WAIT=$value: $output"
+      [ "$status" -ne 0 ]
+      [[ $output == *"HOST_CONSOLE_WAIT is not a whole number of seconds of at most 9 digits"* ]]
+      run grep -cE '^(tofu|ssh|ssh-keyscan|gh|openstack) ' "$RECORD/argv"
+      [ "$output" = 0 ]
+    done
+  done
 }
 
 @test "setup installs nothing from a runner package whose checksum is not its pin" {

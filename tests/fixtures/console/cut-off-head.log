@@ -1,0 +1,5 @@
+<14>Nov 15 09:57:45 cloud-init: 256 SHA256:CutOffEd25519AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA root@lab-edge-1 (ED25519)
+<14>Nov 15 09:57:45 cloud-init: 3072 SHA256:CutOffRsaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA root@lab-edge-1 (RSA)
+<14>Nov 15 09:57:45 cloud-init: -----END SSH HOST KEY FINGERPRINTS-----
+<14>Nov 15 09:57:45 cloud-init: #############################################################
+lab-edge-1 login: 

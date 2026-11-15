@@ -522,6 +522,13 @@ run "the_user_data_holds_no_secret_and_the_edges_port_allows_exactly_the_address
     condition     = output.instances["1"].key_pair == "lab-edge" && output.instances["1"].user_data == output.user_data["1"] && output.instances["2"].user_data == output.user_data["2"]
     error_message = "Each instance must boot with the key pair of the edges and the user data the stack outputs."
   }
+
+  # scripts/lib/edge.sh names each edge's console, which its SSH host keys are checked against, by
+  # this identifier.
+  assert {
+    condition     = output.instances["1"].id == "edge-1-instance-fixture" && output.instances["2"].id == "edge-2-instance-fixture"
+    error_message = "The instances output must carry each edge's own instance id, by number."
+  }
 }
 
 run "_the_first_boot_script_checks_the_release_before_it_installs_anything" {

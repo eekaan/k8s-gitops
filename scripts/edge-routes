@@ -29,6 +29,7 @@ if [[ ! -t 1 ]]; then
 fi
 # shellcheck source=scripts/stack-env
 . "$here/stack-env" sto2/edge
+host_console_wait || exit 1
 lock_stack
 init_stack
 edge_connect "$((index + 1))"

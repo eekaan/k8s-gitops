@@ -6,11 +6,13 @@
 
 # shellcheck source=scripts/lib/infra.sh
 . "$(dirname "${BASH_SOURCE[0]}")/infra.sh"
-# shellcheck source=scripts/lib/ci-host.sh
-. "$(dirname "${BASH_SOURCE[0]}")/ci-host.sh"
+# shellcheck source=scripts/lib/host-keys.sh
+. "$(dirname "${BASH_SOURCE[0]}")/host-keys.sh"
 
-# edge_load: reads the edges' names and floating addresses from the stack's outputs. Sets edge_names,
-# edge_addresses and edge_known_hosts. The addresses are never printed.
+# edge_load: reads the edges' names, floating addresses and instance identifiers from the stack's
+# outputs. Sets edge_names, edge_addresses, edge_instances (an element is empty when the outputs
+# hold no identifier for the edge, or one that is not a UUID) and edge_known_hosts. The addresses
+# are never printed.
 edge_load() {
   local outputs i
   outputs=$(stack_tofu output -json) || return 1
@@ -28,13 +30,20 @@ edge_load() {
       return 1
     fi
   done
+  edge_instances=()
+  for i in 0 1; do
+    edge_instances[i]=$(jq -r --arg number "$((i + 1))" '.instances.value[$number].id // "" | strings' <<< "$outputs")
+    [[ ${edge_instances[i]} =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]] || edge_instances[i]=
+  done
   edge_known_hosts=${XDG_STATE_HOME:-$HOME/.local/state}/k8s-gitops/edge.known_hosts
 }
 
 # edge_connect [NUMBER]: edge_load, and makes sure the SSH host key of edge NUMBER, or of both
-# edges, is recorded, as for the CI host.
+# edges, is recorded, as for the CI host: checked against the console of the edge's instance, for up
+# to HOST_CONSOLE_WAIT seconds, 30 when unset.
 edge_connect() {
   local i
+  host_console_wait || return 1
   require_env EDGE_SSH_KEY_FILE || return 1
   if [[ ! -f $EDGE_SSH_KEY_FILE ]]; then
     infra_error "$EDGE_SSH_KEY_FILE does not exist; just edge-ssh-key creates the key pair"
@@ -43,7 +52,8 @@ edge_connect() {
   edge_load || return 1
   for i in 0 1; do
     if [[ -z ${1-} || $1 == $((i + 1)) ]]; then
-      ssh_host_trust "${edge_addresses[i]}" "$edge_known_hosts" "edge router ${edge_names[i]}" || return 1
+      ssh_host_trust "${edge_addresses[i]}" "$edge_known_hosts" "edge router ${edge_names[i]}" \
+        "${edge_instances[i]}" "$host_console_wait" || return 1
     fi
   done
 }

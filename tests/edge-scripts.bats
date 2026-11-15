@@ -24,6 +24,8 @@ setup() {
   cp "$ROOT"/infra/openstack/stacks/sto2/edge/*.tf "$ROOT/infra/openstack/stacks/sto2/edge/sshd.conf" "$REPO/infra/openstack/stacks/sto2/edge/"
   ADDRESS_1=203.0.113.51
   ADDRESS_2=203.0.113.52
+  INSTANCE_1=3f6a0c1e-0b5a-4c3e-9d7a-1a2b3c4d5e61
+  INSTANCE_2=8e1d2c3b-4a59-4687-b0c1-d2e3f4a5b672
   KEY="$BATS_TEST_TMPDIR/keys/edge"
   echo 'fixture private key, never read' > "$KEY"
   echo 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureEdgePublicKeyFixtureFixtureFix fixture' > "$KEY.pub"
@@ -60,7 +62,10 @@ JSON
   # The plan a run saves is plan.json, the change the configuration makes, with the instance of each
   # edge given with -replace replaced as well, and, when the run targets one edge, that edge's part
   # of it only. Once applied, the address of each edge whose instance the saved plan creates, alone
-  # or as a replacement, offers a new host key.
+  # or as a replacement, offers a new host key, and, when the outputs name the edges' instances, the
+  # created one is a new server: the outputs give it an identifier of its own, the next of
+  # instance_id's for that edge or what the file next-id-NUMBER in the fake host's directory names,
+  # and the server it replaced is deleted, so the client finds no console for its identifier.
   fake tofu << EOF
 printf '%s\n' "tofu \$*" >> "$RECORD/argv"
 case \${2-} in
@@ -87,9 +92,24 @@ case \${2-} in
     for number in \$(jq -r '.resource_changes[] | select(.type == "openstack_compute_instance_v2" and (.change.actions | index("create")))
         | .address | capture("^module\\\\.edge\\\\[\"(?<n>[12])\"\\\\]").n' "$RECORD/plan.saved"); do
       case \$number in
-        1) echo "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${ADDRESS_1//./}Replacement" > "$HOST/key-$ADDRESS_1" ;;
-        2) echo "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${ADDRESS_2//./}Replacement" > "$HOST/key-$ADDRESS_2" ;;
+        1)
+          echo "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${ADDRESS_1//./}Replacement" > "$HOST/key-$ADDRESS_1"
+          base=${INSTANCE_1:0:32}
+          ;;
+        2)
+          echo "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${ADDRESS_2//./}Replacement" > "$HOST/key-$ADDRESS_2"
+          base=${INSTANCE_2:0:32}
+          ;;
       esac
+      jq -e '.instances' "$BATS_TEST_TMPDIR/outputs.json" > /dev/null || continue
+      replaced=\$(jq -r --arg number "\$number" '.instances.value[\$number].id' "$BATS_TEST_TMPDIR/outputs.json")
+      generation=\$((\$(cat "$RECORD/generation-\$number" 2> /dev/null || echo 0) + 1))
+      echo "\$generation" > "$RECORD/generation-\$number"
+      created=\$(cat "$HOST/next-id-\$number" 2> /dev/null || printf '%s%04x' "\$base" "\$generation")
+      : > "$HOST/gone-\$replaced"
+      jq --arg number "\$number" --arg id "\$created" '.instances.value[\$number].id = \$id' \
+        "$BATS_TEST_TMPDIR/outputs.json" > "$BATS_TEST_TMPDIR/outputs.applied"
+      mv "$BATS_TEST_TMPDIR/outputs.applied" "$BATS_TEST_TMPDIR/outputs.json"
     done
     ;;
 esac
@@ -101,7 +121,7 @@ printf '%s\n' "ssh-keygen \$*" >> "$RECORD/argv"
 case \$1 in
   -F) grep -q "^\$2 " "\$4" 2> /dev/null ;;
   -R) grep -v "^\$2 " "\$4" > "\$4.new" || true; mv "\$4.new" "\$4" ;;
-  -l) read -r address type key; echo "256 SHA256:\$key \$address (ED25519)" ;;
+  -l) while read -r address type key; do echo "256 SHA256:\$(printf %s "\$key" | sha256sum | cut -c1-43) \$address (ED25519)"; done ;;
   *) exit 1 ;;
 esac
 EOF
@@ -127,9 +147,13 @@ while ((\$#)); do
   esac
 done
 [[ \$strict == yes && \$only == yes && \$identity == "$KEY" && -s \$known ]] || { echo "fake ssh: refused" >&2; exit 255; }
+# The user the edges' image logs in as, debian, unless a test names the one it configures in the
+# file ssh-user.
+user=debian
+[[ ! -f "$HOST/ssh-user" ]] || user=\$(cat "$HOST/ssh-user")
 case \$1 in
-  debian@$ADDRESS_1) edge=1 address=$ADDRESS_1 ;;
-  debian@$ADDRESS_2) edge=2 address=$ADDRESS_2 ;;
+  "\$user@$ADDRESS_1") edge=1 address=$ADDRESS_1 ;;
+  "\$user@$ADDRESS_2") edge=2 address=$ADDRESS_2 ;;
   *) echo "fake ssh: unexpected destination" >&2; exit 255 ;;
 esac
 # What strict host key checking does: the recorded key must be the one the host offers.
@@ -138,19 +162,52 @@ shift
 exec env -i EDGE_FIXTURE="$HOST/edge-\$edge" EDGE_SBIN="$HOST_SBIN" PATH="$HOST_BIN" "$(type -P bash)" -c "\$*"
 EOF
   # Nothing else may reach a host, a cloud or a container runtime from this machine.
-  for tool in scp sftp openstack curl docker; do
+  for tool in scp sftp curl docker; do
     fake "$tool" << EOF
 printf '%s\n' "$tool \$*" >> "$RECORD/argv"
 echo "unexpected call: $tool \$*" >&2
 exit 1
 EOF
   done
-  # The host keys an address offers, as ssh-keyscan prints them; nothing from an address with none.
+  # The OpenStack client: its version, 7.1.0 or what the file openstack-version in the fake host's
+  # directory says, and an instance's console log, from the file console-ID there, or, for its Nth
+  # read, console-ID.N when there is one; an instance without a file, or deleted (gone-ID), is not
+  # found, as the client says it.
+  fake openstack << EOF
+printf '%s\n' "openstack \$*" >> "$RECORD/argv"
+if [[ \$* == --version ]]; then cat "$HOST/openstack-version" 2> /dev/null || echo "openstack 7.1.0"; exit 0; fi
+if [[ "\$1 \$2 \$3 \$4" == 'console log show --lines' && \$# -eq 6 ]]; then
+  id=\$6 reads=\$(( \$(cat "$RECORD/reads-\$id" 2> /dev/null || echo 0) + 1 ))
+  echo "\$reads" > "$RECORD/reads-\$id"
+  if [[ ! -e "$HOST/gone-\$id" ]]; then
+    for file in "$HOST/console-\$id.\$reads" "$HOST/console-\$id"; do
+      [[ -f \$file ]] && exec cat "\$file"
+    done
+  fi
+  echo "No server with a name or ID of '\$id' exists." >&2
+  exit 1
+fi
+echo "unexpected call: openstack \$*" >&2
+exit 1
+EOF
+  # The host keys an address offers, as ssh-keyscan prints them; nothing from an address with none,
+  # nor for as many scans as the file silent-ADDRESS says, as from a host still booting. Files
+  # key-ADDRESS.before and key-ADDRESS.rsa add a key offered before the first and one after it, and
+  # key-ADDRESS.rescan is what a second scan of the address answers instead.
   fake ssh-keyscan << EOF
 printf '%s\n' "ssh-keyscan \$*" >> "$RECORD/argv"
 address=\${*: -1}
 [[ -f "$HOST/key-\$address" ]] || exit 1
+scans=\$(( \$(cat "$RECORD/scans-\$address" 2> /dev/null || echo 0) + 1 ))
+echo "\$scans" > "$RECORD/scans-\$address"
+((scans > \$(cat "$HOST/silent-\$address" 2> /dev/null || echo 0))) || exit 1
+if ((scans > 1)) && [[ -f "$HOST/key-\$address.rescan" ]]; then
+  echo "\$address ssh-ed25519 \$(cat "$HOST/key-\$address.rescan")"
+  exit 0
+fi
+[[ ! -f "$HOST/key-\$address.before" ]] || echo "\$address ssh-rsa \$(cat "$HOST/key-\$address.before")"
 echo "\$address ssh-ed25519 \$(cat "$HOST/key-\$address")"
+[[ ! -f "$HOST/key-\$address.rsa" ]] || echo "\$address ssh-rsa \$(cat "$HOST/key-\$address.rsa")"
 EOF
   # What an edge answers: FRR's state and tables, the loaded rules, the kernel's setting and the SSH
   # daemon's. The commands in /usr/bin on Debian are on the ordinary user's PATH; those in /usr/sbin
@@ -284,6 +341,7 @@ EOF
     EDGE_SSH_KEY_FILE="$KEY"
     EDGE_ROLLOUT_WAIT=0
     EDGE_ROLLOUT_INTERVAL=0
+    HOST_CONSOLE_WAIT=0
   )
   WORKERS='192.0.2.20 192.0.2.30 192.0.2.22'
 }
@@ -886,13 +944,14 @@ original_keys() {
   plan_replacing 1 2
   original_1=$(recorded 1)
 
-  # The operator types yes once per replaced edge, as the fingerprints are shown. edge-check is the
-  # real script here: its ssh refuses a host whose key is not the recorded one.
+  # The stack's outputs name no instance here, so no console is read: the operator types yes once
+  # per replaced edge, as the fingerprints are shown. edge-check is the real script here: its ssh
+  # refuses a host whose key is not the recorded one.
   : > "$RECORD/argv"
   run bash -c 'printf "yes\nyes\n" | env "$@"' _ "${ENVIRONMENT[@]}" "$REPO/scripts/edge-rollout" --yes
   echo "$output"
   [ "$status" -eq 0 ]
-  [[ $output == *"SHA256:AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${ADDRESS_1//./}Replacement"* ]]
+  [[ $output == *"$(fingerprint "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${ADDRESS_1//./}Replacement")"* ]]
   [ "$(recorded 1)" = "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${ADDRESS_1//./}Replacement" ]
   [ "$(recorded 1)" != "$original_1" ]
   [ "$(recorded 2)" = "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${ADDRESS_2//./}Replacement" ]
@@ -1077,8 +1136,9 @@ instance_plan() {
   [ "$(trail)" = "$(printf '%s\n' 'forget 2' 'apply')" ]
   [ "$(recorded 2)" = "" ]
   [ "$(recorded 1)" = "$original_1" ]
-  [[ $output == *"edge 2's SSH host keys are no longer recorded"* ]]
-  # The new instance's keys are shown and recorded once yes is typed, and its check passes.
+  [[ $output$'\n' == *$'\n'"edge 2's SSH host keys are no longer recorded; just edge-check --edge 2 checks the new ones against its instance's console and records them, asking for yes only when the console holds none"$'\n'* ]]
+  # The stack's outputs name no instance here, so no console is read: the new instance's keys are
+  # shown and recorded once yes is typed, and its check passes.
   run bash -c 'printf "yes\n" | env "$@"' _ "${ENVIRONMENT[@]}" "$REPO/scripts/edge-check" --edge 2
   echo "$output"
   [ "$status" -eq 0 ]
@@ -1534,4 +1594,783 @@ effective() {
   absent -E '^systemctl (try-reload-or-restart|reload|restart) ssh' "$RECORD/argv"
   absent -E '^systemctl (enable|restart) frr' "$RECORD/argv"
   disarmed
+}
+
+# fingerprint KEY: what the fake ssh-keygen prints as the fingerprint of the key text KEY.
+fingerprint() {
+  printf 'SHA256:%s' "$(printf %s "$1" | sha256sum | cut -c1-43)"
+}
+
+# replacement_key NUMBER: the key edge NUMBER offers once its instance is created again.
+replacement_key() {
+  local address=$ADDRESS_1
+  [[ $1 == 1 ]] || address=$ADDRESS_2
+  echo "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${address//./}Replacement"
+}
+
+# rsa_key NUMBER: the second key edge NUMBER's address offers when the test gives it one.
+rsa_key() {
+  local address=$ADDRESS_1
+  [[ $1 == 1 ]] || address=$ADDRESS_2
+  echo "AAAAB3NzaC1yc2EAAAADAQABAAABgQFixtureRsaKeyOf${address//./}"
+}
+
+# cloud_init_line TEXT: a line as cloud-init's tools/write-ssh-key-fingerprints sends it to the
+# console, through `logger -s -p user.info -t cloud-init --`, which puts a syslog header on it.
+cloud_init_line() {
+  printf '<14>Nov 15 09:42:08 cloud-init: %s\n' "$1"
+}
+
+# console_block FINGERPRINT...: what cloud-init prints on the console at the end of a first boot.
+console_block() {
+  local fingerprint
+  echo "Cloud-init v. 22.4.2 running 'modules:final' at Mon, 01 Jan 2024 00:00:09 +0000. Up 9.9 seconds."
+  cloud_init_line '#############################################################'
+  cloud_init_line '-----BEGIN SSH HOST KEY FINGERPRINTS-----'
+  for fingerprint; do
+    cloud_init_line "256 $fingerprint root@lab-edge (ED25519)"
+  done
+  cloud_init_line '-----END SSH HOST KEY FINGERPRINTS-----'
+  cloud_init_line '#############################################################'
+}
+
+# with_instances: the stack's outputs name each edge's instance, as an applied stack's do; without
+# it they do not, and the recipes cannot read a console.
+with_instances() {
+  jq --arg one "$INSTANCE_1" --arg two "$INSTANCE_2" '.instances = {sensitive: true, value: {
+    "1": {id: $one, name: "lab-edge-1"}, "2": {id: $two, name: "lab-edge-2"}}}' \
+    "$BATS_TEST_TMPDIR/outputs.json" > "$BATS_TEST_TMPDIR/outputs.with"
+  mv "$BATS_TEST_TMPDIR/outputs.with" "$BATS_TEST_TMPDIR/outputs.json"
+}
+
+# early_console: a console whose first boot has not printed its keys yet.
+early_console() {
+  echo "Cloud-init v. 22.4.2 running 'init' at Mon, 01 Jan 2024 00:00:03 +0000. Up 3.9 seconds."
+}
+
+# instance_id NUMBER GENERATION: the identifier of edge NUMBER's instance once an apply has created
+# it GENERATION times, as the fake tofu gives it; generation 0 is the one with_instances writes.
+instance_id() {
+  local id=$INSTANCE_1
+  [[ $1 == 1 ]] || id=$INSTANCE_2
+  if (($2 == 0)); then
+    echo "$id"
+  else
+    printf '%s%04x\n' "${id:0:32}" "$2"
+  fi
+}
+
+# current_instance NUMBER: the identifier the stack's outputs give edge NUMBER's instance now.
+current_instance() {
+  jq -r --arg number "$1" '.instances.value[$number].id' "$BATS_TEST_TMPDIR/outputs.json"
+}
+
+# next_instance NUMBER: the identifier of the instance the next apply that creates edge NUMBER's
+# makes.
+next_instance() {
+  instance_id "$1" "$(($(cat "$RECORD/generation-$1" 2> /dev/null || echo 0) + 1))"
+}
+
+# set_console ID [READ]: the console of the instance ID, the text on standard input; for its READth
+# read of the console only, when READ is given.
+set_console() {
+  local suffix=
+  [[ -z ${2-} ]] || suffix=.$2
+  cat > "$HOST/console-$1$suffix"
+}
+
+# console_reads ID: how many times the console of the instance ID was read.
+console_reads() {
+  cat "$RECORD/reads-$1" 2> /dev/null || echo 0
+}
+
+# crlf FILE: FILE with each line ended by CR LF, as a serial console's terminal writes a line.
+crlf() {
+  sed -i 's/$/\r/' "$1"
+}
+
+# fake_clock: date +%s reads a clock of the test's own, which sleep moves on instead of waiting,
+# recording each sleep, as in tests/cluster-recipes.bats; with a number in the file clock-answers in
+# the record's directory, date answers that many times and then gives no number. A run that sleeps
+# more than 100 times is waiting for a time the clock does not reach, and is stopped.
+fake_clock() {
+  echo 1800000000 > "$RECORD/clock"
+  rm -f "$RECORD/clock-answers"
+  fake date << EOF
+if [[ \$* == +%s ]]; then
+  if [[ -f "$RECORD/clock-answers" ]]; then
+    answers=\$(cat "$RECORD/clock-answers")
+    if ((answers <= 0)); then
+      echo 'no time'
+      exit 0
+    fi
+    echo \$((answers - 1)) > "$RECORD/clock-answers"
+  fi
+  cat "$RECORD/clock"
+  exit 0
+fi
+exec "$(type -P date)" "\$@"
+EOF
+  fake sleep << EOF
+printf '%s\n' "sleep \$*" >> "$RECORD/argv"
+echo \$((\$(cat "$RECORD/clock") + \${1%%[!0-9]*})) > "$RECORD/clock"
+if (("\$(grep -c '^sleep ' "$RECORD/argv")" > 100)); then
+  echo "fake sleep: a wait the clock does not end" >&2
+  kill -TERM "\$PPID"
+fi
+EOF
+}
+
+# clock_moved: how many seconds the fake clock moved on since it was set.
+clock_moved() {
+  echo $(($(cat "$RECORD/clock") - 1800000000))
+}
+
+# fixture_fingerprint NAME: the fingerprint tests/fixtures/console's logs print under NAME.
+fixture_fingerprint() {
+  local s=$1
+  while ((${#s} < 43)); do s+=A; done
+  printf 'SHA256:%s\n' "$s"
+}
+
+# rollout_with_input INPUT [NAME=VALUE...]: scripts/edge-rollout --yes in the copy, INPUT, which
+# printf reads as a format, typed, and the NAME=VALUE pairs added to its environment.
+rollout_with_input() {
+  local input=$1
+  shift
+  run bash -c 'printf "$1" | { shift; env "$@"; }' _ "$input" "${ENVIRONMENT[@]}" "$@" "$REPO/scripts/edge-rollout" --yes
+}
+
+@test "A new edge whose offered keys are all on its console is trusted without a prompt" {
+  local number new_1 new_2
+  with_instances
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_state 2 active "$WORKERS" 203.0.113.17/32
+  plan_replacing 1 2
+  new_1=$(next_instance 1) new_2=$(next_instance 2)
+  # The instances before the rollout printed the keys they had. Each replacement is a new server
+  # with an identifier of its own, which the stack's outputs give once it is applied, and whose
+  # address offers a second key as well; it printed both. Edge 2's console ends its lines with
+  # CR LF, as a serial console's terminal writes them.
+  for number in 1 2; do
+    console_block "$(fingerprint "$(cat "$HOST/key-$(address_of "$number")")")" | set_console "$(current_instance "$number")"
+    rsa_key "$number" > "$HOST/key-$(address_of "$number").rsa"
+    console_block "$(fingerprint "$(replacement_key "$number")")" "$(fingerprint "$(rsa_key "$number")")" | set_console "$(next_instance "$number")"
+  done
+  crlf "$HOST/console-$new_2"
+  : > "$RECORD/argv"
+
+  # Nothing is typed: a prompt would read the end of the input and decline.
+  rollout_with_input ''
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(recorded 1 | head -1)" = "$(replacement_key 1)" ]
+  [ "$(recorded 2 | head -1)" = "$(replacement_key 2)" ]
+  [ "$(grep -c "^$ADDRESS_1 " "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts")" -eq 2 ]
+  [[ $output != *"Type yes"* ]]
+  [[ $output == *"edge router lab-edge-1: the 2 SSH host keys it offers match its instance's console; recorded in "* ]]
+  [[ $output == *"edge router lab-edge-2: the 2 SSH host keys it offers match its instance's console; recorded in "* ]]
+  no_address "$output"
+  # Each console was read through the client, by the identifier the stack's outputs give the new
+  # instance, and the replaced instances' consoles were never read.
+  [ "$(current_instance 1)" = "$new_1" ]
+  [ "$(current_instance 2)" = "$new_2" ]
+  grep -qx "openstack console log show --lines 1000 $new_1" "$RECORD/argv"
+  grep -qx "openstack console log show --lines 1000 $new_2" "$RECORD/argv"
+  absent -E "^openstack console log show .*($INSTANCE_1|$INSTANCE_2)\$" "$RECORD/argv"
+  absent -E "^openstack .*$ADDRESS_1" "$RECORD/argv"
+}
+
+@test "a replaced edge whose outputs still name the instance it replaced is not read or recorded" {
+  with_instances
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_state 2 active "$WORKERS" 203.0.113.17/32
+  plan_replacing 1 2
+  # The apply creates edge 1's instance again, and the outputs read after it still give the old
+  # one's identifier: they do not describe what the apply made.
+  echo "$INSTANCE_1" > "$HOST/next-id-1"
+  console_block "$(fingerprint "$(cat "$HOST/key-$ADDRESS_1")")" | set_console "$INSTANCE_1"
+  : > "$RECORD/argv"
+  rollout_with_input 'yes\nyes\n'
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"edge 1's instance was created again, but the stack's outputs still give the identifier of the one before it"* ]]
+  [[ $output == *"when just infra-plan sto2/edge lists update: output instances and no other change, just infra-apply sto2/edge writes the outputs (a pending change to the other edge lists update: output instances as well); once just infra-plan sto2/edge lists no change to output instances, so the outputs name the new instance, just edge-check --edge 1 records its keys"* ]]
+  [[ $output != *"Type yes"* ]]
+  absent '^openstack console' "$RECORD/argv"
+  absent '^ssh-keyscan ' "$RECORD/argv"
+  [ "$(recorded 1)" = "" ]
+  # The rollout stopped there.
+  [ "$(grep -c '^tofu .* apply ' "$RECORD/argv")" -eq 1 ]
+  absent 'module.edge\["2"\]' "$RECORD/argv"
+  no_address "$output"
+
+  # Edge 1's outputs follow its replacement, and edge 2's stay stale: edge 1's keys are recorded
+  # from its new console, and the rollout stops at edge 2, its keys unread and unrecorded.
+  original_keys
+  plan_replacing 1 2
+  rm "$HOST/next-id-1"
+  current_instance 2 > "$HOST/next-id-2"
+  console_block "$(fingerprint "$(replacement_key 1)")" | set_console "$(next_instance 1)"
+  console_block "$(fingerprint "$(replacement_key 2)")" | set_console "$(current_instance 2)"
+  : > "$RECORD/argv"
+  rollout_with_input 'yes\nyes\n'
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [ "$(recorded 1)" = "$(replacement_key 1)" ]
+  [[ $output == *"edge router lab-edge-1: the 1 SSH host key it offers matches its instance's console"* ]]
+  [[ $output == *"edge 2's instance was created again, but the stack's outputs still give the identifier of the one before it"* ]]
+  [[ $output == *"just edge-check --edge 2 records its keys"* ]]
+  [[ $output != *"Type yes"* ]]
+  [ "$(recorded 2)" = "" ]
+  absent "^openstack console log show .* $(current_instance 2)\$" "$RECORD/argv"
+  absent "^ssh-keyscan .*$ADDRESS_2\$" "$RECORD/argv"
+  [ "$(grep -c '^tofu .* apply ' "$RECORD/argv")" -eq 2 ]
+  no_address "$output"
+}
+
+# address_of NUMBER: the address of edge NUMBER.
+address_of() {
+  if [[ $1 == 1 ]]; then echo "$ADDRESS_1"; else echo "$ADDRESS_2"; fi
+}
+
+@test "An address that offers a key its instance did not print is refused, and nothing is recorded" {
+  local variant new
+  with_instances
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_state 2 active "$WORKERS" 203.0.113.17/32
+  # A refusal is final: the clock is a sleep that records the call and ends the rollout, so one that
+  # read the console again under the default wait, 900 seconds, which the rollouts below have, would
+  # show in the record.
+  fake sleep << FAKE
+printf '%s\n' "sleep \$*" >> "$RECORD/argv"
+kill -TERM "\$PPID"
+FAKE
+  # Every key the address offers must be on the console, wherever in the offer the one that is not
+  # stands: first, last, or between two that are, so a comparison of some of them by position
+  # passes none of these.
+  for variant in 'an unprinted key first' 'an unprinted key last' 'an unprinted key between two printed' 'other keys altogether'; do
+    original_keys
+    plan_replacing 1
+    new=$(next_instance 1)
+    rm -f "$HOST/key-$ADDRESS_1.before" "$HOST/key-$ADDRESS_1.rsa"
+    case $variant in
+      'an unprinted key first')
+        rsa_key 1 > "$HOST/key-$ADDRESS_1.before"
+        console_block "$(fingerprint "$(replacement_key 1)")" | set_console "$new"
+        ;;
+      'an unprinted key last')
+        rsa_key 1 > "$HOST/key-$ADDRESS_1.rsa"
+        console_block "$(fingerprint "$(replacement_key 1)")" | set_console "$new"
+        ;;
+      'an unprinted key between two printed')
+        rsa_key 1 > "$HOST/key-$ADDRESS_1.before"
+        echo "AAAAB3NzaC1yc2EAAAADAQABAAABgQFixtureThirdKeyOf${ADDRESS_1//./}" > "$HOST/key-$ADDRESS_1.rsa"
+        console_block "$(fingerprint "$(rsa_key 1)")" \
+          "$(fingerprint "AAAAB3NzaC1yc2EAAAADAQABAAABgQFixtureThirdKeyOf${ADDRESS_1//./}")" | set_console "$new"
+        ;;
+      *)
+        console_block "$(fixture_fingerprint SomeoneElsesKeyEd25519)" | set_console "$new"
+        ;;
+    esac
+    : > "$RECORD/argv"
+
+    # The operator would say yes to anything, and --yes is given.
+    rollout_with_input 'yes\nyes\nyes\n' EDGE_ROLLOUT_WAIT=900 EDGE_ROLLOUT_INTERVAL=15
+    echo "$variant: $output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"offers a key its instance did not print"* ]]
+    [[ $output != *"Type yes"* ]]
+    [ "$(recorded 1)" = "" ]
+    absent '^sleep ' "$RECORD/argv"
+    [ "$(console_reads "$new")" -eq 1 ]
+    absent "^ssh .*@$ADDRESS_1 " "$RECORD/argv"
+    # The rollout stopped there.
+    [ "$(grep -c '^tofu .* apply ' "$RECORD/argv")" -eq 1 ]
+    absent 'module.edge\["2"\]' "$RECORD/argv"
+    no_address "$output"
+  done
+
+  # A first connection through edge-check is refused the same way: the instance the outputs name
+  # printed another key.
+  original_keys
+  grep -v "^$ADDRESS_1 " "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts" > "$BATS_TEST_TMPDIR/known"
+  cp "$BATS_TEST_TMPDIR/known" "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts"
+  console_block "$(fixture_fingerprint SomeoneElsesKeyEd25519)" | set_console "$(current_instance 1)"
+  : > "$RECORD/argv"
+  run bash -c 'printf "yes\nyes\n" | env "$@"' _ "${ENVIRONMENT[@]}" "$REPO/scripts/edge-check" --edge 1
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"offers a key its instance did not print"* ]]
+  [[ $output != *"Type yes"* ]]
+  [ "$(recorded 1)" = "" ]
+  grep -qx "openstack console log show --lines 1000 $(current_instance 1)" "$RECORD/argv"
+  absent "^ssh .*@$ADDRESS_1 " "$RECORD/argv"
+  no_address "$output"
+}
+
+@test "A console that holds no fingerprints yet is waited for, and then the operator is asked" {
+  local new
+  with_instances
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_state 2 active "$WORKERS" 203.0.113.17/32
+  # The waits are on the test's clock: sleep moves it on, and the rollout's wait ends when it says.
+  fake_clock
+  plan_replacing 1
+  new=$(next_instance 1)
+  # The first boot prints its keys late: the console has none for the first read, and has them for
+  # the second, one interval later.
+  early_console | set_console "$new" 1
+  console_block "$(fingerprint "$(replacement_key 1)")" | set_console "$new" 2
+  : > "$RECORD/argv"
+  rollout_with_input '' EDGE_ROLLOUT_WAIT=60 EDGE_ROLLOUT_INTERVAL=15
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(console_reads "$new")" -eq 2 ]
+  [ "$(clock_moved)" -eq 15 ]
+  [ "$(recorded 1)" = "$(replacement_key 1)" ]
+  [[ $output != *"Type yes"* ]]
+  [ "$(grep -c '^ssh-keyscan ' "$RECORD/argv")" -eq 1 ]
+
+  # The client cannot read it at first, as the new instance is not found yet, and then can: it is
+  # read again within the wait as well.
+  original_keys
+  fake_clock
+  plan_replacing 1
+  new=$(next_instance 1)
+  console_block "$(fingerprint "$(replacement_key 1)")" | set_console "$new" 2
+  : > "$RECORD/argv"
+  rollout_with_input '' EDGE_ROLLOUT_WAIT=60 EDGE_ROLLOUT_INTERVAL=15
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(console_reads "$new")" -eq 2 ]
+  [ "$(recorded 1)" = "$(replacement_key 1)" ]
+  [[ $output != *"Type yes"* ]]
+
+  # It never does: the wait the rollout has is spent on reading it, at the start and every interval
+  # until the wait is over, and then the operator is asked, and told the console held no
+  # fingerprints.
+  original_keys
+  fake_clock
+  plan_replacing 1
+  new=$(next_instance 1)
+  early_console | set_console "$new"
+  : > "$RECORD/argv"
+  rollout_with_input 'yes\n' EDGE_ROLLOUT_WAIT=60 EDGE_ROLLOUT_INTERVAL=15
+  echo "$output"
+  [ "$status" -eq 0 ]
+  echo "reads $(console_reads "$new"), clock moved $(clock_moved)s"
+  [ "$(console_reads "$new")" -eq 5 ]
+  [ "$(clock_moved)" -eq 60 ]
+  [[ $output == *"The console of the edge router lab-edge-1's instance held no fingerprints, so the comparison is yours."* ]]
+  [[ $output == *"Type yes to record them and connect"* ]]
+  [ "$(recorded 1)" = "$(replacement_key 1)" ]
+
+  # An answer that is not yes declines.
+  original_keys
+  plan_replacing 1
+  rollout_with_input 'no\n' EDGE_ROLLOUT_WAIT=0
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"was not accepted"* ]]
+  [ "$(recorded 1)" = "" ]
+
+  # A console the client cannot read, as the instance is not found, is the same, and says so.
+  original_keys
+  plan_replacing 1
+  rollout_with_input 'yes\n' EDGE_ROLLOUT_WAIT=0
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *"could not be read"* ]]
+  [[ $output == *"Type yes to record them and connect"* ]]
+  [ "$(recorded 1)" = "$(replacement_key 1)" ]
+  no_address "$output"
+}
+
+@test "the console is read within what is left of the rollout's wait, for 30 seconds outside it, and not again when the client cannot run" {
+  local new
+  with_instances
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_state 2 active "$WORKERS" 203.0.113.17/32
+  early_console | set_console "$(instance_id 1 1)"
+
+  # The new instance answers on SSH one interval after the apply, so the console is read for the
+  # rest of the wait: at 15, 30, 45 and 60 seconds, and the wait ends at 60, not an interval later.
+  fake_clock
+  plan_replacing 1
+  echo 1 > "$HOST/silent-$ADDRESS_1"
+  : > "$RECORD/argv"
+  rollout_with_input 'yes\n' EDGE_ROLLOUT_WAIT=60 EDGE_ROLLOUT_INTERVAL=15
+  echo "$output"
+  [ "$status" -eq 0 ]
+  echo "scans $(cat "$RECORD/scans-$ADDRESS_1"), reads $(console_reads "$(instance_id 1 1)"), clock moved $(clock_moved)s"
+  [ "$(cat "$RECORD/scans-$ADDRESS_1")" -eq 2 ]
+  [ "$(console_reads "$(instance_id 1 1)")" -eq 4 ]
+  [ "$(clock_moved)" -eq 60 ]
+  [[ $output == *"held no fingerprints"* ]]
+  [ "$(recorded 1)" = "$(replacement_key 1)" ]
+  rm "$HOST/silent-$ADDRESS_1"
+
+  # A client older than the recipes need cannot read a console, which waiting does not change: no
+  # read, no wait, and the operator is asked at once, told why.
+  original_keys
+  fake_clock
+  plan_replacing 1
+  new=$(next_instance 1)
+  console_block "$(fingerprint "$(replacement_key 1)")" | set_console "$new"
+  echo "openstack 6.5.0" > "$HOST/openstack-version"
+  : > "$RECORD/argv"
+  rollout_with_input 'yes\n' EDGE_ROLLOUT_WAIT=900 EDGE_ROLLOUT_INTERVAL=15
+  echo "$output"
+  [ "$status" -eq 0 ]
+  absent '^openstack console' "$RECORD/argv"
+  absent '^sleep ' "$RECORD/argv"
+  [[ $output == *"python-openstackclient 7.0.0 or newer is needed"* ]]
+  [[ $output == *"The console of the edge router lab-edge-1's instance was not read, so the comparison is yours."* ]]
+  [ "$(recorded 1)" = "$(replacement_key 1)" ]
+  rm "$HOST/openstack-version"
+
+  # Outside a rollout, edge-check waits HOST_CONSOLE_WAIT seconds, 30 when unset, reading every 5.
+  local environment=() entry current
+  for entry in "${ENVIRONMENT[@]}"; do
+    [[ $entry == HOST_CONSOLE_WAIT=* ]] || environment+=("$entry")
+  done
+  original_keys
+  grep -v "^$ADDRESS_1 " "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts" > "$BATS_TEST_TMPDIR/known"
+  cp "$BATS_TEST_TMPDIR/known" "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts"
+  current=$(current_instance 1)
+  early_console | set_console "$current"
+  fake_clock
+  : > "$RECORD/argv"
+  run bash -c 'printf "yes\n" | env "$@"' _ "${environment[@]}" "$REPO/scripts/edge-check" --edge 1
+  echo "$output"
+  [ "$status" -eq 0 ]
+  echo "reads $(console_reads "$current"), clock moved $(clock_moved)s"
+  [ "$(console_reads "$current")" -eq 7 ]
+  [ "$(clock_moved)" -eq 30 ]
+  [[ $output == *"held no fingerprints"* ]]
+  [ "$(recorded 1)" = "$(cat "$HOST/key-$ADDRESS_1")" ]
+
+  # A clock that gives no number cannot time a wait: the console is read once, and the operator is
+  # asked, told why.
+  grep -v "^$ADDRESS_1 " "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts" > "$BATS_TEST_TMPDIR/known"
+  cp "$BATS_TEST_TMPDIR/known" "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts"
+  rm -f "$RECORD/reads-$current"
+  fake_clock
+  echo 'no time' > "$RECORD/clock"
+  : > "$RECORD/argv"
+  run bash -c 'printf "yes\n" | env "$@"' _ "${environment[@]}" "$REPO/scripts/edge-check" --edge 1
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(console_reads "$current")" -eq 1 ]
+  absent '^sleep ' "$RECORD/argv"
+  [[ $output == *"date +%s does not give the time, so the wait for the console cannot be timed"* ]]
+  [[ $output == *"Type yes to record them and connect"* ]]
+
+  # A clock that stops giving a number part-way ends the wait there: it answers at the start and
+  # after the first read, and not after the second, so the console is read twice, with one sleep
+  # between, and the operator is asked.
+  grep -v "^$ADDRESS_1 " "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts" > "$BATS_TEST_TMPDIR/known"
+  cp "$BATS_TEST_TMPDIR/known" "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts"
+  rm -f "$RECORD/reads-$current"
+  fake_clock
+  echo 2 > "$RECORD/clock-answers"
+  : > "$RECORD/argv"
+  run bash -c 'printf "yes\n" | env "$@"' _ "${environment[@]}" "$REPO/scripts/edge-check" --edge 1
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(console_reads "$current")" -eq 2 ]
+  [ "$(grep -c '^sleep ' "$RECORD/argv")" -eq 1 ]
+  [[ $output == *"date +%s does not give the time, so the wait for the console cannot be timed"* ]]
+  [[ $output == *"held no fingerprints"* ]]
+  [[ $output == *"Type yes to record them and connect"* ]]
+  [ "$(recorded 1)" = "$(cat "$HOST/key-$ADDRESS_1")" ]
+}
+
+@test "the waits are read in base 10, and one that is not a whole number of at most 9 digits is refused, named, before anything runs" {
+  local environment=() entry current row value reads moved wait interval name new
+  with_instances
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_state 2 active "$WORKERS" 203.0.113.17/32
+  for entry in "${ENVIRONMENT[@]}"; do
+    [[ $entry == HOST_CONSOLE_WAIT=* ]] || environment+=("$entry")
+  done
+  current=$(current_instance 1)
+  early_console | set_console "$current"
+  # forget_1: edge 1's key is not recorded, so edge-check reads its console.
+  forget_1() {
+    grep -v "^$ADDRESS_1 " "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts" > "$BATS_TEST_TMPDIR/known" || true
+    cp "$BATS_TEST_TMPDIR/known" "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts"
+  }
+
+  # HOST_CONSOLE_WAIT=08 waits eight seconds, read every 5: at 0, 5 and 10. 012 waits twelve: at 0,
+  # 5, 10 and 15, where octal's ten would stop at 10.
+  for row in '08 3 10' '012 4 15'; do
+    read -r value reads moved <<< "$row"
+    forget_1
+    rm -f "$RECORD/reads-$current"
+    fake_clock
+    : > "$RECORD/argv"
+    run bash -c 'printf "yes\n" | env "$@"' _ "${environment[@]}" "HOST_CONSOLE_WAIT=$value" "$REPO/scripts/edge-check" --edge 1
+    echo "HOST_CONSOLE_WAIT=$value: $output"
+    [ "$status" -eq 0 ]
+    [ "$(console_reads "$current")" -eq "$reads" ]
+    [ "$(clock_moved)" -eq "$moved" ]
+  done
+  # Nine digits are a wait.
+  forget_1
+  console_block "$(fingerprint "$(cat "$HOST/key-$ADDRESS_1")")" | set_console "$current"
+  run env "${environment[@]}" HOST_CONSOLE_WAIT=999999999 "$REPO/scripts/edge-check" --edge 1 < /dev/null
+  echo "HOST_CONSOLE_WAIT=999999999: $output"
+  [ "$status" -eq 0 ]
+  [[ $output == *"match"*"its instance's console"* ]]
+
+  # EDGE_ROLLOUT_WAIT=08 with EDGE_ROLLOUT_INTERVAL=04 reads the console at 0, 4 and 8; 010 with 02
+  # at 0, 2, 4, 6, 8 and 10, where octal's eight would stop at 8.
+  for row in '08 04 3 8' '010 02 6 10'; do
+    read -r wait interval reads moved <<< "$row"
+    original_keys
+    fake_clock
+    plan_replacing 1
+    new=$(next_instance 1)
+    early_console | set_console "$new"
+    : > "$RECORD/argv"
+    rollout_with_input 'yes\n' "EDGE_ROLLOUT_WAIT=$wait" "EDGE_ROLLOUT_INTERVAL=$interval"
+    echo "EDGE_ROLLOUT_WAIT=$wait EDGE_ROLLOUT_INTERVAL=$interval: $output"
+    [ "$status" -eq 0 ]
+    [ "$(console_reads "$new")" -eq "$reads" ]
+    [ "$(clock_moved)" -eq "$moved" ]
+  done
+
+  # Twenty digits, ten, a unit or a sign: refused, naming the variable, before the stack is touched,
+  # an address scanned or a console read.
+  original_keys
+  for value in 12345678901234567890 1000000000 30s -5; do
+    for name in HOST_CONSOLE_WAIT EDGE_ROLLOUT_WAIT EDGE_ROLLOUT_INTERVAL; do
+      : > "$RECORD/argv"
+      rollout_with_input 'yes\n' "$name=$value"
+      echo "edge-rollout, $name=$value: $output"
+      [ "$status" -ne 0 ]
+      [[ $output == *"$name is not a whole number of seconds of at most 9 digits"* ]]
+      absent -E '^(tofu|ssh|ssh-keyscan|openstack) ' "$RECORD/argv"
+    done
+    forget_1
+    : > "$RECORD/argv"
+    run env "${environment[@]}" "HOST_CONSOLE_WAIT=$value" "$REPO/scripts/edge-check" --edge 1 < /dev/null
+    echo "edge-check, HOST_CONSOLE_WAIT=$value: $output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"HOST_CONSOLE_WAIT is not a whole number of seconds of at most 9 digits"* ]]
+    absent -E '^(tofu|ssh|ssh-keyscan|openstack) ' "$RECORD/argv"
+  done
+}
+
+@test "Only the fingerprints cloud-init printed at the latest boot count" {
+  local fixtures="$ROOT/tests/fixtures/console" name expected first ending
+  with_instances
+  first=$(for name in FirstEcdsa FirstEd25519 FirstRsa; do fixture_fingerprint "$name"; done | sort)
+  # Each log is read as it is, each line ended by LF, and with each line ended by CR LF, as a serial
+  # console's terminal writes it; both read the same.
+  for ending in LF CRLF; do
+    # console_fingerprints INSTANCE reads the console through the client and prints the
+    # fingerprints of the latest block cloud-init printed between its markers, one per line, none
+    # when there is no complete one.
+    read_console() {
+      cp "$fixtures/$1.log" "$HOST/console-$INSTANCE_1"
+      [[ $ending == LF ]] || crlf "$HOST/console-$INSTANCE_1"
+      # shellcheck disable=SC2016 # $1 and $2 are the script's own arguments
+      run env "${ENVIRONMENT[@]}" bash -c '. "$1/scripts/lib/host-keys.sh" && console_fingerprints "$2"' _ "$REPO" "$INSTANCE_1"
+      echo "$1, $ending: $output"
+    }
+
+    read_console one-boot
+    [ "$status" -eq 0 ]
+    [ "$output" = "$first" ]
+
+    # Two boots: the second boot's block alone.
+    read_console two-boots
+    [ "$status" -eq 0 ]
+    expected=$(for name in SecondEcdsa SecondEd25519 SecondRsa; do fixture_fingerprint "$name"; done | sort)
+    [ "$output" = "$expected" ]
+
+    # A block cut off by the line limit, at its start or at its end, is not a block: its lines count
+    # for nothing, and an earlier boot's block does not stand in for the latest boot's.
+    read_console cut-off-head
+    [ "$status" -eq 3 ]
+    [ -z "$output" ]
+    read_console cut-off-tail
+    [ "$status" -eq 3 ]
+    [ -z "$output" ]
+
+    # A fingerprint-shaped string outside the markers, or something inside them that is not a
+    # SHA256 fingerprint, is not cloud-init's.
+    read_console outside-markers
+    [ "$status" -eq 0 ]
+    [ "$output" = "$(fixture_fingerprint InsideEd25519)" ]
+
+    # logger's header in its exact form: the tag ec2 up to cloud-init 21.1 and cloud-init from 21.2,
+    # and the day of the month padded with a space below 10. Only cloud-init's own tags count, so a
+    # block another process printed in the same form, under its own tag, is not cloud-init's.
+    for name in single-digit-day ec2-tag ec2-tag-single-digit-day; do
+      read_console "$name"
+      [ "$status" -eq 0 ]
+      [ "$output" = "$first" ]
+    done
+    read_console foreign-tag
+    [ "$status" -eq 3 ]
+    [ -z "$output" ]
+    # A block without logger's header, one in another form close to it (a day padded with a zero, a
+    # priority other than user.info's, a weekday for a month, a process id after the tag, an hour of
+    # one digit, no space after the colon, no such day, a space before it), and the copy the journal
+    # forwards to the console (a kernel timestamp, then the tag and the process id) are not
+    # cloud-init's block; the journal's copy between logger's lines changes nothing.
+    for name in headerless near-logger journal-echo; do
+      read_console "$name"
+      [ "$status" -eq 3 ]
+      [ -z "$output" ]
+    done
+    read_console with-journal-echo
+    [ "$status" -eq 0 ]
+    [ "$output" = "$first" ]
+  done
+
+  # The client was asked for the instance's console by its identifier, and for a bounded number of
+  # lines.
+  grep -qx "openstack console log show --lines 1000 $INSTANCE_1" "$RECORD/argv"
+
+  # Through the recipe: the key the address offers is in an earlier boot's block, and not in the
+  # latest one's, so it is not the instance's word.
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_state 2 active "$WORKERS" 203.0.113.17/32
+  plan_replacing 1
+  {
+    console_block "$(fingerprint "$(replacement_key 1)")"
+    echo 'lab-edge-1 login: '
+    console_block "$(fixture_fingerprint SomeoneElsesKeyEd25519)"
+  } | set_console "$(next_instance 1)"
+  rollout_with_input 'yes\nyes\n'
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"offers a key its instance did not print"* ]]
+  [ "$(recorded 1)" = "" ]
+}
+
+@test "an identifier that is not a UUID is never used to read a console" {
+  with_instances
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_state 2 active "$WORKERS" 203.0.113.17/32
+  plan_replacing 1
+  # An identifier the cloud would take as a name or a prefix, and an option for the client, are not
+  # the instance the stack created, before the apply or after it.
+  jq '.instances.value["1"].id = "--lines"' "$BATS_TEST_TMPDIR/outputs.json" > "$BATS_TEST_TMPDIR/outputs.bad"
+  mv "$BATS_TEST_TMPDIR/outputs.bad" "$BATS_TEST_TMPDIR/outputs.json"
+  echo '--lines' > "$HOST/next-id-1"
+  console_block "$(fingerprint "$(replacement_key 1)")" | set_console --lines
+  : > "$RECORD/argv"
+  rollout_with_input 'yes\n'
+  echo "$output"
+  [ "$status" -eq 0 ]
+  absent '^openstack console' "$RECORD/argv"
+  [[ $output == *"the stack's outputs name no instance for it"* ]]
+  [[ $output == *"Type yes to record them and connect"* ]]
+  [ "$(recorded 1)" = "$(replacement_key 1)" ]
+}
+
+@test "What is compared with the console is what is recorded" {
+  with_instances
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_state 2 active "$WORKERS" 203.0.113.17/32
+  plan_replacing 1
+  console_block "$(fingerprint "$(replacement_key 1)")" | set_console "$(next_instance 1)"
+  # A second scan of the address would answer with another key, which the instance did not print.
+  echo "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureAnotherKeyAtTheSameAddress" > "$HOST/key-$ADDRESS_1.rescan"
+  : > "$RECORD/argv"
+  rollout_with_input ''
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(recorded 1)" = "$(replacement_key 1)" ]
+  [ "$(cat "$RECORD/scans-$ADDRESS_1")" -eq 1 ]
+  [ "$(grep -c "^ssh-keyscan .*$ADDRESS_1\$" "$RECORD/argv")" -eq 1 ]
+  # The scan is made hashed, so the file does not list the address.
+  grep -q '^ssh-keyscan -H ' "$RECORD/argv"
+}
+
+@test "The settings check asks the daemon as the configured user" {
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_state 2 active "$WORKERS" 203.0.113.17/32
+  # The fake ssh accepts only the user the test names, so connecting as another fails the run.
+  echo ops > "$HOST/ssh-user"
+  # Another user's Match fails the check, and the default user's does not: a check that asks as
+  # debian passes the first and fails the second.
+  echo 'passwordauthentication yes' > "$HOST/edge-1/sshd-match-user-ops"
+  run env "${ENVIRONMENT[@]}" EDGE_SSH_USER=ops "$REPO/scripts/edge-check" --edge 1
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output$'\n' == *"FAIL  lab-edge-1: the SSH daemon's effective settings differ from the first boot's: passwordauthentication"$'\n'* ]]
+  grep -q '^ssh .* ops@' "$RECORD/argv"
+  rm "$HOST/edge-1/sshd-match-user-ops"
+  echo 'passwordauthentication yes' > "$HOST/edge-1/sshd-match-user-debian"
+  run env "${ENVIRONMENT[@]}" EDGE_SSH_USER=ops "$REPO/scripts/edge-check" --edge 1
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *"pass  lab-edge-1: the SSH daemon runs with the settings the first boot wrote"* ]]
+
+  # The same through this machine's own OpenSSH server, where it has one.
+  if type -P sshd ssh-keygen > /dev/null; then
+    rm "$HOST/edge-1/sshd-match-user-debian"
+    mkdir -p "$HOST/edge-1/sshd_config.d"
+    ssh-keygen -q -t ed25519 -N '' -f "$HOST/edge-1/ssh-host-key"
+    printf 'Include %s/*.conf\n' "$HOST/edge-1/sshd_config.d" > "$HOST/edge-1/sshd_config"
+    cp "$ROOT/infra/openstack/stacks/sto2/edge/sshd.conf" "$HOST/edge-1/sshd_config.d/00-edge.conf"
+    printf 'Match User ops\n  PasswordAuthentication yes\n' > "$HOST/edge-1/sshd_config.d/50-image.conf"
+    run env "${ENVIRONMENT[@]}" EDGE_SSH_USER=ops "$REPO/scripts/edge-check" --edge 1
+    echo "real sshd, the configured user's Match: $output"
+    [ "$status" -ne 0 ]
+    [[ $output$'\n' == *"FAIL  lab-edge-1: the SSH daemon's effective settings differ from the first boot's: passwordauthentication"$'\n'* ]]
+    printf 'Match User debian\n  PasswordAuthentication yes\n' > "$HOST/edge-1/sshd_config.d/50-image.conf"
+    run env "${ENVIRONMENT[@]}" EDGE_SSH_USER=ops "$REPO/scripts/edge-check" --edge 1
+    echo "real sshd, the default user's Match: $output"
+    [ "$status" -eq 0 ]
+    [[ $output == *"pass  lab-edge-1: the SSH daemon runs with the settings the first boot wrote"* ]]
+  else
+    echo "not proved here: no sshd on this machine, so the Match for the configured user is read by the fake sshd only"
+  fi
+}
+
+@test "the check describes the connection to the daemon with its port and a local address of the documentation range" {
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_state 2 active "$WORKERS" 203.0.113.17/32
+  edge_check --edge 1
+  echo "$output"
+  [ "$status" -eq 0 ]
+  # shellcheck disable=SC2016 # $edge_user is the check's, expanded on the edge
+  grep -qF 'sshd -T -C "user=$edge_user,host=operator.example.org,addr=198.51.100.1,laddr=203.0.113.1,lport=22"' "$RECORD/argv"
+
+  # An OpenSSH server refuses a configuration with a Match on the local port or address when the
+  # connection it is asked about has none. With them, the blocks that match the port and a local
+  # address of the documentation range apply, and others do not.
+  if type -P sshd ssh-keygen > /dev/null; then
+    mkdir -p "$HOST/edge-1/sshd_config.d"
+    ssh-keygen -q -t ed25519 -N '' -f "$HOST/edge-1/ssh-host-key"
+    printf 'Include %s/*.conf\n' "$HOST/edge-1/sshd_config.d" > "$HOST/edge-1/sshd_config"
+    cp "$ROOT/infra/openstack/stacks/sto2/edge/sshd.conf" "$HOST/edge-1/sshd_config.d/00-edge.conf"
+    printf 'Match LocalPort 22\n  PasswordAuthentication yes\n' > "$HOST/edge-1/sshd_config.d/50-image.conf"
+    edge_check --edge 1
+    echo "Match LocalPort: $output"
+    [ "$status" -ne 0 ]
+    [[ $output$'\n' == *"FAIL  lab-edge-1: the SSH daemon's effective settings differ from the first boot's: passwordauthentication"$'\n'* ]]
+    printf 'Match LocalPort 2222\n  PasswordAuthentication yes\n' > "$HOST/edge-1/sshd_config.d/50-image.conf"
+    edge_check --edge 1
+    echo "Match LocalPort, another: $output"
+    [ "$status" -eq 0 ]
+    printf 'Match LocalAddress 203.0.113.0/24\n  PasswordAuthentication yes\n' > "$HOST/edge-1/sshd_config.d/50-image.conf"
+    edge_check --edge 1
+    echo "Match LocalAddress, the documentation range: $output"
+    [ "$status" -ne 0 ]
+    printf 'Match LocalAddress 192.0.2.0/24\n  PasswordAuthentication yes\n' > "$HOST/edge-1/sshd_config.d/50-image.conf"
+    edge_check --edge 1
+    echo "Match LocalAddress, another range: $output"
+    [ "$status" -eq 0 ]
+  else
+    echo "not proved here: no sshd on this machine, so the Match blocks on the local port and address are not run through sshd -T"
+  fi
 }

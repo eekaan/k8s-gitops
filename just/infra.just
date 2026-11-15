@@ -29,7 +29,7 @@ infra-output stack name:
 infra-destroy *args:
     scripts/infra-destroy "$@"
 
-# Make the CI host of the sto2/ci stack this repository's GitHub Actions runner, over SSH: the pinned Dagger engine with its state on the cache volume, the pinned runner, checksum verified, registered with a token from gh and run as a service; a host key not yet recorded is shown and recorded once yes is typed; a second run changes nothing; see docs/runbooks/ci-host.md
+# Make the CI host of the sto2/ci stack this repository's GitHub Actions runner, over SSH: the pinned Dagger engine with its state on the cache volume, the pinned runner, checksum verified, registered with a token from gh and run as a service; a host key not yet recorded is checked against the instance's console: recorded without a prompt when the console holds every key offered, refused when it holds another, and shown and recorded once yes is typed when it holds none; a second run changes nothing; see docs/runbooks/ci-host.md
 ci-host-setup:
     scripts/ci-host-setup
 

@@ -1,6 +1,7 @@
 # IDs and addresses depend on the deployment and an apply in CI prints outputs to a public log,
 # so every output that carries them is sensitive. scripts/ci-host-setup reads address,
-# runner_name, runner_user and cache_mountpoint.
+# runner_name, runner_user and cache_mountpoint, and the instance's id, which names the console its
+# SSH host key is checked against.
 
 output "address" {
   description = "The CI host's floating address, where scripts/ci-host-setup reaches it over SSH."
@@ -30,7 +31,7 @@ output "cache_mountpoint" {
 }
 
 output "instance" {
-  description = "The CI host as the vm module describes it: its name, flavor, boot volume, user data, key pair, port and data volumes."
+  description = "The CI host as the vm module describes it: its id, name, flavor, boot volume, user data, key pair, port and data volumes."
   sensitive   = true
   value       = module.host
 }

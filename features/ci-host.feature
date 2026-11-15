@@ -48,8 +48,8 @@ Feature: CI host
     When just ci-host-setup and just ci-host-remove run
     Then neither tool's environment holds the state key, the cloud credential, the encryption settings, a stack input, the cluster's S3 key or an age key
 
-  Scenario: A host whose key is not known is refused until its fingerprint has been accepted
-    Given a CI host whose SSH host key is not recorded
+  Scenario: A host whose key is not known and whose console cannot be read is refused until its fingerprint has been accepted
+    Given a CI host whose SSH host key is not recorded, and whose instance's console the OpenStack client cannot read
     When just ci-host-setup runs and the fingerprint it shows is declined, and then accepted
     Then the declined run fails without connecting to the host, and the accepted run records the key and connects only with strict host key checking against it
 
@@ -57,3 +57,8 @@ Feature: CI host
     Given the cluster stack, with and without the CI host's host number
     When it is planned against mocked providers
     Then with the number the nodes admit TCP 50000 and 6443 from the CI host's fixed address, and without it the nodes' rules are as they were
+
+  Scenario: A CI host whose offered keys are on its console is trusted without a prompt, and one that offers another is refused
+    Given a CI host whose SSH host key is not recorded, and an instance identifier in the stack's outputs
+    When just ci-host-setup runs against a console that holds the fingerprint of the key the host offers, and then against one that does not
+    Then the first run records the key without a prompt, and the second exits non-zero saying the address offers a key its instance did not print, records nothing and never connects to the host
