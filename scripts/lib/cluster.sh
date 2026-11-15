@@ -408,6 +408,90 @@ not_ready_since() {
     | [$ARGS.positional[] | select(IN($ready[]) | not)] | join(", ")' --args "$@" <<< "$nodes"
 }
 
+# Where the monitoring application's Prometheus runs, and the jobs that scrape the cluster's own
+# components, as the application's kube-prometheus-stack chart names them: the Service of its
+# Prometheus and the job label of the API server, the controller manager, the scheduler, etcd, the
+# kubelets and node-exporter. tests/monitoring.bats renders the chart and fails when one is renamed.
+# shellcheck disable=SC2034 # read by scripts/cluster-check and tests/monitoring.bats
+prometheus_namespace=monitoring prometheus_service=kube-prometheus-stack-prometheus prometheus_port=9090
+# shellcheck disable=SC2034 # read by scripts/cluster-check and tests/monitoring.bats
+scrape_jobs=(apiserver kube-controller-manager kube-scheduler kube-etcd kubelet node-exporter)
+
+# The parts of a node's configuration that take effect only when the node reboots, one per line as
+# PATH|WHAT, PATH being where the change shows in a diff of the configuration: a dotted path, or
+# kind:NAME for a document of that kind, and WHAT being what the node runs until then. Talos'
+# documentation of editing the machine configuration, for the version in versions.yaml
+# (https://docs.siderolabs.com/talos/v1.14/configure-your-talos-cluster/system-configuration/editing-machine-configuration),
+# says a configuration is always applied to the running node without a reboot, and names what that
+# leaves unchanged until a restart: .cluster.etcd, whose settings, extra arguments among them, are
+# read when etcd starts and which Talos does not restart on a change; environment variables
+# (.machine.env, EnvironmentConfig), which running services keep until they restart; and the sandbox
+# (SecurityProfileConfig), read when its service starts. It names no other section the patches set,
+# the kubelet, API server, controller manager and scheduler among them, as needing one, and Talos
+# restarts those itself. Not listed, as a diff does not show them as a change of a section: removing
+# a kernel module or changing a loaded one's parameters, and rotating a volume encryption key; each
+# needs a reboot too.
+reboot_only_sections='cluster.etcd|etcd with the arguments it had
+machine.env|its services with the environment they had
+kind:EnvironmentConfig|its services with the environment they had
+kind:SecurityProfileConfig|its sandbox with the setting it had'
+
+# reboot_pending DIFF: the nodes the dry run DIFF, as talman prints it, shows a change to in a part
+# of the configuration that takes effect only at a reboot, one per line as the hostname and what it
+# runs until then, for each. A node's part of DIFF starts at a line "== NODE"; its diff at "Config
+# diff:", whose indentation is the margin before the marker column of each line after it, a space for
+# a line around a change, + or - for a changed one. The rest of such a line is the configuration's
+# own YAML, whose indentation gives each changed line its place. Nothing here prints DIFF.
+reboot_pending() {
+  awk -v sections="$reboot_only_sections" '
+    BEGIN {
+      count = split(sections, entries, "\n")
+      for (i = 1; i <= count; i++) {
+        split(entries[i], parts, "|")
+        path[i] = parts[1]
+        what[i] = parts[2]
+      }
+    }
+    function reset() { depth = 0; kind = "" }
+    /^== / { node = $2; margin = -1; next }
+    {
+      trimmed = $0
+      sub(/^ +/, "", trimmed)
+    }
+    trimmed ~ /^Config diff:/ { margin = length($0) - length(trimmed); reset(); next }
+    margin < 0 { next }
+    {
+      marker = substr($0, margin + 1, 1)
+      content = substr($0, margin + 2)
+      if (marker != " " && marker != "+" && marker != "-") next
+      if (content ~ /^ *$/) next
+      indent = match(content, /[^ ]/) - 1
+      text = substr(content, indent + 1)
+    }
+    text == "---" { reset(); next }
+    {
+      key = ""
+      if (match(text, /^[A-Za-z0-9_.\/-]+:/)) key = substr(text, 1, RLENGTH - 1)
+      while (depth > 0 && stack_indent[depth] >= indent) depth--
+      if (key == "") next
+      depth++
+      stack_indent[depth] = indent
+      stack_key[depth] = key
+      if (indent == 0 && key == "kind") {
+        kind = text
+        sub(/^kind: */, "", kind)
+      }
+      if (marker == " ") next
+      full = stack_key[1]
+      for (i = 2; i <= depth; i++) full = full "." stack_key[i]
+      for (i = 1; i <= count; i++) {
+        if (path[i] ~ /^kind:/ ? (kind == substr(path[i], 6)) : (full == path[i] || index(full, path[i] ".") == 1)) {
+          if (!((node, what[i]) in seen)) { seen[node, what[i]] = 1; print node "\t" what[i] }
+        }
+      }
+    }' <<< "$1"
+}
+
 # flux_recipient: the age recipient .sops.yaml encrypts the SOPS files under kubernetes/ to.
 flux_recipient() {
   yq '.creation_rules[0].age // ""' "$flux_sops_config"

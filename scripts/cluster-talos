@@ -16,7 +16,16 @@
 # readiness and the cluster. Only then, and only before the window is about to close, is the same
 # configuration applied again to keep it. A failed check stops the rollout there: the node reverts,
 # the nodes before it keep theirs and those after it are untouched.
-# Usage: scripts/cluster-talos [cluster] [--onboard] [--yes] [--first <node>]
+#
+# Talos applies a configuration to a running node without a reboot, but some of it, such as etcd's
+# arguments, is read only when the service starts (reboot_only_sections in scripts/lib/cluster.sh
+# says which, and why). From the dry run's diff, once the nodes keep the configuration, the recipe
+# names each node that runs the old setting until it reboots and the recipe that reboots it. With
+# --reboot it reboots those nodes itself, one at a time, through scripts/cluster-reboot, which drains
+# each and waits for it to be Ready again, and stops at the first that does not come back. A reboot
+# is not the default: a control plane leaves its etcd and the API load balancer for the time it
+# takes, which the operator, not the recipe, decides to accept.
+# Usage: scripts/cluster-talos [cluster] [--onboard] [--yes] [--reboot] [--first <node>]
 set -euo pipefail
 
 here=$(dirname "$0")
@@ -56,14 +65,15 @@ lb_attempts=15 lb_wait=20 lb_poll=5
 # than 240 seconds after the try, as when earlier ones ran long, keep nothing: the node reverts.
 
 usage() {
-  infra_error "usage: cluster-talos [cluster] [--onboard] [--yes] [--first <node>]"
+  infra_error "usage: cluster-talos [cluster] [--onboard] [--yes] [--reboot] [--first <node>]"
   exit 2
 }
 
-cluster='' confirmed=0 onboard=() first=''
+cluster='' confirmed=0 onboard=() first='' reboot=0
 while (($#)); do
   case $1 in
     --yes) confirmed=1 ;;
+    --reboot) reboot=1 ;;
     --onboard) onboard=(--onboard-new-nodes) ;;
     --first)
       (($# > 1)) && [[ $2 != -* ]] || usage
@@ -96,14 +106,67 @@ if [[ -n $first ]]; then
     complete=0
   fi
 fi
+if ((reboot)); then
+  require_kubeconfig || complete=0
+  require_commands kubectl jq || complete=0
+fi
 ((complete))
+
+# joined: the lines on standard input, joined with commas.
+joined() {
+  paste -sd, - | sed 's/,/, /g'
+}
+
+# say_reboots NODE...: for each NODE, which needs a reboot, the setting it runs until then and the
+# recipe that reboots it, the control planes one at a time.
+say_reboots() {
+  local node what suffix=''
+  [[ $cluster == lab-sto2 ]] || suffix=" $cluster"
+  for node; do
+    what=$(awk -F '\t' -v node="$node" '$1 == node { print $2 }' <<< "$pending" | paste -sd '|' - | sed 's/|/ and /g')
+    echo "cluster-talos: $node runs $what until it reboots; reboot it with: just cluster-reboot $node$suffix"
+  done
+  echo "cluster-talos: reboot them one at a time, each once the one before is Ready again; --reboot does that"
+}
+
+# reboot_nodes NODE...: reboots each NODE through scripts/cluster-reboot, which asks nothing more as
+# --reboot was given, one after the other, and stops at the first that does not come back.
+reboot_nodes() {
+  local node rest=("$@")
+  for node; do
+    step="rebooting $node"
+    echo "cluster-talos: rebooting $node"
+    rest=("${rest[@]:1}")
+    if ! "$here/cluster-reboot" "$node" "$cluster" --yes; then
+      infra_error "$node did not come back, or the API did not ride it out: cluster-reboot $node failed, as its output above says"
+      infra_error "not rebooted: $( ((${#rest[@]} > 0)) && printf '%s\n' "${rest[@]}" | joined || echo 'no other node')"
+      exit 1
+    fi
+    echo "cluster-talos: $node is rebooted"
+  done
+}
+
+# kept_reboots: once the nodes keep the configuration, what the nodes that need a reboot for it are
+# told, or are put through: nothing for a change that applies at once.
+kept_reboots() {
+  ((${#needing[@]} > 0)) || return 0
+  if ((reboot)); then
+    reboot_nodes "${needing[@]}"
+  else
+    say_reboots "${needing[@]}"
+  fi
+}
 
 step="waiting for every node to answer on the Talos API port"
 wait_for_talos_api "$talman_file"
 
 step="asking each node what the configuration would change"
 changes=0
-cluster_talman apply --dry-run --detailed-exit-code --redact-secrets "${onboard[@]}" || changes=$?
+diff_file=$(umask 077 && mktemp -t cluster-talos-diff.XXXXXXXXXX)
+cluster_talman apply --dry-run --detailed-exit-code --redact-secrets "${onboard[@]}" > "$diff_file" || changes=$?
+dry_run=$(< "$diff_file")
+rm -f -- "$diff_file"
+[[ -z $dry_run ]] || printf '%s\n' "$dry_run"
 case $changes in
   0)
     echo "cluster-talos: nothing to change on $cluster"
@@ -113,6 +176,17 @@ case $changes in
   *) exit "$changes" ;;
 esac
 
+# With CI set the diff went to talman's log, which only this reads, and prints nothing of.
+[[ -z ${CI:-} ]] || dry_run=$(< "$talman_log")
+pending=$(reboot_pending "$dry_run")
+# The nodes that need a reboot, in talman.yaml's order.
+mapfile -t needing < <(talman_nodes "$talman_file" | awk -v pending="$pending" '
+  BEGIN { n = split(pending, lines, "\n"); for (i = 1; i <= n; i++) { split(lines[i], fields, "\t"); if (fields[1] != "") want[fields[1]] = 1 } }
+  $1 in want { print $1 }')
+if ((reboot && ${#needing[@]} > 0)); then
+  echo "cluster-talos: once the nodes keep the configuration, $(printf '%s\n' "${needing[@]}" | joined) are rebooted, one at a time"
+fi
+
 step="waiting for $cluster to be typed back"
 ((confirmed)) || confirm "$cluster" "apply this configuration to" changed
 
@@ -120,6 +194,7 @@ if [[ -z $first ]]; then
   step="applying the configuration"
   cluster_talman apply "${onboard[@]}"
   echo "cluster-talos: the configuration of $cluster is applied"
+  kept_reboots
   exit 0
 fi
 
@@ -183,11 +258,6 @@ quietly() {
 metric() {
   awk -v name="$1" '!found && ($1 == name || index($1, name "{") == 1) { value = $NF; found = 1 }
     END { if (found) print value; exit !found }'
-}
-
-# joined: the lines on standard input, joined with commas.
-joined() {
-  paste -sd, - | sed 's/,/, /g'
 }
 
 # changes_on NODE: whether the configuration would change NODE, asked of NODE through its Talos API:
@@ -494,3 +564,4 @@ for position in "${!order[@]}"; do
   echo "cluster-talos: $node keeps the configuration"
 done
 echo "cluster-talos: the configuration of $cluster is applied, node by node, each checked before it was kept"
+kept_reboots

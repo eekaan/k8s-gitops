@@ -13,7 +13,13 @@
 #   certificate requests  no certificate signing request is Pending, neither approved nor denied;
 #   pod logs              kubectl fetches the last log line of a Running pod in kube-system, which the
 #                         API server reads from the pod's kubelet, over the kubelet's serving
-#                         certificate.
+#                         certificate;
+#   scrape targets        no target of the jobs that scrape the cluster's own components (the API
+#                         server, controller manager, scheduler, etcd, kubelets and node-exporter,
+#                         named in scripts/lib/cluster.sh) is down in Prometheus, asked through the
+#                         API server's service proxy; a FAIL names each job and the nodes it is down
+#                         on. Skipped, saying why, while the monitoring stack's Service does not
+#                         exist and when Prometheus does not answer: its silence is not a pass.
 # It runs kubectl get and kubectl logs only. It prints node and object names, never an address, a
 # log line or kubectl's own errors, which can name the API server's or a node's address.
 # Usage: scripts/cluster-check [cluster]
@@ -165,6 +171,37 @@ else
   else
     result FAIL "pod logs" "kubectl could not fetch the logs of kube-system/$pod; the kubelet's serving certificate may not be approved"
   fi
+fi
+
+# scrape_targets_down: the targets of the cluster's own components that Prometheus reports down, from
+# the answer in targets, one per line as the job and, where the target names one, the node it runs
+# on: the node's name, never the address of the target.
+scrape_targets_down() {
+  jq -r --args '[.data.activeTargets[] | select(.labels.job | IN($ARGS.positional[])) | select(.health == "down")
+      | {job: .labels.job, node: (.discoveredLabels["__meta_kubernetes_endpoint_node_name"]
+        // .discoveredLabels["__meta_kubernetes_pod_node_name"] // .labels.node // "")}]
+    | group_by(.job)[] | .[0].job + (map(.node | select(. != "")) | unique | if length > 0 then " on " + join(", ") else "" end)' \
+    "${scrape_jobs[@]}" <<< "$targets"
+}
+
+# Prometheus is asked through the API server's service proxy, as nothing reaches it from outside the
+# cluster. The answer is read into a variable whole, so that no reader of kubectl's output ends the
+# pipe early.
+targets_path=/api/v1/namespaces/$prometheus_namespace/services/$prometheus_service:$prometheus_port/proxy/api/v1/targets
+if ! service=$(kubectl get service "$prometheus_service" --namespace "$prometheus_namespace" --ignore-not-found \
+  --output name --request-timeout=10s 2> /dev/null); then
+  result skip "scrape targets" "Prometheus did not answer: kubectl could not look for its Service"
+elif [[ -z $service ]]; then
+  result skip "scrape targets" "the monitoring stack is not installed: no Service $prometheus_service in $prometheus_namespace"
+elif ! targets=$(kubectl get --raw "$targets_path?state=active" --request-timeout=20s 2> /dev/null) ||
+  ! jq -e '.status == "success" and (.data.activeTargets | type == "array")' <<< "$targets" > /dev/null 2>&1; then
+  result skip "scrape targets" "Prometheus did not answer through the API server's service proxy with its targets"
+elif ! down=$(scrape_targets_down); then
+  result skip "scrape targets" "Prometheus did not answer with targets this check could read"
+elif [[ -z $down ]]; then
+  result pass "scrape targets" "no target of the ${#scrape_jobs[@]} component jobs is down"
+else
+  result FAIL "scrape targets" "down: $(paste -sd';' - <<< "$down" | sed 's/;/; /g')"
 fi
 
 if ((failures > 0)); then

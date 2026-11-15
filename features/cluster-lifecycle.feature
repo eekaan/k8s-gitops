@@ -21,6 +21,16 @@ Feature: Cluster lifecycle
     When cluster-check runs
     Then the check of the pods in flux-system prints skip, saying the namespace does not exist as before Flux is installed, the last line names the skipped check, and the run exits zero; a failing pod in kube-system still fails
 
+  Scenario: cluster-check fails, naming job and node, while a component's scrape target is down
+    Given Prometheus reporting down the etcd targets on cp-1 and cp-2 and the node-exporter target on worker-3, and one of an application that is none of the cluster's own components
+    When cluster-check runs
+    Then the scrape check prints FAIL naming each job and its nodes and no address, every other check passes, the run exits non-zero, and Prometheus was asked through the API server's service proxy with kubectl get; with every component's target up it passes
+
+  Scenario: cluster-check skips the scrape check, saying why, without the monitoring stack or without an answer from Prometheus
+    Given a cluster without Prometheus's Service, one whose Prometheus does not answer through the service proxy, and one whose Prometheus answers with an error
+    When cluster-check runs for each
+    Then the scrape check prints skip with the reason, never pass, the last line names it among the skipped checks, no address is printed and the run exits zero
+
   Scenario: A reboot that the API rides out passes
     Given a node of talman.yaml and an API that answers throughout
     When cluster-reboot runs for it and its name is typed back, and with --yes

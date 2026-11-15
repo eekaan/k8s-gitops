@@ -115,7 +115,7 @@ EOF
   )
   reset_environment
   CHECKS=('/readyz' 'nodes Ready' 'node count' 'no kube-proxy' 'pods in kube-system' 'pods in flux-system'
-    'certificate requests' 'pod logs')
+    'certificate requests' 'pod logs' 'scrape targets')
 }
 
 teardown() {
@@ -385,6 +385,69 @@ no_tofu() {
   [ "$status" -ne 0 ]
   [[ $(line_of 'pods in kube-system') == "FAIL  pods in kube-system: "*kube-system/coredns-failing* ]]
   [[ $(line_of 'pods in flux-system') == "skip  "* ]]
+}
+
+@test "cluster-check fails, naming job and node, while a component's scrape target is down" {
+  printf '%s\n' 'kube-etcd cp-1' 'kube-etcd cp-2' 'node-exporter worker-3' > "$STATE/targets-down"
+
+  recipe cluster-check
+
+  [ "$status" -ne 0 ]
+  [[ $(line_of 'scrape targets') == "FAIL  scrape targets: "* ]]
+  line=$(line_of 'scrape targets')
+  [[ $line == *"kube-etcd on cp-1, cp-2"* && $line == *"node-exporter on worker-3"* ]]
+  [[ $line != *kube-scheduler* && $line != *kubelet* ]]
+  [[ $output != *198.51.100.* ]]
+  for other in "${CHECKS[@]}"; do
+    if [[ $other != 'scrape targets' ]]; then
+      [[ $(line_of "$other") == "pass  $other: "* ]]
+    fi
+  done
+  [[ $output == *"cluster-check: 1 of ${#CHECKS[@]} checks failed"* ]]
+  # Prometheus is asked through the API server's service proxy, by kubectl get.
+  [ -n "$(calls '^kubectl get --raw /api/v1/namespaces/monitoring/services/kube-prometheus-stack-prometheus:9090/proxy/api/v1/targets')" ]
+
+  # A component without a node, and each of the components the check names.
+  for job in apiserver kube-controller-manager kube-scheduler kubelet; do
+    node=cp-1
+    [[ $job == apiserver ]] && node=''
+    echo "$job${node:+ $node}" > "$STATE/targets-down"
+    recipe cluster-check
+    [ "$status" -ne 0 ]
+    [[ $(line_of 'scrape targets') == "FAIL  scrape targets: "*"$job"* ]]
+  done
+
+  # A target of anything else that is down is not this check's concern; all up passes.
+  : > "$STATE/targets-down"
+  : > "$STATE/other-down"
+  recipe cluster-check
+  [ "$status" -eq 0 ]
+  [[ $(line_of 'scrape targets') == "pass  scrape targets: "* ]]
+  rm "$STATE/other-down"
+  recipe cluster-check
+  [ "$status" -eq 0 ]
+  [[ $(line_of 'scrape targets') == "pass  scrape targets: "* ]]
+}
+
+@test "cluster-check skips the scrape check, saying why, without the monitoring stack or without an answer from Prometheus" {
+  for condition in no-monitoring prometheus-silent prometheus-error; do
+    reset_cluster
+    : > "$STATE/$condition"
+    # What a skip must not hide: a target down is not seen, but nothing is passed either.
+    echo 'kube-etcd cp-1' > "$STATE/targets-down"
+
+    recipe cluster-check
+
+    [ "$status" -eq 0 ]
+    line=$(line_of 'scrape targets')
+    [[ $line == "skip  scrape targets: "* ]]
+    case $condition in
+      no-monitoring) [[ $line == *"monitoring stack is not installed"* ]] ;;
+      *) [[ $line == *"Prometheus did not answer"* ]] ;;
+    esac
+    [[ ${output##*$'\n'} == *"skipped: scrape targets"* ]]
+    [[ $output != *198.51.100.* ]]
+  done
 }
 
 @test "A reboot that the API rides out passes" {

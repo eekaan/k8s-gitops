@@ -178,6 +178,9 @@ cluster_files() {
 #                      without try mode keeps it, as kept
 #   reverts.NODE       NODE's configuration in try mode reverts before anything else can ask it
 #   unreachable.NODE   talman apply's dry run of NODE alone fails
+#   etcd.NODE          the change to NODE, one of pending, is to cluster.etcd's extraArgs
+#   network.NODE       the change to NODE, one of pending, is to machine.network only
+#   reboot-fails.NODE  scripts/cluster-reboot NODE does not bring the node back
 #   unhealthy          scripts/cluster-check fails
 #   unhealthy-tried    scripts/cluster-check fails once a node has been applied in try mode
 #   slow-check         scripts/cluster-check takes that many seconds
@@ -308,7 +311,24 @@ case "$1" in
         if [[ -z $target || $node == "$target" ]]; then
           echo "== $node"
           echo "     Config diff:"
-          echo "     +    kind: NetworkRuleConfig"
+          # A diff as talosctl prints one: each line in the configuration's own indentation after a
+          # marker column, a space for the lines around a change.
+          if [[ -e $STATE/etcd.$node ]]; then
+            echo "      machine:"
+            echo "        type: controlplane"
+            echo "      cluster:"
+            echo "        etcd:"
+            echo "          extraArgs:"
+            echo "     +      listen-metrics-urls: http://0.0.0.0:2381"
+          fi
+          if [[ -e $STATE/network.$node ]]; then
+            echo "      machine:"
+            echo "        network:"
+            echo "     +      hostname: $node"
+          fi
+          if [[ ! -e $STATE/etcd.$node && ! -e $STATE/network.$node ]]; then
+            echo "     +    kind: NetworkRuleConfig"
+          fi
           changed=1
         fi
       done
@@ -692,6 +712,19 @@ fi
 echo "cluster-check: every check of lab-sto2 passes"
 EOF
   mv "$BIN/cluster-check" "$REPO/scripts/cluster-check"
+  # cluster-reboot, which cluster-talos --reboot runs for each node that needs a reboot, takes a
+  # moment between its start and its end, so a second one that runs beside it shows in the record.
+  fake_tool cluster-reboot <<'EOF'
+printf '%s\n' "cluster-reboot $*" >> "$RECORD/argv"
+printf '%s\n' "start $1" >> "$RECORD/reboots"
+"$(command -v -p sleep)" 0.3
+printf '%s\n' "end $1" >> "$RECORD/reboots"
+if [[ -e $STATE/reboot-fails.$1 ]]; then
+  echo "cluster-reboot: $1 has not reported Ready since its reboot" >&2
+  exit 1
+fi
+EOF
+  mv "$BIN/cluster-reboot" "$REPO/scripts/cluster-reboot"
   # The etcd bucket, the endpoint's only source, and the Talos age key's recipient the snapshot is
   # encrypted to, with its private half in SNAPSHOT_KEY for the tests to decrypt with.
   sed -E 's#https://[^"]+#https://marker-endpoint.example.invalid#' "$ROOT/infra/openstack/backend.hcl" > "$REPO/infra/openstack/backend.hcl"
@@ -1281,6 +1314,114 @@ early_readers() {
   [ "$(calls '^talman apply( |$)' | wc -l)" -eq 2 ]
   [ "$(calls '^talman apply( |$)' | grep -vc -- ' --onboard-new-nodes')" -eq 0 ]
   [ ! -s "$STATE/new-nodes" ]
+}
+
+@test "A rollout that changes etcd's arguments says which control planes need a reboot" {
+  fake_cluster
+  printf '%s\n' cp-1 cp-2 worker-2 > "$STATE/pending"
+  : > "$STATE/etcd.cp-1"
+  : > "$STATE/etcd.cp-2"
+  : > "$STATE/network.worker-2"
+
+  recipe cluster-talos --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"cp-1 runs etcd with the arguments it had until it reboots"* ]]
+  [[ $output == *"cp-2 runs etcd with the arguments it had until it reboots"* ]]
+  [[ $output == *"just cluster-reboot cp-1"* && $output == *"just cluster-reboot cp-2"* ]]
+  [[ $output == *"one at a time"* ]]
+  # The node whose change applies at once is not named, and nothing is rebooted unasked.
+  [[ $output != *"worker-2 runs"* && $output != *"cluster-reboot worker-2"* ]]
+  [ -z "$(calls '^cluster-reboot ')" ]
+  # What is said comes after the configuration is kept, and names no address.
+  applied=$(grep -n 'Applied configuration' <<< "$output" | tail -1 | cut -d: -f1)
+  said=$(grep -n 'until it reboots' <<< "$output" | head -1 | cut -d: -f1)
+  [ -n "$applied" ] && [ -n "$said" ] && [ "$applied" -lt "$said" ]
+  said_lines=$(grep -E 'until it reboots|cluster-reboot' <<< "$output")
+  [ -n "$said_lines" ]
+  if grep -qE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' <<< "$said_lines"; then false; fi
+
+  # The same through --first, which keeps each node as it is checked.
+  mkdir -p "$CLUSTER/clusterconfig"
+  : > "$CLUSTER/clusterconfig/kubeconfig"
+  printf '%s\n' cp-1 cp-2 worker-2 > "$STATE/pending"
+  : > "$RECORD/argv"
+
+  recipe cluster-talos --first worker-2 --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"cp-1 runs etcd with the arguments it had until it reboots"* ]]
+  [[ $output == *"cp-2 runs etcd with the arguments it had until it reboots"* ]]
+  [[ $output != *"worker-2 runs"* ]]
+  [ -z "$(calls '^cluster-reboot ')" ]
+  applied=$(grep -n 'Applied configuration' <<< "$output" | tail -1 | cut -d: -f1)
+  said=$(grep -n 'until it reboots' <<< "$output" | head -1 | cut -d: -f1)
+  [ -n "$applied" ] && [ -n "$said" ] && [ "$applied" -lt "$said" ]
+}
+
+@test "A rollout that changes only what applies at once says nothing about a reboot" {
+  fake_cluster
+  mkdir -p "$CLUSTER/clusterconfig"
+  : > "$CLUSTER/clusterconfig/kubeconfig"
+  printf '%s\n' cp-1 worker-2 > "$STATE/pending"
+  : > "$STATE/network.cp-1"
+  : > "$STATE/network.worker-2"
+
+  recipe cluster-talos --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"the configuration of lab-sto2 is applied"* ]]
+  [[ $output != *"until it reboots"* && $output != *"cluster-reboot"* ]]
+
+  # --reboot reboots nothing when no change needs it.
+  printf '%s\n' cp-1 > "$STATE/pending"
+  recipe cluster-talos --yes --reboot < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output != *"until it reboots"* ]]
+  [ -z "$(calls '^cluster-reboot ')" ]
+}
+
+@test "With --reboot, the nodes that need one are rebooted one at a time, and the first that does not come back stops the rest" {
+  fake_cluster
+  mkdir -p "$CLUSTER/clusterconfig"
+  : > "$CLUSTER/clusterconfig/kubeconfig"
+  printf '%s\n' cp-1 cp-2 cp-3 worker-2 > "$STATE/pending"
+  : > "$STATE/etcd.cp-1"
+  : > "$STATE/etcd.cp-2"
+  : > "$STATE/etcd.cp-3"
+  : > "$STATE/network.worker-2"
+
+  recipe cluster-talos --yes --reboot < /dev/null
+
+  [ "$status" -eq 0 ]
+  # Only the control planes the change needs it for, each through cluster-reboot, which asks nothing
+  # more, one after the other and after the configuration is kept.
+  [ "$(calls '^cluster-reboot ' | paste -sd'|')" = "cluster-reboot cp-1 lab-sto2 --yes|cluster-reboot cp-2 lab-sto2 --yes|cluster-reboot cp-3 lab-sto2 --yes" ]
+  [ "$(paste -sd' ' "$RECORD/reboots")" = "start cp-1 end cp-1 start cp-2 end cp-2 start cp-3 end cp-3" ]
+  [ "$(call_line "^$(applies | head -1)\$")" -lt "$(call_line '^cluster-reboot cp-1 ')" ]
+  [[ $output == *"cp-1 is rebooted"* && $output == *"cp-3 is rebooted"* ]]
+  [[ $output != *"until it reboots"* ]]
+
+  # A reboot is not the default: the operator says so with --reboot.
+  : > "$RECORD/argv"
+  : > "$RECORD/reboots"
+  printf '%s\n' cp-1 cp-2 cp-3 > "$STATE/pending"
+  recipe cluster-talos --yes < /dev/null
+  [ "$status" -eq 0 ]
+  [ -z "$(calls '^cluster-reboot ')" ]
+
+  # The first that does not come back stops the rest.
+  : > "$RECORD/argv"
+  : > "$RECORD/reboots"
+  printf '%s\n' cp-1 cp-2 cp-3 > "$STATE/pending"
+  : > "$STATE/reboot-fails.cp-2"
+  recipe cluster-talos --yes --reboot < /dev/null
+
+  [ "$status" -ne 0 ]
+  [ "$(calls '^cluster-reboot ' | awk '{ print $2 }' | paste -sd' ')" = "cp-1 cp-2" ]
+  [[ $output == *"cp-2 did not come back"* ]]
+  [[ $output == *"not rebooted: cp-3"* ]]
 }
 
 @test "a rollout whose dry run fails applies nothing and names the step" {

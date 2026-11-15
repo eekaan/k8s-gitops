@@ -50,7 +50,7 @@ cluster-flux *args:
 cluster-kubeconfig cluster='lab-sto2':
     scripts/cluster-kubeconfig {{ quote(cluster) }}
 
-# Roll a cluster's configuration out: show what would change, then apply once its name is typed back (--yes: without asking; --onboard: configure new nodes too; --first <node>: apply to that node and then each other one alone in Talos' try mode, which reverts by itself, and keep it only once the paths into it from the other nodes, its readiness and cluster-check pass)
+# Roll a cluster's configuration out: show what would change, then apply once its name is typed back (--yes: without asking; --onboard: configure new nodes too; --reboot: afterwards reboot, one at a time, the nodes whose change takes effect only at a reboot, such as etcd's arguments, which are otherwise only named; --first <node>: apply to that node and then each other one alone in Talos' try mode, which reverts by itself, and keep it only once the paths into it from the other nodes, its readiness and cluster-check pass)
 [positional-arguments]
 cluster-talos *args:
     scripts/cluster-talos "$@"
@@ -68,7 +68,7 @@ cluster-snapshots cluster='lab-sto2':
 cluster-restore snapshot *args:
     scripts/cluster-restore "$@"
 
-# Check a cluster's health, reading only: /readyz through the kubeconfig, every node Ready and as many as talman.yaml lists, no kube-proxy, every pod in kube-system and flux-system Running or Succeeded, no certificate signing request Pending, a pod's logs fetched; pass, FAIL or skip per check
+# Check a cluster's health, reading only: /readyz through the kubeconfig, every node Ready and as many as talman.yaml lists, no kube-proxy, every pod in kube-system and flux-system Running or Succeeded, no certificate signing request Pending, a pod's logs fetched, no scrape target of the cluster's own components down in Prometheus; pass, FAIL or skip per check
 cluster-check cluster='lab-sto2':
     scripts/cluster-check {{ quote(cluster) }}
 
