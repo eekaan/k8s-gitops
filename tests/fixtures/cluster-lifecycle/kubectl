@@ -18,6 +18,11 @@
 #                     the operator and the agent take a moment
 #   bgp-stays         a labelled-out worker's CiliumBGPNodeConfig never goes
 #   bgp-not-back      a worker whose label is removed never announces again
+#   bgp-peers-down    no worker's BGP session is ever established, as with no edge stack to peer with
+#   bgp-peer-late     with bgp-slow, only the second peer is established late after the label is
+#                     removed: the first is established at once
+#   bgp-unreadable    reading a CiliumBGPNodeConfig fails, as when the API does not answer it
+#   bgp-unreadable-out  the same, but only while the worker carries the label
 #   kube-proxy        a kube-proxy pod runs in kube-system
 #   pods              more pods, one per line as <namespace> <name> <phase> [<node> [<reason>]], on
 #                     cp-1 when no node is given; kubectl delete pod removes them
@@ -136,17 +141,24 @@ announcing() {
 # when there is no such object, else the object, its peers established unless the node's label was
 # removed fewer than bgp-slow reads ago.
 bgp_node_config() {
-  local peering=established present=0
+  local first=established second=established present=0
+  if listed bgp-unreadable || { listed bgp-unreadable-out && listed "bgp-out.$1"; }; then
+    echo "Unable to connect to the server: net/http: TLS handshake timeout" >&2
+    exit 1
+  fi
   announcing "$1" && present=1
-  if listed "bgp-was-out.$1" && (($(cat "$state/bgp-reads.$1" 2> /dev/null || echo 0) < $(cat "$state/bgp-slow" 2> /dev/null || echo 0))); then
-    peering=active
+  if listed bgp-peers-down; then
+    first=active second=active
+  elif listed "bgp-was-out.$1" && (($(cat "$state/bgp-reads.$1" 2> /dev/null || echo 0) < $(cat "$state/bgp-slow" 2> /dev/null || echo 0))); then
+    second=active
+    listed bgp-peer-late || first=active
   fi
   bgp_reads "$1"
   ((present)) || return 0
-  jq -n --arg node "$1" --arg peering "$peering" '{metadata: {name: $node},
+  jq -n --arg node "$1" --arg first "$first" --arg second "$second" '{metadata: {name: $node},
     spec: {bgpInstances: [{name: "cluster", peers: [{name: "edge-1"}, {name: "edge-2"}]}]},
     status: {bgpInstances: [{name: "cluster", peers: [
-      {name: "edge-1", peeringState: $peering}, {name: "edge-2", peeringState: $peering}]}]}}'
+      {name: "edge-1", peeringState: $first}, {name: "edge-2", peeringState: $second}]}]}}'
 }
 
 # pod NAMESPACE NAME PHASE [K8S_APP [NODE [REASON]]]

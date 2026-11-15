@@ -509,6 +509,8 @@ chart_config() {
 @test "Only workers speak BGP, and they peer with exactly the two edge routers, as the cluster's AS to the edge AS" {
   bgp_inputs
   [ "$(chart_config enable-bgp-control-plane)" = true ]
+  # The recipes that take a worker out of BGP read its sessions from the status the agent reports.
+  [ "$(chart_config enable-bgp-control-plane-status-report)" = true ]
   tree_objects > "$BATS_TEST_TMPDIR/tree.jsonl"
   configs=$(jq -c 'select(.object.kind == "CiliumBGPClusterConfig") | .object' "$BATS_TEST_TMPDIR/tree.jsonl")
   echo "$configs"

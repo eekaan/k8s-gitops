@@ -746,9 +746,11 @@ out of the artifact, which is built from `kubernetes/`.
   drained; a Ready condition from before then, including one posted after the drain, does not
   count. A node on its version is left alone. A worker is taken out of BGP before its drain and put
   back once it is uncordoned, as `cluster-reboot` does it below, so at most one worker is out at a
-  time and the edge routers withdraw its paths at once; a control plane has no BGP. Before each
-  drain the API must answer `/readyz` through the kubeconfig within five minutes, or nothing more
-  is drained. talosctl's own drain is
+  time and the edge routers withdraw its paths at once; a control plane has no BGP, and a node
+  whose role in `talman.yaml` is neither `controlplane` nor `worker` is not drained. A worker an
+  earlier run left out of BGP is put back first when it is Ready and schedulable, and a run that
+  ends with one still out fails, saying so last. Before each drain the API must answer `/readyz`
+  through the kubeconfig within five minutes, or nothing more is drained. talosctl's own drain is
   turned off, as it reaches the API at the cluster endpoint, which only the nodes reach. At the end
   every node must run its version. A run that stops after draining a node leaves that node
   cordoned: uncordon it with kubectl once it is back; a second run skips it once it is on its
@@ -831,20 +833,19 @@ out of the artifact, which is built from `kubernetes/`.
   FAIL naming those missing and those it does not list; no Ready worker carries the label that
   takes it out of BGP (`node-restriction.kubernetes.io/bgp-out`), a FAIL naming each and the
   `kubectl label` command that puts it back, as a worker left out silently is capacity lost; no
-  kube-proxy pod runs anywhere; every pod
-  in `kube-system` and in `flux-system` is Running or Succeeded, a FAIL naming the others; no
-  certificate signing request is Pending; and kubectl fetches the last log line of a Running pod in
-  `kube-system`, which the API server reads from the pod's kubelet over the kubelet's serving
-  certificate; and no scrape target of the cluster's own components is down: the jobs of the API
-  server, the controller manager, the scheduler, etcd, the kubelets and node-exporter, asked of
-  Prometheus through the API server's service proxy, a FAIL naming each job and the nodes it is
-  down on, never an address; the pass says how many targets it saw. A job with no active target,
-  as while Prometheus has just started or a monitor selects nothing, is skipped, naming the job,
-  not passed. While the namespace `flux-system` does not exist, as before
-  `just cluster-config` has run, the check of its pods is skipped, and its line and the last line
-  say so. The scrape check is skipped, saying why, while Prometheus's Service does not exist, as
-  before the monitoring application is installed, and when it cannot be asked or does not answer;
-  its silence is never a pass. It runs `kubectl get` and `kubectl logs` only. It needs the
+  kube-proxy pod runs anywhere; every pod in `kube-system` and in `flux-system` is Running or
+  Succeeded, a FAIL naming the others; no certificate signing request is Pending; and kubectl
+  fetches the last log line of a Running pod in `kube-system`, which the API server reads from the
+  pod's kubelet over the kubelet's serving certificate; and no scrape target of the cluster's own
+  components is down: the jobs of the API server, the controller manager, the scheduler, etcd, the
+  kubelets and node-exporter, asked of Prometheus through the API server's service proxy, a FAIL
+  naming each job and the nodes it is down on, never an address; the pass says how many targets it
+  saw. A job with no active target, as while Prometheus has just started or a monitor selects
+  nothing, is skipped, naming the job, not passed. While the namespace `flux-system` does not exist,
+  as before `just cluster-config` has run, the check of its pods is skipped, and its line and the
+  last line say so. The scrape check is skipped, saying why, while Prometheus's Service does not
+  exist, as before the monitoring application is installed, and when it cannot be asked or does not
+  answer; its silence is never a pass. It runs `kubectl get` and `kubectl logs` only. It needs the
   cluster's `talman.yaml` and kubeconfig.
 - `just grafana [cluster]` forwards a local port to Grafana through the cluster's kubeconfig until
   Ctrl-C ([kubernetes.md](kubernetes.md#grafana)): `kubectl port-forward`, listening on 127.0.0.1
@@ -875,11 +876,15 @@ out of the artifact, which is built from `kubernetes/`.
   through the kubeconfig once a second, giving each try two seconds, while the recipe, in order:
   0. for a worker, takes it out of BGP: labels it `node-restriction.kubernetes.io/bgp-out`, which
      the `CiliumBGPClusterConfig`'s node selector excludes and a kubelet cannot set or remove, and
-     waits, up to `BGP_WAIT` seconds (120), until its `CiliumBGPNodeConfig` is gone, which is when
-     Cilium has shut its sessions down with a Cease and the edge routers have withdrawn its paths
-     ([the edge runbook](runbooks/edge.md#a-worker-that-goes)); `just edge-routes` shows the edges'
-     side. A node that is out already, as after a run that stopped, is recognised and waited for. A
-     control plane has no BGP, and nothing here changes for it;
+     waits, up to `BGP_WAIT` seconds (120), until its `CiliumBGPNodeConfig` is gone. The operator
+     deletes it when the node stops matching, and the agent, once it is gone, closes the node's
+     sessions with a notification, so the edge routers withdraw its paths at once
+     ([the sources](infrastructure.md#the-edge-routers)); the recipe sees the configuration, not
+     the sessions, and `just edge-routes` shows the edges' side. It first records which of the
+     node's sessions are established, and stops, changing nothing, when it cannot read the
+     configuration or while another worker is out of BGP. A node that is out already, as after a run
+     that stopped, is recognised and waited for. A control plane has no BGP, and nothing here
+     changes for it;
   1. cordons the node and drains it with `kubectl drain`, as `cluster-upgrade` drains, so nothing
      new is placed on it while it goes down: a kubelet that is shutting down rejects every pod it
      is given, and the scheduler would go on giving it the same replica, each rejected pod left in
@@ -902,23 +907,26 @@ out of the artifact, which is built from `kubernetes/`.
   Then it stops the probe and prints how many probes it made, how many failed and the longest run
   of failures, in seconds. It uncordons the node, unless it was unschedulable before the recipe
   ran: such a node stays cordoned, and the recipe says so. It then removes the worker's label and
-  waits, up to `BGP_WAIT` seconds, until its BGP sessions are established again. It deletes, by namespace and name, the
-  pods the shutdown left in phase Failed on the node, with the reason `NodeShutdown` (rejected
-  while it shut down) or `Terminated` (terminated as it went down), which stay until they are
-  deleted and on which `cluster-check` fails, and says how many, none included; every other pod
-  stays. It exits 0 only when the node is Ready again, with its etcd member for a control plane,
-  and no probe failed; `--tolerate <seconds>` accepts runs of failures up to that long, for the
-  operator to say what counts as an interruption. A control plane after whose reboot etcd is not
+  waits, up to `BGP_WAIT` seconds, until the node's `CiliumBGPNodeConfig` is back and the sessions
+  that were established before it was taken out are established again; a node with none before, as
+  while the edge stack is not applied or an edge is stopped, is put back all the same, and the
+  recipe says it does not wait for one. It deletes, by namespace and name, the pods the shutdown
+  left in phase Failed on the node, with the reason `NodeShutdown` (rejected while it shut down) or
+  `Terminated` (terminated as it went down), which stay until they are deleted and on which
+  `cluster-check` fails, and says how many, none included; every other pod stays. It exits 0 only
+  when the node is Ready again, with its etcd member for a control plane, and no probe failed;
+  `--tolerate <seconds>` accepts runs of failures up to that long, for the operator to say what
+  counts as an interruption. A control plane after whose reboot etcd is not
   whole when the wait runs out fails the run, saying why and to reboot no other control plane until
   it is.
   A run that stops once the node is cordoned, as when the drain, the reboot or the wait fails,
   leaves it cordoned and says so: uncordon it with kubectl once it is Ready. A run that stops while
   a worker is out of BGP says so in its last line, with the command that puts it back,
-  `kubectl label node <node> node-restriction.kubernetes.io/bgp-out-`; `cluster-check` fails until
-  it is. The
-  probe keeps its counts in memory and writes no file; it is stopped, with the kubectl or sleep it
-  is waiting for, on every exit of the recipe, a failed or interrupted run included. It needs what
-  `cluster-talos` needs and the kubeconfig.
+  `kubectl label node <node> node-restriction.kubernetes.io/bgp-out-`, also when `cluster-talos
+  --reboot` ran it; `cluster-check` fails until it is. The probe keeps its counts in memory and
+  writes no file; it is stopped, with the kubectl or sleep it is waiting for, on every exit of the
+  recipe, a failed or interrupted run included. It needs what `cluster-talos` needs and the
+  kubeconfig.
 - `just cluster-destroy [cluster] [--yes] [--unreachable]` destroys the cluster stack,
   `sto2/cluster`, as `just infra-destroy sto2/cluster` does
   ([infrastructure.md](infrastructure.md#recipes)): it shows the plan's summary, destroys once the
@@ -1028,6 +1036,9 @@ to hand it to kubectl and age-keygen on standard input.
   for the nodes, 600 when unset.
 - `REBOOT_WAIT`: how many seconds `cluster-reboot` waits, once talman has rebooted the node, for it
   to report Ready and, for a control plane, for etcd to have its member back, 600 when unset.
+- `BGP_WAIT`: how many seconds `cluster-reboot` and `cluster-upgrade` wait, for a worker, until its
+  `CiliumBGPNodeConfig` is gone once it is labelled out of BGP, and until it is back with its
+  sessions established once the label is removed, 120 when unset.
 - `FLUX_AGE_KEY_FILE`: the path of the Flux age key, outside the repository. In CI, `FLUX_AGE_KEY`
   holds the key itself instead. `cluster-bootstrap`, `cluster-config` and `cluster-flux` need one
   of them.

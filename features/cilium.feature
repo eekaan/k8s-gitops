@@ -44,7 +44,7 @@ Feature: Cilium
   Scenario: Only workers speak BGP, and they peer with exactly the two edge routers, as the cluster's AS to the edge AS
     Given that talman.yaml and cluster-config, and every node's machine configuration rendered offline
     When the chart is rendered and every application is built as Flux builds it
-    Then the BGP control plane is on, the tree holds one BGP cluster configuration and no per-node override, its node selector selects every worker and no control plane by the labels Talos gives them, and its one instance peers as the cluster's AS with the two edge addresses in the edge AS, which differs from it, with explicit timers, graceful restart, eBGP's single hop and no listening port
+    Then the BGP control plane is on and reports each peer's session in the node's BGP configuration, the tree holds one BGP cluster configuration and no per-node override, its node selector selects every worker and no control plane by the labels Talos gives them, and its one instance peers as the cluster's AS with the two edge addresses in the edge AS, which differs from it, with explicit timers, graceful restart, eBGP's single hop and no listening port
 
   Scenario: A worker carrying the opt-out label is not selected for BGP, and its kubelet cannot remove the label
     Given the BGP cluster configuration as Flux builds it, and the label key the cluster recipes set to take a node out

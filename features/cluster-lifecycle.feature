@@ -97,14 +97,14 @@ Feature: Cluster lifecycle
     Then it exits non-zero showing the reason, connection refused, with neither the address nor the port, reboots nothing, and says the node is left cordoned and then that it is out of BGP
 
   Scenario: A planned reboot takes the worker out of BGP, waits until it announces nothing, and puts it back once it is Ready
-    Given a worker whose BGP node configuration follows the opt-out label only after a few reads, out and in
-    When cluster-reboot runs for it
-    Then it sets the label, reads the node's BGP configuration until it is gone, and only then cordons and drains the node, which announces nothing when it is drained and when it goes down; once the node is Ready and uncordoned it removes the label and reads the configuration until its peers are established; no other node is labelled, and cluster-check passes afterwards
+    Given a worker whose BGP node configuration follows the opt-out label only after a few reads, out and in, one of whose two peers is established late; and a cluster whose workers' sessions are never established
+    When cluster-reboot runs for each
+    Then it sets the label, reads the node's BGP configuration until it is gone, and only then cordons and drains the node, which announces nothing when it is drained and when it goes down; once the node is Ready and uncordoned it removes the label and reads the configuration until it is back with both peers established; no other node is labelled, and cluster-check passes afterwards; with no session established before or after, it succeeds all the same, saying it does not wait for one, with the node uncordoned and the label removed
 
   Scenario: A recipe that stops while a worker is out says so last, with the command that puts it back
-    Given a drain that fails, a reboot talman fails, a node that does not come back, a node whose BGP configuration never goes, a node already out from an earlier run, and a node that does not announce again once put back
+    Given a drain that fails, a reboot talman fails, a node that does not come back, a node whose BGP configuration never goes, a node already out from an earlier run, a node that does not announce again once put back, a BGP configuration that cannot be read before the label and after it, and another worker that is out
     When cluster-reboot runs for each, and once more for the node left out by an earlier run
-    Then each exits non-zero with the node still out and the last line saying it is out of BGP and the kubectl command that puts it back, except that a node that never withdraws is neither cordoned nor drained nor rebooted, a node already out is recognised and not labelled again, and the node that does not announce again has its label removed and is said not to announce again; the rerun that succeeds puts the node back
+    Then each exits non-zero with the node still out and the last line saying it is out of BGP and the kubectl command that puts it back, except that a node that never withdraws is neither cordoned nor drained nor rebooted, a node already out is recognised and not labelled again, the node that does not announce again has its label removed and is said not to announce again, a configuration that cannot be read is said so and not taken for one that is gone, and nothing is labelled, cordoned, drained or rebooted for a worker while another is out, which the last line names; the rerun that succeeds puts the node back
 
   Scenario: cluster-check fails while a Ready worker is out of BGP
     Given a Ready worker carrying the opt-out label, and then one that is not Ready

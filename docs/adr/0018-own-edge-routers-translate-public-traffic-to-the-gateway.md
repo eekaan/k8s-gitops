@@ -51,10 +51,11 @@ it refines that record in three places, which stand as written otherwise:
   edges, as stale, for the restart time, so every recipe that drains or reboots a worker takes it
   out of BGP first: the workers' `CiliumBGPClusterConfig` selects only nodes that do not carry
   `node-restriction.kubernetes.io/bgp-out`, a key the NodeRestriction admission plugin keeps a
-  kubelet from setting or removing, and Cilium shuts a node's sessions down with a Cease when it
-  stops matching, which the edges, not negotiating the bit, answer by withdrawing at once. The
-  recipes wait until the node's `CiliumBGPNodeConfig` is gone before the drain and put the node
-  back, waiting for its sessions, once it is Ready. Graceful restart stays on, as an agent restart
+  kubelet from setting or removing, and Cilium's agent closes a node's sessions with a notification
+  once it has stopped matching and its `CiliumBGPNodeConfig` is gone, which the edges, not
+  negotiating the bit, answer by withdrawing at once. The recipes wait until the node's
+  `CiliumBGPNodeConfig` is gone before the drain and put the node back, waiting for the sessions
+  that were established before, once it is Ready. Graceful restart stays on, as an agent restart
   keeps its paths. This refines the restart time's application above: it now applies to a worker
   that stops or restarts without the step.
 - **The data path.** nftables on each edge translates a connection to the edge's own address on a

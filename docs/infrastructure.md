@@ -454,23 +454,41 @@ Every other routing daemon is off in the list. Its configuration, `frr.conf`, is
     it, with new connections hashed to it failing. The restart time in the workers'
     `CiliumBGPPeerConfig` bounds it.
   - **A worker taken out before a planned reboot**: withdrawn at once. A node that stops matching
-    the `CiliumBGPClusterConfig`'s node selector has its sessions shut down with a Cease, and an
-    edge that has not negotiated the bit withdraws its paths then (the guide's "Shutting Down a
-    Node"). The selector also requires that a node does not carry the label
+    the `CiliumBGPClusterConfig`'s node selector has its `CiliumBGPNodeConfig` deleted by the
+    operator
+    ([cluster.go](https://github.com/cilium/cilium/blob/v1.20.4/operator/pkg/bgp/cluster.go#L237-L247)),
+    and the agent, once that is gone, withdraws the node's routes and stops its BGP server with a
+    full destroy, which sends a notification to every peer
+    ([controller.go](https://github.com/cilium/cilium/blob/v1.20.4/pkg/bgp/agent/controller.go#L189-L205),
+    [manager.go](https://github.com/cilium/cilium/blob/v1.20.4/pkg/bgp/manager/manager.go#L505-L506),
+    [server.go](https://github.com/cilium/cilium/blob/v1.20.4/pkg/bgp/gobgp/server.go#L381-L383)),
+    and an edge that has not negotiated the bit withdraws the paths then (the guide's "Shutting Down
+    a Node"). The selector also requires that a node does not carry the label
     `node-restriction.kubernetes.io/bgp-out`, a key the NodeRestriction admission plugin keeps a
     kubelet from setting or removing on its own Node
     ([Kubernetes' admission controllers](https://kubernetes.io/docs/reference/access-authn-authz/admission-controllers/#noderestriction)),
     so only an operator's credentials take a node out or put it back. `just cluster-reboot`
     (and so `just cluster-talos --reboot`) and `just cluster-upgrade` set the label on a worker,
     wait until its `CiliumBGPNodeConfig`, which the operator keeps for each selected node, is gone,
-    and only then drain it; once the node is Ready and uncordoned they remove the label and wait
-    until its sessions are established again. The wait is `BGP_WAIT` seconds (120). `just
-    cluster-upgrade-k8s` drains and reboots no node and leaves the Cilium agents alone, so it takes
-    none out. A control plane has no BGP. A recipe that stops with a worker out says so last, with
-    the `kubectl label` command that puts it back, a rerun recognises a worker that is out already,
-    and `just cluster-check` fails while a Ready worker carries the label. The recipes read
-    Cilium's state, which needs no access beyond the kubeconfig; the edges' side is what
-    `just edge-routes` shows.
+    and only then drain it; that is the state the recipes can see through the kubeconfig, and the
+    agent's closing of its sessions follows from it, which `just edge-routes` shows from the edges'
+    side. Once the node is Ready and uncordoned they remove the label and wait until its
+    `CiliumBGPNodeConfig` is back with the sessions that were established before the label,
+    which `status.bgpInstances[].peers[].peeringState` reports while Cilium's BGP status reporting
+    is on, as the chart's values keep it, are established again
+    ([bgp_node_types.go](https://github.com/cilium/cilium/blob/v1.20.4/pkg/k8s/apis/cilium.io/v2/bgp_node_types.go#L201),
+    [conversions.go](https://github.com/cilium/cilium/blob/v1.20.4/pkg/bgp/types/conversions.go#L40-L41)).
+    A worker with no established session before, as while the edge stack is not applied, with an
+    edge stopped or one being replaced, is put back all the same, and the recipe says it does not
+    wait for one. Both waits are bounded by `BGP_WAIT` seconds (120). `just cluster-upgrade-k8s`
+    drains and reboots no node and leaves the Cilium agents alone, so it takes none out. A control
+    plane has no BGP. No more than one worker is out at a time: `cluster-reboot` and
+    `cluster-upgrade` refuse to take a worker out while another is, naming it and the `kubectl
+    label` command that puts it back, `cluster-upgrade` first puts back a worker that is out and
+    Ready and schedulable, and `cluster-reboot` recognises a worker that is out already. A
+    `cluster-reboot`, `cluster-upgrade` or `cluster-talos --reboot` that stops with a worker out
+    says so last, with that command, and `just cluster-check` fails while a Ready worker carries the
+    label.
 - `maximum-paths` is `max_workers`: as many equal-cost paths to one address as there can be workers.
   The most FRR takes is what its build allows: 128 by its manual, 256 in Debian's package. The
   kernel setting `net.ipv4.fib_multipath_hash_policy = 1` hashes a flow's layer 4 fields, so every

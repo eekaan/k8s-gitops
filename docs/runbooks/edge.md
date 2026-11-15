@@ -151,11 +151,15 @@ they stay; the next ones are spread over the others.
 - **A worker taken out before a planned reboot**: withdrawn at once. `just cluster-reboot`,
   `just cluster-talos --reboot` and `just cluster-upgrade` label the worker
   `node-restriction.kubernetes.io/bgp-out`, which the `CiliumBGPClusterConfig`'s node selector
-  excludes, so Cilium sends a Cease and the edges withdraw its paths, wait until its
-  `CiliumBGPNodeConfig` is gone, and only then drain it; the label is removed once the node is
-  Ready. A kubelet cannot set or remove a label under `node-restriction.kubernetes.io/`, so only
-  an operator's credentials do. A recipe that stops with a worker out says so last and prints the
-  command that puts it back, and `just cluster-check` fails while a Ready worker is out.
+  excludes, wait until its `CiliumBGPNodeConfig` is gone, after which the Cilium agent closes the
+  node's sessions with a notification and the edges withdraw its paths
+  ([how, in Cilium's source](../infrastructure.md#the-edge-routers)), and only then drain it; the
+  label is removed once the node is Ready. A kubelet cannot set or remove a label under
+  `node-restriction.kubernetes.io/`, so only an operator's credentials do. No second worker is
+  taken out while one is. `just cluster-reboot`, `just cluster-talos --reboot` and `just
+  cluster-upgrade` that stop with a worker out say so last and print the command that puts it back,
+  `kubectl label node <node> node-restriction.kubernetes.io/bgp-out-`, and `just cluster-check`
+  fails while a Ready worker is out.
 
 ### Failover tests
 

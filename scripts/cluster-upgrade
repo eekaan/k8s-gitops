@@ -9,8 +9,9 @@
 # before the next is drained. A node already on its version is not drained. A worker is taken out of
 # BGP before its drain, waiting for up to BGP_WAIT seconds (120) until Cilium has it announce
 # nothing, so the edge routers withdraw its paths at once, and put back once it is uncordoned, so no
-# more than one worker is out at a time; a run that stops with a worker out says so last, with the
-# command that puts it back.
+# more than one worker is out at a time. A worker that an earlier run left out is put back first when
+# it is Ready and schedulable, and otherwise stops the run before another is taken out; a run that
+# stops with a worker out says so last, with the command that puts it back.
 #
 # kubectl reaches the API through the kubeconfig cluster-kubeconfig fetches, served at
 # KUBE_API_ADDRESS, and the run stops before a drain when the API does not answer there. talosctl's
@@ -42,6 +43,15 @@ done
 . "$here/cluster-env" "$cluster"
 require_cluster talman secrets age-key api-address
 require_bgp_wait
+
+# on_exit STATUS: a failing run names its step, as report_failed_step has it do, and then the workers
+# it left out of BGP. prepare_snapshot's exit trap does the same once it is made.
+on_exit() {
+  failed_step "$1"
+  bgp_report_out
+  exit "$1"
+}
+trap 'on_exit $?' EXIT
 
 # api_answers: whether the API answers /readyz through the kubeconfig, tried for five minutes, as a
 # control plane just upgraded may still be on its way back into the load balancer's pool.
@@ -84,6 +94,12 @@ behind=0
 cluster_talman upgrade --dry-run --detailed-exit-code || behind=$?
 case $behind in
   0)
+    # A worker an earlier run left out of BGP, which only the kubeconfig that run fetched can tell;
+    # without one no run of this checkout took a worker out.
+    if [[ -f $KUBECONFIG ]]; then
+      bgp_settle_left_out
+      ((${#bgp_left_out[@]} == 0)) || exit 1
+    fi
     echo "cluster-upgrade: every node of $cluster runs its configured Talos"
     exit 0
     ;;
@@ -108,6 +124,7 @@ step="checking that the Kubernetes API answers"
 api_answers
 
 take_etcd_snapshot
+bgp_settle_left_out
 
 hostnames=$(talman_nodes "$talman_file" | cut -d' ' -f1)
 mapfile -t nodes <<< "$hostnames"
@@ -128,9 +145,14 @@ for node in "${nodes[@]}"; do
   # touched, so at most one worker is out of BGP. A control plane has no BGP.
   step="reading the role of $node in talman.yaml"
   role=$(NODE=$node yq '.nodes[] | select(.hostname == strenv(NODE)) | .role // ""' "$talman_file")
-  if [[ $role == worker ]]; then
-    leave_bgp "$node"
-  fi
+  case $role in
+    worker) leave_bgp "$node" ;;
+    controlplane) ;;
+    *)
+      infra_error "talos/$cluster/talman.yaml gives $node the role ${role:-none}, neither controlplane nor worker, so it is not known whether it announces over BGP; $node is not drained"
+      exit 1
+      ;;
+  esac
   step="draining $node"
   drain_node "$node"
   step="upgrading $node, which is drained"
@@ -146,6 +168,10 @@ for node in "${nodes[@]}"; do
     join_bgp "$node"
   fi
 done
+
+# A worker the loop skipped as it runs its version may still be out from a run that stopped.
+bgp_settle_left_out
+((${#bgp_left_out[@]} == 0)) || exit 1
 
 step="checking that every node runs its configured Talos"
 cluster_talman upgrade --dry-run --detailed-exit-code > /dev/null
