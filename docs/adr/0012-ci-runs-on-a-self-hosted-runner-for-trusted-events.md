@@ -49,7 +49,7 @@ capabilities for what it executes, and its socket is open to the runner's user o
 
 - Trusted runs reuse the engine's cache; fork runs are as they were.
 - The host is one more machine to patch, and its runner and engine are pinned in `versions.yaml`
-  and updated by hand with Renovate's help.
+  and updated with Renovate's help and by hand (`.renovate/by-hand.tsv`).
 - The groups of checks run one after another on the host's one runner, instead of side by side on
   hosted runners.
 - The cluster stack lets the host reach the nodes' Talos and Kubernetes APIs only when it is given

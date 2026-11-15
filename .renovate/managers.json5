@@ -1,6 +1,6 @@
 {
   $schema: "https://docs.renovatebot.com/renovate-schema.json",
-  description: "Where this repository keeps versions beyond Renovate's default file patterns.",
+  description: "Where this repository keeps versions beyond Renovate's default file patterns, and the one it reads but must not propose.",
   // HelmRelease, OCIRepository, GitRepository and Flux Kustomization images. Helm values files,
   // kustomization.yaml, mise.toml, GitHub Actions workflows and OpenTofu files are found by their
   // managers' default patterns.
@@ -48,6 +48,19 @@
       matchStrings: [
         "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\n[a-z_]+[ \\t]*:=[ \\t]*\"[^\"@\\n]+:(?<currentValue>[^\"@:\\n]+)@(?<currentDigest>sha256:[0-9a-f]{64})\"",
       ],
+    },
+  ],
+  packageRules: [
+    {
+      // To move mise-action's checksum, Renovate first fetches the current release by the tag the
+      // version input is written as, and mise's tags carry a v that the workflows' versions do not:
+      // it would propose only the version of the workflow without a checksum, which tests/ci.bats
+      // refuses. Moved by hand while the version has that form (.renovate/by-hand.tsv).
+      description: "mise in the workflows, while its version is written without the v of its release tags",
+      matchManagers: ["github-actions"],
+      matchDepNames: ["jdx/mise"],
+      matchCurrentValue: "/^[0-9]/",
+      enabled: false,
     },
   ],
 }

@@ -110,7 +110,7 @@ checks: static tests-1 tests-2 tests-3
 
 # The groups of checks are the dependencies of checks, and each group's checks its own dependencies: just ci runs every group side by side in containers of its own, and CI runs each as a job of its own. A check, with whatever it depends on, belongs to one group only, or it would run twice.
 # The checks other than the bats tests, the cheapest and most basic first
-static: tools-check check-literals check-commit-literals check-conflict-markers cluster-secrets-check lint renovate-check edge-policy-check scenarios-check infra-check talos-check kubernetes-check render-check kubernetes-validate vector-check secrets-scan
+static: tools-check check-literals check-commit-literals check-conflict-markers cluster-secrets-check lint renovate-check renovate-pins edge-policy-check scenarios-check infra-check talos-check kubernetes-check render-check kubernetes-validate vector-check secrets-scan
 
 # The first of three parts of the bats tests
 tests-1: (test '1/3')
@@ -180,11 +180,24 @@ ci-comment:
     scripts/ci-comment
 
 # The image of Renovate's validator, for renovate-check here and for just ci's Dagger module
+# renovate: datasource=docker depName=ghcr.io/renovatebot/renovate
 renovate_image := "ghcr.io/renovatebot/renovate:44.227.4@sha256:fe058db9710840a4821f20190b3769e3ce709a049b8640aa2bf5f044969fe702"
 
-# Validate the Renovate configuration with Renovate's own validator, in its container image
+# Validate the Renovate configuration with Renovate's own validator, in its container image, then fail unless the dependencies Renovate extracts from the files are the ones .renovate/extracted.tsv records
 renovate-check:
-    docker run --rm --network none -v "$PWD":/usr/src/app:ro -w /usr/src/app {{ renovate_image }} renovate-config-validator --strict --no-global renovate.json5 .renovate/*.json5
+    scripts/renovate-run '{{ renovate_image }}'
+
+# Write .renovate/extracted.tsv from what Renovate extracts from the files, after a change to the pins or to the configuration that renovate-check reports, including another change's pins that a merge of main brought
+[script]
+renovate-record:
+    tmp=$(mktemp)
+    trap 'rm -f "$tmp"' EXIT
+    scripts/renovate-run '{{ renovate_image }}' record > "$tmp"
+    cat "$tmp" > .renovate/extracted.tsv
+
+# Fail for any version pin that Renovate does not extract (.renovate/extracted.tsv), under its name and at its place, in a form it can move, and that .renovate/by-hand.tsv does not list as moved by hand, for any listed pin that Renovate now extracts and can move, and for any pin of a custom manager whose value is not the form its datasource's tags have (.renovate/tag-forms.tsv)
+renovate-pins:
+    scripts/check-renovate-pins
 
 # The image of the log collector, Vector, that the vector application's pinned chart runs, pinned by the digest of its image index, for vector-check here and for just ci's Dagger module. Renovate moves the tag and the digest in the same pull request as the chart, and tests/logs.bats fails when it is not the chart's image
 # renovate: datasource=docker depName=docker.io/timberio/vector
@@ -202,7 +215,7 @@ vector-check:
     docker run --rm --network none -e VECTOR_SELF_NODE_NAME=node-1 -v "$dir":/check:ro {{ vector_image }} validate --no-environment /check/vector.yaml
     docker run --rm --network none -e VECTOR_SELF_NODE_NAME=node-1 -v "$dir":/check:ro {{ vector_image }} test /check/vector.yaml /check/tests.yaml
 
-# The image of FRR for edge-policy-check here and for just ci's Dagger module: the upstream build, 10.3.4, of the release the edge routers' Debian image packages, 10.3-3+deb13u1 in trixie, the same release with Debian's patches. Its own build takes 64 equal-cost paths, Debian's 256, which the proof's configuration allows for; it moves with the edge image's release, by hand
+# The image of FRR for edge-policy-check here and for just ci's Dagger module: the upstream build, 10.3.4, of the release the edge routers' Debian image packages, 10.3-3+deb13u1 in trixie, the same release with Debian's patches. Its own build takes 64 equal-cost paths, Debian's 256, which the proof's configuration allows for; it moves with the edge image's release, by hand (.renovate/by-hand.tsv)
 frr_image := "quay.io/frrouting/frr:10.3.4@sha256:c8790a83db3cb105c0823f76afe55de5c9f77d968fb1ebd28174a8ddd49b989c"
 
 # Prove the edge routers' routing policy with a real BGP speaker: the FRR configuration the edge stack renders runs in FRR's container with only its loopback and offered prefixes by speakers of the cluster's AS, another AS and an address outside the listen range, and only the /32 inside the service range may end up in its table, with nothing advertised back; needs docker, as renovate-check does, which just ci's module does not
