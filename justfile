@@ -187,7 +187,7 @@ renovate_image := "ghcr.io/renovatebot/renovate:44.227.4@sha256:fe058db9710840a4
 renovate-check:
     scripts/renovate-run '{{ renovate_image }}'
 
-# Write .renovate/extracted.tsv from what Renovate extracts from the files, after a change to the pins or to the configuration that renovate-check reports
+# Write .renovate/extracted.tsv from what Renovate extracts from the files, after a change to the pins or to the configuration that renovate-check reports, including another change's pins that a merge of main brought
 [script]
 renovate-record:
     tmp=$(mktemp)
@@ -195,7 +195,7 @@ renovate-record:
     scripts/renovate-run '{{ renovate_image }}' record > "$tmp"
     cat "$tmp" > .renovate/extracted.tsv
 
-# Fail for any version pin that Renovate does not extract (.renovate/extracted.tsv) and .renovate/by-hand.tsv does not list as moved by hand, for any listed pin that Renovate now extracts, and for any pin of a custom manager whose value is not the form its datasource's tags have (.renovate/tag-forms.tsv)
+# Fail for any version pin that Renovate does not extract (.renovate/extracted.tsv), under its name and at its place, in a form it can move, and that .renovate/by-hand.tsv does not list as moved by hand, for any listed pin that Renovate now extracts and can move, and for any pin of a custom manager whose value is not the form its datasource's tags have (.renovate/tag-forms.tsv)
 renovate-pins:
     scripts/check-renovate-pins
 

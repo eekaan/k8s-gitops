@@ -1403,8 +1403,9 @@ grammar_cases() {
   done
   [ "$uses" -gt 0 ]
   # A workflow whose token can write has the mise binary checked against a checksum, the same in
-  # every such use. Whether the value is the pinned release's is not read here: a mise bump carries
-  # its checksum, and the publish job fails closed on a mismatch.
+  # every such use. Whether the value is the pinned release's is not read here: a mise bump, which is
+  # by hand (.renovate/by-hand.tsv), carries its checksum, and the publish job fails closed on a
+  # mismatch.
   local writes sums=() sum
   for workflow in "$REPO"/.github/workflows/*.yaml "$REPO"/.github/workflows/*.yml; do
     writes=$(yq '[.permissions // {}, (.jobs[].permissions // {})] | map(to_entries) | flatten | map(select(.value == "write")) | length' "$workflow")

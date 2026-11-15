@@ -61,6 +61,14 @@ commented out with the reason:
   # - ../../base/demo/hello/ks.yaml  # Disabled: <reason>
 ```
 
+The application's versions are pins for Renovate: its chart's tag under a `# renovate:
+datasource=… depName=…` comment, as the other applications' sources have it, and any image in its
+values. Once they are in place, `just renovate-record` writes what Renovate extracts to
+`.renovate/extracted.tsv`, which the change commits; a pin under such a comment also gets the form
+of its datasource's tags in `.renovate/tag-forms.tsv`, read from the registry's own listing, and a
+pin that no manager reads is listed in `.renovate/by-hand.tsv` with why and how it is moved.
+`just renovate-check` and `just renovate-pins` fail, naming the file to change, until they hold.
+
 ## What the root sets
 
 The root Kustomization patches every child Kustomization with:
@@ -1396,9 +1404,11 @@ checksum
 of that release's linux-x64 binary, so the tools that run beside the token are the pinned ones; the
 action fails the job when the binary differs. A bump of the mise version changes the checksum with it,
 in every workflow that has one, and the checksum is the one for `./mise-v<version>-linux-x64` in the
-release's `SHASUMS256.txt`. Renovate does not track either input: it can raise a version but cannot
-carry the checksum with it, so a version alone would fail the signing job's check, and the bump is
-by hand.
+release's `SHASUMS256.txt`. Renovate's github-actions manager reads both inputs as one dependency,
+`jdx/mise`, but it looks the next release's checksum up in the release tagged as the version is
+written, without the `v` that mise's release tags carry: the lookup fails, so Renovate proposes
+nothing for a workflow with a checksum, and would move the version alone in the one without. The bump
+is by hand, in every workflow at once (`.renovate/by-hand.tsv`).
 The two jobs that sign, `publish` and `tools-image`, also turn the action's cache off, so nothing
 runs from an entry another job saved.
 

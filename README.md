@@ -16,7 +16,11 @@ deployment: [`CLAUDE.md`](CLAUDE.md) lists what it never contains.
 
 ## Working on it
 
-Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mise.jdx.dev) and
+Every tool is pinned to an exact version in `mise.toml`. A change that adds or removes a pin, a
+tool or any other, or moves one to another file or key, runs `just renovate-record` and commits
+`.renovate/extracted.tsv` with it, and so does a branch after merging `main` when `main` brought
+another change's pins: `just renovate-check` fails, naming the recipe, until the record is
+current. A new version alone leaves the record as it is. With [mise](https://mise.jdx.dev) and
 [just](https://just.systems) installed:
 
 - `just tools` installs the pinned tools.

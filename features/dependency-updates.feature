@@ -19,7 +19,7 @@ Feature: Dependency updates
     When renovate-check runs Renovate's own extraction on them, offline, with the presets inlined
     Then the dependencies it extracts are those .renovate/extracted.tsv records
 
-  @test @pending #FND-7
+  @by:renovate-check
   Scenario: A change to what Renovate extracts is refused with the difference
     Given a manager's file patterns narrowed, or a "# renovate:" comment moved one line up
     When renovate-check runs Renovate's own extraction
@@ -29,21 +29,21 @@ Feature: Dependency updates
   @test
   Scenario: Every pin in the tree is extracted by a Renovate manager or listed as moved by hand
     Given .renovate/extracted.tsv, what Renovate extracts, and .renovate/by-hand.tsv, the pins moved by hand
-    When the check looks for image references, OCI artifact tags, action pins, tool versions, provider constraints and version values in the repository's files
-    Then every pin it finds is extracted by a manager or listed
+    When the check looks for image references, OCI artifact tags, action pins and their inputs, tool versions, provider constraints and version values in the repository's files
+    Then every pin it finds is extracted by a manager, under the name and at the place Renovate reads it, in a form Renovate can move, or listed
     And every pin that Renovate's custom managers read has the form of its datasource's tags
 
   @test
   Scenario: A finder that cannot run fails the check instead of finding no pins
-    Given a grep that cannot read the patterns that find pins
+    Given a grep that cannot read the patterns that find pins, or a yq that cannot read the files their names come from
     When the check runs
     Then it exits non-zero
     And it does not report that it found no pins
 
   @test
   Scenario: A pin added where no manager looks, and not listed, is refused, naming the file and line
-    Given a file that holds an image reference, an OCI artifact tag, a digest, an action pin, a tool version, a provider version, a mise version or checksum or a tag that no manager extracts
-    And a file that Renovate extracts other pins from holds an image reference that it does not extract
+    Given a file that holds an image reference, an OCI artifact tag, a digest, an action pin, a tool version, a provider version, a mise version or checksum, an action's version input or a tag that no manager extracts
+    And a file that Renovate extracts other pins from holds an image reference, a chart's tag, a provider's version or another action's version input that it does not extract
     And the pin is not in .renovate/by-hand.tsv
     When the check runs
     Then it exits 1
@@ -51,7 +51,7 @@ Feature: Dependency updates
 
   @test
   Scenario: A listed pin that a manager now extracts is refused
-    Given .renovate/by-hand.tsv lists a pin that .renovate/extracted.tsv holds, a checksum that moves with an extracted pin, or one that is not in its file as a value, only in a comment
+    Given .renovate/by-hand.tsv lists a pin that .renovate/extracted.tsv holds in a form Renovate can move, a checksum that moves with an extracted pin, or one that is not in its file as a value, only in a comment
     When the check runs
     Then it exits 1
     And it names the entry's line in .renovate/by-hand.tsv
@@ -64,6 +64,7 @@ Feature: Dependency updates
     And it names the pin's file and line
     And a pin whose package has no recorded tag form is refused too
     And a recorded tag form that no pin reads is refused
+    And an action's input that Renovate reads, whose version is not the form recorded for its tags, is refused unless .renovate/by-hand.tsv lists it
 
   @test @pending #FND-7
   Scenario: A Renovate configuration with an unknown option is refused
