@@ -1,0 +1,8 @@
+---
+# A custom resource whose operator creates a pod at run time, which the render does not hold.
+apiVersion: example.com/v1
+kind: Scanner
+metadata:
+  name: main
+  namespace: agents
+spec: {}

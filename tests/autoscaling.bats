@@ -422,7 +422,8 @@ pod_templates() {
 # defined_keys APP: fails, naming them, on keys of APP's values file or of its HelmRelease's own
 # values that the pinned chart's values do not define. Keys of maps only: list items are the
 # chart's input, not keys. A map the chart leaves empty, such as an annotations map, takes keys of
-# the user's choosing.
+# the user's choosing, and so does a security context map for the fields of Kubernetes' security
+# context types (fixtures/security-context-fields).
 defined_keys() {
   local app=$1 keys="$BATS_TEST_TMPDIR/keys" unknown="" key map open
   local paths='[.. | select(path | length > 0) | path | select(all_c(tag == "!!str")) | join(".")] | .[]'
@@ -436,6 +437,12 @@ defined_keys() {
     for map in $open; do
       if [[ $key == "$map".* ]]; then continue 2; fi
     done
+    # A security context map is Kubernetes' type, which the chart passes through to the pod or
+    # container: a field of that type is a key of the user's choosing, a misspelt one is not.
+    if [[ $key =~ (^|\.)(securityContext|podSecurityContext|containerSecurityContext)\.(.+)$ ]] &&
+      grep -qxF -- "${BASH_REMATCH[3]}" "$BATS_TEST_DIRNAME/fixtures/security-context-fields"; then
+      continue
+    fi
     unknown+=" $key"
   done < <(comm -23 "$keys/$app.ours" "$keys/$app.chart")
   echo "$app: keys the chart does not define:${unknown:- none}"

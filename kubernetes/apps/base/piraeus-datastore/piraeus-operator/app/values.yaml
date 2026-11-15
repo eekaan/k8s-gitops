@@ -6,3 +6,13 @@
 # The resource definitions come with the release, as templates, so each new chart version upgrades
 # them together with the operator that reads them.
 installCRDs: true
+
+# The chart sets no seccomp profile and leaves privilege escalation to the image; the restricted Pod
+# Security level requires the runtime's profile and escalation off. The operator's other defaults
+# already meet the rest: a non-root user and no capabilities.
+podSecurityContext:
+  seccompProfile:
+    type: RuntimeDefault
+operator:
+  securityContext:
+    allowPrivilegeEscalation: false

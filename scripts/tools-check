@@ -24,6 +24,7 @@ version_command() {
     # Without the flag sops asks GitHub for the latest release.
     sops) cmd=(sops --version --disable-version-check) ;;
     cosign) cmd=(cosign version) ;;
+    kyverno) cmd=(kyverno version) ;;
     gitleaks) cmd=(gitleaks version) ;;
     # kubeconform has no --version flag.
     kubeconform) cmd=(kubeconform -v) ;;

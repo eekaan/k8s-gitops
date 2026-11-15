@@ -75,32 +75,39 @@ ci_host_connect() {
   ci_host_trust
 }
 
-# ci_host_trust: when the host's key is not recorded, shows the fingerprints of the keys the host
-# offers and records them only once yes is typed. Never trusts a key on its own.
-ci_host_trust() {
-  local scanned answer=
-  if [[ -s $ci_host_known_hosts ]] && ssh-keygen -F "$ci_host_address" -f "$ci_host_known_hosts" > /dev/null 2>&1; then
+# ssh_host_trust ADDRESS KNOWN_HOSTS LABEL: when the host's key is not in KNOWN_HOSTS, shows the
+# fingerprints of the keys the host offers and records them only once yes is typed. Never trusts a
+# key on its own. LABEL names the host in what it prints, such as "CI host". Returns 2 when the keys
+# were not accepted, 1 when the host does not answer. Shared with scripts/lib/edge.sh.
+ssh_host_trust() {
+  local address=$1 known_hosts=$2 label=$3 scanned answer=
+  if [[ -s $known_hosts ]] && ssh-keygen -F "$address" -f "$known_hosts" > /dev/null 2>&1; then
     return 0
   fi
   # Hashed, so the file does not list the address.
-  scanned=$(ssh-keyscan -H -T 15 "$ci_host_address" 2> /dev/null) || scanned=
+  scanned=$(ssh-keyscan -H -T 15 "$address" 2> /dev/null) || scanned=
   if [[ -z $scanned ]]; then
-    infra_error "the CI host does not answer on SSH; it may still be booting"
+    infra_error "the $label does not answer on SSH; it may still be booting"
     return 1
   fi
-  echo "The CI host's SSH host key is not recorded. The keys it offers:"
+  echo "The $label's SSH host key is not recorded. The keys it offers:"
   ssh-keygen -l -f /dev/stdin <<< "$scanned" | awk '{ print "  " $2 " " $NF }'
   echo "Compare them with the fingerprints the host printed on its console when it first booted."
   printf 'Type yes to record them and connect: ' >&2
   read -r answer || true
   if [[ $answer != yes ]]; then
     infra_error "the host key was not accepted; nothing was done on the host"
-    return 1
+    return 2
   fi
-  mkdir -p "${ci_host_known_hosts%/*}"
-  chmod 700 "${ci_host_known_hosts%/*}"
-  (umask 077 && printf '%s\n' "$scanned" >> "$ci_host_known_hosts")
-  echo "recorded the CI host's key in ${ci_host_known_hosts/#"$HOME"/\~}"
+  mkdir -p "${known_hosts%/*}"
+  chmod 700 "${known_hosts%/*}"
+  (umask 077 && printf '%s\n' "$scanned" >> "$known_hosts")
+  echo "recorded the $label's key in ${known_hosts/#"$HOME"/\~}"
+}
+
+# ci_host_trust: ssh_host_trust for the CI host.
+ci_host_trust() {
+  ssh_host_trust "$ci_host_address" "$ci_host_known_hosts" "CI host"
 }
 
 # ci_host_ssh COMMAND: runs COMMAND, one string, on the host as CI_HOST_SSH_USER, with strict host key

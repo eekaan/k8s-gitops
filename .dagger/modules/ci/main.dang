@@ -19,7 +19,7 @@ type Ci {
   }
 
   """
-  Run the justfile's groups of checks side by side and return what they printed, after a line that says where the tools came from: the groups are the dependencies of the checks recipe, and a group's checks are its own dependencies. A group's renovate-check runs Renovate's validator and extraction in its own image, and its vector-check runs Vector in the image the log collector runs, on the configuration the pinned tools render; its other checks run in one just run, in the tools container (tools). Every group runs to its end; when a check fails, the call fails with every group's output and names the groups that failed.
+  Run the justfile's groups of checks side by side and return what they printed, after a line that says where the tools came from: the groups are the dependencies of the checks recipe, and a group's checks are its own dependencies. A group's renovate-check runs Renovate's validator and extraction in its own image, its vector-check runs Vector in the image the log collector runs, on the configuration the pinned tools render, and its edge-policy-check runs FRR's speakers in FRR's image, on the configuration the pinned tools render; its other checks run in one just run, in the tools container (tools). Every group runs to its end; when a check fails, the call fails with every group's output and names the groups that failed.
   """
   pub checks(
     """
@@ -31,6 +31,11 @@ type Ci {
     The image vector-check runs Vector from, the one the log collector runs.
     """
     vectorImage: String!,
+
+    """
+    The image edge-policy-check runs FRR from.
+    """
+    frrImage: String!,
 
     """
     The image the tools container is built from.
@@ -92,7 +97,7 @@ type Ci {
     """, "bash", group]).stdout
     let groups = listing.trimSpace.split("\n").reject { _.isEmpty }.map { line =>
       let words = line.split(" ")
-      Group(name: words.takeFirst.join(""), checks: words.dropFirst, checkout: checkout, validator: validator, collector: collector)
+      Group(name: words.takeFirst.join(""), checks: words.dropFirst, checkout: checkout, validator: validator, collector: collector, frr: container.from(frrImage))
     }
     if (groups.isEmpty) {
       raise "the checks recipe has no groups"
@@ -230,10 +235,28 @@ type Group {
   let collector: Container!
 
   """
-  Whether every check of the group passed, and what they printed: renovate-check's Renovate, vector-check's Vector and the just run of the others side by side.
+  FRR's image, which edge-policy-check's speakers run in.
+  """
+  let frr: Container!
+
+  """
+  Whether every check of the group passed, and what they printed: renovate-check's Renovate, vector-check's Vector, edge-policy-check's FRR and the just run of the others side by side.
   """
   outcome: Outcome! {
-    let others = checks.reject { _ == "renovate-check" }.reject { _ == "vector-check" }
+    let others = checks.reject { _ == "renovate-check" }.reject { _ == "vector-check" }.reject { _ == "edge-policy-check" }
+    # The edge routers' routing policy against real BGP speakers: the checkout renders the edge's
+    # configuration, FRR's container runs the speakers, which bind and dial loopback addresses only,
+    # and the checkout checks what they printed. No docker, no privileges. What the proof printed is
+    # kept as a failed check's output is, so the check reads it, and prints it when a check fails,
+    # whether the proof's container ended well or not.
+    let policyInputs = checkout.withExec(["just", "edge-policy-render", "/tmp/edge-policy"]).directory("/tmp/edge-policy")
+    let proof = Run(label: "", ctr: frr.withMountedDirectory("/work", policyInputs).withExec(["sh", "-c", `exec 2>&1; sh /work/proof.sh /work`])).outcome
+    let policyPrinted = if (proof.passed) { proof.output } else { proof.output + "\n== container\nended with an error\n" }
+    let edgePolicy: [Run!]! = if (checks.contains("edge-policy-check")) {
+      [Run(label: "edge-policy-check", ctr: checkout.withNewFile("/tmp/proof.out", policyPrinted).withExec(["bash", "-c", `exec 2>&1; just edge-policy-assert /tmp/proof.out`]))]
+    } else {
+      []
+    }
     let renovate: [Run!]! = if (checks.contains("renovate-check")) {
       [Run(label: "renovate-check", ctr: validator.withExec(["sh", "-c", "bash scripts/renovate-check 2>&1"]))]
     } else {
@@ -255,7 +278,7 @@ type Group {
     } else {
       [Run(label: "", ctr: checkout.withExec(["bash", "-c", `exec 2>&1; just "$@"`, "bash"] + others))]
     }
-    let done = (renovate + vector + justRun).{{ label, outcome }}
+    let done = (renovate + vector + edgePolicy + justRun).{{ label, outcome }}
     Outcome(
       passed: done.all { _.outcome.passed },
       output: done.map { r => if (r.label == "") { r.outcome.output } else { r.label + ":\n" + r.outcome.output } }.join("\n"),

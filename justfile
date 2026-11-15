@@ -67,7 +67,7 @@ check-conflict-markers:
 scenarios-check:
     scripts/scenarios-check
 
-# Run the bats tests, except those tagged hermetic: they run just ci, which needs a container runtime. A shard such as 2/3 runs the second of three parts of the test files, split by their number of tests
+# Run the bats tests, except those tagged hermetic, which run just ci and need a container runtime, and those tagged namespace, which need unprivileged user namespaces (just edge-forward-check). A shard such as 2/3 runs the second of three parts of the test files, split by their number of tests
 [script]
 test shard='1/1':
     set -o pipefail
@@ -99,7 +99,7 @@ test shard='1/1':
     if ((cpus > 1)) && { command -v flock || command -v shlock; } > /dev/null; then
       jobs=(--jobs "$cpus" --no-parallelize-across-files)
     fi
-    bats "${jobs[@]}" --filter-tags '!hermetic' "${files[@]}"
+    bats "${jobs[@]}" --filter-tags '!hermetic,!namespace' "${files[@]}"
 
 # Run the bats tests that run just ci
 test-hermetic:
@@ -110,7 +110,7 @@ checks: static tests-1 tests-2 tests-3
 
 # The groups of checks are the dependencies of checks, and each group's checks its own dependencies: just ci runs every group side by side in containers of its own, and CI runs each as a job of its own. A check, with whatever it depends on, belongs to one group only, or it would run twice.
 # The checks other than the bats tests, the cheapest and most basic first
-static: tools-check check-literals check-commit-literals check-conflict-markers cluster-secrets-check lint renovate-check renovate-pins scenarios-check infra-check talos-check kubernetes-check render-check kubernetes-validate vector-check secrets-scan
+static: tools-check check-literals check-commit-literals check-conflict-markers cluster-secrets-check lint renovate-check renovate-pins edge-policy-check scenarios-check infra-check talos-check kubernetes-check render-check kubernetes-validate vector-check secrets-scan
 
 # The first of three parts of the bats tests
 tests-1: (test '1/3')
@@ -122,7 +122,7 @@ tests-2: (test '2/3')
 tests-3: (test '3/3')
 
 # Without a terminal, as in CI, Dagger's default progress is a line every 30 seconds; plain prints every step and each check's output as it happens.
-# Run the checks inside containers built from the pins, as CI does: every group side by side, or only the group named, such as just ci tests-2; renovate-check's validator and vector-check's Vector each in its own image, the other checks in a container with the tools pinned in mise.toml, the tools image versions.yaml records when it was built for these pins
+# Run the checks inside containers built from the pins, as CI does: every group side by side, or only the group named, such as just ci tests-2; renovate-check's validator, vector-check's Vector and edge-policy-check's FRR each in its own image, the other checks in a container with the tools pinned in mise.toml, the tools image versions.yaml records when it was built for these pins
 [script]
 ci group='':
     set -o pipefail
@@ -131,7 +131,7 @@ ci group='':
     tools=$(scripts/tools-image ci-args)
     mapfile -t tools <<< "$tools"
     if [[ -t 2 ]]; then progress=auto; else progress=plain; fi
-    dagger api call --progress="$progress" ci checks --base="$base" --renovate-image='{{ renovate_image }}' --vector-image='{{ vector_image }}' "${tools[@]}" --group={{ quote(group) }}
+    dagger api call --progress="$progress" ci checks --base="$base" --renovate-image='{{ renovate_image }}' --vector-image='{{ vector_image }}' --frr-image='{{ frr_image }}' "${tools[@]}" --group={{ quote(group) }}
 
 # Print the groups of checks as a JSON list, the CI workflow's matrix of jobs; in a GitHub Actions step, also set it as the step's output groups
 [script]
@@ -214,6 +214,25 @@ vector-check:
     scripts/vector-config "$dir"
     docker run --rm --network none -e VECTOR_SELF_NODE_NAME=node-1 -v "$dir":/check:ro {{ vector_image }} validate --no-environment /check/vector.yaml
     docker run --rm --network none -e VECTOR_SELF_NODE_NAME=node-1 -v "$dir":/check:ro {{ vector_image }} test /check/vector.yaml /check/tests.yaml
+
+# The image of FRR for edge-policy-check here and for just ci's Dagger module: the upstream build, 10.3.4, of the release the edge routers' Debian image packages, 10.3-3+deb13u1 in trixie, the same release with Debian's patches. Its own build takes 64 equal-cost paths, Debian's 256, which the proof's configuration allows for; it moves with the edge image's release, by hand
+frr_image := "quay.io/frrouting/frr:10.3.4@sha256:c8790a83db3cb105c0823f76afe55de5c9f77d968fb1ebd28174a8ddd49b989c"
+
+# Prove the edge routers' routing policy with a real BGP speaker: the FRR configuration the edge stack renders runs in FRR's container with only its loopback and offered prefixes by speakers of the cluster's AS, another AS and an address outside the listen range, and only the /32 inside the service range may end up in its table, with nothing advertised back; needs docker, as renovate-check does, which just ci's module does not
+edge-policy-check:
+    scripts/edge-policy-check {{ frr_image }}
+
+# Write what the edge routing policy's proof runs into a directory: the edge stack's rendered FRR configuration, and the proof's script and speaker template; needs tofu only
+edge-policy-render dir:
+    scripts/edge-policy-render {{ quote(dir) }}
+
+# Check what the edge routing policy's proof printed, a file: pass or FAIL per item
+edge-policy-assert file:
+    scripts/edge-policy-assert {{ quote(file) }}
+
+# Prove what an edge forwards: its rendered rules loaded with nft into network namespaces of a user namespace, beside a client, a worker and the cloud's router, where a translated connection, new or established, leaves only through a worker's route; needs unprivileged user namespaces, nft and socat, which the CI containers do not allow, so it runs on a developer's machine and skips, saying why, where they are missing
+edge-forward-check:
+    bats --filter-tags namespace tests/edge-forward.bats
 
 # Publish kubernetes/ as the signed artifact Flux follows, and move its main tag; runs only in the publish workflow
 publish:
