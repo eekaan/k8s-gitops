@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
-# Proves features/kubernetes-layout.feature; each test carries its scenario's title.
-# Needs kustomize, yq and flux on PATH (the versions pinned for the repository).
+# Proves features/kubernetes-layout.feature; each test carries its scenario's title. The scenarios
+# of schemas and images are scripts/kubernetes-validate's, proved in tests/kubernetes-validate.bats.
+# Needs kustomize, yq, jq and flux on PATH (the versions pinned for the repository).
 
 setup() {
   REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
@@ -180,6 +181,16 @@ fails_naming() {
     { echo "no failure message naming '$1' that says '$2'"; return 1; }
 }
 
+# refused_line FILE WORDS...: a failure message that names FILE and every one of WORDS.
+refused_line() {
+  local file=$1 line word
+  shift
+  line=$(grep -F -- "$file" <<<"$output") || { echo "no failure message names $file"; return 1; }
+  for word in "$@"; do
+    grep -qF -- "$word" <<<"$line" || { echo "no message that names $file says '$word':"; echo "$line"; return 1; }
+  done
+}
+
 # build_root: copies the repository's kubernetes/ tree, adds the child Kustomizations given on
 # stdin to the cluster's overlay, and builds the root the way Flux does into $BUILD.
 build_root() {
@@ -229,6 +240,8 @@ unchanged() {
   run "$CHECK"
   echo "$output"
   [ "$status" -eq 0 ]
+  # The dependencies of the enabled applications were checked.
+  [[ $output =~ ([1-9][0-9]*)\ dependencies ]]
 
   local built=0 dir
   while read -r dir; do
@@ -970,4 +983,269 @@ EOF2
       APP: hello"
   check
   [ "$status" -eq 0 ]
+}
+
+# overlay_add PATH: lists PATH, a ks.yaml, in the fixture cluster's overlay.
+overlay_add() {
+  yq -i ".resources += [\"$1\"]" "$TREE/kubernetes/apps/overlays/test/kustomization.yaml"
+}
+
+# world_app DEPENDENCY: the enabled application world, which names DEPENDENCY in dependsOn.
+world_app() {
+  app kubernetes/apps/base/demo/world world demo world ./apps/base/demo/world/app
+  yq -i ".spec.dependsOn = [{\"name\": \"$1\"}]" "$TREE/kubernetes/apps/base/demo/world/ks.yaml"
+  overlay_add ../../base/demo/world/ks.yaml
+}
+
+@test "A dependency on an application the cluster does not enable is refused" {
+  valid_tree
+  # later is in apps/base, as every application is, but the overlay does not list it.
+  app kubernetes/apps/base/demo/later later demo later ./apps/base/demo/later/app
+  yq -i '.spec.wait = true' "$TREE/kubernetes/apps/base/demo/later/ks.yaml"
+  world_app later
+
+  check
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/world/ks.yaml "Kustomization world names later" apps/overlays/test "does not enable"
+
+  overlay_add ../../base/demo/later/ks.yaml
+  check
+  [ "$status" -eq 0 ]
+}
+
+@test "A dependency whose target does not wait is refused" {
+  valid_tree
+  world_app hello
+
+  check
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/world/ks.yaml "Kustomization world names hello" apps/overlays/test "does not wait" \
+    "wait: true" healthChecks healthCheckExprs
+
+  # wait, or health checks, make the target Ready only once what it applies is.
+  yq -i '.spec.wait = true' "$TREE/kubernetes/apps/base/demo/hello/ks.yaml"
+  check
+  [ "$status" -eq 0 ]
+  yq -i 'del(.spec.wait) | .spec.healthChecks = [{"apiVersion": "v1", "kind": "ConfigMap", "name": "hello", "namespace": "demo"}]' \
+    "$TREE/kubernetes/apps/base/demo/hello/ks.yaml"
+  check
+  [ "$status" -eq 0 ]
+
+  # So do health check expressions.
+  yq -i 'del(.spec.healthChecks) | .spec.healthCheckExprs = [{"apiVersion": "v1", "kind": "ConfigMap", "current": "true"}]' \
+    "$TREE/kubernetes/apps/base/demo/hello/ks.yaml"
+  check
+  [ "$status" -eq 0 ]
+
+  # What counts is the built Kustomization, after the root's patches, and not the text of its file.
+  yq -i 'del(.spec.healthCheckExprs)' "$TREE/kubernetes/apps/base/demo/hello/ks.yaml"
+  check
+  [ "$status" -ne 0 ]
+  yq -i '.spec.patches = [{"target": {"group": "kustomize.toolkit.fluxcd.io", "kind": "Kustomization"},
+    "patch": "apiVersion: kustomize.toolkit.fluxcd.io/v1\nkind: Kustomization\nmetadata:\n  name: _\nspec:\n  wait: true\n"}]' \
+    "$TREE/kubernetes/clusters/test/ks.yaml"
+  check
+  [ "$status" -eq 0 ]
+
+  # The Kustomizations the cluster directory builds, which the root does not patch, are read as
+  # dependents and as targets: Flux's own instance names the operator, which does not wait.
+  yq -i '.spec.dependsOn = [{"name": "flux-operator"}]' "$TREE/kubernetes/clusters/test/flux-system/flux-instance/ks.yaml"
+  check
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/clusters/test/flux-system/flux-instance/ks.yaml "Kustomization flux-instance names flux-operator" "does not wait"
+  yq -i '.spec.wait = true' "$TREE/kubernetes/clusters/test/flux-system/flux-operator/ks.yaml"
+  check
+  [ "$status" -eq 0 ]
+  # An application of the overlay may name one of them too.
+  yq -i '.spec.dependsOn += [{"name": "flux-operator"}]' "$TREE/kubernetes/apps/base/demo/world/ks.yaml"
+  check
+  [ "$status" -eq 0 ]
+}
+
+@test "A manifest an application keeps where the artifact does not carry it is refused" {
+  valid_tree
+  local dir=kubernetes/apps/base/demo/hello
+  # Outside app/, which is all the artifact generator publishes.
+  put "$dir/extra.yaml" <<'EOF'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: extra
+EOF
+  # In app/, but nothing lists it, so the build never reads it.
+  put "$dir/app/unlisted.yaml" <<'EOF'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unlisted
+EOF
+  # Not manifests: values a generator reads, and notes.
+  put "$dir/app/values.yaml" <<'EOF'
+---
+replicas: 1
+EOF
+  put "$dir/notes.yaml" <<'EOF'
+---
+- a list that is not an object
+EOF
+
+  check
+  [ "$status" -ne 0 ]
+  refused_line "$dir/extra.yaml" "outside app/"
+  refused_line "$dir/app/unlisted.yaml" "kustomization.yaml"
+  [[ $output != *"$dir/app/values.yaml"* ]]
+  [[ $output != *"$dir/notes.yaml"* ]]
+
+  # What the build reaches counts, however it reaches it: a directory, a patch, a generator's file.
+  rm "${TREE:?}/$dir/extra.yaml" "${TREE:?}/$dir/notes.yaml" "${TREE:?}/$dir/app/unlisted.yaml"
+  put "$dir/app/sub/kustomization.yaml" <<'EOF'
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - listed.yaml
+EOF
+  put "$dir/app/sub/listed.yaml" <<'EOF'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: listed
+EOF
+  put "$dir/app/patch.yaml" <<'EOF'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hello
+data:
+  patched: "yes"
+EOF
+  # A manifest a generator carries as data, as a ConfigMap carries a dashboard.
+  put "$dir/app/embedded.yaml" <<'EOF'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: embedded
+EOF
+  yq -i '.resources += ["sub"] | .patches = [{"path": "patch.yaml"}]
+    | .configMapGenerator = [{"name": "generated", "files": ["values.yaml", "manifest.yaml=embedded.yaml"]}]' "$TREE/$dir/app/kustomization.yaml"
+  check
+  [ "$status" -eq 0 ]
+}
+
+@test "a jq that fails on the built Kustomizations fails the check, naming what it could not read" {
+  valid_tree
+  local shims="$BATS_TEST_TMPDIR/shims" real
+  real="$(command -v jq)"
+  mkdir -p "$shims"
+  # A jq that fails on the program named in FAIL_ON and runs every other program.
+  cat >"$shims/jq" <<EOF
+#!/usr/bin/env bash
+if [[ -n \${FAIL_ON:-} && "\$*" == *"\$FAIL_ON"* ]]; then
+  echo "jq: error: simulated" >&2
+  exit 5
+fi
+exec "$real" "\$@"
+EOF
+  chmod +x "$shims/jq"
+
+  run env PATH="$shims:$PATH" "$CHECK" "$TREE"
+  echo "$output"
+  [ "$status" -eq 0 ]
+
+  run env FAIL_ON='"missing"' PATH="$shims:$PATH" "$CHECK" "$TREE"
+  echo "$output"
+  fails_naming kubernetes/clusters/test/ks.yaml "dependsOn were not checked"
+}
+
+@test "a ks.yaml value holding a '|' or a line break is read as one value" {
+  valid_tree
+  local ks=kubernetes/apps/base/demo/hello/ks.yaml
+  yq -i '.spec.targetNamespace = "de|mo"' "$TREE/$ks"
+
+  check
+  [ "$status" -ne 0 ]
+  refused_line "$ks" "targetNamespace must be demo"
+  # The fields after it are read as what they are.
+  [[ $output != *"sourceRef.name must be"* ]]
+  [[ $output != *"spec.path must be"* ]]
+  [[ $output != *"is overwritten by the root"* ]]
+
+  # A line break does not start a document of its own.
+  yq -i '.spec.targetNamespace = "demo\n0|kustomize.toolkit.fluxcd.io/v1|Kustomization|phantom|elsewhere"' "$TREE/$ks"
+  check
+  [ "$status" -ne 0 ]
+  # One failure, the value shown whole on its line, and no document made of what follows the break.
+  refused_line "$ks" "targetNamespace must be demo" "found demo?0?kustomize.toolkit.fluxcd.io/v1?Kustomization?phantom?elsewhere"
+  [[ $output == *"kubernetes-check: 1 failure(s)"* ]]
+}
+
+# kept_builds DIR: the records of DIR/builds as kubernetes-validate reads them, one per line as
+# FILE, LABEL and APP_DIR, each shown with printf %q.
+kept_builds() {
+  local file label app_dir
+  while IFS= read -r -d '' file && IFS= read -r -d '' label && IFS= read -r -d '' app_dir; do
+    printf '%q %q %q\n' "$file" "$label" "$app_dir"
+  done <"$1/builds"
+}
+
+@test "the builds the check keeps hold each build once and whole, whatever its path holds" {
+  valid_tree
+  # A cluster directory whose name holds a '|' and a line break: the root still builds, from the
+  # overlay its ks.yaml names, under a label that holds both.
+  local cluster=$'te|st\nx'
+  mv "$TREE/kubernetes/clusters/test" "$TREE/kubernetes/clusters/$cluster"
+  local keep="$BATS_TEST_TMPDIR/keep"
+  mkdir "$keep"
+
+  run env KUBERNETES_CHECK_BUILT="$keep" "$CHECK" "$TREE"
+  echo "$output"
+  local records files
+  records="$(kept_builds "$keep")"
+  echo "$records"
+  files="$(find "$keep" -name '*.yaml' | wc -l)"
+  [ "$files" -gt 0 ]
+  [ "$(wc -l <<<"$records")" -eq "$files" ]
+  # Every record names a file the check wrote, and the root's carries its label whole.
+  local file label app_dir
+  while IFS= read -r -d '' file && IFS= read -r -d '' label && IFS= read -r -d '' app_dir; do
+    [[ $file =~ ^[0-9]+\.yaml$ ]]
+    [ -f "$keep/$file" ]
+  done <"$keep/builds"
+  grep -qxF "$(printf '%q' "kubernetes/clusters/$cluster/ks.yaml")" <<<"$(cut -d' ' -f2 <<<"$records")"
+}
+
+@test "the check keeps its builds only in an empty directory that exists" {
+  valid_tree
+  run env KUBERNETES_CHECK_BUILT="$BATS_TEST_TMPDIR/missing" "$CHECK" "$TREE"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"KUBERNETES_CHECK_BUILT"*"empty directory"* ]]
+
+  local keep="$BATS_TEST_TMPDIR/keep"
+  mkdir "$keep"
+  run env KUBERNETES_CHECK_BUILT="$keep" "$CHECK" "$TREE"
+  [ "$status" -eq 0 ]
+  # A directory used once already holds builds; a second run into it would add to them.
+  run env KUBERNETES_CHECK_BUILT="$keep" "$CHECK" "$TREE"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"KUBERNETES_CHECK_BUILT"*"empty directory"* ]]
+}
+
+@test "a root whose path leaves the tree fails the check, and nothing outside it is built" {
+  valid_tree
+  # A directory beside the tree, which a path of ../../outside from the root reaches.
+  mkdir -p "$BATS_TEST_TMPDIR/outside"
+  printf '%s\n' '---' 'apiVersion: v1' 'kind: ConfigMap' 'metadata:' '  name: outside' >"$BATS_TEST_TMPDIR/outside/configmap.yaml"
+  yq -i '.spec.path = "../../outside"' "$TREE/kubernetes/clusters/test/ks.yaml"
+
+  check
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/clusters/test/ks.yaml "spec.path" "a directory of the tree"
+  [[ $output != *"built kubernetes/clusters/test/ks.yaml"* ]]
 }

@@ -1,0 +1,31 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {"type": "string"},
+    "kind": {"type": "string"},
+    "metadata": {"type": "object"},
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "components": {"type": "array"},
+        "decryption": {"type": "object"},
+        "deletionPolicy": {"type": "string"},
+        "dependsOn": {"type": "array"},
+        "healthCheckExprs": {"type": "array"},
+        "healthChecks": {"type": "array"},
+        "interval": {"type": "string"},
+        "patches": {"type": "array"},
+        "path": {"type": "string"},
+        "postBuild": {"type": "object"},
+        "prune": {"type": "boolean"},
+        "retryInterval": {"type": "string"},
+        "sourceRef": {"type": "object"},
+        "targetNamespace": {"type": "string"},
+        "timeout": {"type": "string"},
+        "wait": {"type": "boolean"}
+      }
+    }
+  }
+}

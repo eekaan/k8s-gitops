@@ -1,0 +1,18 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {"type": "string"},
+    "kind": {"type": "string"},
+    "metadata": {"type": "object"},
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "replicas": {"type": "integer"},
+        "selector": {"type": "object"},
+        "template": {"type": "object"}
+      }
+    }
+  }
+}

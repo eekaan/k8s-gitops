@@ -1,0 +1,7 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hello
+data:
+  domain: "${CLUSTER_DOMAIN}"

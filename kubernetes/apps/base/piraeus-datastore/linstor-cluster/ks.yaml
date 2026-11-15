@@ -8,6 +8,27 @@ metadata:
 spec:
   path: ./apps/base/piraeus-datastore/linstor-cluster/app
   targetNamespace: piraeus-datastore
+  # Ready only once what it applies is, so an application that names this one in dependsOn starts
+  # after the storage cluster, its classes and its snapshot class exist, LINSTOR's controller
+  # answers and every satellite configuration has been applied. The operator (v2.12.1,
+  # pkg/conditions and internal/controller/linstorcluster_controller.go) sets on the LinstorCluster
+  # Applied, Available (its controller answers) and Configured, and on each
+  # LinstorSatelliteConfiguration Applied once it has applied it to the satellites it selects, each
+  # with the object's generation; it sets no Ready condition and no status.observedGeneration, so
+  # kstatus would count both Current at once. Available is not taken as failed when false: the
+  # controller does not answer for its first minutes, and the check waits for it to.
+  wait: true
+  healthCheckExprs:
+    - apiVersion: piraeus.io/v1
+      kind: LinstorCluster
+      current: >-
+        has(status.conditions) && status.conditions.exists(e, e.type == 'Available' && e.status == 'True'
+        && e.observedGeneration == metadata.generation)
+    - apiVersion: piraeus.io/v1
+      kind: LinstorSatelliteConfiguration
+      current: >-
+        has(status.conditions) && status.conditions.exists(e, e.type == 'Applied' && e.status == 'True'
+        && e.observedGeneration == metadata.generation)
   # The operator's resource definitions and the webhooks that validate its objects, and every
   # StorageClass of LINSTOR's driver, come with piraeus-operator; the VolumeSnapshotClass's
   # definition comes with snapshot-controller.
