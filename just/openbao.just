@@ -17,3 +17,13 @@ bao-root *args:
 [positional-arguments]
 bao-seal-restore *args:
     scripts/bao-seal-restore "$@"
+
+# Seed the key the volume backups read, once for each store: make the master password, keep it in a new file outside the repository encrypted to the Talos age key's recipient and opened again before the store holds anything, then create the key with the cluster's S3 key (CLUSTER_S3_ACCESS_KEY_ID and CLUSTER_S3_SECRET_ACCESS_KEY), as just bao-seed-volsync <file> [cluster]; refuses a store that holds the key, writes the master an existing file holds to a store that holds none, as after an interruption or on a rebuilt cluster, where <file> must be the existing custody file and never a new one, and with --rotate-s3 replaces only the S3 key (just bao-seed-volsync --rotate-s3 [cluster]); prints neither the master nor the key
+[positional-arguments]
+bao-seed-volsync *args:
+    scripts/bao-seed-volsync "$@"
+
+# Run one command, such as restic, with one application's volume repository, its derived password and the cluster's S3 key in its environment, from the custody file bao-seed-volsync wrote, as just bao-volsync-password <file> <app> <command> [argument...]; prints no password
+[positional-arguments]
+bao-volsync-password *args:
+    scripts/bao-volsync-password "$@"

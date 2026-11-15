@@ -16,6 +16,9 @@ step it failed in ([cluster.md](../cluster.md#recipes)).
   bundle, so it has the same certificate authorities and keys: the credentials in a kubeconfig or
   talosconfig made for the old cluster are valid for the new one, and a copy kept anywhere works
   again once it is pointed at the new addresses.
+- The volume backups' master, in the custody file `just bao-seed-volsync` wrote, which the operator
+  holds: it opens the repositories in the VolSync bucket, and the rebuilt cluster's store is seeded
+  from it ([Building it again](#building-it-again)).
 - Talos images that [image-replacement.md](image-replacement.md) left in the image service: no stack
   holds them, so no destroy removes them. They are removed by hand as that runbook says; once the
   nodes are destroyed, no volume made from them is left.
@@ -28,6 +31,9 @@ step it failed in ([cluster.md](../cluster.md#recipes)).
   written again by the build.
 - The contents of LINSTOR's volumes: they are on the workers' data volumes, which go with the
   cluster stack ([cluster.md](../cluster.md#the-workers-data-device)).
+- OpenBao's store and every key in it, as its data is on LINSTOR's volumes: the rebuilt cluster's
+  OpenBao initialises anew, with a new seal key, and the recovery keys in the old store's custody
+  file open nothing in it.
 - Everything in etcd: every object of the Kubernetes API, the Secrets made in the cluster among
   them. Flux applies again what Git holds. A snapshot restores into the same nodes only
   ([etcd-restore.md](etcd-restore.md#when-to-restore)), so the steps there do not bring it into
@@ -35,10 +41,15 @@ step it failed in ([cluster.md](../cluster.md#recipes)).
 
 ## Taking it down
 
-1. **`just cluster-snapshot`**, when the cluster's state matters: an etcd snapshot, encrypted, in
+1. **The volume backups' custody file**, while the cluster still runs: check that it holds the
+   master the store holds, as [volume-backups.md](volume-backups.md#opening-a-repository-by-hand)
+   compares the hash of an application's derived password with that of its Secret. Once the
+   cluster is gone, the file is the only copy of the master, and nothing compares it any more.
+
+2. **`just cluster-snapshot`**, when the cluster's state matters: an etcd snapshot, encrypted, in
    the etcd bucket, which the rebuild leaves alone.
 
-2. **`just cluster-destroy`**. It asks the cluster, through its kubeconfig, for every Service of
+3. **`just cluster-destroy`**. It asks the cluster, through its kubeconfig, for every Service of
    type LoadBalancer and every PersistentVolume of a CSI driver. A cloud load balancer or volume
    behind one is the cluster's own and not in the cluster stack's state: its destroy would leave it
    in the cloud, where it keeps the network from being deleted. A Service whose addresses all come
@@ -54,7 +65,7 @@ step it failed in ([cluster.md](../cluster.md#recipes)).
    typed back, and removes the cluster's `talman.yaml`, talosconfig and kubeconfig. The plumbing
    stack, the secrets bundle and the buckets stay.
 
-3. **`just infra-destroy sto2/plumbing`**, when the network and the Talos image should go too. The
+4. **`just infra-destroy sto2/plumbing`**, when the network and the Talos image should go too. The
    CI host, the `sto2/ci` stack, is on the plumbing stack's network, and the network cannot be
    removed while its port and floating IP exist. So first, in the state of every other stack, the
    recipe looks for a resource, and while it finds one it plans and destroys nothing, naming the
@@ -81,3 +92,11 @@ step it failed in ([cluster.md](../cluster.md#recipes)).
    ([cluster.md](../cluster.md#recipes)). It fails when any probe failed; `--tolerate <seconds>`
    accepts a gap up to that long, when the operator judges one acceptable. Run `just cluster-check`
    again afterwards: every check passes.
+
+4. Once Flux has applied OpenBao, the operator's steps of its
+   [first initialisation](openbao.md#first-initialisation): `just bao-recovery <file>` with a new
+   file, and every key the store held written again. For the volume backups that is
+   `just bao-seed-volsync <file>` with the existing custody file of their master, never a new one:
+   until it runs, every application's restore waits, its claim Pending, and a new master would open
+   none of the repositories
+   ([volume-backups.md](volume-backups.md#the-stores-key-is-lost-and-the-file-is-kept)).
