@@ -12,3 +12,12 @@ resources:
   requests:
     cpu: 10m
     memory: 128Mi
+
+# The chart sets no seccomp profile and leaves privilege escalation to the image; the restricted Pod
+# Security level requires the runtime's profile and escalation off. Its other defaults already meet
+# the rest: a non-root user, no capabilities and a read-only root filesystem.
+podSecurityContext:
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false

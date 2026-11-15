@@ -1,0 +1,45 @@
+# The fields of Kubernetes' PodSecurityContext and SecurityContext types, and of the types they
+# hold as maps, at the cluster's Kubernetes minor, v1.37: k8s.io/api v0.37.1, core/v1/types.go
+# (PodSecurityContext, SecurityContext, SELinuxOptions, WindowsSecurityContextOptions,
+# SeccompProfile, AppArmorProfile, Capabilities), from which the API reference is generated. One
+# dotted path per line, relative to the security context; list items are not paths.
+#
+# A chart passes a values map named securityContext, podSecurityContext or containerSecurityContext
+# through to a pod or container spec, so the tests that hold an application's values keys to those
+# the chart's values define also accept, directly under such a map, a path listed here: a field the
+# chart's values leave unset, never a misspelt one. The list is the union of the pod's and the
+# container's types, and which of the two a map is goes unchecked, so a container-only field under a
+# pod's map, or the reverse, passes here; the Pod Security check on the render catches one that
+# matters, as the pod it leaves fails the level.
+allowPrivilegeEscalation
+appArmorProfile
+appArmorProfile.localhostProfile
+appArmorProfile.type
+capabilities
+capabilities.add
+capabilities.drop
+fsGroup
+fsGroupChangePolicy
+privileged
+procMount
+readOnlyRootFilesystem
+runAsGroup
+runAsNonRoot
+runAsUser
+seLinuxChangePolicy
+seLinuxOptions
+seLinuxOptions.level
+seLinuxOptions.role
+seLinuxOptions.type
+seLinuxOptions.user
+seccompProfile
+seccompProfile.localhostProfile
+seccompProfile.type
+supplementalGroups
+supplementalGroupsPolicy
+sysctls
+windowsOptions
+windowsOptions.gmsaCredentialSpec
+windowsOptions.gmsaCredentialSpecName
+windowsOptions.hostProcess
+windowsOptions.runAsUserName

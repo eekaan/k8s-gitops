@@ -58,6 +58,13 @@ spec:
       replicas: 1
       template:
         spec:
+          # The pod's part of what the restricted Pod Security level requires; the operator merges
+          # it into the Deployment it makes, whose grafana container it already runs as a non-root
+          # user with no privilege escalation and no capabilities.
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
           containers:
             # The image's entrypoint, run.sh, installs the plugins in GF_INSTALL_PLUGINS, which the
             # operator sets from the datasource's plugins (grafanadatasource-victoria-logs.yaml), with

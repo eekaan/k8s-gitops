@@ -1,0 +1,32 @@
+---
+apiVersion: v1
+kind: ReplicationController
+metadata:
+  name: pool
+  namespace: web
+spec:
+  selector:
+    app: pool
+  template:
+    metadata:
+      labels:
+        app: pool
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: prepare
+          image: registry.example.invalid/site-prepare:1
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+      containers:
+        - name: site
+          image: registry.example.invalid/site:1
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]

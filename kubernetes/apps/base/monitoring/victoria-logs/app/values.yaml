@@ -32,3 +32,8 @@ server:
       memory: 256Mi
   serviceMonitor:
     enabled: true
+  # The chart's pod context sets no seccomp profile; the runtime's default is what the restricted
+  # Pod Security level requires. Its other defaults already meet the rest.
+  podSecurityContext:
+    seccompProfile:
+      type: RuntimeDefault

@@ -1,0 +1,273 @@
+#!/usr/bin/env bash
+# Checks the Pod Security level of every namespace the cluster's overlay deploys into against the
+# pod templates the render holds, offline. Every Pod, Deployment, StatefulSet, DaemonSet,
+# ReplicaSet, ReplicationController, Job and CronJob in RENDER (scripts/render's output) is
+# evaluated against the baseline and restricted levels with Kyverno's podSecurity rule, which runs
+# Kyverno's fork of the Pod Security admission policy library; Helm hooks and tests are objects of
+# the render like the rest. The pods of the Flux install the FluxInstance configures (the pinned
+# Flux CLI's manifests for the components it names) are evaluated too, with the FluxInstance's
+# patches applied, and its Namespace patches declare flux-system's labels.
+#
+# What must hold, and what fails the check naming the namespace and the workload:
+#   - every namespace an application targets, or an object of the render is in, has a Namespace
+#     manifest with a pod-security.kubernetes.io/enforce label;
+#   - every workload passes restricted, unless EXCEPTIONS lists it with the level it needs and the
+#     reason, and the level listed is the one it needs; EXCEPTIONS also lists, with created-by
+#     naming the custom resource in the render, the pods an operator creates at run time, which the
+#     render does not hold and this check cannot evaluate;
+#   - a namespace enforces the strictest level its workloads pass: restricted, or the least strict
+#     level the exceptions list for it;
+#   - a namespace that enforces less than restricted audits and warns at restricted, at the
+#     Kubernetes minor of VERSIONS (versions.yaml);
+#   - that minor is not newer than the one mise.toml records the pinned evaluator as covering.
+# The levels are ordered by what they permit: privileged, baseline, restricted.
+#
+# Prints, for each namespace, "NAMESPACE LEVEL N workloads, M listed"; with --list, also one line
+# "NAMESPACE/KIND/NAME LEVEL" for each workload, LEVEL being the strictest it passes.
+#
+# Usage: scripts/pod-security-check [--list] RENDER EXCEPTIONS VERSIONS
+set -euo pipefail
+shopt -s nullglob
+
+# flux, kustomize and kyverno are run with none of the secrets a recipe's environment may hold.
+# shellcheck source=scripts/lib/tools.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/tools.sh"
+
+die() {
+  echo "pod-security-check: $*" >&2
+  exit 1
+}
+
+list=0
+if [[ ${1:-} == --list ]]; then
+  list=1
+  shift
+fi
+(($# == 3)) || die "usage: scripts/pod-security-check [--list] RENDER EXCEPTIONS VERSIONS"
+render=$1 exceptions=$2 versions=$3
+[[ -d $render ]] || die "$render is not a directory"
+[[ -f $exceptions ]] || die "no exceptions file $exceptions"
+[[ -f $versions ]] || die "no versions file $versions"
+for tool in flux kustomize kyverno yq jq; do
+  type -P "$tool" >/dev/null || die "$tool not found on PATH"
+done
+
+# No kubeconfig and no in-cluster address: a tool that tried to reach a cluster fails instead.
+export KUBECONFIG=/dev/null
+unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+kube=$(yq '.kubernetes // ""' "$versions")
+[[ $kube =~ ^v?([0-9]+\.[0-9]+)\.[0-9]+$ ]] || die "$versions: kubernetes is not a version: $kube"
+minor=v${BASH_REMATCH[1]}
+
+# The evaluator's checks are those of one Kubernetes minor's library; mise.toml records, beside its
+# pin, the newest cluster minor whose checks were compared with it. A newer cluster runs checks
+# nobody compared, and admission could refuse pods this check passes.
+mise_toml=$(dirname "${BASH_SOURCE[0]}")/../mise.toml
+covered=$(sed -n 's/^# pod-security-evaluator-covers: *\(v[0-9][0-9]*\.[0-9][0-9]*\) *$/\1/p' "$mise_toml")
+[[ $covered =~ ^v[0-9]+\.[0-9]+$ ]] ||
+  die "$mise_toml has no line '# pod-security-evaluator-covers: vX.Y' beside the evaluator's pin"
+[[ $(printf '%s\n%s\n' "$minor" "$covered" | sort -V | tail -n 1) == "$covered" ]] ||
+  die "versions.yaml names Kubernetes $minor, newer than $covered, the newest minor the Pod Security evaluator pinned in mise.toml covers: compare its checks with that minor's, then update the record"
+
+files=()
+while IFS= read -r -d '' file; do
+  files+=("$file")
+done < <(find "$render" -type f -name '*.yaml' -print0 | sort -z)
+((${#files[@]} > 0)) || die "$render holds no rendered object"
+yq -N -o json -I0 'select(. != null)' "${files[@]}" >"$tmp/objects.jsonl" || die "$render: not YAML objects"
+
+# The Flux install a FluxInstance pins: the controllers it names from the pinned Flux CLI's
+# manifests, with the instance's own kustomize patches applied, as the operator applies them.
+n=0
+while IFS= read -r instance; do
+  [[ -n $instance ]] || continue
+  n=$((n + 1))
+  dir="$tmp/flux/$n"
+  mkdir -p "$dir"
+  flux_namespace=$(jq -r '.metadata.namespace // "flux-system"' <<<"$instance")
+  components=$(jq -r '(.spec.components // []) | join(",")' <<<"$instance")
+  args=(--export --namespace "$flux_namespace")
+  [[ -z $components ]] || args+=(--components "$components")
+  flux install "${args[@]}" >"$dir/flux.yaml" 2>"$dir/flux.err" ||
+    die "flux install --export failed for the FluxInstance: $(cat "$dir/flux.err")"
+  jq '{"apiVersion": "kustomize.config.k8s.io/v1beta1", "kind": "Kustomization", "resources": ["flux.yaml"],
+    "patches": (.spec.kustomize.patches // [])}' <<<"$instance" >"$dir/kustomization.yaml"
+  kustomize build "$dir" >"$dir/built.yaml" 2>"$dir/kustomize.err" ||
+    die "the FluxInstance's patches do not apply to the Flux install: $(cat "$dir/kustomize.err")"
+  yq -N -o json -I0 'select(. != null)' "$dir/built.yaml" |
+    jq -c '.' >>"$tmp/objects.jsonl"
+done < <(jq -c 'select(.kind == "FluxInstance" and ((.apiVersion // "") | test("^fluxcd\\.controlplane\\.io/")))' "$tmp/objects.jsonl")
+
+yq -o json -I0 '.' "$exceptions" >"$tmp/exceptions.json" || die "$exceptions: not YAML"
+
+workload_kinds='["Pod", "Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "ReplicationController", "Job", "CronJob"]'
+
+# The pod of each workload, as a Pod named after the workload, in the workload's namespace. A chart's
+# object without a namespace is installed into its release's namespace, which helm-controller's
+# labels name through the HelmRelease.
+jq -s -c --argjson workloadKinds "$workload_kinds" '
+  ([.[] | select(.kind == "HelmRelease") | {key: ((.metadata.namespace // "") + "/" + .metadata.name),
+     value: (.spec.targetNamespace // .metadata.namespace // "")}] | from_entries) as $releases
+  | .[]
+  | select(.kind as $k | $workloadKinds | index($k))
+  | (.metadata.labels // {}) as $labels
+  | (.metadata.namespace // $releases[($labels["helm.toolkit.fluxcd.io/namespace"] // "") + "/" + ($labels["helm.toolkit.fluxcd.io/name"] // "")] // "") as $ns
+  | (if .kind == "Pod" then {metadata: .metadata, spec: .spec}
+     elif .kind == "CronJob" then .spec.jobTemplate.spec.template
+     else .spec.template end) as $template
+  | {kind, name: .metadata.name, ns: $ns,
+     pod: {apiVersion: "v1", kind: "Pod",
+       metadata: ({name: (.kind + "/" + .metadata.name), namespace: $ns}
+         + (if $template.metadata.labels then {labels: $template.metadata.labels} else {} end)
+         + (if $template.metadata.annotations then {annotations: $template.metadata.annotations} else {} end)),
+       spec: $template.spec}}' "$tmp/objects.jsonl" >"$tmp/workloads.jsonl"
+jq -e 'select(.ns == "")' "$tmp/workloads.jsonl" >/dev/null &&
+  die "a workload has no namespace and no HelmRelease to take one from: $(jq -r 'select(.ns == "") | .kind + "/" + .name' "$tmp/workloads.jsonl" | paste -sd' ' -)"
+jq -e 'select(.pod.spec == null)' "$tmp/workloads.jsonl" >/dev/null &&
+  die "a workload has no pod template: $(jq -r 'select(.pod.spec == null) | .kind + "/" + .name' "$tmp/workloads.jsonl" | paste -sd' ' -)"
+
+# Each level's verdict on every pod, by Kyverno's podSecurity rule on the Pod kind.
+count=$(wc -l <"$tmp/workloads.jsonl")
+for level in baseline restricted; do
+  if ((count == 0)); then
+    echo '{"results": []}' >"$tmp/$level.json"
+    continue
+  fi
+  cat >"$tmp/$level-policy.yaml" <<EOF
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: $level
+spec:
+  validationFailureAction: Enforce
+  rules:
+    - name: $level
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      validate:
+        podSecurity:
+          level: $level
+          version: latest
+EOF
+  jq -c '.pod' "$tmp/workloads.jsonl" | yq -p json -o yaml '.' >"$tmp/pods.yaml"
+  # Kyverno exits 1 when a pod fails the level, which is a verdict; any other failure leaves no
+  # verdict on some pod, which the count below catches. It prints a deprecation warning for the
+  # policy type on standard output before the report, the one line that starts with a brace.
+  kyverno apply "$tmp/$level-policy.yaml" --resource "$tmp/pods.yaml" -p --output-format json \
+    >"$tmp/$level.out" 2>"$tmp/$level.err" || [[ $? -eq 1 ]] || die "kyverno failed on the $level level: $(cat "$tmp/$level.err")"
+  grep '^{' "$tmp/$level.out" >"$tmp/$level.json" || die "kyverno gave no report at the $level level: $(cat "$tmp/$level.out" "$tmp/$level.err")"
+  jq -e --argjson n "$count" '[.results[] | select(.result == "pass" or .result == "fail")] | length == $n' "$tmp/$level.json" >/dev/null ||
+    die "kyverno gave no verdict on every one of the $count pods at the $level level: $(cat "$tmp/$level.err")"
+done
+
+# The verdicts, and what each namespace must enforce, in one jq program: it prints the problems and,
+# when there are none, the report.
+jq -n -c --arg minor "$minor" --argjson workloadKinds "$workload_kinds" \
+  --slurpfile exceptions "$tmp/exceptions.json" \
+  --slurpfile baseline "$tmp/baseline.json" --slurpfile restricted "$tmp/restricted.json" \
+  --slurpfile workloads "$tmp/workloads.jsonl" --slurpfile objects "$tmp/objects.jsonl" '
+  {"privileged": 0, "baseline": 1, "restricted": 2} as $rank
+  | ["privileged", "baseline", "restricted"] as $levels
+  | def lbl($ns; $key): ($ns.metadata.labels // {})["pod-security.kubernetes.io/" + $key];
+  # The checks a pod fails, and what Kubernetes would say of each.
+  def verdicts($report): [$report.results[] | {key: (.resources[0].namespace + "/" + .resources[0].name),
+    value: {result, controls: (.properties.controls // ""),
+      detail: ((.message // "") | sub("^.*It violates PodSecurity \"[^\"]*\": "; "") | gsub("\\)\\(Forbidden reason: "; "; ")
+        | sub("^\\(Forbidden reason: "; "") | sub("\\)$"; ""))}}] | from_entries;
+  verdicts($baseline[0]) as $b | verdicts($restricted[0]) as $r
+  | [$workloads[] | (.ns + "/" + .kind + "/" + .name) as $id | $r[$id] as $rv | $b[$id] as $bv
+    | . + {id: $id, workload: (.kind + "/" + .name),
+        need: (if $rv.result == "pass" then "restricted" elif $bv.result == "pass" then "baseline" else "privileged" end),
+        fails: {restricted: $rv, baseline: $bv}}] as $ws
+  | ([$objects[] | select(.kind == "Namespace") | {key: .metadata.name, value: .}] | from_entries) as $declared
+  | [($exceptions[0].exceptions // [])[] | {ns: .namespace, workload: .workload, level: .level, reason: .reason, createdBy: .["created-by"]}] as $entries
+  | [$objects[] | .kind + "/" + .metadata.name] as $names
+  # The namespaces in play: those a workload or any other object is in, an application targets, an
+  # exception names, or a manifest declares. An object that is no workload may still be a custom
+  # resource whose operator makes pods, so its namespace counts. An object without a namespace is
+  # cluster-scoped or takes that of its release, which is a targetNamespace.
+  | ([$objects[] | select((.kind == "Kustomization" or .kind == "HelmRelease") and .spec.targetNamespace != null)
+      | {ns: .spec.targetNamespace, by: (.kind + "/" + .metadata.name)}]
+     + [$objects[] | select(.kind != "Namespace" and .metadata.namespace != null)
+      | {ns: .metadata.namespace, by: (.kind + "/" + .metadata.name)}]
+     + [$ws[] | {ns, by: .workload}]) as $uses
+  | ([$uses[].ns] + [$entries[].ns | select(. != null)] + [$declared | keys[]] | unique) as $namespaces
+  | [
+    # The exceptions file itself.
+    ($entries | to_entries[] | .key as $i | .value as $e
+      | ($e.ns // "") as $ens | ($e.workload // "") as $ew
+      | if $ens == "" or $ew == "" or ($e.level // "") == "" then
+          "exceptions entry \($i + 1): namespace, workload and level are all required"
+        elif ($e.reason // "" | gsub("\\s"; "")) == "" then
+          "exceptions entry \($ens): \($ew) has no reason"
+        elif ($e.level | IN("baseline", "privileged") | not) then
+          "exceptions entry \($ens): \($ew) lists the level \($e.level), which is not baseline or privileged"
+        elif $e.createdBy != null then
+          (if ($names | index($e.createdBy)) == null then
+             "exceptions entry \($ens): \($ew) is created by \($e.createdBy), which is not in the render"
+           elif ($e.createdBy | split("/")[0] | IN($workloadKinds[])) then
+             "exceptions entry \($ens): \($ew) is created by \($e.createdBy), a workload the check evaluates itself, not a custom resource"
+           else empty end)
+        else
+          ([$ws[] | select(.ns == $ens and .workload == $ew)] | first) as $w
+          | if $w == null then "the exceptions file lists \($ew) in \($ens), which the render does not hold"
+            elif $w.need == "restricted" then "the exceptions file lists \($ew) at \($e.level), but it passes restricted"
+            elif $rank[$e.level] > $rank[$w.need] then
+              "the exceptions file lists \($ew) at \($e.level), but it needs \($w.need): \($w.fails.baseline.controls)"
+            elif $rank[$e.level] < $rank[$w.need] then
+              "the exceptions file lists \($ew) at \($e.level), but it passes \($w.need)"
+            else empty end
+        end),
+    # A workload above restricted is listed.
+    ($ws[] | select(.need != "restricted") as $w
+      | select(([$entries[] | select(.ns == $w.ns and .workload == $w.workload and .createdBy == null)] | length) == 0)
+      | "\($w.ns): \($w.workload) needs \($w.need) (fails restricted: \($w.fails.restricted.controls)) and is not listed in the exceptions file with its reason"),
+    # Each namespace.
+    ($namespaces[] | . as $ns
+      | $declared[$ns] as $d | lbl($d; "enforce") as $enforce
+      | [$ws[] | select(.ns == $ns)] as $mine
+      | ([$entries[] | select(.ns == $ns and (.level | IN("baseline", "privileged"))) | $rank[.level]] | min // 2) as $requiredRank
+      | $levels[$requiredRank] as $required
+      | if $enforce == null then
+          "namespace \($ns) has no Namespace manifest with a pod-security.kubernetes.io/enforce label"
+          + ([$uses[] | select(.ns == $ns) | .by] | unique | if length > 0 then ", and \(join(", ")) is in it" else "" end)
+        elif $rank[$enforce] == null then
+          "namespace \($ns) enforces \($enforce), which is not privileged, baseline or restricted"
+        else
+          ([$mine[] | select($rank[.need] < $rank[$enforce])] as $over
+           | ($over[] | "namespace \($ns) enforces \($enforce), but \(.workload) fails it: \(.fails[$enforce].controls) (\(.fails[$enforce].detail))"),
+             (if $rank[$enforce] > $requiredRank and ($over | length) == 0 then
+                "namespace \($ns) enforces \($enforce), but the workloads the exceptions file lists for it need \($required)"
+              elif $rank[$enforce] < $requiredRank then
+                "namespace \($ns) enforces \($enforce), but could enforce \($required)"
+              else empty end)),
+          (if $rank[$enforce] < 2 then
+             (if lbl($d; "audit") != "restricted" or lbl($d; "warn") != "restricted" then
+                "namespace \($ns) enforces \($enforce) and must audit and warn at restricted: set pod-security.kubernetes.io/audit and /warn to restricted"
+              else empty end),
+             (if lbl($d; "audit-version") != $minor or lbl($d; "warn-version") != $minor then
+                "namespace \($ns) enforces \($enforce) and must pin audit and warn to the cluster minor: set pod-security.kubernetes.io/audit-version and /warn-version to \($minor)"
+              else empty end)
+           else empty end)
+        end)
+  ] as $errors
+  | {errors: $errors,
+     namespaces: [$namespaces[] | . as $ns | select($declared[$ns] != null)
+       | "\($ns) \(lbl($declared[$ns]; "enforce")) \([$ws[] | select(.ns == $ns)] | length) workloads, \([$entries[] | select(.ns == $ns)] | length) listed"],
+     workloads: [$ws | sort_by(.id)[] | "\(.id) \(.need)"]}' >"$tmp/result.json" || die "the evaluation failed"
+
+if [[ $(jq '.errors | length' "$tmp/result.json") -gt 0 ]]; then
+  jq -r '.errors | unique[] | "pod-security-check: " + .' "$tmp/result.json" >&2
+  exit 1
+fi
+jq -r '.namespaces[]' "$tmp/result.json"
+if ((list)); then
+  jq -r '.workloads[]' "$tmp/result.json"
+fi

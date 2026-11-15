@@ -47,6 +47,10 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
   side by side (a file whose tests share state runs them one at a time, and says why);
   `just test 2/3` runs the second of three parts of the test files, which are split by their number
   of tests.
+- `just pod-security-check` renders the tree, charts pulled from their public registries, and checks
+  that every namespace enforces the strictest Pod Security level its workloads pass
+  ([docs/kubernetes.md](docs/kubernetes.md#pod-security)); `tests/pod-security.bats` runs it as part
+  of the bats tests.
 - `just ci` runs the same groups through the Dagger module in `.dagger/modules/ci`, side by side,
   each in containers of its own: Renovate's validator in its own image, Vector in the log
   collector's image, the speakers of the edge routers' routing policy in FRR's image, every other

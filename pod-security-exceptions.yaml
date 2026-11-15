@@ -1,0 +1,73 @@
+---
+# The workloads that need a Pod Security level above restricted, and the namespaces that therefore
+# enforce a level below it. scripts/pod-security-check (just pod-security-check, and tests/pod-security.bats
+# for the tree) reads this file together with the render of kubernetes/; docs/kubernetes.md, Pod
+# Security, says what it requires.
+#
+# A namespace enforces restricted unless it has an entry here, and then the least strict level of its
+# entries. Every other pod of it that the render holds must pass restricted: the check evaluates the
+# rendered pod templates, Helm hooks and tests included, and the Flux install. A pod an operator
+# creates at run time is not in the render: one above restricted is an entry with created-by, and
+# any other asks for restricted through its custom resource (docs/kubernetes.md, Pod Security).
+# An entry has:
+#   namespace   the workload's namespace
+#   workload    Kind/name of the workload as the render holds it
+#   level       baseline or privileged: the strictest level the workload passes, which the check
+#               evaluates, so a level that is too high or too low fails it
+#   reason      a sentence: what the workload does that restricted refuses
+#   created-by  only for a pod an operator creates at run time, which the render does not hold: the
+#               Kind/name of the custom resource in the render that makes the operator create it.
+#               The check cannot evaluate such a pod; the level is taken as written.
+exceptions:
+  - namespace: kube-system
+    workload: DaemonSet/cilium
+    level: privileged
+    reason: the agent programs each node's networking, so it runs in the host's network namespace, on host ports and with host paths and added capabilities, and its init container is privileged
+  - namespace: kube-system
+    workload: DaemonSet/cilium-envoy
+    level: privileged
+    reason: the proxy runs in the host's network namespace, on a host port, with host paths and added capabilities
+  - namespace: kube-system
+    workload: Deployment/cilium-operator
+    level: privileged
+    reason: the operator reaches the API server through KubePrism on the node's loopback address, which only the host's network namespace has, so it keeps the chart's default operator.hostNetwork true and its host ports
+  - namespace: kube-system
+    workload: DaemonSet/spegel
+    level: privileged
+    reason: it reads and writes the container runtime's content store, socket and registry configuration through host paths
+  - namespace: kube-system
+    workload: DaemonSet/spegel-cleanup
+    level: privileged
+    reason: the hook removes the registry configuration Spegel wrote on each node, which it reaches through a host path
+  - namespace: kube-system
+    workload: Pod/spegel-cleanup-wait
+    level: baseline
+    reason: the hook pod takes the pod and container context of the Spegel DaemonSet, which runs as root to reach the container runtime's socket and registry configuration, so no value gives it the non-root user restricted requires
+  - namespace: monitoring
+    workload: DaemonSet/kube-prometheus-stack-prometheus-node-exporter
+    level: privileged
+    reason: it reads each node's metrics through the host's network and process namespaces and host paths
+  - namespace: monitoring
+    workload: DaemonSet/vector
+    level: privileged
+    reason: it reads each node's log files through a host path and keeps its buffers in another
+  - namespace: piraeus-datastore
+    workload: DaemonSet/linstor-satellite
+    created-by: LinstorCluster/linstorcluster
+    level: privileged
+    reason: the satellites manage each node's storage devices and the DRBD kernel module, so they run privileged, in the host's IPC namespace and with host paths
+  - namespace: piraeus-datastore
+    workload: DaemonSet/linstor-csi-node
+    created-by: LinstorCluster/linstorcluster
+    level: privileged
+    reason: the CSI node plugin mounts volumes on its node, so it runs privileged, in the host's network namespace and with host paths
+  - namespace: piraeus-datastore
+    workload: DaemonSet/linstor-csi-nfs-server
+    created-by: LinstorCluster/linstorcluster
+    level: privileged
+    reason: the NFS server mounts the DRBD devices of the volumes it exports, so it runs privileged and with host paths
+  - namespace: piraeus-datastore
+    workload: DaemonSet/ha-controller
+    created-by: LinstorCluster/linstorcluster
+    level: privileged
+    reason: the high-availability controller listens for the kernel's DRBD events on each node, and the operator's template runs it privileged for that
