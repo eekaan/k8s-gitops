@@ -5,6 +5,11 @@ kind: Kustomization
 metadata:
   name: linstor-cluster
   namespace: flux-system
+  labels:
+    # On a first install the storage controller can take longer than the root's default 3m to
+    # report Available, and the health check would fail every minute until it does; the long
+    # timeout, 10m, waits for it.
+    k8s-gitops/timeout: long
 spec:
   path: ./apps/base/piraeus-datastore/linstor-cluster/app
   targetNamespace: piraeus-datastore

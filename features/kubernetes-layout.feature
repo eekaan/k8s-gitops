@@ -26,6 +26,41 @@ Feature: Kubernetes tree layout
     When the kubernetes validation runs
     Then it exits non-zero and names the file, the object and the field, and prints how many objects of each kind without a schema it could not validate
 
+  Scenario: A definition whose name ends in a line break is refused, not skipped
+    Given an application with an object of a custom kind with a field no schema gives it, and a release whose chart renders a definition of that kind whose group, kind or version ends in a line break
+    When the kubernetes validation runs
+    Then it exits non-zero and names the definition and its file, where it would otherwise pass with the object counted as one without a schema
+
+  Scenario: A root path that leaves the tree through a link is refused
+    Given a root Kustomization whose spec.path is a link inside the tree to a directory outside it, by an absolute and by a relative path
+    When the kubernetes check runs
+    Then it exits non-zero, names the file and the rule, and builds nothing from outside the tree
+
+  Scenario: A tree from which a build would read outside it is refused, and nothing is built
+    Given trees in which a kustomization, a Component or an application's Kustomization names a file outside the tree by an absolute path, by a relative one that climbs out of it or through a link in the tree that leads out of it, or names a remote source, and one whose kustomization file is a link to one outside the tree
+    When the kubernetes check runs on each
+    Then it exits non-zero, names the file and the entry, builds nothing, and the file's content appears nowhere in its output
+
+  Scenario: Every field of a kustomization is one the checks read the paths of, accept or refuse
+    Given the fields of kustomize's and Flux's Kustomization types and of every type they hold, as the pinned kustomize and flux build with, and the fields the checks read of the documents no tool decodes
+    When the checks read a document that sets each by its own name, naming a file outside the tree where the field names a file
+    Then each field that names a file is refused for it, each field the checks refuse is refused, every other is accepted, a key a kustomization's type does not have is refused, and each list is that of the pinned tools' versions and of the checks
+
+  Scenario: A path that is not a plain relative path of the tree is refused, under every locale
+    Given kustomizations, a Flux Kustomization and a cluster's root that name, in every field that names a file, entries holding a letter outside ASCII, a control character, a tab or a space, an empty segment, a leading slash, dash or tilde, or an ASCII character other than letters, digits, ".", "_", "-" and "/"
+    When the checks read them in the C locale and in C.UTF-8
+    Then each entry is refused, naming the file, the field and the entry, each byte outside printable ASCII shown as \xHH
+
+  Scenario: The check's builds fetch nothing from another machine, whatever a kustomization names
+    Given a copy of the checks without the guard, and a kustomization that names a repository on github.com or a file over https
+    When the kubernetes check and the render run on each
+    Then each fails without running the caller's git or looking up a host: kustomize runs the check's own git, which refuses, and sends a request for a file to a closed port of the loopback
+
+  Scenario: A key that a tool reads under another spelling is refused, and nothing it names is read
+    Given trees in which a kustomization, an application's or a root's Flux Kustomization, a HelmRelease, the source it names or a FluxInstance holds, at each position a tool decodes, each field's name in other letter cases and with the characters encoding/json folds into s and k, naming a file outside the tree
+    When the kubernetes check, the render and the Pod Security check run on each that they read
+    Then each fails, naming the file and every such key, and the file's content appears nowhere in its output or in anything it keeps or writes
+
   Scenario: A manifest an application keeps where the artifact does not carry it is refused
     Given an application directory with a manifest beside ks.yaml, and one in app/ that no kustomization.yaml reaches
     When the kubernetes check runs
