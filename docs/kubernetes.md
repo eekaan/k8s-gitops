@@ -597,33 +597,41 @@ Three kinds of record are made smaller or left out before they are sent:
   deny and logs the denial as an AVC record with `permissive=1`, which names the process and the
   file; it then holds the permission as granted in its access vector cache, for that source
   context, target context and class, and logs the same denial again only once the cache no longer
-  holds it, as after the cache has made room for other entries or the policy is loaded again
+  holds it. The cache makes room once it holds more entries than its threshold, 512 by default, and
+  is emptied when the policy is loaded again, so where more pairs of contexts and classes are
+  checked than it holds, entries are dropped and their denials logged again
   ([`security/selinux/avc.c`](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/security/selinux/avc.c?h=v6.18.63)).
   [Talos's `auditd`](https://github.com/siderolabs/talos/blob/v1.14.6/internal/app/auditd/auditd.go)
   loads no audit rule, and writes as a line each record the kernel's audit subsystem sends it of
   the types 1100 to 2999 of
   [`include/uapi/linux/audit.h`](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/include/uapi/linux/audit.h?h=v6.18.63).
-  The kernel joins the `SYSCALL`, `CWD`, `PATH` (whose `nametype` is `PARENT`, `CREATE` and the
-  like), `PROCTITLE` and `EOE` records of the system call to the AVC record's event, as separate
-  lines that share its `msg=audit(<time>:<serial>)` id, only while a system call or task rule, such
-  as a watch on a path, is loaded
-  ([`kernel/auditsc.c`](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/kernel/auditsc.c?h=v6.18.63));
-  without one, the AVC record comes alone. The log store is itself a pod, whose claim is of the
-  default storage class, which sets no such mount option, so its writes can produce such records,
-  and a collector that shipped the audit log to the store would give the store records of its own
-  writes, whose storing can produce more: a loop that amplifies by construction, whatever its rate.
-  The collector therefore does not ship the audit log. Dropping only the AVC records with
-  `permissive=1` would drop the denials of every other process all the same, and once a rule adds
-  records to their events it would need a `reduce` transform keyed on that id, holding every open
-  event in memory until its `EOE` record or an expiry, where an event cut in two by a restart of the
-  collector would leave records that no longer say what they belong to. The drop costs the rest of
-  the file: the SELinux denials of every other process on the node, which show what enforcing mode
-  would deny before it is turned on; the line `audit backlog limit reached, some audit events may
-  have been lost`, which Talos's auditd writes when records were lost on their way to it; and any
-  other record the kernel sends it, such as `ANOM_ABEND` for a process that dumps core. They are
-  read on the node with Talos's documented `talosctl --nodes <node> logs auditd`, which no recipe
-  wraps; the repository's scripts run talosctl through `talman talosctl`. It reads the ring of about
-  1 MiB in which Talos keeps the service's last lines, so it shows no more than that;
+  An AVC record logged inside a system call, by a process started once auditing was enabled, makes
+  the kernel write that system call's records too when the call returns, with no audit rule needed
+  (`audit_log_start` in
+  [`kernel/audit.c`](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/kernel/audit.c?h=v6.18.63)
+  and `__audit_syscall_exit` in
+  [`kernel/auditsc.c`](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/kernel/auditsc.c?h=v6.18.63)):
+  `SYSCALL`, with `key=(null)` as no rule matched it; if the kernel collected file names for the
+  call, which with no rule loaded it does for the names looked up after the AVC record, `CWD` and a
+  `PATH` record for each name, with a `nametype` such as `PARENT` or `CREATE`; `PROCTITLE`; and
+  `EOE`. Each is a separate line that shares the AVC record's `msg=audit(<time>:<serial>)` id, so
+  one denied access can be several lines of the audit log. The log store is itself a pod, whose
+  claim is of the default storage class, which sets no such mount option, so its writes can produce
+  such records, and a collector that shipped the audit log to the store would give the store records
+  of its own writes, whose storing can produce more: a loop that amplifies by construction, whatever
+  its rate. The collector therefore does not ship the audit log. Dropping only the AVC records with
+  `permissive=1` would leave the other lines of their events in the store, so it would need a
+  `reduce` transform keyed on that id, holding every open event in memory until its `EOE` record or
+  an expiry, where an event cut in two by a restart of the collector would leave records that no
+  longer say what they belong to; and it would drop the denials of every other process all the
+  same. The drop costs the rest of the file: the SELinux denials of every other process on the
+  node, which show what enforcing mode would deny before it is turned on; the line `audit backlog
+  limit reached, some audit events may have been lost`, which Talos's auditd writes when records
+  were lost on their way to it; and any other record the kernel sends it, such as `ANOM_ABEND` for
+  a process that dumps core. They are read on the node with Talos's documented
+  `talosctl --nodes <node> logs auditd`, which no recipe wraps; the repository's scripts run
+  talosctl through `talman talosctl`. It reads the ring of about 1 MiB in which Talos keeps the
+  service's last lines, so it shows no more than that;
 - a pod's labels and annotations, its node's labels and its namespace's labels and annotations are
   not stored one field each: VictoriaLogs makes a field of every name, these maps hold dozens of
   names that say nothing about a line, and labels such as `pod-template-hash` and
