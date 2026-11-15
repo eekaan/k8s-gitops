@@ -36,5 +36,6 @@ docker	jdxcode/mise	^[0-9]+\.[0-9]+\.[0-9]+-debian$	registry tag list
 github-releases	kubernetes-sigs/gateway-api	^v[0-9]+\.[0-9]+\.[0-9]+$	release list
 github-releases	kubernetes-csi/external-snapshotter	^v[0-9]+\.[0-9]+\.[0-9]+$	release list
 github-releases	actions/runner	^[0-9]+\.[0-9]+\.[0-9]+$	release list, whose tags are v2.338.2: a pin without the v matches through Renovate's semver-coerced versioning, which writes the new value without it too
+github-releases	VictoriaMetrics/victorialogs-datasource	^[0-9]+\.[0-9]+\.[0-9]+$	release list, whose tags are v0.34.0: a pin without the v matches through Renovate's semver-coerced versioning, which writes the new value without it too, the form Grafana installs the plugin by and tests/logs.bats requires
 github-tags	siderolabs/talos	^v[0-9]+\.[0-9]+\.[0-9]+$	tag list
 github-tags	kubernetes/kubernetes	^v[0-9]+\.[0-9]+\.[0-9]+$	tag list
