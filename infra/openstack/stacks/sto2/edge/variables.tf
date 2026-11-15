@@ -91,20 +91,20 @@ variable "volume_type" {
 }
 
 variable "worker_first_host" {
-  description = "Host number on the node subnet of the first worker, where the cluster stack's nodes module starts numbering them, with the same default, which a test holds equal. The edges take BGP sessions from the block of max_workers host numbers that starts here, and from nowhere else."
+  description = "Host number on the node subnet of the first worker, where the cluster stack starts numbering them, from its own worker_first_host, whose default a test holds equal to this one; one TF_VAR_worker_first_host sets both. The edges take BGP sessions from the block of max_workers host numbers that starts here, and from nowhere else."
   type        = number
   default     = 20
 
   # Neither an edge's address nor one Neutron hands out from the DHCP pool may be in the block.
   validation {
-    condition = floor(var.worker_first_host) == var.worker_first_host && var.worker_first_host >= 2 && try(
+    condition = floor(var.worker_first_host) == var.worker_first_host && var.worker_first_host >= 20 && try(
       local.node_first + var.worker_first_host + var.max_workers - 1 < local.dhcp_first &&
       alltrue([
         for address in local.edge_numbers : address < local.node_first + var.worker_first_host ||
         address > local.node_first + var.worker_first_host + var.max_workers - 1
       ]),
     false)
-    error_message = "worker_first_host and max_workers must make a block of host numbers from 2 up, below the node subnet's DHCP pool, that holds neither edge's address."
+    error_message = "worker_first_host and max_workers must make a block of host numbers from 20 up, below the node subnet's DHCP pool, that holds neither edge's address: the numbers below 20 hold the gateway, the API load balancer, the CI host, the edges and the control planes."
   }
 }
 

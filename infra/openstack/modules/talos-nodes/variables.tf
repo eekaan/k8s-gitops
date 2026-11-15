@@ -50,13 +50,12 @@ variable "controlplane_count" {
 }
 
 variable "worker_first_host" {
-  description = "Host number on the node network of the first worker; each next worker takes the next number. The edge stack takes BGP sessions from the block of host numbers that starts here, so its own worker_first_host keeps the same default, which a test holds equal."
+  description = "Host number on the node network of the first worker; each next worker takes the next number. The cluster stack's worker_first_host gives it."
   type        = number
-  default     = 20
 
   validation {
-    condition     = floor(var.worker_first_host) == var.worker_first_host && var.worker_first_host >= 2
-    error_message = "worker_first_host must be a whole host number of the node network, 2 or more."
+    condition     = floor(var.worker_first_host) == var.worker_first_host && var.worker_first_host >= 20
+    error_message = "worker_first_host must be a whole host number of the node network, 20 or more."
   }
 }
 

@@ -893,9 +893,12 @@ EOF
 
 @test "the edge stack's workers' block starts where the cluster stack numbers its workers" {
   # The edges take BGP sessions from the block that starts at the first worker's host number; the
-  # cluster stack's nodes module puts its workers there.
+  # cluster stack puts its workers there, through its nodes module, which has no default of its own.
+  # One TF_VAR_worker_first_host sets both.
   edge=$(yq -p hcl -o json "$ROOT/infra/openstack/stacks/sto2/edge/variables.tf" | jq -c '.variable.worker_first_host.default')
-  cluster=$(yq -p hcl -o json "$ROOT/infra/openstack/modules/talos-nodes/variables.tf" | jq -c '.variable.worker_first_host.default')
+  cluster=$(yq -p hcl -o json "$ROOT/infra/openstack/stacks/sto2/cluster/variables.tf" | jq -c '.variable.worker_first_host.default')
+  module=$(yq -p hcl -o json "$ROOT/infra/openstack/modules/talos-nodes/variables.tf" | jq -c '.variable.worker_first_host.default')
+  [ "$module" = null ]
   [[ $cluster =~ ^[0-9]+$ ]]
   [ "$edge" = "$cluster" ]
 }

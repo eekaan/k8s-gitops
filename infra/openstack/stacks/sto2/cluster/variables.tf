@@ -141,9 +141,27 @@ variable "controlplane_count" {
 }
 
 variable "worker_count" {
-  description = "Number of workers."
+  description = "Number of workers, at host numbers worker_first_host and up of the node subnet, below its DHCP pool."
   type        = number
   default     = 3
+
+  # The same bound as the edge stack's block of workers: the host numbers below the DHCP pool, whose
+  # addresses Neutron hands to other ports.
+  validation {
+    condition     = floor(var.worker_count) == var.worker_count && var.worker_count >= 0 && try(local.node_first + var.worker_first_host + var.worker_count - 1 < local.pool_first, false)
+    error_message = "worker_count must be a whole number of workers whose host numbers, from worker_first_host up, stay below the node subnet's DHCP pool."
+  }
+}
+
+variable "worker_first_host" {
+  description = "Host number on the node subnet of the first worker; each next worker takes the next number. Host numbers below 20 hold the gateway, the API load balancer, the CI host, the edge routers and the control planes. The edge stack takes BGP sessions from the block that starts here, from its own worker_first_host, whose default a test holds equal to this one; one TF_VAR_worker_first_host sets both."
+  type        = number
+  default     = 20
+
+  validation {
+    condition     = floor(var.worker_first_host) == var.worker_first_host && var.worker_first_host >= 20
+    error_message = "worker_first_host must be a whole host number of the node subnet, 20 or more."
+  }
 }
 
 variable "worker_data_volume_size" {

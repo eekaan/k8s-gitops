@@ -564,6 +564,18 @@ run "_a_workers_block_that_holds_an_edge_is_rejected" {
   expect_failures = [var.worker_first_host]
 }
 
+# Host numbers below 20 hold the gateway, the load balancer, the CI host, the edges and the control
+# planes, none of which may open a session.
+run "_a_first_worker_host_below_20_is_rejected" {
+  command = plan
+
+  variables {
+    worker_first_host = 19
+  }
+
+  expect_failures = [var.worker_first_host]
+}
+
 run "_a_public_port_that_is_not_a_port_is_rejected" {
   command = plan
 
