@@ -156,16 +156,16 @@ customConfig:
         source: |
           !(.talos_service == "kernel" && match(string(.message) ?? "", r'^[a-z0-9]+:\s*[a-z]+: \[[^\]]+\]: audit(d)?(\[\d+\])?: '))
     # The log of Talos's auditd service, the audit records of the kernel's audit subsystem, is
-    # dropped whole, every record type of it, and counted as drop_audit's are. Talos
-    # runs SELinux in permissive mode, so nothing is denied and every access the policy would deny
-    # is logged as an AVC record with permissive=1 and the SYSCALL, PATH and other records of its
-    # event. A pod that writes to a volume whose filesystem carries no labels causes one for every
-    # file it creates or writes, and the store is such a pod: shipping the log would make every
-    # batch the store writes produce records for it to store. An event's records are separate
-    # lines, so dropping only the denials' events would need a reduce transform holding every open
-    # event until its EOE record or an expiry, and an event cut by a restart would leave records
-    # that no longer say what they belong to. What else the file holds stays readable on the node
-    # with talosctl logs auditd.
+    # dropped whole, every record type of it, and counted as drop_audit's are. Talos runs SELinux in
+    # permissive mode, so nothing is denied and every access the policy would deny is logged as an
+    # AVC record with permissive=1 and the SYSCALL, PATH and other records of its event. A pod that
+    # writes to a volume whose filesystem carries no labels causes one for every file it creates or
+    # writes, and the store is such a pod: shipping the log would make every batch the store writes
+    # produce records for it to store. An event's records are separate lines, so dropping only the
+    # denials' events would need a reduce transform holding every open event until its EOE record
+    # or an expiry, and an event cut by a restart would leave records that no longer say what they
+    # belong to. What else the file holds stays readable with talosctl logs auditd for as long as
+    # Talos's ring and rotation keep it.
     drop_auditd_log:
       type: filter
       inputs:

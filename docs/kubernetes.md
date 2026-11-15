@@ -466,21 +466,24 @@ Three kinds of record are made smaller or left out before they are sent:
 - the audit log of the node, the log of Talos's `auditd` service, `/var/log/auditd.log` and its
   rotated file, is dropped whole, every record type of it, by the filter transform
   `drop_auditd_log`, counted the same way as the series with `component_id="drop_auditd_log"`.
-  Talos runs SELinux in permissive mode, which [its documentation](https://docs.siderolabs.com/talos/v1.12/security/selinux)
-  gives as the default because some CNI and CSI solutions and extensions are incompatible with
-  enforcing, so nothing is denied and every access the policy would deny is written to the audit
-  log as an AVC record, with `permissive=1`, together with the `SYSCALL`, `PATH`, `PROCTITLE` and
-  `EOE` records of the same audit event, record types the kernel defines in
+  Talos runs SELinux in permissive mode, which
+  [its documentation](https://docs.siderolabs.com/talos/v1.14/security/selinux) gives as the
+  default because some CNI and CSI solutions and extensions are incompatible with enforcing, so
+  nothing is denied and every access the policy would deny is written to the audit log as an AVC
+  record, with `permissive=1`, together with the `SYSCALL`, `CWD`, `PATH`, `PROCTITLE` and `EOE`
+  records of the same audit event, record types the kernel defines in
   [`include/uapi/linux/audit.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/audit.h).
-  The records of one event are separate lines that share an `msg=audit(<time>:<serial>)` id. A pod that writes to a
-  volume whose filesystem carries no SELinux labels causes such an event for every file it creates
-  or writes, and the log store is such a pod, so a store that received the audit records of its own
-  writes would amplify them: storing them writes more. The collector therefore does not ship them.
-  Dropping only the denials' events would need a `reduce` transform keyed on that id, holding every
-  open event in memory until its `EOE` record or an expiry, and an event cut in two by a restart of
-  the collector would leave records that no longer say what they belong to; dropping the file costs
-  what else it holds, which stays on the node and is read with `talosctl --nodes <node> logs auditd`
-  (through `talman talosctl`, as the repository's scripts run it; no recipe reads it);
+  The records of one event are separate lines that share an `msg=audit(<time>:<serial>)` id. A pod
+  that writes to a volume whose filesystem carries no SELinux labels causes such an event for every
+  file it creates or writes, and the log store is such a pod, so a store that received the audit
+  records of its own writes would amplify them: storing them writes more. The collector therefore
+  does not ship them. Dropping only the denials' events would need a `reduce` transform keyed on
+  that id, holding every open event in memory until its `EOE` record or an expiry, and an event cut
+  in two by a restart of the collector would leave records that no longer say what they belong to.
+  Dropping the file costs what else it holds, which is read with
+  `talosctl --nodes <node> logs auditd` (through `talman talosctl`, as the repository's scripts
+  run it; no recipe reads it) only as long as Talos's ring of about 1 MiB and its rotation of the
+  files keep it, which on a node that logs this much is not long;
 - a pod's labels and annotations, its node's labels and its namespace's labels and annotations are
   not stored one field each: VictoriaLogs makes a field of every name, these maps hold dozens of
   names that say nothing about a line, and labels such as `pod-template-hash` and
@@ -520,8 +523,9 @@ without Secret values. The collector does not ship it: its file source's pattern
 and `/var/log/*.log.1`, match files at the top of `/var/log` only, and its pod-log source reads only
 `/var/log/pods`. The node's own audit log, which every node writes at the top, as
 `/var/log/auditd.log`, matches the patterns and is dropped by `drop_auditd_log` above. What keeps
-the API server's audit log out of the store is this reviewed configuration, which `tests/logs.bats` matches against Talos's layout of `/var/log`; who can read it
-through the collector is whoever may run commands in the pods of `monitoring`.
+the API server's audit log out of the store is this reviewed configuration, which `tests/logs.bats`
+matches against Talos's layout of `/var/log`; who can read it through the collector is whoever
+may run commands in the pods of `monitoring`.
 
 The collector also mounts `/var/lib/vector`, where it keeps its place in each file and a disk buffer
 of 256 MiB. It runs as root, as Talos and the container runtime write their log files as root with
@@ -589,10 +593,11 @@ Reading the logs, with the cluster's kubeconfig:
 checks each of these. `just vector-check` renders the collector's configuration with
 `scripts/vector-config` and has Vector itself, in the image the collector runs, validate it and run
 its unit tests, `tests/vector/talos-lines.yaml`, which hold a line of each format above, a kernel
-audit line, the records of one event of the node's audit log and a pod's record with many labels, and many of its node's. Vector's unit tests cannot see a
-sink, so `tests/logs.bats` checks that each source reaches a sink along one path only, the store's
-through the transforms the unit tests run, and that each scenario's unit test starts at the first
-transform on its path and watches the last. `just logs` runs in `tests/logs.bats` against a
+audit line, the records of one event of the node's audit log and a pod's record with many labels,
+and many of its node's. Vector's unit tests cannot see a sink, so `tests/logs.bats` checks that
+each source reaches a sink along one path only, the store's through the transforms the unit tests
+run, and that each scenario's unit test starts at the first transform on its path and watches the
+last, whichever transform that is. `just logs` runs in `tests/logs.bats` against a
 recording kubectl shaped like kubectl v1.37's output. The image
 is `vector_image` in the justfile, pinned by the digest of its image index under a
 `# renovate: datasource=docker depName=…` comment: Renovate's custom manager for the justfile moves
