@@ -23,8 +23,9 @@
 #     dependency Renovate reads from that action's inputs (known_inputs below) or as
 #     "<action> input <key>", which no extraction holds; a matrix value as "matrix <key>"; any other
 #     by its key. On the tree today every such value is a mise-action input.
-#   - a tag: or version: value with a version in kubernetes/, or one of a key ending in -version
-#     such as a label's, in block or flow style: the chart of a HelmRelease, the URL of an
+#   - a value with a version in kubernetes/ of a key that is tag or version or ends in -version,
+#     _version, .version or /version, such as a label's, in block or flow style: the chart of a
+#     HelmRelease, the URL of an
 #     OCIRepository, the name of a GitRepository (flux); the chart of a kustomization's helmCharts
 #     entry (kustomize); in a values file or a HelmRelease's values, the image of a map under a key
 #     ending in "image" by its registry and repository, or the image a key ending in "image" names
@@ -40,8 +41,10 @@
 # It does not see a version in prose or in another comment, one assembled from parts, an image with
 # neither a tag nor a digest, one with a tag and no registry host under another key than image: or
 # imageName:, a kustomization's newTag:, a digest in a key of its own (digest: sha256:...), an action
-# named by a URL, a file under tests/, or a second untracked pin of a name that its file already has
-# extracted; a pin of any of those forms is listed by hand where it matters, or not at all.
+# named by a URL, a file under tests/, a release codename in a script (such as the Debian release a
+# first-boot script installs from), which that script's own tests hold, or a second untracked pin of
+# a name that its file already has extracted; a pin of any of those forms is listed by hand where it
+# matters, or not at all.
 #
 # A pin is covered when .renovate/extracted.tsv holds its name for its file: a versions.yaml key in
 # the key column, a pin under a custom manager's comment with the key of its line, any other in the
@@ -234,8 +237,9 @@ for key in "${!input_version[@]}"; do
   [[ -z ${held[$key]-} && -n ${stuck_in[$dep]-} ]] && held[$key]=alone$'\t'${stuck_in[$dep]# }
 done
 
-# A tag: or version: value with a version's shape under kubernetes/, or one of a key ending in
-# -version such as a label's, in block or flow style, named as the manager that reads it names it: the chart of a HelmRelease, the URL of an OCIRepository, the
+# A value with a version's shape under kubernetes/ of a key that is tag or version or ends in
+# -version, _version, .version or /version, such as a label's, in block or flow style, named as the
+# manager that reads it names it: the chart of a HelmRelease, the URL of an OCIRepository, the
 # name of a GitRepository (flux), the chart of a kustomization's helmCharts (kustomize); in a values
 # file or a HelmRelease's values (helm-values, which flux applies to those), the image of a map
 # under a key ending in "image" that has a repository, by its registry and repository, of which the

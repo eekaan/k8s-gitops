@@ -221,12 +221,16 @@ EOF
   {
     printf '%s\t%s\t%s\t%s\n' kubernetes/apps/base/openbao/openbao/app/values.yaml ghcr.io/example-org/sidecar 'no datasource' 'by hand'
     printf '%s\t%s\t%s\t%s\n' kubernetes/apps/base/openbao/openbao/app/values.yaml tag 'no datasource' 'by hand'
+    # A record that the check finds on a comment line of its own may be listed, unlike other comment text.
+    printf '%s\t%s\t%s\t%s\n' kubernetes/added-record.yaml example-templates 'read by hand' 'by hand'
   } >> "$WORK/.renovate/by-hand.tsv"
-  total=$(($(wc -l < "$WORK/.renovate/by-hand.tsv") - 2))
+  printf '%s\n' 'apiVersion: v1' 'kind: ConfigMap' '# example-templates: v1.2.3' 'data: {}' > "$WORK/kubernetes/added-record.yaml"
+  total=$(($(wc -l < "$WORK/.renovate/by-hand.tsv") - 3))
   run "$WORK/scripts/check-renovate-pins"
   [ "$status" -eq 1 ]
   grep -q "^.renovate/by-hand.tsv:$((total + 1)): ghcr.io/example-org/sidecar in kubernetes/apps/base/openbao/openbao/app/values.yaml is extracted by Renovate's helm-values manager" <<< "$output"
   grep -q "^.renovate/by-hand.tsv:$((total + 2)): tag in kubernetes/apps/base/openbao/openbao/app/values.yaml is moved with ghcr.io/example-org/sidecar, which Renovate extracts there" <<< "$output"
+  [ "$(grep -c -e "^.renovate/by-hand.tsv:$((total + 3)):" -e '^kubernetes/added-record.yaml:' <<< "$output")" -eq 0 ]
   local i=0
   for workflow in ci publish render-comment tools-image; do
     grep -q "^.renovate/by-hand.tsv:${mise_entries[i]}: jdx/mise in .github/workflows/$workflow.yaml is extracted by Renovate's github-actions manager" <<< "$output"

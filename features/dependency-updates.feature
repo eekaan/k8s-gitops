@@ -52,10 +52,11 @@ Feature: Dependency updates
 
   @test
   Scenario: A listed pin that a manager now extracts is refused
-    Given .renovate/by-hand.tsv lists a pin that .renovate/extracted.tsv holds in a form Renovate can move, a checksum or a tag that moves with an extracted pin, or one that is not in its file as a value, only in a comment
+    Given .renovate/by-hand.tsv lists a pin that .renovate/extracted.tsv holds in a form Renovate can move, a checksum or a tag that moves with an extracted pin, or a name that its file holds only in ordinary comment text
     When the check runs
     Then it exits 1
     And it names the entry's line in .renovate/by-hand.tsv
+    And an entry for a "# name: <version>" record that the check finds on a comment line of its own is not refused
 
   @test
   Scenario: A custom-manager pin whose value cannot match its datasource's tag form is refused

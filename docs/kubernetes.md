@@ -280,7 +280,9 @@ level is declared in the tree, never left to the API server's default.
   request that moves the cluster to a new minor fails it. Whoever moves the minor compares that
   minor's checks in `k8s.io/pod-security-admission` with the evaluator's: when they are no
   stricter, the record moves to the new minor in the same pull request; when they are stricter,
-  the minor waits for an evaluator that applies them.
+  the minor waits for an evaluator that applies them. The same pull request reads
+  `tests/fixtures/security-context-fields` again from that minor's `k8s.io/api`, as nothing fails
+  while it is stale (`.renovate/by-hand.tsv`).
 - **Pods the render does not hold.** An operator creates these at run time from a custom
   resource, and the check cannot evaluate them. Where the resource has the fields, it sets the
   security context `restricted` requires, and `tests/pod-security.bats` requires those fields in
