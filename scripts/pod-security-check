@@ -6,7 +6,8 @@
 # Kyverno's fork of the Pod Security admission policy library; Helm hooks and tests are objects of
 # the render like the rest. The pods of the Flux install the FluxInstance configures (the pinned
 # Flux CLI's manifests for the components it names) are evaluated too, with the FluxInstance's
-# patches applied, and its Namespace patches declare flux-system's labels.
+# patches applied, and its Namespace patches declare flux-system's labels. A patch with more than a
+# patch and its target, such as a path kustomize would read or fetch, is refused.
 #
 # What must hold, and what fails the check naming the namespace and the workload:
 #   - every namespace an application targets, or an object of the render is in, has a Namespace
@@ -89,6 +90,13 @@ while IFS= read -r instance; do
   dir="$tmp/flux/$n"
   mkdir -p "$dir"
   flux_namespace=$(jq -r '.metadata.namespace // "flux-system"' <<<"$instance")
+  # A patch the operator applies is a patch and its target, all its type holds; kustomize would
+  # read a path a patch names, or fetch it.
+  jq -e '(.spec.kustomize.patches // []) | type == "array"' <<<"$instance" >/dev/null ||
+    die "FluxInstance $(jq -r '"\(.metadata.namespace // "flux-system")/\(.metadata.name)" | gsub("[[:cntrl:]]"; "?")' <<<"$instance"): its patches are not a list"
+  while IFS= read -r i; do
+    die "FluxInstance $(jq -r '"\(.metadata.namespace // "flux-system")/\(.metadata.name)" | gsub("[[:cntrl:]]"; "?")' <<<"$instance"): its patch $i holds more than a patch and its target, which is all the operator applies"
+  done < <(jq -r '.spec.kustomize.patches // [] | to_entries[] | select((.value | type) != "object" or (.value | keys - ["patch", "target"] | length > 0)) | .key + 1' <<<"$instance")
   components=$(jq -r '(.spec.components // []) | join(",")' <<<"$instance")
   args=(--export --namespace "$flux_namespace")
   [[ -z $components ]] || args+=(--components "$components")

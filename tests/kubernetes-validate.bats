@@ -328,6 +328,28 @@ EOF
   [[ $output != *"kubernetes-validate: passed"* ]]
 }
 
+@test "a tree from which a build would read outside it is not validated, and nothing of what it names appears" {
+  # kubernetes-check runs first and refuses the tree before anything is built; nothing is rendered.
+  local marker="marker-outside-the-tree-$RANDOM$RANDOM"
+  mkdir -p "$BATS_TEST_TMPDIR/outside"
+  printf '%s\n' '---' 'apiVersion: v1' 'kind: ConfigMap' 'metadata:' '  name: outside' 'data:' "  marker: $marker" \
+    >"$BATS_TEST_TMPDIR/outside/marker.yaml"
+  P="$BATS_TEST_TMPDIR/outside/marker.yaml" yq -i '.configMapGenerator += [{"name": "leak", "files": ["leak=" + strenv(P)]}]' \
+    "$TREE/kubernetes/apps/base/demo/hello/app/kustomization.yaml"
+  validate
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/hello/app/kustomization.yaml "leak=$BATS_TEST_TMPDIR/outside/marker.yaml"
+  fails_naming scripts/kubernetes-check "nothing was validated"
+  [[ $output != *"$marker"* ]]
+}
+
+@test "the check runs by a relative path on a tree elsewhere" {
+  run bash -c 'cd "$1" && scripts/kubernetes-validate "$2"' bash "$REPO" "$TREE"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *"kubernetes-validate: passed"* ]]
+}
+
 # schemas_ref_manager: the custom manager of .renovate/managers.json5 that reads a git ref from
 # versions.yaml, as JSON (the file is JSON5 with comments, which YAML reads once they are dropped).
 schemas_ref_manager() {

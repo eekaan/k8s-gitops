@@ -49,7 +49,7 @@ built() {
   yq ea 'select(fileIndex == 0) as $vars | select(fileIndex == 1 and . != null)
     | .spec.postBuild.substitute = $vars' "$vars" "$TREE/kubernetes/apps/base/$ns/$app/ks.yaml" >"$ks"
   BUILT="$BATS_TEST_TMPDIR/$app-built.yaml"
-  # flux build reads only paths below the working directory.
+  # Built from the tree's parent, with paths from there, as scripts/kubernetes-check builds.
   (cd "$TREE" && flux build kustomization "$app" --path "./kubernetes/apps/base/$ns/$app/app" \
     --kustomization-file "$ks" --dry-run --strict-substitute) >"$BUILT"
 }

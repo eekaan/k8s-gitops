@@ -36,6 +36,16 @@ Feature: Kubernetes tree layout
     When the kubernetes check runs
     Then it exits non-zero, names the file and the rule, and builds nothing from outside the tree
 
+  Scenario: A tree from which a build would read outside it is refused, and nothing is built
+    Given trees in which a kustomization, a Component or an application's Kustomization names a file outside the tree by an absolute path, by a relative one that climbs out of it or through a link in the tree that leads out of it, or names a remote source, and one whose kustomization file is a link to one outside the tree
+    When the kubernetes check runs on each
+    Then it exits non-zero, names the file and the entry, builds nothing, and the file's content appears nowhere in its output
+
+  Scenario: Every field of a kustomization is one the checks read the paths of, accept or refuse
+    Given the fields of kustomize's Kustomization type and of the types it holds that name files, as the pinned kustomize and the kustomize the pinned flux builds with define them
+    When the checks read a kustomization that sets each, naming a file outside the tree where the field names a file
+    Then each field that names a file is refused for it, each other field is accepted or refused as listed, a field the type does not have is refused, and the list is that of the pinned tools' versions
+
   Scenario: A manifest an application keeps where the artifact does not carry it is refused
     Given an application directory with a manifest beside ks.yaml, and one in app/ that no kustomization.yaml reaches
     When the kubernetes check runs

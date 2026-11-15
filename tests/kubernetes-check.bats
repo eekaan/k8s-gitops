@@ -191,11 +191,44 @@ refused_line() {
   done
 }
 
+# outside_marker: a ConfigMap beside the fixture tree, at OUTSIDE, whose data holds MARKER, a text
+# nothing else holds: a build that read the file shows MARKER in what it yields. CLIMB names the
+# same file by a path that climbs out of any directory: twenty ../ and then the path from /.
+outside_marker() {
+  MARKER="marker-outside-the-tree-$RANDOM$RANDOM"
+  OUTSIDE="$BATS_TEST_TMPDIR/outside/marker.yaml"
+  mkdir -p "${OUTSIDE%/*}"
+  printf '%s\n' '---' 'apiVersion: v1' 'kind: ConfigMap' 'metadata:' '  name: outside' 'data:' "  marker: $MARKER" >"$OUTSIDE"
+  CLIMB="$(printf '../%.0s' {1..20})${OUTSIDE#/}"
+}
+
+# reads_outside FILE ENTRY: the check, run on the fixture tree with a directory to keep its builds
+# in, refuses the tree before it builds anything: it fails, a message names FILE and ENTRY, no
+# build is kept, and MARKER is nowhere in its output.
+reads_outside() {
+  local keep="$BATS_TEST_TMPDIR/keep"
+  rm -rf "$keep"
+  mkdir "$keep"
+  run env KUBERNETES_CHECK_BUILT="$keep" "$CHECK" "$TREE"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  refused_line "$1" "$2"
+  [[ $output != *"$MARKER"* ]]
+  [[ $output != *"built "* ]]
+  [ -z "$(find "$keep" -mindepth 1 -print -quit)" ]
+}
+
+# fresh_tree: the valid fixture tree, made anew.
+fresh_tree() {
+  rm -rf "$TREE"
+  valid_tree
+}
+
 # build_root: copies the repository's kubernetes/ tree, adds the child Kustomizations given on
 # stdin to the cluster's overlay, and builds the root the way Flux does into $BUILD.
 build_root() {
   cp -R "$REPO/kubernetes" "$BATS_TEST_TMPDIR/"
-  # flux build only reads paths at or below the working directory.
+  # Built from the copy's parent, with paths from there, as the check builds.
   cd "$BATS_TEST_TMPDIR" || return 1
   local root="kubernetes/clusters/lab-sto2/ks.yaml" overlay
   overlay="kubernetes/$(yq '.spec.path' "$root")"
@@ -1268,5 +1301,158 @@ kept_builds() {
       refused_line kubernetes/clusters/test/ks.yaml "spec.path" "through a link"
       [[ $output != *"built kubernetes/clusters/test/ks.yaml"* ]]
     done
+  done
+}
+
+@test "A tree from which a build would read outside it is refused, and nothing is built" {
+  outside_marker
+  local app=kubernetes/apps/base/demo/hello/app expression entry
+  # A generator's file, a resource, a patch and an env file, each by an absolute path and by a path
+  # that climbs out of the tree.
+  for expression in '.configMapGenerator += [{"name": "leak", "files": ["leak=" + strenv(P)]}]' \
+    '.resources += [strenv(P)]' '.patches += [{"path": strenv(P)}]' \
+    '.secretGenerator += [{"name": "leak", "envs": [strenv(P)]}]'; do
+    for entry in "$OUTSIDE" "$CLIMB"; do
+      fresh_tree
+      P="$entry" yq -i "$expression" "$TREE/$app/kustomization.yaml"
+      reads_outside "$app/kustomization.yaml" "$entry"
+    done
+  done
+
+  # The resource of the demonstration, which flux build reads from the tree's working directory.
+  fresh_tree
+  entry="$(realpath -m --relative-to="$TREE/$app" "$OUTSIDE")"
+  P="$entry" yq -i '.resources += [strenv(P)]' "$TREE/$app/kustomization.yaml"
+  reads_outside "$app/kustomization.yaml" "$entry"
+
+  # A generator's file that is a link in the tree to the file outside: the link and the entry are
+  # each refused.
+  fresh_tree
+  ln -s "$OUTSIDE" "$TREE/$app/linked.yaml"
+  yq -i '.configMapGenerator += [{"name": "leak", "files": ["leak=linked.yaml"]}]' "$TREE/$app/kustomization.yaml"
+  reads_outside "$app/kustomization.yaml" "leak=linked.yaml"
+  refused_line "$app/linked.yaml" "link"
+
+  # A kustomization file that is itself a link to one outside the tree, which names the file.
+  fresh_tree
+  printf '%s\n' 'apiVersion: kustomize.config.k8s.io/v1beta1' 'kind: Kustomization' 'resources:' "  - $OUTSIDE" \
+    >"$BATS_TEST_TMPDIR/outside/kustomization.yaml"
+  rm "$TREE/$app/kustomization.yaml"
+  ln -s "$BATS_TEST_TMPDIR/outside/kustomization.yaml" "$TREE/$app/kustomization.yaml"
+  reads_outside "$app/kustomization.yaml" "link"
+
+  # A Component that names it, which the application takes.
+  fresh_tree
+  put kubernetes/components/leaky/kustomization.yaml <<EOF
+---
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+configMapGenerator:
+  - name: leak
+    files:
+      - leak=$OUTSIDE
+EOF
+  yq -i '.components += ["../../../../../components/leaky"]' "$TREE/$app/kustomization.yaml"
+  reads_outside kubernetes/components/leaky/kustomization.yaml "leak=$OUTSIDE"
+
+  # A remote source, which the check does not fetch.
+  for entry in https://example.invalid/leak.yaml git::https://example.invalid/leak.git file:///leak; do
+    fresh_tree
+    P="$entry" yq -i '.resources += [strenv(P)]' "$TREE/$app/kustomization.yaml"
+    reads_outside "$app/kustomization.yaml" "$entry"
+  done
+
+  # The application's Kustomization takes a component outside the tree.
+  fresh_tree
+  mkdir -p "$BATS_TEST_TMPDIR/outside/component"
+  printf '%s\n' 'apiVersion: kustomize.config.k8s.io/v1alpha1' 'kind: Component' 'resources:' '  - ../marker.yaml' \
+    >"$BATS_TEST_TMPDIR/outside/component/kustomization.yaml"
+  entry="$(printf '../%.0s' {1..20})${BATS_TEST_TMPDIR#/}/outside/component"
+  P="$entry" yq -i '.spec.components = [strenv(P)]' "$TREE/kubernetes/apps/base/demo/hello/ks.yaml"
+  reads_outside kubernetes/apps/base/demo/hello/ks.yaml "$entry"
+}
+
+@test "Every field of a kustomization is one the checks read the paths of, accept or refuse" {
+  local fields="$BATS_TEST_DIRNAME/fixtures/kustomization-fields" want got field class expression P out
+  local top="kubernetes/app/kustomization.yaml" yaml
+  # The list is that of the pinned tools: flux records the kustomize it builds with in its binary.
+  want="$(sed -n 's|^# flux: sigs\.k8s\.io/kustomize/api ||p' "$fields")"
+  got="$(grep -aoE $'dep\tsigs\\.k8s\\.io/kustomize/api\tv[0-9]+\\.[0-9]+\\.[0-9]+' "$(type -P flux)" | cut -f3 | head -n1)"
+  [ "$got" = "$want" ] || { echo "flux builds with kustomize api ${got:-(unknown)}, the fields are those of $want: read them again at $got"; return 1; }
+  want="$(sed -n 's|^# kustomize: \(v[0-9.]*\) .*|\1|p' "$fields")"
+  got="$(kustomize version)"
+  [ "$got" = "$want" ] || { echo "kustomize is $got, the fields are those of $want: read them again at $got"; return 1; }
+
+  # The checks know exactly the fields listed, as listed.
+  diff <(grep -v '^#' "$fields" | cut -d' ' -f1,2 | sort) \
+    <(. "$REPO/scripts/lib/tree-paths.sh" && kustomization_fields | sort)
+
+  # Each field, set alone in a kustomization of a tree: one that names a file is refused for one
+  # outside the tree, by an absolute path and by one that climbs out of it, in a line that names the
+  # file, the field and the entry; the others as listed. The pinned kustomize knows each.
+  outside_marker
+  mkdir -p "$BATS_TEST_TMPDIR/fields/kubernetes/app" "$BATS_TEST_TMPDIR/kz"
+  guard() {
+    (cd "$BATS_TEST_TMPDIR/fields" && . "$REPO/scripts/lib/tree-paths.sh" && tree_paths_refused "$PWD/kubernetes")
+  }
+  while read -r field class expression; do
+    for P in "$OUTSIDE" "$CLIMB"; do
+      echo '{}' | P="$P" yq "$expression" >"$BATS_TEST_TMPDIR/fields/$top"
+      out="$(guard)"
+      case $class in
+        path) grep -F -- "$top: ${field%%[.[]*}" <<<"$out" | grep -qF -- "$P" ||
+          { echo "$field: not refused for $P: $out"; return 1; } ;;
+        none) [ -z "$out" ] || { echo "$field: refused: $out"; return 1; } ;;
+        refused) grep -qF -- "$top: $field" <<<"$out" || { echo "$field: not refused: $out"; return 1; } ;;
+      esac
+    done
+    echo '{}' | P=marker.yaml yq "$expression" >"$BATS_TEST_TMPDIR/kz/kustomization.yaml"
+    if kustomize build "$BATS_TEST_TMPDIR/kz" 2>&1 | grep -q 'unknown field'; then
+      echo "$field: the pinned kustomize has no such field"
+      return 1
+    fi
+  done < <(grep -v '^#' "$fields")
+  # kustomize refuses a field its type does not have, so it reads nothing from one.
+  echo 'resourcez: [marker.yaml]' >"$BATS_TEST_TMPDIR/kz/kustomization.yaml"
+  kustomize build "$BATS_TEST_TMPDIR/kz" 2>&1 | grep -q 'unknown field "resourcez"'
+
+  # A field the type does not have, in any spelling but its own, which Go's decoder matches without
+  # regard to case, or set twice, is refused.
+  for yaml in 'resourcez: [a.yaml]' 'Resources: [a.yaml]' 'RESOURCES: [a.yaml]' $'patches:\n  - Path: a.yaml' \
+    $'configMapGenerator:\n  - name: a\n    Files: [a.yaml]' $'openapi:\n  Path: a.yaml' \
+    $'resources: [a.yaml]\nresources: [b.yaml]'; do
+    printf '%s\n' "$yaml" >"$BATS_TEST_TMPDIR/fields/$top"
+    out="$(guard)"
+    grep -qF -- "$top" <<<"$out" || { echo "not refused: $yaml"; return 1; }
+  done
+  # So is every form of a remote source kustomize fetches, a file over HTTP or a repository.
+  for P in https://example.invalid/a.yaml HTTPS://example.invalid/a.yaml http:a.yaml github.com/example/a \
+    GitHub.com:example/a git@example.invalid:example/a user@example.invalid/a git::https://example.invalid/a \
+    ssh://example.invalid/a file:///a; do
+    echo '{}' | P="$P" yq '.resources = [strenv(P)]' >"$BATS_TEST_TMPDIR/fields/$top"
+    out="$(guard)"
+    grep -F -- "$top: resources" <<<"$out" | grep -qF -- "$P" || { echo "not refused: $P"; return 1; }
+  done
+  # A file of the tree whose name holds a colon is no remote source.
+  echo '{}' | yq '.resources = ["odd:name.yaml"]' >"$BATS_TEST_TMPDIR/fields/$top"
+  [ -z "$(guard)" ]
+  # kustomize joins a path to the file's directory as text: one that climbs out of the tree that way
+  # is refused, though the link it passes leads deeper into the tree; and so is one that leaves the
+  # tree once its link is resolved.
+  mkdir -p "$BATS_TEST_TMPDIR/fields/kubernetes/app/sub/a/b/c"
+  ln -s sub/a/b/c "$BATS_TEST_TMPDIR/fields/kubernetes/app/deep"
+  ln -s .. "$BATS_TEST_TMPDIR/fields/kubernetes/app/up"
+  for P in deep/../../../outside/marker.yaml up/../outside/marker.yaml; do
+    echo '{}' | P="$P" yq '.resources = [strenv(P)]' >"$BATS_TEST_TMPDIR/fields/$top"
+    out="$(guard)"
+    grep -F -- "$top: resources" <<<"$out" | grep -qF -- "$P" || { echo "not refused: $P: $out"; return 1; }
+  done
+  # So is YAML that kustomize's decoder may read otherwise than the checks: an anchor, an alias, a
+  # merge key, or a tag other than the core schema's, such as binary, which it decodes.
+  for yaml in $'a: &a [x.yaml]\nresources: *a' $'resources: &a [x.yaml]' $'patches:\n  - <<: {path: x.yaml}' \
+    $'resources: [!!binary eC55YW1s]' $'resources: [!custom x.yaml]'; do
+    printf '%s\n' "$yaml" >"$BATS_TEST_TMPDIR/fields/$top"
+    out="$(guard)"
+    grep -qF -- "$top" <<<"$out" || { echo "not refused: $yaml"; return 1; }
   done
 }

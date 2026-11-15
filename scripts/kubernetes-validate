@@ -72,7 +72,7 @@ jq_clean='def clean: tostring | gsub("[[:cntrl:]]"; "?");'
 # The shapes the API server requires of an API group, a version, a kind and an apiVersion, which
 # scripts/render checks the definitions it takes API versions from by as well.
 # shellcheck source=scripts/lib/shapes.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib/shapes.sh"
+. "$repo_root/scripts/lib/shapes.sh"
 
 # What Flux builds, as the offline check builds it. Its rules come first: on a tree that fails them
 # the objects are not the ones the cluster would get, so nothing is validated.

@@ -370,6 +370,29 @@ real_render() {
   done
 }
 
+@test "A Flux install patch that names a file is refused" {
+  # A file beside the render, whose content a build that read it would show.
+  local marker="marker-outside-the-render-$RANDOM$RANDOM" entry
+  mkdir -p "$BATS_TEST_TMPDIR/outside"
+  printf '%s\n' '---' 'apiVersion: v1' 'kind: ConfigMap' 'metadata:' '  name: outside' 'data:' "  marker: $marker" \
+    >"$BATS_TEST_TMPDIR/outside/patch.yaml"
+  # The operator applies a patch and its target, which is all its patch type holds: a path, outside
+  # the render or a URL, is refused, neither read nor fetched.
+  for entry in "$BATS_TEST_TMPDIR/outside/patch.yaml" https://example.invalid/patch.yaml; do
+    tree instance
+    printf -- '---\napiVersion: fluxcd.controlplane.io/v1\nkind: FluxInstance\nmetadata:\n  name: flux\n  namespace: flux-system\nspec:\n  components: [source-controller]\n' \
+      >"$BATS_TEST_TMPDIR/instance/render/lab/flux-system/FluxInstance.fluxcd.controlplane.io_flux-system_flux.yaml"
+    P="$entry" yq -i '.spec.kustomize.patches = [{"path": strenv(P)}]' \
+      "$BATS_TEST_TMPDIR/instance/render/lab/flux-system/FluxInstance.fluxcd.controlplane.io_flux-system_flux.yaml"
+    check instance
+    echo "$output"
+    [ "$status" -eq 1 ]
+    [[ $output == *"FluxInstance flux-system/flux: its patch 1 holds more than a patch and its target"* ]]
+    [[ $output != *"$marker"* ]]
+    rm -rf "$BATS_TEST_TMPDIR/instance"
+  done
+}
+
 @test "The custom resources that make an operator create pods ask for what restricted requires" {
   # The operators create these pods at run time, so the check cannot evaluate them. Each resource
   # sets the pod's security context, and that of every container it names, which are the

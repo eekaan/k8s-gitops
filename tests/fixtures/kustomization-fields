@@ -1,0 +1,81 @@
+# The fields of kustomize's Kustomization type, and of the types it holds whose fields name files,
+# by the names kustomize reads them under: sigs.k8s.io/kustomize/api, types/kustomization.go
+# (Kustomization, with TypeMeta), patch.go (Patch), replacementfield.go and replacement.go
+# (ReplacementField, Replacement), configmapargs.go, secretargs.go, generatorargs.go and
+# kvpairsources.go (ConfigMapArgs, SecretArgs, GeneratorArgs, KvPairSources), and the keys of
+# Kustomization.OpenAPI that kustomize reads (krusty/kustomizer.go). The two versions below hold
+# the same types:
+#
+# flux: sigs.k8s.io/kustomize/api v0.21.2
+# kustomize: v5.8.3 (sigs.k8s.io/kustomize/api v0.21.3)
+#
+# flux builds with the api version its binary records; the kustomize binary records none, and its
+# release names the version in kustomize/go.mod. tests/kubernetes-check.bats fails when either
+# pinned tool moves to another version, until the fields are read again at the new one.
+#
+# One field a line, an entry of a list as FIELD[]; then what kustomize does with it, and a yq
+# expression that sets it in a kustomization, naming the file at strenv(P) where it names one:
+#   path     names files or directories kustomize reads, or remote sources it fetches;
+#   none     names nothing kustomize reads;
+#   refused  generators, transformers and validators name plugin configurations, whose own fields
+#            name more files, and Helm charts are inflated only with --enable-helm, which neither
+#            Flux nor the checks give: the checks refuse a kustomization that sets one.
+apiVersion none .apiVersion = "kustomize.config.k8s.io/v1beta1"
+kind none .kind = "Kustomization"
+metadata none .metadata = {"name": "fields"}
+openapi.path path .openapi = {"path": strenv(P)}
+openapi.version none .openapi = {"version": "v1.37.1"}
+namePrefix none .namePrefix = "a-"
+nameSuffix none .nameSuffix = "-a"
+namespace none .namespace = "fields"
+commonLabels none .commonLabels = {"a": "b"}
+labels none .labels = [{"pairs": {"a": "b"}}]
+commonAnnotations none .commonAnnotations = {"a": "b"}
+patchesStrategicMerge path .patchesStrategicMerge = [strenv(P)]
+patchesJson6902[].path path .patchesJson6902 = [{"path": strenv(P), "target": {"kind": "ConfigMap"}}]
+patchesJson6902[].patch none .patchesJson6902 = [{"patch": "[]", "target": {"kind": "ConfigMap"}}]
+patchesJson6902[].target none .patchesJson6902 = [{"patch": "[]", "target": {"kind": "ConfigMap"}}]
+patchesJson6902[].options none .patchesJson6902 = [{"patch": "[]", "options": {"allowNameChange": true}}]
+patches[].path path .patches = [{"path": strenv(P)}]
+patches[].patch none .patches = [{"patch": "[]"}]
+patches[].target none .patches = [{"patch": "[]", "target": {"kind": "ConfigMap"}}]
+patches[].options none .patches = [{"patch": "[]", "options": {"allowKindChange": true}}]
+images none .images = [{"name": "a", "newTag": "1.0.0"}]
+imageTags none .imageTags = [{"name": "a", "newTag": "1.0.0"}]
+replacements[].path path .replacements = [{"path": strenv(P)}]
+replacements[].source none .replacements = [{"source": {"kind": "ConfigMap", "name": "a"}}]
+replacements[].targets none .replacements = [{"targets": [{"select": {"kind": "ConfigMap"}}]}]
+replacements[].sourceValue none .replacements = [{"sourceValue": "a"}]
+replicas none .replicas = [{"name": "a", "count": 1}]
+vars none .vars = [{"name": "A", "objref": {"kind": "ConfigMap", "name": "a", "apiVersion": "v1"}}]
+sortOptions none .sortOptions = {"order": "fifo"}
+resources path .resources = [strenv(P)]
+components path .components = [strenv(P)]
+crds path .crds = [strenv(P)]
+bases path .bases = [strenv(P)]
+configMapGenerator[].name none .configMapGenerator = [{"name": "a"}]
+configMapGenerator[].namespace none .configMapGenerator = [{"name": "a", "namespace": "a"}]
+configMapGenerator[].behavior none .configMapGenerator = [{"name": "a", "behavior": "create"}]
+configMapGenerator[].literals none .configMapGenerator = [{"name": "a", "literals": ["a=b"]}]
+configMapGenerator[].files path .configMapGenerator = [{"name": "a", "files": ["a=" + strenv(P)]}]
+configMapGenerator[].envs path .configMapGenerator = [{"name": "a", "envs": [strenv(P)]}]
+configMapGenerator[].env path .configMapGenerator = [{"name": "a", "env": strenv(P)}]
+configMapGenerator[].options none .configMapGenerator = [{"name": "a", "options": {"immutable": true}}]
+secretGenerator[].name none .secretGenerator = [{"name": "a"}]
+secretGenerator[].namespace none .secretGenerator = [{"name": "a", "namespace": "a"}]
+secretGenerator[].behavior none .secretGenerator = [{"name": "a", "behavior": "create"}]
+secretGenerator[].literals none .secretGenerator = [{"name": "a", "literals": ["a=b"]}]
+secretGenerator[].files path .secretGenerator = [{"name": "a", "files": [strenv(P)]}]
+secretGenerator[].envs path .secretGenerator = [{"name": "a", "envs": [strenv(P)]}]
+secretGenerator[].env path .secretGenerator = [{"name": "a", "env": strenv(P)}]
+secretGenerator[].options none .secretGenerator = [{"name": "a", "options": {"immutable": true}}]
+secretGenerator[].type none .secretGenerator = [{"name": "a", "type": "Opaque"}]
+helmGlobals refused .helmGlobals = {"chartHome": "charts"}
+helmCharts refused .helmCharts = [{"name": "a"}]
+helmChartInflationGenerator refused .helmChartInflationGenerator = [{"chartName": "a"}]
+generatorOptions none .generatorOptions = {"disableNameSuffixHash": true}
+configurations path .configurations = [strenv(P)]
+generators refused .generators = ["generator.yaml"]
+transformers refused .transformers = ["transformer.yaml"]
+validators refused .validators = ["validator.yaml"]
+buildMetadata none .buildMetadata = ["originAnnotations"]

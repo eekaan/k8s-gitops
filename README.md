@@ -107,8 +107,9 @@ The repository checks:
 - `just kubernetes-check` builds `kubernetes/` offline with kustomize and Flux and fails when an
   application, a `ks.yaml` or a variable breaks the layout in `docs/kubernetes.md`, a manifest is
   outside what the artifact carries, or a `dependsOn` names an application the cluster does not
-  enable or one that does not wait. The publish run repeats it on the commit it publishes and
-  publishes nothing when it fails.
+  enable or one that does not wait. It builds nothing from a tree that a build would read outside
+  of, through a link, a path or a remote source a kustomization names. The publish run repeats it
+  on the commit it publishes and publishes nothing when it fails.
 - `just kubernetes-validate` runs `just kubernetes-check`'s builds and the render, and fails when an
   object Flux builds has a field its schema lacks or an image of the render has no tag other than
   `latest` and no digest. It fetches the charts and the schemas, so the publish run does not run

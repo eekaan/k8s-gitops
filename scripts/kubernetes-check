@@ -9,9 +9,13 @@
 # Reports every failure, naming the file and the rule, then exits non-zero. Never contacts a
 # cluster and fetches nothing: the publish run runs it in the job that signs (scripts/publish).
 # What the tree holds is data: each value read from a ks.yaml is one field, a control character or
-# a '|' in it read as '?', and a root's spec.path must be a directory of the tree, as the path
-# resolves: a link that leads outside kubernetes/ is refused. An application's spec.path is
-# compared with the one its directory fixes, and what is built is that directory.
+# a '|' in it read as '?'. Before it reads or builds anything else, the check refuses a tree from
+# which a build would read outside kubernetes/, and then builds nothing (scripts/lib/tree-paths.sh):
+# a link that resolves outside it; a kustomization that names a remote source, an absolute path
+# or one that leaves the tree, or a field the check does not know; a root whose spec.path is not
+# a directory of the tree as it resolves; a ks.yaml the check builds whose spec.components names a
+# path outside the tree. An application's spec.path is compared with the one its directory fixes,
+# and what is built is that directory.
 #
 # KUBERNETES_CHECK_BUILT, an existing empty directory, receives what each Flux build yielded, for
 # scripts/kubernetes-validate: N.yaml, and in its file builds the record N.yaml, LABEL and APP_DIR,
@@ -21,6 +25,9 @@
 # Usage: scripts/kubernetes-check [DIR]   (DIR holds kubernetes/; defaults to this repository)
 set -euo pipefail
 shopt -s nullglob
+
+# shellcheck source=scripts/lib/tree-paths.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/tree-paths.sh"
 
 keep="${KUBERNETES_CHECK_BUILT:-}"
 if [[ -n $keep ]]; then
@@ -40,7 +47,7 @@ unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
 for tool in kustomize yq jq flux; do
   command -v "$tool" >/dev/null || { echo "kubernetes-check: $tool not found on PATH" >&2; exit 1; }
 done
-[[ -d kubernetes ]] || { echo "kubernetes-check: no kubernetes/ directory in $PWD" >&2; exit 1; }
+[[ -d kubernetes && ! -L kubernetes ]] || { echo "kubernetes-check: no kubernetes/ directory in $PWD" >&2; exit 1; }
 tree_root="$(realpath -e kubernetes)"
 
 failures=0
@@ -48,6 +55,44 @@ fail() {
   echo "kubernetes-check: $*" >&2
   failures=$((failures + 1))
 }
+
+# What the builds read is the tree's alone, or nothing is built. Each Kustomization the check builds
+# with Flux takes its spec.components from the directory it is built from: a root's spec.path, an
+# application's app/. A ks.yaml or a directory that leads outside the tree is a link refused here,
+# and is not read.
+while IFS= read -r line; do
+  fail "$line"
+done < <(tree_paths_refused "$tree_root")
+# components_from KS DIR: fails each entry of KS's spec.components that leaves the tree, read from
+# the directory DIR.
+components_from() {
+  local ks=$1 dir line
+  tree_paths_inside "$tree_root" "$(realpath -e -- "$ks" 2>/dev/null)" || return 0
+  dir="$(realpath -e -- "$2" 2>/dev/null)" || return 0
+  tree_paths_inside "$tree_root" "$dir" || return 0
+  while IFS= read -r line; do
+    [[ -z $line ]] || fail "$ks: $line"
+  done <<<"$(components_refused "$ks" "$dir" "$tree_root")"
+}
+for ks in kubernetes/clusters/*/ks.yaml; do
+  tree_paths_inside "$tree_root" "$(realpath -e -- "$ks" 2>/dev/null)" || continue
+  refusal="$(root_path_refused "$ks" "$tree_root")"
+  if [[ -n $refusal ]]; then
+    fail "$refusal"
+    continue
+  fi
+  path="$(yq ea '[select(. != null)] | .[0].spec.path // "" | tostring' "$ks" 2>/dev/null)" || continue
+  components_from "$ks" "kubernetes/${path#./}"
+done
+for dir in kubernetes/apps/base/*/*/ kubernetes/clusters/*/*/*/; do
+  dir="${dir%/}"
+  [[ -f $dir/ks.yaml && -d $dir/app ]] || continue
+  components_from "$dir/ks.yaml" "$dir/app"
+done
+if ((failures > 0)); then
+  echo "kubernetes-check: $failures failure(s); nothing was built, as a build of this tree would read outside it" >&2
+  exit 1
+fi
 
 # Every ks.yaml is a Flux Kustomization in flux-system with a sourceRef: substituteFrom has no
 # namespace field, so a Kustomization anywhere else cannot read cluster-config or cluster-secrets.
@@ -362,19 +407,7 @@ for ks in kubernetes/clusters/*/ks.yaml; do
   path="$(yq ea '[select(. != null)] | .[0].spec.path' "$ks" 2>/dev/null)" || continue
   path="kubernetes/${path#./}"
   path="${path%/}"
-  # The overlay is a directory of the tree; a path that leaves it would have Flux build files from
-  # elsewhere.
-  if [[ ! $path =~ ^kubernetes(/[A-Za-z0-9._-]+)+$ || /$path/ == */../* || /$path/ == */./* || ! -d $path ]]; then
-    fail "$ks: spec.path must be a directory of the tree under kubernetes/, found ${path#kubernetes/}"
-    continue
-  fi
-  # The textual rules above are not enough: a link inside the tree may point outside it. The path
-  # is built as it resolves.
-  real="$(realpath -e -- "$path")"
-  if [[ $real != "$tree_root"/* ]]; then
-    fail "$ks: spec.path must be a directory of the tree under kubernetes/, found ${path#kubernetes/}, which leads outside it through a link"
-    continue
-  fi
+  # A directory of the tree as it resolves, checked before anything was built.
   [[ -z ${broken[$path]:-} ]] || continue
   hints=()
   for dir in kubernetes/apps kubernetes/components; do

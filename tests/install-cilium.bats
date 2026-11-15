@@ -255,7 +255,8 @@ EOF
   recording_tools
   built="$BATS_TEST_TMPDIR/built.yaml"
   # The HelmRelease as Flux applies it: built from the application's Kustomization, which gives
-  # it its namespace. flux build reads only paths below the working directory.
+  # it its namespace. Built from the repository, with paths from there, as scripts/kubernetes-check
+  # builds.
   cd "$REPO"
   flux build kustomization cilium --path ./kubernetes/apps/base/kube-system/cilium/app \
     --kustomization-file ./kubernetes/apps/base/kube-system/cilium/ks.yaml --dry-run >"$built"
@@ -275,8 +276,8 @@ EOF
 
 @test "Flux installs the chart and values the install script installs" {
   built="$BATS_TEST_TMPDIR/built.yaml"
-  # The application as Flux applies it, built from its Kustomization. flux build reads only paths
-  # below the working directory.
+  # The application as Flux applies it, built from its Kustomization, from the repository, with
+  # paths from there, as scripts/kubernetes-check builds.
   cd "$REPO"
   flux build kustomization cilium --path ./kubernetes/apps/base/kube-system/cilium/app \
     --kustomization-file ./kubernetes/apps/base/kube-system/cilium/ks.yaml --dry-run >"$built"

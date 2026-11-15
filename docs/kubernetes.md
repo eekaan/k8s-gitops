@@ -129,16 +129,39 @@ On what Flux builds:
   patches: `wait: true`, `healthChecks` or `healthCheckExprs`. Otherwise the dependent never
   reconciles, or starts before its dependency's objects are ready. The message names both
   Kustomizations and the overlay.
-- **Paths** (`kubernetes-check`). A root's `spec.path` is a directory of the tree under
-  `kubernetes/` as the path resolves: a link inside the tree that leads outside it is refused, not
-  built. The `spec.path` of an application's `ks.yaml` is compared with the one its directory
-  fixes, and what is built is that directory's `app/`. `scripts/render` resolves the path of every
-  Kustomization it builds the same way. Both build with kustomize's load restrictions off
-  (`LoadRestrictionsNone`, as Flux's kustomize-controller does, because an overlay lists `ks.yaml`
-  files outside its own directory), so a kustomization may name a file outside its own directory.
-  That is bounded by what is built from: the artifact the cluster applies holds only `kubernetes/`,
-  so a path that leaves it finds nothing there, and the render builds a copy of `kubernetes/`
-  alone, in which `flux build` reads only paths below its working directory.
+- **Paths** (`kubernetes-check` and `scripts/render`). `flux build` reads with kustomize's load
+  restrictions off (`LoadRestrictionsNone`, its own setting), and so does `kubernetes-check`'s
+  `kustomize`, as an overlay lists `ks.yaml` files outside its own directory: either reads any path
+  a kustomization names and follows any link, and kustomize fetches a remote source. Before they
+  read or build anything else, both refuse a tree from which a build would read outside
+  `kubernetes/`, naming each file and what it names, and build nothing
+  (`scripts/lib/tree-paths.sh`):
+  - a link in the tree that resolves outside it, or to nothing;
+  - a kustomization file (`kustomization.yaml`, `kustomization.yml` or `Kustomization`, a
+    Component's included, used or not) that names, in a field that names files, a remote source (a
+    URL, an scp-style address or a `github.com` path), an absolute path, or a path that leaves the
+    tree, read as text or with every link on it resolved;
+  - a kustomization file that sets a field the checks do not know by its exact name (kustomize
+    matches a field's name without regard to case), a field they refuse (`generators`,
+    `transformers` and `validators`, whose plugin configurations name files of their own, and the
+    Helm chart fields, as neither Flux nor the checks inflate a chart), a key twice, or an anchor,
+    an alias, a merge key or a tag outside YAML's core schema, which kustomize's decoder may read
+    otherwise than the checks;
+  - a root whose `spec.path` is not a directory of the tree under `kubernetes/` as it resolves;
+  - a Kustomization whose `spec.components` names a path outside the tree: `kubernetes-check`
+    checks each `ks.yaml` it builds before it builds any, the render each Kustomization as it
+    builds it.
+
+  The fields the checks know are those of kustomize's `Kustomization` type, and of the types in it
+  whose fields name files, at the versions the pinned `flux` and `kustomize` build with:
+  `tests/fixtures/kustomization-fields` lists them from kustomize's own types, and
+  `tests/kubernetes-check.bats` fails when either pin moves to another kustomize until they are read
+  again. The `spec.path` of an application's `ks.yaml` is compared with the one its directory fixes,
+  and what is built is that directory's `app/`. The render builds a copy of `kubernetes/` alone and
+  reads `versions.yaml` beside it, neither of them a link. A release's post-renderer patches, and
+  the FluxInstance's patches the Pod Security check applies, are a patch and its target, all
+  helm-controller and the operator apply; one that holds more, such as a path kustomize would read
+  or fetch, is refused.
 - **Schemas** (`kubernetes-validate`). Everything Flux builds as `kubernetes-check` builds it,
   each application from its own `ks.yaml` (enabled or not), each cluster's root and each cluster
   directory, is validated by kubeconform with unknown fields refused, against the first schema
@@ -272,8 +295,9 @@ level is declared in the tree, never left to the API server's default.
   less than `restricted` does not audit and warn at `restricted` at the cluster's minor.
   `tests/pod-security.bats` proves each rule on a small render and runs the check on the tree.
 - **The Flux install it evaluates.** The pinned Flux CLI's `flux install --export` for the
-  components the FluxInstance names, with the instance's patches applied: the controllers of the
-  `flux2` release pinned in `mise.toml`. The operator installs the newest Flux 2.x release in its
+  components the FluxInstance names, with the instance's patches applied, each a patch and its
+  target (a patch with more is refused): the controllers of the `flux2` release pinned in
+  `mise.toml`. The operator installs the newest Flux 2.x release in its
   manifests artifact ([Flux itself](#flux-itself)). Renovate moves the CLI pin and the artifact in
   separate pull requests, so once one has merged and until the other does, the check evaluates
   another Flux release than the one the cluster runs.
@@ -1855,19 +1879,23 @@ the chart its OCIRepository names at its tag, or the one its `chart.spec` names 
 the version the tree pins, with the values of its ConfigMaps and its own values over them, the
 release name and namespace helm-controller gives it, the Kubernetes version in `versions.yaml`, every
 API version a definition in the render serves, its post-renderers and helm-controller's labels. A
-definition is an `apiextensions.k8s.io/v1` `CustomResourceDefinition` whose group, kind and versions
-have the shapes the API server requires, and only its served versions count; an object that is only
-called one names no API. A well-shaped definition in the tree, or in a chart, does name its
-versions, which is what the cluster would serve once it is applied. Objects are selected by their
-exact name and namespace, as the controllers look them up: a `valuesFrom` or chart source named
-`x-*` selects nothing that is not called `x-*`. A HelmRelease whose name is not a DNS subdomain or
-whose namespace is not a DNS label is refused, naming its file (or its application's directory), before anything is read from it. A
-chart version bump therefore shows the objects that change. An application may take its chart only
+chart version bump therefore shows the objects that change. A definition is an
+`apiextensions.k8s.io/v1` `CustomResourceDefinition` whose group, kind and versions have the shapes
+the API server requires, and only its served versions count; an object that is only called one
+names no API. A well-shaped definition in the tree, or in a chart, does name its versions, which is
+what the cluster would serve once it is applied. Objects are selected by their exact name and
+namespace, as the controllers look them up: a `valuesFrom` or chart source named `x-*` selects
+nothing that is not called `x-*`. A HelmRelease whose name is not a DNS subdomain or whose
+namespace is not a DNS label is refused, naming its file (or its application's directory), before
+anything is read from it. The render reads the tree's `kubernetes/` and `versions.yaml` alone, and
+refuses a tree from which a build would read outside it
+([What the checks refuse](#what-the-checks-refuse), Paths). An application may take its chart only
 from an `OCIRepository` (at a tag) or a `HelmRepository` (at an exact version), from a source that
 names no credential (the render has no secrets), with values from ConfigMaps of the application; any
-other form (a version range, a `GitRepository` or `Bucket`, a `secretRef`, values from a Secret)
-fails the render, naming the release. `scripts/render --forms` checks that every release is of a form
-the render accepts, without pulling a chart, and `tests/render.bats` runs it on this tree.
+other form (a version range, a `GitRepository` or `Bucket`, a `secretRef`, values from a Secret, a
+post-renderer patch that names a file) fails the render, naming the release.
+`scripts/render --forms` checks that every release is of a form the render accepts, without pulling
+a chart, and `tests/render.bats` runs it on this tree.
 `RENDER_CHART_CACHE` names a directory to keep pulled charts in between renders. A tree that does
 not render fails, naming the application. `just render-diff <base> <head>` prints the comment
 comparing two renders.

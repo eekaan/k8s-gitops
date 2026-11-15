@@ -37,6 +37,11 @@ Feature: The render diff of a pull request
     When just render runs on each
     Then each fails in one line naming the file of the release, before anything is pulled
 
+  Scenario: A tree from which a build would read outside it is refused, and nothing of what it names is rendered
+    Given trees in which a kustomization, a Component or an application's Kustomization names a file outside the tree by an absolute path, by a relative one that climbs out of it or through a link in the tree that leads out of it, or names a remote source, and a release whose post-renderer names a patch file
+    When just render runs on each
+    Then each fails before anything is built, naming the file and the entry, and the file's content appears nowhere in its output or in what it wrote
+
   Scenario: Every release the cluster's overlay enables is one the render accepts
     Given this repository's tree
     When the render checks the form of every HelmRelease the cluster's overlay enables, without pulling a chart
