@@ -108,6 +108,9 @@ kubernetes/clusters/lab-sto2/flux-system/flux-instance/app/values.yaml	regex	ghc
 kubernetes/clusters/lab-sto2/flux-system/flux-operator/app/ocirepository.yaml	flux	ghcr.io/controlplaneio-fluxcd/charts/flux-operator	tag
 kubernetes/clusters/lab-sto2/flux-system/flux-operator/app/ocirepository.yaml	regex	ghcr.io/controlplaneio-fluxcd/charts/flux-operator	tag
 kubernetes/components/cnpg-cluster/cluster.yaml	regex	ghcr.io/cloudnative-pg/postgresql	imageName
+kubernetes/components/cnpg-cluster/cronjob.yaml	kubernetes	docker.io/rclone/rclone	-
+kubernetes/components/cnpg-cluster/cronjob.yaml	kubernetes	ghcr.io/cloudnative-pg/postgresql	-
+kubernetes/components/cnpg-cluster/cronjob.yaml	regex	ghcr.io/cloudnative-pg/postgresql	image
 mise.toml	mise	age	-
 mise.toml	mise	bats	-
 mise.toml	mise	cosign	-

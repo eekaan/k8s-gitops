@@ -323,7 +323,8 @@ pin() {
     + " image=" + (.imageName // "none")' "$BUILT")"
   echo "$spec"
   [[ $spec =~ ^instances=3\ antiAffinity=true\ type=required\ topologyKey=kubernetes\.io/hostname\ pdb=true\ catalog=false\ image=[^:]+:[0-9]+\.[0-9]+(-[a-z0-9]+)*$ ]]
-  # Backups wait for the secret store: nothing archives WAL or takes a backup yet.
+  # None of the operator's own backup objects: the component's dump job copies the database out instead
+  # (tests/postgres-dumps.bats), as the operator's plugin offers server-side encryption only.
   backups="$(yq -N 'select(. != null) | select(.kind == "Backup" or .kind == "ScheduledBackup" or .kind == "ObjectStore"
       or (.kind == "Cluster" and (.spec.backup != null or (.spec.plugins // [] | length) > 0)))
     | .kind + "/" + .metadata.name' "$BUILT")"

@@ -1,0 +1,189 @@
+---
+# Unit tests of the cloudnative-pg application's own alerts, those on the daily dumps of the
+# PostgreSQL clusters made from the component, run by just rules-check with promtool. The series are
+# shaped as kube-state-metrics writes its CronJob metrics (v2.20, the version the pinned chart runs):
+# kube_cronjob_created, kube_cronjob_status_last_schedule_time, kube_cronjob_status_last_successful_time,
+# each labelled cronjob and namespace, from the one replica, with the job, instance, pod, service and
+# endpoint of the chart's ServiceMonitor's scrape. The times are Unix times in seconds, so a series that
+# tracks the clock (0+60x...) is a CronJob that has just run. The component names each CronJob
+# <cluster>-pgdump, which the rules select by. Each group's name is the title of its scenario in
+# features/alerts.feature.
+rule_files:
+  - cloudnative-pg.rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: The alert PostgresDumpStale fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # "old" last succeeded at 10 hours (36000 s) and never since: more than 36 hours old once the
+      # clock passes 165600 s, minute 2760, so the alert is pending from minute 2761.
+      - series: >-
+          kube_cronjob_created{cronjob="old-pgdump", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x2800'
+      - series: >-
+          kube_cronjob_status_last_successful_time{cronjob="old-pgdump", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '36000x2800'
+      # "never" was created at the start and has no last success: it is stale 36 hours after it was
+      # created, minute 2160, pending from minute 2161.
+      - series: >-
+          kube_cronjob_created{cronjob="never-pgdump", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x2800'
+      # "healthy" succeeded a minute ago at every moment.
+      - series: >-
+          kube_cronjob_created{cronjob="healthy-pgdump", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x2800'
+      - series: >-
+          kube_cronjob_status_last_successful_time{cronjob="healthy-pgdump", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0+60x2800'
+      # "young" was created at minute 1667 (100000 s), has had no success yet, and at the end of the test
+      # is not yet 36 hours old: it is quiet throughout.
+      - series: >-
+          kube_cronjob_created{cronjob="young-pgdump", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '100000x2800'
+      # A CronJob whose name is not a dump's is none of its concern, nor is one whose name only
+      # starts with the same letters. One of another application named *-pgdump would be selected.
+      - series: >-
+          kube_cronjob_created{cronjob="etcd-snapshots", namespace="etcd-snapshots", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x2800'
+      - series: >-
+          kube_cronjob_created{cronjob="pgdump-notes", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x2800'
+    alert_rule_test:
+      # Nothing is more than 36 hours old yet.
+      - eval_time: 5m
+        alertname: PostgresDumpStale
+        exp_alerts: []
+      - eval_time: 2160m
+        alertname: PostgresDumpStale
+        exp_alerts: []
+      # "never" is pending from minute 2161 and fires 5 minutes later.
+      - eval_time: 2165m
+        alertname: PostgresDumpStale
+        exp_alerts: []
+      - eval_time: 2166m
+        alertname: PostgresDumpStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: demo
+              cronjob: never-pgdump
+              database: never
+            exp_annotations:
+              summary: No dump of a PostgreSQL database has succeeded for 36 hours
+              description: The database never in demo has had no successful dump, by the CronJob never-pgdump, for 36 hours, so a lost cluster loses everything written since the newest dump.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#postgresdumpstale
+      # "old" is pending from minute 2761, 36 hours after its last success, so a minute before it
+      # fires only "never" does: no threshold shorter than 36 hours on the last-success comparison
+      # passes this.
+      - eval_time: 2765m
+        alertname: PostgresDumpStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: demo
+              cronjob: never-pgdump
+              database: never
+            exp_annotations:
+              summary: No dump of a PostgreSQL database has succeeded for 36 hours
+              description: The database never in demo has had no successful dump, by the CronJob never-pgdump, for 36 hours, so a lost cluster loses everything written since the newest dump.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#postgresdumpstale
+      # "old" is pending from minute 2761 and fires 5 minutes later, with "never" still firing.
+      - eval_time: 2766m
+        alertname: PostgresDumpStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: demo
+              cronjob: never-pgdump
+              database: never
+            exp_annotations:
+              summary: No dump of a PostgreSQL database has succeeded for 36 hours
+              description: The database never in demo has had no successful dump, by the CronJob never-pgdump, for 36 hours, so a lost cluster loses everything written since the newest dump.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#postgresdumpstale
+          - exp_labels:
+              severity: warning
+              namespace: demo
+              cronjob: old-pgdump
+              database: old
+            exp_annotations:
+              summary: No dump of a PostgreSQL database has succeeded for 36 hours
+              description: The database old in demo has had no successful dump, by the CronJob old-pgdump, for 36 hours, so a lost cluster loses everything written since the newest dump.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#postgresdumpstale
+  - name: The alert PostgresDumpJobFailing fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # "failing" last succeeded at the start, and its latest run was scheduled at minute 10 (600 s)
+      # and has not succeeded since: pending from minute 10, firing an hour later.
+      - series: >-
+          kube_cronjob_status_last_schedule_time{cronjob="failing-pgdump", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x9 600x200'
+      - series: >-
+          kube_cronjob_status_last_successful_time{cronjob="failing-pgdump", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x209'
+      # "never" was first scheduled at minute 10 and has no last success at all: the same alert.
+      - series: >-
+          kube_cronjob_status_last_schedule_time{cronjob="never-pgdump", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '_x10 600x200'
+      # "healthy" completed after it was scheduled.
+      - series: >-
+          kube_cronjob_status_last_schedule_time{cronjob="healthy-pgdump", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '600x209'
+      - series: >-
+          kube_cronjob_status_last_successful_time{cronjob="healthy-pgdump", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '660x209'
+      # A CronJob that has not yet had its first schedule has neither series.
+      - series: >-
+          kube_cronjob_created{cronjob="young-pgdump", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x209'
+      # Another CronJob's failing run is none of its concern.
+      - series: >-
+          kube_cronjob_status_last_schedule_time{cronjob="etcd-snapshots", namespace="etcd-snapshots", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '600x209'
+      - series: >-
+          kube_cronjob_status_last_successful_time{cronjob="etcd-snapshots", namespace="etcd-snapshots", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x209'
+    alert_rule_test:
+      # Every run so far succeeded.
+      - eval_time: 5m
+        alertname: PostgresDumpJobFailing
+        exp_alerts: []
+      - eval_time: 69m
+        alertname: PostgresDumpJobFailing
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: PostgresDumpJobFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: demo
+              cronjob: failing-pgdump
+              database: failing
+            exp_annotations:
+              summary: The latest dump of a PostgreSQL database did not succeed
+              description: The latest run of the CronJob failing-pgdump, which dumps failing in demo, was scheduled over an hour ago and has not succeeded, so no dump is newer than the last good one.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#postgresdumpjobfailing
+          - exp_labels:
+              severity: warning
+              namespace: demo
+              cronjob: never-pgdump
+              database: never
+            exp_annotations:
+              summary: The latest dump of a PostgreSQL database did not succeed
+              description: The latest run of the CronJob never-pgdump, which dumps never in demo, was scheduled over an hour ago and has not succeeded, so no dump is newer than the last good one.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#postgresdumpjobfailing

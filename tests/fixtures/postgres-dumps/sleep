@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# A stand-in for sleep that returns at once and records the delay it was asked for in
+# <tmp>/record/sleep.
+root=${0%/bin/*}
+printf '%s\n' "$*" >> "$root/record/sleep"

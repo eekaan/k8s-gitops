@@ -48,9 +48,11 @@ Encrypt's production issuer, whose certificates a client with the usual public r
   [restore](docs/runbooks/etcd-restore.md)).
 - **PostgreSQL**: the CloudNativePG operator runs, and an application gets a database of three
   instances by including the cluster template `components/cnpg-cluster` from its `ks.yaml`, as n8n
-  does, the one application in the cluster's overlay that includes it. The template configures no
-  backup, so n8n's database lives only on the workers' data volumes
-  ([PostgreSQL](docs/kubernetes.md#postgresql), [n8n](docs/kubernetes.md#n8n)).
+  does, the one application in the cluster's overlay that includes it. The template also dumps the
+  database to object storage once a day by a CronJob in the cluster, encrypted with age before
+  upload, whose two alerts fire when its runs stop succeeding: a daily copy, not a point in time, as
+  no WAL is archived and no base backup taken ([Dumps](docs/kubernetes.md#dumps),
+  [restore](docs/runbooks/postgres-restore.md)).
 - **OpenTofu state** is in object storage, encrypted by OpenTofu
   ([State](docs/infrastructure.md#state)).
 

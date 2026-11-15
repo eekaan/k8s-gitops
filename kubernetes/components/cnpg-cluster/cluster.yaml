@@ -5,9 +5,11 @@
 # credentials and connection URI in the Secret <name>-app, and the Services <name>-rw for the
 # primary, <name>-ro for the replicas and <name>-r for any instance.
 #
-# No backups yet. WAL archiving and base backups to object storage, through the Barman Cloud plugin,
-# come in spec.plugins once the secret store can give the cluster the object store's credentials;
-# until then the data lives only on the workers' data volumes.
+# The data is copied out of the cluster once a day by the dump job in cronjob.yaml, a logical dump
+# encrypted before it leaves, which is not a point in time. The operator's own backups, WAL
+# archiving and base backups through the Barman Cloud plugin, are not used: the plugin offers
+# server-side encryption only, and nothing leaves the cluster unencrypted (docs/kubernetes.md,
+# PostgreSQL).
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:

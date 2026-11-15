@@ -445,3 +445,50 @@ and `kubectl get volumesnapshots --all-namespaces` for what can be deleted at on
 
 Usually: what filled it, left to run after the warning: free space first, by deleting snapshots or
 volumes that are no longer needed, then find what grew.
+
+## PostgresDumpStale
+
+The CronJob `<cluster>-pgdump` of a PostgreSQL cluster has had no successful run for 36 hours, a
+day's run missed and half a day of grace, or it has never succeeded and was created more than 36
+hours ago. The newest dump of the database in the bucket is then older than that, and a loss of the
+cluster loses everything written since ([postgres-restore.md](postgres-restore.md)). The data is
+still in the cluster, on three instances, so this is a missing second copy and not an outage: it
+is a warning for the working day. The alert reads kube-state-metrics' record of the CronJob, so it
+cannot fire for a CronJob that does not exist, and is quiet for a database younger than 36 hours.
+Its labels name the `namespace` and the `database`, which is the Cluster's name.
+
+Look at first: `kubectl --namespace <namespace> get cronjob,job,pod` for what the runs did, and for
+the newest dump in the bucket, the listing in [postgres-restore.md](postgres-restore.md#listing-the-dumps).
+A failed run says which step failed: `kubectl --namespace <namespace> logs job/<job>
+--all-containers` (`fetch-age`, `dump`, `encrypt` or `upload`). A pod in
+`CreateContainerConfigError` (`Init:CreateContainerConfigError` while an init step is the one
+affected) names its missing Secret in `kubectl --namespace <namespace> describe pod <pod>`: both of
+the job's Secrets are read as environment variables.
+
+Usually: the Secret `<cluster>-dump-s3` is missing, because the secret store lacks the key `volsync`
+or the External Secrets operator cannot read it (`just bao-seed-volsync`); the S3 key was replaced
+and the store's copy was not (`just bao-seed-volsync --rotate-s3`); the postgres bucket does not
+exist (`just infra-backup-buckets`); the pod cannot download age, which needs the pod network to
+reach its release host, or the archive no longer matches the checksum the manifest pins; the
+database's own Secret `<cluster>-app` is missing, or no instance answers; or the dump outgrew its
+volume ([PostgresDumpJobFailing](#postgresdumpjobfailing)). Once the cause is fixed, take a dump by
+hand to clear the alert without waiting for the night: `kubectl --namespace <namespace> create job
+--from=cronjob/<cluster>-pgdump <name>`. A job made by hand waits the database's stagger like a
+scheduled one, up to 20 minutes, before it starts to dump.
+
+## PostgresDumpJobFailing
+
+The latest scheduled run of the CronJob `<cluster>-pgdump` has not succeeded, an hour after it was
+scheduled, which is longer than the run's 45 minute deadline: it failed, or its pod never started.
+The alert clears once a run succeeds. The previous dump is still in the bucket, so nothing is lost
+yet; [PostgresDumpStale](#postgresdumpstale) fires when it is 36 hours old.
+
+Look at first, and usually: as for [PostgresDumpStale](#postgresdumpstale). A dump that has
+outgrown the memory-backed volume it is written to (512 MiB, compressed) fails the `dump` step with
+`could not write to output file: No space left on device`: the volume's `sizeLimit` and the `dump`
+container's memory limit in the CronJob then grow together, by a patch of the application's
+`kustomization.yaml` that targets the CronJob by kind. A cluster of one instance has no replica to
+read from; the step says so and dumps the primary. A long dump from a replica can be cancelled by
+a conflict with the replica's recovery (`canceling statement due to conflict with recovery`). Each
+retry waits the database's stagger again within the same 45 minute deadline, so a retry has less
+time than the first attempt and a long dump can fail until the next night's run.
