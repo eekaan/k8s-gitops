@@ -14,7 +14,7 @@ Feature: Public Gateway
   Scenario: The HTTPS listener serves a wildcard certificate for the cluster's domain from the cluster's issuer
     Given the public Gateway and the issuer application, built offline with the example cluster-config
     When the https listener, its certificate and the issuers are read
-    Then the listener terminates TLS with the Secret of an ECDSA certificate for the wildcard and the apex of the cluster's domain, renewed at a share of its lifetime and with a new key, issued with nothing chosen by the cluster-wide CA issuer whose CA is a certificate the bootstrap self-signed issuer signed, with no private key in the tree, and a client traffic policy that sets TLS 1.2 and nothing else is the one policy on the Gateway or its routes
+    Then the listener terminates TLS with the Secret of an ECDSA certificate for the wildcard and the apex of the cluster's domain, renewed at a share of its lifetime and with a new key, issued with nothing chosen by the cluster-wide CA issuer whose CA is a certificate the bootstrap self-signed issuer signed, with no private key in the tree, and a client traffic policy that sets TLS 1.2 and the PROXY protocol as optional, and nothing else, is the one policy on the Gateway or its routes, with no patch policy anywhere and no filter of a route attached to the Gateway that sets or removes x-forwarded-for
 
   Scenario: A route attaches to the public Gateway only from a namespace that opts in
     Given the public Gateway's listeners and the namespaces of the tree
@@ -65,3 +65,13 @@ Feature: Public Gateway
     Given a healthy cluster and edges whose Gateway certificate is not Ready for a reason cert-manager gives, or has under a third of its lifetime left
     When just gateway-check runs
     Then the certificate line fails with the condition's reason, cut and made printable as any reason is, or the certificate lifetime line fails with the time left, no other line fails, and a certificate with more than a third left passes
+
+  Scenario: The public Gateway takes a client's address from a PROXY protocol header and still serves a connection without one
+    Given the public Gateway application built offline with the example cluster-config
+    When its client traffic policy is read
+    Then the policy accepts the PROXY protocol on every listener of the Gateway without requiring it and sets nothing else of it, and sets no client IP detection, so the address Envoy takes as the client's is the header's source when a connection carries one and the connection's own otherwise, and a client's own x-forwarded-for is never trusted over it
+
+  Scenario: The proxies' access log names the client address, host, method, path, status and duration of each request, and no query string
+    Given the public Gateway's EnvoyProxy built offline with the example cluster-config
+    When its telemetry is read
+    Then access logging is on and every request, routed or not, is written to standard output as one JSON line with the client address Envoy took, the host, the method, the path without its query string, the status, the duration and the bytes, and no field carries a query string or a client's own x-forwarded-for

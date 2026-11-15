@@ -1,7 +1,7 @@
 ---
 # yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/gateway.envoyproxy.io/clienttrafficpolicy_v1alpha1.json
-# TLS 1.2 at least for the clients of the Gateway's HTTPS listener. The controller's default is the
-# same; the policy states it, so a change of the default does not change what the Gateway accepts.
+# What the Gateway's listeners accept of a client, on both of them: the PROXY protocol, and TLS 1.2
+# at least on the HTTPS one.
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: ClientTrafficPolicy
 metadata:
@@ -11,5 +11,14 @@ spec:
     - group: gateway.networking.k8s.io
       kind: Gateway
       name: public
+  # A header an edge router writes takes the client's address to the proxies (ADR 0020). Optional,
+  # so a connection that starts without one is served too: the address a proxy takes as the
+  # client's is the header's source when there is a header and the connection's own otherwise. No
+  # clientIPDetection is set: with none, the controller has the proxies use that address and never
+  # the x-forwarded-for a client sends.
+  proxyProtocol:
+    optional: true
+  # The controller's default is the same; the policy states it, so a change of the default does not
+  # change what the Gateway accepts.
   tls:
     minVersion: "1.2"
