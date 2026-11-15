@@ -29,7 +29,7 @@ to an Envoy Gateway proxy, and the proxy routes it by hostname to a pod
 name at both edge routers' public addresses ([DNS records](docs/kubernetes.md#dns-records)). The
 Gateway's certificate comes from the issuer the cluster's overlay chooses: the cluster's own CA by
 default, or Let's Encrypt through a DNS-01 challenge against Cloudflare. `lab-sto2` chooses Let's
-Encrypt's staging issuer, whose chain no client outside the cluster trusts
+Encrypt's production issuer, whose certificates a client with the usual public roots trusts
 ([the ACME issuers](docs/kubernetes.md#the-acme-issuers)).
 
 ## Where state lives

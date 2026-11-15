@@ -249,13 +249,13 @@ rendered() {
   [ "$(object "$BUILT" Certificate "$certificate" | yq '.spec.issuerRef.kind + " " + .spec.issuerRef.name')" = "ClusterIssuer cluster-ca" ]
   [ "$(object "$BUILT" Certificate "$certificate" | yq '.spec.issuerRef.group // "cert-manager.io"')" = cert-manager.io ]
 
-  # lab-sto2 chooses the staging issuer: a broken setup spends staging's limits, not production's.
+  # lab-sto2 chooses the production issuer, whose chain a client with the usual public roots trusts.
   # The choice is one patch of the Gateway's Kustomization, and no other Kustomization of the
   # overlay sets the variable.
   overlay
   chosen="$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "gateway-public") | .spec.postBuild.substitute.PUBLIC_ISSUER' "$OVERLAY")"
   echo "chosen: $chosen"
-  [ "$chosen" = letsencrypt-staging ]
+  [ "$chosen" = letsencrypt-production ]
   [ "$(yq -N 'select(.kind == "Kustomization" and .spec.postBuild.substitute.PUBLIC_ISSUER != null) | .metadata.name' "$OVERLAY")" = gateway-public ]
   # The overlay's patches are this one and the one that names external-dns' record owner, each of
   # its own Kustomization.
@@ -266,8 +266,8 @@ rendered() {
   built gateway-public
   [ "$(object "$BUILT" Certificate "$certificate" | yq '.spec.issuerRef.kind + " " + .spec.issuerRef.name')" = "ClusterIssuer $chosen" ]
   built acme-issuers
-  object "$BUILT" ClusterIssuer "$chosen" | yq -e '.spec.acme.server' | grep -qx "$STAGING"
-  [ "$(yq -N 'select(.kind == "ClusterIssuer" and .metadata.name == "letsencrypt-production") | .metadata.name' "$BUILT")" = letsencrypt-production ]
+  object "$BUILT" ClusterIssuer "$chosen" | yq -e '.spec.acme.server' | grep -qx "$PRODUCTION"
+  [ "$(yq -N 'select(.kind == "ClusterIssuer" and .metadata.name == "letsencrypt-staging") | .metadata.name' "$BUILT")" = letsencrypt-staging ]
 }
 
 @test "A cluster that chooses an ACME issuer without the issuers application is refused" {
