@@ -1,0 +1,10 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# A certificate authority the cluster makes for itself, and the cluster-wide issuer that signs with
+# it (docs/kubernetes.md, cert-manager).
+resources:
+  - bootstrap-issuer.yaml
+  - ca-certificate.yaml
+  - clusterissuer.yaml

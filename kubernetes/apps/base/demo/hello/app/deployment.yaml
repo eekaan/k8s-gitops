@@ -1,0 +1,73 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/deployment-apps-v1.json
+# The smallest real HTTP workload: busybox's web server, answering with the page of the ConfigMap.
+# Two replicas on different nodes, so a node's drain or loss leaves one answering, and a budget that
+# keeps one running while a drain evicts the other.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hello
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hello
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          nodeTaintsPolicy: Honor
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: hello
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: httpd
+          image: docker.io/library/busybox:1.38.0
+          # In the foreground, on an unprivileged port, serving /www and logging to the console.
+          command:
+            - httpd
+            - -f
+            - -v
+            - -p
+            - "8080"
+            - -h
+            - /www
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+          resources:
+            requests:
+              cpu: 1m
+              memory: 8Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: www
+              mountPath: /www
+              readOnly: true
+      volumes:
+        - name: www
+          configMap:
+            name: hello
+            items:
+              - key: index.html
+                path: index.html

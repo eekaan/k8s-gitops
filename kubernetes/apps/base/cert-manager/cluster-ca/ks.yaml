@@ -1,0 +1,19 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: cluster-ca
+  namespace: flux-system
+spec:
+  path: ./apps/base/cert-manager/cluster-ca/app
+  targetNamespace: cert-manager
+  # The issuers and the certificate are of cert-manager's kinds, and its webhook admits them.
+  dependsOn:
+    - name: cert-manager
+  # Ready only once the CA certificate is issued and the ClusterIssuer is, so an application that
+  # names this one in dependsOn finds an issuer that signs.
+  wait: true
+  sourceRef:
+    kind: ExternalArtifact
+    name: cluster-ca

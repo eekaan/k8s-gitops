@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Proves that the check refuses what only promtool's check rules reads, in what scripts/rules-config
+# wrote to DIR, one case at a time:
+#   - a chart's rule with an expression promtool cannot parse, in its stock.*.rules.yaml;
+#   - one of the tree's own alerts with an expression promtool cannot parse, in a rule file of its own;
+#   - that alert twice in a rule file of its own, which promtool's lint finds duplicated and the tree's
+#     own rules take as fatal.
+# No unit test loads those files, so promtool's test rules never sees them. Each case runs
+# scripts/rules-promtool on DIR and fails unless that fails with promtool's check rules naming the rule
+# in the part of the output that checks the charts' rules or the tree's own. DIR is put back after
+# each case. PROMTOOL... is the command scripts/rules-promtool takes, which runs promtool in DIR's mount.
+# Usage: scripts/rules-refusal DIR PROMTOOL...
+set -euo pipefail
+shopt -s nullglob
+
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+[[ $# -ge 2 && -d $1 ]] || { echo "usage: scripts/rules-refusal DIR PROMTOOL..." >&2; exit 2; }
+type -P yq >/dev/null || { echo "rules-refusal: yq not found on PATH" >&2; exit 1; }
+dir=$(cd "$1" && pwd)
+shift
+
+# A closing parenthesis short: no promtool accepts it.
+broken='sum(rate(up[5m])'
+
+own_file=
+alert=
+for candidate in "$dir"/*/*.rules.yaml; do
+  [[ $(basename "$candidate") == stock.* ]] && continue
+  alert=$(yq '[.groups[].rules[] | select(has("alert")) | .alert][0] // ""' "$candidate")
+  if [[ -n $alert ]]; then
+    own_file=$candidate
+    break
+  fi
+done
+[[ -n $own_file ]] || { echo "rules-refusal: no own alert in $dir to break" >&2; exit 1; }
+stock_file=
+for candidate in "$dir"/*/stock.*.rules.yaml; do
+  if [[ $(yq '.groups[0].rules // [] | length' "$candidate") -gt 0 ]]; then
+    stock_file=$candidate
+    break
+  fi
+done
+[[ -n $stock_file ]] || { echo "rules-refusal: no chart's rule in $dir to break" >&2; exit 1; }
+stock_rule=$(yq '.groups[0].rules[0] | .alert // .record' "$stock_file")
+
+# A rules file the tree's own rules part takes, by its name, and that no application's unit tests
+# load: an application's name never holds an underscore.
+extra=$(dirname "$own_file")/_refusal.rules.yaml
+kept=$(mktemp)
+cp "$stock_file" "$kept"
+restore() {
+  cp "$kept" "$stock_file"
+  rm -f "$extra"
+}
+trap 'restore; rm -f "$kept"' EXIT
+
+# part OUTPUT CLUSTER WHICH: the lines of OUTPUT that scripts/rules-promtool printed under its
+# heading for promtool's check rules of the cluster's charts' rules ("of charts") or of its own
+# ("of the tree's own").
+part() {
+  awk -v head="== $2: promtool check rules" -v which="$3" '
+    /^== / { on = index($0, head) == 1 && index($0, which) > 0; next }
+    on' <<<"$1"
+}
+
+# refused WHAT CLUSTER WHICH EXPECTED PROMTOOL...: runs scripts/rules-promtool on DIR as the case
+# left it, and fails unless it fails with EXPECTED in the output of check rules for WHICH rules of
+# CLUSTER.
+refused() {
+  local what=$1 cluster=$2 which=$3 expected=$4 output
+  shift 4
+  if output=$("$here/rules-promtool" "$dir" "$@" 2>&1); then
+    echo "$output"
+    echo "rules-refusal: promtool accepted $what" >&2
+    exit 1
+  fi
+  if ! grep -qF -- "$expected" <<<"$(part "$output" "$cluster" "$which")"; then
+    echo "$output"
+    echo "rules-refusal: promtool's check rules did not refuse $what under its heading for the rules $which, naming it: no line with $expected" >&2
+    exit 1
+  fi
+  echo "rules-refusal: promtool's check rules refuses $what, naming it"
+  restore
+}
+
+cluster=$(basename "$(dirname "$stock_file")")
+BROKEN=$broken yq -i '.groups[0].rules[0].expr = strenv(BROKEN)' "$stock_file"
+refused "the chart's rule $stock_rule with an expression it cannot parse" "$cluster" "of charts" \
+  "\"$stock_rule\": could not parse expression" "$@"
+
+cluster=$(basename "$(dirname "$own_file")")
+# shellcheck disable=SC2016 # $rules is a yq variable.
+ALERT=$alert BROKEN=$broken yq '[.groups[].rules[] | select(.alert == strenv(ALERT)) | .expr = strenv(BROKEN)] as $rules
+  | {"groups": [{"name": "refusal", "rules": $rules}]}' "$own_file" >"$extra"
+refused "the tree's own alert $alert with an expression it cannot parse" "$cluster" "of the tree's own" \
+  "\"$alert\": could not parse expression" "$@"
+
+# shellcheck disable=SC2016 # $rules is a yq variable.
+ALERT=$alert yq '[.groups[].rules[] | select(.alert == strenv(ALERT))] as $rules
+  | {"groups": [{"name": "refusal", "rules": $rules + $rules}]}' "$own_file" >"$extra"
+refused "the tree's own alert $alert defined twice" "$cluster" "of the tree's own" "Metric: $alert" "$@"

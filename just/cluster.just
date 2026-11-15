@@ -72,6 +72,10 @@ cluster-restore snapshot *args:
 cluster-check cluster='lab-sto2':
     scripts/cluster-check {{ quote(cluster) }}
 
+# Check a cluster's public Gateway, reading only: the Gateway Accepted and Programmed at the GATEWAY_ADDRESS of cluster-config, its proxies' labelled LoadBalancer Service holding that address, two proxies Ready on different nodes, its certificate Ready, no route accepted from a namespace without the opt-in label; then through each edge's floating address with curl --resolve, plain HTTP answered with a 301 to https, HTTPS verified against the cluster CA's certificate serving the demo's page and a 404 for a host no route serves; pass, FAIL or skip per line, no address; see docs/kubernetes.md, Checking the public Gateway
+gateway-check cluster='lab-sto2':
+    scripts/gateway-check {{ quote(cluster) }}
+
 # Forward a local port, GRAFANA_PORT or 3000, on 127.0.0.1 only, to Grafana on a cluster through its kubeconfig until Ctrl-C; prints the local URL and where the admin password is kept, never the password
 grafana cluster='lab-sto2':
     scripts/grafana {{ quote(cluster) }}

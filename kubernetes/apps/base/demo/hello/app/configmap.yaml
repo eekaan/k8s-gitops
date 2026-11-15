@@ -6,3 +6,6 @@ metadata:
   name: hello
 data:
   domain: "${CLUSTER_DOMAIN}"
+  # The page the Deployment serves.
+  index.html: |
+    hello

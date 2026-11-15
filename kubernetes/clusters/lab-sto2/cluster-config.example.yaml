@@ -25,5 +25,5 @@ BGP_EDGE_ASN: "64497"
 BGP_EDGE_ADDRESS_1: 192.0.2.7
 BGP_EDGE_ADDRESS_2: 192.0.2.8
 # The public Gateway's address, one host of the service range, which the edge routers forward public
-# traffic to. Nothing in the tree uses it yet.
+# traffic to, and which the public Gateway's Service asks for.
 GATEWAY_ADDRESS: 198.51.100.1

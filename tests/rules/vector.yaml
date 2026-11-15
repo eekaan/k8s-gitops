@@ -1,0 +1,192 @@
+---
+# Unit tests of the vector application's own alerts, run by just rules-check with promtool. The
+# series are shaped as Vector's internal_metrics source and the prometheus_exporter sink write them,
+# in the namespace vector, labelled with component_id, component_kind, component_type and, where the
+# metric has them, intentional, error_type and stage
+# (https://vector.dev/docs/reference/configuration/sources/internal_metrics/), and as the PodMonitor's
+# scrape adds job, namespace, pod and instance. One collector pod runs on each node. Each group's name
+# is the title of its scenario in features/alerts.feature.
+rule_files:
+  - vector.rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: The alert LogCollectorOutsizedShare fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # Six collectors send 20 events a second to the store each. From minute 20 the sixth sends
+      # ten times that, 200 a second, the median of the six being 20.
+      - series: >-
+          vector_component_sent_events_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", job="vector", namespace="monitoring", pod="vector-a",
+          instance="192.0.2.1:9598"}
+        values: '0+1200x100'
+      - series: >-
+          vector_component_sent_events_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", job="vector", namespace="monitoring", pod="vector-b",
+          instance="192.0.2.2:9598"}
+        values: '0+1200x100'
+      - series: >-
+          vector_component_sent_events_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", job="vector", namespace="monitoring", pod="vector-c",
+          instance="192.0.2.3:9598"}
+        values: '0+1200x100'
+      - series: >-
+          vector_component_sent_events_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", job="vector", namespace="monitoring", pod="vector-d",
+          instance="192.0.2.4:9598"}
+        values: '0+1200x100'
+      - series: >-
+          vector_component_sent_events_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", job="vector", namespace="monitoring", pod="vector-e",
+          instance="192.0.2.5:9598"}
+        values: '0+1200x100'
+      - series: >-
+          vector_component_sent_events_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", job="vector", namespace="monitoring", pod="vector-f",
+          instance="192.0.2.6:9598"}
+        values: '0+1200x20 24000+12000x80'
+      # The events every component sends are not the store's.
+      - series: >-
+          vector_component_sent_events_total{component_id="pod_fields", component_kind="transform",
+          component_type="remap", job="vector", namespace="monitoring", pod="vector-f",
+          instance="192.0.2.6:9598"}
+        values: '0+100000x100'
+    alert_rule_test:
+      # Six equal rates: nothing is ten times the median.
+      - eval_time: 15m
+        alertname: LogCollectorOutsizedShare
+        exp_alerts: []
+      - eval_time: 54m
+        alertname: LogCollectorOutsizedShare
+        exp_alerts: []
+      - eval_time: 55m
+        alertname: LogCollectorOutsizedShare
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              pod: vector-f
+            exp_annotations:
+              summary: One node sends an outsized share of the logs
+              description: The collector vector-f has sent at least ten times the median node's rate of log events to the store for 30 minutes.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectoroutsizedshare
+  - name: The alert LogCollectorOutsizedShare stays quiet while every node sends little
+    interval: 1m
+    input_series:
+      # The sixth collector sends ten times the median, 5 events a second against 0.5, but under the
+      # 10 events a second below which the share says nothing.
+      - series: >-
+          vector_component_sent_events_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", job="vector", namespace="monitoring", pod="vector-a",
+          instance="192.0.2.1:9598"}
+        values: '0+30x100'
+      - series: >-
+          vector_component_sent_events_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", job="vector", namespace="monitoring", pod="vector-b",
+          instance="192.0.2.2:9598"}
+        values: '0+30x100'
+      - series: >-
+          vector_component_sent_events_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", job="vector", namespace="monitoring", pod="vector-c",
+          instance="192.0.2.3:9598"}
+        values: '0+30x100'
+      - series: >-
+          vector_component_sent_events_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", job="vector", namespace="monitoring", pod="vector-d",
+          instance="192.0.2.4:9598"}
+        values: '0+30x100'
+      - series: >-
+          vector_component_sent_events_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", job="vector", namespace="monitoring", pod="vector-e",
+          instance="192.0.2.5:9598"}
+        values: '0+30x100'
+      - series: >-
+          vector_component_sent_events_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", job="vector", namespace="monitoring", pod="vector-f",
+          instance="192.0.2.6:9598"}
+        values: '0+300x100'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: LogCollectorOutsizedShare
+        exp_alerts: []
+  - name: The alert LogCollectorDiscardingEvents fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # vector-a drops the audit records on purpose, many of them, throughout. vector-b's sink starts
+      # to discard events it did not mean to after minute 10; vector-c never does.
+      - series: >-
+          vector_component_discarded_events_total{component_id="drop_audit", component_kind="transform",
+          component_type="filter", intentional="true", job="vector", namespace="monitoring", pod="vector-a",
+          instance="192.0.2.1:9598"}
+        values: '0+600x100'
+      - series: >-
+          vector_component_discarded_events_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", intentional="false", job="vector", namespace="monitoring",
+          pod="vector-b", instance="192.0.2.2:9598"}
+        values: '0x10 5+5x80'
+      - series: >-
+          vector_component_discarded_events_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", intentional="false", job="vector", namespace="monitoring",
+          pod="vector-c", instance="192.0.2.3:9598"}
+        values: '0x90'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: LogCollectorDiscardingEvents
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: LogCollectorDiscardingEvents
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: LogCollectorDiscardingEvents
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              pod: vector-b
+              component_id: victoria_logs
+            exp_annotations:
+              summary: A log collector loses events
+              description: The component victoria_logs of the collector vector-b has been discarding events it did not mean to for 15 minutes.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectordiscardingevents
+  - name: The alert LogCollectorSendFailing fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # vector-a's sink reports request errors after minute 10; vector-b's sink reports none, and a
+      # transform of vector-b reports errors throughout, which are not a failure to send, nor are
+      # those of the sink that only serves Prometheus.
+      - series: >-
+          vector_component_errors_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", error_type="request_failed", stage="sending", job="vector",
+          namespace="monitoring", pod="vector-a", instance="192.0.2.1:9598"}
+        values: '0x10 3+3x80'
+      - series: >-
+          vector_component_errors_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", error_type="request_failed", stage="sending", job="vector",
+          namespace="monitoring", pod="vector-b", instance="192.0.2.2:9598"}
+        values: '0x90'
+      - series: >-
+          vector_component_errors_total{component_id="prometheus", component_kind="sink",
+          component_type="prometheus_exporter", error_type="request_failed", stage="sending", job="vector",
+          namespace="monitoring", pod="vector-b", instance="192.0.2.2:9598"}
+        values: '0+2x90'
+      - series: >-
+          vector_component_errors_total{component_id="talos_files", component_kind="transform",
+          component_type="remap", error_type="conversion_failed", stage="processing", job="vector",
+          namespace="monitoring", pod="vector-b", instance="192.0.2.2:9598"}
+        values: '0+7x90'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: LogCollectorSendFailing
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: LogCollectorSendFailing
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: LogCollectorSendFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              pod: vector-a
+              component_id: victoria_logs
+            exp_annotations:
+              summary: A log collector cannot send to the store
+              description: The sink victoria_logs of the collector vector-a has reported errors for 15 minutes, so its lines wait on the node's disk.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectorsendfailing

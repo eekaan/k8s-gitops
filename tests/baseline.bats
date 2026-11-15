@@ -63,7 +63,7 @@ built() {
   yq ea 'select(fileIndex == 0) as $vars | select(fileIndex == 1 and . != null)
     | .spec.postBuild.substitute = $vars' "$vars" "$REPO/$APP_DIR/ks.yaml" >"$ks"
   BUILT="$BATS_TEST_TMPDIR/$app-built.yaml"
-  # flux build reads only paths below the working directory.
+  # Built from the tree's parent, with paths from there, as scripts/kubernetes-check builds.
   (cd "$REPO" && flux build kustomization "$app" --path "./$APP_DIR/app" \
     --kustomization-file "$ks" --dry-run --strict-substitute) >"$BUILT"
 }
@@ -671,7 +671,7 @@ envoy_gateway_config() {
   [ -z "$violations" ]
 }
 
-@test "Envoy Gateway has a GatewayClass and no Gateway" {
+@test "Envoy Gateway has a GatewayClass and no Gateway of its own" {
   local app overlay enabled dependencies controller classes
   # Both applications run in the cluster: its overlay applies their Kustomizations.
   overlay="$BATS_TEST_TMPDIR/overlay.yaml"
@@ -696,7 +696,8 @@ envoy_gateway_config() {
   [ -n "$classes" ]
   [ "$(wc -l <<<"$classes")" -eq 1 ]
   [ "${classes#* }" = "$controller" ]
-  # No Gateway yet: each needs a load balancer and a certificate.
+  # The controller's applications make no Gateway: the cluster's public one is the application
+  # gateway-public's, which tests/gateway.bats proves.
   [ -z "$(yq -N 'select(.kind == "Gateway") | .metadata.name' "$BUILT" "$RENDERED")" ]
 }
 

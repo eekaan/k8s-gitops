@@ -873,6 +873,12 @@ out of the artifact, which is built from `kubernetes/`.
   exist, as before the monitoring application is installed, and when it cannot be asked or does not
   answer; its silence is never a pass. It runs `kubectl get` and `kubectl logs` only. It needs the
   cluster's `talman.yaml` and kubeconfig.
+- `just gateway-check [cluster]` says, reading only, whether the cluster's public Gateway serves:
+  its objects through the kubeconfig, then requests through each edge router's floating address
+  with `curl --resolve`, verified against the cluster CA's certificate, with pass, FAIL or skip and
+  one line of why per check, never an address
+  ([kubernetes.md](kubernetes.md#checking-the-public-gateway)). It needs the cluster's kubeconfig
+  and what the edge stack's recipes need to read its outputs.
 - `just grafana [cluster]` forwards a local port to Grafana through the cluster's kubeconfig until
   Ctrl-C ([kubernetes.md](kubernetes.md#grafana)): `kubectl port-forward`, listening on 127.0.0.1
   only, from `GRAFANA_PORT` to port 3000 of the Service `grafana-service` in `monitoring`. Once
@@ -1077,13 +1083,13 @@ denied request, a missing bucket and a name that does not resolve therefore read
 naming the place. With `CI` set nothing of rclone's words is shown: they go to
 `clusterconfig/<recipe>.errors.log` in the cluster's directory, which git ignores, started afresh by
 each run, and only that file's path is printed, as for talman's output. kubectl's and helm's output
-passes through, naming the objects they apply, except in `cluster-check`, `cluster-reboot`,
-`cluster-destroy`, `grafana` and `logs`: they print node and object names only, and `logs` the
-records, and none of what kubectl prints, as the objects it reads and its errors hold the API
-server's, the nodes' and the pods' addresses, but for the message of an error the API server or the
-store answered with, which `logs` shows without an address; only `kubectl drain`'s passes through in
-`cluster-reboot`, as in `cluster-upgrade`, naming the pods it evicts and those it cannot, with its
-errors passed through the same filter line by line, so a connection error still says why,
+passes through, naming the objects they apply, except in `cluster-check`, `gateway-check`,
+`cluster-reboot`, `cluster-destroy`, `grafana` and `logs`: they print node and object names only,
+and `logs` the records, and none of what kubectl prints, as the objects it reads and its errors hold
+the API server's, the nodes' and the pods' addresses, but for the message of an error the API server
+or the store answered with, which `logs` shows without an address; only `kubectl drain`'s passes
+through in `cluster-reboot`, as in `cluster-upgrade`, naming the pods it evicts and those it cannot,
+with its errors passed through the same filter line by line, so a connection error still says why,
 `connection refused`. The checks of `cluster-talos --first` print none of what kubectl, or talosctl
 through `talman talosctl`, prints either, but for a check whose tool failed, its last line of error
 with every IPv4 and IPv6 address in it masked as `<address>`; their `talman apply` dry runs print as

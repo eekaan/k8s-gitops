@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Prints the image of the Prometheus the kube-prometheus-stack application deploys, the one whose
+# promtool just rules-check runs: the application built in memory as Flux applies it, with the
+# cluster's example key lists for its variables, and its pinned chart, pulled from the URL and tag of
+# its OCIRepository, rendered offline with the values helm-controller gives it. It is the image
+# scripts/rules-config finds in the whole render; the module of just ci needs it before that render
+# exists, to take promtool from it. Never contacts a cluster, and reads no registry login.
+# Usage: scripts/rules-image
+set -euo pipefail
+
+# flux and helm are run with none of the secrets a recipe's environment may hold.
+# shellcheck source=scripts/lib/tools.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/tools.sh"
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+app=kubernetes/apps/base/monitoring/kube-prometheus-stack
+cluster=kubernetes/clusters/lab-sto2
+
+for tool in flux helm yq; do
+  type -P "$tool" >/dev/null || { echo "rules-image: $tool not found on PATH" >&2; exit 1; }
+done
+
+# No kubeconfig and no in-cluster address: a tool that tried to reach a cluster fails instead.
+export KUBECONFIG=/dev/null
+unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+# Helm's cache and registry settings, and the Docker configuration helm falls back to for
+# credentials, stay in the run's own directory.
+export HELM_CACHE_HOME="$tmp/helm/cache" HELM_CONFIG_HOME="$tmp/helm/config" HELM_DATA_HOME="$tmp/helm/data"
+export DOCKER_CONFIG="$tmp/docker"
+mkdir -p "$DOCKER_CONFIG"
+
+# shellcheck disable=SC2016 # $list and $vars are yq variables.
+yq ea '. as $list ireduce ({}; . * ($list // {}))' \
+  "$cluster/cluster-config.example.yaml" "$cluster/cluster-secrets.example.yaml" >"$tmp/vars.yaml"
+# shellcheck disable=SC2016 # $vars is a yq variable.
+yq ea 'select(fileIndex == 0) as $vars | select(fileIndex == 1 and . != null)
+  | .spec.postBuild.substitute = $vars' "$tmp/vars.yaml" "$app/ks.yaml" >"$tmp/ks.yaml"
+flux build kustomization kube-prometheus-stack --path "./$app/app" --kustomization-file "$tmp/ks.yaml" \
+  --dry-run --strict-substitute --in-memory-build >"$tmp/built.yaml"
+
+url=$(yq -N 'select(.kind == "OCIRepository") | .spec.url' "$tmp/built.yaml")
+tag=$(yq -N 'select(.kind == "OCIRepository") | .spec.ref.tag' "$tmp/built.yaml")
+values=$(yq -N 'select(.kind == "HelmRelease") | .spec.valuesFrom[0].name' "$tmp/built.yaml")
+release=$(yq -N 'select(.kind == "HelmRelease") | .spec.releaseName // .metadata.name' "$tmp/built.yaml")
+namespace=$(yq -N 'select(.kind == "HelmRelease") | .spec.targetNamespace // .metadata.namespace' "$tmp/built.yaml")
+kube=$(yq '.kubernetes' versions.yaml)
+yq -N "select(.kind == \"ConfigMap\" and .metadata.name == \"$values\") | .data[\"values.yaml\"]" "$tmp/built.yaml" >"$tmp/values.yaml"
+[[ -s $tmp/values.yaml ]] || { echo "rules-image: no values in the ConfigMap $values" >&2; exit 1; }
+yq -N 'select(.kind == "HelmRelease") | .spec.values // {}' "$tmp/built.yaml" >"$tmp/inline.yaml"
+
+mkdir -p "$tmp/chart"
+helm pull "$url" --version "$tag" --destination "$tmp/chart" >/dev/null
+# The monitoring definitions are there before the application starts, as prometheus-operator-crds
+# installs them, so the chart renders the Prometheus.
+helm template "$release" "$tmp"/chart/*.tgz --namespace "$namespace" --kube-version "$kube" \
+  --api-versions monitoring.coreos.com/v1 --api-versions monitoring.coreos.com/v1alpha1 \
+  --values "$tmp/values.yaml" --values "$tmp/inline.yaml" >"$tmp/rendered.yaml"
+
+image=$(yq -N 'select(.kind == "Prometheus") | .spec.image // ""' "$tmp/rendered.yaml")
+[[ $(grep -c . <<<"$image") -eq 1 ]] || { echo "rules-image: the chart renders Prometheus images: ${image:-none}" >&2; exit 1; }
+echo "$image"

@@ -48,6 +48,11 @@ Feature: Pod Security levels
     When the Pod Security check runs on the render of the tree
     Then the namespace flux-system enforces restricted, every controller is evaluated and passes it, and removing the patch that sets the level fails the check
 
+  Scenario: A Flux install patch that names a file is refused
+    Given a FluxInstance whose kustomize patch names a file outside the render by its path, and one that names a URL
+    When the Pod Security check runs
+    Then it exits non-zero, naming the FluxInstance's patch, and the file's content appears nowhere in its output
+
   Scenario: The custom resources that make an operator create pods ask for what restricted requires
     Given the Grafana, Prometheus, Alertmanager, LinstorCluster, ReplicationSource and ReplicationDestination resources of the tree, whose operators create pods the render does not hold
     When the render of the tree is read with the resource definitions it holds

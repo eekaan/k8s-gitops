@@ -1,0 +1,49 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/gateway.networking.k8s.io/gateway_v1.json
+# The cluster's public Gateway. Its listeners are the ports the edge routers translate to its address
+# (infra/openstack/stacks/sto2/edge/variables.tf, public_ports): tests/gateway.bats fails when the
+# two lists differ.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: public
+spec:
+  gatewayClassName: envoy-gateway
+  infrastructure:
+    parametersRef:
+      group: gateway.envoyproxy.io
+      kind: EnvoyProxy
+      name: public
+  listeners:
+    # Every hostname, and only to redirect: the one route that may attach is the redirect's, in
+    # this namespace (httproute-redirect.yaml). HTTPRoutes only, as an HTTP listener that names no
+    # kinds also takes GRPCRoutes.
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+        kinds:
+          - group: gateway.networking.k8s.io
+            kind: HTTPRoute
+    # The cluster's domain, TLS terminated with the Secret certificate.yaml makes. A namespace's
+    # routes attach only when the namespace carries the label; the controller reports a route that
+    # names this Gateway from any other namespace as not accepted and sends nothing to it.
+    - name: https
+      protocol: HTTPS
+      port: 443
+      hostname: "*.${CLUSTER_DOMAIN}"
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: public-wildcard-tls
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              k8s-gitops/gateway: public
+        kinds:
+          - group: gateway.networking.k8s.io
+            kind: HTTPRoute

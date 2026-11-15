@@ -216,9 +216,9 @@ output `bgp`:
   network address nor its last, and the plan fails naming the variable otherwise. The output `bgp`
   carries the address as `gateway_address`, and the cluster stack hands it on in `talman.yaml` as
   `values.bgp.gatewayAddress`, from which `just cluster-config` fills `GATEWAY_ADDRESS`. The
-  LoadBalancer pool holds the whole range and does not set the address aside: keeping another
-  Service from being given it first is for the change that adds the Gateway, which asks the pool
-  for it by annotation.
+  LoadBalancer pool holds the whole range and does not set the address aside; the public Gateway's
+  Service asks the pool for it by annotation
+  ([kubernetes.md](kubernetes.md#the-public-gateway)).
 
 The cluster stack hands them on in `talman.yaml` ([below](#the-generated-talmanyaml)) and makes
 the node network carry the range:
@@ -868,7 +868,8 @@ The tools below get only the secrets they use. `scripts/lib/tools.sh` runs `tofu
 `talman`, `talosctl`, `kubectl`, `helm`, `flux`, `kustomize`, `docker`, `curl`, `sops`, `age`,
 `age-keygen`, `gh`, `ssh`, `ssh-keyscan` and `ssh-keygen` with the secrets they may not see
 unexported, and `s3_rclone` hands rclone the one key pair it is called with. `scripts/render`,
-`scripts/vector-config`, `scripts/ci-comment` and `vector-check` run their tools the same way.
+`scripts/vector-config`, `scripts/rules-config`, `scripts/rules-image`, `scripts/rules-promtool`,
+`scripts/ci-comment`, `vector-check` and `rules-check` run their tools the same way.
 Every other tool, `jq`, `yq`, `git` and `flock` among them, gets the environment as it is: `jq`
 reads `OPERATOR_CIDRS` from it by design, and none of them sends it anywhere. A wrapped tool a
 script starts in the background, such as a port-forward, is started as `( exec_tool kubectl … ) &`,
@@ -892,7 +893,7 @@ client, and for each of these recipes, the one that runs it: `tests/infra-recipe
 `tests/cluster-recipes.bats` (the upgrade recipes' talman, kubectl and age), `tests/ci-host.bats`
 (gh, ssh), `tests/grafana.bats` (kubectl), `tests/render.bats` (flux, helm, kustomize),
 `tests/logs.bats` (`vector-config`'s flux and helm) and `tests/ci.bats` (gh in `ci-comment`). The
-docker of `vector-check` has only the scan.
+docker of `vector-check` and `rules-check` has only the scan.
 
 | Secret | Seen by |
 | --- | --- |

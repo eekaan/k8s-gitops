@@ -9,7 +9,17 @@
 # Reports every failure, naming the file and the rule, then exits non-zero. Never contacts a
 # cluster and fetches nothing: the publish run runs it in the job that signs (scripts/publish).
 # What the tree holds is data: each value read from a ks.yaml is one field, a control character or
-# a '|' in it read as '?', and a root's spec.path must be a directory of the tree.
+# a '|' in it read as '?'. Before it reads or builds anything else, the check refuses a tree from
+# which a build would read outside kubernetes/, or that a tool would read otherwise than the check,
+# and then builds nothing (scripts/lib/tree-paths.sh): a link that resolves outside it; a
+# kustomization that is not one mapping, that names an entry that is not a plain relative path of
+# the tree, or that holds a key that is not exactly a field kustomize reads there; a root whose
+# spec.path is not a plain path of a directory of the tree as it resolves; a ks.yaml the check
+# builds that holds a key flux build would read as a field it is not spelled as, or whose
+# spec.components names anything but a plain path of the tree, so no entry it accepts is a URL.
+# Its builds run in a second layer under that rule: git is a stand-in that refuses, and the proxies
+# a closed port of the loopback. An application's spec.path is compared with the one its directory
+# fixes, and what is built is that directory.
 #
 # KUBERNETES_CHECK_BUILT, an existing empty directory, receives what each Flux build yielded, for
 # scripts/kubernetes-validate: N.yaml, and in its file builds the record N.yaml, LABEL and APP_DIR,
@@ -18,7 +28,12 @@
 #
 # Usage: scripts/kubernetes-check [DIR]   (DIR holds kubernetes/; defaults to this repository)
 set -euo pipefail
+# Text is matched, sorted and shown byte by byte, whatever the caller's locale.
+export LC_ALL=C
 shopt -s nullglob
+
+# shellcheck source=scripts/lib/tree-paths.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/tree-paths.sh"
 
 keep="${KUBERNETES_CHECK_BUILT:-}"
 if [[ -n $keep ]]; then
@@ -38,13 +53,56 @@ unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
 for tool in kustomize yq jq flux; do
   command -v "$tool" >/dev/null || { echo "kubernetes-check: $tool not found on PATH" >&2; exit 1; }
 done
-[[ -d kubernetes ]] || { echo "kubernetes-check: no kubernetes/ directory in $PWD" >&2; exit 1; }
+[[ -d kubernetes && ! -L kubernetes ]] || { echo "kubernetes-check: no kubernetes/ directory in $PWD" >&2; exit 1; }
+tree_root="$(realpath -e kubernetes)"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+# kustomize and flux build run with a git that refuses and a closed proxy (tree_paths_offline).
+tree_paths_offline "$tmp/offline"
 
 failures=0
 fail() {
   echo "kubernetes-check: $*" >&2
   failures=$((failures + 1))
 }
+
+# What the builds read is the tree's alone, read as the check reads it, or nothing is built. Each
+# Kustomization the check builds with Flux is checked as flux build reads it, its spec.components
+# from the directory it is built from: a root's spec.path, an application's app/. A ks.yaml or a
+# directory that leads outside the tree is a link refused here, and is not read.
+while IFS= read -r line; do
+  fail "$line"
+done < <(tree_paths_refused "$tree_root")
+# kustomization_from KS DIR: fails each thing of the Flux Kustomization in KS that flux build, building
+# it from the directory DIR, would read otherwise than the check, or outside the tree.
+kustomization_from() {
+  local ks=$1 dir line
+  tree_paths_inside "$tree_root" "$(realpath -e -- "$ks" 2>/dev/null)" || return 0
+  dir="$(realpath -e -- "$2" 2>/dev/null)" || return 0
+  tree_paths_inside "$tree_root" "$dir" || return 0
+  while IFS= read -r line; do
+    [[ -z $line ]] || fail "$ks: $line"
+  done <<<"$(kustomization_refused "$ks" "$dir" "$tree_root")"
+}
+for ks in kubernetes/clusters/*/ks.yaml; do
+  tree_paths_inside "$tree_root" "$(realpath -e -- "$ks" 2>/dev/null)" || continue
+  refusal="$(root_path_refused "$ks" "$tree_root")"
+  if [[ -n $refusal ]]; then
+    fail "$refusal"
+    continue
+  fi
+  path="$(yq ea '[select(. != null)] | .[0].spec.path // "" | tostring' "$ks" 2>/dev/null)" || continue
+  kustomization_from "$ks" "kubernetes/${path#./}"
+done
+for dir in kubernetes/apps/base/*/*/ kubernetes/clusters/*/*/*/; do
+  dir="${dir%/}"
+  [[ -f $dir/ks.yaml && -d $dir/app ]] || continue
+  kustomization_from "$dir/ks.yaml" "$dir/app"
+done
+if ((failures > 0)); then
+  echo "kubernetes-check: $failures failure(s); nothing was built, as a build of this tree would read outside it" >&2
+  exit 1
+fi
 
 # Every ks.yaml is a Flux Kustomization in flux-system with a sourceRef: substituteFrom has no
 # namespace field, so a Kustomization anywhere else cannot read cluster-config or cluster-secrets.
@@ -236,7 +294,7 @@ for dir in kubernetes/clusters/*/; do
   fi
   # A build that fails is reported with the other kustomize builds below, and a ks.yaml that
   # cannot be read with the ks.yaml rules above.
-  built="$(kustomize build --load-restrictor LoadRestrictionsNone "$dir" 2>/dev/null)" || continue
+  built="$(offline kustomize build --load-restrictor LoadRestrictionsNone "$dir" 2>/dev/null)" || continue
   # Compared by API group, so a new Kustomization API version still counts.
   if ! found="$(yq -N '(.apiVersion | sub("/[^/]*$"; "")) + " " + .kind + "/" + .metadata.name' <<<"$built" 2>&1)"; then
     fail "$dir: cannot read what kustomize build yields: $found"
@@ -259,7 +317,7 @@ build_list="$(find kubernetes -name kustomization.yaml -exec dirname {} \; | sor
 while IFS= read -r dir; do
   [[ -n $dir ]] || continue
   kustomize_builds=$((kustomize_builds + 1))
-  if err="$(kustomize build --load-restrictor LoadRestrictionsNone "$dir" 2>&1 >/dev/null)"; then
+  if err="$(offline kustomize build --load-restrictor LoadRestrictionsNone "$dir" 2>&1 >/dev/null)"; then
     echo "built $dir"
   else
     broken[$dir]=1
@@ -271,8 +329,6 @@ done <<<"$build_list"
 # it leaves comments, $${VAR} and objects marked kustomize.toolkit.fluxcd.io/substitute: disabled
 # alone. The example key lists stand in for cluster-config and cluster-secrets, which --dry-run
 # cannot read; an application's own postBuild.substitute is added to them.
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
 values="$tmp/values.yaml"
 examples=(kubernetes/clusters/*/cluster-config.example.yaml kubernetes/clusters/*/cluster-secrets.example.yaml)
 echo '{}' >"$values"
@@ -305,7 +361,7 @@ last_built=""
 # LABEL is what the output calls the build, and APP_DIR the application directory the objects come
 # from, if they come from one; the result is in last_built when it succeeded.
 flux_build() {
-  local ks=$1 path=$2 label=$3 app_dir=$4 name err var where
+  local ks=$1 path=$2 label=$3 app_dir=$4 name err var where refused line
   shift 4
   last_built=""
   # A ks.yaml that cannot be read is reported with the ks.yaml rules above.
@@ -314,8 +370,16 @@ flux_build() {
   yq ea 'select(fileIndex == 0) as $values | select(fileIndex == 1 and . != null)
     | .spec.postBuild.substitute = ($values * (.spec.postBuild.substitute // {}))' \
     "$values" "$ks" >"$tmp/ks.yaml" 2>/dev/null || return 0
+  # What flux build is handed, as it reads it: the guard above checked the files it comes from.
+  refused="$(kustomization_refused "$tmp/ks.yaml" "$(realpath -e -- "$path")" "$tree_root")"
+  if [[ -n $refused ]]; then
+    while IFS= read -r line; do
+      fail "$label: $line"
+    done <<<"$refused"
+    return 0
+  fi
   flux_builds=$((flux_builds + 1))
-  if err="$(flux build kustomization "$name" --path "$path" --kustomization-file "$tmp/ks.yaml" \
+  if err="$(offline flux build kustomization "$name" --path "$path" --kustomization-file "$tmp/ks.yaml" \
     --dry-run --strict-substitute --in-memory-build 2>&1 >"$tmp/built/$flux_builds.yaml")"; then
     echo "built $label"
     last_built="$tmp/built/$flux_builds.yaml"
@@ -359,12 +423,7 @@ for ks in kubernetes/clusters/*/ks.yaml; do
   path="$(yq ea '[select(. != null)] | .[0].spec.path' "$ks" 2>/dev/null)" || continue
   path="kubernetes/${path#./}"
   path="${path%/}"
-  # The overlay is a directory of the tree; a path that leaves it would have Flux build files from
-  # elsewhere.
-  if [[ ! $path =~ ^kubernetes(/[A-Za-z0-9._-]+)+$ || /$path/ == */../* || /$path/ == */./* || ! -d $path ]]; then
-    fail "$ks: spec.path must be a directory of the tree under kubernetes/, found ${path#kubernetes/}"
-    continue
-  fi
+  # A directory of the tree as it resolves, checked before anything was built.
   [[ -z ${broken[$path]:-} ]] || continue
   hints=()
   for dir in kubernetes/apps kubernetes/components; do

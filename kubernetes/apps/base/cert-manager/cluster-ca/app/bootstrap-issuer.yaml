@@ -1,0 +1,10 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cert-manager.io/issuer_v1.json
+# Signs the CA's own certificate and nothing else. It is an Issuer, not a ClusterIssuer, so it
+# serves cert-manager's namespace alone and no other namespace can ask it for a certificate.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: cluster-ca-bootstrap
+spec:
+  selfSigned: {}
