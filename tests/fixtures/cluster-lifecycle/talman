@@ -6,6 +6,7 @@
 #   never-back    the node's kubelet never reports again
 #   interrupt     the recipe is sent this signal, INT, TERM or KILL, while talman reboots, and talman ends
 #   clean-shutdown  the shutdown leaves no pod behind
+#   agent-leftover  the shutdown leaves the node's Cilium agent pod Failed too (reason Terminated)
 #   etcd-down.NODE  the etcd member of the control plane NODE does not come back once NODE is
 #                   rebooted
 #   etcd-late.NODE  it comes back once etcd status has been asked that many more times after that
@@ -154,6 +155,9 @@ if [[ ! -e $state/clean-shutdown ]]; then
   while IFS= read -r node; do
     echo "kube-system node-agent-$node Failed $node Terminated" >> "$state/pods"
     echo "apps web-$node-1 Failed $node NodeShutdown" >> "$state/pods"
+    if [[ -e $state/agent-leftover ]]; then
+      echo "kube-system cilium-$node-shutdown Failed $node Terminated" >> "$state/pods"
+    fi
     if [[ ! -e $state/cordoned.$node ]]; then
       for replica in 2 3 4; do
         echo "apps web-$node-$replica Failed $node NodeShutdown" >> "$state/pods"

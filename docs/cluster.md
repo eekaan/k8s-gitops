@@ -948,8 +948,15 @@ out of the artifact, which is built from `kubernetes/`.
 
   Then it stops the probe and prints how many probes it made, how many failed and the longest run
   of failures, in seconds. It uncordons the node, unless it was unschedulable before the recipe
-  ran: such a node stays cordoned, and the recipe says so. A worker is then put back in BGP only once
-  it forwards: forward first, announce second. A node that is Ready and uncordoned has a network
+  ran: such a node stays cordoned, and the recipe says so. It then deletes, by namespace and name,
+  the pods the shutdown left in phase Failed on the node, with the reason `NodeShutdown` (rejected
+  while it shut down) or `Terminated` (terminated as it went down), which stay until they are
+  deleted and on which `cluster-check` fails, and says how many, none included; every other pod
+  stays. That comes before a worker is put back, as the shutdown can leave the node's Cilium agent
+  pod Failed as well, and the wait below for every agent pod of the node to be Running and Ready
+  would not end while it stays; such a pod is not running and carries no traffic, and the node is
+  Ready, so removing it first costs nothing. A worker is then put back in BGP only once it forwards:
+  forward first, announce second. A node that is Ready and uncordoned has a network
   plugin that answers its kubelet, and the moment its label goes its agent announces every Service
   address and an edge hashes a share of new connections to it, so a connection that arrives before
   the datapath forwards a Service's traffic to a backend on another node fails. The recipe therefore
@@ -957,12 +964,13 @@ out of the artifact, which is built from `kubernetes/`.
   the node's name as a field selector; no `exec`) every two seconds until each is Running and Ready
   with a Ready condition that turned true after the reboot began, which leaves out the Ready the pod
   posted before the node went down but not one from while `talman reboot` waited for the node (it
-  returns only once the node is Ready, and a pod's Ready does not refresh), and has stayed so, on every read, for `FORWARD_SETTLE` seconds
-  (30). It waits for up to `FORWARD_WAIT` seconds (300), the settle time included. When the agent
-  does not get there, or cannot be read, the label stays, the run fails saying what it waited for
-  and for how long, and its last line names the worker and the `kubectl label` command that puts it
-  back. A worker whose agent never reports that it forwards therefore stays out of BGP, and
-  announces nothing, rather than being put back to fail the connections it is given.
+  returns only once the node is Ready, and a pod's Ready does not refresh), and has stayed so, on
+  every read, for `FORWARD_SETTLE` seconds (30). It waits for up to `FORWARD_WAIT` seconds (300),
+  the settle time included. When the agent does not get there, or cannot be read, the label stays,
+  the run fails saying what it waited for and for how long, and its last line names the worker and
+  the `kubectl label` command that puts it back. A worker whose agent never reports that it forwards
+  therefore stays out of BGP, and announces nothing, rather than being put back to fail the
+  connections it is given.
 
   What the signal covers is what the pinned Cilium says of it (1.20.4, pinned in
   `kubernetes/apps/base/kube-system/cilium/app/ocirepository.yaml`). The
@@ -981,8 +989,8 @@ out of the artifact, which is built from `kubernetes/`.
   readiness does not say that the node's endpoints are
   regenerated or that its ipcache and tunnel map are in step with the other nodes, which a
   connection to a backend on another node needs. No signal the recipes can read with `kubectl get`
-  does: the `CiliumNode` object's status holds the node's IPAM state and its cloud-specific state and
-  nothing of the datapath
+  does: the `CiliumNode` object's status holds the node's IPAM state and its cloud-specific state
+  and nothing of the datapath
   ([`NodeStatus`](https://github.com/cilium/cilium/blob/v1.20.4/pkg/k8s/apis/cilium.io/v2/types.go#L487-L507));
   the node's `NetworkUnavailable` condition is set to false by the operator for a node that has a
   healthy Cilium pod
@@ -990,35 +998,30 @@ out of the artifact, which is built from `kubernetes/`.
   so it follows the same readiness through one more hop; the `cilium-envoy` pod serves Cilium's L7
   proxy, which the chart leaves on; nothing here is L7-load-balanced (the Gateway is Envoy
   Gateway's) and no policy has L7 rules, so no Service's connection passes through it; and
-  `cilium-health`'s node-to-node probes and `cilium status` need `kubectl exec`,
-  which the recipes do not have. The settle time is therefore a margin, not a proof: it gives the
-  agent time to regenerate its endpoints and synchronise its maps after it reports Ready, and
-  Cilium's documentation gives no figure for how long that takes. A longer `FORWARD_SETTLE` widens
-  the margin; `FORWARD_SETTLE=0` relies on the agent's readiness alone.
+  `cilium-health`'s node-to-node probes and `cilium status` need `kubectl exec`, which the recipes
+  do not have. The settle time is therefore a margin, not a proof: it gives the agent time to
+  regenerate its endpoints and synchronise its maps after it reports Ready, and Cilium's
+  documentation gives no figure for how long that takes. A longer `FORWARD_SETTLE` widens the
+  margin; `FORWARD_SETTLE=0` relies on the agent's readiness alone.
 
   Once the worker forwards, the recipe removes its label and waits, up to `BGP_WAIT` seconds, until
   the node's `CiliumBGPNodeConfig` is back and the sessions that were established before it was
-  taken out are established again; a node with none before, as while the edge stack is not applied or an edge is stopped, is put back all the same, and the
-  recipe says it does not wait for one; for a node whose sessions before are not known, one out
-  already or taken out with `--no-bgp-wait`, it waits only until the configuration is back, and
-  says so. It deletes, by namespace and name, the pods the shutdown
-  left in phase Failed on the node, with the reason `NodeShutdown` (rejected while it shut down) or
-  `Terminated` (terminated as it went down), which stay until they are deleted and on which
-  `cluster-check` fails, and says how many, none included; every other pod stays. It exits 0 only
-  when the node is Ready again, with its etcd member for a control plane, and no probe failed;
-  `--tolerate <seconds>` accepts runs of failures up to that long, for the operator to say what
-  counts as an interruption (a whole number of at most nine digits, as the waits' variables are,
-  [below](#environment)). A control plane after whose reboot etcd is not
-  whole when the wait runs out fails the run, saying why and to reboot no other control plane until
-  it is.
-  A run that stops once the node is cordoned, as when the drain, the reboot or the wait fails,
-  leaves it cordoned and says so: uncordon it with kubectl once it is Ready. A run that stops while
-  a worker is out of BGP says so in its last line, with the command that puts it back,
-  `kubectl label node <node> node-restriction.kubernetes.io/bgp-out-`, also when `cluster-talos
-  --reboot` ran it; `cluster-check` fails until it is. The probe keeps its counts in memory and
-  writes no file; it is stopped, with the kubectl or sleep it is waiting for, on every exit of the
-  recipe, a failed or interrupted run included. It needs what `cluster-talos` needs and the
-  kubeconfig.
+  taken out are established again; a node with none before, as while the edge stack is not applied
+  or an edge is stopped, is put back all the same, and the recipe says it does not wait for one; for
+  a node whose sessions before are not known, one out already or taken out with `--no-bgp-wait`, it
+  waits only until the configuration is back, and says so. It exits 0 only when the node is Ready
+  again, with its etcd member for a control plane, and no probe failed; `--tolerate <seconds>`
+  accepts runs of failures up to that long, for the operator to say what counts as an interruption
+  (a whole number of at most nine digits, as the waits' variables are, [below](#environment)). A
+  control plane after whose reboot etcd is not whole when the wait runs out fails the run, saying
+  why and to reboot no other control plane until it is. A run that stops once the node is cordoned,
+  as when the drain, the reboot or the wait fails, leaves it cordoned and says so: uncordon it with
+  kubectl once it is Ready. A run that stops while a worker is out of BGP says so in its last line,
+  with the command that puts it back, `kubectl label node <node>
+  node-restriction.kubernetes.io/bgp-out-`, also when `cluster-talos --reboot` ran it;
+  `cluster-check` fails until it is. The probe keeps its counts in memory and writes no file; it is
+  stopped, with the kubectl or sleep it is waiting for, on every exit of the recipe, a failed or
+  interrupted run included. It needs what `cluster-talos` needs and the kubeconfig.
 - `just cluster-destroy [cluster] [--yes] [--unreachable]` destroys the cluster stack,
   `sto2/cluster`, as `just infra-destroy sto2/cluster` does
   ([infrastructure.md](infrastructure.md#recipes)): it shows the plan's summary, destroys once the

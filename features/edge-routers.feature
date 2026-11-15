@@ -78,6 +78,16 @@ Feature: Edge routers
     When just edge-rollout --replace runs, and again with the first edge missing a worker's session once replaced
     Then it replaces the first edge's instance alone, records its new host keys, waits until its check passes with every worker's session established, and only then replaces the second edge's instance; with the check failing, the second edge is never planned, applied or touched
 
+  Scenario: EDGE_ROLLOUT_WAIT and EDGE_ROLLOUT_INTERVAL are read from .env, as HOST_CONSOLE_WAIT is
+    Given a .env that holds EDGE_ROLLOUT_WAIT, EDGE_ROLLOUT_INTERVAL and HOST_CONSOLE_WAIT, none of them in the environment, and a plan that replaces the first edge whose console holds no fingerprints yet
+    When just edge-rollout runs with 08 and 04, and with 010 and 02 in the file, and with a value in the file that is no whole number of at most 9 digits
+    Then it reads the console at 0, 4 and 8 seconds on the clock, and at 0, 2, 4, 6, 8 and 10, and the value that is no number is refused, named, before the stack is locked or touched
+
+  Scenario: edge-check takes the stack's lock, which only the child of a run that holds it shares
+    Given another run holding the edge stack's lock, with EDGE_STACK_LOCKED set to 1, to the number of a descriptor open on the lock file that holds no lock, to a word and to nothing; and a run holding the lock that runs edge-check with EDGE_STACK_LOCKED naming its descriptor
+    When edge-check runs
+    Then each run that is not the holder's stops, saying the stack is busy, before the stack is initialised or an edge is reached; the child of the run that holds the lock shares it and passes, nothing holds the lock afterwards, and edge-check with no variable takes the lock for itself, as the rollout's and infra-apply's children do
+
   Scenario: edge-check passes with every worker's session established and fails, saying which, when one is missing or a route outside the range is present, and no address is printed
     Given fake edges that report their sessions, routes and rules
     When just edge-check runs against a complete table, a table with a missing session, and one with a route outside the range

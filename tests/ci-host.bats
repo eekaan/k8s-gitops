@@ -587,7 +587,7 @@ console() {
 
   for recipe_name in ci-host-setup ci-host-remove; do
     for value in 12345678901234567890 1000000000 30s; do
-      rm -f "$KNOWN_HOSTS"
+      rm -f "$KNOWN_HOSTS" "$REPO/infra/openstack/stacks/sto2/ci/.terraform/infra.lock"
       : > "$RECORD/argv"
 
       recipe_with "$recipe_name" "$value" < /dev/null
@@ -597,6 +597,8 @@ console() {
       [[ $output == *"HOST_CONSOLE_WAIT is not a whole number of seconds of at most 9 digits"* ]]
       run grep -cE '^(tofu|ssh|ssh-keyscan|gh|openstack) ' "$RECORD/argv"
       [ "$output" = 0 ]
+      # The stack's lock is not even taken: the refusal comes before the stack is touched.
+      [ ! -e "$REPO/infra/openstack/stacks/sto2/ci/.terraform/infra.lock" ]
     done
   done
 }

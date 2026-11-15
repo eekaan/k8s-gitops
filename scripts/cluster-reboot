@@ -31,20 +31,21 @@
 #      quorum.
 # Then it prints how many probes it made, how many failed and the longest run of failures, in
 # seconds; uncordons the node, unless it was unschedulable before the recipe ran, which it says;
-# puts a worker back in BGP only once its Cilium agent has stayed Ready, since the reboot, for
-# FORWARD_SETTLE seconds (30), within FORWARD_WAIT seconds (300): forward first, announce second, as
-# an edge hashes a share of new connections to a worker the moment it announces, and a node that is
-# Ready does not yet forward a Service's connection to a backend on another node (join_bgp in
-# scripts/lib/cluster.sh says what the agent's readiness covers); --no-bgp-wait does not skip this
-# wait; then waits until its CiliumBGPNodeConfig is back and the sessions that were established
-# before are again, or only until it is back when they are not known;
-# and deletes the pods the shutdown left in phase Failed on it, rejected (NodeShutdown) or
-# terminated (Terminated) as the node went down, which nothing else removes, saying how many. It
-# exits 0 only when the node is Ready again, a control plane with its etcd member, and no probe
-# failed; --tolerate <seconds> accepts runs of failures up to that long, for the operator to say
-# what counts as an interruption. A run that stops once the node is cordoned leaves it cordoned and
-# says so; one that stops while a worker is out of BGP leaves it out and says so last, with the
-# command that puts it back, and a rerun recognises a worker that is out already.
+# deletes the pods the shutdown left in phase Failed on it, rejected (NodeShutdown) or terminated
+# (Terminated) as the node went down, which nothing else removes, saying how many, before a worker
+# is put back, as its Cilium agent's pod may be one of them; puts a worker back in BGP only once
+# every Cilium agent pod on it has stayed Ready, since the reboot, for FORWARD_SETTLE seconds (30),
+# within FORWARD_WAIT seconds (300): forward first, announce second, as an edge hashes a share of
+# new connections to a worker the moment it announces, and a node that is Ready does not yet forward
+# a Service's connection to a backend on another node (join_bgp in scripts/lib/cluster.sh says what
+# the agent's readiness covers); --no-bgp-wait does not skip this wait; then waits until its
+# CiliumBGPNodeConfig is back and the sessions that were established before are again, or only until
+# it is back when they are not known. It exits 0 only when the node is Ready again, a control plane
+# with its etcd member, and no probe failed; --tolerate <seconds> accepts runs of failures up to
+# that long, for the operator to say what counts as an interruption. A run that stops once the node
+# is cordoned leaves it cordoned and says so; one that stops while a worker is out of BGP leaves it
+# out and says so last, with the command that puts it back, and a rerun recognises a worker that is
+# out already.
 #
 # The probe runs in the background and keeps its counts in memory, so it writes no file. It is
 # stopped on every exit: at the end, when a step fails, and when SIGINT or SIGTERM ends the recipe;
@@ -407,12 +408,15 @@ else
   say "$node is schedulable again"
 fi
 
+# The shutdown's Failed pods go before the worker is put back: its Cilium agent's is one of them,
+# and the wait for every agent pod of the node to be Ready would not end while it stays. They are
+# not running and carry no traffic, and the node is Ready, so no more are left by the shutdown.
+step="removing the pods the shutdown left Failed on $node"
+remove_shutdown_pods
+
 if ((!member)); then
   join_bgp "$node" "$since" "the reboot"
 fi
-
-step="removing the pods the shutdown left Failed on $node"
-remove_shutdown_pods
 
 step="checking that /readyz answered"
 if ((failed > 0 && longest > tolerate)); then

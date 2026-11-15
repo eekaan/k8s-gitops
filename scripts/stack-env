@@ -58,15 +58,22 @@ export_plumbing_state() {
 # Holds the stack's lock until the script exits, so a second operation on the stack in this checkout
 # stops at once instead of racing the first for the state. The lock is a file in the checkout: it
 # does not exclude CI or another checkout. The object storage's own locking is not used yet; see
-# infra/openstack/backend.hcl.
+# infra/openstack/backend.hcl. A run that holds the lock hands it to the edge-check it runs in
+# EDGE_STACK_LOCKED, the number of its descriptor: the child locks that descriptor, which is
+# granted as it shares the parent's lock, and only when it is open on this lock file
+# (inherited_lock_fd); locking it fails while another run holds the lock, so the variable alone
+# never lets a run past.
 lock_stack() {
+  local file=$stack_dir/.terraform/infra.lock inherited=0
   if ! command -v flock > /dev/null; then
     infra_error "flock is required to lock $stack and is not on PATH; it comes with util-linux"
     return 1
   fi
   # Neither the directory nor the file is taken for granted: a lock that was never taken must not
   # read as one that was.
-  if ! { mkdir -p "$stack_dir/.terraform" && exec {infra_lock_fd}> "$stack_dir/.terraform/infra.lock"; } 2> /dev/null; then
+  if infra_lock_fd=$(inherited_lock_fd EDGE_STACK_LOCKED "$file"); then
+    inherited=1
+  elif ! { mkdir -p "${file%/*}" && exec {infra_lock_fd}> "$file"; } 2> /dev/null; then
     infra_error "cannot lock $stack: its lock file cannot be made in ${stack_dir#"$infra_root"/}/.terraform"
     return 1
   fi
@@ -74,7 +81,8 @@ lock_stack() {
     infra_error "$stack is busy: another operation on it is running"
     return 1
   fi
-  : > "$errors_file"
+  # The parent's errors are not the child's to empty.
+  ((inherited)) || : > "$errors_file"
 }
 
 # stack_tofu SUBCOMMAND [ARG...]: tofu on the stack. Its errors can name resources and hold
