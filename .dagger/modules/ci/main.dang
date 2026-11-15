@@ -13,7 +13,9 @@ type Ci {
   let git: Directory!
 
   new(ws: Workspace!) {
-    self.source = ws.directory("/", exclude: [".git"], gitignore: true)
+    # dagger.lock is not part of the directory a workspace hands over, and the tests read it: the
+    # digest Dagger records for the image promtool comes from.
+    self.source = ws.directory("/", exclude: [".git"], gitignore: true).withFile("dagger.lock", ws.file("dagger.lock"))
     self.git = ws.git.directory
     self
   }

@@ -267,6 +267,7 @@ own_file() {
     grep -q "^## $alert\$" "$REPO/docs/runbooks/alerts.md"
   done < <(own_alerts "$RENDER")
   # Nothing in the table or the runbook is for an alert the tree does not define.
+  # shellcheck disable=SC2016 # the backticks are the table's, not a command substitution
   rows="$(sed -n 's/^| `\([A-Za-z0-9_]*\)` | .*| \(critical\|warning\|info\) |.*$/\1/p' "$REPO/docs/kubernetes.md" | sort)"
   headings="$(sed -n 's/^## //p' "$REPO/docs/runbooks/alerts.md" | sort)"
   echo "table: $rows"
