@@ -1389,9 +1389,10 @@ cannot be listed without it: `just kubernetes-check` refuses the dependency.
   which would attach it to `http` as well, or when the redirect is anything but that rule.
 - **Who may attach.** To `https`, `HTTPRoute`s of the namespaces that carry the label
   `k8s-gitops/gateway: public`, and of no other: the listener's `allowedRoutes` select them by that
-  label and name the one kind. A route in a namespace without it is not accepted, which is the Gateway API's rule and the
-  controller's to apply; it shows in the route's status, and `tests/gateway.bats` proves the
-  selector on the objects. `demo` is the one namespace that carries the label.
+  label and name the one kind. A route in a namespace without it is not accepted, which is the
+  Gateway API's rule and the controller's to apply; it shows in the route's status, which
+  `just gateway-check` reads, and `tests/gateway.bats` proves the selector on the objects. `demo`
+  is the one namespace that carries the label.
 - **The certificate.** The `Certificate` `public-wildcard` asks the `ClusterIssuer` `cluster-ca`
   for an ECDSA P-256 certificate for `*.${CLUSTER_DOMAIN}` and `${CLUSTER_DOMAIN}`, valid for 90
   days and renewed 30 days before it ends. A `Certificate` rather than the Gateway annotation
