@@ -8,7 +8,9 @@
 # lib/cluster.sh would do the same, but it would need shellcheck's source directive to be switched
 # off for stack-env there, and shellcheck would no longer check how the library uses it. Reading state evaluates no variable, but stack-env requires every
 # input the stack declares, so the ci stack's two that come from the environment take a placeholder
-# when unset; a .env that holds the placeholders stack-env refuses makes the read fail and say why.
+# when unset, and so do the edge stack's: its image, and its key pair, whose public half stack-env
+# reads from a file, a placeholder pair in a directory of this run's. A .env that holds the
+# placeholders stack-env refuses makes the read fail and say why.
 # Nothing of the state is printed.
 # Usage: scripts/stack-state STACK
 set -euo pipefail
@@ -18,6 +20,13 @@ here=$(dirname "$0")
 . "$here/lib/cluster.sh"
 export CI_HOST_IMAGE=${CI_HOST_IMAGE:-state-read-only}
 export CI_HOST_SSH_PUBLIC_KEY=${CI_HOST_SSH_PUBLIC_KEY:-state-read-only}
+export EDGE_IMAGE=${EDGE_IMAGE:-state-read-only}
+if [[ -z ${EDGE_SSH_KEY_FILE:-} ]]; then
+  placeholder=$(mktemp -d)
+  trap 'rm -rf "$placeholder"' EXIT
+  echo state-read-only > "$placeholder/key.pub"
+  export EDGE_SSH_KEY_FILE=$placeholder/key
+fi
 stack=${1:-}
 [[ -n $stack ]] || exit 2
 # Whatever these print is not the answer, so it goes to standard error.
