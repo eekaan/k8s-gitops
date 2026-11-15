@@ -77,10 +77,7 @@ if [[ -n $existing ]]; then
     exit 1
   fi
   replaced=
-  if ! ln -- "$partial" "$kept"; then
-    infra_error "$kept exists; nothing is deleted"
-    exit 1
-  fi
+  bao_place "$partial" "$kept" "nothing is deleted" || exit 1
   echo "bao-seal-restore: kept the key the Secret $bao_seal_secret held in $kept"
   step="deleting the Secret $bao_seal_secret, which holds another key"
   kubectl delete secret "$bao_seal_secret" --namespace "$bao_namespace" --wait=true > /dev/null

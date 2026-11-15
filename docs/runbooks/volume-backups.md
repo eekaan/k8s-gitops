@@ -7,7 +7,8 @@ is derived from one master password, which `just bao-seed-volsync` keeps in a cu
 the cluster: encrypted with age to the Talos age key's recipient, opened with the Talos age key from
 `SOPS_AGE_KEY_FILE`, or `SOPS_AGE_KEY`, into memory only. This runbook covers checking the first
 backup, restoring a claim from its repository, opening a repository by hand, replacing the cluster's
-S3 key, and losing the master's file or the store's key. `<file>` is the custody file.
+S3 key, seeding the store again from the file once it lost the key, as on a rebuilt cluster, and
+losing the master's file, or the file and the store's key both. `<file>` is the custody file.
 
 ## Checking the first backup
 
@@ -30,9 +31,11 @@ After `just bao-seed-volsync <file>`, each of these only reads:
 ## Restoring a claim from its repository
 
 The component restores the latest backup when a claim and its ReplicationDestination are created
-together, as on an application's first deployment or on a rebuilt cluster; nothing is done by hand
-for that. To restore the latest backup into an application that runs, as
-[Restoring](../kubernetes.md#restoring) sets out:
+together, as on an application's first deployment or on a rebuilt cluster, once the store holds the
+key `volsync`; nothing else is done by hand for that. A rebuilt cluster's store is new and holds no
+key, so its restores wait, their claims Pending, until the store is seeded again from the file that
+holds the master ([below](#the-stores-key-is-lost-and-the-file-is-kept)). To restore the latest
+backup into an application that runs, as [Restoring](../kubernetes.md#restoring) sets out:
 
 1. Suspend what keeps the application: `flux suspend kustomization <app>`, and
    `flux suspend helmrelease <release> --namespace <namespace>` when a chart runs it, as drift
@@ -78,6 +81,27 @@ store's key `volsync` and keeps the master. External Secrets writes it into each
 Secret at its next refresh; a mover that ran meanwhile with the old key fails until then, and runs
 again at its next schedule.
 
+## The store's key is lost and the file is kept
+
+OpenBao keeps its data on volumes of the default StorageClass, which do not survive a rebuild
+([rebuild.md](rebuild.md#what-does-not)), so a rebuilt cluster's store, like any store started
+again from nothing, holds no key `volsync`. Until it does, no ExternalSecret of the component syncs,
+and no backup or restore runs. The master that opens the existing repositories is in the file, so
+the store is seeded from it, never with a new one:
+
+1. `just bao-recovery <recovery file>`, with a new file, right after the first reconcile, as on any
+   first initialisation ([openbao.md](openbao.md#first-initialisation)): the recovery keys of the
+   old store open nothing in the new one.
+2. `just bao-seed-volsync <file>`, with the existing custody file, with the cluster's S3 key in
+   `.env`. The recipe finds no key, reads the master back from the file, makes no other, and creates
+   the key with it and the cluster's S3 key; the file stays as it was, and the recipe says it wrote
+   the key with the master in it. A new file instead would make a new master, which opens none of
+   the existing repositories: every restore would fail on its repository's password.
+3. Check as in [Checking the first backup](#checking-the-first-backup): each ExternalSecret
+   `SecretSynced`, each ReplicationDestination's `status.latestImage` set by a restore of the latest
+   backup, each claim `Bound`, and `just bao-volsync-password <file> <app> restic snapshots` listing
+   the backups the application had.
+
 ## The master's file is lost and the store still holds the key
 
 The store holds the master, so the repositories still open and the backups run. The `operator` role
@@ -108,7 +132,7 @@ and never an argument, and nothing derives it again.
 
 Once those Secrets are gone too, as on a rebuilt cluster, nothing opens the repositories: restic
 cannot read a repository without its password, and the password cannot be derived without the
-master or guessed. The backups are lost. To back up again, run `just bao-seed-volsync <file>` against
-the store, which holds no key then, for a new master, and move or delete the old repositories'
-objects in the VolSync bucket, as restic does not create a repository over one that exists and the
-movers fail until that path is empty.
+master or guessed. The backups are lost. To back up again, run `just bao-seed-volsync <file>` with a
+new file against the store, which holds no key then, for a new master, and move or delete the old
+repositories' objects in the VolSync bucket, as restic does not create a repository over one that
+exists and the movers fail until that path is empty.

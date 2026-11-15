@@ -132,12 +132,8 @@ if [[ $(bao_decrypt "$partial" | sha256sum) != "$(printf '%s' "$custody" | sha25
   exit 1
 fi
 custody=
-# A hard link fails where a file exists, so one made after the check above is never replaced.
 step="putting $file in place"
-if ! ln -- "$partial" "$file"; then
-  infra_error "$file exists now; the recovery keys go into a new file"
-  exit 1
-fi
+bao_place "$partial" "$file" "no recovery keys are committed" || exit 1
 placed=1
 rm -- "$partial"
 partial=""

@@ -4,8 +4,10 @@
 # cluster whose port-forward runs until it is stopped, and an OpenBao behind it that answers as its
 # API does. age and age-keygen are the pinned ones, offline, with a throwaway key in the test's
 # directory. The recipes' PATH holds only the fakes, recorders and bash: every other command they
-# run is a recorder of the real one, so every command line they run is in the record, and a command
-# no recorder names is not found.
+# run by its name is a recorder of the real one, so its command line is in the record, and a command
+# no recorder names is not found. bash traces the recipes' scripts, so a test can show that they ran
+# no command by its path, past the recorders. The recorders of rm and mv keep a copy of what they
+# remove, and the recorder of head what it returned.
 
 # The fakes keep their state in each test's own directory, and a test waits for the port-forwards
 # it started; nothing is shared between tests, which may run side by side.
@@ -17,8 +19,8 @@ setup() {
   BIN="$BATS_TEST_TMPDIR/bin"
   RECORD="$BATS_TEST_TMPDIR/record"
   STATE="$BATS_TEST_TMPDIR/state"
-  mkdir -p "$BIN" "$RECORD" "$STATE/kv" "$BATS_TEST_TMPDIR/repo/talos/lab-sto2/clusterconfig" \
-    "$BATS_TEST_TMPDIR/keys" "$BATS_TEST_TMPDIR/custody" "$BATS_TEST_TMPDIR/tmp"
+  mkdir -p "$BIN" "$RECORD/removed" "$STATE/kv" "$BATS_TEST_TMPDIR/repo/talos/lab-sto2/clusterconfig" \
+    "$BATS_TEST_TMPDIR/keys" "$BATS_TEST_TMPDIR/custody" "$BATS_TEST_TMPDIR/tmp" "$BATS_TEST_TMPDIR/xtrace"
   : >"$RECORD/argv"
   REPO=$(cd "$BATS_TEST_TMPDIR/repo" && pwd)
   cp -R "$ROOT/scripts" "$REPO/scripts"
@@ -36,8 +38,19 @@ setup() {
   SYS="$BATS_TEST_TMPDIR/sys"
   mkdir -p "$SYS"
   ln -s "$(command -v bash)" "$SYS/bash"
-  record jq age base64 cat sed grep awk tr env head od sha256sum cut date mktemp ln rm mv mkdir chmod \
+  record jq age base64 cat sed grep awk tr env od sha256sum cut date mktemp ln mkdir chmod \
     dirname basename realpath yq paste sort wc sleep
+  record_head
+  record_removal rm mv
+  # bash reads this file before a script runs, and traces each command a recipe's script runs, as
+  # it runs it, into xtrace; the fakes and just's shell are not traced.
+  cat >"$BATS_TEST_TMPDIR/bash-env" <<EOF
+if [[ \$0 == *scripts/bao-* ]]; then
+  exec 9>> "$BATS_TEST_TMPDIR/xtrace/\$\$"
+  BASH_XTRACEFD=9 PS4='+xtrace '
+  set -x
+fi
+EOF
   fake_cluster
 }
 
@@ -74,13 +87,54 @@ EOF
   done
 }
 
+# record_head: like record for head, and keeps every byte head returns in $RECORD/head-output.
+record_head() {
+  fake head <<EOF
+printf '%s\n' "head \$*" >> "$RECORD/argv"
+set -o pipefail
+"$(command -v head)" "\$@" | "$(command -v tee)" -a "$RECORD/head-output"
+EOF
+}
+
+# record_removal NAME...: like record, and first copies each path NAME is given that exists into a
+# directory of its own under $RECORD/removed, which leaked searches: what a recipe writes and
+# removes again, or replaces, is seen there. The fakes' own state is not copied.
+record_removal() {
+  local tool real
+  for tool; do
+    real=$(command -v "$tool")
+    fake "$tool" <<EOF
+printf '%s\n' "$tool \$*" >> "$RECORD/argv"
+kept=\$("$(command -v mktemp)" -d "$RECORD/removed/$tool.XXXXXXXXXX")
+for operand; do
+  if [[ \$operand != -* && \$operand != "$STATE"/* ]] && [[ -e \$operand || -L \$operand ]]; then
+    "$(command -v cp)" -R -- "\$operand" "\$kept/"
+  fi
+done
+exec "$real" "\$@"
+EOF
+  done
+}
+
 # recipe NAME [ARG...]: runs the repository's recipe against the copy, with only what it needs in
 # its environment, the Talos age key's location included. A recipe that blocks fails after two
 # minutes instead of hanging the tests.
 recipe() {
   run timeout 120 env -i HOME="$BATS_TEST_TMPDIR" PATH="$BIN:$SYS" TMPDIR="$BATS_TEST_TMPDIR/tmp" \
-    SOPS_AGE_KEY_FILE="$BATS_TEST_TMPDIR/keys/talos.agekey" \
+    SOPS_AGE_KEY_FILE="$BATS_TEST_TMPDIR/keys/talos.agekey" BASH_ENV="$BATS_TEST_TMPDIR/bash-env" \
     "$JUST" --justfile "$ROOT/justfile" --working-directory "$REPO" "$@"
+}
+
+# by_name: every command the recipes' scripts ran, as bash traced it, ran by its name, so its command
+# line is in the record: none ran by a path, which bypasses the recorders. Prints only the commands
+# that did, never their arguments.
+by_name() {
+  local paths
+  [ -n "$(ls -A "$BATS_TEST_TMPDIR/xtrace")" ] || { echo "no script was traced"; return 1; }
+  paths=$(cat "$BATS_TEST_TMPDIR"/xtrace/* | sed -nE "s/^\\++xtrace ((exec|command|builtin|env|nohup|time) )*//p" |
+    grep -E "^'?[^ =']*/" | cut -d' ' -f1 | sort -u) || true
+  echo "run by a path: ${paths:-none}"
+  [ -z "$paths" ]
 }
 
 # custody_file KEY: writes a custody file, as bao-recovery does, holding the five marker shares and
@@ -121,6 +175,8 @@ forwards_closed() {
 #   login-refused     OpenBao refuses the login
 #   write-refused     OpenBao refuses every write to the key-value mount
 #   create-refused    OpenBao refuses a POST to the key-value mount, and answers a patch as usual
+#   kv-fails          OpenBao fails every write to the key-value mount with a server error
+#   unreachable       no request to the key-value mount reaches OpenBao: curl fails to connect
 #   no-forward        the port-forward fails to start
 #   interrupt         curl sends SIGINT to the recipe's script at the request whose path it names,
 #   interrupt-at      at the Nth request to that path (the first when absent)
@@ -128,7 +184,8 @@ forwards_closed() {
 #                     without it the request goes through
 #   recovery-shares   how many recovery key shares exist; none when absent
 #   stale-rotation    a rotation of the recovery keys is in progress already
-#   clobber           curl writes that file, as someone else would, when the rotation starts
+#   clobber           curl writes that file, as someone else would, when the rotation starts or a
+#                     key of the key-value mount is patched
 #   root-refused      OpenBao refuses the second recovery key share for a root token
 #   stale-root        a root token generation is in progress already
 #   lookup-refused    OpenBao fails every token lookup
@@ -237,6 +294,10 @@ if [[ -e $STATE/interrupt && $(< "$STATE/interrupt") == "$path" ]]; then
     [[ ! -e $STATE/interrupt-drops ]] || exit 28
   fi
 fi
+if [[ -e $STATE/unreachable && $path == secrets/* ]]; then
+  echo "curl: (7) Failed to connect to openbao-active.openbao.svc port 8200 after 0 ms: Could not connect to server" >&2
+  exit 7
+fi
 respond() {
   printf '%s' "$2"
   if [[ -n $write_out ]]; then printf '\n%s' "$1"; fi
@@ -304,7 +365,9 @@ case "$method $path" in
   # request's check-and-set option against the key's current version, 1 or more here, before it
   # writes (pathDataPatch in internal/builtin/logical/kv/path_data.go in OpenBao v2.7.2).
   "PATCH secrets/data/"*)
+    if [[ -e $STATE/clobber ]]; then echo someone-else > "$(cat "$STATE/clobber")"; fi
     [[ -e $STATE/write-refused ]] && respond 403 '{"errors":["permission denied"]}'
+    [[ -e $STATE/kv-fails ]] && respond 500 '{"errors":["internal error"]}'
     file=$STATE/kv/${path#secrets/data/}.json
     [[ -f $file ]] || respond 404 '{"errors":[]}'
     if [[ $("$JQ" -r '.options.cas // "unset"' <<< "$body") == 0 ]]; then
@@ -320,6 +383,7 @@ case "$method $path" in
   # answers 403 to the token.
   "POST secrets/data/"*)
     [[ -e $STATE/write-refused || -e $STATE/create-refused ]] && respond 403 '{"errors":["permission denied"]}'
+    [[ -e $STATE/kv-fails ]] && respond 500 '{"errors":["internal error"]}'
     file=$STATE/kv/${path#secrets/data/}.json
     [[ ! -f $file ]] || respond 403 '{"errors":["permission denied"]}'
     # The custody file must be in place, and non-empty, when the key is written.
@@ -648,6 +712,27 @@ requests_of() {
   [ "$(find "$BATS_TEST_TMPDIR/custody" -mindepth 1 ! -name openbao.age | wc -l)" -eq 0 ]
   rm "$STATE/clobber" "$CUSTODY" "$STATE/cancelled"
 
+  # Where no hard link can be made, as on a filesystem without them, the file is put in place no
+  # other way: ln's own error is shown, the file is not said to exist, nothing is committed and
+  # nothing stays in the custody directory.
+  fake_tool ln <<'LN'
+printf '%s\n' "ln $*" >> "$RECORD/argv"
+printf "ln: failed to create hard link '%s' => '%s': Operation not permitted\n" "${@: -1}" "${@: -2:1}" >&2
+exit 1
+LN
+  : >"$RECORD/requests"
+  recipe bao-recovery "$CUSTODY"
+  echo "no hard links: $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"Operation not permitted"* ]]
+  [[ $output != *exists* ]]
+  [ -z "$(requests_of POST sys/rotate/recovery/verify)" ]
+  [ ! -e "$STATE/recovery-shares" ]
+  [ -e "$STATE/cancelled" ]
+  [ -z "$(ls -A "$BATS_TEST_TMPDIR/custody")" ]
+  record ln
+  rm "$STATE/cancelled"
+
   # Encrypted to a recipient the operator's age key does not open, the shares are never committed.
   age-keygen -o "$BATS_TEST_TMPDIR/keys/other.agekey" 2>/dev/null
   OTHER="$(age-keygen -y "$BATS_TEST_TMPDIR/keys/other.agekey")" yq -i '.creation_rules[].age = strenv(OTHER)' "$REPO/talos/.sops.yaml"
@@ -883,6 +968,22 @@ EOF
   [ ! -e "$STATE/seal-deleted" ]
   cmp "$kept" "$BATS_TEST_TMPDIR/kept-before.age"
   [ "$(find "$BATS_TEST_TMPDIR/custody" -mindepth 1 | sort)" = "$(cat "$BATS_TEST_TMPDIR/custody-before")" ]
+  # Where no hard link can be made, as on a filesystem without them, the key is kept no other way and
+  # nothing is deleted: ln's own error is shown, and the file is not said to exist.
+  rm "$STATE/frozen-time"
+  fake_tool ln <<'LN'
+printf '%s\n' "ln $*" >> "$RECORD/argv"
+printf "ln: failed to create hard link '%s' => '%s': Operation not permitted\n" "${@: -1}" "${@: -2:1}" >&2
+exit 1
+LN
+  recipe bao-seal-restore "$CUSTODY" --replace
+  echo "no hard links: $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"Operation not permitted"* ]]
+  [[ $output != *exists* ]]
+  [ ! -e "$STATE/seal-deleted" ]
+  [ "$(find "$BATS_TEST_TMPDIR/custody" -mindepth 1 | sort)" = "$(cat "$BATS_TEST_TMPDIR/custody-before")" ]
+  record ln
   for secret in "$key" "$other" "$(printf %s "$key" | base64 -w0)" "$(printf %s "$other" | base64 -w0)"; do
     [[ $output != *"$secret"* ]] || { echo "a key in the output"; return 1; }
     absent "$secret" "$RECORD/argv"
@@ -890,11 +991,13 @@ EOF
 }
 
 # seed_env [ID [SECRET]]: the repository's .env, as an operator fills it in: the backup prefix, the
-# state key, and the cluster's S3 key, which differs from the state key. The cluster key is what
-# the volsync recipes put in the store. The object storage's settings are a fixture's.
+# state key and its passphrase, the cloud credential, and the cluster's S3 key, which differs from
+# the state key. The cluster key is what the volsync recipes put in the store. The object storage's
+# settings are a fixture's.
 seed_env() {
   printf '%s\n' BACKUP_BUCKET_PREFIX=marker-prefix AWS_ACCESS_KEY_ID=marker-state-id \
-    AWS_SECRET_ACCESS_KEY=marker-state-secret "CLUSTER_S3_ACCESS_KEY_ID=${1-marker-cluster-id}" \
+    AWS_SECRET_ACCESS_KEY=marker-state-secret TF_STATE_PASSPHRASE=marker-state-passphrase \
+    OS_APPLICATION_CREDENTIAL_SECRET=marker-cloud-secret "CLUSTER_S3_ACCESS_KEY_ID=${1-marker-cluster-id}" \
     "CLUSTER_S3_SECRET_ACCESS_KEY=${2-marker-cluster-secret}" >"$REPO/.env"
   mkdir -p "$REPO/infra/openstack"
   printf 'region = "marker-region"\nendpoints = {\n  s3 = "https://s3.example.com"\n}\nuse_path_style = true\n' \
@@ -915,15 +1018,19 @@ stored() {
 }
 
 # leaked OUTPUT TEXT...: fails when any TEXT is in OUTPUT, the recipe's output, or on a command line
-# the tools recorded, or in any file but the encrypted one, the fakes themselves, the fake store and
-# its record of requests, what the fake command wrote down, and the operator's own .env.
+# the tools recorded, which holds every command line as no command ran by its path, or in any file
+# but the encrypted one, the fakes themselves, the fake store and its record of requests, the trace
+# of the scripts, what the fake command wrote down, and the operator's own .env. The files searched
+# include what the recipes removed or replaced, as the recorders of rm and mv kept it.
 leaked() {
   local printed=$1 text
   shift
+  by_name
   for text; do
     [[ $printed != *"$text"* ]] || { echo "$text in the output"; return 1; }
     absent "$text" "$RECORD/argv"
-    if grep -rlF --exclude-dir=kv --exclude-dir=bin --exclude=requests --exclude=command-env --exclude=.env -- "$text" "$BATS_TEST_TMPDIR"; then
+    if grep -rlF --exclude-dir=kv --exclude-dir=bin --exclude-dir=xtrace --exclude=requests --exclude=command-env \
+      --exclude=.env -- "$text" "$BATS_TEST_TMPDIR"; then
       echo "$text is in a file, unencrypted"
       return 1
     fi
@@ -941,6 +1048,11 @@ leaked() {
   # which restic and the template's digest take as they are.
   master=$(master_in "$VOLSYNC_CUSTODY")
   [[ $master =~ ^[0-9a-f]{64}$ ]]
+  # Those bytes are the ones the kernel's generator gave, and nothing else: head read 32 bytes of
+  # /dev/urandom, once, and the master is exactly what it returned, in hexadecimal.
+  [ "$(grep -c '^head ' "$RECORD/argv")" -eq 1 ]
+  grep -qx 'head -c 32 /dev/urandom' "$RECORD/argv"
+  [ "$(od -An -vtx1 "$RECORD/head-output" | tr -d ' \n')" = "$master" ]
   [ "$(age -d -i "$BATS_TEST_TMPDIR/keys/talos.agekey" "$VOLSYNC_CUSTODY" | "$JQ" -r '.cluster')" = lab-sto2 ]
   [ "$(stat -c %a "$VOLSYNC_CUSTODY")" = 600 ]
   # The store's key holds that master and the cluster's S3 key, written only once the file stood,
@@ -1006,10 +1118,30 @@ AGE
   # Nothing is left in the custody directory, the partial file included.
   [ -z "$(ls -A "$BATS_TEST_TMPDIR/custody")" ]
   forwards_closed
+
+  # Where no hard link can be made, as on a filesystem without them, the file is put in place no
+  # other way: ln's own error is shown and the file is not said to exist; nothing stays in the
+  # custody directory, and the store is never written.
+  RECIPIENT=$RECIPIENT yq -i '.creation_rules[].age = strenv(RECIPIENT)' "$REPO/talos/.sops.yaml"
+  fake_tool ln <<'LN'
+printf '%s\n' "ln $*" >> "$RECORD/argv"
+printf "ln: failed to create hard link '%s' => '%s': Operation not permitted\n" "${@: -1}" "${@: -2:1}" >&2
+exit 1
+LN
+  : >"$RECORD/requests"
+  recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
+  echo "no hard links: $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"Operation not permitted"* ]]
+  [[ $output != *exists* ]]
+  [ -z "$(requests_of POST secrets/data/volsync)" ]
+  [ ! -e "$STATE/kv/volsync.json" ]
+  [ -z "$(ls -A "$BATS_TEST_TMPDIR/custody")" ]
+  forwards_closed
 }
 
 @test "A store that already holds the key is not seeded again, and its master is never replaced" {
-  local master before
+  local master before refusal reason
   seed_env
   recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
   [ "$status" -eq 0 ]
@@ -1092,6 +1224,38 @@ AGE
   [ "$status" -ne 0 ]
   [ ! -e "$STATE/kv/volsync.json" ]
   forwards_closed
+
+  # Asking whether the key exists refused for another reason than its check-and-set, by a denied
+  # permission, a server error or a request that never reached OpenBao: the recipe says that reason,
+  # not that the store holds the key, and makes nothing.
+  for refusal in 'write-refused permission denied' 'kv-fails internal error' 'unreachable Failed to connect'; do
+    reason=${refusal#* }
+    : >"$STATE/${refusal%% *}"
+    : >"$RECORD/requests"
+    recipe bao-seed-volsync "$BATS_TEST_TMPDIR/custody/refused.age"
+    echo "${refusal%% *}: $output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"$reason"* ]]
+    [[ $output != *"already holds"* ]]
+    [ -z "$(requests_of POST secrets/data/volsync)" ]
+    [ ! -e "$STATE/kv/volsync.json" ]
+    [ "$(find "$BATS_TEST_TMPDIR/custody" -mindepth 1 -name '*refused.age*' | wc -l)" -eq 0 ]
+    forwards_closed
+    rm "$STATE/${refusal%% *}"
+  done
+
+  # A file someone makes at the path after the recipe checked it is never replaced, and the store is
+  # not written: the recipe stops before it, and leaves no partial file.
+  echo "$BATS_TEST_TMPDIR/custody/late.age" >"$STATE/clobber"
+  : >"$RECORD/requests"
+  recipe bao-seed-volsync "$BATS_TEST_TMPDIR/custody/late.age"
+  echo "made by someone else: $output"
+  [ "$status" -ne 0 ]
+  [ "$(cat "$BATS_TEST_TMPDIR/custody/late.age")" = someone-else ]
+  [ -z "$(requests_of POST secrets/data/volsync)" ]
+  [ ! -e "$STATE/kv/volsync.json" ]
+  [ "$(find "$BATS_TEST_TMPDIR/custody" -mindepth 1 -name '.late.age.*' | wc -l)" -eq 0 ]
+  forwards_closed
 }
 
 @test "A run interrupted between the file and the store goes on from the file" {
@@ -1162,6 +1326,67 @@ AGE
   [ "$status" -eq 0 ]
   [ "$(stored RESTIC_MASTER_PASSWORD)" = "$master" ]
   forwards_closed
+
+  # The same when it is interrupted as the file is put in place, right after the link is made.
+  rm -r "$STATE/kv" "$VOLSYNC_CUSTODY"
+  mkdir "$STATE/kv"
+  fake_tool ln <<LN
+printf '%s\n' "ln \$*" >> "\$RECORD/argv"
+"$(command -v ln)" "\$@" || exit
+kill -INT "\$PPID"
+LN
+  recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
+  echo "interrupted as the file is put in place: $output"
+  [ "$status" -ne 0 ]
+  [ ! -e "$STATE/kv/volsync.json" ]
+  master=$(master_in "$VOLSYNC_CUSTODY")
+  [[ $output == *"$VOLSYNC_CUSTODY"* ]]
+  [[ $output == *"from the file"* ]]
+  [ "$(ls -A "$BATS_TEST_TMPDIR/custody")" = volsync.age ]
+  forwards_closed
+  record ln
+  recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
+  echo "continued: $output"
+  [ "$status" -eq 0 ]
+  [ "$(stored RESTIC_MASTER_PASSWORD)" = "$master" ]
+  forwards_closed
+}
+
+@test "A rebuilt store is seeded from the existing custody file, never with a new master" {
+  local master
+  seed_env
+  recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
+  [ "$status" -eq 0 ]
+  master=$(master_in "$VOLSYNC_CUSTODY")
+  cp "$VOLSYNC_CUSTODY" "$BATS_TEST_TMPDIR/custody-before.age"
+  # The cluster is rebuilt: OpenBao's store is a new one that holds no key, and the cluster has an S3
+  # key of its own again.
+  rm -r "$STATE/kv"
+  rm -f "$STATE/stored-after-file" "$STATE/revoked"
+  mkdir "$STATE/kv"
+  seed_env marker-rebuilt-id marker-rebuilt-secret
+  : >"$RECORD/argv"
+  : >"$RECORD/requests"
+  recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  # The store's key holds the master the file holds and the cluster's S3 key. No master was made, and
+  # the file is as it was.
+  [ "$(stored RESTIC_MASTER_PASSWORD)" = "$master" ]
+  [ "$(stored AWS_ACCESS_KEY_ID)" = marker-rebuilt-id ]
+  [ "$(stored AWS_SECRET_ACCESS_KEY)" = marker-rebuilt-secret ]
+  [ "$(grep -c '^head ' "$RECORD/argv")" -eq 0 ]
+  cmp "$VOLSYNC_CUSTODY" "$BATS_TEST_TMPDIR/custody-before.age"
+  [ "$(ls -A "$BATS_TEST_TMPDIR/custody")" = volsync.age ]
+  # It is created only as the probe found no key, and the recipe says it wrote the file's master.
+  [ "$(requests_of PATCH secrets/data/volsync | "$JQ" -c '.')" = '{"data":{},"options":{"cas":0}}' ]
+  [ "$(requests_of POST secrets/data/volsync | "$JQ" -r '.options.cas')" = 0 ]
+  [ -e "$STATE/stored-after-file" ]
+  [[ $output == *"master in $VOLSYNC_CUSTODY"* ]]
+  [[ $output != *"new master"* ]]
+  [ -e "$STATE/revoked" ]
+  forwards_closed
+  leaked "$output" "$master" marker-rebuilt-id marker-rebuilt-secret
 }
 
 @test "An S3 key variable that is empty or a placeholder stops the recipe before anything is generated" {
@@ -1208,6 +1433,8 @@ AGE
   [ "$status" -eq 0 ]
   master=$(master_in "$VOLSYNC_CUSTODY")
   leaked "$output" "$master" marker-cluster-id marker-cluster-secret marker-service-account-jwt marker-bao-token
+  # What the recipe removed was searched too, its private directory among it.
+  [ -n "$(find "$RECORD/removed" -name ca.crt)" ]
   # The master and the key travel in the body of the write, and in no other request.
   [ "$("$JQ" -r --arg master "$master" 'select(.body | contains($master)) | .method + " " + .path' "$RECORD/requests")" = \
     'POST secrets/data/volsync' ]
@@ -1240,12 +1467,14 @@ AGE
 }
 
 @test "One application's repository password is derived from the custody file without printing it" {
-  local master password other
+  local master password other name
   seed_env
   recipe bao-seed-volsync "$VOLSYNC_CUSTODY"
   [ "$status" -eq 0 ]
   master=$(master_in "$VOLSYNC_CUSTODY")
-  # The command it runs says what reached its environment, into a file, and prints nothing.
+  # The command it runs says what reached its environment, into files, and prints nothing: the
+  # values it is given, the name of every variable it got, and the name of each that holds a value
+  # of the state key, its passphrase or the cloud credential.
   fake report-env <<EOF
 {
   echo "password=\$RESTIC_PASSWORD"
@@ -1253,6 +1482,10 @@ AGE
   echo "key=\$AWS_ACCESS_KEY_ID:\$AWS_SECRET_ACCESS_KEY region=\$AWS_DEFAULT_REGION"
   echo "args=\$*"
 } > "$STATE/command-env"
+compgen -e > "$STATE/command-names"
+for name in \$(compgen -e); do
+  [[ \${!name} != *marker-state-* && \${!name} != *marker-cloud-* ]] || echo "\$name"
+done > "$STATE/command-foreign"
 EOF
   : >"$RECORD/argv"
   recipe bao-volsync-password "$VOLSYNC_CUSTODY" volsync-demo report-env snapshots latest
@@ -1262,6 +1495,13 @@ EOF
   [ "$(cat "$STATE/command-env")" = "$(printf '%s\n' "password=$password" \
     'repository=s3:https://s3.example.com/marker-prefix-volsync/volsync-demo' \
     'key=marker-cluster-id:marker-cluster-secret region=marker-region' 'args=snapshots latest')" ]
+  # No other secret of the environment reaches it: not the Talos age key's location, the cluster's
+  # key under its own names, the state key, its passphrase or the cloud credential.
+  for name in SOPS_AGE_KEY_FILE CLUSTER_S3_ACCESS_KEY_ID CLUSTER_S3_SECRET_ACCESS_KEY TF_STATE_PASSPHRASE \
+    OS_APPLICATION_CREDENTIAL_SECRET; do
+    ! grep -qx "$name" "$STATE/command-names" || { echo "$name reached the command"; return 1; }
+  done
+  [ ! -s "$STATE/command-foreign" ] || { echo "reached the command: $(cat "$STATE/command-foreign")"; return 1; }
   # It reaches neither the cluster nor OpenBao, and prints nothing.
   [ "$(grep -c -E '^(kubectl|curl) ' "$RECORD/argv")" -eq 0 ]
   [ -z "$output" ]

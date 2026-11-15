@@ -282,8 +282,8 @@ namespace, `external-secrets`. It is how runtime secrets reach workloads (ADR 00
 exception is a credential a controller generates in the cluster for its own workload, which stays
 in the Secret that controller writes, such as Grafana's admin password ([Grafana](#grafana)). The
 one store is the ClusterSecretStore `openbao`, in its own application beside the operator
-([OpenBao](#openbao)). The `volsync` component makes an `ExternalSecret` of it
-([Volume backups](#volume-backups)), and no enabled application includes that component.
+([OpenBao](#openbao)). The `volsync` component makes an `ExternalSecret` of it for each application
+that includes it ([Volume backups](#volume-backups)).
 
 - The chart comes from its publisher's OCI registry and installs and upgrades the operator's
   resource definitions itself, as the publisher documents. No other chart in the tree ships them,
@@ -771,7 +771,10 @@ snapshot whenever the claim is created.
 
 - When the claim and the ReplicationDestination are created together, on the application's first
   deployment, or after both were deleted, as when the application leaves the tree and comes back or
-  the cluster is rebuilt, the volume starts with the latest backup, or empty when there is none.
+  the cluster is rebuilt, the volume starts with the latest backup, or empty when there is none,
+  once the secret store holds the key `volsync`: on a rebuilt cluster, once the operator has seeded
+  it again from the master's file
+  ([below](#what-an-operator-does-once-and-what-then-happens-by-itself)).
 - A claim deleted and created again while the ReplicationDestination stays gets the snapshot kept
   from that one restore, which after a first deployment is of an empty volume, not the latest
   backup.
@@ -823,33 +826,38 @@ them (ADR 0015).
 ### What an operator does once, and what then happens by itself
 
 OpenBao starts with its key-value mount empty and nothing Flux applies writes the key `volsync`, so
-the operator seeds it once, after `just bao-recovery`, with the cluster's S3 key in `.env`
-(`CLUSTER_S3_ACCESS_KEY_ID` and `CLUSTER_S3_SECRET_ACCESS_KEY`, which `just infra-s3-key cluster`
-makes) and `just cluster-config` applied, so the repository's prefix, endpoint and region are in
-`cluster-config`:
+the operator seeds it, once for each store, after `just bao-recovery`, with the cluster's S3 key in
+`.env` (`CLUSTER_S3_ACCESS_KEY_ID` and `CLUSTER_S3_SECRET_ACCESS_KEY`, which
+`just infra-s3-key cluster` makes) and `just cluster-config` applied, so the repository's prefix,
+endpoint and region are in `cluster-config`:
 
 ```sh
 just bao-seed-volsync <file>
 ```
 
-`<file>` is a new file outside the repository, beside the Talos age key. The recipe:
+`<file>` is outside the repository, beside the Talos age key: a new file the first time, and the
+existing one whenever the store holds no key again, as on a rebuilt cluster (below). The recipe:
 
 - stops before it makes anything when either variable is empty, still a placeholder or the state
   key's, naming the variable;
-- makes the master, 32 random bytes from the kernel written as 64 hexadecimal digits, which restic
-  and the template's digest take as they are, and writes it to `<file>` encrypted with age to the
-  Talos age key's recipient; opens the file again with the operator's Talos age key and compares it
-  with what it wrote; and only then creates the key, with the master and the cluster's S3 key. The
-  operator role may create and patch keys, and never read or update them, so before it makes
-  anything the recipe asks whether the key exists with an empty patch and check-and-set 0, which
-  writes nothing: OpenBao answers 404 where there is no key and refuses on check-and-set where
-  there is one. A store that holds one is refused before a master is made, no `<file>` is made, and
-  the master in the store is never replaced: a master that changes orphans every repository, so no
-  flag replaces it. An existing `<file>` is never replaced either;
-- after a failure between writing `<file>` and the store holding the key, as when OpenBao refuses
-  the write or the run is interrupted, says which state it left; the next run with the same `<file>`
-  reads the master back from it, makes no other and goes on. A store that already holds the key
-  says so and changes nothing, and the file is kept;
+- with a new `<file>`, makes the master, 32 random bytes from the kernel written as 64 hexadecimal
+  digits, which restic and the template's digest take as they are, and writes it to `<file>`
+  encrypted with age to the Talos age key's recipient; opens the file again with the operator's
+  Talos age key and compares it with what it wrote; and only then creates the key, with the master
+  and the cluster's S3 key. The operator role may create and patch keys, and never read or update
+  them, so before it makes anything the recipe asks whether the key exists with an empty patch and
+  check-and-set 0, which writes nothing: OpenBao answers 404 where there is no key and refuses on
+  check-and-set where there is one. A store that holds one is refused before a master is made, no
+  `<file>` is made, and the master in the store is never replaced: a master that changes orphans
+  every repository, so no flag replaces it. An existing `<file>` is never replaced either, nor one
+  made at its path while the recipe runs, as the file goes in place by a hard link: where the
+  filesystem makes none, the recipe stops with `ln`'s error and writes nothing to the store;
+- given an existing `<file>` that opens with the Talos age key to this cluster's master, while the
+  store holds no key, reads the master back from it, makes no other, and creates the key with it,
+  leaving the file as it was. That is how a run goes on after a failure between writing `<file>` and
+  the store holding the key, as when OpenBao refuses the write or the run is interrupted, which says
+  which state it left; and how a rebuilt cluster's store is seeded. A store that already holds the
+  key says so and changes nothing, and the file is kept;
 - prints what it did and where the file is, never the master or the key, which travel on pipes and
   in the body of the write.
 
@@ -859,7 +867,8 @@ own and not the recovery keys' file: the two open different things and are neede
 times, the recovery keys when OpenBao has to be reached with a root token and the master when a
 repository has to be opened, and `just bao-recovery` writes its file once and never again, so a
 second secret could not be added to it. `<file>` holds the only copy of the master that outlives the
-cluster: [the runbook](runbooks/volume-backups.md) says what losing it, or the store's key, means.
+cluster: [the runbook](runbooks/volume-backups.md) says what losing it, or the store's key, means,
+and how the store is seeded again from it.
 
 `just bao-volsync-password <file> <app> <command> [argument...]` opens one application's repository
 by hand without computing a digest at a prompt: it derives the application's password from the master
@@ -870,14 +879,23 @@ lists the demo's backups. It prints no password and reaches neither the cluster 
 not one of the pinned tools: no recipe or check runs it, and it is the operator's to install for the
 rare restore by hand.
 
-After that Flux does the rest. `volsync-demo`, in the overlay, is applied once `volsync`,
-`external-secrets`, `openbao-store` and `linstor-cluster` are Ready. The test application
+After that Flux does the rest, for as long as the store holds the key. `volsync-demo`, in the
+overlay, is applied once `volsync`, `external-secrets`, `openbao-store` and `linstor-cluster` are
+Ready. The test application
 `apps/base/demo/volsync-demo/` is a pod that holds a 1 GiB volume and writes the time it first found
 it empty. Its ExternalSecret writes the Secret the movers read as soon as the store holds the key,
 the ReplicationDestination restores the repository's latest backup, which is empty on the first
 deployment, the claim is made from that snapshot and the pod starts, and the ReplicationSource
 backs the volume up at 03:17 each night. A claim and its restore therefore need no manual step once
 the recipe has run.
+
+OpenBao keeps its data on volumes that do not survive a rebuild ([rebuild.md](runbooks/rebuild.md)),
+so a rebuilt cluster's store is new and holds no key `volsync`, and every ExternalSecret of the
+component, and with it every restore, waits for it. Once `just bao-recovery` has made the new
+store's recovery keys, the operator runs `just bao-seed-volsync <file>` with the existing custody
+file, never a new one: the recipe writes the master the file holds, which opens the existing
+repositories, where a new file would make a master that opens none of them
+([runbook](runbooks/volume-backups.md#the-stores-key-is-lost-and-the-file-is-kept)).
 
 `tests/volume-backups.bats` builds the applications as Flux applies them and renders the VolSync
 and External Secrets charts to check this section, and `tests/openbao-recipes.bats` runs the
@@ -1246,8 +1264,9 @@ namespace delegated to anyone else first gets its own store restricted with `con
   restarts cannot start, as the Secret it mounts is missing, and the data stays sealed on its volume.
   `just bao-seal-restore` writes the key back from the operator's file; an etcd snapshot also holds
   it ([runbook](runbooks/openbao.md#bringing-the-seal-key-back)).
-- **The volume backups' master, or its file**: [the runbook](runbooks/volume-backups.md) says what
-  each loss means.
+- **The volume backups' key `volsync`, or the master's file**:
+  [the runbook](runbooks/volume-backups.md) says what each loss means, and how the key is seeded
+  again from the file.
 - **The seal Secret and every copy of it**: every runtime secret is lost. OpenBao starts again empty
   only once its three claims, the Secret and the ExternalSecret `openbao-seal-1` are deleted: the
   ExternalSecret has synced once and never makes a missing Secret again, so Flux makes it anew, it
