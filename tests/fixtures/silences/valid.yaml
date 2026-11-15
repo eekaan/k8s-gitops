@@ -1,0 +1,17 @@
+---
+# A silence that meets every rule of tests/silences.bats; the test refuses copies of it with one
+# part taken away. It is a fixture: nothing applies it.
+apiVersion: observability.giantswarm.io/v1alpha2
+kind: Silence
+metadata:
+  name: example
+  namespace: monitoring
+  annotations:
+    k8s-gitops/reason: The example alert fires on a node that is being replaced.
+    k8s-gitops/issue: EXA-1
+spec:
+  endsAt: "2030-01-01T00:00:00Z"
+  matchers:
+    - name: alertname
+      value: ExampleAlert
+      matchType: "="

@@ -1184,7 +1184,8 @@ every namespace, and evaluates the chart's default alerting and recording rules.
 - the Cilium agents, whose metrics include the workers' BGP sessions, through the `cilium-monitoring`
   application ([Cilium's metrics](#ciliums-metrics));
 - the storage layer, through the `linstor-monitoring` application: the LINSTOR controller's metrics
-  and the satellites' DRBD reactor ([Storage monitoring](#storage-monitoring)).
+  and the satellites' DRBD reactor ([Storage monitoring](#storage-monitoring));
+- the silence operator, through its chart's PodMonitor ([Silences](#silences)).
 
 It does not scrape:
 
@@ -1450,6 +1451,109 @@ What no alert covers, and why:
 
 The alerts have no destination yet: Alertmanager sends them nowhere, so they show in Prometheus and
 Alertmanager only.
+
+#### Silences
+
+An alert that is known and accepted for a while is silenced by a reviewed change that says why and
+until when, not in Alertmanager's interface, whose silences nobody reviews and which go with its
+volume. `apps/base/monitoring/silence-operator/` installs the silence operator from its publisher's
+chart, `oci://gsoci.azurecr.io/charts/giantswarm/silence-operator`, in `monitoring`: one replica,
+restricted, with requests and a memory limit, and the chart's PodMonitor on. It has no route and no
+interface. It turns each `Silence` object into a silence in the cluster's Alertmanager, at
+`http://kube-prometheus-stack-alertmanager.monitoring.svc.cluster.local:9093`, the Service of the
+monitoring chart whose selector names the chart's Alertmanager and picks the pods
+prometheus-operator makes for it, on the port that leads to Alertmanager's web port, and holds no
+credential for it: Alertmanager asks for none, so the operator's authentication is off and its
+service account's token goes to the Kubernetes API only, where it reads the `Silence` objects of
+every namespace. Its chart binds it, through one ClusterRoleBinding to its own service account, to
+a ClusterRole that grants every verb on `Silence` objects (both API groups) and on Leases, in every
+namespace, and `create` on events, and nothing else;
+`tests/silences.bats` compares each rule, with its API groups, resources, resource names,
+non-resource URLs and verbs, any aggregation, and the binding. Its definitions are not an
+application of their own in `kube-system` like the other definitions that several applications use
+([Resource definitions](#resource-definitions)): only the operator reads them, so they ship with its
+release, as templates of the chart that the release keeps when it goes, the way
+`snapshot-controller` ships its definitions with its controller. The application waits for the
+release, so an application that names it in `dependsOn` finds the definitions in place, and
+`kubernetes-check` refuses that name in a cluster whose overlay does not enable the operator.
+Alertmanager is not a dependency: the operator is Ready without it and tries again until it answers.
+Its metrics are scraped; no alert reads them, so a silence that fails to sync shows in the
+operator's log and in `controller_runtime_reconcile_errors_total`, and nowhere else.
+
+**Where one lives.** In the `app/` of the application under `apps/base` whose alert it silences,
+in that application's namespace and listed in its `kustomization.yaml`, with `silence-operator` in
+the application's `dependsOn`. It is reviewed with that application and leaves with it, and a
+silence for an alert of a chart sits beside the application that installs the chart, as a file of
+its own, not in the chart's values. A cluster-level application under `clusters/<cluster>/` holds
+none. The tree ships none: none is true today, and the Watchdog, which is meant to fire, is never
+silenced.
+
+```yaml
+apiVersion: observability.giantswarm.io/v1alpha2
+kind: Silence
+metadata:
+  name: <name>
+  namespace: <the application's namespace>
+  annotations:
+    k8s-gitops/reason: <why the alert is accepted>
+    k8s-gitops/issue: <ISSUE-KEY>
+spec:
+  endsAt: "<RFC 3339 time>"
+  matchers:
+    - name: alertname
+      value: <alert>
+      matchType: "="
+```
+
+`tests/silences.bats` reads the `Silence` objects of two places: the render that
+`pod-security-check` and `kubernetes-validate` read (`scripts/render`: the root, Flux's own
+applications and each Kustomization they apply whose source is the cluster's artifact, built by
+`flux build` with the components it adds, and every object each HelmRelease of those builds renders
+from its chart, with the values of the ConfigMaps Flux builds for its own application), and the
+`app/` of every application under `apps/base`, built by kustomize whether the overlay enables it or
+not. A Kustomization whose source is a `GitRepository`, a `Bucket` or an `OCIRepository` other than
+the cluster's `flux-system` is not followed, and no object a controller makes from another at run
+time is in the render. It refuses a `Silence` that is not the namespaced
+`observability.giantswarm.io/v1alpha2` kind (the `monitoring.giantswarm.io/v1alpha1` kind is
+cluster-scoped, and so belongs to no application); has no `k8s-gitops/reason`; has neither
+`spec.endsAt` nor a `k8s-gitops/issue` of the form `ABC-12`; has no `alertname` matcher with `=`,
+or any `alertname` matcher of another kind, so the alert is named exactly and no silence is wider
+than one alert; or silences the Watchdog.
+`spec.duration` and the `valid-until` annotation, from which the operator also takes an end, do not
+count as one: a silence that uses them needs an issue as well. It also refuses a `Silence` of the
+render that is not a resource of the `app/` of the application under `apps/base` that applies it:
+one a chart renders, from its values or its templates; one a component adds; and one the cluster
+directory, the overlay, a namespace's directory or a cluster-level application applies. And it
+refuses three constructions the render does not expand as the cluster would, so that no `Silence`
+goes unread in them: an object whose kind ends in `List` and that has `items`, which Flux applies
+as objects of their own; a HelmRelease's `valuesFrom` entry that is `optional` or names no object
+Flux builds for its application, whose values the render leaves out; and a Flux Kustomization,
+HelmRelease or source that a chart renders, which the render does not follow. The check catches a
+silence added by mistake or carelessly; a change that hides one on purpose is for the pull
+request's review to catch.
+
+**How it ends.** At `spec.endsAt` the silence ends in Alertmanager, and the operator does not make
+it again; the object stays until a change removes it, which a change should do. A silence with an
+issue and no `spec.endsAt`, `spec.duration` or `valid-until` annotation lasts until its object goes:
+the operator ends such a silence a hundred years after the object was created. Removing the object,
+which Flux prunes once the change merges, removes the silence: the operator holds each `Silence`
+with the finalizer `observability.giantswarm.io/silence-protection`, deletes the silence from
+Alertmanager and then lets the object go, so the removal waits while the operator is down and while
+Alertmanager does not answer, as the operator fails the deletion unless Alertmanager says the
+silence is gone. A removal that waits stalls the pruning of the application that holds the
+`Silence`, as the root waits for termination. If Alertmanager's volume is lost, the silences come
+back when the operator reconciles their objects again, which restarting it does and its periodic
+resync does in time.
+
+**A hand-made silence.** The operator finds the silences it made by their comment,
+`silence-operator-<namespace>-<name>`. It reads every silence in Alertmanager, a hand-made one
+included, and acts only on one whose comment is exactly one of those. A silence made in
+Alertmanager's interface with any other comment is left alone: the operator changes and removes
+nothing of it, and it lasts until it ends or the volume is lost. A hand-made silence with exactly
+such a comment is taken for the operator's own: it is updated to match its object and, once the
+object's `spec.endsAt` has passed, expired. Only the removal of an object passes over a silence
+made by hand, as it finds its silence by comment and by the creator `silence-operator`; a silence's
+creator is free text in Alertmanager, so a hand-made one given both is removed with the object.
 
 ### Dashboards
 
