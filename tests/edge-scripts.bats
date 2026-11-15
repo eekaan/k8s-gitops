@@ -16,6 +16,9 @@ setup() {
   mkdir -p "$BIN" "$HOST_BIN" "$HOST_SBIN" "$RECORD" "$HOME_DIR/.local/state/k8s-gitops" "$HOST" \
     "$REPO/infra/openstack/stacks/sto2/edge" "$REPO/talos/lab-sto2" "$BATS_TEST_TMPDIR/keys"
   : > "$RECORD/argv"
+  # What Debian puts in /usr/bin and the check uses for itself.
+  ln -s "$(type -P mktemp)" "$HOST_BIN/mktemp"
+  ln -s "$(type -P rm)" "$HOST_BIN/rm"
   cp -R "$ROOT/scripts" "$REPO/scripts"
   cp "$ROOT/infra/openstack/backend.hcl" "$REPO/infra/openstack/backend.hcl"
   cp "$ROOT"/infra/openstack/stacks/sto2/edge/*.tf "$ROOT/infra/openstack/stacks/sto2/edge/sshd.conf" "$REPO/infra/openstack/stacks/sto2/edge/"
@@ -154,13 +157,19 @@ EOF
   # (nft, sysctl, sshd) only through sudo, whose secure_path holds the sbin directories. A file
   # broken-SECTION in an edge's fixture directory makes the command that reads SECTION fail with
   # what the file says.
+  # Like the real one, it tells what it runs that it runs under sudo (SUDO_USER), logs what it was
+  # asked, and on a healthy edge warns on standard error while it succeeds, as sudo does when it
+  # cannot resolve the host's name.
   host_fake sudo << 'EOF'
 [[ $1 == -n ]] && shift
-export PATH="$EDGE_SBIN:$PATH"
+echo "$*" >> "$EDGE_FIXTURE/sudo-log"
+compgen -G "$EDGE_FIXTURE/broken-*" > /dev/null || echo "sudo: unable to resolve host lab-edge: Name or service not known" >&2
+export SUDO_USER=debian PATH="$EDGE_SBIN:$PATH"
 exec "$@"
 EOF
   host_fake cat << EOF
 if [[ \$* == /proc/sys/net/ipv4/ip_forward ]]; then
+  if [[ -n \${SUDO_USER:-} ]]; then : > "\$EDGE_FIXTURE/forwarding-read-under-sudo"; else : > "\$EDGE_FIXTURE/forwarding-read-as-user"; fi
   if [[ -f "\$EDGE_FIXTURE/broken-forwarding" ]]; then
     "$(type -P cat)" "\$EDGE_FIXTURE/broken-forwarding" >&2
     exit 1
@@ -517,10 +526,17 @@ on_edge() {
     [ "$status" -eq 0 ]
   done
 
+  rm -f "$HOST"/edge-*/sudo-log
   edge_check
   echo "$output"
   [ "$status" -eq 0 ]
   [[ $output != *FAIL* && $output != *skip* ]]
+  # The forwarding state is read from /proc as the ordinary user, never by asking sudo for it.
+  for n in 1 2; do
+    [ -f "$HOST/edge-$n/forwarding-read-as-user" ]
+    [ ! -e "$HOST/edge-$n/forwarding-read-under-sudo" ]
+    ! grep -Eq 'sysctl|cat|ip_forward' "$HOST/edge-$n/sudo-log"
+  done
   for edge in lab-edge-1 lab-edge-2; do
     [[ $output == *"pass  $edge: FRR is running"* ]]
     [[ $output == *"pass  $edge: 3 of 3 worker sessions are established"* ]]
@@ -1175,7 +1191,9 @@ EOF
   cat > "$bin/sshd" << EOF
 #!/usr/bin/env bash
 printf '%s\n' "sshd \$*" >> "$RECORD/argv"
-if [[ \$1 == -t ]] && grep -qsx 'no-such-keyword.*' "$root"/etc/ssh/sshd_config.d/*.conf; then
+# The whole configuration is what is validated, not a drop-in alone.
+[[ \$* == "-t -f $root/etc/ssh/sshd_config" ]] || { echo "fake sshd: unexpected \$*" >&2; exit 1; }
+if grep -qsx 'no-such-keyword.*' "$root"/etc/ssh/sshd_config.d/*.conf; then
   echo "line 3: Bad configuration option: no-such-keyword"
   exit 255
 fi

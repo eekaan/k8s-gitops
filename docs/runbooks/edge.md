@@ -24,10 +24,10 @@ In this order, after the plumbing stack is applied ([rebuild.md](rebuild.md)):
 4. Wait for the first boot, a minute or two: it turns unattended upgrades off, installs FRR and
    nftables, checks both files, gives the SSH daemon its settings, starts FRR and nftables and turns
    forwarding on last; a first boot that fails says why on the console and leaves forwarding off and
-   FRR stopped. `just edge-check` then reads
-   both edges over SSH, showing the host key's fingerprints the first time for each edge and asking
-   for `yes`; compare them with the ones the instances printed on their console. Until the cluster's
-   workers peer, the sessions line says how many of the workers have none.
+   FRR stopped. `just edge-check` then reads both edges over SSH, showing the host key's
+   fingerprints the first time for each edge and asking for `yes`; compare them with the ones the
+   instances printed on their console. Until the cluster's workers peer, the sessions line says how
+   many of the workers have none.
 5. Compare the hosts the two instances run on: the server group's policy keeps them apart only
    where the cloud can.
 

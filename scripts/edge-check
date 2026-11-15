@@ -184,11 +184,19 @@ IFS= read -r -d '' remote << 'REMOTE' || true
 ask() {
   echo "== $1"
   shift
-  if out=$("$@" 2>&1); then
+  local out err msg status=0
+  err=$(mktemp)
+  # Standard error is kept apart: a warning from a command that succeeds (sudo not resolving its
+  # host's name) is not part of its answer, and is said only when the command fails.
+  out=$("$@" 2> "$err") || status=$?
+  if [ "$status" -eq 0 ]; then
     [ -z "$out" ] || printf '%s\n' "$out"
   else
-    printf '!! %s\n' "${out:-exited with status $?}"
+    msg=$(<"$err")
+    msg=${msg:-$out}
+    printf '!! %s\n' "${msg:-exited with status $status}"
   fi
+  rm -f "$err"
 }
 # systemctl is-active exits 3, printing inactive or failed, for a unit that does not run: an answer.
 frr_state() { systemctl is-active frr || [ $? -eq 3 ]; }

@@ -485,6 +485,26 @@ run "the_user_data_holds_no_secret_and_the_edges_port_allows_exactly_the_address
     error_message = "The cloud-config must write exactly the rendered FRR configuration, nftables rules and kernel settings, the daemon list and the first-boot script."
   }
 
+  # The SSH daemon's settings reach the edge as the tree states them, not as some other file.
+  assert {
+    condition = alltrue([
+      for key in ["1", "2"] : alltrue([
+        for line in [
+          "KexAlgorithms mlkem768x25519-sha256,sntrup761x25519-sha512,curve25519-sha256",
+          "PasswordAuthentication no",
+          "KbdInteractiveAuthentication no",
+          "PermitRootLogin no",
+          "AuthenticationMethods publickey",
+          "AllowTcpForwarding no",
+          "AllowAgentForwarding no",
+          "X11Forwarding no",
+          "PermitTunnel no",
+        ] : contains(split("\n", { for file in yamldecode(output.user_data[key]).write_files : file.path => file.content }["/etc/edge/sshd.conf"]), line)
+      ])
+    ])
+    error_message = "The cloud-config must write the SSH daemon's settings: the post-quantum hybrid and classical key exchanges, public key authentication only, and no forwarding."
+  }
+
   # Written files configure nothing until the first-boot script runs them in place.
   assert {
     condition     = alltrue([for key in ["1", "2"] : yamldecode(output.user_data[key]).runcmd == [["/usr/local/sbin/edge-first-boot"]]])

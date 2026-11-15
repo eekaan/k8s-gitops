@@ -598,9 +598,10 @@ anything of them is installed under `/etc`, then gives the SSH daemon its settin
 its reject route for the service range is in the kernel, and turns forwarding on last. A file
 either check refuses, settings the SSH daemon refuses, or any other failure, fails the first boot,
 saying why on the console and in the log, and leaves forwarding off with its setting removed and FRR
-stopped and disabled, so the edge forwards nothing until it is rebuilt. The release pins the packages' versions only as far as
-the image's repositories do: a rebuild installs whatever the release holds then, so a new edge may
-have newer packages than the one it replaces, and nothing pins them further.
+stopped and disabled, so the edge forwards nothing until it is rebuilt. The release pins the
+packages' versions only as far as the image's repositories do: a rebuild installs whatever the
+release holds then, so a new edge may have newer packages than the one it replaces, and nothing pins
+them further.
 
 Changing anything the user data renders replaces that edge, as the OpenStack provider creates a
 new instance when its `user_data` changes: an edge is rebuilt, not patched. Both edges render from
@@ -706,7 +707,7 @@ accepts is stated and checked, like its firewall, and is not whatever the image 
   and made its default in 10.0 ([release notes](https://www.openssh.com/releaseNotes.html)), and the
   classical one a client that has no hybrid still offers. The client, `edge_ssh`, sets no key
   exchange of its own: an OpenSSH client from 10.0 offers `mlkem768x25519-sha256` first and
-  negotiates it with these settings, and one without the hybrids negotiates `curve25519-sha256`.
+  negotiates it with these settings, and one older than 9.9 negotiates `curve25519-sha256`.
 - Public key authentication only: `PasswordAuthentication no`, `KbdInteractiveAuthentication no`,
   `PermitRootLogin no` and `AuthenticationMethods publickey`.
 - No forwarding of any kind: `AllowTcpForwarding no`, `AllowAgentForwarding no`,
@@ -721,8 +722,10 @@ tells the daemon to reload (`systemctl try-reload-or-restart ssh`, which leaves 
 running to read it when it starts); a configuration the daemon refuses is taken out again, so the
 daemon can start at the next boot, and fails the first boot like any other step. The tests prove the
 precedence with a real `sshd -T` against an image configuration that says otherwise where the machine
-has an OpenSSH server, and otherwise prove only that the file's name sorts first. `just edge-ssh-key` creates the key pair at `EDGE_SSH_KEY_FILE`, and the stack
-reads the public half from the file beside it. An edge's host key is recorded on first contact, in
+has an OpenSSH server, and otherwise prove only that the file's name sorts first.
+
+`just edge-ssh-key` creates the key pair at `EDGE_SSH_KEY_FILE`, and the stack reads the public half
+from the file beside it. An edge's host key is recorded on first contact, in
 `~/.local/state/k8s-gitops/edge.known_hosts`, after the fingerprints it offers are shown and `yes`
 is typed, as for the CI host. A key pair reaches an instance only when it is created, so a new pair
 at `EDGE_SSH_KEY_FILE` replaces the stack's key pair and no instance, and the running edges admit
