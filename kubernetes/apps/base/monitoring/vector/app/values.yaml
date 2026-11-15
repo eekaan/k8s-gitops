@@ -155,17 +155,21 @@ customConfig:
         type: vrl
         source: |
           !(.talos_service == "kernel" && match(string(.message) ?? "", r'^[a-z0-9]+:\s*[a-z]+: \[[^\]]+\]: audit(d)?(\[\d+\])?: '))
-    # The log of Talos's auditd service, the audit records of the kernel's audit subsystem, is
-    # dropped whole, every record type of it, and counted as drop_audit's are. Talos runs SELinux in
-    # permissive mode, so nothing is denied and every access the policy would deny is logged as an
-    # AVC record with permissive=1 and the SYSCALL, PATH and other records of its event. A pod that
-    # writes to a volume whose filesystem carries no labels causes one for every file it creates or
-    # writes, and the store is such a pod: shipping the log would make every batch the store writes
-    # produce records for it to store. An event's records are separate lines, so dropping only the
-    # denials' events would need a reduce transform holding every open event until its EOE record
-    # or an expiry, and an event cut by a restart would leave records that no longer say what they
-    # belong to. What else the file holds stays readable with talosctl logs auditd for as long as
-    # Talos's ring and rotation keep it.
+    # The log of Talos's auditd service, the records of the kernel's audit subsystem, is dropped
+    # whole, every line of it, and counted as drop_audit's are. Talos runs SELinux in permissive
+    # mode, in which the kernel logs an access its policy would deny as an AVC record with
+    # permissive=1, holds it as granted in its access vector cache and logs it again once the cache
+    # no longer holds it; a system call or task audit rule, which Talos's auditd loads none of, would
+    # add the SYSCALL, PATH and other records of the call to its event. The store is a pod on a
+    # volume whose StorageClass passes no SELinux label, which Talos's policy does not let pods use,
+    # so its writes can produce such records: a store that received the audit log would store
+    # records of its own writes, and storing them can produce more. Dropping only the denials would
+    # drop every other process's all the same, and once a rule adds records to their events it would
+    # need a reduce transform holding every open event until its EOE record or an expiry, where an
+    # event cut by a restart would leave records that no longer say what they belong to. The rest of
+    # the file, the denials of every other process, the line auditd writes when records were lost
+    # and any other record, is read on the node with talosctl logs auditd, from the last 1 MiB or so
+    # of the service's lines that Talos keeps.
     drop_auditd_log:
       type: filter
       inputs:

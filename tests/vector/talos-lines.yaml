@@ -280,10 +280,13 @@ tests:
               assert_eq!(.talos_service, "kernel")
               assert_eq!(.level, "notice")
 
-  # One audit event as the kernel's audit subsystem writes it for a pod's process that writes to a
-  # directory on a filesystem without SELinux labels while SELinux is permissive: an AVC record
-  # with permissive=1 and the SYSCALL, CWD, PATH, PROCTITLE and EOE records that share its
-  # msg=audit(<time>:<serial>) id, each a line of /var/log/auditd.log, as the file source hands it on.
+  # One audit event as the kernel's audit subsystem writes it for a pod's process, which Talos's
+  # policy runs as pod_t, that writes to a directory on a filesystem without SELinux labels, whose
+  # files Talos's policy gives unlabeled_t, while SELinux is permissive: an AVC record with
+  # permissive=1 and the SYSCALL, CWD, PATH, PROCTITLE and EOE records that share its
+  # msg=audit(<time>:<serial>) id, each a line of /var/log/auditd.log, as the file source hands it
+  # on. The kernel writes the records after the AVC only while a system call or task audit rule is
+  # loaded, which Talos's auditd does not do; without one, the AVC record comes alone.
   - name: The audit log's records of a permissive denial do not reach the store, and are counted
     inputs:
       - insert_at: talos_files
@@ -292,7 +295,7 @@ tests:
           .file = "/var/log/auditd.log"
           .host = "vector-x1y2z"
           .message = "type=AVC msg=audit(1794571200.123:4242): avc:  denied  { write } for  pid=3141 comm=\"store\" " +
-            "name=\"2026-11-14\" dev=\"drbd1000\" ino=131073 scontext=system_u:system_r:kubelet_t:s0 " +
+            "name=\"2026-11-14\" dev=\"drbd1000\" ino=131073 scontext=system_u:system_r:pod_t:s0 " +
             "tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1"
           .timestamp = t'2026-11-14T13:00:00Z'
       - insert_at: talos_files
@@ -303,7 +306,7 @@ tests:
           .message = "type=SYSCALL msg=audit(1794571200.123:4242): arch=c000003e syscall=257 success=yes exit=7 " +
             "a0=ffffff9c a1=c000a1b2c0 a2=241 a3=1a4 items=1 ppid=2718 pid=3141 auid=4294967295 uid=0 gid=0 " +
             "euid=0 suid=0 fsuid=0 egid=0 sgid=0 fsgid=0 tty=(none) ses=4294967295 comm=\"store\" exe=\"/store\" " +
-            "subj=system_u:system_r:kubelet_t:s0 key=(null)"
+            "subj=system_u:system_r:pod_t:s0 key=(null)"
           .timestamp = t'2026-11-14T13:00:00Z'
       - insert_at: talos_files
         type: vrl
@@ -326,7 +329,7 @@ tests:
         source: |
           .file = "/var/log/auditd.log"
           .host = "vector-x1y2z"
-          .message = "type=PROCTITLE msg=audit(1794571200.123:4242): proctitle=2F73746F7265"
+          .message = "type=PROCTITLE msg=audit(1794571200.123:4242): proctitle=\"/store\""
           .timestamp = t'2026-11-14T13:00:00Z'
       - insert_at: talos_files
         type: vrl
@@ -338,8 +341,31 @@ tests:
     no_outputs_from:
       - drop_auditd_log
 
-  # Every line of the audit log is dropped, whatever its type and whether or not it is a record,
-  # and the kernel's lines and another service's go on, each as it was.
+  # Vector counts a filter's discards under the filter's own component_id, so the audit log's lines
+  # pass the kernel's filter and leave at drop_auditd_log, the series docs/kubernetes.md names.
+  - name: the audit log's lines are counted as discards of drop_auditd_log
+    inputs:
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/auditd.log"
+          .host = "vector-x1y2z"
+          .message = "audit backlog limit reached, some audit events may have been lost"
+          .timestamp = t'2026-11-14T13:00:00Z'
+    outputs:
+      - extract_from: drop_audit
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.talos_service, "auditd")
+              assert_eq!(.message, "audit backlog limit reached, some audit events may have been lost")
+    no_outputs_from:
+      - drop_auditd_log
+
+  # Every line of the audit log is dropped, whatever its type and whether or not it is a record: an
+  # ANOM_ABEND record, which the kernel writes without an audit rule for a process that dumps core,
+  # and the line Talos's auditd writes when records were lost on their way to it among them. The
+  # kernel's lines and another service's go on, each as it was.
   - name: No record of the audit log reaches the store, and a line of another service does
     inputs:
       - insert_at: talos_files
@@ -347,9 +373,8 @@ tests:
         source: |
           .file = "/var/log/auditd.log"
           .host = "vector-x1y2z"
-          .message = "type=USER_AVC msg=audit(1794571201.000:4243): pid=1 uid=0 auid=4294967295 ses=4294967295 " +
-            "subj=system_u:system_r:init_t:s0 msg='avc:  denied  { status } for auid=n/a uid=0 gid=0 path=\"/run/x\" " +
-            "scontext=system_u:system_r:kubelet_t:s0 tcontext=system_u:object_r:init_t:s0 tclass=system permissive=1'"
+          .message = "type=ANOM_ABEND msg=audit(1794571201.000:4243): auid=4294967295 uid=0 gid=0 ses=4294967295 " +
+            "subj=system_u:system_r:pod_t:s0 pid=2718 comm=\"worker\" exe=\"/worker\" sig=11 res=1"
           .timestamp = t'2026-11-14T13:00:00Z'
       - insert_at: talos_files
         type: vrl

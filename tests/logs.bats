@@ -1080,13 +1080,13 @@ window_seconds() {
   collector_config
   # The audit log is a file of the Talos source, so what it carries leaves that source through
   # talos_files only. Every route from it to a sink is listed, and there is one, which ends in the
-  # filter whose discards Vector counts.
+  # filter whose discards Vector counts. That the audit log's lines are the ones it discards, and
+  # that they pass drop_audit to reach it, Vector's unit tests show.
   paths="$(config_paths | grep '^talos>')"
   echo "paths from the Talos source to a sink: $(paste -sd' ' - <<<"$paths")"
   [ "$paths" = "talos>talos_files>drop_audit>drop_auditd_log>victoria_logs" ]
   echo "drop_auditd_log: $(jq -c '.transforms.drop_auditd_log | {type, inputs, condition}' "$CONFIG")"
   [ "$(jq -r '.transforms.drop_auditd_log | .type + " " + (.inputs | join(","))' "$CONFIG")" = "filter drop_audit" ]
-  jq -e '.transforms.drop_auditd_log.condition.source | test("auditd")' "$CONFIG"
 }
 
 @test "every values key of victoria-logs is one its pinned chart defines" {

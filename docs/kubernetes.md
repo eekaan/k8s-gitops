@@ -464,26 +464,43 @@ Three kinds of record are made smaller or left out before they are sent:
   `vector_component_discarded_events_total` of its own metrics, which Prometheus scrapes from the
   PodMonitor, so the drop is visible as the series with `component_id="drop_audit"`;
 - the audit log of the node, the log of Talos's `auditd` service, `/var/log/auditd.log` and its
-  rotated file, is dropped whole, every record type of it, by the filter transform
-  `drop_auditd_log`, counted the same way as the series with `component_id="drop_auditd_log"`.
-  Talos runs SELinux in permissive mode, which
-  [its documentation](https://docs.siderolabs.com/talos/v1.14/security/selinux) gives as the
-  default because some CNI and CSI solutions and extensions are incompatible with enforcing, so
-  nothing is denied and every access the policy would deny is written to the audit log as an AVC
-  record, with `permissive=1`, together with the `SYSCALL`, `CWD`, `PATH`, `PROCTITLE` and `EOE`
-  records of the same audit event, record types the kernel defines in
-  [`include/uapi/linux/audit.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/audit.h).
-  The records of one event are separate lines that share an `msg=audit(<time>:<serial>)` id. A pod
-  that writes to a volume whose filesystem carries no SELinux labels causes such an event for every
-  file it creates or writes, and the log store is such a pod, so a store that received the audit
-  records of its own writes would amplify them: storing them writes more. The collector therefore
-  does not ship them. Dropping only the denials' events would need a `reduce` transform keyed on
-  that id, holding every open event in memory until its `EOE` record or an expiry, and an event cut
-  in two by a restart of the collector would leave records that no longer say what they belong to.
-  Dropping the file costs what else it holds, which is read with
-  `talosctl --nodes <node> logs auditd` (through `talman talosctl`, as the repository's scripts
-  run it; no recipe reads it) only as long as Talos's ring of about 1 MiB and its rotation of the
-  files keep it, which on a node that logs this much is not long;
+  rotated file, is dropped whole, every line of it, by the filter transform `drop_auditd_log`,
+  counted the same way as the series with `component_id="drop_auditd_log"`. Talos runs SELinux in
+  permissive mode, which [its documentation](https://docs.siderolabs.com/talos/v1.14/security/selinux)
+  gives as the default because some CNI and CSI solutions and extensions are incompatible with
+  enforcing; it also says Talos cannot label the volumes a CSI driver mounts, and that without the
+  label, which a StorageClass can pass as a `context=` mount option, the policy does not let pods
+  access such a volume's contents. In permissive mode the kernel allows an access its policy would
+  deny and logs the denial as an AVC record with `permissive=1`, which names the process and the
+  file; it then holds the permission as granted in its access vector cache, for that source
+  context, target context and class, and logs the same denial again only once the cache no longer
+  holds it, as after the cache has made room for other entries or the policy is loaded again
+  ([`security/selinux/avc.c`](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/security/selinux/avc.c?h=v6.18.63)).
+  [Talos's `auditd`](https://github.com/siderolabs/talos/blob/v1.14.6/internal/app/auditd/auditd.go)
+  loads no audit rule, and writes as a line each record the kernel's audit subsystem sends it of
+  the types 1100 to 2999 of
+  [`include/uapi/linux/audit.h`](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/include/uapi/linux/audit.h?h=v6.18.63).
+  The kernel joins the `SYSCALL`, `CWD`, `PATH` (whose `nametype` is `PARENT`, `CREATE` and the
+  like), `PROCTITLE` and `EOE` records of the system call to the AVC record's event, as separate
+  lines that share its `msg=audit(<time>:<serial>)` id, only while a system call or task rule, such
+  as a watch on a path, is loaded
+  ([`kernel/auditsc.c`](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/kernel/auditsc.c?h=v6.18.63));
+  without one, the AVC record comes alone. The log store is itself a pod, whose claim is of the
+  default storage class, which sets no such mount option, so its writes can produce such records,
+  and a collector that shipped the audit log to the store would give the store records of its own
+  writes, whose storing can produce more: a loop that amplifies by construction, whatever its rate.
+  The collector therefore does not ship the audit log. Dropping only the AVC records with
+  `permissive=1` would drop the denials of every other process all the same, and once a rule adds
+  records to their events it would need a `reduce` transform keyed on that id, holding every open
+  event in memory until its `EOE` record or an expiry, where an event cut in two by a restart of the
+  collector would leave records that no longer say what they belong to. The drop costs the rest of
+  the file: the SELinux denials of every other process on the node, which show what enforcing mode
+  would deny before it is turned on; the line `audit backlog limit reached, some audit events may
+  have been lost`, which Talos's auditd writes when records were lost on their way to it; and any
+  other record the kernel sends it, such as `ANOM_ABEND` for a process that dumps core. They are
+  read on the node with Talos's documented `talosctl --nodes <node> logs auditd`, which no recipe
+  wraps; the repository's scripts run talosctl through `talman talosctl`. It reads the ring of about
+  1 MiB in which Talos keeps the service's last lines, so it shows no more than that;
 - a pod's labels and annotations, its node's labels and its namespace's labels and annotations are
   not stored one field each: VictoriaLogs makes a field of every name, these maps hold dozens of
   names that say nothing about a line, and labels such as `pod-template-hash` and
