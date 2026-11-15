@@ -61,6 +61,7 @@ resources:
   - ../../base/monitoring/grafana/ks.yaml
   - ../../base/monitoring/kube-prometheus-stack/ks.yaml
   - ../../base/monitoring/openbao-dashboard/ks.yaml
+  - ../../base/monitoring/silence-operator/ks.yaml
   - ../../base/monitoring/vector/ks.yaml
   - ../../base/monitoring/victoria-logs/ks.yaml
   - ../../base/openbao/openbao/ks.yaml

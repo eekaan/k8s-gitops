@@ -98,6 +98,8 @@ kubernetes/apps/base/monitoring/grafana/app/ocirepository.yaml	flux	ghcr.io/prom
 kubernetes/apps/base/monitoring/grafana/app/ocirepository.yaml	regex	ghcr.io/prometheus-community/charts/kube-prometheus-stack	tag
 kubernetes/apps/base/monitoring/kube-prometheus-stack/app/ocirepository.yaml	flux	ghcr.io/prometheus-community/charts/kube-prometheus-stack	tag
 kubernetes/apps/base/monitoring/kube-prometheus-stack/app/ocirepository.yaml	regex	ghcr.io/prometheus-community/charts/kube-prometheus-stack	tag
+kubernetes/apps/base/monitoring/silence-operator/app/ocirepository.yaml	flux	gsoci.azurecr.io/charts/giantswarm/silence-operator	tag
+kubernetes/apps/base/monitoring/silence-operator/app/ocirepository.yaml	regex	gsoci.azurecr.io/charts/giantswarm/silence-operator	tag
 kubernetes/apps/base/monitoring/vector/app/ocirepository.yaml	flux	ghcr.io/vectordotdev/helm-charts/vector	tag
 kubernetes/apps/base/monitoring/vector/app/ocirepository.yaml	regex	ghcr.io/vectordotdev/helm-charts/vector	tag
 kubernetes/apps/base/monitoring/victoria-logs/app/ocirepository.yaml	flux	ghcr.io/victoriametrics/helm-charts/victoria-logs-single	tag
