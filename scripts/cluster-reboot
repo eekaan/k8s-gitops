@@ -8,6 +8,14 @@
 # name is typed back, or with --yes, a probe asks /readyz
 # through the kubeconfig, which points at the load balancer, once a second, each time for up to two
 # seconds, while the recipe:
+#   0. for a worker, takes it out of BGP (leave_bgp in scripts/lib/cluster.sh): sets the label the
+#      cluster's BGP configuration excludes and waits, for up to BGP_WAIT seconds (120), until
+#      its CiliumBGPNodeConfig is gone, after which the agent closes its sessions and the edge routers
+#      withdraw its paths at once; it first records which of the node's sessions are established,
+#      and stops, changing nothing, while another worker is out of BGP or when the configuration
+#      cannot be read. --no-bgp-wait, for a worker whose Cilium agent is not running to take the
+#      label up, sets it without reading the configuration or waiting, and says what that can cost;
+#      a control plane has no BGP, and nothing here changes for it;
 #   1. cordons the node and drains it with kubectl, as cluster-upgrade drains, so that nothing new
 #      is placed on it while it goes down: a kubelet that is shutting down rejects every pod it is
 #      given, and the scheduler would go on giving it the same replica. talosctl's own drain, which
@@ -22,19 +30,25 @@
 #      quorum.
 # Then it prints how many probes it made, how many failed and the longest run of failures, in
 # seconds; uncordons the node, unless it was unschedulable before the recipe ran, which it says;
+# puts a worker back in BGP, waiting until its CiliumBGPNodeConfig is back and the sessions that were
+# established before are again, or only until it is back when they are not known;
 # and deletes the pods the shutdown left in phase Failed on it, rejected (NodeShutdown) or
 # terminated (Terminated) as the node went down, which nothing else removes, saying how many. It
 # exits 0 only when the node is Ready again, a control plane with its etcd member, and no probe
 # failed; --tolerate <seconds> accepts runs of failures up to that long, for the operator to say
 # what counts as an interruption. A run that stops once the node is cordoned leaves it cordoned and
-# says so last.
+# says so; one that stops while a worker is out of BGP leaves it out and says so last, with the
+# command that puts it back, and a rerun recognises a worker that is out already.
 #
 # The probe runs in the background and keeps its counts in memory, so it writes no file. It is
 # stopped on every exit: at the end, when a step fails, and when SIGINT or SIGTERM ends the recipe;
 # it then stops the kubectl or sleep it is waiting for, so nothing of it keeps running. Of kubectl's
 # output only the drain's passes through, as in cluster-upgrade: it names the pods it evicts and
 # those it cannot. The rest is not printed, as it can name the API server's or the nodes' addresses.
-# Usage: scripts/cluster-reboot <node> [cluster] [--yes] [--tolerate <seconds>]
+# It holds the cluster's lock (lock_cluster in scripts/lib/cluster.sh) for the whole run, sharing it
+# with cluster-talos --reboot when that runs it, and refuses while another recipe that drains,
+# reboots, upgrades or applies to the cluster's nodes holds it.
+# Usage: scripts/cluster-reboot <node> [cluster] [--yes] [--tolerate <seconds>] [--no-bgp-wait]
 set -euo pipefail
 
 here=$(dirname "$0")
@@ -42,14 +56,15 @@ here=$(dirname "$0")
 . "$here/lib/cluster.sh"
 
 usage() {
-  infra_error "usage: cluster-reboot <node> [cluster] [--yes] [--tolerate <seconds>]"
+  infra_error "usage: cluster-reboot <node> [cluster] [--yes] [--tolerate <seconds>] [--no-bgp-wait]"
   exit 2
 }
 
-node='' cluster='' confirmed=0 tolerate=0
+node='' cluster='' confirmed=0 tolerate=0 bgp_wait=1
 while (($#)); do
   case $1 in
     --yes) confirmed=1 ;;
+    --no-bgp-wait) bgp_wait=0 ;;
     --tolerate)
       (($# > 1)) || usage
       tolerate=$2
@@ -85,7 +100,10 @@ if [[ ! ${REBOOT_WAIT:-600} =~ ^[0-9]+$ ]]; then
   infra_error "REBOOT_WAIT is not a whole number of seconds"
   complete=0
 fi
+require_bgp_wait || complete=0
 ((complete))
+step="locking $cluster"
+lock_cluster
 tolerate=$((10#$tolerate))
 ready_wait=$((10#${REBOOT_WAIT:-600}))
 
@@ -257,8 +275,8 @@ remove_shutdown_pods() {
 
 # On every exit the probe is stopped first; then a failing run names its step, as
 # report_failed_step has it do, and once the node is cordoned, says last that it stays so. Ctrl-C
-# ends the recipe even when talman handles SIGINT itself and exits 0, after which bash would
-# otherwise go on.
+# and SIGTERM end the recipe as a failure, even when talman handles the signal itself and exits 0,
+# after which bash would otherwise go on.
 cordoned=0 unschedulable=false
 on_exit() {
   local status=$1
@@ -271,10 +289,12 @@ on_exit() {
       infra_error "$node is left cordoned; once it is Ready, kubectl uncordon $node makes it schedulable again"
     fi
   fi
+  bgp_report_out
   exit "$status"
 }
 trap 'on_exit $?' EXIT
 trap 'exit 130' INT
+trap 'exit 143' TERM
 
 step="reading $node through the kubeconfig"
 if ! unschedulable=$(kubectl get node "$node" --output json --request-timeout=10s 2> /dev/null |
@@ -305,6 +325,12 @@ step="waiting for $node to be typed back"
 
 say "draining and rebooting $node; /readyz is asked through the kubeconfig once a second until it is Ready again"
 start_probe
+
+# A worker leaves BGP first, so the edge routers withdraw its paths before the drain and the reboot
+# rather than keeping them as stale while it is away. A control plane has no BGP.
+if ((!member)); then
+  leave_bgp "$node" "$bgp_wait"
+fi
 
 step="cordoning $node"
 if ! kubectl cordon "$node" > /dev/null 2>&1; then
@@ -372,6 +398,10 @@ else
   fi
   cordoned=0
   say "$node is schedulable again"
+fi
+
+if ((!member)); then
+  join_bgp "$node"
 fi
 
 step="removing the pods the shutdown left Failed on $node"

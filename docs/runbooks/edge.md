@@ -206,12 +206,25 @@ they stay; the next ones are spread over the others.
 - **A Cilium agent that restarts**: Cilium closes its sessions without a NOTIFICATION, and the edge
   keeps the worker's paths, as stale, until the agent is back and has sent them again (End-of-RIB),
   or for the restart time, 120 seconds, at most.
-- **A worker shut down or rebooted gracefully**: its agent stops the same way, so its paths stay,
-  stale, for up to the restart time, 120 seconds, and a shut-down worker's for all of it, unless the
-  worker leaves BGP first: taken out of the `CiliumBGPClusterConfig`'s node selector, Cilium sends
-  a Cease, and the edges withdraw its paths at once. The selector takes every worker and no recipe
-  takes one out, so `just cluster-reboot` and a stop leave the window as it is; the restart time in
-  the workers' `CiliumBGPPeerConfig` bounds it.
+- **A worker shut down or rebooted gracefully, with no step before it** (a stop in the cloud, a
+  reboot from the node): its agent stops the same way, so its paths stay, stale, for up to the
+  restart time, 120 seconds, and a shut-down worker's for all of it; the restart time in the
+  workers' `CiliumBGPPeerConfig` bounds it.
+- **A worker taken out before a planned reboot**: withdrawn at once. `just cluster-reboot`,
+  `just cluster-talos --reboot` and `just cluster-upgrade` label the worker
+  `node-restriction.kubernetes.io/bgp-out`, which the `CiliumBGPClusterConfig`'s node selector
+  excludes, wait until its `CiliumBGPNodeConfig` is gone, after which the Cilium agent closes the
+  node's sessions with a notification and the edges withdraw its paths
+  ([how, in Cilium's source](../infrastructure.md#the-edge-routers)), and only then drain it; the
+  label is removed once the node is Ready. A kubelet cannot set or remove a label under
+  `node-restriction.kubernetes.io/` on its own Node; the node's Cilium agent copies its Node's
+  labels to its `CiliumNode`, which the selector is matched against, so a worker whose agent is not
+  running keeps its `CiliumBGPNodeConfig` and the wait runs out: `--no-bgp-wait` reboots or
+  upgrades it without the wait. No second worker is taken out while one is. `just cluster-reboot`,
+  `just cluster-talos --reboot` and `just cluster-upgrade` that stop with a worker out say so last
+  and print the command that puts it back,
+  `kubectl label node <node> node-restriction.kubernetes.io/bgp-out-`, and `just cluster-check`
+  fails while a Ready worker is out.
 
 ### Failover tests
 
@@ -223,9 +236,13 @@ reached through both edges:
    only. Start it again and `just edge-check` passes.
 2. **A worker, hard**: pause one worker's instance in the cloud, and time how long its /32 paths
    stay in `just edge-routes`: about the hold time, 9 seconds. Unpause it.
-3. **A worker, graceful**: `just cluster-reboot <worker>`, and time the same: up to the restart
-   time, 120 seconds, while the worker reboots, its paths stale and connections hashed to it
-   failing.
+3. **A worker, planned**: run `just edge-routes` on an edge, then `just cluster-reboot <worker>`
+   and run it again while the worker drains and reboots, and once it is back. The worker's /32
+   paths are gone before the drain starts, no path of it is stale at any point, no new connection
+   hashed to it fails, and its paths are back once the recipe ends.
+4. **A worker, graceful, with no step before it**: stop the worker's instance in the cloud, and
+   time the same: its paths stay, stale, for up to the restart time, 120 seconds, and connections
+   hashed to it fail meanwhile.
 
 ## The way back
 
