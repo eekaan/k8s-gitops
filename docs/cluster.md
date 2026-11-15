@@ -870,13 +870,13 @@ passes through, naming the objects they apply, except in `cluster-check`, `clust
 `cluster-destroy`, `grafana` and `logs`: they print node and object names only, and `logs` the
 records, and none of what kubectl prints, as the objects it reads and its errors hold the API
 server's, the nodes' and the pods' addresses, but for the message of an error the API server or the
-store answered with, which `logs` shows without an address; only `kubectl drain`'s passes through
-in `cluster-reboot`, as in `cluster-upgrade`,
-naming the pods it evicts and those it cannot, with its errors passed through the same filter line
-by line, so a connection error still says why, `connection refused`. The checks of
-`cluster-talos --first` print none of what kubectl, or talosctl through `talman talosctl`, prints
-either, but for a check whose tool failed, its last line of error with every IPv4 and IPv6 address
-in it masked as `<address>`; their `talman apply` dry runs print as talman's output does above.
+store answered with, which `logs` shows without an address; only `kubectl drain`'s passes through in
+`cluster-reboot`, as in `cluster-upgrade`, naming the pods it evicts and those it cannot, with its
+errors passed through the same filter line by line, so a connection error still says why,
+`connection refused`. The checks of `cluster-talos --first` print none of what kubectl, or talosctl
+through `talman talosctl`, prints either, but for a check whose tool failed, its last line of error
+with every IPv4 and IPv6 address in it masked as `<address>`; their `talman apply` dry runs print as
+talman's output does above.
 
 ## Environment
 

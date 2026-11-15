@@ -430,8 +430,8 @@ its own workload, which stays in the Secret that controller writes. Anonymous ac
 monitoring application's, and checks the definitions, the operator's namespace and rights, the
 monitors, the version and replicas, the absence of volumes, Secrets and routes, the datasource's
 Service, that the dashboards are exactly those the monitoring chart renders for the cluster's
-monitoring values, and each setting that keeps Grafana off the internet against the defaults of the
-Grafana release it pins. It runs `just grafana` against a recording kubectl.
+monitoring values, and each setting that keeps Grafana from calling the internet on its own against
+the defaults of the Grafana release it pins. It runs `just grafana` against a recording kubectl.
 
 ## Logs
 
@@ -444,8 +444,9 @@ are on, and both applications name `prometheus-operator-crds` in `dependsOn`.
 
 What is collected, by a collector on every node, control planes included, from files only:
 
-- every pod's log lines, from the files under `/var/log/pods`, with the pod's namespace, name,
-  labels and node and the node's labels; the collector's own are left out;
+- every pod's log lines, from the files under `/var/log/pods`, with what the collector attaches:
+  the pod's namespace, name, labels, annotations and node, the node's labels and the namespace's
+  labels and annotations; the collector's own lines are left out;
 - the log of each of the node's Talos services, machined, the kubelet, etcd, containerd, apid and
   the rest, and the kernel's, which Talos keeps as the service `kernel`: Talos writes each to
   `/var/log/<service>.log` and renames it to `<service>.log.1` at 5 MiB, and the collector reads
@@ -463,21 +464,27 @@ Two kinds of record are made smaller before they are sent:
   `vector_component_discarded_events_total` of its own metrics, which Prometheus scrapes from the
   PodMonitor, so the drop is visible as the series with `component_id="drop_audit"`. The log of
   Talos's `auditd` service, `/var/log/auditd.log`, is another file and is still shipped;
-- a pod's labels and its node's are not stored one field each: VictoriaLogs makes a field of every
-  name, a node has a dozen labels that say nothing about a line, and labels such as
-  `pod-template-hash` and `controller-revision-hash` take a new value with every rollout. The
-  transform `pod_fields` keeps three of the pod's, the Kubernetes recommended labels that name the
-  application, `app.kubernetes.io/name`, `app.kubernetes.io/instance` and
-  `app.kubernetes.io/component`, in `kubernetes.pod_labels`, and no other; a pod without them has
-  no such field. It keeps none of the node's labels, `kubernetes.node_labels`, and sets `node` on a
-  pod's record to the node's name, as Talos's lines have it. The store's sink takes a pod's records
-  only from `pod_fields` and Talos's lines only from `drop_audit`.
+- a pod's labels and annotations, its node's labels and its namespace's labels and annotations are
+  not stored one field each: VictoriaLogs makes a field of every name, these maps hold dozens of
+  names that say nothing about a line, and labels such as `pod-template-hash` and
+  `controller-revision-hash` take a new value with every rollout. The transform `pod_fields` keeps
+  three of the pod's labels, the Kubernetes recommended labels that name the application,
+  `app.kubernetes.io/name`, `app.kubernetes.io/instance` and `app.kubernetes.io/component`, in
+  `kubernetes.pod_labels`, and no other; a pod without them has no such field. It drops
+  `kubernetes.pod_annotations`, `kubernetes.node_labels`, `kubernetes.namespace_labels` and
+  `kubernetes.namespace_annotations`, and sets `node` on a pod's record to the node's name, as
+  Talos's lines have it. The store's sink takes a pod's records only from `pod_fields` and Talos's
+  lines only from `drop_audit`.
 
-A record has the fields `_time`, `_msg` and `_stream`, and a pod's `kubernetes.pod_namespace`,
-`kubernetes.pod_name`, `kubernetes.container_name`, `kubernetes.pod_node_name`, `node`,
-`kubernetes.pod_labels` as above and the source's other fields; a Talos
-service's `node`, `talos_service`, `file`, `level` and, for the kernel, `facility`. The stream is
-the namespace, pod, container and node of a pod, or the node and service of a Talos service.
+A record has the fields `_time`, `_msg` and `_stream`. A pod's also has `node`,
+`kubernetes.pod_namespace`, `kubernetes.pod_name`, `kubernetes.pod_node_name`,
+`kubernetes.pod_labels` as above, and the source's single fields, which say which run of which
+workload wrote the line: `kubernetes.container_name`, `kubernetes.container_id`,
+`kubernetes.container_image`, `kubernetes.container_image_id`, `kubernetes.pod_uid`,
+`kubernetes.pod_owner`, the pod's addresses in `kubernetes.pod_ip` and `kubernetes.pod_ips`, and
+`file`, `stream` and `source_type`. A Talos service's has `node`, `talos_service`, `file`, `level`
+and, for the kernel, `facility`. The stream is the namespace, pod, container and node of a pod, or
+the node and service of a Talos service.
 
 Talos flushes its files every 15 seconds, so its lines reach the store within about that. While the
 collector is not reading, such as during its own restart, lines wait in the files, and it goes on
@@ -492,13 +499,12 @@ The collector mounts all of `/var/log` read-only, as Talos renames the files it 
 read every file there. On a control plane that includes the API server's audit log in
 `/var/log/audit/kube`, which Talos's default audit policy, the one this cluster runs, writes at the
 `Metadata` level: who did what to which object, and when, without request or response bodies, so
-without Secret values. The collector does not ship it: its file source's patterns,
-`/var/log/*.log` and `/var/log/*.log.1`, match files at the top of `/var/log` only, and its pod-log
-source reads only `/var/log/pods`. It does ship the log of Talos's `auditd` service, which every node
-writes at the top, `/var/log/auditd.log`. What keeps the audit
-log out of the store is this reviewed configuration, which `tests/logs.bats` matches against
-Talos's layout of `/var/log`; who can read it through the collector is whoever may run commands in
-the pods of `monitoring`.
+without Secret values. The collector does not ship it: its file source's patterns, `/var/log/*.log`
+and `/var/log/*.log.1`, match files at the top of `/var/log` only, and its pod-log source reads only
+`/var/log/pods`. It does ship the log of Talos's `auditd` service, which every node writes at the
+top, `/var/log/auditd.log`. What keeps the audit log out of the store is this reviewed
+configuration, which `tests/logs.bats` matches against Talos's layout of `/var/log`; who can read it
+through the collector is whoever may run commands in the pods of `monitoring`.
 
 The collector also mounts `/var/lib/vector`, where it keeps its place in each file and a disk buffer
 of 256 MiB. It runs as root, as Talos and the container runtime write their log files as root with
@@ -545,9 +551,10 @@ Reading the logs, with the cluster's kubeconfig:
   refuses fails with the store's own message: kubectl keeps the body of a 400 out of its error, so
   the recipe asks again with `-v=4` and reads the body from the Status kubectl logs, in a file it
   never shows. kubectl keeps only a body's first 2048 bytes, and the recipe says so after a message
-  that long. Any other error the store or the API answers with, a store that is away or a request
-  the cluster's access rules deny, shows kubectl's message for it, and an API that does not answer
-  fails with that said. The query is LogsQL, such as `talos_service:kubelet`,
+  that long. Any other error the store or the API answers with, a store that is away or not ready,
+  a request the cluster's access rules deny or a Status without a reason, shows kubectl's message
+  for it; credentials the API server refuses also point to `just cluster-kubeconfig`. An API that
+  does not answer fails with that said. The query is LogsQL, such as `talos_service:kubelet`,
   `kubernetes.pod_namespace:monitoring error` or `node:node-1 talos_service:kernel`; a query that
   ends in a `stats` pipe prints its records as JSON. With the limit, VictoriaLogs answers with the
   newest records, newest first, unless the query's pipes change the records' order, as `sort` and

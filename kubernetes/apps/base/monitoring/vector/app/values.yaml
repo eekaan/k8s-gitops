@@ -155,12 +155,14 @@ customConfig:
         source: |
           !(.talos_service == "kernel" && match(string(.message) ?? "", r'^[a-z0-9]+:\s*[a-z]+: \[[^\]]+\]: audit(d)?(\[\d+\])?: '))
     # The node's name, as on Talos's lines, and three of the pod's labels. The source attaches
-    # every label of the pod and of its node, and VictoriaLogs stores each as a field of its own,
-    # so every record would carry a dozen fields that say nothing about its line, hash labels such
-    # as pod-template-hash among them, whose value changes with every rollout. These three, the
-    # Kubernetes recommended labels that name the application, are what an operator filters on; a
-    # pod without any keeps no labels field. The node is named in node, and none of its labels is
-    # kept.
+    # every label and annotation of the pod, every label of its node and every label and annotation
+    # of its namespace, and VictoriaLogs stores each as a field of its own, so every record would
+    # carry dozens of fields that say nothing about its line, hash labels such as pod-template-hash
+    # among them, whose value changes with every rollout. These three, the Kubernetes recommended
+    # labels that name the application, are what an operator filters on; a pod without any keeps no
+    # labels field. The node is named in node, and none of the other maps is kept. The source's
+    # single fields stay: the container's name, ID and image, and the pod's UID, addresses and
+    # owner, which say which run of which workload wrote the line.
     pod_fields:
       type: remap
       inputs:
@@ -168,6 +170,9 @@ customConfig:
       source: |
         .node = .kubernetes.pod_node_name
         del(.kubernetes.node_labels)
+        del(.kubernetes.pod_annotations)
+        del(.kubernetes.namespace_labels)
+        del(.kubernetes.namespace_annotations)
         named = ["app.kubernetes.io/name", "app.kubernetes.io/instance", "app.kubernetes.io/component"]
         labels = filter(object(.kubernetes.pod_labels) ?? {}) -> |key, _value| { includes(named, key) }
         if is_empty(labels) {

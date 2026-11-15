@@ -109,12 +109,17 @@ start=$(date -u -d "@$(($(date -u +%s) - seconds))" +%Y-%m-%dT%H:%M:%SZ)
 encoded=$(jq -rn --arg q "$query" '$q | @uri')
 path="/api/v1/namespaces/monitoring/services/victoria-logs:9428/proxy/select/logsql/query"
 if ! kubectl get --raw "$path?query=$encoded&start=$start&limit=$limit" > "$work/answer" 2> "$work/error"; then
-  # kubectl prints Error from server (<reason>): <message> for an answer the API server or the
-  # store gave, after any warning lines; any other failure is the connection to the API server,
-  # whose message names its address.
-  failure=$(grep -m1 '^Error from server (' "$work/error" || true)
-  if [[ $failure =~ ^Error\ from\ server\ \([A-Za-z]+\):\ (.*)$ ]]; then
-    message=${BASH_REMATCH[1]}
+  # For an answer the API server or the store gave, kubectl prints, after any warning lines, one of
+  # the lines StandardErrorMessage in its cmd/util/helpers.go (Kubernetes v1.37.1) makes: Error
+  # from server (<reason>): <message>, or Error from server: <message> for a Status without a
+  # reason, error: You must be logged in to the server (<message>) when the API server refuses the
+  # credentials, or Server returned an unexpected response: <message>. Any other failure is the
+  # connection to the API server, whose message names its address.
+  failure=$(grep -m1 -E '^(Error from server( \([A-Za-z]+\))?: |error: You must be logged in to the server \(|Server returned an unexpected response: )' \
+    "$work/error" || true)
+  if [[ -n $failure ]]; then
+    message=${failure#*: } hint=''
+    [[ $failure != 'error: You must be logged in'* ]] || hint='; just cluster-kubeconfig fetches a current kubeconfig'
     # The Kubernetes API relays the store's 400 with a plain-text body, which kubectl keeps out of
     # its message ("the server rejected our request for an unknown reason"). It keeps the body's
     # first 2048 bytes as the message of the cause, UnexpectedServerResponse, of the Status it makes
@@ -136,7 +141,7 @@ if ! kubectl get --raw "$path?query=$encoded&start=$start&limit=$limit" > "$work
     # order, so that no control character in an address hides it.
     message=$(jq -rn --arg message "$message" "$clean"' $message | clean')
     message=$(sed -E 's/[0-9]{1,3}(\.[0-9]{1,3}){3}(:[0-9]+)?/<address>/g' <<< "$message")
-    infra_error "VictoriaLogs or the Kubernetes API refused the query: $message"
+    infra_error "VictoriaLogs or the Kubernetes API refused the query: $message$hint"
   else
     infra_error "the Kubernetes API did not answer; check that the cluster is up and that just cluster-kubeconfig has fetched a current kubeconfig"
   fi

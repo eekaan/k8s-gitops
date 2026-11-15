@@ -7,10 +7,13 @@
 # formats are the kernel's messages, the prefix Go's log package gives machined's, apid's and
 # trustd's lines, etcd's JSON, containerd's logfmt and the kubelet's klog. Each line stays whole,
 # takes its own time and level where it has them, and gets the node's name and its service's. The
-# kernel's audit records are dropped. The last tests start at the pods' transform with a record as the
-# kubernetes_logs source hands it on, its labels in kubernetes.pod_labels and its node's in
-# kubernetes.node_labels. The tests named in sentence case are scenarios of features/logs.feature,
-# proved here; each starts at the first transform on its way to the store and watches the last, as
+# kernel's audit records are dropped. The last tests start at the pods' transform with a record as
+# the kubernetes_logs source hands it on with its default field names: the pod's labels and
+# annotations in kubernetes.pod_labels and kubernetes.pod_annotations, its node's labels in
+# kubernetes.node_labels, its namespace's in kubernetes.namespace_labels and
+# kubernetes.namespace_annotations, and single fields beside them. The tests named in sentence case
+# are scenarios of features/logs.feature, proved here; each starts at the first transform on its way
+# to the store and watches the last, and the sources keep their default field names, as
 # tests/logs.bats checks against the rendered configuration.
 tests:
   - name: a kernel message keeps the kernel's time and priority
@@ -158,6 +161,9 @@ tests:
               assert_eq!(.timestamp, t'2026-11-14T13:00:00Z')
               assert!(!exists(.level))
 
+  # The audit record leaves at a filter transform, which Vector counts in
+  # vector_component_discarded_events_total of its own metrics; of the two lines, only the other
+  # one leaves the filter for the store.
   - name: Kernel audit records are dropped and counted
     inputs:
       - insert_at: talos_files
@@ -167,10 +173,21 @@ tests:
           .host = "vector-x1y2z"
           .message = "kern:  notice: [2026-11-14T12:00:03.000000000Z]: audit: type=1400 audit(1794571203.000:42): apparmor=\"DENIED\" operation=\"open\""
           .timestamp = t'2026-11-14T13:00:00Z'
-    # The records leave at a filter transform, which Vector counts in
-    # vector_component_discarded_events_total of its own metrics; no event reaches the sink from it.
-    no_outputs_from:
-      - drop_audit
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/kernel.log"
+          .host = "vector-x1y2z"
+          .message = "kern:    warn: [2026-11-14T12:00:04.000000000Z]: auditing is not mentioned here: drbd: module verification failed"
+          .timestamp = t'2026-11-14T13:00:00Z'
+    outputs:
+      - extract_from: drop_audit
+        expected_event_count: 1
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.message, "kern:    warn: [2026-11-14T12:00:04.000000000Z]: auditing is not mentioned here: drbd: module verification failed")
+              assert_eq!(.talos_service, "kernel")
 
   - name: a kernel line that is not an audit record goes on to the store
     inputs:
@@ -218,7 +235,30 @@ tests:
           .kubernetes.pod_namespace = "monitoring"
           .kubernetes.pod_name = "vector-x1y2z"
           .kubernetes.container_name = "vector"
+          .kubernetes.container_id = "containerd://4f1c2b7e9a0d"
+          .kubernetes.container_image = "docker.io/timberio/vector:0.61.0-distroless-libc"
+          .kubernetes.container_image_id = "docker.io/timberio/vector@sha256:1a3451978644d5cd4b99a0b28c990791e2f7e1efbea4184122f1c59a56448143"
+          .kubernetes.pod_uid = "6b0e4c1a-2f3d-4e5f-8a9b-0c1d2e3f4a5b"
+          .kubernetes.pod_ip = "192.0.2.21"
+          .kubernetes.pod_ips = ["192.0.2.21"]
+          .kubernetes.pod_owner = "DaemonSet/vector"
           .kubernetes.pod_node_name = "node-3"
+          .kubernetes.pod_annotations = {
+            "checksum/config": "9f2c4e",
+            "kubectl.kubernetes.io/restartedAt": "2026-11-14T12:00:00Z",
+            "prometheus.io/scrape": "true"
+          }
+          .kubernetes.namespace_labels = {
+            "kubernetes.io/metadata.name": "monitoring",
+            "kustomize.toolkit.fluxcd.io/name": "cluster-apps",
+            "kustomize.toolkit.fluxcd.io/namespace": "flux-system",
+            "pod-security.kubernetes.io/enforce": "privileged"
+          }
+          .kubernetes.namespace_annotations = {
+            "kustomize.toolkit.fluxcd.io/prune": "disabled",
+            "kustomize.toolkit.fluxcd.io/ssa": "IfNotPresent",
+            "description": "metrics and logs"
+          }
           .kubernetes.pod_labels = {
             "app.kubernetes.io/name": "vector",
             "app.kubernetes.io/instance": "vector",
@@ -252,9 +292,22 @@ tests:
                 "app.kubernetes.io/component": "Agent"
               })
               assert!(!exists(.kubernetes.node_labels))
+              assert!(!exists(.kubernetes.pod_annotations))
+              assert!(!exists(.kubernetes.namespace_labels))
+              assert!(!exists(.kubernetes.namespace_annotations))
               assert_eq!(.node, "node-3")
               assert_eq!(.kubernetes.pod_namespace, "monitoring")
               assert_eq!(.kubernetes.pod_name, "vector-x1y2z")
+              assert_eq!(.kubernetes.container_name, "vector")
+              assert_eq!(.kubernetes.container_id, "containerd://4f1c2b7e9a0d")
+              assert_eq!(.kubernetes.container_image, "docker.io/timberio/vector:0.61.0-distroless-libc")
+              assert_eq!(.kubernetes.container_image_id, "docker.io/timberio/vector@sha256:1a3451978644d5cd4b99a0b28c990791e2f7e1efbea4184122f1c59a56448143")
+              assert_eq!(.kubernetes.pod_uid, "6b0e4c1a-2f3d-4e5f-8a9b-0c1d2e3f4a5b")
+              assert_eq!(.kubernetes.pod_ip, "192.0.2.21")
+              assert_eq!(.kubernetes.pod_ips, ["192.0.2.21"])
+              assert_eq!(.kubernetes.pod_owner, "DaemonSet/vector")
+              assert_eq!(.kubernetes.pod_node_name, "node-3")
+              assert_eq!(.timestamp, t'2026-11-14T13:00:00Z')
               assert_eq!(.message, "level=info msg=\"scrape\"")
 
   - name: a pod's record without the named labels carries no label field

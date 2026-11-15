@@ -1,9 +1,9 @@
 #!/usr/bin/env bats
 # Proves features/logs.feature, except the scenarios tagged @by:vector-check, which Vector's unit
 # tests in tests/vector prove; each test carries its scenario's title. Needs helm, flux, kustomize,
-# just, yq, jq and awk on PATH (the versions pinned for the repository). Each chart is pulled once per run from its public registry; building and
-# rendering are offline. The applications are built in memory, so no build rewrites a file of this
-# checkout.
+# just, yq, jq and awk on PATH (the versions pinned for the repository). Each chart is pulled once
+# per run from its public registry; building and rendering are offline. The applications are built
+# in memory, so no build rewrites a file of this checkout.
 
 # The tests run one at a time even where bats runs a file's tests side by side: a test that starts
 # while another pulls a chart finds the chart's directory before the chart is in it.
@@ -563,9 +563,11 @@ defined_keys() {
 # of a verbose run, whose lines from -v=6 on name the API server's address: from -v=4 on as the
 # message of the cause of the Status kubectl made of the answer, cut at 2048 bytes, and from -v=8 on
 # also as the response body, cut at 1024; fail500, fail503, fail403 and fail404 fail as for those
-# answers, the first two naming the store's address in kubectl's message; down fails as when the API
-# server does not answer, naming its address; big answers with 4000 records of about 250 bytes, in
-# neither time order. Sets COPY, BIN, RECORD, STATE and KUBECONFIG_FILE.
+# answers, the first two naming the store's address in kubectl's message; notready as when the
+# store's Service has no ready endpoint; noreason as for a Status without a reason, naming the
+# store's address; fail401 as when the API server refuses the kubeconfig's credentials; down fails
+# as when the API server does not answer, naming its address; big answers with 4000 records of
+# about 250 bytes, in neither time order. Sets COPY, BIN, RECORD, STATE and KUBECONFIG_FILE.
 logs_copy() {
   COPY="$BATS_TEST_TMPDIR/copy" BIN="$BATS_TEST_TMPDIR/bin"
   RECORD="$BATS_TEST_TMPDIR/record" STATE="$BATS_TEST_TMPDIR/state"
@@ -638,6 +640,18 @@ case $(cat "$STATE/mode") in
     ;;
   fail404)
     echo 'Error from server (NotFound): the server could not find the requested resource' >&2
+    exit 1
+    ;;
+  notready)
+    echo 'Error from server (ServiceUnavailable): no endpoints available for service "victoria-logs:9428"' >&2
+    exit 1
+    ;;
+  noreason)
+    echo 'Error from server: proxy error from 192.0.2.77:9428 while dialing: dial tcp 192.0.2.77:9428: i/o timeout' >&2
+    exit 1
+    ;;
+  fail401)
+    echo 'error: You must be logged in to the server (Unauthorized)' >&2
     exit 1
     ;;
   down)
@@ -812,6 +826,24 @@ window_seconds() {
   [ "$status" -ne 0 ]
   [[ $output == *'the server could not find the requested resource'* ]]
   [[ $output != *192.0.2.* && $output != *https://* ]]
+  echo notready >"$STATE/mode"
+  logs_recipe '*'
+  echo "store not ready: status $status; $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *'no endpoints available for service "victoria-logs:9428"'* ]]
+  [[ $output != *"did not answer"* ]]
+  echo noreason >"$STATE/mode"
+  logs_recipe '*'
+  echo "no reason: status $status; $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *'proxy error from <address> while dialing: dial tcp <address>: i/o timeout'* ]]
+  [[ $output != *192.0.2.* && $output != *https://* && $output != *"did not answer"* ]]
+  echo fail401 >"$STATE/mode"
+  logs_recipe '*'
+  echo "credentials refused: status $status; $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *'You must be logged in to the server (Unauthorized)'*'just cluster-kubeconfig'* ]]
+  [[ $output != *"did not answer"* ]]
 
   echo down >"$STATE/mode"
   logs_recipe '*'
@@ -950,11 +982,14 @@ window_seconds() {
     | length > 0 and all(test("kubernetes.pod_namespace\":\\$namespace") and test("kubernetes.pod_name\":\\$pod"))' <<<"$json"
 }
 
-# Vector's unit tests run the collector's transforms and cannot see a sink, so what reaches the store
-# is what leaves the transforms its sink reads. Each source's events reach a sink along one path
-# only: Talos's lines through talos_files and drop_audit, the pods' records through pod_fields, and
-# Vector's own metrics to its exporter. Each scenario's unit test starts at the first transform of
-# its path and watches the last, so what it proves is what the store gets.
+# Vector's unit tests run the collector's transforms and cannot see a source or a sink, so what
+# reaches the store is what leaves the transforms its sink reads, given what the sources hand them.
+# Each source's events reach a sink along one path only: Talos's lines through talos_files and
+# drop_audit, the pods' records through pod_fields, and Vector's own metrics to its exporter. Each
+# scenario's unit test starts at the first transform of its path and watches the last, so what it
+# proves is what the store gets. The sources keep the field names they have by default, the ones
+# the unit tests' records carry: a pod's labels in kubernetes.pod_labels, its node's in
+# kubernetes.node_labels, and a Talos line's file in file and the reader's host in host.
 @test "every Vector unit test the scenarios name is in tests/vector and runs a whole path to the store" {
   local tests="$REPO/tests/vector/talos-lines.yaml" title paths
   for title in "Kernel audit records are dropped and counted" \
@@ -966,6 +1001,10 @@ window_seconds() {
   render "$COLLECTOR"
   collector_config
   [ "$(jq -r '.transforms.drop_audit.type' "$CONFIG")" = filter ]
+  echo "settings that rename the sources' fields: $(jq -c '[.sources[] | to_entries[]
+    | select((.key | test("annotation_fields$")) or .key == "file_key" or .key == "host_key")]' "$CONFIG")"
+  [ "$(jq '[.sources[] | to_entries[]
+    | select((.key | test("annotation_fields$")) or .key == "file_key" or .key == "host_key")] | length' "$CONFIG")" -eq 0 ]
   # Every path from a source to a sink, source>transform>…>sink; a name that is not a transform
   # starts one.
   # shellcheck disable=SC2016 # $c, $n and $sink are jq variables.
@@ -980,7 +1019,8 @@ window_seconds() {
     = "$(printf '%s\n' 'prometheus prometheus_exporter' 'victoria_logs elasticsearch' | sort)" ]
   title="Kernel audit records are dropped and counted"
   [ "$(title="$title" yq -N '.tests[] | select(.name == strenv(title))
-    | [.inputs[].insert_at] + (.no_outputs_from // []) | join(" ")' "$tests")" = "talos_files drop_audit" ]
+    | ([.inputs[].insert_at] | unique) + [.outputs[].extract_from] + (.no_outputs_from // []) | join(" ")' "$tests")" \
+    = "talos_files drop_audit" ]
   title="A pod's record carries the named labels and no field per other label"
   [ "$(title="$title" yq -N '.tests[] | select(.name == strenv(title))
     | [.inputs[].insert_at] + [.outputs[].extract_from] | join(" ")' "$tests")" = "pod_fields pod_fields" ]

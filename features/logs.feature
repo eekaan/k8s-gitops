@@ -79,12 +79,12 @@ Feature: Logs
 
   @by:vector-check
   Scenario: Kernel audit records are dropped and counted
-    Given the collector's rendered configuration, whose sink to the store takes Talos's lines only from the last of its Talos transforms, and Vector's unit tests of it
+    Given the collector's rendered configuration, whose Talos source names a line's fields as Vector's unit tests of it do and whose sink to the store takes Talos's lines only from the last of its Talos transforms, and those unit tests
     When a kernel audit line and another kernel line are sent through the collector's Talos transforms
     Then the audit line leaves the pipeline at a filter transform, which Vector counts as discarded events in its own metrics, so the store never gets it, and the other line goes on to the store
 
   @by:vector-check
   Scenario: A pod's record carries the named labels and no field per other label
-    Given the collector's rendered configuration, whose sink to the store takes a pod's records only from its pod transform, and Vector's unit tests of it
-    When a pod's record with many labels, from a node with many labels, is sent through the collector's pod transform
-    Then it goes on to the store with the app.kubernetes.io name, instance and component labels it has, no other label of the pod's and none of the node's, and the node's name in node
+    Given the collector's rendered configuration, whose pod source names a record's fields as Vector's unit tests of it do and whose sink to the store takes a pod's records only from its pod transform, and those unit tests
+    When a pod's record with many labels and annotations, from a node with many labels and a namespace with many labels and annotations, is sent through the collector's pod transform
+    Then it goes on to the store with the app.kubernetes.io name, instance and component labels it has and no other label or annotation, the pod's, the node's or the namespace's, with the node's name in node and the pod's and its container's single fields, their time and their message as they came
