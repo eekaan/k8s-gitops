@@ -61,6 +61,11 @@ Feature: Cilium
     When the chart is rendered
     Then Cilium's configuration enables neither Layer 2 announcements nor Layer 2 pod announcements, and the tree holds no Layer 2 announcement policy
 
+  Scenario: Cilium audits network policy by a value in Git, and the docs say so
+    Given the pinned chart, values.yaml and docs/kubernetes.md
+    When the chart is rendered
+    Then values.yaml sets policyAuditMode, the rendered cilium-config holds policy-audit-mode "true", the agents' pod template carries the configmap checksum so they restart into it, and the docs open a paragraph with "The cluster audits network policy." exactly when the value is set
+
   Scenario: A fresh bootstrap still installs Cilium before its own resource definitions exist
     Given a cluster with no Cilium and so none of Cilium's resource definitions
     When the install script runs against recording tools, and every application is built as Flux builds it

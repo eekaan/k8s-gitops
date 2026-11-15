@@ -191,9 +191,15 @@ chart_ref() {
   keys='.. | select(tag == "!!map") | path as $p | keys | .[] | $p + [.] | join(".")'
 
   helm show values "$url" --version "$tag" >"$BATS_TEST_TMPDIR/chart-values.yaml"
+  # The chart's values.yaml leaves some keys it reads commented out, such as policyAuditMode, which
+  # its cilium-configmap.yaml template reads; such a key is defined when a template of the chart
+  # reads it by its whole path.
+  helm pull "$url" --version "$tag" --untar --untardir "$BATS_TEST_TMPDIR/chart" >/dev/null
+  read="$(grep -rhoE '\.Values(\.[A-Za-z0-9_]+)+' "$BATS_TEST_TMPDIR/chart"/*/templates | sed 's/^\.Values\.//' | sort -u)"
+  [ -n "$read" ]
 
   unknown="$(comm -23 <(yq "$keys" "$APP/values.yaml" | sort -u) \
-    <(yq "$keys" "$BATS_TEST_TMPDIR/chart-values.yaml" | sort -u))"
+    <({ yq "$keys" "$BATS_TEST_TMPDIR/chart-values.yaml"; echo "$read"; } | sort -u))"
   echo "keys the chart does not define: ${unknown:-none}"
   [ -z "$unknown" ]
 }
@@ -624,6 +630,21 @@ chart_config() {
   [ "$(yq '.l2announcements.enabled' "$APP/values.yaml")" = false ]
   tree_objects > "$BATS_TEST_TMPDIR/tree.jsonl"
   [ -z "$(jq -r 'select(.object.kind == "CiliumL2AnnouncementPolicy") | .app' "$BATS_TEST_TMPDIR/tree.jsonl")" ]
+}
+
+@test "Cilium audits network policy by a value in Git, and the docs say so" {
+  local said value
+  # The docs open one paragraph with the sentence that says so.
+  said=$(grep -cE '^\*\*The cluster audits network policy\.\*\*' "$REPO/docs/kubernetes.md" || true)
+  # The top-level key, which the agents read; under operator: it would set nothing.
+  value=$(yq '.policyAuditMode // false' "$APP/values.yaml")
+  echo "docs say audit: $said time(s); policyAuditMode: $value; policy-audit-mode: $(chart_config policy-audit-mode)"
+  [ "$said" -eq 1 ]
+  [ "$value" = true ]
+  [ "$(chart_config policy-audit-mode)" = true ]
+  # A change of the configuration restarts the agents, so each runs the mode it says.
+  [ -n "$(yq 'select(.kind == "DaemonSet" and .metadata.name == "cilium")
+    | .spec.template.metadata.annotations["cilium.io/cilium-configmap-checksum"] // ""' "$BATS_TEST_TMPDIR/render.yaml")" ]
 }
 
 @test "A fresh bootstrap still installs Cilium before its own resource definitions exist" {
