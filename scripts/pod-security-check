@@ -6,8 +6,11 @@
 # Kyverno's fork of the Pod Security admission policy library; Helm hooks and tests are objects of
 # the render like the rest. The pods of the Flux install the FluxInstance configures (the pinned
 # Flux CLI's manifests for the components it names) are evaluated too, with the FluxInstance's
-# patches applied, and its Namespace patches declare flux-system's labels. A patch with more than a
-# patch and its target, such as a path kustomize would read or fetch, is refused.
+# patches applied, and its Namespace patches declare flux-system's labels. The FluxInstance is read
+# by its fields' own names, and kustomize is handed its patches as a patch and its target alone: a
+# key that folds to a field the check reads without being it, or a patch, target or other key
+# kustomize would read that the operator's types do not hold, such as a path, is refused
+# (scripts/lib/tree-paths.sh).
 #
 # What must hold, and what fails the check naming the namespace and the workload:
 #   - every namespace an application targets, or an object of the render is in, has a Namespace
@@ -33,6 +36,9 @@ shopt -s nullglob
 # flux, kustomize and kyverno are run with none of the secrets a recipe's environment may hold.
 # shellcheck source=scripts/lib/tools.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/tools.sh"
+# The fields the check reads of a FluxInstance.
+# shellcheck source=scripts/lib/tree-paths.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/tree-paths.sh"
 
 die() {
   echo "pod-security-check: $*" >&2
@@ -92,11 +98,16 @@ while IFS= read -r instance; do
   flux_namespace=$(jq -r '.metadata.namespace // "flux-system"' <<<"$instance")
   # A patch the operator applies is a patch and its target, all its type holds; kustomize would
   # read a path a patch names, or fetch it.
+  name=$(jq -r '"\(.metadata.namespace // "flux-system")/\(.metadata.name)" | gsub("[[:cntrl:]]"; "?")' <<<"$instance")
   jq -e '(.spec.kustomize.patches // []) | type == "array"' <<<"$instance" >/dev/null ||
-    die "FluxInstance $(jq -r '"\(.metadata.namespace // "flux-system")/\(.metadata.name)" | gsub("[[:cntrl:]]"; "?")' <<<"$instance"): its patches are not a list"
-  while IFS= read -r i; do
-    die "FluxInstance $(jq -r '"\(.metadata.namespace // "flux-system")/\(.metadata.name)" | gsub("[[:cntrl:]]"; "?")' <<<"$instance"): its patch $i holds more than a patch and its target, which is all the operator applies"
-  done < <(jq -r '.spec.kustomize.patches // [] | to_entries[] | select((.value | type) != "object" or (.value | keys - ["patch", "target"] | length > 0)) | .key + 1' <<<"$instance")
+    die "FluxInstance $name: its patches are not a list"
+  refused=$(read_refused FluxInstance <<<"$instance")
+  if [[ -n $refused ]]; then
+    while IFS= read -r line; do
+      echo "pod-security-check: FluxInstance $name: $line" >&2
+    done <<<"$refused"
+    exit 1
+  fi
   components=$(jq -r '(.spec.components // []) | join(",")' <<<"$instance")
   args=(--export --namespace "$flux_namespace")
   [[ -z $components ]] || args+=(--components "$components")

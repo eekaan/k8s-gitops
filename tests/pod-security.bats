@@ -387,7 +387,7 @@ real_render() {
     check instance
     echo "$output"
     [ "$status" -eq 1 ]
-    [[ $output == *"FluxInstance flux-system/flux: its patch 1 holds more than a patch and its target"* ]]
+    [[ $output == *"FluxInstance flux-system/flux: spec.kustomize.patches[0].path is not one of the fields kustomize"* ]]
     [[ $output != *"$marker"* ]]
     rm -rf "$BATS_TEST_TMPDIR/instance"
   done

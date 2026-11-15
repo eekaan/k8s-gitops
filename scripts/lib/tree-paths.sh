@@ -1,67 +1,447 @@
 # shellcheck shell=bash
-# The files the builds of a kubernetes/ tree read, bounded to the tree. flux build reads with
-# kustomize's load restrictions off (LoadRestrictionsNone, its own setting), and so does
-# scripts/kubernetes-check's kustomize, as an overlay lists ks.yaml files outside its own
-# directory: either reads any path a kustomization names and follows any link, and kustomize
-# fetches a remote source. scripts/render and scripts/kubernetes-check therefore refuse, before they
-# build or read anything else of it, a tree in which
+# What a tool is handed of a kubernetes/ tree, bounded to the tree, and read by the checks under the
+# names the tool reads. flux build reads with kustomize's load restrictions off (LoadRestrictionsNone,
+# its own setting), and so does scripts/kubernetes-check's kustomize, as an overlay lists ks.yaml
+# files outside its own directory: either reads any path a kustomization names and follows any link,
+# and kustomize fetches a remote source. Both decode a kustomization, and flux build the Flux
+# Kustomization it is given, with encoding/json, which reads a key into a field when the key is the
+# field's name or folds to it: ASCII letters without regard to case, U+017F as s and U+212A as k
+# (encoding/json's fold.go and decode.go). scripts/render and scripts/kubernetes-check therefore
+# refuse, before they build or read anything else of it, a tree in which
 #   - a link resolves outside the tree, or to nothing: then nothing in the tree leads outside it
 #     but the text of a path;
 #   - a kustomization file (kustomization.yaml, kustomization.yml or Kustomization, a Component's
-#     included) names, in a field that names files, a remote source (a URL, an scp-style address
-#     or a github.com path, as kustomize reads one), an absolute path, or a path that leaves the
-#     tree, read as text, as kustomize joins it to the file's directory, or with every link on it
+#     included) is not one mapping; holds YAML that kustomize's decoder may read otherwise than
+#     yq (a key twice, an anchor, an alias, a merge key, a tag outside YAML's core schema, a NUL
+#     character); sets, at any typed position, a key that is not exactly one of the fields
+#     kustomize reads there (tree_paths_kustomize_fields), or one of those the checks refuse; or
+#     names, in a field that names files, a remote source (a URL, an scp-style address or a
+#     github.com path, as kustomize reads one), an absolute path, or a path that leaves the tree,
+#     read as text, as kustomize joins it to the file's directory, or with every link on it
 #     resolved;
-#   - a kustomization file sets a field that is not one of kustomization_fields by its exact name
-#     (kustomize matches a field's name without regard to case), or one of those it refuses, or
-#     holds YAML that kustomize's decoder may read otherwise than yq: a key twice, an anchor, an
-#     alias, a merge key or a tag outside YAML's core schema;
 #   - a cluster's root Kustomization's spec.path is not a directory of the tree as it resolves.
 # Every kustomization file the builds read is one of the tree's, so the checks read each of them,
-# used or not. A Flux Kustomization's spec.components is checked as it is built (components_refused).
+# used or not. A Flux Kustomization is checked as it is handed to flux build
+# (kustomization_refused): at every typed position (tree_paths_flux_fields), a key that folds to a
+# field's name without being it is refused, as is a Component outside the tree. A document no tool
+# decodes, which the checks read and derive a tool's input from (a HelmRelease, its sources, a
+# FluxInstance), is checked by read_refused against the fields they read (tree_paths_read_fields).
 #
 # Each refusal is one line, FILE: what is refused, FILE a path from the tree's parent; a value from
 # the tree has every control character read as '?'.
 
-# The fields of kustomize's Kustomization type, and of the types it holds whose fields name files,
-# by the names kustomize reads them under, with what each holds: path, a file or directory, or a
-# list of them, that kustomize reads or fetches; files, a list of KEY=FILE or FILE; none, nothing
-# kustomize reads; refused, a field the checks refuse (generators, transformers and validators name
-# plugin configurations, whose fields name files of their own, and neither Flux nor the checks
-# inflate a Helm chart); an object, the fields of a map; a list of one object, those of each entry
-# of a list. tests/fixtures/kustomization-fields lists the same fields from kustomize's own types,
-# at the versions the pinned flux and kustomize build with.
-tree_paths_generator='{"name": "none", "namespace": "none", "behavior": "none", "literals": "none",
-  "files": "files", "envs": "path", "env": "path", "options": "none"}'
-tree_paths_patch='{"path": "path", "patch": "none", "target": "none", "options": "none"}'
-tree_paths_spec='{
-  "apiVersion": "none", "kind": "none", "metadata": "none",
-  "openapi": {"path": "path", "version": "none"},
-  "namePrefix": "none", "nameSuffix": "none", "namespace": "none",
-  "commonLabels": "none", "labels": "none", "commonAnnotations": "none",
-  "patchesStrategicMerge": "path",
-  "patchesJson6902": ['"$tree_paths_patch"'], "patches": ['"$tree_paths_patch"'],
-  "images": "none", "imageTags": "none",
-  "replacements": [{"path": "path", "source": "none", "targets": "none", "sourceValue": "none"}],
-  "replicas": "none", "vars": "none", "sortOptions": "none",
-  "resources": "path", "components": "path", "crds": "path", "bases": "path",
-  "configMapGenerator": ['"$tree_paths_generator"'],
-  "secretGenerator": ['"${tree_paths_generator%\}}"', "type": "none"}],
-  "helmGlobals": "refused", "helmCharts": "refused", "helmChartInflationGenerator": "refused",
-  "generatorOptions": "none", "configurations": "path",
-  "generators": "refused", "transformers": "refused", "validators": "refused",
-  "buildMetadata": "none"
-}'
+# The recorded field lists, one field a line: the type, the field and what it holds (value, map,
+# path, paths, dirs, files, refused, a type, or a list of a type), and TYPE * open for a type at
+# which only a key that folds to one of its fields without being it is refused; at any other type
+# every key that is not one of its fields is. tests/fixtures/kustomization-fields,
+# flux-kustomization-fields and read-fields record the same lists, with the sources they are read
+# from and the versions of the pinned tools they hold for.
+tree_paths_kustomize_fields='Kustomization apiVersion value
+Kustomization kind value
+Kustomization metadata ObjectMeta
+Kustomization openapi OpenAPI
+Kustomization namePrefix value
+Kustomization nameSuffix value
+Kustomization namespace value
+Kustomization commonLabels map
+Kustomization labels []Label
+Kustomization commonAnnotations map
+Kustomization patchesStrategicMerge paths
+Kustomization patchesJson6902 []Patch
+Kustomization patches []Patch
+Kustomization images []Image
+Kustomization imageTags []Image
+Kustomization replacements []ReplacementField
+Kustomization replicas []Replica
+Kustomization vars []Var
+Kustomization sortOptions SortOptions
+Kustomization resources paths
+Kustomization components dirs
+Kustomization crds paths
+Kustomization bases paths
+Kustomization configMapGenerator []ConfigMapArgs
+Kustomization secretGenerator []SecretArgs
+Kustomization helmGlobals refused
+Kustomization helmCharts refused
+Kustomization helmChartInflationGenerator refused
+Kustomization generatorOptions GeneratorOptions
+Kustomization configurations paths
+Kustomization generators refused
+Kustomization transformers refused
+Kustomization validators refused
+Kustomization buildMetadata value
+ObjectMeta name value
+ObjectMeta namespace value
+ObjectMeta labels map
+ObjectMeta annotations map
+OpenAPI path path
+OpenAPI version value
+Label pairs map
+Label includeSelectors value
+Label includeTemplates value
+Label includeVolumeClaimTemplates value
+Label fields []FieldSpec
+FieldSpec group value
+FieldSpec version value
+FieldSpec kind value
+FieldSpec path value
+FieldSpec create value
+Patch path path
+Patch patch value
+Patch target Selector
+Patch options PatchArgs
+PatchArgs allowNameChange value
+PatchArgs allowKindChange value
+Selector group value
+Selector version value
+Selector kind value
+Selector name value
+Selector namespace value
+Selector annotationSelector value
+Selector labelSelector value
+Image name value
+Image newName value
+Image tagSuffix value
+Image newTag value
+Image digest value
+ReplacementField path path
+ReplacementField source SourceSelector
+ReplacementField targets []TargetSelector
+ReplacementField sourceValue value
+SourceSelector group value
+SourceSelector version value
+SourceSelector kind value
+SourceSelector name value
+SourceSelector namespace value
+SourceSelector fieldPath value
+SourceSelector options FieldOptions
+TargetSelector select Selector
+TargetSelector reject []Selector
+TargetSelector fieldPaths value
+TargetSelector options FieldOptions
+FieldOptions delimiter value
+FieldOptions index value
+FieldOptions encoding value
+FieldOptions create value
+Replica name value
+Replica count value
+Var name value
+Var objref Target
+Var fieldref FieldSelector
+Target apiVersion value
+Target group value
+Target version value
+Target kind value
+Target name value
+Target namespace value
+FieldSelector fieldPath value
+SortOptions order value
+SortOptions legacySortOptions LegacySortOptions
+LegacySortOptions orderFirst value
+LegacySortOptions orderLast value
+ConfigMapArgs namespace value
+ConfigMapArgs name value
+ConfigMapArgs behavior value
+ConfigMapArgs literals value
+ConfigMapArgs files files
+ConfigMapArgs envs paths
+ConfigMapArgs env path
+ConfigMapArgs options GeneratorOptions
+SecretArgs namespace value
+SecretArgs name value
+SecretArgs behavior value
+SecretArgs literals value
+SecretArgs files files
+SecretArgs envs paths
+SecretArgs env path
+SecretArgs options GeneratorOptions
+SecretArgs type value
+GeneratorOptions labels map
+GeneratorOptions annotations map
+GeneratorOptions disableNameSuffixHash value
+GeneratorOptions immutable value'
+tree_paths_flux_fields='Kustomization * open
+Kustomization apiVersion value
+Kustomization kind value
+Kustomization metadata ObjectMeta
+Kustomization spec KustomizationSpec
+Kustomization status refused
+ObjectMeta * open
+ObjectMeta name value
+ObjectMeta generateName value
+ObjectMeta namespace value
+ObjectMeta selfLink value
+ObjectMeta uid value
+ObjectMeta resourceVersion value
+ObjectMeta generation value
+ObjectMeta creationTimestamp value
+ObjectMeta deletionTimestamp value
+ObjectMeta deletionGracePeriodSeconds value
+ObjectMeta labels map
+ObjectMeta annotations map
+ObjectMeta ownerReferences refused
+ObjectMeta finalizers value
+ObjectMeta managedFields refused
+KustomizationSpec * open
+KustomizationSpec commonMetadata CommonMetadata
+KustomizationSpec dependsOn []DependencyReference
+KustomizationSpec decryption Decryption
+KustomizationSpec interval value
+KustomizationSpec retryInterval value
+KustomizationSpec kubeConfig KubeConfigReference
+KustomizationSpec path value
+KustomizationSpec postBuild PostBuild
+KustomizationSpec prune value
+KustomizationSpec deletionPolicy value
+KustomizationSpec healthChecks []NamespacedObjectKindReference
+KustomizationSpec namePrefix value
+KustomizationSpec nameSuffix value
+KustomizationSpec patches []Patch
+KustomizationSpec images []Image
+KustomizationSpec serviceAccountName value
+KustomizationSpec sourceRef CrossNamespaceSourceReference
+KustomizationSpec suspend value
+KustomizationSpec targetNamespace value
+KustomizationSpec timeout value
+KustomizationSpec force value
+KustomizationSpec wait value
+KustomizationSpec buildMetadata value
+KustomizationSpec components dirs
+KustomizationSpec ignoreMissingComponents value
+KustomizationSpec healthCheckExprs []CustomHealthCheck
+KustomizationSpec ignore []IgnoreRule
+CommonMetadata * open
+CommonMetadata annotations map
+CommonMetadata labels map
+DependencyReference * open
+DependencyReference name value
+DependencyReference namespace value
+DependencyReference readyExpr value
+Decryption * open
+Decryption provider value
+Decryption serviceAccountName value
+Decryption secretRef LocalObjectReference
+LocalObjectReference * open
+LocalObjectReference name value
+KubeConfigReference * open
+KubeConfigReference configMapRef LocalObjectReference
+KubeConfigReference secretRef SecretKeyReference
+SecretKeyReference * open
+SecretKeyReference name value
+SecretKeyReference key value
+PostBuild * open
+PostBuild substituteStrategy value
+PostBuild substitute map
+PostBuild substituteFrom []SubstituteReference
+SubstituteReference * open
+SubstituteReference kind value
+SubstituteReference name value
+SubstituteReference optional value
+NamespacedObjectKindReference * open
+NamespacedObjectKindReference apiVersion value
+NamespacedObjectKindReference kind value
+NamespacedObjectKindReference name value
+NamespacedObjectKindReference namespace value
+Patch * open
+Patch patch value
+Patch target Selector
+Selector * open
+Selector group value
+Selector version value
+Selector kind value
+Selector namespace value
+Selector name value
+Selector annotationSelector value
+Selector labelSelector value
+Image * open
+Image name value
+Image newName value
+Image newTag value
+Image digest value
+CrossNamespaceSourceReference * open
+CrossNamespaceSourceReference apiVersion value
+CrossNamespaceSourceReference kind value
+CrossNamespaceSourceReference name value
+CrossNamespaceSourceReference namespace value
+CustomHealthCheck * open
+CustomHealthCheck apiVersion value
+CustomHealthCheck kind value
+CustomHealthCheck current value
+CustomHealthCheck inProgress value
+CustomHealthCheck failed value
+IgnoreRule * open
+IgnoreRule paths value
+IgnoreRule target Selector'
+tree_paths_read_fields='HelmRelease * open
+HelmRelease apiVersion value
+HelmRelease kind value
+HelmRelease metadata Metadata
+HelmRelease spec HelmReleaseSpec
+Metadata * open
+Metadata name value
+Metadata namespace value
+HelmReleaseSpec * open
+HelmReleaseSpec chartRef ChartReference
+HelmReleaseSpec chart Chart
+HelmReleaseSpec valuesFrom []ValuesReference
+HelmReleaseSpec values map
+HelmReleaseSpec releaseName value
+HelmReleaseSpec targetNamespace value
+HelmReleaseSpec postRenderers []PostRenderer
+HelmReleaseSpec test Test
+ChartReference * open
+ChartReference kind value
+ChartReference name value
+ChartReference namespace value
+Chart * open
+Chart spec ChartSpec
+ChartSpec * open
+ChartSpec chart value
+ChartSpec version value
+ChartSpec sourceRef SourceReference
+ChartSpec valuesFiles value
+SourceReference * open
+SourceReference kind value
+SourceReference name value
+SourceReference namespace value
+ValuesReference * open
+ValuesReference kind value
+ValuesReference name value
+ValuesReference valuesKey value
+ValuesReference targetPath value
+ValuesReference optional value
+PostRenderer kustomize PostRendererKustomize
+PostRendererKustomize patches []Patch
+PostRendererKustomize images []Image
+Patch patch value
+Patch target Selector
+Selector group value
+Selector version value
+Selector kind value
+Selector namespace value
+Selector name value
+Selector annotationSelector value
+Selector labelSelector value
+Image name value
+Image newName value
+Image newTag value
+Image digest value
+Test * open
+Test enable value
+Test filters []TestFilter
+TestFilter * open
+TestFilter name value
+TestFilter exclude value
+OCIRepository * open
+OCIRepository apiVersion value
+OCIRepository kind value
+OCIRepository metadata Metadata
+OCIRepository spec OCIRepositorySpec
+OCIRepositorySpec * open
+OCIRepositorySpec url value
+OCIRepositorySpec ref OCIRepositoryRef
+OCIRepositoryRef * open
+OCIRepositoryRef tag value
+HelmRepository * open
+HelmRepository apiVersion value
+HelmRepository kind value
+HelmRepository metadata Metadata
+HelmRepository spec HelmRepositorySpec
+HelmRepositorySpec * open
+HelmRepositorySpec url value
+HelmRepositorySpec type value
+HelmRepositorySpec provider value
+HelmRepositorySpec secretRef value
+HelmRepositorySpec certSecretRef value
+FluxInstance * open
+FluxInstance apiVersion value
+FluxInstance kind value
+FluxInstance metadata Metadata
+FluxInstance spec FluxInstanceSpec
+FluxInstanceSpec * open
+FluxInstanceSpec components value
+FluxInstanceSpec kustomize FluxInstanceKustomize
+FluxInstanceKustomize * open
+FluxInstanceKustomize patches []Patch'
 
-# kustomization_fields: one line FIELD CLASS for each field tree_paths_spec knows, an entry of a list
-# as FIELD[], files as path, as tests/fixtures/kustomization-fields lists them.
-kustomization_fields() {
-  jq -rn --argjson spec "$tree_paths_spec" '
-    def class: if . == "files" then "path" else . end;
-    $spec | to_entries[] | .key as $k | .value as $v
-    | if ($v | type) == "string" then "\($k) \($v | class)"
-      elif ($v | type) == "object" then $v | to_entries[] | "\($k).\(.key) \(.value | class)"
-      else $v[0] | to_entries[] | "\($k)[].\(.key) \(.value | class)" end'
+# tree_paths_registry LINES: the field list LINES as JSON, {"types": {TYPE: {FIELD: CLASS}}}.
+tree_paths_registry() {
+  jq -R -s 'reduce (split("\n")[] | select(test("^[A-Za-z]")) | split(" ")) as [$t, $f, $c] ({"types": {}};
+    .types[$t][$f] = $c)' <<<"$1"
+}
+tree_paths_kustomize=$(tree_paths_registry "$tree_paths_kustomize_fields")
+tree_paths_flux=$(tree_paths_registry "$tree_paths_flux_fields")
+tree_paths_read=$(tree_paths_registry "$tree_paths_read_fields")
+
+# tree_paths_fields NAME: the field list NAME (kustomize, flux or read), one line each.
+tree_paths_fields() {
+  local list="tree_paths_${1}_fields"
+  printf '%s\n' "${!list}"
+}
+
+# The walk of a document against a field list: jq, on one JSON document of the type $root, writes a
+# record for each key it refuses and each path a field names, four values each ended by a NUL:
+# field, where the key is, why it is refused, and nothing; path, where it is, the entry, and the
+# path the entry names; doc, nothing, why the document is refused, and nothing. A record is written
+# whole, so jq failing leaves no part of one. A document that holds a NUL, which no key and no path
+# does, is refused whole, so that no value can end a record early.
+# shellcheck disable=SC2016 # $reg, $root, $tool, $folded and $refused are jq variables.
+tree_paths_walk_jq='
+  def record: map(tostring + "\u0000") | add;
+  def fold: gsub("\u017f"; "S") | gsub("\u212a"; "K") | ascii_upcase;
+  def object_type($c): ($c | ltrimstr("[]")) as $t | if ($reg.types | has($t)) then $t else null end;
+  def walk($c; $where):
+    if $c == "value" or $c == "map" then empty
+    elif $c == "refused" then ["field", $where, $refused, ""]
+    elif ($c | IN("path", "paths", "dirs", "files")) then
+      (if type == "array" then .[] else . end) | select(type == "string" or type == "number") | tostring
+      | ["path", $where, ., (if $c == "files" and test("=") then sub("^[^=]*="; "") else . end)]
+    elif object_type($c) == null then empty
+    elif ($c | startswith("[]")) then
+      select(type == "array") | to_entries[] | .key as $i | .value | walk($c[2:]; "\($where)[\($i)]")
+    else
+      $reg.types[$c] as $f
+      | select(type == "object")
+      | (($f["*"] // "") == "open") as $open
+      | to_entries[] | .key as $k | .value as $v
+      | (if $where == "" then $k else $where + "." + $k end) as $w
+      | if $k != "*" and ($f | has($k)) then $v | walk($f[$k]; $w)
+        else ([$f | keys[] | select(. != "*" and fold == ($k | fold))] | first) as $name
+          | if $name != null then
+              ["field", $w, "folds to \($name) without being it: \(if $open then $folded else "\($tool) would read it as that field" end)", ""]
+            elif $open then empty
+            else ["field", $w, "is not one of the fields \($tool) reads there, by its exact name", ""] end
+        end
+    end;
+  if type != "object" then empty
+  elif ([.. | strings, (objects | keys[])] | any(contains("\u0000"))) then ["doc", "", "holds a NUL character", ""] | record
+  else walk($root; "") | record end'
+
+# tree_paths_walk REGISTRY TYPE TOOL FOLDED REFUSED: the records of the walk of each JSON document on
+# stdin against the field list REGISTRY, from its type TYPE; TOOL names what reads a type that is not
+# open, FOLDED what becomes of a key at an open type that folds to a field's name, REFUSED why a
+# refused field is.
+tree_paths_walk() {
+  jq -j --argjson reg "$1" --arg root "$2" --arg tool "$3" --arg folded "$4" --arg refused "$5" \
+    "$tree_paths_walk_jq" 2>/dev/null ||
+    printf '%s\0' doc "" "cannot be read" ""
+}
+
+# tree_paths_lines NAME DIR ROOT: reads the records of a walk on stdin and writes a line for each
+# refusal, NAME: what is refused; a path is read from DIR and must name a path in ROOT.
+tree_paths_lines() {
+  local name=$1 dir=$2 root=$3 kind where text path reason
+  while IFS= read -r -d '' kind && IFS= read -r -d '' where && IFS= read -r -d '' text && IFS= read -r -d '' path; do
+    where=$(tree_paths_clean "$where")
+    case $kind in
+      field) echo "${name}$where $text" ;;
+      path)
+        reason=$(path_refusal "$dir" "$path" "$root")
+        [[ -z $reason ]] || echo "${name}$where names \"$(tree_paths_clean "$text")\", $reason"
+        ;;
+      *) echo "${name%: }: $text" ;;
+    esac
+  done
 }
 
 # tree_paths_clean TEXT: TEXT with every control character read as '?'.
@@ -114,7 +494,7 @@ path_refusal() {
 # tree_paths_refused ROOT: a line for each thing of the tree ROOT, an absolute path with no link in
 # it whose last component is kubernetes, that the checks refuse; nothing when there is none.
 tree_paths_refused() {
-  local root=$1 base link target file name dir odd json kind where entry path reason
+  local root=$1 base link target file name dir odd tags json
   base=${root%/*}
   while IFS= read -r -d '' link; do
     target=$(realpath -e -- "$link" 2>/dev/null) || target=""
@@ -136,50 +516,19 @@ tree_paths_refused() {
       echo "$name: cannot be read as YAML"
       continue
     fi
-    if ! json=$(yq -o json -I0 'select(. != null)' "$file" 2>/dev/null); then
-      echo "$name: cannot be read as YAML"
+    # kustomize reads the first document; the checks read a file of one mapping, and empty documents.
+    tags=$(yq -N 'tag' "$file" 2>/dev/null | grep -vx '!!null') || tags=""
+    if [[ -z $tags ]]; then
+      echo "$name: is empty: a kustomization is one mapping"
+      continue
+    elif [[ $tags != '!!map' ]]; then
+      echo "$name: holds $(wc -l <<<"$tags") documents or one that is no mapping: a kustomization is one mapping"
       continue
     fi
-    # A value or key that holds a NUL character, which no path does, would end a record early.
-    if ! jq -e -s 'all(.[] | [.. | strings, (objects | keys[])][]; contains("\u0000") | not)' <<<"$json" >/dev/null 2>&1; then
-      echo "$name: holds a NUL character"
-      continue
-    fi
-    # Each field, by its exact name: a path it names as one record of four NUL-ended values, path,
-    # where it is, the entry and the path the entry names; a field the checks refuse as field, where
-    # it is, why and an empty value. jq writes each record whole, so one that fails leaves no part of
-    # a record behind, and the record after it says so.
-    while IFS= read -r -d '' kind && IFS= read -r -d '' where && IFS= read -r -d '' entry && IFS= read -r -d '' path; do
-      where=$(tree_paths_clean "$where")
-      case $kind in
-        field) echo "$name: $where $entry" ;;
-        path)
-          reason=$(path_refusal "$dir" "$path" "$root")
-          [[ -z $reason ]] || echo "$name: $where names \"$(tree_paths_clean "$entry")\", $reason"
-          ;;
-        *) echo "$name: cannot be read as a kustomization" ;;
-      esac
-    done < <(jq -j --argjson spec "$tree_paths_spec" '
-      def record: map(tostring + "\u0000") | add;
-      def leaf($class; $where):
-        if $class == "none" then empty
-        elif $class == "refused" then
-          ["field", $where, "is a field the checks refuse: a plugin configuration names files of its own, and neither Flux nor the checks inflate a Helm chart", ""]
-        else (if type == "array" then .[] else . end) | select(type == "string" or type == "number") | tostring
-          | [., (if $class == "files" and test("=") then sub("^[^=]*="; "") else . end)] as [$entry, $path]
-          | ["path", $where, $entry, $path]
-        end;
-      def fields($spec; $where):
-        to_entries[] | .key as $k | .value as $v | ($where + (if $where == "" then "" else "." end) + $k) as $w
-        | if ($spec | has($k) | not) then
-            ["field", $w, "is not a field the checks know: they read the exact names of kustomize'"'"'s fields alone", ""]
-          elif ($spec[$k] | type) == "string" then $v | leaf($spec[$k]; $w)
-          elif ($spec[$k] | type) == "object" then $v | select(type == "object") | fields($spec[$k]; $w)
-          else $v | select(type == "array") | to_entries[] | .key as $i | .value | select(type == "object")
-            | fields($spec[$k][0]; "\($w)[\($i)]")
-          end;
-      select(type == "object") | fields($spec; "") | record' <<<"$json" 2>/dev/null ||
-      printf '%s\0' field "" "cannot be read as a kustomization" "")
+    json=$(yq -o json -I0 'select(. != null)' "$file" 2>/dev/null) || { echo "$name: cannot be read as YAML"; continue; }
+    tree_paths_walk "$tree_paths_kustomize" Kustomization kustomize "kustomize would read it as that field" \
+      "is a field the checks refuse: a plugin configuration names files of its own, and neither Flux nor the checks inflate a Helm chart" \
+      <<<"$json" | tree_paths_lines "$name: " "$dir" "$root"
   done < <(find "$root" \( -name kustomization.yaml -o -name kustomization.yml -o -name Kustomization \) ! -type d -print0 | sort -z)
 }
 
@@ -207,25 +556,29 @@ root_path_refused() {
   echo "$(tree_paths_clean "$ks"): spec.path must be a directory of the tree under kubernetes/, found $(tree_paths_clean "${path#kubernetes/}")"
 }
 
-# components_refused KS DIR ROOT: a line for each entry of spec.components of the Flux
-# Kustomization in the file KS that names no path of the tree ROOT, read from DIR, the directory
-# the Kustomization is built from, as flux build adds them to the kustomization it builds there.
-components_refused() {
-  local ks=$1 dir=$2 root=$3 json entry reason odd
-  # A file yq cannot read is never built: the checks read every Kustomization they build with yq.
+# kustomization_refused KS DIR ROOT: a line for each thing of the Flux Kustomization in the file KS
+# that the checks refuse when they hand KS to flux build, which builds it from DIR, a directory of
+# the tree ROOT: a key that folds to a field's name without being it, at any typed position, and an
+# entry of spec.components that names no path of the tree, read from DIR, as flux build adds them to
+# the kustomization it builds there. A file yq cannot read is never built: the checks read every
+# Kustomization they build with yq.
+kustomization_refused() {
+  local ks=$1 dir=$2 root=$3 json odd
   json=$(yq -o json -I0 'select(. != null)' "$ks" 2>/dev/null) || return 0
   tree_paths_odd "$ks" && odd=0 || odd=$?
   if ((odd == 0)); then
-    echo "holds a key twice, an anchor, an alias, a merge key or a tag outside YAML's core schema, as Flux's decoder may read them otherwise than the checks"
+    echo "holds a key twice, an anchor, an alias, a merge key or a tag outside YAML's core schema, as flux build's decoder may read them otherwise than the checks"
     return
   fi
-  if ! jq -e -s 'all(.[] | .spec.components // []; type == "array" and all(.[]; type == "string" and (contains("\u0000") | not)))' \
-    <<<"$json" >/dev/null 2>&1; then
-    echo "spec.components is not a list of paths"
-    return
-  fi
-  while IFS= read -r -d '' entry; do
-    reason=$(path_refusal "$dir" "$entry" "$root")
-    [[ -z $reason ]] || echo "spec.components names \"$(tree_paths_clean "$entry")\", $reason"
-  done < <(jq -j '(.spec.components // [])[] | . + "\u0000"' <<<"$json")
+  tree_paths_walk "$tree_paths_flux" Kustomization "flux build" "flux build would read it as that field" \
+    "is a field no Kustomization of the tree holds, which the checks refuse" \
+    <<<"$json" | tree_paths_lines "" "$dir" "$root"
+}
+
+# read_refused TYPE: a line for each key of the JSON object on stdin, of TYPE in
+# tree_paths_read_fields, that the checks refuse: one that folds to a field they read without being
+# it, and at a type they hand a tool whole, any key that is not one of its fields.
+read_refused() {
+  tree_paths_walk "$tree_paths_read" "$1" "kustomize, which the checks hand it to," \
+    "the checks read that field alone, and the API server drops this spelling of it" "" | tree_paths_lines "" / /
 }

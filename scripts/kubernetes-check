@@ -10,12 +10,14 @@
 # cluster and fetches nothing: the publish run runs it in the job that signs (scripts/publish).
 # What the tree holds is data: each value read from a ks.yaml is one field, a control character or
 # a '|' in it read as '?'. Before it reads or builds anything else, the check refuses a tree from
-# which a build would read outside kubernetes/, and then builds nothing (scripts/lib/tree-paths.sh):
-# a link that resolves outside it; a kustomization that names a remote source, an absolute path
-# or one that leaves the tree, or a field the check does not know; a root whose spec.path is not
-# a directory of the tree as it resolves; a ks.yaml the check builds whose spec.components names a
-# path outside the tree. An application's spec.path is compared with the one its directory fixes,
-# and what is built is that directory.
+# which a build would read outside kubernetes/, or that a tool would read otherwise than the check,
+# and then builds nothing (scripts/lib/tree-paths.sh): a link that resolves outside it; a
+# kustomization that is not one mapping, that names a remote source, an absolute path or one that
+# leaves the tree, or that holds a key that is not exactly a field kustomize reads there; a root
+# whose spec.path is not a directory of the tree as it resolves; a ks.yaml the check builds that
+# holds a key flux build would read as a field it is not spelled as, or whose spec.components names
+# a path outside the tree. An application's spec.path is compared with the one its directory
+# fixes, and what is built is that directory.
 #
 # KUBERNETES_CHECK_BUILT, an existing empty directory, receives what each Flux build yielded, for
 # scripts/kubernetes-validate: N.yaml, and in its file builds the record N.yaml, LABEL and APP_DIR,
@@ -56,23 +58,23 @@ fail() {
   failures=$((failures + 1))
 }
 
-# What the builds read is the tree's alone, or nothing is built. Each Kustomization the check builds
-# with Flux takes its spec.components from the directory it is built from: a root's spec.path, an
-# application's app/. A ks.yaml or a directory that leads outside the tree is a link refused here,
-# and is not read.
+# What the builds read is the tree's alone, read as the check reads it, or nothing is built. Each
+# Kustomization the check builds with Flux is checked as flux build reads it, its spec.components
+# from the directory it is built from: a root's spec.path, an application's app/. A ks.yaml or a
+# directory that leads outside the tree is a link refused here, and is not read.
 while IFS= read -r line; do
   fail "$line"
 done < <(tree_paths_refused "$tree_root")
-# components_from KS DIR: fails each entry of KS's spec.components that leaves the tree, read from
-# the directory DIR.
-components_from() {
+# kustomization_from KS DIR: fails each thing of the Flux Kustomization in KS that flux build, building
+# it from the directory DIR, would read otherwise than the check, or outside the tree.
+kustomization_from() {
   local ks=$1 dir line
   tree_paths_inside "$tree_root" "$(realpath -e -- "$ks" 2>/dev/null)" || return 0
   dir="$(realpath -e -- "$2" 2>/dev/null)" || return 0
   tree_paths_inside "$tree_root" "$dir" || return 0
   while IFS= read -r line; do
     [[ -z $line ]] || fail "$ks: $line"
-  done <<<"$(components_refused "$ks" "$dir" "$tree_root")"
+  done <<<"$(kustomization_refused "$ks" "$dir" "$tree_root")"
 }
 for ks in kubernetes/clusters/*/ks.yaml; do
   tree_paths_inside "$tree_root" "$(realpath -e -- "$ks" 2>/dev/null)" || continue
@@ -82,12 +84,12 @@ for ks in kubernetes/clusters/*/ks.yaml; do
     continue
   fi
   path="$(yq ea '[select(. != null)] | .[0].spec.path // "" | tostring' "$ks" 2>/dev/null)" || continue
-  components_from "$ks" "kubernetes/${path#./}"
+  kustomization_from "$ks" "kubernetes/${path#./}"
 done
 for dir in kubernetes/apps/base/*/*/ kubernetes/clusters/*/*/*/; do
   dir="${dir%/}"
   [[ -f $dir/ks.yaml && -d $dir/app ]] || continue
-  components_from "$dir/ks.yaml" "$dir/app"
+  kustomization_from "$dir/ks.yaml" "$dir/app"
 done
 if ((failures > 0)); then
   echo "kubernetes-check: $failures failure(s); nothing was built, as a build of this tree would read outside it" >&2
@@ -353,7 +355,7 @@ last_built=""
 # LABEL is what the output calls the build, and APP_DIR the application directory the objects come
 # from, if they come from one; the result is in last_built when it succeeded.
 flux_build() {
-  local ks=$1 path=$2 label=$3 app_dir=$4 name err var where
+  local ks=$1 path=$2 label=$3 app_dir=$4 name err var where refused line
   shift 4
   last_built=""
   # A ks.yaml that cannot be read is reported with the ks.yaml rules above.
@@ -362,6 +364,14 @@ flux_build() {
   yq ea 'select(fileIndex == 0) as $values | select(fileIndex == 1 and . != null)
     | .spec.postBuild.substitute = ($values * (.spec.postBuild.substitute // {}))' \
     "$values" "$ks" >"$tmp/ks.yaml" 2>/dev/null || return 0
+  # What flux build is handed, as it reads it: the guard above checked the files it comes from.
+  refused="$(kustomization_refused "$tmp/ks.yaml" "$(realpath -e -- "$path")" "$tree_root")"
+  if [[ -n $refused ]]; then
+    while IFS= read -r line; do
+      fail "$label: $line"
+    done <<<"$refused"
+    return 0
+  fi
   flux_builds=$((flux_builds + 1))
   if err="$(flux build kustomization "$name" --path "$path" --kustomization-file "$tmp/ks.yaml" \
     --dry-run --strict-substitute --in-memory-build 2>&1 >"$tmp/built/$flux_builds.yaml")"; then

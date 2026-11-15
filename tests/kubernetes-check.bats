@@ -224,6 +224,88 @@ fresh_tree() {
   valid_tree
 }
 
+# fields FIXTURE: the field list in tests/fixtures/FIXTURE as JSON: {"roots": [...], "types":
+# {TYPE: {FIELD: CLASS}}}, a type marked open holding "*": "open".
+fields() {
+  jq -R -s '
+    split("\n") as $lines
+    | {"roots": ([$lines[] | select(test("^# roots?: ")) | sub("^# roots?: "; "") | split(" ")[]]),
+       "types": (reduce ($lines[] | select(test("^[A-Za-z]")) | split(" ")) as [$t, $f, $c] ({}; .[$t][$f] = $c))}' \
+    "$BATS_TEST_DIRNAME/fixtures/$1"
+}
+
+# The case variants of a field's name that encoding/json matches to it: its first letter, all of it
+# and its last letter in upper case, and every s as U+017F and every k as U+212A, which its folding
+# reads as s and k.
+# shellcheck disable=SC2016 # $n, $reg, $file, $dir and $t are jq variables.
+variants_jq='
+  def variants: . as $n
+    | [($n[:1] | ascii_upcase) + $n[1:], ($n | ascii_upcase), $n[:-1] + ($n[-1:] | ascii_upcase)]
+      + (if ($n | test("s")) then [$n | gsub("s"; "ſ")] else [] end)
+      + (if ($n | test("k")) then [$n | gsub("k"; "K")] else [] end)
+    | unique | map(select(. != $n)) | .[];
+  def object_type($c): ($c | ltrimstr("[]")) as $t | if ($reg.types | has($t)) then $t else null end;
+  def leads($c): ($c | IN("path", "paths", "dirs", "files"))
+    or (object_type($c) as $t | $t != null and ($reg.types[$t] | to_entries | any(.key != "*" and leads(.value))));
+  # What a field holds when it names the marker: a file, a list of files, a Component directory, a
+  # generator source, or an object that holds such a field.
+  def danger($c):
+    if $c == "path" then $file elif $c == "paths" then [$file] elif $c == "dirs" then [$dir]
+    elif $c == "files" then ["marker=" + $file] elif $c == "map" then {"marker": $file}
+    elif object_type($c) != null then
+      ($reg.types[object_type($c)] | to_entries | map(select(.key != "*" and leads(.value)) | {key, value: danger(.value)})
+        | from_entries) | if ($c | startswith("[]")) then [.] else . end
+    else $file end;
+  # An object of TYPE that holds every variant of each of its fields, naming the marker, and each
+  # field of an object type by its own name, holding such an object.
+  def generate($t):
+    $reg.types[$t] as $f
+    | reduce ($f | keys[] | select(. != "*")) as $k ({};
+        reduce ($k | variants) as $v (.; .[$v] = danger($f[$k]))
+        | object_type($f[$k]) as $sub
+        | if $sub == null then . else .[$k] = (generate($sub) | if ($f[$k] | startswith("[]")) then [.] else . end) end);
+  # Where each variant generate puts is, as the checks name it.
+  def variant_keys($t; $where):
+    $reg.types[$t] as $f
+    | ($f | keys[] | select(. != "*")) as $k
+    | (if $where == "" then $k else $where + "." + $k end) as $w
+    | (($k | variants) | if $where == "" then . else $where + "." + . end),
+      (object_type($f[$k]) as $sub | if $sub == null then empty
+       elif ($f[$k] | startswith("[]")) then variant_keys($sub; $w + "[0]") else variant_keys($sub; $w) end);'
+
+# with_variants FIXTURE TYPE FILE: FILE, a YAML or JSON document, merged with an object of TYPE that
+# holds every variant of every field of the types FIXTURE lists, written back as JSON; KEYS is where
+# each variant is.
+with_variants() {
+  local reg merged
+  reg="$(fields "$1")"
+  merged="$(yq -o json -I0 '.' "$3" | jq -c --argjson reg "$reg" --arg file "$CLIMB" --arg dir "$EVIL" --arg t "$2" \
+    "$variants_jq"' . * generate($t)')"
+  printf '%s\n' "$merged" >"$3"
+  KEYS="$(jq -rn --argjson reg "$reg" --arg file "$CLIMB" --arg dir "$EVIL" --arg t "$2" "$variants_jq"' variant_keys($t; "")')"
+}
+
+# names_every FILE: the run failed, and for each key in KEYS a line names FILE and the key.
+names_every() {
+  local key lines missing=""
+  [ "$status" -ne 0 ] || { echo "the run passed"; return 1; }
+  lines="$(grep -F -- "$1" <<<"$output")" || { echo "no line names $1"; return 1; }
+  while IFS= read -r key; do
+    grep -qF -- " $key " <<<"$lines" || missing+=" $key"
+  done <<<"$KEYS"
+  [ -z "$missing" ] || { echo "not named with $1:$missing"; return 1; }
+}
+
+# evil_marker: OUTSIDE, a ConfigMap whose data holds MARKER, CLIMB, the same by a path that climbs out
+# of any directory, and EVIL, a Component directory beside it that names it by a generator.
+evil_marker() {
+  outside_marker
+  mkdir -p "$BATS_TEST_TMPDIR/outside/evil"
+  printf '%s\n' 'apiVersion: kustomize.config.k8s.io/v1alpha1' 'kind: Component' 'configMapGenerator:' \
+    '  - name: leak' '    files:' "      - leak=$OUTSIDE" >"$BATS_TEST_TMPDIR/outside/evil/kustomization.yaml"
+  EVIL="$(printf '../%.0s' {1..20})${BATS_TEST_TMPDIR#/}/outside/evil"
+}
+
 # build_root: copies the repository's kubernetes/ tree, adds the child Kustomizations given on
 # stdin to the cluster's overlay, and builds the root the way Flux does into $BUILD.
 build_root() {
@@ -1373,45 +1455,85 @@ EOF
 }
 
 @test "Every field of a kustomization is one the checks read the paths of, accept or refuse" {
-  local fields="$BATS_TEST_DIRNAME/fixtures/kustomization-fields" want got field class expression P out
+  local fixtures="$BATS_TEST_DIRNAME/fixtures" want got module list root type field class route where value P out
   local top="kubernetes/app/kustomization.yaml" yaml
-  # The list is that of the pinned tools: flux records the kustomize it builds with in its binary.
-  want="$(sed -n 's|^# flux: sigs\.k8s\.io/kustomize/api ||p' "$fields")"
-  got="$(grep -aoE $'dep\tsigs\\.k8s\\.io/kustomize/api\tv[0-9]+\\.[0-9]+\\.[0-9]+' "$(type -P flux)" | cut -f3 | head -n1)"
-  [ "$got" = "$want" ] || { echo "flux builds with kustomize api ${got:-(unknown)}, the fields are those of $want: read them again at $got"; return 1; }
-  want="$(sed -n 's|^# kustomize: \(v[0-9.]*\) .*|\1|p' "$fields")"
+  # The lists are those of the pinned tools: flux records the modules it builds with in its binary,
+  # and the kustomize binary is the release its version names.
+  while read -r module want; do
+    got="$(grep -aoE $'dep\t'"${module//./\\.}"$'\tv[0-9]+\\.[0-9]+\\.[0-9]+' "$(type -P flux)" | cut -f3 | head -n1)"
+    [ "$got" = "$want" ] || { echo "flux builds with $module ${got:-(unknown)}, the fields are those of $want: read them again at $got"; return 1; }
+  done < <(sed -n 's|^# flux: ||p' "$fixtures/kustomization-fields" "$fixtures/flux-kustomization-fields")
+  want="$(sed -n 's|^# kustomize: \(v[0-9.]*\) .*|\1|p' "$fixtures/kustomization-fields")"
   got="$(kustomize version)"
   [ "$got" = "$want" ] || { echo "kustomize is $got, the fields are those of $want: read them again at $got"; return 1; }
 
-  # The checks know exactly the fields listed, as listed.
-  diff <(grep -v '^#' "$fields" | cut -d' ' -f1,2 | sort) \
-    <(. "$REPO/scripts/lib/tree-paths.sh" && kustomization_fields | sort)
+  # The checks know exactly the fields listed, as listed, and each line decides what its field holds:
+  # a field added to a list without a decision here, or to the checks alone, fails.
+  for list in kustomize:kustomization-fields flux:flux-kustomization-fields read:read-fields; do
+    diff <(grep -E '^[A-Za-z]' "$fixtures/${list#*:}" | sort) \
+      <(. "$REPO/scripts/lib/tree-paths.sh" && tree_paths_fields "${list%%:*}" | sort)
+    fields "${list#*:}" | jq -e '.types as $types | [$types[][]] | all(. as $c
+      | IN("value", "map", "path", "paths", "dirs", "files", "refused", "open") or ($types | has($c | ltrimstr("[]"))))' >/dev/null ||
+      { echo "${list#*:}: a field holds no class the checks decide"; return 1; }
+  done
 
-  # Each field, set alone in a kustomization of a tree: one that names a file is refused for one
-  # outside the tree, by an absolute path and by one that climbs out of it, in a line that names the
-  # file, the field and the entry; the others as listed. The pinned kustomize knows each.
+  # Each field, set alone where its type is reached from the root, by its own name: one that names a
+  # file is refused for one outside the tree, by an absolute path and by one that climbs out of it,
+  # in a line that names the file, the field and the entry; one the checks refuse is refused; any
+  # other is accepted. The pinned kustomize knows each of its fields.
   outside_marker
   mkdir -p "$BATS_TEST_TMPDIR/fields/kubernetes/app" "$BATS_TEST_TMPDIR/kz"
   guard() {
     (cd "$BATS_TEST_TMPDIR/fields" && . "$REPO/scripts/lib/tree-paths.sh" && tree_paths_refused "$PWD/kubernetes")
   }
-  while read -r field class expression; do
-    for P in "$OUTSIDE" "$CLIMB"; do
-      echo '{}' | P="$P" yq "$expression" >"$BATS_TEST_TMPDIR/fields/$top"
-      out="$(guard)"
-      case $class in
-        path) grep -F -- "$top: ${field%%[.[]*}" <<<"$out" | grep -qF -- "$P" ||
-          { echo "$field: not refused for $P: $out"; return 1; } ;;
-        none) [ -z "$out" ] || { echo "$field: refused: $out"; return 1; } ;;
-        refused) grep -qF -- "$top: $field" <<<"$out" || { echo "$field: not refused: $out"; return 1; } ;;
-      esac
-    done
-    echo '{}' | P=marker.yaml yq "$expression" >"$BATS_TEST_TMPDIR/kz/kustomization.yaml"
-    if kustomize build "$BATS_TEST_TMPDIR/kz" 2>&1 | grep -q 'unknown field'; then
-      echo "$field: the pinned kustomize has no such field"
-      return 1
-    fi
-  done < <(grep -v '^#' "$fields")
+  flux_guard() {
+    (. "$REPO/scripts/lib/tree-paths.sh" &&
+      kustomization_refused "$BATS_TEST_TMPDIR/ks.json" "$BATS_TEST_TMPDIR/fields/kubernetes/app" "$BATS_TEST_TMPDIR/fields/kubernetes")
+  }
+  read_guard() {
+    (. "$REPO/scripts/lib/tree-paths.sh" && read_refused "$1" <"$BATS_TEST_TMPDIR/ks.json")
+  }
+  for list in kustomization-fields flux-kustomization-fields read-fields; do
+    while IFS=$'\t' read -r root type field class route where; do
+      for P in "$OUTSIDE" "$CLIMB"; do
+        value="$(jq -cn --arg c "$class" --arg p "$P" 'if $c == "path" then $p elif $c == "paths" or $c == "dirs" then [$p]
+          elif $c == "files" then ["a=" + $p] elif $c == "map" then {"a": "b"} elif $c | startswith("[]") then [{}]
+          elif $c | test("^[A-Z]") then {} else "a" end')"
+        jq -cn --argjson route "$route" --arg field "$field" --argjson value "$value" 'null | setpath($route + [$field]; $value)' \
+          >"$BATS_TEST_TMPDIR/ks.json"
+        case $list in
+          kustomization-fields)
+            cp "$BATS_TEST_TMPDIR/ks.json" "$BATS_TEST_TMPDIR/fields/$top"
+            out="$(guard)"
+            ;;
+          flux-kustomization-fields) out="$(flux_guard)" ;;
+          read-fields) out="$(read_guard "$root")" ;;
+        esac
+        case $class in
+          path | paths | dirs | files) grep -F -- "$where " <<<"$out" | grep -qF -- "$P" ||
+            { echo "$list $type.$field: not refused for $P: $out"; return 1; } ;;
+          refused) grep -qF -- "$where " <<<"$out" || { echo "$list $type.$field: not refused: $out"; return 1; } ;;
+          *) [ -z "$out" ] || { echo "$list $type.$field: refused: $out"; return 1; } ;;
+        esac
+      done
+      [ "$list" = kustomization-fields ] || continue
+      jq -cn --argjson route "$route" --arg field "$field" 'null | setpath($route + [$field]; null)' \
+        >"$BATS_TEST_TMPDIR/kz/kustomization.yaml"
+      if kustomize build "$BATS_TEST_TMPDIR/kz" 2>&1 | grep -q 'unknown field'; then
+        echo "$type.$field: the pinned kustomize has no such field"
+        return 1
+      fi
+    done < <(fields "$list" | jq -r '. as $reg
+      | def object_type($c): ($c | ltrimstr("[]")) as $t | if ($reg.types | has($t)) then $t else null end;
+        def routes($t; $p): [$t, $p], ($reg.types[$t] | to_entries[] | select(.key != "*") | .key as $k | .value as $c
+          | object_type($c) as $sub | select($sub != null)
+          | routes($sub; $p + [$k] + (if ($c | startswith("[]")) then [0] else [] end)));
+        def where: map(if type == "number" then "[\(.)]" else "." + . end) | join("") | ltrimstr(".");
+      [$reg.roots[] as $root | routes($root; []) | [$root] + .] | group_by(.[1]) | map(.[0]) | .[]
+      | . as [$root, $type, $route]
+      | $reg.types[$type] | to_entries[] | select(.key != "*")
+      | [$root, $type, .key, .value, ($route | tojson), (($route + [.key]) | where)] | @tsv')
+  done
   # kustomize refuses a field its type does not have, so it reads nothing from one.
   echo 'resourcez: [marker.yaml]' >"$BATS_TEST_TMPDIR/kz/kustomization.yaml"
   kustomize build "$BATS_TEST_TMPDIR/kz" 2>&1 | grep -q 'unknown field "resourcez"'
@@ -1454,5 +1576,126 @@ EOF
     printf '%s\n' "$yaml" >"$BATS_TEST_TMPDIR/fields/$top"
     out="$(guard)"
     grep -qF -- "$top" <<<"$out" || { echo "not refused: $yaml"; return 1; }
+  done
+}
+
+@test "A key that a tool reads under another spelling is refused, and nothing it names is read" {
+  evil_marker
+  local render_tree="$BATS_TEST_TMPDIR/render" out
+  # render_tree: a fresh copy of the render's fixture tree, without a chart: nothing is rendered.
+  render_tree() {
+    rm -rf "$render_tree" "$render_tree.out"
+    mkdir -p "$render_tree"
+    cp -R "$BATS_TEST_DIRNAME/fixtures/render/kubernetes" "$BATS_TEST_DIRNAME/fixtures/render/versions.yaml" "$render_tree/"
+  }
+  # The greeter's chart, for a run that gets as far as the ledger's release; nothing is pulled.
+  export RENDER_CHART_CACHE="$BATS_TEST_TMPDIR/charts"
+  helm package "$BATS_TEST_DIRNAME/fixtures/render/charts/greeter" \
+    --destination "$RENDER_CHART_CACHE/charts.example.invalid/greeter/1.0.0" >/dev/null
+  render_run() {
+    run "$REPO/scripts/render" "$render_tree.out" "$render_tree"
+    echo "$output" | grep -v '^built ' | head -n 20
+    [[ $output != *"$MARKER"* ]]
+    [ -z "$(find "$render_tree.out" -mindepth 1 -print -quit 2>/dev/null)" ]
+  }
+  check_run() {
+    local keep="$BATS_TEST_TMPDIR/keep"
+    rm -rf "$keep"
+    mkdir "$keep"
+    run env KUBERNETES_CHECK_BUILT="$keep" "$CHECK" "$TREE"
+    echo "$output" | grep -v '^built ' | head -n 20
+    [[ $output != *"$MARKER"* ]]
+    [ -z "$(find "$keep" -mindepth 1 -print -quit)" ]
+  }
+
+  # A kustomization file, which kustomize and flux build read.
+  fresh_tree
+  with_variants kustomization-fields Kustomization "$TREE/kubernetes/apps/base/demo/hello/app/kustomization.yaml"
+  check_run
+  names_every kubernetes/apps/base/demo/hello/app/kustomization.yaml
+  render_tree
+  with_variants kustomization-fields Kustomization "$render_tree/kubernetes/apps/base/web/greeter/app/kustomization.yaml"
+  render_run
+  names_every kubernetes/apps/base/web/greeter/app/kustomization.yaml
+
+  # An application's Flux Kustomization, which flux build reads.
+  fresh_tree
+  with_variants flux-kustomization-fields Kustomization "$TREE/kubernetes/apps/base/demo/hello/ks.yaml"
+  check_run
+  names_every kubernetes/apps/base/demo/hello/ks.yaml
+  # The render builds each Kustomization as the one that applies it yields it; the root's patches
+  # replace a child's own patches and substituteFrom, so the root itself, which nothing patches,
+  # carries them here.
+  render_tree
+  with_variants flux-kustomization-fields Kustomization "$render_tree/kubernetes/clusters/demo/ks.yaml"
+  render_run
+  names_every kubernetes/clusters/demo/ks.yaml
+
+  # A HelmRelease and the sources it names, which the render reads and hands no tool; kubernetes-check
+  # reads no field of them, and builds them as objects, the marker unread.
+  for kind in HelmRelease OCIRepository; do
+    render_tree
+    out="$render_tree/kubernetes/apps/base/web/greeter/app/$(tr '[:upper:]' '[:lower:]' <<<"$kind").yaml"
+    with_variants read-fields "$kind" "$out"
+    render_run
+    names_every "${out#"$render_tree"/}"
+  done
+  render_tree
+  sed -i 's|^  # - \(../../base/web/ledger/ks.yaml\).*|  - \1|' "$render_tree/kubernetes/apps/overlays/demo/kustomization.yaml"
+  with_variants read-fields HelmRepository "$render_tree/kubernetes/apps/base/web/ledger/app/helmrepository.yaml"
+  render_run
+  names_every kubernetes/apps/base/web/ledger/app/helmrepository.yaml
+  fresh_tree
+  printf -- '---\napiVersion: helm.toolkit.fluxcd.io/v2\nkind: HelmRelease\nmetadata:\n  name: hello\nspec:\n  interval: 30m\n' \
+    >"$TREE/kubernetes/apps/base/demo/hello/app/helmrelease.yaml"
+  yq -i '.resources += ["helmrelease.yaml"]' "$TREE/kubernetes/apps/base/demo/hello/app/kustomization.yaml"
+  with_variants read-fields HelmRelease "$TREE/kubernetes/apps/base/demo/hello/app/helmrelease.yaml"
+  check
+  [ "$status" -eq 0 ]
+  [[ $output != *"$MARKER"* ]]
+
+  # A FluxInstance, which the Pod Security check reads and whose patches it hands kustomize.
+  local render="$BATS_TEST_TMPDIR/pod-security"
+  rm -rf "$render"
+  mkdir -p "$render"
+  cp -R "$BATS_TEST_DIRNAME/fixtures/pod-security/render" "$BATS_TEST_DIRNAME/fixtures/pod-security/exceptions.yaml" \
+    "$BATS_TEST_DIRNAME/fixtures/pod-security/versions.yaml" "$render/"
+  out="$render/render/lab/flux-system/FluxInstance.fluxcd.controlplane.io_flux-system_flux.yaml"
+  printf -- '---\napiVersion: fluxcd.controlplane.io/v1\nkind: FluxInstance\nmetadata:\n  name: flux\n  namespace: flux-system\nspec:\n  components: [source-controller]\n' >"$out"
+  with_variants read-fields FluxInstance "$out"
+  run "$REPO/scripts/pod-security-check" "$render/render" "$render/exceptions.yaml" "$render/versions.yaml"
+  echo "$output" | head -n 20
+  [[ $output != *"$MARKER"* ]]
+  names_every "FluxInstance flux-system/flux"
+}
+
+@test "a component a Flux Kustomization of this tree names under another spelling is refused" {
+  # The review's reproduction on this repository's tree: metrics-server's Kustomization takes a
+  # Component beside the tree, written as spec.Components, which flux build reads as components.
+  evil_marker
+  local real="$BATS_TEST_TMPDIR/real" keep="$BATS_TEST_TMPDIR/keep"
+  mkdir -p "$real" "$keep"
+  cp -R "$REPO/kubernetes" "$real/"
+  cp -R "$BATS_TEST_TMPDIR/outside/evil" "$real/evil"
+  yq -i '.spec.Components = ["../../../../../../evil"]' "$real/kubernetes/apps/base/kube-system/metrics-server/ks.yaml"
+
+  run env KUBERNETES_CHECK_BUILT="$keep" "$CHECK" "$real"
+
+  echo "$output" | grep -v '^built '
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/kube-system/metrics-server/ks.yaml "spec.Components "
+  [[ $output != *"$MARKER"* ]]
+  [ -z "$(find "$keep" -mindepth 1 -print -quit)" ]
+}
+
+@test "an empty kustomization file, or one that is no single mapping, is refused naming it" {
+  local text
+  for text in '' '---' 'resources' '- configmap.yaml' $'resources: [configmap.yaml]\n---\nresources: [configmap.yaml]'; do
+    fresh_tree
+    printf '%s' "$text" >"$TREE/kubernetes/apps/base/demo/hello/app/kustomization.yaml"
+    check
+    [ "$status" -ne 0 ]
+    refused_line kubernetes/apps/base/demo/hello/app/kustomization.yaml "one mapping"
+    [[ $output != *"built "* ]]
   done
 }

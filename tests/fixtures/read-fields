@@ -1,0 +1,106 @@
+# The fields the checks read from documents that no tool decodes: a HelmRelease and the sources it
+# names, as scripts/render reads them, and a FluxInstance, as scripts/pod-security-check reads it.
+# Each reads them with jq, by exact name, and hands a tool only what it derives from them: helm a
+# chart's URL, name and version as arguments and values files it writes, kustomize a kustomization
+# it writes from a release's post-renderers or the instance's patches.
+#
+# roots: HelmRelease OCIRepository HelmRepository FluxInstance
+#
+# The API server drops a field of a custom resource that its schema does not name, by exact name,
+# so the cluster ignores a key that only differs from one of these by case, as the checks would;
+# the checks refuse such a key rather than skip it: one that encoding/json's folding matches to a
+# field of the list (ASCII letters without regard to case, U+017F as s and U+212A as k). A type
+# marked open holds other fields as well, which the checks do not read; every other type is all a
+# tool is handed at that position, and any other key there is refused. One field a line, as in
+# kustomization-fields; TYPE * open marks a type as open.
+HelmRelease * open
+HelmRelease apiVersion value
+HelmRelease kind value
+HelmRelease metadata Metadata
+HelmRelease spec HelmReleaseSpec
+Metadata * open
+Metadata name value
+Metadata namespace value
+HelmReleaseSpec * open
+HelmReleaseSpec chartRef ChartReference
+HelmReleaseSpec chart Chart
+HelmReleaseSpec valuesFrom []ValuesReference
+HelmReleaseSpec values map
+HelmReleaseSpec releaseName value
+HelmReleaseSpec targetNamespace value
+HelmReleaseSpec postRenderers []PostRenderer
+HelmReleaseSpec test Test
+ChartReference * open
+ChartReference kind value
+ChartReference name value
+ChartReference namespace value
+Chart * open
+Chart spec ChartSpec
+ChartSpec * open
+ChartSpec chart value
+ChartSpec version value
+ChartSpec sourceRef SourceReference
+ChartSpec valuesFiles value
+SourceReference * open
+SourceReference kind value
+SourceReference name value
+SourceReference namespace value
+ValuesReference * open
+ValuesReference kind value
+ValuesReference name value
+ValuesReference valuesKey value
+ValuesReference targetPath value
+ValuesReference optional value
+PostRenderer kustomize PostRendererKustomize
+PostRendererKustomize patches []Patch
+PostRendererKustomize images []Image
+Patch patch value
+Patch target Selector
+Selector group value
+Selector version value
+Selector kind value
+Selector namespace value
+Selector name value
+Selector annotationSelector value
+Selector labelSelector value
+Image name value
+Image newName value
+Image newTag value
+Image digest value
+Test * open
+Test enable value
+Test filters []TestFilter
+TestFilter * open
+TestFilter name value
+TestFilter exclude value
+OCIRepository * open
+OCIRepository apiVersion value
+OCIRepository kind value
+OCIRepository metadata Metadata
+OCIRepository spec OCIRepositorySpec
+OCIRepositorySpec * open
+OCIRepositorySpec url value
+OCIRepositorySpec ref OCIRepositoryRef
+OCIRepositoryRef * open
+OCIRepositoryRef tag value
+HelmRepository * open
+HelmRepository apiVersion value
+HelmRepository kind value
+HelmRepository metadata Metadata
+HelmRepository spec HelmRepositorySpec
+HelmRepositorySpec * open
+HelmRepositorySpec url value
+HelmRepositorySpec type value
+HelmRepositorySpec provider value
+HelmRepositorySpec secretRef value
+HelmRepositorySpec certSecretRef value
+FluxInstance * open
+FluxInstance apiVersion value
+FluxInstance kind value
+FluxInstance metadata Metadata
+FluxInstance spec FluxInstanceSpec
+FluxInstanceSpec * open
+FluxInstanceSpec components value
+FluxInstanceSpec kustomize FluxInstanceKustomize
+FluxInstanceKustomize * open
+FluxInstanceKustomize patches []Patch

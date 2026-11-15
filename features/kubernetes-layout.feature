@@ -42,9 +42,14 @@ Feature: Kubernetes tree layout
     Then it exits non-zero, names the file and the entry, builds nothing, and the file's content appears nowhere in its output
 
   Scenario: Every field of a kustomization is one the checks read the paths of, accept or refuse
-    Given the fields of kustomize's Kustomization type and of the types it holds that name files, as the pinned kustomize and the kustomize the pinned flux builds with define them
-    When the checks read a kustomization that sets each, naming a file outside the tree where the field names a file
-    Then each field that names a file is refused for it, each other field is accepted or refused as listed, a field the type does not have is refused, and the list is that of the pinned tools' versions
+    Given the fields of kustomize's and Flux's Kustomization types and of every type they hold, as the pinned kustomize and flux build with, and the fields the checks read of the documents no tool decodes
+    When the checks read a document that sets each by its own name, naming a file outside the tree where the field names a file
+    Then each field that names a file is refused for it, each field the checks refuse is refused, every other is accepted, a key a kustomization's type does not have is refused, and each list is that of the pinned tools' versions and of the checks
+
+  Scenario: A key that a tool reads under another spelling is refused, and nothing it names is read
+    Given trees in which a kustomization, an application's or a root's Flux Kustomization, a HelmRelease, the source it names or a FluxInstance holds, at each position a tool decodes, each field's name in other letter cases and with the characters encoding/json folds into s and k, naming a file outside the tree
+    When the kubernetes check, the render and the Pod Security check run on each that they read
+    Then each fails, naming the file and every such key, and the file's content appears nowhere in its output or in anything it keeps or writes
 
   Scenario: A manifest an application keeps where the artifact does not carry it is refused
     Given an application directory with a manifest beside ks.yaml, and one in app/ that no kustomization.yaml reaches

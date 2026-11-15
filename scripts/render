@@ -29,13 +29,16 @@
 # anything is read from it, and what a release's work file holds is one value to a NUL-ended
 # record. Reads DIR's kubernetes/ and versions.yaml alone, neither of them a link: the tree is
 # copied, and the copy refused before anything is built from it when a build would read outside it
-# (scripts/lib/tree-paths.sh), as is each Kustomization whose spec.path or spec.components leaves
-# it, and a post-renderer patch with more than a patch and its target, which is all
-# helm-controller's has. Never contacts a cluster, and reads no registry login. A chart's URL and name come from the
-# tree, a pull request's included: they are checked against a strict shape and passed to helm as
-# arguments, a pull adds no repository to any Helm configuration, and a hostile URL makes the runner
-# fetch the repository and its index direct, and what the index points to: outbound fetches only,
-# which a registry named by an OCIRepository allows already.
+# or a tool would read a kustomization or a root otherwise than the render
+# (scripts/lib/tree-paths.sh), as is each Kustomization handed to flux build whose spec.path or
+# spec.components leaves it or that holds a key flux build would read as a field it is not spelled
+# as, and a HelmRelease or a source with a key that folds to a field the render reads without being
+# it, or a post-renderer with more than a patch, its target and an image, which is all
+# helm-controller's has. Never contacts a cluster, and reads no registry login. A chart's URL and
+# name come from the tree, a pull request's included: they are checked against a strict shape and
+# passed to helm as arguments, a pull adds no repository to any Helm configuration, and a hostile
+# URL makes the runner fetch the repository and its index direct, and what the index points to:
+# outbound fetches only, which a registry named by an OCIRepository allows already.
 #
 # Writes OUT/<cluster>/<application>/<Kind>[.<group>]_<namespace>_<name>.yaml, the name without the
 # hash kustomize appends to a generated ConfigMap or Secret, so that a changed one compares with
@@ -63,12 +66,13 @@ die() {
   exit 1
 }
 
-# refuse LINES: fails with each of LINES, one refusal a line, when there is any.
+# refuse LINES [PREFIX]: fails with each of LINES, one refusal a line, after PREFIX, when there is
+# any.
 refuse() {
   local line
   [[ -n $1 ]] || return 0
   while IFS= read -r line; do
-    echo "render: $line" >&2
+    echo "render: ${2:-}$line" >&2
   done <<<"$1"
   exit 1
 }
@@ -117,27 +121,74 @@ kube=$(yq '.kubernetes // ""' "$dir/versions.yaml")
 
 # The render builds a copy that holds the tree alone, links copied as links. flux build reads every
 # path a kustomization names and follows every link, so nothing is built from a copy from which a
-# build would read outside it: a link that leads out of it, a kustomization that names a path
-# outside it or a remote source, a root whose spec.path leaves it.
+# build would read outside it, or that a tool would read otherwise than the render: a link that
+# leads out of it, a kustomization that names a path outside it or a remote source or holds a key
+# kustomize reads otherwise, a root whose spec.path leaves it or that flux build reads otherwise.
 mkdir -p "$tmp/tree"
 cp -R "$dir/kubernetes" "$tmp/tree/"
 cd "$tmp/tree"
 tree_root=$(realpath -e kubernetes)
+# Each cluster's root as flux build reads it, from its spec.path, before anything is built.
 refuse "$(
   tree_paths_refused "$tree_root"
   for cluster_dir in kubernetes/clusters/*/; do
     [[ -f $cluster_dir/kustomization.yaml ]] || continue
-    root_path_refused "${cluster_dir}ks.yaml" "$tree_root"
+    refused=$(root_path_refused "${cluster_dir}ks.yaml" "$tree_root")
+    if [[ -n $refused ]]; then
+      echo "$refused"
+      continue
+    fi
+    tree_paths_inside "$tree_root" "$(realpath -e -- "${cluster_dir}ks.yaml" 2>/dev/null)" || continue
+    root_dir=$(yq ea '[select(. != null)] | .[0].spec.path // "" | tostring' "${cluster_dir}ks.yaml")
+    while IFS= read -r line; do
+      [[ -z $line ]] || echo "$(tree_paths_clean "${cluster_dir}ks.yaml"): $line"
+    done <<<"$(kustomization_refused "${cluster_dir}ks.yaml" "$(realpath -e -- "kubernetes/${root_dir#./}")" "$tree_root")"
   done
 )"
 
 label='^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
 
+# app_dir CLUSTER APP: the directory the application's Kustomization builds.
+app_dir() {
+  local dir
+  dir=$(yq '.spec.path // ""' "$tmp/ks/$1/$2.yaml")
+  dir=kubernetes/${dir#./}
+  echo "${dir%/}"
+}
+
+# release_file CLUSTER APP HR: the file of the application's directory that holds the HelmRelease HR
+# (JSON) as written, for a message; the directory when kustomize built it from something else.
+release_file() {
+  object_file "$(app_dir "$1" "$2")" "$3"
+}
+
+# object_file DIR OBJECT: the file under DIR that holds OBJECT (JSON) as written, by its kind, name
+# and namespace, or its kind and name and no namespace, which a Kustomization's targetNamespace
+# gives it; DIR when there is none.
+object_file() {
+  local dir=$1 file match loose=""
+  while IFS= read -r -d '' file; do
+    match=$(yq -o json -I0 'select(. != null)' "$file" 2>/dev/null | jq -s -r --argjson object "$2" '
+      [.[] | select(type == "object" and .kind == $object.kind and .metadata.name == $object.metadata.name)
+        | if .metadata.namespace == $object.metadata.namespace then "exact" elif .metadata.namespace == null then "loose" else empty end]
+      | if index("exact") then "exact" elif index("loose") then "loose" else "" end' 2>/dev/null) || match=""
+    case $match in
+      exact)
+        echo "${file//[[:cntrl:]]/?}"
+        return
+        ;;
+      loose) loose=${loose:-$file} ;;
+    esac
+  done < <(find "$dir" -type f \( -name '*.yaml' -o -name '*.yml' \) -print0 2>/dev/null | sort -z)
+  loose=${loose:-$dir}
+  echo "${loose//[[:cntrl:]]/?}"
+}
+
 # build CLUSTER APP KS: builds the Kustomization in the file KS, the application APP, from its
 # spec.path in the tree, with the cluster's example values under its own postBuild.substitute, into
 # $tmp/built/CLUSTER/APP.yaml.
 build() {
-  local cluster=$1 app=$2 ks=$3 path real err
+  local cluster=$1 app=$2 ks=$3 path real err refused file
   path=$(yq '.spec.path // ""' "$ks")
   path=${path#./}
   path=${path%/}
@@ -152,8 +203,15 @@ build() {
   yq ea 'select(fileIndex == 0) as $values | select(fileIndex == 1)
     | .spec.postBuild.substitute = ($values * (.spec.postBuild.substitute // {}))' \
     "$tmp/values/$cluster.yaml" "$ks" >"$tmp/ks.yaml"
-  # flux build adds these to the kustomization it builds in that directory.
-  refuse "$(components_refused "$tmp/ks.yaml" "$real" "$tree_root" | sed "s|^|$cluster/$app: |")"
+  # What flux build is handed, as it reads it, and the components it adds to the kustomization it
+  # builds in that directory.
+  refused=$(kustomization_refused "$tmp/ks.yaml" "$real" "$tree_root")
+  if [[ -n $refused ]]; then
+    # The instance's sync Kustomization is made from the cluster's ks.yaml.
+    file=kubernetes/clusters/$cluster/ks.yaml
+    [[ $app == flux-system ]] || file=$(object_file kubernetes "$(yq -o json -I0 '.' "$ks")")
+    refuse "$refused" "$cluster/$app: $file: "
+  fi
   if ! err=$(flux build kustomization "$app" --path "kubernetes/$path" --kustomization-file "$tmp/ks.yaml" \
     --dry-run --strict-substitute --in-memory-build --cache-dir "$tmp/kube-cache" 2>&1 >"$tmp/built/$cluster/$app.yaml"); then
     die "$cluster/$app: flux build of $path failed: $err"
@@ -219,39 +277,17 @@ named_objects() {
       and (.metadata.namespace // "default") == $ref.namespace)'
 }
 
-# release_file CLUSTER APP HR: the file of the application's directory that holds the HelmRelease HR
-# (JSON) as written, for a message; the directory when kustomize built it from something else.
-release_file() {
-  local dir file match loose=""
-  dir=$(yq '.spec.path // ""' "$tmp/ks/$1/$2.yaml")
-  dir=kubernetes/${dir#./}
-  dir=${dir%/}
-  # One of HR's name and namespace, or of its name and no namespace, which a Kustomization's
-  # targetNamespace gives it.
-  while IFS= read -r -d '' file; do
-    match=$(yq -o json -I0 'select(. != null)' "$file" 2>/dev/null | jq -s -r --argjson hr "$3" '
-      [.[] | select(type == "object" and .kind == "HelmRelease" and .metadata.name == $hr.metadata.name)
-        | if .metadata.namespace == $hr.metadata.namespace then "exact" elif .metadata.namespace == null then "loose" else empty end]
-      | if index("exact") then "exact" elif index("loose") then "loose" else "" end' 2>/dev/null) || match=""
-    case $match in
-      exact)
-        echo "${file//[[:cntrl:]]/?}"
-        return
-        ;;
-      loose) loose=${loose:-$file} ;;
-    esac
-  done < <(find "$dir" -type f \( -name '*.yaml' -o -name '*.yml' \) -print0 2>/dev/null | sort -z)
-  loose=${loose:-$dir}
-  echo "${loose//[[:cntrl:]]/?}"
-}
-
 # release CLUSTER APP INDEX HR: prepares the INDEXth HelmRelease of the application, HR as JSON: its
 # chart, values and release, in $tmp/releases/CLUSTER/APP/INDEX/.
 release() {
   local cluster=$1 app=$2 index=$3 hr=$4 name namespace where repo url tag pulled release target
   local work="$tmp/releases/$cluster/$app/$index" built="$tmp/built/$cluster/$app.yaml" i entry
-  local chart version type field
+  local chart version type field refused
   local -a tgz pull
+  # Every key the render reads, by its own name: one that folds to a field without being it is
+  # refused, and a post-renderer holds only what kustomize is handed.
+  refused=$(read_refused HelmRelease <<<"$hr")
+  [[ -z $refused ]] || refuse "$refused" "$cluster/$app: $(release_file "$cluster" "$app" "$hr"): "
   # The name and namespace are checked as the values the tree holds, before they are read into a
   # variable, which would drop a final line break, or written to a file.
   jq -e "$(shapes_jq)"'.metadata.name | shaped(env.group_re) and length <= 253' <<<"$hr" >/dev/null ||
@@ -272,6 +308,8 @@ release() {
     repo=$(named_objects "$built" OCIRepository "$(jq -c --arg ns "$namespace" \
       '{"name": .spec.chartRef.name, "namespace": (.spec.chartRef.namespace // $ns)}' <<<"$hr")")
     [[ -n $repo && $repo != *$'\n'* ]] || die "$where: its OCIRepository is not one object of the application"
+    refused=$(read_refused OCIRepository <<<"$repo")
+    [[ -z $refused ]] || refuse "$refused" "$where: its OCIRepository in $(object_file "$(app_dir "$cluster" "$app")" "$repo"): "
     url=$(jq -r '.spec.url // ""' <<<"$repo")
     tag=$(jq -r '.spec.ref.tag // ""' <<<"$repo")
     [[ $url =~ ^oci://[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+$ && /$url/ != */../* ]] || die "$where: not an OCI chart URL: $url"
@@ -293,6 +331,8 @@ release() {
     repo=$(named_objects "$built" HelmRepository "$(jq -c --arg ns "$namespace" \
       '{"name": .spec.chart.spec.sourceRef.name, "namespace": (.spec.chart.spec.sourceRef.namespace // $ns)}' <<<"$hr")")
     [[ -n $repo && $repo != *$'\n'* ]] || die "$where: its HelmRepository is not one object of the application"
+    refused=$(read_refused HelmRepository <<<"$repo")
+    [[ -z $refused ]] || refuse "$refused" "$where: its HelmRepository in $(object_file "$(app_dir "$cluster" "$app")" "$repo"): "
     # The render has no secrets, and no cloud identity to log in with.
     for field in secretRef certSecretRef; do
       jq -e --arg field "$field" '.spec[$field] == null' <<<"$repo" >/dev/null ||
@@ -356,10 +396,6 @@ release() {
   jq -c '.spec.postRenderers // []' <<<"$hr" >"$work/post-renderers.json"
   jq -e 'all(.[]; keys == ["kustomize"] and (.kustomize | keys - ["images", "patches"] | length == 0))' \
     "$work/post-renderers.json" >/dev/null || die "$where: only kustomize post-renderers with patches and images are rendered"
-  # kustomize would read a patch's path, or fetch it.
-  jq -e 'all(.[].kustomize.patches // [] | .[]; type == "object" and (keys - ["patch", "target"] | length == 0))' \
-    "$work/post-renderers.json" >/dev/null ||
-    die "$where: a post-renderer patch holds more than a patch and its target, which is all helm-controller applies"
 }
 
 # release_field WORK N: the Nth value, from 1, of the release record in WORK.

@@ -971,14 +971,35 @@ EOF
   [ -z "$(find "$BATS_TEST_TMPDIR/flux-component.out" -mindepth 1 -print -quit)" ]
 
   # A release's post-renderer patch that names a file, by its path or a URL, which helm-controller's
-  # post-renderer, a patch and its target, does not have.
+  # post-renderer, a patch and its target, does not have: refused by the key, before anything is
+  # pulled.
   for entry in "$OUTSIDE" https://example.invalid/patch.yaml; do
     greeter_app "post-render-$((++n))"
     P="$entry" yq -i '.spec.postRenderers[0].kustomize.patches += [{"path": strenv(P)}]' "$GREETER/helmrelease.yaml"
     render "post-render-$n"
     echo "$output"
     [ "$status" -ne 0 ]
-    grep -F -- "demo/greeter: HelmRelease web/greeter" <<<"$output" | grep -qF -- "a patch and its target"
+    grep -F -- "demo/greeter: kubernetes/apps/base/web/greeter/app/helmrelease.yaml: spec.postRenderers[0].kustomize.patches[1].path " <<<"$output" |
+      grep -qF -- "is not one of the fields kustomize"
     [[ $output != *"$MARKER"* ]]
   done
+}
+
+@test "a component the greeter's Kustomization names under another spelling is refused by the render" {
+  # The review's reproduction: spec.Components, which flux build reads as components, naming a
+  # Component beside the tree whose generator reads the marker.
+  outside_marker
+  mkdir -p "$BATS_TEST_TMPDIR/outside/evil"
+  printf '%s\n' 'apiVersion: kustomize.config.k8s.io/v1alpha1' 'kind: Component' 'configMapGenerator:' \
+    '  - name: leak' '    files:' "      - leak=$OUTSIDE" >"$BATS_TEST_TMPDIR/outside/evil/kustomization.yaml"
+  greeter_app spelled
+  P="$(printf '../%.0s' {1..20})${BATS_TEST_TMPDIR#/}/outside/evil" yq -i '.spec.Components = [strenv(P)]' "$GREETER/../ks.yaml"
+
+  render spelled
+
+  echo "$output"
+  [ "$status" -ne 0 ]
+  grep -F kubernetes/apps/base/web/greeter/ks.yaml <<<"$output" | grep -qF ' spec.Components '
+  [[ $output != *"$MARKER"* ]]
+  [ -z "$(find "$BATS_TEST_TMPDIR/spelled.out" -mindepth 1 -print -quit)" ]
 }
