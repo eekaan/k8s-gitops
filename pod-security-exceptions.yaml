@@ -30,7 +30,7 @@ exceptions:
   - namespace: kube-system
     workload: Deployment/cilium-operator
     level: privileged
-    reason: the operator reaches the API server through KubePrism on the node's loopback address, as Cilium's values set it, which only the host's network namespace has, so the chart runs it there and on host ports
+    reason: the operator reaches the API server through KubePrism on the node's loopback address, which only the host's network namespace has, so it keeps the chart's default operator.hostNetwork true and its host ports
   - namespace: kube-system
     workload: DaemonSet/spegel
     level: privileged

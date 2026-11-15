@@ -242,8 +242,10 @@ level is declared in the tree, never left to the API server's default.
   a namespace whose labels differ. Admission then records in the audit log, and returns as a
   warning, every pod there that fails `restricted`, those an operator creates included. Talos's
   default admission configuration, which the cluster keeps, exempts `kube-system` from Pod Security
-  admission (Talos documentation, Pod Security): admission neither enforces nor records a level
-  there, and the check is what holds its pods to the level its labels state.
+  admission (`DefaultPodSecurityAdmissionControlConfig` in Talos'
+  `pkg/machinery/config/types/k8s/admission_control.go` at the pinned tag): admission neither
+  enforces nor records a level there, and the check is what holds the pods of the render there to
+  the level its labels state.
 - **The check.** `just pod-security-check` renders the tree as `just render-check` does, then
   `scripts/pod-security-check` evaluates every Pod, Deployment, StatefulSet, DaemonSet, ReplicaSet,
   ReplicationController, Job and CronJob in it, Helm hooks and tests included, against the

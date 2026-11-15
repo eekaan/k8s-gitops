@@ -7,7 +7,10 @@
 # A chart passes a values map named securityContext, podSecurityContext or containerSecurityContext
 # through to a pod or container spec, so the tests that hold an application's values keys to those
 # the chart's values define also accept, directly under such a map, a path listed here: a field the
-# chart's values leave unset, never a misspelt one.
+# chart's values leave unset, never a misspelt one. The list is the union of the pod's and the
+# container's types, and which of the two a map is goes unchecked, so a container-only field under a
+# pod's map, or the reverse, passes here; the Pod Security check on the render catches one that
+# matters, as the pod it leaves fails the level.
 allowPrivilegeEscalation
 appArmorProfile
 appArmorProfile.localhostProfile
