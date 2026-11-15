@@ -910,7 +910,13 @@ first_boot() {
   local root="$BATS_TEST_TMPDIR/edge-root" bin="$BATS_TEST_TMPDIR/edge-bin" tool
   mkdir -p "$root/etc/edge" "$root/etc/sysctl.d" "$root/etc/apt/apt.conf.d" "$root/dev" "$root/var/log" "$bin"
   printf 'PRETTY_NAME="Debian GNU/Linux"\nVERSION_CODENAME=%s\n' "${1:-trixie}" > "$root/etc/os-release"
-  : > "$root/dev/console"
+  # A console that cannot be written, when the test asks for one: a directory in its place.
+  rm -rf "$root/dev/console"
+  if [[ -f "$BATS_TEST_TMPDIR/console-unwritable" ]]; then
+    mkdir "$root/dev/console"
+  else
+    : > "$root/dev/console"
+  fi
   for tool in apt-get sysctl nft sleep; do
     cat > "$bin/$tool" << EOF
 #!/usr/bin/env bash
@@ -1028,6 +1034,25 @@ disarmed() {
   [ "$status" -ne 0 ]
   [[ $output == *"edge-first-boot: FAILED at line"* ]]
   absent '^sysctl --system$' "$RECORD/argv"
+  disarmed
+}
+
+@test "a failed first boot leaves the edge disarmed even when the console cannot be written" {
+  local root="$BATS_TEST_TMPDIR/edge-root"
+  edge_files
+  touch "$BATS_TEST_TMPDIR/console-unwritable"
+  # FRR's dry run refuses the file.
+  printf 'router bgp 64497\nno-such-command\nexit\n' > "$root/etc/edge/frr.conf"
+  first_boot
+  echo "$output"
+  [ "$status" -ne 0 ]
+  disarmed
+  # FRR does not restart.
+  edge_files
+  touch "$BATS_TEST_TMPDIR/restart-fails"
+  first_boot
+  echo "$output"
+  [ "$status" -ne 0 ]
   disarmed
 }
 

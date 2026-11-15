@@ -26,18 +26,24 @@ disarm() {
   systemctl disable --now frr > /dev/null 2>&1 || true
 }
 
-# fail MESSAGE: says MESSAGE on the console and in the log, disarms the edge and stops.
+# say MESSAGE: MESSAGE in the log and on the console, which a failure to write cannot stop.
+say() {
+  echo "edge-first-boot: $1" >&2
+  echo "edge-first-boot: $1" 2> /dev/null > "$root/dev/console" || true
+}
+
+# fail MESSAGE: disarms the edge, then says MESSAGE, and stops.
 fail() {
-  echo "edge-first-boot: $1" | tee "$root/dev/console" >&2
   disarm
+  say "$1"
   exit 1
 }
-trap 'echo "edge-first-boot: FAILED at line $LINENO; this edge is not configured, rebuild it" | tee "$root/dev/console" >&2; disarm' ERR
+trap 'disarm; say "FAILED at line $LINENO; this edge is not configured, rebuild it"' ERR
 
 # shellcheck disable=SC1091
 . "$root/etc/os-release"
 if [[ ${VERSION_CODENAME:-} != "$release" ]]; then
-  echo "edge-first-boot: this configuration is written for Debian $release and the image is ${PRETTY_NAME:-of an unknown release}; nothing was installed" | tee "$root/dev/console" >&2
+  say "this configuration is written for Debian $release and the image is ${PRETTY_NAME:-of an unknown release}; nothing was installed"
   exit 1
 fi
 
