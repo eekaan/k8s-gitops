@@ -2,7 +2,8 @@
 # Unit tests of the openbao application's own alerts, run by just rules-check with promtool. The
 # series are shaped as kube-state-metrics writes kube_pod_status_ready, one series per pod and
 # condition with the pod's uid (https://github.com/kubernetes/kube-state-metrics/blob/main/docs/metrics/workload/pod-metrics.md),
-# and as Prometheus writes up for the target of the ServiceMonitor, whose job is the Service's name.
+# with the job, instance, service and endpoint of the ServiceMonitor's scrape, and as Prometheus
+# writes up for the target of the ServiceMonitor, whose job is the Service's name.
 # Each group's name is the title of its scenario in features/alerts.feature.
 rule_files:
   - openbao.rules.yaml
@@ -12,16 +13,19 @@ tests:
     interval: 1m
     input_series:
       # openbao-0 is Ready throughout; openbao-1 is Ready for 10 minutes and then is not.
-      - series: 'kube_pod_status_ready{namespace="openbao", pod="openbao-0", uid="u0", condition="true"}'
+      - series: 'kube_pod_status_ready{namespace="openbao", pod="openbao-0", uid="u0", condition="true", job="kube-state-metrics", instance="192.0.2.3:8080", service="kube-prometheus-stack-kube-state-metrics", endpoint="http"}'
         values: '1x90'
-      - series: 'kube_pod_status_ready{namespace="openbao", pod="openbao-0", uid="u0", condition="false"}'
+      - series: 'kube_pod_status_ready{namespace="openbao", pod="openbao-0", uid="u0", condition="false", job="kube-state-metrics", instance="192.0.2.3:8080", service="kube-prometheus-stack-kube-state-metrics", endpoint="http"}'
         values: '0x90'
-      - series: 'kube_pod_status_ready{namespace="openbao", pod="openbao-1", uid="u1", condition="true"}'
+      - series: 'kube_pod_status_ready{namespace="openbao", pod="openbao-1", uid="u1", condition="true", job="kube-state-metrics", instance="192.0.2.3:8080", service="kube-prometheus-stack-kube-state-metrics", endpoint="http"}'
         values: '1x9 0x80'
-      - series: 'kube_pod_status_ready{namespace="openbao", pod="openbao-1", uid="u1", condition="false"}'
+      - series: 'kube_pod_status_ready{namespace="openbao", pod="openbao-1", uid="u1", condition="false", job="kube-state-metrics", instance="192.0.2.3:8080", service="kube-prometheus-stack-kube-state-metrics", endpoint="http"}'
         values: '0x9 1x80'
-      # A pod of another namespace that is not Ready is not OpenBao's.
-      - series: 'kube_pod_status_ready{namespace="demo", pod="openbao-9", uid="u9", condition="false"}'
+      # A pod of another namespace that is not Ready is not OpenBao's, nor is a pod of its namespace
+      # that is no member, such as a Job's pod that has completed.
+      - series: 'kube_pod_status_ready{namespace="openbao", pod="openbao-snapshot-1-x7k2p", uid="uj", condition="false", job="kube-state-metrics", instance="192.0.2.3:8080", service="kube-prometheus-stack-kube-state-metrics", endpoint="http"}'
+        values: '1x90'
+      - series: 'kube_pod_status_ready{namespace="demo", pod="openbao-9", uid="u9", condition="false", job="kube-state-metrics", instance="192.0.2.3:8080", service="kube-prometheus-stack-kube-state-metrics", endpoint="http"}'
         values: '1x90'
     alert_rule_test:
       - eval_time: 5m
@@ -39,6 +43,10 @@ tests:
               pod: openbao-1
               uid: u1
               condition: "false"
+              job: kube-state-metrics
+              instance: 192.0.2.3:8080
+              service: kube-prometheus-stack-kube-state-metrics
+              endpoint: http
             exp_annotations:
               summary: An OpenBao member is not Ready, which means sealed
               description: The OpenBao member openbao-1 in openbao has not been Ready for 5 minutes; its readiness probe fails while it is sealed.

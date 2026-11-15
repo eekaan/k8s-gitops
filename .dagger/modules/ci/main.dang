@@ -282,7 +282,7 @@ type Group {
       [Run(label: "rules-check", ctr: checkout
         .withFile("/usr/local/bin/promtool", container.from(image).file("/bin/promtool"))
         .withExec(["chmod", "+x", "/usr/local/bin/promtool"])
-        .withExec(["bash", "-c", `PATH="$(mise bin-paths | paste -sd: -):$PATH"; export PATH; exec 2>&1; scripts/rules-config /tmp/rules-check && { [ "$(cat /tmp/rules-check/image)" = "$1" ] || { echo "the render deploys $(cat /tmp/rules-check/image), not $1, which promtool came from"; exit 1; }; } && scripts/rules-promtool /tmp/rules-check promtool`, "bash", image]))]
+        .withExec(["bash", "-c", `PATH="$(mise bin-paths | paste -sd: -):$PATH"; export PATH; exec 2>&1; scripts/rules-config /tmp/rules-check && { [ "$(cat /tmp/rules-check/image)" = "$1" ] || { echo "the render deploys $(cat /tmp/rules-check/image), not $1, which promtool came from"; exit 1; }; } && scripts/rules-promtool /tmp/rules-check promtool && scripts/rules-refusal /tmp/rules-check promtool`, "bash", image]))]
     } else {
       []
     }

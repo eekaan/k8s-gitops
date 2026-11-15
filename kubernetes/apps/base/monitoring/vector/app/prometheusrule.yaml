@@ -44,7 +44,7 @@ spec:
             description: The component {{ $labels.component_id }} of the collector {{ $labels.pod }} has been discarding events it did not mean to for 15 minutes.
             runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectordiscardingevents
         - alert: LogCollectorSendFailing
-          expr: sum by (pod, component_id) (rate(vector_component_errors_total{component_kind="sink"}[5m])) > 0
+          expr: sum by (pod, component_id) (rate(vector_component_errors_total{component_kind="sink", component_id="victoria_logs"}[5m])) > 0
           for: 15m
           labels:
             severity: warning

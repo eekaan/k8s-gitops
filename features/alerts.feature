@@ -4,6 +4,10 @@ Feature: Alerts
   every rule the tree renders and runs the rules' unit tests, one file per application in
   tests/rules/.
 
+  A rule promtool refuses is proved by rules-check itself, which runs promtool on an own alert whose
+  expression it has broken and requires the refusal to name the alert, in just rules-check and in
+  just ci alike.
+
   Scenarios whose title starts with "The alert" are proved by a promtool unit test: the test
   group's name in tests/rules/<application>.yaml is the scenario's title, and the scenario's
   tag by:rules-check is its proof for scenarios-check, as by:vector-check is for Vector's unit
@@ -15,6 +19,7 @@ Feature: Alerts
     When the rules the overlay renders are collected, and again with an application left out of the overlay
     Then each rule is in its application's namespace and the Prometheus the stack runs selects it with no label, and the rules of an application the overlay leaves out are not collected
 
+  @by:rules-check
   Scenario: A rule promtool refuses fails the check, naming the rule
     Given a rendered tree whose own rule has an expression promtool cannot parse
     When the rules are checked with promtool
@@ -33,7 +38,7 @@ Feature: Alerts
   Scenario: The rules are checked with the Prometheus image the chart deploys, in the static group of just ci
     Given the justfile, the Dagger module and the kube-prometheus-stack application's pinned chart
     When the image rules-check runs and the image the rendered Prometheus names are read
-    Then rules-check runs in the static group of just ci with promtool taken from that image, which no pin in the tree names
+    Then rules-check runs in the static group of just ci with promtool taken from that image, which no pin in the tree names but the digest Dagger records for it in dagger.lock, the one entry there for that image's tag
 
   Scenario: The documentation lists every alert the tree defines
     Given the tree's own rules, docs/kubernetes.md and docs/runbooks/alerts.md

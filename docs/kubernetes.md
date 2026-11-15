@@ -601,8 +601,14 @@ file per application, `tests/rules/<application>.yaml`, which loads the applicat
 `just rules-check`, in the `static` group of `just ci`, collects every `PrometheusRule` the tree
 renders for each cluster, those of the charts too, so a chart update that ships a rule promtool
 refuses fails it, and runs promtool's `check rules` and `test rules` on them, from the image of the
-Prometheus the rendered chart deploys, with no network. That image is the chart's: no pin of it
-exists in the tree, and Renovate moves it with the chart, by its tag. A lint finding in a chart's
+Prometheus the rendered chart deploys. `just rules-check` runs promtool in that image in a container
+with no network; `just ci` copies promtool out of the image into the tools container, which has the
+network the render needs. The image is the chart's: the tree holds no pin of it, and Renovate
+moves it with the chart, by its tag. The one record of its digest is the entry Dagger writes into
+`dagger.lock` when it pulls the image, which `dagger lock update` refreshes after the chart's tag
+moves; `tests/rules-check.bats` fails while that entry names another tag than the render does. Each run also breaks
+the expression of one own alert and requires promtool to refuse it, naming the alert, so the check
+is seen to fail where it runs. A lint finding in a chart's
 rules is printed and does not fail the check; the chart's rules stay as they are. For each of the
 tree's own alerts the check also fails, naming the alert, unless:
 
@@ -614,7 +620,8 @@ tree's own alerts the check also fails, naming the alert, unless:
 - its `runbook_url` is `https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/<file>.md#<heading>`
   and the heading exists in that file of this tree;
 - a unit test of the alert expects it to fire after exactly its `for`, and another expects it
-  quiet: an `alert_rule_test` of its name with `exp_alerts`, and one without.
+  quiet: an `alert_rule_test` of its name with `exp_alerts`, and one without, in a test group that
+  has `input_series`, at a time before the alert fires in that group.
 
 The own alerts, each with its runbook section in [docs/runbooks/alerts.md](runbooks/alerts.md):
 

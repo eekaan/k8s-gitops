@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Proves that the check refuses what it should: breaks the expression of one of the tree's own alerts
+# in what scripts/rules-config wrote to DIR, runs scripts/rules-promtool on it, and fails unless that
+# fails with output that names the alert. The rule file is put back afterwards, so DIR is as it was.
+# PROMTOOL... is the command scripts/rules-promtool takes, which runs promtool in DIR's mount.
+# Usage: scripts/rules-refusal DIR PROMTOOL...
+set -euo pipefail
+shopt -s nullglob
+
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+[[ $# -ge 2 && -d $1 ]] || { echo "usage: scripts/rules-refusal DIR PROMTOOL..." >&2; exit 2; }
+type -P yq >/dev/null || { echo "rules-refusal: yq not found on PATH" >&2; exit 1; }
+dir=$(cd "$1" && pwd)
+shift
+
+files=("$dir"/*/*.rules.yaml)
+file=
+for candidate in "${files[@]}"; do
+  [[ $(basename "$candidate") == stock.* ]] && continue
+  alert=$(yq '[.groups[].rules[] | select(has("alert")) | .alert][0] // ""' "$candidate")
+  if [[ -n $alert ]]; then
+    file=$candidate
+    break
+  fi
+done
+[[ -n $file ]] || { echo "rules-refusal: no own alert in $dir to break" >&2; exit 1; }
+
+kept=$(mktemp)
+trap 'cp "$kept" "$file"; rm -f "$kept"' EXIT
+cp "$file" "$kept"
+# A closing parenthesis short: no promtool accepts it.
+ALERT=$alert yq -i '(.groups[].rules[] | select(.alert == strenv(ALERT)) | .expr) = "sum(rate(up[5m])"' "$file"
+
+if output=$("$here/rules-promtool" "$dir" "$@" 2>&1); then
+  echo "$output"
+  echo "rules-refusal: promtool accepted $alert with an expression it cannot parse" >&2
+  exit 1
+fi
+# The line that names the rule is the parse error: a failure that only mentions the alert, such as a
+# unit test that no longer passes, is not the refusal this proves.
+if ! grep -q "\"$alert\": could not parse expression" <<<"$output"; then
+  echo "$output"
+  echo "rules-refusal: promtool did not refuse $alert for its expression, naming it" >&2
+  exit 1
+fi
+echo "rules-refusal: promtool refuses $alert with a broken expression, and names it"

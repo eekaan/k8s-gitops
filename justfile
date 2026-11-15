@@ -202,7 +202,7 @@ vector-check:
     docker run --rm --network none -e VECTOR_SELF_NODE_NAME=node-1 -v "$dir":/check:ro {{ vector_image }} validate --no-environment /check/vector.yaml
     docker run --rm --network none -e VECTOR_SELF_NODE_NAME=node-1 -v "$dir":/check:ro {{ vector_image }} test /check/vector.yaml /check/tests.yaml
 
-# Check the alert rules the tree renders with promtool, in the image of the Prometheus the rendered chart deploys, which scripts/rules-config finds in the render: every rule of every cluster, the charts' and the applications' own, is valid, every own alert has a severity, a summary, a description, a runbook heading that exists and a test in which it fires and one in which it stays quiet, and the unit tests in tests/rules pass; the image has no pin of its own, as the chart's tag is the pin Renovate moves; needs docker, as vector-check does, which just ci's module does not
+# Check the alert rules the tree renders with promtool, in the image of the Prometheus the rendered chart deploys, which scripts/rules-config finds in the render: every rule of every cluster, the charts' and the applications' own, is valid, every own alert has a severity, a summary, a description, a runbook heading that exists and a test in which it fires and one in which it stays quiet, and the unit tests in tests/rules pass, and promtool refuses an alert whose expression is broken, naming it; the image has no pin of its own in the tree, Dagger records its digest in dagger.lock, the chart's tag is the pin Renovate moves; needs docker, as vector-check does, which just ci's module does not
 [script]
 rules-check:
     set -o pipefail
@@ -213,6 +213,7 @@ rules-check:
     scripts/rules-config "$dir/check"
     image=$(< "$dir/check/image")
     scripts/rules-promtool "$dir/check" docker run --rm --network none -v "$dir/check":/check:ro -w /check --entrypoint promtool "$image"
+    scripts/rules-refusal "$dir/check" docker run --rm --network none -v "$dir/check":/check:ro -w /check --entrypoint promtool "$image"
 
 # The image of FRR for edge-policy-check here and for just ci's Dagger module: the upstream build, 10.3.4, of the release the edge routers' Debian image packages, 10.3-3+deb13u1 in trixie, the same release with Debian's patches. Its own build takes 64 equal-cost paths, Debian's 256, which the proof's configuration allows for; it moves with the edge image's release, by hand
 frr_image := "quay.io/frrouting/frr:10.3.4@sha256:c8790a83db3cb105c0823f76afe55de5c9f77d968fb1ebd28174a8ddd49b989c"

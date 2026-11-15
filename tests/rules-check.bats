@@ -5,8 +5,7 @@
 # Needs helm, flux, kustomize, yq and jq on PATH (the versions pinned for the repository). The tree
 # is rendered once per run, charts pulled from their public registries; every fixture is a copy of
 # that render or of tests/rules and docs/runbooks with one thing broken, so nothing here drifts from
-# the rules the tree has. The tests tagged hermetic also need docker, to run promtool as
-# just rules-check does.
+# the rules the tree has. A rule promtool refuses is proved where promtool is, by rules-check itself.
 
 setup_file() {
   local repo
@@ -125,23 +124,6 @@ own_file() {
   [[ $output == *"tests/rules/openbao.yaml"* ]]
 }
 
-# bats test_tags=hermetic
-@test "A rule promtool refuses fails the check, naming the rule" {
-  local app alert image file
-  read -r app alert < <(own_alerts "$RENDER" | head -n 1)
-  fixture
-  file="$(own_file "$app")"
-  ALERT="$alert" yq -i '(.spec.groups[].rules[] | select(.alert == strenv(ALERT)) | .expr) = "sum(rate(up[5m])"' "$file"
-  collect
-  echo "$output"
-  [ "$status" -eq 0 ]
-  image="$(cat "$FX/out/image")"
-  run "$REPO/scripts/rules-promtool" "$FX/out" docker run --rm --network none -v "$FX/out:/check:ro" -w /check --entrypoint promtool "$image"
-  echo "$output"
-  [ "$status" -ne 0 ]
-  [[ $output == *"$alert"* ]]
-}
-
 @test "An alert without a test in which it fires, or without one in which it stays quiet, fails the check" {
   local app alert lacking tests
   [ "$(own_alerts "$RENDER" | wc -l)" -ge 1 ]
@@ -165,6 +147,24 @@ own_file() {
       fi
     done
   done < <(own_alerts "$RENDER")
+  # A quiet test needs series to be quiet about: with the group's input_series gone, or with no test
+  # of the alert at a time before it fires, an expectation of nothing proves nothing.
+  while read -r app alert; do
+    fixture
+    tests="$FX/repo/tests/rules/$app.yaml"
+    ALERT="$alert" yq -i '(.tests[] | select(.alert_rule_test | map(.alertname) | contains([strenv(ALERT)])) | .input_series) = []' "$tests"
+    collect
+    echo "$app $alert, no series: status $status: $output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"alert $alert: no test in which it stays quiet"* ]]
+    fixture
+    tests="$FX/repo/tests/rules/$app.yaml"
+    ALERT="$alert" yq -i '(.tests[].alert_rule_test[] | select(.alertname == strenv(ALERT) and ((.exp_alerts // []) | length) == 0)) |= (.eval_time = "10000h")' "$tests"
+    collect
+    echo "$app $alert, quiet only after it fires: status $status: $output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"alert $alert: no test in which it stays quiet"* ]]
+  done < <(own_alerts "$RENDER")
   # The tree as it is passes, and a test that only expects nothing is not a test that it fires.
   fixture
   collect
@@ -180,27 +180,31 @@ own_file() {
 }
 
 @test "An alert without a known severity, a summary, a description or a runbook heading that exists fails the check" {
-  local app alert kind file filter
+  local app alert kind file filter message
   [ "$(own_alerts "$RENDER" | wc -l)" -ge 1 ]
   while read -r app alert; do
-    for kind in severity-unknown severity-missing summary description-no-labels runbook-other-repository runbook-no-heading runbook-no-file for-missing; do
+    for kind in severity-unknown severity-missing summary description-no-labels runbook-other-repository runbook-other-host runbook-other-branch runbook-no-heading runbook-no-file for-missing; do
       fixture
       file="$(own_file "$app")"
+      # Each break is refused for its own reason, which the output states. The links to another
+      # repository, host or branch have the anchor of an existing heading, so only the address is wrong.
       case $kind in
-        severity-unknown) filter='.labels.severity = "urgent"' ;;
-        severity-missing) filter='del(.labels.severity)' ;;
-        summary) filter='del(.annotations.summary)' ;;
-        description-no-labels) filter='.annotations.description = "something is wrong"' ;;
-        runbook-other-repository) filter='.annotations.runbook_url = "https://example.com/docs/runbooks/alerts.md#" + .alert' ;;
-        runbook-no-heading) filter='.annotations.runbook_url |= sub("#.*$"; "#no-such-heading")' ;;
-        runbook-no-file) filter='.annotations.runbook_url |= sub("alerts.md"; "no-such-file.md")' ;;
-        for-missing) filter='del(.for)' ;;
+        severity-unknown) filter='.labels.severity = "urgent"' message='severity is urgent' ;;
+        severity-missing) filter='del(.labels.severity)' message='severity is missing' ;;
+        summary) filter='del(.annotations.summary)' message='no summary' ;;
+        description-no-labels) filter='.annotations.description = "something is wrong"' message='no description that names' ;;
+        runbook-other-repository) filter='.annotations.runbook_url |= sub("/eekaan/"; "/someone-else/")' message='runbook_url is' ;;
+        runbook-other-host) filter='.annotations.runbook_url |= sub("^https://github.com/"; "https://example.com/")' message='runbook_url is' ;;
+        runbook-other-branch) filter='.annotations.runbook_url |= sub("/blob/main/"; "/blob/dev/")' message='runbook_url is' ;;
+        runbook-no-heading) filter='.annotations.runbook_url |= sub("#.*$"; "#no-such-heading")' message='names a heading that is not' ;;
+        runbook-no-file) filter='.annotations.runbook_url |= sub("alerts.md"; "no-such-file.md")' message='is a file that is not' ;;
+        for-missing) filter='del(.for)' message='no for' ;;
       esac
       ALERT="$alert" yq -i "(.spec.groups[].rules[] | select(.alert == strenv(ALERT))) |= ($filter)" "$file"
       collect
       echo "$app $alert, $kind: status $status: $output"
       [ "$status" -ne 0 ]
-      [[ $output == *"$alert"* ]]
+      [[ $output == *"alert $alert: "*"$message"* ]]
     done
   done < <(own_alerts "$RENDER")
   # A runbook link is checked against the file in the tree: with its heading gone from the file, the
@@ -211,7 +215,7 @@ own_file() {
   collect
   echo "$output"
   [ "$status" -ne 0 ]
-  [[ $output == *"$alert"* ]]
+  [[ $output == *"alert $alert: "*"names a heading that is not"* ]]
 }
 
 @test "The rules are checked with the Prometheus image the chart deploys, in the static group of just ci" {
@@ -234,21 +238,41 @@ own_file() {
   grep -q 'rules-check' "$REPO/.dagger/modules/ci/main.dang"
   grep -q 'scripts/rules-image' "$REPO/.dagger/modules/ci/main.dang"
   # The image is the chart's: no pin of it in the justfile, the module or the tools, so no pin for
-  # Renovate to miss.
+  # Renovate to miss. Dagger itself records the digest of the image it pulls in dagger.lock, and
+  # that is the one entry the tree holds: for the tag the render names, so that a chart update that
+  # moves the tag leaves a stale entry, which fails here until dagger lock update refreshes it.
   run grep -rIl 'prometheus/prometheus' "$REPO/justfile" "$REPO/just" "$REPO/.dagger" "$REPO/mise.toml" "$REPO/renovate.json5" "$REPO/versions.yaml"
+  echo "$output"
+  [ "$status" -eq 1 ]
+  run grep -c 'prometheus/prometheus' "$REPO/dagger.lock"
+  echo "dagger.lock entries of the Prometheus image: $output"
+  [ "$output" = 1 ]
+  grep 'prometheus/prometheus' "$REPO/dagger.lock" | grep -qF "[\"$rendered\"]"
+  run grep -rIl 'prometheus/prometheus' "$REPO" --exclude-dir=.git --exclude-dir=.dagger --exclude-dir=docs --exclude-dir=tests --exclude-dir=features --exclude=dagger.lock --exclude=justfile
   echo "$output"
   [ "$status" -eq 1 ]
 }
 
 @test "The documentation lists every alert the tree defines" {
-  local app alert url
+  local app alert url severity row names rows headings
+  names="$(own_alerts "$RENDER" | cut -d' ' -f2 | sort)"
   while read -r app alert; do
     echo "$app $alert"
-    grep -q "^| \`$alert\` |" "$REPO/docs/kubernetes.md"
-    grep -q "^## $alert\$" "$REPO/docs/runbooks/alerts.md"
     url="$(yq -N 'select(.kind == "PrometheusRule") | .spec.groups[].rules[] | select(.alert == "'"$alert"'") | .annotations.runbook_url' "$RENDER/$CLUSTER/$app"/PrometheusRule.*.yaml)"
-    grep -q "^| \`$alert\` |.*($url)" "$REPO/docs/kubernetes.md"
+    severity="$(yq -N 'select(.kind == "PrometheusRule") | .spec.groups[].rules[] | select(.alert == "'"$alert"'") | .labels.severity' "$RENDER/$CLUSTER/$app"/PrometheusRule.*.yaml)"
+    row="$(grep "^| \`$alert\` |" "$REPO/docs/kubernetes.md")"
+    [ "$(wc -l <<<"$row")" -eq 1 ]
+    [[ $row == *"| $severity |"* ]]
+    [[ $row == *"($url) |" ]]
+    grep -q "^## $alert\$" "$REPO/docs/runbooks/alerts.md"
   done < <(own_alerts "$RENDER")
+  # Nothing in the table or the runbook is for an alert the tree does not define.
+  rows="$(sed -n 's/^| `\([A-Za-z0-9_]*\)` | .*| \(critical\|warning\|info\) |.*$/\1/p' "$REPO/docs/kubernetes.md" | sort)"
+  headings="$(sed -n 's/^## //p' "$REPO/docs/runbooks/alerts.md" | sort)"
+  echo "table: $rows"
+  echo "runbook: $headings"
+  [ "$rows" = "$names" ]
+  [ "$headings" = "$names" ]
   grep -q 'alerts go nowhere\|no destination' "$REPO/docs/kubernetes.md"
   grep -q 'just rules-check' "$REPO/README.md"
 }

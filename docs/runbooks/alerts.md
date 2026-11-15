@@ -112,5 +112,5 @@ read-only. The collector's log, `kubectl --namespace monitoring logs <pod>`, nam
 
 Usually: the store moved to another worker and is starting, which clears by itself; the store's
 volume is full and it answers every insert with HTTP 429 (its metric `vl_storage_is_read_only` is 1);
-or Cilium's tunnel between the collector's node and the store's is down, which `just cluster-check`
-shows as a node that does not pass.
+or Cilium's tunnel between the collector's node and the store's is down, which no recipe checks: the
+collector's log shows connection errors to `victoria-logs` while the store's pod is Running.

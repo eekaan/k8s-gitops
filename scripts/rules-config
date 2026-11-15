@@ -8,7 +8,8 @@
 #   DIR/<cluster>/stock.<name>.rules.yaml    the groups of every PrometheusRule a chart renders, so a
 #                                            chart update that ships a rule promtool refuses fails too
 #   DIR/image                                the image of the Prometheus the render deploys, which has promtool
-# An own rule is one in an application's app/ directory (docs/kubernetes.md, Monitoring). Every own
+# An own rule is a PrometheusRule the render holds that no HelmRelease made, which the tree keeps in
+# an application's app/ directory (docs/kubernetes.md, Monitoring). Every own
 # alert must:
 #   - have a severity of critical, warning or info, a summary, a description that names something
 #     from the alert's labels, and a `for`, which this check requires of every alert, comment or none;
@@ -77,6 +78,9 @@ slugs() {
     tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9 _-]//g; s/ /-/g'
 }
 
+# A promtool duration, such as 90s or 1h30m, in seconds.
+jq_secs='def secs: [scan("([0-9]+)(ms|s|m|h|d|w|y)")] | map((.[0] | tonumber) * ({"ms": 0.001, "s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "y": 31536000}[.[1]])) | add;'
+
 declare -A has_rules=()
 for cluster_dir in "$render"/*/; do
   cluster=$(basename "$cluster_dir")
@@ -100,11 +104,13 @@ for cluster_dir in "$render"/*/; do
     yq -p json -o yaml . "$tmp/rules.json" >"$out/$cluster/$app.rules.yaml"
 
     tests=$repo/tests/rules/$app.yaml
+    tests_json='[]'
     if [[ ! -f $tests ]]; then
       fail "$where: no unit tests, tests/rules/$app.yaml"
       tests=
     else
       cp "$tests" "$out/$cluster/$app.test.yaml"
+      tests_json=$(yq -o json -I0 '.tests // []' "$tests")
       if [[ $(yq -o json -I0 '.rule_files // []' "$tests") != "[\"$app.rules.yaml\"]" ]]; then
         fail "$where: tests/rules/$app.yaml must load the application's own rules and no other file, rule_files: [$app.rules.yaml]"
       fi
@@ -132,11 +138,18 @@ for cluster_dir in "$render"/*/; do
         fail "$where: alert $name: runbook_url is '${url:-missing}', not a link to a file of docs/runbooks on main, ${runbooks}<file>.md#<heading>"
       fi
       [[ -n $tests ]] || continue
-      # Fires: a test with the alert expected. Quiet: one with none, for the alert's name.
-      fires=$(NAME=$name yq '[.tests[].alert_rule_test[] | select(.alertname == strenv(NAME) and ((.exp_alerts // []) | length) > 0)] | length > 0' "$tests")
-      quiet=$(NAME=$name yq '[.tests[].alert_rule_test[] | select(.alertname == strenv(NAME) and ((.exp_alerts // []) | length) == 0)] | length > 0' "$tests")
+      # Fires: a test with the alert expected. Quiet: one with none, for the alert's name, in a test
+      # group that has series and before the alert fires in that group, so there is something to be
+      # quiet about; an empty expectation over no series, or after the alert has fired, proves nothing.
+      fires=$(jq --arg n "$name" '[.[].alert_rule_test[]? | select(.alertname == $n and ((.exp_alerts // []) | length) > 0)] | length > 0' <<<"$tests_json")
+      quiet=$(jq --arg n "$name" "$jq_secs"'
+        [.[] | select((.input_series // []) | length > 0) | (.alert_rule_test // []) as $cases
+          | ([$cases[] | select(.alertname == $n and ((.exp_alerts // []) | length) > 0) | .eval_time | secs] | min) as $first
+          | select($first != null)
+          | $cases[] | select(.alertname == $n and ((.exp_alerts // []) | length) == 0 and (.eval_time | secs) < $first)]
+        | length > 0' <<<"$tests_json")
       [[ $fires == true ]] || fail "$where: alert $name: no test in which it fires, an alert_rule_test of its name with exp_alerts"
-      [[ $quiet == true ]] || fail "$where: alert $name: no test in which it stays quiet, an alert_rule_test of its name with no exp_alerts"
+      [[ $quiet == true ]] || fail "$where: alert $name: no test in which it stays quiet, an alert_rule_test of its name with no exp_alerts, before the alert fires, in a test group with input_series"
     done < <(jq -c '.groups[].rules[] | select(has("alert"))' "$tmp/rules.json")
   done
   unset own

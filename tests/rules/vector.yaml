@@ -150,7 +150,8 @@ tests:
     interval: 1m
     input_series:
       # vector-a's sink reports request errors after minute 10; vector-b's sink reports none, and a
-      # transform of vector-b reports errors throughout, which are not a failure to send.
+      # transform of vector-b reports errors throughout, which are not a failure to send, nor are
+      # those of the sink that only serves Prometheus.
       - series: >-
           vector_component_errors_total{component_id="victoria_logs", component_kind="sink",
           component_type="elasticsearch", error_type="request_failed", stage="sending", job="vector",
@@ -161,6 +162,11 @@ tests:
           component_type="elasticsearch", error_type="request_failed", stage="sending", job="vector",
           namespace="monitoring", pod="vector-b", instance="192.0.2.2:9598"}
         values: '0x90'
+      - series: >-
+          vector_component_errors_total{component_id="prometheus", component_kind="sink",
+          component_type="prometheus_exporter", error_type="request_failed", stage="sending", job="vector",
+          namespace="monitoring", pod="vector-b", instance="192.0.2.2:9598"}
+        values: '0+2x90'
       - series: >-
           vector_component_errors_total{component_id="talos_files", component_kind="transform",
           component_type="remap", error_type="conversion_failed", stage="processing", job="vector",
