@@ -1,0 +1,242 @@
+---
+# The Grafana's home: whether the cluster is healthy, at a glance. Nodes Ready and not, firing alerts
+# by severity, scrape targets down, volumes VolSync reports out of sync and missed scheduled syncs,
+# and what the log store ingests. Every metric it queries is one the stack scrapes or a rule writes
+# (tests/dashboards.bats). Panels for the public Gateway and for Flux are not here: no monitor scrapes
+# either (docs/kubernetes.md, Dashboards). The Grafana's spec.preferences names its uid as the home.
+# Without a folder the operator files a dashboard under its namespace, monitoring; the home is in General.
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: cluster-home
+  annotations:
+    # The JSON's ${datasource} is Grafana's variable, not one of Flux's substitutions.
+    kustomize.toolkit.fluxcd.io/substitute: disabled
+spec:
+  instanceSelector:
+    matchLabels:
+      app.kubernetes.io/instance: grafana
+  # A restarted Grafana starts without it. The operator applies it again every minute, and retries
+  # a failed attempt after 10 seconds, doubling the wait up to two minutes while Grafana starts.
+  resyncPeriod: 1m
+  folder: General
+  json: |
+    {
+      "uid": "cluster-home",
+      "title": "Cluster health",
+      "tags": ["home"],
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": false,
+      "time": { "from": "now-6h", "to": "now" },
+      "refresh": "1m",
+      "timezone": "browser",
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "label": "Datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "hide": 2,
+            "current": {}
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "Nodes Ready",
+          "description": "Nodes whose Ready condition is true, by kube-state-metrics.",
+          "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum(kube_node_status_condition{condition=\"Ready\", status=\"true\"})",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+            },
+            "overrides": []
+          },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "Nodes not Ready",
+          "description": "Nodes that exist and are not Ready.",
+          "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "count(kube_node_info) - sum(kube_node_status_condition{condition=\"Ready\", status=\"true\"})",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }
+            },
+            "overrides": []
+          },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "Alerts firing",
+          "description": "Firing alerts by severity, the always-firing Watchdog left out.",
+          "gridPos": { "h": 4, "w": 6, "x": 8, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum by (severity) (ALERTS{alertstate=\"firing\", alertname!=\"Watchdog\"})",
+              "legendFormat": "{{severity}}",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "noValue": "0",
+              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }] }
+            },
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "critical" },
+                "properties": [{ "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } }]
+              }
+            ]
+          },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "Scrape targets down",
+          "description": "Targets Prometheus could not scrape at its last attempt.",
+          "gridPos": { "h": 4, "w": 5, "x": 14, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "count(up == 0) or vector(0)",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }] }
+            },
+            "overrides": []
+          },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+        },
+        {
+          "id": 5,
+          "type": "stat",
+          "title": "Volumes out of sync",
+          "description": "Volumes whose backup VolSync reports out of sync: the last sync is older than the schedule allows. VolSync exposes no sync time, so this is the measure of a backup's age.",
+          "gridPos": { "h": 4, "w": 5, "x": 19, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "count(volsync_volume_out_of_sync{role=\"source\"} == 1) or vector(0)",
+              "instant": true
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }] }
+            },
+            "overrides": []
+          },
+          "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "Alerts firing over time",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum by (severity) (ALERTS{alertstate=\"firing\", alertname!=\"Watchdog\"})",
+              "legendFormat": "{{severity}}"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "none", "min": 0 }, "overrides": [] }
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "Volume backups missing a scheduled sync, per hour",
+          "description": "Scheduled VolSync syncs that did not start in time, over the last hour.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum(increase(volsync_missed_intervals_total{role=\"source\"}[1h]))",
+              "legendFormat": "missed"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "none", "min": 0 }, "overrides": [] }
+        },
+        {
+          "id": 8,
+          "type": "timeseries",
+          "title": "Log store ingest, entries per second",
+          "description": "Log entries VictoriaLogs accepts per second.",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum(rate(vl_rows_ingested_total[5m]))",
+              "legendFormat": "entries"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "ops", "min": 0 }, "overrides": [] }
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "Log store ingest, bytes per second",
+          "description": "Bytes of log entries VictoriaLogs accepts per second.",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "targets": [
+            {
+              "refId": "A",
+              "datasource": { "type": "prometheus", "uid": "${datasource}" },
+              "expr": "sum(rate(vl_bytes_ingested_total[5m]))",
+              "legendFormat": "bytes"
+            }
+          ],
+          "fieldConfig": { "defaults": { "unit": "Bps", "min": 0 }, "overrides": [] }
+        }
+      ]
+    }

@@ -1,0 +1,31 @@
+---
+# VictoriaLogs' own dashboard for a single node, from its publisher's repository, unchanged:
+# ingestion, storage, queries and resource use. Its panels read the variable $DS_PROMETHEUS, which
+# lists the datasources of type prometheus. Before loading it, the operator replaces
+# ${DS_PROMETHEUS}, which the file has once, as the variable's current value, with the
+# datasourceName that spec.datasources maps it to, the tree's Prometheus; it leaves the panels'
+# $DS_PROMETHEUS as it is. The JSON is the ConfigMap kustomize generates from
+# dashboards/victorialogs.json; a new chart means fetching the file again at the new release, as
+# docs/kubernetes.md (Dashboards) says, and tests/dashboards.bats fails until the record moves.
+# Source: https://github.com/VictoriaMetrics/VictoriaLogs/blob/v1.54.0/dashboards/victorialogs.json
+# Licence: Apache-2.0
+# SHA-256: a55b8f6910d6fd25bc8975980efb27285aaa96e79a4ce3fc24b4dc772917202c
+# dashboard-victorialogs: v1.54.0
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: victoria-logs
+spec:
+  instanceSelector:
+    matchLabels:
+      app.kubernetes.io/instance: grafana
+  # A restarted Grafana starts without it. The operator applies it again every minute, and retries
+  # a failed attempt after 10 seconds, doubling the wait up to two minutes while Grafana starts.
+  resyncPeriod: 1m
+  folder: Logs
+  datasources:
+    - inputName: DS_PROMETHEUS
+      datasourceName: Prometheus
+  configMapRef:
+    name: grafana-dashboard-victoria-logs
+    key: victorialogs.json

@@ -8,9 +8,11 @@ metadata:
 spec:
   path: ./apps/base/monitoring/victoria-logs/app
   targetNamespace: monitoring
-  # The chart creates a ServiceMonitor, whose kind exists once prometheus-operator-crds is Ready.
+  # The chart creates a ServiceMonitor, whose kind exists once prometheus-operator-crds is Ready;
+  # the dashboard is a GrafanaDashboard, whose kind exists once grafana-operator is.
   dependsOn:
     - name: prometheus-operator-crds
+    - name: grafana-operator
   sourceRef:
     kind: ExternalArtifact
     name: victoria-logs

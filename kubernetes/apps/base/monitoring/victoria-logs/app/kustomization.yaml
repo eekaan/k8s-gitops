@@ -5,11 +5,15 @@ kind: Kustomization
 resources:
   - ocirepository.yaml
   - helmrelease.yaml
+  - grafanadashboard.yaml
 
 configMapGenerator:
   - name: victoria-logs-values
     files:
       - values.yaml
+  - name: grafana-dashboard-victoria-logs
+    files:
+      - victorialogs.json=dashboards/victorialogs.json
 generatorOptions:
   annotations:
     kustomize.toolkit.fluxcd.io/substitute: disabled

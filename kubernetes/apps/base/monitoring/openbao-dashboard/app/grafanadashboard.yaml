@@ -1,0 +1,32 @@
+---
+# OpenBao's dashboard from the repository of its Helm chart, unchanged: members, tokens, leases,
+# requests and the Go runtime. Its panels name their datasource ${DS_PROMXY}, the input the file
+# declares; before loading it, the operator replaces each ${DS_PROMXY} with the datasourceName that
+# spec.datasources maps it to, the tree's Prometheus. Its variable metrics_prefix is OpenBao's
+# default metric prefix, vault. The JSON is the ConfigMap kustomize generates from
+# dashboards/openbao.json; a new chart means fetching the file again at the new release, as
+# docs/kubernetes.md (Dashboards) says, and tests/dashboards.bats fails until the record moves with
+# the chart.
+# Source: https://github.com/openbao/openbao-helm/blob/openbao-0.30.7/charts/openbao/grafana/dashboards/dashboard.json
+# Licence: MPL-2.0
+# The licence is at https://mozilla.org/MPL/2.0/
+# SHA-256: 6ed324602038238ea53e5b1bb145a9988be575a10a8cb26df24dcff142d2f8fa
+# dashboard-openbao: 0.30.7
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: openbao
+spec:
+  instanceSelector:
+    matchLabels:
+      app.kubernetes.io/instance: grafana
+  # A restarted Grafana starts without it. The operator applies it again every minute, and retries
+  # a failed attempt after 10 seconds, doubling the wait up to two minutes while Grafana starts.
+  resyncPeriod: 1m
+  folder: OpenBao
+  datasources:
+    - inputName: DS_PROMXY
+      datasourceName: Prometheus
+  configMapRef:
+    name: grafana-dashboard-openbao
+    key: openbao.json

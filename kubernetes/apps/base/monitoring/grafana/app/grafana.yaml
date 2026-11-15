@@ -16,6 +16,10 @@ spec:
   # Without a version the operator writes its own default here once, and it never changes again.
   # renovate: datasource=docker depName=docker.io/grafana/grafana
   version: 13.1.3
+  # The home dashboard, by the uid in grafanadashboard-home.yaml: the operator makes it the
+  # organisation's home each time it applies the dashboard with that uid.
+  preferences:
+    homeDashboardUid: cluster-home
   config:
     # Logs go to the container's output only, not also to a file in the pod.
     log:
