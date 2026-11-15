@@ -438,8 +438,9 @@ out of the artifact, which is built from `kubernetes/`.
   query matches, one line each, the oldest first, from the last 15 minutes and at most 200 unless
   told otherwise ([kubernetes.md](kubernetes.md#logs)): `kubectl get --raw` through the Kubernetes
   API's service proxy to VictoriaLogs, so no port is forwarded. It prints the records and, when it
-  fails, the store's message or the reason the API did not answer, never kubectl's own output or an
-  address. It changes nothing on the cluster and needs the cluster's kubeconfig.
+  fails, the message of the error the API server or the store answered with, the store's own for a
+  query it refuses, or that the API did not answer, without an address and none of kubectl's other
+  output. It changes nothing on the cluster and needs the cluster's kubeconfig.
 - `just cluster-reboot <node> [cluster] [--yes] [--tolerate <seconds>]` reboots one node, named by
   its hostname in the cluster's `talman.yaml`, while it watches the Kubernetes API through its load
   balancer; for a control plane, that is the check that the API does not go away with one. Any
@@ -518,10 +519,12 @@ file's path.
 Of talman's output `cluster-snapshot` shows only the errors, and with `CI` set not those either.
 What rclone prints names the bucket and the endpoint, so the etcd recipes never show it. kubectl's
 and helm's output passes through, naming the objects they apply, except in `cluster-check`,
-`cluster-reboot`, `cluster-destroy`, `grafana` and `logs`: they print node and object names only, and
-`logs` the records and the store's own message, and none of what kubectl prints, as the objects it
-reads and its errors hold the API server's, the nodes' and the pods' addresses; only `kubectl drain`'s passes through in `cluster-reboot`, as in
-`cluster-upgrade`, naming the pods it evicts and those it cannot.
+`cluster-reboot`, `cluster-destroy`, `grafana` and `logs`: they print node and object names only,
+and `logs` the records, and none of what kubectl prints, as the objects it reads and its errors hold
+the API server's, the nodes' and the pods' addresses, but for the message of an error the API
+server or the store answered with, which `logs` shows without an address; only `kubectl drain`'s
+passes through in `cluster-reboot`, as in `cluster-upgrade`, naming the pods it evicts and those it
+cannot.
 
 ## Environment
 

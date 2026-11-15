@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
-# Proves features/logs.feature, except the scenario vector-check proves; each test carries its
-# scenario's title. Needs helm, flux, kustomize, just, yq, jq and awk on PATH (the versions pinned for
-# the repository). Each chart is pulled once per run from its public registry; building and
+# Proves features/logs.feature, except the scenarios tagged @by:vector-check, which Vector's unit
+# tests in tests/vector prove; each test carries its scenario's title. Needs helm, flux, kustomize,
+# just, yq, jq and awk on PATH (the versions pinned for the repository). Each chart is pulled once per run from its public registry; building and
 # rendering are offline. The applications are built in memory, so no build rewrites a file of this
 # checkout.
 
@@ -555,14 +555,17 @@ defined_keys() {
 # logs to run in through the repository's justfile, against recording fakes: a mise with nothing
 # installed, which keeps the justfile from putting real tools in front of the fakes, and a kubectl
 # that records its arguments, the kubeconfig it was given and the names of its environment, then
-# acts as the file $STATE/mode says: ok answers with the file $STATE/answer and, on its error
-# output, a line naming an address; refuse fails as kubectl v1.37 does when the proxied store
-# answers 400 with a plain-text body, which is what VictoriaLogs sends for a query it refuses: with
-# only the generic "the server rejected our request for an unknown reason" on its error output, and
-# the body only in the log of a run with -v=8, whose lines name the API server's address; fail500 as
-# it does for a 500, which carries the body in its message; down as it does when the API server does
-# not answer, naming its address; big answers with 4000 records of about 250 bytes. Sets COPY, BIN,
-# RECORD, STATE and KUBECONFIG_FILE.
+# acts as the file $STATE/mode says, each time after a warning naming the API server's address on
+# its error output. As kubectl v1.37 does: ok answers with the file $STATE/answer; refuse and
+# refuse-long fail as when the proxied store answers 400 with a plain-text body, which is what
+# VictoriaLogs sends for a query it refuses, a short one and one of over 3000 bytes: the error output
+# says only "the server rejected our request for an unknown reason", and the body is only in the log
+# of a verbose run, whose lines from -v=6 on name the API server's address: from -v=4 on as the
+# message of the cause of the Status kubectl made of the answer, cut at 2048 bytes, and from -v=8 on
+# also as the response body, cut at 1024; fail500, fail503, fail403 and fail404 fail as for those
+# answers, the first two naming the store's address in kubectl's message; down fails as when the API
+# server does not answer, naming its address; big answers with 4000 records of about 250 bytes, in
+# neither time order. Sets COPY, BIN, RECORD, STATE and KUBECONFIG_FILE.
 logs_copy() {
   COPY="$BATS_TEST_TMPDIR/copy" BIN="$BATS_TEST_TMPDIR/bin"
   RECORD="$BATS_TEST_TMPDIR/record" STATE="$BATS_TEST_TMPDIR/state"
@@ -576,49 +579,65 @@ logs_copy() {
 printf '%s\n' "$*" >>"$RECORD/argv"
 printf '%s\n' "${KUBECONFIG-unset}" >>"$RECORD/kubeconfig"
 env | cut -d= -f1 >>"$RECORD/names"
-case $(cat "$STATE/mode") in
-  ok)
-    echo 'W1114 12:00:00 request to https://192.0.2.10:6443 was slow' >&2
-    cat "$STATE/answer"
-    ;;
-  refuse)
-    echo 'W1114 12:00:00 request to https://192.0.2.10:6443 was slow' >&2
-    if [[ " $* " == *" -v=8 "* ]]; then
-      cat >&2 <<'LOG'
+level=0
+for arg; do [[ $arg =~ ^-v=([0-9]+)$ ]] && level=${BASH_REMATCH[1]}; done
+# refused BODY: the store answered 400 with the plain-text body BODY.
+refused() {
+  local body=$1
+  if ((level >= 6)); then
+    cat >&2 <<'LOG'
 I1114 12:00:00.777460 3565636 loader.go:408] Config loaded from file:  /home/operator/kubeconfig
 I1114 12:00:00.785877 3565636 round_trippers.go:527] "Request" verb="GET" url="https://192.0.2.10:6443/api/v1/namespaces/monitoring/services/victoria-logs:9428/proxy/select/logsql/query?query=x" headers=<
 	Accept: application/json, */*
 	User-Agent: kubectl/v1.37.1 (linux/amd64) kubernetes/f78e722
  >
 I1114 12:00:00.786392 3565636 round_trippers.go:632] "Response" status="400 Bad Request" headers=<
-	Content-Length: 68
 	Content-Type: text/plain
  > milliseconds=0
-I1114 12:00:00.786485 3565636 get.go:174] "Response Body" body=<
-	cannot parse query "kubernetes.pod_name:(": unexpected end of query
- >
-I1114 12:00:00.786612 3565636 helpers.go:247] server response object: {
-  "metadata": {},
-  "status": "Failure",
-  "message": "the server rejected our request for an unknown reason",
-  "reason": "BadRequest",
-  "details": {
-    "causes": [
-      {
-        "reason": "UnexpectedServerResponse",
-        "message": "cannot parse query \"kubernetes.pod_name:(\": unexpected end of query"
-      }
-    ]
-  },
-  "code": 400
-}
 LOG
+  fi
+  if ((level >= 8)); then
+    if ((${#body} <= 1024)); then
+      printf 'I1114 12:00:00.786485 3565636 get.go:174] "Response Body" body=<\n%s\n >\n' "$(sed 's/^/\t/' <<<"$body")" >&2
+    else
+      printf 'I1114 12:00:00.786485 3565636 get.go:174] "Response Body" body=%s\n' \
+        "$(jq -n --arg b "${body:0:1024} [truncated $((${#body} - 1024)) chars]" '$b')" >&2
     fi
-    echo 'Error from server (BadRequest): the server rejected our request for an unknown reason' >&2
-    exit 1
+  fi
+  if ((level >= 4)); then
+    jq -n --arg m "${body:0:2048}" '{metadata: {}, status: "Failure",
+        message: "the server rejected our request for an unknown reason", reason: "BadRequest",
+        details: {causes: [{reason: "UnexpectedServerResponse", message: ($m | sub("^\\s+|\\s+$"; ""; "g"))}]}, code: 400}' |
+      sed '1s/^/I1114 12:00:00.786612 3565636 helpers.go:247] server response object: /' >&2
+  fi
+  echo 'Error from server (BadRequest): the server rejected our request for an unknown reason' >&2
+  exit 1
+}
+echo 'W1114 12:00:00 request to https://192.0.2.10:6443 was slow' >&2
+case $(cat "$STATE/mode") in
+  ok)
+    cat "$STATE/answer"
+    ;;
+  refuse)
+    refused "cannot parse query \"kubernetes.pod_name:(\": unexpected end of query"$'\n'
+    ;;
+  refuse-long)
+    refused "cannot parse query \"_time:5m at 192.0"$'\xc2\x9b'".2.77:9428 $(printf 'x%.0s' {1..3000})\": unexpected end of query"$'\n'
     ;;
   fail500)
     echo 'Error from server (InternalError): an error on the server ("cannot read the block at 192.0.2.77:9428: store exploded") has prevented the request from succeeding' >&2
+    exit 1
+    ;;
+  fail503)
+    echo 'Error from server (ServiceUnavailable): error trying to reach service: dial tcp 192.0.2.77:9428: connect: connection refused' >&2
+    exit 1
+    ;;
+  fail403)
+    echo 'Error from server (Forbidden): services "victoria-logs:9428" is forbidden: User "operator" cannot get resource "services/proxy" in API group "" in the namespace "monitoring"' >&2
+    exit 1
+    ;;
+  fail404)
+    echo 'Error from server (NotFound): the server could not find the requested resource' >&2
     exit 1
     ;;
   down)
@@ -626,28 +645,32 @@ LOG
     exit 1
     ;;
   big)
+    # Record i of 4000 is i seconds after 12:00; multiplying by 1237 modulo the prime 4001 orders
+    # 1 to 4000 neither oldest nor newest first.
     awk 'BEGIN { pad = sprintf("%200s", ""); gsub(/ /, "x", pad)
-      for (i = 4000; i >= 1; i--)
-        printf "{\"_time\":\"2026-11-14T%02d:%02d:%02dZ\",\"_msg\":\"record %d %s\",\"node\":\"node-1\"}\n", 12 + int(i / 3600), int(i / 60) % 60, i % 60, i, pad }'
+      for (k = 1; k <= 4000; k++) { i = (k * 1237) % 4001
+        printf "{\"_time\":\"2026-11-14T%02d:%02d:%02dZ\",\"_msg\":\"record %d %s\",\"node\":\"node-1\"}\n", 12 + int(i / 3600), int(i / 60) % 60, i % 60, i, pad } }'
     ;;
 esac
 EOF
   chmod +x "$BIN/mise" "$BIN/kubectl"
 }
 
-# answer_records: the answer VictoriaLogs gives, newest first as it does when it stops at the limit,
-# with _time as it writes it: RFC 3339 with the fraction's trailing zeros dropped, so a whole second
-# has none and .12 and .123 differ in length. Four records fall in one second, a whole second, .12,
-# .123 and .5, which sorted as strings come out as .123, .12, .5 and the whole second last; then a
-# pod's record with a message of several lines and a Talos service's record.
+# answer_records: the answer VictoriaLogs gives, newest first as it does for a query that keeps the
+# time order, except the oldest record, as a query whose pipes reorder records is answered, with
+# _time as it writes it: RFC 3339 with the fraction's trailing zeros dropped, so a whole second has
+# none and .12 and .123 differ in length. Four records fall in one second, a whole second, .12, .123
+# and .5, which sorted as strings come out as .123, .12, .5 and the whole second last; then a pod's
+# record with a message of several lines and C0 and C1 control characters and a Talos service's
+# record.
 answer_records() {
   cat >"$STATE/answer" <<'EOF'
 {"_msg":"sixth: the kubelet restarted","_stream":"{node=\"node-2\",talos_service=\"kubelet\"}","_time":"2026-11-14T12:00:03Z","node":"node-2","talos_service":"kubelet"}
-{"_msg":"fifth\nline two \u001b[31mred\u001b[0m","_stream":"{}","_time":"2026-11-14T12:00:02.25Z","kubernetes.pod_name":"grafana-deployment-5d4f","kubernetes.pod_namespace":"monitoring","node":"node-1"}
+{"_msg":"fifth\nline two \u001b[31mred\u001b[0m \u009b2Jclear\u0085next\u0080","_stream":"{}","_time":"2026-11-14T12:00:02.25Z","kubernetes.pod_name":"grafana-deployment-5d4f","kubernetes.pod_namespace":"monitoring","node":"node-1"}
+{"_msg":"first: scrape done","_stream":"{}","_time":"2026-11-14T12:00:01Z","kubernetes.pod_name":"vector-x1y2z","kubernetes.pod_namespace":"monitoring","node":"node-1"}
 {"_msg":"fourth: half past","_stream":"{}","_time":"2026-11-14T12:00:01.5Z","kubernetes.pod_name":"vector-x1y2z","kubernetes.pod_namespace":"monitoring","node":"node-1"}
 {"_msg":"third: millisecond precision","_stream":"{}","_time":"2026-11-14T12:00:01.123Z","kubernetes.pod_name":"vector-x1y2z","kubernetes.pod_namespace":"monitoring","node":"node-1"}
 {"_msg":"second: centisecond precision","_stream":"{}","_time":"2026-11-14T12:00:01.12Z","kubernetes.pod_name":"vector-x1y2z","kubernetes.pod_namespace":"monitoring","node":"node-1"}
-{"_msg":"first: scrape done","_stream":"{}","_time":"2026-11-14T12:00:01Z","kubernetes.pod_name":"vector-x1y2z","kubernetes.pod_namespace":"monitoring","node":"node-1"}
 EOF
 }
 
@@ -697,7 +720,7 @@ window_seconds() {
     '2026-11-14T12:00:01.12Z monitoring/vector-x1y2z second: centisecond precision' \
     '2026-11-14T12:00:01.123Z monitoring/vector-x1y2z third: millisecond precision' \
     '2026-11-14T12:00:01.5Z monitoring/vector-x1y2z fourth: half past' \
-    '2026-11-14T12:00:02.25Z monitoring/grafana-deployment-5d4f fifth line two [31mred[0m' \
+    '2026-11-14T12:00:02.25Z monitoring/grafana-deployment-5d4f fifth line two [31mred[0m 2Jclearnext' \
     '2026-11-14T12:00:03Z node-2 sixth: the kubelet restarted')" ]
   # No address, from the API server's warnings on kubectl's error output or from anywhere else.
   [[ $output != *192.0.2.* && $output != *https://* ]]
@@ -751,11 +774,43 @@ window_seconds() {
   [[ $output == *'cannot parse query "kubernetes.pod_name:(": unexpected end of query'* ]]
   [[ $output != *192.0.2.* && $output != *6443* && $output != *https://* ]]
 
+  # A message longer than kubectl keeps: its first 2048 bytes, without a control character or the
+  # address it names, even with one inside the other, and said to be cut.
+  echo refuse-long >"$STATE/mode"
+  logs_recipe '_time:5m'
+  echo "refused at length: status $status; $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *'cannot parse query "_time:5m at <address> '"$(printf 'x%.0s' {1..1900})"* ]]
+  [[ $output == *"x [kubectl keeps only the first 2048 bytes of the store's answer]"* ]]
+  [[ $output != *'unexpected end of query'* ]]
+  [[ $output != *192.0.2.* && $output != *6443* && $output != *https://* ]]
+  [[ $output != *$'\xc2\x9b'* ]]
+
+  # Any other answer the API server or the store gives is shown as kubectl words it, without the
+  # address it may name.
   echo fail500 >"$STATE/mode"
   logs_recipe '*'
   echo "store failed: status $status; $output"
   [ "$status" -ne 0 ]
-  [[ $output == *"store exploded"* ]]
+  [[ $output == *'an error on the server ("cannot read the block at <address>: store exploded")'* ]]
+  [[ $output != *192.0.2.* && $output != *https://* ]]
+  echo fail503 >"$STATE/mode"
+  logs_recipe '*'
+  echo "store away: status $status; $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *'error trying to reach service: dial tcp <address>: connect: connection refused'* ]]
+  [[ $output != *192.0.2.* && $output != *https://* ]]
+  echo fail403 >"$STATE/mode"
+  logs_recipe '*'
+  echo "forbidden: status $status; $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *'cannot get resource "services/proxy"'* ]]
+  [[ $output != *192.0.2.* && $output != *https://* ]]
+  echo fail404 >"$STATE/mode"
+  logs_recipe '*'
+  echo "not found: status $status; $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *'the server could not find the requested resource'* ]]
   [[ $output != *192.0.2.* && $output != *https://* ]]
 
   echo down >"$STATE/mode"
@@ -834,6 +889,8 @@ window_seconds() {
   [ -n "$uid" ]
   # Grafana's server queries the store, through its Service, so a browser needs no way to it.
   [ "$(jq -r '.spec.datasource.access' <<<"$sources")" = proxy ]
+  # Prometheus stays the default datasource.
+  [ "$(jq -r '.spec.datasource.isDefault // false' <<<"$sources")" = false ]
   url="$(jq -r '.spec.datasource.url // ""' <<<"$sources")"
   render "$STORE"
   read -r name namespace port <<<"$(store_service)"
@@ -893,18 +950,40 @@ window_seconds() {
     | length > 0 and all(test("kubernetes.pod_namespace\":\\$namespace") and test("kubernetes.pod_name\":\\$pod"))' <<<"$json"
 }
 
-@test "every Vector unit test the scenarios name is in tests/vector" {
-  local title
+# Vector's unit tests run the collector's transforms and cannot see a sink, so what reaches the store
+# is what leaves the transforms its sink reads. Each source's events reach a sink along one path
+# only: Talos's lines through talos_files and drop_audit, the pods' records through pod_fields, and
+# Vector's own metrics to its exporter. Each scenario's unit test starts at the first transform of
+# its path and watches the last, so what it proves is what the store gets.
+@test "every Vector unit test the scenarios name is in tests/vector and runs a whole path to the store" {
+  local tests="$REPO/tests/vector/talos-lines.yaml" title paths
   for title in "Kernel audit records are dropped and counted" \
     "A pod's record carries the named labels and no field per other label"; do
     echo "$title"
-    [ "$(yq -N "[.tests[] | select(.name == \"${title//\"/\\\"}\")] | length" "$REPO/tests/vector/talos-lines.yaml")" -eq 1 ]
+    [ "$(title="$title" yq -N '[.tests[] | select(.name == strenv(title))] | length' "$tests")" -eq 1 ]
   done
   # A filter transform is what Vector counts as discarded events, in component_discarded_events_total.
   render "$COLLECTOR"
   collector_config
   [ "$(jq -r '.transforms.drop_audit.type' "$CONFIG")" = filter ]
-  jq -e '.sinks.victoria_logs.inputs | index("drop_audit") != null' "$CONFIG"
+  # Every path from a source to a sink, source>transform>…>sink; a name that is not a transform
+  # starts one.
+  # shellcheck disable=SC2016 # $c, $n and $sink are jq variables.
+  paths="$(jq -r 'def route($c): . as $n
+      | if $c.transforms[$n] == null then [$n] else ($c.transforms[$n].inputs // [])[] | route($c) + [$n] end;
+    . as $c | .sinks | to_entries[] | .key as $sink | .value.inputs[] | route($c) + [$sink] | join(">")' "$CONFIG" | sort)"
+  echo "paths to the sinks: $(paste -sd' ' - <<<"$paths")"
+  [ "$paths" = "$(printf '%s\n' 'pods>pod_fields>victoria_logs' 'talos>talos_files>drop_audit>victoria_logs' \
+    'vector_metrics>prometheus' | sort)" ]
+  echo "sinks: $(jq -r '.sinks | to_entries[] | "\(.key) \(.value.type)"' "$CONFIG" | paste -sd, -)"
+  [ "$(jq -r '.sinks | to_entries[] | "\(.key) \(.value.type)"' "$CONFIG" | sort)" \
+    = "$(printf '%s\n' 'prometheus prometheus_exporter' 'victoria_logs elasticsearch' | sort)" ]
+  title="Kernel audit records are dropped and counted"
+  [ "$(title="$title" yq -N '.tests[] | select(.name == strenv(title))
+    | [.inputs[].insert_at] + (.no_outputs_from // []) | join(" ")' "$tests")" = "talos_files drop_audit" ]
+  title="A pod's record carries the named labels and no field per other label"
+  [ "$(title="$title" yq -N '.tests[] | select(.name == strenv(title))
+    | [.inputs[].insert_at] + [.outputs[].extract_from] | join(" ")' "$tests")" = "pod_fields pod_fields" ]
 }
 
 @test "every values key of victoria-logs is one its pinned chart defines" {

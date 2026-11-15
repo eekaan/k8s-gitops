@@ -379,26 +379,31 @@ them:
 - `grafana` holds the `Grafana`, its `GrafanaDatasource`, a ServiceMonitor for Grafana's own
   metrics and the dashboards release, and names `grafana-operator` in `dependsOn`.
 
-The Grafana runs the version its `grafana.yaml` pins, which Renovate updates, as one replica
-without a disruption budget: a second replica would keep a database of its own. It keeps nothing
-that Git does not hold, so it claims no volume: its data directory is an emptyDir, and the operator
-applies the datasource and every dashboard again every minute. One it cannot apply, as while a
-restarted Grafana starts, it retries after 10 seconds, doubling the wait up to two minutes, so a
-restarted Grafana has them all back within a few minutes. The datasource is the Prometheus Service
-of the monitoring chart, `kube-prometheus-stack-prometheus`, port 9090. Grafana makes no call to the
-internet on its own: its
-configuration turns off usage reporting, the checks for Grafana and plugin updates, the news feed,
-the plugin catalogue, the plugins Grafana would install at every start, the download of plugin
-signing keys, Gravatar images and external snapshots. The one exception is the plugin of the
-VictoriaLogs datasource ([Logs](#logs)): Grafana does not ship it. The operator hands it to Grafana's
-container as `GF_INSTALL_PLUGINS`, `victoriametrics-logs-datasource` at the exact version in
-`grafanadatasource-victoria-logs.yaml`, which Renovate moves, and `grafana.yaml` sets
+The Grafana runs the version its `grafana.yaml` pins, which Renovate updates, as one replica without
+a disruption budget: a second replica would keep a database of its own. It keeps nothing that Git
+does not hold, so it claims no volume: its data directory is an emptyDir, and the operator applies
+the datasource and every dashboard again every minute. One it cannot apply, as while a restarted
+Grafana starts, it retries after 10 seconds, doubling the wait up to two minutes, so a restarted
+Grafana has them all back within a few minutes. The datasource is the Prometheus Service of the
+monitoring chart, `kube-prometheus-stack-prometheus`, port 9090. Grafana makes no call to the
+internet on its own: its configuration turns off usage reporting, the checks for Grafana and plugin
+updates, the news feed, the plugin catalogue, the plugins Grafana would install at every start, the
+download of plugin signing keys, Gravatar images and external snapshots. The one exception is the
+plugin of the VictoriaLogs datasource ([Logs](#logs)): Grafana does not ship it. The operator hands
+it to Grafana's container as `GF_INSTALL_PLUGINS`, `victoriametrics-logs-datasource` at the exact
+version in `grafanadatasource-victoria-logs.yaml`, which Renovate moves, and `grafana.yaml` sets
 `GF_INSTALL_PLUGINS_FORCE=true` on the container. With that set the Grafana image's entrypoint runs
-`grafana cli plugins install victoriametrics-logs-datasource <version>` at every start, which
-downloads that one archive from grafana.com's plugin catalogue; Grafana's own server would install
-it only with its preinstalled-plugins list on, which stays off. The entrypoint runs under `set -e`,
-so a failed download stops Grafana from starting until grafana.com answers. Grafana loads the plugin
-only if its signature verifies against the public key Grafana ships. Nothing else is fetched, and
+`grafana cli plugins install victoriametrics-logs-datasource <version>` at every start, into a data
+directory that starts empty. That makes two requests to grafana.com's plugin API
+(`pkg/plugins/repo/service.go` in Grafana v13.1.3): `GET
+https://grafana.com/api/plugins/victoriametrics-logs-datasource/versions`, the plugin's versions, of
+which it takes the one asked for, and `GET
+https://grafana.com/api/plugins/victoriametrics-logs-datasource/versions/<version>/download`, which
+grafana.com redirects to that version's archive in its catalogue's storage on
+`storage.googleapis.com`. Grafana's own server would install the plugin only with its
+preinstalled-plugins list on, which stays off. The entrypoint runs under `set -e`, so a failed
+request stops Grafana from starting until grafana.com answers. Grafana loads the plugin only if its
+signature verifies against the public key Grafana ships. Nothing else is fetched, and
 `tests/grafana.bats` fails when any other datasource or dashboard asks for a plugin.
 
 The dashboards come from the monitoring stack's own chart. The release `grafana-dashboards` installs
@@ -440,7 +445,7 @@ are on, and both applications name `prometheus-operator-crds` in `dependsOn`.
 What is collected, by a collector on every node, control planes included, from files only:
 
 - every pod's log lines, from the files under `/var/log/pods`, with the pod's namespace, name,
-  labels and node; the collector's own are left out;
+  labels and node and the node's labels; the collector's own are left out;
 - the log of each of the node's Talos services, machined, the kubelet, etcd, containerd, apid and
   the rest, and the kernel's, which Talos keeps as the service `kernel`: Talos writes each to
   `/var/log/<service>.log` and renames it to `<service>.log.1` at 5 MiB, and the collector reads
@@ -458,12 +463,15 @@ Two kinds of record are made smaller before they are sent:
   `vector_component_discarded_events_total` of its own metrics, which Prometheus scrapes from the
   PodMonitor, so the drop is visible as the series with `component_id="drop_audit"`. The log of
   Talos's `auditd` service, `/var/log/auditd.log`, is another file and is still shipped;
-- a pod's labels are not stored one field each: VictoriaLogs makes a field of every name, and
-  labels such as `pod-template-hash` and `controller-revision-hash` take a new value with every
-  rollout. The transform `pod_fields` keeps three, the Kubernetes recommended labels that name the
+- a pod's labels and its node's are not stored one field each: VictoriaLogs makes a field of every
+  name, a node has a dozen labels that say nothing about a line, and labels such as
+  `pod-template-hash` and `controller-revision-hash` take a new value with every rollout. The
+  transform `pod_fields` keeps three of the pod's, the Kubernetes recommended labels that name the
   application, `app.kubernetes.io/name`, `app.kubernetes.io/instance` and
   `app.kubernetes.io/component`, in `kubernetes.pod_labels`, and no other; a pod without them has
-  no such field. It also sets `node` on a pod's record, as Talos's lines have it.
+  no such field. It keeps none of the node's labels, `kubernetes.node_labels`, and sets `node` on a
+  pod's record to the node's name, as Talos's lines have it. The store's sink takes a pod's records
+  only from `pod_fields` and Talos's lines only from `drop_audit`.
 
 A record has the fields `_time`, `_msg` and `_stream`, and a pod's `kubernetes.pod_namespace`,
 `kubernetes.pod_name`, `kubernetes.container_name`, `kubernetes.pod_node_name`, `node`,
@@ -528,17 +536,23 @@ Reading the logs, with the cluster's kubeconfig:
 - `just logs '<LogsQL query>' [--since 15m] [--limit 200] [cluster]` prints the records the query
   matches, from the last 15 minutes and at most 200 unless told otherwise (`--since` is a whole
   number with `s`, `m`, `h`, `d` or `w`), one line each, the oldest first: the time, the namespace
-  and pod, or the node for a Talos service's record, and the message. It asks the Kubernetes API for
-  VictoriaLogs' `/select/logsql/query` through the API's service proxy to the Service
-  `victoria-logs`, so no port is forwarded and none is left behind, and prints neither kubectl's
-  output nor an address. A query the store refuses fails with the store's own message: kubectl
-  keeps the body of a 400 out of its error, so the recipe asks again, with kubectl's verbose log
-  going to a file it reads the body from and never shows, which holds the API server's address. A
-  failure of the store itself shows the message kubectl gives for it, and an API that does not
-  answer fails with that said. The query is LogsQL, such as `talos_service:kubelet`,
+  and pod, or the node for a Talos service's record, and the message, with its newlines made spaces
+  and its control characters, C0 and C1, left out. It asks the Kubernetes API for VictoriaLogs'
+  `/select/logsql/query` through the API's service proxy to the Service `victoria-logs`, so no port
+  is forwarded and none is left behind. Of what kubectl prints it shows only the message of an error
+  the API server or the store answered with, without an address; its warnings and the error of a
+  connection that failed can name the API server's address and are never shown. A query the store
+  refuses fails with the store's own message: kubectl keeps the body of a 400 out of its error, so
+  the recipe asks again with `-v=4` and reads the body from the Status kubectl logs, in a file it
+  never shows. kubectl keeps only a body's first 2048 bytes, and the recipe says so after a message
+  that long. Any other error the store or the API answers with, a store that is away or a request
+  the cluster's access rules deny, shows kubectl's message for it, and an API that does not answer
+  fails with that said. The query is LogsQL, such as `talos_service:kubelet`,
   `kubernetes.pod_namespace:monitoring error` or `node:node-1 talos_service:kernel`; a query that
-  ends in a `stats` pipe prints its records as JSON. VictoriaLogs keeps the records with the
-  largest times when the limit cuts the answer, in no order, and the recipe sorts what it got.
+  ends in a `stats` pipe prints its records as JSON. With the limit, VictoriaLogs answers with the
+  newest records, newest first, unless the query's pipes change the records' order, as `sort` and
+  `stats` do: then with the first the pipes give, in their order. The recipe sorts what it gets by
+  time, oldest first.
 - In Grafana, behind `just grafana`, the datasource VictoriaLogs and the dashboard Logs, in the
   folder Logs: the volume of logs by namespace and by node, and a logs panel for the namespaces and
   pods chosen in the two variables above it. The datasource is the `GrafanaDatasource`
@@ -551,8 +565,11 @@ Reading the logs, with the cluster's kubeconfig:
 checks each of these. `just vector-check` renders the collector's configuration with
 `scripts/vector-config` and has Vector itself, in the image the collector runs, validate it and run
 its unit tests, `tests/vector/talos-lines.yaml`, which hold a line of each format above, an audit
-line and a pod's record with several labels. `just logs` runs in `tests/logs.bats` against a
-recording kubectl. The image
+line and a pod's record with many labels, and many of its node's. Vector's unit tests cannot see a
+sink, so `tests/logs.bats` checks that each source reaches a sink along one path only, the store's
+through the transforms the unit tests run, and that each scenario's unit test starts at the first
+transform on its path and watches the last. `just logs` runs in `tests/logs.bats` against a
+recording kubectl shaped like kubectl v1.37's output. The image
 is `vector_image` in the justfile, pinned by the digest of its image index under a
 `# renovate: datasource=docker depName=…` comment: Renovate's custom manager for the justfile moves
 its tag and digest, in the same pull request as the chart, and `tests/logs.bats` fails, saying what

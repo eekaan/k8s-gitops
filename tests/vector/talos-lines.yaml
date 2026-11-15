@@ -8,8 +8,10 @@
 # trustd's lines, etcd's JSON, containerd's logfmt and the kubelet's klog. Each line stays whole,
 # takes its own time and level where it has them, and gets the node's name and its service's. The
 # kernel's audit records are dropped. The last tests start at the pods' transform with a record as the
-# kubernetes_logs source hands it on, its labels in kubernetes.pod_labels. The tests named in
-# sentence case are scenarios of features/logs.feature, proved here.
+# kubernetes_logs source hands it on, its labels in kubernetes.pod_labels and its node's in
+# kubernetes.node_labels. The tests named in sentence case are scenarios of features/logs.feature,
+# proved here; each starts at the first transform on its way to the store and watches the last, as
+# tests/logs.bats checks against the rendered configuration.
 tests:
   - name: a kernel message keeps the kernel's time and priority
     inputs:
@@ -222,8 +224,22 @@ tests:
             "app.kubernetes.io/instance": "vector",
             "app.kubernetes.io/component": "Agent",
             "app.kubernetes.io/managed-by": "Helm",
+            "app.kubernetes.io/part-of": "logs",
+            "app.kubernetes.io/version": "0.61.0-distroless-libc",
+            "helm.sh/chart": "vector-0.50.0",
             "controller-revision-hash": "7d9f8c6b5",
             "pod-template-generation": "3"
+          }
+          .kubernetes.node_labels = {
+            "beta.kubernetes.io/arch": "amd64",
+            "beta.kubernetes.io/os": "linux",
+            "kubernetes.io/arch": "amd64",
+            "kubernetes.io/hostname": "node-3",
+            "kubernetes.io/os": "linux",
+            "node-role.kubernetes.io/control-plane": "",
+            "node.kubernetes.io/exclude-from-external-load-balancers": "",
+            "topology.kubernetes.io/region": "RegionOne",
+            "topology.kubernetes.io/zone": "nova"
           }
     outputs:
       - extract_from: pod_fields
@@ -235,6 +251,7 @@ tests:
                 "app.kubernetes.io/instance": "vector",
                 "app.kubernetes.io/component": "Agent"
               })
+              assert!(!exists(.kubernetes.node_labels))
               assert_eq!(.node, "node-3")
               assert_eq!(.kubernetes.pod_namespace, "monitoring")
               assert_eq!(.kubernetes.pod_name, "vector-x1y2z")

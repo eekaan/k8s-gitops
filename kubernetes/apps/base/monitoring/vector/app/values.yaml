@@ -154,17 +154,20 @@ customConfig:
         type: vrl
         source: |
           !(.talos_service == "kernel" && match(string(.message) ?? "", r'^[a-z0-9]+:\s*[a-z]+: \[[^\]]+\]: audit(d)?(\[\d+\])?: '))
-    # The node's name, as on Talos's lines, and three of the pod's labels. The source stores every
-    # label of a pod as a field of its own, and VictoriaLogs makes one field of each name, so a
-    # pod's hash labels, such as pod-template-hash, would add a field with every rollout; these
-    # three, the Kubernetes recommended labels that name the application, are what an operator
-    # filters on. A pod without any keeps no labels field.
+    # The node's name, as on Talos's lines, and three of the pod's labels. The source attaches
+    # every label of the pod and of its node, and VictoriaLogs stores each as a field of its own,
+    # so every record would carry a dozen fields that say nothing about its line, hash labels such
+    # as pod-template-hash among them, whose value changes with every rollout. These three, the
+    # Kubernetes recommended labels that name the application, are what an operator filters on; a
+    # pod without any keeps no labels field. The node is named in node, and none of its labels is
+    # kept.
     pod_fields:
       type: remap
       inputs:
         - pods
       source: |
         .node = .kubernetes.pod_node_name
+        del(.kubernetes.node_labels)
         named = ["app.kubernetes.io/name", "app.kubernetes.io/instance", "app.kubernetes.io/component"]
         labels = filter(object(.kubernetes.pod_labels) ?? {}) -> |key, _value| { includes(named, key) }
         if is_empty(labels) {
