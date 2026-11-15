@@ -188,7 +188,7 @@ for number in "${numbers[@]}"; do
     # new instance's word.
     edge_load
     if [[ -n $before && ${edge_instances[number - 1]} == "$before" ]]; then
-      infra_error "edge $number's instance was created again, but the stack's outputs still give the identifier of the one before it, so they are stale and its console is not read; nothing was recorded, the rollout stops here and no later edge was touched; once just infra-plan sto2/edge lists no change to output instances, so the outputs name the new instance, just edge-check --edge $number records its keys"
+      infra_error "edge $number's instance was created again, but the stack's outputs still give the identifier of the one before it, so they are stale and its console is not read; nothing was recorded, the rollout stops here and no later edge was touched; when just infra-plan sto2/edge lists update: output instances and no other change, just infra-apply sto2/edge writes the outputs (a pending change to the other edge lists update: output instances as well); once just infra-plan sto2/edge lists no change to output instances, so the outputs name the new instance, just edge-check --edge $number records its keys"
       exit 1
     fi
     status=0

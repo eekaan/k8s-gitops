@@ -1795,7 +1795,7 @@ rollout_with_input() {
   echo "$output"
   [ "$status" -ne 0 ]
   [[ $output == *"edge 1's instance was created again, but the stack's outputs still give the identifier of the one before it"* ]]
-  [[ $output == *"once just infra-plan sto2/edge lists no change to output instances, so the outputs name the new instance, just edge-check --edge 1 records its keys"* ]]
+  [[ $output == *"when just infra-plan sto2/edge lists update: output instances and no other change, just infra-apply sto2/edge writes the outputs (a pending change to the other edge lists update: output instances as well); once just infra-plan sto2/edge lists no change to output instances, so the outputs name the new instance, just edge-check --edge 1 records its keys"* ]]
   [[ $output != *"Type yes"* ]]
   absent '^openstack console' "$RECORD/argv"
   absent '^ssh-keyscan ' "$RECORD/argv"

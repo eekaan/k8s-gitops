@@ -92,7 +92,10 @@ console_fingerprints() {
 # scripts/edge-rollout wait for a new host's console to hold its fingerprints, 30 when unset, read
 # in base 10, as arithmetic would read a leading zero as octal and 08 as an error; fails, naming it,
 # unless it is a whole number of seconds of at most 9 digits, which arithmetic holds without
-# overflow. The scripts call it as soon as scripts/stack-env has read .env, before anything runs.
+# overflow. The scripts that connect to a host themselves (edge-check, edge-routes, edge-rollout,
+# ci-host-setup, ci-host-remove) call it as soon as scripts/stack-env has read .env, before they
+# touch the stack; a script that runs one of them as a step (infra-apply for the edge stack) is
+# refused at that step, before anything connects to a host.
 host_console_wait() {
   if [[ ! ${HOST_CONSOLE_WAIT:-30} =~ ^[0-9]{1,9}$ ]]; then
     infra_error "HOST_CONSOLE_WAIT is not a whole number of seconds of at most 9 digits"

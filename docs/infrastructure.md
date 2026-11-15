@@ -702,7 +702,9 @@ at once when a key is refused or not accepted; after `just infra-apply sto2/edge
 rollout reads the stack's outputs again after each apply that creates an edge's instance and
 reads the console that identifier names; outputs that still give the identifier of the instance
 before it do not describe what the apply made, and the rollout stops there, with nothing read or
-recorded, saying that once `just infra-plan sto2/edge` lists no change to `output instances`,
+recorded, saying that `just infra-apply sto2/edge` writes the outputs when
+`just infra-plan sto2/edge` lists `update: output instances` and no other change (a pending change
+to the other edge lists it as well), and that once it lists no change to `output instances`,
 `just edge-check --edge N` records the keys. An edge whose part of the plan does not create its
 instance keeps its recorded keys.
 
@@ -991,7 +993,10 @@ docker of `vector-check` has only the scan.
   long the other recipes that connect to an edge or the CI host for the first time wait for the
   console to hold the fingerprints of its host keys before they ask, 30 seconds when unset. Each
   is a whole number of seconds of at most 9 digits, read in base 10 (`08` is eight); any other
-  value is refused, naming the variable, before the recipe touches the stack.
+  value is refused, naming the variable: by the recipes that connect to a host themselves
+  (`edge-check`, `edge-routes`, `edge-rollout`, `ci-host-setup`, `ci-host-remove`) before they touch
+  the stack, and by a recipe that runs one of them as a step (`infra-apply` for the edge stack) at
+  that step, before anything connects to a host.
 - `TF_VAR_security_group_rules`: the cluster stack's `security_group_rules`, `full` unless set to
   `reduced` ([The nodes' security group](#the-nodes-security-group)).
 - `TF_VAR_worker_first_host`: the host number of the first worker, 20 when unset, for the cluster

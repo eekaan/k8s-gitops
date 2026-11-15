@@ -572,29 +572,32 @@ console() {
 }
 
 @test "the CI host's HOST_CONSOLE_WAIT is read in base 10, and refused, named, before anything runs when it is not a whole number of at most 9 digits" {
-  local value
-  # setup_with VALUE: ci-host-setup as recipe runs it, with HOST_CONSOLE_WAIT=VALUE.
-  setup_with() {
+  local value recipe_name
+  # recipe_with NAME VALUE: the recipe NAME as recipe runs it, with HOST_CONSOLE_WAIT=VALUE.
+  recipe_with() {
     run timeout 60 env -i HOME="$HOME_DIR" TMPDIR="$TEMP_DIR" PATH="$BIN:$PATH" "${ENVIRONMENT[@]}" \
-      "HOST_CONSOLE_WAIT=$1" "$JUST" --justfile "$ROOT/justfile" --working-directory "$REPO" ci-host-setup
+      "HOST_CONSOLE_WAIT=$2" "$JUST" --justfile "$ROOT/justfile" --working-directory "$REPO" "$1"
   }
   console SHA256:FixtureFingerprintOfTheCiHost0123456789abcd
 
-  setup_with 08 < /dev/null
+  recipe_with ci-host-setup 08 < /dev/null
 
   [ "$status" -eq 0 ]
   [[ $output == *"CI host: the 1 SSH host key it offers matches its instance's console"* ]]
 
-  for value in 12345678901234567890 1000000000 30s; do
-    rm -f "$KNOWN_HOSTS"
-    : > "$RECORD/argv"
+  for recipe_name in ci-host-setup ci-host-remove; do
+    for value in 12345678901234567890 1000000000 30s; do
+      rm -f "$KNOWN_HOSTS"
+      : > "$RECORD/argv"
 
-    setup_with "$value" < /dev/null
+      recipe_with "$recipe_name" "$value" < /dev/null
 
-    [ "$status" -ne 0 ]
-    [[ $output == *"HOST_CONSOLE_WAIT is not a whole number of seconds of at most 9 digits"* ]]
-    run grep -cE '^(tofu|ssh|ssh-keyscan|gh|openstack) ' "$RECORD/argv"
-    [ "$output" = 0 ]
+      echo "$recipe_name, HOST_CONSOLE_WAIT=$value: $output"
+      [ "$status" -ne 0 ]
+      [[ $output == *"HOST_CONSOLE_WAIT is not a whole number of seconds of at most 9 digits"* ]]
+      run grep -cE '^(tofu|ssh|ssh-keyscan|gh|openstack) ' "$RECORD/argv"
+      [ "$output" = 0 ]
+    done
   done
 }
 
