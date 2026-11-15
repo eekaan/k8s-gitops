@@ -281,12 +281,14 @@ tests:
               assert_eq!(.level, "notice")
 
   # One audit event as the kernel's audit subsystem writes it for a pod's process, which Talos's
-  # policy runs as pod_t, that writes to a directory on a filesystem without SELinux labels, whose
-  # files Talos's policy gives unlabeled_t, while SELinux is permissive: an AVC record with
-  # permissive=1 and the SYSCALL, CWD, PATH, PROCTITLE and EOE records that share its
-  # msg=audit(<time>:<serial>) id, each a line of /var/log/auditd.log, as the file source hands it
-  # on. The kernel writes the records after the AVC only while a system call or task audit rule is
-  # loaded, which Talos's auditd does not do; without one, the AVC record comes alone.
+  # policy runs as pod_t, that creates a file with openat in a directory on a filesystem without
+  # SELinux labels, whose files Talos's policy gives unlabeled_t, while SELinux is permissive: an
+  # AVC record with permissive=1 and the SYSCALL, CWD, PATH, PROCTITLE and EOE records that share
+  # its msg=audit(<time>:<serial>) id, each a line of /var/log/auditd.log, as the file source hands
+  # it on. No audit rule is loaded: the AVC record makes the kernel write the system call's records
+  # when it returns, SYSCALL with key=(null), and PATH records only for the names it collected after
+  # the AVC, an unnamed parent and the file to be created, which it records again once the file
+  # exists; those two PATH records are left out here.
   - name: The audit log's records of a permissive denial do not reach the store, and are counted
     inputs:
       - insert_at: talos_files
@@ -304,7 +306,7 @@ tests:
           .file = "/var/log/auditd.log"
           .host = "vector-x1y2z"
           .message = "type=SYSCALL msg=audit(1794571200.123:4242): arch=c000003e syscall=257 success=yes exit=7 " +
-            "a0=ffffff9c a1=c000a1b2c0 a2=241 a3=1a4 items=1 ppid=2718 pid=3141 auid=4294967295 uid=0 gid=0 " +
+            "a0=ffffff9c a1=c000a1b2c0 a2=241 a3=1a4 items=4 ppid=2718 pid=3141 auid=4294967295 uid=0 gid=0 " +
             "euid=0 suid=0 fsuid=0 egid=0 sgid=0 fsgid=0 tty=(none) ses=4294967295 comm=\"store\" exe=\"/store\" " +
             "subj=system_u:system_r:pod_t:s0 key=(null)"
           .timestamp = t'2026-11-14T13:00:00Z'
@@ -320,8 +322,16 @@ tests:
         source: |
           .file = "/var/log/auditd.log"
           .host = "vector-x1y2z"
-          .message = "type=PATH msg=audit(1794571200.123:4242): item=0 name=\"/data/small/2026-11-14/\" inode=131073 " +
+          .message = "type=PATH msg=audit(1794571200.123:4242): item=0 name=(null) inode=131073 " +
             "dev=93:3e8 mode=040755 ouid=0 ogid=0 rdev=00:00 obj=system_u:object_r:unlabeled_t:s0 nametype=PARENT " +
+            "cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 cap_frootid=0"
+          .timestamp = t'2026-11-14T13:00:00Z'
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/auditd.log"
+          .host = "vector-x1y2z"
+          .message = "type=PATH msg=audit(1794571200.123:4242): item=1 name=(null) nametype=CREATE " +
             "cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 cap_frootid=0"
           .timestamp = t'2026-11-14T13:00:00Z'
       - insert_at: talos_files
