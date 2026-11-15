@@ -167,6 +167,12 @@ level is declared in the tree, never left to the API server's default.
     `spec.csiController` and `spec.affinityController`, each naming every container of the
     operator's template at its pinned version. Its satellites, CSI node plugin, NFS server and HA
     controller run privileged and are entries of the exceptions file, `created-by` it.
+  - The ReplicationSource `<app>` and ReplicationDestination `<app>-restore` of each application
+    with a backed-up volume, `volsync-demo` in `demo` among them: the movers' non-root user and
+    seccomp profile, in `spec.restic.moverSecurityContext`, from `components/volsync`; VolSync
+    gives the mover's container no privilege escalation and no capabilities itself, as its
+    documentation's permission model describes for movers without the privileged-movers
+    annotation, which no namespace here carries ([Volume backups](#volume-backups)).
 
   Admission evaluates each such pod when the operator creates it: a namespace that enforces
   `restricted` refuses one that fails it, and one that enforces less records and reports it

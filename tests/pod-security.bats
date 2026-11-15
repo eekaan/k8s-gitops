@@ -375,28 +375,31 @@ real_render() {
   # sets the pod's security context, and that of every container it names, which are the
   # containers the operator's templates create at the pinned version where the operator leaves a
   # field restricted requires unset: the LINSTOR controller's, the CSI controller's and the
-  # affinity controller's. The Grafana and Prometheus operators set those container fields
-  # themselves. Each field must lie under a path the resource's definition declares, or the API
-  # server prunes it.
+  # affinity controller's. The Grafana and Prometheus operators and VolSync set those container
+  # fields themselves. Each field must lie under a path the resource's definition declares, or the
+  # API server prunes it. An entry: the resource, the path of the pod's spec in it, the name of the
+  # pod's security context there, and the init containers and containers it names.
   real_render
   local entries=(
-    "Grafana grafana .spec.deployment.spec.template.spec - -"
-    "Prometheus kube-prometheus-stack-prometheus .spec - -"
-    "Alertmanager kube-prometheus-stack-alertmanager .spec - -"
-    "LinstorCluster linstorcluster .spec.controller.podTemplate.spec run-migration linstor-controller"
-    "LinstorCluster linstorcluster .spec.csiController.podTemplate.spec linstor-wait-api-online linstor-csi,csi-attacher,csi-livenessprobe,csi-provisioner,csi-snapshotter,csi-resizer"
-    "LinstorCluster linstorcluster .spec.affinityController.podTemplate.spec - linstor-affinity-controller"
+    "Grafana grafana .spec.deployment.spec.template.spec securityContext - -"
+    "Prometheus kube-prometheus-stack-prometheus .spec securityContext - -"
+    "Alertmanager kube-prometheus-stack-alertmanager .spec securityContext - -"
+    "LinstorCluster linstorcluster .spec.controller.podTemplate.spec securityContext run-migration linstor-controller"
+    "LinstorCluster linstorcluster .spec.csiController.podTemplate.spec securityContext linstor-wait-api-online linstor-csi,csi-attacher,csi-livenessprobe,csi-provisioner,csi-snapshotter,csi-resizer"
+    "LinstorCluster linstorcluster .spec.affinityController.podTemplate.spec securityContext - linstor-affinity-controller"
+    "ReplicationSource volsync-demo .spec.restic moverSecurityContext - -"
+    "ReplicationDestination volsync-demo-restore .spec.restic moverSecurityContext - -"
   )
   yq -N -o json -I0 'select(.kind == "CustomResourceDefinition")
     | {"group": .spec.group, "kind": .spec.names.kind, "versions": [.spec.versions[] | {"name": .name, "schema": .schema.openAPIV3Schema}]}' \
     "$REAL"/*/*/CustomResourceDefinition.*.yaml >"$BATS_TEST_TMPDIR/crds.jsonl"
-  local entry kind name at init containers files problems=()
+  local entry kind name at context init containers files problems=()
   for entry in "${entries[@]}"; do
-    read -r kind name at init containers <<<"$entry"
+    read -r kind name at context init containers <<<"$entry"
     files=("$REAL"/*/*/"$kind".*_*_"$name".yaml)
     [ -f "${files[0]}" ] && [ "${#files[@]}" -eq 1 ] || { echo "the render holds no one $kind/$name"; return 1; }
     mapfile -t -O "${#problems[@]}" problems < <(yq -o json -I0 '.' "${files[0]}" | jq -r --slurpfile crds "$BATS_TEST_TMPDIR/crds.jsonl" \
-      --arg at "$at" --arg init "$init" --arg containers "$containers" '
+      --arg at "$at" --arg context "$context" --arg init "$init" --arg containers "$containers" '
       # Whether a schema keeps the field at path $p: it declares it, or keeps unknown fields there.
       def kept($p):
         if ($p | length) == 0 then true
@@ -414,9 +417,9 @@ real_render() {
       else
         ($cr.spec | paths(scalars) as $p | select($schema.properties.spec | kept($p) | not)
           | "\($id): its definition does not declare spec.\($p | map(tostring) | join("."))"),
-        (if $pod.securityContext.runAsNonRoot != true then "\($id): \($at).securityContext.runAsNonRoot is not true" else empty end),
-        (if ($pod.securityContext.runAsUser // 1) == 0 then "\($id): \($at).securityContext.runAsUser is root" else empty end),
-        (if $pod.securityContext.seccompProfile.type != "RuntimeDefault" then "\($id): \($at).securityContext.seccompProfile.type is not RuntimeDefault" else empty end),
+        (if $pod[$context].runAsNonRoot != true then "\($id): \($at).\($context).runAsNonRoot is not true" else empty end),
+        (if ($pod[$context].runAsUser // 1) == 0 then "\($id): \($at).\($context).runAsUser is root" else empty end),
+        (if $pod[$context].seccompProfile.type != "RuntimeDefault" then "\($id): \($at).\($context).seccompProfile.type is not RuntimeDefault" else empty end),
         (["initContainers", names($init)], ["containers", names($containers)]) as [$field, $wanted]
         | $wanted[] as $c | ([$pod[$field][]? | select(.name == $c)] | first) as $container
         | if $container == null then "\($id): \($at).\($field) names no \($c)"

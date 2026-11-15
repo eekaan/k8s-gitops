@@ -49,7 +49,7 @@ Feature: Pod Security levels
     Then the namespace flux-system enforces restricted, every controller is evaluated and passes it, and removing the patch that sets the level fails the check
 
   Scenario: The custom resources that make an operator create pods ask for what restricted requires
-    Given the Grafana, Prometheus, Alertmanager and LinstorCluster resources of the tree, whose operators create pods the render does not hold
+    Given the Grafana, Prometheus, Alertmanager, LinstorCluster, ReplicationSource and ReplicationDestination resources of the tree, whose operators create pods the render does not hold
     When the render of the tree is read with the resource definitions it holds
     Then each sets a non-root user and the runtime's seccomp profile for the pod, and no privilege escalation and no capabilities for every container it names, at paths its resource definition declares
 
