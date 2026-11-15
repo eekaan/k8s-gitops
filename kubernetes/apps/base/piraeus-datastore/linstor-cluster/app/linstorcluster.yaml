@@ -23,7 +23,10 @@ spec:
   # operator's version. The images run as root unless told otherwise; the controller's publisher
   # builds its image to run under an arbitrary user with group 1000, and the affinity controller's
   # image runs as nobody. The satellites, the CSI node plugin, the HA controller and the NFS server
-  # run privileged instead (pod-security-exceptions.yaml).
+  # run privileged instead (pod-security-exceptions.yaml). The container names are those of the
+  # operator's templates at the version below; tests/pod-security.bats fails when the piraeus-operator
+  # application runs another, until its templates are read again and this record moves with them.
+  # piraeus-operator-templates: v2.12.1
   controller:
     podTemplate:
       spec:

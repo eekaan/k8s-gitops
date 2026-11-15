@@ -380,6 +380,20 @@ real_render() {
   # API server prunes it. An entry: the resource, the path of the pod's spec in it, the name of the
   # pod's security context there, and the init containers and containers it names.
   real_render
+  # The LinstorCluster names the containers of the operator's templates at the version recorded
+  # beside them. Another version may name them otherwise, and a name its templates lack becomes a
+  # container without an image, which the operator cannot apply: a new operator fails here until
+  # its templates are read again.
+  local cluster="$REPO/kubernetes/apps/base/piraeus-datastore/linstor-cluster/app/linstorcluster.yaml" recorded operator
+  recorded="$(sed -n 's/^ *# piraeus-operator-templates: *\(v[0-9][0-9.]*\) *$/\1/p' "$cluster")"
+  operator="$(yq -N '.spec.template.spec.containers[] | select(.name == "manager") | .image | sub("^.*:"; "")' \
+    "$REAL"/*/piraeus-operator/Deployment.apps_piraeus-datastore_piraeus-operator-controller-manager.yaml)"
+  echo "container names read from piraeus-operator ${recorded:-(no record)}; the render runs ${operator:-(none)}"
+  [ -n "$recorded" ] || { echo "linstorcluster.yaml has no line '# piraeus-operator-templates: vX.Y.Z' beside its podTemplates"; return 1; }
+  [ "$recorded" = "$operator" ] || {
+    echo "the operator is $operator: read pkg/resources/cluster/{controller,csi-controller,affinity-controller} at $operator for the containers of each template, then update the podTemplates, the entries below and the record"
+    return 1
+  }
   local entries=(
     "Grafana grafana .spec.deployment.spec.template.spec securityContext - -"
     "Prometheus kube-prometheus-stack-prometheus .spec securityContext - -"
