@@ -6,8 +6,9 @@
 #
 # Vector runs as an agent, one pod on every node, and sends to the VictoriaLogs store
 # (victoria-logs) every pod's log lines and the log of each of the node's Talos services, the
-# kernel's included less its audit records, which Talos writes to /var/log (ADR 0014). It reads
-# files only: nothing on the node sends to it, and it listens only for Prometheus.
+# kernel's included less its audit records, which Talos writes to /var/log (ADR 0014), and less the
+# log of its auditd service. It reads files only: nothing on the node sends to it, and it listens
+# only for Prometheus.
 role: Agent
 
 # Every node, control planes included: a toleration without a key tolerates every taint. At the
@@ -88,7 +89,7 @@ customConfig:
     # The node's name, from the pod's environment, and the service's, from the file's name. Each
     # line stays whole; its own time and level, where its format has them, replace the time it was
     # read: the kernel's messages, the prefix Go's log package gives machined's, apid's and trustd's
-    # lines, JSON such as etcd's, logfmt such as containerd's, and the kubelet's klog.
+    # lines, JSON such as etcd's, logfmt such as containerd's and cri's, and the kubelet's klog.
     # tests/vector/talos-lines.yaml holds a line of each.
     talos_files:
       type: remap
@@ -154,6 +155,31 @@ customConfig:
         type: vrl
         source: |
           !(.talos_service == "kernel" && match(string(.message) ?? "", r'^[a-z0-9]+:\s*[a-z]+: \[[^\]]+\]: audit(d)?(\[\d+\])?: '))
+    # The log of Talos's auditd service, the records of the kernel's audit subsystem, is dropped
+    # whole, every line of it, and counted as drop_audit's are. Talos runs SELinux in permissive
+    # mode, in which the kernel logs an access its policy would deny as an AVC record with
+    # permissive=1, holds it as granted in its access vector cache and logs it again once the
+    # cache, 512 entries by default, no longer holds it. An AVC record logged inside a system call
+    # makes the kernel write that call's SYSCALL, PROCTITLE and EOE records too, and CWD and PATH
+    # records for the file names it collected, without any audit rule, as separate lines sharing
+    # its event id, so one denied access can be several lines. The store is a pod on a volume whose
+    # StorageClass passes no SELinux label, which Talos's policy does not let pods use, so its
+    # writes can produce such records: a store that received the audit log would store records of
+    # its own writes, and storing them can produce more. Dropping only the AVC lines would leave the
+    # rest of their events, so it would need a reduce transform holding every open event until its
+    # EOE record or an expiry, where an event cut by a restart would leave records that no longer
+    # say what they belong to, and it would drop every other process's denials all the same. The
+    # rest of the file, the denials of every other process, the line auditd writes when records
+    # were lost and any other record, is read on the node with talosctl logs auditd, from the last
+    # 1 MiB or so of the service's lines that Talos keeps.
+    drop_auditd_log:
+      type: filter
+      inputs:
+        - drop_audit
+      condition:
+        type: vrl
+        source: |
+          .talos_service != "auditd"
     # The node's name, as on Talos's lines, and three of the pod's labels. The source attaches
     # every label and annotation of the pod, every label of its node and every label and annotation
     # of its namespace, and VictoriaLogs stores each as a field of its own, so every record would
@@ -187,7 +213,7 @@ customConfig:
       type: elasticsearch
       inputs:
         - pod_fields
-        - drop_audit
+        - drop_auditd_log
       endpoints:
         - http://victoria-logs.monitoring.svc.cluster.local:9428/insert/elasticsearch/
       api_version: v8

@@ -3,7 +3,9 @@
 `kubernetes/` is everything Flux reconciles; CI publishes it as the cluster's artifact
 (ADR 0003, [Publishing](#publishing)). `just kubernetes-check` builds it offline with kustomize and Flux, and fails, naming
 the file, when a cluster directory, a `ks.yaml`, an application directory or a variable breaks
-the rules below.
+the rules below, or when a dependency the cluster would never reconcile passes the build;
+`just kubernetes-validate` adds the rules that need the render or the network, schemas and images
+([What the checks refuse](#what-the-checks-refuse)).
 
 ## Layout
 
@@ -17,7 +19,9 @@ the rules below.
 - `apps/base/<namespace>/`: a namespace directory, with `namespace.yaml` and a
   `kustomization.yaml` that sets the namespace and includes `components/common`.
 - `apps/base/<namespace>/<app>/`: an application, its Flux Kustomization in `ks.yaml` and its
-  manifests in `app/`.
+  manifests in `app/`, which is all the artifact generator publishes. A manifest outside `app/`, or
+  in it but not listed by `app/kustomization.yaml` (directly, through a directory or component it
+  lists, as a patch or as a generator's file), is never applied, and the check refuses it.
 - `apps/base/flux-system/artifact-generator/`: publishes one artifact per application.
 - `components/`: Kustomize components. `common` adds the `app-template-defaults` ConfigMap, which
   an app-template HelmRelease opts into through `valuesFrom`; `cnpg-cluster` adds an application's
@@ -49,6 +53,11 @@ spec:
   `<namespace>`, and `path` is the application's own `app/`.
 - `dependsOn`, `wait`, `healthCheckExprs`, `components` and `postBuild.substitute` belong to the
   application. The fields the root sets do not; see below.
+- What `dependsOn` names is an application the cluster's overlay enables, and one that waits: it
+  sets `wait: true`, `healthChecks` or `healthCheckExprs`, so it is Ready only once what it
+  applies is. A dependency on an application a cluster deliberately does not enable is an error:
+  the dependent would never reconcile there, so the dependent is not enabled either, or the
+  dependency is.
 - A new namespace gets its directory: `namespace.yaml` with the Pod Security labels
   ([Pod Security](#pod-security)) and the annotation `kustomize.toolkit.fluxcd.io/prune: disabled`,
   so removing it from the tree does not delete what runs in it.
@@ -88,6 +97,117 @@ child that sets any of these fields without opting out fails the check.
   release gets none of the release defaults.
 - `k8s-gitops/timeout: long` on a child Kustomization: a 10m timeout with every other default
   kept. It does nothing on a child that opted out.
+
+## What the checks refuse
+
+Beyond the layout above, two checks refuse what the cluster would refuse or never reconcile, split
+by what a rule needs:
+
+- `just kubernetes-check` holds every rule that reads only the tree and what kustomize and Flux
+  build from it: the layout, a manifest outside what the artifact carries, and the dependencies.
+  It fetches nothing, and it is the gate of the publish run, in the job that signs
+  ([Publishing](#publishing)), so nothing that job runs comes from the network.
+- `just kubernetes-validate` holds the rules that need the network or the render: schemas and
+  images. It runs `kubernetes-check` first, keeping what Flux builds, and stops when that fails;
+  then `scripts/render`, whose output it reads. It is a check of the `static` group, so it runs on
+  every pull request and every push to `main`, and not in the publish run.
+
+That split is the design, and its cost is this: a tree with a misspelt field or an untagged image
+fails every pull request's `static` group, but the publish run does not refuse it again. Where the
+ruleset does not require a branch to be up to date with `main` before it merges, two pull requests
+that pass apart can still merge into such a tree, and the run that publishes it passes. The control
+is the next run of the validation: the `static` group of that push to `main`, and of every pull
+request after it, fails, naming the file, until a pull request fixes the tree.
+
+On what Flux builds:
+
+- **Dependencies** (`kubernetes-check`), on the root's build, so its patches count. Each
+  `dependsOn` of the Kustomizations the overlay and the cluster directory build (the application
+  Kustomizations, the root, `flux-operator`, `flux-instance`) names one that the same cluster
+  applies: one the overlay lists, or one the cluster directory builds. The Kustomizations an
+  application applies from its own `app/` are not read. It must also wait after the root's
+  patches: `wait: true`, `healthChecks` or `healthCheckExprs`. Otherwise the dependent never
+  reconciles, or starts before its dependency's objects are ready. The message names both
+  Kustomizations and the overlay.
+- **Schemas** (`kubernetes-validate`). Everything Flux builds as `kubernetes-check` builds it,
+  each application from its own `ks.yaml` (enabled or not), each cluster's root and each cluster
+  directory, is validated by kubeconform with unknown fields refused, against the first schema
+  that has its kind: Flux's for the Flux release pinned in `mise.toml`, one made from a
+  CustomResourceDefinition the render holds, or Kubernetes' for the Kubernetes version in
+  `versions.yaml`. The HelmReleases of an application a cluster enables are validated as the
+  render builds them, with the patches the root gives each child, the release defaults among them;
+  those of an application no cluster enables, as its own `ks.yaml` builds them. A misspelt field
+  fails, naming the file, the object and the field. A definition's schema is its version's
+  `openAPIV3Schema`, made as strict as Kubernetes' own: wherever it lists the fields of an object,
+  it refuses any other, unless that object keeps unknown fields
+  (`x-kubernetes-preserve-unknown-fields`) or says what other fields may be; a field the
+  definition defaults is not required, as the API server fills it in before it validates; at the
+  top it also lists `apiVersion`, `kind` and `metadata`, which the API server adds to every
+  definition; OpenAPI's `nullable` becomes JSON Schema's null type. Each schema made is compiled
+  once, by kubeconform on an object of its kind: one that does not compile fails the check, naming
+  the definition, as kubeconform would otherwise take it for no schema. Two different definitions
+  of one kind and version in the render fail the check, and neither is used. Objects of a kind
+  that no schema describes, those whose definition is not in the render (one an operator creates
+  at run time, as Cilium's does, or one applied from a source outside the tree, which the render
+  does not fetch), are counted: the check prints each kind with the number of objects it could not
+  validate (`no schema for GatewayClass (gateway.networking.k8s.io/v1): 1 object`), so a pass
+  never silently means a skip. A kind of a group Kubernetes serves itself (the core group, `apps`,
+  `batch`, `policy`, `autoscaling`, and the `*.k8s.io` groups `rbac.authorization`, `networking`,
+  `storage`, `admissionregistration`, `apiextensions`, `scheduling`, `node`, `coordination`,
+  `certificates`, `discovery`, `events`, `apiregistration`, `flowcontrol.apiserver`, `resource`,
+  `authentication`, `authorization`, `storagemigration`, `internal.apiserver`) or of Flux's with
+  no schema is an error; the kinds of any other group are counted.
+
+  The schemas are fetched at exact versions, never from a moving reference: Flux's from the
+  release asset `crd-schemas.tar.gz` of the pinned Flux release, Kubernetes' a kind at a time from
+  the public `yannh/kubernetes-json-schema` repository at the commit `kubernetes_schemas` in
+  `versions.yaml` names. A `kubernetes` version that commit holds no schemas for fails the check
+  until the commit moves. Renovate's git-refs datasource reads the commit through the
+  `# renovate-ref:` comment above it and proposes the newest commit of that repository's branch
+  whenever the branch moves, whatever the Kubernetes version, in the Kubernetes group with
+  `kubernetes` and the `kubectl` pin. The group keeps patch releases apart from the rest
+  (`separateMinorPatch`), so the schemas commit arrives in the group's pull request with a minor
+  release, and alone otherwise: a patch release of Kubernetes comes in a pull request of its own,
+  whose check fails, when the pinned commit lacks that version's schemas, until the schemas pull
+  request has merged and the patch's runs again. The requests are plain GETs that carry nothing
+  from the tree beyond the kind, group and version of each object whose kind no rendered
+  definition describes, which name the schema file asked for, whether or not it exists. curl and
+  kubeconform run with none of the secrets of the caller's environment (`scripts/lib/tools.sh`).
+  `KUBERNETES_VALIDATE_SCHEMAS`, a directory with `kubernetes/<version>-standalone-strict/` and
+  `flux/`, replaces both sources, as the tests do with their fixtures.
+- **Images** (`kubernetes-validate`). In what `scripts/render` writes, which builds each
+  application as the root patches it, the Helm hooks of the enabled releases included, every image
+  of a container, init container or ephemeral container of a pod spec, wherever an object holds
+  one, and every image an object names in its own `spec.image`, as Prometheus and Alertmanager
+  name the one their operator runs, has a tag other than `latest` or a digest: `sha256` and 64
+  hexadecimal digits, as a reference with any other digest pins nothing. A mutable or missing tag
+  is pulled anew at every upgrade, and a failed pull in a Helm test fails the upgrade, which the
+  default remediation rolls back. A test hook the release does not run (`test.enable` unset or
+  false, or the test excluded by name in `test.filters`) is not pulled and is left out; a hook
+  that is no test runs whatever the release's tests do. The root's defaults set
+  `test.enable: true` on every release and overwrite a release's own value, so a release that must
+  not run a test excludes it by name, as `kubelet-csr-approver` does with its chart's `test-connection`. An
+  exception is one line of `.image-allowlist`: the application, the image as rendered, and the
+  reason, which the check requires. Images an object names anywhere else are not read, and their
+  pins are Renovate's or a change by hand to keep: the image list of the Piraeus operator's
+  ConfigMap, Envoy Gateway's configuration ConfigMap, the Grafana resource's `spec.version` and
+  the FluxInstance's `spec.distribution`.
+
+`kubernetes-validate` runs the render once, so it pulls the charts as `just render-check` does, and
+the `static` group runs both, each pulling them. Sharing them would take a directory that outlives
+one recipe: `just` has none that lasts exactly one run of the group, and a cache kept beyond a run,
+on the CI host's persistent engine, would be one a pull request's code could write for the runs
+after it, so neither keeps one. `RENDER_CHART_CACHE`, set by hand, serves both.
+
+What the tree and the charts hold is data to the validation, a chart's definitions included, which a
+pull request that bumps a chart's version does not show. A group, version or kind reaches a path or
+a schema location only once it has the shape the API server requires of it (a group a DNS subdomain,
+a version a DNS-1035 label, a kind a letter followed by letters and digits); a definition or an
+object without that shape is refused, naming its file, and nothing is made of it. Every record the
+validation reads from a tool's output has each field cleaned of control characters, so no value
+starts another field or record, and an index in it is checked to be a number before it is used.
+`kubernetes-check` hands its builds on as records ended by a NUL byte, which no path or label holds,
+into an empty directory it refuses otherwise.
 
 ## Every child Kustomization is in flux-system
 
@@ -272,10 +392,13 @@ does not define itself.
   `NODE_CIDR` becomes a value the approver cannot parse, so it stops rather than read an empty
   list as every address. Nothing in this repository makes node names resolvable in the cluster's
   DNS, so the approver does not look them up.
-- `metrics-server` serves resource metrics. It verifies each kubelet's serving certificate
-  against the cluster CA, and starts only once `kubelet-csr-approver` is ready, which it names in
+- `metrics-server` serves resource metrics. It verifies each kubelet's serving certificate against
+  the cluster CA, and starts only once `kubelet-csr-approver` is ready, which it names in
   `dependsOn`. Its own `/metrics` is served without authorization, as its chart's ServiceMonitor
-  carries no credential.
+  carries no credential. Its `ks.yaml` sets `wait` and the long timeout: on a new cluster its pods
+  turn ready only once the approver has signed each kubelet's serving certificate, which can take
+  most of the 10m the release defaults give the install, and with the default 3m the Kustomization
+  would report its health check failed and retry every minute until the release is Ready.
 - `spegel` shares images between nodes, serving the image layers containerd keeps on each node,
   which every node's machine configuration has it keep;
   [cluster.md](cluster.md#image-layers-for-spegel) says which images that is, and how a change to
@@ -555,17 +678,62 @@ What is collected, by a collector on every node, control planes included, from f
   both. Each line stays whole, with the node's name in `node` and its service's in
   `talos_service`, and keeps its own time and level where its format has them: the kernel's
   messages, the prefix Go's log package gives machined's, apid's and trustd's lines, JSON such as
-  etcd's, logfmt such as containerd's and the kubelet's klog. Any other line keeps the time it was
-  read.
+  etcd's, logfmt such as containerd's and cri's and the kubelet's klog. Any other line keeps the
+  time it was read.
 
-Two kinds of record are made smaller before they are sent:
+Three kinds of record are made smaller or left out before they are sent:
 
 - the kernel's audit records, the lines of the service `kernel` that the kernel prints as `audit:`
   or `auditd:`, which the kernel's audit subsystem writes, are dropped by the filter
   transform `drop_audit`. Vector counts what a filter drops in
   `vector_component_discarded_events_total` of its own metrics, which Prometheus scrapes from the
-  PodMonitor, so the drop is visible as the series with `component_id="drop_audit"`. The log of
-  Talos's `auditd` service, `/var/log/auditd.log`, is another file and is still shipped;
+  PodMonitor, so the drop is visible as the series with `component_id="drop_audit"`;
+- the audit log of the node, the log of Talos's `auditd` service, `/var/log/auditd.log` and its
+  rotated file, is dropped whole, every line of it, by the filter transform `drop_auditd_log`,
+  counted the same way as the series with `component_id="drop_auditd_log"`. Talos runs SELinux in
+  permissive mode, which [its documentation](https://docs.siderolabs.com/talos/v1.14/security/selinux)
+  gives as the default because some CNI and CSI solutions and extensions are incompatible with
+  enforcing; it also says Talos cannot label the volumes a CSI driver mounts, and that without the
+  label, which a StorageClass can pass as a `context=` mount option, the policy does not let pods
+  access such a volume's contents. In permissive mode the kernel allows an access its policy would
+  deny and logs the denial as an AVC record with `permissive=1`, which names the process and the
+  file; it then holds the permission as granted in its access vector cache, for that source
+  context, target context and class, and logs the same denial again only once the cache no longer
+  holds it. The cache makes room once it holds more entries than its threshold, 512 by default, and
+  is emptied when the policy is loaded again, so where more pairs of contexts and classes are
+  checked than it holds, entries are dropped and their denials logged again
+  ([`security/selinux/avc.c`](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/security/selinux/avc.c?h=v6.18.63)).
+  [Talos's `auditd`](https://github.com/siderolabs/talos/blob/v1.14.6/internal/app/auditd/auditd.go)
+  loads no audit rule, and writes as a line each record the kernel's audit subsystem sends it of
+  the types 1100 to 2999 of
+  [`include/uapi/linux/audit.h`](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/include/uapi/linux/audit.h?h=v6.18.63).
+  An AVC record logged inside a system call, by a process started once auditing was enabled, makes
+  the kernel write that system call's records too when the call returns, with no audit rule needed
+  (`audit_log_start` in
+  [`kernel/audit.c`](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/kernel/audit.c?h=v6.18.63)
+  and `__audit_syscall_exit` in
+  [`kernel/auditsc.c`](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/kernel/auditsc.c?h=v6.18.63)):
+  `SYSCALL`, with `key=(null)` as no rule matched it; if the kernel collected file names for the
+  call, which with no rule loaded it does for the names looked up after the AVC record, `CWD` and a
+  `PATH` record for each name, with a `nametype` such as `PARENT` or `CREATE`; `PROCTITLE`; and
+  `EOE`. Each is a separate line that shares the AVC record's `msg=audit(<time>:<serial>)` id, so
+  one denied access can be several lines of the audit log. The log store is itself a pod, whose
+  claim is of the default storage class, which sets no such mount option, so its writes can produce
+  such records, and a collector that shipped the audit log to the store would give the store records
+  of its own writes, whose storing can produce more: a loop that amplifies by construction, whatever
+  its rate. The collector therefore does not ship the audit log. Dropping only the AVC records with
+  `permissive=1` would leave the other lines of their events in the store, so it would need a
+  `reduce` transform keyed on that id, holding every open event in memory until its `EOE` record or
+  an expiry, where an event cut in two by a restart of the collector would leave records that no
+  longer say what they belong to; and it would drop the denials of every other process all the
+  same. The drop costs the rest of the file: the SELinux denials of every other process on the
+  node, which show what enforcing mode would deny before it is turned on; the line `audit backlog
+  limit reached, some audit events may have been lost`, which Talos's auditd writes when records
+  were lost on their way to it; and any other record the kernel sends it, such as `ANOM_ABEND` for
+  a process that dumps core. They are read on the node with Talos's documented
+  `talosctl --nodes <node> logs auditd`, which no recipe wraps; the repository's scripts run
+  talosctl through `talman talosctl`. It reads the ring of about 1 MiB in which Talos keeps the
+  service's last lines, so it shows no more than that;
 - a pod's labels and annotations, its node's labels and its namespace's labels and annotations are
   not stored one field each: VictoriaLogs makes a field of every name, these maps hold dozens of
   names that say nothing about a line, and labels such as `pod-template-hash` and
@@ -576,7 +744,7 @@ Two kinds of record are made smaller before they are sent:
   `kubernetes.pod_annotations`, `kubernetes.node_labels`, `kubernetes.namespace_labels` and
   `kubernetes.namespace_annotations`, and sets `node` on a pod's record to the node's name, as
   Talos's lines have it. The store's sink takes a pod's records only from `pod_fields` and Talos's
-  lines only from `drop_audit`.
+  lines only from `drop_auditd_log`, which takes them from `drop_audit`.
 
 A record has the fields `_time`, `_msg` and `_stream`. A pod's also has `node`,
 `kubernetes.pod_namespace`, `kubernetes.pod_name`, `kubernetes.pod_node_name`,
@@ -603,10 +771,11 @@ read every file there. On a control plane that includes the API server's audit l
 `Metadata` level: who did what to which object, and when, without request or response bodies, so
 without Secret values. The collector does not ship it: its file source's patterns, `/var/log/*.log`
 and `/var/log/*.log.1`, match files at the top of `/var/log` only, and its pod-log source reads only
-`/var/log/pods`. It does ship the log of Talos's `auditd` service, which every node writes at the
-top, `/var/log/auditd.log`. What keeps the audit log out of the store is this reviewed
-configuration, which `tests/logs.bats` matches against Talos's layout of `/var/log`; who can read it
-through the collector is whoever may run commands in the pods of `monitoring`.
+`/var/log/pods`. The node's own audit log, which every node writes at the top, as
+`/var/log/auditd.log`, matches the patterns and is dropped by `drop_auditd_log` above. What keeps
+the API server's audit log out of the store is this reviewed configuration, which `tests/logs.bats`
+matches against Talos's layout of `/var/log`; who can read it through the collector is whoever
+may run commands in the pods of `monitoring`.
 
 The collector also mounts `/var/lib/vector`, where it keeps its place in each file and a disk buffer
 of 256 MiB. It runs as root, as Talos and the container runtime write their log files as root with
@@ -673,11 +842,14 @@ Reading the logs, with the cluster's kubeconfig:
 `tests/logs.bats` builds both applications as Flux applies them, renders their pinned charts and
 checks each of these. `just vector-check` renders the collector's configuration with
 `scripts/vector-config` and has Vector itself, in the image the collector runs, validate it and run
-its unit tests, `tests/vector/talos-lines.yaml`, which hold a line of each format above, an audit
-line and a pod's record with many labels, and many of its node's. Vector's unit tests cannot see a
-sink, so `tests/logs.bats` checks that each source reaches a sink along one path only, the store's
-through the transforms the unit tests run, and that each scenario's unit test starts at the first
-transform on its path and watches the last. `just logs` runs in `tests/logs.bats` against a
+its unit tests, `tests/vector/talos-lines.yaml`, which hold a line of each format above from each
+service named with it, and one of udevd's, a kernel audit line, the records of one event of the
+node's audit log and a pod's record with many labels, and many of its node's. Vector's unit tests
+cannot see a sink, so `tests/logs.bats` checks that each source reaches a sink along one path only,
+the store's through the transforms the unit tests run, that each scenario's unit test starts at the
+first transform on its path and watches the last, whichever transform that is, and that the unit
+tests find a line of each of those services at the last transform on Talos's path and none of the
+audit log's. `just logs` runs in `tests/logs.bats` against a
 recording kubectl shaped like kubectl v1.37's output. The image
 is `vector_image` in the justfile, pinned by the digest of its image index under a
 `# renovate: datasource=docker depName=…` comment: Renovate's custom manager for the justfile moves
@@ -767,8 +939,7 @@ pod.
   directory, which Helm installs once and never removes with a release, so they stay when the
   application leaves the tree. Flux creates and replaces them on upgrade through the release
   defaults. `ks.yaml` sets `wait` and names `metrics-server`, whose API the chart's Helm test reads;
-  metrics-server's own `ks.yaml` does not set `wait`, so on a new cluster the test can run before
-  that API answers, fail, and use up an install retry.
+  metrics-server's own `ks.yaml` sets `wait` too, so the test runs once that API answers.
 - The chart's three `vpa-test-*` pods run after each install and upgrade, because the cluster's
   Helm releases run their tests. They set no requests, and the chart has no value to set them; they
   are the one exception to every container having requests, and they are left out of the check.
@@ -822,7 +993,15 @@ restricted requires ([Pod Security](#pod-security)).
   `LinstorSatelliteConfiguration`s, the StorageClasses and the VolumeSnapshotClass. It names
   `piraeus-operator` and `snapshot-controller` in `dependsOn`, as the operator's webhooks validate
   its objects and every StorageClass of LINSTOR's driver, and the VolumeSnapshotClass needs the
-  snapshot definitions ([Resource definitions](#resource-definitions)).
+  snapshot definitions ([Resource definitions](#resource-definitions)). Its `ks.yaml` sets `wait`
+  and health check expressions, as the operator gives these kinds no Ready condition and no
+  `status.observedGeneration`, so kstatus alone would count them Current at once: it is Ready once
+  what it applies exists, the operator reports the `LinstorCluster` `Available`, its controller
+  answering, and every `LinstorSatelliteConfiguration` `Applied` to the satellites it selects,
+  each at the generation the object holds. That is what the applications that name it in
+  `dependsOn` wait for. It does not wait for every satellite to run, so a node down does not hold
+  them back; a satellite that never starts shows as the storage cluster's `Configured` condition,
+  which the check leaves out, and in the satellite counts of its status.
 
 ### What runs
 
@@ -1584,7 +1763,8 @@ When that tree does not build, the run fails, nothing is pushed, signed or tagge
 stays on the last tagged artifact until a run for a later commit that changes `kubernetes/` or the
 workflow, or a manual run, publishes a tree that does. The gate is `just kubernetes-check`, the
 offline build, and no more: `just render-check` pulls charts from the network and needs helm in the
-job that signs, so it stays out of that job.
+job that signs, so it stays out of that job, and so does `just kubernetes-validate`, which pulls the
+charts and fetches schemas as well ([What the checks refuse](#what-the-checks-refuse)).
 
 Every workflow installs its tools with the same pinned `mise-action` at an exact mise release. A
 workflow whose token can write, `publish`, `tools-image` and `render-comment`, also gives the action the

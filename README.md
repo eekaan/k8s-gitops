@@ -32,11 +32,12 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
   (`just talos-check`: every node's machine configuration rendered from the template, the patches
   and fixture node data, and validated, offline), the offline build of `kubernetes/`, its render
   with every chart expanded (`just render-check`, which pulls the charts from their public
-  registries), the log collector's configuration (`just vector-check`: Vector itself validates it
-  and runs its unit tests, in the image the collector runs, pinned by digest, so it needs Docker
-  too), and gitleaks over the committable files and the git history reachable from `HEAD`, so a
-  clone and a CI checkout are judged on the same commits. The groups `tests-1` to `tests-3` each
-  run a third of the bats tests.
+  registries), the schemas and images of what it builds and renders (`just kubernetes-validate`,
+  which pulls the charts as well and fetches the schemas), the log collector's configuration
+  (`just vector-check`: Vector itself validates it and runs its unit tests, in the image the
+  collector runs, pinned by digest, so it needs Docker too), and gitleaks over the committable
+  files and the git history reachable from `HEAD`, so a clone and a CI checkout are judged on the
+  same commits. The groups `tests-1` to `tests-3` each run a third of the bats tests.
 - The groups are the dependencies of the `checks` recipe, and a group's checks are its own
   dependencies; a new check goes into exactly one group, and then runs in `just checks`, in
   `just ci` and in CI.
@@ -83,8 +84,14 @@ The repository checks:
 
 - `just tools-check` fails when a pinned tool is missing or its binary reports a different version.
 - `just kubernetes-check` builds `kubernetes/` offline with kustomize and Flux and fails when an
-  application, a `ks.yaml` or a variable breaks the layout in `docs/kubernetes.md`. The publish
-  run repeats it on the commit it publishes and publishes nothing when it fails.
+  application, a `ks.yaml` or a variable breaks the layout in `docs/kubernetes.md`, a manifest is
+  outside what the artifact carries, or a `dependsOn` names an application the cluster does not
+  enable or one that does not wait. The publish run repeats it on the commit it publishes and
+  publishes nothing when it fails.
+- `just kubernetes-validate` runs `just kubernetes-check`'s builds and the render, and fails when an
+  object Flux builds has a field its schema lacks or an image of the render has no tag other than
+  `latest` and no digest. It fetches the charts and the schemas, so the publish run does not run
+  it (`docs/kubernetes.md`, What the checks refuse).
 - `just check-literals` fails when a file git would commit, tracked or untracked and not ignored,
   holds an IPv4 literal outside the documentation ranges, loopback, `0.0.0.0`, the metadata
   address and netmasks, unless `.address-allowlist` declares it with a reason. It skips the

@@ -1,0 +1,10 @@
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: hooked
+spec:
+  interval: 12h
+  url: oci://charts.example.invalid/hooked
+  ref:
+    tag: 1.0.0

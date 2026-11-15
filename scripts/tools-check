@@ -26,6 +26,8 @@ version_command() {
     cosign) cmd=(cosign version) ;;
     kyverno) cmd=(kyverno version) ;;
     gitleaks) cmd=(gitleaks version) ;;
+    # kubeconform has no --version flag.
+    kubeconform) cmd=(kubeconform -v) ;;
     *) cmd=("$1" --version) ;;
   esac
 }

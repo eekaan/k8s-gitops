@@ -1,0 +1,18 @@
+---
+image: registry.example.invalid/hooked:1.0.0
+# The image of the test hook; empty renders none.
+testImage: ""
+# The image of a hook that runs before each upgrade; empty renders none.
+upgradeImage: ""
+# The image of a bare Pod that is a test hook; empty renders none.
+podTestImage: ""
+# The image of an init container of the Deployment; empty renders none.
+initImage: ""
+# The image a Widget names in its own spec.image; empty renders none.
+widgetImage: ""
+# A definition the chart renders of the group, kind and version given; empty renders none.
+definitionGroup: ""
+definitionKind: ""
+definitionVersion: ""
+# Whether the chart renders a definition whose schema does not compile.
+brokenDefinition: false

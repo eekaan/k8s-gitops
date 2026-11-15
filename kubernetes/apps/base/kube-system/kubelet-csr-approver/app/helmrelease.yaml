@@ -15,6 +15,13 @@ spec:
   chartRef:
     kind: OCIRepository
     name: kubelet-csr-approver
+  # The root's defaults run each release's Helm tests. The chart's only test pulls busybox with no
+  # tag, which moves, and a failed pull fails the upgrade and rolls the approver back. The test is
+  # excluded by name: spec.test.enable is overwritten by those defaults.
+  test:
+    filters:
+      - name: kubelet-csr-approver-test-connection
+        exclude: true
   valuesFrom:
     - kind: ConfigMap
       name: kubelet-csr-approver-values
