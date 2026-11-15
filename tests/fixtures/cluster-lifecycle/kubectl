@@ -10,6 +10,7 @@
 #                     heartbeat is the current time; without it, a heartbeat from long ago
 #   cordoned.<hostname>  the node is unschedulable: cordon and drain make it so, uncordon undoes it
 #   drain-fails       kubectl drain cordons the node, cannot evict a pod and fails
+#   drain-unreachable kubectl drain cannot reach the API, and its error names the API server's address
 #   kube-proxy        a kube-proxy pod runs in kube-system
 #   pods              more pods, one per line as <namespace> <name> <phase> [<node> [<reason>]], on
 #                     cp-1 when no node is given; kubectl delete pod removes them
@@ -228,6 +229,10 @@ case $args in
     echo "node/$2 cordoned"
     ;;
   " drain "*)
+    if listed drain-unreachable; then
+      echo "Unable to connect to the server: dial tcp 198.51.100.66:6443: connect: connection refused" >&2
+      exit 1
+    fi
     : > "$state/cordoned.$2"
     echo "node/$2 cordoned"
     # Evicting takes a while, as a drain does.

@@ -2,7 +2,9 @@
 # Takes an etcd snapshot of a cluster and keeps it, encrypted, in the etcd backup bucket,
 # <BACKUP_BUCKET_PREFIX>-etcd: take_etcd_snapshot in scripts/lib/snapshot.sh, which the upgrade
 # recipes run as well, says how. Prints one line: the cluster, the object's name and its size.
-# Nothing is left on disk, whether the run succeeds, fails or is interrupted.
+# Nothing is left on disk, whether the run succeeds, fails or is interrupted. Of rclone's errors only
+# the reason is shown, with places and keys replaced, and with CI set none of it, but the name of the
+# file that keeps it (scripts/lib/errors.sh).
 # Usage: scripts/cluster-snapshot [cluster]
 set -euo pipefail
 umask 077

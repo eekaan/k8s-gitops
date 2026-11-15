@@ -1,10 +1,13 @@
 # shellcheck shell=bash
 # Shared by the scripts that reach the object storage through its S3 API: the key sets, the backup
 # buckets' roles, the one way rclone is run against the store, and the etcd snapshots in the etcd
-# bucket. Builds on scripts/lib/infra.sh.
+# bucket. Builds on scripts/lib/infra.sh, and on scripts/lib/errors.sh for what is shown of rclone's
+# errors.
 
 # shellcheck source=scripts/lib/infra.sh
 . "$(dirname "${BASH_SOURCE[0]}")/infra.sh"
+# shellcheck source=scripts/lib/errors.sh
+. "$(dirname "${BASH_SOURCE[0]}")/errors.sh"
 
 # The backup buckets are named <BACKUP_BUCKET_PREFIX>-<role>, one per role.
 s3_backup_roles=(etcd openbao volsync postgres)
@@ -134,16 +137,24 @@ s3_owned_buckets() {
   done <<< "$listing"
 }
 
-# s3_etcd_snapshots CLUSTER: CLUSTER's etcd snapshots in the etcd bucket,
+# s3_etcd_snapshots CLUSTER [missing-bucket-ok]: CLUSTER's etcd snapshots in the etcd bucket,
 # <BACKUP_BUCKET_PREFIX>-etcd, as the state key lists them: the objects directly under CLUSTER/ named
 # as a snapshot is, each as its name and size in bytes, one per line, newest first; nothing when
-# there is none. When the bucket cannot be listed, returns rclone's status and prints nothing of
-# rclone's: 3 when the bucket does not exist, while a prefix without objects lists as empty.
+# there is none. When the bucket cannot be listed, returns rclone's status, 3 when the bucket does
+# not exist, while a prefix without objects lists as empty. Prints nothing of rclone's output but
+# its reason, on standard error, as scripts/lib/errors.sh shows errors: not for the missing bucket
+# when the caller says it may be missing.
 s3_etcd_snapshots() {
-  local listing
-  listing=$(s3_rclone state lsjson --files-only "store:$BACKUP_BUCKET_PREFIX-etcd/$1/" 2> /dev/null) || return
+  local status=0
+  run_keeping_errors s3_rclone state lsjson --files-only "store:$BACKUP_BUCKET_PREFIX-etcd/$1/" || status=$?
+  if ((status != 0)); then
+    if ((status != 3)) || [[ ${2-} != missing-bucket-ok ]]; then
+      report_errors rclone
+    fi
+    return "$status"
+  fi
   jq -r --arg name "$s3_snapshot_name_re" \
-    '[.[] | select(.Name | test($name))] | sort_by(.Name) | reverse[] | "\(.Name) \(.Size)"' <<< "$listing"
+    '[.[] | select(.Name | test($name))] | sort_by(.Name) | reverse[] | "\(.Name) \(.Size)"' <<< "$last_output"
 }
 
 # s3_create_buckets KEYSET NAME...: creates each bucket NAME that KEYSET's project does not own

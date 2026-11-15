@@ -2027,7 +2027,13 @@ EOF
 
       [ "$status" -ne 0 ]
       [[ $output == *"$recipe: $expected"* ]]
-      for shown in AccessDenied marker-endpoint marker-prefix; do
+      # A failed upload says why, as cluster-snapshot's does, and names none of the places and keys.
+      if [[ $failure == uploading ]]; then
+        [[ $output == *"AccessDenied"* ]]
+      else
+        [[ $output != *"AccessDenied"* ]]
+      fi
+      for shown in marker-endpoint marker-prefix marker-state; do
         [[ $output != *"$shown"* ]]
       done
       [ -n "$(calls '^talman etcd snapshot ')" ]

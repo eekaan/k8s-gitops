@@ -63,6 +63,7 @@ setup() {
     AWS_ACCESS_KEY_ID=marker-state-access-key-id
     AWS_SECRET_ACCESS_KEY=marker-state-secret-key
     TMPDIR="$WORK"
+    TALOS_WAIT=5
   )
   reset_environment
 }
@@ -130,6 +131,12 @@ recipe() {
 #   apply-fails     talman apply --bootstrap fails
 #   stale           hostnames whose kubelet has not reported since the reset: their Ready condition
 #                   is the one etcd held, from before
+#   linstor-volumes how many PersistentVolumes of LINSTOR's CSI driver kubectl lists, beside two of
+#                   other kinds
+#   api-down        kubectl cannot reach the API, and its error names the API server's address
+#   forbidden       kubectl reaches the API, which refuses it: Forbidden to list volumes
+#   down            addresses of the nodes that do not answer on the Talos API port: those talman
+#                   reset with --reboot=false, which shuts a node down instead of rebooting it
 # talman records what it bootstraps from: the file's path in recovered-from and, as it was at that
 # moment, its content in recovered. Like talman, the fake names the nodes it reaches by address.
 fake_cluster() {
@@ -197,6 +204,21 @@ case "$1" in
       mapfile -t selected < <("$YQ" '.nodes[].hostname' "$TALMAN_CONFIG/talman.yaml")
     fi
     printf '%s\n' "${selected[@]}" | sort -u > "$STATE/reset-nodes"
+    # talman reset reboots the nodes it resets unless --reboot=false, which shuts them down: they
+    # then answer nothing until someone starts them.
+    reboot=1
+    for ((i = 0; i < ${#args[@]}; i++)); do
+      case ${args[i]} in
+        --reboot=false | --reboot=0) reboot=0 ;;
+        --reboot=true | --reboot=1) reboot=1 ;;
+        --reboot) [[ ${args[i + 1]-} != false ]] || reboot=0 ;;
+      esac
+    done
+    if ((!reboot)); then
+      while IFS= read -r node; do
+        NODE=$node "$YQ" '.nodes[] | select(.hostname == strenv(NODE)) | .ipAddress' "$TALMAN_CONFIG/talman.yaml"
+      done < "$STATE/reset-nodes" >> "$STATE/down"
+    fi
     echo "== resetting $(paste -sd, "$STATE/reset-nodes") at $addresses"
     ;;
   apply)
@@ -248,6 +270,23 @@ esac
 EOF
   fake_tool kubectl <<'EOF'
 printf '%s\n' "kubectl $*" >> "$RECORD/argv"
+if [[ -e $STATE/api-down ]]; then
+  echo "Unable to connect to the server: dial tcp 198.51.100.66:6443: connect: connection refused" >&2
+  exit 1
+fi
+if [[ -e $STATE/forbidden && "${1-} ${2-}" == "get persistentvolumes" ]]; then
+  echo 'Error from server (Forbidden): persistentvolumes is forbidden: User "admin" cannot list resource "persistentvolumes" at the cluster scope' >&2
+  exit 1
+fi
+if [[ "${1-} ${2-}" == "get persistentvolumes" ]]; then
+  items=('{"metadata": {"name": "local-volume-1"}, "spec": {"local": {"path": "/var/mnt/local"}}}')
+  items+=('{"metadata": {"name": "pvc-cinder-1"}, "spec": {"csi": {"driver": "cinder.csi.openstack.org", "volumeHandle": "marker-volume-handle"}}}')
+  for ((i = 1; i <= $(cat "$STATE/linstor-volumes" 2> /dev/null || echo 0); i++)); do
+    items+=("{\"metadata\": {\"name\": \"pvc-linstor-$i\"}, \"spec\": {\"csi\": {\"driver\": \"linstor.csi.linbit.com\", \"volumeHandle\": \"marker-volume-handle\"}}}")
+  done
+  printf '{"apiVersion": "v1", "kind": "List", "items": [%s]}\n' "$(IFS=,; echo "${items[*]}")"
+  exit 0
+fi
 if [[ "${1-} ${2-}" != "get nodes" ]]; then
   echo "unexpected call: kubectl $*" >&2
   exit 1
@@ -268,7 +307,7 @@ EOF
   # The nodes answer a connection to the Talos API port only.
   fake_tool timeout <<'EOF'
 printf '%s\n' "timeout $*" >> "$RECORD/argv"
-[[ $* == *"/dev/tcp/"*50000* ]]
+[[ $* == *"/dev/tcp/"*50000* ]] && ! grep -qxF -- "${!#}" "$STATE/down" 2> /dev/null
 EOF
   fake sleep < /dev/null
   for tool in openstack helm; do
@@ -435,12 +474,104 @@ resets_or_bootstraps() {
 
   [ "$status" -ne 0 ]
   [[ $output == *"cluster-snapshot: failed while uploading the encrypted snapshot to the etcd bucket"* ]]
-  for shown in AccessDenied marker-endpoint marker-prefix; do
+  # The reason the S3 client gave is shown, and none of the places and keys it names.
+  [[ $output == *"AccessDenied"* ]]
+  for shown in marker-endpoint marker-prefix marker-state; do
     [[ $output != *"$shown"* ]]
   done
   [ -n "$(calls '^rclone copyto ')" ]
   [ -z "$(find "$STORE" -type f)" ]
   nothing_left
+}
+
+@test "A failed S3 request says why, without an address, a bucket or a key" {
+  # A repository with this repository's ignore rules, to see which files git ignores.
+  export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+  git init -q "$REPO"
+  cp "$ROOT/.gitignore" "$REPO/.gitignore"
+  put_snapshot 20261101T000000Z.snapshot.age
+  # Each way the store can fail: denied, on a listing, a download and an upload; a bucket that is
+  # not there; and an endpoint whose name does not resolve.
+  ways=(list-denied download-denied upload-denied no-bucket lookup)
+  for ci in '' true; do
+    for way in "${ways[@]}"; do
+      echo "ci=$ci $way"
+      reset_environment
+      [[ -z $ci ]] || with CI=true
+      rm -rf "${FAILS:?}"/*
+      mkdir -p "$STORE/$BUCKET"
+      put_snapshot 20261101T000000Z.snapshot.age
+      case $way in
+        list-denied) : > "$FAILS/list" && reason='AccessDenied' ;;
+        download-denied) : > "$FAILS/download" && reason='AccessDenied' ;;
+        upload-denied) : > "$FAILS/upload" && reason='AccessDenied' ;;
+        no-bucket) rm -r "${STORE:?}/$BUCKET" && reason='directory not found' ;;
+        lookup) : > "$FAILS/lookup" && reason='no such host' ;;
+      esac
+      rm -f "$CLUSTER"/clusterconfig/*.errors.log
+      next_second
+
+      case $way in
+        download-denied) recipe cluster-restore latest --yes < /dev/null ;;
+        list-denied | no-bucket | lookup)
+          recipe cluster-restore latest --yes < /dev/null
+          ;;
+        upload-denied) recipe cluster-snapshot ;;
+      esac
+
+      [ "$status" -ne 0 ]
+      for place in marker-endpoint marker-prefix marker-state 192.0.2.53 "$ENDPOINT"; do
+        [[ $output != *"$place"* ]]
+      done
+      if [[ -z $ci ]]; then
+        [[ $output == *"$reason"* ]]
+      else
+        # With CI set the reason is kept in a file git ignores, and only the file is named.
+        [[ $output != *"$reason"* ]]
+        [[ $output == *"errors are in talos/lab-sto2/clusterconfig/"*".errors.log"* ]]
+        grep -q "$reason" "$CLUSTER"/clusterconfig/*.errors.log
+        git -C "$REPO" check-ignore -q "$CLUSTER"/clusterconfig/*.errors.log
+      fi
+      nothing_left
+    done
+  done
+
+  # The listing that fails on its own, which cluster-snapshots shares with them, shows its reason
+  # and with CI set keeps it in the file.
+  for ci in '' true; do
+    reset_environment
+    [[ -z $ci ]] || with CI=true
+    rm -rf "${FAILS:?}"/*
+    rm -f "$CLUSTER"/clusterconfig/*.errors.log
+    : > "$FAILS/lookup"
+
+    recipe cluster-snapshots
+
+    [ "$status" -ne 0 ]
+    [[ $output != *marker-endpoint* && $output != *192.0.2.53* ]]
+    if [[ -z $ci ]]; then
+      [[ $output == *"no such host"* ]]
+    else
+      [[ $output != *"no such host"* ]]
+      [[ $output == *"errors are in talos/lab-sto2/clusterconfig/cluster-snapshots.errors.log"* ]]
+      grep -q "no such host" "$CLUSTER/clusterconfig/cluster-snapshots.errors.log"
+      git -C "$REPO" check-ignore -q "$CLUSTER/clusterconfig/cluster-snapshots.errors.log"
+    fi
+  done
+}
+
+@test "A failed S3 request shows at most eight lines of the client's errors, each cut at 300 characters" {
+  reset_environment
+  rm -rf "${FAILS:?}"/*
+  : > "$FAILS/noisy"
+
+  recipe cluster-restore latest --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [ "$(grep -c '^cluster-restore: rclone: ' <<< "$output")" -eq 8 ]
+  [[ $output == *"failure marker a"* && $output != *"failure marker h"* ]]
+  long=$(printf 'z%.0s' {1..300})
+  [[ $output == *"$long"* && $output != *"${long}z"* ]]
 }
 
 @test "A failed or interrupted snapshot leaves nothing on disk" {
@@ -476,6 +607,10 @@ resets_or_bootstraps() {
 
   [ "$status" -ne 0 ]
   [[ $output == *"the etcd bucket must exist; just infra-backup-buckets creates it"* ]]
+  # The listing before the upload may find the bucket missing without a word; the upload's own
+  # reason is what is shown.
+  [[ $output == *"NoSuchBucket"* ]]
+  [[ $output != *"directory not found"* ]]
   [ "$(calls '^rclone copyto ' | wc -l)" -eq 1 ]
   [[ " $(calls '^rclone copyto ') " == *" --s3-no-check-bucket "* ]]
   [ -z "$(find "$STORE" -mindepth 1)" ]
@@ -676,6 +811,107 @@ resets_or_bootstraps() {
   cmp "$STATE/recovered" "$STATE/older"
   [[ $output == *"20261102T000000Z.snapshot.age"* ]]
   nothing_left
+}
+
+@test "A restore reboots the control planes it resets" {
+  put_snapshot 20261101T000000Z.snapshot.age
+
+  recipe cluster-restore latest --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  # The reset says that it reboots, and the nodes answer on the Talos API port afterwards: a reset
+  # that shuts them down leaves them silent.
+  reset=$(calls '^talman reset( |$)')
+  [[ " $reset " == *" --reboot=true "* ]]
+  [ ! -e "$STATE/down" ]
+  [ "$(calls '^timeout .*/dev/tcp/' | wc -l)" -ge 12 ]
+  [ -n "$(calls '^talman apply ')" ]
+}
+
+@test "A restore counts the volumes first and says what it does to them" {
+  put_snapshot 20261101T000000Z.snapshot.age
+  mkdir -p "$CLUSTER/clusterconfig"
+  : > "$CLUSTER/clusterconfig/kubeconfig"
+
+  for count in 3 1 0; do
+    echo "$count"
+    echo "$count" > "$STATE/linstor-volumes"
+    clear_record
+
+    recipe cluster-restore latest <<< no
+
+    [ "$status" -ne 0 ]
+    # What the recipe printed before it asked for the cluster's name.
+    asked=${output%%"Type lab-sto2 to reset and restore it"*}
+    [ "$asked" != "$output" ]
+    case $count in
+      1) [[ $asked == *"lab-sto2 has 1 PersistentVolume of LINSTOR"* ]] ;;
+      0) [[ $asked == *"lab-sto2 has no PersistentVolume of LINSTOR"* ]] ;;
+      *) [[ $asked == *"lab-sto2 has $count PersistentVolumes of LINSTOR"* ]] ;;
+    esac
+    # What it does to them, and where to read on.
+    [[ $asked == *"LINSTOR keeps its database in the Kubernetes API"* ]]
+    [[ $asked == *"a volume created after the snapshot is orphaned on the workers"* ]]
+    [[ $asked == *"a volume deleted after it comes back"* ]]
+    [[ $asked == *"etcd-restore.md"* ]]
+    # By number, not by name, and nothing of the volumes but that.
+    for shown in pvc-linstor pvc-cinder local-volume marker-volume-handle; do
+      [[ $output != *"$shown"* ]]
+    done
+    [ -n "$(calls '^kubectl get persistentvolumes ')" ]
+    [ -z "$(resets_or_bootstraps)" ]
+  done
+
+  # The count comes with --yes too, and the restore goes on.
+  echo 2 > "$STATE/linstor-volumes"
+  clear_record
+
+  recipe cluster-restore latest --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"lab-sto2 has 2 PersistentVolumes of LINSTOR"* ]]
+  [[ $output != *"Type lab-sto2"* ]]
+
+  # An API that does not answer cannot be counted, which is said, without its address.
+  : > "$STATE/api-down"
+  clear_record
+
+  recipe cluster-restore latest <<< no
+
+  [ "$status" -ne 0 ]
+  asked=${output%%"Type lab-sto2 to reset and restore it"*}
+  [ "$asked" != "$output" ]
+  [[ $asked == *"cannot be counted"* ]]
+  [[ $asked == *"LINSTOR keeps its database in the Kubernetes API"* ]]
+  [[ $output != *198.51.100.66* ]]
+  [ -z "$(resets_or_bootstraps)" ]
+  rm "$STATE/api-down"
+
+  # An API that answers and refuses is not one that does not answer.
+  : > "$STATE/forbidden"
+  clear_record
+
+  recipe cluster-restore latest <<< no
+
+  [ "$status" -ne 0 ]
+  asked=${output%%"Type lab-sto2 to reset and restore it"*}
+  [[ $asked == *"cannot be counted"*"not allowed to list them"* ]]
+  [[ $asked != *"does not answer"* ]]
+  [[ $asked == *"LINSTOR keeps its database in the Kubernetes API"* ]]
+  [ -z "$(resets_or_bootstraps)" ]
+  rm "$STATE/forbidden"
+
+  # Without a kubeconfig it cannot be asked either, and kubectl is not run.
+  rm "$CLUSTER/clusterconfig/kubeconfig"
+  clear_record
+
+  recipe cluster-restore latest <<< no
+
+  [ "$status" -ne 0 ]
+  asked=${output%%"Type lab-sto2 to reset and restore it"*}
+  [[ $asked == *"cannot be counted, as it has no kubeconfig"* ]]
+  [[ $asked != *"does not answer"* ]]
+  [ -z "$(calls '^kubectl ')" ]
 }
 
 @test "A snapshot this key cannot decrypt stops the restore before anything is reset" {
@@ -977,4 +1213,13 @@ EOF
   grep -q '== resetting cp-1' "$CLUSTER/clusterconfig/cluster-restore.log"
   grep -q 'bootstrapping etcd' "$CLUSTER/clusterconfig/cluster-restore.log"
   [[ $output != *"reaching the nodes"* ]]
+}
+
+@test "the storage operator's documentation is linked at the version the cluster pins" {
+  pinned=$(yq '.spec.ref.tag' "$ROOT/kubernetes/apps/base/piraeus-datastore/piraeus-operator/app/ocirepository.yaml")
+  [[ $pinned =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+  for file in scripts/cluster-restore docs/runbooks/etcd-restore.md; do
+    links=$(grep -o 'piraeus-operator/blob/[^/]*/' "$ROOT/$file" | sort -u)
+    [ "$links" = "piraeus-operator/blob/v$pinned/" ]
+  done
 }
