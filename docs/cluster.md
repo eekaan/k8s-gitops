@@ -241,7 +241,73 @@ range only ([The node firewall](#the-node-firewall)): Prometheus's scrapes arriv
 of the node its pod runs on, or from the pod's own address when that node is the control plane
 itself. Nothing outside the cluster reaches them, also not on a node's floating address.
 `just cluster-talos` rolls the patch out; until it has, the three targets are down in Prometheus and
-their alerts fire.
+their alerts fire. The controller manager and the scheduler take their new arguments as soon as
+Talos has restarted them; etcd serves 2381 from its next start, which is the control plane's next
+reboot ([A change that needs a reboot](#a-change-that-needs-a-reboot)): until then its etcd target
+is down and `cluster-check` fails on it. If an etcd alert fires on a healthy cluster, read the
+`kube-etcd` target on the control plane in Prometheus; a target that is down while `talosctl etcd
+status` is healthy means that control plane has not rebooted since the patch reached it, and
+`just cluster-reboot <node>` fixes it.
+
+## A change that needs a reboot
+
+Talos applies a machine configuration to the running node without a reboot
+([Talos](https://docs.siderolabs.com/talos/v1.14/configure-your-talos-cluster/system-configuration/editing-machine-configuration)),
+but some of it is read only when a service starts, and Talos does not restart the service:
+
+- `cluster.etcd`: etcd's image, extra arguments, such as `listen-metrics-urls`, and advertised and
+  listen subnets. Talos does not restart etcd on a change, so the node runs the old setting until
+  it reboots.
+- Kernel modules (`machine.kernel.modules`, `KernelModuleConfig`): a module removed stays loaded and
+  a loaded one keeps its parameters until the node reboots. A module added is loaded at once.
+- Environment variables (`machine.env`, `EnvironmentConfig`): running services keep theirs until
+  they restart.
+- The sandbox (`SecurityProfileConfig`).
+- Volume encryption keys: a new key re-encrypts the volume at the next reboot.
+
+The patches in `talos/patches/` set the first two, and `just cluster-talos` reads them back. For
+each node whose dry run shows a change, a diff talman did not show included, it reads from the
+node's Talos API, through `talman talosctl get`, what Talos derives from them: etcd's configuration
+(`EtcdConfigs.etcd.talos.dev`, on a control plane) and the kernel modules it loads with their
+parameters (`KernelModuleSpecs.runtime.talos.dev`). Neither holds a secret. It reads them before it
+applies the configuration and again once the node runs it; a node on which they differ runs the old
+setting until it reboots. The diff does not decide it: a unified diff shows three lines around a
+change, not the section that holds them. The other three are not read back, as their values can be
+secrets; no patch sets them, and a test fails when one does. The kubelet, the API server, the
+controller manager and the scheduler, which the patches also configure, are not on the list: Talos'
+page names none of them, but it calls its own list not exhaustive, so a setting found to need a
+reboot is added to the list above `reboot_state` in `scripts/lib/cluster.sh`, which holds it with
+the citation. A test fails when the version in that citation is not the Talos minor version in
+`versions.yaml`. The page also names `UnattendedInstallConfig` and `machine.install`, which
+`talos/patches/all/install.yaml` sets, as used only when Talos installs or upgrades itself, with
+no effect on an installed node even after a reboot: they are not on the list, and
+`just cluster-upgrade` is what applies them.
+
+Once the nodes keep the configuration, the rollout names each node that runs an old setting, saying
+what it runs until it reboots and the recipe that reboots it, for example `cp-1 runs etcd as it was
+started until it reboots; reboot it with: just cluster-reboot cp-1`. Reboot the control planes one
+at a time: `cluster-reboot` reboots a control plane only while etcd has every control plane as a
+healthy member, and returns once the node is Ready again and etcd has its member back. A change to
+nothing on the list prints nothing about a reboot. A dry run that shows changes in no node's block
+that reads as the pinned talman prints one, as another talman version's might, leaves the recipe
+unable to tell which nodes change: it says so, and that it cannot say whether any needs a reboot,
+and applies the configuration; with `--reboot` it applies nothing. A node whose Talos API does not
+answer with those settings, before or after, is named as one it could not read, not passed over. A
+run that stops after some nodes took the configuration, with `--first` or when `talman apply` fails
+partway, names those of them that need a reboot, as a later run finds nothing to change on them and
+would not. A node that took such a change in an earlier run and has not rebooted since is not named
+again: what Talos holds for it already matches the configuration, and says nothing of what its etcd
+was started with; its etcd target, down in Prometheus, does ([The control planes'
+metrics](#the-control-planes-metrics)).
+
+With `--reboot` the recipe names, before it asks for the cluster's name and applies anything, the
+nodes the dry run shows a change on as those it reboots if they then run an old setting. It reboots
+those that do itself, through `scripts/cluster-reboot`, one at a time, once every node has kept the
+configuration, and stops at the first that does not come back, Ready and with its etcd member,
+naming the nodes it did not reboot; `--tolerate <seconds>` is passed to each `cluster-reboot`, for
+the interruption of the API a control plane's reboot causes behind its load balancer. A reboot is
+not the default: it takes a control plane out of etcd and the API load balancer for a few minutes,
+and the operator says so by passing `--reboot`.
 
 ## The node firewall
 
@@ -400,13 +466,16 @@ reaches them, and neither does a node without machine configuration. Each, with 
 
 ### Rolling it out
 
-A configuration that changes what a node admits can cut the node off from the operator and from
-the other nodes. `just cluster-talos --first <node>` rolls it out so that it cannot: after the dry
-run and the confirmation, `just cluster-check` must pass, and then the named node, followed by
-every other node the configuration changes in `talman.yaml`'s order, is applied alone in Talos' try
-mode ([Talos](https://docs.siderolabs.com/talos/v1.14/configure-your-talos-cluster/system-configuration/editing-machine-configuration)),
-which reverts the node by itself to the configuration it had five minutes after the apply, without
-a reboot, unless another configuration is applied first. Within that window, from the operator's
+A configuration that changes what a node admits can cut the node off from the operator and from the
+other nodes. `just cluster-talos --first <node>` rolls it out so that it cannot: after the dry run
+and the confirmation, `just cluster-check` must pass, its check of the scrape targets of the
+cluster's own components included, so while one is down, as a control plane's etcd target is until
+it reboots after a change to etcd's metrics, the rollout applies nothing; and then the named node,
+followed by every other node the configuration changes in `talman.yaml`'s order, is applied alone in
+Talos' try mode
+([Talos](https://docs.siderolabs.com/talos/v1.14/configure-your-talos-cluster/system-configuration/editing-machine-configuration)),
+which reverts the node by itself to the configuration it had five minutes after the apply, without a
+reboot, unless another configuration is applied first. Within that window, from the operator's
 machine, each of these must pass, in this order:
 
 1. The node's Talos API reports that the configuration is in effect, which also says it answers.
@@ -420,8 +489,11 @@ machine, each of these must pass, in this order:
    health port.
 5. For a control plane, its etcd member and another control plane's, each asked through its own
    Talos API, follow the same leader in the same term, vote and report no error, such as having no
-   leader, and the other control plane lists the node's member. talosctl's table is read by
-   position, so one that is not its twelve columns with `ERRORS` last fails the check.
+   leader, and the other control plane's member lists exactly the control planes of `talman.yaml`,
+   the node's among them: a member etcd holds besides them, as of a control plane removed without
+   its member, counts toward its quorum, and the check names it, or one missing, by its hostname.
+   talosctl's table is read by position, so one that is not its twelve columns with `ERRORS` last
+   fails the check.
 6. The node is still Ready 65 seconds after the apply: Kubernetes' node lifecycle controller marks a
    node not Ready once its kubelet has not renewed its lease for `node-monitor-grace-period`,
    50 seconds by default, and looks every 5 seconds, and the kubelet renews its lease every 10
@@ -448,7 +520,8 @@ machine, each of these must pass, in this order:
    never answered, as it does not when the firewall drops it, which of its checks were still
    failing, or that it stopped answering at its own address once ready.
 8. `just cluster-check` passes: the Kubernetes API through the load balancer, every node Ready, the
-   pods of `kube-system` running and a pod's logs fetched through its kubelet.
+   pods of `kube-system` running, a pod's logs fetched through its kubelet and no scrape target of
+   the cluster's own components down.
 9. The node's Talos API still reports the configuration in effect. Talos reverts a tried
    configuration once and for all, so one still in effect was in effect throughout the checks.
 
@@ -636,17 +709,20 @@ out of the artifact, which is built from `kubernetes/`.
   `clusterconfig/kubeconfig`, with mode 0600, and points it at `https://KUBE_API_ADDRESS:6443`:
   talman writes the cluster endpoint, the load balancer's address on the node network, which only
   the nodes reach. It prints the file's path. The recipes that use the cluster read it from there.
-- `just cluster-talos [cluster] [--onboard] [--yes]` rolls the configuration out: the cluster's
-  `talman.yaml` and the patches it lists, as they are now. It waits for every node as
-  `cluster-bootstrap` does, then shows what `talman apply --dry-run` says would change on each
-  node, with the cluster's secrets redacted, and applies once the cluster's name is typed back;
-  `--yes` does not ask. talman applies one node at a time, control planes always alone, rebooting
-  a node only when the change needs it and waiting for each to come back before the next. A node
-  in maintenance mode, such as one OpenTofu has just added, is configured only with `--onboard`:
-  the maintenance service authenticates nothing, and a node's configuration carries the cluster's
-  keys. Without it, talman refuses a rollout while such a node is there. With nothing to change,
-  nothing is asked or applied. It needs the cluster's `talman.yaml` and `secrets.sops.yaml` and
-  the age key's location.
+- `just cluster-talos [cluster] [--onboard] [--yes] [--reboot [--tolerate <seconds>]]` rolls the
+  configuration out: the cluster's `talman.yaml` and the patches it lists, as they are now. It
+  waits for every node as `cluster-bootstrap` does, then shows what `talman apply --dry-run` says
+  would change on each node, with the cluster's secrets redacted, and applies once the cluster's
+  name is typed back; `--yes` does not ask. talman applies one node at a time, control planes
+  always alone, rebooting a node only when the change needs it and waiting for each to come back
+  before the next. A node in maintenance mode, such as one OpenTofu has just added, is configured
+  only with `--onboard`: the maintenance service authenticates nothing, and a node's configuration
+  carries the cluster's keys. Without it, talman refuses a rollout while such a node is there. With
+  nothing to change, nothing is asked or applied. Once the nodes keep the configuration, or when it
+  stops after some took it, it names those that run an old setting until they reboot, as
+  [A change that needs a reboot](#a-change-that-needs-a-reboot) says, and with `--reboot` reboots
+  them one at a time, as `just cluster-reboot` does, which needs the kubeconfig. It needs the
+  cluster's `talman.yaml` and `secrets.sops.yaml` and the age key's location.
 
   `just cluster-talos [cluster] --first <node>` tries the configuration on each node before it keeps
   it, the named node first ([Rolling it out](#rolling-it-out)): it checks the cluster with
@@ -753,9 +829,17 @@ out of the artifact, which is built from `kubernetes/`.
   in `kube-system` and in `flux-system` is Running or Succeeded, a FAIL naming the others; no
   certificate signing request is Pending; and kubectl fetches the last log line of a Running pod in
   `kube-system`, which the API server reads from the pod's kubelet over the kubelet's serving
-  certificate. While the namespace `flux-system` does not exist, as before `just cluster-config`
-  has run, the check of its pods is skipped, and its line and the last line say so. It runs
-  `kubectl get` and `kubectl logs` only. It needs the cluster's `talman.yaml` and kubeconfig.
+  certificate; and no scrape target of the cluster's own components is down: the jobs of the API
+  server, the controller manager, the scheduler, etcd, the kubelets and node-exporter, asked of
+  Prometheus through the API server's service proxy, a FAIL naming each job and the nodes it is
+  down on, never an address; the pass says how many targets it saw. A job with no active target,
+  as while Prometheus has just started or a monitor selects nothing, is skipped, naming the job,
+  not passed. While the namespace `flux-system` does not exist, as before
+  `just cluster-config` has run, the check of its pods is skipped, and its line and the last line
+  say so. The scrape check is skipped, saying why, while Prometheus's Service does not exist, as
+  before the monitoring application is installed, and when it cannot be asked or does not answer;
+  its silence is never a pass. It runs `kubectl get` and `kubectl logs` only. It needs the
+  cluster's `talman.yaml` and kubeconfig.
 - `just grafana [cluster]` forwards a local port to Grafana through the cluster's kubeconfig until
   Ctrl-C ([kubernetes.md](kubernetes.md#grafana)): `kubectl port-forward`, listening on 127.0.0.1
   only, from `GRAFANA_PORT` to port 3000 of the Service `grafana-service` in `monitoring`. Once
@@ -775,10 +859,14 @@ out of the artifact, which is built from `kubernetes/`.
   its hostname in the cluster's `talman.yaml`, while it watches the Kubernetes API through its load
   balancer; for a control plane, that is the check that the API does not go away with one. Any
   other name, an address among them, is refused before anything runs; a node kubectl cannot read
-  through the kubeconfig, before anything changes. Once the node's name is typed back, or with
-  `--yes`, a probe in the background
-  asks `/readyz` through the kubeconfig once a second, giving each try two seconds, while the
-  recipe, in order:
+  through the kubeconfig, and a `talman.yaml` whose roles cannot be read or name anything but
+  `controlplane` and `worker`, before anything changes. A control plane is rebooted only while etcd
+  is whole, as step 3 checks it: rebooting one while another's member is down, or while etcd holds
+  a member that is no control plane, can leave etcd without a quorum, so the recipe stops before it
+  asks for the name, says why, naming such a member by its hostname, and changes nothing.
+  `cluster-upgrade` drains and upgrades the nodes with code of its own and does not check this.
+  Once the node's name is typed back, or with `--yes`, a probe in the background asks `/readyz`
+  through the kubeconfig once a second, giving each try two seconds, while the recipe, in order:
   1. cordons the node and drains it with `kubectl drain`, as `cluster-upgrade` drains, so nothing
      new is placed on it while it goes down: a kubelet that is shutting down rejects every pod it
      is given, and the scheduler would go on giving it the same replica, each rejected pod left in
@@ -787,7 +875,16 @@ out of the artifact, which is built from `kubernetes/`.
      talosctl's own drain off, as it reaches the API at the cluster endpoint, which only the nodes
      reach;
   3. waits, up to `REBOOT_WAIT` seconds, until the node is Ready with a heartbeat from after the
-     reboot, as `cluster-restore` waits for its nodes.
+     reboot, as `cluster-restore` waits for its nodes, and, for a control plane, until etcd is
+     whole again: `talosctl etcd status`, asked of every control plane through `talman talosctl`,
+     shows each member following one leader in one term as a voting member without error, and the
+     node's own member lists exactly the control planes of `talman.yaml`. A Talos control plane
+     reports Ready without its etcd member, as its kubelet reaches the API through the others, so a
+     control plane rebooted in with an etcd setting its member cannot start with is Ready all the
+     same; rebooting another after it would leave etcd without a quorum. Nothing talosctl prints is
+     shown, as it names addresses. The wait is checked between attempts, five seconds apart, so it
+     can run one attempt over `REBOOT_WAIT`: talosctl sets no deadline of its own on a request, so
+     an attempt lasts until the nodes answer or gRPC gives up connecting to one.
 
   Then it stops the probe and prints how many probes it made, how many failed and the longest run
   of failures, in seconds. It uncordons the node, unless it was unschedulable before the recipe
@@ -795,13 +892,16 @@ out of the artifact, which is built from `kubernetes/`.
   pods the shutdown left in phase Failed on the node, with the reason `NodeShutdown` (rejected
   while it shut down) or `Terminated` (terminated as it went down), which stay until they are
   deleted and on which `cluster-check` fails, and says how many, none included; every other pod
-  stays. It exits 0 only when the node is Ready again and no probe failed; `--tolerate <seconds>`
-  accepts runs of failures up to that long, for the operator to say what counts as an
-  interruption. A run that stops once the node is cordoned, as when the drain, the reboot or the
-  wait fails, leaves it cordoned and says so in its last line: uncordon it with kubectl once it is
-  Ready. The probe keeps its counts in memory and writes no file; it is stopped, with the kubectl
-  or sleep it is waiting for, on every exit of the recipe, a failed or interrupted run included. It
-  needs what `cluster-talos` needs and the kubeconfig.
+  stays. It exits 0 only when the node is Ready again, with its etcd member for a control plane,
+  and no probe failed; `--tolerate <seconds>` accepts runs of failures up to that long, for the
+  operator to say what counts as an interruption. A control plane after whose reboot etcd is not
+  whole when the wait runs out fails the run, saying why and to reboot no other control plane until
+  it is.
+  A run that stops once the node is cordoned, as when the drain, the reboot or the wait fails,
+  leaves it cordoned and says so in its last line: uncordon it with kubectl once it is Ready. The
+  probe keeps its counts in memory and writes no file; it is stopped, with the kubectl or sleep it
+  is waiting for, on every exit of the recipe, a failed or interrupted run included. It needs what
+  `cluster-talos` needs and the kubeconfig.
 - `just cluster-destroy [cluster] [--yes] [--unreachable]` destroys the cluster stack,
   `sto2/cluster`, as `just infra-destroy sto2/cluster` does
   ([infrastructure.md](infrastructure.md#recipes)): it shows the plan's summary, destroys once the
@@ -910,7 +1010,7 @@ to hand it to kubectl and age-keygen on standard input.
 - `TALOS_WAIT`: how many seconds `cluster-bootstrap`, `cluster-talos` and `cluster-restore` wait
   for the nodes, 600 when unset.
 - `REBOOT_WAIT`: how many seconds `cluster-reboot` waits, once talman has rebooted the node, for it
-  to report Ready, 600 when unset.
+  to report Ready and, for a control plane, for etcd to have its member back, 600 when unset.
 - `FLUX_AGE_KEY_FILE`: the path of the Flux age key, outside the repository. In CI, `FLUX_AGE_KEY`
   holds the key itself instead. `cluster-bootstrap`, `cluster-config` and `cluster-flux` need one
   of them.

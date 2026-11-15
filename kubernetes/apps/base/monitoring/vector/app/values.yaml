@@ -158,18 +158,20 @@ customConfig:
     # The log of Talos's auditd service, the records of the kernel's audit subsystem, is dropped
     # whole, every line of it, and counted as drop_audit's are. Talos runs SELinux in permissive
     # mode, in which the kernel logs an access its policy would deny as an AVC record with
-    # permissive=1, holds it as granted in its access vector cache and logs it again once the cache
-    # no longer holds it; a system call or task audit rule, which Talos's auditd loads none of, would
-    # add the SYSCALL, PATH and other records of the call to its event. The store is a pod on a
-    # volume whose StorageClass passes no SELinux label, which Talos's policy does not let pods use,
-    # so its writes can produce such records: a store that received the audit log would store
-    # records of its own writes, and storing them can produce more. Dropping only the denials would
-    # drop every other process's all the same, and once a rule adds records to their events it would
-    # need a reduce transform holding every open event until its EOE record or an expiry, where an
-    # event cut by a restart would leave records that no longer say what they belong to. The rest of
-    # the file, the denials of every other process, the line auditd writes when records were lost
-    # and any other record, is read on the node with talosctl logs auditd, from the last 1 MiB or so
-    # of the service's lines that Talos keeps.
+    # permissive=1, holds it as granted in its access vector cache and logs it again once the
+    # cache, 512 entries by default, no longer holds it. An AVC record logged inside a system call
+    # makes the kernel write that call's SYSCALL, PROCTITLE and EOE records too, and CWD and PATH
+    # records for the file names it collected, without any audit rule, as separate lines sharing
+    # its event id, so one denied access can be several lines. The store is a pod on a volume whose
+    # StorageClass passes no SELinux label, which Talos's policy does not let pods use, so its
+    # writes can produce such records: a store that received the audit log would store records of
+    # its own writes, and storing them can produce more. Dropping only the AVC lines would leave the
+    # rest of their events, so it would need a reduce transform holding every open event until its
+    # EOE record or an expiry, where an event cut by a restart would leave records that no longer
+    # say what they belong to, and it would drop every other process's denials all the same. The
+    # rest of the file, the denials of every other process, the line auditd writes when records
+    # were lost and any other record, is read on the node with talosctl logs auditd, from the last
+    # 1 MiB or so of the service's lines that Talos keeps.
     drop_auditd_log:
       type: filter
       inputs:

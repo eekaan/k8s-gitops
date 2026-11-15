@@ -49,8 +49,18 @@ variable "controlplane_count" {
   type        = number
 }
 
+variable "worker_first_host" {
+  description = "Host number on the node network of the first worker; each next worker takes the next number. The cluster stack's worker_first_host gives it."
+  type        = number
+
+  validation {
+    condition     = floor(var.worker_first_host) == var.worker_first_host && var.worker_first_host >= 20
+    error_message = "worker_first_host must be a whole host number of the node network, 20 or more."
+  }
+}
+
 variable "worker_count" {
-  description = "Number of workers, at host numbers 20 and up of the node subnet."
+  description = "Number of workers, at host numbers worker_first_host and up of the node subnet."
   type        = number
 }
 

@@ -242,6 +242,29 @@ bytes() {
   (($(bytes "$cap") * 100 <= $(bytes "$size") * 85))
 }
 
+@test "the jobs and the Service cluster-check reads are the ones the chart's monitors and Prometheus give" {
+  local jobs job service port
+  render
+  # A monitor's job is the value of the label its jobLabel names on the Service it selects, or on
+  # the selector itself where it names it, as the API server's and the kubelets' do.
+  jobs="$(yq -N -o json -I0 'select(.kind == "Service" or .kind == "ServiceMonitor")' "$RENDERED" | jq -rs '
+    [.[] | select(.kind == "Service")] as $services
+    | .[] | select(.kind == "ServiceMonitor" and .spec.jobLabel != null)
+    | .spec.jobLabel as $label | .spec.selector.matchLabels as $match
+    | ($match[$label] // ([$services[] | select(.metadata.labels as $labels | $match | to_entries | all(.value == $labels[.key]))
+        | .metadata.labels[$label]] | first)) | select(. != null)' | sort)"
+  echo "jobs the chart's monitors give: $(paste -sd' ' <<<"$jobs")"
+  for job in $(bash -c ". '$REPO/scripts/lib/cluster.sh'; printf '%s\n' \"\${scrape_jobs[@]}\""); do
+    echo "cluster-check reads $job"
+    grep -qx -- "$job" <<<"$jobs"
+  done
+  service="$(bash -c ". '$REPO/scripts/lib/cluster.sh'; echo \$prometheus_service")"
+  port="$(bash -c ". '$REPO/scripts/lib/cluster.sh'; echo \$prometheus_port")"
+  echo "cluster-check asks the Service $service on port $port in $NAMESPACE"
+  [ "$(yq -N "select(.kind == \"Service\" and .metadata.name == \"$service\" and .metadata.namespace == \"$NAMESPACE\")
+    | .spec.ports[] | select(.port == $port) | .port" "$RENDERED")" = "$port" ]
+}
+
 @test "Alerts go nowhere yet" {
   local config
   render

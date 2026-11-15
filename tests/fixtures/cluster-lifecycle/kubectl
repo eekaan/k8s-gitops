@@ -28,6 +28,16 @@
 #                     name and no address
 #   extra-services    more Services, one JSON object per line
 #   csi-volume        a PersistentVolume of a CSI driver exists
+#   no-monitoring     the monitoring stack is not installed: there is no Service for Prometheus
+#   targets-down      Prometheus's targets that are down, one per line as <job> [<node>]
+#   other-down        a target of a job that is none of the cluster's own components is down
+#   prometheus-silent Prometheus does not answer through the service proxy, and kubectl's error names
+#                     an address
+#   prometheus-error  Prometheus answers its targets request with an error status
+#   targets-none      Prometheus answers successfully with no active target at all, as just started
+#   unscraped         the jobs that file names, one per line, have no active target
+#   many-targets      Prometheus's answer carries that many more targets of another job, enough to
+#                     fill a pipe many times over
 #   linstor-volumes   as many PersistentVolumes of LINSTOR's CSI driver as the file's number
 # Every object it answers with holds addresses from the documentation ranges, as do its errors and the
 # log line, which the recipes must never print. It records "kubectl ARGS" in <tmp>/record/argv, and
@@ -207,7 +217,63 @@ list() {
   jq -s '{apiVersion: "v1", kind: "List", items: .}'
 }
 
+# targets: Prometheus's answer to a request for its active targets: each of the cluster's own
+# components, on every node that runs it, up unless targets-down names it, with the addresses a real
+# answer holds in its labels, which the recipes must never print. A target names its node as the
+# monitor that finds it does: etcd's by its endpoint's node alone; the controller manager's and the
+# scheduler's by their endpoint's node and their pod's; node-exporter's by its pod's node alone; a
+# kubelet's, whose endpoint the Prometheus Operator points at the Node, only in the label node the
+# Operator gives it; the API server's not at all.
+targets() {
+  local job node
+  {
+    if ! listed targets-none; then
+      for job in kube-controller-manager kube-scheduler kube-etcd; do
+        for node in cp-1 cp-2 cp-3; do echo "$job $node"; done
+      done
+      for job in kubelet node-exporter; do
+        for node in cp-1 cp-2 cp-3 worker-1 worker-2 worker-3; do echo "$job $node"; done
+      done
+      echo "apiserver"
+      echo "coredns"
+      if listed other-down; then echo "my-app down"; fi
+      if listed many-targets; then
+        for ((n = 0; n < $(< "$state/many-targets"); n++)); do echo "coredns-$n"; done
+      fi
+    fi
+  } | jq -R -s --rawfile down <(cat "$state/targets-down" 2> /dev/null) --rawfile unscraped <(cat "$state/unscraped" 2> /dev/null) '
+    ($down | split("\n") | map(select(. != ""))) as $down
+    | ($unscraped | split("\n") | map(select(. != ""))) as $unscraped
+    | {status: "success", data: {activeTargets: [split("\n")[] | select(. != "") | split(" ") as $t | select($t[0] | IN($unscraped[]) | not)
+      | (if ($t | length) > 1 and $t[0] != "my-app" then $t[1] else null end) as $node
+      | {discoveredLabels: ({"__address__": "198.51.100.31:9100"}
+          + (if $node == null then {}
+            elif $t[0] == "kube-etcd" then {"__meta_kubernetes_endpoint_node_name": $node}
+            elif $t[0] == "node-exporter" then {"__meta_kubernetes_pod_node_name": $node}
+            elif $t[0] == "kubelet" then {"__meta_kubernetes_endpoint_address_target_kind": "Node",
+              "__meta_kubernetes_endpoint_address_target_name": $node}
+            else {"__meta_kubernetes_endpoint_node_name": $node, "__meta_kubernetes_pod_node_name": $node} end)),
+        labels: ({job: $t[0], instance: "198.51.100.31:9100"}
+          + (if $t[0] == "kubelet" and $node != null then {node: $node} else {} end)),
+        scrapeUrl: "http://198.51.100.31:9100/metrics",
+        health: (if ($down | index($t | join(" "))) != null or ($t[0] == "my-app") then "down" else "up" end)}]}}'
+}
+
 case $args in
+  *" get service kube-prometheus-stack-prometheus "*)
+    listed no-monitoring || echo service/kube-prometheus-stack-prometheus
+    ;;
+  *" get --raw /api/v1/namespaces/monitoring/services/kube-prometheus-stack-prometheus:9090/proxy/api/v1/targets"*)
+    if listed prometheus-silent; then
+      echo 'Error from server (ServiceUnavailable): the server is currently unable to handle the request (get services kube-prometheus-stack-prometheus:9090): dial tcp 198.51.100.55:9090: i/o timeout' >&2
+      exit 1
+    fi
+    if listed prometheus-error; then
+      echo '{"status":"error","errorType":"internal","error":"reading 198.51.100.55 failed"}'
+      exit 0
+    fi
+    targets
+    ;;
   *" get --raw /readyz "*)
     if listed readyz-fails; then
       echo 'Error from server (InternalError): an error on the server ("[-]etcd failed: reason withheld") has prevented the request from succeeding' >&2

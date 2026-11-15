@@ -24,6 +24,7 @@ run "_todays_rules_keep_their_resource_addresses" {
     api_allowed_cidrs   = ["203.0.113.192/26", "198.51.100.0/24"]
     controlplane_count  = 3
     worker_count        = 3
+    worker_first_host   = 20
     controlplane_flavor = "b.4c8gb"
     worker_flavor       = "b.6c16gb"
   }

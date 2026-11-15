@@ -69,3 +69,9 @@ deschedulerPolicy:
             - RemovePodsViolatingNodeTaints
             - RemovePodsViolatingNodeAffinity
             - RemovePodsViolatingInterPodAntiAffinity
+
+# The chart sets no seccomp profile; the runtime's default is what the restricted Pod Security level
+# requires. Its container context already meets the rest.
+podSecurityContext:
+  seccompProfile:
+    type: RuntimeDefault

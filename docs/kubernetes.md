@@ -58,9 +58,15 @@ spec:
   applies is. A dependency on an application a cluster deliberately does not enable is an error:
   the dependent would never reconcile there, so the dependent is not enabled either, or the
   dependency is.
-- A new namespace gets its directory: `namespace.yaml` with the Pod Security labels and the
-  annotation `kustomize.toolkit.fluxcd.io/prune: disabled`, so removing it from the tree does not
-  delete what runs in it.
+- A new namespace gets its directory: `namespace.yaml` with the Pod Security labels
+  ([Pod Security](#pod-security)) and the annotation `kustomize.toolkit.fluxcd.io/prune: disabled`,
+  so removing it from the tree does not delete what runs in it.
+- The namespace enforces the strictest Pod Security level the application's workloads pass. A
+  workload that needs more than `restricted` is an entry of `pod-security-exceptions.yaml` with its
+  reason, and `just pod-security-check` fails when the namespace's labels or the entries do not
+  match what the render holds. A custom resource whose operator creates pods sets the security
+  context `restricted` requires where the resource has the fields, and `tests/pod-security.bats`
+  lists it; a pod it makes that needs more is an entry with `created-by`.
 
 Enable the application by listing its namespace directory, once, and its `ks.yaml` in
 `apps/overlays/<cluster>/kustomization.yaml`. A disabled application stays in the list,
@@ -222,6 +228,100 @@ into an empty directory it refuses otherwise.
 `postBuild.substituteFrom` has no namespace field: Flux reads the ConfigMap and Secret from the
 Kustomization's own namespace. `cluster-config` and `cluster-secrets` live in `flux-system`, so
 every child Kustomization lives there too and sets `targetNamespace` for what it deploys.
+
+## Pod Security
+
+Pod Security admission is what stops a workload from asking for the host: a privileged container,
+the host's network or process namespaces, a host path. Each namespace enforces one level, and a
+level is declared in the tree, never left to the API server's default.
+
+- **Where levels are declared.** `pod-security.kubernetes.io/enforce` on the namespace's
+  `namespace.yaml`; every namespace an application targets, or an object of the render is in, has one.
+  `flux-system` is the Flux Operator's: the FluxInstance's `kustomize.patches` set its label, as the
+  Flux Operator's documentation describes for the namespace's Pod Security Standards, and Flux's
+  security documentation states that the controllers are built for the restricted level.
+  `cilium-secrets`, which the Cilium chart creates, is labelled by a post-renderer of its
+  HelmRelease.
+- **What a namespace enforces.** The strictest level its workloads pass. That is `restricted`,
+  unless `pod-security-exceptions.yaml` at the repository root lists workloads in it that need
+  more: the namespace then enforces the least strict level of its entries, and every other pod of
+  it that the render holds passes `restricted` all the same. Each entry names the namespace, the
+  workload (`Kind/name`), the level it needs, `baseline` or `privileged`, and the reason in a
+  sentence. A pod an operator creates at run time, which the render does not hold, is listed with
+  `created-by`, the custom resource in the render that makes the operator create it, never a
+  workload the check evaluates itself; the check takes its level as written.
+- **Audit and warn.** A namespace that enforces less than `restricted` sets
+  `pod-security.kubernetes.io/audit` and `/warn` to `restricted`, with `audit-version` and
+  `warn-version` at the cluster's Kubernetes minor, `versions.yaml`'s `kubernetes`; the check fails
+  a namespace whose labels differ. Admission then records in the audit log, and returns as a
+  warning, every pod there that fails `restricted`, those an operator creates included. Talos's
+  default admission configuration, which the cluster keeps, exempts `kube-system` from Pod Security
+  admission (`DefaultPodSecurityAdmissionControlConfig` in Talos'
+  `pkg/machinery/config/types/k8s/admission_control.go` at the pinned tag): admission neither
+  enforces nor records a level there, and the check is what holds the pods of the render there to
+  the level its labels state.
+- **The check.** `just pod-security-check` renders the tree as `just render-check` does, then
+  `scripts/pod-security-check` evaluates every Pod, Deployment, StatefulSet, DaemonSet, ReplicaSet,
+  ReplicationController, Job and CronJob in it, Helm hooks and tests included, against the
+  `baseline` and `restricted` levels, and the controllers of the Flux install the FluxInstance
+  configures in the same way. The check fails, naming the namespace and the workload, when a
+  namespace an object of the render is in has no `enforce` label; when a workload fails the level
+  its namespace enforces, with the checks it fails; when a workload fails `restricted` and is not
+  listed with its reason, or is listed at a level other than the one it needs; when a namespace
+  enforces a level other than the strictest its workloads pass; and when a namespace that enforces
+  less than `restricted` does not audit and warn at `restricted` at the cluster's minor.
+  `tests/pod-security.bats` proves each rule on a small render and runs the check on the tree.
+- **The Flux install it evaluates.** The pinned Flux CLI's `flux install --export` for the
+  components the FluxInstance names, with the instance's patches applied: the controllers of the
+  `flux2` release pinned in `mise.toml`. The operator installs the newest Flux 2.x release in its
+  manifests artifact ([Flux itself](#flux-itself)). Renovate moves the CLI pin and the artifact in
+  separate pull requests, so once one has merged and until the other does, the check evaluates
+  another Flux release than the one the cluster runs.
+- **The evaluator.** Kyverno's `podSecurity` rule, pinned in `mise.toml` with the release's
+  checksums, which runs Kyverno's fork of the Pod Security admission policy library at the 1.36
+  check set, at the library's latest policy version. The rule is of Kyverno's legacy policy type,
+  whose execution the 1.20 release removes from Kyverno's controllers, so the pin stays on the 1.19
+  line. `mise.toml` records beside the pin the newest Kubernetes minor whose checks were compared
+  with the evaluator's, and the check fails when `versions.yaml` names a newer one, so a pull
+  request that moves the cluster to a new minor fails it. Whoever moves the minor compares that
+  minor's checks in `k8s.io/pod-security-admission` with the evaluator's: when they are no
+  stricter, the record moves to the new minor in the same pull request; when they are stricter,
+  the minor waits for an evaluator that applies them.
+- **Pods the render does not hold.** An operator creates these at run time from a custom
+  resource, and the check cannot evaluate them. Where the resource has the fields, it sets the
+  security context `restricted` requires, and `tests/pod-security.bats` requires those fields in
+  the render, under paths the resource's definition declares, so the API server keeps them:
+  - `Grafana/grafana` in `monitoring`: the pod's non-root user and seccomp profile, in
+    `spec.deployment.spec.template.spec.securityContext`; the Grafana operator runs its container
+    with no privilege escalation and no capabilities itself.
+  - `Prometheus/kube-prometheus-stack-prometheus` and
+    `Alertmanager/kube-prometheus-stack-alertmanager` in `monitoring`: `spec.securityContext`, from
+    the kube-prometheus-stack values; the Prometheus operator gives every container it creates no
+    privilege escalation and no capabilities.
+  - `LinstorCluster/linstorcluster` in `piraeus-datastore`: the LINSTOR controller, the CSI
+    controller and the affinity controller, in the `podTemplate` of `spec.controller`,
+    `spec.csiController` and `spec.affinityController`, each naming every container of the
+    operator's template at its pinned version. Its satellites, CSI node plugin, NFS server and HA
+    controller run privileged and are entries of the exceptions file, `created-by` it.
+  - The ReplicationSource `<app>` and ReplicationDestination `<app>-restore` of each application
+    with a backed-up volume, `volsync-demo` in `demo` among them: the movers' non-root user and
+    seccomp profile, in `spec.restic.moverSecurityContext`, from `components/volsync`; VolSync
+    gives the mover's container no privilege escalation and no capabilities itself, as its
+    documentation's permission model describes for movers without the privileged-movers
+    annotation, which no namespace here carries ([Volume backups](#volume-backups)).
+
+  Admission evaluates each such pod when the operator creates it: a namespace that enforces
+  `restricted` refuses one that fails it, and one that enforces less records and reports it
+  through its audit and warn labels.
+
+An application's namespace is its `apps/base/<namespace>/namespace.yaml` with the label at the
+level its workloads pass; a workload that needs more is a new entry in the exceptions file in the
+same change, and the namespace's level and its audit and warn labels follow it. A chart value that
+brings a workload to `restricted`, a seccomp profile or a container context, goes in the
+application's values instead of an entry. The tests that hold an application's values keys to
+those its chart's values define accept, under a `securityContext`, `podSecurityContext` or
+`containerSecurityContext` map, any field of Kubernetes' security context types
+(`tests/fixtures/security-context-fields`); an entry's reason says why no value does.
 
 ## Variables
 
@@ -386,8 +486,14 @@ restarts every agent, node by node, and the operator.
 - **What is advertised.** The `CiliumBGPAdvertisement` the peer configuration selects advertises
   the `LoadBalancer` address of each labelled Service, as a /32, and nothing else: no pod range and
   no cluster IP.
-- **Before the edge routers exist** the sessions stay down: a labelled Service gets an address, but
-  nothing outside the cluster reaches it.
+- **Without the edge routers** (the `edge` stack not applied, [infrastructure.md](infrastructure.md#the-edge-routers))
+  the sessions stay down: a labelled Service gets an address, but nothing outside the cluster
+  reaches it.
+- **The Gateway's address.** The edge routers forward public traffic to one address of the service
+  range, `GATEWAY_ADDRESS` in `cluster-config`, a host the plumbing stack picks. Nothing in the tree
+  uses it yet: the public Gateway is to ask the pool for it with the `lbipam.cilium.io/ips`
+  annotation. The pool does not set it aside, so any other labelled Service may be given it first;
+  keeping that from happening is for the change that adds the Gateway.
 - **`externalTrafficPolicy`.** With `Cluster`, the default, every worker announces every labelled
   address, the edge routers spread connections over all of them, and a worker forwards each to an
   endpoint on any node, translating the source to its own address when the endpoint is elsewhere.
@@ -451,7 +557,11 @@ Alertmanager, kube-state-metrics and node-exporter in the namespace `monitoring`
 prometheus-community `kube-prometheus-stack` chart. The namespace's Pod Security level is
 privileged, as node-exporter reads each node through the host's network and process namespaces and
 through host paths, and the log collector ([Logs](#logs)) reads the nodes' log files through a
-host path. The chart installs no resource definitions: `prometheus-operator-crds` does
+host path; those two DaemonSets are its entries in `pod-security-exceptions.yaml`, and every
+other pod of it that the render holds passes restricted. The pods the operators make from the
+Prometheus, Alertmanager and Grafana resources are not in the render; each resource sets the
+security context restricted requires ([Pod Security](#pod-security)). The chart installs no
+resource definitions: `prometheus-operator-crds` does
 ([Resource definitions](#resource-definitions)), and the application names it in `dependsOn`. The
 two charts run the same operator version: Renovate moves them in one pull request, and
 `tests/monitoring.bats` fails when the pinned charts name different ones. The application installs
@@ -611,33 +721,41 @@ Three kinds of record are made smaller or left out before they are sent:
   deny and logs the denial as an AVC record with `permissive=1`, which names the process and the
   file; it then holds the permission as granted in its access vector cache, for that source
   context, target context and class, and logs the same denial again only once the cache no longer
-  holds it, as after the cache has made room for other entries or the policy is loaded again
+  holds it. The cache makes room once it holds more entries than its threshold, 512 by default, and
+  is emptied when the policy is loaded again, so where more pairs of contexts and classes are
+  checked than it holds, entries are dropped and their denials logged again
   ([`security/selinux/avc.c`](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/security/selinux/avc.c?h=v6.18.63)).
   [Talos's `auditd`](https://github.com/siderolabs/talos/blob/v1.14.6/internal/app/auditd/auditd.go)
   loads no audit rule, and writes as a line each record the kernel's audit subsystem sends it of
   the types 1100 to 2999 of
   [`include/uapi/linux/audit.h`](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/include/uapi/linux/audit.h?h=v6.18.63).
-  The kernel joins the `SYSCALL`, `CWD`, `PATH` (whose `nametype` is `PARENT`, `CREATE` and the
-  like), `PROCTITLE` and `EOE` records of the system call to the AVC record's event, as separate
-  lines that share its `msg=audit(<time>:<serial>)` id, only while a system call or task rule, such
-  as a watch on a path, is loaded
-  ([`kernel/auditsc.c`](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/kernel/auditsc.c?h=v6.18.63));
-  without one, the AVC record comes alone. The log store is itself a pod, whose claim is of the
-  default storage class, which sets no such mount option, so its writes can produce such records,
-  and a collector that shipped the audit log to the store would give the store records of its own
-  writes, whose storing can produce more: a loop that amplifies by construction, whatever its rate.
-  The collector therefore does not ship the audit log. Dropping only the AVC records with
-  `permissive=1` would drop the denials of every other process all the same, and once a rule adds
-  records to their events it would need a `reduce` transform keyed on that id, holding every open
-  event in memory until its `EOE` record or an expiry, where an event cut in two by a restart of the
-  collector would leave records that no longer say what they belong to. The drop costs the rest of
-  the file: the SELinux denials of every other process on the node, which show what enforcing mode
-  would deny before it is turned on; the line `audit backlog limit reached, some audit events may
-  have been lost`, which Talos's auditd writes when records were lost on their way to it; and any
-  other record the kernel sends it, such as `ANOM_ABEND` for a process that dumps core. They are
-  read on the node with Talos's documented `talosctl --nodes <node> logs auditd`, which no recipe
-  wraps; the repository's scripts run talosctl through `talman talosctl`. It reads the ring of about
-  1 MiB in which Talos keeps the service's last lines, so it shows no more than that;
+  An AVC record logged inside a system call, by a process started once auditing was enabled, makes
+  the kernel write that system call's records too when the call returns, with no audit rule needed
+  (`audit_log_start` in
+  [`kernel/audit.c`](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/kernel/audit.c?h=v6.18.63)
+  and `__audit_syscall_exit` in
+  [`kernel/auditsc.c`](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/kernel/auditsc.c?h=v6.18.63)):
+  `SYSCALL`, with `key=(null)` as no rule matched it; if the kernel collected file names for the
+  call, which with no rule loaded it does for the names looked up after the AVC record, `CWD` and a
+  `PATH` record for each name, with a `nametype` such as `PARENT` or `CREATE`; `PROCTITLE`; and
+  `EOE`. Each is a separate line that shares the AVC record's `msg=audit(<time>:<serial>)` id, so
+  one denied access can be several lines of the audit log. The log store is itself a pod, whose
+  claim is of the default storage class, which sets no such mount option, so its writes can produce
+  such records, and a collector that shipped the audit log to the store would give the store records
+  of its own writes, whose storing can produce more: a loop that amplifies by construction, whatever
+  its rate. The collector therefore does not ship the audit log. Dropping only the AVC records with
+  `permissive=1` would leave the other lines of their events in the store, so it would need a
+  `reduce` transform keyed on that id, holding every open event in memory until its `EOE` record or
+  an expiry, where an event cut in two by a restart of the collector would leave records that no
+  longer say what they belong to; and it would drop the denials of every other process all the
+  same. The drop costs the rest of the file: the SELinux denials of every other process on the
+  node, which show what enforcing mode would deny before it is turned on; the line `audit backlog
+  limit reached, some audit events may have been lost`, which Talos's auditd writes when records
+  were lost on their way to it; and any other record the kernel sends it, such as `ANOM_ABEND` for
+  a process that dumps core. They are read on the node with Talos's documented
+  `talosctl --nodes <node> logs auditd`, which no recipe wraps; the repository's scripts run
+  talosctl through `talman talosctl`. It reads the ring of about 1 MiB in which Talos keeps the
+  service's last lines, so it shows no more than that;
 - a pod's labels and annotations, its node's labels and its namespace's labels and annotations are
   not stored one field each: VictoriaLogs makes a field of every name, these maps hold dozens of
   names that say nothing about a line, and labels such as `pod-template-hash` and
@@ -881,8 +999,11 @@ the chart makes no disruption budget. Its chart serves no metrics and has no mon
 
 Persistent volumes come from LINSTOR, run by the Piraeus operator, on the workers' data volumes
 (ADR 0011). Two applications in `apps/base/piraeus-datastore/` hold it; their namespace admits
-privileged pods, as LINSTOR's satellites, the CSI node plugin and the HA controller run privileged
-with host paths.
+privileged pods, as LINSTOR's satellites, the CSI node plugin, the NFS server and the HA controller
+run privileged with host paths; they are its entries in `pod-security-exceptions.yaml`. The
+operator's own pod, the only one the render holds, passes restricted, and the LinstorCluster gives
+the LINSTOR controller, the CSI controller and the affinity controller the security context
+restricted requires ([Pod Security](#pod-security)).
 
 - `piraeus-operator` installs the operator from its publisher's chart,
   `oci://ghcr.io/piraeusdatastore/piraeus-operator/piraeus`, with the baseline's shape. The chart
@@ -1575,7 +1696,10 @@ artifact generator publishes only `apps/base`, and `path` is
   `OCIRepository` refuses a chart without the keyless cosign signature of the publisher's release
   workflow on a version tag.
 - **Instance**: upstream Flux 2.x, with source-watcher beside the four default controllers for
-  the per-application artifacts, and Flux's network policies on.
+  the per-application artifacts, and Flux's network policies on. A patch of the instance sets the
+  namespace `flux-system` to enforce the restricted Pod Security level ([Pod
+  Security](#pod-security)), and `tests/pod-security.bats` evaluates against it the controllers of
+  the pinned Flux CLI's install, with the instance's patches applied.
 - **Flux versions**: the operator installs the newest Flux 2.x release in its manifests artifact,
   `oci://ghcr.io/controlplaneio-fluxcd/flux-operator-manifests`, which the instance pins to the
   operator chart's version. Flux therefore moves only when that tag moves, in the same Renovate
@@ -1846,8 +1970,10 @@ starts to use is listed in the example and given its source in `fill_cluster_con
   workers' and the edge routers' AS numbers.
 - `BGP_EDGE_ADDRESS_1` and `BGP_EDGE_ADDRESS_2`: the two addresses of `values.bgp.edgeAddresses`
   there, the edge routers'.
+- `GATEWAY_ADDRESS`: `values.bgp.gatewayAddress` there, the public Gateway's address in the service
+  range, which the edge routers forward public traffic to.
 
-The cluster stack renders the last five from the plumbing stack's numbers for BGP
+The cluster stack renders the last six from the plumbing stack's numbers for BGP
 ([infrastructure.md](infrastructure.md#services-announced-over-bgp)).
 
 `cluster-secrets` is decrypted from `clusters/<cluster>/secrets/cluster-secrets.sops.yaml` by sops,

@@ -469,6 +469,12 @@ replicas() {
     for map in $open; do
       if [[ $key == "$map".* ]]; then continue 2; fi
     done
+    # A security context map is Kubernetes' type, which the chart passes through to the pod or
+    # container: a field of that type is a key of the user's choosing, a misspelt one is not.
+    if [[ $key =~ (^|\.)(securityContext|podSecurityContext|containerSecurityContext)\.(.+)$ ]] &&
+      grep -qxF -- "${BASH_REMATCH[3]}" "$BATS_TEST_DIRNAME/fixtures/security-context-fields"; then
+      continue
+    fi
     unknown+=" $key"
   done < <(comm -23 "$keys/ours" "$keys/chart")
   echo "keys the chart does not define:${unknown:- none}"

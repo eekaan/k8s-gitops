@@ -72,6 +72,16 @@ remove_private_dir() {
   exit "$status"
 }
 
+# talman_log_start: with CI set, empties talman_log once per run. A caller that runs cluster_talman in
+# a command substitution, whose variables do not outlast it, calls this first, or the next call
+# would empty the log again.
+talman_log_start() {
+  [[ -z ${talman_log_started-} ]] || return 0
+  # shellcheck disable=SC2154 # scripts/cluster-env sets talman_log
+  (umask 077 && mkdir -p "${talman_log%/*}" && : > "$talman_log")
+  talman_log_started=1
+}
+
 # cluster_talman ARG...: talman with ARG... on the cluster scripts/cluster-env set up. talman's output,
 # talosctl's within it, names the nodes by address and shows configuration diffs, and CI logs are
 # public, so with CI set it goes to talman_log, in the cluster's clusterconfig/, which git ignores,
@@ -84,11 +94,7 @@ cluster_talman() {
     talman "$@"
     return
   fi
-  if [[ -z ${talman_log_started-} ]]; then
-    # shellcheck disable=SC2154 # scripts/cluster-env sets talman_log
-    (umask 077 && mkdir -p "${talman_log%/*}" && : > "$talman_log")
-    talman_log_started=1
-  fi
+  talman_log_start
   talman "$@" >> "$talman_log" 2>&1 || status=$?
   log=${talman_log#"$infra_root"/}
   if ((status == 0)) || { ((status == 2)) && [[ " $* " == *" --detailed-exit-code "* ]]; }; then
@@ -408,6 +414,141 @@ not_ready_since() {
     | [$ARGS.positional[] | select(IN($ready[]) | not)] | join(", ")' --args "$@" <<< "$nodes"
 }
 
+# etcd_status_healthy COUNT: whether the table talosctl etcd status prints on standard input, a row
+# for each member asked, has COUNT rows and shows every member following the same leader in the same
+# term as a voting member, with no error, such as having no leader. Columns are padded with three
+# spaces or more; a value holds single spaces only. The columns are read by position, so the table
+# must be the one talosctl 1.14 prints: twelve columns, ERRORS last.
+etcd_status_healthy() {
+  awk -F '   +' -v count="$1" '
+    NR == 1 { if (NF != 12 || $1 != "NODE" || $5 != "LEADER" || $NF != "ERRORS") { unknown = 1; exit } next }
+    { rows++
+      if (rows == 1) { leader = $5; term = $7 } else if ($5 != leader || $7 != term) bad = 1
+      if ($5 ~ /^0+$/ || $9 != "false" || $12 != "") bad = 1 }
+    END { exit unknown || !(rows == count && !bad) }'
+}
+
+# etcd_members_are HOSTNAME...: whether the members in the table talosctl etcd members prints on
+# standard input are exactly the HOSTNAMEs, the control planes of talman.yaml: a member etcd holds
+# besides them, as of a control plane removed without its member, counts toward its quorum. When
+# they are not, it says why, naming members by hostname, never by address.
+etcd_members_are() {
+  awk -F '   +' '
+    BEGIN { for (i = 1; i < ARGC; i++) { want[ARGV[i]] = 1; names[i] = ARGV[i] } count = ARGC - 1; ARGC = 1 }
+    NR == 1 { if ($3 != "HOSTNAME") unknown = 1; next }
+    { if ($3 in want) seen[$3] = 1; else extra = extra (extra == "" ? "" : ", ") $3 }
+    END {
+      if (unknown || NR == 0) { print "etcd members printed a table this does not read"; exit 1 }
+      for (i = 1; i <= count; i++) if (!(names[i] in seen)) missing = missing (missing == "" ? "" : ", ") names[i]
+      if (extra != "") said = "etcd holds " extra ", no control plane of talman.yaml"
+      if (missing != "") said = said (said == "" ? "" : "; ") "etcd does not list " missing " as a member"
+      if (said != "") { print said; exit 1 }
+    }' "$@"
+}
+
+# Where the monitoring application's Prometheus runs, and the jobs that scrape the cluster's own
+# components, as the application's kube-prometheus-stack chart names them: the Service of its
+# Prometheus and the job label of the API server, the controller manager, the scheduler, etcd, the
+# kubelets and node-exporter. tests/monitoring.bats renders the chart and fails when one is renamed.
+# shellcheck disable=SC2034 # read by scripts/cluster-check and tests/monitoring.bats
+prometheus_namespace=monitoring prometheus_service=kube-prometheus-stack-prometheus prometheus_port=9090
+# shellcheck disable=SC2034 # read by scripts/cluster-check and tests/monitoring.bats
+scrape_jobs=(apiserver kube-controller-manager kube-scheduler kube-etcd kubelet node-exporter)
+
+# The settings of a node that take effect only when it reboots. Talos' documentation of editing the
+# machine configuration, for the version in versions.yaml
+# (https://docs.siderolabs.com/talos/v1.14/configure-your-talos-cluster/system-configuration/editing-machine-configuration),
+# says a configuration is always applied to the running node without a reboot, and names what a
+# running node does not take up, as a service reads it only when it starts and Talos does not restart
+# it:
+#   - .cluster.etcd: etcd's image, extra arguments and advertised and listen subnets;
+#   - kernel modules (.machine.kernel.modules, KernelModuleConfig): Talos never unloads a module and
+#     sets a module's parameters only when it first loads it, so a module removed stays loaded and a
+#     loaded one keeps its parameters; a module added is loaded at once;
+#   - environment variables (.machine.env, EnvironmentConfig), which a running service keeps;
+#   - the sandbox (SecurityProfileConfig);
+#   - volume encryption keys, a new one taking a reboot to re-encrypt the volume.
+# The first two, which the patches in talos/patches/ set, are read back: for each node the dry run
+# shows a change on, reboot_state reads what Talos derives from them, the resources
+# EtcdConfigs.etcd.talos.dev and KernelModuleSpecs.runtime.talos.dev, which hold no secret, before
+# the configuration is applied and again once the node runs it, and a node on which they differ runs
+# the old setting until it reboots (reboot_pending). The other three are not read back, as their
+# values can be secrets, and no patch sets them: reboot_unwatched names them in a patch, and a test
+# fails when a patch sets one. The page calls its list not exhaustive; a setting found to need a
+# reboot that is missing here is added. It also names UnattendedInstallConfig and .machine.install,
+# which talos/patches/all/install.yaml sets, as used only when Talos installs or upgrades itself,
+# with no effect on an installed node even after a reboot: they are not on the list, and
+# just cluster-upgrade is what applies them.
+#
+# What changes is read from Talos, not from the diff the dry run prints: a unified diff has three
+# lines of context around a change, so the section a changed line belongs to is not in it.
+
+# reboot_only_program: the jq program reboot_pending runs on the two states it compares.
+# shellcheck disable=SC2016 # a jq program
+reboot_only_program='
+  .[0] as $before | .[1] as $after
+  | (if $before.etcd != $after.etcd then "etcd as it was started" else empty end),
+    (if any($before.modules | to_entries[]; ($after.modules[.key] // null) as $now
+        | $now == null or ($now | sort) != (.value | sort))
+      then "its kernel modules as they were loaded" else empty end)'
+
+# reboot_unwatched: a yq expression that, over the documents of a machine configuration patch, names
+# each setting on the list above that the rollout does not read back. Each name is made from the
+# document, as yq yields a bare string even where select yielded nothing.
+# shellcheck disable=SC2016,SC2034 # a yq expression, read by tests/cluster-recipes.bats
+reboot_unwatched='
+  (select(.machine.env != null) | .machine.env | path | join(".")),
+  (select(.kind == "EnvironmentConfig" or .kind == "SecurityProfileConfig") | .kind),
+  (select(.machine.systemDiskEncryption != null) | .machine.systemDiskEncryption | path | join(".")),
+  (select(.encryption != null) | .kind + " encryption")'
+
+# reboot_state NODE ROLE: what NODE, whose role in talman.yaml is ROLE, holds of the settings on the
+# list above that the rollout reads back, asked of its Talos API through talman, as one line of JSON:
+# etcd's configuration, which only a control plane has, and each kernel module Talos loads, with its
+# parameters. Neither resource holds a secret; they name the node's subnets, and stay in variables and
+# pipes, never printed. Fails, saying nothing, when NODE does not answer with them: what talosctl says
+# then names addresses.
+reboot_state() {
+  local etcd='' modules
+  if [[ $2 == controlplane ]]; then
+    etcd=$(talman talosctl -n "$1" get EtcdConfigs.etcd.talos.dev etcd --output json 2> /dev/null) || return 1
+  fi
+  modules=$(talman talosctl -n "$1" get KernelModuleSpecs.runtime.talos.dev --output json 2> /dev/null) || return 1
+  printf '%s\n%s\n' "$etcd" "$modules" | jq -cs --arg role "$2" '
+    (map(select(.metadata.type? == "EtcdConfigs.etcd.talos.dev")) | if length == 1 then .[0].spec else null end) as $etcd
+    | if $role == "controlplane" and $etcd == null then error("no etcd configuration") else . end
+    | {etcd: $etcd, modules: (map(select(.metadata.type? == "KernelModuleSpecs.runtime.talos.dev")
+        | {key: .metadata.id, value: (.spec.parameters // [])}) | from_entries)}' 2> /dev/null
+}
+
+# reboot_pending BEFORE AFTER: what a node runs until it reboots, one per line, when AFTER, what it
+# holds of those settings once it runs a configuration (reboot_state), differs from BEFORE, what it
+# held before; nothing when they agree.
+reboot_pending() {
+  printf '%s\n%s\n' "$1" "$2" | jq -rs "$reboot_only_program"
+}
+
+# new_nodes DRY_RUN: the hostnames of the nodes whose block of the dry run DRY_RUN, as changed_nodes
+# reads it, is a new node's, one per line.
+new_nodes() {
+  awk '/^== \[[0-9?]+\/[0-9]+\] / && /\) ·/ { print $3 }' <<< "$1"
+}
+
+# changed_nodes DRY_RUN: the hostnames of the nodes whose block of the dry run DRY_RUN, as talman
+# prints it, does not say the node is unchanged, one per line, in the order of the blocks, which is
+# talman.yaml's; not those that are new, which run no configuration to change. A block starts at a
+# header "== [i/n] HOSTNAME (ADDRESS)", with a note after the address for a new node, and says "No
+# changes." after its "Config diff:", or, from a talman that cannot hide the cluster's secrets in a
+# diff, "no changes" in place of the diff, as it says "changes; diff not shown" for a change. The
+# address is not printed.
+changed_nodes() {
+  awk '
+    function finish() { if (node != "" && !note && !same) print node }
+    /^== \[[0-9?]+\/[0-9]+\] / { finish(); node = $3; note = ($0 ~ /\) ·/); same = 0; next }
+    /^ +(No changes\.|no changes)$/ { same = 1 }
+    END { finish() }' <<< "$1"
+}
+
 # flux_recipient: the age recipient .sops.yaml encrypts the SOPS files under kubernetes/ to.
 flux_recipient() {
   yq '.creation_rules[0].age // ""' "$flux_sops_config"
@@ -535,7 +676,9 @@ declare -A cluster_config=()
 #   BGP_EDGE_ASN
 #   BGP_EDGE_ADDRESS_1,   the edge routers' two addresses, values.bgp
 #   BGP_EDGE_ADDRESS_2
-# The last five the cluster stack renders from the plumbing stack's numbers for BGP (ADR 0013).
+#   GATEWAY_ADDRESS       the public Gateway's address, a host of the service range, which the edge
+#                         routers forward public traffic to, values.bgp.gatewayAddress
+# The last six the cluster stack renders from the plumbing stack's numbers for BGP (ADR 0013).
 # A missing talman.yaml leaves its keys to the caller's require_cluster, which names the file.
 fill_cluster_config() {
   local cluster=$1 talman=$2 example value keys key complete=1 i
@@ -544,7 +687,7 @@ fill_cluster_config() {
   local -a listed=() edges=()
   local -A sources=([CLUSTER_DOMAIN]=1 [BACKUP_BUCKET_PREFIX]=1 [S3_ENDPOINT]=1 [S3_REGION]=1
     [NODE_CIDR]=1 [NODE_NAME_REGEX]=1 [SERVICE_RANGE]=1 [BGP_CLUSTER_ASN]=1 [BGP_EDGE_ASN]=1
-    [BGP_EDGE_ADDRESS_1]=1 [BGP_EDGE_ADDRESS_2]=1) wanted=()
+    [BGP_EDGE_ADDRESS_1]=1 [BGP_EDGE_ADDRESS_2]=1 [GATEWAY_ADDRESS]=1) wanted=()
   example=$infra_root/kubernetes/clusters/$cluster/cluster-config.example.yaml
   cluster_config=()
   if [[ ! -f $example ]]; then
@@ -612,6 +755,13 @@ fill_cluster_config() {
       done
     else
       infra_error "cannot fill BGP_EDGE_ADDRESS_1 and BGP_EDGE_ADDRESS_2 of cluster-config: ${talman#"$infra_root"/} gives no two IPv4 addresses in values.bgp.edgeAddresses"
+      complete=0
+    fi
+    value=$(yq '.values.bgp.gatewayAddress // ""' "$talman" 2> /dev/null) || value=
+    if [[ $value =~ ^$ipv4$ ]]; then
+      cluster_config[GATEWAY_ADDRESS]=$value
+    else
+      infra_error "cannot fill GATEWAY_ADDRESS of cluster-config: ${talman#"$infra_root"/} gives no IPv4 address in values.bgp.gatewayAddress"
       complete=0
     fi
   fi

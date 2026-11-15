@@ -1,0 +1,36 @@
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: collector
+  namespace: agents
+spec:
+  selector:
+    matchLabels:
+      app: collector
+  template:
+    metadata:
+      labels:
+        app: collector
+    spec:
+      hostNetwork: true
+      initContainers:
+        - name: prepare
+          image: registry.example.invalid/collector-prepare:1
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+      containers:
+        - name: collector
+          image: registry.example.invalid/collector:1
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: logs
+              mountPath: /var/log
+              readOnly: true
+      volumes:
+        - name: logs
+          hostPath:
+            path: /var/log

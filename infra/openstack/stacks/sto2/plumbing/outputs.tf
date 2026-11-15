@@ -42,13 +42,14 @@ output "image" {
 }
 
 output "bgp" {
-  description = "What Services announced over BGP rest on: the cluster's and the edge routers' autonomous system numbers, the edge routers' two addresses on the node subnet, and the service range LoadBalancer addresses come from."
+  description = "What Services announced over BGP rest on: the cluster's and the edge routers' autonomous system numbers, the edge routers' two addresses on the node subnet, the service range LoadBalancer addresses come from, and the public Gateway's address in it."
   sensitive   = true
   value = {
-    cluster_asn    = var.cluster_asn
-    edge_asn       = var.edge_asn
-    edge_addresses = [for host in var.edge_hosts : cidrhost(var.node_cidr, host)]
-    service_range  = var.service_range
+    cluster_asn     = var.cluster_asn
+    edge_asn        = var.edge_asn
+    edge_addresses  = [for host in var.edge_hosts : cidrhost(var.node_cidr, host)]
+    service_range   = var.service_range
+    gateway_address = cidrhost(var.service_range, var.gateway_host)
   }
 }
 

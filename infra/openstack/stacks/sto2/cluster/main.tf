@@ -36,6 +36,7 @@ module "nodes" {
   security_group_rules = var.security_group_rules
   controlplane_count   = var.controlplane_count
   worker_count         = var.worker_count
+  worker_first_host    = var.worker_first_host
   controlplane_flavor  = var.controlplane_flavor
   worker_flavor        = var.worker_flavor
 

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Lists, reading only, the names of the public images the cloud offers, one per line and sorted, so
+# that EDGE_IMAGE and CI_HOST_IMAGE can be chosen without a console. With a pattern, only the names
+# that contain it, ignoring case. Prints nothing but names: no ID, size or owner.
+# Usage: scripts/os-images [pattern]
+set -euo pipefail
+
+# shellcheck source=scripts/lib/infra.sh
+. "$(dirname "$0")/lib/infra.sh"
+if (($# > 1)); then
+  infra_error "usage: os-images [pattern]"
+  exit 2
+fi
+load_env
+refuse_http2_debug
+require_openstack_auth
+if ! type -P openstack > /dev/null; then
+  infra_error "the openstack client is not on PATH"
+  exit 1
+fi
+
+images=$(openstack image list --public --status active -f json -c Name)
+jq -r --arg pattern "${1-}" '.[].Name | select($pattern == "" or (ascii_downcase | contains($pattern | ascii_downcase)))' <<< "$images" | sort

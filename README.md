@@ -24,11 +24,13 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
   by group. The group `static` holds tool versions, address literals in the files and the commit
   messages, merge conflict markers, that every Talos secrets bundle is encrypted, shellcheck and
   yamllint, the Renovate configuration (`just renovate-check`: Renovate's own validator, run from
-  its pinned container image, so it needs a container runtime, Docker), scenario proofs, the
-  OpenTofu check (`just infra-check`: formatting, that the Talos schematic lists no QEMU guest
-  agent extension, that every stack enforces state encryption, that no stack or module declares a
-  bucket, that the default service range overlaps no default node, pod or service subnet,
-  validation without a state backend and the mocked `tofu test` runs), the Talos check
+  its pinned container image, so it needs a container runtime, Docker), the edge routers' routing
+  policy (`just edge-policy-check`: their rendered FRR configuration against real BGP speakers in
+  FRR's pinned container image, which needs Docker as well), scenario proofs, the OpenTofu check
+  (`just infra-check`: formatting, that the Talos schematic lists no QEMU guest agent extension,
+  that every stack enforces state encryption, that no stack or module declares a bucket, that the
+  default service range overlaps no default node, pod or service subnet, validation without a
+  state backend and the mocked `tofu test` runs), the Talos check
   (`just talos-check`: every node's machine configuration rendered from the template, the patches
   and fixture node data, and validated, offline), the offline build of `kubernetes/`, its render
   with every chart expanded (`just render-check`, which pulls the charts from their public
@@ -41,13 +43,19 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
 - The groups are the dependencies of the `checks` recipe, and a group's checks are its own
   dependencies; a new check goes into exactly one group, and then runs in `just checks`, in
   `just ci` and in CI.
-- `just test` runs the bats tests but the hermetic ones, the tests of each file side by side (a file
-  whose tests share state runs them one at a time, and says why); `just test 2/3` runs the second
-  of three parts of the test files, which are split by their number of tests.
+- `just test` runs the bats tests but the hermetic ones and the namespace one, the tests of each file
+  side by side (a file whose tests share state runs them one at a time, and says why);
+  `just test 2/3` runs the second of three parts of the test files, which are split by their number
+  of tests.
+- `just pod-security-check` renders the tree, charts pulled from their public registries, and checks
+  that every namespace enforces the strictest Pod Security level its workloads pass
+  ([docs/kubernetes.md](docs/kubernetes.md#pod-security)); `tests/pod-security.bats` runs it as part
+  of the bats tests.
 - `just ci` runs the same groups through the Dagger module in `.dagger/modules/ci`, side by side,
   each in containers of its own: Renovate's validator in its own image, Vector in the log
-  collector's image, every other check in a container with the pinned tools, the tools image
-  `versions.yaml` records when it was built for these pins and one built from them otherwise
+  collector's image, the speakers of the edge routers' routing policy in FRR's image, every other
+  check in a container with the pinned tools, the tools image `versions.yaml` records when it was
+  built for these pins and one built from them otherwise
   ([The tools image](#the-tools-image)); the run's first line says which. `just ci tests-2` runs
   one group, as each CI job does. It needs
   only `just`, the pinned `dagger` and a container runtime such as Docker. Every group runs to its
@@ -60,14 +68,31 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
   each showing its own result on the pull request, the render job renders the change for its
   comment (`just ci-render`), and the job named `ci`, the required check on `main`, passes only when
   every one of them succeeded (`just ci-passed`).
-- `just test-hermetic` runs the bats tests that drive `just ci` itself.
+- `just test-hermetic` runs the bats tests that drive `just ci` itself, and `just edge-forward-check`
+  the one that loads the edge routers' rules into network namespaces of a user namespace, which
+  the CI containers refuse; both run on a developer's machine.
 - `just render <out>` renders what Flux would apply, charts expanded, one file per object, and
   `just render-diff <base> <head>` prints what changes between two renders, as the comment every
   pull request gets ([docs/kubernetes.md](docs/kubernetes.md#the-render-diff)).
 
 `docs/infrastructure.md` covers the recipes that plan, apply and destroy the OpenTofu stacks: what
 they need in the environment, how state is stored and encrypted, and what they print.
-`docs/cluster.md` covers the recipes that create and change the Talos cluster. `docs/kubernetes.md`
+`docs/cluster.md` covers the recipes that create and change the Talos cluster. The edge routers
+that publish the cluster's Services have recipes of their own, each described in
+`docs/infrastructure.md#the-edge-routers` and `docs/runbooks/edge.md`:
+
+- `just os-images [pattern]` lists the names of the cloud's public images.
+- `just edge-ssh-key` creates the edge routers' SSH key pair at `EDGE_SSH_KEY_FILE`.
+- `just edge-check` checks, reading only, that both edge routers serve.
+- `just edge-routes` shows an edge router's BGP sessions and routes, in a terminal only.
+- `just edge-rollout [--replace] [--edge N [--other-down]]` replaces the edge routers one at a time,
+  checking each before the next; `--replace` replaces them when only the image is new, and `--edge`
+  one named edge.
+- `just edge-policy-check` proves the edge routers' routing policy with real BGP speakers.
+- `just edge-forward-check` proves what an edge router forwards, in network namespaces, on a
+  developer's machine.
+
+`docs/kubernetes.md`
 covers the tree Flux reconciles and how the publish workflow pushes, signs and verifies it before
 moving the `main` tag Flux follows, on every merge to `main` that changes it. `docs/runbooks/`
 holds the procedures that take more than one recipe, such as replacing the Talos image.

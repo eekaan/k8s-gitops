@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# Rolls a change out to the edge routers one edge at a time. Both edges render from one template,
+# and a change to the rendered user data replaces an instance, so one plan would replace both at
+# once, which scripts/infra-apply refuses. A newer image replaces nothing by itself, as the vm
+# module ignores a change to an instance's boot device: --replace replaces each edge's instance
+# anyway, and with it its boot volume, which Nova makes again from the image EDGE_IMAGE names. The
+# edge's port stays, and with it its address and floating IP.
+#
+# Plans the stack and prints the summary; once the stack's name is typed back (--yes: without
+# asking), replaces edge 1, waits until scripts/edge-check passes for it, and only then replaces
+# edge 2. Before it replaces an edge it checks that the other one passes, so an edge is never
+# replaced while the other is not serving. A replaced edge has SSH host keys of its own at the same
+# address, so the recorded keys are dropped before it is replaced, and the new ones are recorded,
+# their fingerprints shown and yes typed, before its check runs; keys that are not accepted stop the
+# rollout at once. A check that does not pass within EDGE_ROLLOUT_WAIT seconds (900 when unset),
+# tried every EDGE_ROLLOUT_INTERVAL seconds (15), stops the rollout there: an edge after it is not
+# touched. The last step plans the whole stack again and prints what is left, which only
+# scripts/infra-apply applies: each edge's plan holds that edge's own resources alone.
+#
+# --edge N replaces edge N alone, after the same check of the other edge. With --other-down it goes
+# on when the other edge does not pass either, once a sentence that names both edges is typed back,
+# --yes or not: with both edges down nothing serves anyway, and replacing one is the way back.
+# Usage: scripts/edge-rollout [--replace] [--edge 1|2 [--other-down]] [--yes]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/edge.sh
+. "$here/lib/edge.sh"
+
+usage() {
+  infra_error "usage: edge-rollout [--replace] [--edge 1|2 [--other-down]] [--yes]"
+  exit 2
+}
+
+confirmed=0 forced=0 only='' other_down=0
+while (($#)); do
+  case $1 in
+    --yes) confirmed=1 ;;
+    --replace) forced=1 ;;
+    --other-down) other_down=1 ;;
+    --edge)
+      [[ ${2-} == 1 || ${2-} == 2 ]] || usage
+      only=$2
+      shift
+      ;;
+    *) usage ;;
+  esac
+  shift
+done
+# Going on with the other edge down is for one named edge only.
+if ((other_down)) && [[ -z $only ]]; then
+  usage
+fi
+numbers=(1 2)
+if [[ -n $only ]]; then
+  numbers=("$only")
+fi
+wait_seconds=${EDGE_ROLLOUT_WAIT:-900} interval=${EDGE_ROLLOUT_INTERVAL:-15}
+if [[ ! $wait_seconds =~ ^[0-9]+$ || ! $interval =~ ^[0-9]+$ ]]; then
+  infra_error "EDGE_ROLLOUT_WAIT and EDGE_ROLLOUT_INTERVAL are whole numbers of seconds"
+  exit 1
+fi
+
+# shellcheck source=scripts/stack-env
+. "$here/stack-env" sto2/edge
+lock_stack
+export EDGE_STACK_LOCKED=1
+init_stack
+edge_load
+echo "$stack:"
+plan_stack
+if ((forced)); then
+  echo "and, with --replace, the instance and boot volume of edge ${numbers[*]}, one edge at a time; ports stay"
+fi
+((confirmed)) || confirm "$stack" "roll out" "rolled out"
+
+# check NUMBER: scripts/edge-check for edge NUMBER, under this run's lock.
+check() {
+  edge_check_passes "$1"
+}
+
+# other_down_typed NUMBER OTHER: whether the operator, told that OTHER does not serve either, types
+# the sentence that names both edges, --yes or not: replacing NUMBER then leaves no edge serving
+# until it passes its check.
+other_down_typed() {
+  local expected="replace edge $1 with edge $2 down" answer=
+  printf 'Edge %s does not serve either, so no edge serves until edge %s passes its check. Type "%s" to replace it anyway: ' "$2" "$1" "$expected" >&2
+  read -r answer || true
+  [[ $answer == "$expected" ]]
+}
+
+# records_new_keys NUMBER: shows the host keys edge NUMBER offers and records them once yes is
+# typed, trying again while the new instance does not answer until the wait is over.
+records_new_keys() {
+  local deadline=$((SECONDS + wait_seconds)) status
+  while :; do
+    status=0
+    ssh_host_trust "${edge_addresses[$1 - 1]}" "$edge_known_hosts" "edge router ${edge_names[$1 - 1]}" || status=$?
+    if ((status == 0)); then
+      return 0
+    fi
+    # Declined, or the wait is over.
+    if ((status == 2 || SECONDS >= deadline)); then
+      return 1
+    fi
+    sleep "$interval"
+  done
+}
+
+# passes NUMBER: whether edge-check passes for edge NUMBER, tried until the wait is over.
+passes() {
+  local deadline=$((SECONDS + wait_seconds))
+  while :; do
+    if check "$1"; then
+      return 0
+    fi
+    if ((SECONDS >= deadline)); then
+      return 1
+    fi
+    sleep "$interval"
+  done
+}
+
+# Each edge with its floating IP association, as the instance's replacement leaves the port and the
+# address in place; what the edge depends on, the shared group and key pair, comes with it. With
+# --replace, the edge's instance is replaced whatever the plan says: its boot volume, which Nova
+# makes from the image and deletes with the instance, goes with it, and its port, which holds the
+# fixed address and the floating IP's association, is kept, so the new instance boots on the same
+# port, at the same addresses.
+replaced_numbers=()
+for number in "${numbers[@]}"; do
+  other=$((3 - number))
+  echo "edge $number: checking that edge $other serves before it is replaced"
+  if ! check "$other"; then
+    if ((!other_down)); then
+      infra_error "edge $other does not pass its check, so edge $number is not replaced; to replace edge $number while edge $other is down, run: just edge-rollout --replace --edge $number --other-down"
+      exit 1
+    fi
+    if ! other_down_typed "$number" "$other"; then
+      infra_error "edge $number is not replaced while edge $other is down, as that was not typed back"
+      exit 1
+    fi
+  fi
+  echo "edge $number: replacing"
+  replace=()
+  if ((forced)); then
+    replace=("-replace=module.edge[\"$number\"].openstack_compute_instance_v2.this")
+  fi
+  stack_tofu plan -input=false -out="$plan_file" "-target=module.edge[\"$number\"]" \
+    "-target=openstack_networking_floatingip_associate_v2.edge[\"$number\"]" "${replace[@]}" > /dev/null
+  stack_tofu show -json "$plan_file" | plan_summary
+  # Only an instance the plan creates, replacing the old one or not, has new host keys; an edge the
+  # plan changes in place keeps the recorded ones, which are never dropped and asked for again
+  # without cause.
+  created=$(edge_created)
+  if [[ $'\n'$created$'\n' == *$'\n'$number$'\n'* ]]; then
+    edge_forget_keys "$number"
+    apply_plan
+    replaced_numbers+=("$number")
+    echo "edge $number: applied; its SSH host keys are new"
+    if ! records_new_keys "$number"; then
+      infra_error "edge $number's new SSH host key was not recorded within ${wait_seconds}s or was not accepted; the rollout stops here and no later edge was touched"
+      exit 1
+    fi
+  else
+    apply_plan
+    echo "edge $number: applied; its instance was not replaced, so its SSH host keys stay"
+  fi
+  echo "edge $number: waiting for its check to pass"
+  if ! passes "$number"; then
+    infra_error "edge $number does not pass its check within ${wait_seconds}s; the rollout stops here and no later edge was touched"
+    exit 1
+  fi
+done
+
+if ((${#replaced_numbers[@]} == 0)); then
+  echo "$stack: no edge was replaced, and edge ${numbers[*]} passes; what is left of the plan:"
+else
+  echo "$stack: edge ${replaced_numbers[*]} replaced, and edge ${numbers[*]} passes; what is left of the plan:"
+fi
+plan_stack
+echo "what is left is not applied: the rollout applies each edge's own part alone; just infra-apply sto2/edge applies the rest"

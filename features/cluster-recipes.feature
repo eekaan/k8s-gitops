@@ -56,6 +56,21 @@ Feature: Cluster recipes
     When cluster-talos runs, and then runs with --onboard
     Then without --onboard no talman call onboards new nodes and the node stays new, and with --onboard both the dry run and the apply onboard it
 
+  Scenario: A rollout that changes etcd's arguments says which control planes need a reboot
+    Given talman's dry run showing a change to cluster.etcd's extraArgs on cp-1 and cp-2, which etcd's configuration in Talos holds once each runs it, and one to machine.network only on worker-2
+    When cluster-talos runs with --yes, and with --yes --first worker-2
+    Then once the nodes keep the configuration it says that cp-1 and cp-2 run etcd as it was started until they reboot, names just cluster-reboot for each, one at a time, says nothing of worker-2, and reboots nothing
+
+  Scenario: A rollout that changes only what applies at once says nothing about a reboot
+    Given talman's dry run showing changes to machine.network only, and then to nothing in a reboot-only section
+    When cluster-talos runs with --yes, and with --yes --reboot
+    Then it says nothing about a reboot, calls no cluster-reboot and exits zero
+
+  Scenario: With --reboot, the nodes that need one are rebooted one at a time, and the first that does not come back stops the rest
+    Given talman's dry run showing a change to cluster.etcd's extraArgs on cp-1, cp-2 and cp-3
+    When cluster-talos runs with --yes --reboot, with a cp-2 that does not come back, and with a cp-1 that is Ready again while its etcd member is not
+    Then once the configuration is kept it runs cluster-reboot for cp-1, cp-2 and cp-3 in turn, each ended before the next starts, and without --reboot it reboots none; with the failing cp-2 it exits non-zero naming cp-2 and the nodes not rebooted, and cp-3 is not rebooted; with cp-1's member not back, cluster-reboot itself fails on it and neither cp-2 nor cp-3 is rebooted
+
   Scenario: A Talos upgrade drains through the Kubernetes API one node at a time
     Given talman reporting cp-2 and worker-1 behind the Talos version and schematic talman.yaml gives them
     When cluster-upgrade runs, without the cluster's name typed back and then with it
