@@ -1665,10 +1665,12 @@ of that release's linux-x64 binary, so the tools that run beside the token are t
 action fails the job when the binary differs. A bump of the mise version changes the checksum with it,
 in every workflow that has one, and the checksum is the one for `./mise-v<version>-linux-x64` in the
 release's `SHASUMS256.txt`. Renovate's github-actions manager reads both inputs as one dependency,
-`jdx/mise`, but it looks the next release's checksum up in the release tagged as the version is
-written, without the `v` that mise's release tags carry: the lookup fails, so Renovate proposes
-nothing for a workflow with a checksum, and would move the version alone in the one without. The bump
-is by hand, in every workflow at once (`.renovate/by-hand.tsv`).
+`jdx/mise`, but to move the checksum it first fetches the current release by the tag the version is
+written as, and the version is written without the `v` that mise's release tags carry: that lookup
+fails, so Renovate proposes nothing for a workflow with a checksum. For `ci.yaml`, which has none, it
+would move the version alone, which `tests/ci.bats` refuses, as the publish workflow's mise must be
+CI's. A package rule in `.renovate/managers.json5` tells Renovate not to propose `jdx/mise` while its
+version has that form, and the bump is by hand, in every workflow at once (`.renovate/by-hand.tsv`).
 The two jobs that sign, `publish` and `tools-image`, also turn the action's cache off, so nothing
 runs from an entry another job saved.
 
