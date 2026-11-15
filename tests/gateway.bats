@@ -35,15 +35,33 @@ built() {
   app_dir "$app"
   # shellcheck disable=SC2016 # $vars is a yq variable.
   yq ea 'select(fileIndex == 0) as $vars | select(fileIndex == 1 and . != null)
-    | .spec.postBuild.substitute = $vars' "$EXAMPLE" "$REPO/$APP_DIR/ks.yaml" >"$ks"
+    | .spec.postBuild.substitute = $vars' "${VARS:-$EXAMPLE}" "$REPO/$APP_DIR/ks.yaml" >"$ks"
   BUILT="$BATS_TEST_TMPDIR/$app-built.yaml"
   (cd "$REPO" && flux build kustomization "$app" --path "./$APP_DIR/app" \
     --kustomization-file "$ks" --dry-run --strict-substitute) >"$BUILT"
 }
 
-# var NAME: the example value of the cluster-config variable NAME.
+# var NAME: the value of the cluster-config variable NAME in the key lists built with: the example
+# values, or those of the file VARS names.
 var() {
-  NAME="$1" yq -e '.[strenv(NAME)]' "$EXAMPLE"
+  NAME="$1" yq -e '.[strenv(NAME)]' "${VARS:-$EXAMPLE}"
+}
+
+# other_vars: writes a copy of the example values with the Gateway's address and the domain changed
+# and sets OTHER to it, so a test can build again and see that what it read came from the
+# variables, not from a literal that happens to equal the example.
+other_vars() {
+  OTHER="$BATS_TEST_TMPDIR/other-vars.yaml"
+  GATEWAY_ADDRESS=203.0.113.77 CLUSTER_DOMAIN=other.example.org \
+    yq '.GATEWAY_ADDRESS = strenv(GATEWAY_ADDRESS) | .CLUSTER_DOMAIN = strenv(CLUSTER_DOMAIN)' "$EXAMPLE" >"$OTHER"
+}
+
+# overlay: the lab-sto2 overlay as Flux reads it, its namespaces and the Kustomization of each
+# enabled application, so what a test reads is what an overlay patch would have changed too.
+# Writes $OVERLAY.
+overlay() {
+  OVERLAY="$BATS_TEST_TMPDIR/overlay.yaml"
+  kustomize build --load-restrictor LoadRestrictionsNone "$REPO/kubernetes/apps/overlays/lab-sto2" >"$OVERLAY"
 }
 
 # object FILE KIND NAME: the one object of that kind and name in FILE.
@@ -60,10 +78,10 @@ only() {
   echo "$names"
 }
 
-# depends_on APP: the names the application's ks.yaml lists in dependsOn, one per line.
+# depends_on APP: the names the overlay's Kustomization of APP lists in dependsOn, one per line.
 depends_on() {
-  app_dir "$1"
-  yq '.spec.dependsOn // [] | .[].name' "$REPO/$APP_DIR/ks.yaml"
+  overlay
+  APP="$1" yq -N 'select(.kind == "Kustomization" and .metadata.name == strenv(APP)) | .spec.dependsOn // [] | .[].name' "$OVERLAY"
 }
 
 # listener FILE NAME: the Gateway's listener NAME, as JSON.
@@ -106,25 +124,51 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   # Every worker announces it and forwards to a proxy on any node, so a proxy that moves, or is
   # replaced in a rollout, does not change what the edge routers see.
   [ "$(yq '.externalTrafficPolicy' "$service")" = Cluster ]
+  # Nothing patches the Service after the fields above.
+  [ "$(yq 'has("patch")' "$service")" = false ]
+  # The address comes from the variable: built with another value, the annotation follows it.
+  other_vars
+  VARS="$OTHER" built gateway-public
+  [ "$(object "$BUILT" EnvoyProxy "$proxy" | yq '.spec.provider.kubernetes.envoyService.annotations["lbipam.cilium.io/ips"]')" \
+    = "$(VARS="$OTHER" var GATEWAY_ADDRESS)" ]
   # It is applied after what it needs: the controller, the issuer and the BGP objects.
   [ "$(depends_on gateway-public | sort | paste -sd' ' -)" = "cilium-bgp cluster-ca envoy-gateway" ]
 }
 
 @test "Plain HTTP is answered only with a redirect to HTTPS" {
-  local gateway http routes route stray
+  local gateway http routes route namespace dir app
   built gateway-public
   gateway="$(only "$BUILT" Gateway)"
+  namespace="$(object "$BUILT" Gateway "$gateway" | yq '.metadata.namespace')"
   http="$(listener "$BUILT" http)"
   echo "http listener: $http"
   [ "$(jq -r '.port' <<<"$http")" -eq 80 ]
   [ "$(jq -r '.protocol' <<<"$http")" = HTTP ]
   # Every hostname.
   [ "$(jq -r 'has("hostname")' <<<"$http")" = false ]
-  # One route attached to it, in the Gateway's own namespace.
-  routes="$(GATEWAY="$gateway" yq -N 'select(.kind == "HTTPRoute" and (.spec.parentRefs
-    | map(select(.name == strenv(GATEWAY) and .sectionName == "http")) | length > 0)) | .metadata.name' "$BUILT")"
+  # One route attached to it, in the Gateway's own namespace. A parentRef attaches to the http
+  # listener when it names the Gateway and neither its sectionName nor its port rules the listener
+  # out: it is not enough to look for sectionName: http, as a parentRef without one attaches to
+  # every listener that allows the route's namespace, and http allows the Gateway's own. The
+  # routes counted are those of every application that applies objects to that namespace.
+  : >"$BATS_TEST_TMPDIR/namespace-routes.yaml"
+  for dir in "$REPO"/kubernetes/apps/base/*/*/; do
+    app="$(basename "$dir")"
+    [ -f "$dir/ks.yaml" ] || continue
+    [ "$(yq '.spec.targetNamespace' "$dir/ks.yaml")" = "$namespace" ] || continue
+    built "$app"
+    NS="$namespace" yq -N 'select(.kind == "HTTPRoute" and ((.metadata.namespace // strenv(NS)) == strenv(NS)))' "$BUILT" \
+      >>"$BATS_TEST_TMPDIR/namespace-routes.yaml"
+    echo --- >>"$BATS_TEST_TMPDIR/namespace-routes.yaml"
+  done
+  routes="$(GATEWAY="$gateway" NS="$namespace" yq -N 'select(.kind == "HTTPRoute" and (.spec.parentRefs
+    | map(select(.name == strenv(GATEWAY)
+        and ((.namespace // strenv(NS)) == strenv(NS))
+        and ((.sectionName // "http") == "http")
+        and ((.port // 80) == 80))) | length > 0)) | .metadata.name' "$BATS_TEST_TMPDIR/namespace-routes.yaml")"
   echo "routes on the http listener: ${routes:-none}"
-  [ -n "$routes" ] && [ "$(wc -l <<<"$routes")" -eq 1 ]
+  [ "$routes" = https-redirect ]
+  built gateway-public
   route="$(object "$BUILT" HTTPRoute "$routes")"
   [ "$(yq '.metadata.namespace' <<<"$route")" = "$(object "$BUILT" Gateway "$gateway" | yq '.metadata.namespace')" ]
   # It redirects to https with a 301 and forwards nowhere: no backend, no other filter.
@@ -135,10 +179,6 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   [ "$(yq '.spec.rules[0].filters[0].requestRedirect.statusCode' <<<"$route")" -eq 301 ]
   [ "$(yq '.spec.rules[0] | has("backendRefs")' <<<"$route")" = false ]
   [ "$(yq '.spec | has("hostnames")' <<<"$route")" = false ]
-  # No other route anywhere in the tree attaches to the http listener.
-  stray="$(grep -rl 'sectionName: http$' "$REPO"/kubernetes/apps/base --include='*.yaml' | grep -v 'gateway-public/app/' || true)"
-  echo "files naming the http listener outside the Gateway's application: ${stray:-none}"
-  [ -z "$stray" ]
 }
 
 @test "The HTTPS listener serves a wildcard certificate for the cluster's domain from the cluster's issuer" {
@@ -154,7 +194,13 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   [ "$(jq -r '.protocol' <<<"$https")" = HTTPS ]
   [ "$(jq -r '.hostname' <<<"$https")" = "*.$domain" ]
   [ "$(jq -r '.tls.mode' <<<"$https")" = Terminate ]
+  # Only the https listener and the http one: a further listener would be an unreviewed way in.
+  [ "$(yq -N '.spec.listeners | map(.name) | sort | join(" ")' <(object "$BUILT" Gateway "$gateway"))" = "http https" ]
   secret="$(jq -r '.tls.certificateRefs | map(select((.kind // "Secret") == "Secret")) | .[0].name' <<<"$https")"
+  # In the Gateway's namespace, which a listener reaches without a ReferenceGrant.
+  [ "$(jq -r '.tls.certificateRefs | length' <<<"$https")" -eq 1 ]
+  [ "$(jq -r '.tls.certificateRefs[0].namespace // ""' <<<"$https")" = "" ] \
+    || [ "$(jq -r '.tls.certificateRefs[0].namespace' <<<"$https")" = "$(object "$BUILT" Gateway "$gateway" | yq '.metadata.namespace')" ]
   # The Secret is the one of the Certificate for the wildcard and the apex, in the Gateway's
   # namespace, which a listener's certificateRefs reach without a grant.
   leaf="$(only "$BUILT" Certificate)"
@@ -166,6 +212,13 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   [ "$(yq '.spec.privateKey.algorithm' "$BATS_TEST_TMPDIR/leaf.yaml")" = ECDSA ]
   [ "$(yq '.spec.duration' "$BATS_TEST_TMPDIR/leaf.yaml")" = 2160h ]
   [ "$(yq '.spec.renewBefore' "$BATS_TEST_TMPDIR/leaf.yaml")" = 720h ]
+  # The names come from the variable: built with another domain they follow it.
+  other_vars
+  VARS="$OTHER" built gateway-public
+  [ "$(listener "$BUILT" https | jq -r '.hostname')" = "*.$(VARS="$OTHER" var CLUSTER_DOMAIN)" ]
+  [ "$(object "$BUILT" Certificate "$leaf" | yq '.spec.dnsNames | sort | join(" ")')" \
+    = "$(printf '%s %s' "*.$(VARS="$OTHER" var CLUSTER_DOMAIN)" "$(VARS="$OTHER" var CLUSTER_DOMAIN)")" ]
+  built gateway-public
   # It is issued by the cluster-wide CA issuer, never by the bootstrap issuer that signs the CA.
   cluster_issuer="$(only "$BATS_TEST_TMPDIR/issuers.yaml" ClusterIssuer)"
   [ "$(yq '.spec.issuerRef.group // "cert-manager.io"' "$BATS_TEST_TMPDIR/leaf.yaml")" = cert-manager.io ]
@@ -194,7 +247,8 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   # finds it.
   [ "$(depends_on cluster-ca)" = cert-manager ]
   app_dir cluster-ca
-  [ "$(yq '.spec.wait' "$REPO/$APP_DIR/ks.yaml")" = true ]
+  overlay
+  [ "$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "cluster-ca") | .spec.wait' "$OVERLAY")" = true ]
   # No private key is committed: the CA's is made in the cluster, and no Secret is applied.
   [ -z "$(yq -N 'select(.kind == "Secret") | .metadata.name' "$BATS_TEST_TMPDIR/issuers.yaml" "$BUILT")" ]
   [ -z "$(grep -rl 'PRIVATE KEY' "$REPO/$APP_DIR" "$REPO/kubernetes/apps/base/envoy-gateway-system/gateway-public" || true)" ]
@@ -209,7 +263,7 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
 }
 
 @test "A route attaches to the public Gateway only from a namespace that opts in" {
-  local gateway https http label dir name labels attached=()
+  local gateway https http label name labels attached=()
   built gateway-public
   gateway="$(only "$BUILT" Gateway)"
   https="$(listener "$BUILT" https)"
@@ -222,16 +276,13 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   label="$(jq -r '.allowedRoutes.namespaces.selector.matchLabels["k8s-gitops/gateway"]' <<<"$https")"
   [ "$label" = public ]
   [ "$(jq -r '.allowedRoutes.namespaces.from' <<<"$http")" = Same ]
-  # A namespace of the tree attaches to https when its labels carry the selector's pair, and the
-  # demo namespace is the only one that does.
-  for dir in "$REPO"/kubernetes/apps/base/*/; do
-    # flux-system is the Flux Operator's, which the FluxInstance labels.
-    [ -f "$dir/namespace.yaml" ] || continue
-    name="$(yq '.metadata.name' "$dir/namespace.yaml")"
-    labels="$(yq '.metadata.labels["k8s-gitops/gateway"] // "none"' "$dir/namespace.yaml")"
+  # A namespace of the cluster attaches to https when its labels, as the overlay builds them,
+  # carry the selector's pair, and the demo namespace is the only one that does.
+  overlay
+  while IFS=$'\t' read -r name labels; do
     echo "namespace $name: k8s-gitops/gateway=$labels"
     if [ "$labels" = "$label" ]; then attached+=("$name"); fi
-  done
+  done < <(yq -N 'select(.kind == "Namespace") | .metadata.name + "\t" + (.metadata.labels["k8s-gitops/gateway"] // "none")' "$OVERLAY")
   [ "${attached[*]}" = demo ]
   # Every route that names the Gateway from another namespace is in one that attached.
   built hello-route
@@ -256,6 +307,11 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   object "$BUILT" HTTPRoute "$route" >"$BATS_TEST_TMPDIR/route.yaml"
   echo "route $route: $(yq -o json -I0 '.spec' "$BATS_TEST_TMPDIR/route.yaml")"
   [ "$(yq '.spec.hostnames | join(",")' "$BATS_TEST_TMPDIR/route.yaml")" = "hello.$domain" ]
+  # The hostname comes from the variable: built with another domain it follows it.
+  other_vars
+  VARS="$OTHER" built hello-route
+  [ "$(object "$BUILT" HTTPRoute "$route" | yq '.spec.hostnames | join(",")')" = "hello.$(VARS="$OTHER" var CLUSTER_DOMAIN)" ]
+  built hello-route
   # On the public Gateway's https listener.
   built gateway-public
   [ "$(yq '.spec.parentRefs | length' "$BATS_TEST_TMPDIR/route.yaml")" -eq 1 ]
@@ -270,6 +326,10 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   [ "$(yq '.spec.rules[0].backendRefs[0].port' "$BATS_TEST_TMPDIR/route.yaml")" = "$(yq '.spec.ports[0].port' "$BATS_TEST_TMPDIR/service.yaml")" ]
   deployment="$(only "$BUILT" Deployment)"
   object "$BUILT" Deployment "$deployment" >"$BATS_TEST_TMPDIR/deployment.yaml"
+  # The Service's target is a port the workload's container declares, by name or number.
+  [ -n "$(TARGET="$(yq '.spec.ports[0].targetPort' "$BATS_TEST_TMPDIR/service.yaml")" \
+    yq '.spec.template.spec.containers[].ports[] | select(.name == strenv(TARGET) or (.containerPort | tostring) == strenv(TARGET)) | .name' \
+    "$BATS_TEST_TMPDIR/deployment.yaml")" ]
   # The Service selects the pods the Deployment makes.
   jq -e --argjson labels "$(yq -o json -I0 '.spec.template.metadata.labels' "$BATS_TEST_TMPDIR/deployment.yaml")" \
     'to_entries | length > 0 and all(. as $e | $labels[$e.key] == $e.value)' \
@@ -280,9 +340,20 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   [ "$(yq '.spec.template.spec.securityContext.seccompProfile.type' "$BATS_TEST_TMPDIR/deployment.yaml")" = RuntimeDefault ]
   # The workload is a real one, of a pinned image, and its namespace opts in and enforces restricted.
   [[ $(yq '.spec.template.spec.containers[0].image' "$BATS_TEST_TMPDIR/deployment.yaml") =~ :[0-9][^:]*$ ]]
-  [ "$(yq '.spec.replicas' "$BATS_TEST_TMPDIR/deployment.yaml")" -ge 1 ]
-  [ "$(yq '.metadata.labels["k8s-gitops/gateway"]' "$REPO/kubernetes/apps/base/demo/namespace.yaml")" = public ]
-  [ "$(yq '.metadata.labels["pod-security.kubernetes.io/enforce"]' "$REPO/kubernetes/apps/base/demo/namespace.yaml")" = restricted ]
+  # Two replicas that a drain or a node's loss cannot take together: spread over the hostnames,
+  # and a budget that keeps one running.
+  [ "$(yq '.spec.replicas' "$BATS_TEST_TMPDIR/deployment.yaml")" -eq 2 ]
+  [ "$(yq '.spec.template.spec.topologySpreadConstraints | map(select(.topologyKey == "kubernetes.io/hostname" and .whenUnsatisfiable == "DoNotSchedule" and .maxSkew == 1)) | length' "$BATS_TEST_TMPDIR/deployment.yaml")" -eq 1 ]
+  jq -e --argjson labels "$(yq -o json -I0 '.spec.template.metadata.labels' "$BATS_TEST_TMPDIR/deployment.yaml")" \
+    'to_entries | length > 0 and all(. as $e | $labels[$e.key] == $e.value)' \
+    <<<"$(yq -o json -I0 '.spec.template.spec.topologySpreadConstraints[0].labelSelector.matchLabels' "$BATS_TEST_TMPDIR/deployment.yaml")"
+  [ "$(yq -N 'select(.kind == "PodDisruptionBudget") | .spec.minAvailable' "$BUILT")" -eq 1 ]
+  jq -e --argjson labels "$(yq -o json -I0 '.spec.template.metadata.labels' "$BATS_TEST_TMPDIR/deployment.yaml")" \
+    'to_entries | length > 0 and all(. as $e | $labels[$e.key] == $e.value)' \
+    <<<"$(yq -N -o json -I0 'select(.kind == "PodDisruptionBudget") | .spec.selector.matchLabels' "$BUILT")"
+  overlay
+  [ "$(yq -N 'select(.kind == "Namespace" and .metadata.name == "demo") | .metadata.labels["k8s-gitops/gateway"]' "$OVERLAY")" = public ]
+  [ "$(yq -N 'select(.kind == "Namespace" and .metadata.name == "demo") | .metadata.labels["pod-security.kubernetes.io/enforce"]' "$OVERLAY")" = restricted ]
   # The route is applied after the Gateway, which it names.
   [ "$(depends_on hello-route | sort | paste -sd' ' -)" = "gateway-public hello" ]
 }
@@ -334,8 +405,12 @@ tree_without() {
   namespace="$(object "$BUILT" Gateway "$(only "$BUILT" Gateway)" | yq '.metadata.namespace')"
   # The proxies' Deployment is made by the controller at run time, so no render holds it: its
   # level is what the namespace enforces, and the fields that produce its pods are these.
-  [ "$(yq '.metadata.labels["pod-security.kubernetes.io/enforce"]' "$REPO/kubernetes/apps/base/$namespace/namespace.yaml")" = restricted ]
+  overlay
+  [ "$(NS="$namespace" yq -N 'select(.kind == "Namespace" and .metadata.name == strenv(NS)) | .metadata.labels["pod-security.kubernetes.io/enforce"]' "$OVERLAY")" = restricted ]
   [ "$(yq '.envoyDeployment.replicas' "$spec")" -eq 2 ]
+  # No autoscaler: the controller drops the replica count when one is set, and two proxies on two
+  # workers are what the spread below asks for.
+  [ "$(yq 'has("envoyHpa")' "$spec")" = false ]
   # Spread over the workers, never two on one: the selector is the proxies' own labels.
   [ "$(yq '.envoyDeployment.pod.topologySpreadConstraints | length' "$spec")" -eq 1 ]
   [ "$(yq '.envoyDeployment.pod.topologySpreadConstraints[0].topologyKey' "$spec")" = kubernetes.io/hostname ]

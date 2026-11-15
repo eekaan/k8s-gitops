@@ -293,9 +293,9 @@ level is declared in the tree, never left to the API server's default.
     `spec.provider.kubernetes.envoyDeployment.pod.securityContext`, and the proxy container's
     non-root user, seccomp profile, no privilege escalation and no capabilities in
     `envoyDeployment.container.securityContext`; the controller adds its shutdown manager container
-    with the same hardened defaults. `tests/gateway.bats` requires these fields, as the proxy is one
-    container patched by the resource rather than a list of named containers
-    ([The public Gateway](#the-public-gateway)).
+    with the same hardened defaults. `tests/gateway.bats` requires these fields in the built `EnvoyProxy`:
+    the render holds no definition of the proxy's pod to check the paths against, as the controller
+    makes its Deployment at run time ([The public Gateway](#the-public-gateway)).
   - The ReplicationSource `<app>` and ReplicationDestination `<app>-restore` of each application
     with a backed-up volume, `volsync-demo` in `demo` among them: the movers' non-root user and
     seccomp profile, in `spec.restic.moverSecurityContext`, from `components/volsync`; VolSync
@@ -916,7 +916,8 @@ that had been given the old one must be given again. It is not the decision of A
 stands unamended: the public certificate comes from the Let's Encrypt DNS-01 issuer of that record
 when its story lands, and each `Certificate` that names `cluster-ca` then changes its `issuerRef`,
 one place for the Gateway's ([The public Gateway](#the-public-gateway)). `tests/gateway.bats` checks
-the three objects, the Gateway's certificate against them, and that no Secret or key is in the tree.
+the three objects, the Gateway's certificate against them, and that neither application's build
+holds a Secret nor its directory a private key; `secrets-scan` covers the rest of the tree.
 
 ## Autoscaling and reflection
 
@@ -1409,7 +1410,8 @@ cannot be listed without it: `just kubernetes-check` refuses the dependency.
    `apps/base/demo/hello-route/` does, so a cluster without the Gateway cannot enable it.
 
 `hello`, the demo's workload, answers this way at `hello.${CLUSTER_DOMAIN}`: two replicas of
-busybox's web server, as an unprivileged user, serving a page from its ConfigMap.
+busybox's web server, spread over the workers and held by a disruption budget of one, as an
+unprivileged user, serving a page from its ConfigMap.
 
 ## PostgreSQL
 

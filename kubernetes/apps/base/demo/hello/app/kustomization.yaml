@@ -5,4 +5,5 @@ kind: Kustomization
 resources:
   - configmap.yaml
   - deployment.yaml
+  - poddisruptionbudget.yaml
   - service.yaml

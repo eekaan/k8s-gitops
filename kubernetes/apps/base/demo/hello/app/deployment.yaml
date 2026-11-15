@@ -1,7 +1,8 @@
 ---
 # yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/deployment-apps-v1.json
 # The smallest real HTTP workload: busybox's web server, answering with the page of the ConfigMap.
-# Two replicas, so a node's drain or loss leaves one answering.
+# Two replicas on different nodes, so a node's drain or loss leaves one answering, and a budget that
+# keeps one running while a drain evicts the other.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -16,6 +17,14 @@ spec:
       labels:
         app.kubernetes.io/name: hello
     spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          nodeTaintsPolicy: Honor
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: hello
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534
