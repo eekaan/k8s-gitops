@@ -409,6 +409,20 @@ no_address() {
   no_address "$output"
 }
 
+@test "edge-check fails, naming the worker and the way out, when talman.yaml gives a worker no address" {
+  # A talman.yaml written before it carried each node's own address: a session from an address that
+  # is no worker's must not pass for a worker's.
+  yq -i 'del(.nodes[] | select(.hostname == "lab-w-2") | .values.privateAddress)' "$REPO/talos/lab-sto2/talman.yaml"
+  edge_state 1 active "192.0.2.20 192.0.2.22 192.0.2.99" 203.0.113.17/32
+  edge_check --edge 1
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL  lab-edge-1: 3 of 3 worker sessions are established, but talman.yaml has no privateAddress for lab-w-2; run just infra-talman"* ]]
+  [[ $output == *"FAIL  lab-edge-1: the forward chain's guard cannot be checked against every worker: talman.yaml has no privateAddress for lab-w-2; run just infra-talman"* ]]
+  [[ $output != *"pass  lab-edge-1: 3 of 3 worker sessions"* ]]
+  no_address "$output"
+}
+
 # rollout: scripts/edge-rollout --yes in the copy, the operator typing yes for every host key the
 # replaced edges offer.
 rollout() {

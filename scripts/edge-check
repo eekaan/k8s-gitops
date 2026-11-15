@@ -62,6 +62,13 @@ if [[ -f $talman ]]; then
   service_range=$(yq '.values.serviceRange // ""' "$talman")
   gateway=$(yq '.values.bgp.gatewayAddress // ""' "$talman")
 fi
+# A talman.yaml written before it carried each node's own address gives a worker none, and a
+# session or a guard cannot be matched to that worker: the lines that need it fail, saying so.
+unaddressed=()
+for i in "${!workers[@]}"; do
+  [[ -n ${worker_addresses[i]-} ]] || unaddressed+=("${workers[i]}")
+done
+no_address="talman.yaml has no privateAddress for ${unaddressed[*]}; run just infra-talman, after just infra-apply sto2/cluster if the stack's output has none either"
 
 ipv4_number() {
   local -a octets
@@ -117,6 +124,10 @@ guard() {
   done <<< "$chain"
   if [[ -z $drop || -z $accept || $established_at -eq 0 || $drop_at -gt $established_at ]]; then
     echo "the forward chain does not drop an established connection's packets toward the Gateway that do not go through a worker"
+    return
+  fi
+  if ((${#unaddressed[@]} > 0)); then
+    echo "the forward chain's guard cannot be checked against every worker: $no_address"
     return
   fi
   for set in "$drop" "$accept"; do
@@ -197,7 +208,9 @@ check_edge() {
         missing+=("${workers[i]}")
       fi
     done
-    if ((${#established[@]} == ${#workers[@]} && ${#missing[@]} == 0)); then
+    if ((${#unaddressed[@]} > 0)); then
+      fail "$edge" "${#established[@]} of ${#workers[@]} worker sessions are established, but $no_address"
+    elif ((${#established[@]} == ${#workers[@]} && ${#missing[@]} == 0)); then
       pass "$edge" "${#established[@]} of ${#workers[@]} worker sessions are established"
     elif ((${#missing[@]} > 0)); then
       fail "$edge" "${#established[@]} of ${#workers[@]} worker sessions are established; no session from ${missing[*]}"
