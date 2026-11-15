@@ -6,6 +6,13 @@
 talos: v1.14.6
 # renovate: datasource=github-tags depName=kubernetes/kubernetes
 kubernetes: v1.37.1
+# The commit of the public yannh/kubernetes-json-schema repository whose JSON schemas
+# scripts/kubernetes-validate validates against; it must hold the schemas of the version above.
+# Renovate proposes the branch's newest commit whenever the branch moves, in the Kubernetes group,
+# and a patch release of Kubernetes in a pull request of its own (docs/kubernetes.md, What the
+# checks refuse).
+# renovate-ref: depName=https://github.com/yannh/kubernetes-json-schema branch=master
+kubernetes_schemas: 2bfaff3898a7a4fa4e4760da3d2656211c9b4c71
 
 # What just ci-host-setup installs on the CI host (docs/runbooks/ci-host.md). The runner's release,
 # and the SHA-256 of its linux-x64 package as the release's notes give it, which setup verifies

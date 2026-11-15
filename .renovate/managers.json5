@@ -31,6 +31,16 @@
     },
     {
       customType: "regex",
+      // A commit of a branch, not a version: the digest under 'branch=…' is what moves.
+      description: "A commit of a Git repository's branch on the line under a '# renovate-ref: depName=<URL> branch=…' comment",
+      managerFilePatterns: ["/^versions\\.yaml$/"],
+      datasourceTemplate: "git-refs",
+      matchStrings: [
+        "# renovate-ref: depName=(?<depName>\\S+) branch=(?<currentValue>\\S+)\\n[a-z_]+:[ \\t]*(?<currentDigest>[0-9a-f]{40})(?:\\s|$)",
+      ],
+    },
+    {
+      customType: "regex",
       // A justfile variable such as vector_image := "host/name:tag@sha256:…": Renovate moves the
       // tag and the digest of its image index together.
       description: "An image pinned by tag and digest in a justfile variable under a '# renovate: datasource=… depName=…' comment",

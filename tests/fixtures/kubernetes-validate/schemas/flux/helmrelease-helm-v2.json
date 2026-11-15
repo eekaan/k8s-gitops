@@ -1,0 +1,29 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {"type": "string"},
+    "kind": {"type": "string"},
+    "metadata": {"type": "object"},
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "chartRef": {"type": "object"},
+        "driftDetection": {"type": "object"},
+        "install": {"type": "object"},
+        "interval": {"type": "string"},
+        "maxHistory": {"type": "integer"},
+        "releaseName": {"type": "string"},
+        "rollback": {"type": "object"},
+        "storageNamespace": {"type": "string"},
+        "targetNamespace": {"type": "string"},
+        "test": {"type": "object"},
+        "uninstall": {"type": "object"},
+        "upgrade": {"type": "object"},
+        "values": {"type": "object"},
+        "valuesFrom": {"type": "array"}
+      }
+    }
+  }
+}

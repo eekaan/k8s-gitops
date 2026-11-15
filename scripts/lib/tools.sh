@@ -2,8 +2,8 @@
 # Shared by every script that reads .env, through scripts/lib/infra.sh: each tool a recipe runs
 # gets only the secrets it uses. .env and the environment give the recipes the state passphrase,
 # both S3 key pairs, the cloud credential, the age keys and the operator allowlist; talman,
-# talosctl, kubectl, helm and flux need none of the S3, cloud or state secrets, and tofu needs
-# neither the cluster's S3 key nor an age key.
+# talosctl, kubectl, helm, flux and kubeconform need none of the S3, cloud or state secrets, and tofu
+# needs neither the cluster's S3 key nor an age key.
 #
 # The tools below are shell functions of the same name, so a recipe runs them by name and
 # each runs the real binary with the secrets it may not see unexported. Every other variable
@@ -116,8 +116,10 @@ helm() { run_tool helm "$@"; }
 flux() { run_tool flux "$@"; }
 kustomize() { run_tool kustomize "$@"; }
 docker() { run_tool docker "$@"; }
-# OpenBao's requests carry its tokens and need none of the secrets of the environment.
+# OpenBao's requests carry its tokens and need none of the secrets of the environment, and neither
+# do kubernetes-validate's fetches of public schemas, with curl and kubeconform.
 curl() { run_tool curl "$@"; }
+kubeconform() { run_tool kubeconform "$@"; }
 sops() { run_tool sops "$@"; }
 age() { run_tool age "$@"; }
 age-keygen() { run_tool age-keygen "$@"; }
