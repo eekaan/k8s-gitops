@@ -156,14 +156,27 @@ EOF
 case $2 in
   'show bgp ipv4 unicast summary json') cat "$EDGE_FIXTURE/sessions.json" ;;
   'show bgp ipv4 unicast json') cat "$EDGE_FIXTURE/table.json" ;;
+  'show running-config') cat "$EDGE_FIXTURE/config" ;;
   *) echo "fake vtysh: unexpected $*" >&2; exit 1 ;;
 esac
 EOF
   host_fake nft << 'EOF'
-cat "$EDGE_FIXTURE/rules"
+case $* in
+  'list tables') cat "$EDGE_FIXTURE/rules" ;;
+  'list chain inet edge forward') cat "$EDGE_FIXTURE/forward" ;;
+  *) echo "fake nft: unexpected $*" >&2; exit 1 ;;
+esac
 EOF
   host_fake sysctl << 'EOF'
 cat "$EDGE_FIXTURE/forwarding"
+EOF
+  host_fake ip << 'EOF'
+[[ $* == '-4 -o route show type unreachable' ]] || { echo "fake ip: unexpected $*" >&2; exit 1; }
+cat "$EDGE_FIXTURE/unreachable"
+EOF
+  host_fake apt-config << 'EOF'
+[[ $* == 'dump APT::Periodic::Unattended-Upgrade' ]] || { echo "fake apt-config: unexpected $*" >&2; exit 1; }
+cat "$EDGE_FIXTURE/upgrades"
 EOF
 
   ENVIRONMENT=(
@@ -220,6 +233,13 @@ edge_state() {
     | from_entries)}' > "$dir/table.json"
   printf 'table inet edge\ntable ip edge-nat\n' > "$dir/rules"
   echo "${5:-1}" > "$dir/forwarding"
+  # FRR's configuration with its reject route for the service range, the kernel's route from it, the
+  # forward chain that admits a translated connection only through a worker, and no unattended
+  # upgrades.
+  printf 'router bgp 64497\nexit\nip route 203.0.113.16/28 reject\n' > "$dir/config"
+  echo 'unreachable 203.0.113.16/28 proto static metric 20' > "$dir/unreachable"
+  printf 'table inet edge {\n\tchain forward {\n\t\tip daddr 203.0.113.21 tcp dport { 80, 443 } ct state new ct status dnat rt ip nexthop { 192.0.2.20/30 } accept\n\t}\n}\n' > "$dir/forward"
+  echo 'APT::Periodic::Unattended-Upgrade "0";' > "$dir/upgrades"
 }
 
 # edge_check [ARG...]: scripts/edge-check in the copy, in the environment above.
@@ -292,6 +312,62 @@ no_address() {
   edge_check --edge 1
   [ "$status" -eq 0 ]
   [[ $output == *"skip  lab-edge-1: sessions:"* && $output == *"skip  lab-edge-1: routes:"* ]]
+}
+
+@test "edge-check fails when what keeps a translated connection from the cloud's router is missing, or unattended upgrades are on" {
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_check --edge 1
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *"pass  lab-edge-1: the service range is unreachable on the edge but through a worker's route"* ]]
+  [[ $output == *"pass  lab-edge-1: the forward chain forwards a translated connection only through a worker"* ]]
+  [[ $output == *"pass  lab-edge-1: unattended upgrades are off"* ]]
+
+  # FRR runs its package's defaults, as after a first boot that failed: no reject route is configured.
+  printf 'frr defaults traditional\n' > "$HOST/edge-1/config"
+  : > "$HOST/edge-1/unreachable"
+  edge_check --edge 1
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL  lab-edge-1: FRR's configuration holds no reject route for the service range"* ]]
+
+  # Configured, but not in the kernel, as while FRR is stopped.
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  : > "$HOST/edge-1/unreachable"
+  edge_check --edge 1
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL  lab-edge-1: the service range's reject route is not in the kernel"* ]]
+
+  # A reject route for another range than the cluster's service range.
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  printf 'ip route 198.51.100.0/28 reject\n' > "$HOST/edge-1/config"
+  echo 'unreachable 198.51.100.0/28 proto static metric 20' > "$HOST/edge-1/unreachable"
+  edge_check --edge 1
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL  lab-edge-1: FRR's reject route is not for the cluster's service range"* ]]
+
+  # A forward chain that forwards a translated connection wherever its route goes.
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  printf 'table inet edge {\n\tchain forward {\n\t\tip daddr 203.0.113.21 tcp dport { 80, 443 } ct state new ct status dnat accept\n\t}\n}\n' > "$HOST/edge-1/forward"
+  edge_check --edge 1
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL  lab-edge-1: the forward chain forwards a translated connection wherever its route goes"* ]]
+
+  # Forwarding on with no rules loaded.
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  : > "$HOST/edge-1/rules"
+  : > "$HOST/edge-1/forward"
+  edge_check --edge 1
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL  lab-edge-1: the kernel forwards without the nftables rules"* ]]
+
+  # Unattended upgrades on, as the image's package has them.
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  echo 'APT::Periodic::Unattended-Upgrade "1";' > "$HOST/edge-1/upgrades"
+  edge_check --edge 1
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL  lab-edge-1: unattended upgrades are on, and would upgrade and restart FRR in place"* ]]
+  no_address "$output"
 }
 
 # rollout: scripts/edge-rollout --yes in the copy, the operator typing yes for every host key the
@@ -783,21 +859,34 @@ EOF
   [ "$edge" = "$cluster" ]
 }
 
-# first_boot: the edge stack's first-boot script, run here with the edge's file system under
-# EDGE_ROOT, a directory of the test's, and fakes of the system's commands first on PATH. The fake
-# vtysh's dry run refuses a file with a command FRR does not have, as FRR's does
-# (tests/fixtures/edge-policy/proof.sh checks that of FRR's own).
+# first_boot [OS_RELEASE]: the edge stack's first-boot script, run here with the edge's file system
+# under EDGE_ROOT, a directory of the test's, and fakes of the system's commands first on PATH, on an
+# image of the release OS_RELEASE names, trixie by default. The fake vtysh's dry run refuses a file
+# with a command FRR does not have, as FRR's does (tests/fixtures/edge-policy/proof.sh checks that of
+# FRR's own); the fake systemctl fails to restart FRR when the file restart-fails says so; the fake
+# ip shows the kernel's unreachable route for the service range once FRR is restarted.
 first_boot() {
   local root="$BATS_TEST_TMPDIR/edge-root" bin="$BATS_TEST_TMPDIR/edge-bin" tool
-  mkdir -p "$root/etc/edge" "$root/dev" "$root/var/log" "$bin"
-  printf 'PRETTY_NAME="Debian GNU/Linux 13 (trixie)"\nVERSION_CODENAME=trixie\n' > "$root/etc/os-release"
+  mkdir -p "$root/etc/edge" "$root/etc/sysctl.d" "$root/etc/apt/apt.conf.d" "$root/dev" "$root/var/log" "$bin"
+  printf 'PRETTY_NAME="Debian GNU/Linux"\nVERSION_CODENAME=%s\n' "${1:-trixie}" > "$root/etc/os-release"
   : > "$root/dev/console"
-  for tool in apt-get sysctl nft systemctl sleep; do
+  for tool in apt-get sysctl nft sleep; do
     cat > "$bin/$tool" << EOF
 #!/usr/bin/env bash
 printf '%s\n' "$tool \$*" >> "$RECORD/argv"
 EOF
   done
+  cat > "$bin/systemctl" << EOF
+#!/usr/bin/env bash
+printf '%s\n' "systemctl \$*" >> "$RECORD/argv"
+[[ "\$*" != 'restart frr' || ! -f "$BATS_TEST_TMPDIR/restart-fails" ]] || exit 1
+[[ "\$*" != 'restart frr' ]] || touch "$BATS_TEST_TMPDIR/frr-restarted"
+EOF
+  cat > "$bin/ip" << EOF
+#!/usr/bin/env bash
+printf '%s\n' "ip \$*" >> "$RECORD/argv"
+[[ ! -f "$BATS_TEST_TMPDIR/frr-restarted" ]] || echo "unreachable 203.0.113.16/28 proto static metric 20"
+EOF
   cat > "$bin/install" << EOF
 #!/usr/bin/env bash
 printf '%s\n' "install \$*" >> "$RECORD/argv"
@@ -813,34 +902,111 @@ if [[ \$1 == -C ]] && grep -qx 'no-such-command' "\$3"; then
 fi
 EOF
   chmod +x "$bin"/*
+  rm -f "$BATS_TEST_TMPDIR/frr-restarted"
+  : > "$RECORD/argv"
   run env EDGE_ROOT="$root" PATH="$bin:$PATH" bash "$ROOT/infra/openstack/stacks/sto2/edge/first-boot.sh"
 }
 
-@test "the first boot starts FRR only once FRR's dry run accepts its file, and fails saying why otherwise" {
-  local root="$BATS_TEST_TMPDIR/edge-root" steps
+# edge_files: the files cloud-init writes under /etc/edge, FRR's naming the service range.
+edge_files() {
+  local root="$BATS_TEST_TMPDIR/edge-root" file
   mkdir -p "$root/etc/edge"
   for file in daemons nftables.conf sysctl.conf; do
     echo "fixture $file" > "$root/etc/edge/$file"
   done
-  printf 'router bgp 64497\nexit\n' > "$root/etc/edge/frr.conf"
+  printf 'router bgp 64497\nexit\nip route 203.0.113.16/28 reject\n' > "$root/etc/edge/frr.conf"
+}
+
+# first_line PATTERN: the number of the first line of the record that matches PATTERN, 0 for none.
+first_line() {
+  grep -nE "$1" "$RECORD/argv" | head -1 | cut -d: -f1 | grep . || echo 0
+}
+
+# disarmed: what a failed first boot leaves: forwarding off now and at the next boot, and FRR stopped
+# and kept from starting at the next boot.
+disarmed() {
+  local root="$BATS_TEST_TMPDIR/edge-root"
+  [ ! -e "$root/etc/sysctl.d/90-edge.conf" ]
+  grep -qx 'sysctl -q -w net.ipv4.ip_forward=0' "$RECORD/argv"
+  grep -qx 'systemctl disable --now frr' "$RECORD/argv"
+}
+
+@test "the first boot starts FRR only once FRR's dry run accepts its file, and fails saying why otherwise" {
+  local root="$BATS_TEST_TMPDIR/edge-root"
+  edge_files
   first_boot
   echo "$output"
   [ "$status" -eq 0 ]
   [[ $output == *"edge-first-boot: done"* ]]
-  # The check of FRR's file, as it was put in place, comes before FRR is started.
-  steps=$(grep -nE "^vtysh -C -f $root/etc/frr/frr.conf\$|^systemctl restart frr\$" "$RECORD/argv" | cut -d: -f2-)
-  [ "$steps" = "$(printf '%s\n' "vtysh -C -f $root/etc/frr/frr.conf" 'systemctl restart frr')" ]
+  # Both files are checked as cloud-init wrote them, before anything of theirs is installed under
+  # /etc; FRR is restarted only after that, with the file that was checked.
+  [ "$(first_line "^nft --check --file $root/etc/edge/nftables.conf\$")" -gt 0 ]
+  [ "$(first_line "^vtysh -C -f $root/etc/edge/frr.conf\$")" -gt 0 ]
+  [ "$(first_line "^nft --check")" -lt "$(first_line '^install ')" ]
+  [ "$(first_line "^vtysh -C")" -lt "$(first_line '^install ')" ]
+  [ "$(first_line '^install ')" -lt "$(first_line '^systemctl restart frr$')" ]
+  cmp "$root/etc/edge/frr.conf" "$root/etc/frr/frr.conf"
 
-  # A file FRR refuses: the first boot fails, says why on the console and in the log, and FRR is
-  # neither enabled nor restarted with it.
+  # A file FRR refuses: the first boot fails, says why on the console and in the log, installs
+  # nothing under /etc, and leaves FRR stopped and forwarding off.
+  rm -rf "$root/etc/frr" "$root/etc/sysctl.d/90-edge.conf"
   printf 'router bgp 64497\nno-such-command\nexit\n' > "$root/etc/edge/frr.conf"
-  : > "$RECORD/argv"
   first_boot
   echo "$output"
   [ "$status" -ne 0 ]
-  [[ $output == *"edge-first-boot: FRR's dry run refuses /etc/frr/frr.conf"* ]]
+  [[ $output == *"edge-first-boot: FRR's dry run refuses /etc/edge/frr.conf"* ]]
   [[ $output == *"Unknown command: no-such-command"* ]]
-  grep -q "FRR's dry run refuses /etc/frr/frr.conf" "$root/dev/console"
-  grep -q "FRR's dry run refuses /etc/frr/frr.conf" "$root/var/log/edge-first-boot.log"
+  grep -q "FRR's dry run refuses /etc/edge/frr.conf" "$root/dev/console"
+  grep -q "FRR's dry run refuses /etc/edge/frr.conf" "$root/var/log/edge-first-boot.log"
+  [ ! -e "$root/etc/frr/frr.conf" ]
+  absent '^install ' "$RECORD/argv"
   absent -E '^systemctl (enable|restart) frr' "$RECORD/argv"
+  disarmed
+}
+
+@test "the first boot turns forwarding on last, once FRR answers and the reject route is in the kernel" {
+  local root="$BATS_TEST_TMPDIR/edge-root"
+  edge_files
+  first_boot
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ -f "$root/etc/sysctl.d/90-edge.conf" ]
+  forwarding=$(first_line '^sysctl --system$')
+  [ "$forwarding" -gt "$(first_line '^systemctl restart nftables$')" ]
+  [ "$forwarding" -gt "$(first_line "^vtysh -c show bgp summary\$")" ]
+  [ "$forwarding" -gt "$(first_line '^ip -4 route show exact 203.0.113.16/28 type unreachable$')" ]
+  [ "$forwarding" -gt "$(first_line '^nft list table ip edge-nat$')" ]
+  # The forwarding setting is installed with it, and not before.
+  [ "$(first_line "^install -m 0644 $root/etc/edge/sysctl.conf ")" -gt "$(first_line '^systemctl restart frr$')" ]
+
+  # FRR fails to restart: the trap leaves forwarding off, its setting gone, and FRR stopped.
+  touch "$BATS_TEST_TMPDIR/restart-fails"
+  rm -f "$root/etc/sysctl.d/90-edge.conf"
+  first_boot
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"edge-first-boot: FAILED at line"* ]]
+  absent '^sysctl --system$' "$RECORD/argv"
+  disarmed
+}
+
+@test "the first boot installs nothing on an image of another release" {
+  edge_files
+  first_boot bookworm
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"written for Debian trixie"* ]]
+  absent -E '^(apt-get|install|systemctl) ' "$RECORD/argv"
+}
+
+@test "the first boot turns unattended upgrades off before it installs anything" {
+  local root="$BATS_TEST_TMPDIR/edge-root"
+  edge_files
+  first_boot
+  [ "$status" -eq 0 ]
+  grep -qx 'APT::Periodic::Unattended-Upgrade "0";' "$root/etc/apt/apt.conf.d/99edge-no-unattended-upgrades"
+  [ "$(first_line '^systemctl disable --now apt-daily-upgrade.timer$')" -gt 0 ]
+  [ "$(first_line '^systemctl disable --now apt-daily-upgrade.timer$')" -lt "$(first_line '^apt-get ')" ]
+  # apt waits for a lock another apt run holds at first boot, instead of failing at once.
+  grep -q '^apt-get .*-o DPkg::Lock::Timeout=' "$RECORD/argv"
 }

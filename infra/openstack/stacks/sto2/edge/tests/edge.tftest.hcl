@@ -355,9 +355,9 @@ run "traffic_to_an_edges_public_ports_is_forwarded_to_the_gateways_address_and_n
       "    type filter hook forward priority filter; policy drop;\n",
       "    ct state established,related accept\n",
       "    ct state invalid drop\n",
-      "    ip daddr 203.0.113.21 tcp dport { 80, 443 } ct state new ct status dnat accept\n",
+      "    ip daddr 203.0.113.21 tcp dport { 80, 443 } ct state new ct status dnat rt ip nexthop { 192.0.2.20/30, 192.0.2.24/29, 192.0.2.32/27, 192.0.2.64/27, 192.0.2.96/30 } accept\n",
     ])
-    error_message = "The forward chain must drop by default and admit only new translated connections to the Gateway on the public ports, and what belongs to them."
+    error_message = "The forward chain must drop by default and admit only new translated connections to the Gateway on the public ports whose route goes through a worker, and what belongs to them."
   }
 
   assert {
@@ -372,9 +372,10 @@ run "traffic_to_an_edges_public_ports_is_forwarded_to_the_gateways_address_and_n
   }
 
   # With no worker announcing the Gateway's address there is no route to it, and a translated
-  # connection must not follow the default route to the cloud's router: the service range is a
-  # reject route on the edge, which the workers' /32s, being more specific, win over. staticd, which
-  # installs it, is one of the daemons FRR's start script always starts.
+  # connection must not follow the default route to the cloud's router: the forward chain admits it
+  # only when its route's next hop is a worker, which holds whether FRR runs or not, and the service
+  # range is a reject route on the edge, which the workers' /32s, being more specific, win over.
+  # staticd, which installs it, is one of the daemons FRR's start script always starts.
   assert {
     condition = (
       strcontains(output.config["1"].frr_conf, "\nip route 203.0.113.16/28 reject\n") &&

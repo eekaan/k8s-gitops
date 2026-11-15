@@ -3,8 +3,11 @@
 # FRR runs; as many BGP sessions are established as the cluster's talman.yaml lists workers, and the
 # table says which worker has none; the table holds only /32s inside the service range; each has as
 # many next hops as there are sessions, or fewer, which is for a person to read, as a Service that
-# is local-only is announced by some workers only; the nftables rules are loaded; and the kernel
-# forwards. Prints pass, FAIL or skip per line, never an address, and exits non-zero on any FAIL.
+# is local-only is announced by some workers only; FRR is configured with the reject route for the
+# service range, which is in the kernel; the nftables rules are loaded, and their forward chain
+# admits a translated connection only through a worker; the kernel forwards, and not without the
+# rules; and unattended upgrades are off, as an edge is rebuilt, not patched. Prints pass, FAIL or
+# skip per line, never an address, and exits non-zero on any FAIL.
 # A check that needs the cluster's talman.yaml is skipped while it does not exist.
 # Usage: scripts/edge-check [--edge 1|2] [cluster]
 set -euo pipefail
@@ -91,11 +94,16 @@ skip() { say skip "$1" "$2"; }
 remote='echo "== frr"; systemctl is-active frr || true
 echo "== sessions"; sudo -n vtysh -c "show bgp ipv4 unicast summary json" || true
 echo "== table"; sudo -n vtysh -c "show bgp ipv4 unicast json" || true
+echo "== config"; sudo -n vtysh -c "show running-config" || true
+echo "== unreachable"; ip -4 -o route show type unreachable || true
 echo "== rules"; sudo -n nft list tables || true
-echo "== forwarding"; sysctl -n net.ipv4.ip_forward || true'
+echo "== forward"; sudo -n nft list chain inet edge forward || true
+echo "== forwarding"; sysctl -n net.ipv4.ip_forward || true
+echo "== upgrades"; apt-config dump APT::Periodic::Unattended-Upgrade || true'
 
 check_edge() {
   local index=$1 edge=${edge_names[$1]} report section_frr section_sessions section_table section_rules section_forwarding
+  local section_config section_unreachable section_forward section_upgrades reject loaded=0
   local -a established=() prefixes=() missing=() outside=() fewer=()
   local prefix hops worker address
   if ! report=$(edge_ssh "$index" "$remote" 2> /dev/null); then
@@ -109,6 +117,10 @@ check_edge() {
   section_table=$(section table)
   section_rules=$(section rules)
   section_forwarding=$(section forwarding)
+  section_config=$(section config)
+  section_unreachable=$(section unreachable)
+  section_forward=$(section forward)
+  section_upgrades=$(section upgrades)
 
   if [[ $section_frr == active ]]; then
     pass "$edge" "FRR is running"
@@ -165,15 +177,43 @@ check_edge() {
     fi
   fi
 
+  # The reject route FRR is configured with, and that it is in the kernel: with it, a translated
+  # connection with no worker's route is refused on the edge instead of following its default route.
+  reject=$(sed -n 's/^ip route \([^ ]*\) reject$/\1/p' <<< "$section_config" | head -1)
+  if [[ -z $reject ]]; then
+    fail "$edge" "FRR's configuration holds no reject route for the service range"
+  elif [[ -n $service_range && $reject != "$service_range" ]]; then
+    fail "$edge" "FRR's reject route is not for the cluster's service range"
+  elif ! awk -v range="$reject" '$1 == "unreachable" && $2 == range { found = 1 } END { exit !found }' <<< "$section_unreachable"; then
+    fail "$edge" "the service range's reject route is not in the kernel"
+  else
+    pass "$edge" "the service range is unreachable on the edge but through a worker's route"
+  fi
+
   if grep -qx 'table inet edge' <<< "$section_rules" && grep -qx 'table ip edge-nat' <<< "$section_rules"; then
     pass "$edge" "the nftables rules are loaded"
+    loaded=1
   else
     fail "$edge" "the nftables rules are not loaded"
   fi
-  if [[ $section_forwarding == 1 ]]; then
+  # The next hop must be a worker's for the forward chain to admit a translated connection, which
+  # holds whether FRR runs or not.
+  if grep -q 'rt ip nexthop' <<< "$section_forward"; then
+    pass "$edge" "the forward chain forwards a translated connection only through a worker"
+  elif ((loaded)); then
+    fail "$edge" "the forward chain forwards a translated connection wherever its route goes"
+  fi
+  if [[ $section_forwarding == 1 ]] && ((loaded)); then
     pass "$edge" "the kernel forwards"
+  elif [[ $section_forwarding == 1 ]]; then
+    fail "$edge" "the kernel forwards without the nftables rules"
   else
     fail "$edge" "the kernel does not forward"
+  fi
+  if [[ $section_upgrades == 'APT::Periodic::Unattended-Upgrade "0";' ]]; then
+    pass "$edge" "unattended upgrades are off"
+  else
+    fail "$edge" "unattended upgrades are on, and would upgrade and restart FRR in place"
   fi
 }
 
