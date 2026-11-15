@@ -22,6 +22,27 @@ values:
     clusterASN: ${bgp.cluster_asn}
     edgeASN: ${bgp.edge_asn}
     edgeAddresses: ${jsonencode(bgp.edge_addresses)}
+  # The ingress firewall's rules for each role (talos/patches/all/firewall.yaml): every listener of
+  # talos/firewall.yaml the role has, accepting the networks of its sources. A port is written as a
+  # range, the one form in which a rule takes it quoted.
+  firewall: ${jsonencode({
+    for role in ["controlplane", "worker"] : role => [
+      for listener in firewall.listeners : {
+        name     = listener.name
+        protocol = listener.protocol
+        ports    = [for port in listener.ports : strcontains(tostring(port), "-") ? tostring(port) : "${port}-${port}"]
+        subnets = sort(distinct(flatten([for source in listener.from : {
+          operators     = operator_cidrs
+          floating      = [for node in nodes : "${node.floating_ip}/32"]
+          pods          = [pod_subnet]
+          controlplanes = [for node in nodes : "${node.private_address}/32" if node.role == "controlplane"]
+          members       = [for node in nodes : "${node.private_address}/32"]
+          loadbalancer  = api_load_balancer_addresses
+          cihost        = ci_host_address == null ? [] : ["${ci_host_address}/32"]
+        }[source]])))
+      } if contains(["all", role], listener.nodes)
+    ]
+  })}
 
 # Installer images are the Image Factory's openstack installer for this schematic; talman computes
 # the schematic's ID offline.
@@ -44,10 +65,12 @@ patches:
     - ../patches/all/user-namespaces.yaml
     - ../patches/all/seccomp-default.yaml
     - ../patches/all/spegel.yaml
+    - ../patches/all/firewall.yaml
   controlplane:
     - ../patches/controlplane/api-sans.yaml
     - ../patches/controlplane/etcd.yaml
     - ../patches/controlplane/metrics.yaml
+    - ../patches/controlplane/deny-service-external-ips.yaml
     - ../patches/cni/cilium.yaml
 %{ if contains([for node in nodes : node.role], "worker") ~}
   worker:

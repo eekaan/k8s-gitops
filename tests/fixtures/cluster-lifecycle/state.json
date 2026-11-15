@@ -1,0 +1,10 @@
+{
+  "format_version": "1.0",
+  "values": {
+    "root_module": {
+      "resources": [
+        { "address": "module.nodes.openstack_networking_port_v2.node", "mode": "managed", "type": "openstack_networking_port_v2", "name": "node" }
+      ]
+    }
+  }
+}

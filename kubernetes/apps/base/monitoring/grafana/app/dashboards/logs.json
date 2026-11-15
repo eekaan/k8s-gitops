@@ -1,0 +1,107 @@
+{
+  "uid": "logs",
+  "title": "Logs",
+  "tags": ["logs"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "1m",
+  "timezone": "browser",
+  "templating": {
+    "list": [
+      {
+        "name": "namespace",
+        "label": "Namespace",
+        "type": "query",
+        "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victoria-logs" },
+        "query": { "refId": "namespace", "type": "fieldValue", "field": "kubernetes.pod_namespace", "query": "*", "limit": 1000 },
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "allValue": "*",
+        "current": { "text": "All", "value": "$__all" },
+        "sort": 1,
+        "hide": 0
+      },
+      {
+        "name": "pod",
+        "label": "Pod",
+        "type": "query",
+        "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victoria-logs" },
+        "query": { "refId": "pod", "type": "fieldValue", "field": "kubernetes.pod_name", "query": "\"kubernetes.pod_namespace\":$namespace", "limit": 1000 },
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "allValue": "*",
+        "current": { "text": "All", "value": "$__all" },
+        "sort": 1,
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Log volume by namespace",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victoria-logs" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "drawStyle": "bars", "fillOpacity": 60, "stacking": { "mode": "normal", "group": "A" } } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victoria-logs" },
+          "queryType": "statsRange",
+          "editorMode": "code",
+          "expr": "\"kubernetes.pod_namespace\":* | stats by (\"kubernetes.pod_namespace\") count() logs",
+          "legendFormat": "{{kubernetes.pod_namespace}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Log volume by node",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victoria-logs" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "drawStyle": "bars", "fillOpacity": 60, "stacking": { "mode": "normal", "group": "A" } } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victoria-logs" },
+          "queryType": "statsRange",
+          "editorMode": "code",
+          "expr": "* | stats by (node) count() logs",
+          "legendFormat": "{{node}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "logs",
+      "title": "Logs of the selected namespaces and pods",
+      "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victoria-logs" },
+      "gridPos": { "h": 16, "w": 24, "x": 0, "y": 8 },
+      "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending", "enableLogDetails": true, "dedupStrategy": "none" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "victoriametrics-logs-datasource", "uid": "victoria-logs" },
+          "queryType": "instant",
+          "editorMode": "code",
+          "maxLines": 1000,
+          "expr": "\"kubernetes.pod_namespace\":$namespace \"kubernetes.pod_name\":$pod"
+        }
+      ]
+    }
+  ]
+}

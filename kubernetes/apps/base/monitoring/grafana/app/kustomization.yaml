@@ -5,6 +5,8 @@ kind: Kustomization
 resources:
   - grafana.yaml
   - grafanadatasource.yaml
+  - grafanadatasource-victoria-logs.yaml
+  - grafanadashboard-logs.yaml
   - servicemonitor.yaml
   - ocirepository.yaml
   - helmrelease.yaml
@@ -13,6 +15,9 @@ configMapGenerator:
   - name: grafana-dashboards-values
     files:
       - values.yaml
+  - name: grafana-dashboard-logs
+    files:
+      - logs.json=dashboards/logs.json
 generatorOptions:
   annotations:
     kustomize.toolkit.fluxcd.io/substitute: disabled
