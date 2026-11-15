@@ -510,9 +510,11 @@ absent() {
 console() {
   {
     echo "Cloud-init v. 22.4.2 running 'modules:final' at Mon, 01 Jan 2024 00:00:09 +0000. Up 9.9 seconds."
-    echo '-----BEGIN SSH HOST KEY FINGERPRINTS-----'
-    echo "256 $1 root@lab-ci (ED25519)"
-    echo '-----END SSH HOST KEY FINGERPRINTS-----'
+    # Through `logger -s -p user.info -t cloud-init --`, as cloud-init's write-ssh-key-fingerprints
+    # sends each line of the block, which puts a syslog header on it.
+    echo '<14>Nov 15 09:42:08 cloud-init: -----BEGIN SSH HOST KEY FINGERPRINTS-----'
+    echo "<14>Nov 15 09:42:08 cloud-init: 256 $1 root@lab-ci (ED25519)"
+    echo '<14>Nov 15 09:42:08 cloud-init: -----END SSH HOST KEY FINGERPRINTS-----'
   } > "$RECORD/console-$INSTANCE"
 }
 

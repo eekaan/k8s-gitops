@@ -759,7 +759,11 @@ host's instance's console. The recipe scans the address once, hashed (`ssh-keysc
 the console, `openstack console log show --lines 1000`, by the instance identifier the stack's
 outputs give (`instances` for the edges, by number, `instance` for the CI host), for the `SHA256:`
 fingerprints in the latest complete block cloud-init's `keys_to_console` module printed between
-`BEGIN SSH HOST KEY FINGERPRINTS` and `END SSH HOST KEY FINGERPRINTS`. The console is the
+`BEGIN SSH HOST KEY FINGERPRINTS` and `END SSH HOST KEY FINGERPRINTS`. cloud-init's
+`tools/write-ssh-key-fingerprints` sends each line of the block through
+`logger -s -p user.info -t cloud-init --`, so each starts with logger's header
+(`<14>Nov 15 09:42:08 cloud-init: `, tag `ec2` in older releases), which the recipe takes off in
+exactly that form, and a line without it is not read. The console is the
 instance's word, read through the cloud's API with the operator's credentials and not through the
 address being verified; a cloud whose API lies is outside what this defends against. With F the
 fingerprints the scan offers and C the console's:
@@ -775,7 +779,9 @@ fingerprints the scan offers and C the console's:
   shown and the keys recorded only once `yes` is typed.
 
 What is compared is what is recorded: there is no second scan between. The CI host is covered the
-same way, by the `instance` output of the ci stack. A key pair reaches an instance only when it is created, so a new pair
+same way, by the `instance` output of the ci stack.
+
+A key pair reaches an instance only when it is created, so a new pair
 at `EDGE_SSH_KEY_FILE` replaces the stack's key pair and no instance, and the running edges admit
 the old key alone until `just edge-rollout --replace` replaces them
 ([runbooks/edge.md](runbooks/edge.md#replacing-one-edge)).

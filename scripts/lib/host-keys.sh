@@ -3,8 +3,10 @@
 # trusted. A new instance has host keys of its own, and the connection that follows holds to what is
 # recorded, so what is recorded decides who the operator's key-based session talks to.
 #
-# cloud-init's keys_to_console module prints the fingerprints of the instance's host keys on its
-# console at the end of the first boot, between the lines
+# cloud-init's keys_to_console module runs tools/write-ssh-key-fingerprints at the end of the first
+# boot, which sends each line of its output through `logger -s -p user.info -t cloud-init --` to the
+# console, so each line carries logger's header, `<14>Nov 15 09:42:08 cloud-init: ` (older releases tag
+# them ec2), and the fingerprints stand between the lines
 #   -----BEGIN SSH HOST KEY FINGERPRINTS-----
 #   -----END SSH HOST KEY FINGERPRINTS-----
 # one per line, as `256 SHA256:<43 characters> root@host (ED25519)`. The console is readable through
@@ -21,6 +23,10 @@
 # is, with room for the boot's own output after it. A block the limit cuts off is not read.
 host_console_lines=1000
 
+# logger's header on a line cloud-init printed: <PRI>Mmm dd hh:mm:ss TAG: , the day padded with a
+# space. Capture 2 is the line itself.
+console_header='^<[0-9]{1,3}>[A-Z][a-z]{2} [ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2} (cloud-init|ec2): (.*)$'
+
 # console_fingerprints INSTANCE_ID: prints the SHA256 fingerprints cloud-init printed on the console
 # of the instance INSTANCE_ID, sorted, one per line, and returns
 #   0 when it printed some,
@@ -31,10 +37,12 @@ host_console_lines=1000
 # Only the block between cloud-init's own markers counts, and of several, the latest: the log holds
 # every boot of the instance that its limit reaches, and cloud-init prints the block at the end of
 # a first boot (its keys_to_console module runs once per instance, so a reboot adds none, and a
-# rebuilt instance has a console of its own). A block cut off by the line limit, at its start or at
-# its end, is not a block, and the earlier boot's block does not stand in for the latest boot's. A
-# line that is not a fingerprint of that form is ignored, as is every line outside the markers: a
-# line a process on the instance printed is not cloud-init's.
+# new instance, with a new identifier, has a console of its own). A block cut off by the line limit,
+# at its start or at its end, is not a block, and the earlier boot's block does not stand in for the
+# latest boot's. Only lines with logger's header in exactly the form above, under the tag cloud-init
+# or ec2, are cloud-init's: the header is taken off, and a line without it, or under another tag,
+# is ignored, as is a line inside the markers that is not a fingerprint of that form and every line
+# outside them: a line a process on the instance printed is not cloud-init's.
 console_fingerprints() {
   local id=$1 log line inside=0 block='' latest=''
   refuse_http2_debug || return 4
@@ -51,6 +59,8 @@ console_fingerprints() {
   log=$(openstack console log show --lines "$host_console_lines" "$id" 2> /dev/null) || return 1
   while IFS= read -r line || [[ -n $line ]]; do
     line=${line%$'\r'}
+    [[ $line =~ $console_header ]] || continue
+    line=${BASH_REMATCH[2]}
     case $line in
       '-----BEGIN SSH HOST KEY FINGERPRINTS-----')
         inside=1 block=''

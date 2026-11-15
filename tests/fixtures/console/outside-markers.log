@@ -2,11 +2,11 @@
 [    3.512341] systemd[1]: Reached target Basic System.
 Cloud-init v. 22.4.2 running 'init' at Mon, 01 Jan 2024 00:00:03 +0000. Up 3.9 seconds.
 256 SHA256:BeforeEd25519AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA root@somewhere (ED25519)
------BEGIN SSH HOST KEY FINGERPRINTS-----
-256 SHA256:InsideEd25519AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA root@lab-edge-1 (ED25519)
-256 MD5:00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff root@lab-edge-1 (RSA)
-256 SHA256:tooShortFingerprint root@lab-edge-1 (ECDSA)
-not a fingerprint line
------END SSH HOST KEY FINGERPRINTS-----
+<14>Nov 15 09:57:45 cloud-init: -----BEGIN SSH HOST KEY FINGERPRINTS-----
+<14>Nov 15 09:57:45 cloud-init: 256 SHA256:InsideEd25519AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA root@lab-edge-1 (ED25519)
+<14>Nov 15 09:57:45 cloud-init: 256 MD5:00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff root@lab-edge-1 (RSA)
+<14>Nov 15 09:57:45 cloud-init: 256 SHA256:tooShortFingerprint root@lab-edge-1 (ECDSA)
+<14>Nov 15 09:57:45 cloud-init: not a fingerprint line
+<14>Nov 15 09:57:45 cloud-init: -----END SSH HOST KEY FINGERPRINTS-----
 256 SHA256:AfterEd25519AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA root@lab-edge-1 (ED25519)
 a process printed: SHA256:InLineEd25519AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA

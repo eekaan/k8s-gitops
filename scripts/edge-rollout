@@ -12,13 +12,14 @@
 # replaced while the other is not serving. A replaced edge has SSH host keys of its own at the same
 # address, so the recorded keys are dropped before it is replaced, and the new ones are recorded
 # before its check runs: without a prompt when every key the address offers is one its instance
-# printed on its console, which is read through the OpenStack client within the wait below; a key the
-# console does not hold stops the rollout at once, nothing recorded, --yes or not; and when the console
-# holds no fingerprints by the end of the wait the fingerprints are shown and yes typed, and keys that
-# are not accepted stop the rollout at once. A check that does not pass within EDGE_ROLLOUT_WAIT seconds (900 when unset),
-# tried every EDGE_ROLLOUT_INTERVAL seconds (15), stops the rollout there: an edge after it is not
-# touched. The last step plans the whole stack again and prints what is left, which only
-# scripts/infra-apply applies: each edge's plan holds that edge's own resources alone.
+# printed on its console, which is read through the OpenStack client within the wait below; a key
+# the console does not hold stops the rollout at once, nothing recorded, --yes or not; and when the
+# console holds no fingerprints by the end of the wait the fingerprints are shown and yes typed, and
+# keys that are not accepted stop the rollout at once. A check that does not pass within
+# EDGE_ROLLOUT_WAIT seconds (900 when unset), tried every EDGE_ROLLOUT_INTERVAL seconds (15), stops
+# the rollout there: an edge after it is not touched. The last step plans the whole stack again and
+# prints what is left, which only scripts/infra-apply applies: each edge's plan holds that edge's
+# own resources alone.
 #
 # --edge N replaces edge N alone, after the same check of the other edge. With --other-down it goes
 # on when the other edge does not pass either, once a sentence that names both edges is typed back,
@@ -92,11 +93,11 @@ other_down_typed() {
   [[ $answer == "$expected" ]]
 }
 
-# records_new_keys NUMBER: records the host keys edge NUMBER offers, which ssh_host_trust compares with
-# the console of the edge's instance and, when that holds no fingerprints, shows and records once yes
-# is typed. It tries again while the new instance does not answer until the wait is over, and reads
-# the console within what is left of the same wait. Returns ssh_host_trust's status: 2, keys that were
-# not accepted, and 3, a key the instance did not print, stop the rollout at once.
+# records_new_keys NUMBER: records the host keys edge NUMBER offers, which ssh_host_trust compares
+# with the console of the edge's instance and, when that holds no fingerprints, shows and records
+# once yes is typed. It tries again while the new instance does not answer until the wait is over,
+# and reads the console within what is left of the same wait. Returns ssh_host_trust's status: 2,
+# keys that were not accepted, and 3, a key the instance did not print, stop the rollout at once.
 records_new_keys() {
   local deadline=$((SECONDS + wait_seconds)) status left
   while :; do

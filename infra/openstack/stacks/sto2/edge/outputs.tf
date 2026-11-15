@@ -21,7 +21,7 @@ output "private_addresses" {
 }
 
 output "instances" {
-  description = "Each edge as the vm module describes it, by number: its name, flavor, boot volume, user data, key pair, server group and port."
+  description = "Each edge as the vm module describes it, by number: its id, name, flavor, boot volume, user data, key pair, server group and port."
   sensitive   = true
   value       = module.edge
 }

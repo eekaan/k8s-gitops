@@ -58,7 +58,8 @@ The owner sets these once, in the repository's settings on GitHub:
 The first time, the host's SSH key is not recorded. The recipe scans the host once for the keys it
 offers and reads the instance's console through the OpenStack client, by the instance identifier
 in the stack's `instance` output, for the fingerprints cloud-init printed between
-`BEGIN SSH HOST KEY FINGERPRINTS` and `END SSH HOST KEY FINGERPRINTS` at its first boot. It waits
+`BEGIN SSH HOST KEY FINGERPRINTS` and `END SSH HOST KEY FINGERPRINTS` at its first boot, each line
+with the syslog header cloud-init's `tools/write-ssh-key-fingerprints` gives it. It waits
 for them for `HOST_CONSOLE_WAIT` seconds, 30 by default, as the first boot prints them late. When
 every key the host offers is one the instance printed, the keys are recorded in
 `~/.local/state/k8s-gitops/ci-host.known_hosts` without a prompt, and every later connection is
@@ -100,7 +101,8 @@ Push to a branch of this repository and open a pull request, or merge one. In th
   `just infra-apply sto2/ci`. The cache volume stays. The new instance has a new SSH key, so the
   recorded one no longer matches and setup is refused: remove
   `~/.local/state/k8s-gitops/ci-host.known_hosts`, then run `just ci-host-setup`, which records the
-  new keys when they are on the new instance's console. Registering under the same name replaces the old runner.
+  new keys when they are on the new instance's console. Registering under the same name replaces
+  the old runner.
 
 ## Removing it
 

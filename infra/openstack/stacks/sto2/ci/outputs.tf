@@ -31,7 +31,7 @@ output "cache_mountpoint" {
 }
 
 output "instance" {
-  description = "The CI host as the vm module describes it: its name, flavor, boot volume, user data, key pair, port and data volumes."
+  description = "The CI host as the vm module describes it: its id, name, flavor, boot volume, user data, key pair, port and data volumes."
   sensitive   = true
   value       = module.host
 }

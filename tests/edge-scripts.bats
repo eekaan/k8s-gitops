@@ -129,9 +129,13 @@ while ((\$#)); do
   esac
 done
 [[ \$strict == yes && \$only == yes && \$identity == "$KEY" && -s \$known ]] || { echo "fake ssh: refused" >&2; exit 255; }
+# The user the edges' image logs in as, debian, unless a test names the one it configures in the
+# file ssh-user.
+user=debian
+[[ ! -f "$HOST/ssh-user" ]] || user=\$(cat "$HOST/ssh-user")
 case \$1 in
-  *@$ADDRESS_1) edge=1 address=$ADDRESS_1 ;;
-  *@$ADDRESS_2) edge=2 address=$ADDRESS_2 ;;
+  "\$user@$ADDRESS_1") edge=1 address=$ADDRESS_1 ;;
+  "\$user@$ADDRESS_2") edge=2 address=$ADDRESS_2 ;;
   *) echo "fake ssh: unexpected destination" >&2; exit 255 ;;
 esac
 # What strict host key checking does: the recorded key must be the one the host offers.
@@ -166,7 +170,8 @@ echo "unexpected call: openstack \$*" >&2
 exit 1
 EOF
   # The host keys an address offers, as ssh-keyscan prints them; nothing from an address with none.
-  # A file key-ADDRESS.rsa adds a second key, and key-ADDRESS.rescan is what a second scan of the
+  # Files key-ADDRESS.before and key-ADDRESS.rsa add a key offered before the first and one after it,
+  # and key-ADDRESS.rescan is what a second scan of the
   # address answers instead.
   fake ssh-keyscan << EOF
 printf '%s\n' "ssh-keyscan \$*" >> "$RECORD/argv"
@@ -178,6 +183,7 @@ if ((scans > 1)) && [[ -f "$HOST/key-\$address.rescan" ]]; then
   echo "\$address ssh-ed25519 \$(cat "$HOST/key-\$address.rescan")"
   exit 0
 fi
+[[ ! -f "$HOST/key-\$address.before" ]] || echo "\$address ssh-rsa \$(cat "$HOST/key-\$address.before")"
 echo "\$address ssh-ed25519 \$(cat "$HOST/key-\$address")"
 [[ ! -f "$HOST/key-\$address.rsa" ]] || echo "\$address ssh-rsa \$(cat "$HOST/key-\$address.rsa")"
 EOF
@@ -1585,17 +1591,23 @@ rsa_key() {
   echo "AAAAB3NzaC1yc2EAAAADAQABAAABgQFixtureRsaKeyOf${address//./}"
 }
 
+# cloud_init_line TEXT: a line as cloud-init's tools/write-ssh-key-fingerprints sends it to the
+# console, through `logger -s -p user.info -t cloud-init --`, which puts a syslog header on it.
+cloud_init_line() {
+  printf '<14>Nov 15 09:42:08 cloud-init: %s\n' "$1"
+}
+
 # console_block FINGERPRINT...: what cloud-init prints on the console at the end of a first boot.
 console_block() {
   local fingerprint
   echo "Cloud-init v. 22.4.2 running 'modules:final' at Mon, 01 Jan 2024 00:00:09 +0000. Up 9.9 seconds."
-  echo '#############################################################'
-  echo '-----BEGIN SSH HOST KEY FINGERPRINTS-----'
+  cloud_init_line '#############################################################'
+  cloud_init_line '-----BEGIN SSH HOST KEY FINGERPRINTS-----'
   for fingerprint; do
-    echo "256 $fingerprint root@lab-edge (ED25519)"
+    cloud_init_line "256 $fingerprint root@lab-edge (ED25519)"
   done
-  echo '-----END SSH HOST KEY FINGERPRINTS-----'
-  echo '#############################################################'
+  cloud_init_line '-----END SSH HOST KEY FINGERPRINTS-----'
+  cloud_init_line '#############################################################'
 }
 
 # with_instances: the stack's outputs name each edge's instance, as an applied stack's do; without
@@ -1683,17 +1695,40 @@ address_of() {
   with_instances
   edge_state 1 active "$WORKERS" 203.0.113.17/32
   edge_state 2 active "$WORKERS" 203.0.113.17/32
-  # The address offers a second key beyond the one the instance printed.
-  rsa_key 1 > "$HOST/key-$ADDRESS_1.rsa"
-  for variant in 'only one of two keys' 'other keys altogether'; do
+  # A refusal is final: the clock is a sleep that records the call and ends the rollout, so one that
+  # read the console again under the default wait (900 seconds) would show in the record.
+  fake sleep << FAKE
+printf '%s\n' "sleep \$*" >> "$RECORD/argv"
+kill -TERM "\$PPID"
+FAKE
+  # Every key the address offers must be on the console, wherever in the offer the one that is not
+  # stands: first, last, or between two that are, so a comparison of some of them by position
+  # passes none of these.
+  for variant in 'an unprinted key first' 'an unprinted key last' 'an unprinted key between two printed' 'other keys altogether'; do
     original_keys
     plan_replacing 1
-    if [[ $variant == 'only one of two keys' ]]; then
-      console_block "$(fingerprint "$(replacement_key 1)")" | set_console 1
-    else
-      console_block "$(fixture_fingerprint SomeoneElsesKeyEd25519)" | set_console 1
-    fi
+    rm -f "$HOST/key-$ADDRESS_1.before" "$HOST/key-$ADDRESS_1.rsa"
+    case $variant in
+      'an unprinted key first')
+        rsa_key 1 > "$HOST/key-$ADDRESS_1.before"
+        console_block "$(fingerprint "$(replacement_key 1)")" | set_console 1
+        ;;
+      'an unprinted key last')
+        rsa_key 1 > "$HOST/key-$ADDRESS_1.rsa"
+        console_block "$(fingerprint "$(replacement_key 1)")" | set_console 1
+        ;;
+      'an unprinted key between two printed')
+        rsa_key 1 > "$HOST/key-$ADDRESS_1.before"
+        echo "AAAAB3NzaC1yc2EAAAADAQABAAABgQFixtureThirdKeyOf${ADDRESS_1//./}" > "$HOST/key-$ADDRESS_1.rsa"
+        console_block "$(fingerprint "$(rsa_key 1)")" \
+          "$(fingerprint "AAAAB3NzaC1yc2EAAAADAQABAAABgQFixtureThirdKeyOf${ADDRESS_1//./}")" | set_console 1
+        ;;
+      *)
+        console_block "$(fixture_fingerprint SomeoneElsesKeyEd25519)" | set_console 1
+        ;;
+    esac
     : > "$RECORD/argv"
+    rm -f "$RECORD/reads-$INSTANCE_1"
 
     # The operator would say yes to anything, and --yes is given.
     rollout_with_input 'yes\nyes\nyes\n'
@@ -1702,6 +1737,8 @@ address_of() {
     [[ $output == *"offers a key its instance did not print"* ]]
     [[ $output != *"Type yes"* ]]
     [ "$(recorded 1)" = "" ]
+    absent '^sleep ' "$RECORD/argv"
+    [ "$(console_reads 1)" -eq 1 ]
     absent "^ssh .*@$ADDRESS_1 " "$RECORD/argv"
     # The rollout stopped there.
     [ "$(grep -c '^tofu .* apply ' "$RECORD/argv")" -eq 1 ]
@@ -1721,7 +1758,7 @@ address_of() {
 }
 
 @test "A console that holds no fingerprints yet is waited for, and then the operator is asked" {
-  local started
+  local slept
   with_instances
   edge_state 1 active "$WORKERS" 203.0.113.17/32
   edge_state 2 active "$WORKERS" 203.0.113.17/32
@@ -1745,12 +1782,21 @@ address_of() {
   plan_replacing 1
   rm -f "$RECORD/reads-$INSTANCE_1" "$HOST/console-$INSTANCE_1.1" "$HOST/console-$INSTANCE_1.2"
   early_console | set_console 1
-  started=$SECONDS
-  rollout_with_input 'yes\n' EDGE_ROLLOUT_WAIT=2 EDGE_ROLLOUT_INTERVAL=1
+  # The clock is a sleep that records what it was asked to wait, then waits.
+  fake sleep << FAKE
+printf '%s\n' "sleep \$*" >> "$RECORD/sleeps"
+exec "$(type -P sleep)" "\$@"
+FAKE
+  : > "$RECORD/sleeps"
+  rollout_with_input 'yes\n' EDGE_ROLLOUT_WAIT=3 EDGE_ROLLOUT_INTERVAL=1
   echo "$output"
   [ "$status" -eq 0 ]
-  ((SECONDS - started >= 2))
-  [ "$(console_reads 1)" -ge 2 ]
+  # The console was read at the start and after each wait, and the waits ended at the bound: all of
+  # it, and no more.
+  slept=$(awk '{ total += $2 } END { print total + 0 }' "$RECORD/sleeps")
+  echo "reads $(console_reads 1), slept ${slept}s"
+  ((slept >= 2 && slept <= 3))
+  [ "$(console_reads 1)" -eq $((slept + 1)) ]
   [[ $output == *"held no fingerprints"* ]]
   [[ $output == *"Type yes to record them and connect"* ]]
   [ "$(recorded 1)" = "$(replacement_key 1)" ]
@@ -1816,6 +1862,16 @@ address_of() {
   [ "$status" -eq 0 ]
   [ "$output" = "$(fixture_fingerprint InsideEd25519)" ]
 
+  # Older releases tag the lines ec2, and are read the same; only cloud-init's own tags are, so a
+  # block another process printed in the same header form, under its own tag, is not cloud-init's.
+  read_console ec2-tag
+  [ "$status" -eq 0 ]
+  expected=$(for name in FirstEcdsa FirstEd25519 FirstRsa; do fixture_fingerprint "$name"; done | sort)
+  [ "$output" = "$expected" ]
+  read_console foreign-tag
+  [ "$status" -eq 3 ]
+  [ -z "$output" ]
+
   # The client was asked for the instance's console by its identifier, and for a bounded number of
   # lines.
   grep -qx "openstack console log show --lines 1000 $INSTANCE_1" "$RECORD/argv"
@@ -1835,6 +1891,26 @@ address_of() {
   [ "$status" -ne 0 ]
   [[ $output == *"offers a key its instance did not print"* ]]
   [ "$(recorded 1)" = "" ]
+}
+
+@test "an identifier that is not a UUID is never used to read a console" {
+  with_instances
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_state 2 active "$WORKERS" 203.0.113.17/32
+  plan_replacing 1
+  # An identifier the cloud would take as a name or a prefix, and an option for the client, are not
+  # the instance the stack created.
+  jq '.instances.value["1"].id = "--lines"' "$BATS_TEST_TMPDIR/outputs.json" > "$BATS_TEST_TMPDIR/outputs.bad"
+  mv "$BATS_TEST_TMPDIR/outputs.bad" "$BATS_TEST_TMPDIR/outputs.json"
+  console_block "$(fingerprint "$(replacement_key 1)")" | set_console 1
+  : > "$RECORD/argv"
+  rollout_with_input 'yes\n'
+  echo "$output"
+  [ "$status" -eq 0 ]
+  absent '^openstack console' "$RECORD/argv"
+  [[ $output == *"the stack's outputs name no instance for it"* ]]
+  [[ $output == *"Type yes to record them and connect"* ]]
+  [ "$(recorded 1)" = "$(replacement_key 1)" ]
 }
 
 @test "What is compared with the console is what is recorded" {
@@ -1859,6 +1935,8 @@ address_of() {
 @test "The settings check asks the daemon as the configured user" {
   edge_state 1 active "$WORKERS" 203.0.113.17/32
   edge_state 2 active "$WORKERS" 203.0.113.17/32
+  # The fake ssh accepts only the user the test names, so connecting as another fails the run.
+  echo ops > "$HOST/ssh-user"
   # Another user's Match fails the check, and the default user's does not: a check that asks as
   # debian passes the first and fails the second.
   echo 'passwordauthentication yes' > "$HOST/edge-1/sshd-match-user-ops"

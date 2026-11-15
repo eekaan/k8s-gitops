@@ -2,12 +2,12 @@
 [    3.512341] systemd[1]: Reached target Basic System.
 Cloud-init v. 22.4.2 running 'init' at Mon, 01 Jan 2024 00:00:03 +0000. Up 3.9 seconds.
 Cloud-init v. 22.4.2 running 'modules:final' at Mon, 01 Jan 2024 00:00:09 +0000. Up 9.9 seconds.
-#############################################################
------BEGIN SSH HOST KEY FINGERPRINTS-----
-256 SHA256:FirstEcdsaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA root@lab-edge-1 (ECDSA)
-256 SHA256:FirstEd25519AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA root@lab-edge-1 (ED25519)
-3072 SHA256:FirstRsaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA root@lab-edge-1 (RSA)
------END SSH HOST KEY FINGERPRINTS-----
-#############################################################
+<14>Nov 15 09:57:45 cloud-init: #############################################################
+<14>Nov 15 09:57:45 cloud-init: -----BEGIN SSH HOST KEY FINGERPRINTS-----
+<14>Nov 15 09:57:45 cloud-init: 256 SHA256:FirstEcdsaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA root@lab-edge-1 (ECDSA)
+<14>Nov 15 09:57:45 cloud-init: 256 SHA256:FirstEd25519AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA root@lab-edge-1 (ED25519)
+<14>Nov 15 09:57:45 cloud-init: 3072 SHA256:FirstRsaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA root@lab-edge-1 (RSA)
+<14>Nov 15 09:57:45 cloud-init: -----END SSH HOST KEY FINGERPRINTS-----
+<14>Nov 15 09:57:45 cloud-init: #############################################################
 Cloud-init v. 22.4.2 finished at Mon, 01 Jan 2024 00:00:10 +0000. Datasource DataSourceOpenStack.  Up 10.2 seconds
 lab-edge-1 login: 

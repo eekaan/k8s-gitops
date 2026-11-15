@@ -144,8 +144,12 @@ identifier from the stack's outputs. cloud-init's `keys_to_console` module print
 of the host keys on the console at the end of the first boot, between
 `BEGIN SSH HOST KEY FINGERPRINTS` and `END SSH HOST KEY FINGERPRINTS`
 ([the module's documentation](https://cloudinit.readthedocs.io/en/latest/reference/modules.html#keys-to-console)).
-The recipe reads the last 1000 lines and takes the `SHA256:` fingerprints in the latest complete
-block between those markers; a line anywhere else, or a block cut off by the line limit, does not
+It does so with cloud-init's `tools/write-ssh-key-fingerprints`, which sends every line, markers
+included, through `logger -s -p user.info -t cloud-init --`, so each line on the console starts with
+logger's header, such as `<14>Nov 15 09:42:08 cloud-init: ` (older releases tag it `ec2`). The
+recipe reads the last 1000 lines, takes that header, in exactly that form, off each line, and takes
+the `SHA256:` fingerprints in the latest complete block between the markers; a line without the
+header or under another tag, a line anywhere else, or a block cut off by the line limit, does not
 count, and a console that holds several boots counts only the latest block, which a reboot does not
 add to (the module runs once per instance) and a new instance, with a console of its own, does not
 inherit. The console is read through the cloud's API with the credentials the recipes hold, not
@@ -160,11 +164,10 @@ scan:
 - **The console holds fingerprints and one the address offers is not among them:** nothing is
   recorded, no prompt is offered, `--yes` and a typed `yes` change nothing, and the recipe exits
   non-zero (the rollout stops there). Check, in order: that the floating address is still
-  associated with this instance (`openstack floating ip list`, and `openstack server show` for the
-  instance's addresses); that something else did not rebuild the instance, so that its keys are new
-  and its console is not the one of the first boot (`openstack server show` for its status and
-  `updated`, and `openstack console log show` for the boots it holds); and when both are as they
-  should be, treat it as someone else answering on that address: do not connect, and report it.
+  associated with this instance, in the cloud's own view of the project's floating addresses and
+  of the instance's; that something else did not rebuild the instance, which the instance's status
+  and last update in the cloud show; and when both are as they should be, treat it as someone else
+  answering on that address: do not connect, and report it.
 - **The console holds none, or cannot be read** (the client fails, the instance is not found, the
   first boot has not printed its keys yet): the recipe tries again within the wait the rollout has,
   `EDGE_ROLLOUT_WAIT`, or for `HOST_CONSOLE_WAIT` seconds, 30 by default, outside a rollout, then
