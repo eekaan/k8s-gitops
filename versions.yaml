@@ -31,5 +31,5 @@ ci_tools_packages: apt-get update && apt-get install -y --no-install-recommends 
 # have that key, and builds the tools from them otherwise. just tools-image-pin writes both, once the
 # image's signature verifies (README, The tools image). gitleaks takes 64 hexadecimal digits under a
 # name with "key" in it for a credential, so the key goes under another name.
-ci_tools_inputs: ""
-ci_tools_image: ""
+ci_tools_inputs: fa419e48a9af7f5a8c7cb2c32584e447d17de065cd20861e6e3c99aec9ebacbc
+ci_tools_image: ghcr.io/eekaan/k8s-gitops/ci-tools@sha256:e1b2d2033ee3305d22d72522b54127ef454ce17988498a2ddeacddca0b06d0d6
