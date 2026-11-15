@@ -1,0 +1,24 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cert-manager.io/clusterissuer_v1.json
+# Let's Encrypt's production CA, whose certificates every client trusts and whose rate limits a
+# broken setup can exhaust: a cluster chooses it once the staging issuer has issued
+# (docs/kubernetes.md, cert-manager). It differs from the staging issuer in its directory and its
+# account key alone.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-production
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    privateKeySecretRef:
+      name: letsencrypt-production-account
+    solvers:
+      - selector:
+          dnsZones:
+            - ${CLUSTER_DOMAIN}
+        dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: cloudflare-api-token
+              key: api-token

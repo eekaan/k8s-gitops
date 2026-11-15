@@ -1,0 +1,34 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: acme-issuers
+  namespace: flux-system
+spec:
+  path: ./apps/base/cert-manager/acme-issuers/app
+  targetNamespace: cert-manager
+  # The issuers are of cert-manager's kinds, which its webhook admits, and the ExternalSecret names
+  # the store, which its application makes Ready.
+  dependsOn:
+    - name: cert-manager
+    - name: openbao-store
+  # Ready only once the DNS provider's token has come through the store and each issuer has
+  # registered its account with its CA, so an application that names this one in dependsOn finds
+  # issuers that can sign. kstatus reads neither kind by itself: an object without a status counts
+  # as ready, so the conditions are read. Until an operator has written the token into the store
+  # (docs/kubernetes.md, cert-manager) the ExternalSecret reports the missing key and this
+  # application is not Ready, which holds back what names it.
+  wait: true
+  healthCheckExprs:
+    - apiVersion: external-secrets.io/v1
+      kind: ExternalSecret
+      current: has(status.conditions) && status.conditions.exists(e, e.type == 'Ready' && e.status == 'True')
+      failed: has(status.conditions) && status.conditions.exists(e, e.type == 'Ready' && e.status == 'False')
+    - apiVersion: cert-manager.io/v1
+      kind: ClusterIssuer
+      current: has(status.conditions) && status.conditions.exists(e, e.type == 'Ready' && e.status == 'True')
+      failed: has(status.conditions) && status.conditions.exists(e, e.type == 'Ready' && e.status == 'False')
+  sourceRef:
+    kind: ExternalArtifact
+    name: acme-issuers

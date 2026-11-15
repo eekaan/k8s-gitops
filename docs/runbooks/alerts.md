@@ -114,3 +114,35 @@ Usually: the store moved to another worker and is starting, which clears by itse
 volume is full and it answers every insert with HTTP 429 (its metric `vl_storage_is_read_only` is 1);
 or Cilium's tunnel between the collector's node and the store's is down, which no recipe checks: the
 collector's log shows connection errors to `victoria-logs` while the store's pod is Running.
+
+## CertManagerCertificateNotReady
+
+A Certificate has not been Ready for an hour: it was never issued, or a renewal failed and its
+certificate is no longer valid. While an issued certificate is still valid, a failing renewal leaves
+the Certificate Ready, so this alert means no current certificate or an issuance that never finished.
+For the public Gateway's `public-wildcard` the Gateway keeps serving the Secret it has.
+
+Look at first: `kubectl --namespace <namespace> describe certificate <name>`, then down the chain
+cert-manager makes: `kubectl --namespace <namespace> get certificaterequest,order,challenge`. For a
+DNS-01 challenge the Challenge's `status.reason` says what the provider or the CA refused
+([cert-manager](../kubernetes.md#cert-manager)).
+
+Usually: the DNS provider's token is missing, wrong or cannot edit the zone, so the Challenge is
+refused (`kubectl --namespace cert-manager get externalsecret cloudflare-api-token` says whether the
+token came through, and `just bao-put cert-manager/cloudflare api-token` writes it); the TXT record
+is not yet visible to the public resolvers the self-check asks; or the CA's rate limits are spent.
+
+## CertManagerCertificateExpiringSoon
+
+The certificate of a Certificate ends within 14 days, for 15 minutes: cert-manager renews well
+before that (the public Gateway's at two fifths of the lifetime left), so a renewal has been failing
+for a long time. A Certificate that has never been issued has no end and does not fire this alert;
+[CertManagerCertificateNotReady](#certmanagercertificatenotready) covers it.
+
+Look at first: the same objects as for [CertManagerCertificateNotReady](#certmanagercertificatenotready):
+the Certificate's `Issuing` condition and the CertificateRequest, Order and Challenge of the renewal.
+`just gateway-check` says how much of the public Gateway's certificate is left.
+
+Usually: what makes a Certificate not Ready, for a longer time than the Certificate showed, as it
+stays Ready while its current certificate is valid.
+

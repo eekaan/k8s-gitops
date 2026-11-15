@@ -1,0 +1,38 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/prometheusrule-monitoring-v1.json
+# Alerts on every Certificate of the cluster, from the controller's own metrics, which its
+# ServiceMonitor has Prometheus scrape: certmanager_certificate_ready_status, one series per
+# Certificate and condition with value 1 for the condition that holds, and
+# certmanager_certificate_expiration_timestamp_seconds, the second its certificate ends, or 0 for a
+# Certificate that has never been issued, which the expiry alert leaves to the not-Ready one (names
+# and labels: pkg/metrics/metrics.go in https://github.com/cert-manager/cert-manager).
+# Tests: tests/rules/cert-manager.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cert-manager-alerts
+  namespace: cert-manager
+spec:
+  groups:
+    - name: cert-manager
+      rules:
+        - alert: CertManagerCertificateNotReady
+          expr: certmanager_certificate_ready_status{condition="False"} == 1
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: A Certificate has not been Ready for an hour
+            description: The Certificate {{ $labels.name }} in {{ $labels.namespace }} has not been Ready for an hour, so it is not issued or not renewed.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#certmanagercertificatenotready
+        - alert: CertManagerCertificateExpiringSoon
+          expr: |-
+            certmanager_certificate_expiration_timestamp_seconds > 0
+            and certmanager_certificate_expiration_timestamp_seconds - time() < 14 * 24 * 3600
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: A Certificate ends within 14 days
+            description: The certificate of {{ $labels.name }} in {{ $labels.namespace }} ends within 14 days and has not been renewed, though cert-manager renews well before that.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#certmanagercertificateexpiringsoon

@@ -39,6 +39,20 @@ built() {
   build_from_overlay "$app" >"$BUILT"
 }
 
+# built_default APP: the application APP as its own ks.yaml has it, with no patch of any overlay,
+# which is what a cluster that chooses nothing gets. Writes $BATS_TEST_TMPDIR/APP-default.yaml and
+# sets BUILT and APP_DIR.
+built_default() {
+  local app=$1 ks="$BATS_TEST_TMPDIR/default-$1-ks.yaml"
+  app_dir "$app"
+  # shellcheck disable=SC2016 # $vars is a yq variable.
+  yq ea 'select(fileIndex == 0) as $vars | select(fileIndex == 1 and . != null)
+    | .spec.postBuild.substitute = ($vars * (.spec.postBuild.substitute // {}))' "${VARS:-$EXAMPLE}" "$REPO/$APP_DIR/ks.yaml" >"$ks"
+  BUILT="$BATS_TEST_TMPDIR/$app-default.yaml"
+  (cd "$REPO" && flux build kustomization "$app" --path "./$APP_DIR/app" \
+    --kustomization-file "$ks" --dry-run --strict-substitute) >"$BUILT"
+}
+
 # build_from_overlay APP: the objects the overlay's Kustomization of APP applies, built offline.
 build_from_overlay() {
   local ks="$BATS_TEST_TMPDIR/overlay-$1-ks.yaml" path
@@ -171,8 +185,10 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   VARS="$OTHER" built gateway-public
   [ "$(object "$BUILT" EnvoyProxy "$proxy" | yq '.spec.provider.kubernetes.envoyService.annotations["lbipam.cilium.io/ips"]')" \
     = "$(VARS="$OTHER" var GATEWAY_ADDRESS)" ]
-  # It is applied after what it needs: the controller, the issuer and the BGP objects.
-  [ "$(depends_on gateway-public | sort | paste -sd' ' -)" = "cilium-bgp cluster-ca envoy-gateway" ]
+  # It is applied after what it needs: the controller, the issuer and the BGP objects, and, where
+  # the cluster chooses an ACME issuer for its certificate, the application that makes the issuers.
+  [ "$(yq '.spec.dependsOn | map(.name) | sort | join(" ")' "$REPO/$APP_DIR/ks.yaml")" = "cilium-bgp cluster-ca envoy-gateway" ]
+  [ "$(depends_on gateway-public | sort | paste -sd' ' -)" = "acme-issuers cilium-bgp cluster-ca envoy-gateway" ]
   # Nothing else can take the address first: of everything the cluster applies, built with an
   # address of its own, only this EnvoyProxy carries the label outside a selector, sets an LB-IPAM
   # annotation or names the Gateway's address anywhere, and no text, such as the values a chart
@@ -243,7 +259,8 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   local gateway https domain leaf ca_issuer ca bootstrap cluster_issuer secret
   built cluster-ca
   cp "$BUILT" "$BATS_TEST_TMPDIR/issuers.yaml"
-  built gateway-public
+  # With nothing chosen, as a cluster that says nothing gets it: the cluster's own CA issues it.
+  built_default gateway-public
   gateway="$(only "$BUILT" Gateway)"
   domain="$(var CLUSTER_DOMAIN)"
   https="$(listener "$BUILT" https)"
@@ -269,7 +286,11 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   [ "$(yq '.spec.dnsNames | sort | join(" ")' "$BATS_TEST_TMPDIR/leaf.yaml")" = "$(printf '%s %s' "*.$domain" "$domain")" ]
   [ "$(yq '.spec.privateKey.algorithm' "$BATS_TEST_TMPDIR/leaf.yaml")" = ECDSA ]
   [ "$(yq '.spec.duration' "$BATS_TEST_TMPDIR/leaf.yaml")" = 2160h ]
-  [ "$(yq '.spec.renewBefore' "$BATS_TEST_TMPDIR/leaf.yaml")" = 720h ]
+  # Renewed with two fifths of the lifetime left, which holds whatever lifetime the CA gives and is
+  # above the third gateway-check fails below, and with a new key.
+  [ "$(yq '.spec | has("renewBefore")' "$BATS_TEST_TMPDIR/leaf.yaml")" = false ]
+  [ "$(yq '.spec.renewBeforePercentage' "$BATS_TEST_TMPDIR/leaf.yaml")" -eq 40 ]
+  [ "$(yq '.spec.privateKey.rotationPolicy' "$BATS_TEST_TMPDIR/leaf.yaml")" = Always ]
   # The names come from the variable: built with another domain they follow it.
   other_vars
   VARS="$OTHER" built gateway-public

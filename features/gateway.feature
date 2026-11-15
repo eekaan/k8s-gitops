@@ -14,7 +14,7 @@ Feature: Public Gateway
   Scenario: The HTTPS listener serves a wildcard certificate for the cluster's domain from the cluster's issuer
     Given the public Gateway and the issuer application, built offline with the example cluster-config
     When the https listener, its certificate and the issuers are read
-    Then the listener terminates TLS with the Secret of an ECDSA certificate for the wildcard and the apex of the cluster's domain, issued by the cluster-wide CA issuer whose CA is a certificate the bootstrap self-signed issuer signed, with no private key in the tree, and a client traffic policy that sets TLS 1.2 and nothing else is the one policy on the Gateway or its routes
+    Then the listener terminates TLS with the Secret of an ECDSA certificate for the wildcard and the apex of the cluster's domain, renewed at a share of its lifetime and with a new key, issued with nothing chosen by the cluster-wide CA issuer whose CA is a certificate the bootstrap self-signed issuer signed, with no private key in the tree, and a client traffic policy that sets TLS 1.2 and nothing else is the one policy on the Gateway or its routes
 
   Scenario: A route attaches to the public Gateway only from a namespace that opts in
     Given the public Gateway's listeners and the namespaces of the tree
@@ -55,3 +55,13 @@ Feature: Public Gateway
     Given a healthy cluster and an edge stack with no outputs
     When just gateway-check runs
     Then the cluster's lines pass, one line says the edge lines are skipped because the stack has no outputs, curl is never run, and the recipe exits 0
+
+  Scenario: The Gateway check verifies the certificate against the trust its issuer implies, and says which
+    Given a healthy cluster and edges whose Gateway certificate is named for the cluster's own CA issuer, for the ACME production issuer, and for the ACME staging issuer, in turn
+    When just gateway-check runs against the fakes
+    Then it verifies every edge's HTTPS answer against the cluster CA's certificate, against the system's public trust store with nothing added, and against the issuing chain of the certificate's own Secret, each line saying which, and it fails an answer whose chain is not the one that issuer implies
+
+  Scenario: A certificate that is not issued, or is close to expiry, fails the Gateway check with the reason
+    Given a healthy cluster and edges whose Gateway certificate is not Ready for a reason cert-manager gives, or has under a third of its lifetime left
+    When just gateway-check runs
+    Then the certificate line fails with the condition's reason, cut and made printable as any reason is, or the certificate lifetime line fails with the time left, no other line fails, and a certificate with more than a third left passes

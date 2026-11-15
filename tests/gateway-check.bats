@@ -80,7 +80,7 @@ EOF
     TMPDIR="$WORK"
   )
   CLUSTER_LINES=(cluster-config Gateway 'Gateway address' 'proxy Service' 'proxy Service address' proxies
-    certificate 'cluster CA' routes 'http listener')
+    certificate 'certificate lifetime' 'cluster CA' routes 'http listener')
   EDGE_LINES=(http TLS 'certificate names' hello 'unrouted host')
   LINES=("${CLUSTER_LINES[@]}")
   for edge in lab-edge-1 lab-edge-2; do
@@ -288,6 +288,7 @@ calls() {
   for entry in "${ENVIRONMENT[@]}"; do
     [[ $entry == TF_STATE_BUCKET=* ]] || kept+=("$entry")
   done
+  # shellcheck disable=SC2030 # Each test starts from the setup's ENVIRONMENT.
   ENVIRONMENT=("${kept[@]}")
 
   recipe
@@ -438,4 +439,197 @@ calls() {
   echo "$output"
   [ "$status" -ne 0 ]
   [ "$(line_of Gateway)" = "FAIL  Gateway: Accepted, not Programmed: $(printf 'A%.0s' {1..120})..." ]
+}
+
+# acme KIND: the Gateway's certificate is issued by the ACME issuer KIND, production or staging, and
+# the edges serve a certificate that issuer's chain signed; STATE and the record of calls are emptied.
+acme() {
+  find "$STATE" -mindepth 1 -delete
+  : > "$RECORD/argv"
+  printf '"letsencrypt-%s"\n' "$1" > "$STATE/issuer-name"
+  echo "$1" > "$STATE/served-by"
+  # The lines of an ACME issuer: the one about trust has another name.
+  ACME_LINES=("${LINES[@]/#cluster CA/issuer trust}")
+}
+
+# https_calls: the HTTPS requests the recipe made through the edges.
+https_calls() {
+  calls '^curl .*https://'
+}
+
+@test "The Gateway check verifies the certificate against the trust its issuer implies, and says which" {
+  local check served edge kind directory
+
+  # The cluster's own CA, which is what the Gateway's certificate names unless the cluster chose.
+  recipe
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(line_of 'cluster CA')" = "pass  cluster CA: read the public certificate of cert-manager/cluster-ca, which cluster-ca signs with" ]
+  [ "$(line_of 'lab-edge-1 TLS')" = "pass  lab-edge-1 TLS: HTTPS for hello verifies against the cluster's CA" ]
+
+  # The ACME production issuer: the system's public trust store, and nothing added or set aside.
+  acme production
+  recipe
+  echo "$output"
+  [ "$status" -eq 0 ]
+  for check in "${ACME_LINES[@]}"; do
+    [ "$(verdict "$check")" = pass ] || { echo "not passed: $check"; return 1; }
+  done
+  [ "$(grep -cE '^(pass|FAIL|skip)  ' <<< "$output")" -eq "${#ACME_LINES[@]}" ]
+  [ "$(line_of 'issuer trust')" = "pass  issuer trust: letsencrypt-production is the ACME production issuer, so each edge's certificate is verified against the system's public trust store" ]
+  for edge in lab-edge-1 lab-edge-2; do
+    [ "$(line_of "$edge TLS")" = "pass  $edge TLS: HTTPS for hello verifies against the system's public trust store" ]
+  done
+  # No Secret is read, and curl is given no authority of its own and is never told to skip the check.
+  [ -z "$(calls ' secret ')" ]
+  [ "$(https_calls | wc -l)" -eq 4 ]
+  [ "$(https_calls | grep -cE -- ' (--cacert|--capath|-k|--insecure)( |$)')" -eq 0 ]
+  nothing_secret
+
+  # The ACME staging issuer: no public store holds its chain, so the issuing certificates of the
+  # Secret the Gateway's Certificate makes are what is trusted, and the line says so.
+  acme staging
+  recipe
+  echo "$output"
+  [ "$status" -eq 0 ]
+  for check in "${ACME_LINES[@]}"; do
+    [ "$(verdict "$check")" = pass ] || { echo "not passed: $check"; return 1; }
+  done
+  [ "$(grep -cE '^(pass|FAIL|skip)  ' <<< "$output")" -eq "${#ACME_LINES[@]}" ]
+  [ "$(line_of 'issuer trust')" = "pass  issuer trust: letsencrypt-staging is the ACME staging issuer, whose chain no public store trusts, so each edge's certificate is verified against the issuing chain of envoy-gateway-system/public-wildcard-tls: its signature, names and validity, not public trust" ]
+  for edge in lab-edge-1 lab-edge-2; do
+    [ "$(line_of "$edge TLS")" = "pass  $edge TLS: HTTPS for hello verifies against the staging issuing chain, which no public store trusts" ]
+  done
+  # Only the certificate's public part is read, and only that key, and the leaf is never a trust
+  # anchor: curl is given the chain after it.
+  [ "$(calls ' secret ')" = 'kubectl get --output=jsonpath={.data.tls\.crt} --request-timeout=10s secret --namespace=envoy-gateway-system -- public-wildcard-tls' ]
+  [ "$(https_calls | grep -vcE -- ' --cacert [^ ]+ --capath [^ ]+ ')" -eq 0 ]
+  [ "$(https_calls | grep -cE -- ' (-k|--insecure)( |$)')" -eq 0 ]
+  nothing_secret
+  [ -z "$(find "$WORK" -mindepth 1)" ]
+
+  # An answer is verified against the trust its issuer implies and no other: a chain of another
+  # authority than the one the Certificate's issuer implies fails TLS at both edges, and only that.
+  for served in 'production|staging' 'staging|production' 'production|cluster-ca' 'staging|cluster-ca'; do
+    acme "${served%|*}"
+    echo "${served#*|}" > "$STATE/served-by"
+    recipe
+    echo "$served: $output"
+    [ "$status" -ne 0 ]
+    [ "$(sed -nE 's/^FAIL  ([^:]+): .*/\1/p' <<< "$output" | sort | tr '\n' ,)" = "lab-edge-1 TLS,lab-edge-2 TLS," ] ||
+      { echo "not the failures expected"; return 1; }
+    nothing_secret
+  done
+
+  # And the cluster's own CA does not vouch for a chain of a public authority either.
+  find "$STATE" -mindepth 1 -delete
+  echo production > "$STATE/served-by"
+  recipe
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [ "$(sed -nE 's/^FAIL  ([^:]+): .*/\1/p' <<< "$output" | sort | tr '\n' ,)" = "lab-edge-1 TLS,lab-edge-2 TLS," ]
+
+  # A directory that is none of Let's Encrypt's is not one whose trust the check knows, whatever
+  # the issuer or the directory is called.
+  for kind in production staging; do
+    for directory in '' https://acme-staging.example.net/directory https://acme-v02.api.letsencrypt.org.example.net/directory; do
+      acme "$kind"
+      printf '%s\n' "$directory" > "$STATE/non-acme-issuer"
+      recipe
+      echo "$kind $directory: $output"
+      [ "$status" -ne 0 ]
+      [[ $(line_of 'issuer trust') == "FAIL  issuer trust: "* ]]
+      [ "$(verdict 'lab-edge-1 TLS')" = skip ]
+      nothing_secret
+    done
+  done
+
+  # Production's trust is curl's own store alone: the variables that make curl trust another
+  # bundle or directory do not reach it, whatever the operator's environment holds.
+  acme production
+  # shellcheck disable=SC2031 # Each test starts from the setup's ENVIRONMENT.
+  ENVIRONMENT+=(CURL_CA_BUNDLE=/nonexistent/bundle.pem SSL_CERT_FILE=/nonexistent/file.pem SSL_CERT_DIR=/nonexistent/dir)
+  recipe
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$RECORD/curl-env")" -gt 0 ]
+  [ "$(tr -d ' \n' < "$RECORD/curl-env")" = "" ]
+
+  # The staging chain that cannot be read leaves nothing to verify with.
+  acme staging
+  : > "$STATE/no-tls-secret"
+  recipe
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $(line_of 'issuer trust') == "FAIL  issuer trust: kubectl could not read the certificate chain of envoy-gateway-system/public-wildcard-tls" ]]
+  [ "$(verdict 'lab-edge-1 TLS')" = skip ]
+  nothing_secret
+}
+
+@test "A certificate that is not issued, or is close to expiry, fails the Gateway check with the reason" {
+  local case hours remaining expected kind
+  # Not Ready, as with a token cert-manager's challenge is refused with: its reason, and nothing else
+  # fails, as the Gateway keeps serving the Secret it has.
+  for kind in staging production; do
+    acme "$kind"
+    echo Issuing > "$STATE/certificate-reason"
+    : > "$STATE/certificate-not-ready"
+    recipe
+    echo "$output"
+    [ "$status" -ne 0 ]
+    [ "$(line_of certificate)" = "FAIL  certificate: public-wildcard is not Ready: Issuing" ]
+    [ "$(sed -nE 's/^FAIL  ([^:]+): .*/\1/p' <<< "$output")" = certificate ]
+    nothing_secret
+  done
+
+  # A reason that is not a word, or is long, is cut and made printable as every reason is.
+  acme staging
+  printf '%s\n' $'Failed\nFAIL  injected: every line passes' > "$STATE/certificate-reason"
+  : > "$STATE/certificate-not-ready"
+  recipe
+  echo "$output"
+  [ "$(line_of certificate)" = "FAIL  certificate: public-wildcard is not Ready: a reason that is not a word" ]
+  [[ $output != *injected* ]]
+
+  # Never issued: no validity to read, so the lifetime is skipped, and the certificate line fails.
+  acme staging
+  echo Issuing > "$STATE/certificate-reason"
+  : > "$STATE/certificate-not-ready"
+  : > "$STATE/no-validity"
+  recipe
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [ "$(verdict 'certificate lifetime')" = skip ]
+  [ "$(sed -nE 's/^FAIL  ([^:]+): .*/\1/p' <<< "$output")" = certificate ]
+
+  # Close to expiry: under a third of the lifetime left, which cert-manager, renewing at a share of
+  # it, should have renewed by now. Each: hours since notBefore and until notAfter, and the verdict.
+  for case in '1800 360 FAIL' '1441 719 FAIL' '1439 721 pass' '100 20 FAIL' '100 60 pass' '2200 -40 FAIL'; do
+    read -r hours remaining expected <<< "$case"
+    for kind in staging production; do
+      acme "$kind"
+      echo "$hours $remaining" > "$STATE/validity"
+      recipe
+      echo "$kind $case: $output"
+      [ "$(verdict 'certificate lifetime')" = "$expected" ]
+      if [[ $expected == FAIL ]]; then
+        [ "$status" -ne 0 ]
+        [ "$(sed -nE 's/^FAIL  ([^:]+): .*/\1/p' <<< "$output")" = 'certificate lifetime' ]
+      else
+        [ "$status" -eq 0 ]
+      fi
+      nothing_secret
+    done
+  done
+  # The line says how much is left of how much, in hours, and why that fails.
+  acme staging
+  echo '1800 360' > "$STATE/validity"
+  recipe
+  [ "$(line_of 'certificate lifetime')" = "FAIL  certificate lifetime: 360 of 2160 hours remain, under a third, which cert-manager should have renewed by now" ]
+  echo '2200 -40' > "$STATE/validity"
+  recipe
+  [ "$(line_of 'certificate lifetime')" = "FAIL  certificate lifetime: it ended 40 hours ago" ]
+  echo '1000 1160' > "$STATE/validity"
+  recipe
+  [ "$(line_of 'certificate lifetime')" = "pass  certificate lifetime: 1160 of 2160 hours remain" ]
 }

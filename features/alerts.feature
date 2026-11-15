@@ -92,3 +92,15 @@ Feature: Alerts
     Given a collector whose sink reports errors, and one whose sink reports none
     When the rule is evaluated over time
     Then the alert fires after its time for the first and never for the second
+
+  @by:rules-check
+  Scenario: The alert CertManagerCertificateNotReady fires after its time in the failing case and stays quiet in the healthy one
+    Given a Certificate that stops being Ready, and one that is Ready throughout
+    When the rule is evaluated over time
+    Then the alert fires after an hour for the Certificate that is not Ready and never for the one that is
+
+  @by:rules-check
+  Scenario: The alert CertManagerCertificateExpiringSoon fires after its time in the failing case and stays quiet in the healthy one
+    Given a Certificate whose certificate ends within 14 days, and one that ends in 60 days
+    When the rule is evaluated over time
+    Then the alert fires after its time for the first and never for the second

@@ -7,6 +7,10 @@
 #   edge-down.ADDRESS   nothing answers at ADDRESS; curl's error names it
 #   redirect-status     the status plain HTTP is answered with, 301 without it
 #   redirect-location   the Location plain HTTP is sent to, https on the same host and path without it
+#   served-by           which authority signed the certificate served: cluster-ca (the default),
+#                       production (a public one, trusted from the CA path curl was built with alone)
+#                       or staging (trusted from the issuing certificate of <tmp>/fixtures/acme-anchors.crt,
+#                       given by --cacert, alone)
 #   untrusted           the certificate served is signed by another authority than the cluster's CA,
 #                       one in the CA path this curl was built with, as a public authority would be
 #   wrong-names         the certificate served names another domain
@@ -25,6 +29,8 @@ root=${0%/bin/*}
 state=$root/state
 fixtures=$root/fixtures
 printf '%s\n' "curl $*" >> "$root/record/argv"
+# The variables that give curl trust of the caller's choosing, as set when it ran.
+printf '%s\n' "${CURL_CA_BUNDLE+CURL_CA_BUNDLE }${SSL_CERT_FILE+SSL_CERT_FILE }${SSL_CERT_DIR+SSL_CERT_DIR}" >> "$root/record/curl-env"
 
 listed() {
   [[ -e $state/$1 ]]
@@ -93,6 +99,12 @@ if [[ $scheme == http ]]; then
 fi
 
 issuer=cluster-ca names="DNS:*.$domain, DNS:$domain"
+served_by=cluster-ca
+listed served-by && served_by=$(< "$state/served-by")
+case $served_by in
+  production) issuer="fixture public intermediate" ;;
+  staging) issuer="(STAGING) fixture intermediate" ;;
+esac
 listed untrusted && issuer=another-ca
 listed wrong-names && names="DNS:*.other.example.org, DNS:other.example.org"
 certs="Subject:CN = public-wildcard
@@ -120,10 +132,16 @@ covered() {
 }
 # trusted: whether the authority that signed the certificate served is trusted.
 trusted() {
-  if [[ $issuer == cluster-ca ]]; then
-    [[ -n $cacert && $(< "$cacert") == "$(< "$fixtures/ca.crt")" ]]
-  else
+  if [[ $issuer == another-ca ]]; then
     [[ $capath == built-in || -n $(ls -A "$capath" 2> /dev/null) ]]
+  else
+    case $served_by in
+      cluster-ca) [[ -n $cacert && $(< "$cacert") == "$(< "$fixtures/ca.crt")" ]] ;;
+      # A public authority's chain: in the CA path curl was built with, which nothing else sets aside.
+      production) [[ -z $cacert && $capath == built-in ]] ;;
+      # The staging chain, which no public store holds: only the issuing certificate the file gives.
+      staging) [[ -n $cacert && $(< "$cacert") == "$(< "$fixtures/acme-anchors.crt")" && -z $(ls -A "$capath" 2> /dev/null) ]] ;;
+    esac
   fi
 }
 if ((!insecure)); then

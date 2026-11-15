@@ -1,0 +1,26 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cert-manager.io/clusterissuer_v1.json
+# Let's Encrypt's staging CA, whose certificates no client trusts and whose rate limits are far
+# above production's: a cluster that is being set up, or whose setup is broken, asks this one.
+# Let's Encrypt asks for no contact address, so none is set. cert-manager makes the account key in
+# the Secret named below and registers it on first use. The solver answers DNS-01 through the DNS
+# provider's API with the token the ExternalSecret brings, and only for names under the cluster's
+# domain: a Certificate for another name finds no solver and is refused.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    privateKeySecretRef:
+      name: letsencrypt-staging-account
+    solvers:
+      - selector:
+          dnsZones:
+            - ${CLUSTER_DOMAIN}
+        dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: cloudflare-api-token
+              key: api-token

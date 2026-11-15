@@ -1,0 +1,10 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# The ACME issuers of ADR 0006 and the DNS provider's token they solve DNS-01 with, which comes from
+# the secret store (docs/kubernetes.md, cert-manager).
+resources:
+  - externalsecret.yaml
+  - clusterissuer-staging.yaml
+  - clusterissuer-production.yaml

@@ -1,8 +1,8 @@
 ---
 # yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cert-manager.io/certificate_v1.json
 # The https listener's certificate, for every host under the cluster's domain and for the domain
-# itself. Its issuer is the one line that changes when the public issuer of ADR 0006 exists:
-# issuerRef names the cluster's own authority until then (docs/kubernetes.md, cert-manager).
+# itself. Its issuer is the ClusterIssuer named by PUBLIC_ISSUER, which a cluster sets in its overlay
+# (docs/kubernetes.md, cert-manager), and the cluster's own authority when it sets nothing.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -12,8 +12,13 @@ spec:
   dnsNames:
     - "*.${CLUSTER_DOMAIN}"
     - "${CLUSTER_DOMAIN}"
+  # What the cluster's own authority is asked for; an ACME CA decides its certificates' lifetime
+  # itself, and cert-manager works from the lifetime it was given.
   duration: 2160h
-  renewBefore: 720h
+  # A share of the lifetime, not a time, so it holds for 90 days and for the shorter lifetimes a CA
+  # may move to: renewal starts with two fifths left, well before the third that gateway-check
+  # treats as too little.
+  renewBeforePercentage: 40
   privateKey:
     algorithm: ECDSA
     size: 256
@@ -21,4 +26,4 @@ spec:
   issuerRef:
     group: cert-manager.io
     kind: ClusterIssuer
-    name: cluster-ca
+    name: ${PUBLIC_ISSUER:=cluster-ca}

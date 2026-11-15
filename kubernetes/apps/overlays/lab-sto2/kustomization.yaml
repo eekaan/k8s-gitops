@@ -18,6 +18,7 @@ resources:
   - ../../base/openbao
   - ../../base/piraeus-datastore
   - ../../base/volsync-system
+  - ../../base/cert-manager/acme-issuers/ks.yaml
   - ../../base/cert-manager/cert-manager/ks.yaml
   - ../../base/cert-manager/cluster-ca/ks.yaml
   - ../../base/cnpg-system/cloudnative-pg/ks.yaml
@@ -53,3 +54,25 @@ resources:
   - ../../base/piraeus-datastore/linstor-cluster/ks.yaml
   - ../../base/piraeus-datastore/piraeus-operator/ks.yaml
   - ../../base/volsync-system/volsync/ks.yaml
+
+patches:
+  # The issuer of the public Gateway's certificate, the one place this cluster chooses it: Let's
+  # Encrypt's staging CA, whose certificates no client trusts, until the staging certificate is
+  # issued; then letsencrypt-production, which every client trusts. Without this patch the
+  # certificate comes from the cluster's own CA. Choosing an issuer of acme-issuers names that
+  # application in dependsOn, which scripts/kubernetes-check requires.
+  - target:
+      group: kustomize.toolkit.fluxcd.io
+      version: v1
+      kind: Kustomization
+      name: gateway-public
+    patch: |-
+      - op: add
+        path: /spec/dependsOn/-
+        value:
+          name: acme-issuers
+      - op: add
+        path: /spec/postBuild
+        value:
+          substitute:
+            PUBLIC_ISSUER: letsencrypt-staging

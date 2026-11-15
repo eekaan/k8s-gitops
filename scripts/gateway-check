@@ -12,8 +12,14 @@
 #   proxy Service address  it holds the GATEWAY_ADDRESS;
 #   proxies                two proxies, or more, are Ready, on different nodes;
 #   certificate            the Certificate whose Secret the https listener serves is Ready;
-#   cluster CA             the public certificate of the CA its issuer signs with is read: the
-#                          tls.crt of the issuer's Secret, by a path that names that one key;
+#   certificate lifetime   a third of its lifetime or more is left, which cert-manager, renewing
+#                          earlier, would have seen to;
+#   cluster CA             for an issuer of kind CA, the public certificate of the CA it signs with is
+#                          read: the tls.crt of the issuer's Secret, by a path that names that one key;
+#   issuer trust           for a Let's Encrypt issuer, what its certificates are verified against: the
+#                          system's public trust store for production, and for staging, whose chain
+#                          no public store holds, the issuing certificates in the tls.crt of the
+#                          Certificate's own Secret, read by a path that names that one key;
 #   routes                 no HTTPRoute is Accepted on the Gateway from a namespace without the label
 #                          k8s-gitops/gateway: public, but for the redirect in the Gateway's own;
 #   http listener          the http listener holds one route, the redirect;
@@ -21,20 +27,21 @@
 # outputs, and a failed one when they cannot be read):
 #   EDGE http              plain HTTP on 80 for hello.<CLUSTER_DOMAIN> answers 301 with the Location
 #                          https://hello.<CLUSTER_DOMAIN> and the same path;
-#   EDGE TLS               HTTPS on 443 for it verifies against the cluster CA's certificate, chain
-#                          and name, with nothing else trusted;
+#   EDGE TLS               HTTPS on 443 for it verifies, chain and name, against the trust the issuer
+#                          implies, with nothing else trusted: the cluster CA's certificate, the
+#                          system's public trust store, or the staging issuing chain;
 #   EDGE certificate names the certificate served names it, read from what curl shows of it, which
 #                          says, when TLS fails, whether the names are the cause;
 #   EDGE hello             the demo answers 200 with the page of its ConfigMap demo/hello;
 #   EDGE unrouted host     a host under the domain that no route serves answers 404.
 # It runs kubectl get, tofu init and output on the edge stack, and curl. It prints object, node and
 # edge names, each only once it is a valid name of its kind, and never an address, a host name under
-# the domain, what the CA's Secret holds, or a tool's own errors, which can name addresses: kubectl's
+# the domain, what the Secrets it reads hold, or a tool's own errors, which can name addresses: kubectl's
 # go nowhere, and tofu's to the edge stack's errors file. Any other text it shows from the cluster or
 # an answer passes through printable (scripts/lib/errors.sh). A name read from the cluster reaches
 # kubectl after --, so it can never be taken for a flag. kubectl is bounded by --request-timeout and
 # curl by --connect-timeout and --max-time, and curl reads no configuration file, uses no proxy and
-# trusts nothing but the cluster's CA. Needs curl 7.88 or newer, for its write-out of the
+# trusts nothing but what the issuer's line names. Needs curl 7.88 or newer, for its write-out of the
 # certificates. A failure that is not a check's names the step it happened in, and so does Ctrl-C
 # or SIGTERM, which stops the run there.
 # Usage: scripts/gateway-check [cluster]
@@ -59,6 +66,9 @@ complete=1
 require_kubeconfig || complete=0
 require_commands kubectl jq curl base64 sha256sum || complete=0
 ((complete))
+# Only the trust the issuer's line names reaches curl: not a bundle or directory the caller's
+# environment would add.
+unset CURL_CA_BUNDLE SSL_CERT_FILE SSL_CERT_DIR
 
 # The Gateway and where its parts are, as the tree makes them (docs/kubernetes.md, The public
 # Gateway); cert-manager keeps a ClusterIssuer's Secret in its own namespace.
@@ -276,9 +286,43 @@ else
   fi
 fi
 
+# hours SECONDS: SECONDS as whole hours, to the nearest.
+hours() {
+  echo $((($1 + 1800) / 3600))
+}
+
+# lifetime CERTIFICATE: the line for how much of the Certificate's lifetime is left. cert-manager
+# renews at a share of it well above a third, so a certificate with less than a third left is one it
+# should have renewed and did not, whatever its Ready condition says.
+lifetime() {
+  local times before after total left
+  times=$(jq -r 'def secs: sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
+    if .status.notBefore == null or .status.notAfter == null then "none"
+    else (try "\(.status.notBefore | secs) \(.status.notAfter | secs)" catch "invalid") end' <<< "$1")
+  case $times in
+    none) result skip "certificate lifetime" "its status holds no notBefore and notAfter: it has not been issued" ;;
+    invalid) result FAIL "certificate lifetime" "its status holds a notBefore or notAfter that is not a time" ;;
+    *)
+      read -r before after <<< "$times"
+      total=$((after - before))
+      left=$((after - $(date +%s)))
+      if ((total <= 0)); then
+        result FAIL "certificate lifetime" "its notAfter is not after its notBefore"
+      elif ((left <= 0)); then
+        result FAIL "certificate lifetime" "it ended $(hours $((-left))) hours ago"
+      elif ((left * 3 < total)); then
+        result FAIL "certificate lifetime" "$(hours "$left") of $(hours "$total") hours remain, under a third, which cert-manager should have renewed by now"
+      else
+        result pass "certificate lifetime" "$(hours "$left") of $(hours "$total") hours remain"
+      fi
+      ;;
+  esac
+}
+
 issuer='' issuer_valid=1
 if ! certificates=$(get certificates.cert-manager.io --namespace="$namespace"); then
   result FAIL certificate "kubectl could not read the Certificates of $namespace"
+  result skip "certificate lifetime" "no Certificate was read"
 else
   certificate=$(jq -c --arg secret "$tls_name" '[.items[] | select(.spec.secretName == $secret)] | first // {}' <<< "$certificates")
   name_valid=1
@@ -294,6 +338,11 @@ else
   else
     result pass certificate "$name, the https listener's, is Ready"
   fi
+  if [[ -z $certificate || $certificate == '{}' ]] || ((!name_valid)); then
+    result skip "certificate lifetime" "no Certificate of the https listener to read the lifetime of"
+  else
+    lifetime "$certificate"
+  fi
   name_field issuer subdomain "$certificate" 'if (.spec.issuerRef.kind // "Issuer") == "ClusterIssuer"
     and (.spec.issuerRef.group // "cert-manager.io") == "cert-manager.io" then .spec.issuerRef.name else null end' || issuer_valid=0
 fi
@@ -302,16 +351,59 @@ fi
 # Secret from the API server and prints only that key, through the jsonpath; this script never
 # prints the certificate, and never prints or writes the private key. The certificate goes to a
 # file of this run, removed at its end.
+#
+# The trust the edges' answers are verified against follows the issuer the Certificate names:
+#   a CA issuer          the CA's own certificate, alone;
+#   Let's Encrypt's production directory
+#                        the system's public trust store, which curl is given no more and no less
+#                        of: nothing is read for it;
+#   Let's Encrypt's staging directory
+#                        whose chain no public store holds, the issuing certificates in the
+#                        tls.crt of the Certificate's own Secret, the leaf left out so it is never
+#                        its own anchor. The chain comes from the cluster and not from the CA, so
+#                        this proves the answer is signed by the issuer cert-manager stored, with
+#                        the names and validity curl checks, and not public trust.
+# trust is what curl is given for it, and trust_what how the lines name it.
 ca_file=$tmp/ca.crt
 ca=0
 ca_name=''
 ca_name_valid=1
+acme_production='https://acme-v02.api.letsencrypt.org/directory'
+acme_staging='https://acme-staging-v02.api.letsencrypt.org/directory'
+trust=(--cacert "$ca_file" --capath "$tmp/no-authorities")
+trust_what="the cluster's CA"
+trust_note=''
+no_trust="no certificate of the cluster's CA to verify with"
+acme_server=''
 if ((!issuer_valid)); then
   result FAIL "cluster CA" "the ClusterIssuer the Gateway's Certificate names is not a valid name"
 elif [[ -z $issuer ]]; then
   result FAIL "cluster CA" "the Gateway's Certificate names no ClusterIssuer to read a CA from"
-elif ! issuer_json=$(get clusterissuers.cert-manager.io -- "$issuer") ||
-  ! { name_field ca_name subdomain "$issuer_json" '.spec.ca.secretName' || ca_name_valid=0; } ||
+elif ! issuer_json=$(get clusterissuers.cert-manager.io -- "$issuer"); then
+  result FAIL "cluster CA" "the ClusterIssuer $issuer is not a CA issuer kubectl could read"
+elif acme_server=$(jq -r '.spec.acme.server // "" | tostring' <<< "$issuer_json") && [[ -n $acme_server ]]; then
+  no_trust="no trust to verify with: the issuer trust line says why"
+  if [[ $acme_server == "$acme_production" ]]; then
+    trust=()
+    trust_what="the system's public trust store"
+    result pass "issuer trust" "$issuer is the ACME production issuer, so each edge's certificate is verified against the system's public trust store"
+    ca=1
+  elif [[ $acme_server != "$acme_staging" ]]; then
+    result FAIL "issuer trust" "the ClusterIssuer $issuer names an ACME directory that is neither Let's Encrypt's production nor its staging, so there is no trust to verify the certificate with"
+  elif [[ -z $tls_name ]] || ((!tls_name_valid)); then
+    result FAIL "issuer trust" "the Secret the https listener serves is not a valid name, so its issuing chain cannot be read"
+  elif ! encoded=$(kubectl get --output='jsonpath={.data.tls\.crt}' --request-timeout=10s secret --namespace="$namespace" -- "$tls_name" 2> /dev/null) ||
+    ! base64 -d <<< "$encoded" > "$tmp/chain.crt" 2> /dev/null || ! grep -q '^-----BEGIN CERTIFICATE-----' "$tmp/chain.crt"; then
+    result FAIL "issuer trust" "kubectl could not read the certificate chain of $namespace/$tls_name"
+  elif ! awk '/^-----BEGIN CERTIFICATE-----$/ { n++ } n > 1' "$tmp/chain.crt" > "$ca_file" || ! grep -q '^-----BEGIN CERTIFICATE-----' "$ca_file"; then
+    result FAIL "issuer trust" "the chain in $namespace/$tls_name holds no issuing certificate after the leaf, so there is nothing to verify the staging certificate with"
+  else
+    trust_what="the staging issuing chain"
+    trust_note=", which no public store trusts"
+    result pass "issuer trust" "$issuer is the ACME staging issuer, whose chain no public store trusts, so each edge's certificate is verified against the issuing chain of $namespace/$tls_name: its signature, names and validity, not public trust"
+    ca=1
+  fi
+elif ! { name_field ca_name subdomain "$issuer_json" '.spec.ca.secretName' || ca_name_valid=0; } ||
   { ((ca_name_valid)) && [[ -z $ca_name ]]; }; then
   result FAIL "cluster CA" "the ClusterIssuer $issuer is not a CA issuer kubectl could read"
 elif ((!ca_name_valid)); then
@@ -443,19 +535,19 @@ check_edge() {
   fi
 
   if ((!ca)); then
-    result skip "$edge TLS" "no certificate of the cluster's CA to verify with"
-    result skip "$edge certificate names" "no certificate of the cluster's CA to verify with"
+    result skip "$edge TLS" "$no_trust"
+    result skip "$edge certificate names" "$no_trust"
   else
     status=0
     answer=$(request "$edge_address" 443 "$host" / "$tmp/page" '%{http_code}\n%{certs}' "${trust[@]}") || status=$?
     code=${answer%%$'\n'*}
     certs=${answer#*$'\n'}
     if ((status == 0)); then
-      result pass "$edge TLS" "HTTPS for hello verifies against the cluster's CA"
+      result pass "$edge TLS" "HTTPS for hello verifies against $trust_what$trust_note"
       result pass "$edge certificate names" "the certificate served names hello under the cluster's domain"
       tls=1
     elif ((status == 60)); then
-      result FAIL "$edge TLS" "HTTPS for hello does not verify against the cluster's CA for its name (curl exit 60)"
+      result FAIL "$edge TLS" "HTTPS for hello does not verify against $trust_what for its name (curl exit 60)"
       if ! grep -q '^Subject:' <<< "$certs"; then
         result skip "$edge certificate names" "curl showed no certificate to read the names of"
       elif covers "$host"; then
@@ -495,9 +587,9 @@ check_edge() {
 }
 
 step="checking through the edge routers"
-# The cluster's CA alone: its certificate, and curl's place for more authorities left empty, so that
-# neither a CA path curl was built with nor one of the system's verifies an answer.
-trust=(--cacert "$ca_file" --capath "$tmp/no-authorities")
+# trust, as the issuer's line set it: for a CA, its certificate alone, and curl's place for more
+# authorities left empty, so that neither a CA path curl was built with nor one of the system's
+# verifies an answer; for a public CA, nothing, which leaves curl its own.
 if [[ -z $domain ]]; then
   result skip edges "no CLUSTER_DOMAIN from cluster-config to ask for, so no edge is checked"
 else
