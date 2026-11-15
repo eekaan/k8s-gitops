@@ -89,7 +89,7 @@ os-images pattern='':
 edge-ssh-key:
     scripts/edge-ssh-key
 
-# Check, reading only and over SSH, that both edge routers serve (or only edge 1 or 2): FRR runs, every worker has an established session, the table holds only /32s inside the service range, the rules are loaded and the kernel forwards; pass, FAIL or skip per line, no address; see docs/runbooks/edge.md
+# Check, reading only and over SSH, that both edge routers serve (or only edge 1 or 2): FRR runs, every worker has an established session, the table holds only /32s inside the service range, the reject route for the range is configured and in the kernel, the rules are loaded with their forwarding guard, the kernel forwards, and unattended upgrades are off; pass, FAIL or skip per line, no address; see docs/runbooks/edge.md
 [positional-arguments]
 edge-check *args:
     scripts/edge-check "$@"
@@ -98,7 +98,7 @@ edge-check *args:
 edge-routes edge='1':
     scripts/edge-routes {{ quote(edge) }}
 
-# Replace the edge routers one at a time after a change to their configuration, once the stack's name is typed back (--yes: without asking): replace one, wait until edge-check passes for it, then the other; stops at the first edge that does not pass. --replace replaces each edge's instance and boot volume even when the configuration is unchanged, which is how a new image reaches them
+# Replace the edge routers one at a time after a change to their configuration, once the stack's name is typed back (--yes: without asking): replace one, wait until edge-check passes for it, then the other; stops at the first edge that does not pass. --replace replaces each edge's instance and boot volume even when the configuration is unchanged, which is how a new image reaches them; --edge N replaces edge N alone, and --other-down goes on with the other edge down once a sentence naming both is typed back
 [positional-arguments]
 edge-rollout *flags:
     scripts/edge-rollout "$@"

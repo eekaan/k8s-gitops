@@ -647,7 +647,10 @@ SSH admits the operator allowlist only, by key only, as the image's default user
 `debian` by default). `just edge-ssh-key` creates the key pair at `EDGE_SSH_KEY_FILE`, and the stack
 reads the public half from the file beside it. An edge's host key is recorded on first contact, in
 `~/.local/state/k8s-gitops/edge.known_hosts`, after the fingerprints it offers are shown and `yes`
-is typed, as for the CI host.
+is typed, as for the CI host. A key pair reaches an instance only when it is created, so a new pair at
+`EDGE_SSH_KEY_FILE` replaces the stack's key pair and no instance, and the running edges admit the
+old key alone until `just edge-rollout --replace` replaces them
+([runbooks/edge.md](runbooks/edge.md#replacing-one-edge)).
 
 Outputs, all sensitive but `names`: `addresses` (the floating addresses), `private_addresses`,
 `instances`, `config` (each edge's rendered FRR configuration, nftables rules and kernel settings),
