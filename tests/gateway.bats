@@ -27,18 +27,29 @@ app_dir() {
   APP_DIR="${dirs[0]#"$REPO"/}"
 }
 
-# built APP: the application APP as Flux applies it, its app/ built with its ks.yaml, substituting
-# strictly the variables of the example key lists. Writes $BATS_TEST_TMPDIR/APP-built.yaml and
-# sets BUILT and APP_DIR.
+# built APP: the application APP as Flux applies it on lab-sto2: the overlay's Kustomization of it,
+# with whatever the overlay patches into it, built with the example key lists, or those of the file
+# VARS names, and its own substitutions, strictly. Writes $BATS_TEST_TMPDIR/APP-built.yaml and sets
+# BUILT and APP_DIR.
 built() {
-  local app=$1 ks="$BATS_TEST_TMPDIR/$1-ks.yaml"
+  local app=$1
   app_dir "$app"
-  # shellcheck disable=SC2016 # $vars is a yq variable.
-  yq ea 'select(fileIndex == 0) as $vars | select(fileIndex == 1 and . != null)
-    | .spec.postBuild.substitute = $vars' "${VARS:-$EXAMPLE}" "$REPO/$APP_DIR/ks.yaml" >"$ks"
+  overlay
   BUILT="$BATS_TEST_TMPDIR/$app-built.yaml"
-  (cd "$REPO" && flux build kustomization "$app" --path "./$APP_DIR/app" \
-    --kustomization-file "$ks" --dry-run --strict-substitute) >"$BUILT"
+  build_from_overlay "$app" >"$BUILT"
+}
+
+# build_from_overlay APP: the objects the overlay's Kustomization of APP applies, built offline.
+build_from_overlay() {
+  local ks="$BATS_TEST_TMPDIR/overlay-$1-ks.yaml" path
+  # shellcheck disable=SC2016 # $vars is a yq variable.
+  NAME="$1" yq ea 'select(fileIndex == 0) as $vars
+    | select(fileIndex == 1 and .kind == "Kustomization" and .metadata.name == strenv(NAME))
+    | .spec.postBuild.substitute = ($vars * (.spec.postBuild.substitute // {}))' "${VARS:-$EXAMPLE}" "$OVERLAY" >"$ks"
+  [ -s "$ks" ] || { echo "the lab-sto2 overlay does not enable $1"; return 1; }
+  path="$(yq '.spec.path' "$ks")"
+  (cd "$REPO" && flux build kustomization "$1" --path "./kubernetes/${path#./}" \
+    --kustomization-file "$ks" --dry-run --strict-substitute)
 }
 
 # var NAME: the value of the cluster-config variable NAME in the key lists built with: the example
@@ -68,20 +79,13 @@ overlay() {
 # applies it from the overlay's Kustomization, with the example key lists and its own substitutions,
 # all in one file. Writes $EVERYTHING.
 everything() {
-  local name ks path
+  local name
   overlay
   EVERYTHING="$BATS_TEST_TMPDIR/everything.yaml"
   cp "$OVERLAY" "$EVERYTHING"
   for name in $(yq -N 'select(.kind == "Kustomization") | .metadata.name' "$OVERLAY"); do
-    ks="$BATS_TEST_TMPDIR/overlay-$name-ks.yaml"
-    # shellcheck disable=SC2016 # $vars is a yq variable.
-    NAME="$name" yq ea 'select(fileIndex == 0) as $vars
-      | select(fileIndex == 1 and .kind == "Kustomization" and .metadata.name == strenv(NAME))
-      | .spec.postBuild.substitute = ($vars * (.spec.postBuild.substitute // {}))' "${VARS:-$EXAMPLE}" "$OVERLAY" >"$ks"
-    path="$(yq '.spec.path' "$ks")"
     echo --- >>"$EVERYTHING"
-    (cd "$REPO" && flux build kustomization "$name" --path "./kubernetes/${path#./}" \
-      --kustomization-file "$ks" --dry-run --strict-substitute) >>"$EVERYTHING"
+    build_from_overlay "$name" >>"$EVERYTHING"
   done
 }
 
@@ -169,6 +173,22 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
     = "$(VARS="$OTHER" var GATEWAY_ADDRESS)" ]
   # It is applied after what it needs: the controller, the issuer and the BGP objects.
   [ "$(depends_on gateway-public | sort | paste -sd' ' -)" = "cilium-bgp cluster-ca envoy-gateway" ]
+  # Nothing else can take the address first: of everything the cluster applies, built with an
+  # address of its own, only this EnvoyProxy carries the label outside a selector, asks Cilium for
+  # an address by annotation, or names the Gateway's address anywhere.
+  local holders
+  VARS="$OTHER" everything
+  # shellcheck disable=SC2016 # $address, $o and $p are jq variables.
+  holders="$(yq -N -o json -I0 '.' "$EVERYTHING" | jq -rs --arg address "$(VARS="$OTHER" var GATEWAY_ADDRESS)" '
+    ($address | gsub("\\."; "\\.")) as $pattern
+    | .[] | objects | . as $o | paths as $p
+    | select(($p[-1] == "k8s-gitops/announce" and ([$p[] | tostring | test("[sS]elector|matchLabels")] | any | not))
+        or $p[-1] == "lbipam.cilium.io/ips"
+        or (($o | getpath($p) | type) == "string" and ($o | getpath($p) | test("(^|[^0-9.])" + $pattern + "([^0-9]|$)"))))
+    | "\($o.kind)/\($o.metadata.name): \($p | map(tostring) | join("."))"' | sort -u)"
+  echo "what carries the label or names the address: $holders"
+  [ "$holders" = "$(printf '%s\n' "EnvoyProxy/$proxy: spec.provider.kubernetes.envoyService.annotations.lbipam.cilium.io/ips" \
+    "EnvoyProxy/$proxy: spec.provider.kubernetes.envoyService.labels.k8s-gitops/announce")" ]
 }
 
 @test "Plain HTTP is answered only with a redirect to HTTPS" {
@@ -278,13 +298,34 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   [ -z "$(yq -N 'select(.kind == "Secret") | .metadata.name' "$BATS_TEST_TMPDIR/issuers.yaml" "$BUILT")" ]
   [ -z "$(grep -rl 'PRIVATE KEY' "$REPO/$APP_DIR" "$REPO/kubernetes/apps/base/envoy-gateway-system/gateway-public" || true)" ]
   # TLS 1.2 at least, which the Gateway's client traffic policy says rather than leaving to the
-  # controller's default.
-  local policies versions
-  policies="$(yq -N 'select(.kind == "ClientTrafficPolicy") | .spec.targetRefs[] | select(.kind == "Gateway") | .name' "$BUILT")"
-  [ "$policies" = "$gateway" ]
-  versions="$(yq -N 'select(.kind == "ClientTrafficPolicy") | .spec.tls.minVersion' "$BUILT")"
-  echo "ClientTrafficPolicy minimum TLS version: $versions"
-  [[ $versions == "1.2" || $versions == "1.3" ]]
+  # controller's default, and nothing more: another field, such as proxyProtocol, would change what
+  # every client must send.
+  local policy namespace targeting
+  namespace="$(object "$BUILT" Gateway "$gateway" | yq '.metadata.namespace')"
+  policy="$(object "$BUILT" ClientTrafficPolicy "$(only "$BUILT" ClientTrafficPolicy)" | yq -o json -I0 '.spec' | jq -cS .)"
+  echo "ClientTrafficPolicy: $policy"
+  [ "$policy" = "$(jq -cnS --arg gateway "$gateway" '{targetRefs: [{group: "gateway.networking.k8s.io", kind: "Gateway", name: $gateway}],
+    tls: {minVersion: "1.2"}}')" ]
+  # It is the one policy on the Gateway or on a route attached to it: of everything the cluster
+  # applies, no other object's targetRef, targetRefs or targetSelectors names the Gateway or such a
+  # route, and none selects a Gateway or a route by its labels.
+  everything
+  # shellcheck disable=SC2016 # $gateway, $namespace, $routes, $p and $own are jq variables.
+  targeting="$(yq -N -o json -I0 '.' "$EVERYTHING" | jq -rs --arg gateway "$gateway" --arg namespace "$namespace" '
+    [.[] | objects] as $all
+    | [$all[] | select(.spec.parentRefs? != null) | .metadata.namespace as $own
+        | select(any(.spec.parentRefs[]; .name == $gateway and (.kind // "Gateway") == "Gateway"
+            and (.namespace // $own) == $namespace))
+        | {namespace: $own, kind, name: .metadata.name}] as $routes
+    | $all[] | . as $p | ($p.metadata.namespace // "") as $own
+    | select(($p.spec | type) == "object")
+    | select(any(([$p.spec.targetRef // empty] + ($p.spec.targetRefs // []))[];
+          (.kind == "Gateway" and .name == $gateway and $own == $namespace)
+          or ((.kind | tostring | endswith("Route")) and ({namespace: $own, kind, name} | IN($routes[]))))
+        or any($p.spec.targetSelectors[]?; .kind == "Gateway" or (.kind | tostring | endswith("Route"))))
+    | "\($p.kind)/\($own)/\($p.metadata.name)"')"
+  echo "policies on the Gateway or its routes: $targeting"
+  [ "$targeting" = "ClientTrafficPolicy/$namespace/$(only "$BUILT" ClientTrafficPolicy)" ]
 }
 
 @test "A route attaches to the public Gateway only from a namespace that opts in" {
@@ -307,6 +348,15 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
     = '[{"group":"gateway.networking.k8s.io","kind":"HTTPRoute"}]' ]
   [ "$(jq -c '.allowedRoutes.kinds // [] | map({group: (.group // "gateway.networking.k8s.io"), kind})' <<<"$http")" \
     = '[{"group":"gateway.networking.k8s.io","kind":"HTTPRoute"}]' ]
+  # No ListenerSet adds a listener: the Gateway allows none, the API's default, and nothing the
+  # cluster applies names it as a ListenerSet's parent.
+  local listener_sets
+  [ "$(object "$BUILT" Gateway "$gateway" | yq '.spec.allowedListeners.namespaces.from // "None"')" = None ]
+  everything
+  listener_sets="$(GATEWAY="$gateway" yq -N 'select(.spec.parentRef != null and .spec.parentRef.name == strenv(GATEWAY))
+    | .kind + "/" + .metadata.namespace + "/" + .metadata.name' "$EVERYTHING")"
+  echo "what names the Gateway as its parent: ${listener_sets:-nothing}"
+  [ -z "$listener_sets" ]
   # A namespace of the cluster attaches to https when its labels, as the overlay builds them,
   # carry the selector's pair, and the demo namespace is the only one that does.
   overlay

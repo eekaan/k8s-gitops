@@ -4,22 +4,22 @@ Feature: Public Gateway
   Scenario: The public Gateway asks for the Gateway address and is announced over BGP
     Given the public Gateway application built offline with the example cluster-config
     When its Gateway, its EnvoyProxy and the BGP objects are read
-    Then the proxies' Service is of type LoadBalancer, carries the label the pool and the BGP advertisement select, asks for the Gateway address by annotation and sets nothing else, and the Gateway names that EnvoyProxy for its infrastructure
+    Then the proxies' Service is of type LoadBalancer, carries the label the pool and the BGP advertisement select, asks for the Gateway address by annotation and sets nothing else, the Gateway names that EnvoyProxy for its infrastructure, and nothing else the cluster applies carries that label, asks Cilium for an address or names the Gateway address
 
   Scenario: Plain HTTP is answered only with a redirect to HTTPS
-    Given the public Gateway application and every application the overlay enables, built offline
+    Given every application the overlay enables, built offline from the overlay's Kustomizations as Flux applies them
     When the http listener and every route of any kind that names the public Gateway are read
     Then the listener takes HTTPRoutes for every hostname, the one route that names it is the redirect in the Gateway's own namespace, no route there names the Gateway without a listener, and the redirect's one rule sends every path to https on the same host and the default port with status 301 and forwards nowhere
 
   Scenario: The HTTPS listener serves a wildcard certificate for the cluster's domain from the cluster's issuer
     Given the public Gateway and the issuer application, built offline with the example cluster-config
     When the https listener, its certificate and the issuers are read
-    Then the listener terminates TLS with the Secret of an ECDSA certificate for the wildcard and the apex of the cluster's domain, issued by the cluster-wide CA issuer whose CA is a certificate the bootstrap self-signed issuer signed, with no private key in the tree and TLS 1.2 or newer
+    Then the listener terminates TLS with the Secret of an ECDSA certificate for the wildcard and the apex of the cluster's domain, issued by the cluster-wide CA issuer whose CA is a certificate the bootstrap self-signed issuer signed, with no private key in the tree, and a client traffic policy that sets TLS 1.2 and nothing else is the one policy on the Gateway or its routes
 
   Scenario: A route attaches to the public Gateway only from a namespace that opts in
     Given the public Gateway's listeners and the namespaces of the tree
     When each namespace's labels are matched against the https listener's selector and the http listener's scope
-    Then only namespaces labelled k8s-gitops/gateway: public attach to https, only the Gateway's own namespace to http, and each listener takes HTTPRoutes only
+    Then only namespaces labelled k8s-gitops/gateway: public attach to https, only the Gateway's own namespace to http, each listener takes HTTPRoutes only, and no ListenerSet adds a listener
 
   Scenario: The Gateway listens on exactly the ports the edge routers translate
     Given the Gateway's listeners and the edge stack's public ports
@@ -44,7 +44,7 @@ Feature: Public Gateway
   Scenario: A healthy public Gateway passes every line of gateway-check, which reads only and prints no address
     Given a cluster whose Gateway public is Accepted and Programmed at the GATEWAY_ADDRESS of cluster-config, with its proxies' labelled LoadBalancer Service holding that address, two proxies Ready on two nodes, its certificate Ready and only labelled namespaces' routes accepted, and two edges that forward to it
     When just gateway-check runs against fakes of kubectl, curl and the edge stack's outputs, every answer holding addresses
-    Then every line passes, plain HTTP through each edge answers 301 to https on the same host and path, HTTPS verifies against the cluster CA's public certificate and serves the demo's page and a 404 for a host no route serves, kubectl only reads and curl and kubectl are bounded in time, and no address, private key or host name under the domain is printed
+    Then every line passes, plain HTTP through each edge answers 301 to https on the same host and path, HTTPS verifies against the cluster CA's public certificate alone and serves the demo's page and a 404 for a host no route serves, kubectl only reads and takes every name after --, curl and kubectl are bounded in time, and no address, private key or host name under the domain is printed
 
   Scenario: Each unhealthy condition of the public Gateway fails its own line of gateway-check
     Given the healthy cluster and edges, with one condition made unhealthy at a time
