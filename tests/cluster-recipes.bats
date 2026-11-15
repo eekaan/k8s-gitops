@@ -222,6 +222,9 @@ cluster_files() {
 #   reverts-late.NODE  NODE's configuration in try mode reverts while scripts/cluster-check runs
 #   clock              the time date +%s gives, which sleep and a slow cluster-check move on
 #   talos-behind       the hostnames of nodes whose Talos is behind their configured version
+#   upgrade-fails      talman upgrade of a node fails
+#   bgp-out.NODE       NODE carries the BGP opt-out label, which the fake kubectl sets and removes
+#   bgp-held.NODE      NODE's CiliumBGPNodeConfig stays although it carries the label
 #   k8s-behind         the kubelets run a Kubernetes behind kubernetesVersion
 #   api-down           the Kubernetes API does not answer /readyz
 # talosctl's own drain and upgrade-k8s reach the API at the cluster endpoint, the load balancer's
@@ -648,6 +651,15 @@ KUBECONFIG
       echo "error: draining $node: dial tcp 192.0.2.5:6443: i/o timeout" >&2
       exit 1
     fi
+    if [[ -e $STATE/upgrade-fails ]]; then
+      echo "error: upgrading $node: the node did not come back within the timeout" >&2
+      exit 1
+    fi
+    if [[ -e $STATE/bgp-out.$node ]]; then
+      echo "$node out" >> "$RECORD/upgraded-bgp"
+    else
+      echo "$node in" >> "$RECORD/upgraded-bgp"
+    fi
     # The node's kubelet reports once more while the upgrade starts, after the drain and before the
     # node goes away, and the next second begins before talman returns, as heartbeats are told to
     # the second.
@@ -845,16 +857,36 @@ case $line in
     done
     printf '{"nodes":[%s]}\n' "$(IFS=,; echo "${entries[*]}")"
     ;;
+  *" label node "*)
+    # The BGP opt-out label, which the CiliumBGPNodeConfig of a worker follows at once: bgp-out.NODE
+    # says the node carries it, and bgp-held.NODE that its configuration stays all the same.
+    node=${line#* label node }
+    node=${node%% *}
+    case $line in
+      *" node-restriction.kubernetes.io/bgp-out=true "*) : > "$STATE/bgp-out.$node" ;;
+      *" node-restriction.kubernetes.io/bgp-out- "*) rm -f "$STATE/bgp-out.$node" ;;
+    esac
+    echo "node/$node labeled"
+    ;;
+  *" get ciliumbgpnodeconfig "*)
+    node=${line#* get ciliumbgpnodeconfig }
+    node=${node%% *}
+    if [[ ! -e $STATE/bgp-out.$node || -e $STATE/bgp-held.$node ]]; then
+      printf '{"metadata":{"name":"%s"},"status":{"bgpInstances":[{"name":"cluster","peers":[{"name":"edge-1","peeringState":"established"}]}]}}\n' "$node"
+    fi
+    ;;
   *" get node "*" --output json "*)
     node=${line#* get node }
     node=${node%% *}
     ready=True
     [[ ! -e $STATE/notready.$node ]] || ready=Unknown
+    labels='{}'
+    [[ ! -e $STATE/bgp-out.$node ]] || labels='{"node-restriction.kubernetes.io/bgp-out":"true"}'
     # A warning the API server attaches to an answer, which kubectl prints and still succeeds.
     echo "Warning: node $node is answered from 192.0.2.211" >&2
     # The images a node holds are part of its status, which they make longer than a pipe holds.
     images=$(printf '{"names":["registry.example.com/filler/image-%s:v1"],"sizeBytes":1},' $(seq 3000))
-    printf '{"status":{"conditions":[{"type":"Ready","status":"%s"}],"images":[%s]}}\n' "$ready" "${images%,}"
+    printf '{"metadata":{"labels":%s},"status":{"conditions":[{"type":"Ready","status":"%s"}],"images":[%s]}}\n' "$labels" "$ready" "${images%,}"
     ;;
 esac
 if [[ $1 == drain ]]; then
@@ -862,6 +894,11 @@ if [[ $1 == drain ]]; then
   # a Ready that counts is one reported after the upgrade began, not after the run did. The next
   # second begins before the drain returns, as heartbeats are told to the second.
   date -u +%Y-%m-%dT%H:%M:%SZ > "$STATE/drained.$2"
+  if [[ -e $STATE/bgp-out.$2 && ! -e $STATE/bgp-held.$2 ]]; then
+    echo "$2 withdrawn" >> "$RECORD/drained-bgp"
+  else
+    echo "$2 announcing" >> "$RECORD/drained-bgp"
+  fi
   now=$(date -u +%s)
   while [[ $(date -u +%s) == "$now" ]]; do
     command sleep 0.1
@@ -2560,6 +2597,58 @@ EOF
   [[ $output != *"Type lab-sto2"* ]]
   [ -z "$(calls '^(kubectl drain|talman etcd)')" ]
   [ -z "$(upgrades)" ]
+}
+
+@test "An upgrade does the same for each worker in turn, and never has two workers out at once" {
+  fake_cluster
+  printf '%s\n' cp-2 worker-1 worker-2 > "$STATE/talos-behind"
+  label='node-restriction.kubernetes.io/bgp-out'
+
+  recipe cluster-upgrade --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  # Each worker is taken out, waited for, drained, upgraded, and put back once it is Ready and
+  # uncordoned, before the next is taken out; the control plane is never.
+  previous=0
+  for node in worker-1 worker-2; do
+    out=$(call_line "^kubectl label node $node $label=true( |\$)")
+    absent=$(grep -n "^kubectl get ciliumbgpnodeconfig $node " "$RECORD/argv" | cut -d: -f1 | awk -v after="$out" '$1 > after' | head -1)
+    drained=$(call_line "^kubectl drain $node( |\$)")
+    upgraded=$(grep -nE "^talman upgrade -n $node( |\$)" "$RECORD/argv" | grep -v -- ' --dry-run' | head -1 | cut -d: -f1)
+    uncordoned=$(call_line "^kubectl uncordon $node( |\$)")
+    back=$(call_line "^kubectl label node $node $label-\$")
+    for call in "$out" "$absent" "$drained" "$upgraded" "$uncordoned" "$back"; do
+      [ -n "$call" ]
+    done
+    [ "$previous" -lt "$out" ]
+    [ "$out" -lt "$absent" ]
+    [ "$absent" -lt "$drained" ]
+    [ "$drained" -lt "$upgraded" ]
+    [ "$upgraded" -lt "$uncordoned" ]
+    [ "$uncordoned" -lt "$back" ]
+    # Announcing again is waited for: the node's configuration is read after the label goes.
+    [ "$(grep -n "^kubectl get ciliumbgpnodeconfig $node " "$RECORD/argv" | cut -d: -f1 | awk -v after="$back" '$1 > after' | wc -l)" -ge 1 ]
+    previous=$(grep -n "^kubectl get ciliumbgpnodeconfig $node " "$RECORD/argv" | tail -1 | cut -d: -f1)
+  done
+  [ "$(sort "$RECORD/drained-bgp")" = "$(printf '%s\n' 'cp-2 announcing' 'worker-1 withdrawn' 'worker-2 withdrawn')" ]
+  [ "$(sort "$RECORD/upgraded-bgp")" = "$(printf '%s\n' 'cp-2 in' 'worker-1 out' 'worker-2 out')" ]
+  [ -z "$(calls "^kubectl label node cp-")" ]
+  [ -z "$(calls 'ciliumbgpnodeconfig cp-')" ]
+  # No more than one worker is ever out: the labels set and removed alternate.
+  [ "$(calls '^kubectl label ' | awk '{ print ($NF == "'"$label"'-") ? "in" : "out" }' | paste -sd' ')" = 'out in out in' ]
+  [ ! -e "$STATE/bgp-out.worker-1" ] && [ ! -e "$STATE/bgp-out.worker-2" ]
+
+  # A worker whose upgrade fails is left out, and the run says so last.
+  printf '%s\n' worker-1 > "$STATE/talos-behind"
+  : > "$STATE/upgrade-fails"
+  : > "$RECORD/argv"
+  next_second
+
+  recipe cluster-upgrade --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [ -e "$STATE/bgp-out.worker-1" ]
+  [[ $(grep -v '^error: recipe ' <<< "$output" | tail -1) == *"worker-1 is out of BGP"*"kubectl label node worker-1 $label-"* ]]
 }
 
 @test "A Kubernetes upgrade shows the change and asks before applying" {

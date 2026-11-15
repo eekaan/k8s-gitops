@@ -47,6 +47,16 @@ it refines that record in three places, which stand as written otherwise:
   default, so a dead worker's paths go when its hold timer expires rather than a restart time later.
   Equal-cost multipath covers as many paths as there can be workers, and the kernel hashes a flow's
   layer 4 fields, so a connection stays on one path.
+- **A worker leaves BGP before a planned stop.** A worker whose agent stops keeps its paths on the
+  edges, as stale, for the restart time, so every recipe that drains or reboots a worker takes it
+  out of BGP first: the workers' `CiliumBGPClusterConfig` selects only nodes that do not carry
+  `node-restriction.kubernetes.io/bgp-out`, a key the NodeRestriction admission plugin keeps a
+  kubelet from setting or removing, and Cilium shuts a node's sessions down with a Cease when it
+  stops matching, which the edges, not negotiating the bit, answer by withdrawing at once. The
+  recipes wait until the node's `CiliumBGPNodeConfig` is gone before the drain and put the node
+  back, waiting for its sessions, once it is Ready. Graceful restart stays on, as an agent restart
+  keeps its paths. This refines the restart time's application above: it now applies to a worker
+  that stops or restarts without the step.
 - **The data path.** nftables on each edge translates a connection to the edge's own address on a
   public port to the public Gateway's address, a host of the service range that the plumbing stack
   picks and `cluster-config` carries as `GATEWAY_ADDRESS`, and translates its source to the edge's
@@ -120,7 +130,8 @@ it refines that record in three places, which stand as written otherwise:
   installs what the distribution's repositories hold for it then.
 - **A flow moves when an edge, a worker or a route goes.** Kernel multipath is not resilient: when
   the set of next hops changes, flows are hashed again, and a connection whose path changes is
-  reset. Graceful restart keeps a restarting worker's routes meanwhile.
+  reset. Graceful restart keeps a restarting worker's routes meanwhile; a worker taken out of BGP
+  before a planned reboot has them withdrawn instead.
 - **The cloud is still relied on for** the floating IPs, which carry the public addresses to the
   edges, and the router, which carries the traffic between the external network and the node subnet,
   and for nothing that is BGP.

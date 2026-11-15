@@ -11,6 +11,13 @@
 #   cordoned.<hostname>  the node is unschedulable: cordon and drain make it so, uncordon undoes it
 #   drain-fails       kubectl drain cordons the node, cannot evict a pod and fails
 #   drain-unreachable kubectl drain cannot reach the API, and its error names the API server's address
+#   bgp-out.<hostname>  the node carries the BGP opt-out label: kubectl label sets and removes it
+#   bgp-slow          the number of reads of a worker's CiliumBGPNodeConfig after its label changes
+#                     before the change shows: the config stays that long after the label is set,
+#                     and its peers are not established that long after the label is removed, as
+#                     the operator and the agent take a moment
+#   bgp-stays         a labelled-out worker's CiliumBGPNodeConfig never goes
+#   bgp-not-back      a worker whose label is removed never announces again
 #   kube-proxy        a kube-proxy pod runs in kube-system
 #   pods              more pods, one per line as <namespace> <name> <phase> [<node> [<reason>]], on
 #                     cp-1 when no node is given; kubectl delete pod removes them
@@ -44,7 +51,8 @@
 # "drain of <hostname> finished" there when a drain has evicted every pod, a
 # /readyz it refuses in <tmp>/record/readyz-refused, each pod it deletes as <namespace>/<name> in
 # <tmp>/record/deleted, and for each uncordon whether the node had come back, as "<hostname> back" or
-# "<hostname> away", in <tmp>/record/uncordoned.
+# "<hostname> away", in <tmp>/record/uncordoned, and for each drain whether the node still announced
+# when it began, as "<hostname> announcing" or "<hostname> withdrawn", in <tmp>/record/drained-bgp.
 set -uo pipefail
 
 root=${0%/bin/*}
@@ -83,9 +91,16 @@ nodes() {
     if listed "cordoned.$node"; then
       unschedulable=true
     fi
+    labels='{}'
+    if [[ $node == cp-* ]]; then
+      labels='{"node-role.kubernetes.io/control-plane": ""}'
+    fi
+    if listed "bgp-out.$node"; then
+      labels=$(jq -c '. + {"node-restriction.kubernetes.io/bgp-out": "true"}' <<< "$labels")
+    fi
     jq -n --arg node "$node" --arg ready "$ready" --arg beat "$beat" --arg now "$now" \
-      --argjson unschedulable "$unschedulable" '{
-      metadata: {name: $node},
+      --argjson unschedulable "$unschedulable" --argjson labels "$labels" '{
+      metadata: {name: $node, labels: $labels},
       spec: (if $unschedulable then {unschedulable: true} else {} end),
       status: {
         addresses: [
@@ -97,6 +112,41 @@ nodes() {
           {type: "Ready", status: $ready, lastHeartbeatTime: $beat,
            message: "kubelet on 198.51.100.31 reports \($ready)"}]}}'
   done < "$state/nodes"
+}
+
+# bgp_reads NODE: counts a read of NODE's CiliumBGPNodeConfig since its label last changed.
+bgp_reads() {
+  echo $(($(cat "$state/bgp-reads.$1" 2> /dev/null || echo 0) + 1)) > "$state/bgp-reads.$1"
+}
+
+# announcing NODE: whether NODE's CiliumBGPNodeConfig exists, which the operator makes for each node
+# the cluster configuration selects: never for a control plane, for a worker without the label, and
+# for one with it only until bgp-slow reads have passed.
+announcing() {
+  [[ $1 != cp-* ]] || return 1
+  if listed "bgp-out.$1"; then
+    listed bgp-stays && return 0
+    (($(cat "$state/bgp-reads.$1" 2> /dev/null || echo 0) < $(cat "$state/bgp-slow" 2> /dev/null || echo 0)))
+    return
+  fi
+  ! listed bgp-not-back || ! listed "bgp-was-out.$1"
+}
+
+# bgp_node_config NODE: what kubectl get ciliumbgpnodeconfig NODE --ignore-not-found prints: nothing
+# when there is no such object, else the object, its peers established unless the node's label was
+# removed fewer than bgp-slow reads ago.
+bgp_node_config() {
+  local peering=established present=0
+  announcing "$1" && present=1
+  if listed "bgp-was-out.$1" && (($(cat "$state/bgp-reads.$1" 2> /dev/null || echo 0) < $(cat "$state/bgp-slow" 2> /dev/null || echo 0))); then
+    peering=active
+  fi
+  bgp_reads "$1"
+  ((present)) || return 0
+  jq -n --arg node "$1" --arg peering "$peering" '{metadata: {name: $node},
+    spec: {bgpInstances: [{name: "cluster", peers: [{name: "edge-1"}, {name: "edge-2"}]}]},
+    status: {bgpInstances: [{name: "cluster", peers: [
+      {name: "edge-1", peeringState: $peering}, {name: "edge-2", peeringState: $peering}]}]}}'
 }
 
 # pod NAMESPACE NAME PHASE [K8S_APP [NODE [REASON]]]
@@ -290,6 +340,25 @@ case $args in
     fi
     printf '%s\n' "$found"
     ;;
+  " label node "*)
+    node=$3
+    for arg in "${@:4}"; do
+      case $arg in
+        node-restriction.kubernetes.io/bgp-out=*)
+          : > "$state/bgp-out.$node"
+          : > "$state/bgp-was-out.$node"
+          echo 0 > "$state/bgp-reads.$node"
+          echo "node/$node labeled"
+          ;;
+        node-restriction.kubernetes.io/bgp-out-)
+          rm -f "$state/bgp-out.$node"
+          echo 0 > "$state/bgp-reads.$node"
+          echo "node/$node unlabeled"
+          ;;
+      esac
+    done
+    ;;
+  *" get ciliumbgpnodeconfig "*) bgp_node_config "$3" ;;
   " cordon "*)
     : > "$state/cordoned.$2"
     echo "node/$2 cordoned"
@@ -307,6 +376,11 @@ case $args in
       echo 'error when evicting pods/"web-0" -n "apps" (will retry after 5s): Cannot evict pod as it would violate the pod'"'"'s disruption budget.' >&2
       echo "error: unable to drain node \"$2\" due to error: global timeout reached: 10m0s" >&2
       exit 1
+    fi
+    if announcing "$2"; then
+      echo "$2 announcing" >> "$record/drained-bgp"
+    else
+      echo "$2 withdrawn" >> "$record/drained-bgp"
     fi
     echo "evicting pod apps/web-0"
     echo "pod/web-0 evicted"

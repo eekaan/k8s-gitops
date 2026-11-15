@@ -24,8 +24,8 @@
 # the node runs it, and names each node on which they differ, which runs the old setting until it
 # reboots, and the recipe that reboots it: once the nodes keep the configuration, and also when the
 # rollout stops after some took it, as a later run finds nothing to change on them. With --reboot it
-# reboots the nodes itself, one at a time, through scripts/cluster-reboot, which drains each and
-# waits for it to be Ready again, a control plane with its etcd member, and stops at the first that
+# reboots the nodes itself, one at a time, through scripts/cluster-reboot, which takes a worker out
+# of BGP first, drains each and waits for it to be Ready again, a control plane with its etcd member, and stops at the first that
 # does not come back; --tolerate <seconds> is passed on to it. A reboot is not the default: a control
 # plane leaves its etcd and the API load balancer for the time it takes, which the operator, not the
 # recipe, decides to accept.

@@ -76,6 +76,11 @@ Feature: Cluster recipes
     When cluster-upgrade runs, without the cluster's name typed back and then with it
     Then the first shows talman's dry run and changes nothing; the second takes an etcd snapshot to the bucket, then for cp-2 and then worker-1 only drains the node with kubectl through the kubeconfig served at KUBE_API_ADDRESS, upgrades it with talman with talosctl's own drain off, waits for it to report Ready after the upgrade and uncordons it before the next is drained; with the API not answering nothing is drained, and with every node on its version it exits zero without asking
 
+  Scenario: An upgrade does the same for each worker in turn, and never has two workers out at once
+    Given talman reporting cp-2, worker-1 and worker-2 behind the Talos version
+    When cluster-upgrade runs, and again with a worker whose upgrade fails
+    Then each worker is labelled out of BGP, waited for until its BGP configuration is gone, drained, upgraded, uncordoned and put back, in that order, before the next worker is labelled; cp-2 is drained and upgraded with no BGP step; at most one worker is ever out; and the worker whose upgrade fails stays out, the last line saying so and how to put it back
+
   Scenario: An upgrade's etcd snapshot is uploaded encrypted and nothing is left on disk
     Given talman reporting nodes behind the Talos version and Kubernetes behind kubernetesVersion, and the etcd backup bucket
     When cluster-upgrade and cluster-upgrade-k8s run with the cluster's name typed back

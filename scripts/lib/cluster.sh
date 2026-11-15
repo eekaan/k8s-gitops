@@ -69,6 +69,8 @@ remove_private_dir() {
     ((status != 0)) || status=1
   fi
   failed_step "$status"
+  # A worker the run left out of BGP is the last thing a failed run says.
+  bgp_report_out
   exit "$status"
 }
 
@@ -397,6 +399,126 @@ drain_node() {
   { kubectl drain "$1" --ignore-daemonsets --delete-emptydir-data --timeout=10m 2>&1 1>&3 3>&- |
     redact_stream >&2; status=${PIPESTATUS[0]}; } 3>&1
   return "$status"
+}
+
+# A worker leaves BGP before it is drained or rebooted: the label under which the cluster's
+# CiliumBGPClusterConfig stops selecting a node (kubernetes/apps/base/kube-system/cilium-bgp), so
+# Cilium shuts the node's sessions down with a Cease and the edge routers withdraw its paths at once,
+# where a node that stops or reboots with its sessions up has its paths kept as stale for the whole
+# graceful restart time. The key is one a kubelet may not set or remove on its own Node
+# (NodeRestriction admission), so only these recipes' credentials move a node. tests/install-cilium.bats
+# fails when the selector and this key differ.
+bgp_out_label="node-restriction.kubernetes.io/bgp-out"
+# The workers this run has left out of BGP and not put back, for bgp_report_out.
+bgp_left_out=()
+
+# require_bgp_wait: fails unless BGP_WAIT, how long the recipes wait for a node's BGP state to follow
+# its label, is a whole number of seconds.
+require_bgp_wait() {
+  if [[ ! ${BGP_WAIT:-120} =~ ^[0-9]+$ ]]; then
+    infra_error "BGP_WAIT is not a whole number of seconds"
+    return 1
+  fi
+}
+
+# bgp_say MESSAGE: a line of the recipe's progress.
+bgp_say() {
+  printf '%s: %s\n' "${0##*/}" "$1"
+}
+
+# bgp_node_state NODE: whether Cilium has NODE announce, from its CiliumBGPNodeConfig, which the
+# operator makes for each node the cluster configuration selects and removes when it stops selecting
+# it, and which holds the state of each peer's session: "absent" with no such object, "established"
+# when every peer's session is, "other" otherwise. Read through the API with the access the recipes
+# have already; the agent's own view (cilium bgp peers, through kubectl exec) needs more, and the
+# edge routers' needs SSH and prints addresses, so just edge-routes shows that side to a person.
+# Fails, saying nothing, when the API does not answer.
+bgp_node_state() {
+  local config
+  config=$(kubectl get ciliumbgpnodeconfig "$1" --ignore-not-found --output json --request-timeout=10s 2> /dev/null) || return 1
+  if [[ -z $config ]]; then
+    echo absent
+    return 0
+  fi
+  jq -r 'if ([.status.bgpInstances[]?.peers[]?] | length > 0)
+      and all(.status.bgpInstances[]?.peers[]?; .peeringState == "established")
+    then "established" else "other" end' <<< "$config" 2> /dev/null
+}
+
+# wait_bgp_state NODE STATE: waits until bgp_node_state says STATE for NODE, for up to BGP_WAIT
+# seconds (120), checked every two, once at least; fails when it does not.
+wait_bgp_state() {
+  local deadline=$((SECONDS + ${BGP_WAIT:-120})) now
+  while :; do
+    if now=$(bgp_node_state "$1") && [[ $now == "$2" ]]; then
+      return 0
+    fi
+    ((SECONDS < deadline)) || return 1
+    sleep 2
+  done
+}
+
+# node_carries_label NODE: whether NODE has the opt-out label. Fails when the API does not answer.
+node_carries_label() {
+  local node
+  node=$(kubectl get node "$1" --output json --request-timeout=10s 2> /dev/null) || return 2
+  jq -e --arg key "$bgp_out_label" '.metadata.labels | has($key)' <<< "$node" > /dev/null 2> /dev/null
+}
+
+# leave_bgp NODE: takes the worker NODE out of BGP and waits until Cilium has it announce nothing. A
+# node that is out already, as after a run that stopped, is recognised and waited for all the same.
+# From the label on, NODE is in bgp_left_out until join_bgp puts it back.
+leave_bgp() {
+  local node=$1 carries=0
+  step="taking $node out of BGP"
+  node_carries_label "$node" || carries=$?
+  if ((carries == 2)); then
+    infra_error "kubectl could not read the node $node through the kubeconfig; nothing was changed"
+    return 1
+  fi
+  if ((carries == 0)); then
+    bgp_say "$node is out of BGP already"
+  elif ! kubectl label node "$node" "$bgp_out_label=true" > /dev/null 2>&1; then
+    infra_error "kubectl could not label $node out of BGP; nothing was changed"
+    return 1
+  fi
+  bgp_left_out+=("$node")
+  step="waiting for $node to announce nothing"
+  if ! wait_bgp_state "$node" absent; then
+    infra_error "$node still announces after ${BGP_WAIT:-120}s; BGP_WAIT sets how long to wait"
+    return 1
+  fi
+  bgp_say "$node announces nothing: its BGP configuration is gone, so the edge routers withdraw its paths at once (just edge-routes shows their side)"
+}
+
+# join_bgp NODE: puts the worker NODE back in BGP and waits until its sessions are established
+# again. Once the label is gone the node is no longer out, whether or not it announces yet.
+join_bgp() {
+  local node=$1 still_out=() each
+  step="putting $node back in BGP"
+  if ! kubectl label node "$node" "$bgp_out_label-" > /dev/null 2>&1; then
+    infra_error "kubectl could not remove the label that has $node out of BGP"
+    return 1
+  fi
+  for each in "${bgp_left_out[@]}"; do
+    [[ $each == "$node" ]] || still_out+=("$each")
+  done
+  bgp_left_out=("${still_out[@]}")
+  step="waiting for $node to announce again"
+  if ! wait_bgp_state "$node" established; then
+    infra_error "$node does not announce again within ${BGP_WAIT:-120}s: its BGP sessions are not established; BGP_WAIT sets how long to wait"
+    return 1
+  fi
+  bgp_say "$node announces again"
+}
+
+# bgp_report_out: for each worker this run left out of BGP and did not put back, says so and which
+# command puts it back; a recipe calls it last when it stops.
+bgp_report_out() {
+  local node
+  for node in "${bgp_left_out[@]}"; do
+    infra_error "$node is out of BGP; kubectl label node $node $bgp_out_label- puts it back"
+  done
 }
 
 # not_ready_since SINCE HOSTNAME...: the HOSTNAMEs that are not a Ready node whose kubelet has

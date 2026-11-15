@@ -449,13 +449,28 @@ Every other routing daemon is off in the list. Its configuration, `frr.conf`, is
     [server.go](https://github.com/cilium/cilium/blob/v1.20.4/pkg/bgp/gobgp/server.go#L374-L390)),
     so the edges keep the worker's paths, stale, until the agent is back and has sent End-of-RIB, or
     for the restart time, 120 seconds, at most.
-  - **A worker shut down or rebooted gracefully**: its agent stops the same way, so its paths stay
-    stale for up to the restart time, and a shut-down worker's for all of it, with new connections
-    hashed to it failing, unless the node leaves BGP first: taken out of the
-    `CiliumBGPClusterConfig`'s node selector, Cilium sends a Cease, and an edge that has not
-    negotiated the bit withdraws its paths at once (the guide's "Shutting Down a Node"). The
-    selector takes every worker and no recipe takes one out, so a reboot or a stop leaves the
-    window as it is; the restart time in the workers' `CiliumBGPPeerConfig` bounds it.
+  - **A worker shut down or rebooted gracefully, with no step before it**: its agent stops the same
+    way, so its paths stay stale for up to the restart time, and a shut-down worker's for all of
+    it, with new connections hashed to it failing. The restart time in the workers'
+    `CiliumBGPPeerConfig` bounds it.
+  - **A worker taken out before a planned reboot**: withdrawn at once. A node that stops matching
+    the `CiliumBGPClusterConfig`'s node selector has its sessions shut down with a Cease, and an
+    edge that has not negotiated the bit withdraws its paths then (the guide's "Shutting Down a
+    Node"). The selector also requires that a node does not carry the label
+    `node-restriction.kubernetes.io/bgp-out`, a key the NodeRestriction admission plugin keeps a
+    kubelet from setting or removing on its own Node
+    ([Kubernetes' admission controllers](https://kubernetes.io/docs/reference/access-authn-authz/admission-controllers/#noderestriction)),
+    so only an operator's credentials take a node out or put it back. `just cluster-reboot`
+    (and so `just cluster-talos --reboot`) and `just cluster-upgrade` set the label on a worker,
+    wait until its `CiliumBGPNodeConfig`, which the operator keeps for each selected node, is gone,
+    and only then drain it; once the node is Ready and uncordoned they remove the label and wait
+    until its sessions are established again. The wait is `BGP_WAIT` seconds (120). `just
+    cluster-upgrade-k8s` drains and reboots no node and leaves the Cilium agents alone, so it takes
+    none out. A control plane has no BGP. A recipe that stops with a worker out says so last, with
+    the `kubectl label` command that puts it back, a rerun recognises a worker that is out already,
+    and `just cluster-check` fails while a Ready worker carries the label. The recipes read
+    Cilium's state, which needs no access beyond the kubeconfig; the edges' side is what
+    `just edge-routes` shows.
 - `maximum-paths` is `max_workers`: as many equal-cost paths to one address as there can be workers.
   The most FRR takes is what its build allows: 128 by its manual, 256 in Debian's package. The
   kernel setting `net.ipv4.fib_multipath_hash_policy = 1` hashes a flow's layer 4 fields, so every

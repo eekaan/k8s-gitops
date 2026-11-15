@@ -561,6 +561,32 @@ chart_config() {
   [ "$(jq -c '[.spec.families[] | {afi, safi}]' <<< "$peer_config")" = '[{"afi":"ipv4","safi":"unicast"}]' ]
 }
 
+@test "A worker carrying the opt-out label is not selected for BGP, and its kubelet cannot remove the label" {
+  bgp_inputs
+  tree_objects > "$BATS_TEST_TMPDIR/tree.jsonl"
+  configs=$(jq -c 'select(.object.kind == "CiliumBGPClusterConfig") | .object' "$BATS_TEST_TMPDIR/tree.jsonl")
+  [ "$(grep -c . <<< "$configs")" -eq 1 ]
+  # The key the recipes set is the one the selector excludes.
+  # shellcheck disable=SC2016 # $1 and $bgp_out_label are the inner shell's.
+  key=$(env -i PATH="$PATH" bash -c '. "$1/scripts/lib/cluster.sh" && echo "$bgp_out_label"' _ "$COPY")
+  [ -n "$key" ]
+  # The NodeRestriction admission plugin stops a kubelet from setting, changing or removing a label
+  # under this prefix on its own Node, so only an operator's credentials move a node in or out
+  # (https://kubernetes.io/docs/reference/access-authn-authz/admission-controllers/#noderestriction).
+  [[ $key == node-restriction.kubernetes.io/* ]]
+
+  worker='{"kubernetes.io/hostname": "worker-1", "kubernetes.io/os": "linux"}'
+  control_plane='{"kubernetes.io/hostname": "cp-1", "kubernetes.io/os": "linux", "node-role.kubernetes.io/control-plane": ""}'
+  # selected LABELS: whether the cluster config's node selector selects a node with LABELS.
+  selected() {
+    jq --argjson labels "$1" "$SELECTS .spec.nodeSelector | selects(\$labels)" <<< "$configs"
+  }
+  [ "$(selected "$worker")" = true ]
+  [ "$(selected "$control_plane")" = false ]
+  [ "$(selected "$(jq -c --arg key "$key" '. + {($key): "true"}' <<< "$worker")")" = false ]
+  [ "$(selected "$(jq -c --arg key "$key" '. + {($key): ""}' <<< "$worker")")" = false ]
+}
+
 @test "Only the addresses of Services that opt in are advertised; pod and ClusterIP ranges never are" {
   bgp_inputs
   tree_objects > "$BATS_TEST_TMPDIR/tree.jsonl"

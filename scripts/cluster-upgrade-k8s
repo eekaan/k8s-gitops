@@ -8,6 +8,8 @@
 # talosctl upgrade-k8s moves the control plane components and the kubelets node by node. It reaches
 # the API at KUBE_API_ADDRESS: left to itself it would use the cluster endpoint, the load
 # balancer's address on the node network, which only the nodes reach.
+# It restarts the control plane's components and the kubelets but drains and reboots no node, and a
+# kubelet's restart leaves the Cilium agent and its BGP sessions alone, so no node leaves BGP here.
 # Afterwards checks that every node runs the version. With every node on it already, nothing is
 # asked or upgraded.
 # Usage: scripts/cluster-upgrade-k8s [cluster] [--yes]

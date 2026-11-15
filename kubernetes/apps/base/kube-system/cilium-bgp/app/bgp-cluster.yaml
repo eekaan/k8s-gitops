@@ -5,6 +5,14 @@
 # may carry the service range. The edge routers sit on the node subnet, one hop from every worker,
 # so the sessions keep eBGP's TTL of 1. Without localPort a worker opens its sessions and listens
 # for none.
+#
+# A worker that carries the label node-restriction.kubernetes.io/bgp-out stops matching, and Cilium
+# then shuts its sessions down with a Cease, so the edge routers withdraw its paths at once instead
+# of keeping them as stale for the graceful restart time. The recipes that drain or reboot a worker
+# set it first and remove it when the node is Ready. The NodeRestriction admission plugin keeps a
+# kubelet from setting or removing a label under node-restriction.kubernetes.io/ on its own Node,
+# so only an operator's credentials take a node out or put it back; scripts/lib/cluster.sh names
+# the same key.
 apiVersion: cilium.io/v2
 kind: CiliumBGPClusterConfig
 metadata:
@@ -13,6 +21,8 @@ spec:
   nodeSelector:
     matchExpressions:
       - key: node-role.kubernetes.io/control-plane
+        operator: DoesNotExist
+      - key: node-restriction.kubernetes.io/bgp-out
         operator: DoesNotExist
   bgpInstances:
     - name: cluster

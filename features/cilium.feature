@@ -46,6 +46,11 @@ Feature: Cilium
     When the chart is rendered and every application is built as Flux builds it
     Then the BGP control plane is on, the tree holds one BGP cluster configuration and no per-node override, its node selector selects every worker and no control plane by the labels Talos gives them, and its one instance peers as the cluster's AS with the two edge addresses in the edge AS, which differs from it, with explicit timers, graceful restart, eBGP's single hop and no listening port
 
+  Scenario: A worker carrying the opt-out label is not selected for BGP, and its kubelet cannot remove the label
+    Given the BGP cluster configuration as Flux builds it, and the label key the cluster recipes set to take a node out
+    When its node selector is applied to a worker, to a worker carrying that label with a value and with none, and to a control plane
+    Then the worker is selected, neither labelled worker is, the control plane is not, and the key lies under node-restriction.kubernetes.io/, which the NodeRestriction admission plugin keeps a kubelet from setting or removing on its own Node
+
   Scenario: Only the addresses of Services that opt in are advertised; pod and ClusterIP ranges never are
     Given the applications as Flux builds them
     When the advertisements the peer configuration selects are read

@@ -6,7 +6,11 @@
 # and goes through the nodes one at a time in talman.yaml's order. A snapshot that cannot be taken
 # stops the run before any node is touched. Each node that is behind is drained with kubectl,
 # upgraded with talman, and uncordoned once its kubelet has reported Ready since the upgrade began,
-# before the next is drained. A node already on its version is not drained.
+# before the next is drained. A node already on its version is not drained. A worker is taken out of
+# BGP before its drain, waiting for up to BGP_WAIT seconds (120) until Cilium has it announce
+# nothing, so the edge routers withdraw its paths at once, and put back once it is uncordoned, so no
+# more than one worker is out at a time; a run that stops with a worker out says so last, with the
+# command that puts it back.
 #
 # kubectl reaches the API through the kubeconfig cluster-kubeconfig fetches, served at
 # KUBE_API_ADDRESS, and the run stops before a drain when the API does not answer there. talosctl's
@@ -37,6 +41,7 @@ done
 # shellcheck source=scripts/cluster-env
 . "$here/cluster-env" "$cluster"
 require_cluster talman secrets age-key api-address
+require_bgp_wait
 
 # api_answers: whether the API answers /readyz through the kubeconfig, tried for five minutes, as a
 # control plane just upgraded may still be on its way back into the load balancer's pool.
@@ -118,6 +123,14 @@ for node in "${nodes[@]}"; do
 
   step="checking that the Kubernetes API answers before draining $node"
   api_answers
+  # A worker leaves BGP before it is drained, so the edge routers withdraw its paths instead of
+  # keeping them as stale while its Cilium agent is away. It is put back before the next node is
+  # touched, so at most one worker is out of BGP. A control plane has no BGP.
+  step="reading the role of $node in talman.yaml"
+  role=$(NODE=$node yq '.nodes[] | select(.hostname == strenv(NODE)) | .role // ""' "$talman_file")
+  if [[ $role == worker ]]; then
+    leave_bgp "$node"
+  fi
   step="draining $node"
   drain_node "$node"
   step="upgrading $node, which is drained"
@@ -129,6 +142,9 @@ for node in "${nodes[@]}"; do
   ready_after "$since" "$node"
   step="uncordoning $node"
   kubectl uncordon "$node"
+  if [[ $role == worker ]]; then
+    join_bgp "$node"
+  fi
 done
 
 step="checking that every node runs its configured Talos"
