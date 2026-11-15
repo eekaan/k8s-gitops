@@ -5,6 +5,12 @@ kind: Kustomization
 metadata:
   name: metrics-server
   namespace: flux-system
+  labels:
+    # The release's install may take the 10m the root's defaults give it on a new cluster, where the
+    # pods turn ready only once the approver has signed each kubelet's serving certificate; the
+    # Kustomization waits for it as long, instead of failing its health check after 3m and
+    # retrying every minute until the release is Ready.
+    k8s-gitops/timeout: long
 spec:
   path: ./apps/base/kube-system/metrics-server/app
   targetNamespace: kube-system
