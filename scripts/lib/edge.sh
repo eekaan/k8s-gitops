@@ -106,11 +106,13 @@ edge_applied() {
   stack_tofu output -json | jq -e '(.addresses.value // []) | length == 2' > /dev/null
 }
 
-# edge_check_passes NUMBER: whether scripts/edge-check passes for edge NUMBER, run under the lock the
-# caller holds on the stack. stack-env keeps the state passphrase out of the environment of what it
-# runs, and edge-check, which sources stack-env itself, needs it again.
+# edge_check_passes NUMBER: whether scripts/edge-check passes for edge NUMBER, run under the lock
+# the caller holds on the stack, whose descriptor it shares with it (lock_stack). stack-env keeps
+# the state passphrase out of the environment of what it runs, and edge-check, which sources
+# stack-env itself, needs it again.
 edge_check_passes() {
-  EDGE_STACK_LOCKED=1 TF_STATE_PASSPHRASE=${TF_STATE_PASSPHRASE-} \
+  # shellcheck disable=SC2154 # lock_stack sets infra_lock_fd
+  EDGE_STACK_LOCKED=$infra_lock_fd TF_STATE_PASSPHRASE=${TF_STATE_PASSPHRASE-} \
     "$(dirname "${BASH_SOURCE[0]}")/../edge-check" --edge "$1"
 }
 

@@ -408,9 +408,8 @@ lock_cluster() {
     infra_error "flock is required to lock $cluster and is not on PATH; it comes with util-linux"
     return 1
   fi
-  if [[ ${CLUSTER_LOCK_FD-} =~ ^[0-9]+$ && /dev/fd/$CLUSTER_LOCK_FD -ef $file ]]; then
-    cluster_lock_fd=$CLUSTER_LOCK_FD
-  elif ! { (umask 077 && mkdir -p "${file%/*}") && exec {cluster_lock_fd}> "$file"; } 2> /dev/null; then
+  if ! cluster_lock_fd=$(inherited_lock_fd CLUSTER_LOCK_FD "$file") &&
+    ! { (umask 077 && mkdir -p "${file%/*}") && exec {cluster_lock_fd}> "$file"; } 2> /dev/null; then
     infra_error "cannot lock $cluster: its lock file cannot be made in talos/$cluster/clusterconfig"
     return 1
   fi
@@ -467,18 +466,18 @@ bgp_left_out=()
 # were established, as bgp_established_peers names them, so join_bgp waits for those again.
 declare -gA bgp_had_config=() bgp_had_peers=()
 
-# require_bgp_wait: fails unless BGP_WAIT, how long the recipes wait for a node's BGP state to follow
-# its label, is a whole number of seconds (require_seconds), and sets it to that number in base 10:
-# arithmetic would read a leading zero as octal, and 08 as an error that drops the rest of the
-# command it is in.
+# require_bgp_wait: fails unless BGP_WAIT, how long the recipes wait for a node's BGP state to
+# follow its label, is a whole number of seconds (require_seconds), and sets it to that number in
+# base 10: arithmetic would read a leading zero as octal, and 08 as an error that drops the rest of
+# the command it is in.
 require_bgp_wait() {
   require_seconds BGP_WAIT "${BGP_WAIT:-120}" || return 1
   BGP_WAIT=$((10#${BGP_WAIT:-120}))
 }
 
 # require_forward_waits: fails unless FORWARD_WAIT, how long a recipe waits, once a worker is Ready
-# again, for its Cilium agent to report that the node forwards (300 seconds), and FORWARD_SETTLE, for
-# how long the agent must have stayed Ready within it (30 seconds), are whole numbers of seconds
+# again, for its Cilium agent to report that the node forwards (300 seconds), and FORWARD_SETTLE,
+# for how long the agent must have stayed Ready within it (30 seconds), are whole numbers of seconds
 # (require_seconds) and FORWARD_SETTLE does not exceed FORWARD_WAIT, which could never be met. Sets
 # both to their numbers in base 10.
 require_forward_waits() {
@@ -495,8 +494,8 @@ require_forward_waits() {
 }
 
 # bgp_clock [WHAT]: the time in seconds since the epoch, from date +%s; fails, saying so, when date
-# gives anything but a whole number, which arithmetic could not be trusted with. WHAT is the wait
-# the time is for, a node's BGP state when it is not given.
+# gives anything but a whole number, which arithmetic could not be trusted with. WHAT completes
+# "the wait for" in what it says: a node's BGP state when it is not given.
 bgp_clock() {
   local now what=${1-}
   [[ -n $what ]] || what="a node's BGP state"
@@ -585,16 +584,17 @@ bgp_note_out() {
   bgp_left_out+=("$1")
 }
 
-# agent_forwarding NODE SINCE: whether the Cilium agent pods on NODE, which kubectl reads through the
-# kubeconfig, are all Running and Ready with a Ready condition that turned true at or after SINCE, a
-# UTC time as Kubernetes writes it; and at least one is. Returns 0 when so, 1 when not, and 2 when
-# kubectl cannot read them. A pod's Ready from before the node went down is the one it posted before,
-# which SINCE leaves out. The agent's readiness probe is /healthz, which answers once every probe of
-# the agent has run, none is stale and writing the CNI configuration has not failed (daemon/healthz
-# in Cilium's source; the check that the API server is reachable applies only to a request with the
-# require-k8s-connectivity header, which the readiness probe does not send); it does not say that the node's endpoints are regenerated or
-# its ipcache and tunnel map are in step, which a connection to a backend on another node needs.
-# docs/cluster.md says why that is covered with a settle time.
+# agent_forwarding NODE SINCE: whether the Cilium agent pods on NODE, which kubectl reads through
+# the kubeconfig, are all Running and Ready with a Ready condition that turned true at or after
+# SINCE, a UTC time as Kubernetes writes it; and at least one is. Returns 0 when so, 1 when not, and
+# 2 when kubectl cannot read them. A pod's Ready from before the node went down is the one it posted
+# before, which SINCE leaves out. The agent's readiness probe is /healthz, which answers once every
+# probe of the agent has run, none is stale and writing the CNI configuration has not failed
+# (daemon/healthz in Cilium's source; the check that the API server is reachable applies only to a
+# request with the require-k8s-connectivity header, which the readiness probe does not send); it
+# does not say that the node's endpoints are regenerated or its ipcache and tunnel map are in step,
+# which a connection to a backend on another node needs. docs/cluster.md says why that is covered
+# with a settle time.
 agent_forwarding() {
   local pods
   if ! pods=$(kubectl get pods --namespace kube-system --selector k8s-app=cilium \
@@ -610,18 +610,18 @@ agent_forwarding() {
 # wait_forwarding NODE SINCE: waits for up to FORWARD_WAIT seconds (300), checked every two and once
 # at least, until the Cilium agent on NODE has been Ready since SINCE (agent_forwarding) for
 # FORWARD_SETTLE seconds (30) without a read that says otherwise. That the agent is Ready says that
-# it has started and every probe of it has run; the settle time is the margin for what its readiness does not cover,
-# not a proof of it. Fails with 1 when the time runs out, with 2 when it runs out with the last read
-# having failed, and with 3, saying why, when the clock cannot be read as a number. The time is read
-# with date +%s, so a test's clock bounds the wait.
+# it has started and every probe of it has run; the settle time is the margin for what its readiness
+# does not cover, not a proof of it. Fails with 1 when the time runs out, with 2 when it runs out
+# with the last read having failed, and with 3, saying why, when the clock cannot be read as a
+# number. The time is read with date +%s, so a test's clock bounds the wait.
 wait_forwarding() {
   local node=$1 since=$2 now deadline steady='' result
-  now=$(bgp_clock "the wait for a node's Cilium agent") || return 3
+  now=$(bgp_clock "a node's Cilium agent") || return 3
   deadline=$((now + 10#${FORWARD_WAIT:-300}))
   while :; do
     result=0
     agent_forwarding "$node" "$since" || result=$?
-    now=$(bgp_clock "the wait for a node's Cilium agent") || return 3
+    now=$(bgp_clock "a node's Cilium agent") || return 3
     if ((result == 0)); then
       [[ -n $steady ]] || steady=$now
       ((now - steady >= 10#${FORWARD_SETTLE:-30})) && return 0
@@ -712,10 +712,10 @@ leave_bgp() {
 # is the last step, as an edge hashes a share of new connections to a worker the moment it announces
 # its addresses, and a node that is Ready may not yet forward a Service's connection to a backend on
 # another node: the agent must have stayed Ready since SINCE, the time the reboot or upgrade WHAT
-# names began (wait_forwarding), or at all when they are not given, as for a node this run did not take
-# out. A node whose agent does not get there keeps its label and stays in bgp_left_out. --no-bgp-wait
-# does not skip this wait. Once the label is gone the node is no longer out, whether or not it
-# announces yet.
+# names began (wait_forwarding), or at all when they are not given, as for a node this run did not
+# take out. A node whose agent does not get there keeps its label and stays in bgp_left_out.
+# --no-bgp-wait does not skip this wait. Once the label is gone the node is no longer out, whether
+# or not it announces yet.
 join_bgp() {
   local node=$1 since=${2:-1970-01-01T00:00:00Z} what=${3-} still_out=() each peers waited=0
   step="waiting for the Cilium agent on $node to forward"
@@ -794,9 +794,9 @@ bgp_report_labelled() {
   bgp_report_out
 }
 
-# Nothing records which run set a worker's label, and the cluster's lock (lock_cluster) excludes only
-# the runs of this checkout, so a worker a run that stopped left out and one another checkout's run
-# is taking out look the same. A recipe therefore removes a label it did not set only once the
+# Nothing records which run set a worker's label, and the cluster's lock (lock_cluster) excludes
+# only the runs of this checkout, so a worker a run that stopped left out and one another checkout's
+# run is taking out look the same. A recipe therefore removes a label it did not set only once the
 # operator has confirmed the run, and otherwise only reports it (bgp_check_left_out): a confirmed
 # cluster-upgrade puts back one that is Ready and schedulable (bgp_settle_left_out) and takes one
 # that is the first worker behind through as out already, drained, upgraded, uncordoned and put

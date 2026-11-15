@@ -49,10 +49,9 @@ fi
 # shellcheck source=scripts/stack-env
 . "$here/stack-env" sto2/edge
 host_console_wait || exit 1
-# scripts/edge-rollout holds the stack's lock while it runs this.
-if [[ -z ${EDGE_STACK_LOCKED-} ]]; then
-  lock_stack
-fi
+# scripts/edge-rollout and scripts/infra-apply hold the stack's lock while they run this, and share
+# it with it through EDGE_STACK_LOCKED (lock_stack).
+lock_stack
 init_stack
 edge_connect "$only"
 

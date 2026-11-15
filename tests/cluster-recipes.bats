@@ -1795,6 +1795,36 @@ EOF
   [ "$(calls '^talman reboot ' | paste -sd'|')" = 'talman reboot -n cp-1 --yes --extra-flags=--drain=false' ]
   [[ $output == *"cp-1 is Ready again, but etcd was not whole within 1s"* ]]
   [[ $output == *"cp-1 did not come back"* && $output == *"not rebooted: cp-2, cp-3"* ]]
+
+  # A worker that needs a reboot, through the real cluster-reboot, which succeeds: once the worker is
+  # Ready it is uncordoned, its agent is read, and only then is its label removed. The waits are real
+  # ones, with no settle time.
+  rm "$STATE/etcd-lost.cp-1" "$STATE/network.worker-2"
+  : > "$STATE/module-remove.worker-2"
+  : > "$RECORD/argv"
+  printf '%s\n' worker-2 > "$STATE/pending"
+  reset_environment
+  with FORWARD_SETTLE=0
+  recipe cluster-talos --yes --reboot < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ "$(calls '^talman reboot ' | paste -sd'|')" = 'talman reboot -n worker-2 --yes --extra-flags=--drain=false' ]
+  rebooted=$(call_line '^talman reboot -n worker-2 ')
+  ready=$(awk -v from="$rebooted" 'NR > from && /^kubectl get nodes / { print NR; exit }' "$RECORD/argv")
+  uncordoned=$(call_line '^kubectl uncordon worker-2$')
+  agent=$(call_line '^agent worker-2 ')
+  removed=$(call_line "^kubectl label node worker-2 node-restriction.kubernetes.io/bgp-out-\$")
+  for call in "$rebooted" "$ready" "$uncordoned" "$agent" "$removed"; do
+    [ -n "$call" ]
+  done
+  [ "$rebooted" -lt "$ready" ]
+  [ "$ready" -lt "$uncordoned" ]
+  [ "$uncordoned" -lt "$agent" ]
+  [ "$agent" -lt "$removed" ]
+  [ "$(cat "$RECORD/label-removed")" = 'worker-2 ready' ]
+  [ ! -e "$STATE/bgp-out.worker-2" ]
+  [[ $output == *"worker-2 is rebooted"* ]]
+  [[ $output != *"is out of BGP"* ]]
 }
 
 @test "cluster-talos names a node by what its configuration changes, not by the lines around the change" {
@@ -2792,6 +2822,13 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(calls '^kubectl label ' | awk '{ print $4 ":" (($NF == "'"$label"'-") ? "in" : "out") }' | paste -sd' ')" = 'worker-1:in worker-2:out worker-2:in' ]
   [[ $output == *"worker-1 is out of BGP by a label this run did not set, and is Ready and schedulable; putting it back, as the run is confirmed"* ]]
+  # A worker no step of this run took out is put back only once its agent is read, as one it took
+  # out is, although there is no time to read it since.
+  agent=$(call_line '^agent worker-1 ')
+  restored=$(call_line "^kubectl label node worker-1 $label-\$")
+  [ -n "$agent" ]
+  [ -n "$restored" ]
+  [ "$agent" -lt "$restored" ]
 
   # With only a control plane behind, a worker left out and cordoned is not put back: the control
   # plane is upgraded, and the run then fails in the step that checks for a worker out, saying why
@@ -2918,6 +2955,25 @@ EOF
     [[ $output == *"the Cilium agent on worker-1 has not been Ready since the upgrade for 30s within 40s"* ]]
     [[ $(grep -v '^error: recipe ' <<< "$output" | tail -1) == *"worker-1 is out of BGP"*"kubectl label node worker-1 $label-"* ]]
   done
+
+  # A clock that gives no number cannot time the wait for an agent: the recipe says so once, with the
+  # worker left out by another run, which it puts back first, still out and said to be last.
+  reset_environment
+  printf '%s\n' worker-2 > "$STATE/talos-behind"
+  rm -f "$STATE"/upgraded.* "$STATE"/agent-reads.* "$STATE"/agent-last.* "$STATE"/cordoned.*
+  rm -f "$STATE/agent-sequence.worker-1"
+  : > "$STATE/bgp-out.worker-1"
+  echo 'no time' > "$STATE/clock"
+  : > "$RECORD/argv"
+  next_second
+
+  recipe cluster-upgrade --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  grep -Fxq "cluster-upgrade: date +%s does not give the time, so the wait for a node's Cilium agent cannot be timed" <<< "$output"
+  [ -z "$(calls '^kubectl drain ')" ]
+  [ -e "$STATE/bgp-out.worker-1" ]
+  [[ $(grep -v '^error: recipe ' <<< "$output" | tail -1) == *"worker-1 is out of BGP"*"kubectl label node worker-1 $label-"* ]]
 }
 
 @test "A wait given as a number too long to hold is refused before anything runs" {
@@ -2928,7 +2984,8 @@ EOF
   printf '%s\n' worker-1 > "$STATE/talos-behind"
   printf '%s\n' worker-2 > "$STATE/pending"
   # Each input, with the recipes that read it. A value of nineteen digits or more wraps in 64-bit
-  # arithmetic into a short, a negative or an endless wait; ten are refused too, as the bound is nine.
+  # arithmetic into a short, a negative or an endless wait; ten are refused too, as the bound is nine,
+  # and so is each of them with a leading zero, which adds a digit.
   inputs=(
     'BGP_WAIT|cluster-reboot worker-2 --yes|cluster-upgrade --yes|cluster-talos --yes --reboot'
     'REBOOT_WAIT|cluster-reboot worker-2 --yes|cluster-talos --yes --reboot'
@@ -2941,7 +2998,8 @@ EOF
     IFS='|' read -ra recipes <<< "$input"
     name=${recipes[0]}
     for run in "${recipes[@]:1}"; do
-      for value in 1234567890 9999999999999999999 99999999999999999999; do
+      for value in 1234567890 9999999999999999999 99999999999999999999 \
+        01234567890 09999999999999999999 099999999999999999999; do
         echo "$name=$value for $run"
         reset_environment
         : > "$RECORD/argv"

@@ -61,6 +61,11 @@ numbers=(1 2)
 if [[ -n $only ]]; then
   numbers=("$only")
 fi
+
+# shellcheck source=scripts/stack-env
+. "$here/stack-env" sto2/edge
+# The waits may be in .env, which stack-env has read now, and are refused before the stack is
+# locked or touched.
 wait_seconds=${EDGE_ROLLOUT_WAIT:-900} interval=${EDGE_ROLLOUT_INTERVAL:-15}
 # Read in base 10, as arithmetic would read a leading zero as octal and 08 as an error, and of at
 # most 9 digits, which arithmetic holds without overflow.
@@ -73,13 +78,10 @@ if [[ ! $interval =~ ^[0-9]{1,9}$ ]]; then
   exit 1
 fi
 wait_seconds=$((10#$wait_seconds)) interval=$((10#$interval))
-
-# shellcheck source=scripts/stack-env
-. "$here/stack-env" sto2/edge
 # The edge-check runs below read it.
 host_console_wait || exit 1
 lock_stack
-export EDGE_STACK_LOCKED=1
+export EDGE_STACK_LOCKED=$infra_lock_fd
 init_stack
 edge_load
 echo "$stack:"

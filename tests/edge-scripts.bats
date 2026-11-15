@@ -1040,6 +1040,8 @@ EOF
   run bash -c 'printf "yes\nyes\n" | env "$@"' _ "${ENVIRONMENT[@]}" "$REPO/scripts/edge-rollout" --replace --yes
   echo "$output"
   [ "$status" -eq 0 ]
+  # Each edge-check, a child of the rollout, shares the lock the rollout holds and is not refused.
+  [[ $output != *"is busy"* ]]
   # Each plan that is applied targets one edge and replaces that edge's instance and nothing else;
   # the second edge is planned only once the first one's new keys are recorded and its check passes.
   expected=$(printf '%s\n' \
@@ -2143,25 +2145,124 @@ FAKE
   done
 
   # Twenty digits, ten, a unit or a sign: refused, naming the variable, before the stack is touched,
-  # an address scanned or a console read.
+  # its lock taken, an address scanned or a console read, by each recipe that connects to an edge.
   original_keys
+  lock="$REPO/infra/openstack/stacks/sto2/edge/.terraform/infra.lock"
   for value in 12345678901234567890 1000000000 30s -5; do
     for name in HOST_CONSOLE_WAIT EDGE_ROLLOUT_WAIT EDGE_ROLLOUT_INTERVAL; do
+      rm -f "$lock"
       : > "$RECORD/argv"
       rollout_with_input 'yes\n' "$name=$value"
       echo "edge-rollout, $name=$value: $output"
       [ "$status" -ne 0 ]
       [[ $output == *"$name is not a whole number of seconds of at most 9 digits"* ]]
       absent -E '^(tofu|ssh|ssh-keyscan|openstack) ' "$RECORD/argv"
+      [ ! -e "$lock" ]
     done
     forget_1
+    rm -f "$lock"
     : > "$RECORD/argv"
     run env "${environment[@]}" "HOST_CONSOLE_WAIT=$value" "$REPO/scripts/edge-check" --edge 1 < /dev/null
     echo "edge-check, HOST_CONSOLE_WAIT=$value: $output"
     [ "$status" -ne 0 ]
     [[ $output == *"HOST_CONSOLE_WAIT is not a whole number of seconds of at most 9 digits"* ]]
     absent -E '^(tofu|ssh|ssh-keyscan|openstack) ' "$RECORD/argv"
+    [ ! -e "$lock" ]
+    # edge-routes prints to a terminal only, so it runs on one.
+    rm -f "$lock"
+    : > "$RECORD/argv"
+    command=$(printf '%q ' env "${environment[@]}" "HOST_CONSOLE_WAIT=$value" "$REPO/scripts/edge-routes")
+    run script --quiet --return --command "$command" /dev/null < /dev/null
+    echo "edge-routes, HOST_CONSOLE_WAIT=$value: $output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"HOST_CONSOLE_WAIT is not a whole number of seconds of at most 9 digits"* ]]
+    absent -E '^(tofu|ssh|ssh-keyscan|openstack) ' "$RECORD/argv"
+    [ ! -e "$lock" ]
   done
+}
+
+@test "EDGE_ROLLOUT_WAIT and EDGE_ROLLOUT_INTERVAL are read from .env, as HOST_CONSOLE_WAIT is" {
+  local environment=() entry row wait interval reads moved new lock
+  lock="$REPO/infra/openstack/stacks/sto2/edge/.terraform/infra.lock"
+  with_instances
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_state 2 active "$WORKERS" 203.0.113.17/32
+  # The three waits are in the fake .env only, not in the environment the scripts start with.
+  for entry in "${ENVIRONMENT[@]}"; do
+    [[ $entry == EDGE_ROLLOUT_WAIT=* || $entry == EDGE_ROLLOUT_INTERVAL=* || $entry == HOST_CONSOLE_WAIT=* ]] || environment+=("$entry")
+  done
+
+  # Eight seconds in steps of four read the console at 0, 4 and 8; ten in steps of two at 0, 2, 4, 6,
+  # 8 and 10, where the defaults, 900 and 15, would read it far more often.
+  for row in '08 04 3 8' '010 02 6 10'; do
+    read -r wait interval reads moved <<< "$row"
+    printf 'EDGE_ROLLOUT_WAIT=%s\nEDGE_ROLLOUT_INTERVAL=%s\nHOST_CONSOLE_WAIT=0\n' "$wait" "$interval" > "$REPO/.env"
+    original_keys
+    fake_clock
+    plan_replacing 1
+    new=$(next_instance 1)
+    early_console | set_console "$new"
+    : > "$RECORD/argv"
+    run bash -c 'printf "yes\n" | env "$@"' _ "${environment[@]}" "$REPO/scripts/edge-rollout" --yes
+    echo "EDGE_ROLLOUT_WAIT=$wait EDGE_ROLLOUT_INTERVAL=$interval in .env: $output"
+    [ "$status" -eq 0 ]
+    [ "$(console_reads "$new")" -eq "$reads" ]
+    [ "$(clock_moved)" -eq "$moved" ]
+  done
+
+  # A value in .env that is no whole number of at most 9 digits is refused, named, before the stack
+  # is locked or touched.
+  original_keys
+  for name in EDGE_ROLLOUT_WAIT EDGE_ROLLOUT_INTERVAL; do
+    printf 'EDGE_ROLLOUT_WAIT=0\nEDGE_ROLLOUT_INTERVAL=0\nHOST_CONSOLE_WAIT=0\n%s=30s\n' "$name" > "$REPO/.env"
+    rm -f "$lock"
+    : > "$RECORD/argv"
+    run bash -c 'printf "yes\n" | env "$@"' _ "${environment[@]}" "$REPO/scripts/edge-rollout" --yes
+    echo "$name=30s in .env: $output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"$name is not a whole number of seconds of at most 9 digits"* ]]
+    absent -E '^(tofu|ssh|ssh-keyscan|openstack) ' "$RECORD/argv"
+    [ ! -e "$lock" ]
+  done
+}
+
+@test "edge-check takes the stack's lock, which only the child of a run that holds it shares" {
+  local lock="$REPO/infra/openstack/stacks/sto2/edge/.terraform/infra.lock" value
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  mkdir -p "${lock%/*}"
+  # Another run holds the lock, on descriptor 8. Descriptor 9 is open on the same file without
+  # holding it.
+  exec 8> "$lock" 9> "$lock"
+  flock -n 8
+
+  # EDGE_STACK_LOCKED alone does not let edge-check read the stack: whatever it is set to, a number
+  # that names no descriptor open on the lock file or one open on it that holds no lock, a run
+  # that cannot take the lock stops, saying the stack is busy.
+  for value in 1 9 x ''; do
+    : > "$RECORD/argv"
+    run env "${ENVIRONMENT[@]}" "EDGE_STACK_LOCKED=$value" "$REPO/scripts/edge-check" --edge 1 < /dev/null
+    echo "EDGE_STACK_LOCKED=$value: $output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"sto2/edge is busy: another operation on it is running"* ]]
+    absent -E '^(tofu|ssh) ' "$RECORD/argv"
+  done
+  exec 8>&- 9>&-
+
+  # The child of a run that holds the lock, on the descriptor it names, shares it and runs.
+  : > "$RECORD/argv"
+  # shellcheck disable=SC2016 # $1 and $2 are the inner shell's.
+  run env "${ENVIRONMENT[@]}" bash -c 'exec 7> "$1" && flock -n 7 && EDGE_STACK_LOCKED=7 "$2" --edge 1' _ "$lock" "$REPO/scripts/edge-check" < /dev/null
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output != *"is busy"* ]]
+  grep -q '^tofu .* init ' "$RECORD/argv"
+
+  # Nothing holds the lock afterwards, and a run with no variable takes it for itself.
+  flock -n "$lock" true
+  : > "$RECORD/argv"
+  edge_check --edge 1 < /dev/null
+  [ "$status" -eq 0 ]
+  grep -q '^tofu .* init ' "$RECORD/argv"
 }
 
 @test "Only the fingerprints cloud-init printed at the latest boot count" {

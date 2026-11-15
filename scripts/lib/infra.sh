@@ -15,6 +15,18 @@ infra_error() {
   printf '%s: %s\n' "${0##*/}" "$1" >&2
 }
 
+# inherited_lock_fd VARIABLE FILE: prints the descriptor number VARIABLE holds, and succeeds, when
+# that descriptor is open on FILE: the lock file a run that holds the lock hands to the recipe it
+# runs, so the child can lock that descriptor, which is granted as it shares the parent's lock.
+# Fails otherwise, for a variable that is unset, is no number, or names a descriptor open on another
+# file; locking a descriptor that shares no lock fails while another run holds it, so the variable
+# alone never lets a run past.
+inherited_lock_fd() {
+  local fd=${!1-}
+  [[ $fd =~ ^[0-9]+$ && /dev/fd/$fd -ef $2 ]] || return 1
+  printf '%s' "$fd"
+}
+
 # Reads .env at the repository root, when it exists, into the environment; CI has no .env and sets
 # the variables itself. Each line is a literal NAME=value: nothing in a value is expanded or run,
 # and one pair of matching quotes around it is dropped. Blank lines and # comments are skipped.

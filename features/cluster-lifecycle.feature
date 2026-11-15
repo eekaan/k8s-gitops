@@ -107,9 +107,14 @@ Feature: Cluster lifecycle
     Then once the node is Ready and uncordoned the agent's pod is read until it is Ready since the reboot, and only then is the label removed, after which the BGP configuration is awaited as before; the run says the agent has been Ready since the reboot for the settle time and that the worker is put back; no agent is read for the control plane
 
   Scenario: A worker whose agent never reports that it forwards stays out of BGP, and the run says so last
-    Given a worker whose Cilium agent pod is never Ready after the reboot, keeps the Ready it posted before the node went down, does not exist, cannot be read, or is never Ready while the run has --no-bgp-wait and the worker's BGP configuration stays
+    Given a worker whose Cilium agent pod is never Ready after the reboot, keeps the Ready it posted before the node went down, does not exist, cannot be read, or is never Ready while the run has --no-bgp-wait and the worker's BGP configuration stays; and a worker whose Cilium agent pod is Ready since the reboot beside a second agent pod of the node that is Failed for a reason that is not the shutdown's
     When cluster-reboot runs for the worker with FORWARD_WAIT=4
     Then each exits non-zero after the node is rebooted, Ready and uncordoned, with the label still on it and never removed, saying what was waited for and for how long, or that the agent could not be read and so it is not known whether the node forwards, and the last line says the worker is out of BGP and gives the kubectl command that puts it back; --no-bgp-wait does not skip the wait
+
+  Scenario: A Cilium agent pod the shutdown left Failed is removed before the worker is put back into BGP
+    Given a worker whose shutdown leaves its Cilium agent pod Failed with the reason Terminated, beside the agent pod that is Ready since the reboot
+    When cluster-reboot runs for the worker
+    Then once the node is Ready and uncordoned the shutdown's Failed pods, that one among them, are deleted, then the agent pods are read until every one is Ready since the reboot, and only then is the label removed; the run exits 0 and the worker announces again
 
   Scenario: A recipe killed outright does not leave the cluster locked
     Given a cluster-reboot that is sent SIGKILL while talman reboots a control plane and its probe of /readyz runs

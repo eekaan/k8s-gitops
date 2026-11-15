@@ -14,8 +14,8 @@
 # So no more than one worker is out at a time; --no-bgp-wait skips the first wait, for the
 # withdrawal, for every worker the run takes out, as for a worker whose Cilium agent is not running,
 # and not the wait for the agent. A worker out of BGP by a label this
-# run did not set is dealt with only once the run is confirmed: one Ready and schedulable is put back
-# before the first node is upgraded, and taken out again like any other when it is behind; any
+# run did not set is dealt with only once the run is confirmed: one Ready and schedulable is put
+# back before the first node is upgraded, and taken out again like any other when it is behind; any
 # other, when it is the first worker behind, is taken through as out already: drained, upgraded,
 # uncordoned and put back; otherwise it stops the run before another worker is taken out, or fails
 # it at the end. With nothing behind it is only reported, and the run fails. A run that stops with a
@@ -62,8 +62,8 @@ require_forward_waits || complete=0
 step="locking $cluster"
 lock_cluster
 
-# on_exit STATUS: a failing run names its step, as report_failed_step has it do, and then the workers
-# it left out of BGP. prepare_snapshot's exit trap does the same once it is made.
+# on_exit STATUS: a failing run names its step, as report_failed_step has it do, and then the
+# workers it left out of BGP. prepare_snapshot's exit trap does the same once it is made.
 on_exit() {
   failed_step "$1"
   bgp_report_out

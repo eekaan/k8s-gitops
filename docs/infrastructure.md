@@ -482,37 +482,37 @@ Every other routing daemon is off in the list. Its configuration, `frr.conf`, is
     wait until its Cilium agent pods have stayed Ready, since the reboot or upgrade, for
     `FORWARD_SETTLE` seconds (30) within `FORWARD_WAIT` seconds (300), and only then remove the
     label: forward first, announce second, as an edge hashes a share of new connections to a worker
-    the moment its agent announces, and a Ready agent has started and run every probe of itself but is not
-    shown to have regenerated its endpoints or synchronised its maps, which the settle time is a
-    margin for, not a proof of
-    ([cluster.md](cluster.md#recipes), under `cluster-reboot`, says what the readiness covers and why no other
-    signal does better). A worker whose agent does not get there stays out of BGP, and the run
-    says so last; a worker put back that the run did not take out is waited for in the same way.
-    They then wait until its `CiliumBGPNodeConfig` is back with the sessions that were established before the
-    label, which `status.bgpInstances[].peers[].peeringState` reports while Cilium's BGP status
-    reporting is on, as the chart's values keep it, are established again
+    the moment its agent announces, and a Ready agent has started and run every probe of itself but
+    is not shown to have regenerated its endpoints or synchronised its maps, which the settle time
+    is a margin for, not a proof of ([cluster.md](cluster.md#recipes), under `cluster-reboot`, says
+    what the readiness covers and why no other signal does better). A worker whose agent does not
+    get there stays out of BGP, and the run says so last; a worker put back that the run did not
+    take out is waited for in the same way. They then wait until its `CiliumBGPNodeConfig` is back
+    with the sessions that were established before the label, which
+    `status.bgpInstances[].peers[].peeringState` reports while Cilium's BGP status reporting is on,
+    as the chart's values keep it, are established again
     ([bgp_node_types.go](https://github.com/cilium/cilium/blob/v1.20.4/pkg/k8s/apis/cilium.io/v2/bgp_node_types.go#L201),
     [conversions.go](https://github.com/cilium/cilium/blob/v1.20.4/pkg/bgp/types/conversions.go#L40-L41)).
     A worker with no established session before, as while the edge stack is not applied, with an
     edge stopped or one being replaced, is put back all the same, and the recipe says it does not
     wait for one; one whose sessions before are not known, as one out already or taken out with
-    `--no-bgp-wait`, is waited for until its `CiliumBGPNodeConfig` is back. Both of those waits
-    are bounded by `BGP_WAIT` seconds (120), a whole number of at most nine digits like every wait
-    of these recipes. `just cluster-upgrade-k8s` drains and reboots no node and leaves
-    the Cilium agents alone, so it takes none out. A control plane has no BGP. No more than one
-    worker is out at a time: `cluster-reboot` and `cluster-upgrade` refuse to take a worker out
-    while another is, naming it and the `kubectl label` command that puts it back, and
-    `cluster-reboot`, `cluster-upgrade`, `cluster-upgrade-k8s` and `cluster-talos` hold the
-    cluster's lock, so no two of them run at once from one checkout; the lock goes with the run,
-    also one killed outright, though a foreground child such as `talman reboot` holds it until its
-    own timeout ends it, and its directory is private. Nothing records which run set a label, so a
-    recipe removes one it did not set only once the operator has confirmed the run: `cluster-upgrade` then puts back a worker that
-    is out and Ready and schedulable and takes one that is out and is the first worker behind
-    through as out already, drained, upgraded, uncordoned and put back, and `cluster-reboot` run
-    for a worker that is out already puts it back after the reboot; `cluster-upgrade` with nothing
-    to upgrade only reports one. A `cluster-reboot`,
-    `cluster-upgrade` or `cluster-talos --reboot` that stops with a worker out says so last, with
-    that command, and `just cluster-check` fails while a Ready worker carries the label.
+    `--no-bgp-wait`, is waited for until its `CiliumBGPNodeConfig` is back. Both of those waits are
+    bounded by `BGP_WAIT` seconds (120), a whole number of at most nine digits like every wait of
+    these recipes. `just cluster-upgrade-k8s` drains and reboots no node and leaves the Cilium
+    agents alone, so it takes none out. A control plane has no BGP. No more than one worker is out
+    at a time: `cluster-reboot` and `cluster-upgrade` refuse to take a worker out while another is,
+    naming it and the `kubectl label` command that puts it back, and `cluster-reboot`,
+    `cluster-upgrade`, `cluster-upgrade-k8s` and `cluster-talos` hold the cluster's lock, so no two
+    of them run at once from one checkout; the lock goes with the run, also one killed outright,
+    though a foreground child such as `talman reboot` holds it until its own timeout ends it, and
+    its directory is private. Nothing records which run set a label, so a recipe removes one it did
+    not set only once the operator has confirmed the run: `cluster-upgrade` then puts back a worker
+    that is out and Ready and schedulable and takes one that is out and is the first worker behind
+    through as out already, drained, upgraded, uncordoned and put back, and `cluster-reboot` run for
+    a worker that is out already puts it back after the reboot; `cluster-upgrade` with nothing to
+    upgrade only reports one. A `cluster-reboot`, `cluster-upgrade` or `cluster-talos --reboot` that
+    stops with a worker out says so last, with that command, and `just cluster-check` fails while a
+    Ready worker carries the label.
 - `maximum-paths` is `max_workers`: as many equal-cost paths to one address as there can be workers.
   The most FRR takes is what its build allows: 128 by its manual, 256 in Debian's package. The
   kernel setting `net.ipv4.fib_multipath_hash_policy = 1` hashes a flow's layer 4 fields, so every
@@ -1047,8 +1047,13 @@ The recipes do not handle these; they are done by hand when needed:
 The object storage's own state locking is not used, as it is not verified that the store supports
 it. The recipes lock each stack in the checkout they run from, with `flock` on a file under the
 stack's `.terraform/`, and a second operation on a stack from that checkout fails saying the stack
-is busy. The lock does not exclude CI or another checkout, so stacks are applied from one place at
-a time. Without `flock` on `PATH` (it comes with util-linux), the recipes stop and say so.
+is busy. `just edge-rollout` and `just infra-apply sto2/edge` run `just edge-check` under the lock
+they hold, which they share with it through a descriptor it inherits: `edge-check` locks that
+descriptor only when it is open on the stack's lock file, and the lock is granted only while it
+shares the holder's, so an `edge-check` run on its own takes the lock itself and is refused while
+another operation holds it, whatever its environment says. The lock does not exclude CI or another
+checkout, so stacks are applied from one place at a time. Without `flock` on `PATH` (it comes with
+util-linux), the recipes stop and say so.
 
 ## What the recipes print
 

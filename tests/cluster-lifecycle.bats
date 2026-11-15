@@ -1026,7 +1026,7 @@ OUT_LABEL="node-restriction.kubernetes.io/bgp-out"
 }
 
 @test "A worker whose agent never reports that it forwards stays out of BGP, and the run says so last" {
-  for case in not-ready stale missing no-bgp-wait unreadable; do
+  for case in not-ready stale missing no-bgp-wait unreadable failed-pod; do
     echo "$case"
     reset_cluster
     reset_environment
@@ -1045,6 +1045,9 @@ OUT_LABEL="node-restriction.kubernetes.io/bgp-out"
         ;;
       # An agent that cannot be read is not taken for one that forwards.
       unreadable) : > "$STATE/agent-unreadable" ;;
+      # Ready since the reboot, but a second agent pod of the node is Failed, for a reason the
+      # shutdown's leftovers do not have, so it stays: every agent pod of the node must be Ready.
+      failed-pod) echo 'kube-system cilium-worker-2-crashed Failed worker-2 Error' > "$STATE/pods" ;;
     esac
 
     recipe cluster-reboot "${args[@]}" < /dev/null
@@ -1063,12 +1066,36 @@ OUT_LABEL="node-restriction.kubernetes.io/bgp-out"
       [[ $output == *"the Cilium agent on worker-2 has not been Ready since the reboot for 0s within 4s"* ]]
       [[ $output == *"FORWARD_WAIT"* ]]
     fi
-    if [[ $case == not-ready || $case == stale || $case == no-bgp-wait ]]; then
+    if [[ $case == not-ready || $case == stale || $case == no-bgp-wait || $case == failed-pod ]]; then
       [ "$(calls '^agent worker-2 ' | wc -l)" -ge 2 ]
     fi
     last=$(script_lines | tail -1)
     [[ $last == *"worker-2 is out of BGP"*"kubectl label node worker-2 $OUT_LABEL-"* ]]
   done
+}
+
+@test "A Cilium agent pod the shutdown left Failed is removed before the worker is put back into BGP" {
+  # The shutdown leaves the node's agent pod Failed beside the one the DaemonSet makes again, which
+  # is Ready since the reboot: the worker is put back once the leftover is gone, not before.
+  : > "$STATE/agent-leftover"
+
+  recipe cluster-reboot worker-2 --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  uncordoned=$(call_line '^kubectl uncordon worker-2$')
+  removed=$(call_line '^kubectl delete pod --namespace kube-system (.* )?cilium-worker-2-shutdown( |$)')
+  first=$(call_line '^agent worker-2 ')
+  restored=$(call_line "^kubectl label node worker-2 $OUT_LABEL-\$")
+  for call in "$uncordoned" "$removed" "$first" "$restored"; do
+    [ -n "$call" ]
+  done
+  [ "$uncordoned" -lt "$removed" ]
+  [ "$removed" -lt "$first" ]
+  [ "$first" -lt "$restored" ]
+  [ "$(grep -c '^kube-system/cilium-worker-2-shutdown$' "$RECORD/deleted")" -eq 1 ]
+  [ ! -e "$STATE/bgp-out.worker-2" ]
+  [[ $output == *"removed 3 pods the shutdown left Failed on worker-2"* ]]
+  [[ $output == *"the Cilium agent on worker-2 has been Ready since the reboot"* ]]
 }
 
 @test "A recipe killed outright does not leave the cluster locked" {

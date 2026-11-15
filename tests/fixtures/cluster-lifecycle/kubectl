@@ -30,6 +30,7 @@
 #                     stale (Ready, but since before it: the pod's last report before the node went
 #                     down) or not (not Ready); without the file it is ready at once
 #   agent-missing     no Cilium agent pod runs on the nodes
+#   a pod of the pods file named cilium-* on a node is a second agent pod of that node, in its phase
 #   agent-unreadable  reading a Cilium agent pod fails, as when the API does not answer it
 #   kube-proxy        a kube-proxy pod runs in kube-system
 #   pods              more pods, one per line as <namespace> <name> <phase> [<node> [<reason>]], on
@@ -183,7 +184,7 @@ bgp_node_config() {
 # the pod's last report from before it went down; afterwards what agent-sequence.NODE says of this
 # read.
 agent_pods() {
-  local node=$1 reads answer words status when now
+  local node=$1 reads answer words status when now namespace name phase pod_node reason
   if listed agent-unreadable; then
     echo "Unable to connect to the server: net/http: TLS handshake timeout" >&2
     exit 1
@@ -207,11 +208,18 @@ agent_pods() {
   [[ ! -e $state/back.$node ]] || when=$(date -u -r "$state/back.$node" +%Y-%m-%dT%H:%M:%SZ)
   [[ $answer != stale ]] || when=2026-01-01T00:00:00Z
   [[ $answer != not ]] || status=False
-  jq -n --arg node "$node" --arg status "$status" --arg when "$when" '{
-    metadata: {namespace: "kube-system", name: "cilium-\($node)", labels: {"k8s-app": "cilium"}},
-    spec: {nodeName: $node},
-    status: {phase: "Running", podIP: "198.51.100.51", conditions: [
-      {type: "Ready", status: $status, lastTransitionTime: $when}]}}' | list
+  {
+    jq -n --arg node "$node" --arg status "$status" --arg when "$when" '{
+      metadata: {namespace: "kube-system", name: "cilium-\($node)", labels: {"k8s-app": "cilium"}},
+      spec: {nodeName: $node},
+      status: {phase: "Running", podIP: "198.51.100.51", conditions: [
+        {type: "Ready", status: $status, lastTransitionTime: $when}]}}'
+    # Another agent pod of the node, as the pods file holds one: not Running, so not forwarding.
+    while read -r namespace name phase pod_node reason; do
+      [[ $namespace == kube-system && $name == cilium-* && ${pod_node-} == "$node" ]] || continue
+      pod "$namespace" "$name" "$phase" cilium "$pod_node" "$reason"
+    done < "$state/pods" 2> /dev/null
+  } | list
 }
 
 # pod NAMESPACE NAME PHASE [K8S_APP [NODE [REASON]]]
