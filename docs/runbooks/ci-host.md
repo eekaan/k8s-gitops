@@ -82,7 +82,8 @@ Push to a branch of this repository and open a pull request, or merge one. In th
 ## Updating and rotating
 
 - **A new runner release**: Renovate proposes the version in `versions.yaml`; the pull request
-  also changes `actions_runner_sha256` (`.renovate/by-hand.tsv` says how). Once it is merged, `just ci-host-setup` installs it and restarts the runner.
+  also changes `actions_runner_sha256` (`.renovate/by-hand.tsv` says how). Once it is merged,
+  `just ci-host-setup` installs it and restarts the runner.
 - **A new Dagger version**: `dagger_engine` in `versions.yaml` moves with the `dagger` pin in
   `mise.toml` (`.renovate/by-hand.tsv` says how). `just ci-host-setup` replaces the engine's
   container; the cache stays on the volume.

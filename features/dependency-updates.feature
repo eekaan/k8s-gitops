@@ -18,7 +18,13 @@ Feature: Dependency updates
     Given renovate.json5, the presets under .renovate/ and the repository's files
     When renovate-check runs Renovate's own extraction on them, offline, with the presets inlined
     Then the dependencies it extracts are those .renovate/extracted.tsv records
-    And a change to a manager's file patterns, or to where a "# renovate:" comment sits, that adds or drops a dependency is refused with the difference
+
+  @test @pending #FND-7
+  Scenario: A change to what Renovate extracts is refused with the difference
+    Given a manager's file patterns narrowed, or a "# renovate:" comment moved one line up
+    When renovate-check runs Renovate's own extraction
+    Then it exits 1
+    And it prints the dependencies that were added or dropped
 
   @test
   Scenario: Every pin in the tree is extracted by a Renovate manager or listed as moved by hand
@@ -28,8 +34,16 @@ Feature: Dependency updates
     And every pin that Renovate's custom managers read has the form of its datasource's tags
 
   @test
+  Scenario: A finder that cannot run fails the check instead of finding no pins
+    Given a grep that cannot read the patterns that find pins
+    When the check runs
+    Then it exits non-zero
+    And it does not report that it found no pins
+
+  @test
   Scenario: A pin added where no manager looks, and not listed, is refused, naming the file and line
-    Given a file that holds an image reference, an OCI artifact tag, a digest, an action pin, a tool version or a tag that no manager extracts
+    Given a file that holds an image reference, an OCI artifact tag, a digest, an action pin, a tool version, a provider version, a mise version or checksum or a tag that no manager extracts
+    And a file that Renovate extracts other pins from holds an image reference that it does not extract
     And the pin is not in .renovate/by-hand.tsv
     When the check runs
     Then it exits 1
@@ -37,7 +51,7 @@ Feature: Dependency updates
 
   @test
   Scenario: A listed pin that a manager now extracts is refused
-    Given .renovate/by-hand.tsv lists a pin that .renovate/extracted.tsv holds, or one that is not in its file
+    Given .renovate/by-hand.tsv lists a pin that .renovate/extracted.tsv holds, a checksum that moves with an extracted pin, or one that is not in its file as a value, only in a comment
     When the check runs
     Then it exits 1
     And it names the entry's line in .renovate/by-hand.tsv
@@ -49,6 +63,7 @@ Feature: Dependency updates
     Then it exits 1
     And it names the pin's file and line
     And a pin whose package has no recorded tag form is refused too
+    And a recorded tag form that no pin reads is refused
 
   @test @pending #FND-7
   Scenario: A Renovate configuration with an unknown option is refused

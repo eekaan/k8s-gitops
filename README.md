@@ -23,13 +23,14 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
 - `just checks` runs every check that needs no credentials, with the tools on this machine, group
   by group. The group `static` holds tool versions, address literals in the files and the commit
   messages, merge conflict markers, that every Talos secrets bundle is encrypted, shellcheck and
-  yamllint, the Renovate configuration (`just renovate-check`: Renovate's own validator and, offline,
-  its own extraction of the dependencies from the files, which `.renovate/extracted.tsv` records,
-  run from its pinned container image, so it needs a container runtime, Docker; `just
-  renovate-record` rewrites the record after a change to the pins or the configuration), that every
-  version pin is extracted by Renovate or listed in `.renovate/by-hand.tsv` as moved by hand, with
-  where, why and how (`just renovate-pins`), scenario proofs, the
-  OpenTofu check (`just infra-check`: formatting, that the Talos schematic lists no QEMU guest
+  yamllint, the Renovate configuration (`just renovate-check`: Renovate's own validator and,
+  offline, its own extraction of the dependencies from the files, which `.renovate/extracted.tsv`
+  records, run from its pinned container image, so it needs a container runtime, Docker; `just
+  renovate-record` rewrites the record after a change to the pins or the configuration), that
+  every version pin the check finds is extracted by Renovate or listed in `.renovate/by-hand.tsv`
+  as moved by hand, with where, why and how (`just renovate-pins`; the header of
+  `scripts/check-renovate-pins` says which forms it finds and which it does not), scenario proofs,
+  the OpenTofu check (`just infra-check`: formatting, that the Talos schematic lists no QEMU guest
   agent extension, that every stack enforces state encryption, that no stack or module declares a
   bucket, that the default service range overlaps no default node, pod or service subnet,
   validation without a state backend and the mocked `tofu test` runs), the Talos check

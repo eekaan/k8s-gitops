@@ -13,9 +13,11 @@
 # are extracted all the same, and a lookup with a token would find them.
 #
 # The local platform cannot fetch the "local>" presets renovate.json5 extends, so the copy's
-# renovate.json5 holds them inline instead, merged the way Renovate merges a preset into its
-# parent: lists are joined in order, objects replace. The presets hold only the keys the merge
-# below handles; any other key fails the run rather than being left out of the extraction.
+# renovate.json5 holds them inline instead. Each preset's lists are appended to the configuration's
+# own and its other values replace them; Renovate instead deep-merges objects and lets the
+# repository's own configuration win. The two agree while renovate.json5 sets none of the keys the
+# presets set, which holds today. The presets hold only the keys the merge below handles; any other
+# key fails the run rather than being left out of the extraction.
 set -euo pipefail
 export LC_ALL=C
 

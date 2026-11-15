@@ -15,7 +15,7 @@
 #   - uses: owner/repo@ref in a workflow
 #   - tag: and version: lines with a version, in kubernetes/ and the workflows, and version = "..."
 #     in OpenTofu files (OCIRepository, GitRepository and HelmRelease versions, a provider's)
-#   - sha256: lines in the workflows
+#   - sha256: lines in the workflows, which Renovate moves with the mise version beside them
 #   - versions.yaml's top-level values that are a version or a digest
 #   - TOML lines that set a version: name = "1.2.3", name = { version = "1.2.3", ... }
 # It does not see a version in prose or a comment, one assembled from parts, an image with no
@@ -24,7 +24,9 @@
 #
 # A pin is covered when .renovate/extracted.tsv holds its name for its file, in the name column or the
 # key column. Pins found by a line form that carries no name (tag:, version = ) are covered by any
-# extraction in their file. Otherwise it must be in .renovate/by-hand.tsv.
+# extraction in their file. Otherwise it must be in .renovate/by-hand.tsv, whose entry must name text
+# on a line of its file that is no comment in a YAML, TOML or HCL file, and must not name text of a
+# pin that Renovate extracts.
 #
 # Prints one line per problem, path:line: what is wrong, and exits non-zero; otherwise one line with
 # the counts.
@@ -55,25 +57,32 @@ excluded=(':!*.md' ':!tests/' ':!features/' ':!docs/' ':!**/tests/**' ':!*.lock.
   ':!*.sops.*' ':!.renovate/' ':!renovate.json5' ':!.gitleaks.toml' ':!LICENSE')
 mapfile -d '' -t files < <(git ls-files -z --cached --others --exclude-standard -- . "${excluded[@]}")
 
-# found FILE LINE NAME: a pin the forms below found.
+# found FILE LINE NAME TEXT: a pin the forms below found, and the text that matched.
 pins=()
 found() {
-  pins+=("$1"$'\t'"$2"$'\t'"$3")
+  pins+=("$1"$'\t'"$2"$'\t'"$3"$'\t'"$4")
 }
 
 # scan PATTERN NAMER [FILE...]: every match of the PCRE PATTERN in the files, as found pins named by
 # NAMER, a sed expression applied to the match.
 scan() {
-  local pattern=$1 namer=$2 hit file line match
+  local pattern=$1 namer=$2 hits hit file line match rc=0
   shift 2
   [[ $# -gt 0 ]] || return 0
+  # Exit 1 is no match; any other failure (a grep without -P, say) must not read as no pins.
+  hits=$(grep -HnoP -- "$pattern" "$@") || rc=$?
+  if [[ $rc -gt 1 ]]; then
+    echo "check-renovate-pins: grep -P failed with $rc on $pattern; a grep with PCRE support is needed" >&2
+    exit 1
+  fi
+  [[ -n $hits ]] || return 0
   while IFS= read -r hit; do
     file=${hit%%:*}
     line=${hit#*:}
     match=${line#*:}
     line=${line%%:*}
-    found "$file" "$line" "$(sed -E "$namer" <<< "$match")"
-  done < <(grep -HnoP -- "$pattern" "$@" || true)
+    found "$file" "$line" "$(sed -E "$namer" <<< "$match")" "$match"
+  done <<< "$hits"
 }
 
 # The files of a kind: those of the scanned files that match a pattern.
@@ -106,7 +115,7 @@ scan "uses:\s+\K[\w.-]+/[\w./-]+(?=@)" 's/ //g' "${workflows[@]}"
 scan '^\s*(?:tag|version):\s*["'\'']?v?\d+\.\d+' 's/.*/*/' "${k8s[@]}"
 scan '^\s*version\s*=\s*"[^"]*\d' 's/.*/*/' "${tofu[@]}"
 scan '^\s*version:\s*["'\'']?\d+\.\d+' 's/.*/jdx\/mise/' "${workflows[@]}"
-scan '^\s*sha256:\s*[0-9a-f]{64}' 's/:.*//; s/^ *//' "${workflows[@]}"
+scan '^\s*sha256:\s*[0-9a-f]{64}' 's/.*/jdx\/mise/' "${workflows[@]}"
 scan '^("[^"]+"|[\w.-]+)\s*=\s*(?:\{\s*version\s*=\s*)?"v?\d+\.\d+' 's/\s*=.*//; s/"//g' "${toml[@]}"
 if printf '%s\n' "${files[@]}" | grep -qxF versions.yaml; then
   scan '^[a-z0-9_]+(?=:\s*(?:v?\d+\.\d+\.\d+|[0-9a-f]{64}$|\S+@sha256:))' 's/.*/&/' versions.yaml
@@ -121,6 +130,17 @@ while IFS=$'\t' read -r file manager name key; do
   has_extraction[$file]=$manager
 done < "$extracted"
 
+# Whether a file has a string on a line that is not a comment, where the file's syntax has comments
+# and the entry is meant to name a value: a comment that mentions a pin is no pin.
+in_file() {
+  local file=$1 name=$2 text
+  case $file in
+    *.yaml | *.yml | *.toml | *.hcl | *.tf) text=$(sed '/^[[:space:]]*#/d' -- "$file") ;;
+    *) text=$(< "$file") ;;
+  esac
+  grep -qF -- "$name" <<< "$text"
+}
+
 # What is listed by hand, by file and name, checked on its own: four columns, the pin in its file, and
 # not one that Renovate extracts, so the list does not hold a pin that something else moves.
 declare -A listed=()
@@ -132,7 +152,7 @@ while IFS=$'\t' read -r file name why how extra || [[ -n ${file-} ]]; do
     problem "$by_hand:$n: an entry is a file, the pin's name, why Renovate does not move it and how it is moved, four columns separated by tabs"
     continue
   fi
-  if [[ ! -f $file ]] || ! grep -qF -- "$name" "$file"; then
+  if [[ ! -f $file ]] || ! in_file "$file" "$name"; then
     problem "$by_hand:$n: $file has no $name; remove the entry or correct it"
     continue
   fi
@@ -145,17 +165,32 @@ done < "$by_hand"
 
 # Every pin found is extracted or listed.
 checked=0
+extracted_pins=()
 if [[ ${#pins[@]} -gt 0 ]]; then
-  while IFS=$'\t' read -r file line name; do
+  while IFS=$'\t' read -r file line name text; do
     checked=$((checked + 1))
     if [[ $name == '*' ]]; then
       [[ -n ${has_extraction[$file]-} ]] && continue
     else
-      [[ -n ${tracked["$file"$'\t'"$name"]-} || -n ${listed["$file"$'\t'"$name"]-} ]] && continue
+      if [[ -n ${tracked["$file"$'\t'"$name"]-} ]]; then
+        extracted_pins+=("$file"$'\t'"$name"$'\t'"$text")
+        continue
+      fi
+      [[ -n ${listed["$file"$'\t'"$name"]-} ]] && continue
     fi
     problem "$file:$line: $name is a pin that no Renovate manager extracts ($extracted) and $by_hand does not list"
   done < <(printf '%s\n' "${pins[@]}" | sort -u -t$'\t' -k1,1 -k2,2n -k3,3)
 fi
+
+# A listed string that sits in a pin Renovate extracts, such as a checksum it moves with the version
+# beside it, is moved by Renovate too.
+for pin in "${extracted_pins[@]}"; do
+  IFS=$'\t' read -r file name text <<< "$pin"
+  for key in "${!listed[@]}"; do
+    [[ ${key%%$'\t'*} == "$file" && $text == *"${key#*$'\t'}"* ]] || continue
+    problem "$by_hand:${listed[$key]}: ${key#*$'\t'} in $file is moved with $name, which Renovate extracts there; remove it from the list"
+  done
+done
 
 # The value of each custom-manager pin is the form its datasource's tags have.
 declare -A form=() form_used=()
