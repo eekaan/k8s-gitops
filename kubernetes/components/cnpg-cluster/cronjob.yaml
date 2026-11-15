@@ -1,0 +1,276 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/cronjob-batch-v1.json
+# A dump of the cluster's application database once a day, encrypted to the Talos age key's recipient
+# before it leaves the pod and uploaded under <cluster>/<namespace>/<name>/ in the postgres bucket,
+# named <UTC time>.dump.age. It is a daily copy, not a point in time: the changes since the last dump
+# are lost with the cluster (docs/kubernetes.md, PostgreSQL; docs/runbooks/postgres-restore.md). The
+# alerts on it select the CronJob by its name's suffix, -pgdump (the cloudnative-pg application).
+#
+# The pod runs four steps in turn, each in the one image that has its tool, so no image is built
+# here and the plain dump is in reach of the second and third only:
+#   fetch-age  age, the pinned release's, checked against its SHA-256: no public image carries it;
+#   dump       pg_dump, of the PostgreSQL version the Cluster runs, writes the dump into the
+#              memory-backed volume "plain" as the application's own role, with the credentials of
+#              the Secret the operator makes for it, which no other step holds;
+#   encrypt    age encrypts it into "out" and removes the plain file;
+#   upload     rclone sends the one file of "out" to the bucket with the cluster's S3 key, which no
+#              earlier step holds, and keeps the newest KEEP_DUMPS of this database's path.
+# The pod has no Kubernetes token. The scripts are the component's own copies of the etcd snapshot
+# job's, which a kustomize component cannot read from outside its directory (tests/postgres-dumps.bats
+# holds them to it).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  # A CronJob's name is at most 52 characters, so a cluster's name is at most 45.
+  name: ${CNPG_CLUSTER_NAME}-pgdump
+spec:
+  # Every database's job is scheduled at this minute; each waits a time of its own below
+  # DUMP_STAGGER_SECONDS before it starts, from a checksum of its namespace and name, as no variable
+  # a manifest substitutes is a hash and an application passes nothing. A deadline of 45 minutes
+  # covers that wait, the fetch, the dump and the upload, and ends a run before
+  # PostgresDumpJobFailing has waited its hour, so it never fires on a run still going
+  # (tests/postgres-dumps.bats).
+  schedule: "0 2 * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 2700
+      template:
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+            - name: fetch-age
+              image: docker.io/rclone/rclone:1.76.0@sha256:7cbeec24a44f206067597c0368be4de90ae19a64d5113c7d1938bd737a81e466
+              command: ["/bin/sh", "/scripts/fetch-age.sh"]
+              env:
+                # The age pin of mise.toml, which tests/postgres-dumps.bats holds this to. The
+                # checksums are those of the release's linux archives; .renovate/by-hand.tsv says
+                # how they follow the version.
+                - name: AGE_VERSION
+                  value: "1.3.2"
+                - name: AGE_SHA256_AMD64
+                  value: cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10
+                - name: AGE_SHA256_ARM64
+                  value: 6b8dc4333c53a5a57c9e5834e3a48f92605d7154014cd07269ff3327db5d37f4
+                - name: TOOLS_DIR
+                  value: /tools
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 128Mi
+              securityContext: &container-security
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                capabilities:
+                  drop: ["ALL"]
+                seccompProfile:
+                  type: RuntimeDefault
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+                - name: tools
+                  mountPath: /tools
+            - name: dump
+              # The Cluster's own image, which carries pg_dump of the version the server runs: the
+              # same registry path and PostgreSQL major as the Cluster's imageName, which
+              # tests/postgres-dumps.bats holds it to. A dump taken by an older pg_dump than the
+              # server is refused. Renovate moves it with the Cluster's.
+              # renovate: datasource=docker depName=ghcr.io/cloudnative-pg/postgresql
+              image: ghcr.io/cloudnative-pg/postgresql:18.6-standard-trixie@sha256:de572898499fab9406f0da51929da562f96f3be40ca79fafea8ec1a8d5b42065
+              command: ["/bin/sh", "/scripts/dump.sh"]
+              env:
+                - name: DUMP_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+                - name: DUMP_NAME
+                  value: ${CNPG_CLUSTER_NAME}
+                - name: DUMP_STAGGER_SECONDS
+                  value: "1200"
+                # The replicas' Service, which has no endpoint for a cluster of one instance, and
+                # the primary's, which then answers.
+                - name: DUMP_READ_HOST
+                  value: ${CNPG_CLUSTER_NAME}-ro
+                - name: DUMP_WRITE_HOST
+                  value: ${CNPG_CLUSTER_NAME}-rw
+                - name: PLAIN_DUMP
+                  value: /plain/db.dump
+                # The application's own role, from the Secret <name>-app the operator makes: three of
+                # its keys, no superuser. The operator's instances accept TLS on every connection.
+                - name: PGPORT
+                  value: "5432"
+                - name: PGSSLMODE
+                  value: require
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef:
+                      name: ${CNPG_CLUSTER_NAME}-app
+                      key: username
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: ${CNPG_CLUSTER_NAME}-app
+                      key: password
+                - name: PGDATABASE
+                  valueFrom:
+                    secretKeyRef:
+                      name: ${CNPG_CLUSTER_NAME}-app
+                      key: dbname
+              # The volume "plain" is memory-backed, and what is written to it counts against the
+              # container's memory limit: the limit is that volume's size and room for pg_dump.
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 128Mi
+                limits:
+                  memory: 768Mi
+              securityContext: *container-security
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+                - name: plain
+                  mountPath: /plain
+            - name: encrypt
+              image: docker.io/rclone/rclone:1.76.0@sha256:7cbeec24a44f206067597c0368be4de90ae19a64d5113c7d1938bd737a81e466
+              command: ["/bin/sh", "/scripts/encrypt.sh"]
+              env:
+                - name: PLAIN_DUMP
+                  value: /plain/db.dump
+                - name: OUT_DIR
+                  value: /out
+                - name: AGE
+                  value: /tools/age/age
+                # The public half of the Talos age key, talos/.sops.yaml's recipient, which the
+                # operator's recipes encrypt to; tests/postgres-dumps.bats fails when the two differ.
+                # A cluster with another key sets CNPG_DUMP_AGE_RECIPIENT.
+                - name: AGE_RECIPIENT
+                  value: ${CNPG_DUMP_AGE_RECIPIENT:=age1pklkf3zmxckt2xv2anwljpylrlkzkzv2tuwn2eurcht8jhu36ququnulxj}
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  memory: 256Mi
+              securityContext: *container-security
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+                - name: tools
+                  mountPath: /tools
+                  readOnly: true
+                - name: plain
+                  mountPath: /plain
+                - name: out
+                  mountPath: /out
+          containers:
+            - name: upload
+              image: docker.io/rclone/rclone:1.76.0@sha256:7cbeec24a44f206067597c0368be4de90ae19a64d5113c7d1938bd737a81e466
+              command: ["/bin/sh", "/scripts/upload.sh"]
+              env:
+                - name: OUT_DIR
+                  value: /out
+                - name: DUMP_BUCKET
+                  value: ${BACKUP_BUCKET_PREFIX}-postgres
+                # The cluster the dumps are of, the directory name of kubernetes/clusters/<cluster>
+                # and talos/<cluster>, under which the operator's recipes list the etcd snapshots;
+                # tests/postgres-dumps.bats holds it to one that exists. A second cluster that
+                # shares the bucket prefix must set CNPG_DUMP_CLUSTER: at the default it would share
+                # paths with this one, and its retention would delete this cluster's dumps.
+                - name: DUMP_CLUSTER
+                  value: ${CNPG_DUMP_CLUSTER:=lab-sto2}
+                - name: DUMP_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+                - name: DUMP_NAME
+                  value: ${CNPG_CLUSTER_NAME}
+                # Two weeks of dumps, one a day. The job holds the right to delete: the bucket's
+                # lifecycle rules are not set by any stack, and the cluster's S3 key reaches every
+                # object of the project in any case (docs/cluster.md).
+                - name: KEEP_DUMPS
+                  value: "14"
+                - name: HOME
+                  value: /tmp
+                # rclone's store, in its environment as the operator's recipes give it theirs: the
+                # object storage of the project, any S3-compatible provider.
+                - name: RCLONE_CONFIG
+                  value: /dev/null
+                - name: RCLONE_CONFIG_STORE_TYPE
+                  value: s3
+                - name: RCLONE_CONFIG_STORE_PROVIDER
+                  value: Other
+                - name: RCLONE_CONFIG_STORE_ENV_AUTH
+                  value: "false"
+                - name: RCLONE_CONFIG_STORE_ENDPOINT
+                  value: ${S3_ENDPOINT}
+                - name: RCLONE_CONFIG_STORE_REGION
+                  value: ${S3_REGION}
+                - name: RCLONE_CONFIG_STORE_FORCE_PATH_STYLE
+                  value: "true"
+                - name: RCLONE_CONFIG_STORE_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: ${CNPG_CLUSTER_NAME}-dump-s3
+                      key: AWS_ACCESS_KEY_ID
+                - name: RCLONE_CONFIG_STORE_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: ${CNPG_CLUSTER_NAME}-dump-s3
+                      key: AWS_SECRET_ACCESS_KEY
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  memory: 256Mi
+              securityContext: *container-security
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+                - name: out
+                  mountPath: /out
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: scripts
+              configMap:
+                name: ${CNPG_CLUSTER_NAME}-dump-scripts
+            # The plain dump lives here and nowhere else: memory-backed, so it never reaches a
+            # disk, and sized, so a dump that outgrows it fails the run, pg_dump out of space, and
+            # raises the alert instead of filling a node. The custom format is compressed, and 512Mi
+            # holds the dump of a small database, as n8n's; a database whose dump is larger patches
+            # this size and the dump container's memory limit together.
+            - name: plain
+              emptyDir:
+                medium: Memory
+                sizeLimit: 512Mi
+            - name: out
+              emptyDir:
+                sizeLimit: 1Gi
+            - name: tools
+              emptyDir:
+                medium: Memory
+                sizeLimit: 64Mi
+            - name: tmp
+              emptyDir:
+                medium: Memory
+                sizeLimit: 32Mi

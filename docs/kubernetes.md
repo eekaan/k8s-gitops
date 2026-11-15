@@ -1381,6 +1381,8 @@ The own alerts, each with its runbook section in [docs/runbooks/alerts.md](runbo
 | `CertManagerCertificateExpiringSoon` | A Certificate's certificate ends within 14 days, for 15 minutes. | warning | [CertManagerCertificateExpiringSoon](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#certmanagercertificateexpiringsoon) |
 | `EtcdSnapshotStale` | No run of the etcd snapshot CronJob has succeeded for 13 hours. | critical | [EtcdSnapshotStale](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#etcdsnapshotstale) |
 | `EtcdSnapshotJobFailing` | The etcd snapshot CronJob's latest scheduled run has not succeeded after 30 minutes. | warning | [EtcdSnapshotJobFailing](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#etcdsnapshotjobfailing) |
+| `PostgresDumpStale` | No dump of a PostgreSQL database made from the component has succeeded for 36 hours. | warning | [PostgresDumpStale](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#postgresdumpstale) |
+| `PostgresDumpJobFailing` | The latest scheduled run of a database's dump CronJob has not succeeded after an hour. | warning | [PostgresDumpJobFailing](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#postgresdumpjobfailing) |
 | `LogCollectorOutsizedShare` | One node's collector sends at least ten times the median node's rate of events, and at least 10 a second, for 30 minutes. | info | [LogCollectorOutsizedShare](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectoroutsizedshare) |
 | `LogCollectorDiscardingEvents` | A collector's component discards events it was not set to drop, for 15 minutes. | warning | [LogCollectorDiscardingEvents](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectordiscardingevents) |
 | `LogCollectorSendFailing` | A collector's sink to the store reports errors for 15 minutes. | warning | [LogCollectorSendFailing](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectorsendfailing) |
@@ -1402,13 +1404,17 @@ The own alerts, each with its runbook section in [docs/runbooks/alerts.md](runbo
 The alerts read only what Prometheus scrapes: kube-state-metrics' pod readiness for OpenBao's
 members, its Deployment availability for the Flux Operator, its nodes' roles, which tell the
 control planes' Cilium agents from the workers', and its CronJob metrics for the etcd snapshot job
-([cluster.md](cluster.md#scheduled-etcd-snapshots)), Prometheus' own `up` for OpenBao's active
-Service and the Cilium agents, VolSync's controller metrics, Vector's internal metrics,
-cert-manager's certificate metrics, the Flux Operator's state of Flux's resources, the Cilium
-agents' BGP session state, LINSTOR's own metrics, the DRBD reactor's, and external-dns' gauge of
-its last successful sync and its absence. `tests/rules-check.bats` fails when an alert reads a
-metric that no monitor of the render scrapes, or whose monitor selects nothing of the Service or
-pod that serves it.
+([cluster.md](cluster.md#scheduled-etcd-snapshots)) and for the dump job of every PostgreSQL cluster
+([Dumps](#dumps)), Prometheus' own `up` for OpenBao's active Service and the Cilium agents, VolSync's
+controller metrics, Vector's internal metrics, cert-manager's certificate metrics, the Flux
+Operator's state of Flux's resources, the Cilium agents' BGP session state, LINSTOR's own metrics,
+the DRBD reactor's, and external-dns' gauge of its last successful sync and its absence. The dump
+alerts are written once, in the `cloudnative-pg` application's `app/`, whose tests are
+`tests/rules/cloudnative-pg.yaml`, and select the CronJobs by their names' suffix, `-pgdump`:
+kube-state-metrics exposes no CronJob label unless its chart is told to, so a label the component
+set would not reach the metrics. `tests/rules-check.bats` fails when an alert reads a metric that
+no monitor of the render scrapes, or whose monitor selects nothing of the Service or pod that
+serves it.
 
 What no alert covers, and why:
 
@@ -2794,6 +2800,8 @@ spec:
   dependsOn:
     - name: cloudnative-pg
     - name: prometheus-operator-crds
+    - name: external-secrets
+    - name: openbao-store
   components:
     - ../../../../../components/cnpg-cluster
   postBuild:
@@ -2808,9 +2816,13 @@ the build it pulled first, so instances can run different builds of one minor ve
 must run on a different worker, and requests and is limited to 500m CPU and 512Mi memory. The
 operator's disruption budgets move the primary away by switchover before its worker is drained, and
 let drains take one replica at a time. A PodMonitor scrapes every instance. Without
-`CNPG_CLUSTER_NAME` the build fails. The operator creates the database `app`, owned by the user
+`CNPG_CLUSTER_NAME` the build fails, and so does the apply of a name longer than 45 characters: the
+dump job's CronJob, `<name>-pgdump`, is named in at most 52, and Flux applies an application whole
+or not at all. The operator creates the database `app`, owned by the user
 `app`, whose password and connection URI are in the Secret `<name>-app`; the Services `<name>-rw`,
-`<name>-ro` and `<name>-r` reach the primary, the replicas and any instance.
+`<name>-ro` and `<name>-r` reach the primary, the replicas and any instance. The dump job
+([Dumps](#dumps)) needs the External Secrets operator and the secret store, so the application
+names `external-secrets` and `openbao-store` in `dependsOn` as well, and nothing else new.
 
 A patch in the application's own `kustomization.yaml` changes anything else, as it applies after the
 component. It targets the Cluster by kind alone: Flux substitutes after the build, so when the patch
@@ -2840,16 +2852,83 @@ worker or its data volume is lost for good, the instance's PersistentVolumeClaim
 are deleted, which removes the instance, and the operator clones a new one from the primary. With
 three workers, the new one waits for a worker without an instance.
 
-No backup is configured: the component's `Cluster` archives no WAL and takes no base backup to
-object storage, though the secret store holds the cluster's S3 key, which the volume backups read
-([The repository and its password](#the-repository-and-its-password)). Until then a cluster's data
-lives only on the workers' data volumes ([Where the data lives](#where-the-data-lives)).
-
 `tests/postgresql.bats` renders the operator's chart and checks its namespace, definitions,
 replicas, budget, monitor and pods; builds applications that take a cluster from the component, one
 that does not name it and two that patch it, by kind and by name, as Flux applies them; and checks
 each field of the `Cluster` against the pinned chart's definition and its StorageClass against
-LINSTOR's.
+LINSTOR's. `tests/postgres-dumps.bats` builds applications that take a cluster from the component and
+runs the dump job's scripts as its containers run them, with stand-ins for `pg_dump`, `pg_isready` and
+the S3 client.
+
+### Dumps
+
+The component adds a CronJob, `<name>-pgdump`, in the application's namespace, so an application
+that names the component gets a daily copy of its database and passes nothing more. It runs at
+02:00 UTC, never two at once (`concurrencyPolicy: Forbid`), with a start deadline of an hour, a
+run deadline of 45 minutes, two retries and the last three failed runs kept. Each job waits a time
+of its own, up to 20 minutes, before it starts: a checksum of the database's namespace and name,
+modulo 1200 seconds, so databases on one schedule do not all start together (two can still draw
+the same second; nothing breaks if they do). A pod of four steps runs in turn, each in the one image
+that has its tool, so no image is built:
+
+1. `fetch-age` downloads the pinned age release and checks it against the SHA-256 the manifest
+   pins, as the etcd snapshot job does ([cluster.md](cluster.md#scheduled-etcd-snapshots)).
+2. `dump` runs `pg_dump` in custom format, as the application's own role, the database `app`'s
+   owner, never a superuser. It reads three keys of the Secret `<name>-app`, which the operator
+   makes: `username`, `password` and `dbname`, as `PGUSER`, `PGPASSWORD` and `PGDATABASE`, never on
+   a command line. It connects over TLS (`PGSSLMODE=require`) to `<name>-ro`, so a replica carries
+   the read, and to `<name>-rw` only when no replica answers `pg_isready`: a cluster of one instance
+   has no replica, its `-ro` Service has no endpoint, and its primary is dumped. A long dump from a
+   replica can be cancelled by a conflict with the replica's recovery, which fails the attempt. Each
+   retry waits its stagger again, and the job's one 45 minute deadline bounds all attempts, so a
+   retry has less time than the first attempt did and a long dump can fail until the next night. The image is the Cluster's own, which carries `pg_dump`: the same registry
+   path and PostgreSQL major as the Cluster's `imageName`, pinned by tag and digest in the CronJob,
+   so the tool is never older than the server, which `pg_dump` refuses. `tests/postgres-dumps.bats`
+   fails when the majors differ; Renovate moves the CronJob's image with the Cluster's, which share a package.
+3. `encrypt` encrypts the plain dump with age to the Talos age key's recipient, the one
+   `just cluster-snapshot` and the etcd job encrypt to, and removes the plain file. The recipient is
+   in the manifest as the default of `CNPG_DUMP_AGE_RECIPIENT`, and the test holds it to
+   `talos/.sops.yaml`'s, so there is one source of truth.
+4. `upload` sends the one encrypted file with `rclone`, with the cluster's S3 key, to the postgres
+   bucket under `<cluster>/<namespace>/<name>/<UTC time>.dump.age`, checks that the bucket lists it
+   there, and deletes the oldest dumps of that path beyond the newest 14. `<cluster>` is the
+   Kubernetes cluster's name, `lab-sto2`, the default of `CNPG_DUMP_CLUSTER`, which a second cluster
+   that shares the bucket prefix must set: left at the default it would write to the same paths as
+   `lab-sto2` and its retention would delete that cluster's dumps of the same namespace and name. It lists only its own path, and never creates a bucket or replaces an object.
+
+The plain dump is on an `emptyDir` of its own, `plain`, memory-backed and limited to 512Mi, and only
+the `dump` and `encrypt` containers mount it; the encrypted file goes to a disk-backed `out` of 1Gi,
+the only volume the `upload` container sees. Memory-backed keeps the plain dump from any disk, and
+512Mi holds the compressed dump of a small database, as n8n's; the `dump` container's memory limit,
+768Mi, is that volume's size and room for `pg_dump`. A database whose dump outgrows the volume fails
+the `dump` step with no space left, which fails the job and, an hour later, raises
+[`PostgresDumpJobFailing`](runbooks/alerts.md#postgresdumpjobfailing): the volume is sized so it
+cannot fill a node. Such a database patches the CronJob by kind, as above, with the volume's
+`sizeLimit` and the container's memory limit together. The pod runs restricted, with every
+container's requests and limits set and no service account token.
+
+The S3 key reaches the pod through an ExternalSecret in the application's namespace,
+`<name>-dump-s3`, which reads the two properties of the key `volsync` of the secret store, the key
+the volume backups and the etcd snapshots use, and nothing else of it. Only the `upload` container
+takes the Secret, and only the `dump` container takes the database's: the key that can delete
+objects never meets the database's password. The key reaches every bucket of the project
+([Infrastructure](infrastructure.md#s3-keys-and-backup-buckets)), so the job's rights end where the
+code ends; the retention deletes only dumps of its own path. Nothing new is seeded, and no key is in
+the tree. The scripts are the component's own copies of the etcd snapshot job's, as a component
+cannot read a file outside its directory; `tests/postgres-dumps.bats` holds `fetch-age.sh` to the
+etcd job's byte for byte, and the encrypting and uploading scripts to it line by line apart from the
+words that say dump for snapshot and the path.
+
+**What a dump is not.** It is a copy of one day, not a point in time: a restore loses everything
+written since the dump, and a dump holds one database's objects, not the cluster's roles' passwords
+or its settings. The operator's own backups, WAL archiving and base backups through its Barman Cloud
+plugin, would give point-in-time recovery, and are not used: the plugin offers server-side
+encryption only, and [ADR 0008](adr/0008-state-and-backups-are-encrypted-before-they-leave.md) lets
+nothing leave the cluster unencrypted. `PostgresDumpStale` and `PostgresDumpJobFailing`
+([Alerts](#alerts)) fire when the newest dump is too old or the latest run failed, and
+[postgres-restore.md](runbooks/postgres-restore.md) restores a dump into a new cluster. Until the
+first dump has run a database's data lives on the workers' data volumes alone
+([Where the data lives](#where-the-data-lives)).
 
 ## OpenBao
 
@@ -3163,8 +3242,9 @@ once n8n answers its readiness endpoint.
   component's three instances and 5Gi each. n8n reads its host, port, database, user and password
   from the keys `host`, `port`, `dbname`, `username` and `password` of the Secret `n8n-db-app`, which
   the operator makes; no credential is in a values file, and the connection is without TLS, inside
-  the cluster. The component has no backup yet, so the database lives on the three workers' data
-  volumes alone ([PostgreSQL](#postgresql)).
+  the cluster. The component dumps the database once a day, encrypted, to the object storage
+  ([Dumps](#dumps)); the `external-secrets` and `openbao-store` in n8n's `dependsOn` serve the S3
+  key the dump job reads as much as the encryption key.
 - **The encryption key** `N8N_ENCRYPTION_KEY` encrypts the credentials n8n stores in its database.
   It comes from the secret store, as [How an application gets a secret out](#how-an-application-gets-a-secret-out)
   describes: the ExternalSecret `n8n-encryption-key` reads the property `encryption-key` at
@@ -3218,8 +3298,9 @@ once n8n answers its readiness endpoint.
   It holds no workflow, credential, user or execution record: those are rows of the database. So
   restoring the volume brings back files and none of the work, and restoring the database brings
   back the work and not the files that executions refer to. Steps to restore the claim are in
-  [the runbook](runbooks/volume-backups.md#restoring-a-claim-from-its-repository); the database has
-  nothing to restore from yet.
+  [the runbook](runbooks/volume-backups.md#restoring-a-claim-from-its-repository); the database is
+  restored from its daily dump ([Dumps](#dumps), [the runbook](runbooks/postgres-restore.md)), which
+  is up to a day old.
 - **The hostname** is `n8n.${CLUSTER_DOMAIN}`, an `HTTPRoute` on the public Gateway's `https`
   listener to the Service `n8n` on 5678. `N8N_HOST`, `N8N_PROTOCOL`, `N8N_EDITOR_BASE_URL` and
   `N8N_WEBHOOK_URL` are that name over https, set from the variable, and `N8N_PROXY_HOPS` is 1: the

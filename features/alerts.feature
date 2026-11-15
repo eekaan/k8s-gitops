@@ -262,3 +262,15 @@ Feature: Alerts
     Given the tree's own alerts, the render of the tree and, for what an operator makes at run time, the labels and ports its pinned version gives
     When each metric an alert reads is matched with the monitor that scrapes it, and the monitor with what it selects
     Then every metric is one a monitor of the render scrapes, from a Service or pod that exposes the port the monitor names, or is Prometheus' own series of the scrape, and an alert on a metric nothing scrapes fails
+
+  @by:rules-check
+  Scenario: The alert PostgresDumpStale fires after its time in the failing case and stays quiet in the healthy one
+    Given the dump CronJob of a database whose last success is older than 36 hours, one that has never succeeded and is older than that, one that succeeded within 36 hours, and one that has not yet had its first success and is younger than that
+    When the rule is evaluated over time
+    Then the alert fires after its time for the first two and never for the others
+
+  @by:rules-check
+  Scenario: The alert PostgresDumpJobFailing fires after its time in the failing case and stays quiet in the healthy one
+    Given the dump CronJob of a database whose latest scheduled run ended without success, one that was scheduled and never succeeded, one whose latest run succeeded, and one not yet scheduled
+    When the rule is evaluated over time
+    Then the alert fires after its time for the first two and never for the others

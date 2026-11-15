@@ -1,0 +1,73 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/prometheusrule-monitoring-v1.json
+# Alerts on the daily dump of every PostgreSQL cluster made from the cnpg-cluster component, from
+# kube-state-metrics' CronJob metrics, which Prometheus already scrapes:
+# kube_cronjob_status_last_successful_time, kube_cronjob_status_last_schedule_time and
+# kube_cronjob_created, each labelled cronjob and namespace, as v2.20, the version the pinned
+# kube-prometheus-stack chart runs, documents them. Times are Unix times in seconds. The rules are
+# written once, here with the operator, for every database in every namespace: the component names
+# each CronJob <cluster>-pgdump, which they select by, as kube-state-metrics exposes no CronJob's
+# labels unless its chart is told to, and the label the alerts carry, database, is the cluster's name.
+# Tests: tests/rules/cloudnative-pg.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cloudnative-pg-alerts
+  namespace: cnpg-system
+spec:
+  groups:
+    - name: postgres-dumps
+      rules:
+        # 36 hours is a day's run missed and half a day of grace. A CronJob that has never succeeded
+        # has no last-success series, so it is stale 36 hours after it was created, which is after its
+        # first schedule: a database younger than that is quiet. The newest dump is then older than
+        # that, which a loss of the cluster costs: warning, not critical, as the data is still in
+        # the cluster three times and a lost dump needs a second failure to matter, so it is a matter
+        # for the working day.
+        - alert: PostgresDumpStale
+          expr: |
+            label_replace(
+              (
+                time() - max by (namespace, cronjob) (kube_cronjob_status_last_successful_time{cronjob=~".+-pgdump"}) > 36 * 3600
+              )
+              or
+              (
+                time() - max by (namespace, cronjob) (kube_cronjob_created{cronjob=~".+-pgdump"}) > 36 * 3600
+                unless on (namespace, cronjob)
+                kube_cronjob_status_last_successful_time{cronjob=~".+-pgdump"}
+              ),
+              "database", "$1", "cronjob", "(.+)-pgdump"
+            )
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: No dump of a PostgreSQL database has succeeded for 36 hours
+            description: The database {{ $labels.database }} in {{ $labels.namespace }} has had no successful dump, by the CronJob {{ $labels.cronjob }}, for 36 hours, so a lost cluster loses everything written since the newest dump.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#postgresdumpstale
+        # The latest run was scheduled after the last success, and has had an hour, which is longer
+        # than the job's deadline of 45 minutes: it ended without succeeding. It clears once a run
+        # succeeds. A CronJob not yet scheduled has no schedule series, so a new database is quiet.
+        - alert: PostgresDumpJobFailing
+          expr: |
+            label_replace(
+              (
+                max by (namespace, cronjob) (kube_cronjob_status_last_schedule_time{cronjob=~".+-pgdump"})
+                > on (namespace, cronjob)
+                max by (namespace, cronjob) (kube_cronjob_status_last_successful_time{cronjob=~".+-pgdump"})
+              )
+              or
+              (
+                max by (namespace, cronjob) (kube_cronjob_status_last_schedule_time{cronjob=~".+-pgdump"})
+                unless on (namespace, cronjob)
+                kube_cronjob_status_last_successful_time{cronjob=~".+-pgdump"}
+              ),
+              "database", "$1", "cronjob", "(.+)-pgdump"
+            )
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: The latest dump of a PostgreSQL database did not succeed
+            description: The latest run of the CronJob {{ $labels.cronjob }}, which dumps {{ $labels.database }} in {{ $labels.namespace }}, was scheduled over an hour ago and has not succeeded, so no dump is newer than the last good one.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#postgresdumpjobfailing

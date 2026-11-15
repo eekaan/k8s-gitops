@@ -3,9 +3,28 @@
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 
-# A PostgreSQL cluster for one application, run by the CloudNativePG operator, and the PodMonitor
-# that scrapes it. An application takes it by naming this component in its ks.yaml's
-# spec.components and the cluster in its postBuild.substitute (docs/kubernetes.md, PostgreSQL).
+# A PostgreSQL cluster for one application, run by the CloudNativePG operator, the PodMonitor that
+# scrapes it, and a CronJob that dumps its database once a day, encrypted, to the object storage,
+# with the ExternalSecret that gives the job's upload the S3 key. An application takes it by naming
+# this component in its ks.yaml's spec.components, the cluster in its postBuild.substitute, and the
+# External Secrets operator and the secret store in its dependsOn (docs/kubernetes.md, PostgreSQL).
 resources:
   - cluster.yaml
   - podmonitor.yaml
+  - externalsecret.yaml
+  - cronjob.yaml
+
+# The dump job's steps' scripts, which tests/postgres-dumps.bats runs as the containers run them. The
+# component carries its own copies of the etcd snapshot job's generic ones, as a component cannot
+# read a file outside its directory. The job reads the ConfigMap afresh at every run, so it needs no
+# hash in its name. The scripts hold shell variables, so Flux leaves them alone: none holds a
+# `${...}`.
+configMapGenerator:
+  - name: ${CNPG_CLUSTER_NAME}-dump-scripts
+    files:
+      - scripts/fetch-age.sh
+      - scripts/dump.sh
+      - scripts/encrypt.sh
+      - scripts/upload.sh
+generatorOptions:
+  disableNameSuffixHash: true

@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# A stand-in for pg_dump, installed by the tests as <tmp>/bin/pg_dump. It records "pg_dump ARGS" in
+# <tmp>/record/argv and its PG* environment in <tmp>/record/env.pg_dump, and writes marker content,
+# the database it was asked for among it, to the file named by --file. It takes no database name: the
+# database comes in PGDATABASE, as the application's Secret gives it. While <tmp>/dump-fails
+# exists it fails as pg_dump does when its target is full.
+set -uo pipefail
+root=${0%/bin/*}
+record=$root/record
+printf '%s\n' "pg_dump $*" >> "$record/argv"
+env | grep '^PG' | sort > "$record/env.pg_dump"
+file=
+prev=
+for arg; do
+  case $arg in
+    --file=*) file=${arg#--file=} ;;
+    --format=custom | --no-password | --file) ;;
+    -*)
+      echo "unexpected option: pg_dump $arg" >&2
+      exit 2
+      ;;
+    *)
+      # The database comes in PGDATABASE, so a name on the command line is dumping another one.
+      if [[ $prev != --file ]]; then
+        echo "unexpected argument: pg_dump $arg" >&2
+        exit 2
+      fi
+      file=$arg
+      ;;
+  esac
+  prev=$arg
+done
+if [[ -z $file ]]; then
+  echo "pg_dump: error: no --file: a custom-format dump is not written to a terminal" >&2
+  exit 1
+fi
+printf 'PGDMP marker-dump-content of %s\n\001\002binary tail\n' "${PGDATABASE-}" > "$file"
+if [[ -e $root/dump-fails ]]; then
+  echo "pg_dump: error: could not write to output file: No space left on device" >&2
+  exit 1
+fi

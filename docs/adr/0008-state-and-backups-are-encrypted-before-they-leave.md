@@ -4,9 +4,11 @@
 - Date: 2026-11-14
 - Amended: 2026-11-14, application volumes are backed up by VolSync's restic mover, as upstream
   VolSync has no Kopia mover ([ADR 0015](0015-volume-backups-with-volsyncs-restic-mover.md))
-- Note: 2026-11-15, the PostgreSQL cluster template configures no object-store backup, so n8n's
-  database, the one the cluster's overlay makes from it, is not backed up
-  ([PostgreSQL](../kubernetes.md#postgresql))
+- Note: 2026-11-15, the PostgreSQL cluster template dumps each database made from it once a day,
+  n8n's among them, and the job encrypts each dump with age to the Talos age key before upload: a
+  daily copy, not a point in time, as nothing archives WAL or takes a base backup, which the
+  operator's Barman Cloud plugin would encrypt on the server's side only
+  ([Dumps](../kubernetes.md#dumps))
 - Note: 2026-11-15, etcd snapshots are taken every six hours by a CronJob in the cluster as well as
   by the operator's recipe; the job encrypts each to the Talos age key before upload, and uploads
   and prunes them with the cluster's S3 key, which reaches every bucket of the project

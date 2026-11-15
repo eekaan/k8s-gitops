@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# A stand-in for pg_isready: every host answers except those named, one a line, in
+# <tmp>/hosts-down. Records "pg_isready ARGS" in <tmp>/record/argv.
+set -uo pipefail
+root=${0%/bin/*}
+printf '%s\n' "pg_isready $*" >> "$root/record/argv"
+host=
+while (($#)); do
+  case $1 in
+    -h)
+      host=$2
+      shift
+      ;;
+    -h*) host=${1#-h} ;;
+    --host=*) host=${1#--host=} ;;
+  esac
+  shift
+done
+[[ -n $host ]] || exit 3
+if grep -qxF "$host" "$root/hosts-down" 2> /dev/null; then
+  echo "$host:5432 - no response"
+  exit 2
+fi
+echo "$host:5432 - accepting connections"
