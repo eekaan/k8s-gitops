@@ -485,22 +485,28 @@ established with its five prefixes offered (120), the edge has accepted one (60)
 speaker has been refused (60 each); a wait that runs out is a FAIL that names it and what it last
 saw, and a daemon that has stopped by then is shown with its own log. The proof runs to its end
 whatever it finds, and when any check fails, the check prints everything the proof printed, in
-`just edge-policy-check` as in `just ci`, whether the proof's container ended well or not. Each
-speaker announces its prefixes with a next hop that is not its own address, and the check asserts
-that the accepted /32's path has the speaker's address as next hop instead; and that the edge offers
-graceful restart without the notification bit, as the speaker sees its capabilities. Before any of
-that, FRR's dry run (`vtysh -C -f`) reads the edge's file as rendered, whole, and must accept it,
-and must refuse a copy with a command FRR does not have, so the check is known to catch one. The
-static route is taken out of the file the proof's BGP daemon reads, which has no `zebra` or
-`staticd` beside it; the stack's tests check it. The speakers sit on loopback addresses, which FRR
-refuses as next hops (martian next hops), so the proof's copy of the file also has
-`bgp allow-martian-nexthop`, and the routing policy alone decides what is accepted; the workers'
-addresses on the node subnet are no martians. The proof does not show the routes reaching the
-kernel, equal-cost paths across several workers, graceful restart across a restart or the nftables
-rules, which the stack's tests compare as text and `nft --check` reads for syntax at first boot:
-`nft` is in neither of the proof's containers, and `unshare` is not permitted in either, so no
-network namespace of its own could hold the rules. The container's FRR takes 64 equal-cost paths
-where Debian's takes 256, so the proof renders with 64.
+`just edge-policy-check` as in `just ci`, whether the proof's container ended well or not. The
+daemons keep the proof's own user, as FRR's own change to its `frr` user needs capabilities a
+container is not given, and write only under one directory the proof makes in `/tmp`, a directory of
+its own per daemon for its configuration, pid file, log and vty socket; the proof checks first that
+each takes a new file, and nothing is written under `/etc/frr`, `/run/frr` or `/var/lib/frr`.
+`just edge-policy-check` runs it with no capability, no new privileges and the image's files
+read-only, and a failed proof's report starts with the user it ran as, its capabilities, its
+security label and its user namespace. Each speaker announces its prefixes with a next hop that is
+not its own address, and the check asserts that the accepted /32's path has the speaker's address as
+next hop instead; and that the edge offers graceful restart without the notification bit, as the
+speaker sees its capabilities. Before any of that, FRR's dry run (`vtysh -C -f`) reads the edge's
+file as rendered, whole, and must accept it, and must refuse a copy with a command FRR does not
+have, so the check is known to catch one. The static route is taken out of the file the proof's BGP
+daemon reads, which has no `zebra` or `staticd` beside it; the stack's tests check it. The speakers
+sit on loopback addresses, which FRR refuses as next hops (martian next hops), so the proof's copy
+of the file also has `bgp allow-martian-nexthop`, and the routing policy alone decides what is
+accepted; the workers' addresses on the node subnet are no martians. The proof does not show the
+routes reaching the kernel, equal-cost paths across several workers, graceful restart across a
+restart or the nftables rules, which the stack's tests compare as text and `nft --check` reads for
+syntax at first boot: `nft` is in neither of the proof's containers, and `unshare` is not permitted
+in either, so no network namespace of its own could hold the rules. The container's FRR takes 64
+equal-cost paths where Debian's takes 256, so the proof renders with 64.
 
 ### The data path
 

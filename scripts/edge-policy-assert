@@ -6,8 +6,8 @@
 # no session; the edge advertised nothing back, the speaker holds no path learned from it, and the
 # sessions never dropped; the edge offers graceful restart without the notification bit; and FRR's
 # dry run accepts the edge's file and refuses one with an unknown command.
-# Before those: every daemon ran, each wait for a state of the sessions was met within its bound,
-# and the proof ran to its end. Prints pass or FAIL per item, then, after any FAIL, everything the
+# Before those: every place a daemon writes took a new file from the daemons' user, every daemon
+# ran, each wait for a state of the sessions was met within its bound, and the proof ran to its end. Prints pass or FAIL per item, then, after any FAIL, everything the
 # proof printed, its waits with what they last saw and a stopped daemon's log among it, and exits
 # non-zero on any FAIL.
 # Usage: scripts/edge-policy-assert FILE, FILE being the proof's output
@@ -53,6 +53,12 @@ met() {
   fi
 }
 
+if [[ $(section places | grep -c ': takes a new file$') -eq 5 ]] && ! section places | grep -q ': takes no new file$'; then
+  printf 'pass  every place a daemon writes takes a new file from the user the daemons run as\n'
+else
+  printf 'FAIL  every place a daemon writes takes a new file from the user the daemons run as\n'
+  failed=1
+fi
 if [[ $(section daemons | grep -cE '^(edge|a|b|c): running$') -eq 4 ]]; then
   printf 'pass  every BGP daemon of the proof is running\n'
 else

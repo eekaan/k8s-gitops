@@ -1,4 +1,6 @@
 #!/bin/sh
+# The conditions the waits poll, and what they show, run through wait_for by name.
+# shellcheck disable=SC2329
 # Runs in the FRR image, in a container that has no capabilities beyond the container runtime's
 # defaults and whose speakers bind and dial loopback addresses only (edge-policy-check gives it no
 # other network; the Dagger module's exec has the engine's default one). Starts the edge's BGP
@@ -18,13 +20,36 @@
 # are scripts/edge-policy-assert's, so a failure says which.
 # Usage: sh proof.sh DIR, the directory scripts/edge-policy-render wrote
 set -u
-# The conditions and what they show run through wait_for, by name.
-# shellcheck disable=SC2329
 dir=$1
-vty=/run/frr-proof
-# Each daemon's vty socket is a file in a directory of its own.
+# Everything the daemons and vtysh write is under one directory the proof makes in /tmp, as the user
+# the daemons run as: they keep the proof's own user (-S), as FRR's own change to its frr user needs
+# capabilities (net-admin, sys-admin) no container here is given. Each daemon has a directory of its
+# own there for its configuration, pid file, log and vty socket; nothing is written under /etc/frr,
+# /run/frr or /var/lib/frr, whose owners are the image's, nor anywhere else of the image's files,
+# which may be read-only.
+vty=${TMPDIR:-/tmp}/frr-proof
 mkdir -p "$vty/edge" "$vty/a" "$vty/b" "$vty/c"
-# vtysh reads its own file from the proof's directory: /etc/frr is the image's frr user's.
+
+# Who the proof runs as and what it may do, for a failure to be read from the report: its user, its
+# capabilities and security label, its user namespace's mapping, and its directory's owner.
+echo "== environment"
+id
+grep -E '^Cap(Eff|Bnd)' /proc/self/status
+printf 'security label: %s\n' "$(cat /proc/self/attr/current 2> /dev/null || echo none)"
+printf 'user namespace: %s\n' "$(tr -s ' ' < /proc/self/uid_map 2> /dev/null | tr '\n' ' ')"
+ls -ldn "$vty" 2> /dev/null || echo "$vty: not made"
+
+# Each place a daemon or vtysh writes must take a new file from the proof's user before anything
+# starts; one that does not is named.
+echo "== places"
+for place in "$vty" "$vty/edge" "$vty/a" "$vty/b" "$vty/c"; do
+  if : > "$place/.probe" 2> /dev/null && rm -f "$place/.probe"; then
+    echo "$place: takes a new file"
+  else
+    echo "$place: takes no new file"
+  fi
+done
+# vtysh reads its own file from the proof's directory.
 : > "$vty/vtysh.conf"
 : > "$vty/waits"
 
@@ -48,14 +73,14 @@ else
   echo "a file with an unknown command is refused"
 fi
 
-# bgpd NAME ARG...: starts a BGP daemon as NAME, with its own vty socket, its log in a file of its
-# own and what it prints on starting kept beside it.
+# bgpd NAME ARG...: starts a BGP daemon as NAME from its configuration in its own directory, with
+# its pid file, log and vty socket there, and what it prints on starting kept beside them.
 bgpd() {
   name=$1
   shift
-  /usr/lib/frr/bgpd -d -S -Z -i "$vty/$name.pid" --vty_socket "$vty/$name" --log "file:$vty/$name.log" \
-    --log-level informational "$@" > "$vty/$name.start" 2>&1 ||
-    echo "bgpd exited with status $? as it started" >> "$vty/$name.start"
+  /usr/lib/frr/bgpd -d -S -Z -f "$vty/$name/bgpd.conf" -i "$vty/$name/bgpd.pid" --vty_socket "$vty/$name" \
+    --log "file:$vty/$name/bgpd.log" --log-level informational "$@" > "$vty/$name/start.out" 2>&1 ||
+    echo "bgpd exited with status $? as it started" >> "$vty/$name/start.out"
 }
 
 # The edge's own file, unchanged but for what the BGP daemon started on its own does not know: the
@@ -64,13 +89,13 @@ bgpd() {
 # lets the daemon take them: the routing policy alone then decides what the table holds. A worker's
 # address on the node subnet is no martian.
 grep -v -e '^service integrated-vtysh-config$' -e '^ip route ' "$dir/edge.conf" |
-  awk '{ print } /^router bgp / { print " bgp allow-martian-nexthop" }' > "$vty/edge.conf"
-bgpd edge -f "$vty/edge.conf" -A 127.0.0.1 -l 127.0.0.1
+  awk '{ print } /^router bgp / { print " bgp allow-martian-nexthop" }' > "$vty/edge/bgpd.conf"
+bgpd edge -A 127.0.0.1 -l 127.0.0.1
 
 # speaker NAME AS ADDRESS INSIDE PORT: a speaker that does not listen (-p 0).
 speaker() {
-  sed "s/@NAME@/$1/; s/@AS@/$2/; s/@ADDRESS@/$3/g; s|@INSIDE@|$4|" "$dir/speaker.conf.in" > "$vty/$1.conf"
-  bgpd "$1" -f "$vty/$1.conf" -A 127.0.0.1 -P "$5" -p 0
+  sed "s/@NAME@/$1/; s/@AS@/$2/; s/@ADDRESS@/$3/g; s|@INSIDE@|$4|" "$dir/speaker.conf.in" > "$vty/$1/bgpd.conf"
+  bgpd "$1" -A 127.0.0.1 -P "$5" -p 0
 }
 speaker a 64496 127.0.0.20 203.0.113.17 2616
 speaker b 64511 127.0.0.21 203.0.113.18 2617
@@ -107,7 +132,7 @@ wait_for() {
 }
 # running NAME: whether daemon NAME's process is alive.
 running() {
-  [ -s "$vty/$1.pid" ] && kill -0 "$(cat "$vty/$1.pid")" 2> /dev/null
+  [ -s "$vty/$1/bgpd.pid" ] && kill -0 "$(cat "$vty/$1/bgpd.pid")" 2> /dev/null
 }
 
 # The conditions the waits poll, and what each shows of the state it reads.
@@ -178,7 +203,7 @@ for name in edge a b c; do
     echo "$name: running"
   else
     echo "$name: not running; what it printed and logged:"
-    cat "$vty/$name.start" "$vty/$name.log" 2> /dev/null | tail -n 30
+    cat "$vty/$name/start.out" "$vty/$name/bgpd.log" 2> /dev/null | tail -n 30
   fi
 done
 
