@@ -25,6 +25,8 @@ version_command() {
     sops) cmd=(sops --version --disable-version-check) ;;
     cosign) cmd=(cosign version) ;;
     gitleaks) cmd=(gitleaks version) ;;
+    # kubeconform has no --version flag.
+    kubeconform) cmd=(kubeconform -v) ;;
     *) cmd=("$1" --version) ;;
   esac
 }

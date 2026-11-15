@@ -1,20 +1,41 @@
 #!/usr/bin/env bash
-# Offline check of the kubernetes/ tree: every kustomization builds, Flux builds each cluster's
-# root Kustomization and each application with strict substitution, and the layout rules in
-# docs/kubernetes.md hold. Reports every failure, naming the file and the rule, then exits
-# non-zero. Never contacts a cluster.
+# Offline check of the kubernetes/ tree, for what the cluster would refuse or never reconcile:
+# every kustomization builds, Flux builds each cluster's root Kustomization and each application
+# with strict substitution, and the layout rules in docs/kubernetes.md hold, among them:
+#   - an application keeps manifests only where its build reads them, in app/;
+#   - on what Flux builds, every dependsOn of a Kustomization names one the cluster's overlay (or
+#     its cluster directory) builds, and that one waits (wait or health checks, after the root's
+#     patches are applied).
+# Reports every failure, naming the file and the rule, then exits non-zero. Never contacts a
+# cluster and fetches nothing: the publish run runs it in the job that signs (scripts/publish).
+# What the tree holds is data: each value read from a ks.yaml is one field, a control character or
+# a '|' in it read as '?', and a root's spec.path must be a directory of the tree.
+#
+# KUBERNETES_CHECK_BUILT, an existing empty directory, receives what each Flux build yielded, for
+# scripts/kubernetes-validate: N.yaml, and in its file builds the record N.yaml, LABEL and APP_DIR,
+# each ended by a NUL byte, which no path holds: LABEL is what the output calls the build and APP_DIR
+# the application directory the objects come from, empty for a cluster directory or root.
 #
 # Usage: scripts/kubernetes-check [DIR]   (DIR holds kubernetes/; defaults to this repository)
 set -euo pipefail
 shopt -s nullglob
 
+keep="${KUBERNETES_CHECK_BUILT:-}"
+if [[ -n $keep ]]; then
+  # A directory that already holds builds would get a second set added to them.
+  if [[ ! -d $keep || -n $(find "$keep" -mindepth 1 -print -quit) ]]; then
+    echo "kubernetes-check: KUBERNETES_CHECK_BUILT must name an existing empty directory, not $keep" >&2
+    exit 1
+  fi
+  keep="$(cd "$keep" && pwd)"
+fi
 cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}"
 
 # No kubeconfig and no in-cluster address: a tool that tried to reach a cluster fails instead.
 export KUBECONFIG=/dev/null
 unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
 
-for tool in kustomize yq flux; do
+for tool in kustomize yq jq flux; do
   command -v "$tool" >/dev/null || { echo "kubernetes-check: $tool not found on PATH" >&2; exit 1; }
 done
 [[ -d kubernetes ]] || { echo "kubernetes-check: no kubernetes/ directory in $PWD" >&2; exit 1; }
@@ -29,11 +50,13 @@ fail() {
 # namespace field, so a Kustomization anywhere else cannot read cluster-config or cluster-secrets.
 # An application's Kustomization also names the namespace it deploys into.
 ks_files=0
+declare -A ks_name_file=()
 ks_list="$(find kubernetes -name ks.yaml | sort)"
 while IFS= read -r ks; do
   [[ -n $ks ]] || continue
   ks_files=$((ks_files + 1))
-  # Empty documents, such as one after a trailing ---, hold nothing to check.
+  # Empty documents, such as one after a trailing ---, hold nothing to check. Each value is one
+  # field of one line: a control character or a '|' in it reads as '?'.
   if ! docs="$(yq -N 'select(. != null) | [document_index, .apiVersion // "", .kind // "",
     .metadata.name // "", .metadata.namespace // "", .spec.targetNamespace // "",
     .spec.sourceRef.kind // "", .spec.sourceRef.name // "", .spec.path // "",
@@ -42,16 +65,19 @@ while IFS= read -r ks; do
         . == "timeout" or . == "prune" or . == "deletionPolicy" or . == "decryption" or
         . == "patches")),
       ((.spec.postBuild // {}) | keys | .[] | select(. == "substituteFrom") | "postBuild." + .)]
-      | join(","))] | join("|")' "$ks" 2>&1)"; then
+      | join(","))] | map(tostring | sub("[\x00-\x1f\x7f|]"; "?")) | join("|")' "$ks" 2>&1)"; then
     fail "$ks: not valid YAML: $docs"
     continue
   fi
   while IFS='|' read -r doc api kind name ns target src_kind src_name ks_path defaults overridden; do
-    [[ -n $doc ]] || continue
+    # The document's index goes into yq expressions below.
+    [[ $doc =~ ^[0-9]+$ ]] || continue
     if [[ $api != kustomize.toolkit.fluxcd.io/* || $kind != Kustomization ]]; then
       fail "$ks: document $doc must be a Flux Kustomization (kustomize.toolkit.fluxcd.io), found ${api:-no apiVersion} ${kind:-no kind}"
       continue
     fi
+    # The file a built Kustomization came from, for the messages about what Flux builds.
+    ks_name_file[$name]="$ks"
     [[ $ns == flux-system ]] ||
       fail "$ks: Kustomization $name must be in namespace flux-system, found ${ns:-none} (substituteFrom reads cluster-config from the Kustomization's own namespace)"
     [[ -n $src_kind && -n $src_name ]] ||
@@ -116,6 +142,58 @@ while IFS= read -r ks; do
   done <<<"$docs"
 done <<<"$ks_list"
 
+# reached: the kustomization files and the files they list, as paths from here, filled by reach.
+declare -A reached=()
+
+# reach DIR: marks the kustomization file in DIR and every file it lists as reached, and goes on into
+# each directory it lists. The lists are the fields kustomize reads a file or directory from.
+reach() {
+  local dir=$1 kfile entry path
+  for kfile in "$dir/kustomization.yaml" "$dir/kustomization.yml" "$dir/Kustomization"; do
+    [[ -f $kfile ]] && break
+    kfile=""
+  done
+  [[ -n $kfile && -z ${reached[$kfile]:-} ]] || return 0
+  reached[$kfile]=1
+  while IFS= read -r entry; do
+    [[ $entry != *://* && $entry != git@* ]] || continue
+    path="$(realpath -m --relative-to=. -- "$dir/$entry")"
+    if [[ -d $path ]]; then
+      reach "$path"
+    else
+      reached[$path]=1
+    fi
+  done < <(yq -N '[(.resources // [])[], (.components // [])[], (.crds // [])[], (.configurations // [])[],
+      ((.patchesStrategicMerge // [])[] | select(tag == "!!str")),
+      ((.patches // [])[] | .path // ""), ((.patchesJson6902 // [])[] | .path // ""),
+      ((.replacements // [])[] | select(tag == "!!map") | .path // ""),
+      (.openapi.path // ""), ((.helmCharts // [])[] | .valuesFile // ""),
+      (((.configMapGenerator // []) + (.secretGenerator // []))[]
+        | ((.files // [])[] | sub("^[^=]*="; "")), (.envs // [])[], (.env // ""))]
+    | .[] | select(. != "" and (contains("\n") | not))' "$kfile" 2>/dev/null)
+}
+
+# app_manifests DIR: every Kubernetes manifest (a document with an apiVersion and a kind) in the
+# application directory DIR is one its app/kustomization.yaml reaches. The artifact generator
+# publishes only app/, and the build reads only what the kustomization lists, so any other
+# manifest is in Git, passes the build and never reaches the cluster.
+app_manifests() {
+  local dir=$1 file count
+  reached=()
+  reach "$dir/app"
+  while IFS= read -r file; do
+    [[ $file != "$dir/ks.yaml" && -z ${reached[$file]:-} ]] || continue
+    count="$(yq ea '[select(tag == "!!map" and (.apiVersion // "") != "" and (.kind // "") != "")] | length' "$file" 2>/dev/null)" ||
+      continue
+    [[ $count =~ ^[1-9] ]] || continue
+    if [[ $file != "$dir"/app/* ]]; then
+      fail "$file: a Kubernetes manifest outside app/, which is all the artifact generator publishes, so the cluster never gets it; move it into $dir/app/ and list it in app/kustomization.yaml"
+    else
+      fail "$file: a Kubernetes manifest that $dir/app/kustomization.yaml does not reach through resources, components, patches or generators, so the build leaves it out; list it, or delete it"
+    fi
+  done < <(find "$dir" -type f \( -name '*.yaml' -o -name '*.yml' \) | sort)
+}
+
 # An application directory holds its Flux Kustomization in ks.yaml and its manifests in app/,
 # which is also what the artifact generator publishes. Flux's own applications in a cluster
 # directory have the same shape.
@@ -127,6 +205,7 @@ for dir in kubernetes/apps/base/*/*/ kubernetes/clusters/*/*/*/; do
   apps=$((apps + 1))
   [[ -f $dir/ks.yaml && -d $dir/app ]] ||
     fail "$dir: an application directory needs both ks.yaml and app/"
+  app_manifests "$dir"
   # The directory name becomes the name of the application's Kustomization and artifact, which
   # all live in flux-system, enabled or not. A cluster's own applications share that namespace
   # with every application in apps/base, but not with another cluster's.
@@ -219,12 +298,16 @@ hint() {
 }
 
 flux_builds=0
-# flux_build KS PATH LABEL HINT_ARG...: builds the Kustomization in KS from PATH as Flux does, with
-# strict substitution, and names where an unset variable is used, passing HINT_ARG to hint. LABEL
-# is what the output calls the build.
+mkdir "$tmp/built"
+last_built=""
+# flux_build KS PATH LABEL APP_DIR HINT_ARG...: builds the Kustomization in KS from PATH as Flux does,
+# with strict substitution, and names where an unset variable is used, passing HINT_ARG to hint.
+# LABEL is what the output calls the build, and APP_DIR the application directory the objects come
+# from, if they come from one; the result is in last_built when it succeeded.
 flux_build() {
-  local ks=$1 path=$2 label=$3 name err var where
-  shift 3
+  local ks=$1 path=$2 label=$3 app_dir=$4 name err var where
+  shift 4
+  last_built=""
   # A ks.yaml that cannot be read is reported with the ks.yaml rules above.
   name="$(yq ea '[select(. != null)] | .[0].metadata.name' "$ks" 2>/dev/null)" || return 0
   # shellcheck disable=SC2016 # $values is a yq variable.
@@ -233,8 +316,13 @@ flux_build() {
     "$values" "$ks" >"$tmp/ks.yaml" 2>/dev/null || return 0
   flux_builds=$((flux_builds + 1))
   if err="$(flux build kustomization "$name" --path "$path" --kustomization-file "$tmp/ks.yaml" \
-    --dry-run --strict-substitute --in-memory-build 2>&1 >/dev/null)"; then
+    --dry-run --strict-substitute --in-memory-build 2>&1 >"$tmp/built/$flux_builds.yaml")"; then
     echo "built $label"
+    last_built="$tmp/built/$flux_builds.yaml"
+    if [[ -n $keep ]]; then
+      cp "$last_built" "$keep/$flux_builds.yaml"
+      printf '%s\0%s\0%s\0' "$flux_builds.yaml" "$label" "$app_dir" >>"$keep/builds"
+    fi
   elif [[ $err =~ variable\ not\ set\ \(strict\ mode\):\ \"([A-Za-z_][A-Za-z0-9_]*)\" ]]; then
     var="${BASH_REMATCH[1]}"
     where="$(hint "$var" "$@")"
@@ -243,6 +331,10 @@ flux_build() {
     fail "$label: flux build of $path failed: $err"
   fi
 }
+
+# What flux_build built for each cluster directory: the directory as the instance's sync
+# Kustomization applies it, and its root Kustomization's overlay.
+declare -A sync_built=() root_built=()
 
 # The instance's sync Kustomization applies each cluster directory with the root's decryption and
 # substitution (tests/flux.bats proves they match), so the root's and Flux's own ks.yaml files are
@@ -257,7 +349,8 @@ for dir in kubernetes/clusters/*/; do
        "spec": {"path": strenv(sync_path), "sourceRef": {"kind": "OCIRepository", "name": "flux-system"},
          "decryption": .spec.decryption, "postBuild": {"substituteFrom": .spec.postBuild.substituteFrom}}}' \
     "$dir/ks.yaml" >"$tmp/sync.yaml" 2>/dev/null || continue
-  flux_build "$tmp/sync.yaml" "$dir" "$dir as the instance's sync Kustomization" --exclude-dir=app "$dir"
+  flux_build "$tmp/sync.yaml" "$dir" "$dir as the instance's sync Kustomization" "" --exclude-dir=app "$dir"
+  [[ -z $last_built ]] || sync_built[$dir]="$last_built"
 done
 
 # The root applies its patches to the children; only a Flux build shows they still apply. It also
@@ -265,12 +358,20 @@ done
 for ks in kubernetes/clusters/*/ks.yaml; do
   path="$(yq ea '[select(. != null)] | .[0].spec.path' "$ks" 2>/dev/null)" || continue
   path="kubernetes/${path#./}"
+  path="${path%/}"
+  # The overlay is a directory of the tree; a path that leaves it would have Flux build files from
+  # elsewhere.
+  if [[ ! $path =~ ^kubernetes(/[A-Za-z0-9._-]+)+$ || /$path/ == */../* || /$path/ == */./* || ! -d $path ]]; then
+    fail "$ks: spec.path must be a directory of the tree under kubernetes/, found ${path#kubernetes/}"
+    continue
+  fi
   [[ -z ${broken[$path]:-} ]] || continue
   hints=()
   for dir in kubernetes/apps kubernetes/components; do
     [[ -d $dir ]] && hints+=("$dir")
   done
-  flux_build "$ks" "$path" "$ks" --exclude-dir=app "${hints[@]}"
+  flux_build "$ks" "$path" "$ks" "" --exclude-dir=app "${hints[@]}"
+  [[ -z $last_built ]] || root_built[${ks%/ks.yaml}]="$last_built"
 done
 
 # Every application, enabled or not, and Flux's own, with its own substitution.
@@ -279,11 +380,54 @@ for dir in kubernetes/apps/base/*/*/ kubernetes/clusters/*/*/*/; do
   [[ -f $dir/ks.yaml && -d $dir/app && -z ${broken[$dir/app]:-} ]] || continue
   hints=("$dir/app")
   [[ -d kubernetes/components ]] && hints+=(kubernetes/components)
-  flux_build "$dir/ks.yaml" "$dir/app" "$dir/ks.yaml" "${hints[@]}"
+  flux_build "$dir/ks.yaml" "$dir/app" "$dir/ks.yaml" "$dir" "${hints[@]}"
+done
+
+# kustomizations FILE: the Flux Kustomizations among the objects FILE holds, one JSON object a line.
+kustomizations() {
+  yq -N -o json -I0 'select(. != null and .kind == "Kustomization" and ((.apiVersion // "") | test("^kustomize\.toolkit\.fluxcd\.io/")))' "$1"
+}
+
+# What a Kustomization that names another in dependsOn needs, judged on what Flux builds, so the
+# root's patches count: the other is one the cluster applies, which is one its overlay lists or one
+# its cluster directory builds, and it is Ready only once what it applies is, through wait or health
+# checks; otherwise the dependent never reconciles, or starts before its dependency's objects exist.
+dependencies=0
+for dir in kubernetes/clusters/*/; do
+  dir="${dir%/}"
+  [[ -n ${root_built[$dir]:-} && -n ${sync_built[$dir]:-} ]] || continue
+  overlay="$(yq ea '[select(. != null)] | .[0].spec.path' "$dir/ks.yaml" 2>/dev/null)" || continue
+  overlay="kubernetes/${overlay#./}"
+  overlay="${overlay%/}"
+  kustomizations "${root_built[$dir]}" >"$tmp/dependents.jsonl"
+  kustomizations "${sync_built[$dir]}" >>"$tmp/dependents.jsonl"
+  if ! jq -rs 'def ns: .metadata.namespace // "default";
+    def ready: .spec.wait == true or ((.spec.healthChecks // []) | length > 0) or ((.spec.healthCheckExprs // []) | length > 0);
+    . as $all
+    | (reduce $all[] as $k ({}; .[($k | ns) + "/" + $k.metadata.name] = $k)) as $by
+    | $all[] | . as $k | (.spec.dependsOn // [])[]
+    | ((.namespace // ($k | ns)) + "/" + .name) as $key
+    | [(if $by[$key] == null then "missing" elif ($by[$key] | ready) then "ok" else "nowait" end),
+       $k.metadata.name, (if .namespace then $key else .name end)] | join("|")' "$tmp/dependents.jsonl" >"$tmp/dependency-verdicts"; then
+    fail "$dir/ks.yaml: cannot read the Kustomizations built for $overlay, so their dependsOn were not checked"
+    continue
+  fi
+  while IFS='|' read -r verdict dependent dep; do
+    dependencies=$((dependencies + 1))
+    file="${ks_name_file[$dependent]:-$dir/ks.yaml}"
+    case $verdict in
+      missing)
+        fail "$file: Kustomization $dependent names $dep in dependsOn, but $overlay does not enable $dep, nor does $dir build it, so $dependent would never reconcile; list the ks.yaml of $dep in $overlay/kustomization.yaml, or drop the dependency"
+        ;;
+      nowait)
+        fail "$file: Kustomization $dependent names $dep in dependsOn, but $dep does not wait, as built for $overlay: it sets none of wait: true, healthChecks and healthCheckExprs, so $dependent starts before the objects of $dep are ready; set wait: true on $dep"
+        ;;
+    esac
+  done <"$tmp/dependency-verdicts"
 done
 
 if ((failures > 0)); then
   echo "kubernetes-check: $failures failure(s)" >&2
   exit 1
 fi
-echo "kubernetes-check: passed ($kustomize_builds kustomize builds, $flux_builds flux builds, $ks_files ks.yaml, $apps applications)"
+echo "kubernetes-check: passed ($kustomize_builds kustomize builds, $flux_builds flux builds, $ks_files ks.yaml, $apps applications, $dependencies dependencies)"

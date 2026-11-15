@@ -213,6 +213,17 @@ replicas() {
   depends="$(yq -N 'select(.metadata.name == "linstor-cluster") | .spec.dependsOn // [] | .[].name' "$OVERLAY" | sort | xargs)"
   echo "linstor-cluster depends on: $depends"
   [ "$depends" = "piraeus-operator snapshot-controller" ]
+  # linstor-cluster is Ready only once the operator reports the storage cluster Available, its
+  # controller answering, and every satellite configuration Applied, each at the generation it
+  # holds: kstatus reads neither from these kinds, which carry no Ready condition.
+  local exprs
+  [ "$(yq -N 'select(.metadata.name == "linstor-cluster") | .spec.wait' "$OVERLAY")" = true ]
+  exprs="$(yq -N -o json -I0 'select(.metadata.name == "linstor-cluster") | .spec.healthCheckExprs // [] | .[]' "$OVERLAY")"
+  echo "linstor-cluster health: ${exprs:-none}"
+  jq -e -s 'any(.[]; .apiVersion == "piraeus.io/v1" and .kind == "LinstorCluster"
+    and (.current | test("type == .Available.") and test("status == .True.") and test("observedGeneration == metadata.generation")))' <<<"$exprs"
+  jq -e -s 'any(.[]; .apiVersion == "piraeus.io/v1" and .kind == "LinstorSatelliteConfiguration"
+    and (.current | test("type == .Applied.") and test("status == .True.") and test("observedGeneration == metadata.generation")))' <<<"$exprs"
   # The satellites, the CSI node plugin and the HA controller run privileged with host paths.
   [ "$(yq -N 'select(.kind == "Namespace" and .metadata.name == "piraeus-datastore")
     | .metadata.labels["pod-security.kubernetes.io/enforce"]' "$OVERLAY")" = privileged ]
