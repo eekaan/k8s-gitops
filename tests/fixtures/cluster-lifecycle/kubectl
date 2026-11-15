@@ -25,6 +25,12 @@
 #                     after its label is removed, as the operator takes a moment to make it again
 #   bgp-unreadable    reading a CiliumBGPNodeConfig fails, as when the API does not answer it
 #   bgp-unreadable-out  the same, but only while the worker carries the label
+#   agent-sequence.<hostname>  what the node's Cilium agent pod answers to each read after the node is
+#                     back, one word per read, the last repeated: ready (Ready since the reboot),
+#                     stale (Ready, but since before it: the pod's last report before the node went
+#                     down) or not (not Ready); without the file it is ready at once
+#   agent-missing     no Cilium agent pod runs on the nodes
+#   agent-unreadable  reading a Cilium agent pod fails, as when the API does not answer it
 #   kube-proxy        a kube-proxy pod runs in kube-system
 #   pods              more pods, one per line as <namespace> <name> <phase> [<node> [<reason>]], on
 #                     cp-1 when no node is given; kubectl delete pod removes them
@@ -171,6 +177,41 @@ bgp_node_config() {
     spec: {bgpInstances: [{name: "cluster", peers: [{name: "edge-1"}, {name: "edge-2"}]}]},
     status: {bgpInstances: [{name: "cluster", peers: [
       {name: "edge-1", peeringState: $first}, {name: "edge-2", peeringState: $second}]}]}}'
+}
+
+# agent_pods NODE: the Cilium agent pods on NODE as a kubectl List: while the node has not come back,
+# the pod's last report from before it went down; afterwards what agent-sequence.NODE says of this
+# read.
+agent_pods() {
+  local node=$1 reads answer words status when now
+  if listed agent-unreadable; then
+    echo "Unable to connect to the server: net/http: TLS handshake timeout" >&2
+    exit 1
+  fi
+  listed agent-missing && { list < /dev/null; return; }
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  answer=stale
+  if listed "back.$node"; then
+    reads=$(cat "$state/agent-reads.$node" 2> /dev/null || echo 0)
+    echo $((reads + 1)) > "$state/agent-reads.$node"
+    answer=ready
+    if listed "agent-sequence.$node"; then
+      read -ra words < "$state/agent-sequence.$node"
+      answer=${words[reads]:-${words[${#words[@]} - 1]}}
+    fi
+  fi
+  echo "agent $node $answer" >> "$record/argv"
+  echo "$answer" > "$state/agent-last.$node"
+  # Ready since the node came back: a pod's Ready does not refresh as a node's heartbeat does.
+  status=True when=$now
+  [[ ! -e $state/back.$node ]] || when=$(date -u -r "$state/back.$node" +%Y-%m-%dT%H:%M:%SZ)
+  [[ $answer != stale ]] || when=2026-01-01T00:00:00Z
+  [[ $answer != not ]] || status=False
+  jq -n --arg node "$node" --arg status "$status" --arg when "$when" '{
+    metadata: {namespace: "kube-system", name: "cilium-\($node)", labels: {"k8s-app": "cilium"}},
+    spec: {nodeName: $node},
+    status: {phase: "Running", podIP: "198.51.100.51", conditions: [
+      {type: "Ready", status: $status, lastTransitionTime: $when}]}}' | list
 }
 
 # pod NAMESPACE NAME PHASE [K8S_APP [NODE [REASON]]]
@@ -376,6 +417,7 @@ case $args in
           ;;
         node-restriction.kubernetes.io/bgp-out-)
           rm -f "$state/bgp-out.$node"
+          echo "$node $(cat "$state/agent-last.$node" 2> /dev/null || echo unread)" >> "$record/label-removed"
           : > "$state/bgp-put-back.$node"
           echo 0 > "$state/bgp-reads.$node"
           echo "node/$node unlabeled"
@@ -424,6 +466,10 @@ case $args in
   " delete pod "*)
     shift 2
     delete_pods "$@"
+    ;;
+  *" get pods --namespace kube-system --selector k8s-app=cilium --field-selector spec.nodeName="*)
+    node=${args#*spec.nodeName=}
+    agent_pods "${node%% *}"
     ;;
   *" get pods "*) pods | list ;;
   *" get namespace flux-system "*) listed no-flux || echo namespace/flux-system ;;

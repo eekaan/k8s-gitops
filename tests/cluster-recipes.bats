@@ -677,6 +677,11 @@ KUBECONFIG
     grep -vx -- "$node" "$STATE/talos-behind" > "$STATE/talos-behind.next" || true
     mv "$STATE/talos-behind.next" "$STATE/talos-behind"
     : > "$STATE/upgraded.$node"
+    # talosctl returns only once the node is Ready, a while after its agent turned Ready.
+    now=$(date -u +%s)
+    while [[ $(date -u +%s) == "$now" ]]; do
+      command sleep 0.1
+    done
     echo "== $node: upgraded to v1.14.6"
     ;;
   upgrade-k8s)
@@ -706,6 +711,10 @@ KUBECONFIG
     fi
     # The node goes down and comes back, its kubelet reporting Ready again.
     : > "$STATE/rebooted.$target"
+    now=$(date -u +%s)
+    while [[ $(date -u +%s) == "$now" ]]; do
+      command sleep 0.1
+    done
     echo "== $target: rebooted"
     ;;
   etcd)
@@ -866,6 +875,37 @@ case $line in
     done
     printf '{"nodes":[%s]}\n' "$(IFS=,; echo "${entries[*]}")"
     ;;
+  *" get pods --namespace kube-system --selector k8s-app=cilium --field-selector spec.nodeName="*)
+    # The Cilium agent's pod on a node: Ready, since the node came back (a pod's Ready does not
+    # refresh as a node's heartbeat does), unless agent-sequence.NODE says what
+    # each read answers after the node was upgraded or rebooted, one word per read, the last
+    # repeated: ready, stale (Ready, but since before the reboot: what the pod last reported before
+    # the node went down) or not (not Ready); before then it is Ready since long ago. agent-missing:
+    # no pod runs on the node.
+    node=${line#*spec.nodeName=}
+    node=${node%% *}
+    answer=ready when=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    if [[ -e $STATE/upgraded.$node || -e $STATE/rebooted.$node ]]; then
+      reads=$(cat "$STATE/agent-reads.$node" 2> /dev/null || echo 0)
+      echo $((reads + 1)) > "$STATE/agent-reads.$node"
+      if [[ -e $STATE/agent-sequence.$node ]]; then
+        read -ra words < "$STATE/agent-sequence.$node"
+        answer=${words[reads]:-${words[${#words[@]} - 1]}}
+      fi
+      when=$(date -u -r "$STATE/upgraded.$node" +%Y-%m-%dT%H:%M:%SZ 2> /dev/null || date -u -r "$STATE/rebooted.$node" +%Y-%m-%dT%H:%M:%SZ)
+    else
+      when=2026-01-01T00:00:00Z
+    fi
+    [[ $answer != stale ]] || when=2026-01-01T00:00:00Z
+    status=True
+    [[ $answer != not ]] || status=False
+    echo "agent $node $answer" >> "$RECORD/argv"
+    echo "$answer" > "$STATE/agent-last.$node"
+    items=()
+    [[ -e $STATE/agent-missing ]] || items+=("{\"metadata\": {\"namespace\": \"kube-system\", \"name\": \"cilium-$node\"}, \"spec\": {\"nodeName\": \"$node\"},
+      \"status\": {\"phase\": \"Running\", \"conditions\": [{\"type\": \"Ready\", \"status\": \"$status\", \"lastTransitionTime\": \"$when\"}]}}")
+    printf '{"apiVersion": "v1", "kind": "List", "items": [%s]}\n' "$(IFS=,; echo "${items[*]}")"
+    ;;
   *" label node "*)
     # The BGP opt-out label, which the CiliumBGPNodeConfig of a worker follows after bgp-slow reads:
     # bgp-out.NODE says the node carries it, and bgp-held.NODE that its configuration stays all the
@@ -880,6 +920,7 @@ case $line in
         ;;
       *" node-restriction.kubernetes.io/bgp-out- "*)
         rm -f "$STATE/bgp-out.$node"
+        echo "$node $(cat "$STATE/agent-last.$node" 2> /dev/null || echo unread)" >> "$RECORD/label-removed"
         echo 0 > "$STATE/bgp-reads.$node"
         ;;
     esac
@@ -2811,6 +2852,180 @@ EOF
   [ -z "$(upgrades)" ]
 }
 
+@test "An upgrade waits for each worker to forward before it announces again and before the next worker is taken out" {
+  fake_cluster
+  label='node-restriction.kubernetes.io/bgp-out'
+  printf '%s\n' worker-1 worker-2 > "$STATE/talos-behind"
+  # worker-1's agent pod still reports the Ready it posted before the upgrade for longer than the
+  # settle time, which is no sign that it forwards, then is Ready since the upgrade; worker-2's
+  # agent is Ready, not Ready, and Ready again.
+  echo "$(printf 'stale %.0s' {1..20})ready" > "$STATE/agent-sequence.worker-1"
+  echo 'ready not ready' > "$STATE/agent-sequence.worker-2"
+
+  recipe cluster-upgrade --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  previous=0
+  for node in worker-1 worker-2; do
+    out=$(call_line "^kubectl label node $node $label=true( |\$)")
+    uncordoned=$(call_line "^kubectl uncordon $node( |\$)")
+    first=$(call_line "^agent $node ")
+    last=$(last_call_line "^agent $node ")
+    back=$(call_line "^kubectl label node $node $label-\$")
+    for call in "$out" "$uncordoned" "$first" "$last" "$back"; do
+      [ -n "$call" ]
+    done
+    # Taken out only after the worker before is back, uncordoned, then its agent is read until it is
+    # Ready, and only then is the label removed.
+    [ "$previous" -lt "$out" ]
+    [ "$uncordoned" -lt "$first" ]
+    [ "$last" -lt "$back" ]
+    [ "$(grep "^$node " "$RECORD/label-removed")" = "$node ready" ]
+    [ "$(calls "^kubectl get pods --namespace kube-system --selector k8s-app=cilium --field-selector spec.nodeName=$node " | wc -l)" -eq "$(calls "^agent $node " | wc -l)" ]
+    # The agent has stayed Ready for FORWARD_SETTLE seconds, 30 by default, on the clock, counted from
+    # its last read that was not Ready: the sleep that follows that read and fifteen two-second ones.
+    unready=$(grep -nE "^agent $node (not|stale)\$" "$RECORD/argv" | tail -1 | cut -d: -f1)
+    settled=$(awk -v from="$unready" -v to="$back" 'NR > from && NR < to && $1 == "sleep" { total += $2 } END { print total + 0 }' "$RECORD/argv")
+    [ "$settled" -ge 32 ]
+    [ "$settled" -le 34 ]
+    previous=$back
+  done
+  [ "$(calls '^kubectl label ' | awk '{ print ($NF == "'"$label"'-") ? "in" : "out" }' | paste -sd' ')" = 'out in out in' ]
+  [ -z "$(calls '^agent cp-')" ]
+
+  # A worker whose agent never reports that it forwards stays out, is not followed by the next, and
+  # the run says so last; --no-bgp-wait does not skip the wait.
+  for flag in '' --no-bgp-wait; do
+    echo "flag: $flag"
+    printf '%s\n' worker-1 worker-2 > "$STATE/talos-behind"
+    rm -f "$STATE"/upgraded.* "$STATE"/agent-reads.* "$STATE"/agent-last.* "$STATE"/bgp-out.* "$STATE"/cordoned.*
+    echo not > "$STATE/agent-sequence.worker-1"
+    : > "$RECORD/argv"
+    rm -f "$RECORD/label-removed"
+    reset_environment
+    with FORWARD_WAIT=40
+    next_second
+
+    # shellcheck disable=SC2086 # the flag is one word or none
+    recipe cluster-upgrade --yes $flag < /dev/null
+
+    [ "$status" -ne 0 ]
+    [ -e "$STATE/bgp-out.worker-1" ]
+    [ ! -e "$RECORD/label-removed" ]
+    [ -n "$(calls "^kubectl uncordon worker-1( |\$)")" ]
+    [ -z "$(calls 'label node worker-2')" ]
+    [ -z "$(calls '^kubectl drain worker-2')" ]
+    [[ $output == *"the Cilium agent on worker-1 has not been Ready since the upgrade for 30s within 40s"* ]]
+    [[ $(grep -v '^error: recipe ' <<< "$output" | tail -1) == *"worker-1 is out of BGP"*"kubectl label node worker-1 $label-"* ]]
+  done
+}
+
+@test "A wait given as a number too long to hold is refused before anything runs" {
+  fake_cluster
+  cp "$ROOT/scripts/cluster-reboot" "$REPO/scripts/cluster-reboot"
+  mkdir -p "$CLUSTER/clusterconfig"
+  : > "$CLUSTER/clusterconfig/kubeconfig"
+  printf '%s\n' worker-1 > "$STATE/talos-behind"
+  printf '%s\n' worker-2 > "$STATE/pending"
+  # Each input, with the recipes that read it. A value of nineteen digits or more wraps in 64-bit
+  # arithmetic into a short, a negative or an endless wait; ten are refused too, as the bound is nine.
+  inputs=(
+    'BGP_WAIT|cluster-reboot worker-2 --yes|cluster-upgrade --yes|cluster-talos --yes --reboot'
+    'REBOOT_WAIT|cluster-reboot worker-2 --yes|cluster-talos --yes --reboot'
+    'FORWARD_WAIT|cluster-reboot worker-2 --yes|cluster-upgrade --yes|cluster-talos --yes --reboot'
+    'FORWARD_SETTLE|cluster-reboot worker-2 --yes|cluster-upgrade --yes|cluster-talos --yes --reboot'
+    'TALOS_WAIT|cluster-talos --yes|cluster-talos --yes --reboot|cluster-bootstrap'
+    '--tolerate|cluster-reboot worker-2 --yes|cluster-talos --yes --reboot'
+  )
+  for input in "${inputs[@]}"; do
+    IFS='|' read -ra recipes <<< "$input"
+    name=${recipes[0]}
+    for run in "${recipes[@]:1}"; do
+      for value in 1234567890 9999999999999999999 99999999999999999999; do
+        echo "$name=$value for $run"
+        reset_environment
+        : > "$RECORD/argv"
+        args=()
+        if [[ $name == --tolerate ]]; then
+          args=(--tolerate "$value")
+        else
+          with "$name=$value"
+        fi
+
+        # shellcheck disable=SC2086 # the recipe and its arguments
+        recipe $run "${args[@]}" < /dev/null
+
+        [ "$status" -ne 0 ]
+        [[ $output == *"$name "*" a whole number of seconds of at most 9 digits"* ]]
+        [ -z "$(calls '^(kubectl|talman|timeout|rclone|cluster-reboot|agent) ')" ]
+        [ ! -e "$CLUSTER/clusterconfig/cluster.lock" ]
+      done
+    done
+  done
+
+  # A leading zero is no octal: 08 and 010 are eight and ten, and the run goes on to what follows,
+  # here a node the cluster does not have.
+  for name in BGP_WAIT REBOOT_WAIT FORWARD_WAIT FORWARD_SETTLE --tolerate; do
+    for value in 08 010 000000008; do
+      echo "$name=$value"
+      reset_environment
+      with BGP_WAIT=0 FORWARD_WAIT=10 FORWARD_SETTLE=0
+      args=()
+      if [[ $name == --tolerate ]]; then
+        args=(--tolerate "$value")
+      else
+        with "$name=$value"
+      fi
+
+      recipe cluster-reboot no-such-node --yes "${args[@]}" < /dev/null
+
+      [ "$status" -ne 0 ]
+      [[ $output == *"no-such-node is not a node of lab-sto2"* ]]
+      [[ $output != *"too great for base"* ]]
+    done
+  done
+  reset_environment
+  with TALOS_WAIT=08
+  recipe cluster-talos < /dev/null
+  [[ $output != *"TALOS_WAIT is not"* ]]
+  [[ $output != *"too great for base"* ]]
+
+  # A settle time longer than the wait could never be met, so it is refused too.
+  reset_environment
+  with FORWARD_WAIT=10 FORWARD_SETTLE=11
+  : > "$RECORD/argv"
+
+  recipe cluster-reboot worker-2 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"FORWARD_SETTLE is 11 seconds, longer than FORWARD_WAIT, 10"* ]]
+  [ -z "$(calls '^(kubectl|talman) ')" ]
+}
+
+@test "The lock makes the cluster's directory private when it creates it" {
+  fake_cluster
+  umask 022
+  # A checkout that has no clusterconfig/ yet.
+  rm -rf "$CLUSTER/clusterconfig"
+  git_repository
+  before=$(git -C "$REPO" status --porcelain)
+
+  recipe cluster-talos --yes < /dev/null
+
+  [[ $output != *"is busy"* ]]
+  [ "$(stat -c %a "$CLUSTER/clusterconfig")" = 700 ]
+  [ -e "$CLUSTER/clusterconfig/cluster.lock" ]
+  # What git sees is the same: the directory and its lock are ignored.
+  [ "$(git -C "$REPO" status --porcelain)" = "$before" ]
+
+  # A directory that is there is left as it is.
+  chmod 755 "$CLUSTER/clusterconfig"
+
+  recipe cluster-talos --yes < /dev/null
+
+  [ "$(stat -c %a "$CLUSTER/clusterconfig")" = 755 ]
+}
+
 @test "A reboot that cluster-talos makes and that stops with a worker out says so last, with the command that puts it back" {
   fake_cluster
   mkdir -p "$CLUSTER/clusterconfig"
@@ -2948,7 +3163,7 @@ EOF
   [ "$status" -eq 2 ]
 }
 
-@test "Only one recipe at a time drains, reboots, upgrades or applies to a cluster's nodes" {
+@test "Only one of cluster-reboot, cluster-upgrade, cluster-upgrade-k8s and cluster-talos runs at a time on a cluster" {
   fake_cluster
   cp "$ROOT/scripts/cluster-reboot" "$REPO/scripts/cluster-reboot"
   mkdir -p "$CLUSTER/clusterconfig"
@@ -2967,10 +3182,14 @@ EOF
   # A descriptor open on the lock file without holding the lock, named in CLUSTER_LOCK_FD, lets no
   # run past it either.
   exec {spoof}> "$lock"
+  # Nor does a descriptor open on another file, which flock would lock without anyone else's lock in
+  # its way.
+  exec {elsewhere}> "$BATS_TEST_TMPDIR/not-the-lock"
   for run in 'cluster-upgrade-k8s --yes' 'cluster-upgrade --yes' 'cluster-talos --yes --reboot' 'cluster-reboot worker-2 --yes'; do
-    for claimed in no yes; do
+    for claimed in no yes elsewhere; do
       reset_environment
-      [[ $claimed == no ]] || with CLUSTER_LOCK_FD="$spoof"
+      [[ $claimed != yes ]] || with CLUSTER_LOCK_FD="$spoof"
+      [[ $claimed != elsewhere ]] || with CLUSTER_LOCK_FD="$elsewhere"
       : > "$RECORD/argv"
 
       # shellcheck disable=SC2086 # the recipe and its arguments
@@ -2981,7 +3200,7 @@ EOF
       [ -z "$(calls '^(kubectl|talman|rclone|cluster-reboot|timeout) ')" ]
     done
   done
-  exec {spoof}>&-
+  exec {spoof}>&- {elsewhere}>&-
   kill "$holder"
   wait "$holder" || true
 

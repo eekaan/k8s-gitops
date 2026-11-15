@@ -4,7 +4,7 @@
 #   reboot-gap    while the node reboots, the API stops answering for this many seconds
 #   reboot-fails  the reboot fails
 #   never-back    the node's kubelet never reports again
-#   interrupt     the recipe is sent this signal, INT or TERM, while talman reboots, and talman ends
+#   interrupt     the recipe is sent this signal, INT, TERM or KILL, while talman reboots, and talman ends
 #   clean-shutdown  the shutdown leaves no pod behind
 #   etcd-down.NODE  the etcd member of the control plane NODE does not come back once NODE is
 #                   rebooted
@@ -165,6 +165,8 @@ if [[ ! -e $state/never-back ]]; then
   while IFS= read -r node; do
     : > "$state/back.$node"
   done < "$state/rebooted"
+  # talosctl returns once the node is Ready, a while after its agent turned Ready.
+  sleep 1
 fi
 echo "== rebooted $(paste -sd, "$state/rebooted") at $addresses"
 printf '%s\n' "talman reboot finished" >> "$record/argv"

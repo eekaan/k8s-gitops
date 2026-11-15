@@ -54,8 +54,10 @@ it refines that record in three places, which stand as written otherwise:
   kubelet from setting or removing, and Cilium's agent closes a node's sessions with a notification
   once it has stopped matching and its `CiliumBGPNodeConfig` is gone, which the edges, not
   negotiating the bit, answer by withdrawing at once. The recipes wait until the node's
-  `CiliumBGPNodeConfig` is gone before the drain and put the node back, waiting for the sessions
-  that were established before, once it is Ready; the node's Cilium agent is what takes the label
+  `CiliumBGPNodeConfig` is gone before the drain and put the node back once it is Ready and its
+  Cilium agent has stayed Ready for a settle time, forward first and announce second, as an edge
+  hashes connections to a worker the moment it announces, waiting then for the sessions that were
+  established before; the node's Cilium agent is what takes the label
   up, so for a worker whose agent is not running `--no-bgp-wait` skips the first wait, at the cost
   of paths kept as stale for up to the restart time. Graceful restart stays on, as an agent restart
   keeps its paths. This refines the restart time's application above: it now applies to a worker
