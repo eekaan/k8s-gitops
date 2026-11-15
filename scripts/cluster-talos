@@ -7,6 +7,9 @@
 # added, is configured only with --onboard: the maintenance service authenticates nothing, and a
 # node's configuration carries the cluster's keys. With nothing to change, nothing is asked or
 # applied. No health check runs, for the reason scripts/cluster-bootstrap gives.
+# It holds the cluster's lock (lock_cluster in scripts/lib/cluster.sh) for the whole run, and
+# refuses while another recipe that drains, reboots, upgrades or applies to the cluster's nodes
+# holds it.
 #
 # With --first <node>, a change that could cut the nodes off, such as their firewall, is tried before
 # it is kept: once scripts/cluster-check passes, the named node and then every other node the
@@ -24,12 +27,13 @@
 # the node runs it, and names each node on which they differ, which runs the old setting until it
 # reboots, and the recipe that reboots it: once the nodes keep the configuration, and also when the
 # rollout stops after some took it, as a later run finds nothing to change on them. With --reboot it
-# reboots the nodes itself, one at a time, through scripts/cluster-reboot, which drains each and
-# waits for it to be Ready again, a control plane with its etcd member, and stops at the first that
-# does not come back; --tolerate <seconds> is passed on to it. A reboot is not the default: a control
-# plane leaves its etcd and the API load balancer for the time it takes, which the operator, not the
-# recipe, decides to accept.
-# Usage: scripts/cluster-talos [cluster] [--onboard] [--yes] [--reboot [--tolerate <seconds>]] [--first <node>]
+# reboots the nodes itself, one at a time, through scripts/cluster-reboot, which takes a worker out
+# of BGP first, drains each and waits for it to be Ready again, a control plane with its etcd member,
+# and stops at the first that does not come back, saying last which worker is out of BGP and the
+# command that puts it back; --tolerate <seconds> and --no-bgp-wait are passed on to it. A reboot is
+# not the default: a control plane leaves its etcd and the API load balancer for the time it takes,
+# which the operator, not the recipe, decides to accept.
+# Usage: scripts/cluster-talos [cluster] [--onboard] [--yes] [--reboot [--tolerate <seconds>] [--no-bgp-wait]] [--first <node>]
 set -euo pipefail
 
 here=$(dirname "$0")
@@ -69,11 +73,11 @@ lb_attempts=15 lb_wait=20 lb_poll=5
 # than 240 seconds after the try, as when earlier ones ran long, keep nothing: the node reverts.
 
 usage() {
-  infra_error "usage: cluster-talos [cluster] [--onboard] [--yes] [--reboot [--tolerate <seconds>]] [--first <node>]"
+  infra_error "usage: cluster-talos [cluster] [--onboard] [--yes] [--reboot [--tolerate <seconds>] [--no-bgp-wait]] [--first <node>]"
   exit 2
 }
 
-cluster='' confirmed=0 onboard=() first='' reboot=0 tolerate=()
+cluster='' confirmed=0 onboard=() first='' reboot=0 tolerate=() bgp_wait=()
 while (($#)); do
   case $1 in
     --yes) confirmed=1 ;;
@@ -83,6 +87,7 @@ while (($#)); do
       tolerate=(--tolerate "$2")
       shift
       ;;
+    --no-bgp-wait) bgp_wait=(--no-bgp-wait) ;;
     --onboard) onboard=(--onboard-new-nodes) ;;
     --first)
       (($# > 1)) && [[ $2 != -* ]] || usage
@@ -100,6 +105,10 @@ while (($#)); do
 done
 if ((${#tolerate[@]} > 0 && !reboot)); then
   infra_error "--tolerate is for the reboots --reboot makes: it is passed to scripts/cluster-reboot"
+  exit 2
+fi
+if ((${#bgp_wait[@]} > 0 && !reboot)); then
+  infra_error "--no-bgp-wait is for the reboots --reboot makes: it is passed to scripts/cluster-reboot"
   exit 2
 fi
 if [[ -n $first && ${#onboard[@]} -gt 0 ]]; then
@@ -129,6 +138,27 @@ if [[ -z $first ]]; then
   require_commands "${tools[@]}" || complete=0
 fi
 ((complete))
+step="locking $cluster"
+lock_cluster
+# Ctrl-C and SIGTERM end the run as a failure, through its exit trap, even when the program they
+# interrupted handles the signal itself and exits 0, after which bash would otherwise go on.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# reboot_on_exit STATUS: when STATUS is a failure, names the step the run failed in, as
+# report_failed_step has it do, and then each worker that carries the label that has it out of BGP,
+# which a cluster-reboot that stopped left out: its line is the last. --first has its own on_exit.
+reboot_on_exit() {
+  local status=$1
+  failed_step "$status"
+  if ((status != 0)); then
+    bgp_report_labelled
+  fi
+  exit "$status"
+}
+if ((reboot)); then
+  trap 'reboot_on_exit $?' EXIT
+fi
 
 # joined: the lines on standard input, joined with commas.
 joined() {
@@ -159,7 +189,7 @@ reboot_nodes() {
     step="rebooting $node"
     echo "cluster-talos: rebooting $node"
     rest=("${rest[@]:1}")
-    if ! "$here/cluster-reboot" "$node" "$cluster" --yes "${tolerate[@]}"; then
+    if ! "$here/cluster-reboot" "$node" "$cluster" --yes "${tolerate[@]}" "${bgp_wait[@]}"; then
       infra_error "$node did not come back, Ready with its etcd member if it is a control plane, or the API did not ride it out: cluster-reboot $node failed, as its output above says, so nothing else is rebooted"
       infra_error "not rebooted: $( ((${#rest[@]} > 0)) && printf '%s\n' "${rest[@]}" | joined || echo 'no other node')"
       exit 1
@@ -289,11 +319,15 @@ fi
 # end.
 
 # on_exit STATUS: removes said; then, when STATUS is a failure, names the step the rollout failed in,
-# as report_failed_step has it do.
+# as report_failed_step has it do, and, when it rebooted nodes, each worker that carries the label
+# that has it out of BGP, which a cluster-reboot that stopped left out: its line is the last.
 on_exit() {
   local status=$1
   rm -f -- "$said"
   failed_step "$status"
+  if ((status != 0 && reboot)); then
+    bgp_report_labelled
+  fi
   exit "$status"
 }
 
