@@ -21,6 +21,16 @@ api_address: 192.0.2.210
 # documentation range is large enough.
 pod_subnet: 10.244.0.0/16
 service_subnet: 203.0.113.0/24
+# The operator allowlist: two networks, apart from every other range here.
+operator_cidrs:
+  - 198.51.100.0/26
+  - 198.51.100.64/26
+# The API load balancer's own addresses on the node network: its address, and the networks of the
+# node network's DHCP pool, from which its ports take theirs. And the CI host's address there.
+api_load_balancer_addresses:
+  - 192.0.2.10/32
+  - 192.0.2.96/28
+ci_host_address: 192.0.2.6
 # The plumbing stack's numbers for Services announced over BGP: the range LoadBalancer addresses come
 # from, outside the node subnet, and the documentation AS numbers and two edge addresses on the node
 # subnet.
@@ -31,28 +41,35 @@ bgp:
   edge_addresses:
     - 192.0.2.7
     - 192.0.2.8
+# Each node at its floating address, and with its own address on the node network.
 nodes:
   - hostname: cp-1
     role: controlplane
     address: 192.0.2.211
     floating_ip: 192.0.2.211
+    private_address: 192.0.2.20
   - hostname: cp-2
     role: controlplane
     address: 192.0.2.212
     floating_ip: 192.0.2.212
+    private_address: 192.0.2.21
   - hostname: cp-3
     role: controlplane
     address: 192.0.2.213
     floating_ip: 192.0.2.213
+    private_address: 192.0.2.22
   - hostname: worker-1
     role: worker
     address: 192.0.2.221
     floating_ip: 192.0.2.221
+    private_address: 192.0.2.30
   - hostname: worker-2
     role: worker
     address: 192.0.2.222
     floating_ip: 192.0.2.222
+    private_address: 192.0.2.31
   - hostname: worker-3
     role: worker
     address: 192.0.2.223
     floating_ip: 192.0.2.223
+    private_address: 192.0.2.32
