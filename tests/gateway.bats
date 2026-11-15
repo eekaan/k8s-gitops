@@ -410,6 +410,9 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   built kromgo
   [ "$(yq -N 'select(.kind == "HTTPRoute") | .spec.parentRefs[].name' "$BUILT")" = "$gateway" ]
   [ "$(yq -N 'select(.kind == "HTTPRoute") | .metadata.namespace' "$BUILT")" = kromgo ]
+  built open-webui
+  [ "$(yq -N 'select(.kind == "HTTPRoute") | .spec.parentRefs[].name' "$BUILT")" = "$gateway" ]
+  [ "$(yq -N 'select(.kind == "HTTPRoute") | .metadata.namespace' "$BUILT")" = ai-system ]
 }
 
 @test "The Gateway listens on exactly the ports the edge routers translate" {
@@ -503,7 +506,7 @@ tree_without() {
   done
   # Leaving the Gateway, the applications that have a route on it and the DNS records of their
   # routes out builds: nothing else names them.
-  tree_without gateway-public hello-route n8n kromgo external-dns
+  tree_without gateway-public hello-route n8n kromgo external-dns open-webui
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]

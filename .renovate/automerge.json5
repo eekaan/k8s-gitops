@@ -92,6 +92,13 @@
       automerge: false,
     },
     {
+      // Open WebUI is before 1.0 and its minors migrate its database, which a person reads the
+      // release notes for (docs/kubernetes.md, Open WebUI).
+      description: "Open WebUI",
+      matchPackageNames: ["ghcr.io/open-webui/open-webui"],
+      automerge: false,
+    },
+    {
       description: "Anything pinned in mise.toml or versions.yaml",
       matchFileNames: ["mise.toml", "versions.yaml"],
       automerge: false,

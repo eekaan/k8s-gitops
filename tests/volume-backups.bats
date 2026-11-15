@@ -578,9 +578,9 @@ unknown_fields() {
   echo "volsync: ${enabled:-not applied}; namespace: ${namespace:-none}; applications with the component: ${opted:-none}"
   [ "$enabled" = ./apps/base/volsync-system/volsync/app ]
   [ "$namespace" = volsync-system ]
-  # The test application and n8n, which keeps its data on a volume of the component's, are the
-  # applications that take it.
-  [ "$(paste -sd' ' - <<<"$opted")" = "n8n $DEMO" ]
+  # The test application, n8n and Open WebUI, which keep their data on a volume of the component's,
+  # are the applications that take it.
+  [ "$(paste -sd' ' - <<<"$opted")" = "n8n open-webui $DEMO" ]
   # It waits for the operator, External Secrets, LINSTOR's classes and the store's application, each
   # of which the overlay applies.
   dependencies="$(DEMO="$DEMO" yq -N 'select(.kind == "Kustomization" and .metadata.name == strenv(DEMO)) | .spec.dependsOn[].name' "$overlay" | sort | paste -sd' ' -)"

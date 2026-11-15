@@ -1,0 +1,22 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/ocirepository-source-v1.json
+# The app-template chart from its publisher's public OCI registry, as the other applications of the
+# tree take it (components/common has its defaults): Open WebUI is a container and its Service, and
+# the chart leaves the environment, the probes, the security context and the volumes to values this
+# tree reads in full. The object is named after the application: the namespace holds one per
+# application, and two applications applying one name would take turns owning it.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: open-webui
+spec:
+  # The tag is pinned: a new chart arrives by a change to this file, which Flux applies at once.
+  interval: 12h
+  # The chart's packaged layer, which helm-controller reads as it is.
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy
+  url: oci://ghcr.io/bjw-s-labs/helm/app-template
+  ref:
+    # renovate: datasource=docker depName=ghcr.io/bjw-s-labs/helm/app-template
+    tag: 5.3.0

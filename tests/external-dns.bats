@@ -492,7 +492,7 @@ tree_without() {
   [ "$status" -eq 0 ]
   # Without the Gateway and the applications whose routes name it, nothing but external-dns needs
   # the Gateway, so it is the one refused, naming it.
-  tree_without gateway-public hello-route n8n kromgo
+  tree_without gateway-public hello-route n8n kromgo open-webui
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -ne 0 ]
