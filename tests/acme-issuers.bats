@@ -1,8 +1,9 @@
 #!/usr/bin/env bats
 # Proves features/certificates.feature; each test carries its scenario's title.
-# Needs helm, kustomize, flux, yq and jq on PATH (the versions pinned for the repository). The
-# cert-manager chart is pulled once per run from its public registry; building and rendering are
-# offline, as Flux applies the tree, with the placeholders of the cluster's example key lists.
+# Needs helm, kustomize, flux, yq and jq on PATH (the versions pinned for the repository). The test
+# of the self-check renders the whole tree with scripts/render, its charts pulled from their public
+# registries; building and rendering are offline, as Flux applies the tree, with the placeholders of
+# the cluster's example key lists.
 
 # flux build rewrites the kustomization.yaml of the application it builds in this checkout and puts
 # it back afterwards, so two builds at once could leave the rewritten file behind.
@@ -21,7 +22,6 @@ setup_file() {
 setup() {
   REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   CLUSTER="$REPO/kubernetes/clusters/lab-sto2"
-  KUBE="$(yq -e '.kubernetes' "$REPO/versions.yaml")"
   # Nothing to connect to: a step that needed a cluster fails instead of finding one.
   export KUBECONFIG="$BATS_TEST_TMPDIR/no-kubeconfig"
   unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
@@ -151,7 +151,7 @@ tree_copy() {
 }
 
 @test "An ACME issuer solves DNS-01 only for names under the cluster's domain" {
-  local issuer server account zones domain accounts=() args
+  local issuer server account zones domain accounts=()
   built acme-issuers
   domain="$(yq -e '.CLUSTER_DOMAIN' "$EXAMPLE")"
   [ "$(names "$BUILT" ClusterIssuer | tr '\n' ' ')" = "letsencrypt-production letsencrypt-staging " ]
@@ -184,42 +184,60 @@ tree_copy() {
   [ "$(object "$BUILT" ClusterIssuer letsencrypt-staging | yq '.spec.acme.solvers[0].selector.dnsZones | join(" ")')" = other.example.org ]
   [ "$(object "$BUILT" ClusterIssuer letsencrypt-production | yq '.spec.acme.solvers[0].selector.dnsZones | join(" ")')" = other.example.org ]
   unset VARS
-  # The controller checks the challenge against public resolvers alone: the cluster's own resolver
-  # may not see the zone, and caches what it asked for.
-  render_cert_manager
-  args="$(yq -N 'select(.kind == "Deployment" and .metadata.name == "cert-manager") | .spec.template.spec.containers[0].args[]' "$RENDERED")"
-  echo "controller arguments: $args"
-  grep -qx -- '--dns01-recursive-nameservers-only=true' <<<"$args"
-  [ "$(grep -c -- '^--dns01-recursive-nameservers=' <<<"$args")" -eq 1 ]
-  # One name over HTTPS, so the tree holds no address. With the nameservers-only flag the self-check
-  # asks every listed resolver and fails when any one fails to answer or lacks the record, so each
-  # one added is one more that must be up: it is not redundancy, and one is the fewest.
-  [ "$(grep -- '^--dns01-recursive-nameservers=' <<<"$args" | cut -d= -f2- | tr ',' '\n' | grep -cE '^https://[a-z0-9.-]+/[a-z-]+$')" -eq 1 ]
 }
 
-# render_cert_manager: the cert-manager chart the application installs, rendered as helm-controller
-# does, from the URL and tag of its OCIRepository and the values of its ConfigMap. Writes
-# $BATS_TEST_TMPDIR/rendered.yaml and sets RENDERED.
-render_cert_manager() {
-  local url tag pulled app_ks="$BATS_TEST_TMPDIR/cm-ks.yaml" built="$BATS_TEST_TMPDIR/cm-built.yaml" values="$BATS_TEST_TMPDIR/cm-values.yaml"
-  app_dir cert-manager
-  # shellcheck disable=SC2016 # $vars is a yq variable.
-  yq ea 'select(fileIndex == 0) as $vars | select(fileIndex == 1 and . != null)
-    | .spec.postBuild.substitute = $vars' "$EXAMPLE" "$REPO/$APP_DIR/ks.yaml" >"$app_ks"
-  (cd "$REPO" && flux build kustomization cert-manager --path "./$APP_DIR/app" \
-    --kustomization-file "$app_ks" --dry-run --strict-substitute) >"$built"
-  url="$(yq -N 'select(.kind == "OCIRepository") | .spec.url' "$built")"
-  tag="$(yq -N 'select(.kind == "OCIRepository") | .spec.ref.tag' "$built")"
-  yq -N 'select(.kind == "ConfigMap") | .data["values.yaml"]' "$built" >"$values"
-  pulled="$BATS_FILE_TMPDIR/charts/$tag"
-  if [ ! -d "$pulled" ]; then
-    mkdir -p "$pulled"
-    helm pull "$url" --version "$tag" --destination "$pulled"
+@test "The DNS-01 self-check asks the zone's own nameservers, so a cached negative answer cannot hold a challenge" {
+  local deployment controller args path mount configmap config resolvers
+  # The controller as the cluster would run it, so a value set in the HelmRelease itself, a
+  # post-renderer or a patch of a Kustomization on the way counts as much as the values file.
+  cluster_render
+  deployment="$(rendered Deployment.apps_cert-manager_cert-manager.yaml)"
+  controller='.spec.template.spec.containers[] | select(.name == "cert-manager-controller")'
+  [ "$(yq "[$controller] | length" "$deployment")" -eq 1 ]
+  args="$(yq "$controller | .args[]" "$deployment")"
+  echo "controller arguments: $args"
+  # The nameservers-only setting would send the TXT lookup to the listed resolver, whose cache holds
+  # a negative answer for the zone's SOA time. Without it the controller finds the zone's
+  # nameservers through the resolver and asks each of them for the record. It can be given as an
+  # argument or in the config file the controller loads with --config, so both are read.
+  [ -z "$(grep -- '^--dns01-recursive-nameservers-only' <<<"$args" || true)" ]
+  # The config file is the one --config names, in the ConfigMap mounted at its directory.
+  [ "$(grep -c -- '^--config=' <<<"$args")" -eq 1 ]
+  path="$(grep -- '^--config=' <<<"$args" | cut -d= -f2-)"
+  mount="$(DIR="${path%/*}" yq "$controller | .volumeMounts[] | select(.mountPath == strenv(DIR)) | .name" "$deployment")"
+  configmap="$(MOUNT="$mount" yq '.spec.template.spec.volumes[] | select(.name == strenv(MOUNT)) | .configMap.name' "$deployment")"
+  config="$(KEY="${path##*/}" yq '.data[strenv(KEY)]' "$(rendered "ConfigMap_cert-manager_$configmap.yaml")")"
+  echo "controller config, $path from ConfigMap $configmap: $config"
+  [ "$(yq '.kind' <<<"$config")" = ControllerConfiguration ]
+  [ "$(yq '.acmeDNS01Config.recursiveNameserversOnly // false' <<<"$config")" = false ]
+  [ "$(yq '.acmeDNS01Config | has("recursiveNameservers")' <<<"$config")" = false ]
+  # The resolver that finds the zone and its nameservers is one name over HTTPS, so the tree holds no
+  # address, and only one: each endpoint listed is one more destination the controller's egress
+  # must allow.
+  [ "$(grep -c -- '^--dns01-recursive-nameservers=' <<<"$args")" -eq 1 ]
+  resolvers="$(grep -- '^--dns01-recursive-nameservers=' <<<"$args" | cut -d= -f2-)"
+  echo "resolvers: $resolvers"
+  [ "$(tr ',' '\n' <<<"$resolvers" | grep -cE '^https://([a-z0-9-]+\.)+[a-z]{2,}/[a-z-]+$')" -eq 1 ]
+  [ "$(tr ',' '\n' <<<"$resolvers" | wc -l)" -eq 1 ]
+}
+
+# cluster_render: the tree as Flux and helm-controller would apply it on lab-sto2, rendered by
+# scripts/render: every Kustomization built from the cluster's root with the patches it is given on
+# the way, and each HelmRelease's chart rendered with the values of its ConfigMaps, its own values
+# over them and its post-renderers. Sets RENDER to lab-sto2's render, a directory per application.
+cluster_render() {
+  "$REPO/scripts/render" "$BATS_TEST_TMPDIR/render" >/dev/null
+  RENDER="$BATS_TEST_TMPDIR/render/${CLUSTER##*/}"
+}
+
+# rendered FILE: the path of the one file named FILE among the applications of $RENDER.
+rendered() {
+  local files=("$RENDER"/*/"$1")
+  if [ "${#files[@]}" -ne 1 ] || [ ! -f "${files[0]}" ]; then
+    echo "$1 is not one file of the render: ${files[*]}" >&2
+    return 1
   fi
-  RENDERED="$BATS_TEST_TMPDIR/rendered.yaml"
-  helm template cert-manager "$(echo "$pulled"/*.tgz)" --namespace cert-manager --kube-version "$KUBE" --include-crds \
-    --api-versions monitoring.coreos.com/v1 --api-versions monitoring.coreos.com/v1/ServiceMonitor \
-    --values "$values" >"$RENDERED"
+  echo "${files[0]}"
 }
 
 @test "A cluster chooses its public certificate's issuer in one place, and the cluster's own CA is the default" {

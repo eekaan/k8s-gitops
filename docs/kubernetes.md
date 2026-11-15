@@ -1195,13 +1195,38 @@ can; each has a disruption budget that keeps one pod available, so a drain never
 one. They run at `system-cluster-critical` with small requests and no limits. The chart's
 ServiceMonitor scrapes the three components' metrics, which the alerts on certificates read
 ([Alerts](#alerts)), so the application names `prometheus-operator-crds` in `dependsOn` as well.
-The DNS-01 self-check asks one public resolver over DNS-over-HTTPS, by name, and nothing else: the
-cluster's own resolver may not see the zone and caches what it was asked before the record
-existed. With the nameservers-only setting the controller asks every resolver listed and fails the
-check when any one does not answer or lacks the record, so a second resolver would be a second
-dependency, not a fallback. `tests/baseline.bats` renders the chart with these values and checks the
-namespace, the definitions and their policy, the Gateway API configuration and dependency, and the
-replicas, spreads and budgets.
+The DNS-01 self-check, which asks whether a challenge's TXT record is visible before cert-manager
+asks the CA to look, asks the zone's own authoritative nameservers. The controller finds the zone
+and its nameservers through one resolver, a public DNS-over-HTTPS endpoint given by name, so the
+tree holds no address and the zone is not looked up through the cluster's own resolver, which may
+not see it. It then asks those nameservers for the record one at a time, in the order the
+resolver's answer lists them, over UDP port 53, and again over TCP port 53 when the UDP answer is
+truncated or does not arrive before the query times out. A round of the check passes only when every
+one of them has the record, and ends at the first that lacks it, does not answer or answers with an
+error; the ones after it are not asked in that round, and no other server is asked in its place. A
+round that does not pass is followed by the next once `--dns01-check-retry-period` has gone by, ten
+seconds by default, which the tree keeps. The nameservers-only setting is off: it would send the TXT
+lookup to the resolver, and a recursive resolver caches a negative answer for the time the zone's
+SOA gives (RFC 2308), which a zone holding a wildcard record gives for the challenge's name until
+the record exists, so a record visible to everyone else could be reported missing for that long.
+The authoritative servers hold no such cache. The resolver is asked only what a cached answer
+cannot get wrong: the zone's SOA and nameservers, which exist before the challenge does, and
+whether the challenge's name is a CNAME, for which a cached "no" and a fresh one lead the check to
+the same servers. The exception is a zone whose wildcard record is a CNAME: until the record
+reaches the zone's nameservers the wildcard answers for the challenge's name, so a resolver that
+cached that answer, from any lookup made before then, the controller's own first round included,
+sends the check to the CNAME's target, whose nameservers never have the record, until the cached
+answer's TTL runs out. One resolver is listed; a second would be asked only when the first fails to
+answer, and would be one more destination for the controller's egress to allow. The controller
+therefore needs egress to the resolver on TCP port 443 and to every nameserver of the zone on UDP
+and TCP port 53, and the cluster's resolver to look up the resolver's and the nameservers' names; a
+network policy for `cert-manager` must allow these, the provider's API and the CA's directory.
+After the check passes the controller waits a further minute before it asks the CA to validate.
+`tests/acme-issuers.bats` reads these settings from the controller's arguments and config file as
+`scripts/render` renders the whole tree, the HelmRelease's own values and post-renderers included.
+`tests/baseline.bats` renders the chart with these values and checks the namespace, the definitions
+and their policy, the Gateway API configuration and dependency, and the replicas, spreads and
+budgets.
 
 ### The cluster's own CA
 
@@ -1249,7 +1274,7 @@ A `ClusterIssuer` reads its Secrets from the controller's cluster resource names
 - **The solver.** DNS-01 through the provider's API, the only solver, for names under
   `${CLUSTER_DOMAIN}` only: the `dnsZones` selector means a Certificate for any other name finds no
   solver and is refused. HTTP-01 is not used, which is also what lets one certificate cover a
-  wildcard. The controller checks the challenge's record against public resolvers alone, as above.
+  wildcard. The controller checks the challenge's record at the zone's own nameservers, as above.
 - **Staging and production.** Both issuers exist whenever the application is enabled, so that moving
   from one to the other is a change of the choice below and nothing else. Staging's certificates are
   signed by a chain no client trusts, and its rate limits are far above production's: a setup that is
@@ -1306,8 +1331,19 @@ serves the new certificate when it is Ready; the old one is served until then.
   cert-manager get externalsecret cloudflare-api-token` says whether the token came through, and
   `kubectl describe clusterissuer letsencrypt-staging` whether the account registered. A DNS-01
   challenge usually takes a minute or two to be visible and verified, and cert-manager retries
-  with a growing delay after a failure. `just gateway-check` fails its `certificate` line with the
-  Ready condition's reason.
+  with a growing delay after a failure. Until the self-check passes, the Challenge's reason is
+  `Waiting for DNS-01 challenge propagation:` and what ended its last round, which asks the zone's
+  nameservers one at a time and stops at the first that fails. `DNS record for "..." not yet
+  propagated` means one nameserver answered without the record: each asked before it had it, and
+  those after it were not asked in that round. A provider can take a short while to publish a
+  record to all of its servers, and in a zone whose wildcard record is a CNAME the reason can last
+  until a cached answer runs out, as above. A nameserver that cannot be reached on port 53 from
+  the controller shows as the network error, such as an `i/o timeout`, and one that answers with
+  an error as `NS ... returned` and its response code, each only when the server's turn comes:
+  while a server before it lacks the record, the reason is `not yet propagated`. A resolver that
+  cannot be asked shows as `Post` and its URL followed by the network error, or as `dns: server
+  returned HTTP` and a status, and no nameserver was asked in that round. `just gateway-check`
+  fails its `certificate` line with the Ready condition's reason.
 
 ## Autoscaling and reflection
 
