@@ -491,11 +491,14 @@ Every other routing daemon is off in the list. Its configuration, `frr.conf`, is
     by `BGP_WAIT` seconds (120). `just cluster-upgrade-k8s` drains and reboots no node and leaves
     the Cilium agents alone, so it takes none out. A control plane has no BGP. No more than one
     worker is out at a time: `cluster-reboot` and `cluster-upgrade` refuse to take a worker out
-    while another is, naming it and the `kubectl label` command that puts it back. Nothing records
-    which run set a label, so a recipe removes one it did not set only once the operator has
-    confirmed the run: `cluster-upgrade` then puts back a worker that is out and Ready and
-    schedulable, and `cluster-reboot` run for a worker that is out already puts it back after the
-    reboot; `cluster-upgrade` with nothing to upgrade only reports one. A `cluster-reboot`,
+    while another is, naming it and the `kubectl label` command that puts it back, and the recipes
+    that drain, reboot, upgrade or apply to a cluster's nodes hold its lock, so no two run at once
+    from one checkout. Nothing records which run set a label, so a recipe removes one it did not
+    set only once the operator has confirmed the run: `cluster-upgrade` then puts back a worker that
+    is out and Ready and schedulable and takes one that is out and is the first worker behind
+    through as out already, drained, upgraded, uncordoned and put back, and `cluster-reboot` run
+    for a worker that is out already puts it back after the reboot; `cluster-upgrade` with nothing
+    to upgrade only reports one. A `cluster-reboot`,
     `cluster-upgrade` or `cluster-talos --reboot` that stops with a worker out says so last, with
     that command, and `just cluster-check` fails while a Ready worker carries the label.
 - `maximum-paths` is `max_workers`: as many equal-cost paths to one address as there can be workers.

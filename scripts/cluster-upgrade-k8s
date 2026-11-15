@@ -10,6 +10,9 @@
 # balancer's address on the node network, which only the nodes reach.
 # It restarts the control plane's components and the kubelets but drains and reboots no node, and a
 # kubelet's restart leaves the Cilium agent and its BGP sessions alone, so no node leaves BGP here.
+# It holds the cluster's lock (lock_cluster in scripts/lib/cluster.sh) for the whole run, and
+# refuses while another recipe that drains, reboots, upgrades or applies to the cluster's nodes
+# holds it.
 # Afterwards checks that every node runs the version. With every node on it already, nothing is
 # asked or upgraded.
 # Usage: scripts/cluster-upgrade-k8s [cluster] [--yes]
@@ -36,6 +39,8 @@ done
 # shellcheck source=scripts/cluster-env
 . "$here/cluster-env" "$cluster"
 require_cluster talman secrets age-key api-address
+step="locking $cluster"
+lock_cluster
 
 step="asking each node which Kubernetes it runs"
 behind=0

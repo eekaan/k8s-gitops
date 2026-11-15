@@ -746,19 +746,23 @@ out of the artifact, which is built from `kubernetes/`.
   reported Ready since `talman upgrade` returned for it, within ten minutes, before the next is
   drained; a Ready condition from before then, including one posted after the drain, does not
   count. A node on its version is left alone. A worker is taken out of BGP before its drain and put
-  back once it is uncordoned, as `cluster-reboot` does it below, `--no-bgp-wait` included, so at
-  most one worker is out at a time and the edge routers withdraw its paths at once; a control plane
-  has no BGP, and a node whose role in `talman.yaml` is neither `controlplane` nor `worker` is not
-  drained. Nothing records which run set a worker's label or whether that run is still working on
-  it, so the recipes cannot tell a worker a stopped run left out from one another run is taking
-  out, and a recipe removes a label it did not set only once the operator has confirmed the run.
-  So, once the cluster's name is typed back, or with `--yes`, a worker out of BGP by a label this
-  run did not set is put back before the first node is upgraded when it is Ready and schedulable;
-  one that is not stops the run before another worker is taken out, or, when none is behind, fails
-  it at the end, saying why it is not put back. With nothing behind, nothing is asked, so a worker
-  that is out is only reported, and the run fails. Either way the last line names the worker and
-  the `kubectl label` command that puts it back; run one of these recipes at a time, as a confirmed
-  run puts back a worker another run is still taking out. Before each drain the API must answer
+  back once it is uncordoned, as `cluster-reboot` does it below, `--no-bgp-wait` applying to every
+  worker the run takes out, so at most one worker is out at a time and the edge routers withdraw its
+  paths at once; a control plane has no BGP, and a node whose role in `talman.yaml` is neither
+  `controlplane` nor `worker` is not drained. `cluster-reboot`, `cluster-upgrade`,
+  `cluster-upgrade-k8s` and `cluster-talos` hold the cluster's lock, flock's on
+  `clusterconfig/cluster.lock` in its directory, for their whole run, and refuse, changing nothing,
+  while another of them holds it: a `cluster-reboot` that `cluster-talos --reboot` runs shares its
+  parent's. The lock excludes only runs from this checkout, and nothing records which run set a
+  worker's label, so a recipe removes a label it did not set only once the operator has confirmed
+  the run. So, once the cluster's name is typed back, or with `--yes`, a worker out of BGP by a
+  label this run did not set is put back before the first node is upgraded when it is Ready and
+  schedulable, and taken out again like any other when it is behind; one that is not is taken
+  through as out already when it is the first worker behind: drained, upgraded, uncordoned and put
+  back; otherwise it stops the run before another worker is taken out, or, when none is behind,
+  fails it at the end, saying why it is not put back. With nothing behind, nothing is asked, so a
+  worker that is out is only reported, and the run fails. Either way the last line names the worker
+  and the `kubectl label` command that puts it back. Before each drain the API must answer
   `/readyz` through the kubeconfig within five minutes, or nothing more is drained. talosctl's own
   drain is turned off, as it reaches the API at the cluster endpoint, which only the nodes reach.
   At the end every node must run its version. A run that stops after draining a node leaves that
@@ -1058,7 +1062,8 @@ to hand it to kubectl and age-keygen on standard input.
   to report Ready and, for a control plane, for etcd to have its member back, 600 when unset.
 - `BGP_WAIT`: how many seconds `cluster-reboot` and `cluster-upgrade` wait, for a worker, until its
   `CiliumBGPNodeConfig` is gone once it is labelled out of BGP, and until it is back with its
-  sessions established once the label is removed, 120 when unset.
+  sessions established once the label is removed, 120 when unset; a whole number, read in base 10,
+  so `08` is eight seconds.
 - `FLUX_AGE_KEY_FILE`: the path of the Flux age key, outside the repository. In CI, `FLUX_AGE_KEY`
   holds the key itself instead. `cluster-bootstrap`, `cluster-config` and `cluster-flux` need one
   of them.

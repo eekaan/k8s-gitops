@@ -7,6 +7,9 @@
 # added, is configured only with --onboard: the maintenance service authenticates nothing, and a
 # node's configuration carries the cluster's keys. With nothing to change, nothing is asked or
 # applied. No health check runs, for the reason scripts/cluster-bootstrap gives.
+# It holds the cluster's lock (lock_cluster in scripts/lib/cluster.sh) for the whole run, and
+# refuses while another recipe that drains, reboots, upgrades or applies to the cluster's nodes
+# holds it.
 #
 # With --first <node>, a change that could cut the nodes off, such as their firewall, is tried before
 # it is kept: once scripts/cluster-check passes, the named node and then every other node the
@@ -135,6 +138,12 @@ if [[ -z $first ]]; then
   require_commands "${tools[@]}" || complete=0
 fi
 ((complete))
+step="locking $cluster"
+lock_cluster
+# Ctrl-C and SIGTERM end the run as a failure, through its exit trap, even when the program they
+# interrupted handles the signal itself and exits 0, after which bash would otherwise go on.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # reboot_on_exit STATUS: when STATUS is a failure, names the step the run failed in, as
 # report_failed_step has it do, and then each worker that carries the label that has it out of BGP,

@@ -9,17 +9,23 @@
 # before the next is drained. A node already on its version is not drained. A worker is taken out of
 # BGP before its drain, waiting for up to BGP_WAIT seconds (120) until its CiliumBGPNodeConfig is
 # gone, so the edge routers withdraw its paths at once, and put back once it is uncordoned, so no
-# more than one worker is out at a time; --no-bgp-wait skips the first wait, for a worker whose
-# Cilium agent is not running. A worker out of BGP by a label this run did not set is put back, once
-# the run is confirmed, when it is Ready and schedulable, and otherwise stops the run before another
-# is taken out and fails it at the end; with nothing behind it is only reported, and the run fails.
-# A run that stops with a worker out says so last, with the command that puts it back.
+# more than one worker is out at a time; --no-bgp-wait skips the first wait for every worker the run
+# takes out, as for a worker whose Cilium agent is not running. A worker out of BGP by a label this
+# run did not set is dealt with only once the run is confirmed: one Ready and schedulable is put back
+# before the first node is upgraded, and taken out again like any other when it is behind; any
+# other, when it is the first worker behind, is taken through as out already: drained, upgraded,
+# uncordoned and put back; otherwise it stops the run before another worker is taken out, or fails
+# it at the end. With nothing behind it is only reported, and the run fails. A run that stops with a
+# worker out says so last, with the command that puts it back.
 #
 # kubectl reaches the API through the kubeconfig cluster-kubeconfig fetches, served at
 # KUBE_API_ADDRESS, and the run stops before a drain when the API does not answer there. talosctl's
 # own drain is turned off: it reaches the API at the cluster endpoint, the load balancer's address
 # on the node network, which only the nodes reach. When a run stops after draining a node, the node
 # stays cordoned until it is uncordoned by hand; a second run skips it once it is on its version.
+# It holds the cluster's lock (lock_cluster in scripts/lib/cluster.sh) for the whole run, and
+# refuses while another recipe that drains, reboots, upgrades or applies to the cluster's nodes
+# holds it.
 # Usage: scripts/cluster-upgrade [cluster] [--yes] [--no-bgp-wait]
 set -euo pipefail
 
@@ -46,6 +52,8 @@ done
 . "$here/cluster-env" "$cluster"
 require_cluster talman secrets age-key api-address
 require_bgp_wait
+step="locking $cluster"
+lock_cluster
 
 # on_exit STATUS: a failing run names its step, as report_failed_step has it do, and then the workers
 # it left out of BGP. prepare_snapshot's exit trap does the same once it is made.

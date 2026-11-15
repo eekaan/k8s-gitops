@@ -45,6 +45,9 @@
 # it then stops the kubectl or sleep it is waiting for, so nothing of it keeps running. Of kubectl's
 # output only the drain's passes through, as in cluster-upgrade: it names the pods it evicts and
 # those it cannot. The rest is not printed, as it can name the API server's or the nodes' addresses.
+# It holds the cluster's lock (lock_cluster in scripts/lib/cluster.sh) for the whole run, sharing it
+# with cluster-talos --reboot when that runs it, and refuses while another recipe that drains,
+# reboots, upgrades or applies to the cluster's nodes holds it.
 # Usage: scripts/cluster-reboot <node> [cluster] [--yes] [--tolerate <seconds>] [--no-bgp-wait]
 set -euo pipefail
 
@@ -99,6 +102,8 @@ if [[ ! ${REBOOT_WAIT:-600} =~ ^[0-9]+$ ]]; then
 fi
 require_bgp_wait || complete=0
 ((complete))
+step="locking $cluster"
+lock_cluster
 tolerate=$((10#$tolerate))
 ready_wait=$((10#${REBOOT_WAIT:-600}))
 
@@ -270,8 +275,8 @@ remove_shutdown_pods() {
 
 # On every exit the probe is stopped first; then a failing run names its step, as
 # report_failed_step has it do, and once the node is cordoned, says last that it stays so. Ctrl-C
-# ends the recipe even when talman handles SIGINT itself and exits 0, after which bash would
-# otherwise go on.
+# and SIGTERM end the recipe as a failure, even when talman handles the signal itself and exits 0,
+# after which bash would otherwise go on.
 cordoned=0 unschedulable=false
 on_exit() {
   local status=$1
@@ -289,6 +294,7 @@ on_exit() {
 }
 trap 'on_exit $?' EXIT
 trap 'exit 130' INT
+trap 'exit 143' TERM
 
 step="reading $node through the kubeconfig"
 if ! unschedulable=$(kubectl get node "$node" --output json --request-timeout=10s 2> /dev/null |
