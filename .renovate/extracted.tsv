@@ -30,6 +30,8 @@ infra/openstack/stacks/sto2/ci/versions.tf	terraform	hashicorp/terraform	-
 infra/openstack/stacks/sto2/ci/versions.tf	terraform	openstack	-
 infra/openstack/stacks/sto2/cluster/versions.tf	terraform	hashicorp/terraform	-
 infra/openstack/stacks/sto2/cluster/versions.tf	terraform	openstack	-
+infra/openstack/stacks/sto2/edge/versions.tf	terraform	hashicorp/terraform	-
+infra/openstack/stacks/sto2/edge/versions.tf	terraform	openstack	-
 infra/openstack/stacks/sto2/plumbing/versions.tf	terraform	hashicorp/terraform	-
 infra/openstack/stacks/sto2/plumbing/versions.tf	terraform	openstack	-
 infra/openstack/stacks/sto2/plumbing/versions.tf	terraform	talos	-
