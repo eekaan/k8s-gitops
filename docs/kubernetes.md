@@ -76,6 +76,14 @@ commented out with the reason:
   # - ../../base/demo/hello/ks.yaml  # Disabled: <reason>
 ```
 
+The application's versions are pins for Renovate: its chart's tag under a `# renovate:
+datasource=… depName=…` comment, as the other applications' sources have it, and any image in its
+values. Once they are in place, `just renovate-record` writes what Renovate extracts to
+`.renovate/extracted.tsv`, which the change commits; a pin under such a comment also gets the form
+of its datasource's tags in `.renovate/tag-forms.tsv`, read from the registry's own listing, and a
+pin that no manager reads is listed in `.renovate/by-hand.tsv` with why and how it is moved.
+`just renovate-check` and `just renovate-pins` fail, naming the file to change, until they hold.
+
 ## What the root sets
 
 The root Kustomization patches every child Kustomization with:
@@ -272,7 +280,9 @@ level is declared in the tree, never left to the API server's default.
   request that moves the cluster to a new minor fails it. Whoever moves the minor compares that
   minor's checks in `k8s.io/pod-security-admission` with the evaluator's: when they are no
   stricter, the record moves to the new minor in the same pull request; when they are stricter,
-  the minor waits for an evaluator that applies them.
+  the minor waits for an evaluator that applies them. The same pull request reads
+  `tests/fixtures/security-context-fields` again from that minor's `k8s.io/api`, as nothing fails
+  while it is stale (`.renovate/by-hand.tsv`).
 - **Pods the render does not hold.** An operator creates these at run time from a custom
   resource, and the check cannot evaluate them. Where the resource has the fields, it sets the
   security context `restricted` requires, and `tests/pod-security.bats` requires those fields in
@@ -1833,9 +1843,13 @@ checksum
 of that release's linux-x64 binary, so the tools that run beside the token are the pinned ones; the
 action fails the job when the binary differs. A bump of the mise version changes the checksum with it,
 in every workflow that has one, and the checksum is the one for `./mise-v<version>-linux-x64` in the
-release's `SHASUMS256.txt`. Renovate does not track either input: it can raise a version but cannot
-carry the checksum with it, so a version alone would fail the signing job's check, and the bump is
-by hand.
+release's `SHASUMS256.txt`. Renovate's github-actions manager reads both inputs as one dependency,
+`jdx/mise`, but to move the checksum it first fetches the current release by the tag the version is
+written as, and the version is written without the `v` that mise's release tags carry: that lookup
+fails, so Renovate proposes nothing for a workflow with a checksum. For `ci.yaml`, which has none, it
+would move the version alone, which `tests/ci.bats` refuses, as the publish workflow's mise must be
+CI's. A package rule in `.renovate/managers.json5` tells Renovate not to propose `jdx/mise` while its
+version has that form, and the bump is by hand, in every workflow at once (`.renovate/by-hand.tsv`).
 The two jobs that sign, `publish` and `tools-image`, also turn the action's cache off, so nothing
 runs from an entry another job saved.
 

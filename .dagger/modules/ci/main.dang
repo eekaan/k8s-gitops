@@ -21,11 +21,11 @@ type Ci {
   }
 
   """
-  Run the justfile's groups of checks side by side and return what they printed, after a line that says where the tools came from: the groups are the dependencies of the checks recipe, and a group's checks are its own dependencies. A group's renovate-check runs Renovate's validator in its own image, its vector-check runs Vector in the image the log collector runs, on the configuration the pinned tools render, and its edge-policy-check runs FRR's speakers in FRR's image, on the configuration the pinned tools render; its rules-check runs promtool, taken from the Prometheus image the monitoring chart deploys, on the alert rules the pinned tools render; its other checks run in one just run, in the tools container (tools). Every group runs to its end; when a check fails, the call fails with every group's output and names the groups that failed.
+  Run the justfile's groups of checks side by side and return what they printed, after a line that says where the tools came from: the groups are the dependencies of the checks recipe, and a group's checks are its own dependencies. A group's renovate-check runs Renovate's validator and extraction in its own image, its vector-check runs Vector in the image the log collector runs, on the configuration the pinned tools render, and its edge-policy-check runs FRR's speakers in FRR's image, on the configuration the pinned tools render; its rules-check runs promtool, taken from the Prometheus image the monitoring chart deploys, on the alert rules the pinned tools render; its other checks run in one just run, in the tools container (tools). Every group runs to its end; when a check fails, the call fails with every group's output and names the groups that failed.
   """
   pub checks(
     """
-    The image renovate-check runs Renovate's validator from.
+    The image renovate-check runs Renovate from.
     """
     renovateImage: String!,
 
@@ -75,7 +75,7 @@ type Ci {
       .withExec(["sh", "-c", """if [ -n "$1" ]; then git update-ref refs/remotes/origin/main "$1"; fi""", "sh", base])
     let validator = container
       .from(renovateImage)
-      .withMountedDirectory("/usr/src/app", source.filter(include: ["renovate.json5", ".renovate/"]))
+      .withMountedDirectory("/usr/src/app", source)
       .withWorkdir("/usr/src/app")
     # The configuration the log collector runs with and Vector's unit tests of it, as
     # scripts/vector-config writes them with the pinned tools, where vector-check reads them.
@@ -227,7 +227,7 @@ type Group {
   let checkout: Container!
 
   """
-  Renovate's image with the Renovate configuration under test.
+  Renovate's image with the files under test, which scripts/renovate-check validates the configuration of and extracts the dependencies from.
   """
   let validator: Container!
 
@@ -242,7 +242,7 @@ type Group {
   let frr: Container!
 
   """
-  Whether every check of the group passed, and what they printed: renovate-check's validator, vector-check's Vector, edge-policy-check's FRR, rules-check's promtool and the just run of the others side by side.
+  Whether every check of the group passed, and what they printed: renovate-check's Renovate, vector-check's Vector, edge-policy-check's FRR, rules-check's promtool and the just run of the others side by side.
   """
   outcome: Outcome! {
     let others = checks.reject { _ == "renovate-check" }.reject { _ == "vector-check" }.reject { _ == "edge-policy-check" }.reject { _ == "rules-check" }
@@ -260,7 +260,7 @@ type Group {
       []
     }
     let renovate: [Run!]! = if (checks.contains("renovate-check")) {
-      [Run(label: "renovate-check", ctr: validator.withExec(["sh", "-c", "renovate-config-validator --strict --no-global renovate.json5 .renovate/*.json5 2>&1"]))]
+      [Run(label: "renovate-check", ctr: validator.withExec(["sh", "-c", "bash scripts/renovate-check 2>&1"]))]
     } else {
       []
     }
