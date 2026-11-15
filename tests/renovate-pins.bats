@@ -88,8 +88,55 @@ EOF
   # workflow gives an action.
   printf '%s\n' 'new_tool: 1.2.3' >> "$WORK/versions.yaml"
   versions_line=$(wc -l < "$WORK/versions.yaml")
+  # And a commit pinned there.
+  printf '%s\n' "new_commit: $(printf 'z' | sha1sum | cut -d' ' -f1)" >> "$WORK/versions.yaml"
   printf '%s\n' 'terraform {' '  required_providers {' '    example = {' '      version = "1.2.3"' '    }' '  }' '}' > "$WORK/infra/added.tf"
   printf '%s\n' 'jobs:' '  build:' '    steps:' '      - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785  # v5.2.8' '        with:' '          version: 1.2.3' "          sha256: $(printf 'y' | sha256sum | cut -d' ' -f1)" > "$WORK/.github/workflows/added-mise.yaml"
+  # Pins that a manager reads, recorded as Renovate's own extraction records them, pass when named
+  # as that manager names them: an image in a values file by its repository and registry, in block
+  # and flow style, or by the image beside its tag; a HelmRelease's values image; a kustomization's
+  # chart; a module, a provider block and a helm_release by their source, label and chart; a tool
+  # by its name without options; an action by its repository, without the path.
+  values="$WORK/kubernetes/apps/base/openbao/openbao/app/values.yaml"
+  printf '%s\n' 'extraSidecar:' '  image:' '    repository: ghcr.io/example-org/sidecar' '    tag: 1.2.3' \
+    'flowSidecar:' '  image: {registry: ghcr.io, repository: example-org/flow, tag: 2.3.4}' \
+    'cli:' '  image: ghcr.io/example-org/cli' '  tag: 4.5.6' \
+    'both:' '  image:' '    repository: ghcr.io/example-org/both' '    tag: 5.6.7' '    version: 6.7.8' \
+    'plain:' '  tag: 3.4.5' 'sidecar:' '  repository: ghcr.io/example-org/notimage' '  tag: 7.8.9' >> "$values"
+  mkdir -p "$WORK/kubernetes/added"
+  printf '%s\n' 'apiVersion: helm.toolkit.fluxcd.io/v2' 'kind: HelmRelease' 'metadata:' '  name: thing' 'spec:' '  chart:' '    spec:' \
+    '      chart: thing' '      version: 1.0.0' '      sourceRef: {kind: HelmRepository, name: example}' '  values:' '    image:' \
+    '      repository: ghcr.io/example-org/released' '      tag: 9.8.7' > "$WORK/kubernetes/added/helmrelease.yaml"
+  printf '%s\n' 'apiVersion: kustomize.config.k8s.io/v1beta1' 'kind: Kustomization' 'helmCharts:' '  - name: thing' \
+    '    repo: https://charts.example.com' '    version: 2.0.0' > "$WORK/kubernetes/added/kustomization.yaml"
+  printf '%s\n' 'module "network" {' '  source  = "example-org/network/openstack"' '  version = "1.2.3"' '}' 'provider "example" {' \
+    '  version = "2.3.4"' '}' 'resource "helm_release" "thing" {' '  name       = "thing"' '  chart      = "thing"' \
+    '  repository = "https://charts.example.com"' '  version    = "3.4.5"' '}' > "$WORK/infra/openstack/modules/network/added.tf"
+  printf '%s\n' '"ubi:example-org/tool[exe=tool]" = "1.2.3"' >> "$WORK/mise.toml"
+  # Any value of a workflow with a version's shape is a pin: an input of an action Renovate does
+  # not read, in flow style or under another key, and a matrix value.
+  printf '%s\n' 'jobs:' '  build:' '    strategy:' '      matrix:' '        go: [1.22.1]' '    steps:' \
+    '      - uses: example-org/setup-thing@0123456789abcdef0123456789abcdef01234567  # v1.0.0' '        with: {version: 4.5.6}' \
+    '      - uses: example-org/setup-other@0123456789abcdef0123456789abcdef01234567  # v1.0.0' '        with:' '          tool-version: 5.6.7' \
+    '      - uses: example-org/repo/path@0123456789abcdef0123456789abcdef01234567  # v1.0.0' > "$WORK/.github/workflows/added-inputs.yaml"
+  {
+    printf '%s\t%s\t%s\t%s\n' kubernetes/apps/base/openbao/openbao/app/values.yaml helm-values ghcr.io/example-org/sidecar -
+    printf '%s\t%s\t%s\t%s\n' kubernetes/apps/base/openbao/openbao/app/values.yaml helm-values ghcr.io/example-org/flow -
+    printf '%s\t%s\t%s\t%s\n' kubernetes/apps/base/openbao/openbao/app/values.yaml helm-values ghcr.io/example-org/cli -
+    printf '%s\t%s\t%s\t%s\n' kubernetes/apps/base/openbao/openbao/app/values.yaml helm-values ghcr.io/example-org/both -
+    printf '%s\t%s\t%s\t%s\n' kubernetes/added/helmrelease.yaml flux ghcr.io/example-org/released -
+    printf '%s\t%s\t%s\t%s\n' kubernetes/added/kustomization.yaml kustomize thing -
+    printf '%s\t%s\t%s\t%s\n' infra/openstack/modules/network/added.tf terraform example-org/network/openstack -
+    printf '%s\t%s\t%s\t%s\n' infra/openstack/modules/network/added.tf terraform example -
+    printf '%s\t%s\t%s\t%s\n' infra/openstack/modules/network/added.tf terraform thing -
+    printf '%s\t%s\t%s\t%s\n' mise.toml mise ubi:example-org/tool -
+    printf '%s\t%s\t%s\t%s\n' .github/workflows/added-inputs.yaml github-actions example-org/setup-thing -
+    printf '%s\t%s\t%s\t%s\n' .github/workflows/added-inputs.yaml github-actions example-org/setup-other -
+    printf '%s\t%s\t%s\t%s\n' .github/workflows/added-inputs.yaml github-actions example-org/repo -
+  } >> "$WORK/.renovate/extracted.tsv"
+  line_of() {
+    grep -nxF -- "$2" "$1" | cut -d: -f1
+  }
   run "$WORK/scripts/check-renovate-pins"
   [ "$status" -eq 1 ]
   grep -q "^kubernetes/apps/base/openbao/openbao/app/values.yaml:$values_line: ghcr.io/example-org/untracked is a pin that no Renovate manager extracts" <<< "$output"
@@ -99,6 +146,7 @@ EOF
   grep -q "^.github/workflows/ci.yaml:$input_line: example-org/setup-thing input version is a pin that no Renovate manager extracts" <<< "$output"
   grep -q "^.github/workflows/ci.yaml:$env_line: version is a pin that no Renovate manager extracts" <<< "$output"
   grep -q "^versions.yaml:$versions_line: new_tool is a pin that no Renovate manager extracts" <<< "$output"
+  grep -q "^versions.yaml:$((versions_line + 1)): new_commit is a pin that no Renovate manager extracts" <<< "$output"
   grep -q '^infra/added.tf:4: example is a pin that no Renovate manager extracts' <<< "$output"
   grep -q '^.github/workflows/added-mise.yaml:4: jdx/mise-action is a pin that no Renovate manager extracts' <<< "$output"
   grep -q '^.github/workflows/added-mise.yaml:6: jdx/mise is a pin that no Renovate manager extracts' <<< "$output"
@@ -112,17 +160,40 @@ EOF
   grep -q '^apps/added-pod.yaml:5: tool is a pin that no Renovate manager extracts' <<< "$output"
   grep -q '^added-tools.toml:2: newtool is a pin that no Renovate manager extracts' <<< "$output"
   grep -q '^kubernetes/added-source.yaml:3: tag is a pin that no Renovate manager extracts' <<< "$output"
+  # What no manager reads of those: a version beside the tag that an image takes, a tag with no
+  # image beside it, a tag under a key that is not an image's, a chart whose source Renovate does not
+  # find, and the workflow's values.
+  grep -q "^kubernetes/apps/base/openbao/openbao/app/values.yaml:$(line_of "$values" '    version: 6.7.8'): version is a pin that no Renovate manager extracts" <<< "$output"
+  grep -q "^kubernetes/apps/base/openbao/openbao/app/values.yaml:$(line_of "$values" '  tag: 3.4.5'): tag is a pin that no Renovate manager extracts" <<< "$output"
+  grep -q "^kubernetes/apps/base/openbao/openbao/app/values.yaml:$(line_of "$values" '  tag: 7.8.9'): tag is a pin that no Renovate manager extracts" <<< "$output"
+  grep -q '^kubernetes/added/helmrelease.yaml:9: thing is a pin that no Renovate manager extracts' <<< "$output"
+  grep -q '^.github/workflows/added-inputs.yaml:5: matrix go is a pin that no Renovate manager extracts' <<< "$output"
+  grep -q '^.github/workflows/added-inputs.yaml:8: example-org/setup-thing input version is a pin that no Renovate manager extracts' <<< "$output"
+  grep -q '^.github/workflows/added-inputs.yaml:11: example-org/setup-other input tool-version is a pin that no Renovate manager extracts' <<< "$output"
+  # The rest pass.
+  local covered
+  for covered in "$(line_of "$values" '    tag: 1.2.3')" "$(line_of "$values" '  image: {registry: ghcr.io, repository: example-org/flow, tag: 2.3.4}')" \
+    "$(line_of "$values" '  tag: 4.5.6')" "$(line_of "$values" '    tag: 5.6.7')"; do
+    [ -n "$covered" ]
+    [ "$(grep -c "^kubernetes/apps/base/openbao/openbao/app/values.yaml:$covered:" <<< "$output")" -eq 0 ]
+  done
+  [ "$(grep -cE '^(kubernetes/added/kustomization.yaml|infra/openstack/modules/network/added.tf|mise.toml):' <<< "$output")" -eq 0 ]
+  [ "$(grep -cE '^kubernetes/added/helmrelease.yaml:14:|^.github/workflows/added-inputs.yaml:(7|9|12):' <<< "$output")" -eq 0 ]
   # Nothing else is refused: the tree's own pins pass.
-  [ "$(wc -l <<< "$output")" -eq 20 ]
+  [ "$(wc -l <<< "$output")" -eq 28 ]
 }
 
 @test "A listed pin that a manager now extracts is refused" {
   checkout
-  # mise's version written as its releases are tagged, so that Renovate moves it with its checksum.
-  sed -i -E 's/^( +version: )([0-9]+\.[0-9]+\.[0-9]+)$/\1v\2/' "$WORK/.github/workflows/tools-image.yaml"
-  grep -qE '^ +version: v[0-9]+\.[0-9]+\.[0-9]+$' "$WORK/.github/workflows/tools-image.yaml"
-  mise_entry=$(grep -n "^.github/workflows/tools-image.yaml"$'\t'"jdx/mise"$'\t' "$WORK/.renovate/by-hand.tsv" | cut -d: -f1)
-  [ -n "$mise_entry" ]
+  # mise's version written in every workflow as its releases are tagged, so that Renovate moves it
+  # with its checksum, in all of them at once.
+  local workflow mise_entries=()
+  for workflow in ci publish render-comment tools-image; do
+    sed -i -E 's/^( +version: )([0-9]+\.[0-9]+\.[0-9]+)$/\1v\2/' "$WORK/.github/workflows/$workflow.yaml"
+    grep -qE '^ +version: v[0-9]+\.[0-9]+\.[0-9]+$' "$WORK/.github/workflows/$workflow.yaml"
+    mise_entries+=("$(grep -n "^.github/workflows/$workflow.yaml"$'\t'"jdx/mise"$'\t' "$WORK/.renovate/by-hand.tsv" | cut -d: -f1)")
+    [ -n "${mise_entries[-1]}" ]
+  done
   {
     printf '%s\t%s\t%s\t%s\n' versions.yaml talos 'no datasource' 'by hand'
     printf '%s\t%s\t%s\t%s\n' mise.toml kubectl 'no datasource' 'by hand'
@@ -137,10 +208,24 @@ EOF
     printf '%s\t%s\t%s\t%s\n' infra/openstack/backend.hcl 'only-in-a-comment 9.9.9' 'a comment' 'by hand'
   } >> "$WORK/.renovate/by-hand.tsv"
   printf '%s\n' '# only-in-a-comment 9.9.9' | tee -a "$WORK/mise.toml" "$WORK/infra/openstack/modules/network/versions.tf" >> "$WORK/infra/openstack/backend.hcl"
-  total=$(wc -l < "$WORK/.renovate/by-hand.tsv")
+  # An image in a values file that Renovate's helm-values manager reads, listed by its name and by
+  # its tag's key.
+  printf '%s\n' 'extraSidecar:' '  image:' '    repository: ghcr.io/example-org/sidecar' '    tag: 1.2.3' >> "$WORK/kubernetes/apps/base/openbao/openbao/app/values.yaml"
+  printf '%s\t%s\t%s\t%s\n' kubernetes/apps/base/openbao/openbao/app/values.yaml helm-values ghcr.io/example-org/sidecar - >> "$WORK/.renovate/extracted.tsv"
+  {
+    printf '%s\t%s\t%s\t%s\n' kubernetes/apps/base/openbao/openbao/app/values.yaml ghcr.io/example-org/sidecar 'no datasource' 'by hand'
+    printf '%s\t%s\t%s\t%s\n' kubernetes/apps/base/openbao/openbao/app/values.yaml tag 'no datasource' 'by hand'
+  } >> "$WORK/.renovate/by-hand.tsv"
+  total=$(($(wc -l < "$WORK/.renovate/by-hand.tsv") - 2))
   run "$WORK/scripts/check-renovate-pins"
   [ "$status" -eq 1 ]
-  grep -q "^.renovate/by-hand.tsv:$mise_entry: jdx/mise in .github/workflows/tools-image.yaml is extracted by Renovate's github-actions manager" <<< "$output"
+  grep -q "^.renovate/by-hand.tsv:$((total + 1)): ghcr.io/example-org/sidecar in kubernetes/apps/base/openbao/openbao/app/values.yaml is extracted by Renovate's helm-values manager" <<< "$output"
+  grep -q "^.renovate/by-hand.tsv:$((total + 2)): tag in kubernetes/apps/base/openbao/openbao/app/values.yaml is moved with ghcr.io/example-org/sidecar, which Renovate extracts there" <<< "$output"
+  local i=0
+  for workflow in ci publish render-comment tools-image; do
+    grep -q "^.renovate/by-hand.tsv:${mise_entries[i]}: jdx/mise in .github/workflows/$workflow.yaml is extracted by Renovate's github-actions manager" <<< "$output"
+    i=$((i + 1))
+  done
   grep -q "^.renovate/by-hand.tsv:$((total - 7)): talos in versions.yaml is extracted by Renovate's regex manager" <<< "$output"
   grep -q "^.renovate/by-hand.tsv:$((total - 6)): kubectl in mise.toml is extracted by Renovate's mise manager" <<< "$output"
   grep -q "^.renovate/by-hand.tsv:$((total - 5)): sha256 in .github/workflows/tools-image.yaml is moved with jdx/mise, which Renovate extracts" <<< "$output"
@@ -149,7 +234,7 @@ EOF
   grep -q "^.renovate/by-hand.tsv:$((total - 2)): mise.toml has no only-in-a-comment 9.9.9" <<< "$output"
   grep -q "^.renovate/by-hand.tsv:$((total - 1)): infra/openstack/modules/network/versions.tf has no only-in-a-comment 9.9.9" <<< "$output"
   grep -q "^.renovate/by-hand.tsv:$total: infra/openstack/backend.hcl has no only-in-a-comment 9.9.9" <<< "$output"
-  [ "$(wc -l <<< "$output")" -eq 9 ]
+  [ "$(wc -l <<< "$output")" -eq 14 ]
 }
 
 @test "A custom-manager pin whose value cannot match its datasource's tag form is refused" {
@@ -166,11 +251,14 @@ EOF
   # cannot move it, and that the list no longer holds.
   grep -q "^.github/workflows/publish.yaml"$'\t'"jdx/mise"$'\t' "$WORK/.renovate/by-hand.tsv"
   sed -i "/^.github\/workflows\/publish.yaml"$'\t'"jdx\/mise"$'\t'"/d" "$WORK/.renovate/by-hand.tsv"
+  # And one with no checksum, which Renovate would move alone, without those it cannot move.
+  grep -q "^.github/workflows/ci.yaml"$'\t'"jdx/mise"$'\t' "$WORK/.renovate/by-hand.tsv"
+  sed -i "/^.github\/workflows\/ci.yaml"$'\t'"jdx\/mise"$'\t'"/d" "$WORK/.renovate/by-hand.tsv"
   run "$WORK/scripts/check-renovate-pins"
   [ "$status" -eq 1 ]
   grep -q "^.renovate/tag-forms.tsv:$forms: no pin reads docker example.invalid/team/gone any more" <<< "$output"
-  grep -q '^kubernetes/apps/base/kube-system/cilium/app/ocirepository.yaml:19: "latest" is not the form the tags of quay.io/cilium/charts/cilium have' <<< "$output"
-  grep -q '^versions.yaml:15: "v2.338.2" is not the form the tags of actions/runner have' <<< "$output"
+  grep -q "^kubernetes/apps/base/kube-system/cilium/app/ocirepository.yaml:$(grep -n '^    tag: latest$' "$WORK/kubernetes/apps/base/kube-system/cilium/app/ocirepository.yaml" | cut -d: -f1): \"latest\" is not the form the tags of quay.io/cilium/charts/cilium have" <<< "$output"
+  grep -q "^versions.yaml:$(grep -n '^actions_runner: v2.338.2$' "$WORK/versions.yaml" | cut -d: -f1): \"v2.338.2\" is not the form the tags of actions/runner have" <<< "$output"
   grep -q '^scripts/annotated:1: registry.example.com/team/charts/thing (docker) has no recorded tag form' <<< "$output"
   mise=$(yq '.jobs[].steps[] | select(.uses // "" | test("^jdx/mise-action@")) | .with.version' "$WORK/.github/workflows/publish.yaml")
   [[ $mise =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
@@ -178,6 +266,10 @@ EOF
     grep -q "^.github/workflows/publish.yaml:$line: jdx/mise is read by Renovate here but cannot be moved: \"$mise\" is not the form the tags of jdx/mise have" <<< "$output"
   done < <(grep -nE "^ +(version: ${mise//./\\.}|sha256: [0-9a-f]{64})\$" "$WORK/.github/workflows/publish.yaml")
   [ "$(grep -c '^.github/workflows/publish.yaml:' <<< "$output")" -eq 2 ]
+  while IFS=: read -r line _; do
+    grep -q "^.github/workflows/ci.yaml:$line: jdx/mise is read by Renovate here and would be moved alone, without the workflows whose checksum it cannot look up" <<< "$output"
+  done < <(grep -nE "^ +version: ${mise//./\\.}\$" "$WORK/.github/workflows/ci.yaml")
+  [ "$(grep -c '^.github/workflows/ci.yaml:' <<< "$output")" -eq "$(grep -cE "^ +version: ${mise//./\\.}\$" "$WORK/.github/workflows/ci.yaml")" ]
 }
 
 @test "an entry of the by-hand list or of the tag forms without its four columns is refused" {

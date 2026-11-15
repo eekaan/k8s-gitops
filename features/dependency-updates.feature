@@ -42,16 +42,17 @@ Feature: Dependency updates
 
   @test
   Scenario: A pin added where no manager looks, and not listed, is refused, naming the file and line
-    Given a file that holds an image reference, an OCI artifact tag, a digest, an action pin, a tool version, a provider version, a mise version or checksum, an action's version input or a tag that no manager extracts
-    And a file that Renovate extracts other pins from holds an image reference, a chart's tag, a provider's version or another action's version input that it does not extract
+    Given a file that holds an image reference, an OCI artifact tag, a digest, an action pin, a tool version, a provider version, a mise version or checksum, an action's input or a matrix value with a version's shape, or a tag that no manager extracts
+    And a file that Renovate extracts other pins from holds an image reference, a chart's tag, a provider's version, another action's input or a values file's tag that it does not extract
     And the pin is not in .renovate/by-hand.tsv
     When the check runs
     Then it exits 1
     And it names each pin's file and line
+    And a pin that a manager reads, in block or flow style, passes once recorded, named as that manager names it: a values file's image by its repository, a HelmRelease's values image, a kustomization's chart, a module, a provider block, a helm_release, a tool with options and an action with a path
 
   @test
   Scenario: A listed pin that a manager now extracts is refused
-    Given .renovate/by-hand.tsv lists a pin that .renovate/extracted.tsv holds in a form Renovate can move, a checksum that moves with an extracted pin, or one that is not in its file as a value, only in a comment
+    Given .renovate/by-hand.tsv lists a pin that .renovate/extracted.tsv holds in a form Renovate can move, a checksum or a tag that moves with an extracted pin, or one that is not in its file as a value, only in a comment
     When the check runs
     Then it exits 1
     And it names the entry's line in .renovate/by-hand.tsv
@@ -64,7 +65,7 @@ Feature: Dependency updates
     And it names the pin's file and line
     And a pin whose package has no recorded tag form is refused too
     And a recorded tag form that no pin reads is refused
-    And an action's input that Renovate reads, whose version is not the form recorded for its tags, is refused unless .renovate/by-hand.tsv lists it
+    And an action's input that Renovate reads, whose version is not the form recorded for its tags, is refused unless .renovate/by-hand.tsv lists it, as is that dependency's version in a workflow without a checksum, which Renovate would move alone
 
   @test @pending #FND-7
   Scenario: A Renovate configuration with an unknown option is refused
