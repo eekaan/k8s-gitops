@@ -227,8 +227,8 @@ Every control plane's machine configuration adds `talos/patches/controlplane/met
 Prometheus, from its pod, can scrape the controller manager, the scheduler and etcd
 ([kubernetes.md](kubernetes.md#monitoring)). Talos binds the controller manager and the scheduler
 to 127.0.0.1, and etcd serves its metrics only on its client port, which takes client
-certificates. The patch makes each listen on all of the node's addresses, as `talman.yaml` holds
-no node's own address on the node network:
+certificates. The patch makes each listen on all of the node's addresses, as `talman.yaml` gives no
+node its own address on the node network:
 
 - the controller manager's secure port, 10257, and the scheduler's, 10259: HTTPS, with every
   request but the health checks authorized by the API server, so only a token allowed to read
@@ -236,11 +236,320 @@ no node's own address on the node network:
 - etcd's metrics and health on 2381: plain HTTP, without authentication. It serves etcd's own
   counters and latencies, not the keys or values it stores.
 
-The nodes' security group (`infra/openstack/modules/talos-nodes`) admits everything between the
-nodes and, from anywhere else, only the Talos and Kubernetes APIs. Every node, and every pod
-through its node, therefore reaches these ports, and nothing outside the cluster does, also not on
-a node's floating address. `just cluster-talos` rolls the patch out; until it has, the three
-targets are down in Prometheus and their alerts fire.
+Each control plane's firewall admits the three ports from the nodes' own addresses and the pod
+range only ([The node firewall](#the-node-firewall)): Prometheus's scrapes arrive from the address
+of the node its pod runs on, or from the pod's own address when that node is the control plane
+itself. Nothing outside the cluster reaches them, also not on a node's floating address.
+`just cluster-talos` rolls the patch out; until it has, the three targets are down in Prometheus and
+their alerts fire.
+
+## The node firewall
+
+Every node filters what reaches it itself, with Talos' ingress firewall
+([Talos](https://docs.siderolabs.com/talos/v1.14/networking/ingress-firewall),
+[ADR 0017](adr/0017-nodes-firewall-themselves-with-talos-ingress-firewall.md)), so the cluster's
+protection does not depend on the cloud's security groups. `talos/patches/all/firewall.yaml` sets
+the firewall's default action to block and gives the node one rule for each listener of its role.
+Talos itself admits traffic on the loopback interface, replies to connections the node opened,
+ICMP at up to five packets a second and traffic from the pod and service ranges to those ranges;
+every other packet addressed to the node is dropped unless a rule admits it.
+
+The listeners are written down once, in `talos/firewall.yaml`: each with its protocol and ports, the
+nodes that have it, all or control planes only, and the sources it accepts. The cluster stack
+renders them into the cluster's `talman.yaml` as `values.firewall`, a list of rules for each role
+whose sources are networks, and the patch writes each into the node's machine configuration as a
+`NetworkRuleConfig`. The operator allowlist reaches the rules that way only: from the same
+`api_allowed_cidrs` the security group takes, through the generated `talman.yaml`, which git
+ignores; no committed file holds it. A new listener, or a listener that moves, needs its entry in
+`talos/firewall.yaml` and its row in the table below, and nothing else, or the firewall drops what
+reaches it. `tests/node-firewall.bats` renders every node's configuration offline and fails when a
+node has a rule `talos/firewall.yaml` does not list or lacks one it lists, when a rule accepts other
+networks than its sources stand for, and when the table below and the file disagree.
+
+### Sources
+
+- `operators`: the operator allowlist, `OPERATOR_CIDRS` or `operator-cidrs.json`
+  ([infrastructure.md](infrastructure.md#environment)).
+- `floating`: each node's floating address. A node that reaches another node's floating address goes
+  out through the router and arrives from its own.
+- `members`: each node's own address on the node network, the one its kubelet registers it with
+  (`talos/patches/all/node-ip.yaml`), and so the one Kubernetes reports for it. A node's own
+  connections come from it, and so does a pod's connection to another node's address. Cilium routes
+  in tunnel mode, and a node's address has a tunnel endpoint only with Cilium's host firewall or
+  node encryption on
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/node/manager/manager.go#L577-L584)),
+  neither of which `kubernetes/apps/base/kube-system/cilium/app/values.yaml` turns on, so the packet
+  leaves through the node's own interface. There it is masqueraded to that interface's address:
+  with eBPF masquerading off, as by the chart's default
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/install/kubernetes/cilium/values.yaml#L704-L707)),
+  Cilium's iptables rule masquerades what leaves the node's pod range, for an address outside it,
+  on any device but Cilium's own
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/datapath/iptables/iptables.go#L2206-L2241)),
+  and exempts traffic to other nodes from it only without tunnelling
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/option/config.go#L2061-L2063)).
+- `pods`: the pod range, from which a pod arrives at the node it runs on.
+- `controlplanes`: each control plane's address on the node network.
+- `loadbalancer`: the API load balancer's address on the node network, and the networks of the
+  node subnet's DHCP pool. A load balancer that proxies, as Octavia's amphora provider does,
+  connects to the API servers and health-checks them from its own ports' addresses, not from the
+  client's. An amphora configures each of its ports with the address Neutron gave the port, or
+  takes it by DHCP
+  ([Octavia](https://github.com/openstack/octavia/blob/19.0.0/octavia/amphorae/backends/utils/interface_file.py#L109-L131),
+  [member ports](https://github.com/openstack/octavia/blob/19.0.0/octavia/amphorae/backends/utils/interface_file.py#L248-L278)),
+  and Neutron allocates a port that asks for no particular address an available one of its subnet
+  and returns it, when the port goes, to the subnet's allocation pools, here the DHCP pool
+  ([Neutron](https://docs.openstack.org/api-ref/network/v2/index.html#create-port)). The cluster
+  stack renders the pool as the fewest networks that hold it exactly.
+- `cihost`: the CI host's address on the node network, once the cluster stack's `ci_host_number`
+  gives it ([infrastructure.md](infrastructure.md#the-ci-host)); nothing without it.
+
+A port that pods reach therefore accepts both `members` and `pods`. No source is the node network as
+a whole, which also holds the two edge routers the workers announce Services to
+([infrastructure.md](infrastructure.md#services-announced-over-bgp)), at host numbers outside every
+source above. An edge router's address therefore reaches no listener on any node: at the firewall it
+gets only what Talos admits to everyone, replies to connections the node opened, such as a worker's
+BGP sessions to it, and ICMP at up to five packets a second.
+
+### What each node admits
+
+| Rule | Protocol and ports | Nodes | Accepted from | Who connects, and why |
+| --- | --- | --- | --- | --- |
+| `apid` | TCP 50000 | all | `operators`, `members`, `floating`, `cihost` | The Talos API: talman and talosctl on the operator's machine and the CI host, and a node's Talos API passing a request on to another node. |
+| `trustd` | TCP 50001 | control planes | `members` | Talos' trust daemon, from which a worker gets its certificates. |
+| `kube-apiserver` | TCP 6443 | control planes | `operators`, `members`, `floating`, `pods`, `loadbalancer`, `cihost` | The Kubernetes API: the operator and the CI host, the load balancer, every node's KubePrism and kubelet, and every pod that reaches the `kubernetes` Service, which Cilium sends to a control plane's address. |
+| `etcd` | TCP 2379-2380 | control planes | `controlplanes` | etcd's client and peer ports: the other members, and a control plane that joins. |
+| `etcd-metrics` | TCP 2381 | control planes | `members`, `pods` | etcd's metrics, which Prometheus scrapes ([above](#the-control-planes-metrics)). |
+| `kube-controller-manager` | TCP 10257 | control planes | `members`, `pods` | The controller manager's secure port, which Prometheus scrapes. |
+| `kube-scheduler` | TCP 10259 | control planes | `members`, `pods` | The scheduler's secure port, which Prometheus scrapes. |
+| `kubelet` | TCP 10250 | all | `members`, `pods` | The kubelet: the API server, for logs, exec and port forwarding, and metrics-server and Prometheus, for metrics. metrics-server serves the API's metrics, so a node it cannot reach makes that API unavailable, which breaks API discovery and the deletion of namespaces. |
+| `cilium-vxlan` | UDP 8472 | all | `members` | Cilium's overlay, which carries pod traffic between nodes in VXLAN on Linux's default port ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/operations/system_requirements.rst#firewall-rules)). Cilium trusts the identity a VXLAN packet carries, so only the nodes may send it. |
+| `cilium-health` | TCP 4240 | all | `members` | Cilium's health checks between nodes; the ICMP echo they send as well is admitted by Talos itself. |
+| `hubble` | TCP 4244 | all | `members`, `pods` | The Hubble server in each node's Cilium agent, from which Hubble Relay reads the node's flows. |
+| `node-exporter` | TCP 9100 | all | `members`, `pods` | node-exporter, on the host network, which Prometheus scrapes. |
+
+### What gets no rule
+
+- KubePrism and Talos' own DNS listen for the node itself; the loopback interface is always
+  admitted, and Talos admits the cluster's DNS traffic to its host DNS from the pod and service
+  ranges itself, as the machine configuration forwards the cluster's DNS to it.
+- The Cilium agent's health API, TCP 9879, listens on the loopback address only
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/operations/system_requirements.rst#firewall-rules)).
+- LINSTOR's CSI node plugin runs on the host network with health ports, TCP 9808 and 9809, that
+  only its own kubelet probes; a connection to the node's own address goes over the loopback
+  interface
+  ([Piraeus](https://github.com/piraeusdatastore/piraeus-operator/blob/v2.12.1/pkg/resources/cluster/csi-node/csi-node-daemon-set.yaml)).
+- The Cilium operator and Cilium's Envoy can serve metrics on the host network. Nothing scrapes
+  them, as their monitors are off ([kubernetes.md](kubernetes.md#monitoring)), so nothing off the
+  node reaches them.
+- Spegel runs on the pod network: its peers reach each other, and Prometheus its metrics, at pod
+  addresses, and its registry is a NodePort that each node's own containerd reaches at the node's
+  own address
+  ([Spegel](https://github.com/spegel-org/spegel/blob/v0.8.1/charts/spegel/templates/daemonset.yaml)),
+  which Cilium serves on the node.
+- Cilium's BGP control plane runs on the workers ([kubernetes.md](kubernetes.md#service-addresses)):
+  each opens its sessions to the two edge routers, and listens on no port, as no BGP instance of
+  `cilium-bgp` sets `localPort`
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/bgp/manager/manager.go#L961-L966)).
+  What an edge router sends on a session is a reply to the worker's connection, which Talos admits.
+- LINSTOR's satellites, which the controller reaches on TCP 3366-3367, and DRBD's replication, on a
+  TCP port per volume that LINSTOR takes from its `TcpPortAutoRange`, 7000-7999 unless the controller
+  is told otherwise ([LINBIT](https://kb.linbit.com/linstor/linstor-change-tcp-port-range-for-drbd-resources/)),
+  run on the pod network: the Piraeus operator gives the satellites, and DRBD with them, the host
+  network only when asked
+  ([Piraeus](https://github.com/piraeusdatastore/piraeus-operator/blob/v2.12.1/docs/how-to/drbd-host-networking.md)),
+  which `linstor-cluster` does not. Cilium carries that traffic between pods, where the firewall does
+  not look.
+
+### What the firewall does not see
+
+The firewall's chains are netfilter's input and prerouting hooks, for packets addressed to the node
+itself. What Cilium serves before netfilter, or delivers to a pod rather than to the node, never
+reaches them, and neither does a node without machine configuration. Each, with what controls it:
+
+- Traffic to a pod's address, between pods or through a Service. No route from outside the node
+  network leads to the pod range, and each node's cloud port carries only its node's own address;
+  between pods, Talos leaves it to network policies.
+- NodePorts, which Cilium serves from its eBPF datapath at the node's network device as it replaces
+  kube-proxy. The security group keeps Kubernetes' NodePort range, 30000-32767, closed to everything
+  outside the nodes in both of its sets ([infrastructure.md](infrastructure.md#the-nodes-security-group)).
+- Host ports of pods, which Cilium serves the same way, outside the NodePort range. Pod Security
+  refuses them at the baseline level, which Talos enforces wherever a namespace sets no other; only
+  `kube-system`, `monitoring` and `piraeus-datastore` allow them, and the one pod there that
+  declares one, node-exporter, runs on the host network, where its port is the node's own and the
+  firewall filters it. The full security group also admits no host port from outside the nodes.
+- Services' external addresses, which Cilium serves the same way, and which any Service could name.
+  The API server refuses a new one: every control plane enables Kubernetes' `DenyServiceExternalIPs`
+  admission plugin (`talos/patches/controlplane/deny-service-external-ips.yaml`), which refuses a
+  Service that names an external address it did not have before
+  ([Kubernetes](https://kubernetes.io/docs/reference/access-authn-authz/admission-controllers/#denyserviceexternalips)),
+  and no Service under `kubernetes/` names one. The plugin reads `spec.externalIPs` alone and passes
+  every subresource
+  ([Kubernetes](https://github.com/kubernetes/kubernetes/blob/v1.37.1/plugin/pkg/admission/network/denyserviceexternalips/admission.go#L60-L98)),
+  so Cilium writing a Service's load-balancer address into its status, and Services labelled for
+  BGP, are not affected.
+- Services' load-balancer addresses, which Cilium assigns from the service range and serves the same
+  way, and which the workers announce to the edge routers
+  ([kubernetes.md](kubernetes.md#service-addresses)). They are reachable only through the edge
+  routers: no route outside the node network leads to the service range but theirs, and the
+  workers' own security group admits traffic to the service ports, and nothing else, from the two
+  edge addresses only ([infrastructure.md](infrastructure.md#services-announced-over-bgp)). That
+  group is part of the outer ring in both sets of the nodes' rules, which leave it as it is.
+- A node in maintenance mode, which has no machine configuration and so no firewall, and whose
+  Talos API takes a configuration from anyone who reaches it. The security group admits that port
+  only from the allowlist, the nodes' floating addresses and the CI host, in both of its sets.
+
+### Rolling it out
+
+A configuration that changes what a node admits can cut the node off from the operator and from
+the other nodes. `just cluster-talos --first <node>` rolls it out so that it cannot: after the dry
+run and the confirmation, `just cluster-check` must pass, and then the named node, followed by
+every other node the configuration changes in `talman.yaml`'s order, is applied alone in Talos' try
+mode ([Talos](https://docs.siderolabs.com/talos/v1.14/configure-your-talos-cluster/system-configuration/editing-machine-configuration)),
+which reverts the node by itself to the configuration it had five minutes after the apply, without
+a reboot, unless another configuration is applied first. Within that window, from the operator's
+machine, each of these must pass, in this order:
+
+1. The node's Talos API reports that the configuration is in effect, which also says it answers.
+2. Every node answers on the Talos API port.
+3. The API server on another control plane, reached at that control plane's own address rather
+   than the load balancer, reaches the node's kubelet (`/api/v1/nodes/<node>/proxy/healthz`) and
+   its node-exporter (`/api/v1/nodes/http:<node>:9100/proxy/metrics`). Its requests arrive from that
+   control plane's address, as a pod's on that control plane would once Cilium has masqueraded them.
+4. The Cilium agent on the node and the one on another node, each running Cilium's own health probe
+   at once, reach each other's health endpoint through the overlay and each other's host on the
+   health port.
+5. For a control plane, its etcd member and another control plane's, each asked through its own
+   Talos API, follow the same leader in the same term, vote and report no error, such as having no
+   leader, and the other control plane lists the node's member. talosctl's table is read by
+   position, so one that is not its twelve columns with `ERRORS` last fails the check.
+6. The node is still Ready 65 seconds after the apply: Kubernetes' node lifecycle controller marks a
+   node not Ready once its kubelet has not renewed its lease for `node-monitor-grace-period`,
+   50 seconds by default, and looks every 5 seconds, and the kubelet renews its lease every 10
+   seconds, a quarter of its 40 ([Kubernetes](https://github.com/kubernetes/kubernetes/blob/v1.37.1/pkg/controller/nodelifecycle/config/v1alpha1/defaults.go#L40-L53)).
+   Talos sets none of them.
+7. For a control plane, its own Kubernetes API answers `/readyz` at its own address, and the load
+   balancer still sends it connections: of fifteen fresh requests through the load balancer's
+   address for the API server's metrics, one is answered by the tried node's API server, told apart
+   from the others by the start time of its process, `process_start_time_seconds`, which Prometheus'
+   process collector in the API server's metrics reads from the process itself
+   ([Kubernetes](https://github.com/kubernetes/kubernetes/blob/v1.37.1/staging/src/k8s.io/component-base/metrics/legacyregistry/registry.go#L54)),
+   and which the same request at the node's own address gives. Talos turns the API server's
+   profiling off, and nothing else it serves names its member. The load balancer gives each new
+   connection to the next member in turn, and its health monitor, which checks every member every
+   five seconds and takes one out after three failures, has by then taken out one it cannot reach;
+   a check through the load balancer alone would not see that, as it routes around such a member. A
+   configuration that changes the API server's own settings makes Talos restart it, so `/readyz` is
+   asked every 5 seconds for up to 90, as a server that has just started is not ready until its
+   post-start hooks are done, and the fifteen requests are repeated every 5 seconds for up to 20,
+   the time the monitor takes to put a member back after two checks that pass. Neither wait starts a
+   request after its bound and a request gives up after 10 seconds, so at their longest they take
+   100 and 40 seconds after check 6, which ends 65 seconds after the try at the earliest; checks
+   that run into the last minute of the window keep nothing. A failure says whether the API server
+   never answered, as it does not when the firewall drops it, which of its checks were still
+   failing, or that it stopped answering at its own address once ready.
+8. `just cluster-check` passes: the Kubernetes API through the load balancer, every node Ready, the
+   pods of `kube-system` running and a pod's logs fetched through its kubelet.
+9. The node's Talos API still reports the configuration in effect. Talos reverts a tried
+   configuration once and for all, so one still in effect was in effect throughout the checks.
+
+Only then, and only while more than a minute of the window is left, is the same configuration
+applied again, which keeps it. A failed check stops the rollout: the node reverts by itself, the
+nodes before it keep theirs and those after it are untouched, and the recipe says which are which,
+as it does when a later node cannot say what the configuration would change. It names the check
+that failed and, when the tool the check ran failed, that tool's last line of error, with every
+address in it masked, or its exit status when it printed none. A check reads a tool's whole answer,
+however early the line it looks for comes: a reader that stopped at it, such as `grep -q`, would
+leave a tool with a long answer, such as metrics, to die of SIGPIPE, which fails the check under
+`pipefail` whatever the answer held. `tests/cluster-recipes.bats` answers the checks' requests for
+metrics and for a node with hundreds of kilobytes, and fails on a pipe written into such a reader
+in the rollout's scripts.
+
+### What the checks prove, and what to watch afterwards
+
+The firewall admits what belongs to a connection it has seen, so a connection open before the try
+keeps working through it, and only a connection opened inside the window tests a rule. On the
+tried node, the checks open fresh connections on these paths:
+
+- the Talos API, TCP 50000, from the operator's address (checks 1, 2, 5 and 9);
+- node-exporter, TCP 9100, from another control plane's address, as `members` (check 3);
+- Cilium's overlay, UDP 8472, both ways with another node: a VXLAN packet is never a reply, so every
+  one is judged (check 4);
+- for a control plane, the Kubernetes API, TCP 6443, from the operator's address and from the load
+  balancer's addresses, as `loadbalancer` (check 7).
+
+These are reached in the window as well, but on a connection that may be older than the try, so
+they are not proved there: the kubelet, TCP 10250, which the API server may reach on a connection it
+keeps (checks 3 and 8); Cilium's health port, TCP 4240, which Cilium probes on connections it keeps
+(check 4). And these are not reached in the window at all: etcd's peer and client ports, TCP
+2379-2380, whose members hold their streams open; etcd's metrics, the controller manager's and the
+scheduler's ports, TCP 2381, 10257 and 10259, and node-exporter's and the kubelet's from Prometheus,
+which keeps its scrape connections; Hubble, TCP 4244, which Hubble Relay keeps; any path from a pod
+on the node itself, from the pod range; trustd, TCP 50001, which a worker reaches when it joins; the
+CI host; and the nodes' floating addresses. `tests/node-firewall.bats` pins their rules offline.
+
+After the rollout, each of these is proved once its client opens a new connection, which a restart
+makes it do. Until each has been, watch:
+
+1. Prometheus, restarted once: two scrape intervals later, `up` is 1 for every target of the
+   kubelet, node-exporter, etcd, controller manager and scheduler jobs, a target on every node.
+2. metrics-server, restarted once: `kubectl top nodes` answers for every node.
+3. Hubble Relay, restarted once: it reports every node connected.
+4. Cilium's agents, restarted one node at a time: `cilium-health status` reports every node
+   reachable on the health port and through the overlay.
+5. One control plane, rebooted with `just cluster-reboot`: once it is back, `etcd status` from every
+   control plane shows the same leader and no error, as its peers have opened their streams again.
+6. trustd and the CI host stay unproved until a worker joins and the CI host connects; the paths
+   from pods on a node to the node itself, until a pod there, such as Prometheus on a control
+   plane, uses one.
+
+### The way back
+
+A node that fails its checks needs nothing: it reverts by itself. For a node that kept a
+configuration whose rule turns out wrong, the rule is fixed in `talos/firewall.yaml`, and the fix
+reaches the nodes the way every rule does: `just infra-apply sto2/cluster`, which renders it into
+`talman.yaml` (the stack's output is the only way the file reaches it), then
+`just cluster-talos --first <node>`.
+
+The nodes admit the Talos and Kubernetes APIs from the allowlist their configuration holds, so a
+change of the allowlist reaches them only from an address they admit before it. In order:
+
+1. Add the new network to the allowlist, leaving the old one in it.
+2. `just infra-apply sto2/cluster`, then `just cluster-talos --first <node>` from an address of the
+   old allowlist.
+3. Remove the old network, and apply and roll out the same way, now from the new one.
+
+When the old address is gone already, the way back runs through the cluster itself:
+
+1. `just infra-apply sto2/cluster` with the new network in the allowlist, from anywhere: it changes
+   the cloud's side, the security group and the load balancer's listener, which then admits the new
+   network, and writes a `talman.yaml` with it.
+2. The Kubernetes API now answers through the load balancer: the load balancer connects to the API
+   servers from its own addresses, which every control plane's firewall accepts as `loadbalancer`.
+   This holds only while the load balancer proxies, as Octavia's amphora provider does; one that
+   passes the client's address through would arrive from the new network, which no node admits
+   yet.
+3. A pod in `kube-system`, on the host network, runs talosctl with the cluster's talosconfig and
+   each node's configuration as `talman render` writes it from the new `talman.yaml`, and applies
+   them, one node at a time, through each node's Talos API at the node's own address on the node
+   network: the pod's connections come from its node's own address, which every node accepts as
+   `members`, and reach its own node over the loopback interface. A pod on the pod network reaches
+   the other nodes the same way, masqueraded, but its own node only through the node's floating
+   address, as `floating`.
+4. Once the nodes hold the new allowlist, `just cluster-talos` runs from the new network again.
+
+The talosconfig and the rendered configurations hold the cluster's keys. They reach the pod as a
+Secret in `kube-system`, whose Pod Security level allows the host network and which only cluster
+administrators reach, created for the recovery and deleted with the pod as soon as it is done. No
+recipe does this yet; one would render the configurations, put them and a talosconfig whose
+endpoints are the nodes' own addresses into that Secret through kubectl's standard input, run the
+pod from talosctl's image pinned by digest, apply in try mode node by node and keep each once it
+answers from the new network, and delete the pod and the Secret on every exit.
+
+The other way back is the CI host's address, when the configuration the nodes hold was rendered
+with `ci_host_number` set: from the CI host, or a machine started at its address, the same
+configurations are applied through each node's Talos API at its own address. Neither the cloud's
+console nor a host elsewhere on the node network is a way back: the console shows Talos' dashboard
+only, and the nodes admit no other address there.
 
 ## The Talos age key
 
@@ -338,6 +647,19 @@ out of the artifact, which is built from `kubernetes/`.
   keys. Without it, talman refuses a rollout while such a node is there. With nothing to change,
   nothing is asked or applied. It needs the cluster's `talman.yaml` and `secrets.sops.yaml` and
   the age key's location.
+
+  `just cluster-talos [cluster] --first <node>` tries the configuration on each node before it keeps
+  it, the named node first ([Rolling it out](#rolling-it-out)): it checks the cluster with
+  `cluster-check` before anything is applied, and applies to a node in Talos' try mode, with talman
+  waiting up to two minutes for it to answer, checks the paths into it from the other nodes, its
+  readiness, for a control plane its own Kubernetes API and its place behind the load balancer, and
+  the cluster, and applies again to keep it, one node at a time, skipping the nodes
+  the configuration does not change. A failed check stops the rollout, saying that the node reverts
+  by itself, which nodes kept the configuration before it and which are untouched. It needs what
+  `cluster-talos` needs, the kubeconfig, at least two nodes of which one is another control plane,
+  and node-exporter and Cilium running; it refuses a node `talman.yaml` does not list before it runs
+  anything, and does not onboard. It prints node names only: what kubectl and talosctl print about
+  the checks names addresses and stays out of the output.
 - `just cluster-upgrade [cluster] [--yes]` upgrades Talos on every node that does not run the
   version and schematic `talman.yaml` gives it. It shows which nodes `talman upgrade --dry-run`
   says are behind, and once the cluster's name is typed back, or with `--yes`, fetches the
@@ -393,14 +715,22 @@ out of the artifact, which is built from `kubernetes/`.
   temporary directory as `cluster-snapshot` makes one, decrypts it there with the Talos age key, and
   waits for every node as `cluster-bootstrap` does; a snapshot that is not there, is not an age file
   or that the key cannot decrypt stops it. It says that the control planes are reset, the workers
-  not, and the cluster's state replaced by the snapshot's, losing what was written since, and goes
-  on once the cluster's name is typed back; `--yes` does not ask. `talman reset --group
-  controlplane` then wipes each control plane's EPHEMERAL partition without leaving etcd and reboots
-  it, and once every node answers again, `talman apply --bootstrap --recover-from` restores etcd
-  from the snapshot on the first control plane, which the others join. It fetches the kubeconfig as
-  `cluster-kubeconfig` does, and asks every ten seconds, ninety times at most, until every node in
-  `talman.yaml`, workers included, reports Ready after the reset. What `cluster-bootstrap` applies
-  before Flux is not applied again, as the restored etcd holds it. The decrypted snapshot is removed once etcd is restored and whenever the recipe exits.
+  not, and the cluster's state replaced by the snapshot's, losing what was written since. It counts
+  the PersistentVolumes of LINSTOR's driver the cluster has now, when its API answers through the
+  kubeconfig and the kubeconfig may list them, and says so when not, and says, by number and not by
+  name, that LINSTOR keeps its database in the Kubernetes API: a restore rolls its records back with
+  the PersistentVolumes and claims while the volumes' data on the workers stays current, so a volume
+  created after the snapshot is orphaned on the workers and one deleted after it comes back without
+  its data, missing or created again empty ([the
+  runbook](runbooks/etcd-restore.md#volumes-since-the-snapshot) says how to find and remove them,
+  and when not to restore). It goes on once the cluster's name is typed back; `--yes` does not ask.
+  `talman reset --group controlplane --reboot=true` then wipes each control plane's EPHEMERAL
+  partition without leaving etcd and reboots it, and once every node answers again, `talman apply
+  --bootstrap --recover-from` restores etcd from the snapshot on the first control plane, which the
+  others join. It fetches the kubeconfig as `cluster-kubeconfig` does, and asks every ten seconds,
+  ninety times at most, until every node in `talman.yaml`, workers included, reports Ready after the
+  reset. What `cluster-bootstrap` applies before Flux is not applied again, as the restored etcd
+  holds it. The decrypted snapshot is removed once etcd is restored and whenever the recipe exits.
   It needs what `cluster-talos` needs, the API address, the bucket prefix and the state key.
 - `just cluster-config [cluster]` applies what Flux needs before it starts: the namespace
   `flux-system`, the ConfigMap `cluster-config`, the Secret `cluster-secrets` and the Secret
@@ -476,24 +806,33 @@ out of the artifact, which is built from `kubernetes/`.
   `sto2/cluster`, as `just infra-destroy sto2/cluster` does
   ([infrastructure.md](infrastructure.md#recipes)): it shows the plan's summary, destroys once the
   stack's name is typed back, or with `--yes`, and then removes the cluster's `talman.yaml`,
-  talosconfig and kubeconfig. The plumbing stack, the secrets bundle and the buckets stay. First,
-  through the kubeconfig of the cluster it is given, it lists
-  every Service of type LoadBalancer and every PersistentVolume of a CSI driver: a cloud load
-  balancer or volume behind one is made by the cluster, not by OpenTofu, so the destroy would leave
-  it in the cloud, where it keeps the network from being deleted. A Service whose every
-  load-balancer address lies in the service range of the cluster's `talman.yaml` does not count:
-  Cilium gave it that address and the workers announce it, and nothing in the cloud stands behind
-  it ([kubernetes.md](kubernetes.md#service-addresses)). A Service without an address yet, or with
-  one outside the range, counts, as does every one when `talman.yaml` names no service range. While
-  there are any, it names each, by namespace and name or by the volume's name, and destroys
-  nothing. Volumes of LINSTOR's driver, `linstor.csi.linbit.com`, are the other exception: their
-  data is on the workers' data volumes ([above](#the-workers-data-device)), which the stack holds
-  and deletes, so none of them stays in the cloud. They do not hold the destroy up; it says how
-  many there are, by number and not by name, before it shows the plan, and the one confirmation,
-  the stack's name typed back or `--yes`, destroys them with the stack. A cluster whose API does
-  not answer, or that has no kubeconfig, cannot be asked and is not destroyed either, unless
-  `--unreachable` is given: the operator then takes on whatever it owned, which stays in the
-  cloud. Before it asks the cluster it checks what `infra-destroy` needs for the stack.
+  talosconfig and kubeconfig. The plumbing stack, the secrets bundle and the buckets stay. The stack
+  holds one cluster, so first, before it asks any cluster anything and whatever flags are given, it
+  refuses a name other than the cluster name in the stack's `talman_yaml` output, saying which
+  cluster the stack holds, or that the stack names none while its state holds resources, and the
+  name of a cluster that has no directory under `talos/`. A stack whose state holds no resource,
+  destroyed already or never applied, is not an error: the recipe says so, removes the cluster's
+  generated files if they are there, and exits 0, as `infra-destroy` does; a state that cannot be
+  read, or that is not a state, refuses. `cluster-env` does not make that refusal for every recipe:
+  `cluster-secrets` and `infra-talman` run before a cluster's directory exists. Then, through the
+  kubeconfig of the cluster it is given, it lists every Service of type LoadBalancer and every
+  PersistentVolume of a CSI driver: a cloud load balancer or volume behind one is made by the
+  cluster, not by OpenTofu, so the destroy would leave it in the cloud, where it keeps the network
+  from being deleted. A Service whose every load-balancer address lies in the service range of the
+  cluster's `talman.yaml` does not count: Cilium gave it that address and the workers announce it,
+  and nothing in the cloud stands behind it ([kubernetes.md](kubernetes.md#service-addresses)). A Service without an address yet, or with one outside
+  the range, counts, as does every one when `talman.yaml` names no service range. While there are
+  any, it names each, by namespace and name or by the volume's name, and destroys nothing. Volumes
+  of LINSTOR's driver, `linstor.csi.linbit.com`, are the other exception: their data is on the
+  workers' data volumes ([above](#the-workers-data-device)), which the stack holds and deletes, so
+  none of them stays in the cloud. They do not hold the destroy up; it says how many there are, by
+  number and not by name, before it shows the plan, and the one confirmation, the stack's name typed
+  back or `--yes`, destroys them with the stack. A cluster whose API does not answer, or that has no
+  kubeconfig, cannot be asked and is not destroyed either, unless `--unreachable` is given: the
+  operator then takes on whatever it owned, which stays in the cloud. Before it asks the cluster it
+  checks what `infra-destroy` needs for the stack. The asking is `infra-destroy`'s own, through
+  shared code, so `just infra-destroy sto2/cluster`, and `just infra-destroy` with no stack, ask the
+  same, count the same Services and refuse the same; they take `--unreachable` too.
   [runbooks/rebuild.md](runbooks/rebuild.md) has it in the procedure around it.
 
 A failing recipe ends with a line naming the step it failed in.
@@ -517,14 +856,27 @@ write it to `clusterconfig/<recipe>.log` in the cluster's directory, which git i
 afresh by each run, and print for each talman call only whether it succeeded or failed and that
 file's path.
 Of talman's output `cluster-snapshot` shows only the errors, and with `CI` set not those either.
-What rclone prints names the bucket and the endpoint, so the etcd recipes never show it. kubectl's
-and helm's output passes through, naming the objects they apply, except in `cluster-check`,
-`cluster-reboot`, `cluster-destroy`, `grafana` and `logs`: they print node and object names only,
-and `logs` the records, and none of what kubectl prints, as the objects it reads and its errors hold
-the API server's, the nodes' and the pods' addresses, but for the message of an error the API
-server or the store answered with, which `logs` shows without an address; only `kubectl drain`'s
-passes through in `cluster-reboot`, as in `cluster-upgrade`, naming the pods it evicts and those it
-cannot.
+What rclone prints names the bucket and the endpoint, so the etcd recipes never show it. A failed S3
+request does say why, though: of rclone's errors the recipes show only the reason, a few lines at
+most, after each line has passed through a filter that replaces the value of every variable that
+holds a key, the bucket prefix, the endpoint or the API address, matched literally, and every URL,
+IPv4 and IPv6 address, host name with a dot in it and long token by pattern (`<redacted>`, `<url>`,
+`<address>`, `<name>`, `<token>`; the filter is `redact_stream` in `scripts/lib/errors.sh`). A
+denied request, a missing bucket and a name that does not resolve therefore read differently without
+naming the place. With `CI` set nothing of rclone's words is shown: they go to
+`clusterconfig/<recipe>.errors.log` in the cluster's directory, which git ignores, started afresh by
+each run, and only that file's path is printed, as for talman's output. kubectl's and helm's output
+passes through, naming the objects they apply, except in `cluster-check`, `cluster-reboot`,
+`cluster-destroy`, `grafana` and `logs`: they print node and object names only, and `logs` the
+records, and none of what kubectl prints, as the objects it reads and its errors hold the API
+server's, the nodes' and the pods' addresses, but for the message of an error the API server or the
+store answered with, which `logs` shows without an address; only `kubectl drain`'s passes through
+in `cluster-reboot`, as in `cluster-upgrade`,
+naming the pods it evicts and those it cannot, with its errors passed through the same filter line
+by line, so a connection error still says why, `connection refused`. The checks of
+`cluster-talos --first` print none of what kubectl, or talosctl through `talman talosctl`, prints
+either, but for a check whose tool failed, its last line of error with every IPv4 and IPv6 address
+in it masked as `<address>`; their `talman apply` dry runs print as talman's output does above.
 
 ## Environment
 

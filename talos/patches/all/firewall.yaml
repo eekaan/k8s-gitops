@@ -1,0 +1,26 @@
+# Talos' ingress firewall. A node drops every packet that reaches it, apart from the traffic Talos
+# always admits (loopback, replies to its own connections, rate-limited ICMP and traffic between the
+# pod and service ranges), unless a rule admits it. Each rule admits one listener of
+# talos/firewall.yaml, on the nodes it names, from its sources only; talman.yaml's values.firewall
+# holds them for each role, rendered by the cluster stack from that file and its own inputs.
+# The range actions sit in comments so the file is YAML before it is rendered as well.
+---
+apiVersion: v1alpha1
+kind: NetworkDefaultActionConfig
+ingress: block
+# {{- range index .Values.firewall .Node.Role }}
+---
+apiVersion: v1alpha1
+kind: NetworkRuleConfig
+name: "{{ .name }}"
+portSelector:
+  ports:
+    # {{- range .ports }}
+    - "{{ . }}"
+    # {{- end }}
+  protocol: "{{ .protocol }}"
+ingress:
+  # {{- range .subnets }}
+  - subnet: "{{ . }}"
+  # {{- end }}
+# {{- end }}

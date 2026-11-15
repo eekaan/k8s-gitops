@@ -30,13 +30,14 @@ module "nodes" {
     subnet_id = local.plumbing.router.attached_subnet_ids.nodes
     cidr      = local.plumbing.network.cidr
   }
-  image_id            = local.plumbing.image.id
-  external_network    = local.plumbing.router.external_network
-  api_allowed_cidrs   = var.api_allowed_cidrs
-  controlplane_count  = var.controlplane_count
-  worker_count        = var.worker_count
-  controlplane_flavor = var.controlplane_flavor
-  worker_flavor       = var.worker_flavor
+  image_id             = local.plumbing.image.id
+  external_network     = local.plumbing.router.external_network
+  api_allowed_cidrs    = var.api_allowed_cidrs
+  security_group_rules = var.security_group_rules
+  controlplane_count   = var.controlplane_count
+  worker_count         = var.worker_count
+  controlplane_flavor  = var.controlplane_flavor
+  worker_flavor        = var.worker_flavor
 
   # A worker receives packets addressed to the service range and answers from it, which port
   # security allows only for the port's own address and its allowed address pairs. Control planes
@@ -113,6 +114,35 @@ module "api_lb" {
   tags                  = [var.prefix]
 }
 
+# Where the API load balancer and the CI host reach the nodes' APIs from, for the nodes' firewall,
+# which admits neither the node network as a whole nor so the edge routers on it. A load balancer
+# that proxies, as Octavia's amphora provider does, connects to the API servers and health-checks
+# them from its own ports, which the cloud gives addresses from the node subnet's DHCP pool; the
+# pool goes in as the fewest networks that hold it exactly: every block of the node subnet that lies
+# in the pool and whose enclosing block does not.
+locals {
+  # An IPv4 address as a number.
+  node_cidr  = local.plumbing.network.cidr
+  node_bits  = tonumber(split("/", local.node_cidr)[1])
+  node_first = sum([for i, octet in split(".", cidrhost(local.node_cidr, 0)) : tonumber(octet) * pow(256, 3 - i)])
+  pool_first = sum([for i, octet in split(".", local.plumbing.network.dhcp_pool.start) : tonumber(octet) * pow(256, 3 - i)])
+  pool_last  = sum([for i, octet in split(".", local.plumbing.network.dhcp_pool.end) : tonumber(octet) * pow(256, 3 - i)])
+  pool_blocks = flatten([
+    for bits in range(33 - local.node_bits) : [
+      for index in range(pow(2, bits)) : cidrsubnet(local.node_cidr, bits, index)
+      if local.node_first + index * pow(2, 32 - local.node_bits - bits) >= local.pool_first &&
+      local.node_first + (index + 1) * pow(2, 32 - local.node_bits - bits) - 1 <= local.pool_last && !(
+        bits > 0 &&
+        local.node_first + floor(index / 2) * pow(2, 33 - local.node_bits - bits) >= local.pool_first &&
+        local.node_first + (floor(index / 2) + 1) * pow(2, 33 - local.node_bits - bits) - 1 <= local.pool_last
+      )
+    ]
+  ])
+
+  api_load_balancer_addresses = concat(["${module.api_lb.vip_address}/32"], local.pool_blocks)
+  ci_host_address             = var.ci_host_number == null ? null : cidrhost(local.node_cidr, var.ci_host_number)
+}
+
 # talman's configuration of the cluster, from this stack's own nodes and load balancer. talman runs
 # outside the node network and reaches every node at its floating address.
 locals {
@@ -121,10 +151,11 @@ locals {
   talman_nodes = flatten([
     for role in ["controlplane", "worker"] : [
       for name in sort(keys(module.nodes.nodes)) : {
-        hostname    = name
-        role        = role
-        address     = module.nodes.nodes[name].floating_address
-        floating_ip = module.nodes.nodes[name].floating_address
+        hostname        = name
+        role            = role
+        address         = module.nodes.nodes[name].floating_address
+        floating_ip     = module.nodes.nodes[name].floating_address
+        private_address = module.nodes.nodes[name].private_address
       } if module.nodes.nodes[name].role == role
     ]
   ])
@@ -149,5 +180,11 @@ locals {
     # Where the cluster recipes, which run outside the node network, reach the Kubernetes API.
     api_address = module.api_lb.floating_address
     nodes       = local.talman_nodes
+    # The nodes' own firewall: its listeners, and the allowlist that reaches the Talos and Kubernetes
+    # APIs, which the generated talman.yaml carries and nothing committed does.
+    firewall                    = yamldecode(file("${path.module}/../../../../../talos/firewall.yaml"))
+    operator_cidrs              = sort(distinct(var.api_allowed_cidrs))
+    api_load_balancer_addresses = local.api_load_balancer_addresses
+    ci_host_address             = local.ci_host_address
   })
 }
