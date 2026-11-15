@@ -1706,6 +1706,23 @@ early_readers() {
   [ -z "$(calls '^cluster-reboot ')" ]
 }
 
+@test "cluster-talos with CI set finds the nodes that need a reboot from talman's log, and prints no address" {
+  fake_cluster
+  with CI=true
+  printf '%s\n' cp-1 cp-2 worker-2 > "$STATE/pending"
+  : > "$STATE/etcd.cp-1"
+  : > "$STATE/etcd.cp-2"
+  : > "$STATE/network.worker-2"
+
+  recipe cluster-talos --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"cp-1 runs etcd with the arguments it had until it reboots"* ]]
+  [[ $output == *"cp-2 runs etcd with the arguments it had until it reboots"* ]]
+  [[ $output != *"worker-2 runs"* ]]
+  if grep -qE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' <<< "$output"; then false; fi
+}
+
 @test "the Talos documentation the reboot list cites is the minor version versions.yaml pins" {
   minor=$(yq '.talos' "$ROOT/versions.yaml" | sed -E 's/^(v[0-9]+\.[0-9]+)\..*/\1/')
   [[ $minor == v* ]]

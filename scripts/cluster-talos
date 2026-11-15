@@ -197,6 +197,7 @@ wait_for_talos_api "$talman_file"
 step="asking each node what the configuration would change"
 changes=0
 # talman writes each node's block to standard error, and talosctl's own output with it.
+[[ -z ${CI:-} ]] || talman_log_start
 dry_run=$(cluster_talman apply --dry-run --detailed-exit-code --redact-secrets "${onboard[@]}" 2>&1) || changes=$?
 [[ -z $dry_run ]] || printf '%s\n' "$dry_run"
 case $changes in

@@ -72,6 +72,16 @@ remove_private_dir() {
   exit "$status"
 }
 
+# talman_log_start: with CI set, empties talman_log once per run. A caller that runs cluster_talman in
+# a command substitution, whose variables do not outlast it, calls this first, or the next call
+# would empty the log again.
+talman_log_start() {
+  [[ -z ${talman_log_started-} ]] || return 0
+  # shellcheck disable=SC2154 # scripts/cluster-env sets talman_log
+  (umask 077 && mkdir -p "${talman_log%/*}" && : > "$talman_log")
+  talman_log_started=1
+}
+
 # cluster_talman ARG...: talman with ARG... on the cluster scripts/cluster-env set up. talman's output,
 # talosctl's within it, names the nodes by address and shows configuration diffs, and CI logs are
 # public, so with CI set it goes to talman_log, in the cluster's clusterconfig/, which git ignores,
@@ -84,11 +94,7 @@ cluster_talman() {
     talman "$@"
     return
   fi
-  if [[ -z ${talman_log_started-} ]]; then
-    # shellcheck disable=SC2154 # scripts/cluster-env sets talman_log
-    (umask 077 && mkdir -p "${talman_log%/*}" && : > "$talman_log")
-    talman_log_started=1
-  fi
+  talman_log_start
   talman "$@" >> "$talman_log" 2>&1 || status=$?
   log=${talman_log#"$infra_root"/}
   if ((status == 0)) || { ((status == 2)) && [[ " $* " == *" --detailed-exit-code "* ]]; }; then
