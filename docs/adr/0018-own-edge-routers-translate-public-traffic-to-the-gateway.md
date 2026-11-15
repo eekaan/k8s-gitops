@@ -5,11 +5,26 @@
 
 ## Context
 
-ADR 0013 has the workers announce every `LoadBalancer` Service's address over BGP to two edge routers
-on the node subnet and leaves open what those routers are and how public traffic gets through them
-to a Service. The owner wants the path from the internet to a Service to be routers the deployment
-runs itself, speaking a standard protocol, so that the cluster does not depend on one cloud's load
-balancer service, the same design runs on other infrastructure, and BGP is learned on something real.
+ADR 0013 has the workers announce every `LoadBalancer` Service's address over BGP to two edge
+routers on the node subnet and leaves open what those routers are and how public traffic gets
+through them to a Service. The owner wants the path from the internet to a Service to be routers the
+deployment runs itself, speaking a standard protocol, so that the cluster does not depend on one
+cloud's load balancer service, the same design runs on other infrastructure, and BGP is learned on
+something real.
+
+This record is the change ADR 0013's decision on the edge routers leaves to "their own change", and
+it refines that record in three places, which stand as written otherwise:
+
+- ADR 0013's consequence that "how the edge routers translate, and whether they pass the client's
+  address on another way, is decided with them": they translate the source, and do not pass the
+  client's address on (the data path, below).
+- Its consequence that a failed worker stops receiving traffic "once its sessions' hold time
+  expires, or, as graceful restart is on, once the restart time also has": the edges do not
+  negotiate the notification bit, so a worker that dies or is cut off goes at its hold time, and the
+  restart time applies to a worker whose agent stops or restarts, which closes its sessions without
+  a NOTIFICATION (the routing, below).
+- Its edge routers "on the node subnet" that the workers peer with: the edges take sessions from the
+  workers' addresses only, not from the rest of the node subnet.
 
 ## Decision
 
@@ -21,25 +36,26 @@ balancer service, the same design runs on other infrastructure, and BGP is learn
 - **Routing.** Plain eBGP in the edge AS. The workers open the sessions and never listen, so an edge
   takes dynamic neighbours from the workers' addresses only, the block of host numbers the cluster
   stack numbers its workers from, in one peer group whose remote AS is the cluster's: the node
-  subnet also holds the control planes, the CI host and the other edge, none of which may announce
-  a Service. The edge's firewall and its security group admit BGP from that block alone. It accepts a prefix only if it is a /32 inside the service range, denies everything
-  else, sets the maximum of accepted prefixes to the size of the range (a guard only a loosened
-  prefix list can reach, as FRR counts accepted prefixes and the list lets in no more than the range
-  holds), takes the worker that announced a path as its next hop, and advertises nothing. The
-  timers and the graceful restart time are read from the workers' `CiliumBGPPeerConfig` in the
-  manifests, so the two ends cannot disagree. Graceful restart runs without the notification bit of
-  RFC 8538, which FRR sets by default, so a dead worker's paths go when its hold timer expires
-  rather than a restart time later. Equal-cost multipath covers as many paths as there can
-  be workers, and the kernel hashes a flow's layer 4 fields, so a connection stays on one path.
+  subnet also holds the control planes, the CI host and the other edge, none of which may announce a
+  Service. The edge's firewall and its security group admit BGP from that block alone. It accepts a
+  prefix only if it is a /32 inside the service range, denies everything else, sets the maximum of
+  accepted prefixes to the size of the range (a guard only a loosened prefix list can reach, as FRR
+  counts accepted prefixes and the list lets in no more than the range holds), takes the worker that
+  announced a path as its next hop, and advertises nothing. The timers and the graceful restart time
+  are read from the workers' `CiliumBGPPeerConfig` in the manifests, so the two ends cannot
+  disagree. Graceful restart runs without the notification bit of RFC 8538, which FRR sets by
+  default, so a dead worker's paths go when its hold timer expires rather than a restart time later.
+  Equal-cost multipath covers as many paths as there can be workers, and the kernel hashes a flow's
+  layer 4 fields, so a connection stays on one path.
 - **The data path.** nftables on each edge translates a connection to the edge's own address on a
   public port to the public Gateway's address, a host of the service range that the plumbing stack
   picks and `cluster-config` carries as `GATEWAY_ADDRESS`, and translates its source to the edge's
   own address. Forwarding is allowed between those only; everything else addressed to an edge is
-  dropped but SSH, BGP from the workers' addresses and the ICMP path MTU discovery needs. **The source
-  translation is deliberate.** A worker sends its reply to the address a packet came from, through
-  its default route, which is the cloud's router, unless that address is on the node subnet; without
-  the translation the reply would leave by another path than the connection came in on and would
-  never meet it.
+  dropped but SSH, BGP from the workers' addresses and the ICMP path MTU discovery needs. **The
+  source translation is deliberate.** A worker sends its reply to the address a packet came from,
+  through its default route, which is the cloud's router, unless that address is on the node subnet;
+  without the translation the reply would leave by another path than the connection came in on and
+  would never meet it.
 - **No allowed address pairs.** With the translation an edge sends only from its own address and
   receives only for it, so its port keeps port security on with no allowed address pair, which is
   what the Neutron API reference describes: the pairs define the addresses a port may send from when
@@ -89,11 +105,11 @@ balancer service, the same design runs on other infrastructure, and BGP is learn
 ## Consequences
 
 - **Pods see an edge's address, not the client's.** Restoring the client's address later takes one
-  of two things: a layer 4 proxy on each edge speaking the PROXY protocol to the Gateway, which costs
-  a daemon, a protocol the Gateway must accept and no UDP; or replies routed back through the edges,
-  which costs source routing on the workers, each reply meeting the edge that holds the connection,
-  and an edge sending from addresses of the service range and of clients, which takes the port
-  security off. Neither is built.
+  of two things: a layer 4 proxy on each edge speaking the PROXY protocol to the Gateway, which
+  costs a daemon, a protocol the Gateway must accept and no UDP; or replies routed back through the
+  edges, which costs source routing on the workers, each reply meeting the edge that holds the
+  connection, and an edge sending from addresses of the service range and of clients, which takes
+  the port security off. Neither is built.
 - **Two DNS answers.** A hostname publishes both floating IPs. While one edge is down, half of the
   clients' attempts reach nothing until its address is removed from DNS. Health-checked DNS removes
   it, or the shared virtual address removes the half, each a later change.
