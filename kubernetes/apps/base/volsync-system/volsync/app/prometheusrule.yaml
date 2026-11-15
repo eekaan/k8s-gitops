@@ -1,0 +1,38 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/prometheusrule-monitoring-v1.json
+# Alerts on the controller's own metrics, which the chart's ServiceMonitor scrapes: the
+# volsync_volume_out_of_sync gauge and the volsync_missed_intervals_total counter, each labelled
+# obj_name, obj_namespace, role and method (https://volsync.readthedocs.io/en/stable/usage/metrics/index.html).
+# Every replica serves the metrics, so the expressions take the largest value over the replicas'
+# series. Both metrics need a schedule on the ReplicationSource. Tests: tests/rules/volsync.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: volsync-alerts
+  namespace: volsync-system
+spec:
+  groups:
+    - name: volsync
+      rules:
+        # The gauge is 1 after a failed sync or an iteration that overran its schedule, and 0 once
+        # a sync completes, so half an hour is longer than a backup of the lab's volumes takes.
+        - alert: VolSyncSourceOutOfSync
+          expr: max by (obj_namespace, obj_name, method) (volsync_volume_out_of_sync{role="source"}) == 1
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: A volume's backup is out of sync
+            description: The ReplicationSource {{ $labels.obj_name }} in {{ $labels.obj_namespace }} has been out of sync for 30 minutes, so its newest backup is older than its schedule allows.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#volsyncsourceoutofsync
+        # The counter rises when an iteration has not finished before the next is due; a rise in
+        # the last hour keeps the alert up for that hour.
+        - alert: VolSyncSourceMissedIntervals
+          expr: max by (obj_namespace, obj_name, method) (increase(volsync_missed_intervals_total{role="source"}[1h])) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: A volume's backup missed a scheduled interval
+            description: The ReplicationSource {{ $labels.obj_name }} in {{ $labels.obj_namespace }} did not finish a backup before the next was due, within the last hour.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#volsyncsourcemissedintervals

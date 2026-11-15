@@ -46,9 +46,13 @@ current. A new version alone leaves the record as it is. With [mise](https://mis
   registries), the schemas and images of what it builds and renders (`just kubernetes-validate`,
   which pulls the charts as well and fetches the schemas), the log collector's configuration
   (`just vector-check`: Vector itself validates it and runs its unit tests, in the image the
-  collector runs, pinned by digest, so it needs Docker too), and gitleaks over the committable
-  files and the git history reachable from `HEAD`, so a clone and a CI checkout are judged on the
-  same commits. The groups `tests-1` to `tests-3` each run a third of the bats tests.
+  collector runs, pinned by digest, so it needs Docker too), the alert rules the tree renders
+  (`just rules-check`: promtool, in the image of the Prometheus the rendered chart deploys, checks
+  every rule and runs the unit tests in `tests/rules`, and each alert of the tree's own has its
+  severity, runbook and a test that fires and one that stays quiet; Docker as well), and gitleaks
+  over the committable files and the git history reachable from `HEAD`, so a clone and a CI
+  checkout are judged on the same commits. The groups `tests-1` to `tests-3` each run a third of
+  the bats tests.
 - The groups are the dependencies of the `checks` recipe, and a group's checks are its own
   dependencies; a new check goes into exactly one group, and then runs in `just checks`, in
   `just ci` and in CI.
@@ -63,8 +67,9 @@ current. A new version alone leaves the record as it is. With [mise](https://mis
 - `just ci` runs the same groups through the Dagger module in `.dagger/modules/ci`, side by side,
   each in containers of its own: Renovate in its own image, Vector in the log collector's image,
   the speakers of the edge routers' routing policy in FRR's image, every other check in a container
-  with the pinned tools, the tools image `versions.yaml` records when it was built for these pins
-  and one built from them otherwise
+  with the pinned tools, promtool among them, copied from the Prometheus image the monitoring chart
+  deploys; the tools image `versions.yaml` records when it was built for these pins and one built
+  from them otherwise
   ([The tools image](#the-tools-image)); the run's first line says which. `just ci tests-2` runs
   one group, as each CI job does. It needs
   only `just`, the pinned `dagger` and a container runtime such as Docker. Every group runs to its

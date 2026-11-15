@@ -147,6 +147,57 @@ runs_of() {
   [[ $output == *"commit $flagged"*":1: $literal"* ]]
 }
 
+# bats test_tags=hermetic
+@test "just ci runs rules-check with promtool from the image the render names, after a chart update moves its tag" {
+  local values rendered tag other
+  checkout
+  # The Prometheus the chart deploys, and the other variant of the same release: the render naming
+  # another tag, as a chart update that moves it does, with nothing else in the tree changed.
+  rendered=$(cd "$WORK" && scripts/rules-image)
+  tag=${rendered##*:}
+  other=${tag%-distroless}
+  [[ $other != "$tag" ]] || other=$tag-distroless
+  values="$WORK/kubernetes/apps/base/monitoring/kube-prometheus-stack/app/values.yaml"
+  TAG=$other yq -i '.prometheus.prometheusSpec.image.tag = strenv(TAG)' "$values"
+  [ "$(cd "$WORK" && scripts/rules-image)" = "${rendered%:*}:$other" ]
+  # A group of the checkout's own: rules-check, and the bats tests of the rules.
+  sed -i 's/^checks:.*$/& rules-only/' "$WORK/justfile"
+  printf '\nrules-only: rules-check rules-tests\n\nrules-tests:\n    bats tests/rules-check.bats\n' >> "$WORK/justfile"
+
+  run_ci rules-only
+
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *"== rules-only: passed"* ]]
+  # The module runs rules-check: promtool from the image of the moved tag checks every rule and
+  # refuses the broken ones, ...
+  [[ $output == *"rules-check:"* ]]
+  [[ $output == *"and the image ${rendered%:*}:$other to"* ]]
+  [[ $output == *"rules-promtool: every rule is valid and every unit test passes"* ]]
+  [[ $output == *"rules-refusal: promtool's check rules refuses the chart's rule"* ]]
+  [[ $output == *"rules-refusal: promtool's check rules refuses the tree's own alert"*"defined twice, naming it"* ]]
+  # ... and the tests of the rules pass on it, with no file edited by hand.
+  [[ $output == *"ok "*" The rules are checked with the Prometheus image the chart deploys, in the static group of just ci"* ]]
+}
+
+# bats test_tags=hermetic
+@test "just ci reports a chart rules-check cannot pull as rules-check's failure, beside the group's other checks" {
+  checkout
+  # A chart version the registry does not have, so rules-image cannot pull the chart.
+  TAG=0.0.0-none yq -i '.spec.ref.tag = strenv(TAG)' "$WORK/kubernetes/apps/base/monitoring/kube-prometheus-stack/app/ocirepository.yaml"
+  sed -i 's/^checks:.*$/& rules-only/' "$WORK/justfile"
+  printf '\nrules-only: rules-check check-literals\n' >> "$WORK/justfile"
+
+  run_ci rules-only
+
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"== rules-only: failed (rules-check check-literals)"* ]]
+  [[ $output == *"rules-check:"*"kube-prometheus-stack:0.0.0-none: not found"* ]]
+  [[ $output == *"No undeclared address literals in the files git would commit."* ]]
+  [[ $output == *"failed: rules-only"* ]]
+}
+
 @test "just ci shows every step where there is no terminal" {
   checkout
   bin="$BATS_TEST_TMPDIR/shown"
