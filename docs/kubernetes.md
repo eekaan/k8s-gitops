@@ -137,6 +137,91 @@ On what Flux builds:
   patches: `wait: true`, `healthChecks` or `healthCheckExprs`. Otherwise the dependent never
   reconciles, or starts before its dependency's objects are ready. The message names both
   Kustomizations and the overlay.
+- **Paths** (`kubernetes-check` and `scripts/render`). `flux build` reads with kustomize's load
+  restrictions off (`LoadRestrictionsNone`, its own setting), and so does `kubernetes-check`'s
+  `kustomize`, as an overlay lists `ks.yaml` files outside its own directory: either reads any path
+  a kustomization names and follows any link. Both read a kustomization, and `flux build` the Flux
+  Kustomization it is given, with Go's `encoding/json`, which reads a key into a field when the key
+  is the field's name or folds to it, so `spec.Components` is `spec.components` to `flux build`.
+  Before they read or build anything else, both checks refuse a tree from which a build would read
+  outside `kubernetes/`, or that a tool would read otherwise than they do, naming each file and the
+  key or entry, and build nothing (`scripts/lib/tree-paths.sh`):
+  - a link in the tree that resolves outside it, or to nothing;
+  - a kustomization file (`kustomization.yaml`, `kustomization.yml` or `Kustomization`, a
+    Component's included, used or not) that is not one mapping (empty, a list, text, or more than
+    one document), or that holds a key twice, an anchor, an alias, a merge key, a tag outside YAML's
+    core schema or a NUL character, which kustomize's decoder may read otherwise than the checks;
+  - a kustomization file with a key, at any position kustomize decodes into a type, that is not
+    ASCII or not exactly one of that type's fields, or with a field the checks refuse
+    (`generators`, `transformers` and `validators`, whose plugin configurations name files of their
+    own, and the Helm chart fields, as neither Flux nor the checks inflate a chart);
+  - an entry of a field that names a file or a directory that is not a plain path, or that leaves
+    the tree, read as text or with every link on it resolved;
+  - a root whose `spec.path` is not a plain path of a directory of the tree under `kubernetes/`, as
+    it resolves;
+  - a Flux Kustomization with a key, at any position `flux build` decodes into a type, that is not
+    ASCII, or that folds to one of that type's fields without being it, or whose `spec.components`
+    names anything but a plain path of the tree. `kubernetes-check` checks each `ks.yaml` it builds
+    before it builds any, and the file it hands `flux build` as it builds; the render checks each
+    cluster's root before it builds anything and each Kustomization as it hands it to
+    `flux build`. `flux build` reads no key that matches no field, and the schema check below
+    refuses one.
+
+  A plain path is relative, and made of segments of the ASCII letters, digits, `.`, `_` and `-`
+  alone, separated by single `/`: none empty and none that starts with `-`. A segment that is
+  exactly `..` climbs, and is allowed only while the resolved path stays inside the tree; dots
+  inside a longer segment, as in `a..b` or `...`, are part of a name. A generator's `KEY=PATH` has a
+  key of the same characters. So no entry holds `:`, `@`, `?`, `#`, `%`, `\`, `~`, a space, a
+  control character or a byte outside ASCII, and none is a URL, an scp-style address or a `git::`
+  form. kustomize reads one remote form without those, a path whose first segment is `github.com` in
+  any case (`isStandardGithubHost` in its `api/internal/git/repospec.go`), and the checks refuse
+  that too. The checks judge the tree's text with `jq`, which reads it as Unicode code points, and
+  run their scripts and every function of the guard in the C locale, so the caller's locale changes
+  nothing they decide; a value of the tree in a message shows each byte outside printable ASCII as
+  `\xHH`.
+
+  The free-form positions are not checked by key: labels, annotations, `commonLabels`,
+  `commonAnnotations`, a label's `pairs`, generator options' labels and annotations,
+  `postBuild.substitute`, the text of a patch, generator literals, a release's `values` and a
+  ConfigMap's data are maps or text, which the decoders read by exact key or not at all and never
+  as a path, a host or a field. The fields the checks know are recorded with the types they come
+  from: `tests/fixtures/kustomization-fields` (kustomize's `Kustomization` and every type it holds),
+  `flux-kustomization-fields` (Flux's `Kustomization` and every type it holds) and `read-fields`.
+  `tests/kubernetes-check.bats` fails when either pinned tool moves to another version of these
+  types until they are read again, and when the checks and a list disagree; it writes every case
+  and `encoding/json` fold of every field at every position, and every kind of character a plain
+  path holds none of in every field that names a file, into a tree, and requires each to be
+  refused, naming the file and the key or entry, by every check that reads it, in the C locale and
+  in C.UTF-8.
+
+  The grammar is what refuses every URL: no entry with a `:` passes. The builds of the checks run
+  in a second layer under it: `kustomize`, `flux build`, `helm template` and the Pod Security
+  check's `flux install` see a `git` first on their path that refuses, which is what kustomize runs
+  for a remote base (`exec.LookPath("git")`), git's protocols and prompts off; `HTTP_PROXY` and
+  `HTTPS_PROXY`, in both cases, name port 0 of the loopback, where nothing listens, with `NO_PROXY`
+  empty, so Go's HTTP client, with which kustomize fetches a remote file, sends a request for any
+  other host there and fails. `ALL_PROXY`, in both cases, names the same port for git and libcurl,
+  which read it; Go does not. The layer does not cover a plain HTTP request to the loopback of the
+  machine that runs a check, which Go never sends to a proxy. The processes that fetch are
+  `helm pull` in the render, for the charts, and `kubernetes-validate`'s `curl` and `kubeconform`,
+  for the schemas.
+
+  The `spec.path` of an application's `ks.yaml` is compared with the one its directory fixes, and
+  what is built is that directory's `app/`. The render builds a copy of `kubernetes/` alone and
+  reads `versions.yaml` beside it, neither of them a link.
+
+  A document no tool decodes is read by the checks by its fields' exact names, and they hand a tool
+  only what they derive from it: the render a HelmRelease and the `OCIRepository` or
+  `HelmRepository` it names, from which helm gets a chart's URL, name and version as arguments and
+  values files the render writes, and kustomize a kustomization the render writes from the
+  release's post-renderers; the Pod Security check a `FluxInstance`, from whose patches it writes a
+  kustomization. The API server drops a field of a custom resource that its schema does not name,
+  by exact name, so the cluster ignores the same spellings the checks do not read; a key that is not
+  ASCII, or that folds to a field they read without being it, is refused
+  (`tests/fixtures/read-fields`). What they hand kustomize, a post-renderer's or the instance's
+  patches and a post-renderer's images, holds a patch, its target and an image's fields by their
+  exact names alone: any other key there, such as a `path` kustomize would read or fetch, is
+  refused.
 - **Schemas** (`kubernetes-validate`). Everything Flux builds as `kubernetes-check` builds it,
   each application from its own `ks.yaml` (enabled or not), each cluster's root and each cluster
   directory, is validated by kubeconform with unknown fields refused, against the first schema
@@ -211,7 +296,11 @@ What the tree and the charts hold is data to the validation, a chart's definitio
 pull request that bumps a chart's version does not show. A group, version or kind reaches a path or
 a schema location only once it has the shape the API server requires of it (a group a DNS subdomain,
 a version a DNS-1035 label, a kind a letter followed by letters and digits); a definition or an
-object without that shape is refused, naming its file, and nothing is made of it. Every record the
+object without that shape is refused, naming its file, and nothing is made of it. The shapes
+(`scripts/lib/shapes.sh`, which `scripts/render` uses as well) are anchored at the true end of the
+string, so a value that ends in a line break does not pass, and a control character fails them. A
+definition for which no schema can be written is an error naming it, never one left out, and an
+image that ends in a line break after its tag or digest is not pinned. Every record the
 validation reads from a tool's output has each field cleaned of control characters, so no value
 starts another field or record, and an index in it is checked to be a number before it is used.
 `kubernetes-check` hands its builds on as records ended by a NUL byte, which no path or label holds,
@@ -266,11 +355,12 @@ level is declared in the tree, never left to the API server's default.
   less than `restricted` does not audit and warn at `restricted` at the cluster's minor.
   `tests/pod-security.bats` proves each rule on a small render and runs the check on the tree.
 - **The Flux install it evaluates.** The pinned Flux CLI's `flux install --export` for the
-  components the FluxInstance names, with the instance's patches applied: the controllers of the
-  `flux2` release pinned in `mise.toml`. The operator installs the newest Flux 2.x release in its
-  manifests artifact ([Flux itself](#flux-itself)). Renovate moves the CLI pin and the artifact in
-  separate pull requests, so once one has merged and until the other does, the check evaluates
-  another Flux release than the one the cluster runs.
+  components the FluxInstance names, with the instance's patches applied, each a patch and its
+  target by their exact fields (any other key is refused, [Paths](#what-the-checks-refuse)): the
+  controllers of the `flux2` release pinned in `mise.toml`. The operator installs the newest Flux
+  2.x release in its manifests artifact ([Flux itself](#flux-itself)). Renovate moves the CLI pin
+  and the artifact in separate pull requests, so once one has merged and until the other does, the
+  check evaluates another Flux release than the one the cluster runs.
 - **The evaluator.** Kyverno's `podSecurity` rule, pinned in `mise.toml` with the release's
   checksums, which runs Kyverno's fork of the Pod Security admission policy library at the 1.36
   check set, at the library's latest policy version. The rule is of Kyverno's legacy policy type,
@@ -1082,7 +1172,10 @@ restricted requires ([Pod Security](#pod-security)).
   each at the generation the object holds. That is what the applications that name it in
   `dependsOn` wait for. It does not wait for every satellite to run, so a node down does not hold
   them back; a satellite that never starts shows as the storage cluster's `Configured` condition,
-  which the check leaves out, and in the satellite counts of its status.
+  which the check leaves out, and in the satellite counts of its status. It carries
+  `k8s-gitops/timeout: long`: on a first install the storage controller can take longer than the
+  root's default 3m to report `Available`, and the health check would fail every minute until it
+  does.
 
 ### What runs
 
@@ -1915,12 +2008,25 @@ the chart its OCIRepository names at its tag, or the one its `chart.spec` names 
 the version the tree pins, with the values of its ConfigMaps and its own values over them, the
 release name and namespace helm-controller gives it, the Kubernetes version in `versions.yaml`, every
 API version a definition in the render serves, its post-renderers and helm-controller's labels. A
-chart version bump therefore shows the objects that change. An application may take its chart only
+chart version bump therefore shows the objects that change. A definition is an
+`apiextensions.k8s.io/v1` `CustomResourceDefinition` whose group, kind and versions have the shapes
+the API server requires, and only its served versions count; an object that is only called one
+names no API. A well-shaped definition in the tree, or in a chart, does name its versions, which is
+what the cluster would serve once it is applied. Objects are selected by their exact name and
+namespace, as the controllers look them up: a `valuesFrom` or chart source named `x-*` selects
+nothing that is not called `x-*`. A HelmRelease whose name is not a DNS subdomain or whose
+namespace is not a DNS label is refused, naming its file (or its application's directory), before
+anything is read from it. The render reads the tree's `kubernetes/` and `versions.yaml` alone, and
+refuses a tree from which a build would read outside it, or a document a tool would read otherwise
+than the render, naming the file and the key ([What the checks refuse](#what-the-checks-refuse),
+Paths). An application may take its chart only
 from an `OCIRepository` (at a tag) or a `HelmRepository` (at an exact version), from a source that
 names no credential (the render has no secrets), with values from ConfigMaps of the application; any
-other form (a version range, a `GitRepository` or `Bucket`, a `secretRef`, values from a Secret)
-fails the render, naming the release. `scripts/render --forms` checks that every release is of a form
-the render accepts, without pulling a chart, and `tests/render.bats` runs it on this tree.
+other form (a version range, a `GitRepository` or `Bucket`, a `secretRef`, values from a Secret, a
+post-renderer patch that names a file, a key that folds to a field the render reads) fails the
+render, naming the release.
+`scripts/render --forms` checks that every release is of a form the render accepts, without pulling
+a chart, and `tests/render.bats` runs it on this tree.
 `RENDER_CHART_CACHE` names a directory to keep pulled charts in between renders. A tree that does
 not render fails, naming the application. `just render-diff <base> <head>` prints the comment
 comparing two renders.

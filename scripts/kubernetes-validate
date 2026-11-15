@@ -35,6 +35,8 @@
 #
 # Usage: scripts/kubernetes-validate [DIR]   (DIR holds kubernetes/ and versions.yaml; defaults to this repository)
 set -euo pipefail
+# Text is matched, sorted and shown byte by byte, whatever the caller's locale.
+export LC_ALL=C
 shopt -s nullglob
 
 # shellcheck source=scripts/lib/tools.sh
@@ -69,12 +71,10 @@ trap 'rm -rf "$tmp"' EXIT
 sep=$'\x1f'
 jq_clean='def clean: tostring | gsub("[[:cntrl:]]"; "?");'
 
-# The shapes the API server requires of an API group (a DNS subdomain), a version (a DNS-1035 label)
-# and a kind.
-export group_re='^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$'
-export version_re='^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$'
-export kind_re='^[A-Za-z][A-Za-z0-9]{0,62}$'
-export api_re='^([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*/)?[a-z]([-a-z0-9]{0,61}[a-z0-9])?$'
+# The shapes the API server requires of an API group, a version, a kind and an apiVersion, which
+# scripts/render checks the definitions it takes API versions from by as well.
+# shellcheck source=scripts/lib/shapes.sh
+. "$repo_root/scripts/lib/shapes.sh"
 
 # What Flux builds, as the offline check builds it. Its rules come first: on a tree that fails them
 # the objects are not the ones the cluster would get, so nothing is validated.
@@ -182,7 +182,7 @@ crd_schemas() {
   mkdir -p "$dir"
   ((${#crds[@]} > 0)) || return 0
   if ! yq -N -o json -I0 'select(. != null) | {"from": filename, "crd": .}' "${crds[@]}" >"$tmp/crds.jsonl" 2>"$tmp/crds.err" ||
-    ! jq -r "$jq_clean"'
+    ! jq -r "$jq_clean$(shapes_jq)"'
       def strict:
         if type != "object" then .
         else
@@ -201,14 +201,11 @@ crd_schemas() {
           | reduce ("allOf", "anyOf", "oneOf") as $k (.; if (.[$k] | type) == "array" then .[$k] |= map(strict) else . end)
           | (if (.not | type) == "object" then .not |= strict else . end)
         end;
-      def shaped($re): type == "string" and test($re);
       (.from | split("/") | .[-3:-1] | join("/") | clean) as $from
       | .crd | select(.kind == "CustomResourceDefinition" and .apiVersion == "apiextensions.k8s.io/v1")
       | (.metadata.name | clean) as $name
       | .spec as $spec
-      | if ($spec.group | shaped(env.group_re)) and ($spec.group | length) <= 253
-          and ($spec.names.kind | shaped(env.kind_re))
-          and ([($spec.versions // [])[] | .name | shaped(env.version_re)] | all)
+      | if crd_shaped
         then ($spec.versions // [])[] | select(.schema.openAPIV3Schema != null)
           | ["ok", $from, $name, $spec.names.kind, $spec.group + "/" + .name,
              $spec.group + "/" + ($spec.names.kind | ascii_downcase) + "_" + .name + ".json",
@@ -228,8 +225,12 @@ crd_schemas() {
       fail "$file: CustomResourceDefinition $crd_name, rendered for ${from%%/*}: its group, kind or a version has not the shape the API server requires, so no schema is made of it: $kind"
       continue
     fi
-    # Built from the checked group, kind and version alone; checked again before it is written.
-    [[ $status == ok && $path =~ ^[a-z0-9.-]+/[a-z][a-z0-9]*_[a-z][-a-z0-9]*\.json$ && $path != *..* ]] || continue
+    # Built from the checked group, kind and version alone; checked again before it is written, and
+    # a path that fails it is an error naming the definition, never a definition left out.
+    if [[ $status != ok || ! $path =~ ^[a-z0-9.-]+/[a-z][a-z0-9]*_[a-z][-a-z0-9]*\.json$ || $path == *..* ]]; then
+      fail "$file: CustomResourceDefinition $crd_name, rendered for ${from%%/*}: no schema can be written for $kind $api, so its objects would go unvalidated"
+      continue
+    fi
     where="$file: CustomResourceDefinition $crd_name, $kind $api"
     if [[ -z ${made[$path]:-} ]]; then
       made[$path]="$schema"
@@ -442,9 +443,11 @@ image_rule() {
     app="${cluster_app##*/}"
     objects="$tmp/objects.jsonl"
     yq -N -o json -I0 '.' "$cluster_app"/*.yaml >"$objects" 2>/dev/null || { fail "$cluster_app: cannot read what scripts/render wrote"; continue; }
+    # \z is the end of the string; $ would also match before a final line break.
     if ! jq -rs "$jq_clean"'def pinned:
-        if test("@") then test("@sha256:[0-9a-f]{64}$")
-        else split("/")[-1] | test(":[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$") and (test(":latest$") | not) end;
+        if test("[[:cntrl:]]") then false
+        elif test("@") then test("@sha256:[0-9a-f]{64}\\z")
+        else split("/")[-1] | test(":[A-Za-z0-9_][A-Za-z0-9._-]{0,127}\\z") and (test(":latest\\z") | not) end;
       def hooks: ((.metadata.annotations["helm.sh/hook"] // "") | split(",") | map(gsub("^ +| +$"; "")) | map(select(. != "")));
       def testonly: (hooks | length > 0) and (hooks | all(. == "test" or . == "test-success" or . == "test-failure"));
       . as $all

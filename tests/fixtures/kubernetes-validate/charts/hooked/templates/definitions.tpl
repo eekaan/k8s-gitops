@@ -4,15 +4,15 @@ kind: CustomResourceDefinition
 metadata:
   name: escapes.example.invalid
 spec:
-  group: {{ .Values.definitionGroup | quote }}
+  group: {{ .Values.definitionGroup | toJson }}
   names:
-    kind: {{ .Values.definitionKind | default "Escape" | quote }}
+    kind: {{ .Values.definitionKind | default "Escape" | toJson }}
     listKind: EscapeList
     plural: escapes
     singular: escape
   scope: Namespaced
   versions:
-    - name: {{ .Values.definitionVersion | default "v1" | quote }}
+    - name: {{ .Values.definitionVersion | default "v1" | toJson }}
       served: true
       storage: true
       schema:

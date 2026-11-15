@@ -1,0 +1,138 @@
+# The fields of Flux's Kustomization (kustomize.toolkit.fluxcd.io/v1) and of every type it holds,
+# by the names flux build reads them under, at the modules the pinned flux records in its binary:
+#
+# flux: github.com/fluxcd/kustomize-controller/api v1.10.1
+# flux: github.com/fluxcd/pkg/apis/kustomize v1.23.0
+# flux: github.com/fluxcd/pkg/apis/meta v1.38.0
+# flux: k8s.io/apimachinery v0.37.1
+# root: Kustomization
+#
+# kustomize-controller's api/v1/kustomization_types.go and reference_types.go (Kustomization,
+# KustomizationSpec, CommonMetadata, IgnoreRule, Decryption, PostBuild, SubstituteReference,
+# CrossNamespaceSourceReference), fluxcd/pkg's apis/kustomize/kustomize_types.go (Patch, Selector,
+# Image, CustomHealthCheck with HealthCheckExpressions inline) and apis/meta/reference_types.go
+# (DependencyReference, LocalObjectReference, SecretKeyReference, KubeConfigReference,
+# NamespacedObjectKindReference), and apimachinery's ObjectMeta (pkg/apis/meta/v1/types.go).
+#
+# flux build reads the Kustomization it is given with apimachinery's YAML decoder and
+# encoding/json, which picks the document by the apiVersion, kind and name it decodes, and reads a
+# key into a field when the key is the field's name or folds to it (ASCII letters without regard to
+# case, U+017F as s and U+212A as k); it reads no other key. So every type is open: the checks
+# refuse, at each typed position, a key that folds to a field's name without being it, and leave a
+# key that matches no field to kubernetes-validate's schemas. One field a line: the type, the
+# field, and what it holds, as in kustomization-fields; dirs is a list of Components flux build adds
+# to the kustomization it builds, read from the directory it builds. spec.path names the directory
+# built, which the checks read and check themselves before they build. status, an owner reference
+# and the managed fields are refused: no tree holds them. TYPE * open marks a type as open.
+Kustomization * open
+Kustomization apiVersion value
+Kustomization kind value
+Kustomization metadata ObjectMeta
+Kustomization spec KustomizationSpec
+Kustomization status refused
+ObjectMeta * open
+ObjectMeta name value
+ObjectMeta generateName value
+ObjectMeta namespace value
+ObjectMeta selfLink value
+ObjectMeta uid value
+ObjectMeta resourceVersion value
+ObjectMeta generation value
+ObjectMeta creationTimestamp value
+ObjectMeta deletionTimestamp value
+ObjectMeta deletionGracePeriodSeconds value
+ObjectMeta labels map
+ObjectMeta annotations map
+ObjectMeta ownerReferences refused
+ObjectMeta finalizers value
+ObjectMeta managedFields refused
+KustomizationSpec * open
+KustomizationSpec commonMetadata CommonMetadata
+KustomizationSpec dependsOn []DependencyReference
+KustomizationSpec decryption Decryption
+KustomizationSpec interval value
+KustomizationSpec retryInterval value
+KustomizationSpec kubeConfig KubeConfigReference
+KustomizationSpec path value
+KustomizationSpec postBuild PostBuild
+KustomizationSpec prune value
+KustomizationSpec deletionPolicy value
+KustomizationSpec healthChecks []NamespacedObjectKindReference
+KustomizationSpec namePrefix value
+KustomizationSpec nameSuffix value
+KustomizationSpec patches []Patch
+KustomizationSpec images []Image
+KustomizationSpec serviceAccountName value
+KustomizationSpec sourceRef CrossNamespaceSourceReference
+KustomizationSpec suspend value
+KustomizationSpec targetNamespace value
+KustomizationSpec timeout value
+KustomizationSpec force value
+KustomizationSpec wait value
+KustomizationSpec buildMetadata value
+KustomizationSpec components dirs
+KustomizationSpec ignoreMissingComponents value
+KustomizationSpec healthCheckExprs []CustomHealthCheck
+KustomizationSpec ignore []IgnoreRule
+CommonMetadata * open
+CommonMetadata annotations map
+CommonMetadata labels map
+DependencyReference * open
+DependencyReference name value
+DependencyReference namespace value
+DependencyReference readyExpr value
+Decryption * open
+Decryption provider value
+Decryption serviceAccountName value
+Decryption secretRef LocalObjectReference
+LocalObjectReference * open
+LocalObjectReference name value
+KubeConfigReference * open
+KubeConfigReference configMapRef LocalObjectReference
+KubeConfigReference secretRef SecretKeyReference
+SecretKeyReference * open
+SecretKeyReference name value
+SecretKeyReference key value
+PostBuild * open
+PostBuild substituteStrategy value
+PostBuild substitute map
+PostBuild substituteFrom []SubstituteReference
+SubstituteReference * open
+SubstituteReference kind value
+SubstituteReference name value
+SubstituteReference optional value
+NamespacedObjectKindReference * open
+NamespacedObjectKindReference apiVersion value
+NamespacedObjectKindReference kind value
+NamespacedObjectKindReference name value
+NamespacedObjectKindReference namespace value
+Patch * open
+Patch patch value
+Patch target Selector
+Selector * open
+Selector group value
+Selector version value
+Selector kind value
+Selector namespace value
+Selector name value
+Selector annotationSelector value
+Selector labelSelector value
+Image * open
+Image name value
+Image newName value
+Image newTag value
+Image digest value
+CrossNamespaceSourceReference * open
+CrossNamespaceSourceReference apiVersion value
+CrossNamespaceSourceReference kind value
+CrossNamespaceSourceReference name value
+CrossNamespaceSourceReference namespace value
+CustomHealthCheck * open
+CustomHealthCheck apiVersion value
+CustomHealthCheck kind value
+CustomHealthCheck current value
+CustomHealthCheck inProgress value
+CustomHealthCheck failed value
+IgnoreRule * open
+IgnoreRule paths value
+IgnoreRule target Selector

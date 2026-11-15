@@ -6,6 +6,11 @@ Feature: Storage
     When it is built as Flux applies it
     Then it enables snapshot-controller, piraeus-operator and linstor-cluster, each builds with Flux's strict substitution, the first two are Ready only once what they install is, linstor-cluster waits for both and is Ready only once the operator reports the storage cluster Available and every satellite configuration Applied, and the namespace admits the satellites' privileged pods
 
+  Scenario: The storage cluster's Kustomization waits long enough for a first install
+    Given the cluster's overlay
+    When it is built as Flux applies it
+    Then linstor-cluster carries the long-timeout label, so the root gives it the long timeout instead of the default one, which the storage controller may exceed before it reports Available on a first install
+
   Scenario: Satellites run with the Talos settings, on the workers only
     Given the operator's satellite DaemonSet at the version the pinned chart runs, and the nodes' machine configurations rendered offline
     When the satellite configuration is applied to it as the operator applies it
