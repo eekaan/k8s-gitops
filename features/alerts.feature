@@ -104,3 +104,15 @@ Feature: Alerts
     Given a Certificate whose certificate ends within 14 days, and one that ends in 60 days
     When the rule is evaluated over time
     Then the alert fires after its time for the first and never for the second
+
+  @by:rules-check
+  Scenario: The alert EtcdSnapshotStale fires after its time in the failing case and stays quiet in the healthy one
+    Given the snapshot CronJob whose last success is older than 13 hours, one that has never succeeded, and one that succeeded within 13 hours
+    When the rule is evaluated over time
+    Then the alert fires after its time for the first two and never for the third
+
+  @by:rules-check
+  Scenario: The alert EtcdSnapshotJobFailing fires after its time in the failing case and stays quiet in the healthy one
+    Given the snapshot CronJob whose latest scheduled run ended without success, and one whose latest run succeeded
+    When the rule is evaluated over time
+    Then the alert fires after its time for the first and never for the second

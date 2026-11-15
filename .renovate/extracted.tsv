@@ -53,6 +53,8 @@ kubernetes/apps/base/envoy-gateway-system/envoy-gateway-crds/app/ocirepository.y
 kubernetes/apps/base/envoy-gateway-system/envoy-gateway-crds/app/ocirepository.yaml	regex	docker.io/envoyproxy/gateway-helm	tag
 kubernetes/apps/base/envoy-gateway-system/envoy-gateway/app/ocirepository.yaml	flux	docker.io/envoyproxy/gateway-helm	tag
 kubernetes/apps/base/envoy-gateway-system/envoy-gateway/app/ocirepository.yaml	regex	docker.io/envoyproxy/gateway-helm	tag
+kubernetes/apps/base/etcd-snapshots/etcd-snapshots/app/cronjob.yaml	kubernetes	docker.io/rclone/rclone	-
+kubernetes/apps/base/etcd-snapshots/etcd-snapshots/app/cronjob.yaml	kubernetes	ghcr.io/siderolabs/talosctl	-
 kubernetes/apps/base/external-secrets/external-secrets/app/ocirepository.yaml	flux	ghcr.io/external-secrets/charts/external-secrets	tag
 kubernetes/apps/base/external-secrets/external-secrets/app/ocirepository.yaml	regex	ghcr.io/external-secrets/charts/external-secrets	tag
 kubernetes/apps/base/keda/keda/app/ocirepository.yaml	flux	ghcr.io/home-operations/charts-mirror/keda	tag

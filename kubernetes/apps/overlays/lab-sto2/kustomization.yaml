@@ -12,6 +12,7 @@ resources:
   - ../../base/cnpg-system
   - ../../base/demo
   - ../../base/envoy-gateway-system
+  - ../../base/etcd-snapshots
   - ../../base/external-secrets
   - ../../base/keda
   - ../../base/kube-system
@@ -31,6 +32,7 @@ resources:
   - ../../base/envoy-gateway-system/envoy-gateway-crds/ks.yaml
   - ../../base/envoy-gateway-system/envoy-gateway/ks.yaml
   - ../../base/envoy-gateway-system/gateway-public/ks.yaml
+  - ../../base/etcd-snapshots/etcd-snapshots/ks.yaml
   - ../../base/external-secrets/external-secrets/ks.yaml
   - ../../base/external-secrets/openbao-store/ks.yaml
   - ../../base/keda/keda/ks.yaml

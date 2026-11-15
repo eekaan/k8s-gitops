@@ -1,0 +1,160 @@
+---
+# Unit tests of the etcd-snapshots application's own alerts, run by just rules-check with promtool.
+# The series are shaped as kube-state-metrics writes its CronJob metrics (v2.20, the version the
+# pinned chart runs): kube_cronjob_created, kube_cronjob_status_last_schedule_time,
+# kube_cronjob_status_last_successful_time, each labelled cronjob and namespace, from the one
+# replica, with the job, instance, pod, service and endpoint of the chart's ServiceMonitor's scrape.
+# The times are Unix times in seconds, so a series that tracks the clock (0+60x...) is a CronJob
+# that has just run. Each group's name is the title of its scenario in features/alerts.feature.
+rule_files:
+  - etcd-snapshots.rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: The alert EtcdSnapshotStale fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # "old" last succeeded at 10 hours (36000 s) and never since: more than 13 hours old once the
+      # clock passes 82800 s, minute 1380, so the alert is pending from minute 1381.
+      - series: >-
+          kube_cronjob_created{cronjob="old", namespace="etcd-snapshots", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x1500'
+      - series: >-
+          kube_cronjob_status_last_successful_time{cronjob="old", namespace="etcd-snapshots",
+          job="kube-state-metrics", instance="192.0.2.1:8080", pod="ksm-a",
+          service="kube-state-metrics", endpoint="http"}
+        values: '36000x1500'
+      # "never" was created at the start and has no last success: it is stale 13 hours after it was
+      # created, minute 780, pending from minute 781.
+      - series: >-
+          kube_cronjob_created{cronjob="never", namespace="etcd-snapshots", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x1500'
+      # "healthy" succeeded a minute ago at every moment.
+      - series: >-
+          kube_cronjob_created{cronjob="healthy", namespace="etcd-snapshots", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x1500'
+      - series: >-
+          kube_cronjob_status_last_successful_time{cronjob="healthy", namespace="etcd-snapshots",
+          job="kube-state-metrics", instance="192.0.2.1:8080", pod="ksm-a",
+          service="kube-state-metrics", endpoint="http"}
+        values: '0+60x1500'
+      # A CronJob of another namespace is none of its concern.
+      - series: >-
+          kube_cronjob_created{cronjob="elsewhere", namespace="other", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x1500'
+    alert_rule_test:
+      # Nothing is more than 13 hours old yet.
+      - eval_time: 5m
+        alertname: EtcdSnapshotStale
+        exp_alerts: []
+      - eval_time: 779m
+        alertname: EtcdSnapshotStale
+        exp_alerts: []
+      # "never" is pending from minute 781 and fires 5 minutes later.
+      - eval_time: 785m
+        alertname: EtcdSnapshotStale
+        exp_alerts: []
+      - eval_time: 786m
+        alertname: EtcdSnapshotStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: etcd-snapshots
+              cronjob: never
+            exp_annotations:
+              summary: No etcd snapshot has succeeded for 13 hours
+              description: The CronJob never in etcd-snapshots has had no successful run for 13 hours, so the newest etcd snapshot in the bucket is too old to restore from without losing a day of changes.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#etcdsnapshotstale
+      # "old" is pending from minute 1381 and fires 5 minutes later, with "never" still firing.
+      - eval_time: 1385m
+        alertname: EtcdSnapshotStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: etcd-snapshots
+              cronjob: never
+            exp_annotations:
+              summary: No etcd snapshot has succeeded for 13 hours
+              description: The CronJob never in etcd-snapshots has had no successful run for 13 hours, so the newest etcd snapshot in the bucket is too old to restore from without losing a day of changes.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#etcdsnapshotstale
+      - eval_time: 1386m
+        alertname: EtcdSnapshotStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: etcd-snapshots
+              cronjob: never
+            exp_annotations:
+              summary: No etcd snapshot has succeeded for 13 hours
+              description: The CronJob never in etcd-snapshots has had no successful run for 13 hours, so the newest etcd snapshot in the bucket is too old to restore from without losing a day of changes.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#etcdsnapshotstale
+          - exp_labels:
+              severity: critical
+              namespace: etcd-snapshots
+              cronjob: old
+            exp_annotations:
+              summary: No etcd snapshot has succeeded for 13 hours
+              description: The CronJob old in etcd-snapshots has had no successful run for 13 hours, so the newest etcd snapshot in the bucket is too old to restore from without losing a day of changes.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#etcdsnapshotstale
+  - name: The alert EtcdSnapshotJobFailing fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # "failing" last succeeded at the start, and its latest run was scheduled at minute 10 (600 s)
+      # and has not succeeded since: pending from minute 10, firing 30 minutes later.
+      - series: >-
+          kube_cronjob_status_last_schedule_time{cronjob="failing", namespace="etcd-snapshots",
+          job="kube-state-metrics", instance="192.0.2.1:8080", pod="ksm-a",
+          service="kube-state-metrics", endpoint="http"}
+        values: '0x9 600x200'
+      - series: >-
+          kube_cronjob_status_last_successful_time{cronjob="failing", namespace="etcd-snapshots",
+          job="kube-state-metrics", instance="192.0.2.1:8080", pod="ksm-a",
+          service="kube-state-metrics", endpoint="http"}
+        values: '0x209'
+      # "never" was first scheduled at minute 10 and has no last success at all: the same alert.
+      - series: >-
+          kube_cronjob_status_last_schedule_time{cronjob="never", namespace="etcd-snapshots",
+          job="kube-state-metrics", instance="192.0.2.1:8080", pod="ksm-a",
+          service="kube-state-metrics", endpoint="http"}
+        values: '_x10 600x200'
+      # "healthy" completed after it was scheduled.
+      - series: >-
+          kube_cronjob_status_last_schedule_time{cronjob="healthy", namespace="etcd-snapshots",
+          job="kube-state-metrics", instance="192.0.2.1:8080", pod="ksm-a",
+          service="kube-state-metrics", endpoint="http"}
+        values: '600x209'
+      - series: >-
+          kube_cronjob_status_last_successful_time{cronjob="healthy", namespace="etcd-snapshots",
+          job="kube-state-metrics", instance="192.0.2.1:8080", pod="ksm-a",
+          service="kube-state-metrics", endpoint="http"}
+        values: '660x209'
+    alert_rule_test:
+      # Every run so far succeeded.
+      - eval_time: 5m
+        alertname: EtcdSnapshotJobFailing
+        exp_alerts: []
+      - eval_time: 39m
+        alertname: EtcdSnapshotJobFailing
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: EtcdSnapshotJobFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: etcd-snapshots
+              cronjob: failing
+            exp_annotations:
+              summary: The etcd snapshot job's latest run did not succeed
+              description: The latest run of the CronJob failing in etcd-snapshots, scheduled more than 30 minutes ago, has not succeeded, so no new etcd snapshot has been taken since the last good one.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#etcdsnapshotjobfailing
+          - exp_labels:
+              severity: warning
+              namespace: etcd-snapshots
+              cronjob: never
+            exp_annotations:
+              summary: The etcd snapshot job's latest run did not succeed
+              description: The latest run of the CronJob never in etcd-snapshots, scheduled more than 30 minutes ago, has not succeeded, so no new etcd snapshot has been taken since the last good one.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#etcdsnapshotjobfailing

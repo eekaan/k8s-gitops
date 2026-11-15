@@ -655,6 +655,94 @@ found from anywhere in the repository but `talos/`, where `talos/.sops.yaml` is 
 nothing under `kubernetes/`, so sops refuses rather than encrypt to the Talos age key; and it stays
 out of the artifact, which is built from `kubernetes/`.
 
+## Scheduled etcd snapshots
+
+A CronJob in the namespace `etcd-snapshots` (`apps/base/etcd-snapshots/etcd-snapshots/`) takes an
+etcd snapshot every six hours, so the newest one never depends on an operator remembering. It
+encrypts the snapshot to the Talos age key's recipient, the one `just cluster-snapshot` encrypts
+to, before it leaves the pod, and uploads only that file to the etcd backup bucket as
+`<cluster>/<UTC time>.snapshot.age`, the name the operator's recipe gives its own. `just
+cluster-snapshots` lists the job's snapshots with the operator's, and `just cluster-restore latest`
+restores the newest of either ([Recipes](#recipes), [the restore
+runbook](runbooks/etcd-restore.md)). The private half of the age key is never in the cluster, so
+the job can encrypt and cannot decrypt.
+
+**The grant.** `talos/patches/controlplane/talos-api-access.yaml` is a `KubeTalosAPIAccessConfig`
+document, which turns on Talos' access from Kubernetes on the control planes with `allowedRoles`
+exactly `os:etcd:backup` and `allowedKubernetesNamespaces` exactly `etcd-snapshots`, a namespace
+that holds nothing but this job. For a `talos.dev/v1alpha1` `ServiceAccount` in such a namespace
+Talos makes a Secret of the same name holding a talosconfig whose client certificate carries the
+requested roles, and its endpoint is the Service `talos.default`, which reaches the control planes'
+Talos API. `tests/talos-check.bats` holds both lists exactly, and that the workers enable none of
+it.
+
+- What the role permits: Talos' etcd snapshot call and the read-only etcd status, member list and
+  alarm list calls, and nothing that changes a node or reads its configuration, so no reset, reboot
+  or upgrade. What it reaches is still every Secret of the cluster in the clear, as a snapshot
+  holds them all: whoever can read the Secret `etcd-snapshots-talos`, or run a pod in the namespace
+  with it, can take a snapshot, so the namespace is reserved for the job and its Secrets are the
+  cluster administrators' to read.
+- Why that is the narrowest: the machine configuration names namespaces and roles, not accounts, so
+  the namespace is the unit of the grant; the role is the narrowest Talos has for a snapshot.
+
+**What the nodes' firewall admits.** Nothing new. A control plane admits its Talos API port from
+the nodes' own addresses ([The node firewall](#the-node-firewall), ADR 0017), and Cilium
+masquerades a pod's connection to another node to the address of the node the pod runs on, so a
+pod on a worker arrives as a node. The job's pod has no toleration and so runs on a worker, never
+on a control plane, where a pod would arrive by its own address, which the rule does not admit.
+No pod can use that to reach the port from anywhere else: what the port takes is a connection
+authorised by Talos' own RBAC, which needs a certificate the Talos CA signed, and only the Secret
+above holds one a pod can use, with only this role. The job asks the node `127.0.0.1` of the
+control plane its connection reaches, the one the Service chose, so it needs no control plane's
+address.
+
+**The steps.** Four, each in the image that has its tool, so the repository builds none: age's
+release, downloaded and checked against the SHA-256 pinned in the manifest (no public image carries
+age, so it needs the pod to reach its release host); `talosctl`, the cluster's Talos version,
+which writes the snapshot into a memory-backed volume of 1 GiB that only it and the encrypting
+step mount, so the plain snapshot never reaches a disk and is never given to the upload; the
+encrypting step, which removes the plain snapshot; and rclone, which uploads the encrypted file
+and nothing else, and holds the S3 key. Every image is pinned by tag and digest. The `talosctl`
+image's tag is `versions.yaml`'s `talos`, the cluster's Talos version, and
+`tests/etcd-snapshots.bats` fails when they or the `talosctl` pin of `mise.toml` differ; Renovate
+moves the image with the Talos group. A snapshot larger than its volume fails the run, which
+`EtcdSnapshotJobFailing` reports. A step that fails fails the run, which is retried twice
+under a 20 minute deadline, and a run never starts while another runs.
+
+**The S3 key.** An `ExternalSecret` reads the two properties of the secret store's key `volsync`,
+the cluster's S3 key, which `just bao-seed-volsync` has already written for the volume backups
+([kubernetes.md](kubernetes.md#volume-backups)): nothing more is seeded. The key reaches every
+bucket of the project, the etcd bucket among them, so it lets the job delete and overwrite
+objects, as it lets every namespace that holds it; ADR 0008 states that residual risk. Only the
+uploading container takes it, as environment variables from the Secret.
+
+**Retention.** The job keeps the newest 56 objects named as snapshots under the cluster's prefix,
+two weeks of runs, and deletes the older ones once the new snapshot is listed, never any other
+object. A bucket lifecycle rule would not need the right to delete, but no stack owns the backup
+buckets ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)), so none can set one.
+The count includes the operator's own snapshots under the same prefix.
+
+**Selecting it.** The overlay of a cluster lists the namespace directory and the application's
+`ks.yaml`, which waits for External Secrets, the secret store and the monitoring definitions. A
+cluster whose overlay leaves them out builds none of it; the control planes' patch stays, as
+`talos/talman.yaml.tftpl` lists it for every cluster, and grants a namespace nothing runs in. A
+cluster that lists the job while its control planes lack the patch builds none of it either: Talos
+creates the `ServiceAccount` kind of `talos.dev` only when the document is applied, and Flux
+dry-runs every object of the application together and applies none when one fails, so neither the
+CronJob nor the alerts exist and no alert fires. The only sign is the Kustomization `etcd-snapshots`
+not Ready (`flux get kustomization etcd-snapshots`), which nothing scrapes.
+
+**The recipient.** The recipient, `ETCD_SNAPSHOT_AGE_RECIPIENT` in the application's `ks.yaml`, is
+`talos/.sops.yaml`'s, as the artifact holds `kubernetes/` only. `tests/etcd-snapshots.bats` fails
+when they differ, so a new Talos age key (`just cluster-age-key`) changes both; the snapshots
+already in the bucket stay encrypted to the old key.
+
+**Seeing the last snapshot, and when the alert fires.** `just cluster-snapshots` lists the bucket's
+snapshots, newest first. `kubectl --namespace etcd-snapshots get cronjob,job` shows the runs, and
+`kubectl --namespace etcd-snapshots logs job/<job> --all-containers` says which step failed. To
+take one now, `kubectl --namespace etcd-snapshots create job --from=cronjob/etcd-snapshots
+<name>`. The alerts and what to do are in [the alerts' runbook](runbooks/alerts.md#etcdsnapshotstale).
+
 ## Recipes
 
 - `just cluster-age-key` creates the key with `age-keygen` at the path `SOPS_AGE_KEY_FILE` names,
@@ -813,8 +901,9 @@ out of the artifact, which is built from `kubernetes/`.
   prefix and the state key. `scripts/lib/snapshot.sh` holds the code, which both upgrade recipes
   run as well.
 - `just cluster-snapshots [cluster]` lists the cluster's snapshots in the etcd bucket, reading only:
-  one per line, newest first, by name and size in bytes. It needs the bucket prefix and the state
-  key.
+  one per line, newest first, by name and size in bytes, those the cluster's own CronJob took
+  ([Scheduled etcd snapshots](#scheduled-etcd-snapshots)) and those of `cluster-snapshot` alike,
+  as both name them by the UTC time. It needs the bucket prefix and the state key.
 - `just cluster-restore <snapshot> [cluster] [--yes]` restores the cluster's etcd from a snapshot
   `cluster-snapshots` lists, or from `latest`, into the same nodes with the same secrets bundle;
   [runbooks/etcd-restore.md](runbooks/etcd-restore.md) says when, and what is lost. Before it

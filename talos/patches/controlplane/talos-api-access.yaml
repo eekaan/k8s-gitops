@@ -1,0 +1,15 @@
+# Lets a pod in one namespace reach the Talos API with a role that can take an etcd snapshot and
+# read etcd's status, and cannot change a node or read its configuration: Talos creates a Secret
+# holding a talosconfig for each talos.dev ServiceAccount a pod's namespace holds, but only in the
+# namespaces named here, and only for the roles named here. os:etcd:backup permits the etcd snapshot
+# call and the read-only etcd status, member list and alarm list calls. A snapshot holds every
+# Secret of the cluster in the clear, so both lists stay as narrow as the job that reads it:
+# kubernetes/apps/base/etcd-snapshots (docs/cluster.md, Scheduled etcd snapshots).
+# tests/talos-check.bats holds the exact lists.
+---
+apiVersion: v1alpha1
+kind: KubeTalosAPIAccessConfig
+allowedRoles:
+  - os:etcd:backup
+allowedKubernetesNamespaces:
+  - etcd-snapshots

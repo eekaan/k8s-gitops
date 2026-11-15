@@ -4,7 +4,11 @@ etcd holds every object of the Kubernetes API: every Deployment, every Secret, F
 `just cluster-snapshot` takes a snapshot of it with `talman etcd snapshot`, encrypts it with age to
 the Talos age key's recipient on the machine it runs on, and uploads only the encrypted file to the
 etcd backup bucket, as `<cluster>/<UTC time>.snapshot.age` ([cluster.md](../cluster.md#recipes)).
-`just cluster-restore` puts one back.
+`just cluster-restore` puts one back. The cluster takes one itself every six hours, with a CronJob
+that encrypts it the same way and uploads it under the same name
+([cluster.md](../cluster.md#scheduled-etcd-snapshots)), so `just cluster-snapshots` lists both
+kinds, and `latest` is the newest of either; the job keeps the newest 56 snapshots of the cluster's
+prefix, whoever took them, and deletes the older ones.
 
 A snapshot holds every Secret in the cluster, and every S3 key of the project reaches the bucket
 ([ADR 0008](../adr/0008-state-and-backups-are-encrypted-before-they-leave.md)), so it is readable
@@ -51,7 +55,9 @@ snapshot, from the workload's own backup where it has one, as they are not in it
 1. **`just cluster-snapshots [cluster]`** lists the cluster's snapshots in the etcd bucket, newest
    first, each by its name and size. The name is the UTC time the snapshot was taken. While the
    cluster still answers, `just cluster-snapshot [cluster]` first keeps the state that is about to
-   be replaced.
+   be replaced. When it no longer does, the newest snapshot may be the cluster's own job's, up to
+   six hours old while the job succeeds and older while `EtcdSnapshotJobFailing` or
+   `EtcdSnapshotStale` fires: the restore loses what was written since.
 
 2. **`just cluster-restore <name> [cluster]`**, or `just cluster-restore latest [cluster]` for the
    newest. Before it changes anything it checks what it needs, finds the snapshot, downloads it into
