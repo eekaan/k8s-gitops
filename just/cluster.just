@@ -76,6 +76,10 @@ cluster-check cluster='lab-sto2':
 gateway-check cluster='lab-sto2':
     scripts/gateway-check {{ quote(cluster) }}
 
+# List, changing nothing, the flows the network policies drop or, in audit mode, would drop: the last DROPPED and AUDIT flows of each Cilium agent, read by its own hubble through kubectl exec, so the kubeconfig needs exec on the agents' pods in kube-system; counted by source, destination and port, pod names and ports only and no address; NETWORK_DROPS_LAST bounds the flows asked of each agent (500) and NETWORK_DROPS_TIMEOUT the seconds each call may take (60); see docs/kubernetes.md, Network policy
+network-drops cluster='lab-sto2':
+    scripts/network-drops {{ quote(cluster) }}
+
 # Forward a local port, GRAFANA_PORT or 3000, on 127.0.0.1 only, to Grafana on a cluster through its kubeconfig until Ctrl-C; prints the local URL and where the admin password is kept, never the password
 grafana cluster='lab-sto2':
     scripts/grafana {{ quote(cluster) }}

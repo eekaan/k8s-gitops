@@ -1,0 +1,19 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ledger
+  namespace: legacy
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ledger
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ledger
+    spec:
+      hostNetwork: true
+      containers:
+        - name: ledger
+          image: example.com/ledger:1

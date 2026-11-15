@@ -6,6 +6,7 @@ resources:
   - ocirepository.yaml
   - helmrelease.yaml
   - gatewayclass.yaml
+  - ciliumnetworkpolicy.yaml
 
 configMapGenerator:
   - name: envoy-gateway-values

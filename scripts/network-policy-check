@@ -1,0 +1,458 @@
+#!/usr/bin/env bash
+# Checks the network policy posture of every namespace the cluster's overlay deploys into, offline,
+# on the render (scripts/render's output), so the policies charts render are seen with the tree's.
+#
+# What must hold, and what fails the check naming the namespace and the policy:
+#   - every namespace that an object of the render is in, or that a Namespace manifest or a
+#     Kustomization or HelmRelease targets, either holds a default deny of both directions, or is
+#     listed in EXCEPTIONS with a reason and what covers it instead. The default deny is the
+#     NetworkPolicy default-deny, which selects every pod (an empty podSelector), names Ingress and
+#     Egress in its policyTypes and has no rule: the namespace denies a direction once that policy
+#     selects every pod for it, and each flow it lets through is a policy of its own beside the
+#     application that needs it;
+#   - a listed namespace holds no default deny, and exists: an entry that no longer matches is
+#     refused, as is an entry without a reason or a covered-by, or a namespace listed twice;
+#   - in a namespace that has the default deny, the default deny alone denies: Cilium puts a pod in
+#     default deny for a direction when any policy that selects it for the direction asks for it,
+#     which a NetworkPolicy always does, so no other NetworkPolicy is there, a second deny of the
+#     namespace under another name included, and every Cilium policy sets enableDefaultDeny to false
+#     for ingress and egress. Taking the default deny out then opens the namespace, whatever its
+#     allows say;
+#   - in a namespace that has the default deny, a rule that allows every peer, an empty peer, every
+#     pod of every namespace (a selector that names only the namespace, by Exists or NotIn), the
+#     cluster, every endpoint, the unmanaged endpoints, other nodes' hosts, egress to the world or a
+#     host, or the world in, other than to the proxies of a Gateway of the namespace on its listener
+#     ports, is the one rule of a policy that carries the annotation
+#     k8s-gitops/network-policy-reason with a reason, on the ports it names, each a number; a policy
+#     with a reason and more than one rule, or whose rule names no port, is refused, as a reason
+#     excuses one rule on its ports. The rules of a policy of no namespace (a
+#     CiliumClusterwideNetworkPolicy) are judged as if in every one;
+#   - no policy, wherever it is, names an address: a CIDR, an address block or a literal in a
+#     selector. Peers are named by entities, labels or names, and a deployment's addresses never
+#     reach the tree;
+#   - no Cilium policy, wherever it is, holds what the evaluator below does not read: a deny rule
+#     (ingressDeny, egressDeny), which drops whatever the allows say; a policy of the nodes
+#     (nodeSelector), which the node firewall's layer is; an entity written as a label of an
+#     endpoint selector (reserved:world); or an endpoint selector that names the namespace or its
+#     labels without requiring one (DoesNotExist, NotIn), to which Cilium adds no namespace of its
+#     own, so that it also selects the world, the hosts and the nodes
+#     (pkg/k8s/apis/cilium.io/utils/utils.go, getEndpointSelector).
+#
+# Prints "NAMESPACE denies ingress and egress" or "NAMESPACE listed" for each namespace.
+#
+# With --reach, prints whether the policies of RENDER let FROM reach TO on PORT/PROTOCOL, and exits
+# 0 when they do and 1 when they do not; --reach-ingress asks only whether TO takes it, and
+# --reach-egress only whether FROM may send it. FROM and TO are
+#   @NAME             an entity: world, host, remote-node or kube-apiserver;
+#   NAMESPACE/KIND/NAME   the pods of a workload of the render, by the labels of its pod template;
+#   NAMESPACE:K=V,K=V     the pods of a namespace that carry the labels, for pods that no render
+#                         holds because an operator makes them at run time.
+# A flow is allowed when the egress of FROM and the ingress of TO both allow it: a pod is in default
+# deny for a direction only when a policy that selects it for the direction asks for it, as in
+# Cilium's default policy enforcement mode, and is otherwise open. Cilium's own admission of the
+# local host's traffic to a pod is not assumed, so a probe is allowed only by a rule of the tree.
+# What the evaluator reads: NetworkPolicy, CiliumNetworkPolicy and CiliumClusterwideNetworkPolicy
+# with endpoint selectors, entities, ports and enableDefaultDeny; peers named by address or DNS name
+# match no pod, and a named port matches no number. It does not read what the check refuses wherever
+# it is (deny rules, policies of the nodes, entities written as labels, selectors that hold for what
+# has no namespace), and gives no answer, exiting 2, over a render that holds any of it.
+#
+# Usage: scripts/network-policy-check RENDER EXCEPTIONS
+#        scripts/network-policy-check --reach[-ingress|-egress] RENDER FROM TO PORT/PROTOCOL
+set -euo pipefail
+# Text is matched, sorted and shown byte by byte, whatever the caller's locale.
+export LC_ALL=C
+shopt -s nullglob
+
+die() {
+  echo "network-policy-check: $*" >&2
+  exit 2
+}
+
+reach=0 side=both
+if [[ ${1:-} == --reach || ${1:-} == --reach-ingress || ${1:-} == --reach-egress ]]; then
+  reach=1
+  case $1 in
+    --reach-ingress) side=ingress ;;
+    --reach-egress) side=egress ;;
+  esac
+  shift
+  (($# == 4)) || die "usage: scripts/network-policy-check --reach[-ingress|-egress] RENDER FROM TO PORT/PROTOCOL"
+else
+  (($# == 2)) || die "usage: scripts/network-policy-check RENDER EXCEPTIONS"
+fi
+render=$1
+[[ -d $render ]] || die "$render is not a directory"
+for tool in yq jq; do
+  type -P "$tool" >/dev/null || die "$tool not found on PATH"
+done
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+files=()
+while IFS= read -r -d '' file; do
+  files+=("$file")
+done < <(find "$render" -type f -name '*.yaml' -print0 | sort -z)
+((${#files[@]} > 0)) || die "$render holds no rendered object"
+yq -N -o json -I0 'select(. != null)' "${files[@]}" >"$tmp/objects.jsonl" || die "$render: not YAML objects"
+
+# The policies and the namespaces' labels, and how a policy selects and allows.
+read -r -d '' lib <<'JQ' || true
+def stripk: sub("^(k8s|any):"; "");
+def sel_match($sel; $labels):
+  ((($sel // {}).matchLabels // {}) | to_entries | all(.[]; $labels[(.key | stripk)] == .value))
+  and ((($sel // {}).matchExpressions // []) | all(.[];
+    (.key | stripk) as $k | $labels[$k] as $v | (.values // []) as $vs
+    | if .operator == "In" then $v != null and ($vs | index($v)) != null
+      elif .operator == "NotIn" then $v == null or ($vs | index($v)) == null
+      elif .operator == "Exists" then $v != null
+      elif .operator == "DoesNotExist" then $v == null
+      else false end));
+def sel_empty($sel): ((($sel // {}).matchLabels // {}) | length) == 0 and ((($sel // {}).matchExpressions // []) | length) == 0;
+# A selector that names nothing but the namespace, by Exists or NotIn, selects every pod of every
+# namespace (or all but a few): the namespace of a Cilium peer, by name or by the label every
+# namespace carries, with or without the source of the label, and the namespace selector of a
+# Kubernetes peer, empty or by that label.
+def nskey: stripk | IN("io.kubernetes.pod.namespace", "io.cilium.k8s.namespace.labels.kubernetes.io/metadata.name");
+def every_ns_cnp($sel): ((($sel // {}).matchLabels // {}) | length) == 0 and ((($sel // {}).matchExpressions // []) | length) > 0
+  and (($sel.matchExpressions // []) | all(.[]; (.key | nskey) and (.operator | IN("Exists", "NotIn"))));
+def every_ns_np($sel): $sel != null and ((($sel.matchLabels // {}) | length) == 0)
+  and (($sel.matchExpressions // []) | all(.[]; .key == "kubernetes.io/metadata.name" and (.operator | IN("Exists", "NotIn"))));
+
+# Every policy as one record per spec: the namespace (null for a cluster-wide policy), the pods it
+# selects, its ingress and egress rules, null for a direction it has none for, and whether it puts
+# the pods in default deny for each direction it has rules for: a NetworkPolicy always does
+# (Cilium's pkg/k8s/network_policy.go), a Cilium policy unless its enableDefaultDeny says false for
+# the direction (pkg/policy/utils/parserules.go).
+def policies:
+  [ .[] | select((.apiVersion // "") | test("^(networking\\.k8s\\.io|cilium\\.io)/"))
+    | select(.kind | IN("NetworkPolicy", "CiliumNetworkPolicy", "CiliumClusterwideNetworkPolicy"))
+    | . as $p
+    | if .kind == "NetworkPolicy" then
+        (.spec.policyTypes // null) as $t
+        | {kind, name: .metadata.name, ns: (.metadata.namespace // ""), ann: (.metadata.annotations // {}), np: true,
+           sel: (.spec.podSelector // {}), ptypes: $t, ingressRules: (.spec.ingress // []), egressRules: (.spec.egress // []),
+           dd: {ingress: true, egress: true},
+           ingress: (if $t == null or ($t | index("Ingress")) != null then (.spec.ingress // []) else null end),
+           egress: (if ($t == null and ((.spec.egress // []) | length) > 0) or ($t != null and ($t | index("Egress")) != null) then (.spec.egress // []) else null end),
+           spec: .spec}
+      else
+        ((if .spec != null then [.spec] else [] end) + (.specs // []))[]
+        | select(.endpointSelector != null)
+        | {kind: $p.kind, name: $p.metadata.name,
+           ns: (if $p.kind == "CiliumNetworkPolicy" then ($p.metadata.namespace // "") else null end),
+           ann: ($p.metadata.annotations // {}), np: false, sel: .endpointSelector,
+           dd: {ingress: (.enableDefaultDeny.ingress != false), egress: (.enableDefaultDeny.egress != false)},
+           ingress: (if (.ingress // []) | length > 0 then .ingress else null end),
+           egress: (if (.egress // []) | length > 0 then .egress else null end), spec: .}
+      end ];
+
+def nslabels: [ .[] | select(.kind == "Namespace" and ((.apiVersion // "") == "v1")) | {key: .metadata.name, value: (.metadata.labels // {})} ] | from_entries;
+
+# Everything Cilium matches an endpoint's selectors against: its pod labels, its namespace and the
+# namespace's labels.
+def full($ep; $nsl):
+  ($ep.labels // {}) + {"io.kubernetes.pod.namespace": $ep.ns}
+  + (($nsl[$ep.ns] // {}) | with_entries(.key |= "io.cilium.k8s.namespace.labels." + .));
+
+def selects($pol; $ep; $nsl):
+  ($pol.ns == null or $pol.ns == $ep.ns)
+  and (if $pol.np then sel_match($pol.sel; $ep.labels // {}) else sel_match($pol.sel; full($ep; $nsl)) end);
+
+# A peer selector of a Cilium rule names the policy's own namespace unless it names a namespace
+# or the labels of one.
+def ns_aware_key: stripk | (. == "io.kubernetes.pod.namespace" or startswith("io.cilium.k8s.namespace.labels."));
+def cnp_peer($sel; $peer; $pns; $nsl):
+  (((($sel.matchLabels // {}) | keys) + (($sel.matchExpressions // []) | map(.key))) | any(.[]; ns_aware_key)) as $aware
+  | ($aware or $pns == null or $peer.ns == $pns) and sel_match($sel; full($peer; $nsl));
+
+def where: if .ns == null then "cluster-wide \(.kind)/\(.name)" else "namespace \(.ns): \(.kind)/\(.name)" end;
+
+# An endpoint selector that names the namespace or its labels, so that Cilium adds no namespace of
+# its own, and requires none, by matchLabels, In or Exists, on such a key: it holds for an endpoint
+# that has no namespace, the world, a host or a node, too.
+def outside($sel):
+  ((($sel.matchLabels // {}) | keys) + (($sel.matchExpressions // []) | map(.key))) as $keys
+  | ($keys | any(.[]; ns_aware_key))
+    and ((((($sel.matchLabels // {}) | keys) | any(.[]; ns_aware_key))
+          or (($sel.matchExpressions // []) | any(.[]; (.key | ns_aware_key) and (.operator | IN("In", "Exists")))))
+         | not);
+
+# What the evaluator does not read, one line for each Cilium policy spec that holds it, wherever it
+# is: a policy of the nodes; a deny rule; an entity written as a label of an endpoint selector, to
+# which Cilium adds no namespace (pkg/k8s/apis/cilium.io/utils/utils.go, getEndpointSelector); an
+# endpoint selector of the namespace that requires none.
+def unread:
+  .[] | select((.apiVersion // "") | test("^cilium\\.io/"))
+  | select(.kind | IN("CiliumNetworkPolicy", "CiliumClusterwideNetworkPolicy")) | . as $p
+  | ({kind: $p.kind, name: $p.metadata.name,
+      ns: (if $p.kind == "CiliumNetworkPolicy" then ($p.metadata.namespace // "") else null end)} | where) as $w
+  | ((if .spec != null then [.spec] else [] end) + (.specs // []))[] as $s
+  | (if $s.endpointSelector == null then "\($w) selects nodes, not pods: the nodes' own traffic is the node firewall's (ADR 0017)" else empty end),
+    (["ingressDeny", "egressDeny"][] | select((($s[.] // []) | length) > 0)
+      | "\($w) holds a deny rule (\(.)), which drops what it names whatever the allows say: the namespace's default deny denies, and a policy only allows"),
+    ([ $s | .. | objects | ((.matchLabels | objects | keys[]), (.matchExpressions | arrays | .[] | objects | .key | strings)) ]
+      | map(select(startswith("reserved:"))) | unique
+      | if length > 0 then "\($w) names an entity by its label (\(join(", "))), which selects what is no pod of the cluster: name it in fromEntities or toEntities" else empty end),
+    ([ ($s.endpointSelector | objects),
+       (($s.ingress // [])[] | ((.fromEndpoints // []) + (.fromRequires // []))[]),
+       (($s.egress // [])[] | ((.toEndpoints // []) + (.toRequires // []))[]) ]
+      | if any(.[]; outside(.)) then "\($w) selects by the namespace or its labels without requiring one (DoesNotExist, NotIn), which also selects what is no pod of the cluster, the world, the hosts and the nodes: require the namespace by matchLabels, In or Exists" else empty end);
+
+def ent_match($names; $peer):
+  ($names | any(.[]; IN("cluster", "cluster-mesh"))) as $cluster
+  | ($names | index("all")) != null
+  or ($peer.kind == "entity" and (($names | index($peer.name)) != null
+       or ($cluster and ($peer.name | IN("host", "remote-node", "kube-apiserver", "health", "init", "ingress", "unmanaged")))))
+  or ($peer.kind == "pod" and $cluster);
+
+def port_in($p; $port; $proto):
+  ($p.protocol // "ANY" | ascii_upcase) as $pr
+  | ($pr == "ANY" or $pr == $proto)
+  and (($p.port | tostring) as $lo | ($lo | test("^[0-9]+$"))
+       and (($lo | tonumber) as $a | ($p.endPort // $a) as $b | ($a == 0 or ($a <= $port and $port <= $b))));
+
+def cnp_ports($r; $port; $proto):
+  ($r.toPorts // []) as $tp
+  | ($tp | length) == 0 or ($tp | any(.[]; (.ports // []) as $ps | ($ps | length) == 0 or ($ps | any(.[]; port_in(.; $port; $proto)))));
+
+def cnp_rule($dir; $r; $peer; $pns; $port; $proto; $nsl):
+  (if $dir == "ingress" then ["fromEndpoints", "fromEntities", "fromCIDR", "fromCIDRSet", "fromNodes", "fromGroups"]
+   else ["toEndpoints", "toEntities", "toCIDR", "toCIDRSet", "toFQDNs", "toServices", "toGroups", "toNodes"] end) as $keys
+  | ($keys | map($r[.]) | all(. == null)) as $nopeer
+  | (if $nopeer then (($r.toPorts // []) | length) > 0
+     else (($r[if $dir == "ingress" then "fromEndpoints" else "toEndpoints" end] // [])
+           | any(.[]; $peer.kind == "pod" and cnp_peer(.; $peer; $pns; $nsl)))
+          or ent_match(($r[if $dir == "ingress" then "fromEntities" else "toEntities" end] // []); $peer)
+     end)
+  and cnp_ports($r; $port; $proto);
+
+def np_ports($r; $port; $proto):
+  ($r.ports // []) as $ps
+  | ($ps | length) == 0 or ($ps | any(.[]; (.protocol // "TCP") == $proto
+      and ((.port | tostring) as $lo | ($lo | test("^[0-9]+$"))
+           and (($lo | tonumber) as $a | (.endPort // $a) as $b | $a <= $port and $port <= $b))));
+
+def np_rule($dir; $r; $peer; $pns; $port; $proto; $nsl):
+  ($r[if $dir == "ingress" then "from" else "to" end] // []) as $peers
+  | (($peers | length) == 0
+     or ($peer.kind == "pod" and ($peers | any(.[];
+          if .ipBlock != null then false
+          else (if .namespaceSelector != null then sel_match(.namespaceSelector; ($nsl[$peer.ns] // {})) else $peer.ns == $pns end)
+               and (if .podSelector != null then sel_match(.podSelector; $peer.labels // {}) else true end)
+          end))))
+  and np_ports($r; $port; $proto);
+
+# Whether the policies let the pod $self take or send $peer's traffic in direction $dir. The pod is
+# in default deny for the direction when a policy that selects it for the direction asks for it;
+# when none does, Cilium adds an allow of everything (pkg/policy/repository.go).
+def side($pols; $nsl; $dir; $self; $peer; $port; $proto):
+  [ $pols[] | select(.[$dir] != null and selects(.; $self; $nsl)) ] as $sel
+  | if ($sel | any(.[]; .dd[$dir])) | not then true
+    else $sel | any(.[]; . as $pol | $pol[$dir] | any(.[];
+        if $pol.np then np_rule($dir; .; $peer; $pol.ns; $port; $proto; $nsl)
+        else cnp_rule($dir; .; $peer; $pol.ns; $port; $proto; $nsl) end))
+    end;
+JQ
+
+if ((reach)); then
+  from=$2 to=$3 flow=$4
+  [[ $flow =~ ^([0-9]+)/(tcp|udp|TCP|UDP)$ ]] || die "the port is PORT/PROTOCOL, such as 8080/tcp, not $flow"
+  port=${BASH_REMATCH[1]} proto=${BASH_REMATCH[2]^^}
+  # endpoint SPEC: the entity or the pod of SPEC as JSON.
+  endpoint() {
+    local spec=$1 ns kind name labels
+    if [[ $spec == @* ]]; then
+      jq -n -c --arg n "${spec#@}" '{kind: "entity", name: $n}'
+    elif [[ $spec =~ ^([a-z0-9.-]+)/([A-Za-z]+)/([a-z0-9.-]+)$ ]]; then
+      ns=${BASH_REMATCH[1]} kind=${BASH_REMATCH[2]} name=${BASH_REMATCH[3]}
+      jq -s -c --arg ns "$ns" --arg kind "$kind" --arg name "$name" '
+        [ .[] | select(.kind == $kind and .metadata.namespace == $ns and .metadata.name == $name) ] as $w
+        | if ($w | length) != 1 then error("no \($kind) \($name) in \($ns) in the render") else $w[0] end
+        | (if .kind == "Pod" then .metadata.labels
+           elif .kind == "CronJob" then .spec.jobTemplate.spec.template.metadata.labels
+           else .spec.template.metadata.labels end) as $l
+        | {kind: "pod", ns: $ns, labels: ($l // {})}' "$tmp/objects.jsonl" || die "$spec is not a workload of the render"
+    elif [[ $spec =~ ^([a-z0-9.-]+):(.*)$ ]]; then
+      ns=${BASH_REMATCH[1]} labels=${BASH_REMATCH[2]}
+      jq -n -c --arg ns "$ns" --arg l "$labels" '{kind: "pod", ns: $ns,
+        labels: ($l | split(",") | map(select(. != "") | split("=") | {key: .[0], value: (.[1:] | join("="))}) | from_entries)}'
+    else
+      die "$spec is neither @ENTITY, NAMESPACE/KIND/NAME nor NAMESPACE:LABELS"
+    fi
+  }
+  src=$(endpoint "$from") dst=$(endpoint "$to")
+  jq -s -r "$lib"' unread' "$tmp/objects.jsonl" >"$tmp/unread" 2>"$tmp/jq.err" || die "reading the render: $(cat "$tmp/jq.err")"
+  [[ ! -s $tmp/unread ]] || die "$render holds what the evaluator does not read, which the check refuses: $(paste -sd';' "$tmp/unread")"
+  jq -s -r --argjson src "$src" --argjson dst "$dst" --argjson port "$port" --arg proto "$proto" --arg side "$side" "$lib"'
+    nslabels as $nsl | policies as $pols
+    | (if $src.kind == "pod" and $side != "ingress" then side($pols; $nsl; "egress"; $src; $dst; $port; $proto) else true end) as $out
+    | (if $dst.kind == "pod" and $side != "egress" then side($pols; $nsl; "ingress"; $dst; $src; $port; $proto) else true end) as $in
+    | if $out and $in then "allowed"
+      else "denied: " + ([if $out then empty else "egress of the source" end, if $in then empty else "ingress of the destination" end] | join(" and "))
+      end' "$tmp/objects.jsonl" >"$tmp/answer"
+  cat "$tmp/answer"
+  [[ $(cat "$tmp/answer") == allowed ]]
+  exit
+fi
+
+exceptions=$2
+[[ -f $exceptions ]] || die "no exceptions file $exceptions"
+yq -o json -I0 '.' "$exceptions" >"$tmp/exceptions.json" || die "$exceptions: not YAML"
+
+# Every problem, one a line, and then each namespace's verdict.
+jq -s -r --slurpfile exc "$tmp/exceptions.json" "$lib"'
+  def reason_key: "k8s-gitops/network-policy-reason";
+  def has_reason: ((.ann[reason_key] // "") | type == "string" and test("[^[:space:]]"));
+  # Whether a Cilium rule names its ports, each a number of one port.
+  def names_ports($r):
+    (($r.toPorts // []) | length) > 0
+    and (($r.toPorts // []) | all(.[]; ((.ports // []) | length) > 0 and ((.ports // []) | all(.[];
+         (.port | tostring | test("^[1-9][0-9]{0,4}$")) and (.port | tostring | tonumber) <= 65535 and .endPort == null))));
+
+  nslabels as $nsl | policies as $pols
+  | . as $objs
+  # Each Gateway and the container ports its proxies listen on: Envoy Gateway adds 10000 to a
+  # listener port below 1024 unless the EnvoyProxy the Gateway names keeps the listener ports
+  # (internal/gatewayapi/listener.go, servicePortToContainerPort).
+  | ([ .[] | select(.kind == "Gateway" and ((.apiVersion // "") | startswith("gateway.networking.k8s.io/"))) | . as $g
+       | ($g.spec.infrastructure.parametersRef // {}) as $ref
+       | ([ $objs[] | select(.kind == "EnvoyProxy" and $ref.kind == "EnvoyProxy" and .metadata.namespace == $g.metadata.namespace
+              and .metadata.name == $ref.name) ][0].spec.provider.kubernetes.useListenerPortAsContainerPort == true) as $keep
+       | {ns: $g.metadata.namespace, name: $g.metadata.name,
+          ports: [ ($g.spec.listeners // [])[].port | numbers | if $keep or . >= 1024 then . else . + 10000 end ]} ]) as $gws
+  # The rules of each policy, its specs together: a reason excuses a policy of one rule.
+  | ([ $pols[] | {key: "\(.kind)/\(.ns // "")/\(.name)",
+                  n: (if .np then ((.ingressRules + .egressRules) | length)
+                      else (((.spec.ingress // []) + (.spec.egress // []) + (.spec.ingressDeny // []) + (.spec.egressDeny // [])) | length) end)} ]
+     | group_by(.key) | map({key: .[0].key, value: (map(.n) | add)}) | from_entries) as $nrules
+  # The namespaces the tree deploys into.
+  | ([ .[] | (.metadata.namespace // empty), (select(.kind == "Namespace") | .metadata.name),
+        (select(.kind | IN("Kustomization", "HelmRelease")) | .spec.targetNamespace // empty) ]
+     | map(select(type == "string" and . != "")) | unique) as $namespaces
+  | ($exc[0].exceptions // []) as $listed
+  | ($listed | map(.namespace)) as $listednames
+
+  # The directions a namespace denies, by its default deny, and what keeps a policy of it from
+  # denying one.
+  | def denies($ns; $dir):
+      [ $pols[] | select(.ns == $ns and .np and .name == "default-deny" and sel_empty(.sel)
+          and ((.ptypes // ["Ingress"]) | index({"ingress": "Ingress", "egress": "Egress"}[$dir]) != null)
+          and (.[$dir + "Rules"] | length) == 0) ] | length > 0;
+    # The ports of the Gateway whose proxies a Cilium policy selects, by the labels Envoy Gateway
+    # gives them, or none.
+    def proxy_ports($pol):
+      (($pol.sel.matchLabels // {}) | with_entries(.key |= stripk)) as $l
+      | if $pol.np or $pol.ns == null then []
+        elif $l["app.kubernetes.io/component"] == "proxy" and $l["app.kubernetes.io/managed-by"] == "envoy-gateway"
+             and ($l["gateway.envoyproxy.io/owning-gateway-namespace"] // $pol.ns) == $pol.ns
+        then [ $gws[] | select(.ns == $pol.ns and .name == $l["gateway.envoyproxy.io/owning-gateway-name"]) | .ports[] ]
+        else [] end;
+    # Whether a rule names ports, each of them one of $ports.
+    def on_ports($r; $ports):
+      ($ports | length) > 0 and (($r.toPorts // []) | length) > 0
+      and (($r.toPorts // []) | all(.[]; ((.ports // []) | length) > 0 and ((.ports // []) | all(.[];
+           (.port | tostring | test("^[0-9]+$")) and ((.port | tostring | tonumber) as $p
+             | ($ports | index($p)) != null and ((.endPort // $p) == $p))))));
+    def hints($ns):
+      [ $pols[] | select(.ns == $ns and .np)
+        | . as $p
+        | (if .name != "default-deny" and sel_empty(.sel) and ((.ingressRules + .egressRules) | length) == 0
+           then "NetworkPolicy/\(.name) is not named default-deny" else empty end),
+          (if sel_empty(.sel) then empty else "NetworkPolicy/\(.name) does not select every pod" end),
+          (if (.ingressRules | length) > 0 or (.egressRules | length) > 0 then "NetworkPolicy/\(.name) has allow rules, so it is no default deny" else empty end) ];
+
+  # The exceptions list itself.
+  ( ($listed | to_entries[] | select((.value | type) != "object" or ((.value.namespace // "") | type) != "string" or .value.namespace == "")
+      | "the entry \(.key + 1) of the exceptions has no namespace"),
+    ($listed[] | select(type == "object" and (.namespace // "" | type) == "string" and .namespace != "")
+      | . as $e
+      | ($e | keys[] | select(IN("namespace", "reason", "covered-by") | not) | "namespace \($e.namespace) is listed with a field the check does not read: \(.)"),
+        (if (($e.reason // "") | type == "string" and test("[^[:space:]]")) then empty else "namespace \($e.namespace) is listed without a reason" end),
+        (if (($e["covered-by"] // "") | type == "string" and test("[^[:space:]]")) then empty else "namespace \($e.namespace) is listed without covered-by, what covers it instead" end)),
+    ($listednames | group_by(.)[] | select(length > 1) | "namespace \(.[0]) is listed twice")
+  ),
+  # Each namespace.
+  ( $namespaces[] | . as $ns
+    | (denies($ns; "ingress")) as $di | (denies($ns; "egress")) as $de
+    | ($listednames | index($ns) != null) as $isl
+    | if $isl and $di and $de then "namespace \($ns) is listed but has the default deny: remove its entry"
+      elif $isl then empty
+      elif $di and $de then empty
+      else "namespace \($ns) has no default deny of \(if $di then "egress" elif $de then "ingress" else "ingress and egress" end) and is not listed in the exceptions"
+           + (hints($ns) | if length > 0 then " (" + join("; ") + ")" else "" end)
+      end ),
+  ( $listednames[] | select(. as $n | $namespaces | index($n) == null)
+    | "namespace \(.) is listed but the render holds no object in it: remove its entry" ),
+  # Policies. A rule that undoes a default needs its reason where there is a default to undo.
+  ( $pols[] | . as $pol
+    | ( [ $pol.spec | .. | objects | keys[] | select(test("^(from|to)CIDR(Set)?$|^cidr$|^cidrSet$|^ipBlock$")) ]
+        + [ $pol.spec | .. | strings | select(test("(^|[^0-9.])[0-9]{1,3}(\\.[0-9]{1,3}){3}($|[^0-9])") or test("(^|[^0-9A-Za-z:])([0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}($|[^0-9A-Za-z:])")) ] ) as $addr
+    | (if ($addr | length) > 0 then ($pol | where) + " names an address (" + ($addr | unique | join(", ")) + "): name peers by entity, label or name" else empty end),
+      ( if $pol.ns != null and (($listednames | index($pol.ns)) != null or (denies($pol.ns; "ingress") and denies($pol.ns; "egress") | not)) then empty
+        else
+          # The default deny of the namespace alone denies, so taking that one object out opens the
+          # namespace: every other policy allows and leaves the default alone.
+          ( if $pol.np then
+              (if $pol.name == "default-deny" and sel_empty($pol.sel) and (($pol.ingressRules + $pol.egressRules) | length) == 0 then empty
+               else ($pol | where) + " is a NetworkPolicy other than the default deny of the namespace, and Cilium puts every pod a NetworkPolicy selects in default deny: an allow is a CiliumNetworkPolicy that sets enableDefaultDeny ingress and egress to false" end)
+            elif $pol.spec.enableDefaultDeny.ingress == false and $pol.spec.enableDefaultDeny.egress == false then empty
+            else ($pol | where) + " does not set enableDefaultDeny ingress and egress to false: an allow leaves the deny to the default-deny NetworkPolicy of the namespace, so that taking that one object out opens the namespace"
+            end ),
+          if $pol | has_reason then
+            $nrules["\($pol.kind)/\($pol.ns // "")/\($pol.name)"] as $n
+            | if $n != 1 then ($pol | where) + " carries a reason but holds \($n) rules: a reason excuses the one rule of its policy, so a rule that needs one is a policy of its own"
+              elif $pol.np or ([($pol.ingress // [])[], ($pol.egress // [])[]] | all(.[]; names_ports(.))) then empty
+              else ($pol | where) + " carries a reason but its rule names no port: a reason excuses the one rule of its policy on the ports it names, each a number of one port" end
+          else
+          ( [ (["ingress", "egress"][] | . as $dir
+                | ($pol[$dir] // [])[] | . as $r
+                | if $pol.np then
+                    (($r[if $dir == "ingress" then "from" else "to" end] // []) as $peers
+                     | (if ($peers | length) == 0 then "allows every peer" else empty end),
+                       ($peers[] | select((.podSelector != null and sel_empty(.podSelector)) or (.namespaceSelector != null and sel_empty(.namespaceSelector))) | "allows an empty peer selector"),
+                       ($peers[] | select(every_ns_np(.namespaceSelector) and (.podSelector == null or sel_empty(.podSelector))) | "allows every pod of every namespace"))
+                  else
+                    (if $dir == "ingress" then ["fromEndpoints", "fromEntities", "fromCIDR", "fromCIDRSet", "fromNodes", "fromGroups"]
+                     else ["toEndpoints", "toEntities", "toCIDR", "toCIDRSet", "toFQDNs", "toServices", "toGroups", "toNodes"] end) as $keys
+                    | (if ($keys | map($r[.]) | all(. == null)) and (($r.toPorts // []) | length) > 0 then "allows every peer on its ports" else empty end),
+                      (($r[if $dir == "ingress" then "fromEndpoints" else "toEndpoints" end] // [])[]
+                        | if sel_empty(.) then "allows an empty peer selector"
+                          elif every_ns_cnp(.) then "allows every pod of every namespace"
+                          else empty end),
+                      (($r[if $dir == "ingress" then "fromEntities" else "toEntities" end] // [])[]
+                        | if . == "all" then "allows every endpoint"
+                          elif IN("cluster", "cluster-mesh") then "allows the whole cluster"
+                          elif . == "unmanaged" then "allows the endpoints Cilium does not manage"
+                          elif $dir == "ingress" and . == "world" then
+                            (if on_ports($r; proxy_ports($pol)) then empty
+                             else "allows the world in, other than to the proxies of a Gateway on its listener ports" end)
+                          elif $dir == "ingress" and . == "remote-node" then "allows the hosts of other nodes in"
+                          elif $dir == "egress" and IN("world", "host", "remote-node") then "allows egress to \(.)"
+                          else empty end),
+                      (($r.toFQDNs // [])[] | select((.matchPattern // "") | test("^\\*+$")) | "allows every DNS name")
+                  end) ] | unique ) as $broad
+          | if ($broad | length) > 0 then ($pol | where) + " undoes the default deny (" + ($broad | join("; ")) + "): narrow it, or say why with the annotation " + reason_key
+            else empty end
+          end
+        end ) ),
+  # What the evaluator does not read, wherever it is.
+  ( $objs | unread )
+' "$tmp/objects.jsonl" >"$tmp/problems" 2>"$tmp/jq.err" || die "reading the render: $(cat "$tmp/jq.err")"
+
+if [[ -s $tmp/problems ]]; then
+  # A policy of several specs can give one problem once a spec.
+  awk '!seen[$0]++' "$tmp/problems" | while IFS= read -r line; do
+    echo "network-policy-check: $line" >&2
+  done
+  exit 1
+fi
+
+jq -s -r --slurpfile exc "$tmp/exceptions.json" "$lib"'
+  policies as $pols
+  | ($exc[0].exceptions // [] | map(.namespace)) as $listednames
+  | ([ .[] | (.metadata.namespace // empty), (select(.kind == "Namespace") | .metadata.name),
+        (select(.kind | IN("Kustomization", "HelmRelease")) | .spec.targetNamespace // empty) ]
+     | map(select(type == "string" and . != "")) | unique)[]
+  | . as $ns | if ($listednames | index($ns)) != null then "\($ns) listed" else "\($ns) denies ingress and egress" end' "$tmp/objects.jsonl"

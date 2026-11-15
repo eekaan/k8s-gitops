@@ -8,6 +8,9 @@ metadata:
 spec:
   path: ./apps/base/demo/hello/app
   targetNamespace: demo
+  # Its CiliumNetworkPolicy is a kind Cilium's operator defines.
+  dependsOn:
+    - name: cilium
   # Ready once the Deployment's pods are, so the route that names its Service waits for them.
   wait: true
   sourceRef:

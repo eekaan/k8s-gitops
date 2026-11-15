@@ -324,7 +324,11 @@ protection does not depend on the cloud's security groups. `talos/patches/all/fi
 the firewall's default action to block and gives the node one rule for each listener of its role.
 Talos itself admits traffic on the loopback interface, replies to connections the node opened,
 ICMP at up to five packets a second and traffic from the pod and service ranges to those ranges;
-every other packet addressed to the node is dropped unless a rule admits it.
+every other packet addressed to the node is dropped unless a rule admits it. It is the layer for
+what reaches the node's own listeners; what a pod takes and sends is the layer of the namespaces'
+network policies ([Network policy](kubernetes.md#network-policy), [ADR
+0019](adr/0019-namespaces-deny-traffic-by-default-and-each-declares-its-flows.md)), which does not
+select pods in the host's network namespace.
 
 The listeners are written down once, in `talos/firewall.yaml`: each with its protocol and ports, the
 nodes that have it, all or control planes only, and the sources it accepts. The cluster stack
@@ -701,7 +705,9 @@ No pod can use that to reach the port from anywhere else: what the port takes is
 authorised by Talos' own RBAC, which needs a certificate the Talos CA signed, and only the Secret
 above holds one a pod can use, with only this role. The job asks the node `127.0.0.1` of the
 control plane its connection reaches, the one the Service chose, so it needs no control plane's
-address.
+address. The namespace holds no default deny of network policy, and
+`network-policy-exceptions.yaml` lists it with the job's flows
+([Network policy](kubernetes.md#network-policy)).
 
 **The steps.** Four, each in the image that has its tool, so the repository builds none: age's
 release, downloaded and checked against the SHA-256 pinned in the manifest (no public image carries

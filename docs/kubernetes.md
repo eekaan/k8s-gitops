@@ -68,6 +68,11 @@ spec:
   match what the render holds. A custom resource whose operator creates pods sets the security
   context `restricted` requires where the resource has the fields, and `tests/pod-security.bats`
   lists it; a pod it makes that needs more is an entry with `created-by`.
+- The namespace denies ingress and egress by default, and the application declares the flows it
+  lets through in a `CiliumNetworkPolicy` beside it ([Network policy](#network-policy)): a new
+  namespace gets a `default-deny` `NetworkPolicy` next to its `namespace.yaml`, or an entry of
+  `network-policy-exceptions.yaml` with its reason, and `just network-policy-check` fails until
+  one of them holds.
 
 Enable the application by listing its namespace directory, once, and its `ks.yaml` in
 `apps/overlays/<cluster>/kustomization.yaml`. A disabled application stays in the list,
@@ -530,6 +535,346 @@ those its chart's values define accept, under a `securityContext`, `podSecurityC
 `containerSecurityContext` map, any field of Kubernetes' security context types
 (`tests/fixtures/security-context-fields`); an entry's reason says why no value does.
 
+## Network policy
+
+A namespace that holds applications denies ingress and egress by default and carries, beside its
+applications, the few flows it lets through; a namespace that does not is listed with its reason and
+what covers it instead. The decision is [ADR 0019](adr/0019-namespaces-deny-traffic-by-default-and-each-declares-its-flows.md).
+The node firewall ([ADR 0017](adr/0017-nodes-firewall-themselves-with-talos-ingress-firewall.md))
+is another layer: it decides what reaches a node's own listeners, policy decides what a pod takes
+and sends.
+
+- **The mechanism.** The default deny is a Kubernetes `NetworkPolicy` named `default-deny` in the
+  namespace's directory, next to `namespace.yaml`, and the namespace's only `NetworkPolicy`: an
+  empty pod selector, `Ingress` and `Egress` in its policy types, no rule. Every allow is a
+  `CiliumNetworkPolicy` in the directory of the application that needs the flow, because it must
+  name the API server, the nodes and "the world" without an address, which only Cilium's entities
+  do, and must select backends by the labels of their namespaces. Every allow sets
+  `enableDefaultDeny: {ingress: false, egress: false}` and holds no deny rule, so the default deny
+  is that one object and nothing else.
+- **How the pinned Cilium combines them.** A pod is in default deny for a direction once a policy
+  rule that selects it for that direction asks for it, and then only what some rule allows passes
+  (`Documentation/security/policy/intro.rst`, "Endpoint default policy"). A Kubernetes
+  `NetworkPolicy` always asks for it (`pkg/k8s/network_policy.go`); a `CiliumNetworkPolicy` asks
+  for it in each direction it has rules for, unless its `enableDefaultDeny` says `false` for the
+  direction (`pkg/policy/api/rule.go`, `pkg/policy/utils/parserules.go`); one that asks is enough
+  (`pkg/policy/repository.go`). With the namespace's default deny, its pods are in default deny both
+  ways and the allows add what passes; without it, no rule asks, Cilium adds an allow of
+  everything, and the allows change nothing. The agents read `enableDefaultDeny` only with
+  `enable-non-default-deny-policies` on, which the chart's `enableNonDefaultDenyPolicies` sets by
+  default and `tests/network-policy.bats` reads in the rendered agent configuration. The field does
+  not reach layer-7 rules, which drop what they do not allow whatever it says; the tree has none.
+- **Per namespace, enforcement mode `default`.** The default deny is a namespace's own object
+  rather than one cluster-wide policy with an opt-out label: a mistake in the latter changes every
+  namespace at once and silently, while a namespace that lacks its object is refused by the check.
+  Cilium's `policyEnforcementMode` stays `default`, so a pod no policy asks to deny is open; mode
+  `always` would deny every listed namespace's traffic too.
+
+Whether the agents audit these policies or enforce them is Cilium's value `policyAuditMode`, which
+holds for the whole cluster at once; the paragraph that states the mode is at the end of
+[Service addresses](#service-addresses), and the policies land, are watched and are enforced in
+the order of [Turning it on, and back](#turning-it-on-and-back). `tests/network-policy.bats` fails
+unless `docs/kubernetes.md` states the mode exactly once, as that paragraph's opening sentence
+while the value is set, or as **The cluster enforces the policies.** at the start of a paragraph
+once it is not, and the agents' rendered configuration agrees.
+
+| Namespace | Posture | Why, and what covers it instead |
+| --- | --- | --- |
+| `demo` | default deny | `hello` takes the proxies on 8080; the backup movers resolve names and reach the object storage on 443; `volsync-demo` and the rest open nothing. |
+| `envoy-gateway-system` | default deny | the controller, its webhook, its certificate job and the proxies, below. |
+| `ai-system` | listed | an application whose allows are not written, not a namespace that cannot have the posture. n8n takes the proxies on 5678 and reaches its database, the resolver and whatever its workflows call outside; the PostgreSQL instances take n8n, each other and the operator, and reach the API server; the backup movers reach the object storage on 443. The proxies reach n8n's 5678 alone there and forward only to n8n's Service, PostgreSQL authenticates every client, Pod Security, node firewall. |
+| `etcd-snapshots` | listed | an application whose allows are not written, not a namespace that cannot have the posture. The snapshot job takes nothing and reaches the Talos API through `talos.default`, the object storage, the hosts age's release is downloaded from (its URL redirects to a second host, which serves the file) and the resolver. Talos' own authorisation of its one role, Pod Security, node firewall. |
+| `external-dns` | listed | an application whose allows are not written, not a namespace that cannot have the posture. external-dns takes Prometheus' scrape and the kubelet's probes on 7979 and nothing else, and reaches the API server, the DNS provider's API on 443 and the resolver. Its token, scoped to zone read and DNS edit on the cluster's one zone, its name filter, a ClusterRole that only reads, Pod Security, node firewall ([DNS records](#dns-records)). |
+| `kube-system` | listed | Cilium's agent, its Envoy and its operator run in the host's network namespace; the resolver takes queries from every namespace; the pod-network workloads' flows are not yet enumerated. Node firewall, Pod Security. |
+| `flux-system` | listed | the controllers' flows are not yet enumerated as allows; Flux's own network policies, which the operator makes at run time, and the operator's for its web interface, `flux-operator-web`, which the check reads and passes because the namespace is listed ([What the check refuses](#what-the-check-refuses)); Pod Security, node firewall. |
+| `monitoring` | listed | Prometheus scrapes every namespace and the nodes, the node exporter runs in the host's network namespace, the API server calls the operator's webhook, the other flows are not yet enumerated. |
+| `openbao`, `external-secrets`, `cert-manager`, `cnpg-system`, `keda`, `volsync-system` | listed | flows not yet enumerated: webhooks and APIs the API server calls, the store's clients, scrapes. Each entry says which, and what covers it. |
+| `piraeus-datastore` | listed | the CSI node plugin runs in the host's network namespace; the satellites replicate over the pod network, and their flows are not yet enumerated. |
+| `cilium-secrets` | listed | holds no pod. |
+
+`network-policy-exceptions.yaml` is the list; its header says what an entry holds.
+
+### What the namespaces let through
+
+- **`envoy-gateway-system`.** The proxies (labels `app.kubernetes.io/name: envoy`,
+  `app.kubernetes.io/component: proxy`, `app.kubernetes.io/managed-by: envoy-gateway`,
+  `gateway.envoyproxy.io/owning-gateway-name: public`) take the world on 10080 and 10443, the
+  container ports the controller derives from the listeners 80 and 443 by adding 10000, and the
+  kubelet on 19003 and 19002: Envoy Gateway v1.10.0 probes the envoy container on its readiness
+  port, 19003 (`internal/xds/bootstrap/bootstrap.go`,
+  `internal/infrastructure/kubernetes/proxy/resource.go`), and the shutdown manager on 19002
+  (`internal/cmd/envoy/shutdown_manager.go`); 19001 is the stats port and 19000 the admin port on
+  the loopback. They reach the resolver, the controller on 18000 (xDS) and each backend the routes
+  attached to the Gateway send to, by one rule each: the pods its Service selects, in its namespace
+  while that carries `k8s-gitops/gateway: public`, on the container port the route sends to and no
+  other: `hello` in `demo` on 8080 and n8n in `ai-system` on 5678. `tests/network-policy.bats`
+  reads those ports from the render, from each route's backend through its Service's target port to
+  the container port, and fails unless the rules name, in each labelled namespace, exactly them; it
+  reads the proxies' egress in every form the evaluation reads, and fails on a port entry or a peer
+  it cannot compare, a backend in a namespace without the label and a Service without a selector.
+  What a pod of such a namespace takes is its own namespace's to say: in `demo`, `hello` on 8080. In
+  `ai-system`, which is listed and so has no pod in default deny, every pod takes them on every
+  port, so the proxies' rule is what keeps them from n8n's other ports and from every port of its
+  database; PostgreSQL also authenticates every client. The controller takes the proxies on 18000
+  and the kubelet on 8081, and reaches the resolver and the API server on 443 and 6443 (a Service's
+  address is translated to the control plane's before policy applies). Its admission webhook takes
+  the API server, the local host and other nodes' hosts on 9443, in a policy of its own with its
+  reason (below). The
+  certificate job reaches the resolver and the API server. No monitor of the tree scrapes the
+  Gateway, so no scrape is allowed; a monitor that does adds its rule.
+- **`demo`.** `hello` takes the proxies by their labels, not by their namespace, on 8080, so the
+  controller is no path to it, and the kubelet's probe. The backup movers, the pods VolSync labels
+  `app.kubernetes.io/created-by: volsync` for every application of the namespace that adds
+  `components/volsync`, reach the resolver, and the world on 443 in a policy of its own with its
+  reason, both by the application `demo-volsync-movers`, one for the namespace. A pod without a
+  policy of its own reaches nothing and is reached by nothing. The movers' policies select by that
+  label, so any pod of `demo` that carries it gets the movers' flows, the world on 443 among them:
+  the label is no proof of being a mover. What keeps it to the movers is who makes pods in the
+  namespace, Flux from the reviewed tree and VolSync's controller.
+- **The object storage's port.** cluster-config holds the object storage's endpoint as a URL, which
+  a DNS name rule cannot take, so the movers' rule is the world on 443: the port https uses for an
+  endpoint that names none, as cluster-config's example does and `tests/network-policy.bats` holds
+  it to. The endpoint's validation (`scripts/lib/s3.sh`) admits a port: with an endpoint on
+  another port, the rule refuses the movers, every backup and restore of the namespace fails to
+  connect, and `just network-drops` shows the movers' flows to `@world` on that port. The rule's
+  port changes with the endpoint.
+- **Which entity.** Public traffic is translated by the edge routers, arrives at the address the
+  workers announce, and a worker may forward it to a proxy on another node
+  (`externalTrafficPolicy: Cluster`, [The public Gateway](#the-public-gateway)). A proxy on the
+  node that took the connection sees a client outside the cluster, `world`; one on another node
+  gets it through the tunnel with the world's identity, which the pinned datapath sets for a
+  load-balanced connection from outside so that the receiving node does not take it for a node's
+  (`bpf/lib/nodeport.h`, `nodeport_lb4` and the NAT that follows it). The listeners therefore take
+  `world` alone, and the watch in audit mode confirms it: a flow from `@remote-node` to the
+  listeners would show as `AUDIT`.
+- **The local host and the API server.** In Kubernetes mode the pinned agent lets the local host
+  reach the pods on its node whatever the policies say (`allow-localhost` `auto` becomes `always`,
+  `daemon/cmd/daemon.go`; `pkg/policy/repository.go` adds the rule), so the kubelet's probes do not
+  depend on the rules from `host`. Those rules state each probe port, so that the offline evaluation
+  proves it, and are what would admit the probes if the agents ever required a rule for the local
+  host. The API server calls webhooks from the control planes' host network: a call from another
+  node crosses the tunnel as `remote-node` (`bpf/bpf_overlay.c`), which Cilium names
+  `kube-apiserver` only for an address it knows as the API server's, so the webhook's rule names
+  both, on its port alone, with its reason.
+
+### Declaring an application's flows
+
+1. Put a `CiliumNetworkPolicy` in the application's `app/` directory, list it in its
+   `kustomization.yaml` and name `cilium` in the application's `dependsOn`: the kind is the one
+   Cilium's operator defines. Its `endpointSelector` is the application's pod labels, and it sets
+   `enableDefaultDeny: {ingress: false, egress: false}`: the namespace's default deny does the
+   denying. A Kubernetes `NetworkPolicy` is no allow, as it always asks for the default deny.
+2. For each flow, one rule with a comment saying what it is for. Peers are named by entity
+   (`kube-apiserver`, `host`, `world`), by labels (`k8s:io.kubernetes.pod.namespace` and the pod's
+   labels) or by DNS name, never by address; ports are listed. An entity is written as an entity,
+   never as a `reserved:` label, and a selector that names a namespace or its labels requires one,
+   by `matchLabels`, `In` or `Exists`. No rule denies: the namespace's default deny does. Ingress
+   from the Gateway names the proxies' labels, the application's namespace carries
+   `k8s-gitops/gateway: public`, and the proxies' egress names the port
+   ([Giving an application a public hostname](#giving-an-application-a-public-hostname)). DNS is a
+   rule to `k8s:k8s-app: kube-dns` in `kube-system` on port 53, UDP and TCP; a DNS name rule
+   (`toFQDNs`) also needs that rule to let Cilium read the queries,
+   `rules: {dns: [{matchPattern: "*"}]}` (`Documentation/security/dns.rst`). The kubelet's
+   probes are a rule from `host` on each probe port; a scrape is a rule from
+   `app.kubernetes.io/name: prometheus` in `monitoring`, once a monitor scrapes the application.
+3. A rule that allows every peer, an empty selector, every pod of every namespace, the cluster,
+   every endpoint, the unmanaged endpoints, other nodes' hosts, the world other than into a
+   Gateway's proxies on its listener ports, or a name pattern of `*`, is the one rule of a policy
+   of its own that carries the annotation `k8s-gitops/network-policy-reason` with the reason, and
+   names its ports, each a number of one port: a reason excuses the one rule of its policy on the
+   ports it names.
+4. A new namespace has a `default-deny` `NetworkPolicy` beside its `namespace.yaml`, or an entry
+   in `network-policy-exceptions.yaml`. A listed namespace whose applications already run takes the
+   default deny in the order [Turning it on, and back](#turning-it-on-and-back) gives.
+5. A namespace whose applications add `components/volsync` has the policies of its movers, once:
+   copy `apps/base/demo/demo-volsync-movers/` under the namespace's directory and list its
+   `ks.yaml` in the overlay.
+
+### What the check refuses
+
+`just network-policy-check` renders the tree as `just render-check` does, charts pulled from their
+registries, and reads `scripts/network-policy-check` over it; it is a check of the `static` group,
+and `tests/network-policy.bats` proves it on fixture trees and on the tree. It fails, naming the
+namespace and the policy, when
+
+- a namespace the render holds an object in, or an application targets, has neither a default deny
+  of both directions that selects every pod, the `NetworkPolicy` `default-deny`, nor an entry in the
+  list;
+- an entry's namespace has the default deny or holds no object of the render, is listed twice, has
+  no reason or no `covered-by`, or has a field the check does not read;
+- in a namespace that has the default deny, or cluster-wide, a policy would deny by itself: a
+  `NetworkPolicy` other than the default deny, a second deny of the namespace under another name
+  among them, or a Cilium policy that does not set `enableDefaultDeny` to `false` for both
+  directions;
+- in the same places, a rule allows every peer, an empty peer, every pod of every namespace (a
+  selector that names only the namespace, by `Exists` or `NotIn`, or an empty or such namespace
+  selector of a `NetworkPolicy`), the whole cluster (`cluster`, `cluster-mesh`), every endpoint
+  (`all`), the unmanaged endpoints (`unmanaged`), other nodes' hosts in, the world in other than to
+  the proxies of a Gateway of the namespace on its listener ports (the proxies by the labels Envoy
+  Gateway gives them, the ports as it derives them from the Gateway's listeners), egress to the
+  world, the host or other nodes, or every DNS name, and is not the one rule of a policy that
+  carries the reason annotation; or a policy carries a reason and more than one rule, or a rule
+  that names no port or a range;
+- any policy names an address: a CIDR, an address block, a literal in a selector;
+- any Cilium policy, wherever it is, listed namespaces included, holds what the evaluator below
+  does not read: a deny rule (`ingressDeny`, `egressDeny`), which drops what it names whatever the
+  allows say; a policy of the nodes (`nodeSelector`); an entity written as a label of an endpoint
+  selector (`reserved:world`); or an endpoint selector that names the namespace or its labels
+  without requiring one (`DoesNotExist`, or `NotIn` alone), to which Cilium adds no namespace of its
+  own (`pkg/k8s/apis/cilium.io/utils/utils.go`), so that it also selects the world, the hosts and
+  the nodes. A reason excuses none of these.
+
+The check reads only what the render holds. Besides the policies of `demo` and
+`envoy-gateway-system`, that is one policy of a listed namespace: `flux-operator-web`, the
+`NetworkPolicy` the Flux Operator's chart renders in `flux-system`, which lets every pod of every
+namespace (an empty `namespaceSelector`) reach the operator's web interface on 9080. It passes
+because `flux-system` is listed; the day `flux-system` takes the default deny, the check refuses it,
+as a `NetworkPolicy` other than the default deny and as an allow of every pod of every namespace.
+The `NetworkPolicy` objects the operator makes for the Flux instance, which its
+`spec.cluster.networkPolicy` turns on, are made at run time, so no render holds them and the check
+never sees them.
+
+`scripts/network-policy-check --reach RENDER FROM TO PORT/PROTOCOL` evaluates the policies of a
+render for one flow and answers `allowed` or `denied`; the egress of the source and the ingress of
+the destination both have to allow it, and a pod is in default deny for a direction only when a
+policy that selects it asks for it, as Cilium decides. Over a render that holds what the check
+refuses wherever it is, it gives no answer and exits 2. The tests use it to follow the public path
+hop by hop (the world to the proxies' listener ports, the proxies to `hello`'s port and to n8n's
+but not to n8n's other ports or its database, the kubelet to every probe port), to show that no pod
+of `demo` reaches the secret store, the storage controller, another pod of `demo` or another
+application, n8n among them, and that without their default deny `demo` and `envoy-gateway-system`
+take and send everything. What it
+cannot show: the entity the pinned datapath gives a connection an edge translated and a worker
+forwarded again, read from its source above and confirmed in audit mode; the labels of the pods the
+operators create at run time, taken from the operators' source and observed in audit mode; that an
+address a name resolves to is the one a rule meant; and anything about pods in the host's network
+namespace.
+
+### What policy does not cover
+
+Pods in the host's network namespace (Cilium's agent, its Envoy and its operator, the storage's
+CSI node plugin, the node exporter) are not selected by a pod policy; the node firewall is their
+layer. The nodes' own listeners are the node firewall's
+([ADR 0017](adr/0017-nodes-firewall-themselves-with-talos-ingress-firewall.md)). The listed
+namespaces take and send what they did before. Policy is connection-level: no layer 7 rule, no
+mutual authentication, no encryption.
+
+### Turning it on, and back
+
+The policies land on a cluster whose agents already audit, are watched there, and are enforced by a
+change of their own. The order follows from how they land. The root Kustomization `cluster`, which
+has no dependency, applies the namespaces' default denies as soon as it reconciles the change; each
+application that holds allows names `cilium` in `dependsOn`, and Flux applies it only once `cilium`
+is Ready, trying again after the dependency requeue, 30 seconds by default, while it is not.
+kustomize-controller marks a Kustomization Ready `Unknown` from the start of each of its reconciles
+until the reconcile ends, and `cilium` waits for its release, so `cilium` is not Ready for the
+moments of every reconcile, for the whole rollout when its release changes, and for as long as
+that release fails. A change of the Cilium values file alone, a comment among them, gives the
+ConfigMap of the values a new name, as its generator hashes the file, so `cilium` reconciles it;
+helm-controller compares the values themselves, and where they are unchanged it neither upgrades
+the release nor restarts an agent, and `cilium` is Ready again within about a minute. The allows
+therefore land after the denies, by tens of seconds to a couple of minutes, or by the whole rollout
+when the change rolls the agents. On a cluster whose agents enforce, `demo` and
+`envoy-gateway-system` would deny with none of their allows for that time: `hello` would refuse the
+proxies, the controller would be cut off from the API server and the proxies from their
+configuration. An agent that audits drops nothing a policy denies at layers 3 and 4, which is all
+these policies decide, so on a cluster that audits the order in which the denies and the allows land
+does not matter.
+
+1. **The cluster audits.** The Cilium values set `policyAuditMode: true`, in a change of its own
+   that lands before the policies do (the paragraph on audit mode at the end of
+   [Service addresses](#service-addresses)), and every agent has restarted into it: the ConfigMap
+   `cilium-config` in `kube-system` holds `policy-audit-mode: "true"`, and the Kustomization
+   `cilium` is Ready at a revision that holds the value, which it is only once its release has
+   rolled every agent onto that configuration (`rollOutCiliumPods`, at most two agents at a time by
+   the chart's update strategy).
+2. **The policies merge.** The root applies the default denies, the applications apply their
+   allows, and the agents evaluate both and drop nothing they deny; what a policy would drop is
+   reported as `AUDIT`. As the allows land after the denies, `AUDIT` flows of `demo` and
+   `envoy-gateway-system` from before they landed are expected, such as the proxies to `hello` on
+   8080 and to the controller on 18000, and the controller to the API server, and an agent's recent
+   flows can hold them for a while.
+3. **Watch**, from the moment the Kustomizations that hold the allows, `hello`,
+   `demo-volsync-movers` and `envoy-gateway`, are Ready at the merge's revision
+   (`flux get kustomizations`). `just network-drops` lists what the agents' Hubble holds: the
+   `AUDIT` flows a policy would drop, by namespace, pod and port, never an address. It runs each
+   agent's own `hubble` through `kubectl exec`, so the kubeconfig needs exec on the Cilium agents'
+   pods in `kube-system`, more than the reading recipes need; `NETWORK_DROPS_LAST` (500) bounds the
+   flows asked of each agent and `NETWORK_DROPS_TIMEOUT` (60) the seconds each call may take. Hubble
+   keeps only each agent's recent flows (4095 by the chart's default), so run it after each of:
+   `just gateway-check`; `just cluster-check`; the secret demo (`just bao-put demo/hello greeting`,
+   then the Secret in `demo`); the nightly backup of `volsync-demo` at 03:17, and a restore of it
+   ([Restoring](#restoring)). Watch a day at least, through one nightly backup. An `AUDIT` flow of
+   `demo` or `envoy-gateway-system` that a check made once the allows were Ready is a missing allow,
+   added beside its application in a pull request while the cluster still audits, or a pod doing
+   what it should not. Confirm also that no `@remote-node` flow reaches the proxies' listener ports
+   and none to the webhook's 9443 is `AUDIT`. `AUDIT` flows of `flux-system` show too: Flux's own
+   policies and the Flux Operator's `flux-operator-web`, which the agents enforced before the value,
+   are only audited while it is set, and what they would drop is what they dropped before; they are
+   not the namespaces' allows.
+4. **Enforce, a change of its own.** One pull request makes these edits, together and no others:
+   - `kubernetes/apps/base/kube-system/cilium/app/values.yaml`: the line `policyAuditMode: true`
+     goes, with the three comment lines above it, from `# The agents evaluate every policy`; the
+     two lines before them, on the enforcement mode, stay.
+   - `docs/kubernetes.md`: the paragraph at the end of [Service addresses](#service-addresses) that
+     opens with "**The cluster audits network policy.**" is replaced, whole, by one that opens with
+     "**The cluster enforces the policies.**" and says that the agents drop what the policies deny,
+     Flux's own in `flux-system` among them, that `rollOutCiliumPods` restarts them into it and
+     `scripts/install-cilium` passes the same values, and that `tests/install-cilium.bats` fails
+     when that sentence, the values and the agents' rendered configuration disagree. In
+     [What the namespaces let through](#what-the-namespaces-let-through), "the watch in audit mode
+     confirms it: a flow from `@remote-node` to the listeners would show as `AUDIT`" becomes
+     "`just network-drops` confirms it: a flow from `@remote-node` to the listeners would show as
+     `DROPPED`".
+   - `features/cilium.feature` and `tests/install-cilium.bats`: the scenario "Cilium audits network
+     policy by a value in Git, and the docs say so" and its test are retitled together "Cilium
+     enforces network policy, and the docs say so". The scenario's Then becomes "values.yaml does
+     not set policyAuditMode, the rendered cilium-config does not hold policy-audit-mode "true" and
+     holds enable-policy "default", the agents' pod template carries the configmap checksum so they
+     restart into it, and the docs open a paragraph with "The cluster enforces the policies.""; in
+     the test, the audit sentence it counts becomes that sentence, its echo says "enforce" for
+     "audit", the check that the value is `true` becomes one that the values have no
+     `policyAuditMode` key, the rendered `policy-audit-mode` is required to be other than `true`,
+     and its checks of `enable-policy` and the checksum stay as they are, the comment above the
+     former becoming "Enforcement stays in its default mode, so the agents enforce the policies:
+     never would enforce none."
+   - `docs/roadmap.md`, M8's row: "the namespaces' default deny with their allows in `demo` and
+     `envoy-gateway-system`" gains ", which Cilium enforces", and the clause "; and network policy
+     that drops anything, as Cilium audits every policy, cluster-wide, and drops nothing
+     ([Service addresses](kubernetes.md#service-addresses))" goes, the row ending at
+     "`infra-apply`.".
+
+   `tests/network-policy.bats` requires the enforcing sentence exactly when the value is gone, and
+   fails, saying which sentence the value needs, on a change that does one without the other.
+   Without the value every agent enforces every policy of the tree. The agents restart into
+   enforcing as they restarted into audit mode, and a node audits until its agent has. Run the
+   checks of step 3 again; `just network-drops` then shows `DROPPED` flows, and each of an
+   application namespace is an intended denial.
+5. **Back.** For the whole cluster: one pull request that reverses each edit of step 4, putting
+   back the value and its comment, the audit paragraph, the scenario and its test under their audit
+   title, and the roadmap's clause; the agents restart into audit mode and drop nothing a policy
+   denies at layers 3 and 4. For one namespace: one pull request that deletes the
+   `networkpolicy-default-deny.yaml` line from the namespace directory's `kustomization.yaml` and
+   lists the namespace in `network-policy-exceptions.yaml` with its reason. Flux prunes the default
+   deny; the namespace's allows stay and change nothing, as none asks for the default deny, so the
+   namespace takes and sends everything, as before it had a policy; `tests/network-policy.bats`
+   proves it on the objects.
+
+**A listed namespace that takes the posture once the cluster enforces**, as `ai-system`,
+`etcd-snapshots` and `external-dns` would, does it in two pull requests, as the root applies a
+default deny at once while the allows wait for `cilium`. The first adds the allows beside the
+namespace's applications, each application naming `cilium` in `dependsOn`, and leaves the namespace
+listed: no policy of the namespace asks for the default deny, so they alter nothing. Once those
+applications' Kustomizations are Ready at that revision (`flux get kustomizations`), the second adds
+`networkpolicy-default-deny.yaml` to the namespace directory's `kustomization.yaml` and removes the
+namespace's entry from `network-policy-exceptions.yaml`, so the default deny lands on allows already
+in place. Then run the namespace's own checks and `just network-drops`: a `DROPPED` flow of the
+namespace is an intended denial or a missing allow, which the way back for one namespace reopens in
+one pull request. A namespace with a flow whose peer only the live cluster shows, such as the
+callers of a webhook, is watched in audit mode as the first namespaces were: the cluster audits
+again (step 5) while its policies land, and enforces again by step 4. While the cluster audits, a
+namespace takes the posture in one change, its default deny and its allows together.
+
 ## Variables
 
 - `${VAR}` is replaced from `cluster-config` or `cluster-secrets`. Their values are never
@@ -733,8 +1078,9 @@ from `cluster-config` ([Before Flux starts](#before-flux-starts)). `tests/instal
 renders the chart and the nodes' machine configurations and builds every application as Flux
 applies it to check each of these. The chart ships none of the definitions; the operator installs
 the ones it embeds, which Cilium publishes in its repository, so `operator-definitions.yaml` has
-`kubernetes-validate` read them there at the release the chart's tag pins, and validate the pool and
-the BGP objects against them, unknown fields refused ([Schemas](#what-the-checks-refuse)). A Cilium
+`kubernetes-validate` read them there at the release the chart's tag pins, and validate the pool,
+the BGP objects and every `CiliumNetworkPolicy` ([Network policy](#network-policy)) against them,
+unknown fields refused ([Schemas](#what-the-checks-refuse)). A Cilium
 upgrade moves the definitions with the chart's tag.
 
 **The cluster audits network policy.** Cilium's values set `policyAuditMode: true`, which the chart
@@ -742,8 +1088,11 @@ renders into the key `policy-audit-mode` of the ConfigMap `cilium-config`; read 
 with `kubectl -n kube-system get configmap cilium-config -o jsonpath='{.data.policy-audit-mode}'`,
 which prints `true`. The mode is the agent's, so it holds for the whole cluster at once, not for a
 namespace: an agent evaluates every policy, reports each flow a policy would drop with the verdict
-`AUDIT`, and drops nothing. The NetworkPolicies that exist today, Flux's own in `flux-system` and
-the operator's, are therefore audited and no longer enforced until the value is removed; that
+`AUDIT`, and drops nothing a policy denies at layers 3 and 4. Audit mode covers those layers only
+(`Documentation/security/policy-creation.rst`; `bpf/lib/policy.h` turns a layer-3 or layer-4 drop
+into an audit), not a layer-7 rule, of which the tree has none. The NetworkPolicies Flux's
+instance installs in `flux-system` and the Flux Operator's own for its web interface,
+`flux-operator-web`, are therefore audited and no longer enforced until the value is removed; that
 loosens Flux's own policies for as long as the mode is on. `rollOutCiliumPods` restarts the agents
 into a change of their configuration, and `scripts/install-cilium` passes the same values file to
 helm, so a cluster built from nothing comes up in audit mode too. `tests/install-cilium.bats`
@@ -2290,6 +2639,14 @@ answer holding addresses.
    without the Gateway cannot enable it: an application of its own, as `apps/base/demo/hello-route/`
    is, or the application that owns the Service, as `ai-system/n8n` does
    ([Applications](#applications)).
+4. Give the policy `public-proxy`
+   (`apps/base/envoy-gateway-system/envoy-gateway/app/ciliumnetworkpolicy.yaml`) a rule that lets
+   the proxies reach the backend, as its rules for `hello` and n8n do: the pods its Service selects,
+   in its namespace and that namespace's label, on the container port the route sends to. The
+   proxies reach those backends alone, and `tests/network-policy.bats` fails until the rules name,
+   in each labelled namespace, exactly the ports the routes send to there.
+   In a namespace with the default deny, the backend also takes the proxies on that port
+   ([Declaring an application's flows](#declaring-an-applications-flows)).
 
 The record for the name is made by external-dns within a minute or two of the route being accepted,
 and removed when the route is; there is no DNS step to do by hand ([DNS records](#dns-records)).
@@ -2785,12 +3142,13 @@ chart renders (`features/applications.feature`).
 ### n8n
 
 n8n, the workflow automation tool, runs in `ai-system` (`apps/base/ai-system/n8n/`). The namespace
-enforces the restricted Pod Security level and carries the Gateway label. n8n's `ks.yaml` names the
-operator, the Prometheus Operator definitions, External Secrets, the store's application, VolSync,
-LINSTOR and the public Gateway in `dependsOn`, and sets `wait` with the long timeout, so a cluster
-that lacks one of them is refused by `just kubernetes-check`, the encryption key's ExternalSecret
-is applied once the store is Ready, and the application is Ready once n8n answers its readiness
-endpoint.
+enforces the restricted Pod Security level and carries the Gateway label; it holds no default deny,
+and `network-policy-exceptions.yaml` lists it with n8n's flows ([Network policy](#network-policy)).
+n8n's `ks.yaml` names the operator, the Prometheus Operator definitions, External Secrets, the
+store's application, VolSync, LINSTOR and the public Gateway in `dependsOn`, and sets `wait` with
+the long timeout, so a cluster that lacks one of them is refused by `just kubernetes-check`, the
+encryption key's ExternalSecret is applied once the store is Ready, and the application is Ready
+once n8n answers its readiness endpoint.
 
 - **The chart** is app-template, from its publisher's OCI registry, pinned by tag and tracked by
   Renovate, with the images `docker.io/n8nio/n8n` and `docker.io/n8nio/runners` pinned by tag and
@@ -2939,7 +3297,9 @@ The steps n8n took, in order; the next port does the same and says where it diff
 1. **Layout.** A namespace directory with `namespace.yaml` (the strictest Pod Security level the
    workload passes, the prune annotation, and `k8s-gitops/gateway: public` if it has a route) and a
    `kustomization.yaml` that includes `components/common`; the application's `ks.yaml` and `app/`
-   beside it. List both in the overlay.
+   beside it. List both in the overlay. The namespace's default deny with the application's flows
+   ([Declaring an application's flows](#declaring-an-applications-flows)), or its entry in
+   `network-policy-exceptions.yaml` with the flows it would declare, as `ai-system`'s is.
 2. **Pins.** The chart as an `OCIRepository` with its tag under a `# renovate:` comment, each image
    by tag and digest under one. `just renovate-record`, then the form of the tags in
    `.renovate/tag-forms.tsv`, read from the registry's own listing; `just renovate-pins` passes.
@@ -2956,7 +3316,8 @@ The steps n8n took, in order; the next port does the same and says where it diff
 5. **Volume.** `components/volsync` with `APP`, a capacity and a minute of its own for the schedule;
    the claim named in `existingClaim`; say what is in the volume and what is in the database.
 6. **Route.** An `HTTPRoute` on `https` of `public`, the application's own settings for its
-   host, protocol and proxies agreeing with it, and `gateway-public` in `dependsOn`.
+   host, protocol and proxies agreeing with it, `gateway-public` in `dependsOn`, and a rule for the
+   backend's pods and container port in the proxies' egress ([Giving an application a public hostname](#giving-an-application-a-public-hostname)).
 7. **Hardening.** Restricted: a user the image runs as, a read-only root filesystem with every path
    the application writes as a volume, found by running the pinned image read-only with those
    mounts alone, no capability, requests and a memory limit, probes on the application's health

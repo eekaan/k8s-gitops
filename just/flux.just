@@ -21,6 +21,14 @@ pod-security-check:
     scripts/render "$out/render" > /dev/null
     scripts/pod-security-check "$out/render" pod-security-exceptions.yaml versions.yaml
 
+# Check that every namespace the overlay deploys into denies ingress and egress by default or is listed in network-policy-exceptions.yaml with its reason, that no policy of such a namespace undoes the default without saying why and that no policy names an address: renders kubernetes/ as render-check does, charts pulled from their registries (docs/kubernetes.md, Network policy); tests/network-policy.bats runs its script on the render of the tree
+[script]
+network-policy-check:
+    out=$(mktemp -d)
+    trap 'rm -rf "$out"' EXIT
+    scripts/render "$out/render" > /dev/null
+    scripts/network-policy-check "$out/render" network-policy-exceptions.yaml
+
 # Render what Flux would apply from kubernetes/ into OUT, one file per object and application, charts expanded, with the example key lists for cluster-config and cluster-secrets and no Secret's data; from the tree in DIR, this checkout by default
 render out dir='.':
     scripts/render {{ quote(out) }} {{ quote(dir) }}

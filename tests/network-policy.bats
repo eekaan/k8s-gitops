@@ -1,0 +1,952 @@
+#!/usr/bin/env bats
+# Proves features/network-policy.feature; each test carries its scenario's title.
+# Needs helm, flux, kustomize, yq and jq on PATH (the versions pinned for the repository). The tests
+# on a fixture render are offline; those on the tree render it with its charts pulled from their
+# public registries.
+
+# The tests run one at a time even where bats runs a file's tests side by side: the tests on the
+# tree share one render, made by whichever of them comes first.
+export BATS_NO_PARALLELIZE_WITHIN_FILE=true
+
+setup_file() {
+  # Helm's settings, and the Docker configuration it reads registry logins from, stay in the run's
+  # own directory.
+  export HELM_CACHE_HOME="$BATS_FILE_TMPDIR/helm/cache"
+  export HELM_CONFIG_HOME="$BATS_FILE_TMPDIR/helm/config"
+  export HELM_DATA_HOME="$BATS_FILE_TMPDIR/helm/data"
+  export DOCKER_CONFIG="$BATS_FILE_TMPDIR/docker"
+  mkdir -p "$DOCKER_CONFIG"
+}
+
+setup() {
+  REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  FIXTURE="$BATS_TEST_DIRNAME/fixtures/network-policy"
+  # Nothing to connect to: a step that needed a cluster fails instead of finding one.
+  export KUBECONFIG="$BATS_TEST_TMPDIR/no-kubeconfig"
+  unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
+  # The labels of the pods Envoy Gateway makes for the public Gateway at run time, which no render
+  # holds, and of the pods the storage operator, VolSync and the PostgreSQL operator make.
+  PROXY='envoy-gateway-system:app.kubernetes.io/name=envoy,app.kubernetes.io/component=proxy,app.kubernetes.io/managed-by=envoy-gateway,gateway.envoyproxy.io/owning-gateway-name=public,gateway.envoyproxy.io/owning-gateway-namespace=envoy-gateway-system'
+  MOVER='demo:app.kubernetes.io/created-by=volsync'
+  N8N_DB='ai-system:cnpg.io/cluster=n8n-db,cnpg.io/podRole=instance'
+  STORAGE='piraeus-datastore:app.kubernetes.io/name=piraeus-datastore,app.kubernetes.io/component=linstor-controller'
+  DNS='kube-system:k8s-app=kube-dns'
+  PROMETHEUS='monitoring:app.kubernetes.io/name=prometheus'
+  OTHER_APP='other:app.kubernetes.io/name=app'
+}
+
+# tree NAME: a copy of the fixture in $BATS_TEST_TMPDIR/NAME, for the test to change.
+tree() {
+  mkdir -p "$BATS_TEST_TMPDIR/$1"
+  cp -R "$FIXTURE/render" "$FIXTURE/exceptions.yaml" "$BATS_TEST_TMPDIR/$1/"
+}
+
+# check NAME: runs the check on the tree NAME.
+check() {
+  run "$REPO/scripts/network-policy-check" "$BATS_TEST_TMPDIR/$1/render" "$BATS_TEST_TMPDIR/$1/exceptions.yaml"
+}
+
+# object NAME FILE: the path of the one file named FILE in the tree NAME.
+object() {
+  local files=("$BATS_TEST_TMPDIR/$1"/render/*/*/"$2")
+  [ "${#files[@]}" -eq 1 ] || { echo "$2 is not one file of $1: ${files[*]}"; return 1; }
+  echo "${files[0]}"
+}
+
+# real_render: the render of this repository's tree, charts pulled, in $BATS_FILE_TMPDIR/render,
+# made once for the file, and VIEW, the files of it that the evaluation of a flow reads (the
+# namespaces, the workloads, the Gateways and the policies), which it reads fast.
+real_render() {
+  REAL="$BATS_FILE_TMPDIR/render"
+  VIEW="$BATS_FILE_TMPDIR/view"
+  if [ ! -d "$REAL" ]; then
+    "$REPO/scripts/render" "$REAL.partial" >/dev/null
+    mv "$REAL.partial" "$REAL"
+  fi
+  if [ ! -d "$VIEW" ]; then
+    mkdir -p "$VIEW.partial"
+    (cd "$REAL" && find . -type f \( -name 'Namespace_*' -o -name 'Deployment.apps_*' -o -name 'StatefulSet.apps_*' \
+      -o -name 'DaemonSet.apps_*' -o -name 'Job.batch_*' -o -name 'CronJob.batch_*' -o -name 'Pod_*' \
+      -o -name 'Gateway.gateway.networking.k8s.io_*' -o -name 'NetworkPolicy.*' -o -name 'CiliumNetworkPolicy.*' \
+      -o -name 'CiliumClusterwideNetworkPolicy.*' \) -exec cp --parents {} "$VIEW.partial/" \;)
+    mv "$VIEW.partial" "$VIEW"
+  fi
+}
+
+# reach RENDER FROM TO PORT/PROTOCOL: whether the policies of RENDER let FROM reach TO.
+reach() {
+  run "$REPO/scripts/network-policy-check" --reach "$@"
+}
+
+# allowed, denied, allowed_in and denied_in RENDER FROM TO PORT: assert the answer for the flow, and
+# for the destination's ingress alone.
+allowed() {
+  reach "$@"
+  [ "$status" -eq 0 ] || { echo "expected $* to be allowed: $output"; return 1; }
+}
+denied() {
+  reach "$@"
+  [ "$status" -eq 1 ] || { echo "expected $* to be denied: $output"; return 1; }
+}
+allowed_in() {
+  run "$REPO/scripts/network-policy-check" --reach-ingress "$@"
+  [ "$status" -eq 0 ] || { echo "expected the ingress of $* to be allowed: $output"; return 1; }
+}
+denied_in() {
+  run "$REPO/scripts/network-policy-check" --reach-ingress "$@"
+  [ "$status" -eq 1 ] || { echo "expected the ingress of $* to be denied: $output"; return 1; }
+}
+
+# A policy added to the tree NAME as a file of the application web.
+add_policy() {
+  cat >"$BATS_TEST_TMPDIR/$1/render/lab/web/$2"
+}
+
+# allow NAME NAMESPACE SELECTOR RULES: a CiliumNetworkPolicy NAME added to the tree NAME in
+# NAMESPACE, for the pods SELECTOR's labels select, that leaves the deny to the namespace's default
+# deny, with RULES, its ingress and egress lines, as the rest of its spec.
+allow() {
+  {
+    printf 'apiVersion: cilium.io/v2\nkind: CiliumNetworkPolicy\nmetadata:\n  name: %s\n  namespace: %s\n' "$1" "$2"
+    printf 'spec:\n  endpointSelector:\n    matchLabels: %s\n  enableDefaultDeny: {ingress: false, egress: false}\n' "$3"
+    printf '  %s\n' "${4//$'\n'/$'\n'  }"
+  } >"$BATS_TEST_TMPDIR/$1/render/lab/$2/CiliumNetworkPolicy.cilium.io_$2_$1.yaml"
+}
+
+# reason NAME NAMESPACE TEXT: gives the policy NAME of the tree NAME the reason annotation TEXT.
+reason() {
+  TEXT=$3 yq -i '.metadata.annotations["k8s-gitops/network-policy-reason"] = strenv(TEXT)' \
+    "$(object "$1" "CiliumNetworkPolicy.cilium.io_$2_$1.yaml")"
+}
+
+# The selectors, labels and namespaces both sides of the port comparison read, as jq definitions.
+read -r -d '' PORTS_JQ <<'JQ' || true
+def fail($w; $m): error("\($w): \($m)");
+def key($w): if test("^(k8s|any):") then sub("^(k8s|any):"; "")
+  elif test(":") then fail($w; "the key \(.) has a source this test does not read") else . end;
+def nskey: . == "io.kubernetes.pod.namespace" or startswith("io.cilium.k8s.namespace.labels.");
+# A selector as its requirements, each a key, an operator and values.
+def reqs($w):
+  if type != "object" or (keys - ["matchLabels", "matchExpressions"] | length) > 0 then fail($w; "the selector \(tojson) is one this test does not read")
+  else [ ((.matchLabels // {}) | to_entries[] | {key: (.key | key($w)), op: "In", values: [.value]}),
+         ((.matchExpressions // [])[] | {key: (.key | key($w)), op: .operator, values: (.values // [])}
+          | if .op | IN("In", "NotIn", "Exists", "DoesNotExist") then . else fail($w; "the operator \(.op) is one this test does not read") end) ] end;
+def holds($l): $l[.key] as $v
+  | if .op == "In" then $v != null and (.values | index($v)) != null
+    elif .op == "NotIn" then $v == null or (.values | index($v)) == null
+    elif .op == "Exists" then $v != null
+    else $v == null end;
+# Each namespace's labels, the name label Kubernetes adds among them.
+def nslabels: [ .[] | select(.kind == "Namespace") | {key: .metadata.name, value: ((.metadata.labels // {}) + {"kubernetes.io/metadata.name": .metadata.name})} ]
+  | from_entries;
+# The namespaces whose routes the Gateway public takes by their labels: the labelled namespaces.
+def labelled($nsl):
+  [ .[] | select(.kind == "Gateway" and .metadata.namespace == "envoy-gateway-system" and .metadata.name == "public")
+    | .spec.listeners[] | select(.allowedRoutes.namespaces.from == "Selector") | .allowedRoutes.namespaces.selector | reqs("the Gateway public") ]
+  | if length == 0 then error("the Gateway public takes routes by no namespace label") else . end
+  | . as $gsel | [ $nsl | to_entries[] | .value as $l | select(any($gsel[]; all(.[]; holds($l)))) | .key ];
+JQ
+
+# routed_ports RENDER: the namespace and container port, NAMESPACE:PORT, of each backend the public
+# Gateway's routes send to: each backend of an HTTPRoute attached to the Gateway public, through its
+# Service, in the route's namespace unless the reference names another, to the Service port's
+# targetPort, the port itself where it gives none, and a named targetPort to the container port of
+# that name in the pods the Service selects. A backend in a namespace that is not labelled, or
+# behind a Service without a selector, fails it.
+routed_ports() {
+  (set -o pipefail; yq -N -o json -I0 'select(. != null)' "$1"/*/*/HTTPRoute.gateway.networking.k8s.io_*.yaml \
+    "$1"/*/*/Service_*.yaml "$1"/*/*/Deployment.apps_*.yaml "$1"/*/*/StatefulSet.apps_*.yaml \
+    "$1"/*/*/DaemonSet.apps_*.yaml "$1"/*/*/Namespace_*.yaml "$1"/*/*/Gateway.gateway.networking.k8s.io_*.yaml | jq -s -r "$PORTS_JQ"'
+    . as $objs
+    | labelled(nslabels) as $labelled
+    | [ $objs[] | select(.kind == "HTTPRoute") | .metadata.namespace as $rns | .metadata.name as $route
+        | select(any(.spec.parentRefs[]; .name == "public" and (.namespace // $rns) == "envoy-gateway-system"))
+        | (.spec.rules // [])[] | (.backendRefs // [])[] | select((.kind // "Service") == "Service" and (.group // "") == "")
+        | (.namespace // $rns) as $ns | .name as $name | .port as $port
+        | if ($labelled | index($ns)) == null then
+            error("the route \($rns)/\($route) sends to \($ns)/\($name), but \($ns) does not carry the label the Gateway public takes routes by, and the proxies reach the labelled namespaces alone: give \($ns) that label in its namespace.yaml")
+          else . end
+        | ([ $objs[] | select(.kind == "Service" and .metadata.namespace == $ns and .metadata.name == $name) ][0]
+           // error("a route sends to \($ns)/\($name), which is no Service of the render")) as $svc
+        | if (($svc.spec.selector // {}) | length) == 0 then
+            error("the Service \($ns)/\($name), which a route sends to, has no selector, so the render does not say which pods serve it: give it one")
+          else . end
+        | ([ $svc.spec.ports[] | select(.port == $port) ][0] // error("the Service \($ns)/\($name) has no port \($port)")) as $sp
+        | ($sp.targetPort // $sp.port) as $target
+        | if ($target | type) == "number" then $target
+          else [ $objs[] | select(.kind | IN("Deployment", "StatefulSet", "DaemonSet")) | select(.metadata.namespace == $ns)
+                 | (.spec.template.metadata.labels // {}) as $l
+                 | select($svc.spec.selector | to_entries | all(.[]; $l[.key] == .value))
+                 | .spec.template.spec.containers[] | (.ports // [])[] | select(.name == $target) | .containerPort ] | unique
+               | if length == 1 then .[0] else error("the port \($target) of the Service \($ns)/\($name) is not one container port of its pods") end
+          end
+        | "\($ns):\(.)" ]
+    | unique | join(" ")')
+}
+
+# proxies_egress RENDER: the namespace and port, NAMESPACE:PORT, of each labelled namespace and
+# port on which the egress of the public Gateway's proxies, the pods of PROXY, lets them reach a
+# pod of that namespace. It reads every policy that can select the proxies: each Cilium policy of
+# their namespace or of none, and each NetworkPolicy of their namespace, whose selector holds for
+# their namespace and for the labels PROXY gives them; a requirement on a label PROXY does not
+# give them is taken to hold, as the pods may carry it at run time. Of those, it reads every egress
+# rule whose peers can be a pod of a labelled namespace: a selector whose requirements on the
+# namespace and its labels that namespace meets, whatever it asks of the pod, the entities cluster
+# and all, and a rule that names no peer. It fails on what it cannot compare rather than skip it: a
+# port entry for a protocol other than TCP or for none, a range, a named port, a rule that names no
+# port, a NetworkPolicy that allows the proxies egress, and a peer, a selector or a field of a
+# rule that it does not read.
+proxies_egress() {
+  (set -o pipefail; yq -N -o json -I0 'select(. != null)' "$1"/*/*/*.yaml | jq -s -r --arg proxy "$PROXY" "$PORTS_JQ"'
+    # What Cilium matches the namespace part of a selector against for a pod of the namespace $n.
+    def nsfull($n; $nsl): {"io.kubernetes.pod.namespace": $n}
+      + ($nsl[$n] | with_entries(.key |= "io.cilium.k8s.namespace.labels." + .));
+    def ports($w):
+      if ((.toPorts // []) | length) == 0 then fail($w; "a rule to a labelled namespace names no port, so it allows every port")
+      else .toPorts[]
+        | if (keys - ["ports"] | length) > 0 then fail($w; "a port rule with \(keys - ["ports"] | join(", ")), which this test cannot compare")
+          elif ((.ports // []) | length) == 0 then fail($w; "a rule to a labelled namespace names no port, so it allows every port")
+          else .ports[] end
+        | if (keys - ["port", "protocol"] | length) > 0 then fail($w; "the port entry \(tojson) has \(keys - ["port", "protocol"] | join(", ")), which this test cannot compare")
+          elif .protocol != "TCP" then fail($w; "the port entry \(tojson) is for \(.protocol // "every protocol"), not TCP alone, which this test cannot compare")
+          elif ((.port | tostring | test("^[1-9][0-9]{0,4}$")) and (.port | tostring | tonumber) <= 65535) | not then
+            fail($w; "the port entry \(tojson) names no one port by its number, which this test cannot compare")
+          else .port | tostring | tonumber end
+      end;
+    . as $objs
+    | ($proxy | capture("^(?<ns>[^:]+):(?<l>.*)$")) as $p
+    | ($p.l | split(",") | map(split("=") | {key: .[0], value: (.[1:] | join("="))}) | from_entries) as $pl
+    | nslabels as $nsl
+    | (nsfull($p.ns; $nsl) + $pl) as $self
+    | def selects_proxies($w): reqs($w) | all(.[]; .key as $k | if ($k | nskey) or ($pl | has($k)) then holds($self) else true end);
+    labelled($nsl) as $labelled
+    | [ $objs[] | select(.kind == "NetworkPolicy" and .metadata.namespace == $p.ns) | . as $np | "NetworkPolicy/\($np.metadata.name)" as $w
+        | select(($np.spec.podSelector // {}) | selects_proxies($w)) | select((($np.spec.egress // []) | length) > 0)
+        | fail($w; "a NetworkPolicy that allows the proxies egress, which this test does not read") ]
+    | [ $objs[] | select(.kind == "CiliumClusterwideNetworkPolicy" or (.kind == "CiliumNetworkPolicy" and .metadata.namespace == $p.ns))
+        | . as $pol | "\($pol.kind)/\($pol.metadata.name)" as $w
+        | ((if .spec != null then [.spec] else [] end) + (.specs // []))[] | select(.endpointSelector != null)
+        | select(.endpointSelector | selects_proxies($w))
+        | (.egress // [])[] | . as $r
+        | (keys - ["toEndpoints", "toEntities", "toPorts"]) as $other
+        | if ($other | length) > 0 then fail($w; "an egress rule with \($other | join(", ")), which this test does not read") else . end
+        | [ if (((.toEndpoints // []) + (.toEntities // [])) | length) == 0 then $labelled[]
+            else
+              ((.toEndpoints // [])[] | reqs($w) | map(select(.key | nskey)) as $nq
+               | $labelled[] as $n
+               | select(if ($nq | length) == 0 then $pol.kind == "CiliumClusterwideNetworkPolicy" or $n == $p.ns
+                        else $nq | all(.[]; holds(nsfull($n; $nsl))) end) | $n),
+              ((.toEntities // [])[]
+               | if IN("cluster", "all") then $labelled[]
+                 elif IN("world", "world-ipv4", "world-ipv6", "host", "remote-node", "kube-apiserver", "health", "init", "ingress", "unmanaged") then empty
+                 else fail($w; "the entity \(.) is one this test does not read") end)
+            end ] | unique
+        | select(length > 0) as $nss
+        | $r | ports($w) as $port | $nss[] | "\(.):\($port)" ]
+    | unique | join(" ")')
+}
+
+@test "An application namespace denies ingress and egress by default" {
+  tree good
+  check good
+  [ "$status" -eq 0 ]
+  [[ $output == *"web denies ingress and egress"* ]]
+  [[ $output == *"gw denies ingress and egress"* ]]
+  [[ $output == *"legacy listed"* ]]
+  # The tree: exactly these namespaces hold the default deny, and every other namespace it deploys
+  # into is listed.
+  real_render
+  run "$REPO/scripts/network-policy-check" "$REAL" "$REPO/network-policy-exceptions.yaml"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(grep ' denies ingress and egress' <<<"$output" | cut -d' ' -f1 | paste -sd' ')" = "demo envoy-gateway-system" ]
+  [ "$(grep -c ' listed' <<<"$output")" -eq "$(yq '.exceptions | length' "$REPO/network-policy-exceptions.yaml")" ]
+}
+
+@test "A namespace without the posture fails the check unless it is listed with its reason" {
+  tree nopolicy
+  rm "$(object nopolicy NetworkPolicy.networking.k8s.io_web_default-deny.yaml)"
+  check nopolicy
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace web has no default deny of ingress and egress"* ]]
+  # A default deny that selects only some pods.
+  tree partial
+  yq -i '.spec.podSelector = {"matchLabels": {"app.kubernetes.io/name": "site"}}' \
+    "$(object partial NetworkPolicy.networking.k8s.io_web_default-deny.yaml)"
+  check partial
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace web"* && $output == *"does not select every pod"* ]]
+  # One that leaves egress open, and one that leaves ingress open.
+  tree open-egress
+  yq -i '.spec.policyTypes = ["Ingress"]' "$(object open-egress NetworkPolicy.networking.k8s.io_web_default-deny.yaml)"
+  check open-egress
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace web"* && $output == *"egress"* ]]
+  tree open-ingress
+  yq -i '.spec.policyTypes = ["Egress"]' "$(object open-ingress NetworkPolicy.networking.k8s.io_web_default-deny.yaml)"
+  check open-ingress
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace web"* && $output == *"ingress"* ]]
+  # One that has an allow of its own is not a default deny.
+  tree allowing
+  yq -i '.spec.ingress = [{"from": [{"podSelector": {}}]}]' "$(object allowing NetworkPolicy.networking.k8s.io_web_default-deny.yaml)"
+  check allowing
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace web"* ]]
+  # A deny under another name is no default deny: the default deny is the one named default-deny,
+  # the object the way back for a namespace takes out.
+  tree renamed
+  yq -i '.metadata.name = "deny-all"' "$(object renamed NetworkPolicy.networking.k8s.io_web_default-deny.yaml)"
+  check renamed
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace web has no default deny of ingress and egress"*"NetworkPolicy/deny-all is not named default-deny"* ]]
+  # The exceptions list is read: without the entry of a namespace that has no default deny, or
+  # with an entry that gives no reason or says nothing covers it.
+  tree unlisted
+  yq -i '.exceptions = []' "$BATS_TEST_TMPDIR/unlisted/exceptions.yaml"
+  check unlisted
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace legacy has no default deny"* ]]
+  tree noreason
+  yq -i 'del(.exceptions[0].reason)' "$BATS_TEST_TMPDIR/noreason/exceptions.yaml"
+  check noreason
+  [ "$status" -eq 1 ]
+  [[ $output == *"legacy"* && $output == *"reason"* ]]
+  tree nocover
+  yq -i '.exceptions[0]["covered-by"] = ""' "$BATS_TEST_TMPDIR/nocover/exceptions.yaml"
+  check nocover
+  [ "$status" -eq 1 ]
+  [[ $output == *"legacy"* && $output == *"covered-by"* ]]
+}
+
+@test "A listed namespace that has the posture, or that does not exist, fails the check" {
+  tree stale
+  yq -i '.exceptions += [{"namespace": "web", "reason": "a reason", "covered-by": "something"}]' "$BATS_TEST_TMPDIR/stale/exceptions.yaml"
+  check stale
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace web is listed but has the default deny"* ]]
+  tree ghost
+  yq -i '.exceptions += [{"namespace": "ghost", "reason": "a reason", "covered-by": "something"}]' "$BATS_TEST_TMPDIR/ghost/exceptions.yaml"
+  check ghost
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace ghost is listed but the render holds no object in it"* ]]
+  # An entry twice.
+  tree twice
+  yq -i '.exceptions += .exceptions' "$BATS_TEST_TMPDIR/twice/exceptions.yaml"
+  check twice
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace legacy is listed twice"* ]]
+}
+
+@test "An allow that undoes the default fails the check unless it says why" {
+  local name
+  local site='{app.kubernetes.io/name: site}'
+  local proxies='{app.kubernetes.io/name: envoy, app.kubernetes.io/component: proxy, app.kubernetes.io/managed-by: envoy-gateway, gateway.envoyproxy.io/owning-gateway-name: public}'
+  # Each allow, as the one rule of a policy of the namespace in ns (web when unset), for the pods sel
+  # selects (site's when unset).
+  local -A rule=(
+    [empty-peer]='ingress: [{fromEndpoints: [{}]}]'
+    [world-in]='ingress: [{fromEntities: [world], toPorts: [{ports: [{port: "8080", protocol: TCP}]}]}]'
+    [remote-node-in]='ingress: [{fromEntities: [remote-node]}]'
+    [cluster-out]='egress: [{toEntities: [cluster]}]'
+    [mesh-out]='egress: [{toEntities: [cluster-mesh]}]'
+    [all-in]='ingress: [{fromEntities: [all]}]'
+    [all-out]='egress: [{toEntities: [all]}]'
+    [unmanaged-in]='ingress: [{fromEntities: [unmanaged]}]'
+    [unmanaged-out]='egress: [{toEntities: [unmanaged]}]'
+    [world-out]='egress: [{toEntities: [world]}]'
+    [ports-only]='egress: [{toPorts: [{ports: [{port: "53", protocol: ANY}]}]}]'
+    [any-name]='egress: [{toFQDNs: [{matchPattern: "*"}], toPorts: [{ports: [{port: "443"}]}]}]'
+    # Every pod of every namespace, by a selector of the namespace alone, as Cilium names it with
+    # and without the source of the label.
+    [ns-exists-in]='ingress: [{fromEndpoints: [{matchExpressions: [{key: "k8s:io.kubernetes.pod.namespace", operator: Exists}]}]}]'
+    [ns-exists-out]='egress: [{toEndpoints: [{matchExpressions: [{key: io.kubernetes.pod.namespace, operator: Exists}]}], toPorts: [{ports: [{port: "8080", protocol: TCP}]}]}]'
+    [ns-notin-out]='egress: [{toEndpoints: [{matchExpressions: [{key: "k8s:io.kubernetes.pod.namespace", operator: Exists}, {key: "k8s:io.kubernetes.pod.namespace", operator: NotIn, values: [kube-system]}]}]}]'
+    [ns-labels-in]='ingress: [{fromEndpoints: [{matchExpressions: [{key: "k8s:io.cilium.k8s.namespace.labels.kubernetes.io/metadata.name", operator: Exists}]}]}]'
+    # The world into the Gateway's namespace other than to its proxies on its listener ports, and
+    # other nodes' hosts there.
+    [gw-other-pods]='ingress: [{fromEntities: [world], toPorts: [{ports: [{port: "10443", protocol: TCP}]}]}]'
+    [gw-other-port]='ingress: [{fromEntities: [world], toPorts: [{ports: [{port: "22", protocol: TCP}]}]}]'
+    [gw-every-port]='ingress: [{fromEntities: [world]}]'
+    [gw-other-gateway]='ingress: [{fromEntities: [world], toPorts: [{ports: [{port: "10443", protocol: TCP}]}]}]'
+    [gw-name-only]='ingress: [{fromEntities: [world], toPorts: [{ports: [{port: "10443", protocol: TCP}]}]}]'
+    [gw-remote-node]='ingress: [{fromEntities: [remote-node], toPorts: [{ports: [{port: "10443", protocol: TCP}]}]}]'
+  )
+  local -A ns=([gw-other-pods]=gw [gw-other-port]=gw [gw-every-port]=gw [gw-other-gateway]=gw [gw-name-only]=gw [gw-remote-node]=gw)
+  local -A sel=(
+    [gw-other-pods]='{control-plane: gw-controller}'
+    [gw-other-port]=$proxies [gw-every-port]=$proxies [gw-remote-node]=$proxies
+    [gw-other-gateway]='{app.kubernetes.io/name: envoy, app.kubernetes.io/component: proxy, app.kubernetes.io/managed-by: envoy-gateway, gateway.envoyproxy.io/owning-gateway-name: private}'
+    [gw-name-only]='{gateway.envoyproxy.io/owning-gateway-name: public}'
+  )
+  local file
+  for name in "${!rule[@]}"; do
+    tree "$name"
+    allow "$name" "${ns[$name]:-web}" "${sel[$name]:-$site}" "${rule[$name]}"
+    file=$(object "$name" "CiliumNetworkPolicy.cilium.io_${ns[$name]:-web}_$name.yaml")
+    check "$name"
+    [ "$status" -eq 1 ] || { echo "$name: $output"; return 1; }
+    [[ $output == *"namespace ${ns[$name]:-web}: CiliumNetworkPolicy/$name"* ]] || { echo "$name: $output"; return 1; }
+    # The same policy with its reason passes, its rule on the ports it names, or on 8080 where it
+    # names none.
+    reason "$name" "${ns[$name]:-web}" 'the application needs it'
+    PORTS='{"toPorts": [{"ports": [{"port": "8080", "protocol": "TCP"}]}]}' yq -i '
+      (.spec | select(has("ingress")) | .ingress[]) |= (env(PORTS) * .)
+      | (.spec | select(has("egress")) | .egress[]) |= (env(PORTS) * .)' "$file"
+    check "$name"
+    [ "$status" -eq 0 ] || { echo "$name with its reason: $output"; return 1; }
+    # A reason with nothing in it is none.
+    reason "$name" "${ns[$name]:-web}" ''
+    check "$name"
+    [ "$status" -eq 1 ] || { echo "$name with an empty reason: $output"; return 1; }
+    # A reason excuses a rule on the ports it names: without them, the rule is refused, reason and
+    # all.
+    reason "$name" "${ns[$name]:-web}" 'the application needs it'
+    yq -i 'del(.spec.ingress[].toPorts, .spec.egress[].toPorts)' "$file"
+    check "$name"
+    [ "$status" -eq 1 ] || { echo "$name with its reason and no port: $output"; return 1; }
+    [[ $output == *"namespace ${ns[$name]:-web}: CiliumNetworkPolicy/$name carries a reason but its rule names no port"* ]] || { echo "$name: $output"; return 1; }
+  done
+  # The Gateway's proxies may take the world on the listener ports without a reason: the fixture's
+  # proxy policy does, and passes.
+  tree gateway
+  check gateway
+  [ "$status" -eq 0 ]
+  # A reason excuses the one rule of its policy: with a second rule, broad or not, or a rule in a
+  # second spec, the policy is refused, reason and all.
+  local -A more=(
+    [two-broad]='egress: [{toEntities: [world]}, {toEntities: [cluster]}]'
+    [broad-and-narrow]=$'egress: [{toEntities: [world]}]\ningress: [{fromEntities: [host], toPorts: [{ports: [{port: "8080", protocol: TCP}]}]}]'
+  )
+  for name in "${!more[@]}"; do
+    tree "$name"
+    allow "$name" web "$site" "${more[$name]}"
+    reason "$name" web 'the application needs it'
+    check "$name"
+    [ "$status" -eq 1 ] || { echo "$name: $output"; return 1; }
+    [[ $output == *"namespace web: CiliumNetworkPolicy/$name carries a reason but holds 2 rules"* ]] || { echo "$name: $output"; return 1; }
+  done
+  tree two-specs
+  allow two-specs web "$site" 'egress: [{toEntities: [world]}]'
+  yq -i '.specs = [.spec, .spec] | del(.spec) | .specs[1].egress = [{"toEntities": ["cluster"]}]' \
+    "$(object two-specs CiliumNetworkPolicy.cilium.io_web_two-specs.yaml)"
+  reason two-specs web 'the application needs it'
+  check two-specs
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace web: CiliumNetworkPolicy/two-specs carries a reason but holds 2 rules"* ]]
+  # An entity written as a label of an endpoint selector, and a selector of the namespace or its
+  # labels that does not require one (DoesNotExist, NotIn), select what is no pod of the cluster:
+  # Cilium adds the policy's namespace to neither (pkg/k8s/apis/cilium.io/utils/utils.go,
+  # getEndpointSelector), and NotIn holds for a peer without the label. Each is refused, reason or
+  # not, in a namespace with the default deny, in a listed one and as the policy's own selector.
+  local -A outside=(
+    [reserved-in]='ingress: [{fromEndpoints: [{matchLabels: {"reserved:world": ""}}], toPorts: [{ports: [{port: "8080", protocol: TCP}]}]}]'
+    [reserved-out]='egress: [{toEndpoints: [{matchExpressions: [{key: "reserved:host", operator: Exists}]}], toPorts: [{ports: [{port: "10250", protocol: TCP}]}]}]'
+    [ns-absent-in]='ingress: [{fromEndpoints: [{matchExpressions: [{key: "k8s:io.kubernetes.pod.namespace", operator: DoesNotExist}]}], toPorts: [{ports: [{port: "8080", protocol: TCP}]}]}]'
+    [ns-notin-alone-out]='egress: [{toEndpoints: [{matchExpressions: [{key: io.kubernetes.pod.namespace, operator: NotIn, values: [kube-system]}]}], toPorts: [{ports: [{port: "8080", protocol: TCP}]}]}]'
+    [labelled-notin-in]='ingress: [{fromEndpoints: [{matchLabels: {world: ""}, matchExpressions: [{key: "k8s:io.kubernetes.pod.namespace", operator: NotIn, values: [kube-system]}]}], toPorts: [{ports: [{port: "8080", protocol: TCP}]}]}]'
+    [ns-label-absent-in]='ingress: [{fromEndpoints: [{matchExpressions: [{key: "k8s:io.cilium.k8s.namespace.labels.team", operator: DoesNotExist}]}], toPorts: [{ports: [{port: "8080", protocol: TCP}]}]}]'
+  )
+  for name in "${!outside[@]}"; do
+    tree "$name"
+    allow "$name" web "$site" "${outside[$name]}"
+    reason "$name" web 'the application needs it'
+    check "$name"
+    [ "$status" -eq 1 ] || { echo "$name: $output"; return 1; }
+    [[ $output == *"namespace web: CiliumNetworkPolicy/$name "*"what is no pod of the cluster"* ]] || { echo "$name: $output"; return 1; }
+  done
+  tree reserved-listed
+  allow reserved-listed legacy '{app.kubernetes.io/name: ledger}' "${outside[reserved-in]}"
+  check reserved-listed
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace legacy: CiliumNetworkPolicy/reserved-listed "*"what is no pod of the cluster"* ]]
+  tree reserved-subject
+  allow reserved-subject web '{"reserved:host": ""}' 'ingress: [{fromEntities: [host], toPorts: [{ports: [{port: "8080", protocol: TCP}]}]}]'
+  check reserved-subject
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace web: CiliumNetworkPolicy/reserved-subject "*"what is no pod of the cluster"* ]]
+  # The evaluator, which reads endpoint selectors as selecting pods, does not answer over a render
+  # that holds one.
+  for name in reserved-in ns-absent-in; do
+    run "$REPO/scripts/network-policy-check" --reach "$BATS_TEST_TMPDIR/$name/render" @world web/Deployment/site 8080/tcp
+    [ "$status" -eq 2 ] || { echo "$name: $output"; return 1; }
+    [[ $output == *"does not read"*"CiliumNetworkPolicy/$name "* ]] || { echo "$name: $output"; return 1; }
+  done
+  # A Kubernetes NetworkPolicy that allows everything is as much an undoing, and so is one whose
+  # peer is every pod of every namespace.
+  tree k8s-all
+  add_policy k8s-all NetworkPolicy.networking.k8s.io_web_allow-all.yaml <<'E'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-all
+  namespace: web
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - {}
+E
+  check k8s-all
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace web"* && $output == *"NetworkPolicy/allow-all"* ]]
+  local -A k8s=(
+    [k8s-ns-exists-in]='ingress: [{from: [{namespaceSelector: {matchExpressions: [{key: kubernetes.io/metadata.name, operator: Exists}]}}], ports: [{port: 8080}]}]'
+    [k8s-ns-empty-out]='egress: [{to: [{namespaceSelector: {}}], ports: [{port: 8080}]}]'
+  )
+  for name in "${!k8s[@]}"; do
+    tree "$name"
+    add_policy "$name" "NetworkPolicy.networking.k8s.io_web_$name.yaml" <<E
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: $name
+  namespace: web
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: site
+  ${k8s[$name]}
+E
+    check "$name"
+    [ "$status" -eq 1 ] || { echo "$name: $output"; return 1; }
+    [[ $output == *"namespace web: NetworkPolicy/$name undoes the default deny ("*"allows every pod of every namespace"* ]] || { echo "$name: $output"; return 1; }
+  done
+}
+
+@test "Traffic from the public Gateway reaches a routed backend and nothing else in its namespace" {
+  real_render
+  local hello=demo/Deployment/hello
+  # The chain: the world to the proxies' listener ports, the proxies to the backend's port, the
+  # proxies to their controller for configuration, and DNS. A connection a worker forwards to a
+  # proxy on another node crosses the tunnel as the world (the pinned Cilium's
+  # bpf/lib/nodeport.h), so other nodes' hosts are no peer of the listeners.
+  allowed "$VIEW" @world "$PROXY" 10443/tcp
+  allowed "$VIEW" @world "$PROXY" 10080/tcp
+  denied "$VIEW" @remote-node "$PROXY" 10443/tcp
+  allowed "$VIEW" "$PROXY" "$hello" 8080/tcp
+  # n8n's route sends the proxies to its port in ai-system, which carries the Gateway label: the
+  # proxies' egress allows it, and n8n's side takes it unrestricted, as ai-system is listed.
+  allowed "$VIEW" "$PROXY" ai-system/Deployment/n8n 5678/tcp
+  # The proxies' egress names each routed backend's pods and the port its route sends to, and no
+  # other, so in a namespace that is listed, and takes them on every port, they reach neither n8n's
+  # other ports, demo's backend's port among them, nor its database on any port.
+  denied "$VIEW" "$PROXY" ai-system/Deployment/n8n 5680/tcp
+  denied "$VIEW" "$PROXY" ai-system/Deployment/n8n 8080/tcp
+  denied "$VIEW" "$PROXY" "$N8N_DB" 5432/tcp
+  denied "$VIEW" "$PROXY" "$N8N_DB" 5678/tcp
+  allowed "$VIEW" "$PROXY" envoy-gateway-system/Deployment/envoy-gateway 18000/tcp
+  allowed "$VIEW" "$PROXY" "$DNS" 53/udp
+  # Nothing but the listener ports reaches the proxies from outside.
+  denied "$VIEW" @world "$PROXY" 22/tcp
+  denied "$VIEW" @world "$PROXY" 19001/tcp
+  # The controller takes the API server and other nodes' hosts on its webhook's port alone, and the
+  # world on none.
+  allowed "$VIEW" @kube-apiserver envoy-gateway-system/Deployment/envoy-gateway 9443/tcp
+  allowed "$VIEW" @remote-node envoy-gateway-system/Deployment/envoy-gateway 9443/tcp
+  denied "$VIEW" @remote-node envoy-gateway-system/Deployment/envoy-gateway 18000/tcp
+  denied "$VIEW" @remote-node envoy-gateway-system/Deployment/envoy-gateway 19001/tcp
+  denied "$VIEW" @world envoy-gateway-system/Deployment/envoy-gateway 9443/tcp
+  denied "$VIEW" @world envoy-gateway-system/Deployment/envoy-gateway 18000/tcp
+  # The proxies reach the one port of the backend, and no other pod of demo.
+  denied "$VIEW" "$PROXY" "$hello" 22/tcp
+  denied "$VIEW" "$PROXY" "$hello" 80/tcp
+  denied "$VIEW" "$PROXY" demo/Deployment/volsync-demo 8080/tcp
+  denied "$VIEW" "$PROXY" "$MOVER" 8080/tcp
+  # A namespace without the Gateway label is not a backend, whatever it allows itself.
+  denied "$VIEW" "$PROXY" "$OTHER_APP" 8080/tcp
+  denied "$VIEW" "$PROXY" "$STORAGE" 3370/tcp
+  # The Gateway's controller is not the proxies: the allow names their labels, not the namespace.
+  # The backend's ingress alone refuses the pods of the Gateway's namespace that are no proxy.
+  allowed_in "$VIEW" "$PROXY" "$hello" 8080/tcp
+  denied_in "$VIEW" envoy-gateway-system/Deployment/envoy-gateway "$hello" 8080/tcp
+  denied_in "$VIEW" envoy-gateway-system:app=certgen "$hello" 8080/tcp
+  denied_in "$VIEW" envoy-gateway-system:app.kubernetes.io/name=envoy "$hello" 8080/tcp
+  denied "$VIEW" envoy-gateway-system/Deployment/envoy-gateway "$hello" 8080/tcp
+  denied "$VIEW" @world "$hello" 8080/tcp
+  denied "$VIEW" @remote-node "$hello" 8080/tcp
+  # No monitor of the tree scrapes the Gateway, so Prometheus reaches neither its controller nor
+  # its proxies.
+  denied "$VIEW" "$PROMETHEUS" envoy-gateway-system/Deployment/envoy-gateway 19001/tcp
+  denied "$VIEW" "$PROMETHEUS" "$PROXY" 19001/tcp
+  # The kubelet reaches the probe port of every pod of the namespaces that deny by default,
+  # proxies included, which no render holds: Envoy Gateway v1.10.0 probes the envoy container on
+  # its readiness port 19003 (internal/xds/bootstrap/bootstrap.go,
+  # internal/infrastructure/kubernetes/proxy/resource.go) and the shutdown manager on 19002
+  # (internal/cmd/envoy/shutdown_manager.go); 19001 is the stats port, which no probe uses.
+  allowed "$VIEW" @host "$PROXY" 19003/tcp
+  allowed "$VIEW" @host "$PROXY" 19002/tcp
+  denied "$VIEW" @host "$PROXY" 19001/tcp
+  local probes pod port
+  probes=$(yq -N -o json -I0 'select(. != null)' "$VIEW"/*/*/*.yaml | jq -r '
+    select(.kind | IN("Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"))
+    | select(.metadata.namespace | IN("demo", "envoy-gateway-system"))
+    | . as $w
+    | (if .kind == "CronJob" then .spec.jobTemplate.spec.template else .spec.template end).spec.containers[]
+    | . as $c
+    | [$c.readinessProbe, $c.livenessProbe, $c.startupProbe][] | select(. != null)
+    | (.httpGet.port // .tcpSocket.port // .grpc.port) as $p
+    | select($p != null)
+    | ($p | if type == "number" then . else (($c.ports // [])[] | select(.name == $p) | .containerPort) end) as $n
+    | "\($w.metadata.namespace)/\($w.kind)/\($w.metadata.name) \($n)"' | sort -u)
+  [ -n "$probes" ]
+  while read -r pod port; do
+    allowed "$VIEW" @host "$pod" "$port/tcp"
+  done <<<"$probes"
+  # Each such pod is among those the evaluator knows: a workload the probe list names is not a typo.
+  [[ $probes == *"demo/Deployment/hello 8080"* ]]
+  [[ $probes == *"envoy-gateway-system/Deployment/envoy-gateway 8081"* ]]
+  # The ports the proxies' egress names in each labelled namespace are exactly the container ports
+  # the Gateway's routes send to in that namespace, read from the render. A route to a backend on
+  # another port, or in another labelled namespace, fails here until the rules name it.
+  local routed named
+  routed=$(routed_ports "$REAL")
+  named=$(proxies_egress "$VIEW")
+  echo "the routes' backends' container ports: $routed; the proxies' egress to the labelled namespaces: ${named:-every port}"
+  [[ " $routed " == *" demo:8080 "* && " $routed " == *" ai-system:5678 "* ]]
+  [ "$named" = "$routed" ]
+  # A route to a backend in a namespace without the Gateway label, or behind a Service without a
+  # selector, has no port the comparison could name, and fails it saying why.
+  local backends="$BATS_TEST_TMPDIR/backends"
+  mkdir -p "$backends"
+  (cd "$REAL" && find . -type f \( -name 'HTTPRoute.*' -o -name 'Service_*' -o -name 'Deployment.apps_*' -o -name 'StatefulSet.apps_*' \
+    -o -name 'DaemonSet.apps_*' -o -name 'Namespace_*' -o -name 'Gateway.gateway.networking.k8s.io_*' \) -exec cp --parents {} "$backends/" \;)
+  cp -R "$backends" "$backends-unlabelled"
+  yq -i '.spec.rules[0].backendRefs[0] |= (.namespace = "openbao" | .name = "openbao" | .port = 8200)' \
+    "$backends-unlabelled"/*/*/HTTPRoute.gateway.networking.k8s.io_demo_hello.yaml
+  run routed_ports "$backends-unlabelled"
+  [ "$status" -ne 0 ] && [[ $output == *"sends to openbao/openbao, but openbao does not carry the label the Gateway public takes routes by"* ]] \
+    || { echo "a backend in a namespace without the label: $output"; return 1; }
+  cp -R "$backends" "$backends-selectorless"
+  yq -i 'del(.spec.selector)' "$backends-selectorless"/*/*/Service_demo_hello.yaml
+  run routed_ports "$backends-selectorless"
+  [ "$status" -ne 0 ] && [[ $output == *"the Service demo/hello, which a route sends to, has no selector"* ]] \
+    || { echo "a backend behind a Service without a selector: $output"; return 1; }
+  # Each way of widening that egress, which the evaluation answers allowed for, fails the
+  # comparison: a port entry with no protocol, a range, a second policy that selects the proxies
+  # by one of their labels, and the labelled namespaces written as an expression.
+  local case dir policy port
+  local -A says=([no-protocol]='cannot compare' [end-port]='cannot compare' [one-label]=8000 [expressions]=8000)
+  for case in no-protocol end-port one-label expressions; do
+    dir="$BATS_TEST_TMPDIR/$case"
+    cp -R "$VIEW" "$dir"
+    policy=$(echo "$dir"/*/*/CiliumNetworkPolicy.cilium.io_envoy-gateway-system_public-proxy.yaml)
+    case $case in
+      no-protocol) yq -i '(.spec.egress[] | select(.toPorts[0].ports | any_c(.port == "5678")) | .toPorts[0].ports) += [{"port": "8000"}]' "$policy" ;;
+      end-port) yq -i '(.spec.egress[].toPorts[].ports[] | select(.port == "5678")).endPort = 5679' "$policy" ;;
+      one-label) cat >"${policy%_*}_widened.yaml" <<'E' ;;
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: widened
+  namespace: envoy-gateway-system
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: proxy
+  enableDefaultDeny: {ingress: false, egress: false}
+  egress:
+    - toEndpoints: [{matchLabels: {"k8s:io.cilium.k8s.namespace.labels.k8s-gitops/gateway": public}}]
+      toPorts: [{ports: [{port: "8000", protocol: TCP}]}]
+E
+      expressions) yq -i '.spec.egress += [{"toEndpoints": [{"matchExpressions": [{"key": "k8s:io.cilium.k8s.namespace.labels.k8s-gitops/gateway",
+          "operator": "In", "values": ["public"]}]}], "toPorts": [{"ports": [{"port": "8000", "protocol": "TCP"}]}]}]' "$policy" ;;
+    esac
+    port=8000
+    [ "$case" != end-port ] || port=5679
+    run "$REPO/scripts/network-policy-check" --reach-egress "$dir" "$PROXY" ai-system/Deployment/n8n "$port/tcp"
+    [ "$status" -eq 0 ] || { echo "$case is no widening: $output"; return 1; }
+    run proxies_egress "$dir"
+    [ "$output" != "$routed" ] && [[ $output == *"${says[$case]}"* ]] || { echo "$case passes the comparison: $output"; return 1; }
+  done
+}
+
+@test "A pod of an application cannot reach the secret store, the storage controller or another application" {
+  real_render
+  local pods=(demo/Deployment/hello demo/Deployment/volsync-demo "$MOVER")
+  local pod
+  for pod in "${pods[@]}"; do
+    denied "$VIEW" "$pod" openbao/StatefulSet/openbao 8200/tcp
+    denied "$VIEW" "$pod" openbao/StatefulSet/openbao 8201/tcp
+    denied "$VIEW" "$pod" "$STORAGE" 3370/tcp
+    denied "$VIEW" "$pod" "$STORAGE" 3371/tcp
+    denied "$VIEW" "$pod" "$OTHER_APP" 8080/tcp
+    denied "$VIEW" "$pod" ai-system/Deployment/n8n 5678/tcp
+    denied "$VIEW" "$pod" envoy-gateway-system/Deployment/envoy-gateway 18000/tcp
+    denied "$VIEW" "$pod" "$PROXY" 10443/tcp
+    denied "$VIEW" "$pod" external-secrets/Deployment/external-secrets 8080/tcp
+    denied "$VIEW" "$pod" @kube-apiserver 6443/tcp
+    denied "$VIEW" "$pod" @host 10250/tcp
+    denied "$VIEW" "$pod" openbao/StatefulSet/openbao 53/udp
+    denied "$VIEW" "$pod" "$OTHER_APP" 53/udp
+  done
+  # The application pods open no connection at all; the movers resolve names through the cluster's
+  # resolver and nothing else.
+  denied "$VIEW" demo/Deployment/hello "$DNS" 53/udp
+  denied "$VIEW" demo/Deployment/volsync-demo "$DNS" 53/udp
+  allowed "$VIEW" "$MOVER" "$DNS" 53/udp
+  allowed "$VIEW" "$MOVER" "$DNS" 53/tcp
+  denied "$VIEW" "$MOVER" "$DNS" 9153/tcp
+  # Neither reaches the other, and nothing else of demo reaches either.
+  denied "$VIEW" demo/Deployment/hello demo/Deployment/volsync-demo 8080/tcp
+  denied "$VIEW" demo/Deployment/volsync-demo demo/Deployment/hello 8080/tcp
+  denied "$VIEW" "$MOVER" demo/Deployment/hello 8080/tcp
+  denied "$VIEW" "$MOVER" demo/Deployment/volsync-demo 8080/tcp
+  denied "$VIEW" "$OTHER_APP" demo/Deployment/hello 8080/tcp
+  denied "$VIEW" openbao/StatefulSet/openbao demo/Deployment/hello 8080/tcp
+  # The backup movers reach the object storage on 443 and no other port of the world; the other
+  # pods reach none of it.
+  allowed "$VIEW" "$MOVER" @world 443/tcp
+  denied "$VIEW" "$MOVER" @world 80/tcp
+  # That is the port of the endpoint as cluster-config's example gives it: 443 for one that names
+  # none, as the validation of the endpoint (scripts/lib/s3.sh) allows, or the port it names.
+  local endpoint
+  endpoint=$(yq '.S3_ENDPOINT' "$REPO/kubernetes/clusters/lab-sto2/cluster-config.example.yaml")
+  [[ $endpoint =~ ^https://[^/:]+(:([0-9]+))?$ ]]
+  allowed "$VIEW" "$MOVER" @world "${BASH_REMATCH[2]:-443}/tcp"
+  denied "$VIEW" demo/Deployment/hello @world 443/tcp
+  denied "$VIEW" demo/Deployment/volsync-demo @world 443/tcp
+}
+
+@test "An allow that names an address fails the check" {
+  local name rule
+  local -A rules=(
+    [cidr]='egress: [{toCIDR: ["192.0.2.0/24"]}]'
+    [cidr-set]='egress: [{toCIDRSet: [{cidr: "198.51.100.0/24"}]}]'
+    [from-cidr]='ingress: [{fromCIDR: ["203.0.113.5/32"]}]'
+    [label-address]='ingress: [{fromEndpoints: [{matchLabels: {peer: "198.51.100.7"}}]}]'
+    [v6]='egress: [{toCIDR: ["2001:db8::/32"]}]'
+  )
+  for name in "${!rules[@]}"; do
+    rule=${rules[$name]}
+    tree "$name"
+    add_policy "$name" "CiliumNetworkPolicy.cilium.io_web_$name.yaml" <<E
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: $name
+  namespace: web
+  annotations:
+    k8s-gitops/network-policy-reason: the reason does not excuse an address
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: site
+  enableDefaultDeny: {ingress: false, egress: false}
+  $rule
+E
+    check "$name"
+    [ "$status" -eq 1 ] || { echo "$name: $output"; return 1; }
+    [[ $output == *"namespace web"* && $output == *"CiliumNetworkPolicy/$name"* && $output == *"address"* ]] || { echo "$name: $output"; return 1; }
+  done
+  # An address block of a Kubernetes NetworkPolicy.
+  tree block
+  add_policy block NetworkPolicy.networking.k8s.io_web_block.yaml <<'E'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: block
+  namespace: web
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.0/24
+E
+  check block
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace web"* && $output == *"NetworkPolicy/block"* && $output == *"address"* ]]
+}
+
+@test "A namespace without its default deny takes and sends everything, whatever its allows say" {
+  local name
+  # An allow that does not leave the deny to the namespace's default deny is refused, naming it:
+  # one that puts its pods in default deny for a direction itself, or that does not say so.
+  local -A modes=(
+    [unset]=''
+    [ingress-deny]='enableDefaultDeny: {ingress: true, egress: false}'
+    [egress-unsaid]='enableDefaultDeny: {ingress: false}'
+  )
+  for name in "${!modes[@]}"; do
+    tree "$name"
+    add_policy "$name" "CiliumNetworkPolicy.cilium.io_web_$name.yaml" <<E
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: $name
+  namespace: web
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: worker
+  ${modes[$name]}
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: site
+      toPorts:
+        - ports:
+            - port: "9000"
+              protocol: TCP
+E
+    check "$name"
+    [ "$status" -eq 1 ] || { echo "$name: $output"; return 1; }
+    [[ $output == *"namespace web: CiliumNetworkPolicy/$name"* && $output == *enableDefaultDeny* ]] || { echo "$name: $output"; return 1; }
+  done
+  # A Kubernetes NetworkPolicy that allows is refused too: Cilium puts every pod a NetworkPolicy
+  # selects in default deny.
+  tree k8s-allow
+  add_policy k8s-allow NetworkPolicy.networking.k8s.io_web_worker.yaml <<'E'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: worker
+  namespace: web
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: worker
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: site
+      ports:
+        - port: 9000
+E
+  check k8s-allow
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace web: NetworkPolicy/worker"* ]]
+  # So is a second deny beside the namespace's default deny: with it, taking the default deny out
+  # would leave the namespace closed.
+  tree second-deny
+  add_policy second-deny NetworkPolicy.networking.k8s.io_web_deny-all.yaml <<'E'
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all
+  namespace: web
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+E
+  check second-deny
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace web: NetworkPolicy/deny-all is a NetworkPolicy other than the default deny"* ]]
+  # A deny rule drops what it names whatever the allows say, and a policy of the nodes polices the
+  # hosts; the evaluator reads neither. The check refuses each wherever it is, in a namespace with
+  # the default deny, in a listed one and cluster-wide, reason or not, and the evaluator does not
+  # answer over a render that holds one.
+  tree deny-in
+  allow deny-in web '{app.kubernetes.io/name: site}' 'ingressDeny: [{fromEntities: [world], toPorts: [{ports: [{port: "8080", protocol: TCP}]}]}]'
+  reason deny-in web 'a reason does not excuse a deny rule'
+  check deny-in
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace web: CiliumNetworkPolicy/deny-in holds a deny rule"* ]]
+  tree deny-out
+  allow deny-out legacy '{app.kubernetes.io/name: ledger}' 'egressDeny: [{toEntities: [world]}]'
+  check deny-out
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace legacy: CiliumNetworkPolicy/deny-out holds a deny rule"* ]]
+  tree deny-cluster
+  add_policy deny-cluster CiliumClusterwideNetworkPolicy.cilium.io__deny-cluster.yaml <<'E'
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: deny-cluster
+  annotations:
+    k8s-gitops/network-policy-reason: a reason does not excuse a deny rule
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: envoy
+  enableDefaultDeny: {ingress: false, egress: false}
+  ingressDeny:
+    - fromEntities: [world]
+E
+  check deny-cluster
+  [ "$status" -eq 1 ]
+  [[ $output == *"cluster-wide CiliumClusterwideNetworkPolicy/deny-cluster holds a deny rule"* ]]
+  run "$REPO/scripts/network-policy-check" --reach "$BATS_TEST_TMPDIR/deny-cluster/render" @world \
+    gw:app.kubernetes.io/name=envoy,app.kubernetes.io/component=proxy,app.kubernetes.io/managed-by=envoy-gateway,gateway.envoyproxy.io/owning-gateway-name=public 10443/tcp
+  [ "$status" -eq 2 ]
+  [[ $output == *"does not read"*"CiliumClusterwideNetworkPolicy/deny-cluster holds a deny rule"* ]]
+  tree nodes
+  add_policy nodes CiliumClusterwideNetworkPolicy.cilium.io__nodes.yaml <<'E'
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: nodes
+spec:
+  nodeSelector: {}
+  ingress:
+    - fromEntities: [cluster]
+E
+  check nodes
+  [ "$status" -eq 1 ]
+  [[ $output == *"cluster-wide CiliumClusterwideNetworkPolicy/nodes selects nodes"* ]]
+
+  # The tree: the agents honour the field, and the allows of demo and envoy-gateway-system let
+  # exactly their flows through with the namespaces' default deny, and every flow without it.
+  real_render
+  [ "$(yq '.data["enable-non-default-deny-policies"]' "$REAL"/*/cilium/ConfigMap_kube-system_cilium-config.yaml)" = true ]
+  local open="$BATS_TEST_TMPDIR/open" removed
+  cp -R "$VIEW" "$open"
+  removed=("$open"/*/*/NetworkPolicy.networking.k8s.io_demo_default-deny.yaml "$open"/*/*/NetworkPolicy.networking.k8s.io_envoy-gateway-system_default-deny.yaml)
+  [ "${#removed[@]}" -eq 2 ]
+  rm -- "${removed[@]}"
+  local flow want from to port
+  local flows=(
+    "allowed @world $PROXY 10443/tcp"
+    "denied @world $PROXY 22/tcp"
+    "allowed $PROXY demo/Deployment/hello 8080/tcp"
+    "denied $PROXY demo/Deployment/hello 22/tcp"
+    "denied @world demo/Deployment/hello 8080/tcp"
+    "denied demo/Deployment/hello openbao/StatefulSet/openbao 8200/tcp"
+    "denied demo/Deployment/hello @world 443/tcp"
+    "denied demo/Deployment/volsync-demo demo/Deployment/hello 8080/tcp"
+    "allowed $MOVER @world 443/tcp"
+    "denied $MOVER @world 80/tcp"
+    "allowed $MOVER $DNS 53/udp"
+    "denied $MOVER openbao/StatefulSet/openbao 8200/tcp"
+    "allowed $PROXY envoy-gateway-system/Deployment/envoy-gateway 18000/tcp"
+    "denied $OTHER_APP envoy-gateway-system/Deployment/envoy-gateway 18000/tcp"
+    "allowed envoy-gateway-system/Deployment/envoy-gateway @kube-apiserver 6443/tcp"
+    "denied envoy-gateway-system/Deployment/envoy-gateway @world 443/tcp"
+    "denied envoy-gateway-system/Job/envoy-gateway-gateway-helm-certgen @world 443/tcp"
+  )
+  for flow in "${flows[@]}"; do
+    read -r want from to port <<<"$flow"
+    "$want" "$VIEW" "$from" "$to" "$port"
+    allowed "$open" "$from" "$to" "$port"
+  done
+}
+
+@test "The cluster audits or enforces the policies as the docs say" {
+  real_render
+  local values="$REPO/kubernetes/apps/base/kube-system/cilium/app/values.yaml" said mode
+  local config=("$REAL"/*/cilium/ConfigMap_kube-system_cilium-config.yaml) agents=("$REAL"/*/cilium/DaemonSet.apps_kube-system_cilium.yaml)
+  [ "${#config[@]}" -eq 1 ] && [ "${#agents[@]}" -eq 1 ]
+  # The docs state the mode once, at the start of a paragraph: the cluster audits network policy, or
+  # enforces the policies.
+  local statement='^\*\*The cluster (audits network policy|enforces the policies)\.\*\*'
+  said=$(grep -cE "$statement" "$REPO/docs/kubernetes.md" || true)
+  [ "$said" -eq 1 ] || { echo "docs/kubernetes.md states the mode $said times: once, as **The cluster audits network policy.** or **The cluster enforces the policies.**"; return 1; }
+  mode=$(grep -oE "$statement" "$REPO/docs/kubernetes.md")
+  # The values the chart and scripts/install-cilium read set it, and the agents' configuration
+  # carries it. The policies land on a cluster that already audits, and the value goes only with
+  # the paragraph that says the cluster enforces them (docs/kubernetes.md, Turning it on, and back).
+  if [[ $mode == *audits* ]]; then
+    [ "$(yq '.policyAuditMode' "$values")" = true ] \
+      || { echo "docs/kubernetes.md says the cluster audits network policy, but the Cilium values do not set policyAuditMode: true, so every agent enforces the policies of the tree: say **The cluster enforces the policies.** instead, once the policies have been watched in audit mode"; return 1; }
+    [ "$(yq '.data["policy-audit-mode"]' "${config[0]}")" = true ]
+  else
+    [ "$(yq '.policyAuditMode // false' "$values")" = false ] \
+      || { echo "the Cilium values set policyAuditMode: true, so every agent audits and drops nothing: docs/kubernetes.md says **The cluster audits network policy.**"; return 1; }
+    [ "$(yq '.data["policy-audit-mode"] // "false"' "${config[0]}")" = false ]
+  fi
+  # A change of the configuration rolls the agents, so each runs the mode it says.
+  [ -n "$(yq '.spec.template.metadata.annotations["cilium.io/cilium-configmap-checksum"] // ""' "${agents[0]}")" ]
+}
