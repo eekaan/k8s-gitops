@@ -119,9 +119,9 @@ The repository checks:
   enable or one that does not wait. It builds nothing from a tree that a build would read outside
   of, through a link or an entry that is not a plain relative path of the tree, or that kustomize
   or `flux build` would read otherwise than the check, through a key spelled otherwise than the
-  field it reads as; its builds run with a `git` that refuses and a closed proxy, so they fetch
-  nothing. The publish run repeats it on the commit it publishes and publishes nothing when it
-  fails.
+  field it reads as. No entry it accepts is a URL, and its builds run with a `git` that refuses and
+  a closed proxy, a second layer under that rule. The publish run repeats it on the commit it
+  publishes and publishes nothing when it fails.
 - `just kubernetes-validate` runs `just kubernetes-check`'s builds and the render, and fails when an
   object Flux builds has a field its schema lacks or an image of the render has no tag other than
   `latest` and no digest. It fetches the charts and the schemas, so the publish run does not run

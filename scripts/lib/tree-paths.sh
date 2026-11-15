@@ -33,9 +33,10 @@
 # from the tree's parent; a value from the tree is shown with each byte that is not printable ASCII
 # as \xHH (tree_paths_show).
 #
-# The builds of the checks run where nothing can be fetched (tree_paths_offline): git resolves to a
-# stand-in that refuses, which is what kustomize runs for a remote base, and every proxy variable
-# names a closed port of the loopback, which Go's HTTP client uses for a remote file.
+# A plain path is no URL, so no entry the checks accept names one. Under that rule, the builds of
+# the checks run in a second layer (tree_paths_offline): git resolves to a stand-in that refuses,
+# which is what kustomize runs for a remote base, and the proxy variables name a closed port of the
+# loopback, where Go's HTTP client sends a request for any host but the loopback itself.
 
 # The recorded field lists, one field a line: the type, the field and what it holds (value, map,
 # path, paths, dirs, files, refused, a type, or a list of a type), and TYPE * open for a type at
@@ -387,13 +388,14 @@ tree_paths_fields() {
 }
 
 # A plain path: relative, of segments of ASCII letters, digits, ".", "_" and "-", none empty and
-# none that starts with "-"; ".." only as a whole segment, and the path still has to name a path of
-# the tree. It holds no ":", "@", "?", "#", "%", "\", "~", space, control character or byte outside
-# ASCII, so it is no URL, no scp-style address and no git:: form, and the one remote kustomize reads
-# in what remains is a path whose first segment is github.com, in any case of its ASCII letters
-# (api/internal/git/repospec.go at v0.21.2: isStandardGithubHost lowers with strings.ToLower; no
-# other host is read as remote without a scheme or a user). A KEY=PATH entry of a generator's files
-# has a key of the same characters, without "/".
+# none that starts with "-"; a segment that is exactly ".." climbs, and the path still has to name a
+# path of the tree, while dots inside a longer segment are part of a name. It holds no ":", "@",
+# "?", "#", "%", "\", "~", space, control character or byte outside ASCII, so it is no URL, no
+# scp-style address and no git:: form, and the one remote kustomize reads in what remains is a path
+# whose first segment is github.com, in any case of its ASCII letters (api/internal/git/repospec.go
+# at v0.21.2: isStandardGithubHost lowers with strings.ToLower; no other host is read as remote
+# without a scheme or a user). A KEY=PATH entry of a generator's files has a key of the same
+# characters, without "/".
 # shellcheck disable=SC2016 # jq regular expressions, not expansions.
 tree_paths_plain_jq='
   def plain: type == "string" and test("\\A[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*\\z") and (test("(\\A|/)-") | not);
@@ -532,13 +534,14 @@ path_refusal() {
   tree_paths_inside "$root" "$resolved" || echo "a path that leaves kubernetes/ through a link"
 }
 
-# tree_paths_offline DIR: makes DIR the place the checks' builds run from where nothing can be
-# fetched, and sets tree_paths_offline_env to their environment: DIR, first on the path, holds a git
-# that refuses, which kustomize runs for a remote base (exec.LookPath("git"),
-# api/internal/git/gitrunner.go), with git's own protocols and prompts off; HTTP_PROXY, HTTPS_PROXY
-# and ALL_PROXY, in both cases, name port 0 of the loopback, where nothing listens, which Go's HTTP
-# client uses for a remote file (http.ProxyFromEnvironment; api/internal/loader/fileloader.go), and
-# NO_PROXY exempts no host.
+# tree_paths_offline DIR: makes DIR the place the checks' builds run from, a second layer under the
+# plain-path rule, and sets tree_paths_offline_env to their environment: DIR, first on the path,
+# holds a git that refuses, which kustomize runs for a remote base (exec.LookPath("git"),
+# api/internal/git/gitrunner.go), with git's own protocols and prompts off; HTTP_PROXY and
+# HTTPS_PROXY, in both cases, name port 0 of the loopback, where nothing listens, which Go's HTTP
+# client uses for a remote file on any host but the loopback, which it never proxies
+# (http.ProxyFromEnvironment; api/internal/loader/fileloader.go); ALL_PROXY names it for git and
+# libcurl, which read it, as Go does not; and NO_PROXY exempts no host.
 tree_paths_offline() {
   local dir=$1 proxy=http://127.0.0.1:0
   mkdir -p "$dir"

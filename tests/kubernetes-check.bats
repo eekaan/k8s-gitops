@@ -1873,7 +1873,7 @@ kept_builds() {
   done
 }
 
-@test "The check's builds reach no network, whatever a kustomization names" {
+@test "The check's builds fetch nothing from another machine, whatever a kustomization names" {
   # A copy of the code with the guard taken out, so that a kustomization naming a remote source
   # reaches kustomize and flux build. git, first on the caller's path, records any run; the caller's
   # proxy is a closed port the check's own is not, so a fetch that used the caller's settings shows.

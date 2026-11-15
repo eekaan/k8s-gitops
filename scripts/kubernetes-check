@@ -16,10 +16,10 @@
 # the tree, or that holds a key that is not exactly a field kustomize reads there; a root whose
 # spec.path is not a plain path of a directory of the tree as it resolves; a ks.yaml the check
 # builds that holds a key flux build would read as a field it is not spelled as, or whose
-# spec.components names anything but a plain path of the tree. Its builds run where nothing can be
-# fetched: git is a stand-in that refuses and every proxy a closed port of the loopback. An
-# application's spec.path is compared with the one its directory fixes, and what is built is that
-# directory.
+# spec.components names anything but a plain path of the tree, so no entry it accepts is a URL.
+# Its builds run in a second layer under that rule: git is a stand-in that refuses, and the proxies
+# a closed port of the loopback. An application's spec.path is compared with the one its directory
+# fixes, and what is built is that directory.
 #
 # KUBERNETES_CHECK_BUILT, an existing empty directory, receives what each Flux build yielded, for
 # scripts/kubernetes-validate: N.yaml, and in its file builds the record N.yaml, LABEL and APP_DIR,
@@ -57,7 +57,7 @@ done
 tree_root="$(realpath -e kubernetes)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-# kustomize and flux build run where nothing can be fetched.
+# kustomize and flux build run with a git that refuses and a closed proxy (tree_paths_offline).
 tree_paths_offline "$tmp/offline"
 
 failures=0

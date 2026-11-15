@@ -34,8 +34,8 @@
 # spec.components leaves it or that holds a key flux build would read as a field it is not spelled
 # as, and a HelmRelease or a source with a key that folds to a field the render reads without being
 # it, or a post-renderer with more than a patch, its target and an image, which is all
-# helm-controller's has. flux build, helm template and kustomize run where nothing can be fetched
-# (git a stand-in that refuses, every proxy a closed port of the loopback); helm pull alone fetches.
+# helm-controller's has. flux build, helm template and kustomize run with git a stand-in that
+# refuses and the proxies a closed port of the loopback; helm pull alone fetches.
 # Never contacts a cluster, and reads no registry login. A chart's URL and
 # name come from the tree, a pull request's included: they are checked against a strict shape and
 # passed to helm as arguments, a pull adds no repository to any Helm configuration, and a hostile
@@ -105,7 +105,8 @@ fi
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-# flux build, helm template and kustomize run where nothing can be fetched; helm pull alone fetches.
+# flux build, helm template and kustomize run with a git that refuses and a closed proxy; helm pull
+# alone fetches.
 tree_paths_offline "$tmp/offline"
 
 # No kubeconfig and no in-cluster address: a tool that tried to reach a cluster fails instead.

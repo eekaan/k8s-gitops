@@ -67,7 +67,7 @@ unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-# flux install and kustomize run where nothing can be fetched.
+# flux install and kustomize run with a git that refuses and a closed proxy (tree_paths_offline).
 tree_paths_offline "$tmp/offline"
 
 kube=$(yq '.kubernetes // ""' "$versions")

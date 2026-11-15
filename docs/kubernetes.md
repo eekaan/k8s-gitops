@@ -168,15 +168,17 @@ On what Flux builds:
     refuses one.
 
   A plain path is relative, and made of segments of the ASCII letters, digits, `.`, `_` and `-`
-  alone, separated by single `/`: none empty, none that starts with `-`, and `..` only as a whole
-  segment, with the path still inside the tree; a generator's `KEY=PATH` has a key of the same
-  characters. So no entry holds `:`, `@`, `?`, `#`, `%`, `\`, `~`, a space, a control character or
-  a byte outside ASCII, and none is a URL, an scp-style address or a `git::` form. kustomize reads
-  one remote form without those, a path whose first segment is `github.com` in any case
-  (`isStandardGithubHost` in its `api/internal/git/repospec.go`), and the checks refuse that too.
-  The checks judge the tree's text with `jq`, which reads it as Unicode code points, and run their
-  scripts and every function of the guard in the C locale, so the caller's locale changes nothing
-  they decide; a value of the tree in a message shows each byte outside printable ASCII as `\xHH`.
+  alone, separated by single `/`: none empty and none that starts with `-`. A segment that is
+  exactly `..` climbs, and is allowed only while the resolved path stays inside the tree; dots
+  inside a longer segment, as in `a..b` or `...`, are part of a name. A generator's `KEY=PATH` has a
+  key of the same characters. So no entry holds `:`, `@`, `?`, `#`, `%`, `\`, `~`, a space, a
+  control character or a byte outside ASCII, and none is a URL, an scp-style address or a `git::`
+  form. kustomize reads one remote form without those, a path whose first segment is `github.com` in
+  any case (`isStandardGithubHost` in its `api/internal/git/repospec.go`), and the checks refuse
+  that too. The checks judge the tree's text with `jq`, which reads it as Unicode code points, and
+  run their scripts and every function of the guard in the C locale, so the caller's locale changes
+  nothing they decide; a value of the tree in a message shows each byte outside printable ASCII as
+  `\xHH`.
 
   The free-form positions are not checked by key: labels, annotations, `commonLabels`,
   `commonAnnotations`, a label's `pairs`, generator options' labels and annotations,
@@ -192,14 +194,17 @@ On what Flux builds:
   refused, naming the file and the key or entry, by every check that reads it, in the C locale and
   in C.UTF-8.
 
-  The builds of the checks run where nothing can be fetched: `kustomize`, `flux build`,
-  `helm template` and the Pod Security check's `flux install` see a `git` first on their path that
-  refuses, which is what kustomize runs for a remote base (`exec.LookPath("git")`), git's protocols
-  and prompts off, and `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` in both cases naming port 0 of
-  the loopback, where nothing listens, which Go's HTTP client uses for a remote file, with
-  `NO_PROXY` empty. `kubernetes-check`, the gate of the publish run, so fetches nothing even for an
-  entry its guard let through. The processes that fetch are `helm pull` in the render, for the
-  charts, and `kubernetes-validate`'s `curl` and `kubeconform`, for the schemas.
+  The grammar is what refuses every URL: no entry with a `:` passes. The builds of the checks run
+  in a second layer under it: `kustomize`, `flux build`, `helm template` and the Pod Security
+  check's `flux install` see a `git` first on their path that refuses, which is what kustomize runs
+  for a remote base (`exec.LookPath("git")`), git's protocols and prompts off; `HTTP_PROXY` and
+  `HTTPS_PROXY`, in both cases, name port 0 of the loopback, where nothing listens, with `NO_PROXY`
+  empty, so Go's HTTP client, with which kustomize fetches a remote file, sends a request for any
+  other host there and fails. `ALL_PROXY`, in both cases, names the same port for git and libcurl,
+  which read it; Go does not. The layer does not cover a plain HTTP request to the loopback of the
+  machine that runs a check, which Go never sends to a proxy. The processes that fetch are
+  `helm pull` in the render, for the charts, and `kubernetes-validate`'s `curl` and `kubeconform`,
+  for the schemas.
 
   The `spec.path` of an application's `ks.yaml` is compared with the one its directory fixes, and
   what is built is that directory's `app/`. The render builds a copy of `kubernetes/` alone and
