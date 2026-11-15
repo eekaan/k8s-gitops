@@ -31,6 +31,11 @@ variable "api_allowed_cidrs" {
   description = "IPv4 networks, in CIDR form, that may reach the Talos API (TCP 50000) and the Kubernetes API (TCP 6443) on the nodes' floating IPs."
   type        = list(string)
   sensitive   = true
+
+  validation {
+    condition     = alltrue([for cidr in var.api_allowed_cidrs : can(cidrnetmask(cidr))])
+    error_message = "Every entry of api_allowed_cidrs must be an IPv4 network in CIDR form."
+  }
 }
 
 variable "security_group_rules" {

@@ -229,3 +229,43 @@ EOF
   [[ $output == *"infra-check: infra/openstack/stacks: no stack found"* ]]
   [ "${lines[-1]}" = "infra-check: failed: infra/openstack/stacks" ]
 }
+
+# A module with a test and no stack calling it, so only the discovery of module tests runs it.
+module_with_test() {
+  mkdir -p "infra/openstack/modules/$1/tests"
+  cat > "infra/openstack/modules/$1/main.tf" <<'EOF'
+variable "size" {
+  type    = number
+  default = 1
+}
+
+output "size" {
+  value = var.size
+}
+EOF
+  cat > "infra/openstack/modules/$1/tests/size.tftest.hcl" <<EOF
+run "size" {
+  command = plan
+
+  assert {
+    condition     = output.size == $2
+    error_message = "The size must be $2."
+  }
+}
+EOF
+}
+
+@test "A module whose test fails fails the infrastructure check, naming it" {
+  repository module-test
+  valid_stack region/good
+  module_with_test passing 1
+  module_with_test failing 2
+
+  run "$SCRIPT"
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"infra-check: infra/openstack/modules/failing: tofu test failed"* ]]
+  [[ $output == *"infra-check: infra/openstack/modules/passing: init, validate and test passed"* ]]
+  [[ $output != *"modules/passing: tofu test failed"* ]]
+  [ "${lines[-1]}" = "infra-check: failed: infra/openstack/modules/failing" ]
+}
