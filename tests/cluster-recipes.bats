@@ -1569,7 +1569,9 @@ early_readers() {
   # What is said comes after the configuration is kept, and names no address.
   applied=$(grep -n 'Applied configuration' <<< "$output" | tail -1 | cut -d: -f1)
   said=$(grep -n 'until it reboots' <<< "$output" | head -1 | cut -d: -f1)
-  [ -n "$applied" ] && [ -n "$said" ] && [ "$applied" -lt "$said" ]
+  [ -n "$applied" ]
+  [ -n "$said" ]
+  [ "$applied" -lt "$said" ]
   said_lines=$(grep -E 'until it reboots|cluster-reboot' <<< "$output")
   [ -n "$said_lines" ]
   if grep -qE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' <<< "$said_lines"; then false; fi
@@ -1589,7 +1591,9 @@ early_readers() {
   [ -z "$(calls '^cluster-reboot ')" ]
   applied=$(grep -n 'Applied configuration' <<< "$output" | tail -1 | cut -d: -f1)
   said=$(grep -n 'until it reboots' <<< "$output" | head -1 | cut -d: -f1)
-  [ -n "$applied" ] && [ -n "$said" ] && [ "$applied" -lt "$said" ]
+  [ -n "$applied" ]
+  [ -n "$said" ]
+  [ "$applied" -lt "$said" ]
 }
 
 @test "A rollout that changes only what applies at once says nothing about a reboot" {
@@ -1638,7 +1642,9 @@ early_readers() {
   # Before anything is applied it names the nodes it may reboot: each the dry run shows a change on.
   announced=$(grep -nxF 'cluster-talos: once every node keeps the configuration, those of cp-1, cp-2, cp-3, worker-2 that then run a setting only a reboot takes up are rebooted, one at a time' <<< "$output" | cut -d: -f1)
   applied=$(grep -n 'Applied configuration without a reboot$' <<< "$output" | head -1 | cut -d: -f1)
-  [ -n "$announced" ] && [ -n "$applied" ] && [ "$announced" -lt "$applied" ]
+  [ -n "$announced" ]
+  [ -n "$applied" ]
+  [ "$announced" -lt "$applied" ]
 
   # A reboot is not the default: the operator says so with --reboot.
   : > "$RECORD/argv"
@@ -1835,7 +1841,8 @@ EOF
   # A reboot between a node's try and its keep would revert what the checks saw.
   [ "$(calls '^cluster-reboot ' | paste -sd'|')" = "cluster-reboot cp-1 lab-sto2 --yes --tolerate 30|cluster-reboot cp-2 lab-sto2 --yes --tolerate 30" ]
   last_keep=$(last_call_line "^$(keeps cp-2 | tail -1)\$")
-  [ -n "$last_keep" ] && [ "$last_keep" -lt "$(call_line '^cluster-reboot cp-1 ')" ]
+  [ -n "$last_keep" ]
+  [ "$last_keep" -lt "$(call_line '^cluster-reboot cp-1 ')" ]
   [ "$last_keep" -gt "$(last_call_line "^$(keeps worker-2 | tail -1)\$")" ]
 
   # --tolerate is for the reboots.
