@@ -1,7 +1,8 @@
 # shellcheck shell=bash
-# Shared by scripts/edge-check, scripts/edge-routes, scripts/edge-rollout and scripts/infra-apply: the
-# edge routers' addresses, the SSH connection to them, and which of them a plan replaces. Needs
-# scripts/stack-env sourced with sto2/edge, and for edge_connect the stack locked and initialised.
+# Shared by scripts/edge-check, scripts/edge-routes, scripts/edge-rollout, scripts/infra-apply and
+# scripts/infra-destroy: the edge routers' addresses, the SSH connection to them, and which of them a
+# plan replaces or creates. Needs scripts/stack-env sourced with sto2/edge, and for edge_connect the
+# stack locked and initialised.
 
 # shellcheck source=scripts/lib/infra.sh
 . "$(dirname "${BASH_SOURCE[0]}")/infra.sh"
@@ -47,9 +48,10 @@ edge_connect() {
   done
 }
 
-# edge_forget_keys NUMBER...: drops the recorded SSH host keys of the edges, 1 or 2. A replacement
-# instance has host keys of its own at the same floating address, and the connection checks them
-# strictly against what is recorded, so the old ones would refuse it for good. Needs edge_load.
+# edge_forget_keys NUMBER...: drops the recorded SSH host keys of the edges, 1 or 2. A new instance,
+# a replacement or one created again, has host keys of its own at the same floating address, and
+# the connection checks them strictly against what is recorded, so the old ones would refuse it for
+# good. Needs edge_load.
 edge_forget_keys() {
   local number
   for number; do
@@ -67,14 +69,54 @@ edge_ssh() {
     -o ConnectTimeout=30 "${EDGE_SSH_USER:-debian}@${edge_addresses[$1]}" "$2"
 }
 
-# edge_replaced: the edge numbers, 1 and 2, whose instance the saved plan deletes, replacing it or
-# not, one per line.
-edge_replaced() {
+# edge_planned ACTION: the edge numbers, 1 and 2, whose instance the saved plan's change on it
+# includes ACTION, delete or create, one per line, each once. A replacement is both.
+edge_planned() {
   # shellcheck disable=SC2154 # scripts/stack-env sets plan_file
-  stack_tofu show -json "$plan_file" | jq -r '
-    .resource_changes[]?
-    | select(.type == "openstack_compute_instance_v2" and (.change.actions | index("delete")))
-    | .address | capture("^module\\.edge\\[\"(?<number>[0-9]+)\"\\]") | .number'
+  stack_tofu show -json "$plan_file" | jq -r --arg action "$1" '
+    [.resource_changes[]?
+      | select(.type == "openstack_compute_instance_v2" and (.change.actions | index($action)))
+      | .address | capture("^module\\.edge\\[\"(?<number>[0-9]+)\"\\]") | .number]
+    | unique[]'
+}
+
+# edge_replaced: the edges whose instance the saved plan deletes, replacing it or not.
+edge_replaced() {
+  edge_planned delete
+}
+
+# edge_created: the edges whose instance the saved plan creates: a replacement, or a new instance
+# for one that is gone from the cloud. Either has SSH host keys of its own.
+edge_created() {
+  edge_planned create
+}
+
+# edge_applied: whether the stack's outputs name two edges, as they do once it is applied.
+edge_applied() {
+  stack_tofu output -json | jq -e '(.addresses.value // []) | length == 2' > /dev/null
+}
+
+# edge_check_passes NUMBER: whether scripts/edge-check passes for edge NUMBER, run under the lock the
+# caller holds on the stack. stack-env keeps the state passphrase out of the environment of what it
+# runs, and edge-check, which sources stack-env itself, needs it again.
+edge_check_passes() {
+  EDGE_STACK_LOCKED=1 TF_STATE_PASSPHRASE=${TF_STATE_PASSPHRASE-} \
+    "$(dirname "${BASH_SOURCE[0]}")/../edge-check" --edge "$1"
+}
+
+# edge_require_other_serves: for a saved plan that deletes or replaces one edge, whether the other
+# passes its check; fails, naming the way to replace the edge anyway, when it does not, as the plan
+# would leave no edge serving. Needs edge_refuse_double_replace's edge_replaced_numbers.
+edge_require_other_serves() {
+  local number other
+  ((${#edge_replaced_numbers[@]} == 1)) || return 0
+  number=${edge_replaced_numbers[0]}
+  other=$((3 - number))
+  echo "checking that edge $other serves before edge $number is taken down"
+  if ! edge_check_passes "$other"; then
+    infra_error "edge $other does not pass its check, so the plan that takes edge $number down is not applied; to replace edge $number while edge $other is down, run: just edge-rollout --replace --edge $number --other-down"
+    return 1
+  fi
 }
 
 # edge_refuse_double_replace: sets edge_replaced_numbers to the edges the saved plan deletes or

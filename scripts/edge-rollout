@@ -14,25 +14,47 @@
 # their fingerprints shown and yes typed, before its check runs; keys that are not accepted stop the
 # rollout at once. A check that does not pass within EDGE_ROLLOUT_WAIT seconds (900 when unset),
 # tried every EDGE_ROLLOUT_INTERVAL seconds (15), stops the rollout there: an edge after it is not
-# touched. The last step plans the whole stack again and prints what is left.
-# Usage: scripts/edge-rollout [--replace] [--yes]
+# touched. The last step plans the whole stack again and prints what is left, which only
+# scripts/infra-apply applies: each edge's plan holds that edge's own resources alone.
+#
+# --edge N replaces edge N alone, after the same check of the other edge. With --other-down it goes
+# on when the other edge does not pass either, once a sentence that names both edges is typed back,
+# --yes or not: with both edges down nothing serves anyway, and replacing one is the way back.
+# Usage: scripts/edge-rollout [--replace] [--edge 1|2 [--other-down]] [--yes]
 set -euo pipefail
 
 here=$(dirname "$0")
 # shellcheck source=scripts/lib/edge.sh
 . "$here/lib/edge.sh"
 
-confirmed=0 forced=0
-for arg; do
-  case $arg in
+usage() {
+  infra_error "usage: edge-rollout [--replace] [--edge 1|2 [--other-down]] [--yes]"
+  exit 2
+}
+
+confirmed=0 forced=0 only='' other_down=0
+while (($#)); do
+  case $1 in
     --yes) confirmed=1 ;;
     --replace) forced=1 ;;
-    *)
-      infra_error "usage: edge-rollout [--replace] [--yes]"
-      exit 2
+    --other-down) other_down=1 ;;
+    --edge)
+      [[ ${2-} == 1 || ${2-} == 2 ]] || usage
+      only=$2
+      shift
       ;;
+    *) usage ;;
   esac
+  shift
 done
+# Going on with the other edge down is for one named edge only.
+if ((other_down)) && [[ -z $only ]]; then
+  usage
+fi
+numbers=(1 2)
+if [[ -n $only ]]; then
+  numbers=("$only")
+fi
 wait_seconds=${EDGE_ROLLOUT_WAIT:-900} interval=${EDGE_ROLLOUT_INTERVAL:-15}
 if [[ ! $wait_seconds =~ ^[0-9]+$ || ! $interval =~ ^[0-9]+$ ]]; then
   infra_error "EDGE_ROLLOUT_WAIT and EDGE_ROLLOUT_INTERVAL are whole numbers of seconds"
@@ -48,14 +70,23 @@ edge_load
 echo "$stack:"
 plan_stack
 if ((forced)); then
-  echo "and, with --replace, each edge's instance and boot volume, one edge at a time; ports stay"
+  echo "and, with --replace, the instance and boot volume of edge ${numbers[*]}, one edge at a time; ports stay"
 fi
 ((confirmed)) || confirm "$stack" "roll out" "rolled out"
 
-# check NUMBER: scripts/edge-check for edge NUMBER. stack-env keeps the state passphrase out of the
-# environment of what it runs, and edge-check, which sources stack-env itself, needs it again.
+# check NUMBER: scripts/edge-check for edge NUMBER, under this run's lock.
 check() {
-  TF_STATE_PASSPHRASE=${TF_STATE_PASSPHRASE-} "$here/edge-check" --edge "$1"
+  edge_check_passes "$1"
+}
+
+# other_down_typed NUMBER OTHER: whether the operator, told that OTHER does not serve either, types
+# the sentence that names both edges, --yes or not: replacing NUMBER then leaves no edge serving
+# until it passes its check.
+other_down_typed() {
+  local expected="replace edge $1 with edge $2 down" answer=
+  printf 'Edge %s does not serve either, so no edge serves until edge %s passes its check. Type "%s" to replace it anyway: ' "$2" "$1" "$expected" >&2
+  read -r answer || true
+  [[ $answer == "$expected" ]]
 }
 
 # records_new_keys NUMBER: shows the host keys edge NUMBER offers and records them once yes is
@@ -96,12 +127,19 @@ passes() {
 # makes from the image and deletes with the instance, goes with it, and its port, which holds the
 # fixed address and the floating IP's association, is kept, so the new instance boots on the same
 # port, at the same addresses.
-for number in 1 2; do
+replaced_numbers=()
+for number in "${numbers[@]}"; do
   other=$((3 - number))
   echo "edge $number: checking that edge $other serves before it is replaced"
   if ! check "$other"; then
-    infra_error "edge $other does not pass its check, so edge $number is not replaced"
-    exit 1
+    if ((!other_down)); then
+      infra_error "edge $other does not pass its check, so edge $number is not replaced; to replace edge $number while edge $other is down, run: just edge-rollout --replace --edge $number --other-down"
+      exit 1
+    fi
+    if ! other_down_typed "$number" "$other"; then
+      infra_error "edge $number is not replaced while edge $other is down, as that was not typed back"
+      exit 1
+    fi
   fi
   echo "edge $number: replacing"
   replace=()
@@ -111,12 +149,14 @@ for number in 1 2; do
   stack_tofu plan -input=false -out="$plan_file" "-target=module.edge[\"$number\"]" \
     "-target=openstack_networking_floatingip_associate_v2.edge[\"$number\"]" "${replace[@]}" > /dev/null
   stack_tofu show -json "$plan_file" | plan_summary
-  # Only an instance the plan replaces has new host keys; an edge the plan changes in place keeps
-  # the recorded ones, which are never dropped and asked for again without cause.
-  replaced=$(edge_replaced)
-  if [[ $'\n'$replaced$'\n' == *$'\n'$number$'\n'* ]]; then
+  # Only an instance the plan creates, replacing the old one or not, has new host keys; an edge the
+  # plan changes in place keeps the recorded ones, which are never dropped and asked for again
+  # without cause.
+  created=$(edge_created)
+  if [[ $'\n'$created$'\n' == *$'\n'$number$'\n'* ]]; then
     edge_forget_keys "$number"
     apply_plan
+    replaced_numbers+=("$number")
     echo "edge $number: applied; its SSH host keys are new"
     if ! records_new_keys "$number"; then
       infra_error "edge $number's new SSH host key was not recorded within ${wait_seconds}s or was not accepted; the rollout stops here and no later edge was touched"
@@ -133,5 +173,10 @@ for number in 1 2; do
   fi
 done
 
-echo "$stack: both edges replaced and passing; what is left of the plan:"
+if ((${#replaced_numbers[@]} == 0)); then
+  echo "$stack: no edge was replaced, and edge ${numbers[*]} passes; what is left of the plan:"
+else
+  echo "$stack: edge ${replaced_numbers[*]} replaced, and edge ${numbers[*]} passes; what is left of the plan:"
+fi
 plan_stack
+echo "what is left is not applied: the rollout applies each edge's own part alone; just infra-apply sto2/edge applies the rest"

@@ -52,8 +52,8 @@ JSON
   done
   # The plan a run saves is plan.json, the change the configuration makes, with the instance of each
   # edge given with -replace replaced as well, and, when the run targets one edge, that edge's part
-  # of it only. Once applied, the address of each edge whose instance the saved plan replaces offers
-  # a new host key.
+  # of it only. Once applied, the address of each edge whose instance the saved plan creates, alone
+  # or as a replacement, offers a new host key.
   fake tofu << EOF
 printf '%s\n' "tofu \$*" >> "$RECORD/argv"
 case \${2-} in
@@ -77,7 +77,7 @@ case \${2-} in
         "\${forced[@]}" > "$RECORD/plan.saved"
     ;;
   apply)
-    for number in \$(jq -r '.resource_changes[] | select(.type == "openstack_compute_instance_v2" and (.change.actions | index("delete")))
+    for number in \$(jq -r '.resource_changes[] | select(.type == "openstack_compute_instance_v2" and (.change.actions | index("create")))
         | .address | capture("^module\\\\.edge\\\\[\"(?<n>[12])\"\\\\]").n' "$RECORD/plan.saved"); do
       case \$number in
         1) echo "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${ADDRESS_1//./}Replacement" > "$HOST/key-$ADDRESS_1" ;;
@@ -558,6 +558,148 @@ EOF
   [ "$(recorded 2)" = "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${ADDRESS_2//./}Original" ]
 }
 
+# instance_plan NUMBER ACTIONS: a plan, as tofu show -json prints it, whose only change is ACTIONS,
+# a JSON list such as ["create"], on the instance of edge NUMBER.
+instance_plan() {
+  jq -n --arg number "$1" --argjson actions "$2" '{resource_changes: [{
+    address: "module.edge[\"\($number)\"].openstack_compute_instance_v2.this", mode: "managed",
+    type: "openstack_compute_instance_v2", change: {actions: $actions}}]}' > "$BATS_TEST_TMPDIR/plan.json"
+}
+
+@test "infra-apply replaces or deletes one edge only while the other passes its check" {
+  real_edge_check
+  edge_state 1 inactive "" "" 0
+  edge_state 2 active "$WORKERS" 203.0.113.17/32
+  original_2=$(recorded 2)
+  # Edge 1 does not serve: a plan that replaces edge 2, or deletes it, would leave none serving.
+  for actions in '["delete", "create"]' '["delete"]'; do
+    instance_plan 2 "$actions"
+    : > "$RECORD/argv"
+    run env "${ENVIRONMENT[@]}" "$REPO/scripts/infra-apply" sto2/edge --yes < /dev/null
+    echo "$output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"edge 1 does not pass its check, so the plan that takes edge 2 down is not applied"* ]]
+    [[ $output == *"just edge-rollout --replace --edge 2 --other-down"* ]]
+    grep -qx 'edge-check --edge 1' "$RECORD/argv"
+    absent '^tofu .* apply ' "$RECORD/argv"
+    [ "$(recorded 2)" = "$original_2" ]
+  done
+
+  # Once edge 1 serves, the plan is applied, after edge 1's check.
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  instance_plan 2 '["delete", "create"]'
+  : > "$RECORD/argv"
+  run env "${ENVIRONMENT[@]}" "$REPO/scripts/infra-apply" sto2/edge --yes < /dev/null
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(sequence | grep -v '^plan$')" = "$(printf '%s\n' 'check 1' 'forget 2' 'apply')" ]
+
+  # A plan that only creates edge 2, gone from the cloud, takes nothing down and needs no check.
+  edge_state 1 inactive "" "" 0
+  instance_plan 2 '["create"]'
+  : > "$RECORD/argv"
+  run env "${ENVIRONMENT[@]}" "$REPO/scripts/infra-apply" sto2/edge --yes < /dev/null
+  echo "$output"
+  [ "$status" -eq 0 ]
+  absent '^edge-check ' "$RECORD/argv"
+}
+
+@test "an edge whose instance a plan creates has its recorded host keys dropped, and new ones recorded" {
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_state 2 active "$WORKERS" 203.0.113.17/32
+  original_1=$(recorded 1)
+  # Edge 2's instance is gone from the cloud: the refreshed plan creates it, and deletes nothing.
+  instance_plan 2 '["create"]'
+  run env "${ENVIRONMENT[@]}" "$REPO/scripts/infra-apply" sto2/edge --yes < /dev/null
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(trail)" = "$(printf '%s\n' 'forget 2' 'apply')" ]
+  [ "$(recorded 2)" = "" ]
+  [ "$(recorded 1)" = "$original_1" ]
+  [[ $output == *"edge 2's SSH host keys are no longer recorded"* ]]
+  # The new instance's keys are shown and recorded once yes is typed, and its check passes.
+  run bash -c 'printf "yes\n" | env "$@"' _ "${ENVIRONMENT[@]}" "$REPO/scripts/edge-check" --edge 2
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(recorded 2)" = "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${ADDRESS_2//./}Replacement" ]
+
+  # The rollout does the same for an edge its plan only creates: the old keys go before the apply
+  # and the new ones are recorded before the edge's check.
+  original_keys
+  : > "$RECORD/argv"
+  run bash -c 'printf "yes\n" | env "$@"' _ "${ENVIRONMENT[@]}" "$REPO/scripts/edge-rollout" --yes
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(trail)" = "$(printf '%s\n' 'ssh 2' 'apply' 'ssh 1' 'ssh 1' 'forget 2' 'apply' 'scan 2' 'ssh 2')" ]
+  [ "$(recorded 2)" = "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${ADDRESS_2//./}Replacement" ]
+}
+
+@test "destroying the edge stack drops the edges' recorded host keys" {
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  echo "198.51.100.200 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOfAnotherHost" >> "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts"
+  echo '{"resource_changes": []}' > "$BATS_TEST_TMPDIR/plan.json"
+  run env "${ENVIRONMENT[@]}" "$REPO/scripts/infra-destroy" sto2/edge --yes < /dev/null
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(recorded 1)" = "" ]
+  [ "$(recorded 2)" = "" ]
+  grep -q '^198.51.100.200 ' "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts"
+  [[ $output == *"the edges' SSH host keys are no longer recorded"* ]]
+  no_address "$output"
+}
+
+@test "edge-rollout --replace --edge replaces the one edge named, and with the other down only once that is typed back" {
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_state 2 active "$WORKERS" 203.0.113.17/32
+  echo '{"resource_changes": []}' > "$BATS_TEST_TMPDIR/plan.json"
+  real_edge_check
+  : > "$RECORD/argv"
+  run bash -c 'printf "yes\n" | env "$@"' _ "${ENVIRONMENT[@]}" "$REPO/scripts/edge-rollout" --replace --edge 2 --yes
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(sequence)" = "$(printf '%s\n' \
+    'plan' \
+    'check 1' \
+    'plan -target=module.edge["2"] -target=openstack_networking_floatingip_associate_v2.edge["2"] -replace=module.edge["2"].openstack_compute_instance_v2.this' \
+    'forget 2' 'apply' 'scan 2' 'check 2' \
+    'plan')" ]
+  absent 'edge\["1"\]' "$RECORD/argv"
+
+  # Edge 1 is down as well: edge 2 is not replaced, and the run names the way to do it anyway.
+  original_keys
+  edge_state 1 inactive "" "" 0
+  : > "$RECORD/argv"
+  run bash -c 'printf "yes\n" | env "$@"' _ "${ENVIRONMENT[@]}" "$REPO/scripts/edge-rollout" --replace --edge 2 --yes
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"edge 1 does not pass its check, so edge 2 is not replaced"* ]]
+  [[ $output == *"--other-down"* ]]
+  absent '^tofu .* apply ' "$RECORD/argv"
+
+  # --other-down asks for the sentence that names both edges, --yes or not; anything else stops it.
+  : > "$RECORD/argv"
+  run bash -c 'printf "yes\n" | env "$@"' _ "${ENVIRONMENT[@]}" "$REPO/scripts/edge-rollout" --replace --edge 2 --other-down --yes
+  echo "$output"
+  [ "$status" -ne 0 ]
+  absent '^tofu .* apply ' "$RECORD/argv"
+  [ "$(recorded 2)" = "AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOf${ADDRESS_2//./}Original" ]
+
+  : > "$RECORD/argv"
+  run bash -c 'printf "replace edge 2 with edge 1 down\nyes\n" | env "$@"' _ "${ENVIRONMENT[@]}" "$REPO/scripts/edge-rollout" --replace --edge 2 --other-down --yes
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(sequence)" = "$(printf '%s\n' \
+    'plan' \
+    'check 1' \
+    'plan -target=module.edge["2"] -target=openstack_networking_floatingip_associate_v2.edge["2"] -replace=module.edge["2"].openstack_compute_instance_v2.this' \
+    'forget 2' 'apply' 'scan 2' 'check 2' \
+    'plan')" ]
+
+  # --other-down replaces one named edge only.
+  run env "${ENVIRONMENT[@]}" "$REPO/scripts/edge-rollout" --replace --other-down --yes < /dev/null
+  [ "$status" -eq 2 ]
+}
+
 @test "applying a plan that replaces one edge drops its recorded host keys and no other edge's" {
   edge_state 1 active "$WORKERS" 203.0.113.17/32
   edge_state 2 active "$WORKERS" 203.0.113.17/32
@@ -566,7 +708,8 @@ EOF
   run env "${ENVIRONMENT[@]}" "$REPO/scripts/infra-apply" sto2/edge --yes
   echo "$output"
   [ "$status" -eq 0 ]
-  [ "$(trail)" = "$(printf '%s\n' 'forget 2' 'apply')" ]
+  # Edge 1 is checked over its connection first, as the plan takes edge 2 down.
+  [ "$(trail)" = "$(printf '%s\n' 'ssh 1' 'forget 2' 'apply')" ]
   [ "$(recorded 2)" = "" ]
   [ "$(recorded 1)" = "$original_1" ]
   no_address "$output"

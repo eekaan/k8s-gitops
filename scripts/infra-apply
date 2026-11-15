@@ -4,7 +4,8 @@
 # object storage. After a cluster stack, it writes the cluster's talman.yaml as infra-talman does.
 # Usage: scripts/infra-apply <region>/<stack> [--yes], such as scripts/infra-apply sto2/plumbing;
 # --yes may come before the stack too. A plan for sto2/edge that replaces both edge routers is
-# refused: scripts/edge-rollout replaces them one at a time.
+# refused: scripts/edge-rollout replaces them one at a time. One that replaces or deletes one edge
+# is refused while the other does not pass scripts/edge-check.
 set -euo pipefail
 
 here=$(dirname "$0")
@@ -40,22 +41,27 @@ init_stack
 echo "$stack:"
 plan_stack
 # One plan replacing both edge routers would leave none serving; edge-rollout does it one at a time.
-edge_replaced_numbers=()
+# One that takes one edge down is applied only while the other serves.
+edge_replaced_numbers=() edge_created_numbers=() forgotten=()
 if [[ $stack == */edge ]]; then
   edge_refuse_double_replace
+  edge_require_other_serves
+  mapfile -t edge_created_numbers < <(edge_created)
 fi
 ((confirmed)) || confirm "$stack" apply applied
-# A replaced edge's instance has new SSH host keys at the same address, so the recorded ones go
-# before it is replaced; edge-check records the new ones, showing their fingerprints.
-if ((${#edge_replaced_numbers[@]} > 0)); then
+# An edge's new instance, a replacement or one created again, has new SSH host keys at the address
+# the old one had, so the recorded ones go before the apply; edge-check records the new ones,
+# showing their fingerprints. A stack applied for the first time has none recorded.
+if ((${#edge_created_numbers[@]} > 0)) && edge_applied; then
   edge_load
-  edge_forget_keys "${edge_replaced_numbers[@]}"
+  edge_forget_keys "${edge_created_numbers[@]}"
+  forgotten=("${edge_created_numbers[@]}")
 fi
 apply_plan
 echo "$stack applied"
-if ((${#edge_replaced_numbers[@]} > 0)); then
-  echo "the replaced edge's SSH host keys are no longer recorded; just edge-check shows the new ones and records them once yes is typed"
-fi
+for number in "${forgotten[@]}"; do
+  echo "edge $number's SSH host keys are no longer recorded; just edge-check --edge $number shows the new ones and records them once yes is typed"
+done
 # The apply can change the nodes and their addresses, so talman.yaml is written again from the
 # state it left, under this run's lock.
 if [[ $stack == */cluster ]]; then
