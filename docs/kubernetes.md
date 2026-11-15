@@ -634,10 +634,14 @@ alert, unless:
   a `for`;
 - its `runbook_url` is `https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/<file>.md#<heading>`
   and the heading exists in that file of this tree;
-- a unit test of the alert expects it to fire after exactly its `for`, and another expects it
-  quiet: an `alert_rule_test` of its name with `exp_alerts`, and one without at a time before the
-  alert fires in the same test group, when every one of the group's `input_series` has a sample no
-  older than the 5 minutes Prometheus looks back.
+- its unit tests hold, in one test group, a case in which it fires and a case one evaluation
+  earlier in which it stays quiet, an `alert_rule_test` of its name with `exp_alerts` and one
+  without, which pins when it starts to fire, and so its `for`, to within one evaluation: promtool
+  evaluates the rules every `evaluation_interval` of the test file, 1m unless set;
+- and, in a test group in which it fires, a case before it fires in which it stays quiet while
+  every one of the group's `input_series` has a sample no older than the 5 minutes Prometheus looks
+  back. That case need not be the one an evaluation before it fires: an alert on a series' absence
+  is pending while the series is gone.
 
 The own alerts, each with its runbook section in [docs/runbooks/alerts.md](runbooks/alerts.md):
 

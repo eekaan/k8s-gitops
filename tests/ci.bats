@@ -180,6 +180,24 @@ runs_of() {
   [[ $output == *"ok "*" The rules are checked with the Prometheus image the chart deploys, in the static group of just ci"* ]]
 }
 
+# bats test_tags=hermetic
+@test "just ci reports a chart rules-check cannot pull as rules-check's failure, beside the group's other checks" {
+  checkout
+  # A chart version the registry does not have, so rules-image cannot pull the chart.
+  TAG=0.0.0-none yq -i '.spec.ref.tag = strenv(TAG)' "$WORK/kubernetes/apps/base/monitoring/kube-prometheus-stack/app/ocirepository.yaml"
+  sed -i 's/^checks:.*$/& rules-only/' "$WORK/justfile"
+  printf '\nrules-only: rules-check check-literals\n' >> "$WORK/justfile"
+
+  run_ci rules-only
+
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"== rules-only: failed (rules-check check-literals)"* ]]
+  [[ $output == *"rules-check:"*"kube-prometheus-stack:0.0.0-none: not found"* ]]
+  [[ $output == *"No undeclared address literals in the files git would commit."* ]]
+  [[ $output == *"failed: rules-only"* ]]
+}
+
 @test "just ci shows every step where there is no terminal" {
   checkout
   bin="$BATS_TEST_TMPDIR/shown"

@@ -170,7 +170,7 @@ promtool_calls() {
 }
 
 @test "An alert without a test in which it fires, or without one in which it stays quiet, fails the check" {
-  local app alert lacking tests
+  local app alert lacking tests times time
   [ "$(own_alerts "$RENDER" | wc -l)" -ge 1 ]
   while read -r app alert; do
     for lacking in fires quiet; do
@@ -224,6 +224,38 @@ promtool_calls() {
     echo "$app $alert, quiet only after it fires: status $status: $output"
     [ "$status" -ne 0 ]
     [[ $output == *"alert $alert: no test in which it stays quiet"* ]]
+    # Every series must have a sample: one series of the group that starts later, or whose last
+    # sample is more than the 5 minutes Prometheus looks back old at each quiet test, is enough.
+    fixture
+    tests="$FX/repo/tests/rules/$app.yaml"
+    ALERT="$alert" yq -i '(.tests[] | select(.alert_rule_test | map(.alertname) | contains([strenv(ALERT)])) | .input_series[0].values) |= "_x10000 " + .' "$tests"
+    collect
+    echo "$app $alert, one series that starts later: status $status: $output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"alert $alert: no test in which it stays quiet, an alert_rule_test"* ]]
+    fixture
+    tests="$FX/repo/tests/rules/$app.yaml"
+    ALERT="$alert" yq -i '(.tests[] | select(.alert_rule_test | map(.alertname) | contains([strenv(ALERT)])) | .input_series[0].values) = "1"' "$tests"
+    collect
+    echo "$app $alert, one series with only an old sample: status $status: $output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"alert $alert: no test in which it stays quiet, an alert_rule_test"* ]]
+    # Its tests in which it fires one evaluation later: the quiet test one evaluation before each is
+    # then two before, and nothing pins when the alert starts to fire. The tests' times are minutes,
+    # an evaluation apart.
+    fixture
+    tests="$FX/repo/tests/rules/$app.yaml"
+    [ "$(yq '.evaluation_interval // "1m"' "$tests")" = 1m ]
+    times="$(ALERT="$alert" yq '.tests[].alert_rule_test[] | select(.alertname == strenv(ALERT)) | .eval_time' "$tests")"
+    [ -n "$times" ]
+    while read -r time; do
+      [[ $time =~ ^[0-9]+m$ ]]
+    done <<<"$times"
+    ALERT="$alert" yq -i '(.tests[].alert_rule_test[] | select(.alertname == strenv(ALERT) and ((.exp_alerts // []) | length) > 0) | .eval_time) |= ((sub("m$"; "") | to_number) + 1 | tostring) + "m"' "$tests"
+    collect
+    echo "$app $alert, firing one evaluation later: status $status: $output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"alert $alert: no test in which it stays quiet one evaluation"* ]]
   done < <(own_alerts "$RENDER")
   # The tree as it is passes, and a test that only expects nothing is not a test that it fires.
   fixture
@@ -302,8 +334,10 @@ promtool_calls() {
   # and features name it as text. dagger.lock is Dagger's record of the lookups it made: a local
   # just ci writes there the digest it resolved for the tag, which the tree does not commit and
   # nothing reads once the tag moves.
-  named="$(cd "$REPO" && git ls-files -z --cached --others --exclude-standard -- . ':!docs/' ':!tests/' ':!features/' ':!dagger.lock' |
-    while IFS= read -r -d '' file; do [ ! -f "$file" ] || grep -Il -- 'prometheus/prometheus' "$file" || true; done)"
+  # The list is written first, so a git that fails fails the test, and must hold the justfile.
+  (cd "$REPO" && git ls-files -z --cached --others --exclude-standard -- . ':!docs/' ':!tests/' ':!features/' ':!dagger.lock') > "$BATS_TEST_TMPDIR/files"
+  tr '\0' '\n' < "$BATS_TEST_TMPDIR/files" | grep -qx justfile
+  named="$(cd "$REPO" && while IFS= read -r -d '' file; do [ ! -f "$file" ] || grep -Il -- 'prometheus/prometheus' "$file" || true; done < "$BATS_TEST_TMPDIR/files")"
   echo "files that name the image: $named"
   [ -z "$named" ]
   # A chart update that moves the tag moves the image with it: a copy of the tree whose chart names

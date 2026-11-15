@@ -76,7 +76,7 @@ refused() {
   fi
   if ! grep -qF -- "$expected" <<<"$(part "$output" "$cluster" "$which")"; then
     echo "$output"
-    echo "rules-refusal: promtool's check rules of the $which rules did not refuse $what, naming it: no line with $expected" >&2
+    echo "rules-refusal: promtool's check rules did not refuse $what under its heading for the rules $which, naming it: no line with $expected" >&2
     exit 1
   fi
   echo "rules-refusal: promtool's check rules refuses $what, naming it"

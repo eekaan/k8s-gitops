@@ -280,11 +280,18 @@ type Group {
     # works in a directory of its own, where mise's shims find no version. The check fails when the
     # render names another image.
     let rules: [Run!]! = if (checks.contains("rules-check")) {
-      let image = checkout.withExec(["scripts/rules-image"]).stdout.trimSpace
-      [Run(label: "rules-check", ctr: checkout
-        .withFile("/usr/local/bin/promtool", container.from(image).file("/bin/promtool"))
-        .withExec(["chmod", "+x", "/usr/local/bin/promtool"])
-        .withExec(["bash", "-c", `PATH="$(mise bin-paths | paste -sd: -):$PATH"; export PATH; exec 2>&1; scripts/rules-config /tmp/rules-check && { [ "$(cat /tmp/rules-check/image)" = "$1" ] || { echo "the render deploys $(cat /tmp/rules-check/image), not $1, which promtool came from"; exit 1; }; } && scripts/rules-promtool /tmp/rules-check promtool && scripts/rules-refusal /tmp/rules-check promtool`, "bash", image]))]
+      # rules-image pulls the chart: when it cannot, the check fails with what rules-image printed,
+      # and the group's other checks still report.
+      let found = Run(label: "", ctr: checkout.withExec(["scripts/rules-image"])).outcome
+      if (found.passed) {
+        let image = found.output.trimSpace
+        [Run(label: "rules-check", ctr: checkout
+          .withFile("/usr/local/bin/promtool", container.from(image).file("/bin/promtool"))
+          .withExec(["chmod", "+x", "/usr/local/bin/promtool"])
+          .withExec(["bash", "-c", `PATH="$(mise bin-paths | paste -sd: -):$PATH"; export PATH; exec 2>&1; scripts/rules-config /tmp/rules-check && { [ "$(cat /tmp/rules-check/image)" = "$1" ] || { echo "the render deploys $(cat /tmp/rules-check/image), not $1, which promtool came from"; exit 1; }; } && scripts/rules-promtool /tmp/rules-check promtool && scripts/rules-refusal /tmp/rules-check promtool`, "bash", image]))]
+      } else {
+        [Run(label: "rules-check", ctr: checkout.withNewFile("/tmp/rules-image.out", found.output).withExec(["sh", "-c", `cat /tmp/rules-image.out; echo "rules-image found no Prometheus image to take promtool from"; exit 1`]))]
+      }
     } else {
       []
     }

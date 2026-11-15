@@ -26,9 +26,9 @@ Feature: Alerts
     Then the check fails, and promtool's check rules of the charts' or of the tree's own rules names the rule
 
   Scenario: An alert without a test in which it fires, or without one in which it stays quiet, fails the check
-    Given the tree's own rules and a unit test file that lacks, for one alert, a test with an alert expected, or a test with none expected at a time before it fires when every series of its test group has a sample
+    Given the tree's own rules and a unit test file that lacks, for one alert, a test with an alert expected, a test with none expected one evaluation before the first in its group with the alert expected, or a test with none expected at a time before it fires when every series of its test group has a sample
     When the rules are collected for the check
-    Then the check fails, naming the alert and which of the two tests it lacks
+    Then the check fails, naming the alert and which test it lacks
 
   Scenario: An alert without a known severity, a summary, a description or a runbook heading that exists fails the check
     Given the tree's own rules, one alert at a time with its severity, summary, description or runbook link broken
