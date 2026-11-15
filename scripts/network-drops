@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# Lists, reading only, the flows the cluster's network policies drop or, in audit mode, would drop:
+# the recent flows with the verdict DROPPED or AUDIT that each Cilium agent's Hubble holds, through
+# the cluster's kubeconfig, as one line per source, destination, port and verdict with the number
+# of flows that match, the most frequent first:
+#   COUNT VERDICT SOURCE DESTINATION PORT/PROTOCOL
+# SOURCE and DESTINATION are NAMESPACE/POD, or @world, @host, @remote-node and the like for an
+# endpoint that is no pod. It never prints an address: the flows are reduced to the fields above in
+# jq, and kubectl's and Hubble's own errors, which can name addresses, go nowhere.
+# It runs the agent's own hubble through kubectl exec, so the kubeconfig needs exec on the Cilium
+# agents' pods in kube-system, more than a reading recipe otherwise needs. Two things bound it: each
+# agent is asked for its last NETWORK_DROPS_LAST flows (500 when unset), which Hubble sends and then
+# ends the stream, and each kubectl call is stopped after NETWORK_DROPS_TIMEOUT seconds (60 when
+# unset); Hubble's --timeout is only how long it dials its own server. An agent that does not answer
+# in time is named, and the run fails after the others are listed.
+# docs/kubernetes.md, Network policy, says what to look for.
+# Usage: scripts/network-drops [cluster]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/cluster.sh
+. "$here/lib/cluster.sh"
+# shellcheck source=scripts/lib/errors.sh
+. "$here/lib/errors.sh"
+
+if (($# > 1)) || [[ ${1-} == -* ]]; then
+  infra_error "usage: network-drops [cluster]"
+  exit 2
+fi
+
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "${1-}"
+complete=1
+require_kubeconfig || complete=0
+require_commands kubectl jq || complete=0
+((complete))
+
+last=${NETWORK_DROPS_LAST:-500}
+if [[ ! $last =~ ^[1-9][0-9]{0,4}$ ]]; then
+  infra_error "NETWORK_DROPS_LAST is a number of flows from 1 to 99999, not $last"
+  exit 2
+fi
+bound=${NETWORK_DROPS_TIMEOUT:-60}
+if [[ ! $bound =~ ^[1-9][0-9]{0,3}$ ]]; then
+  infra_error "NETWORK_DROPS_TIMEOUT is a number of seconds from 1 to 9999, not $bound"
+  exit 2
+fi
+
+tmp=$(mktemp -d)
+call='' timer=''
+# Nothing this started outlives it, however it ends: the call and the timer that still run are
+# stopped, and the run's files removed.
+# shellcheck disable=SC2329 # It runs from the EXIT trap.
+stop() {
+  local pid
+  for pid in ${call:+"$call"} ${timer:+"$timer"}; do
+    kill "$pid" 2> /dev/null || true
+  done
+  rm -rf -- "$tmp"
+}
+trap 'stop' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+agents=$(kubectl get pods --namespace kube-system --selector k8s-app=cilium --output name \
+  --request-timeout=10s 2> /dev/null) || {
+  infra_error "cannot list the Cilium agents in kube-system through the kubeconfig"
+  exit 1
+}
+[[ -n $agents ]] || {
+  infra_error "no Cilium agent runs in kube-system"
+  exit 1
+}
+
+# The fields of a flow worth showing, and none that holds an address.
+# shellcheck disable=SC2016 # jq's own variables.
+reduce='
+  def ep($e):
+    if ($e.pod_name // "") != "" then "\($e.namespace)/\($e.pod_name)"
+    else (($e.labels // []) | map(select(startswith("reserved:"))) | (first // "reserved:unknown") | sub("^reserved:"; "@")) end;
+  select(.flow != null) | .flow
+  | ((.l4.TCP // .l4.UDP // .l4.SCTP // {}).destination_port // 0) as $port
+  | (if .l4.TCP then "tcp" elif .l4.UDP then "udp" elif .l4.SCTP then "sctp" else "other" end) as $proto
+  | [.verdict, ep(.source), ep(.destination), "\($port)/\($proto)"] | @tsv'
+
+failed=0
+while IFS= read -r agent; do
+  # A name read from the cluster reaches kubectl only once it has the shape of a pod's.
+  if [[ ! $agent =~ ^pod/[a-z0-9]([-a-z0-9.]*[a-z0-9])?$ ]]; then
+    echo "network-drops: an agent's name is not a pod name; skipped" >&2
+    failed=1
+    continue
+  fi
+  # kubectl is the process whose id call holds, so the bound stops kubectl itself: whichever of it
+  # and the timer ends first, the other is stopped.
+  (exec_tool kubectl exec --namespace kube-system --container cilium-agent "$agent" -- \
+    hubble observe --timeout 30s --last "$last" --verdict DROPPED --verdict AUDIT --output json) \
+    > "$tmp/agent" 2> /dev/null &
+  call=$!
+  sleep "$bound" &
+  timer=$!
+  wait -n "$call" "$timer" || true
+  kill "$call" "$timer" 2> /dev/null || true
+  if wait "$call" && jq -r "$reduce" < "$tmp/agent" >> "$tmp/flows" 2> /dev/null; then
+    :
+  else
+    echo "network-drops: ${agent#pod/} did not answer" >&2
+    failed=1
+  fi
+  wait "$timer" 2> /dev/null || true
+  call='' timer=''
+done <<< "$agents"
+
+if [[ -s $tmp/flows ]]; then
+  sort "$tmp/flows" | uniq -c | sort -k1,1nr -k2 | sed -E 's/^ *([0-9]+) /\1\t/' | tr '\t' ' '
+else
+  echo "no dropped or audited flow among the agents' recent flows"
+fi
+exit "$failed"

@@ -1,0 +1,56 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What the backup movers of the namespace let through, on top of its default deny: they resolve the
+# repository's name and reach the object storage, and nothing else. The movers are the pods VolSync
+# labels as created by it, for every application of the namespace that adds components/volsync; they
+# take no connection. Two policies: the object storage's rule carries a reason of its own.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: volsync-movers
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/created-by: volsync
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    # The cluster's resolver, for the repository's name.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# The object storage, where the movers' repositories are. Its endpoint is outside the cluster, and
+# cluster-config gives it as a URL, which a DNS name rule cannot take, so the policy allows the world
+# on 443, the port https reaches an endpoint without one on (docs/kubernetes.md, Network policy).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: volsync-movers-object-storage
+  annotations:
+    k8s-gitops/network-policy-reason: the repository is in the object storage outside the cluster, whose endpoint cluster-config holds as a URL and so cannot name a DNS name here; the movers reach it on 443 only
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/created-by: volsync
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP

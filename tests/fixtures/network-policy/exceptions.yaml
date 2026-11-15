@@ -1,0 +1,5 @@
+---
+exceptions:
+  - namespace: legacy
+    reason: its pod runs in the host's network namespace, which policy does not select
+    covered-by: the node firewall

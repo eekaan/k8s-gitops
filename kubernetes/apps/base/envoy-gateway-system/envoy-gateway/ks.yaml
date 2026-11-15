@@ -9,8 +9,10 @@ spec:
   path: ./apps/base/envoy-gateway-system/envoy-gateway/app
   targetNamespace: envoy-gateway-system
   # The GatewayClass is a Gateway API object, and the controller watches only the kinds whose
-  # definitions exist when it starts, so both sets of definitions come first.
+  # definitions exist when it starts, so both sets of definitions come first. Its
+  # CiliumNetworkPolicy is a kind Cilium's operator defines.
   dependsOn:
+    - name: cilium
     - name: gateway-api-crds
     - name: envoy-gateway-crds
   # Ready only once the controller runs, so an application that names this one in dependsOn finds

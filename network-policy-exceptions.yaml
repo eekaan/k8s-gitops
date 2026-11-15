@@ -1,0 +1,117 @@
+---
+# The namespaces the cluster deploys into that do not hold the default deny of both directions, each
+# with the reason and what covers it instead. scripts/network-policy-check (just
+# network-policy-check, and tests/network-policy.bats for the tree) reads this file together with
+# the render of kubernetes/; docs/kubernetes.md, Network policy, says what it requires.
+#
+# A namespace is here or holds a NetworkPolicy that selects every pod and names Ingress and Egress
+# with no rule. An entry for a namespace that holds that policy, or that the render has no object
+# in, fails the check. An entry has:
+#   namespace   the namespace
+#   reason      a sentence: why it has no default deny
+#   covered-by  what limits its traffic instead
+exceptions:
+  - namespace: kube-system
+    reason: Cilium's agent, its Envoy and its operator run in the host's network namespace, which a
+      pod policy does not select; the cluster's resolver takes queries from every namespace; and the
+      flows of the pod-network workloads (Spegel, Hubble Relay, metrics-server, which the API server
+      calls as the metrics API, the descheduler, kubelet-csr-approver, Reflector, Reloader and the
+      VPA recommender) are not yet enumerated
+    covered-by: the node firewall (ADR 0017) for the host-network pods, and the namespace's Pod
+      Security level
+  - namespace: flux-system
+    reason: the Flux operator and the controllers it installs reach the API server and the
+      registries that hold the signed artifact and the charts; their flows are not yet enumerated as
+      allows
+    covered-by: the NetworkPolicies the Flux Operator makes for its instance at run time, which no
+      render holds (the controllers take connections from their own namespace only, but for the
+      metrics port and the notification receiver), and the operator's own NetworkPolicy for its web
+      interface, flux-operator-web, which its chart renders and the check passes only while this
+      entry stands; the namespace's Pod Security level and the node firewall (ADR 0017)
+  - namespace: monitoring
+    reason: Prometheus scrapes pods of every namespace and the nodes, the node exporter runs in the
+      host's network namespace, the API server calls the Prometheus operator's admission webhook,
+      and the flows of the log collector, VictoriaLogs and Grafana are not yet enumerated
+    covered-by: the namespace's Pod Security level and the node firewall (ADR 0017)
+  - namespace: openbao
+    reason: the secret store takes connections from External Secrets, from Prometheus and from its
+      own replicas, and reaches the API server to review the tokens its clients present; those flows
+      are not yet enumerated
+    covered-by: the store's own authentication of every client (ADR 0005), the namespace's Pod
+      Security level and the node firewall (ADR 0017)
+  - namespace: external-secrets
+    reason: the API server calls its webhook from the control planes' host network and its
+      controller reaches the secret store and the API server; the flows are not yet enumerated, and
+      the webhook's callers are observed in audit mode before a policy names them
+    covered-by: the secret store's own authentication of the controller, the namespace's Pod
+      Security level and the node firewall (ADR 0017)
+  - namespace: cert-manager
+    reason: the API server calls its webhook from the control planes' host network; the controller,
+      the CA injector and the startup check reach the API server; for the DNS-01 challenge the
+      controller reaches the ACME CA, the DNS provider's API and the DNS-over-HTTPS resolver its
+      values name on 443, and every authoritative nameserver of the zone on UDP and TCP 53, all
+      outside the cluster, and the cluster's resolver for their names; and Prometheus scrapes its
+      components. The flows are not yet enumerated, and the webhook's callers are observed in audit
+      mode before a policy names them
+    covered-by: the namespace's Pod Security level and the node firewall (ADR 0017)
+  - namespace: cnpg-system
+    reason: the API server calls the operator's webhook from the control planes' host network, and
+      the operator reaches the API server and every database pod it manages; its flows are not yet
+      enumerated
+    covered-by: the namespace's Pod Security level and the node firewall (ADR 0017)
+  - namespace: keda
+    reason: the API server calls the metrics adapter, as the external metrics API, and the admission
+      webhooks from the control planes' host network, and the adapter queries the operator; its
+      flows are not yet enumerated
+    covered-by: the namespace's Pod Security level and the node firewall (ADR 0017)
+  - namespace: piraeus-datastore
+    reason: the CSI node plugin runs in the host's network namespace, which a pod policy does not
+      select; the LINSTOR controller, the satellites and the CSI plugins talk to each other, the
+      satellites replicate over the pod network, and the API server calls the operator's webhook;
+      its flows are not yet enumerated
+    covered-by: the namespace's Pod Security level and the node firewall (ADR 0017)
+  - namespace: volsync-system
+    reason: the operator reaches the API server and Prometheus scrapes its metrics; the movers run
+      in the applications' namespaces, under their policies; its flows are not yet enumerated
+    covered-by: the namespace's Pod Security level and the node firewall (ADR 0017)
+  - namespace: cilium-secrets
+    reason: it holds only the Roles and RoleBindings Cilium's chart makes for the secrets of TLS
+      interception, and no pod
+    covered-by: no pod runs in it; the namespace enforces the restricted Pod Security level
+  - namespace: ai-system
+    reason: n8n is an application whose allows are not written, not a namespace that cannot hold the
+      default deny. n8n's pod takes the public Gateway's proxies on 5678 and the kubelet's probes on
+      5678 and 5680, reaches its database through n8n-db-rw on 5432, the cluster's resolver and
+      whatever hosts and ports its workflows call outside the cluster, and talks to its task runners
+      on the pod's loopback, which policy does not see; the three PostgreSQL instances take n8n and
+      each other's replication on 5432, the operator in cnpg-system and the kubelet on the status
+      port 8000 and Prometheus on 9187, and reach the API server; the backup movers reach the
+      resolver and the object storage on 443
+    covered-by: the public Gateway's proxies, whose egress here names n8n's pods alone, on 5678,
+      the container port its route sends to, and which forward only to n8n's Service; PostgreSQL's
+      authentication of every client, whose credentials only the operator's Secrets hold; n8n's pod,
+      which mounts no service account token; the namespace's Pod Security level and the node
+      firewall (ADR 0017)
+  - namespace: etcd-snapshots
+    reason: the etcd snapshot job is an application whose allows are not written, not a namespace
+      that cannot hold the default deny. Its pod takes no connection and reaches the control planes'
+      Talos API on 50000 through the Service talos.default, whose endpoints are the control planes'
+      own addresses, the object storage on 443, the hosts it downloads age's release from on 443
+      (the release's URL redirects to a second host, which serves the file), and the cluster's
+      resolver; it mounts no service account token and does not reach the API server
+    covered-by: Talos' own authorisation of every call, which needs a certificate the Talos CA
+      signed and gives the job the role os:etcd:backup alone, in a Secret only this namespace
+      holds; the age archive's pinned SHA-256; the namespace's Pod Security level, in a namespace
+      that holds nothing but the job; and the node firewall (ADR 0017)
+  - namespace: external-dns
+    reason: external-dns is an application whose allows are not written, not a namespace that
+      cannot hold the default deny. Its one pod takes Prometheus' scrape of its metrics port 7979,
+      through the chart's ServiceMonitor, and the kubelet's probes on that port, and no other
+      connection; it reaches the API server to watch Gateways, HTTPRoutes and Namespaces, the DNS
+      provider's API on 443, outside the cluster, and the cluster's resolver
+    covered-by: the provider's API token, from the store's entry cert-manager/cloudflare through an
+      ExternalSecret, whose Secrets are in this namespace and cert-manager's alone, and which the
+      operator scopes to zone read and DNS edit on the cluster's one zone; the name filter, which
+      admits no name outside the cluster's domain but the zone's own; the ClusterRole, which reads
+      Gateways, HTTPRoutes and Namespaces and nothing else and writes nothing; the namespace's Pod
+      Security level and the node firewall (ADR 0017)

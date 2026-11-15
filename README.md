@@ -127,9 +127,12 @@ current. A new version alone leaves the record as it is. With [mise](https://mis
   (`just talos-check`: every node's machine configuration rendered from the template, the patches
   and fixture node data, and validated, offline), the offline build of `kubernetes/`, its render
   with every chart expanded (`just render-check`, which pulls the charts from their public
-  registries), the schemas and images of what it builds and renders (`just kubernetes-validate`,
-  which pulls the charts as well and fetches the schemas and the definitions the tree's sources and
-  its operators publish), the log collector's configuration
+  registries), the network policy posture of its namespaces (`just network-policy-check`: each
+  denies ingress and egress by default or is listed with its reason, every allow leaves the deny
+  to that default, and no policy undoes the default unexplained or names an address; it renders
+  the charts as well), the schemas and images of what it builds and renders
+  (`just kubernetes-validate`, which pulls the charts as well and fetches the schemas and the
+  definitions the tree's sources and its operators publish), the log collector's configuration
   (`just vector-check`: Vector itself validates it and runs its unit tests, in the image the
   collector runs, pinned by digest, so it needs Docker too), the alert rules the tree renders
   (`just rules-check`: promtool, in the image of the Prometheus the rendered chart deploys, checks

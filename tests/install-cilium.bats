@@ -195,9 +195,10 @@ chart_ref() {
   helm show values "$url" --version "$tag" >"$BATS_TEST_TMPDIR/chart-values.yaml"
   # The chart's values.yaml leaves some keys it reads commented out, such as policyAuditMode, which
   # its cilium-configmap.yaml template reads; such a key is defined when a template of the chart
-  # reads it by its whole path.
+  # reads it by its whole path. A path that starts with an upper-case letter is a method Helm gives
+  # .Values, such as AsMap, and no key.
   helm pull "$url" --version "$tag" --untar --untardir "$BATS_TEST_TMPDIR/chart" >/dev/null
-  read="$(grep -rhoE '\.Values(\.[A-Za-z0-9_]+)+' "$BATS_TEST_TMPDIR/chart"/*/templates | sed 's/^\.Values\.//' | sort -u)"
+  read="$(grep -rhoE '\.Values(\.[A-Za-z0-9_]+)+' "$BATS_TEST_TMPDIR/chart"/*/templates | sed 's/^\.Values\.//; /^[A-Z]/d' | sort -u)"
   [ -n "$read" ]
 
   unknown="$(comm -23 <(yq "$keys" "$APP/values.yaml" | sort -u) \
@@ -647,6 +648,9 @@ chart_config() {
   [ "$said" -eq 1 ]
   [ "$value" = true ]
   [ "$(chart_config policy-audit-mode)" = true ]
+  # Enforcement stays in its default mode, so audit mode reports what the agents would enforce:
+  # never would leave no policy to audit.
+  [ "$(chart_config enable-policy)" = default ]
   # A change of the configuration restarts the agents, so each runs the mode it says.
   [ -n "$(yq 'select(.kind == "DaemonSet" and .metadata.name == "cilium")
     | .spec.template.metadata.annotations["cilium.io/cilium-configmap-checksum"] // ""' "$BATS_TEST_TMPDIR/render.yaml")" ]

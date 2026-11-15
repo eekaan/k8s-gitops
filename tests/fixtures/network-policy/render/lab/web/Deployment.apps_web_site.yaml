@@ -1,0 +1,25 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: site
+  namespace: web
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: site
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: site
+    spec:
+      containers:
+        - name: httpd
+          image: example.com/httpd:1
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http

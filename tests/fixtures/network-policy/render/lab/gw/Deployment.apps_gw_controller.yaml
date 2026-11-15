@@ -1,0 +1,18 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: controller
+  namespace: gw
+spec:
+  selector:
+    matchLabels:
+      control-plane: gw-controller
+  template:
+    metadata:
+      labels:
+        control-plane: gw-controller
+    spec:
+      containers:
+        - name: controller
+          image: example.com/controller:1

@@ -1,0 +1,227 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What the Envoy Gateway controller lets through, on top of the namespace's default deny: the proxies
+# fetch their configuration from it and the kubelet probes it; it reaches the API server and the
+# cluster's resolver. It opens no other connection: the proxies are configured over the connection
+# they open to it. No monitor of the tree scrapes its metrics. The API server's calls to its webhook
+# are the next policy's.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: envoy-gateway
+spec:
+  endpointSelector:
+    matchLabels:
+      control-plane: envoy-gateway
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    # The proxies' configuration, served over xDS.
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": envoy-gateway-system
+            app.kubernetes.io/name: envoy
+            app.kubernetes.io/component: proxy
+            app.kubernetes.io/managed-by: envoy-gateway
+      toPorts:
+        - ports:
+            - port: "18000"
+              protocol: TCP
+    # The kubelet's probes.
+    - fromEntities:
+        - host
+      toPorts:
+        - ports:
+            - port: "8081"
+              protocol: TCP
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    # The API server, where the controller reads the Gateway API's objects and writes the proxies'
+    # Deployment, Service and status. A Service's address is translated to the control plane's before
+    # policy applies, so 6443 is the port that counts.
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "6443"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# The topology injector's admission webhook, which the API server calls from the control planes' host
+# network. A call another node's host sends crosses the tunnel as a remote node (bpf/bpf_overlay.c),
+# which Cilium names the API server only for an address it knows as the API server's; a call from
+# the node the pod runs on comes from the host. The rule names all three, on the webhook's port alone.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: envoy-gateway-webhook
+  annotations:
+    k8s-gitops/network-policy-reason: >-
+      the API server calls the webhook from the control planes' host network, and a call from another
+      node reaches the pod as remote-node unless Cilium knows its source address as the API server's;
+      port 9443 only
+spec:
+  endpointSelector:
+    matchLabels:
+      control-plane: envoy-gateway
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    - fromEntities:
+        - kube-apiserver
+        - host
+        - remote-node
+      toPorts:
+        - ports:
+            - port: "9443"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# The certificate job that makes the controller's own certificates before each install and upgrade:
+# it reads and writes Secrets through the API server and takes no connection.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: envoy-gateway-certgen
+spec:
+  endpointSelector:
+    matchLabels:
+      app: certgen
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "6443"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What the public Gateway's proxies let through, on top of the namespace's default deny; no monitor
+# of the tree scrapes their metrics. The
+# controller makes the proxies at run time with the labels below, which the EnvoyProxy of
+# gateway-public names in its spread constraint too; the policy is this application's, with the
+# controller's, because the proxies are the controller's pods.
+#
+# Public traffic arrives from the edge routers, which translate it (ADR 0018), at the address the
+# workers announce, and the node that took the connection may forward it to a proxy on another node
+# (externalTrafficPolicy Cluster). Either way the proxy sees the world: Cilium sends a load-balanced
+# connection from outside the cluster through the tunnel to another node with the world's identity
+# (bpf/lib/nodeport.h), so the rule allows the world, on the listener ports alone. The listeners
+# are on the container ports the controller derives from the Gateway's: 80 and 443 are privileged,
+# so it adds 10000.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: public-proxy
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: envoy
+      app.kubernetes.io/component: proxy
+      app.kubernetes.io/managed-by: envoy-gateway
+      gateway.envoyproxy.io/owning-gateway-name: public
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    - fromEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "10080"
+              protocol: TCP
+            - port: "10443"
+              protocol: TCP
+    # The kubelet's probes: Envoy Gateway probes the envoy container on its readiness port, 19003,
+    # and the shutdown manager on 19002. The pinned Cilium lets the local host reach its pods
+    # whatever the policies say; the rule states the ports, so that the offline evaluation proves
+    # them, and admits the probes if the agents ever require a rule for the local host.
+    - fromEntities:
+        - host
+      toPorts:
+        - ports:
+            - port: "19003"
+              protocol: TCP
+            - port: "19002"
+              protocol: TCP
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    # The controller, which serves the proxies' configuration.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": envoy-gateway-system
+            control-plane: envoy-gateway
+      toPorts:
+        - ports:
+            - port: "18000"
+              protocol: TCP
+    # The routed backends, one rule for each: the pods its Service selects, in its namespace while
+    # that carries the label the Gateway's https listener selects routes by, on the container port
+    # the route sends to and no other. A backend in a namespace with the default deny still has to
+    # allow the proxies itself; a listed namespace takes them on every port, so its rule is what
+    # keeps them off its other pods and ports, n8n's database among them. A route to another backend
+    # or port adds its rule or port here; tests/network-policy.bats fails until the rules name, in
+    # each labelled namespace, exactly the ports its routes send to.
+    # hello's 8080 in demo.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": demo
+            "k8s:io.cilium.k8s.namespace.labels.k8s-gitops/gateway": public
+            app.kubernetes.io/name: hello
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+    # n8n's 5678 in ai-system.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": ai-system
+            "k8s:io.cilium.k8s.namespace.labels.k8s-gitops/gateway": public
+            app.kubernetes.io/controller: n8n
+            app.kubernetes.io/instance: n8n
+            app.kubernetes.io/name: n8n
+      toPorts:
+        - ports:
+            - port: "5678"
+              protocol: TCP

@@ -110,9 +110,9 @@ l2announcements:
 
 # Policy enforcement stays in the chart's default mode: a pod is open in a direction until a policy
 # that selects it for it asks for the default deny, and then only what the policies allow passes.
-# The agents evaluate every policy and report what it would drop, and drop nothing, until the
-# policies have been watched; taking this line out makes them enforce (docs/kubernetes.md, Service
-# addresses).
+# The agents evaluate every policy and report what it would drop, and drop nothing a policy denies
+# at layers 3 and 4, which is all audit mode covers (no layer-7 rule), until the policies have been
+# watched; taking this line out makes them enforce (docs/kubernetes.md, Service addresses).
 policyAuditMode: true
 
 # Off until something uses them: Gateway API also needs its CRDs, and a cluster mesh needs a second

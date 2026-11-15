@@ -1,0 +1,23 @@
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: proxy
+  namespace: gw
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: envoy
+      app.kubernetes.io/component: proxy
+      app.kubernetes.io/managed-by: envoy-gateway
+      gateway.envoyproxy.io/owning-gateway-name: public
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    - fromEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "10443"
+              protocol: TCP
