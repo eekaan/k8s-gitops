@@ -6,6 +6,10 @@
 
 infra_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 
+# The tools the scripts run get only the secrets they use.
+# shellcheck source=scripts/lib/tools.sh
+. "$(dirname "${BASH_SOURCE[0]}")/tools.sh"
+
 # infra_error MESSAGE: MESSAGE on stderr, after the name of the script that failed.
 infra_error() {
   printf '%s: %s\n' "${0##*/}" "$1" >&2
@@ -158,23 +162,23 @@ export_state_encryption() {
   export -n TF_STATE_PASSPHRASE
 }
 
-# Hook for adding this machine's public address to the allowlist for the run, so an operator on a
-# new network is not locked out. Looking the address up needs a network call and is not done:
-# the allowlist is passed on as it is, and the hook says so.
-add_current_address() {
-  infra_error "not implemented: adding this machine's public address to the allowlist; the allowlist is used as given"
-  printf '%s' "$1"
-}
+# The shortest prefix an allowlist entry may have. A /16 is 65,536 addresses, the widest network an
+# operator's own allowlist reasonably holds, such as an organisation's address block; /8 networks,
+# which are a 256th of the address space each, and the halves of it that a pair of /1 entries make
+# are not an allowlist. Only IPv4 is accepted, so there is no IPv6 prefix. The cluster and ci
+# stacks' variables hold the same number.
+allowlist_shortest_prefix=16
 
 # export_api_allowed_cidrs [VARIABLE]: exports TF_VAR_<VARIABLE>, TF_VAR_api_allowed_cidrs without
 # one, from OPERATOR_CIDRS (CI) or operator-cidrs.json at the repository root: a non-empty JSON list
-# of IPv4 CIDRs, none of which covers every address. A wrong entry is named by its position, as the
-# list is the operator's own and is never printed. jq's own errors would quote the list, so they are
-# dropped.
+# of IPv4 CIDRs, none wider than allowlist_shortest_prefix and none with bits set below its prefix.
+# A wrong entry is named by its position and the rule it breaks, as the list is the operator's own
+# and is never printed. jq's own errors would quote the list, so they are dropped; a list jq cannot
+# check is refused, never passed.
 export_api_allowed_cidrs() {
-  local variable=TF_VAR_${1:-api_allowed_cidrs} from cidrs position problem refused=0
+  local variable=TF_VAR_${1:-api_allowed_cidrs} from cidrs position problem problems
   local valid='select(type == "array" and length > 0 and all(.[]; type == "string"
-    and test("^([0-9]{1,3}[.]){3}[0-9]{1,3}/[0-9]{1,2}$|^[0-9A-Fa-f:]+/[0-9]{1,3}$")))'
+    and test("^([0-9]{1,3}[.]){3}[0-9]{1,3}/[0-9]{1,2}\\z|^[0-9A-Fa-f:]+/[0-9]{1,3}\\z")))'
   if [[ -n ${OPERATOR_CIDRS:-} ]]; then
     from=OPERATOR_CIDRS
     cidrs=$(jq -nce "env.OPERATOR_CIDRS | fromjson | $valid" 2> /dev/null) || cidrs=
@@ -189,18 +193,39 @@ export_api_allowed_cidrs() {
     infra_error "$from is not a JSON list of CIDRs"
     return 1
   fi
-  # The stacks' rules and the cluster's listener take IPv4 only, and a /0 would open the APIs and
-  # the CI host's SSH to every address.
+  # The stacks' rules and the cluster's listener take IPv4 only. Each entry is checked as the
+  # variables of the cluster and ci stacks check it, so a run outside the recipes is held to the
+  # same rule: written as tofu's cidrsubnet gives it back, no bit set below the prefix, and no wider
+  # than the shortest prefix.
+  problems=$(jq -r --argjson shortest "$allowlist_shortest_prefix" '
+    def octet: test("^(0|[1-9][0-9]{0,2})$") and tonumber <= 255;
+    def problem:
+      if test(":") then "ipv6"
+      else
+        (split("/")) as [$address, $length]
+        | ($address | split(".")) as $octets
+        | if ($octets | length) != 4 or ($octets | all(octet) | not) then "form"
+          elif $length | test("^0+$") then "all"
+          elif ($length | test("^(0|[1-9][0-9]?)$") | not) or ($length | tonumber) > 32 then "form"
+          elif ($length | tonumber) < $shortest then "wide"
+          elif ((($octets | map(tonumber) | .[0] * 16777216 + .[1] * 65536 + .[2] * 256 + .[3])
+            % pow(2; 32 - ($length | tonumber))) != 0) then "bits"
+          else empty end
+      end;
+    to_entries[] | .key as $i | (.value | problem) as $problem | "\($i + 1) \($problem)"' <<< "$cidrs" 2> /dev/null) || {
+    infra_error "$from could not be checked"
+    return 1
+  }
   while read -r position problem; do
     case $problem in
       ipv6) infra_error "$from entry $position is an IPv6 network; the stacks take IPv4 networks only" ;;
+      form) infra_error "$from entry $position is not an IPv4 network written as in 192.0.2.0/24, without leading zeros" ;;
       all) infra_error "$from entry $position covers every address; the allowlist names the operator's own networks" ;;
+      wide) infra_error "$from entry $position is wider than /$allowlist_shortest_prefix; the allowlist names the operator's own networks" ;;
+      bits) infra_error "$from entry $position has bits set below its prefix; a network is written by its own address, as in 192.0.2.0/24" ;;
     esac
-    refused=1
-  done < <(jq -r 'to_entries[]
-    | if (.value | test(":")) then "\(.key + 1) ipv6" elif (.value | test("/0+$")) then "\(.key + 1) all" else empty end' <<< "$cidrs")
-  ((!refused)) || return 1
-  cidrs=$(add_current_address "$cidrs")
+  done <<< "$problems"
+  [[ -z $problems ]] || return 1
   export "$variable=$cidrs"
 }
 

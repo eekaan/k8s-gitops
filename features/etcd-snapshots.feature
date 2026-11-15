@@ -14,7 +14,17 @@ Feature: etcd snapshots
   Scenario: A failed upload fails the recipe and leaves no snapshot on disk
     Given an S3 client whose upload fails
     When cluster-snapshot runs
-    Then it exits non-zero naming the upload as the step it failed in, without what the S3 client reported, and neither the snapshot nor its encrypted copy is left on disk
+    Then it exits non-zero naming the upload as the step it failed in and showing the reason the S3 client gave, without the endpoint, bucket or keys it names, and neither the snapshot nor its encrypted copy is left on disk
+
+  Scenario: A failed S3 request says why, without an address, a bucket or a key
+    Given an S3 client that fails a listing, a download or an upload as denied, a bucket that is not there, and an endpoint whose name does not resolve, each naming the endpoint, the bucket and an address
+    When cluster-snapshot, cluster-restore and cluster-snapshots run, without CI and with CI set
+    Then each exits non-zero, and without CI shows the reason the client gave, with no endpoint, bucket name, address or key; with CI set it shows none of the client's words and names the file git ignores that holds them
+
+  Scenario: A failed S3 request shows at most eight lines of the client's errors, each cut at 300 characters
+    Given an S3 client whose listing fails with a line of 350 characters and eleven more lines
+    When cluster-restore runs without CI
+    Then it exits non-zero showing eight lines of the client's errors, the first cut at 300 characters
 
   Scenario: A failed or interrupted snapshot leaves nothing on disk
     Given talman failing once it has started writing the snapshot, or the run interrupted while talman writes it, whether talman dies of the interruption or handles it and finishes
@@ -45,6 +55,16 @@ Feature: etcd snapshots
     Given snapshots of the cluster in the etcd bucket, encrypted to the Talos age key
     When cluster-restore runs for one of them by name, and for latest, and the cluster's name is typed back
     Then talman resets the EPHEMERAL partition of every control plane and of no worker, without a graceful leave, then bootstraps etcd from a file holding that snapshot's content, then the kubeconfig is fetched and every node, workers included, is waited for until it reports Ready after the reset, in that order, and nothing applied before Flux starts is applied again
+
+  Scenario: A restore reboots the control planes it resets
+    Given snapshots of the cluster in the etcd bucket, and nodes that answer on the Talos API port only while they run
+    When cluster-restore runs for the latest
+    Then talman reset is told to reboot, the nodes it reset answer on the Talos API port again, and etcd is bootstrapped from the snapshot, where a reset told not to reboot would leave them silent and fail the wait
+
+  Scenario: A restore counts the volumes first and says what it does to them
+    Given a cluster with PersistentVolumes of LINSTOR's CSI driver beside others, or none, an API that does not answer or refuses the kubeconfig, and no kubeconfig
+    When cluster-restore runs for a snapshot and the cluster's name is not typed back, and with --yes
+    Then before it asks it says by number, without a volume's name, how many PersistentVolumes of LINSTOR the cluster has, or that they cannot be counted, because the API does not answer or the kubeconfig may not list them, and that LINSTOR keeps its database in the Kubernetes API, so a volume created after the snapshot is orphaned on the workers and one deleted after it comes back without its data, and where the runbook says what to do; nothing is reset without the name
 
   Scenario: A snapshot this key cannot decrypt stops the restore before anything is reset
     Given an object encrypted to another age key, and one that is not an age file

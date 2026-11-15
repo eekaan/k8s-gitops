@@ -341,26 +341,33 @@ out of the artifact, which is built from `kubernetes/`.
 - `just cluster-upgrade [cluster] [--yes]` upgrades Talos on every node that does not run the
   version and schematic `talman.yaml` gives it. It shows which nodes `talman upgrade --dry-run`
   says are behind, and once the cluster's name is typed back, or with `--yes`, fetches the
-  kubeconfig as `cluster-kubeconfig` does, takes an etcd snapshot with `talman etcd snapshot`, and
+  kubeconfig as `cluster-kubeconfig` does, takes an etcd snapshot as `cluster-snapshot` does, and
   goes through the nodes in `talman.yaml`'s order, one at a time. A node that is behind is drained
-  with `kubectl drain`, upgraded with `talman upgrade`, and uncordoned once it is Ready, before the
-  next is drained; a node on its version is left alone. Before each drain the API must answer
-  `/readyz` through the kubeconfig within five minutes, or nothing more is drained. talosctl's own
-  drain is turned off, as it reaches the API at the cluster endpoint, which only the nodes reach.
-  At the end every node must run its version. A run that stops after draining a node leaves that
-  node cordoned: uncordon it with kubectl once it is back; a second run skips it once it is on its
+  with `kubectl drain`, upgraded with `talman upgrade`, and uncordoned once its kubelet has
+  reported Ready since `talman upgrade` returned for it, within ten minutes, before the next is
+  drained; a Ready condition from before then, including one posted after the drain, does not
+  count. A node on its version is left alone. Before each drain the API must answer `/readyz`
+  through the kubeconfig within five minutes, or nothing more is drained. talosctl's own drain is
+  turned off, as it reaches the API at the cluster endpoint, which only the nodes reach. At the end
+  every node must run its version. A run that stops after draining a node leaves that node
+  cordoned: uncordon it with kubectl once it is back; a second run skips it once it is on its
   version.
 - `just cluster-upgrade-k8s [cluster] [--yes]` upgrades Kubernetes to the version `talman.yaml`
   gives. It shows what `talman upgrade-k8s --dry-run` says, and once the cluster's name is typed
-  back, or with `--yes`, runs `talman upgrade-k8s` with an etcd snapshot first; talosctl moves the
-  control plane components and the kubelets node by node. It reaches the API at
-  `KUBE_API_ADDRESS`, given to talosctl as its endpoint. At the end every node must run the
-  version.
+  back, or with `--yes`, takes an etcd snapshot as `cluster-snapshot` does and runs
+  `talman upgrade-k8s`; talosctl moves the control plane components and the kubelets node by
+  node. It reaches the API at `KUBE_API_ADDRESS`, given to talosctl as its endpoint. At the end
+  every node must run the version.
 
-  Both upgrade recipes do nothing and ask nothing when every node runs its version, and need what
-  `cluster-talos` needs and the API address. An etcd snapshot holds every Secret in the cluster;
-  talman writes it
-  into `clusterconfig/` with mode 0600, and it stays there.
+  Both upgrade recipes do nothing and ask nothing when every node runs its version. Before they
+  ask, they need what `cluster-talos` needs, the API address, and what `cluster-snapshot` needs:
+  the age key's recipient, the bucket prefix and the state key. An etcd snapshot holds every Secret
+  in the cluster, so the recipes take it the way `cluster-snapshot` does, encrypted and uploaded,
+  and leave nothing of it on disk; a snapshot that cannot be taken stops the run before any node
+  is touched. They never pass `--snapshot` to talman, which would write an unencrypted
+  `etcd-<cluster>-<UTC time>.db` into `clusterconfig/`. Such a file there, mode 0600, is an etcd
+  snapshot in the clear that holds every Secret of the cluster: no recipe removes it, and removing
+  it is the operator's.
 - `just cluster-snapshot [cluster]` keeps an etcd snapshot, encrypted, in the etcd backup bucket,
   `BACKUP_BUCKET_PREFIX` followed by `-etcd`
   ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)). `talman etcd snapshot`
@@ -374,7 +381,8 @@ out of the artifact, which is built from `kubernetes/`.
   line, the cluster, the object's name and its size. The directory is removed whenever the recipe
   exits, a failed run and one interrupted by Ctrl-C or SIGTERM included. It needs the cluster's
   `talman.yaml` and `secrets.sops.yaml`, the age key's location and its recipient, the bucket
-  prefix and the state key.
+  prefix and the state key. `scripts/lib/snapshot.sh` holds the code, which both upgrade recipes
+  run as well.
 - `just cluster-snapshots [cluster]` lists the cluster's snapshots in the etcd bucket, reading only:
   one per line, newest first, by name and size in bytes. It needs the bucket prefix and the state
   key.
@@ -385,14 +393,22 @@ out of the artifact, which is built from `kubernetes/`.
   temporary directory as `cluster-snapshot` makes one, decrypts it there with the Talos age key, and
   waits for every node as `cluster-bootstrap` does; a snapshot that is not there, is not an age file
   or that the key cannot decrypt stops it. It says that the control planes are reset, the workers
-  not, and the cluster's state replaced by the snapshot's, losing what was written since, and goes
-  on once the cluster's name is typed back; `--yes` does not ask. `talman reset --group
-  controlplane` then wipes each control plane's EPHEMERAL partition without leaving etcd and reboots
-  it, and once every node answers again, `talman apply --bootstrap --recover-from` restores etcd
-  from the snapshot on the first control plane, which the others join. It fetches the kubeconfig as
-  `cluster-kubeconfig` does, and asks every ten seconds, ninety times at most, until every node in
-  `talman.yaml`, workers included, reports Ready after the reset. What `cluster-bootstrap` applies
-  before Flux is not applied again, as the restored etcd holds it. The decrypted snapshot is removed once etcd is restored and whenever the recipe exits.
+  not, and the cluster's state replaced by the snapshot's, losing what was written since. It counts
+  the PersistentVolumes of LINSTOR's driver the cluster has now, when its API answers through the
+  kubeconfig and the kubeconfig may list them, and says so when not, and says, by number and not by
+  name, that LINSTOR keeps its database in the Kubernetes API: a restore rolls its records back with
+  the PersistentVolumes and claims while the volumes' data on the workers stays current, so a volume
+  created after the snapshot is orphaned on the workers and one deleted after it comes back without
+  its data, missing or created again empty ([the
+  runbook](runbooks/etcd-restore.md#volumes-since-the-snapshot) says how to find and remove them,
+  and when not to restore). It goes on once the cluster's name is typed back; `--yes` does not ask.
+  `talman reset --group controlplane --reboot=true` then wipes each control plane's EPHEMERAL
+  partition without leaving etcd and reboots it, and once every node answers again, `talman apply
+  --bootstrap --recover-from` restores etcd from the snapshot on the first control plane, which the
+  others join. It fetches the kubeconfig as `cluster-kubeconfig` does, and asks every ten seconds,
+  ninety times at most, until every node in `talman.yaml`, workers included, reports Ready after the
+  reset. What `cluster-bootstrap` applies before Flux is not applied again, as the restored etcd
+  holds it. The decrypted snapshot is removed once etcd is restored and whenever the recipe exits.
   It needs what `cluster-talos` needs, the API address, the bucket prefix and the state key.
 - `just cluster-config [cluster]` applies what Flux needs before it starts: the namespace
   `flux-system`, the ConfigMap `cluster-config`, the Secret `cluster-secrets` and the Secret
@@ -461,24 +477,33 @@ out of the artifact, which is built from `kubernetes/`.
   `sto2/cluster`, as `just infra-destroy sto2/cluster` does
   ([infrastructure.md](infrastructure.md#recipes)): it shows the plan's summary, destroys once the
   stack's name is typed back, or with `--yes`, and then removes the cluster's `talman.yaml`,
-  talosconfig and kubeconfig. The plumbing stack, the secrets bundle and the buckets stay. First,
-  through the kubeconfig of the cluster it is given, it lists
-  every Service of type LoadBalancer and every PersistentVolume of a CSI driver: a cloud load
-  balancer or volume behind one is made by the cluster, not by OpenTofu, so the destroy would leave
-  it in the cloud, where it keeps the network from being deleted. A Service whose every
-  load-balancer address lies in the service range of the cluster's `talman.yaml` does not count:
-  Cilium gave it that address and the workers announce it, and nothing in the cloud stands behind
-  it ([kubernetes.md](kubernetes.md#service-addresses)). A Service without an address yet, or with
-  one outside the range, counts, as does every one when `talman.yaml` names no service range. While
-  there are any, it names each, by namespace and name or by the volume's name, and destroys
-  nothing. Volumes of LINSTOR's driver, `linstor.csi.linbit.com`, are the other exception: their
-  data is on the workers' data volumes ([above](#the-workers-data-device)), which the stack holds
-  and deletes, so none of them stays in the cloud. They do not hold the destroy up; it says how
-  many there are, by number and not by name, before it shows the plan, and the one confirmation,
-  the stack's name typed back or `--yes`, destroys them with the stack. A cluster whose API does
-  not answer, or that has no kubeconfig, cannot be asked and is not destroyed either, unless
-  `--unreachable` is given: the operator then takes on whatever it owned, which stays in the
-  cloud. Before it asks the cluster it checks what `infra-destroy` needs for the stack.
+  talosconfig and kubeconfig. The plumbing stack, the secrets bundle and the buckets stay. The stack
+  holds one cluster, so first, before it asks any cluster anything and whatever flags are given, it
+  refuses a name other than the cluster name in the stack's `talman_yaml` output, saying which
+  cluster the stack holds, or that the stack names none while its state holds resources, and the
+  name of a cluster that has no directory under `talos/`. A stack whose state holds no resource,
+  destroyed already or never applied, is not an error: the recipe says so, removes the cluster's
+  generated files if they are there, and exits 0, as `infra-destroy` does; a state that cannot be
+  read, or that is not a state, refuses. `cluster-env` does not make that refusal for every recipe:
+  `cluster-secrets` and `infra-talman` run before a cluster's directory exists. Then, through the
+  kubeconfig of the cluster it is given, it lists every Service of type LoadBalancer and every
+  PersistentVolume of a CSI driver: a cloud load balancer or volume behind one is made by the
+  cluster, not by OpenTofu, so the destroy would leave it in the cloud, where it keeps the network
+  from being deleted. A Service whose every load-balancer address lies in the service range of the
+  cluster's `talman.yaml` does not count: Cilium gave it that address and the workers announce it,
+  and nothing in the cloud stands behind it ([kubernetes.md](kubernetes.md#service-addresses)). A Service without an address yet, or with one outside
+  the range, counts, as does every one when `talman.yaml` names no service range. While there are
+  any, it names each, by namespace and name or by the volume's name, and destroys nothing. Volumes
+  of LINSTOR's driver, `linstor.csi.linbit.com`, are the other exception: their data is on the
+  workers' data volumes ([above](#the-workers-data-device)), which the stack holds and deletes, so
+  none of them stays in the cloud. They do not hold the destroy up; it says how many there are, by
+  number and not by name, before it shows the plan, and the one confirmation, the stack's name typed
+  back or `--yes`, destroys them with the stack. A cluster whose API does not answer, or that has no
+  kubeconfig, cannot be asked and is not destroyed either, unless `--unreachable` is given: the
+  operator then takes on whatever it owned, which stays in the cloud. Before it asks the cluster it
+  checks what `infra-destroy` needs for the stack. The asking is `infra-destroy`'s own, through
+  shared code, so `just infra-destroy sto2/cluster`, and `just infra-destroy` with no stack, ask the
+  same, count the same Services and refuse the same; they take `--unreachable` too.
   [runbooks/rebuild.md](runbooks/rebuild.md) has it in the procedure around it.
 
 A failing recipe ends with a line naming the step it failed in.
@@ -502,20 +527,32 @@ write it to `clusterconfig/<recipe>.log` in the cluster's directory, which git i
 afresh by each run, and print for each talman call only whether it succeeded or failed and that
 file's path.
 Of talman's output `cluster-snapshot` shows only the errors, and with `CI` set not those either.
-What rclone prints names the bucket and the endpoint, so the etcd recipes never show it. kubectl's
-and helm's output passes through, naming the objects they apply, except in `cluster-check`,
-`cluster-reboot`, `cluster-destroy` and `grafana`: they print node and object names only, and none
-of what kubectl prints, as the objects it reads and its errors hold the API server's, the nodes' and
-the pods' addresses; only `kubectl drain`'s passes through in `cluster-reboot`, as in
-`cluster-upgrade`, naming the pods it evicts and those it cannot.
+What rclone prints names the bucket and the endpoint, so the etcd recipes never show it. A failed S3
+request does say why, though: of rclone's errors the recipes show only the reason, a few lines at
+most, after each line has passed through a filter that replaces the value of every variable that
+holds a key, the bucket prefix, the endpoint or the API address, matched literally, and every URL,
+IPv4 and IPv6 address, host name with a dot in it and long token by pattern (`<redacted>`, `<url>`,
+`<address>`, `<name>`, `<token>`; the filter is `redact_stream` in `scripts/lib/errors.sh`). A
+denied request, a missing bucket and a name that does not resolve therefore read differently without
+naming the place. With `CI` set nothing of rclone's words is shown: they go to
+`clusterconfig/<recipe>.errors.log` in the cluster's directory, which git ignores, started afresh by
+each run, and only that file's path is printed, as for talman's output. kubectl's and helm's output
+passes through, naming the objects they apply, except in `cluster-check`, `cluster-reboot`,
+`cluster-destroy` and `grafana`: they print node and object names only, and none of what kubectl
+prints, as the objects it reads and its errors hold the API server's, the nodes' and the pods'
+addresses; only `kubectl drain`'s passes through in `cluster-reboot`, as in `cluster-upgrade`,
+naming the pods it evicts and those it cannot, with its errors passed through the same filter line
+by line, so a connection error still says why, `connection refused`.
 
 ## Environment
 
 The recipes read `.env` and the environment as the infrastructure recipes do
 ([infrastructure.md](infrastructure.md#environment)), and name each variable that is missing. No
-recipe prints a secret or passes one on a command line. sops and talman get the Talos age key's
-location from their environment; `cluster-restore` hands age the key file's path, or, when only
-`SOPS_AGE_KEY` holds the key, the key on standard input. `cluster-config` reads the Flux age key,
+recipe prints a secret or passes one on a command line. Each tool gets only the secrets it uses
+([infrastructure.md](infrastructure.md#environment)): talman, talosctl, kubectl and helm get none of
+the S3, cloud or state secrets. sops and talman get the Talos age key's location from their
+environment; `cluster-restore` hands age the key file's path, or, when only `SOPS_AGE_KEY` holds
+the key, the key on standard input. `cluster-config` reads the Flux age key,
 to hand it to kubectl and age-keygen on standard input.
 
 - `SOPS_AGE_KEY_FILE`: the path of the Talos age key, outside the repository. In CI,
@@ -523,13 +560,13 @@ to hand it to kubectl and age-keygen on standard input.
   them, as talman decrypts the bundle, and `cluster-restore` decrypts the snapshot with it.
 - `BACKUP_BUCKET_PREFIX`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`: the start of the backup
   buckets' names and the state key ([infrastructure.md](infrastructure.md#environment)), with which
-  `cluster-snapshot`, `cluster-snapshots` and `cluster-restore` reach the etcd bucket through
-  rclone, configured as the infrastructure recipes configure it
+  `cluster-snapshot`, both upgrade recipes, `cluster-snapshots` and `cluster-restore` reach the
+  etcd bucket through rclone, configured as the infrastructure recipes configure it
   ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)). `cluster-bootstrap`,
   `cluster-config` and `cluster-flux` need the prefix as well, which becomes `BACKUP_BUCKET_PREFIX`
   in `cluster-config`.
-- `TMPDIR`: where `cluster-snapshot` and `cluster-restore` make their private directory, `/tmp`
-  when unset. Inside the repository it is refused.
+- `TMPDIR`: where `cluster-snapshot`, both upgrade recipes and `cluster-restore` make their private
+  directory, `/tmp` when unset. Inside the repository it is refused.
 - `KUBE_API_ADDRESS`: the Kubernetes API load balancer's floating address, an IPv4 address, as
   the API's certificate names are addresses. The cluster stack renders it into the cluster's
   `talman.yaml` as `values.apiAddress`, and the recipes read it from there; set in `.env` or the

@@ -71,6 +71,16 @@ Feature: Infrastructure state and stack recipes
     When infra-plan runs for the cluster stack
     Then it exits non-zero naming the entry's position and not its value, and tofu is never started
 
+  Scenario: An allowlist entry wider than /16 or with host bits set is refused by its position
+    Given an operator allowlist with a network of prefix 15, a host address written with prefix 1, and an address with bits set below a /24
+    When infra-plan runs for the cluster stack
+    Then it exits non-zero naming each entry's position and the rule it breaks and not its value, and tofu is never started
+
+  Scenario: The recipes and the stacks accept and refuse the same allowlist entries
+    Given entries accepted and refused, with the prefixes on either side of the shortest allowed one
+    When the recipes' check, the cluster stack's variable and the ci stack's variable each take an entry alone
+    Then each entry is accepted by all three or refused by all three
+
   Scenario: The backend is configured from the environment
     Given a complete environment
     When infra-plan runs for the plumbing stack against a recording tofu
@@ -80,6 +90,46 @@ Feature: Infrastructure state and stack recipes
     Given an environment whose secrets are marker strings
     When infra-plan, infra-apply and infra-destroy run against a recording tofu
     Then no marker appears in any recorded argument list or in anything the recipes print
+
+  Scenario: Each tool gets only the secrets it uses
+    Given every secret variable set to a marker, and a recording fake of each tool the recipes run
+    When each tool is run as the recipes run it
+    Then each fake records the names, never the values, of the secret variables in its environment: tofu the object storage key, the encryption settings, the cloud credential and the stacks' inputs, the openstack client the cloud credential, talman and sops the age key variables, age the age key file's path, and talosctl, kubectl, helm, flux, kustomize, docker, curl, age-keygen, gh, ssh, ssh-keyscan and ssh-keygen none
+
+  Scenario: The S3 client gets the one key pair it is called with and no other secret
+    Given the state key pair and the cluster key pair, and a recording S3 client
+    When the S3 client is called with each key set
+    Then it gets that key pair, and no other secret variable
+
+  Scenario: A wrapped tool started in the background is the process the caller holds, with only its secrets
+    Given every secret variable set to a marker, and a recording kubectl that runs until it is ended
+    When the tool is started in the background as ( exec_tool kubectl ... ) & and the process id the caller got is ended
+    Then that id was the tool's own, the tool is gone, and it saw none of the secrets
+
+  Scenario: A sops run for the Flux key sees only that key, as the one age key it is given
+    Given the Flux age key and the Talos age key's variables set to markers, and a sops that records which of its age variables holds the Flux key
+    When the Flux key's sops runs, with the key itself and with a key file
+    Then sops sees one age variable, SOPS_AGE_KEY holding the Flux key or SOPS_AGE_KEY_FILE holding its file, and no other secret
+
+  Scenario: No script runs a wrapped tool around its wrapper
+    Given the scripts and the justfiles of the repository
+    When each is searched for a wrapped tool after command, env, exec, timeout, xargs, sudo and the like, whatever options and arguments come between, after which, in the body of bash -c or sh -c, or by a path from type -P, or started in the background by name
+    Then none is found, as each would give the tool the whole environment
+
+  Scenario: The scan for a wrapped tool run around its wrapper flags every way of doing it
+    Given command lines that run a wrapped tool after a runner with options of their own, through which, command -v, a path from type -P or a shell's -c body, and command lines that do not
+    When the scan reads them
+    Then it flags each of the first and none of the second
+
+  Scenario: A variable added to .env.example is assigned to the tools that may see it
+    Given the variables of .env.example, commented ones included
+    When each is looked up among the secrets and the variables that hold none
+    Then each is found, and a name that is in neither is not, whatever its prefix
+
+  Scenario: The infrastructure recipes run tofu with only the secrets it uses
+    Given every secret variable set to a marker and a recording tofu
+    When infra-plan, infra-apply and infra-destroy run for the cluster stack
+    Then tofu gets the state key, the encryption settings, the cloud credential and the stacks' inputs, and no age key, no cluster S3 key, no passphrase variable and no allowlist variable
 
   Scenario: The plan summary shows counts and types only
     Given a saved plan with resources to add, change and destroy
@@ -106,10 +156,20 @@ Feature: Infrastructure state and stack recipes
     When infra-plan runs for the cluster stack against a recording tofu
     Then the allowlist is in the tofu process environment and in no argument
 
+  Scenario: The allowlist is used as given and no recipe says otherwise
+    Given an operator allowlist and the cluster and ci stacks
+    When infra-plan, infra-apply and infra-destroy run for each, with --yes where they ask
+    Then no recipe prints anything about adding an address to the allowlist, and tofu gets the allowlist exactly as the operator wrote it
+
   Scenario: Two operations on one stack do not overlap
     Given an operation in progress on a stack
     When a second one starts on the same stack
     Then it exits non-zero saying the stack is busy
+
+  Scenario: A stack whose lock cannot be taken fails naming it and runs nothing
+    Given a stack whose .terraform is no directory, so its lock file cannot be made
+    When infra-plan or infra-destroy runs on it
+    Then it exits non-zero saying it cannot lock the stack and where, without an unbound-variable error, and tofu runs nothing on that stack
 
   Scenario: Apply asks before it applies the saved plan
     Given a stack with changes to apply

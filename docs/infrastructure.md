@@ -40,21 +40,37 @@ them is a `just` recipe.
 - `just infra-destroy` destroys `sto2/cluster`, then `sto2/plumbing`. Each destroy is planned and
   summarised first, and runs once the stack's name is typed back; `just infra-destroy --yes` does
   not ask. When the cluster stack is not destroyed, the plumbing stack is left as it is. The load
-  balancers and volumes the cluster creates itself, outside OpenTofu, are not removed, and the
-  recipe says so; while any are left, the plumbing network cannot be deleted. Once the cluster
-  stack is destroyed, the recipe removes the files generated for its cluster that hold the nodes'
-  and the API's addresses, which the cloud may give to someone else: `talos/<cluster>/talman.yaml`
+  balancers and volumes the cluster creates itself, outside OpenTofu, are not in the stack's state,
+  so its destroy would leave them in the cloud, where they keep the plumbing network from being
+  deleted. So before it plans the cluster stack's destroy, whichever way it is asked for, the
+  recipe asks the cluster, through its kubeconfig, for them, as `just cluster-destroy` does
+  ([cluster.md](cluster.md#recipes) says what it lists and counts): while the cluster owns any, or
+  cannot be asked, nothing is destroyed, unless `--unreachable` is given. A cluster stack whose
+  state holds no resource, destroyed already or never applied, is not asked and is skipped with a
+  line saying so, so a re-run ends as the first run did; a state that cannot be read, or that is
+  not a state, refuses the run, and so does one whose lock cannot be taken. Once the cluster stack
+  is destroyed, the recipe removes the files generated for its cluster that hold the nodes' and the
+  API's addresses, which the cloud may give to someone else: `talos/<cluster>/talman.yaml`
   and the talosconfig and kubeconfig in its `clusterconfig/`. It names each file it removes and
   removes only files git ignores; the secrets bundle and etcd snapshots stay.
   `just infra-destroy sto2/cluster`, or `sto2/plumbing`, destroys that stack only, the same way.
   `just cluster-destroy` ([cluster.md](cluster.md#recipes)) destroys the cluster stack so, once the
   cluster owns none of those load balancers and volumes. The `ci` stack is destroyed by its name
   only, `just infra-destroy sto2/ci`, the same way; `just infra-destroy` without a stack leaves it.
+  The plumbing stack's subnet and router interface cannot be removed while a port or a floating IP
+  of another stack uses them, so a run that would destroy the plumbing stack, with no stack or with
+  `sto2/plumbing`, first reads the state of every other stack of its region that the run does not
+  destroy before it, and plans and destroys nothing while one holds a resource: it exits non-zero
+  naming that stack and the recipe that destroys it, `just infra-destroy sto2/ci` or
+  `just cluster-destroy`, and prints no resource's address. A stack that was never applied, or holds
+  data sources only, holds nothing; a state that cannot be read, for any reason, refuses the run
+  too.
 - `just ci-host-setup` and `just ci-host-remove` set up and deregister the CI host's runner
   ([runbooks/ci-host.md](runbooks/ci-host.md)).
 
 Apply `plumbing` before `cluster` and `ci`, as both read the plumbing stack's state. Destroy goes
-the other way round: `ci` by name, before `plumbing`, whose network its port is on. State objects
+the other way round: `ci` by name, before `plumbing`, whose network its port is on, and which the
+recipe refuses to destroy while the `ci` stack holds anything. State objects
 stay in the bucket after a destroy.
 
 ## Before the first plan
@@ -86,7 +102,14 @@ storage container or an S3 bucket.
   printed. Nothing is created while `.env` is a symlink or a file git does not ignore, or while one
   of the names there holds a value; a name that is empty or a placeholder is filled in, an absent
   one is appended after a comment, and every other line stays as it is. `.env` is written to a
-  temporary file beside it, mode 0600, and renamed into place.
+  temporary file beside it, mode 0600, and renamed into place. When the client fails, the recipe
+  shows the reason it gave, a few lines at most, after each line has passed through the filter
+  `redact_stream` in `scripts/lib/errors.sh`: the values of the variables that hold keys, the bucket
+  prefix, the endpoint and the cloud's address are replaced as written, and every URL, address, host
+  name with a dot in it and long token by pattern, so an unauthorized request and a name that does
+  not resolve read differently without naming the endpoint, a project or a request. With `CI` set
+  none of the client's words is shown: they go to `.env.infra-s3-key.errors` beside `.env`, which
+  git ignores, and only its name is printed.
 - `just infra-backup-buckets` creates the four buckets unless they exist, through the object
   storage's S3 API with the state key, and names each by its role, never by its name. A second run
   creates nothing. A name another project owns fails, naming the role.
@@ -101,10 +124,12 @@ why state and snapshots are encrypted before they are uploaded
 These recipes, `just infra-state-bucket` and the etcd snapshot recipes `just cluster-snapshot`,
 `cluster-snapshots` and `cluster-restore` ([cluster.md](cluster.md#recipes)) reach the object
 storage with rclone, pinned in `mise.toml`, at the endpoint, region and addressing that
-`infra/openstack/backend.hcl` gives OpenTofu's state. rclone is configured through its environment only and reads no config file; the
-operator's own rclone configuration, its `RCLONE_` and `AWS_` variables and every other variable
-but `PATH`, `HOME`, `TMPDIR` and the proxy variables stay out of its environment. What rclone
-prints names the buckets and the endpoint, so it is not shown.
+`infra/openstack/backend.hcl` gives OpenTofu's state. rclone is configured through its environment
+only and reads no config file; the operator's own rclone configuration, its `RCLONE_` and `AWS_`
+variables and every other variable but `PATH`, `HOME`, `TMPDIR` and the proxy variables stay out of
+its environment. What rclone prints names the buckets and the endpoint, so it is not shown; of its
+errors the etcd recipes show the reason only, with places and keys replaced, as
+[cluster.md](cluster.md#what-the-recipes-print) says.
 
 ## The node subnet
 
@@ -287,6 +312,50 @@ lock, out of its `.terraform/`; and while `GODEBUG` sets `http2debug`, as Go's H
 prints what tofu and its providers send and receive. No recipe prints a value or passes a secret
 on a command line; secrets reach tofu and rclone through their environment.
 
+The tools below get only the secrets they use. `scripts/lib/tools.sh` runs `tofu`, `openstack`,
+`talman`, `talosctl`, `kubectl`, `helm`, `flux`, `kustomize`, `docker`, `curl`, `sops`, `age`,
+`age-keygen`, `gh`, `ssh`, `ssh-keyscan` and `ssh-keygen` with the secrets they may not see
+unexported, and `s3_rclone` hands rclone the one key pair it is called with. `scripts/render`,
+`scripts/vector-config`, `scripts/ci-comment` and `vector-check` run their tools the same way.
+Every other tool, `jq`, `yq`, `git` and `flock` among them, gets the environment as it is: `jq`
+reads `OPERATOR_CIDRS` from it by design, and none of them sends it anywhere. A wrapped tool a
+script starts in the background, such as a port-forward, is started as `( exec_tool kubectl … ) &`,
+so that the process id the script holds is the tool's and ending it ends the tool; the test fails
+for the bare `kubectl … &`. Every variable of `.env.example` is listed, either as a secret with the
+tools that may see it or as holding none, and a test fails for one that is not, whatever its prefix:
+a new variable is assigned before it passes. One set by hand that begins `OS_` or `AWS_` and is
+listed nowhere is a secret that only `tofu` sees.
+
+A script runs a wrapped tool by its name. A test reads each script and justfile recipe as commands,
+a backslash continuation and a `bash -c` body or a here-document fed to a shell included, and fails
+for one that names a wrapped tool after `command`, `env`, `exec`, `timeout`, `sudo`, `xargs`,
+`nice`, `nohup`, `setsid`, `stdbuf`, `ionice`, `chroot`, `su`, `doas`, `flock`, `watch`,
+`parallel`, `mise x`, `mise exec`, `which` or `find -exec`, whatever options and lines come between,
+in a `bash -c`, `sh -c` or here-document body, or in `$(type -P tool)`, `$(type -aP tool)` or
+backticks, as each reaches the binary with the whole environment. A text scan cannot see a runner
+held in an array or a variable (`"${cmd[@]}" kubectl`), a tool run from a script file or a
+here-document fed to anything but a shell, or one run by another language's process call. Only the
+tests that record a tool's environment catch those: `tests/tool-secrets.bats` for every wrapped tool and the S3
+client, and for each of these recipes, the one that runs it: `tests/infra-recipes.bats` (tofu),
+`tests/cluster-recipes.bats` (the upgrade recipes' talman, kubectl and age), `tests/ci-host.bats`
+(gh, ssh), `tests/grafana.bats` (kubectl), `tests/render.bats` (flux, helm, kustomize),
+`tests/logs.bats` (`vector-config`'s flux and helm) and `tests/ci.bats` (gh in `ci-comment`). The
+docker of `vector-check` has only the scan.
+
+| Secret | Seen by |
+| --- | --- |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | `tofu`; rclone, as the state key set |
+| `TF_ENCRYPTION` | `tofu` |
+| `TF_STATE_PASSPHRASE` | none, as `TF_ENCRYPTION` carries the key derived from it |
+| `CLUSTER_S3_ACCESS_KEY_ID`, `CLUSTER_S3_SECRET_ACCESS_KEY` | rclone, as the cluster key set |
+| `OS_*`, the cloud credential | `tofu`, `openstack` |
+| `GH_TOKEN`, `GITHUB_TOKEN` | `gh` |
+| `TF_VAR_*`, the stacks' inputs, among them the allowlist; `TF_TOKEN_*`, registry tokens | `tofu` |
+| `SOPS_AGE_KEY`, `SOPS_AGE_KEY_CMD` | `talman`, `sops` |
+| `SOPS_AGE_KEY_FILE` | `talman`, `sops`, `age` |
+| `FLUX_AGE_KEY`, `FLUX_AGE_KEY_FILE` | none; `flux_sops` gives sops the one it uses |
+| `OPERATOR_CIDRS` | none; it reaches tofu as `TF_VAR_api_allowed_cidrs` and `TF_VAR_ssh_allowed_cidrs` |
+
 - `TF_STATE_BUCKET`: the bucket that holds state.
 - `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`: the state key, S3 credentials for that bucket,
   which also create the backup buckets.
@@ -294,17 +363,21 @@ on a command line; secrets reach tofu and rclone through their environment.
   hyphens.
 - `CLUSTER_S3_ACCESS_KEY_ID` and `CLUSTER_S3_SECRET_ACCESS_KEY`: the cluster's S3 key.
 - `TF_STATE_PASSPHRASE`: the passphrase state and plans are encrypted with, 16 characters or more.
-  tofu gets it inside `TF_ENCRYPTION` only, and the `openstack` client gets neither it nor the S3
-  credentials.
+  tofu gets it inside `TF_ENCRYPTION` only.
 - `OS_CLOUD`, naming a `clouds.yaml` entry outside the repository, or `OS_AUTH_URL` with the
   application-credential variables: OpenStack authentication, which tofu's provider and the
   `openstack` client read themselves. `os-smoke` and `infra-s3-key` need only this.
 - `OPERATOR_CIDRS`, or else `operator-cidrs.json` at the repository root (gitignored): the
   operator allowlist of the cluster stack's APIs and the CI host's SSH, a JSON list of IPv4 CIDRs.
-  An entry that is IPv6, or whose prefix is 0 and so covers every address, is refused, named by its
-  position in the list and not by its value. It reaches tofu only in its environment, as
-  `TF_VAR_api_allowed_cidrs` for the cluster stack and `TF_VAR_ssh_allowed_cidrs` for the ci stack,
-  as given: the address of the machine the recipes run on is not added, and the recipe says so.
+  A network is no wider than `/16`, 65,536 addresses, the widest an operator's own allowlist
+  reasonably holds, and is written by its own address, as `192.0.2.0/24` and not `192.0.2.5/24`.
+  IPv6 networks are refused, as the stacks' rules and the load balancer's listener take IPv4 only,
+  so no IPv6 prefix limit applies. An entry that breaks a rule is refused, named by its position in
+  the list and the rule, not by its value. The `api_allowed_cidrs` variable of the cluster stack and
+  the `ssh_allowed_cidrs` variable of the ci stack hold the same rule, so a `tofu` run outside the
+  recipes cannot open the APIs or SSH wider either. The list reaches tofu only in its environment,
+  as `TF_VAR_api_allowed_cidrs` for the cluster stack and `TF_VAR_ssh_allowed_cidrs` for the ci
+  stack, as given: nothing is added to it, such as the address of the machine the recipes run on.
 - `CI_HOST_IMAGE` and `CI_HOST_SSH_PUBLIC_KEY`: the ci stack's image name and the operator's SSH
   public key, which reach tofu as `TF_VAR_image_name` and `TF_VAR_ssh_public_key`; only the ci stack
   needs them. `CI_HOST_SSH_USER`: the image's default user, whom `just ci-host-setup` and

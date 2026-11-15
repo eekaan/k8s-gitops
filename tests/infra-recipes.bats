@@ -20,6 +20,14 @@ setup() {
   cp "$ROOT"/infra/openstack/stacks/sto2/plumbing/*.tf "$PLUMBING/"
   cp "$ROOT"/infra/openstack/stacks/sto2/cluster/*.tf "$CLUSTER/"
   cp "$ROOT"/infra/openstack/stacks/sto2/ci/*.tf "$CI_STACK/"
+  # A cluster that owns no load balancer and no volume, which infra-destroy asks before it destroys
+  # the cluster stack; its kubeconfig is the one the fixture's cluster would have.
+  mkdir -p "$REPO/talos/fixture/clusterconfig"
+  : > "$REPO/talos/fixture/clusterconfig/kubeconfig"
+  fake kubectl <<EOF
+printf '%s\n' "kubectl \$*" >> "$RECORD/argv"
+echo '{"items": []}'
+EOF
   # What tofu itself prints: a resource address on stdout, and on stderr when it fails.
   STDOUT_MARKER='module.fixture.openstack_networking_port_v2.stdout_marker'
   ERROR_MARKER='module.fixture.openstack_networking_port_v2.error_marker'
@@ -79,16 +87,37 @@ EOF
 # recording_tofu [PLAN_JSON [FAILING_SUBCOMMAND]]: a tofu that records its arguments, one call per
 # line, and its environment per subcommand; prints a resource address on stdout as tofu's own
 # report; shows PLAN_JSON as every saved plan; and fails FAILING_SUBCOMMAND with an error naming a
-# resource.
+# resource. A stack's state and outputs are the fixture `holds` names, as state_tofu's are; without
+# one the cluster stack holds resources and the others none.
 recording_tofu() {
+  mkdir -p "$BATS_TEST_TMPDIR/state"
   fake tofu <<EOF
 printf '%s\n' "\$*" >> "$RECORD/tofu"
 printf '%s\n' "tofu \$*" >> "$RECORD/argv"
 env -0 > "$RECORD/env.\${2-}"
 case \${2-} in
   init | plan | apply) echo "$STDOUT_MARKER: tofu's own report" ;;
-  show) cat "${1:-$FIXTURES/no-changes.json}" ;;
-  output) cat "$FIXTURES/outputs.json" ;;
+  show)
+    if [[ \$# -eq 3 ]]; then
+      stack=\${1#-chdir=$REPO/infra/openstack/stacks/}
+      file="$BATS_TEST_TMPDIR/state/\${stack//\//_}"
+      if [[ -f \$file ]]; then
+        cat "$FIXTURES/\$(< "\$file")"
+      elif [[ \$stack == */cluster ]]; then
+        cat "$FIXTURES/state-with-resources.json"
+      else
+        cat "$FIXTURES/no-changes.json"
+      fi
+    else
+      cat "${1:-$FIXTURES/no-changes.json}"
+    fi
+    ;;
+  output)
+    stack=\${1#-chdir=$REPO/infra/openstack/stacks/}
+    file="$BATS_TEST_TMPDIR/state/\${stack//\//_}"
+    # A stack that holds nothing has no outputs.
+    if [[ -f \$file && \$(< "\$file") =~ ^state-(never-applied|data-only)\.json$ ]]; then echo '{}'; else cat "$FIXTURES/outputs.json"; fi
+    ;;
 esac
 if [[ \${2-} == "${2:-none}" ]]; then
   echo "Error: fixture failure in $ERROR_MARKER" >&2
@@ -130,6 +159,17 @@ recipe() {
 # tofu_calls SUBCOMMAND: the recorded tofu calls of SUBCOMMAND, as recorded.
 tofu_calls() {
   awk -v subcommand="$1" '$2 == subcommand' "$RECORD/tofu" 2> /dev/null
+}
+
+# tofu_only_reads: every tofu call was a read of a stack's state or outputs, so nothing was planned,
+# applied, destroyed, imported or removed from state.
+tofu_only_reads() {
+  local changed
+  changed=$(awk '$2 != "init" && $2 != "output" && $2 != "show"' "$RECORD/tofu" 2> /dev/null || true)
+  if [[ -n $changed ]]; then
+    echo "tofu changed or planned: $changed" >&2
+    return 1
+  fi
 }
 
 # tofu_env SUBCOMMAND NAME: NAME's value in the environment of the last tofu SUBCOMMAND.
@@ -353,6 +393,152 @@ absent() {
   done
 }
 
+@test "The allowlist is used as given and no recipe says otherwise" {
+  with CI_HOST_IMAGE=fixture-image 'CI_HOST_SSH_PUBLIC_KEY=ssh-ed25519 AAAAfixture operator'
+  for stack in sto2/cluster sto2/ci; do
+    for flags in '' --yes; do
+      echo "$stack $flags"
+      rm -f "$RECORD/tofu"
+
+      if [[ -n $flags ]]; then
+        recipe infra-apply "$flags" "$stack" < /dev/null
+      else
+        recipe infra-plan "$stack"
+      fi
+
+      [ "$status" -eq 0 ]
+      [[ $output != *"public address"* && $output != *"not implemented"* ]]
+      [[ $(tofu_calls plan) == *"-chdir=$REPO/infra/openstack/stacks/$stack plan "* ]]
+      [ "$(tofu_env plan "TF_VAR_$([[ $stack == */ci ]] && echo ssh || echo api)_allowed_cidrs")" = '["203.0.113.77/32"]' ]
+    done
+  done
+
+  recipe infra-destroy --yes < /dev/null
+
+  [[ $output != *"public address"* ]]
+}
+
+@test "An allowlist entry wider than /16 or with host bits set is refused by its position" {
+  # Each list and the messages naming each of its wrong entries, in order.
+  lists=('["198.51.100.0/24", "255.254.0.0/15"]' '["255.0.0.1/1", "0.0.0.0/1", "128.0.0.0/1"]'
+    '["198.51.100.7/24", "203.0.113.0/24", "255.1.0.1/16"]' '["192.0.2.0/24", "255.01.0.0/24", "256.0.0.0/24"]')
+  messages=('entry 2 is wider than /16' 'entry 1 is wider than /16|entry 2 is wider than /16|entry 3 is wider than /16'
+    'entry 1 has bits set below its prefix|entry 3 has bits set below its prefix'
+    'entry 2 is not an IPv4 network|entry 3 is not an IPv4 network')
+  for i in "${!lists[@]}"; do
+    for from in OPERATOR_CIDRS operator-cidrs.json; do
+      echo "$from: ${lists[i]}"
+      reset_environment
+      without OPERATOR_CIDRS
+      rm -f "$RECORD/tofu" "$REPO/operator-cidrs.json"
+      if [[ $from == OPERATOR_CIDRS ]]; then
+        with "OPERATOR_CIDRS=${lists[i]}"
+      else
+        printf '%s\n' "${lists[i]}" > "$REPO/operator-cidrs.json"
+      fi
+
+      recipe infra-plan sto2/cluster
+
+      [ "$status" -ne 0 ]
+      IFS="|" read -ra rules <<< "${messages[i]}"
+      for message in "${rules[@]}"; do
+        [[ $output == *"$from $message"* ]]
+      done
+      for shown in 255.254.0.0 255.0.0.1 198.51.100.7 203.0.113.0 255.1.0.1 255.01.0.0 256.0.0.0; do
+        [[ $output != *"$shown"* ]]
+      done
+      [ ! -e "$RECORD/tofu" ]
+    done
+  done
+}
+
+# stack_accepts STACK VARIABLE ENTRY...: whether the variable of the stack, given the allowlist of
+# the ENTRYs, passes its validation. The variable's block is planned alone, as tofu does with a
+# variable it is given outside the recipes.
+stack_accepts() {
+  local dir="$BATS_TEST_TMPDIR/validation/$1"
+  mkdir -p "$dir"
+  awk -v name="$2" '$0 == "variable \"" name "\" {" {p = 1} p {print} p && /^}/ {exit}' \
+    "$REPO/infra/openstack/stacks/sto2/$1/variables.tf" > "$dir/main.tf"
+  [ -s "$dir/main.tf" ]
+  (cd "$dir" && tofu plan -input=false -no-color -var="$2=$(jq -cn '$ARGS.positional' --args "${@:3}")" > /dev/null 2>&1)
+}
+
+# shell_accepts ENTRY...: whether the recipes' check passes the allowlist of the ENTRYs.
+shell_accepts() {
+  OPERATOR_CIDRS=$(jq -cn '$ARGS.positional' --args "$@") \
+    bash -c '. "$1/scripts/lib/infra.sh" && export_api_allowed_cidrs' _ "$REPO" > /dev/null 2>&1
+}
+
+@test "The recipes and the stacks accept and refuse the same allowlist entries" {
+  accepted=(192.0.2.0/24 198.51.100.0/24 203.0.113.77/32 255.0.0.0/16 255.1.0.0/17 255.2.0.0/16
+    203.0.113.192/26 255.255.255.255/32 255.0.0.0/32)
+  refused=(0.0.0.0/0 0.0.0.0/1 128.0.0.0/1 255.0.0.1/1 255.0.0.0/8 255.254.0.0/15 255.2.0.0/15 192.0.2.5/24
+    255.0.0.1/16 203.0.113.64/25x 192.0.2.0/33 192.0.2.0/-1 192.0.2.0/2a 256.0.0.0/24 192.0.2.0/024
+    192.0.2.0/00 255.01.0.0/24 192.0.2.0 192.0.2.0/ 2001:db8::/32 not-a-cidr '' ' 192.0.2.0/24'
+    '192.0.2.0/24 ' 1.2.3/24 1.2.3.4.5/24)
+  for entry in "${accepted[@]}"; do
+    echo "accepted: $entry"
+    shell_accepts "$entry"
+    stack_accepts cluster api_allowed_cidrs "$entry"
+    stack_accepts ci ssh_allowed_cidrs "$entry"
+  done
+  for entry in "${refused[@]}"; do
+    echo "refused: $entry"
+    # A negated command never fails a test, so each is run to see its status.
+    if shell_accepts "$entry" || stack_accepts cluster api_allowed_cidrs "$entry" ||
+      stack_accepts ci ssh_allowed_cidrs "$entry"; then
+      echo "accepted by a check that should refuse it" >&2
+      return 1
+    fi
+  done
+  # An entry that ends in a newline, alone and ahead of an entry no check may let through: a
+  # check that stops at the first entry it cannot read must not let the rest pass unchecked.
+  echo "refused: an entry ending in a newline"
+  if shell_accepts $'192.0.2.0/24\n' || stack_accepts cluster api_allowed_cidrs $'192.0.2.0/24\n' ||
+    stack_accepts ci ssh_allowed_cidrs $'192.0.2.0/24\n'; then
+    echo "accepted by a check that should refuse it" >&2
+    return 1
+  fi
+  echo "refused: an entry ending in a newline, then 0.0.0.0/1"
+  if shell_accepts $'192.0.2.0/24\n' 0.0.0.0/1 || stack_accepts cluster api_allowed_cidrs $'192.0.2.0/24\n' 0.0.0.0/1 ||
+    stack_accepts ci ssh_allowed_cidrs $'192.0.2.0/24\n' 0.0.0.0/1; then
+    echo "accepted by a check that should refuse it" >&2
+    return 1
+  fi
+}
+
+@test "The infrastructure recipes run tofu with only the secrets it uses" {
+  with CLUSTER_S3_ACCESS_KEY_ID=marker-cluster-key-id CLUSTER_S3_SECRET_ACCESS_KEY=marker-cluster-secret \
+    SOPS_AGE_KEY_FILE="$BATS_TEST_TMPDIR/talos.agekey" SOPS_AGE_KEY=marker-talos-age-key \
+    FLUX_AGE_KEY_FILE="$BATS_TEST_TMPDIR/flux.agekey" FLUX_AGE_KEY=marker-flux-age-key
+  for run in 'infra-plan sto2/cluster' 'infra-apply --yes sto2/cluster' 'infra-destroy --yes'; do
+    echo "$run"
+    rm -f "$RECORD"/env.*
+    # shellcheck disable=SC2086 # the recipe and its arguments as an operator types them
+    recipe $run < /dev/null
+
+    [ "$status" -eq 0 ]
+    for env in "$RECORD"/env.*; do
+      subcommand=${env##*/env.}
+      # What tofu reads: the state key, the encryption settings, the cloud credential and the inputs.
+      [ "$(tofu_env "$subcommand" AWS_ACCESS_KEY_ID)" = marker-access-key-id ]
+      [ "$(tofu_env "$subcommand" AWS_SECRET_ACCESS_KEY)" = marker-secret-access-key ]
+      [ -n "$(tofu_env "$subcommand" TF_ENCRYPTION)" ]
+      [ "$(tofu_env "$subcommand" OS_APPLICATION_CREDENTIAL_SECRET)" = marker-application-credential-secret ]
+      # The destroy ends with the plumbing stack, which takes no allowlist.
+      if [[ $run == *sto2/cluster ]]; then
+        [ "$(tofu_env "$subcommand" TF_VAR_api_allowed_cidrs | jq -c .)" = '["203.0.113.77/32"]' ]
+      fi
+      # What it does not: the cluster's key, the age keys, the passphrase's own variable, the allowlist.
+      for name in CLUSTER_S3_ACCESS_KEY_ID CLUSTER_S3_SECRET_ACCESS_KEY SOPS_AGE_KEY_FILE SOPS_AGE_KEY \
+        FLUX_AGE_KEY_FILE FLUX_AGE_KEY TF_STATE_PASSPHRASE OPERATOR_CIDRS; do
+        [ -z "$(tofu_env "$subcommand" "$name")" ]
+      done
+    done
+  done
+}
+
 @test "The backend is configured from the environment" {
   recipe infra-plan sto2/plumbing
 
@@ -546,6 +732,25 @@ EOF
   [[ $output == *"sto2/plumbing is busy"* ]]
 }
 
+@test "A stack whose lock cannot be taken fails naming it and runs nothing" {
+  # .terraform is a file, so neither its directory nor the lock file in it can be made; the same
+  # happens when it cannot be written.
+  : > "$PLUMBING/.terraform"
+  holds sto2/cluster state-never-applied.json
+  for args in 'infra-plan sto2/plumbing' 'infra-destroy sto2/plumbing --yes'; do
+    rm -f "$RECORD/tofu"
+    # shellcheck disable=SC2086 # the arguments as an operator types them
+    recipe $args < /dev/null
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"cannot lock sto2/plumbing: its lock file cannot be made in"*".terraform"* ]]
+    [[ $output != *"unbound variable"* ]]
+    # Only the other stacks' state was read, and nothing of this one's.
+    tofu_only_reads
+    absent "-chdir=$PLUMBING " "$RECORD/tofu"
+  done
+}
+
 @test "Apply asks before it applies the saved plan" {
   recording_tofu "$FIXTURES/plan.json"
 
@@ -604,7 +809,10 @@ EOF
   fake tofu <<EOF
 printf '%s\n' "\$*" >> "$RECORD/tofu"
 case \${2-} in
-  show) cat "$FIXTURES/no-changes.json" ;;
+  show)
+    # A state read: the cluster stack holds resources and the others none.
+    if [[ \$# -eq 3 && \$1 == *cluster ]]; then cat "$FIXTURES/state-with-resources.json"; else cat "$FIXTURES/no-changes.json"; fi
+    ;;
   output) cat "$FIXTURES/outputs.json" ;;
   apply) [[ ! -e "$BATS_TEST_TMPDIR/cluster-fails" || \$1 != *cluster ]] ;;
 esac
@@ -652,6 +860,9 @@ EOF
   recipe infra-destroy --yes < /dev/null
 
   [ "$status" -eq 0 ]
+  # Each stack is initialised once, under the lock its destroy holds.
+  [ "$(tofu_calls init | awk '{ print $1 }' | grep -cxF -- "-chdir=$CLUSTER")" -eq 1 ]
+  [ "$(tofu_calls init | awk '{ print $1 }' | grep -cxF -- "-chdir=$PLUMBING")" -eq 1 ]
   [ "$(tofu_calls apply | awk '{ print $1 }')" = "-chdir=$CLUSTER
 -chdir=$PLUMBING" ]
 }
@@ -660,7 +871,11 @@ EOF
   fake tofu <<EOF
 printf '%s\n' "\$*" >> "$RECORD/tofu"
 case \${2-} in
-  show) cat "$FIXTURES/no-changes.json" ;;
+  show)
+    # A state read: the cluster stack holds resources and the others none.
+    if [[ \$# -eq 3 && \$1 == *cluster ]]; then cat "$FIXTURES/state-with-resources.json"; else cat "$FIXTURES/no-changes.json"; fi
+    ;;
+  output) cat "$FIXTURES/outputs.json" ;;
   apply) [[ \$1 != *cluster ]] ;;
 esac
 EOF
@@ -670,6 +885,143 @@ EOF
   [ "$status" -ne 0 ]
   [[ $(tofu_calls apply) == "-chdir=$CLUSTER apply "* ]]
   absent "-chdir=$PLUMBING " "$RECORD/tofu"
+}
+
+# The constitution's "A recipe that changes live state is idempotent" is proved here: what a first
+# run destroyed is not asked or destroyed again, so a re-run, or a run after only part of the lab
+# was applied, ends as the first did.
+@test "A destroy that is run again ends as the first run did, with the cluster stack gone or never applied" {
+  recipe infra-destroy --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ "$(tofu_calls apply | awk '{ print $1 }')" = "-chdir=$CLUSTER
+-chdir=$PLUMBING" ]
+
+  # The cluster stack now holds nothing and its kubeconfig is gone, as after a cluster destroy.
+  holds sto2/cluster state-never-applied.json
+  rm -f "$REPO/talos/fixture/clusterconfig/kubeconfig"
+  : > "$RECORD/argv"
+  rm -f "$RECORD/tofu"
+  recipe infra-destroy --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"sto2/cluster holds no resource, so there is nothing to destroy"* ]]
+  [[ $output != *"names no cluster"* && $output != *"--unreachable"* ]]
+  absent "-chdir=$CLUSTER plan" "$RECORD/tofu"
+  absent "-chdir=$CLUSTER apply" "$RECORD/tofu"
+  absent kubectl "$RECORD/argv"
+  [ "$(tofu_calls plan | awk '{ print $1 }')" = "-chdir=$PLUMBING" ]
+  [ "$(tofu_calls apply | awk '{ print $1 }')" = "-chdir=$PLUMBING" ]
+
+  # A lab where only the plumbing stack and the CI host were applied is destroyed the same way.
+  holds sto2/ci state-with-resources.json
+  rm -f "$RECORD/tofu"
+  recipe infra-destroy sto2/cluster --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"sto2/cluster holds no resource, so there is nothing to destroy"* ]]
+  absent "-chdir=$CLUSTER plan" "$RECORD/tofu"
+  absent "-chdir=$CLUSTER apply" "$RECORD/tofu"
+  absent kubectl "$RECORD/argv"
+}
+
+@test "A cluster stack that holds resources and cannot be asked is still refused unless --unreachable is given" {
+  rm -f "$REPO/talos/fixture/clusterconfig/kubeconfig"
+
+  recipe infra-destroy --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"--unreachable"* ]]
+  tofu_only_reads
+  absent kubectl "$RECORD/argv"
+
+  recipe infra-destroy sto2/cluster --yes --unreachable < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ "$(tofu_calls apply | awk '{ print $1 }')" = "-chdir=$CLUSTER" ]
+
+  # A state that cannot be read is not taken for an empty one, whatever else is given.
+  fake tofu <<EOF
+printf '%s\n' "\$*" >> "$RECORD/tofu"
+[[ \${2-} != show || \$# -ne 3 ]] || exit 1
+EOF
+  rm -f "$RECORD/tofu"
+  recipe infra-destroy sto2/cluster --yes --unreachable < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"cannot read the state of sto2/cluster"* ]]
+  tofu_only_reads
+
+  # A state is read and parsed, or it is not taken for an empty one: an answer that is empty, is no
+  # JSON or is not a state refuses the cluster stack's destroy, and the plumbing stack's, whatever
+  # else is given.
+  for answer in '' 'not a state' '[]' 'null'; do
+    fake tofu <<EOF
+printf '%s\n' "\$*" >> "$RECORD/tofu"
+[[ \${2-} != show || \$# -ne 3 ]] || printf '%s' '$answer'
+EOF
+    for args in 'sto2/cluster --yes --unreachable' 'sto2/plumbing --yes'; do
+      rm -f "$RECORD/tofu"
+      # shellcheck disable=SC2086 # the arguments as an operator types them
+      recipe infra-destroy $args < /dev/null
+
+      [ "$status" -ne 0 ]
+      [[ $output == *"cannot read the state of sto2/"* ]]
+      tofu_only_reads
+    done
+  done
+
+  # A stack that holds resources while its outputs name no cluster cannot be asked, so it is refused
+  # unless --unreachable is given, and is not taken for an empty one.
+  fake tofu <<EOF
+printf '%s\n' "\$*" >> "$RECORD/tofu"
+case \${2-} in
+  show) [[ \$# -ne 3 ]] || cat "$FIXTURES/state-with-resources.json" ;;
+  output) echo '{}' ;;
+esac
+EOF
+  rm -f "$RECORD/tofu"
+  recipe infra-destroy sto2/cluster --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"names no cluster"*"--unreachable"* ]]
+  [[ $output != *"holds no resource"* ]]
+  tofu_only_reads
+
+  recipe infra-destroy sto2/cluster --yes --unreachable < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ "$(tofu_calls apply | awk '{ print $1 }')" = "-chdir=$CLUSTER" ]
+}
+
+@test "A stack whose state could not be reached is not taken for one that holds nothing" {
+  # The ci stack holds a resource, but its lock cannot be taken, as .terraform is no directory (a
+  # directory that cannot be written does the same, and this holds as root too): the read ends with
+  # status 2 and its own reason, and is not an answer that the stack holds nothing.
+  holds sto2/ci state-with-resources.json
+  : > "$CI_STACK/.terraform"
+  for args in '--yes' 'sto2/plumbing --yes'; do
+    rm -f "$RECORD/tofu"
+    # shellcheck disable=SC2086 # the arguments as an operator types them
+    recipe infra-destroy $args < /dev/null
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"cannot read the state of sto2/ci"* ]]
+    [[ $output != *"sto2/plumbing destroyed"* ]]
+    tofu_only_reads
+  done
+
+  # The same for a read that ends without a word, or with another one, and status 0.
+  rm "$CI_STACK/.terraform"
+  for body in 'exit 0' 'echo something' 'exit 1' 'printf "holds\nempty\n"' 'echo empty; exit 1' 'echo holds; exit 1'; do
+    printf '#!/usr/bin/env bash\n%s\n' "$body" > "$REPO/scripts/stack-state"
+    rm -f "$RECORD/tofu"
+    recipe infra-destroy sto2/plumbing --yes < /dev/null
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"cannot read the state of sto2/ci"* ]]
+    tofu_only_reads
+  done
 }
 
 @test "infra-destroy given a stack destroys that stack only" {
@@ -687,12 +1039,19 @@ EOF
   [ "$(tofu_calls apply | awk '{ print $1 }')" = "-chdir=$CLUSTER" ]
   absent "-chdir=$PLUMBING " "$RECORD/tofu"
 
+  # With the cluster stack destroyed, its state holds nothing.
+  holds sto2/cluster state-never-applied.json
   rm -f "$RECORD/tofu"
   recipe infra-destroy --yes sto2/plumbing < /dev/null
 
   [ "$status" -eq 0 ]
   [ "$(tofu_calls apply | awk '{ print $1 }')" = "-chdir=$PLUMBING" ]
-  absent "-chdir=$CLUSTER " "$RECORD/tofu"
+  # The cluster stack's state is read, as the plumbing stack's destroy needs it empty; nothing is
+  # planned, applied or otherwise written to it.
+  [ "$(tofu_calls plan | awk '{ print $1 }')" = "-chdir=$PLUMBING" ]
+  absent "-chdir=$CLUSTER plan" "$RECORD/tofu"
+  absent "-chdir=$CLUSTER apply" "$RECORD/tofu"
+  absent "-chdir=$CLUSTER destroy" "$RECORD/tofu"
 
   rm -f "$RECORD/tofu"
   for args in 'sto2/nothing --yes' 'sto2/cluster sto2/plumbing' '--force'; do
@@ -710,15 +1069,12 @@ EOF
   # The ci stack reads the plumbing stack's state and no other.
   [ "$(yq -p hcl -o json "$CI_STACK"/*.tf | jq -sc '[.[].data.terraform_remote_state // {} | keys[]]')" = '["plumbing"]' ]
 
-  for args in '--yes' 'sto2/cluster --yes'; do
-    rm -f "$RECORD/tofu"
-    # shellcheck disable=SC2086 # the arguments as an operator types them
-    recipe infra-destroy $args < /dev/null
+  rm -f "$RECORD/tofu"
+  recipe infra-destroy sto2/cluster --yes < /dev/null
 
-    [ "$status" -eq 0 ]
-    [ -n "$(tofu_calls apply)" ]
-    absent "-chdir=$CI_STACK " "$RECORD/tofu"
-  done
+  [ "$status" -eq 0 ]
+  [ "$(tofu_calls apply | awk '{ print $1 }')" = "-chdir=$CLUSTER" ]
+  absent "-chdir=$CI_STACK " "$RECORD/tofu"
 
   rm -f "$RECORD/tofu"
   recipe infra-destroy sto2/ci <<< "no"
@@ -736,6 +1092,123 @@ EOF
   [[ " $(tofu_calls init) " == *" -backend-config=key=sto2/ci.tfstate "* ]]
   absent "-chdir=$CLUSTER " "$RECORD/tofu"
   absent "-chdir=$PLUMBING " "$RECORD/tofu"
+}
+
+# state_tofu: a tofu that answers `show -json` without a plan as the state of the stack it runs in,
+# the fixture `holds` names, or no state at all, and shows no changes for a plan; records its calls
+# and applies anything.
+state_tofu() {
+  mkdir -p "$BATS_TEST_TMPDIR/state"
+  fake tofu <<EOF
+printf '%s\n' "\$*" >> "$RECORD/tofu"
+case \${2-} in
+  show)
+    if [[ \$# -eq 3 ]]; then
+      stack=\${1#-chdir=$REPO/infra/openstack/stacks/}
+      file="$BATS_TEST_TMPDIR/state/\${stack//\//_}"
+      if [[ -f \$file ]]; then cat "$FIXTURES/\$(< "\$file")"; else cat "$FIXTURES/state-never-applied.json"; fi
+    else
+      cat "$FIXTURES/no-changes.json"
+    fi
+    ;;
+  output)
+    stack=\${1#-chdir=$REPO/infra/openstack/stacks/}
+    file="$BATS_TEST_TMPDIR/state/\${stack//\//_}"
+    # A stack that holds nothing has no outputs.
+    if [[ -f \$file && \$(< "\$file") != state-never-applied.json && \$(< "\$file") != state-data-only.json ]]; then cat "$FIXTURES/outputs.json"; else echo '{}'; fi
+    ;;
+esac
+EOF
+}
+
+# holds STACK FIXTURE: STACK's state is the fixture's.
+holds() {
+  echo "$2" > "$BATS_TEST_TMPDIR/state/${1//\//_}"
+}
+
+@test "The plumbing stack is not destroyed while another stack still has resources on its network" {
+  state_tofu
+  holds sto2/ci state-with-resources.json
+  for args in '--yes' 'sto2/plumbing --yes'; do
+    rm -f "$RECORD/tofu"
+    # shellcheck disable=SC2086 # the arguments as an operator types them
+    recipe infra-destroy $args < /dev/null
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"sto2/ci still holds resources"*"just infra-destroy sto2/ci"* ]]
+    [[ $output != *stdout_marker* ]]
+    tofu_only_reads
+    # The ci stack's state is read where its own backend key says.
+    tofu_calls init | grep -qF -- "-backend-config=key=sto2/ci.tfstate"
+  done
+
+  # Another stack's resources, found in a module, hold the plumbing stack back as well.
+  holds sto2/ci state-never-applied.json
+  holds sto2/cluster state-in-module.json
+  rm -f "$RECORD/tofu"
+  recipe infra-destroy sto2/plumbing --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"sto2/cluster still holds resources"*"just cluster-destroy"* ]]
+  [[ $output != *openstack_compute_instance_v2* ]]
+  tofu_only_reads
+
+  # Without a stack the cluster stack is destroyed first, so its resources do not hold the plumbing
+  # stack back; the ci stack's would.
+  rm -f "$RECORD/tofu"
+  recipe infra-destroy --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ "$(tofu_calls apply | awk '{ print $1 }')" = "-chdir=$CLUSTER
+-chdir=$PLUMBING" ]
+
+  holds sto2/ci state-with-resources.json
+  rm -f "$RECORD/tofu"
+  recipe infra-destroy --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"sto2/ci still holds resources"* ]]
+  tofu_only_reads
+
+  # Data sources are not resources, and a stack that was never applied holds none.
+  for fixture in state-data-only.json state-never-applied.json; do
+    holds sto2/ci "$fixture"
+    holds sto2/cluster "$fixture"
+    rm -f "$RECORD/tofu"
+    recipe infra-destroy sto2/plumbing --yes < /dev/null
+
+    [ "$status" -eq 0 ]
+    [ "$(tofu_calls apply | awk '{ print $1 }')" = "-chdir=$PLUMBING" ]
+  done
+
+  # The stacks that hold the plumbing stack back are the directories of its region, so a stack added
+  # later is read as well, with nothing else naming it.
+  mkdir -p "$REPO/infra/openstack/stacks/sto2/later"
+  holds sto2/ci state-never-applied.json
+  holds sto2/cluster state-never-applied.json
+  holds sto2/later state-with-resources.json
+  for args in '--yes' 'sto2/plumbing --yes'; do
+    rm -f "$RECORD/tofu"
+    # shellcheck disable=SC2086 # the arguments as an operator types them
+    recipe infra-destroy $args < /dev/null
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"sto2/later still holds resources"*"just infra-destroy sto2/later"* ]]
+    tofu_only_reads
+  done
+  holds sto2/later state-never-applied.json
+
+  # A state that cannot be read is not taken for an empty one.
+  fake tofu <<EOF
+printf '%s\n' "\$*" >> "$RECORD/tofu"
+[[ \${2-} != show || \$# -ne 3 ]] || exit 1
+EOF
+  rm -f "$RECORD/tofu"
+  recipe infra-destroy sto2/plumbing --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"cannot read the state of sto2/"* ]]
+  tofu_only_reads
 }
 
 @test "the ci stack takes the allowlist, the image and the public key from the environment" {
@@ -870,16 +1343,13 @@ EOF
   [ ! -e "$RECORD/tofu" ]
 }
 
-@test "the unimplemented hooks say so when they are reached" {
-  recipe infra-plan sto2/cluster
-
-  [ "$status" -eq 0 ]
-  [[ $output == *"not implemented: adding this machine's public address to the allowlist"* ]]
-
+@test "destroying the cluster stack claims no step it does not take" {
+  # The cluster is asked for what it owns instead.
   recipe infra-destroy --yes < /dev/null
 
   [ "$status" -eq 0 ]
-  [[ $output == *"not implemented: removing the load balancers and volumes the cluster created outside OpenTofu; they are left in place"* ]]
+  [[ $output != *"not implemented"* ]]
+  [[ $output == *"owns no Service of type LoadBalancer"* ]]
 }
 
 # fake_openstack [--missing-flavor NAME] [--version TEXT] [--no-octavia] [--lb-quota JSON]:

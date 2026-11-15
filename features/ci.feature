@@ -52,6 +52,11 @@ Feature: Continuous integration
     When its triggers, permissions, concurrency and steps are read
     Then it runs for every pull request and every push to main with no path filter, requests read-only permissions and no secrets, cancels a pull request's older run, checks out and installs with the same pinned actions in every job, and every command it runs is one just recipe
 
+  Scenario: The tool installer is pinned to an exact version in every workflow, a workflow whose token can write checks its binary, and the publish job keeps no cache
+    Given every workflow file under .github/workflows/
+    When the version of each use of the mise action is read, the checksum input of each use in a workflow that holds a write permission, and the publish job's cache input
+    Then every version is an exact release number, never a range or latest, every use in a workflow that holds a write permission gives a checksum, the same one, and the publish job turns the action's cache off
+
   Scenario: A pull request from a fork never runs on the self-hosted runner
     Given the CI workflow and a self-hosted runner label in CI_RUNNER_LABEL
     When just ci-runner picks the check jobs' runner for a push to main, a pull request from a branch of the repository and one from a fork, and the CI host's job-started hook gets a job of each, the fork's workflow changed to ask for the host
@@ -92,7 +97,17 @@ Feature: Continuous integration
     When the checks of just ci's groups are read
     Then one group renders this checkout's tree with scripts/render and keeps nothing, so a tree that does not render fails just ci as it fails the required check
 
+  Scenario: The comment job runs gh with its own token and none of the other secrets
+    Given every secret variable the recipes read set to a marker, and a recording gh
+    When the comment job runs
+    Then gh's recorded environment holds the job's token and none of those secrets
+
   Scenario: The render is part of the required result, and the comment is not
     Given the CI workflow and the comment workflow
     When the jobs the required job waits for and the comment workflow's jobs are read
     Then the required job waits for the render job, which nothing skips, and the comment workflow is a workflow of its own with no job named ci
+
+  Scenario: Every workflow job that calls the Dagger module checks out the whole history
+    Given every workflow file under .github/workflows/ and the recipes its jobs run
+    When a job runs a recipe that, itself or in the script it runs, calls the Dagger module
+    Then that job checks out the whole history, as the module reads the workspace's Git history, which a shallow clone of a commit with parents cannot give

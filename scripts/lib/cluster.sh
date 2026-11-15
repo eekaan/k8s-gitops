@@ -37,7 +37,7 @@ failed_step() {
 require_commands() {
   local name complete=1
   for name; do
-    if ! command -v "$name" > /dev/null; then
+    if ! type -P "$name" > /dev/null; then
       infra_error "$name is not on PATH; install the pinned tools with: just tools"
       complete=0
     fi
@@ -97,6 +97,172 @@ cluster_talman() {
     infra_error "talman $1 failed; its output is in $log"
   fi
   return "$status"
+}
+
+# stack_cluster_name: the name of the cluster the stack's talman_yaml output configures, empty when
+# the stack has none, for a stack that scripts/stack-env has set up and initialised. tofu's JSON holds
+# every output's value; only jq and yq read it.
+stack_cluster_name() {
+  local outputs name
+  outputs=$(stack_tofu output -json) || return 1
+  name=$(jq -r '.talman_yaml.value // ""' <<< "$outputs" | yq '.clusterName // ""')
+  # The name becomes a path under talos/, so it is a plain name that cannot lead out of it.
+  if [[ -n $name && ! $name =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
+    # shellcheck disable=SC2154 # scripts/stack-env sets stack
+    infra_error "the clusterName in $stack's talman_yaml is not a name of lower-case letters, digits and hyphens"
+    return 1
+  fi
+  printf '%s' "$name"
+}
+
+# stack_holds_resources: prints holds when the state of the stack that scripts/stack-env has set up
+# and initialised holds a managed resource, and empty when it holds none; data sources are not
+# resources and a stack never applied holds none. Only a state that was read and parsed as a JSON
+# object counts as empty. Any other outcome prints nothing and fails, and a caller takes anything but
+# exactly one of the two words, whatever the status, for a state it could not read, as a failure of
+# bash itself leaves no word to take for an answer.
+stack_holds_resources() {
+  local state count
+  state=$(stack_tofu show -json) || return 2
+  count=$(jq -r 'if type != "object" then error("not a state") else
+    [.values.root_module? // empty | .. | objects | select(.mode? == "managed")] | length end' <<< "$state" 2> /dev/null) || return 2
+  [[ $count =~ ^[0-9]+$ ]] || return 2
+  if ((count > 0)); then echo holds; else echo empty; fi
+}
+
+# holds_resources STACK: whether STACK's state holds a managed resource: 0 when it does, 1 when it
+# holds none, 2 when it cannot be read. STACK's lock is taken and the stack initialised in a process
+# of its own (scripts/stack-state), so STACK's inputs and lock do not carry over; its answer is taken
+# only as the word it prints, with status 0.
+holds_resources() {
+  local answer
+  answer=$("$(dirname "${BASH_SOURCE[0]}")/../stack-state" "$1") || return 2
+  case $answer in
+    holds) return 0 ;;
+    empty) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+# remove_generated CLUSTER: removes the files generated for CLUSTER that hold the addresses of its
+# nodes and its API: talman.yaml, and the talosconfig and kubeconfig talman writes into
+# clusterconfig/. A later bootstrap or onboarding would otherwise send machine configuration to
+# whoever answers at those addresses. Only a file that git ignores, and so neither tracks nor would
+# commit, is removed; the secrets bundle and etcd snapshots stay. Names what it removes, never what
+# the files held.
+remove_generated() {
+  local path
+  local -a removed=()
+  for path in "talos/$1/talman.yaml" "talos/$1/clusterconfig/talosconfig" "talos/$1/clusterconfig/kubeconfig"; do
+    [[ -e $infra_root/$path || -L $infra_root/$path ]] || continue
+    if git -C "$infra_root" check-ignore -q -- "$path"; then
+      rm -f -- "${infra_root:?}/$path"
+      removed+=("$path")
+    else
+      infra_error "$path is not a file git ignores, so it is left in place; it may hold the destroyed cluster's addresses"
+    fi
+  done
+  if ((${#removed[@]} > 0)); then
+    echo "removed what held the destroyed cluster's addresses: ${removed[*]}"
+  fi
+}
+
+# require_cluster_owns_nothing CLUSTER STACK UNREACHABLE: the check before the cluster stack STACK is
+# destroyed, shared by cluster-destroy and infra-destroy. The load balancers that Services of type
+# LoadBalancer get and the volumes behind PersistentVolumes of a CSI driver are made by the cluster,
+# not by OpenTofu, so the stack's destroy would leave them in the cloud, where they also keep the
+# network from being deleted. So, through CLUSTER's kubeconfig, it lists every such Service and
+# PersistentVolume, and while there are any, names them and fails. A Service whose every
+# load-balancer address lies in the service range of the cluster's talman.yaml is left out: Cilium
+# gave it that address from its pool, the workers announce it over BGP, and nothing in the cloud
+# stands behind it. A Service with no address yet, or one outside the range, still counts, as does
+# every such Service when talman.yaml names no service range. LINSTOR's volumes are the other
+# exception: their data is on the workers' data volumes, which the stack holds and destroys, so
+# nothing of them stays in the cloud; it says how many there are. A cluster whose API does not
+# answer, that has no kubeconfig, or whose name the stack does not give (empty CLUSTER), cannot be
+# asked and may still own some, so it fails too, unless UNREACHABLE is 1, with which the operator takes
+# on what may be left. Neither kubectl's errors nor anything of the objects but their names are
+# printed, as they can hold addresses.
+require_cluster_owns_nothing() {
+  local cluster=$1 stack=$2 unreachable=$3 kubeconfig why services volumes balancers csi_volumes
+  local linstor_volumes counted name driver service_range
+  # LINSTOR's CSI driver, whose volumes are on the workers' data volumes in the stack.
+  local linstor_driver=linstor.csi.linbit.com
+  require_commands kubectl jq yq || return 1
+  local asked=0
+  if [[ -z $cluster ]]; then
+    why="$stack names no cluster, which leaves no kubeconfig to ask"
+    cluster="the cluster of $stack"
+  else
+    kubeconfig=$infra_root/talos/$cluster/clusterconfig/kubeconfig
+    if [[ ! -f $kubeconfig ]]; then
+      why="${kubeconfig#"$infra_root"/} does not exist"
+    elif services=$(KUBECONFIG=$kubeconfig kubectl get services --all-namespaces --output json --request-timeout=30s 2> /dev/null) &&
+      volumes=$(KUBECONFIG=$kubeconfig kubectl get persistentvolumes --output json --request-timeout=30s 2> /dev/null); then
+      asked=1
+    else
+      why="the API of $cluster does not answer through its kubeconfig"
+    fi
+  fi
+
+  if ((asked)); then
+    # The service range the cluster stack rendered into talman.yaml; without one, no address counts
+    # as the pool's.
+    service_range=
+    if [[ -f $infra_root/talos/$cluster/talman.yaml ]]; then
+      service_range=$(yq '.values.serviceRange // ""' "$infra_root/talos/$cluster/talman.yaml" 2> /dev/null) || service_range=
+    fi
+    # A range is known only as an IPv4 network with octets 0 to 255 and a prefix of 1 to 32, and an
+    # address is the pool's only as an IPv4 address with octets 0 to 255 inside it: anything else
+    # could pass the arithmetic without being in the range.
+    balancers=$(jq -r --arg range "$service_range" '
+      def ipv4: type == "string" and test("^[0-9]{1,3}(\\.[0-9]{1,3}){3}$")
+        and (split(".") | all(tonumber <= 255));
+      def ip4: split(".") | map(tonumber) | .[0] * 16777216 + .[1] * 65536 + .[2] * 256 + .[3];
+      def in_range($cidr): ($cidr | split("/")) as $net | pow(2; 32 - ($net[1] | tonumber)) as $size
+        | ((ip4 / $size) | floor) == (($net[0] | ip4) / $size | floor);
+      def from_pool: if .hostname == null and (.ip | ipv4) then .ip | in_range($range) else false end;
+      ($range | test("^[^/]+/[0-9]{1,2}$") and (split("/") | (.[0] | ipv4) and (.[1] | tonumber | . >= 1 and . <= 32))) as $known
+      | .items[] | select(.spec.type == "LoadBalancer")
+      | (.status.loadBalancer.ingress // []) as $ingress
+      | select(if $known and ($ingress | length) > 0 then ($ingress | all(from_pool)) | not else true end)
+      | "\(.metadata.namespace)/\(.metadata.name)"' <<< "$services")
+    csi_volumes=$(jq -r --arg linstor "$linstor_driver" '.items[]
+      | select(.spec.csi != null and .spec.csi.driver != $linstor)
+      | "\(.metadata.name) \(.spec.csi.driver // "unnamed")"' <<< "$volumes")
+    linstor_volumes=$(jq --arg linstor "$linstor_driver" '[.items[] | select(.spec.csi.driver? == $linstor)] | length' <<< "$volumes")
+    if [[ -n $balancers || -n $csi_volumes ]]; then
+      while read -r name; do
+        [[ -z $name ]] || infra_error "the Service $name is of type LoadBalancer, with an address outside the service range, or none yet"
+      done <<< "$balancers"
+      while read -r name driver; do
+        [[ -z $name ]] || infra_error "the PersistentVolume $name is a volume of the CSI driver $driver"
+      done <<< "$csi_volumes"
+      infra_error "$cluster still owns load balancers or volumes that are not in the state of $stack, which a destroy would leave in the cloud, keeping the network from being deleted; remove them first. Nothing was destroyed"
+      return 1
+    fi
+    if ((linstor_volumes == 0)); then
+      infra_say "$cluster owns no Service of type LoadBalancer outside its service range and no PersistentVolume of a CSI driver"
+    else
+      infra_say "$cluster owns no Service of type LoadBalancer outside its service range and no PersistentVolume of a CSI driver other than LINSTOR's"
+      if ((linstor_volumes == 1)); then
+        counted="1 PersistentVolume of LINSTOR ($linstor_driver), whose data is on the workers' data volumes in $stack: it is"
+      else
+        counted="$linstor_volumes PersistentVolumes of LINSTOR ($linstor_driver), whose data is on the workers' data volumes in $stack: they are"
+      fi
+      infra_say "$cluster has $counted destroyed with the stack, and confirming its destroy confirms that"
+    fi
+  elif ((unreachable)); then
+    infra_say "$why; with --unreachable it is destroyed without being asked, and a load balancer or volume it owns stays in the cloud"
+  else
+    infra_error "$why, so $cluster cannot be asked whether it owns load balancers or volumes, which are not in the state of $stack. Nothing was destroyed; --unreachable destroys it without asking, leaving any it owns in the cloud"
+    return 1
+  fi
+}
+
+# infra_say MESSAGE: MESSAGE on stdout, after the name of the script, as infra_error does on stderr.
+infra_say() {
+  printf '%s: %s\n' "${0##*/}" "$1"
 }
 
 # inside_repository PATH: whether PATH, with symlinks resolved, lies in the repository.
@@ -217,9 +383,14 @@ cluster_talman_drain_off() {
 
 # drain_node NODE: cordons NODE and evicts its pods with kubectl through the kubeconfig, which points
 # at the API load balancer, leaving DaemonSets' pods and dropping emptyDir data, for up to ten
-# minutes. kubectl's output names the node and the pods it evicts.
+# minutes. kubectl's output names the node and the pods it evicts and passes through. Its errors do
+# too, line by line as they come, through redact_stream (scripts/lib/errors.sh), as they can name the
+# API server's address when it cannot be reached; the reason stays.
 drain_node() {
-  kubectl drain "$1" --ignore-daemonsets --delete-emptydir-data --timeout=10m
+  local status
+  { kubectl drain "$1" --ignore-daemonsets --delete-emptydir-data --timeout=10m 2>&1 1>&3 3>&- |
+    redact_stream >&2; status=${PIPESTATUS[0]}; } 3>&1
+  return "$status"
 }
 
 # not_ready_since SINCE HOSTNAME...: the HOSTNAMEs that are not a Ready node whose kubelet has
@@ -296,11 +467,15 @@ require_flux_age_key() {
 # flux_sops ARG...: sops with the Flux age key as its only age key, whichever key the environment
 # gives sops for the Talos secrets bundles. The key reaches sops in its environment.
 flux_sops() {
-  if [[ -n ${FLUX_AGE_KEY:-} ]]; then
-    SOPS_AGE_KEY=$FLUX_AGE_KEY env -u SOPS_AGE_KEY_FILE -u SOPS_AGE_KEY_CMD sops "$@"
-  else
-    SOPS_AGE_KEY_FILE=$FLUX_AGE_KEY_FILE env -u SOPS_AGE_KEY -u SOPS_AGE_KEY_CMD sops "$@"
-  fi
+  local key=${FLUX_AGE_KEY:-} file=${FLUX_AGE_KEY_FILE:-}
+  (
+    export -n SOPS_AGE_KEY SOPS_AGE_KEY_FILE SOPS_AGE_KEY_CMD
+    if [[ -n $key ]]; then
+      SOPS_AGE_KEY=$key sops "$@"
+    else
+      SOPS_AGE_KEY_FILE=$file sops "$@"
+    fi
+  )
 }
 
 # node_name_regex: from the node names on standard input, one per line, a regular expression (Go RE2
@@ -559,7 +734,7 @@ require_install_tools() {
     fi
   done
   for tool in yq helm kubectl; do
-    if ! command -v "$tool" > /dev/null; then
+    if ! type -P "$tool" > /dev/null; then
       infra_error "$tool not found on PATH"
       return 1
     fi
@@ -573,7 +748,7 @@ require_install_tools() {
 substitute() {
   local file=$1 flux name value i
   local -a names=() values=()
-  flux=$(command -v flux) || {
+  flux=$(type -P flux) || {
     infra_error "flux not found on PATH"
     return 1
   }

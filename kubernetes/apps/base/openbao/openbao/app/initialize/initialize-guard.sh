@@ -27,8 +27,14 @@ fi
 if [ -n "$(printf '%s\n' "$listing" | grep -vx 'lost+found')" ]; then
   exit 0
 fi
-if ! claims=$(kubectl get persistentvolumeclaim data-openbao-1 data-openbao-2 --namespace "${POD_NAMESPACE:-}" \
-  --ignore-not-found --output name --request-timeout 10s); then
+# kubectl finds the API through the pod's in-cluster configuration, which client-go takes only while
+# flags and kubeconfig files leave its configuration at the default: a flag such as
+# --request-timeout sends it to http://localhost:8080 instead (client-go's
+# tools/clientcmd/merged_client_builder.go). So the call carries no such flag, --namespace being
+# none, and timeout bounds it: BusyBox's sends SIGKILL after 10 seconds, which no program can catch,
+# so a call stopped so fails like any other.
+if ! claims=$(timeout -s KILL 10 kubectl get persistentvolumeclaim data-openbao-1 data-openbao-2 \
+  --namespace "${POD_NAMESPACE:-}" --ignore-not-found --output name); then
   echo "initialize-guard: no answer from the Kubernetes API on the other members' claims; not initialising" >&2
   exit 1
 fi

@@ -2,9 +2,11 @@
 # Upgrades Talos on a cluster's nodes to the version and schematic their talman.yaml gives them,
 # which come from versions.yaml through the cluster stack; it takes no version of its own. Shows
 # which nodes talman upgrade would reach, and once the cluster's name is typed back, or with --yes,
-# takes an etcd snapshot and goes through the nodes one at a time in talman.yaml's order. Each node
-# that is behind is drained with kubectl, upgraded with talman, and uncordoned once it is a Ready
-# node again, before the next is drained. A node already on its version is not drained.
+# takes an etcd snapshot, encrypted and kept in the etcd backup bucket as cluster-snapshot keeps it,
+# and goes through the nodes one at a time in talman.yaml's order. A snapshot that cannot be taken
+# stops the run before any node is touched. Each node that is behind is drained with kubectl,
+# upgraded with talman, and uncordoned once its kubelet has reported Ready since the upgrade began,
+# before the next is drained. A node already on its version is not drained.
 #
 # kubectl reaches the API through the kubeconfig cluster-kubeconfig fetches, served at
 # KUBE_API_ADDRESS, and the run stops before a drain when the API does not answer there. talosctl's
@@ -15,8 +17,8 @@
 set -euo pipefail
 
 here=$(dirname "$0")
-# shellcheck source=scripts/lib/cluster.sh
-. "$here/lib/cluster.sh"
+# shellcheck source=scripts/lib/snapshot.sh
+. "$here/lib/snapshot.sh"
 
 cluster='' confirmed=0
 for arg; do
@@ -50,6 +52,28 @@ api_answers() {
   return 1
 }
 
+# ready_after SINCE NODE: waits until NODE's kubelet has reported Ready since SINCE, sixty tries ten
+# seconds apart, and fails naming NODE, or the API when it does not answer through the kubeconfig.
+ready_after() {
+  local attempt not_ready
+  for ((attempt = 1; ; attempt++)); do
+    if not_ready=$(not_ready_since "$1" "$2"); then
+      [[ -n $not_ready ]] || return 0
+    else
+      not_ready=
+    fi
+    if ((attempt >= 60)); then
+      if [[ -n $not_ready ]]; then
+        infra_error "$not_ready did not report Ready after the upgrade"
+      else
+        infra_error "the Kubernetes API does not answer through the kubeconfig"
+      fi
+      return 1
+    fi
+    sleep 10
+  done
+}
+
 step="asking each node whether its Talos is behind"
 behind=0
 cluster_talman upgrade --dry-run --detailed-exit-code || behind=$?
@@ -62,6 +86,13 @@ case $behind in
   *) exit "$behind" ;;
 esac
 
+step="checking what the etcd snapshot needs"
+complete=1
+require_cluster recipient || complete=0
+require_snapshot || complete=0
+((complete))
+prepare_snapshot
+
 step="waiting for $cluster to be typed back"
 ((confirmed)) || confirm "$cluster" "upgrade Talos on" upgraded
 
@@ -71,8 +102,7 @@ step="fetching the kubeconfig"
 step="checking that the Kubernetes API answers"
 api_answers
 
-step="taking an etcd snapshot"
-cluster_talman etcd snapshot
+take_etcd_snapshot
 
 hostnames=$(talman_nodes "$talman_file" | cut -d' ' -f1)
 mapfile -t nodes <<< "$hostnames"
@@ -92,8 +122,11 @@ for node in "${nodes[@]}"; do
   drain_node "$node"
   step="upgrading $node, which is drained"
   cluster_talman_drain_off upgrade -n "$node"
-  step="waiting for $node, which is drained, to be Ready"
-  kubectl wait --for=condition=Ready "node/$node" --timeout=10m
+  # A Ready condition from before talman returned is the one etcd kept while the node was away, or
+  # one the kubelet posted as the upgrade began; only a report after it shows the upgraded node.
+  since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  step="waiting for $node, which is drained, to report Ready after the upgrade"
+  ready_after "$since" "$node"
   step="uncordoning $node"
   kubectl uncordon "$node"
 done

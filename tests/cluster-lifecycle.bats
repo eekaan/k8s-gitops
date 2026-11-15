@@ -4,9 +4,10 @@
 # environment of their own, so no run reads this checkout's .env, keys or kubeconfig. Whatever would
 # reach a node, the cluster or the cloud is a recording fake: kubectl and talman are
 # tests/fixtures/cluster-lifecycle/kubectl and talman, which answer from files in STATE; tofu plans
-# and destroys from tests/fixtures/cluster-lifecycle/destroy-plan.json; openstack, helm, rclone and
-# talosctl fail when called. sleep is the real one under the fakes' directory as its name, so that a
-# probe left running is found by its command line, as are the fakes and the copy's scripts.
+# and destroys from tests/fixtures/cluster-lifecycle/destroy-plan.json, with state.json as the
+# stack's state; openstack, helm, rclone and talosctl fail when called. sleep is the real one under
+# the fakes' directory as its name, so that a probe left running is found by its command line, as
+# are the fakes and the copy's scripts.
 
 setup_file() {
   # The Talos check's fixture cluster: talos/talman.yaml.tftpl rendered from tests/fixtures/talos,
@@ -87,7 +88,10 @@ EOF
 printf '%s\n' "tofu \$*" >> "$RECORD/argv"
 case \${2-} in
   init | plan | apply) echo "$TOFU_REPORT: tofu's own report" ;;
-  show) cat "$FIXTURES/destroy-plan.json" ;;
+  show)
+    # Without a saved plan, the stack's state: the cluster stack holds resources.
+    if [[ \$# -eq 3 ]]; then cat "$FIXTURES/state.json"; else cat "$FIXTURES/destroy-plan.json"; fi
+    ;;
   output) cat "$FIXTURES/outputs.json" ;;
 esac
 EOF
@@ -253,9 +257,16 @@ restore_generated() {
   done
 }
 
-# no_tofu: tofu has not run.
+# no_tofu: every tofu call was an init, or a read of the stack's outputs or state, which name the
+# cluster the stack holds and whether it holds anything; nothing was planned, applied, destroyed,
+# imported or removed from state.
 no_tofu() {
-  [ -z "$(calls '^tofu ')" ]
+  local changed
+  changed=$(awk '$1 == "tofu" && $3 != "init" && $3 != "output" && $3 != "show"' "$RECORD/argv" 2> /dev/null)
+  if [[ -n $changed ]]; then
+    echo "tofu changed or planned: $changed" >&2
+    return 1
+  fi
 }
 
 @test "A healthy cluster passes every check" {
@@ -629,6 +640,29 @@ kube-system/node-agent-cp-1' ]
   done
 }
 
+@test "A failed drain says why without the API's address" {
+  : > "$STATE/drain-unreachable"
+  for ci in '' true; do
+    echo "ci=$ci"
+    reset_cluster
+    : > "$STATE/drain-unreachable"
+    reset_environment
+    [[ -z $ci ]] || with CI=true
+
+    recipe cluster-reboot worker-2 --yes < /dev/null
+
+    [ "$status" -ne 0 ]
+    # The reason is shown, and where the API is is not.
+    [[ $output == *"connection refused"* ]]
+    for address in 198.51.100.66 "$KUBE_API_ADDRESS" 6443; do
+      [[ $output != *"$address"* ]]
+    done
+    # Nothing was rebooted, and the node is left cordoned and said to be.
+    [ -z "$(calls '^talman ')" ]
+    [[ $(script_lines | tail -1) == *"worker-2 is left cordoned"* ]]
+  done
+}
+
 @test "A cluster that still owns a load balancer or a volume is not destroyed, and they are named" {
   for owned in load-balancer csi-volume both; do
     echo "$owned"
@@ -796,8 +830,12 @@ kube-system/node-agent-cp-1' ]
 
   [ "$status" -ne 0 ]
   [[ $output == *"--unreachable"* ]]
-  [ ! -e "$RECORD/argv" ]
+  [ -z "$(calls '^kubectl ')" ]
+  no_tofu
+  # Nothing but tofu's reads ran at all.
+  [ "$(grep -cv '^tofu ' "$RECORD/argv")" -eq 0 ]
   mv "$BATS_TEST_TMPDIR/kubeconfig" "$CLUSTER/clusterconfig/kubeconfig"
+  generated_kept
 
   # With --unreachable, an API that does not answer is not asked to answer.
   : > "$STATE/api-down"
@@ -827,7 +865,9 @@ kube-system/node-agent-cp-1' ]
   # The cluster is asked first, then only the cluster stack is planned for destruction and destroyed.
   asked=$(last_call_line '^kubectl get ')
   [ -n "$asked" ]
-  [ "$asked" -lt "$(call_line '^tofu ')" ]
+  [ "$(call_line '^tofu .* output ')" -lt "$asked" ]
+  [ "$asked" -lt "$(call_line '^tofu .* plan ')" ]
+  [ "$asked" -lt "$(call_line '^tofu .* apply ')" ]
   [ "$(calls '^tofu ' | grep -cv "^tofu -chdir=$STACK ")" -eq 0 ]
   [ "$(calls '^tofu .* plan ' | wc -l)" -eq 1 ]
   [[ $(calls '^tofu .* plan ') == *" -destroy "* ]]
@@ -842,6 +882,238 @@ kube-system/node-agent-cp-1' ]
   done
   cmp "$CLUSTER/secrets.sops.yaml" "$BATS_TEST_TMPDIR/cluster.before/secrets.sops.yaml"
   [ -z "$(calls '^(rclone|openstack|helm|talosctl|talman) ')" ]
+}
+
+@test "The cluster stack is asked the same way whichever recipe destroys it" {
+  for args in 'sto2/cluster' ''; do
+    for owned in load-balancer csi-volume; do
+      echo "$args $owned"
+      reset_cluster
+      restore_generated
+      : > "$STATE/$owned"
+
+      # shellcheck disable=SC2086 # the arguments as an operator types them
+      recipe infra-destroy $args --yes < /dev/null
+
+      [ "$status" -ne 0 ]
+      if [[ $owned == load-balancer ]]; then
+        [[ $output == *"Service apps/web"* ]]
+      else
+        [[ $output == *"PersistentVolume pvc-0a1b2c3d"* ]]
+      fi
+      for other in default/kubernetes local-volume-1 marker-volume-handle 198.51.100.62; do
+        [[ $output != *"$other"* ]]
+      done
+      no_tofu
+      generated_kept
+    done
+
+    # A Service on a pool address is not a load balancer of the cloud's, by either recipe; beside a
+    # Service at another address, that one is named and nothing is destroyed.
+    reset_cluster
+    restore_generated
+    : > "$STATE/pool-load-balancer"
+    : > "$STATE/load-balancer"
+    # shellcheck disable=SC2086
+    recipe infra-destroy $args --yes < /dev/null
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"Service apps/web"* ]]
+    [[ $output != *"gateways/public"* ]]
+    no_tofu
+    generated_kept
+
+    reset_cluster
+    restore_generated
+    : > "$STATE/pool-load-balancer"
+    # shellcheck disable=SC2086
+    recipe infra-destroy $args --yes < /dev/null
+
+    [ "$status" -eq 0 ]
+    [[ $output == *"sto2/cluster destroyed"* ]]
+    restore_generated
+
+    # An API that does not answer, and no kubeconfig: refused, naming --unreachable.
+    reset_cluster
+    : > "$STATE/api-down"
+    # shellcheck disable=SC2086
+    recipe infra-destroy $args --yes < /dev/null
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"--unreachable"* ]]
+    [[ $output != *198.51.100.66* ]]
+    no_tofu
+    generated_kept
+
+    # shellcheck disable=SC2086
+    recipe infra-destroy $args --unreachable --yes < /dev/null
+
+    [ "$status" -eq 0 ]
+    [[ $output == *"sto2/cluster destroyed"* ]]
+    restore_generated
+  done
+
+  # A cluster that owns nothing is destroyed, and nothing is said to be left undone.
+  reset_cluster
+  restore_generated
+  echo 2 > "$STATE/linstor-volumes"
+
+  recipe infra-destroy sto2/cluster --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"2 PersistentVolumes of LINSTOR"*"destroyed with the stack"* ]]
+  [[ $output == *"sto2/cluster destroyed"* ]]
+  [[ $output != *"not implemented: removing"* ]]
+  [ "$(call_line '^kubectl get persistentvolumes ')" -lt "$(call_line '^tofu .* plan ')" ]
+}
+
+@test "A cluster is destroyed only under the name its stack holds" {
+  # No directory under talos/ for the name: nothing is planned, asked or destroyed.
+  recipe cluster-destroy other-cluster --unreachable --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"holds lab-sto2, not other-cluster"* ]]
+  no_tofu
+  [ -z "$(calls '^kubectl ')" ]
+  generated_kept
+
+  # A directory for it, as cluster-secrets and infra-talman make before a cluster exists: the stack
+  # still holds another cluster, which is the only one it destroys.
+  mkdir -p "$REPO/talos/other-cluster"
+  for args in '--unreachable --yes' '--yes' ''; do
+    rm -f "$RECORD/argv"
+    # shellcheck disable=SC2086 # the arguments as an operator types them
+    recipe cluster-destroy other-cluster $args <<< other-cluster
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"holds lab-sto2, not other-cluster"* ]]
+    no_tofu
+    [ -z "$(calls '^kubectl ')" ]
+    generated_kept
+  done
+
+  # The cluster the stack holds, without a directory of its own, is told so.
+  rmdir "$REPO/talos/other-cluster"
+  mv "$CLUSTER" "$REPO/talos/lab-sto2.away"
+  rm -f "$RECORD/argv"
+  recipe cluster-destroy lab-sto2 --unreachable --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"talos/lab-sto2 does not exist"* ]]
+  no_tofu
+  [ -z "$(calls '^kubectl ')" ]
+  mv "$REPO/talos/lab-sto2.away" "$CLUSTER"
+  generated_kept
+
+  # A stack whose outputs name no cluster, while its state holds resources, cannot be told to be any
+  # name, and nothing is asked.
+  fake tofu <<EOF
+printf '%s\n' "tofu \$*" >> "$RECORD/argv"
+case \${2-} in
+  output) echo '{}' ;;
+  show) cat "$FIXTURES/state.json" ;;
+esac
+EOF
+  for args in 'lab-sto2 --unreachable --yes' 'lab-sto2 --yes' 'lab-sto2'; do
+    rm -f "$RECORD/argv"
+    # shellcheck disable=SC2086 # the arguments as an operator types them
+    recipe cluster-destroy $args <<< lab-sto2
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"outputs name no cluster"* ]]
+    [[ $output == *"just infra-destroy sto2/cluster --unreachable"* ]]
+    no_tofu
+    [ -z "$(calls '^kubectl ')" ]
+    generated_kept
+  done
+}
+
+@test "A cluster destroy that is run again ends as the first run did, with the cluster stack holding nothing" {
+  # The constitution's "A recipe that changes live state is idempotent": the stack is gone, so its
+  # outputs name no cluster and its state holds no resource.
+  fake tofu <<EOF
+printf '%s\n' "tofu \$*" >> "$RECORD/argv"
+case \${2-} in
+  output) echo '{}' ;;
+  show) echo '{"format_version": "1.0"}' ;;
+esac
+EOF
+  # Another cluster's generated files are no concern of this one's destroy.
+  mkdir -p "$REPO/talos/other-cluster/clusterconfig"
+  for file in "${GENERATED[@]}"; do
+    echo marker > "$REPO/talos/other-cluster/$file"
+  done
+  for args in '--unreachable --yes' '--yes' ''; do
+    restore_generated
+    rm -f "$RECORD/argv"
+    # shellcheck disable=SC2086 # the arguments as an operator types them
+    recipe cluster-destroy lab-sto2 $args < /dev/null
+
+    [ "$status" -eq 0 ]
+    [[ $output == *"sto2/cluster holds no resource, so there is nothing to destroy"* ]]
+    no_tofu
+    [ -z "$(calls '^kubectl ')" ]
+    for file in "${GENERATED[@]}"; do
+      [ ! -e "$CLUSTER/$file" ]
+      [ -f "$REPO/talos/other-cluster/$file" ]
+    done
+  done
+
+  # A name with no directory under talos/ is refused whatever the stack holds.
+  rm -f "$RECORD/argv"
+  recipe cluster-destroy ghost --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"talos/ghost does not exist"* ]]
+  no_tofu
+
+  # Run once more, with the generated files already gone.
+  rm -f "$RECORD/argv"
+  recipe cluster-destroy lab-sto2 --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"holds no resource, so there is nothing to destroy"* ]]
+  no_tofu
+
+  # A state that is not read and parsed is not taken for an empty one: no answer, or text that is no
+  # JSON, leaves the generated files where they are.
+  for answer in '' 'not a state' '[]'; do
+    restore_generated
+    fake tofu <<EOF
+printf '%s\n' "tofu \$*" >> "$RECORD/argv"
+case \${2-} in
+  output) echo '{}' ;;
+  show) printf '%s' '$answer' ;;
+esac
+EOF
+    rm -f "$RECORD/argv"
+    recipe cluster-destroy lab-sto2 --unreachable --yes < /dev/null
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"cannot read the state of sto2/cluster"* ]]
+    no_tofu
+    generated_kept
+  done
+
+  # A read that fails the way bash does, with status 1, or that ends without the word that says what
+  # it found, is not an answer that the stack holds nothing.
+  for body in 'exit 1' 'exit 0' 'echo something; exit 0' 'printf "holds\nempty\n"' 'echo empty; exit 1' 'echo holds; exit 1'; do
+    restore_generated
+    printf '#!/usr/bin/env bash\n%s\n' "$body" > "$REPO/scripts/stack-state"
+    fake tofu <<EOF
+printf '%s\n' "tofu \$*" >> "$RECORD/argv"
+case \${2-} in
+  output) echo '{}' ;;
+esac
+EOF
+    rm -f "$RECORD/argv"
+    recipe cluster-destroy lab-sto2 --unreachable --yes < /dev/null
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"cannot read the state of sto2/cluster"* ]]
+    no_tofu
+    generated_kept
+  done
 }
 
 @test "Nothing is destroyed without the stack's name" {

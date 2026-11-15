@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # Publishes kubernetes/ as the OCI artifact Flux follows (ADR 0003), and runs only in the publish
-# workflow. In order: logs in to the registry; pushes the artifact tagged with the commit; signs the
+# workflow. In order: runs just kubernetes-check on the commit being published, and stops if it
+# fails; logs in to the registry; pushes the artifact tagged with the commit; signs the
 # digest the push reports, keyless, with the job's identity token; verifies that signature against
 # the identity of this workflow at the run's ref, which on main is the one the FluxInstance accepts;
 # and only then tags that digest main. The tag moves last and
 # by digest, so main only ever names the bytes that were signed and verified, whatever becomes of the
 # commit's tag in between. It moves only on a run on refs/heads/main for which no newer commit on
-# main changes what is published, so a run that finishes late never moves it back; otherwise the run
-# says why the tag stayed, and exits 0.
+# main changes what is published, so a run that finishes late never moves it back; otherwise the
+# run says why the tag stayed, and exits 0. The check is run on this run's own commit only: what a
+# newer commit's tree does is for that commit's run, so a newer commit that fails publishes nothing
+# and the tag stays where it is until a later commit passes.
 # Reads what GitHub Actions sets: GITHUB_ACTIONS, ACTIONS_ID_TOKEN_REQUEST_URL and
 # ACTIONS_ID_TOKEN_REQUEST_TOKEN (a job with id-token: write), GITHUB_REF and GITHUB_ACTOR; and
 # REGISTRY_TOKEN, the job's token with packages: write. The token reaches docker login on standard
@@ -61,6 +64,18 @@ begin() {
   step=$1
   say "$step"
 }
+
+# without_tokens COMMAND...: runs COMMAND without the job's tokens. The Kubernetes check builds
+# manifests and needs no credential, so it gets none.
+without_tokens() {
+  env -u REGISTRY_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL -u ACTIONS_ID_TOKEN_REQUEST_TOKEN "$@"
+}
+
+# Nothing is pushed from a tree whose manifests do not build: the check runs on the commit being
+# published, which can differ from the branch a pull request's own check ran against. A failure
+# stops the run here, with the check's own message, before the registry is touched.
+begin "checking that kubernetes/ builds"
+without_tokens just kubernetes-check
 
 begin "logging in to ghcr.io"
 printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin > /dev/null

@@ -291,6 +291,58 @@ run "_an_empty_allowlist_is_rejected" {
   expect_failures = [var.api_allowed_cidrs]
 }
 
+run "an_allowlist_network_wider_than_16_or_with_host_bits_set_is_rejected" {
+  command = plan
+
+  variables {
+    api_allowed_cidrs = ["198.51.100.0/24", "255.254.0.0/15"]
+  }
+
+  expect_failures = [var.api_allowed_cidrs]
+}
+
+# The same scenario with the other ways to open it wide; a scenario is proved by one run of its
+# name, so these are named apart from it.
+run "_an_allowlist_of_every_address_is_rejected" {
+  command = plan
+
+  variables {
+    api_allowed_cidrs = ["0.0.0.0/0"]
+  }
+
+  expect_failures = [var.api_allowed_cidrs]
+}
+
+run "_an_allowlist_of_two_halves_of_the_address_space_is_rejected" {
+  command = plan
+
+  variables {
+    api_allowed_cidrs = ["0.0.0.0/1", "128.0.0.0/1"]
+  }
+
+  expect_failures = [var.api_allowed_cidrs]
+}
+
+run "_an_allowlist_host_address_written_with_a_short_prefix_is_rejected" {
+  command = plan
+
+  variables {
+    api_allowed_cidrs = ["255.0.0.1/1"]
+  }
+
+  expect_failures = [var.api_allowed_cidrs]
+}
+
+run "_an_allowlist_address_with_bits_set_below_its_prefix_is_rejected" {
+  command = plan
+
+  variables {
+    api_allowed_cidrs = ["198.51.100.7/24"]
+  }
+
+  expect_failures = [var.api_allowed_cidrs]
+}
+
 run "every_node_has_its_own_floating_ip" {
   command = plan
 
