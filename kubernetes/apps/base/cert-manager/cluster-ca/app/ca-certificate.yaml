@@ -1,0 +1,27 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cert-manager.io/certificate_v1.json
+# The cluster's own certificate authority: the certificate and its private key, which cert-manager
+# makes and keeps in the Secret cluster-ca of this namespace. The key is never in the tree, and a
+# rebuilt cluster makes a new one.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: cluster-ca
+spec:
+  isCA: true
+  commonName: cluster-ca
+  secretName: cluster-ca
+  # Ten years, renewed in the last one, so a long-lived cluster is never left with an expired
+  # authority, and whoever trusts it has a year to take the renewed certificate.
+  duration: 87600h
+  renewBefore: 8760h
+  privateKey:
+    algorithm: ECDSA
+    size: 384
+    # A renewal gives the same authority a longer life, not a new key, so what it signed stays
+    # valid.
+    rotationPolicy: Never
+  issuerRef:
+    group: cert-manager.io
+    kind: Issuer
+    name: cluster-ca-bootstrap

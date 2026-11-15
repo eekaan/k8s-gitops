@@ -289,6 +289,13 @@ level is declared in the tree, never left to the API server's default.
     `spec.csiController` and `spec.affinityController`, each naming every container of the
     operator's template at its pinned version. Its satellites, CSI node plugin, NFS server and HA
     controller run privileged and are entries of the exceptions file, `created-by` it.
+  - `EnvoyProxy/public` in `envoy-gateway-system`: the pod's non-root user and seccomp profile in
+    `spec.provider.kubernetes.envoyDeployment.pod.securityContext`, and the proxy container's
+    non-root user, seccomp profile, no privilege escalation and no capabilities in
+    `envoyDeployment.container.securityContext`; the controller adds its shutdown manager container
+    with the same hardened defaults. `tests/gateway.bats` requires these fields, as the proxy is one
+    container patched by the resource rather than a list of named containers
+    ([The public Gateway](#the-public-gateway)).
   - The ReplicationSource `<app>` and ReplicationDestination `<app>-restore` of each application
     with a backed-up volume, `volsync-demo` in `demo` among them: the movers' non-root user and
     seccomp profile, in `spec.restic.moverSecurityContext`, from `components/volsync`; VolSync
@@ -476,10 +483,11 @@ restarts every agent, node by node, and the operator.
   the sessions stay down: a labelled Service gets an address, but nothing outside the cluster
   reaches it.
 - **The Gateway's address.** The edge routers forward public traffic to one address of the service
-  range, `GATEWAY_ADDRESS` in `cluster-config`, a host the plumbing stack picks. Nothing in the tree
-  uses it yet: the public Gateway is to ask the pool for it with the `lbipam.cilium.io/ips`
-  annotation. The pool does not set it aside, so any other labelled Service may be given it first;
-  keeping that from happening is for the change that adds the Gateway.
+  range, `GATEWAY_ADDRESS` in `cluster-config`, a host the plumbing stack picks. The public Gateway's
+  proxies' Service asks the pool for it with the `lbipam.cilium.io/ips` annotation and carries the
+  label ([The public Gateway](#the-public-gateway)). The pool does not set it aside, so any other
+  labelled Service may be given it first, and the Gateway's Service would then stay pending; no
+  other Service carries the label.
 - **`externalTrafficPolicy`.** With `Cluster`, the default, every worker announces every labelled
   address, the edge routers spread connections over all of them, and a worker forwards each to an
   endpoint on any node, translating the source to its own address when the endpoint is elsewhere.
@@ -867,10 +875,9 @@ to set, while it is not the image the chart runs.
 ## cert-manager
 
 `apps/base/cert-manager/cert-manager/` installs cert-manager, which issues and renews the TLS
-certificates applications and gateways ask for, from the issuers they name (ADR 0006). Its only
-issuers are OpenBao's own, which are namespaced and sign OpenBao's listener certificate alone
-([OpenBao](#openbao)); no ClusterIssuer exists yet, so it issues nothing for an application or a
-gateway.
+certificates applications and gateways ask for, from the issuers they name (ADR 0006). OpenBao's own
+issuers are namespaced and sign OpenBao's listener certificate alone ([OpenBao](#openbao)); the one
+issuer any namespace may name is the `ClusterIssuer` `cluster-ca`, below.
 
 It runs in its own namespace, `cert-manager`, at the restricted Pod Security level, from the
 publisher's chart in `oci://quay.io/jetstack/charts`; its leader election leases are there too, so
@@ -890,6 +897,26 @@ one. They run at `system-cluster-critical` with small requests and no limits. No
 PodMonitor is enabled. `tests/baseline.bats` renders the chart with these values and checks the
 namespace, the definitions and their policy, the Gateway API configuration and dependency, and the
 replicas, spreads and budgets.
+
+### The cluster's own CA
+
+`apps/base/cert-manager/cluster-ca/` applies three objects in `cert-manager`: a SelfSigned `Issuer`,
+`cluster-ca-bootstrap`; the `Certificate` `cluster-ca`, a CA (`isCA`) of ECDSA P-384, valid for ten
+years and renewed in the last one, with the key kept on renewal, which the bootstrap issuer signs
+and which cert-manager keeps in the Secret `cluster-ca`; and the `ClusterIssuer` `cluster-ca`, of
+kind CA, that signs with that Secret. The application names `cert-manager` in `dependsOn` and sets
+`wait`, so it is Ready only once the authority is issued and the issuer is, and what names it in
+`dependsOn` finds an issuer that signs. The bootstrap issuer is namespaced, so no other namespace
+can ask it for a certificate.
+
+This is an interim authority, and the docs say what it is: it is made in the cluster, its private
+key is in a Secret in `cert-manager`, and no tree file holds a key; nothing outside the cluster
+trusts it; and it is lost with the cluster, as a rebuilt cluster makes a new one, which a client
+that had been given the old one must be given again. It is not the decision of ADR 0006, which
+stands unamended: the public certificate comes from the Let's Encrypt DNS-01 issuer of that record
+when its story lands, and each `Certificate` that names `cluster-ca` then changes its `issuerRef`,
+one place for the Gateway's ([The public Gateway](#the-public-gateway)). `tests/gateway.bats` checks
+the three objects, the Gateway's certificate against them, and that no Secret or key is in the tree.
 
 ## Autoscaling and reflection
 
@@ -1301,11 +1328,88 @@ serves every stable kind and version of the chart's copy; an Envoy Gateway updat
 Gateway API therefore waits for `gateway-api-crds` to move first. The tests also render the chart
 and build both applications offline to check the rest of this section.
 
-No Gateway exists yet. A Gateway's proxies are reached through a Service of type LoadBalancer,
-which needs the cloud controller, and its HTTPS listener needs a certificate from an issuer that
-serves its namespace, which no issuer does yet: cert-manager's only issuers are OpenBao's, in the
-`openbao` namespace. Until both are in place the controller accepts the GatewayClass and runs no
-proxy.
+### The public Gateway
+
+`gateway-public`, an application of the same namespace, runs the one Gateway, `public`, of the
+GatewayClass `envoy-gateway`. It names `envoy-gateway`, `cluster-ca` (the issuer,
+[cert-manager](#cert-manager)) and `cilium-bgp` in `dependsOn`, so it starts once the controller
+runs, an issuer signs and the pool and the BGP objects exist. It is Ready, with the 10 minute
+timeout, once its certificate is issued and the controller reports the Gateway programmed, which it
+does once the proxies' Service holds an address and the proxies are available. A cluster whose
+overlay does not list it runs no Gateway, and `hello-route`, the application that has a route on it,
+cannot be listed without it: `just kubernetes-check` refuses the dependency.
+
+- **Its address.** The Gateway names the `EnvoyProxy` `public` in `infrastructure.parametersRef`.
+  That gives the Service the controller makes for the proxies type `LoadBalancer`, the label
+  `k8s-gitops/announce: bgp` and the annotation `lbipam.cilium.io/ips: ${GATEWAY_ADDRESS}`, so
+  Cilium gives it the one address of the service range the edge routers forward public traffic to,
+  and the workers announce that address ([Service addresses](#service-addresses)). No address is
+  written in the tree.
+- **`externalTrafficPolicy: Cluster`**, where the controller's default is `Local`. Every worker
+  announces the address and forwards a connection to a proxy on any node, so a proxy that is
+  replaced, drained or moved changes no route an edge router holds, and no connection is reset by a
+  route that went away; with `Local` only the workers that run a proxy would announce it, and each
+  rollout would withdraw and add routes. `Local` would keep the source of a connection, but the edge
+  routers translate every client's address to their own (ADR 0018), so there is no client address to
+  keep. A proxy therefore sees as the client the address of an edge router, or of the worker that
+  forwarded the connection from another node, never the client's, and its access logs carry that
+  address.
+- **The proxies.** Two replicas, spread over the workers with a skew of one and never scheduled
+  where that fails, under a disruption budget that keeps one running, with requests of 100m of CPU
+  and 128Mi of memory and no limits. They run as a non-root user with the runtime's default seccomp
+  profile, no privilege escalation and no capabilities, which the namespace's restricted level
+  requires. The controller makes their Deployment at run time, so no render holds it and
+  `just pod-security-check` does not evaluate it; admission enforces the namespace's level when the
+  controller creates it. `tests/gateway.bats` asserts the fields of the `EnvoyProxy` that produce
+  its pods, and the controller adds its shutdown manager container with the same hardened defaults.
+- **Listeners.** `http` on 80 for every hostname, and `https` on 443 for `*.${CLUSTER_DOMAIN}`,
+  terminating TLS with the Secret `public-wildcard-tls`. They are the ports the edge routers
+  translate ([The edge routers](infrastructure.md#the-edge-routers)): `tests/gateway.bats` fails,
+  naming both files, when the Gateway's listeners and the edge stack's `public_ports` differ.
+- **Redirect.** The `HTTPRoute` `https-redirect`, in the Gateway's namespace, is the only route
+  that attaches to `http`, whose `allowedRoutes` admit that namespace alone. It sends every request
+  to `https` with status 301, on the scheme's default port, and has no backend: plain HTTP is never
+  forwarded.
+- **Who may attach.** To `https`, routes of the namespaces that carry the label
+  `k8s-gitops/gateway: public`, and of no other: the listener's `allowedRoutes` select them by that
+  label. A route in a namespace without it is not accepted, which is the Gateway API's rule and the
+  controller's to apply; it shows in the route's status, and `tests/gateway.bats` proves the
+  selector on the objects. `demo` is the one namespace that carries the label.
+- **The certificate.** The `Certificate` `public-wildcard` asks the `ClusterIssuer` `cluster-ca`
+  for an ECDSA P-256 certificate for `*.${CLUSTER_DOMAIN}` and `${CLUSTER_DOMAIN}`, valid for 90
+  days and renewed 30 days before it ends. A `Certificate` rather than the Gateway annotation
+  cert-manager reads, as the annotation makes a certificate for each listener's hostname only, so
+  it would leave out the domain itself. Its `issuerRef` is the one place that changes when the
+  public issuer of ADR 0006 exists.
+- **TLS.** A `ClientTrafficPolicy` sets 1.2 as the least version a client may use, the
+  controller's default stated rather than relied on.
+- **What a client outside sees.** The certificate is signed by the cluster's own authority, which
+  nothing outside trusts, until the public issuer exists, so a client refuses it unless it is given
+  the authority's certificate. The hostnames are not in DNS yet, so an operator checks the Gateway
+  by connecting to an edge router's public address with the name the route has, and the
+  authority's certificate, which is public material, from the `ca.crt` of the certificate's Secret:
+
+  ```sh
+  kubectl -n envoy-gateway-system get secret public-wildcard-tls -o jsonpath='{.data.ca\.crt}' | base64 -d > cluster-ca.crt
+  curl --cacert cluster-ca.crt --resolve hello.example.com:443:<an edge's public address> https://hello.example.com/
+  curl --resolve hello.example.com:80:<an edge's public address> -I http://hello.example.com/
+  ```
+
+  The first answers with the demo's page, the second with a `301` whose `location` is the `https`
+  address. Only the networks the edge stack admits reach the edge's public ports
+  ([The edge routers](infrastructure.md#the-edge-routers)).
+
+#### Giving an application a public hostname
+
+1. Label the application's namespace in its `namespace.yaml` with `k8s-gitops/gateway: public`.
+2. Add an `HTTPRoute` whose `parentRefs` name the Gateway `public` of `envoy-gateway-system` and its
+   `https` listener, and whose `hostnames` are under the domain: `<name>.${CLUSTER_DOMAIN}`. The
+   listener and the certificate cover that domain only, so a name outside it is not served.
+3. Keep the route in an application of its own that names `gateway-public` in `dependsOn`, as
+   `apps/base/demo/hello-route/` does, so a cluster without the Gateway cannot enable it.
+
+`hello`, the demo's workload, answers this way at `hello.${CLUSTER_DOMAIN}`: two replicas of
+busybox's web server, as an unprivileged user, serving a page from its ConfigMap.
 
 ## PostgreSQL
 

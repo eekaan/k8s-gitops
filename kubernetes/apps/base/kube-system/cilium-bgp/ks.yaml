@@ -13,6 +13,9 @@ spec:
     - name: cilium
   path: ./apps/base/kube-system/cilium-bgp/app
   targetNamespace: kube-system
+  # Ready once the pool and the BGP objects are applied, so the public Gateway, which asks the pool
+  # for its address, starts after them.
+  wait: true
   sourceRef:
     kind: ExternalArtifact
     name: cilium-bgp
