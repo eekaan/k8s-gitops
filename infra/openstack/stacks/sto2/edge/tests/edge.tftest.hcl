@@ -313,29 +313,28 @@ run "the_edges_timers_and_graceful_restart_agree_with_what_the_workers_are_confi
   }
 }
 
-run "traffic_to_an_edges_public_ports_is_forwarded_to_the_gateways_address_and_nothing_else_is_forwarded" {
+run "an_edge_forwards_nothing_at_the_packet_level_for_the_public_ports_and_refuses_a_port_that_is_not_listed" {
   command = plan
 
+  # Rule text only: the comments say what the rules are for and may use the words the rules do not.
+  # One table and three chains, and no translation of any kind: a connection to a public port ends
+  # at the edge's own proxy, so no rule moves its destination or its source.
   assert {
-    condition     = strcontains(output.config["1"].nftables_conf, "\n    ip daddr 192.0.2.7 tcp dport { 80, 443 } dnat to 203.0.113.21\n")
-    error_message = "Connections to the edge's own address on the public ports must be translated to the Gateway's address."
+    condition = (
+      length(regexall("(?m)^table ", output.config["1"].nftables_conf)) == 1 &&
+      length(regexall("(?m)^table inet edge \\{$", output.config["1"].nftables_conf)) == 1 &&
+      length(regexall("(?m)^  chain ", output.config["1"].nftables_conf)) == 3
+    )
+    error_message = "The file must hold one table, inet edge, and three chains: input, forward and output."
   }
 
   assert {
-    condition     = strcontains(output.config["1"].nftables_conf, "\n    ip daddr 203.0.113.21 tcp dport { 80, 443 } ct status dnat snat to 192.0.2.7\n") && strcontains(output.config["2"].nftables_conf, "snat to 192.0.2.8\n")
-    error_message = "What is forwarded to the Gateway must leave from the edge's own address."
+    condition     = length(regexall("(?m)^[^#\\n]*\\b(?:dnat|snat|masquerade|redirect|tproxy|nat)\\b", output.config["1"].nftables_conf)) == 0 && !strcontains(output.config["1"].nftables_conf, "edge-nat")
+    error_message = "No rule may translate an address or a port, and no translation table may be in the file."
   }
 
   # Every rule of every chain, exactly: a rule added to a chain, or a chain or table added to the
   # file, changes the text and fails here, so these are the only rules.
-  assert {
-    condition = (
-      length(regexall("(?m)^table ", output.config["1"].nftables_conf)) == 2 &&
-      length(regexall("(?m)^  chain ", output.config["1"].nftables_conf)) == 4
-    )
-    error_message = "The file must hold two tables and four chains: input, forward, prerouting and postrouting."
-  }
-
   assert {
     condition = regex("(?s)  chain input \\{\\n(.*?)  \\}\\n", output.config["1"].nftables_conf)[0] == join("", [
       "    type filter hook input priority filter; policy drop;\n",
@@ -343,40 +342,140 @@ run "traffic_to_an_edges_public_ports_is_forwarded_to_the_gateways_address_and_n
       "    ct state invalid drop\n",
       "    iif \"lo\" accept\n",
       "    tcp dport 22 accept\n",
+      "    ip daddr 192.0.2.7 tcp dport { 80, 443 } accept\n",
       "    ip saddr { 192.0.2.20/30, 192.0.2.24/29, 192.0.2.32/27, 192.0.2.64/27, 192.0.2.96/30 } tcp dport 179 accept\n",
       "    icmp type destination-unreachable icmp code frag-needed accept\n",
       "    icmpv6 type { packet-too-big, nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert } accept\n",
     ])
-    error_message = "The input chain must drop by default and admit, besides what belongs to a connection and the loopback, SSH, BGP from the node subnet and the ICMP that path MTU discovery needs, and nothing else."
+    error_message = "The input chain must drop by default and admit, besides what belongs to a connection and the loopback, SSH, the public ports, BGP from the workers' block and the ICMP that path MTU discovery needs, and nothing else: a port that is not listed, or a public port on another address, is dropped."
+  }
+
+  # Each edge takes the public ports on its own address: the second edge's chain is the first's,
+  # with its own address in that rule.
+  assert {
+    condition = regex("(?s)  chain input \\{\\n(.*?)  \\}\\n", output.config["2"].nftables_conf)[0] == replace(
+      regex("(?s)  chain input \\{\\n(.*?)  \\}\\n", output.config["1"].nftables_conf)[0],
+      "    ip daddr 192.0.2.7 tcp dport { 80, 443 } accept\n",
+      "    ip daddr 192.0.2.8 tcp dport { 80, 443 } accept\n",
+    )
+    error_message = "The second edge's input chain must be the first's, with the public ports admitted on its own address, 192.0.2.8."
   }
 
   assert {
     condition = regex("(?s)  chain forward \\{\\n(.*?)  \\}\\n", output.config["1"].nftables_conf)[0] == join("", [
       "    type filter hook forward priority filter; policy drop;\n",
-      "    ip daddr 203.0.113.21 ct direction original ct status dnat rt ip nexthop != { 192.0.2.20/30, 192.0.2.24/29, 192.0.2.32/27, 192.0.2.64/27, 192.0.2.96/30 } drop\n",
-      "    ct state established,related accept\n",
-      "    ct state invalid drop\n",
-      "    ip daddr 203.0.113.21 tcp dport { 80, 443 } ct state new ct status dnat rt ip nexthop { 192.0.2.20/30, 192.0.2.24/29, 192.0.2.32/27, 192.0.2.64/27, 192.0.2.96/30 } accept\n",
     ])
-    error_message = "The forward chain must drop by default, drop first every packet of a translated connection toward the Gateway whose route does not go through a worker, and admit only new translated connections to the Gateway on the public ports through a worker, and what belongs to them."
+    error_message = "The forward chain must drop by default and hold no rule: nothing is forwarded."
+  }
+
+  # The proxy's own connections to the Gateway's address are locally generated, so they leave
+  # through the output chain, and only by a worker's route.
+  assert {
+    condition = regex("(?s)  chain output \\{\\n(.*?)  \\}\\n", output.config["2"].nftables_conf)[0] == join("", [
+      "    type filter hook output priority filter; policy accept;\n",
+      "    ip daddr 203.0.113.21 rt ip nexthop != { 192.0.2.20/30, 192.0.2.24/29, 192.0.2.32/27, 192.0.2.64/27, 192.0.2.96/30 } reject\n",
+    ])
+    error_message = "The output chain must refuse, at once, a packet toward the Gateway's address whose route does not go through a worker, and hold no other rule."
+  }
+}
+
+# The proxy: what listens on the public ports, and where it sends what it accepts.
+run "_the_proxy_listens_on_the_edges_own_address_and_the_public_ports_and_sends_the_header_to_the_gateway" {
+  command = plan
+
+  assert {
+    condition = (
+      tolist([for l in regexall("(?m)^[ \\t]*bind\\b[^\\n]*$", output.config["1"].haproxy_conf) : trimspace(l)]) == tolist(["bind 192.0.2.7:80", "bind 192.0.2.7:443"]) &&
+      tolist([for l in regexall("(?m)^[ \\t]*bind\\b[^\\n]*$", output.config["2"].haproxy_conf) : trimspace(l)]) == tolist(["bind 192.0.2.8:80", "bind 192.0.2.8:443"])
+    )
+    error_message = "Each edge's proxy must listen on its own address and on each public port, and on no other address or port."
   }
 
   assert {
-    condition = regex("(?s)  chain prerouting \\{\\n(.*?)  \\}\\n", output.config["1"].nftables_conf)[0] == join("", [
-      "    type nat hook prerouting priority dstnat; policy accept;\n",
-      "    ip daddr 192.0.2.7 tcp dport { 80, 443 } dnat to 203.0.113.21\n",
-      ]) && regex("(?s)  chain postrouting \\{\\n(.*?)  \\}\\n", output.config["2"].nftables_conf)[0] == join("", [
-      "    type nat hook postrouting priority srcnat; policy accept;\n",
-      "    ip daddr 203.0.113.21 tcp dport { 80, 443 } ct status dnat snat to 192.0.2.8\n",
-    ])
-    error_message = "The translation chains must hold only the destination translation to the Gateway and the source translation to the edge's own address."
+    condition = (
+      tolist([for l in regexall("(?m)^[ \\t]*server\\b[^\\n]*$", output.config["1"].haproxy_conf) : trimspace(l)]) == tolist([
+        "server gateway 203.0.113.21:80 send-proxy-v2 source 192.0.2.7",
+        "server gateway 203.0.113.21:443 send-proxy-v2 source 192.0.2.7",
+      ]) &&
+      tolist([for l in regexall("(?m)^[ \\t]*server\\b[^\\n]*$", output.config["2"].haproxy_conf) : trimspace(l)]) == tolist([
+        "server gateway 203.0.113.21:80 send-proxy-v2 source 192.0.2.8",
+        "server gateway 203.0.113.21:443 send-proxy-v2 source 192.0.2.8",
+      ])
+    )
+    error_message = "Each port's one backend must be the Gateway's address on the same port, sent the PROXY protocol version 2 header on every connection, from the edge's own address."
   }
 
-  # With no worker announcing the Gateway's address there is no route to it, and a translated
-  # connection must not follow the default route to the cloud's router: the forward chain admits it
-  # only when its route's next hop is a worker, which holds whether FRR runs or not, and the service
-  # range is a reject route on the edge, which the workers' /32s, being more specific, win over.
-  # staticd, which installs it, is one of the daemons FRR's start script always starts.
+  # TCP only, and unprivileged: no HTTP, no TLS, and none of the settings that need root or make the
+  # process drop to a user, which the unit does.
+  assert {
+    condition = (
+      length(regexall("(?m)^ *mode tcp$", output.config["1"].haproxy_conf)) == 1 &&
+      length(regexall("(?m)^[^#\\n]*\\b(?:mode http|option http|ssl|crt|user|group|chroot|daemon|stats|master-worker)\\b", output.config["1"].haproxy_conf)) == 0
+    )
+    error_message = "The proxy must run in TCP mode and hold no HTTP, TLS, user, group, chroot, daemon or statistics setting."
+  }
+
+  # Limits: a connection that is not made or not used ends, and a connection that cannot be made
+  # fails at once.
+  assert {
+    condition = alltrue([
+      for setting in ["maxconn 4000", "retries 0", "timeout connect 5s", "timeout client 5m", "timeout server 5m", "timeout client-fin 30s", "timeout server-fin 30s"] :
+      length(regexall("(?m)^ +${setting}$", output.config["1"].haproxy_conf)) == 1
+    ])
+    error_message = "The proxy must state its connection limit and its timeouts, and not try a failed connection again."
+  }
+
+  # Each of those settings once, wherever it is written, and no other timeout: a second one in a
+  # frontend or a backend, or a tunnel timeout, which in TCP mode takes the place of the client and
+  # server timeouts, would change the limits above.
+  assert {
+    condition = alltrue([
+      for key in ["1", "2"] :
+      [for line in regexall("(?m)^[ \\t]*(?:maxconn|retries|timeout)(?:[ \\t][^\\n]*)?$", output.config[key].haproxy_conf) : trimspace(line)] == [
+        "maxconn 4000",
+        "retries 0",
+        "timeout connect 5s",
+        "timeout client 5m",
+        "timeout server 5m",
+        "timeout client-fin 30s",
+        "timeout server-fin 30s",
+      ]
+    ])
+    error_message = "The connection limit, the retries and each timeout must be set once, and no other timeout."
+  }
+
+  # The unit runs the proxy as its own user, with only the capability to bind a low port.
+  assert {
+    condition = alltrue([
+      for line in ["User=haproxy", "Group=haproxy", "AmbientCapabilities=CAP_NET_BIND_SERVICE", "CapabilityBoundingSet=CAP_NET_BIND_SERVICE", "NoNewPrivileges=true", "ProtectSystem=strict"] :
+      contains(split("\n", output.config["1"].haproxy_unit), line)
+    ]) && element([for l in split("\n", output.config["1"].haproxy_unit) : trimspace(l) if startswith(trimspace(l), "User=")], -1) == "User=haproxy"
+    error_message = "The proxy's unit must run it as the unprivileged haproxy user, with the capability to bind low ports and no other, and no new privileges."
+  }
+
+  # systemd merges the capability lines of a unit and its drop-ins and takes the last of the others,
+  # so each is written once, as given; and a command prefixed with + or ! runs with full privileges
+  # or as root whatever User= says (systemd.service(5)).
+  assert {
+    condition = [
+      for line in split("\n", output.config["1"].haproxy_unit) : replace(trimspace(line), "/[ \\t]*=[ \\t]*/", "=")
+      if can(regex("^[ \\t]*(?:User|Group|AmbientCapabilities|CapabilityBoundingSet|NoNewPrivileges)[ \\t]*=", line))
+      ] == [
+      "User=haproxy",
+      "Group=haproxy",
+      "AmbientCapabilities=CAP_NET_BIND_SERVICE",
+      "CapabilityBoundingSet=CAP_NET_BIND_SERVICE",
+      "NoNewPrivileges=true",
+    ] && length(regexall("(?m)^[ \\t]*Exec[A-Za-z]*[ \\t]*=[ \\t]*[-@:|]*[+!]", output.config["1"].haproxy_unit)) == 0
+    error_message = "The proxy's unit must set its user, group, capabilities and no new privileges once each, to haproxy, haproxy, CAP_NET_BIND_SERVICE alone and true, and run no command with a + or ! prefix."
+  }
+}
+
+# The Gateway's route is the one thing the edge needs to hold: no route is a refused connection and
+# the reject route, which FRR installs, is the kernel's answer.
+run "_the_edge_holds_a_reject_route_for_the_service_range_and_the_kernel_settings" {
+  command = plan
+
   assert {
     condition = (
       strcontains(output.config["1"].frr_conf, "\nip route 203.0.113.16/28 reject\n") &&
@@ -387,7 +486,7 @@ run "traffic_to_an_edges_public_ports_is_forwarded_to_the_gateways_address_and_n
 
   assert {
     condition     = strcontains(output.config["1"].sysctl, "net.ipv4.ip_forward = 1\n") && strcontains(output.config["1"].sysctl, "net.ipv4.conf.all.send_redirects = 0\n")
-    error_message = "Forwarding must be on, and ICMP redirects off, as the edge forwards between hosts on one subnet."
+    error_message = "The kernel settings must be forwarding on, which the forward chain leaves with nothing to forward, and ICMP redirects off."
   }
 
   # IPv6 forwarding stays as the kernel starts, off: nothing of IPv6 is forwarded.
@@ -476,13 +575,15 @@ run "the_user_data_holds_no_secret_and_the_edges_port_allows_exactly_the_address
         } == {
         "/etc/edge/frr.conf"              = output.config[key].frr_conf
         "/etc/edge/nftables.conf"         = output.config[key].nftables_conf
+        "/etc/edge/haproxy.cfg"           = output.config[key].haproxy_conf
+        "/etc/edge/haproxy-unit.conf"     = output.config[key].haproxy_unit
         "/etc/edge/sysctl.conf"           = output.config[key].sysctl
         "/etc/edge/sshd.conf"             = output.config[key].sshd_conf
         "/etc/edge/daemons"               = file("frr-daemons")
         "/usr/local/sbin/edge-first-boot" = file("first-boot.sh")
       }
     ])
-    error_message = "The cloud-config must write exactly the rendered FRR configuration, nftables rules and kernel settings, the SSH daemon's settings, the daemon list and the first-boot script."
+    error_message = "The cloud-config must write exactly the rendered FRR configuration, nftables rules, proxy configuration and unit settings and kernel settings, the SSH daemon's settings, the daemon list and the first-boot script."
   }
 
   # The SSH daemon's settings reach the edge as the tree states them, not as some other file.

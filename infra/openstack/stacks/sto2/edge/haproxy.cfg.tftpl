@@ -1,0 +1,43 @@
+# The edge's proxy: HAProxy in TCP mode, from the image's repositories. It accepts connections on the
+# edge's own address and the public ports and opens its own connection for each to the Gateway's
+# address on the same port, sending the client's address in a PROXY protocol version 2 header (ADR
+# 0020), so the Gateway can see it. It does not terminate TLS or read HTTP: the Gateway holds the
+# certificate and the redirect.
+# It runs as the unit's unprivileged user (haproxy-unit.conf), which is why there is no user, group,
+# chroot, daemon or statistics socket here, and logs to standard output, which the journal keeps.
+global
+    log stdout format raw local0
+    # At most this many connections at once on the edge, a client's and the proxy's own to the
+    # Gateway counted as one; one beyond it waits in the kernel's queue until another ends.
+    maxconn 4000
+
+defaults
+    mode tcp
+    log global
+    # Each connection's line names the client's address and port, and how it ended.
+    option tcplog
+    # A connection the Gateway's address has no route for, or refuses, is closed at once, not tried
+    # again: the edge's firewall refuses it in the kernel when no worker announces the address, and
+    # the next connection finds the route again, with no restart.
+    retries 0
+    timeout connect 5s
+    # A connection with nothing sent on either side for this long ends; one side's close gives the
+    # other the shorter time.
+    timeout client 5m
+    timeout server 5m
+    timeout client-fin 30s
+    timeout server-fin 30s
+
+# A frontend and a backend for each public port. The frontend listens on the edge's own address only,
+# so it never answers on another address of the edge. The backend's one server is the Gateway's
+# address on the same port, reached from the edge's own address, which a worker answers straight
+# back to: it is on the node subnet, where a client's address is not.
+%{ for port in ports ~}
+frontend public-${port}
+    bind ${own}:${port}
+    default_backend gateway-${port}
+
+backend gateway-${port}
+    server gateway ${gateway}:${port} send-proxy-v2 source ${own}
+
+%{ endfor ~}

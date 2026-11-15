@@ -1,17 +1,19 @@
 Feature: Edge routers
   Two small Linux VMs the deployment runs itself, on the node subnet at the addresses the plumbing
   stack reserves, speaking BGP with the workers: each learns the address of every announced
-  Service as a /32 with one next hop per announcing worker, and forwards traffic that arrives at
-  its own public address to the cluster's public Gateway address and back. Either edge can be
-  lost or rebuilt while the other keeps serving.
+  Service as a /32 with one next hop per announcing worker, and accepts connections to its own
+  public address on the public ports with a TCP proxy that opens its own connection to the
+  cluster's public Gateway address, by those routes, and names the client in a PROXY protocol
+  header. Either edge can be lost or rebuilt while the other keeps serving.
 
-  One scenario needs unprivileged user namespaces with networks of their own, which the CI
-  containers refuse: "A translated connection leaves an edge only through a worker's route, new or
-  established". Its proof loads the edge's rendered rules with nft into network namespaces beside a
-  client, a worker and the cloud's router, is tagged namespace and runs with just
-  edge-forward-check on a developer's machine, where it skips, saying why, when the host lacks what
-  it needs; just ci and CI run every other proof, and the stack's tests compare the forward chain's
-  rules as text.
+  Two scenarios need unprivileged user namespaces with networks of their own, which the CI
+  containers refuse: "An edge answers a client's connection to a public port through its proxy and
+  names the client's address to the Gateway in a PROXY protocol header" and "An edge that loses its
+  routes to the Gateway fails connections fast and recovers without a restart". Their proofs load
+  the edge's rendered rules with nft and its rendered proxy configuration into network namespaces
+  beside a client, a worker and the cloud's router, are tagged namespace and run with just
+  edge-forward-check on a developer's machine, where they skip, saying why, when the host lacks what
+  they need; just ci and CI run every other proof, and the stack's tests compare the rules as text.
 
   Scenario: The stack makes two edges at the reserved addresses, apart from each other, each with a public address, and plans without the cluster stack
     Given the plumbing stack's outputs and no state of the cluster stack
@@ -38,15 +40,26 @@ Feature: Edge routers
     When an edge's FRR configuration is rendered
     Then its keepalive, hold, connect retry and graceful restart settings are those of the manifests, and its multipath covers at least as many paths as there can be workers
 
-  Scenario: Traffic to an edge's public ports is forwarded to the Gateway's address and nothing else is forwarded
+  Scenario: An edge answers a client's connection to a public port through its proxy and names the client's address to the Gateway in a PROXY protocol header
+    Given the edge's rendered rules and proxy configuration, a client, a worker that holds the Gateway's address with a server there that records what each connection starts with, and the cloud's router as the default route
+    When the client connects to the edge's own address on the public port from a port of its choosing, and to a port that is not listed with a server listening on it, to the edge's other address on the public port, and to the Gateway's address through the edge
+    Then the first connection is answered, and the server on the Gateway's address was connected to once, from the edge's own address, and was sent a PROXY protocol version 2 header for IPv4 over TCP naming the client's address and port and the address and port it connected to, and the proxy's log names the client; the other three get no answer, and nothing but the proxy's own connection reaches the Gateway's server, the worker or the router
+
+  Scenario: An edge forwards nothing at the packet level for the public ports and refuses a port that is not listed
     Given the public ports and the Gateway's address
     When an edge's nftables rules are rendered
-    Then connections to the edge's own address on those ports are translated to the Gateway's address, from the edge's own address, the forward chain drops everything else, and the input chain admits only SSH, BGP from the workers' addresses and the ICMP path MTU needs
+    Then the file holds one table whose forward chain drops by default and holds no rule, no rule translates an address or a port, the input chain admits only SSH, the public ports, BGP from the workers' addresses and the ICMP path MTU needs, so a port that is not listed is dropped, and the output chain refuses a packet toward the Gateway's address that does not go through a worker
 
-  Scenario: A translated connection leaves an edge only through a worker's route, new or established
-    Given the edge's rendered rules, a client, a worker that holds the Gateway's address and announces it, and the cloud's router as the default route
-    When a connection is established through the worker, and the worker's route then goes, as when FRR stops, and new connections are opened with the default route only and with no route at all
-    Then the established connection's packets and the new connections reach neither the router nor anything else, and with the worker's route back a new connection is answered
+  Scenario: An edge that loses its routes to the Gateway fails connections fast and recovers without a restart
+    Given the edge's rendered rules and proxy configuration, a client, a worker that holds the Gateway's address and announces it, and the cloud's router as the default route
+    When a connection is established through the proxy, and the worker's route then goes, as when FRR stops, and new connections are opened with the default route only and with no route at all
+    Then what the established connection sends and the new connections' attempts reach neither the router nor anything else, each new connection is closed unanswered within a second and a half, and with the worker's route back a new connection is answered by the proxy that ran throughout
+
+  @pending @INF-15
+  Scenario: The edges are replaced one at a time only once the Gateway accepts the header
+    Given a Gateway whose public listeners accept a PROXY protocol header and edges that send one
+    When the edges are replaced with just edge-rollout --replace, one at a time, with just gateway-check after each
+    Then the Gateway is the one that accepts the header before the first edge is replaced, and an edge is replaced only once the other serves, so no client's connection is sent a header its Gateway does not accept
 
   Scenario: The public ports admit only the operator allowlist by default, and SSH admits only the operator allowlist
     Given an operator allowlist and no public source networks set

@@ -27,7 +27,7 @@ output "instances" {
 }
 
 output "config" {
-  description = "Each edge's rendered configuration, by number: the FRR configuration, the nftables rules, the kernel settings and the SSH daemon's settings."
+  description = "Each edge's rendered configuration, by number: the FRR configuration, the nftables rules, the proxy's configuration and its unit's settings, the kernel settings and the SSH daemon's settings."
   sensitive   = true
   value       = local.config
 }

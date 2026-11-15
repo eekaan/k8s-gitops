@@ -5,11 +5,16 @@
 # the service range; each has as many next hops as there are sessions, or fewer, which is for a
 # person to read, as a Service that is local-only is announced by some workers only; FRR is
 # configured with the reject route for the service range, which is in the kernel; the nftables
-# rules are loaded, and their forward chain passes a translated connection's packets toward the
-# Gateway, new or established, only through a worker, its guard holding every worker's address and
-# not the default route's next hop; the kernel forwards, and not without the rules; and unattended
-# upgrades are off, as an edge is rebuilt, not patched; and the SSH daemon's effective settings, for
-# a connection of the user the check connects as, are those the first boot writes from sshd.conf.
+# rules are loaded and no table of them translates an address, their forward chain drops by default
+# and holds no rule, and their output chain refuses a packet toward the Gateway, the proxy's
+# connection, unless its route goes through a worker, its guard holding every worker's address and
+# not the default route's next hop; the proxy runs as its own user, not root, its configuration
+# binds the stack's public ports and no other, it listens on exactly the addresses and ports its
+# configuration binds, none of them every address, and sends each connection to the cluster's
+# Gateway address with the PROXY protocol version 2 header; the kernel forwards, and not without
+# the rules; and unattended upgrades are off, as an edge is rebuilt, not patched; and the SSH
+# daemon's effective settings, for a connection of the user the check connects as, are those the
+# first boot writes from sshd.conf.
 # A command the edge could not run, or that failed, is a FAIL of its own line, saying it could not
 # be read and what the edge said, never the unhealthy conclusion drawn from an answer that did not
 # come. Prints pass, FAIL or skip per line, never an address, and exits non-zero on any FAIL.
@@ -107,48 +112,42 @@ in_set() {
   return 1
 }
 
-# guard CHAIN: what the forward chain CHAIN, as nft lists it, does with a translated connection
-# toward the Gateway: says what is wrong with its guard, as a line for check_edge, or nothing.
-# The guard is a rule ahead of what belongs to a connection that drops every packet of one whose
-# route does not go through a worker, and the rule that admits a new one only through a worker;
-# each holds every worker's address and not the default route's next hop.
+# guard CHAIN: what the output chain CHAIN, as nft lists it, does with a packet toward the Gateway:
+# says what is wrong with its guard, as a line for check_edge, or nothing. The guard is the rule that
+# refuses a packet toward the Gateway's address whose route does not go through a worker, which is
+# how the proxy's connection to it fails at once with no worker's route, instead of following the
+# default route; it holds every worker's address and not the default route's next hop. nft lists a
+# set of one element without its braces.
 guard() {
-  local chain=$1 line drop='' accept='' drop_at=0 established_at=0 at=0 address set
+  local chain=$1 line set='' address
   while IFS= read -r line; do
     line=${line#"${line%%[![:space:]]*}"}
-    at=$((at + 1))
-    if [[ $line =~ ^ip\ daddr\ ([0-9.]+)\ ct\ direction\ original\ ct\ status\ dnat\ rt\ ip\ nexthop\ !=\ \{\ (.+)\ \}\ drop$ ]]; then
-      drop="${BASH_REMATCH[1]} ${BASH_REMATCH[2]}" drop_at=$at
-    elif [[ $line == 'ct state established,related accept' ]]; then
-      established_at=$at
-    elif [[ $line =~ ^ip\ daddr\ ([0-9.]+)\ tcp\ dport\ .+\ ct\ state\ new\ ct\ status\ dnat\ rt\ ip\ nexthop\ \{\ (.+)\ \}\ accept$ ]]; then
-      accept="${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"
+    if [[ $line =~ ^ip\ daddr\ ([0-9.]+)\ rt\ ip\ nexthop\ !=\ (.+)\ reject(\ with\ .+)?$ ]]; then
+      set=${BASH_REMATCH[2]}
+      set=${set#\{ } set=${set% \}}
+      if [[ -n $gateway && ${BASH_REMATCH[1]} != "$gateway" ]]; then
+        echo "the output chain's guard is not for the cluster's Gateway address"
+        return
+      fi
     fi
   done <<< "$chain"
-  if [[ -z $drop || -z $accept || $established_at -eq 0 || $drop_at -gt $established_at ]]; then
-    echo "the forward chain does not drop an established connection's packets toward the Gateway that do not go through a worker"
+  if [[ -z $set ]]; then
+    echo "the output chain does not refuse a packet toward the Gateway that does not go through a worker"
     return
   fi
   if ((${#unaddressed[@]} > 0)); then
-    echo "the forward chain's guard cannot be checked against every worker: $no_address"
+    echo "the output chain's guard cannot be checked against every worker: $no_address"
     return
   fi
-  for set in "$drop" "$accept"; do
-    if [[ -n $gateway && ${set%% *} != "$gateway" ]]; then
-      echo "the forward chain's guard is not for the cluster's Gateway address"
-      return
-    fi
-    for address in "${worker_addresses[@]}"; do
-      if [[ -n $address ]] && ! in_set "$address" "${set#* }"; then
-        echo "the forward chain's guard leaves out a worker's address"
-        return
-      fi
-    done
-    if [[ -n $default_hop ]] && in_set "$default_hop" "${set#* }"; then
-      echo "the forward chain's guard admits the default route's next hop"
+  for address in "${worker_addresses[@]}"; do
+    if [[ -n $address ]] && ! in_set "$address" "$set"; then
+      echo "the output chain's guard leaves out a worker's address"
       return
     fi
   done
+  if [[ -n $default_hop ]] && in_set "$default_hop" "$set"; then
+    echo "the output chain's guard admits the default route's next hop"
+  fi
 }
 
 # The settings the first boot writes for the SSH daemon, each as sshd -T reports it: the keyword in
@@ -164,6 +163,21 @@ while read -r keyword value; do
   sshd_keywords+=("${keyword,,}")
   sshd_lines+=("${keyword,,} $value")
 done < "$sshd_tree"
+
+# The stack's public ports, as tofu takes them, in numeric order: TF_VAR_public_ports when it is
+# set, a JSON list as .env gives the stack's other list inputs, or else the default in its
+# variables.tf.
+ports_tree=$infra_root/infra/openstack/stacks/sto2/edge/variables.tf
+if [[ -n ${TF_VAR_public_ports-} ]]; then
+  ports_from="TF_VAR_public_ports" ports=$TF_VAR_public_ports
+else
+  ports_from=$ports_tree ports=$(yq -p hcl -o json '.variable.public_ports.default' "$ports_tree" 2> /dev/null) || ports=''
+fi
+mapfile -t public_ports < <(jq -r '.[] | numbers' <<< "$ports" 2> /dev/null | sort -n)
+if ((${#public_ports[@]} == 0)); then
+  infra_error "cannot read the edge stack's public ports from $ports_from"
+  exit 1
+fi
 
 failed=0
 say() { printf '%-5s %s: %s\n' "$1" "$2" "$3"; }
@@ -211,6 +225,9 @@ ask() {
 }
 # systemctl is-active exits 3, printing inactive or failed, for a unit that does not run: an answer.
 frr_state() { systemctl is-active frr || [ $? -eq 3 ]; }
+proxy_state() { systemctl is-active haproxy || [ $? -eq 3 ]; }
+# ps exits 1 when no process has the name: an answer, an empty one.
+proxy_users() { ps -C haproxy -o user= || [ $? -eq 1 ]; }
 ask frr frr_state
 ask sessions sudo -n vtysh -c 'show bgp ipv4 unicast summary json'
 ask table sudo -n vtysh -c 'show bgp ipv4 unicast json'
@@ -218,6 +235,11 @@ ask config sudo -n vtysh -c 'show running-config'
 ask unreachable ip -4 -o route show type unreachable
 ask rules sudo -n nft list tables
 ask forward sudo -n nft list chain inet edge forward
+ask output sudo -n nft list chain inet edge output
+ask proxy proxy_state
+ask proxy-users proxy_users
+ask proxy-config cat /etc/haproxy/haproxy.cfg
+ask listening sudo -n ss -H -ltnp
 ask default ip -4 -o route show default
 ask forwarding cat /proc/sys/net/ipv4/ip_forward
 ask upgrades apt-config dump APT::Periodic::Unattended-Upgrade
@@ -228,6 +250,7 @@ remote+=$asked
 check_edge() {
   local index=$1 edge=${edge_names[$1]} report section_frr section_sessions section_table section_rules section_forwarding
   local section_config section_unreachable section_forward section_default section_upgrades reject loaded=0
+  local section_output section_proxy section_users section_proxy_config section_listening
   local default_hop wrong i section_sshd differ names
   local -a established=() prefixes=() missing=() outside=() fewer=()
   local prefix hops address
@@ -245,6 +268,11 @@ check_edge() {
   section_config=$(section config)
   section_unreachable=$(section unreachable)
   section_forward=$(section forward)
+  section_output=$(section output)
+  section_proxy=$(section proxy)
+  section_users=$(section proxy-users)
+  section_proxy_config=$(section proxy-config)
+  section_listening=$(section listening)
   section_default=$(section default)
   section_upgrades=$(section upgrades)
   # The daemon prints a keyword in lower case or in its own case, by version.
@@ -270,6 +298,93 @@ check_edge() {
   # unreadable NAME WHAT: the edge's line for a state it did not report.
   unreadable() {
     fail "$edge" "cannot read $2 on the edge: $(said "$1")"
+  }
+
+  # check_proxy: the proxy runs as its own user, binds the stack's public ports, listens where its
+  # configuration binds and nowhere else, and sends each connection to the Gateway's address with
+  # the PROXY protocol version 2 header.
+  check_proxy() {
+    local line user bad users_ok=1 every=0
+    local -a binds=() listens=() bound=() bound_ports=() server_addresses=() server_ports=() server_options=()
+    if unread proxy; then
+      unreadable proxy "the proxy's state"
+    elif [[ $section_proxy == active ]]; then
+      pass "$edge" "the proxy is running"
+    else
+      fail "$edge" "the proxy is not running"
+    fi
+    if unread proxy-users; then
+      unreadable proxy-users "the proxy's processes"
+    elif [[ -z $section_users ]]; then
+      fail "$edge" "the proxy has no process"
+    else
+      while IFS= read -r user; do
+        [[ $user == haproxy ]] || users_ok=0
+      done <<< "$section_users"
+      if ((users_ok)); then
+        pass "$edge" "the proxy runs as its own user, not root"
+      else
+        fail "$edge" "the proxy runs as a user other than haproxy"
+      fi
+    fi
+    if unread proxy-config; then
+      unreadable proxy-config "the proxy's configuration"
+      return
+    fi
+    # What the configuration binds, and the servers it sends to, as the file is written: each bind
+    # line's address and port, and each server line's address, port and options.
+    while IFS= read -r line; do
+      line=${line#"${line%%[![:space:]]*}"}
+      if [[ $line =~ ^bind\ ([^[:space:]]*):([0-9]+)([[:space:]].*)?$ ]]; then
+        binds+=("${BASH_REMATCH[1]}:${BASH_REMATCH[2]}")
+        case ${BASH_REMATCH[1]} in '' | '*' | 0.0.0.0 | '::' | '[::]') every=1 ;; esac
+      elif [[ $line =~ ^server\ [^[:space:]]+\ ([^[:space:]]+):([0-9]+)(.*)$ ]]; then
+        server_addresses+=("${BASH_REMATCH[1]}")
+        server_ports+=("${BASH_REMATCH[2]}")
+        server_options+=("${BASH_REMATCH[3]} ")
+      fi
+    done <<< "$section_proxy_config"
+    if ((every)); then
+      fail "$edge" "the proxy's configuration binds every address, not the edge's own"
+    fi
+    mapfile -t bound_ports < <(printf '%s\n' "${binds[@]##*:}" | sort -nu)
+    if ((${#binds[@]} > 0)) && [[ "${bound_ports[*]}" == "${public_ports[*]}" ]]; then
+      pass "$edge" "the proxy's configuration binds the stack's public ports, and no other port"
+    else
+      fail "$edge" "the ports the proxy's configuration binds are not the stack's public ports"
+    fi
+    if unread listening; then
+      unreadable listening "the listening sockets"
+    else
+      # The proxy's own sockets: the lines whose process is haproxy, by their local address.
+      mapfile -t listens < <(awk '/users:\(\("haproxy"/ { print $4 }' <<< "$section_listening" | sort)
+      mapfile -t bound < <(printf '%s\n' "${binds[@]}" | sort)
+      if ((${#binds[@]} > 0)) && [[ "${listens[*]}" == "${bound[*]}" ]]; then
+        pass "$edge" "the proxy listens on the addresses and ports its configuration binds, and on no others"
+      else
+        fail "$edge" "the proxy's listeners are not those its configuration binds"
+      fi
+    fi
+    # Each server is the Gateway's address, when the cluster's talman.yaml gives it, sent the version 2
+    # header, and the ports of the servers are those of the binds.
+    bad=''
+    for line in "${!server_addresses[@]}"; do
+      if [[ -n $gateway && ${server_addresses[line]} != "$gateway" ]]; then
+        bad="a backend of the proxy is not the cluster's Gateway address"
+      elif [[ ${server_options[line]} != *" send-proxy-v2 "* && -z $bad ]]; then
+        bad="a backend of the proxy does not send the PROXY protocol version 2 header"
+      fi
+    done
+    if [[ -z $bad ]] && { ((${#server_ports[@]} == 0)) || [[ $(printf '%s\n' "${server_ports[@]}" | sort -u) != "$(printf '%s\n' "${binds[@]##*:}" | sort -u)" ]]; }; then
+      bad="the proxy's backends are not for the ports it listens on"
+    fi
+    if [[ -n $bad ]]; then
+      fail "$edge" "$bad"
+    elif [[ -z $gateway ]]; then
+      skip "$edge" "the proxy's backends: not compared with the Gateway's address, which talos/$cluster/talman.yaml does not give; each sends the PROXY protocol version 2 header"
+    else
+      pass "$edge" "the proxy sends each connection to the cluster's Gateway address, with the PROXY protocol version 2 header"
+    fi
   }
 
   if unread frr; then
@@ -358,30 +473,50 @@ check_edge() {
   if unread rules; then
     unreadable rules "the nftables tables"
     loaded=-1
-  elif grep -qx 'table inet edge' <<< "$section_rules" && grep -qx 'table ip edge-nat' <<< "$section_rules"; then
-    pass "$edge" "the nftables rules are loaded"
+  elif ! grep -qx 'table inet edge' <<< "$section_rules"; then
+    fail "$edge" "the nftables rules are not loaded"
+  elif grep -qx 'table ip edge-nat' <<< "$section_rules"; then
+    fail "$edge" "a translation table is loaded, so a connection to a public port may be translated instead of proxied"
     loaded=1
   else
-    fail "$edge" "the nftables rules are not loaded"
+    pass "$edge" "the nftables rules are loaded, and none translates an address"
+    loaded=1
   fi
-  # The next hop must be a worker's for the forward chain to pass a translated connection's packets
-  # toward the Gateway, new or established, which holds whether FRR runs or not.
-  default_hop=$(sed -n 's/^default via \([0-9.]*\) .*/\1/p' <<< "$section_default" | head -1)
+  # The forward chain drops by default and holds no rule: nothing is forwarded, whether FRR runs or
+  # not.
   if unread forward; then
     # Without the tables the chain is not there to be read, which the rules' line has said.
     if ((loaded != 0)); then
       unreadable forward "the forward chain"
     fi
+  elif ((loaded == 1)); then
+    wrong=$(sed -n '/^[[:space:]]*type filter hook forward /!{/^[[:space:]]*\(table\|chain\|}\)/!p}' <<< "$section_forward" | sed 's/^[[:space:]]*//')
+    if ! grep -q 'type filter hook forward priority filter; policy drop;' <<< "$section_forward"; then
+      fail "$edge" "the forward chain does not drop by default"
+    elif [[ -n $wrong ]]; then
+      fail "$edge" "the forward chain holds a rule, so it may forward"
+    else
+      pass "$edge" "the forward chain forwards nothing"
+    fi
+  fi
+  # The output chain's guard keeps the proxy's connection to the Gateway on a worker's route, which
+  # holds whether FRR runs or not: the next hop must be a worker's, or the connection is refused.
+  default_hop=$(sed -n 's/^default via \([0-9.]*\) .*/\1/p' <<< "$section_default" | head -1)
+  if unread output; then
+    if ((loaded != 0)); then
+      unreadable output "the output chain"
+    fi
   elif unread default; then
     unreadable default "the default route"
   else
-    wrong=$(guard "$section_forward")
+    wrong=$(guard "$section_output")
     if [[ -z $wrong ]]; then
-      pass "$edge" "the forward chain sends a translated connection, new or established, toward the Gateway only through a worker"
+      pass "$edge" "the output chain keeps the proxy's connections to the Gateway on a worker's route"
     elif ((loaded == 1)); then
       fail "$edge" "$wrong"
     fi
   fi
+  check_proxy
   if unread forwarding; then
     unreadable forwarding "the kernel's forwarding state"
   elif [[ $section_forwarding == 1 ]] && ((loaded == 1)); then

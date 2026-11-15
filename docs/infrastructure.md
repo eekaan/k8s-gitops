@@ -226,12 +226,12 @@ output `bgp`:
 - `cluster_asn` and `edge_asn`, 64513 and 64512 by default: the workers' and the edge routers'
   autonomous system numbers, two different private 16-bit numbers (64512 to 65534), for eBGP.
 - `gateway_host`, 1 by default: the host number in the service range of the public Gateway's
-  address, the one address the edge routers forward public traffic to. It is neither the range's
-  network address nor its last, and the plan fails naming the variable otherwise. The output `bgp`
-  carries the address as `gateway_address`, and the cluster stack hands it on in `talman.yaml` as
-  `values.bgp.gatewayAddress`, from which `just cluster-config` fills `GATEWAY_ADDRESS`. The
-  LoadBalancer pool holds the whole range and does not set the address aside; the public Gateway's
-  Service asks the pool for it by annotation
+  address, the one address the edge routers' proxies connect to for public traffic. It is neither
+  the range's network address nor its last, and the plan fails naming the variable otherwise. The
+  output `bgp` carries the address as `gateway_address`, and the cluster stack hands it on in
+  `talman.yaml` as `values.bgp.gatewayAddress`, from which `just cluster-config` fills
+  `GATEWAY_ADDRESS`. The LoadBalancer pool holds the whole range and does not set the address aside;
+  the public Gateway's Service asks the pool for it by annotation
   ([kubernetes.md](kubernetes.md#the-public-gateway)).
 
 The cluster stack hands them on in `talman.yaml` ([below](#the-generated-talmanyaml)) and makes
@@ -288,7 +288,7 @@ environment, selects what the outer ring holds:
   The workers get nothing more. A rule matches a packet's protocol, port and source, never its
   destination, and a worker's port carries the service range, whose addresses Cilium serves before
   the worker's firewall sees the packet: open on a worker, every port of a Service's load-balancer
-  address would be too, to the edge routers and whatever they forward. The workers therefore keep
+  address would be too, to the edge routers and whatever they send. The workers therefore keep
   the nodes' group as it is and their own group ([Services announced over BGP](#services-announced-over-bgp)),
   which admits the edge routers to the service ports and nothing else, with either set.
 
@@ -365,16 +365,17 @@ nothing for it, and the cluster stack plans whether the ci stack exists or not.
 
 The `edge` stack makes two small Linux VMs on the plumbing stack's node network that publish the
 cluster's Services: the workers open BGP sessions to them and announce every `LoadBalancer`
-Service's address as a /32, and each edge forwards traffic that arrives at its own public address to
-the public Gateway's address, through the workers, and back
-([ADR 0018](adr/0018-own-edge-routers-translate-public-traffic-to-the-gateway.md)). It reads the
-plumbing stack's state and nothing of the cluster stack's, so the cluster can be destroyed and built
-again around it; it is destroyed by name only ([Recipes](#recipes)).
+Service's address as a /32, and each edge accepts connections to its own public address on the
+public ports with a TCP proxy that opens its own connection to the public Gateway's address,
+through the workers, and names the client's address in a PROXY protocol version 2 header
+([ADR 0018](adr/0018-own-edge-routers-translate-public-traffic-to-the-gateway.md), amended by
+ADR 0020). It reads the plumbing stack's state and nothing of the cluster stack's, so the cluster
+can be destroyed and built again around it; it is destroyed by name only ([Recipes](#recipes)).
 
 - `<prefix>-edge-1` and `<prefix>-edge-2`, `lab-edge-1` and `lab-edge-2` by default, of the flavor
   `flavor`, each booting from a volume of `root_volume_size_gb` GB made from the image `EDGE_IMAGE`
-  names. The configuration is written for Debian 13 (trixie), whose FRR is 10.3 and whose nftables
-  is 1.1. The first boot checks the release and fails, on the console and in
+  names. The configuration is written for Debian 13 (trixie), whose FRR is 10.3, whose HAProxy is
+  3.0 and whose nftables is 1.1. The first boot checks the release and fails, on the console and in
   `/var/log/edge-first-boot.log`, on any other; nothing is refused at plan time. Each edge's port is
   at its reserved address on the node subnet, from the plumbing stack's output `bgp`. Each has a
   floating IP of its own from the plumbing stack's external network. A public hostname publishes
@@ -388,11 +389,12 @@ again around it; it is destroyed by name only ([Recipes](#recipes)).
   is when a rebuild is needed. After a build, compare the hosts the two instances are on.
 - Each port keeps port security on and has **no allowed address pair**. The Neutron API reference
   gives a port's allowed address pairs as the addresses it may send from when port security is on.
-  An edge sends only from its own address, because it translates the source of what it forwards, and
-  receives only for its own address, so nothing is added. Without the source translation it would
-  send from every client's address and receive the answers for them: that takes a pair for every
-  address, which the reference warns bypasses the source restrictions of rules that name a remote
-  group, or port security off, and either removes the port's anti-spoofing.
+  An edge sends only from its own address, because its proxy makes its own connection to the
+  Gateway, and receives only for its own address, so nothing is added. An edge that forwarded
+  clients' packets as they are would send from every client's address and receive the answers for
+  them: that takes a pair for every address, which the reference warns bypasses the source
+  restrictions of rules that name a remote group, or port security off, and either removes the
+  port's anti-spoofing.
 
 ### Routing
 
@@ -439,9 +441,9 @@ Every other routing daemon is off in the list. Its configuration, `frr.conf`, is
   statement added to it fails.
 - `ip route <service range> reject`, installed by `staticd`, makes the whole service range
   unreachable on the edge. A Service's /32 learned over BGP is more specific and wins. With no
-  route for the Gateway's address, as right after a build before any worker announces it, a
-  translated connection is refused on the edge and does not follow the edge's default route to the
-  cloud's router, toward a private address of the provider's external side.
+  route for the Gateway's address, as right after a build before any worker announces it, the
+  proxy's connection to it is refused on the edge and does not follow the edge's default route to
+  the cloud's router, toward a private address of the provider's external side.
 - The timers and the graceful restart time are those of the workers' `CiliumBGPPeerConfig`, which
   `main.tf` reads from `kubernetes/apps/base/kube-system/cilium-bgp/app/bgp-peer.yaml`:
   `neighbor workers timers <keepalive> <hold>`, `timers connect <retry>`, `bgp graceful-restart` and
@@ -587,47 +589,124 @@ equal-cost paths where Debian's takes 256, so the proof renders with 64.
 
 ### The data path
 
-Each edge's nftables rules, `nftables.conf` rendered from `nftables.conf.tftpl`, and its kernel
-settings, `sysctl.conf`, are written once at first boot:
+Each edge's proxy configuration, `haproxy.cfg` rendered from `haproxy.cfg.tftpl`, the settings of
+its unit, `haproxy-unit.conf`, its nftables rules, `nftables.conf` rendered from
+`nftables.conf.tftpl`, and its kernel settings, `sysctl.conf`, are written once at first boot.
 
-- A connection to the edge's own address on a port of `public_ports`, 80 and 443 by default, the
-  same as the cluster stack's `service_ports`, which a test keeps equal, is destination translated
-  to the public Gateway's address and source translated to the edge's own address
-  ([nftables NAT](https://wiki.nftables.org/wiki-nftables/index.php/Performing_Network_Address_Translation_(NAT))).
-  Forwarding is on in the kernel. The forward chain's first rule, ahead of what belongs to a
-  connection, drops every packet of a translated connection toward the Gateway whose route's next
-  hop is not a worker's address; then it admits what belongs to connections it has accepted, and a
-  new translated connection to the Gateway on those ports through a worker; everything else is
-  dropped. So with no worker's route to the Gateway's address, before FRR has learned one, or once
-  FRR stops and zebra takes its routes out of the kernel (it does on exit; the edges run it without
-  `-r`, which would leave them), a new connection is refused and an established one's packets are
-  dropped at the edge, whether or not FRR's reject route is in place, and none of them follows the
-  default route to the cloud's router
-  ([nftables](https://wiki.nftables.org/wiki-nftables/index.php/Matching_routing_information); the
-  kernel takes `rt nexthop` in any hook, the forward hook among them,
-  [nft_rt.c](https://github.com/torvalds/linux/blob/v6.12/net/netfilter/nft_rt.c#L173-L178)).
-  Replies come from the Gateway to the edge's own address, are translated back to the client's, and
-  leave by the default route, the one way to a client, whatever FRR does. Nothing of IPv6 is
-  forwarded: the kernel's IPv6 forwarding stays off, as `sysctl.conf` turns on IPv4's alone, and no
-  rule admits it. `just edge-forward-check` proves this with the rendered rules in network
-  namespaces on a developer's machine; the CI containers refuse the user namespaces it needs, and
-  the stack's tests compare the chain's rules as text.
+**The proxy.** HAProxy in TCP mode, from the image's repositories: `haproxy` of Debian 13, version
+3.0 (3.0.11-1+deb13u4 in the release's security updates), which a rebuild takes as the release holds
+it then, and no third-party repository
+([First boot, packages and secrets](#first-boot-packages-and-secrets)). For each port of
+`public_ports`, 80 and 443 by default, the same as the cluster stack's `service_ports`, which a test
+keeps equal, there is a frontend that binds the edge's own address on that port and a backend whose
+one server is the public Gateway's address on the same port, with `send-proxy-v2`: the proxy sends a
+PROXY protocol version 2 header, which names the client's address and port and the address and port
+it connected to, at the start of every connection it opens
+([HAProxy's PROXY protocol](https://www.haproxy.org/download/3.0/doc/proxy-protocol.txt) and its
+configuration manual's `send-proxy-v2`). The edge does not terminate TLS or read HTTP: the Gateway
+holds the certificate and the redirect, and the proxy copies bytes. The Gateway accepts the header
+on its public listeners (ADR 0020), which is why the edges are replaced only after that is live
+([runbooks/edge.md](runbooks/edge.md#rolling-out-the-proxy)).
+
+- **Listeners.** The edge's own address and the listed ports, nothing else: a frontend bound to
+  every address would answer on every address the edge has, and the input chain admits the public
+  ports from anywhere the security group lets in. A port that is not listed has no listener and no
+  input rule, so a connection to it is dropped and gets no answer.
+- **Limits.** `maxconn 4000` for the process: that many connections at once, a client's and the
+  proxy's own to the Gateway counted as one, and one beyond it waits in the kernel's queue until
+  another ends. The proxy's connections to one Gateway port all leave from the edge's one address,
+  so the kernel's range of ports for them, 32768 to 60999 by default, about 28,000, bounds them for
+  each public port, far above the limit. Timeouts: 5 seconds to connect, 5 minutes with nothing
+  sent on either side, 30 seconds for the other side once one has closed.
+- **No route to the Gateway.** `retries 0`: a connection the Gateway's address has no route for is
+  closed at once, not tried again. With FRR running, its reject route for the service range makes
+  the kernel refuse the connection; with FRR stopped, before it has learned a route or once zebra
+  has taken its routes out, the output chain below refuses it. Either way the client's connection
+  is accepted and closed unanswered at once and nothing is sent out of the default route. A route
+  that comes back is used by the next connection, with no restart: the proxy looks the route up for
+  each connection it opens, and keeps no state about the last one's failure.
+- **Unprivileged.** The package's unit starts the proxy as root, which drops to a user once its
+  sockets are bound, and keeps a PID file and a control socket under `/run`. A drop-in of the unit
+  installed at first boot, `/etc/systemd/system/haproxy.service.d/10-edge.conf` (from
+  `haproxy-unit.conf`), runs it as `haproxy` from the start, with `CAP_NET_BIND_SERVICE` as an
+  ambient capability and the only one in its bounding set, to bind ports 80 and 443
+  ([`capabilities(7)`](https://man7.org/linux/man-pages/man7/capabilities.7.html)), and with
+  `NoNewPrivileges=true`, a read-only file system, a private `/tmp` and `/dev`, no access to kernel
+  tunables, modules or logs, and only the IPv4, IPv6 and Unix socket families
+  ([`systemd.exec(5)`](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html)).
+  It has no PID file or control socket; its configuration has no `user`, `group`, `chroot` or
+  `daemon` and logs to standard output, which the journal keeps, one line per connection that names
+  the client's address and port (`option tcplog`).
+- **The connection to the Gateway.** It is locally generated, so it leaves by the routes FRR
+  learned over BGP, the equal-cost path to a worker chosen by the hash of the connection's layer 4
+  fields (`net.ipv4.fib_multipath_hash_policy = 1`). Its source is the edge's own address on the
+  node subnet, which the configuration names with `source`, the one the kernel picks for a route
+  out of that interface. A worker answers a packet from a node-subnet address straight back to it,
+  where it would send the answer to a client's address through the cloud's router, so the replies
+  return to the edge on the path the connection took. The Gateway sees the edge as the peer and the
+  client in the header.
+
+The rules, all in one table, `inet edge`:
+
+| Chain | Rule | What it does |
+| --- | --- | --- |
+| input | `ct state established,related accept`, `ct state invalid drop`, `iif "lo" accept` | What belongs to the edge's own connections, SSH's, BGP's and the proxy's among them, and the loopback. |
+| input | `tcp dport 22 accept` | SSH, from the security group's allowlist. |
+| input | `ip daddr <the edge's address> tcp dport { <public_ports> } accept` | The public ports reach the proxy, on the edge's own address and over IPv4. By address and port only: the networks that may connect are the security group's, so the operator allowlist stays out of the user data. |
+| input | `ip saddr { <workers' block> } tcp dport 179 accept` | BGP from the workers' addresses. |
+| input | the ICMP destination unreachable, fragmentation needed, and the ICMPv6 neighbour discovery and path MTU discovery need | Path MTU discovery. |
+| forward | policy `drop`, no rule | Nothing is forwarded, for the public ports or anything else. Kernel forwarding stays on, as `sysctl.conf` has it, for the ICMP redirects below, and this chain is what decides. |
+| output | `ip daddr <Gateway> rt ip nexthop != { <workers' block> } reject` | A packet of the proxy's toward the Gateway's address whose route does not go through a worker, as with no route learned or FRR stopped, is refused at once and the connection fails instead of following the default route. Policy `accept` for everything else the edge sends. |
+
+There is no translation table, and the forward chain holds no rule: a connection to a public port
+ends at the proxy, so nothing is translated or forwarded. The guard on the route is in the output
+chain, where the proxy's own packets are (the kernel takes `rt nexthop` in the output hook as in
+the forward hook,
+[nftables](https://wiki.nftables.org/wiki-nftables/index.php/Matching_routing_information)). Over
+IPv6 the input chain admits SSH's port and the ICMPv6 that neighbour discovery and path MTU
+discovery need, and drops the rest; IPv6 forwarding stays off, as `sysctl.conf` turns on IPv4's
+alone.
+
+`just edge-forward-check` proves this with the rendered rules and proxy configuration in network
+namespaces of an unprivileged user namespace on a developer's machine: a client, a worker that holds
+the Gateway's address with a server that reads the 28 bytes of a PROXY protocol version 2 header for
+IPv4 from each connection and records them, and the cloud's router, which counts what reaches it
+toward the Gateway. A client that connects from a port of its choosing is answered, and the server's
+record is the header's signature, version 2 and the proxy command, IPv4 over TCP, and the client's
+address and port and the edge's address and the public port; the connection came from the edge's own
+address. A port that is not listed, though a server listens on it, the edge's other address and the
+Gateway's address through the edge get no answer, and nothing of them reaches the server, the worker
+or the router. With the worker's route gone, the established connection and every new one, with the
+default route or with none, send nothing to the router, a new one is closed within a second and a
+half, and with the route back it is answered by the proxy that ran throughout. It needs `unshare`,
+`nft`, `ip`, `ss`, `socat`, `haproxy` (3.0, the edge's version) and `tofu` on `PATH`, and a host
+that allows unprivileged user namespaces with networks and mounts of their own; where one of them is
+missing, each of its tests skips, saying which. CI does not run it: the CI containers refuse those
+namespaces, so `just test` leaves its tests out, and the stack's tests compare the rules and the
+configuration as text.
+
 - zebra runs without `-r` (FRR's [zebra](https://docs.frrouting.org/en/stable-10.3/zebra.html):
   "When program terminates, do not flush routes installed by zebra from the kernel"). With it, an
   FRR that stops would leave its last routes to the workers in the kernel with nothing to withdraw
   them, and a worker that went meanwhile would keep its share of new connections for as long as
-  FRR is down. Without it, an edge whose FRR stops forwards nothing, `just edge-check` fails it,
-  and a client that retries can reach the other edge.
-- The input chain drops everything addressed to the edge except what belongs to its own connections,
-  loopback, TCP 22, TCP 179 from the workers' block and the ICMP destination unreachable,
-  fragmentation needed, that path MTU discovery needs. IPv6 is dropped but for the ICMPv6 that
-  neighbour discovery and path MTU discovery need.
-- **The source translation is deliberate.** A worker answers a packet to the address it came from,
-  through its default route, the cloud's router, unless that address is on the node subnet. Without
-  the translation the answer to a client would leave by that router and never meet the connection it
-  belongs to. Pods therefore see an edge's address, not the client's; ADR 0018 names the two ways to
-  restore the client's address later and what each costs.
-- ICMP redirects are off, as the edge forwards between hosts of one subnet.
+  FRR is down. Without it, an edge whose FRR stops serves nothing, `just edge-check` fails it, and
+  a client that retries can reach the other edge.
+- ICMP redirects are off, which is why kernel forwarding stays on although nothing is forwarded.
+  With forwarding on, the kernel takes a redirect on an interface only when
+  `conf/all/accept_redirects` and the interface's own setting are both on, and `sysctl.conf` turns
+  `all` off; with forwarding off either one would do, and the interface, which exists before the
+  first boot applies the settings, keeps the kernel's default, on
+  ([ip-sysctl](https://docs.kernel.org/networking/ip-sysctl.html), `accept_redirects`). The first
+  boot loads the rules before it turns forwarding on, and `just edge-check` fails an edge that
+  forwards without them.
+- **What is lost and gained.** UDP on the public ports was never forwarded and still is not (the
+  proxy is TCP only, as the rules were). A long-lived connection ends when the edge that holds it
+  is replaced, as before. The edge now holds connection state in a user-space process: its limits
+  are the ones above, and it closes a connection that is idle for 5 minutes, where the kernel's
+  tracking kept one for days (`nf_conntrack_tcp_timeout_established`, five days by default,
+  [nf_conntrack-sysctl](https://docs.kernel.org/networking/nf_conntrack-sysctl.html)). The
+  Gateway's access logs can name the client, which was the point, and the edge's own log names it
+  too.
 - **What an edge can reach.** An edge is internet-facing on the public ports and sits on the node
   subnet, so the nodes' group rule for TCP 6443 from that subnet lets its packets reach every node,
   as [Services announced over BGP](#services-announced-over-bgp) states. Behind the group, each
@@ -635,7 +714,7 @@ settings, `sysctl.conf`, are written once at first boot:
   ([cluster.md](cluster.md#sources)), so an edge reaches the service ports on the workers and
   nothing else. Beyond that, an edge holds no kubeconfig, token or client certificate, its first
   boot is given none, and its only inbound path from the internet is the two public ports,
-  forwarded to the Gateway, and SSH from the operator allowlist.
+  served by the proxy, and SSH from the operator allowlist.
 
 The security group `<prefix>-edge` holds the rules the cloud enforces, and the cloud's default rules
 are deleted. It admits TCP on each public port from each network of `public_allowed_cidrs`, which is
@@ -651,12 +730,12 @@ is admitted only when both the group and the rules admit it.
 ### First boot, packages and secrets
 
 The configuration is delivered once, as cloud-init user data, which holds no secret: the routing
-configuration and the firewall rules name the node subnet and the service range, and nothing names
-the operator allowlist, the SSH key or a password. A BGP session password would have to be
-generated and kept where both ends can read it. The cluster's side can hold it as a secret
-(ADR 0005); an edge could only get it from its user data, which is kept in state and served by the
-metadata service, or from a secret store it can reach, which does not exist for it yet. The sessions
-carry none (ADR 0013).
+configuration, the firewall rules and the proxy's configuration name the node subnet, the service
+range and the edge's own address, and nothing names the operator allowlist, the SSH key or a
+password. A BGP session password would have to be generated and kept where both ends can read it.
+The cluster's side can hold it as a secret (ADR 0005); an edge could only get it from its user data,
+which is kept in state and served by the metadata service, or from a secret store it can reach,
+which does not exist for it yet. The sessions carry none (ADR 0013).
 
 The first boot checks the release, then turns unattended upgrades off: Debian's cloud images install
 `unattended-upgrades`
@@ -664,15 +743,18 @@ The first boot checks the release, then turns unattended upgrades off: Debian's 
 whose package turns them on by default (its `enable_auto_updates` template defaults to true), and
 they would upgrade FRR and restart it in place; the first boot sets
 `APT::Periodic::Unattended-Upgrade "0"` and disables `apt-daily-upgrade.timer`, and `apt` waits for
-a lock an upgrade already running holds. It installs `frr` and `nftables` from the repositories of
-the image's release, keeps FRR stopped, checks both files as cloud-init wrote them under
-`/etc/edge`, the rules with `nft --check` and FRR's file with FRR's dry run (`vtysh -C -f`), before
-anything of them is installed under `/etc`, then gives the SSH daemon its settings
-([SSH and host keys](#ssh-and-host-keys)), loads the rules, starts FRR, waits until it answers and
-its reject route for the service range is in the kernel, and turns forwarding on last. A file
-either check refuses, settings the SSH daemon refuses, or any other failure, fails the first boot,
-saying why on the console and in the log, and leaves forwarding off with its setting removed and FRR
-stopped and disabled, so the edge forwards nothing until it is rebuilt. The release pins the
+a lock an upgrade already running holds. It installs `frr`, `haproxy` and `nftables` from the
+repositories of the image's release, keeps FRR and the proxy stopped, checks the three files as
+cloud-init wrote them under `/etc/edge`, the rules with `nft --check`, FRR's file with FRR's dry
+run (`vtysh -C -f`) and the proxy's with its own check (`haproxy -c -q -f`), before anything of them
+is installed under `/etc`, then gives the SSH daemon its settings
+([SSH and host keys](#ssh-and-host-keys)), installs the proxy's configuration and the drop-in of
+its unit, loads the rules, starts FRR, waits until it answers and its reject route for the service
+range is in the kernel, starts the proxy, which is of the notify type and so has bound its ports
+when the start returns, and turns forwarding on last. A file a check refuses, settings the SSH
+daemon refuses, a proxy that does not start, or any other failure, fails the first boot, saying why
+on the console and in the log, and leaves forwarding off with its setting removed and FRR and the
+proxy stopped and disabled, so the edge serves nothing until it is rebuilt. The release pins the
 packages' versions only as far as the image's repositories do: a rebuild installs whatever the
 release holds then, so a new edge may have newer packages than the one it replaces, and nothing pins
 them further.
@@ -750,10 +832,19 @@ host's are, it prints pass, FAIL or skip for each edge:
   local-only is announced by some workers only.
 - FRR is configured with its reject route for the service range, for the range of the same file
   when there is one, and the kernel has it.
-- The nftables tables are loaded, and the forward chain sends a translated connection's packets
-  toward the Gateway, new or established, only through a worker: its first rule drops the rest
-  ahead of what belongs to a connection, and both its guarded rules are for the cluster's Gateway,
-  hold every worker's address of `talman.yaml` and not the edge's default route's next hop.
+- The nftables tables are loaded and none translates an address, which is a FAIL when the old
+  translation table is there; the forward chain drops by default and holds no rule; and the output
+  chain refuses a packet toward the Gateway, which is the proxy's connection, unless its route goes
+  through a worker: its one guarded rule is for the cluster's Gateway, holds every worker's address
+  of `talman.yaml` and not the edge's default route's next hop.
+- The proxy is running, as its own user and not root (`systemctl is-active haproxy` and
+  `ps -C haproxy -o user=`). Its configuration, read from `/etc/haproxy/haproxy.cfg`, binds the
+  stack's public ports and no other port: `TF_VAR_public_ports` when it is set, as tofu takes it,
+  or else the default in the stack's `variables.tf`. Its sockets, read with `sudo -n ss -H -ltnp`,
+  are exactly the addresses and ports its configuration binds: none of them every address. Each of
+  its servers sends the PROXY protocol version 2 header, on the ports it listens on, to the
+  Gateway's address of `talman.yaml`; without that address the line is a skip that says the
+  servers' address was not compared.
 - The kernel forwards, which is a FAIL when it forwards without the rules. The state is read from
   `/proc/sys/net/ipv4/ip_forward`, the file the kernel exposes it as
   ([ip-sysctl](https://docs.kernel.org/networking/ip-sysctl.html)), as the edge's ordinary user and
@@ -777,10 +868,12 @@ host's are, it prints pass, FAIL or skip for each edge:
 The commands run on an edge are those of the ordinary user, whose `PATH` on Debian has no `sbin`
 directory (`ENV_PATH` in `login.defs`, and the `PATH` OpenSSH's server gives a command run over
 SSH), so a program that lives in `/usr/sbin` is run through `sudo -n`, whose `secure_path` has
-them: `nft` and `sshd`. `vtysh`, `ip`, `systemctl` and `apt-config` are in `/usr/bin`. An answer the
-edge could not give, as its command was not found or failed, is a FAIL of its own line, `cannot read
-<what> on the edge: <what the edge said>`, with any address in the edge's words left out, and not
-the unhealthy conclusion drawn from an empty answer; the other lines are still checked.
+them: `nft` and `sshd`. `vtysh`, `ss`, `ip`, `systemctl` and `apt-config` are in `/usr/bin`; `vtysh`
+and `ss` run through `sudo -n` as well, for what only root may read: FRR's daemons, and which
+process holds each listening socket. An answer the edge could not give, as its command was not
+found or failed, is a FAIL of its own line, `cannot read <what> on the edge: <what the edge said>`,
+with any address in the edge's words left out, and not the unhealthy conclusion drawn from an empty
+answer; the other lines are still checked.
 
 A worker that is down fails the sessions line on both edges, so no rollout gets past its first
 check until the worker is back or the cluster stack no longer has it; the line counts every worker
@@ -882,8 +975,9 @@ the old key alone until `just edge-rollout --replace` replaces them
 ([runbooks/edge.md](runbooks/edge.md#replacing-one-edge)).
 
 Outputs, all sensitive but `names`: `addresses` (the floating addresses), `private_addresses`,
-`instances`, `config` (each edge's rendered FRR configuration, nftables rules, kernel settings and
-SSH daemon's settings), `user_data`, `server_group`, `security_group` and `floating_ips`.
+`instances`, `config` (each edge's rendered FRR configuration, nftables rules, proxy configuration
+and unit settings, kernel settings and SSH daemon's settings), `user_data`, `server_group`,
+`security_group` and `floating_ips`.
 
 ## The generated talman.yaml
 
