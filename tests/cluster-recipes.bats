@@ -677,6 +677,11 @@ KUBECONFIG
     grep -vx -- "$node" "$STATE/talos-behind" > "$STATE/talos-behind.next" || true
     mv "$STATE/talos-behind.next" "$STATE/talos-behind"
     : > "$STATE/upgraded.$node"
+    # talosctl returns only once the node is Ready, a while after its agent turned Ready.
+    now=$(date -u +%s)
+    while [[ $(date -u +%s) == "$now" ]]; do
+      command sleep 0.1
+    done
     echo "== $node: upgraded to v1.14.6"
     ;;
   upgrade-k8s)
@@ -706,6 +711,10 @@ KUBECONFIG
     fi
     # The node goes down and comes back, its kubelet reporting Ready again.
     : > "$STATE/rebooted.$target"
+    now=$(date -u +%s)
+    while [[ $(date -u +%s) == "$now" ]]; do
+      command sleep 0.1
+    done
     echo "== $target: rebooted"
     ;;
   etcd)
@@ -867,7 +876,8 @@ case $line in
     printf '{"nodes":[%s]}\n' "$(IFS=,; echo "${entries[*]}")"
     ;;
   *" get pods --namespace kube-system --selector k8s-app=cilium --field-selector spec.nodeName="*)
-    # The Cilium agent's pod on a node: Ready, since just now, unless agent-sequence.NODE says what
+    # The Cilium agent's pod on a node: Ready, since the node came back (a pod's Ready does not
+    # refresh as a node's heartbeat does), unless agent-sequence.NODE says what
     # each read answers after the node was upgraded or rebooted, one word per read, the last
     # repeated: ready, stale (Ready, but since before the reboot: what the pod last reported before
     # the node went down) or not (not Ready); before then it is Ready since long ago. agent-missing:
@@ -882,6 +892,7 @@ case $line in
         read -ra words < "$STATE/agent-sequence.$node"
         answer=${words[reads]:-${words[${#words[@]} - 1]}}
       fi
+      when=$(date -u -r "$STATE/upgraded.$node" +%Y-%m-%dT%H:%M:%SZ 2> /dev/null || date -u -r "$STATE/rebooted.$node" +%Y-%m-%dT%H:%M:%SZ)
     else
       when=2026-01-01T00:00:00Z
     fi
@@ -2845,9 +2856,10 @@ EOF
   fake_cluster
   label='node-restriction.kubernetes.io/bgp-out'
   printf '%s\n' worker-1 worker-2 > "$STATE/talos-behind"
-  # worker-1's agent pod still reports the Ready it posted before the upgrade, then is not Ready,
-  # then is; worker-2's agent is Ready, not Ready, and Ready again.
-  echo 'stale not ready' > "$STATE/agent-sequence.worker-1"
+  # worker-1's agent pod still reports the Ready it posted before the upgrade for longer than the
+  # settle time, which is no sign that it forwards, then is Ready since the upgrade; worker-2's
+  # agent is Ready, not Ready, and Ready again.
+  echo "$(printf 'stale %.0s' {1..20})ready" > "$STATE/agent-sequence.worker-1"
   echo 'ready not ready' > "$STATE/agent-sequence.worker-2"
 
   recipe cluster-upgrade --yes < /dev/null

@@ -590,8 +590,9 @@ bgp_note_out() {
 # UTC time as Kubernetes writes it; and at least one is. Returns 0 when so, 1 when not, and 2 when
 # kubectl cannot read them. A pod's Ready from before the node went down is the one it posted before,
 # which SINCE leaves out. The agent's readiness probe is /healthz, which answers once every probe of
-# the agent has run, none is stale, the API server is reachable and the CNI configuration is written
-# (daemon/healthz in Cilium's source); it does not say that the node's endpoints are regenerated or
+# the agent has run, none is stale and writing the CNI configuration has not failed (daemon/healthz
+# in Cilium's source; the check that the API server is reachable applies only to a request with the
+# require-k8s-connectivity header, which the readiness probe does not send); it does not say that the node's endpoints are regenerated or
 # its ipcache and tunnel map are in step, which a connection to a backend on another node needs.
 # docs/cluster.md says why that is covered with a settle time.
 agent_forwarding() {
@@ -609,7 +610,7 @@ agent_forwarding() {
 # wait_forwarding NODE SINCE: waits for up to FORWARD_WAIT seconds (300), checked every two and once
 # at least, until the Cilium agent on NODE has been Ready since SINCE (agent_forwarding) for
 # FORWARD_SETTLE seconds (30) without a read that says otherwise. That the agent is Ready says that
-# it runs and reaches the API; the settle time is the margin for what its readiness does not cover,
+# it has started and every probe of it has run; the settle time is the margin for what its readiness does not cover,
 # not a proof of it. Fails with 1 when the time runs out, with 2 when it runs out with the last read
 # having failed, and with 3, saying why, when the clock cannot be read as a number. The time is read
 # with date +%s, so a test's clock bounds the wait.
@@ -710,8 +711,8 @@ leave_bgp() {
 # out already or one taken out with --no-bgp-wait, only until its configuration is back. Announcing
 # is the last step, as an edge hashes a share of new connections to a worker the moment it announces
 # its addresses, and a node that is Ready may not yet forward a Service's connection to a backend on
-# another node: the agent must have stayed Ready since SINCE, the time of the reboot or upgrade WHAT
-# names (wait_forwarding), or at all when they are not given, as for a node this run did not take
+# another node: the agent must have stayed Ready since SINCE, the time the reboot or upgrade WHAT
+# names began (wait_forwarding), or at all when they are not given, as for a node this run did not take
 # out. A node whose agent does not get there keeps its label and stays in bgp_left_out. --no-bgp-wait
 # does not skip this wait. Once the label is gone the node is no longer out, whether or not it
 # announces yet.

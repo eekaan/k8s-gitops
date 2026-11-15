@@ -210,16 +210,19 @@ reported() {
 }
 
 # leftovers: each process still running whose command line names this test's directory, such as a
-# fake, the real sleep under its fake's name or a copy's script, as its PID and command line.
+# fake, the real sleep under its fake's name or a copy's script, or whose working directory is in it,
+# such as the recipe's own script, which is run from the copy of the repository there, as its PID
+# and command line.
 leftovers() {
-  local file pid
+  local file pid cwd
   local -a argv
   for file in /proc/[0-9]*/cmdline; do
     pid=${file#/proc/}
     pid=${pid%/cmdline}
     [[ $pid != "$$" && $pid != "$BASHPID" ]] || continue
     mapfile -d '' -t argv 2> /dev/null < "$file" || continue
-    if [[ " ${argv[*]} " == *"$BATS_TEST_TMPDIR/"* ]]; then
+    cwd=$(readlink "/proc/$pid/cwd" 2> /dev/null) || cwd=
+    if [[ " ${argv[*]} " == *"$BATS_TEST_TMPDIR/"* || $cwd == "$BATS_TEST_TMPDIR"/* ]]; then
       printf '%s %s\n' "$pid" "${argv[*]}"
     fi
   done

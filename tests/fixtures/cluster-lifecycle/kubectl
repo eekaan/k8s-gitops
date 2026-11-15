@@ -202,7 +202,9 @@ agent_pods() {
   fi
   echo "agent $node $answer" >> "$record/argv"
   echo "$answer" > "$state/agent-last.$node"
+  # Ready since the node came back: a pod's Ready does not refresh as a node's heartbeat does.
   status=True when=$now
+  [[ ! -e $state/back.$node ]] || when=$(date -u -r "$state/back.$node" +%Y-%m-%dT%H:%M:%SZ)
   [[ $answer != stale ]] || when=2026-01-01T00:00:00Z
   [[ $answer != not ]] || status=False
   jq -n --arg node "$node" --arg status "$status" --arg when "$when" '{

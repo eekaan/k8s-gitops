@@ -758,8 +758,11 @@ out of the artifact, which is built from `kubernetes/`.
   `clusterconfig/cluster.lock` in its directory, for their whole run, and refuse, changing nothing,
   while another of them holds it: a `cluster-reboot` that `cluster-talos --reboot` runs shares its
   parent's, which it takes only from a descriptor open on the lock file itself. The lock goes when
-  the run ends, however it ends, a kill that no trap sees included: the one process a run starts
-  that outlives it, `cluster-reboot`'s probe of `/readyz`, closes the lock's descriptor first. The
+  the run ends, however it ends, a kill that no trap sees included: `cluster-reboot`'s probe of
+  `/readyz`, the one background process a run starts, closes the lock's descriptor first. A run
+  killed outright while a foreground child it started runs, `talman reboot` or `upgrade`,
+  `kubectl drain` or a `cluster-reboot` of `cluster-talos`, leaves that child holding the lock
+  until it ends, which its own timeout bounds (`talosctl` thirty minutes, the drain ten). The
   recipes make `clusterconfig/` private (mode 0700) when the lock is the first thing to create it.
   The lock excludes only runs from this checkout, and nothing records which run set a
   worker's label, so a recipe removes a label it did not set only once the operator has confirmed
@@ -768,7 +771,9 @@ out of the artifact, which is built from `kubernetes/`.
   schedulable, and taken out again like any other when it is behind; one that is not is taken
   through as out already when it is the first worker behind: drained, upgraded, uncordoned and put
   back; otherwise it stops the run before another worker is taken out, or, when none is behind,
-  fails it at the end, saying why it is not put back. With nothing behind, nothing is asked, so a
+  fails it at the end, saying why it is not put back. A worker put back that this run did not take
+  out waits for its agent to be Ready for `FORWARD_SETTLE` seconds, as any other, and the run stops
+  if it is not within `FORWARD_WAIT`. With nothing behind, nothing is asked, so a
   worker that is out is only reported, and the run fails. Either way the last line names the worker
   and the `kubectl label` command that puts it back. Before each drain the API must answer
   `/readyz` through the kubeconfig within five minutes, or nothing more is drained. talosctl's own
@@ -944,24 +949,30 @@ out of the artifact, which is built from `kubernetes/`.
   the datapath forwards a Service's traffic to a backend on another node fails. The recipe therefore
   reads the node's Cilium agent pods (`kubectl get pods` on `k8s-app=cilium` in `kube-system`, with
   the node's name as a field selector; no `exec`) every two seconds until each is Running and Ready
-  with a Ready condition that turned true after the reboot, which leaves out the Ready the pod
-  posted before the node went down, and has stayed so, on every read, for `FORWARD_SETTLE` seconds
+  with a Ready condition that turned true after the reboot began, which leaves out the Ready the pod
+  posted before the node went down but not one from while `talman reboot` waited for the node (it
+  returns only once the node is Ready, and a pod's Ready does not refresh), and has stayed so, on every read, for `FORWARD_SETTLE` seconds
   (30). It waits for up to `FORWARD_WAIT` seconds (300), the settle time included. When the agent
   does not get there, or cannot be read, the label stays, the run fails saying what it waited for
   and for how long, and its last line names the worker and the `kubectl label` command that puts it
   back. A worker whose agent never reports that it forwards therefore stays out of BGP, and
   announces nothing, rather than being put back to fail the connections it is given.
 
-  What the signal covers is what the pinned Cilium (1.20.4, `versions.yaml`) says of it. The
+  What the signal covers is what the pinned Cilium says of it (1.20.4, pinned in
+  `kubernetes/apps/base/kube-system/cilium/app/ocirepository.yaml`). The
   agent's readiness probe is `GET /healthz` with the `brief` header on the node's loopback
   ([the chart's DaemonSet](https://github.com/cilium/cilium/blob/v1.20.4/install/kubernetes/cilium/templates/cilium-agent/daemonset.yaml)),
   which answers 200 unless the agent's status is not OK, and the status is not OK when not every
   probe of the agent has run yet, a probe's data is stale, the key-value store (off here) is not
-  ready, the Kubernetes API is not reachable, or the CNI configuration file cannot be written
+  ready, or writing the CNI configuration file failed
   ([`agenthealth.go`](https://github.com/cilium/cilium/blob/v1.20.4/daemon/healthz/agenthealth.go),
   [`GetStatus`](https://github.com/cilium/cilium/blob/v1.20.4/pkg/status/status_collector.go#L552-L640)).
-  The same probe gates the pod's startup. So a Ready agent has started, has reached the API and has
-  written its CNI configuration; its readiness does not say that the node's endpoints are
+  The check that the Kubernetes API is reachable is not part of it: the handler is built without
+  its configuration, so it applies that check only to a request that sends the
+  `require-k8s-connectivity` header, which the chart's liveness probe sends and its readiness and
+  startup probes do not. The same probe gates the pod's startup. So a Ready agent has started, has
+  run every probe once, has none stale and has not failed to write its CNI configuration; its
+  readiness does not say that the node's endpoints are
   regenerated or that its ipcache and tunnel map are in step with the other nodes, which a
   connection to a backend on another node needs. No signal the recipes can read with `kubectl get`
   does: the `CiliumNode` object's status holds the node's IPAM state and its cloud-specific state and
@@ -971,16 +982,17 @@ out of the artifact, which is built from `kubernetes/`.
   healthy Cilium pod
   ([`operator.setNodeNetworkStatus`](https://github.com/cilium/cilium/blob/v1.20.4/install/kubernetes/cilium/README.md)),
   so it follows the same readiness through one more hop; the `cilium-envoy` pod serves Cilium's L7
-  features, which are off here (the Gateway is Envoy Gateway's), so no Service's connection passes
-  through it; and `cilium-health`'s node-to-node probes and `cilium status` need `kubectl exec`,
+  proxy, which the chart leaves on; nothing here is L7-load-balanced (the Gateway is Envoy
+  Gateway's) and no policy has L7 rules, so no Service's connection passes through it; and
+  `cilium-health`'s node-to-node probes and `cilium status` need `kubectl exec`,
   which the recipes do not have. The settle time is therefore a margin, not a proof: it gives the
   agent time to regenerate its endpoints and synchronise its maps after it reports Ready, and
   Cilium's documentation gives no figure for how long that takes. A longer `FORWARD_SETTLE` widens
   the margin; `FORWARD_SETTLE=0` relies on the agent's readiness alone.
 
-  Once the worker forwards, the recipe removes its label and waits, up to `BGP_WAIT` seconds, until the node's `CiliumBGPNodeConfig` is back and the sessions
-  that were established before it was taken out are established again; a node with none before, as
-  while the edge stack is not applied or an edge is stopped, is put back all the same, and the
+  Once the worker forwards, the recipe removes its label and waits, up to `BGP_WAIT` seconds, until
+  the node's `CiliumBGPNodeConfig` is back and the sessions that were established before it was
+  taken out are established again; a node with none before, as while the edge stack is not applied or an edge is stopped, is put back all the same, and the
   recipe says it does not wait for one; for a node whose sessions before are not known, one out
   already or taken out with `--no-bgp-wait`, it waits only until the configuration is back, and
   says so. It deletes, by namespace and name, the pods the shutdown
