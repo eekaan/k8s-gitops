@@ -452,9 +452,9 @@ Every other routing daemon is off in the list. Its configuration, `frr.conf`, is
     stale for up to the restart time, and a shut-down worker's for all of it, with new connections
     hashed to it failing, unless the node leaves BGP first: taken out of the
     `CiliumBGPClusterConfig`'s node selector, Cilium sends a Cease, and an edge that has not
-    negotiated the bit withdraws its paths at once (the guide's "Shutting Down a Node"). The selector
-    takes every worker and no recipe takes one out, so a reboot or a stop leaves the window as it
-    is; the restart time in the workers' `CiliumBGPPeerConfig` bounds it.
+    negotiated the bit withdraws its paths at once (the guide's "Shutting Down a Node"). The
+    selector takes every worker and no recipe takes one out, so a reboot or a stop leaves the
+    window as it is; the restart time in the workers' `CiliumBGPPeerConfig` bounds it.
 - `maximum-paths` is `max_workers`: as many equal-cost paths to one address as there can be workers.
   The most FRR takes is what its build allows: 128 by its manual, 256 in Debian's package. The
   kernel setting `net.ipv4.fib_multipath_hash_policy = 1` hashes a flow's layer 4 fields, so every
@@ -668,9 +668,9 @@ SSH admits the operator allowlist only, by key only, as the image's default user
 `debian` by default). `just edge-ssh-key` creates the key pair at `EDGE_SSH_KEY_FILE`, and the stack
 reads the public half from the file beside it. An edge's host key is recorded on first contact, in
 `~/.local/state/k8s-gitops/edge.known_hosts`, after the fingerprints it offers are shown and `yes`
-is typed, as for the CI host. A key pair reaches an instance only when it is created, so a new pair at
-`EDGE_SSH_KEY_FILE` replaces the stack's key pair and no instance, and the running edges admit the
-old key alone until `just edge-rollout --replace` replaces them
+is typed, as for the CI host. A key pair reaches an instance only when it is created, so a new pair
+at `EDGE_SSH_KEY_FILE` replaces the stack's key pair and no instance, and the running edges admit
+the old key alone until `just edge-rollout --replace` replaces them
 ([runbooks/edge.md](runbooks/edge.md#replacing-one-edge)).
 
 Outputs, all sensitive but `names`: `addresses` (the floating addresses), `private_addresses`,
