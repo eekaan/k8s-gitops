@@ -460,11 +460,11 @@ run "the_user_data_holds_no_secret_and_the_edges_port_allows_exactly_the_address
         !strcontains(output.user_data[key], "marker-key-comment") &&
         !strcontains(output.user_data[key], "203.0.113.192") &&
         !strcontains(output.user_data[key], "198.51.100.0/24") &&
-        !strcontains(lower(output.user_data[key]), "password") &&
+        !strcontains(replace(lower(output.user_data[key]), "passwordauthentication no", ""), "password") &&
         !strcontains(lower(output.user_data[key]), "secret")
       )
     ])
-    error_message = "The user data must hold neither the SSH key, nor the operator allowlist, nor a password."
+    error_message = "The user data must hold neither the SSH key, nor the operator allowlist, nor a password; the word is allowed only as the SSH daemon's setting that turns password login off."
   }
 
   # What cloud-init writes is what the stack renders: the cloud-config parses, and its files hold
@@ -477,11 +477,34 @@ run "the_user_data_holds_no_secret_and_the_edges_port_allows_exactly_the_address
         "/etc/edge/frr.conf"              = output.config[key].frr_conf
         "/etc/edge/nftables.conf"         = output.config[key].nftables_conf
         "/etc/edge/sysctl.conf"           = output.config[key].sysctl
+        "/etc/edge/sshd.conf"             = output.config[key].sshd_conf
         "/etc/edge/daemons"               = file("frr-daemons")
         "/usr/local/sbin/edge-first-boot" = file("first-boot.sh")
       }
     ])
-    error_message = "The cloud-config must write exactly the rendered FRR configuration, nftables rules and kernel settings, the daemon list and the first-boot script."
+    error_message = "The cloud-config must write exactly the rendered FRR configuration, nftables rules and kernel settings, the SSH daemon's settings, the daemon list and the first-boot script."
+  }
+
+  # The SSH daemon's settings reach the edge as the tree states them, not as some other file.
+  assert {
+    condition = alltrue([
+      for key in ["1", "2"] : alltrue([
+        for line in [
+          "KexAlgorithms mlkem768x25519-sha256,sntrup761x25519-sha512,curve25519-sha256",
+          "Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com",
+          "MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com",
+          "PasswordAuthentication no",
+          "KbdInteractiveAuthentication no",
+          "PermitRootLogin no",
+          "AuthenticationMethods publickey",
+          "AllowTcpForwarding no",
+          "AllowAgentForwarding no",
+          "X11Forwarding no",
+          "PermitTunnel no",
+        ] : contains(split("\n", { for file in yamldecode(output.user_data[key]).write_files : file.path => file.content }["/etc/edge/sshd.conf"]), line)
+      ])
+    ])
+    error_message = "The cloud-config must write the SSH daemon's settings: the post-quantum hybrid and classical key exchanges, AEAD ciphers and encrypt-then-MAC MACs, public key authentication only, and no forwarding."
   }
 
   # Written files configure nothing until the first-boot script runs them in place.
