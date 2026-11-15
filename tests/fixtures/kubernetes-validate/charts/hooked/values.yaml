@@ -8,3 +8,5 @@ upgradeImage: ""
 podTestImage: ""
 # The image of an init container of the Deployment; empty renders none.
 initImage: ""
+# The image a Widget names in its own spec.image; empty renders none.
+widgetImage: ""

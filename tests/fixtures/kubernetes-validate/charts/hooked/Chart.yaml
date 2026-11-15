@@ -1,0 +1,7 @@
+---
+# The chart the fixture's HelmReleases install: a Deployment, the definition of Widget, and the
+# hooks and the Widget values.yaml names. Its templates end in .tpl, which helm renders like .yaml,
+# so that yamllint leaves their syntax alone.
+apiVersion: v2
+name: hooked
+version: 1.0.0

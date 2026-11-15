@@ -3,8 +3,9 @@
 `kubernetes/` is everything Flux reconciles; CI publishes it as the cluster's artifact
 (ADR 0003, [Publishing](#publishing)). `just kubernetes-check` builds it offline with kustomize and Flux, and fails, naming
 the file, when a cluster directory, a `ks.yaml`, an application directory or a variable breaks
-the rules below, or when something the cluster would refuse passes the build
-([What the check refuses](#what-the-check-refuses)).
+the rules below, or when a dependency the cluster would never reconcile passes the build;
+`just kubernetes-validate` adds the rules that need the render or the network, schemas and images
+([What the checks refuse](#what-the-checks-refuse)).
 
 ## Layout
 
@@ -53,9 +54,10 @@ spec:
 - `dependsOn`, `wait`, `healthCheckExprs`, `components` and `postBuild.substitute` belong to the
   application. The fields the root sets do not; see below.
 - What `dependsOn` names is an application the cluster's overlay enables, and one that waits: it
-  sets `wait: true`, `healthChecks` or `healthCheckExprs`, so it is Ready only once what it applies is. A dependency on
-  an application a cluster deliberately does not enable is an error: the dependent would never
-  reconcile there, so the dependent is not enabled either, or the dependency is.
+  sets `wait: true`, `healthChecks` or `healthCheckExprs`, so it is Ready only once what it
+  applies is. A dependency on an application a cluster deliberately does not enable is an error:
+  the dependent would never reconcile there, so the dependent is not enabled either, or the
+  dependency is.
 - A new namespace gets its directory: `namespace.yaml` with the Pod Security labels and the
   annotation `kustomize.toolkit.fluxcd.io/prune: disabled`, so removing it from the tree does not
   delete what runs in it.
@@ -90,48 +92,96 @@ child that sets any of these fields without opting out fails the check.
 - `k8s-gitops/timeout: long` on a child Kustomization: a 10m timeout with every other default
   kept. It does nothing on a child that opted out.
 
-## What the check refuses
+## What the checks refuse
 
-Beyond the layout above, `just kubernetes-check` refuses what the cluster would refuse or never
-reconcile, judged on what Flux builds, so the root's patches count:
+Beyond the layout above, two checks refuse what the cluster would refuse or never reconcile, split
+by what a rule needs:
 
-- **Dependencies.** Each `dependsOn` of the Kustomizations the overlay and the cluster directory
-  build (the application Kustomizations, the root, `flux-operator`, `flux-instance`) names one that
-  the same cluster applies: one the overlay lists, or one the cluster directory builds. The
-  Kustomizations an application applies from its own `app/` are not read. It must also wait after the root's patches: `wait: true`, `healthChecks` or
-  `healthCheckExprs`. Otherwise the dependent never reconciles, or starts before its dependency's
-  objects are ready. The message names both Kustomizations and the overlay.
-- **Schemas.** Everything Flux builds, for every application (enabled or not) and each cluster's
-  root, is validated by kubeconform with unknown fields refused: against Kubernetes' schemas for the
-  Kubernetes version in `versions.yaml`, and Flux's for the pinned release. A misspelt field fails,
-  naming the file, the object and the field. Objects of other kinds, the custom resources of the
-  charts, have no schema: the check prints each kind with the number of objects it could not
-  validate (`no schema for Certificate (cert-manager.io/v1): 2 objects`), so a pass never silently
-  means a skip. A kind of a group Kubernetes serves itself (the core group, `apps`, `batch`, `policy`,
-  `autoscaling`, and the `*.k8s.io` groups `rbac.authorization`, `networking`, `storage`,
-  `admissionregistration`, `apiextensions`, `scheduling`, `node`, `coordination`, `certificates`,
-  `discovery`, `events`, `apiregistration`, `flowcontrol.apiserver`, `resource`, `authentication`,
-  `authorization`, `storagemigration`, `internal.apiserver`) or of Flux's with no schema is an error;
-  the kinds of any other group are counted. The schemas
-  are fetched at exact versions, never from a moving reference: Flux's from the release asset
-  `crd-schemas.tar.gz` of the Flux release pinned in `mise.toml`, Kubernetes' a kind at a time from
+- `just kubernetes-check` holds every rule that reads only the tree and what kustomize and Flux
+  build from it: the layout, a manifest outside what the artifact carries, and the dependencies.
+  It fetches nothing, and it is the gate of the publish run, in the job that signs
+  ([Publishing](#publishing)), so nothing that job runs comes from the network.
+- `just kubernetes-validate` holds the rules that need the network or the render: schemas and
+  images. It runs `kubernetes-check` first, keeping what Flux builds, and stops when that fails;
+  then `scripts/render`, whose output it reads. It is a check of the `static` group, so it runs on
+  every pull request and every push to `main`, and not in the publish run.
+
+That split is the design, and its cost is this: a tree with a misspelt field or an untagged image
+fails every pull request's `static` group, but the publish run does not refuse it again. The ruleset
+does not require a branch to be up to date with `main` before it merges (`strict` is off), so two
+pull requests that pass apart can still merge into such a tree, and the run that publishes it
+passes. The control is the next run of the validation: the `static` group of that push to `main`,
+and of every pull request after it, fails, naming the file, until a pull request fixes the tree.
+
+On what Flux builds:
+
+- **Dependencies** (`kubernetes-check`), on the root's build, so its patches count. Each
+  `dependsOn` of the Kustomizations the overlay and the cluster directory build (the application
+  Kustomizations, the root, `flux-operator`, `flux-instance`) names one that the same cluster
+  applies: one the overlay lists, or one the cluster directory builds. The Kustomizations an
+  application applies from its own `app/` are not read. It must also wait after the root's
+  patches: `wait: true`, `healthChecks` or `healthCheckExprs`. Otherwise the dependent never
+  reconciles, or starts before its dependency's objects are ready. The message names both
+  Kustomizations and the overlay.
+- **Schemas** (`kubernetes-validate`). Everything Flux builds as `kubernetes-check` builds it,
+  each application from its own `ks.yaml` (enabled or not), each cluster's root and each cluster
+  directory, is validated by kubeconform with unknown fields refused, against the first schema
+  that has its kind: Flux's for the Flux release pinned in `mise.toml`, one made from a
+  CustomResourceDefinition the render holds, or Kubernetes' for the Kubernetes version in
+  `versions.yaml`. A misspelt field fails, naming the file, the object and the field. A
+  definition's schema is its version's `openAPIV3Schema`, made as strict as Kubernetes' own:
+  wherever it lists the fields of an object, it refuses any other, unless that object keeps
+  unknown fields (`x-kubernetes-preserve-unknown-fields`) or says what other fields may be; at the
+  top it also lists `apiVersion`, `kind` and `metadata`, which the API server adds to every
+  definition; OpenAPI's `nullable` becomes JSON Schema's null type. Two different definitions of
+  one kind and version in the render fail the check, and neither is used. Objects of a kind that
+  no schema describes, those whose definition is not in the render (one an operator creates at run
+  time, as Cilium's does, or one applied from a source outside the tree, which the render does not
+  fetch), are counted: the check prints each kind with the number of objects it could not validate
+  (`no schema for GatewayClass (gateway.networking.k8s.io/v1): 1 object`), so a pass never
+  silently means a skip. A kind of a group Kubernetes serves itself (the core group, `apps`,
+  `batch`, `policy`, `autoscaling`, and the `*.k8s.io` groups `rbac.authorization`, `networking`,
+  `storage`, `admissionregistration`, `apiextensions`, `scheduling`, `node`, `coordination`,
+  `certificates`, `discovery`, `events`, `apiregistration`, `flowcontrol.apiserver`, `resource`,
+  `authentication`, `authorization`, `storagemigration`, `internal.apiserver`) or of Flux's with
+  no schema is an error; the kinds of any other group are counted.
+
+  The schemas are fetched at exact versions, never from a moving reference: Flux's from the
+  release asset `crd-schemas.tar.gz` of the pinned Flux release, Kubernetes' a kind at a time from
   the public `yannh/kubernetes-json-schema` repository at the commit `kubernetes_schemas` in
-  `versions.yaml` names. Renovate moves that commit through the `# renovate-ref:` comment above it,
-  in the Kubernetes group with `kubernetes` and the `kubectl` pin, so the schemas follow the version;
-  a `kubernetes` newer than the commit holds fails the check until the commit moves. The requests
-  are plain GETs that carry nothing from the tree beyond each object's kind, group and version,
-  which name the schema file asked for, whether or not it exists. `KUBERNETES_CHECK_SCHEMAS`, a directory with `kubernetes/<version>-standalone-strict/` and
+  `versions.yaml` names. A `kubernetes` version that commit holds no schemas for fails the check
+  until the commit moves. Renovate's git-refs datasource reads the commit through the
+  `# renovate-ref:` comment above it and proposes the newest commit of that repository's branch
+  whenever the branch moves, whatever the Kubernetes version, in the Kubernetes group with
+  `kubernetes` and the `kubectl` pin. The group keeps patch releases apart from the rest
+  (`separateMinorPatch`), so the schemas commit arrives in the group's pull request with a minor
+  release, and alone otherwise: a patch release of Kubernetes comes in a pull request of its own,
+  whose check fails, when the pinned commit lacks that version's schemas, until the schemas pull
+  request has merged and the patch's runs again. The requests are plain GETs that carry nothing
+  from the tree beyond the kind, group and version of each object whose kind no rendered
+  definition describes, which name the schema file asked for, whether or not it exists. curl and
+  kubeconform run with none of the secrets of the caller's environment (`scripts/lib/tools.sh`).
+  `KUBERNETES_VALIDATE_SCHEMAS`, a directory with `kubernetes/<version>-standalone-strict/` and
   `flux/`, replaces both sources, as the tests do with their fixtures.
-- **Images.** Every image of every object `scripts/render` writes, the Helm hooks of the enabled
-  releases included, has a tag other than `latest` or a digest. A mutable or missing tag is pulled
-  anew at every upgrade, and a failed pull in a Helm test fails the upgrade, which the default
-  remediation rolls back. The check runs the render once, so it pulls the charts as
-  `just render-check` does. A test hook the release does not run (`test.enable` unset or false, or
-  the test excluded by name in `test.filters`) is not pulled and is left out. The root's defaults
-  set `test.enable: true` on every release and overwrite a release's own value, so a release that
-  must not run a test excludes it by name, as `kubelet-csr-approver` does with its chart's
-  `test-connection`. An exception is one line of `.image-allowlist`: the application, the image as
-  rendered, and the reason, which the check requires.
+- **Images** (`kubernetes-validate`). Every container image of a pod spec, wherever an object
+  holds one, and every image an object names in its own `spec.image`, as Prometheus and
+  Alertmanager name the one their operator runs, in what `scripts/render` writes, which builds
+  each application as the root patches it, the Helm hooks of the enabled releases included, has a
+  tag other than `latest` or a digest. A mutable or missing tag is pulled anew at every upgrade,
+  and a failed pull in a Helm test fails the upgrade, which the default remediation rolls back. A
+  test hook the release does not run (`test.enable` unset or false, or the test excluded by name
+  in `test.filters`) is not pulled and is left out; a hook that is no test runs whatever the
+  release's tests do. The root's defaults set `test.enable: true` on every release and overwrite a
+  release's own value, so a release that must not run a test excludes it by name, as
+  `kubelet-csr-approver` does with its chart's `test-connection`. An exception is one line of
+  `.image-allowlist`: the application, the image as rendered, and the reason, which the check
+  requires.
+
+`kubernetes-validate` runs the render once, so it pulls the charts as `just render-check` does, and
+the `static` group runs both, each pulling them. Sharing them would take a directory that outlives
+one recipe: `just` has none that lasts exactly one run of the group, and a cache kept beyond a run,
+on the CI host's persistent engine, would be one a pull request's code could write for the runs
+after it, so neither keeps one. `RENDER_CHART_CACHE`, set by hand, serves both.
 
 ## Every child Kustomization is in flux-system
 
@@ -1364,7 +1414,8 @@ When that tree does not build, the run fails, nothing is pushed, signed or tagge
 stays on the last tagged artifact until a run for a later commit that changes `kubernetes/` or the
 workflow, or a manual run, publishes a tree that does. The gate is `just kubernetes-check`, the
 offline build, and no more: `just render-check` pulls charts from the network and needs helm in the
-job that signs, so it stays out of that job.
+job that signs, so it stays out of that job, and so does `just kubernetes-validate`, which pulls the
+charts and fetches schemas as well ([What the checks refuse](#what-the-checks-refuse)).
 
 Every workflow installs its tools with the same pinned `mise-action` at an exact mise release. A
 workflow whose token can write, `publish`, `tools-image` and `render-comment`, also gives the action the

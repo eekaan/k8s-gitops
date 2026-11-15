@@ -1,0 +1,12 @@
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: hello
+  namespace: flux-system
+spec:
+  path: ./apps/base/demo/hello/app
+  targetNamespace: demo
+  sourceRef:
+    kind: ExternalArtifact
+    name: hello

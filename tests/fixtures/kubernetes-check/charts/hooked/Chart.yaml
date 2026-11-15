@@ -1,6 +1,0 @@
----
-# The chart the fixture's HelmReleases install: a Deployment, and the hooks values.yaml names. Its
-# templates end in .tpl, which helm renders like .yaml, so that yamllint leaves their syntax alone.
-apiVersion: v2
-name: hooked
-version: 1.0.0
