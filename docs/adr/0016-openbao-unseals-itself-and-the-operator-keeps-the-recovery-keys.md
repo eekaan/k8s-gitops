@@ -2,6 +2,10 @@
 
 - Status: accepted
 - Date: 2026-11-14
+- Note: 2026-11-15, a CronJob in the `openbao` namespace logs in as the `snapshot` role and takes
+  snapshots of the raft storage every six hours, encrypted before upload; restoring one needs the
+  seal key it was taken under, which the operator's file holds
+  ([Raft snapshots](../kubernetes.md#raft-snapshots))
 
 ## Context
 

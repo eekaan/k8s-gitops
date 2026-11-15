@@ -1414,12 +1414,14 @@ The own alerts, each with its runbook section in [docs/runbooks/alerts.md](runbo
 | `LinstorSatelliteOffline` | LINSTOR has not seen a satellite online for 10 minutes. | warning | [LinstorSatelliteOffline](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#linstorsatelliteoffline) |
 | `LinstorStoragePoolFilling` | A storage pool has been above 85 percent full, and at most 95, for 15 minutes. | warning | [LinstorStoragePoolFilling](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#linstorstoragepoolfilling) |
 | `LinstorStoragePoolFull` | A storage pool has been above 95 percent full for 5 minutes. | critical | [LinstorStoragePoolFull](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#linstorstoragepoolfull) |
+| `OpenBaoSnapshotStale` | No run of the OpenBao snapshot CronJob has succeeded for 13 hours. | critical | [OpenBaoSnapshotStale](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#openbaosnapshotstale) |
+| `OpenBaoSnapshotJobFailing` | The OpenBao snapshot CronJob's latest scheduled run has not succeeded after 30 minutes. | warning | [OpenBaoSnapshotJobFailing](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#openbaosnapshotjobfailing) |
 
 The alerts read only what Prometheus scrapes: kube-state-metrics' pod readiness for OpenBao's
 members, its Deployment availability for the Flux Operator, its nodes' roles, which tell the
 control planes' Cilium agents from the workers', and its CronJob metrics for the etcd snapshot job
-([cluster.md](cluster.md#scheduled-etcd-snapshots)) and for the dump job of every PostgreSQL cluster
-([Dumps](#dumps)), Prometheus' own `up` for OpenBao's active Service and the Cilium agents, VolSync's
+([cluster.md](cluster.md#scheduled-etcd-snapshots)), for the OpenBao snapshot job
+([Raft snapshots](#raft-snapshots)) and for the dump job of every PostgreSQL cluster ([Dumps](#dumps)), Prometheus' own `up` for OpenBao's active Service and the Cilium agents, VolSync's
 controller metrics, Vector's internal metrics, cert-manager's certificate metrics, the Flux
 Operator's state of Flux's resources, the Cilium agents' BGP session state, LINSTOR's own metrics,
 the DRBD reactor's, and external-dns' gauge of its last successful sync and its absence. The dump
@@ -3061,7 +3063,7 @@ first dump has run a database's data lives on the workers' data volumes alone
 ## OpenBao
 
 Runtime secrets live in OpenBao (ADR 0005), which unseals itself with a key the cluster holds while
-the operator keeps its recovery keys (ADR 0016). Three applications hold it:
+the operator keeps its recovery keys (ADR 0016). Four applications hold it:
 
 - `openbao/openbao` runs OpenBao in the namespace `openbao`. It names `external-secrets`,
   `cert-manager`, `linstor-cluster` and `prometheus-operator-crds` in `dependsOn`, for the seal key's
@@ -3074,9 +3076,14 @@ the operator keeps its recovery keys (ADR 0016). Three applications hold it:
   expression reads, as kstatus does not.
 - `demo/hello-secret` holds one ExternalSecret that reads `demo/hello` through the store. It names
   `openbao-store` in `dependsOn` and does not wait, as the key exists once an operator writes it.
+- `openbao/openbao-snapshots` holds the CronJob that snapshots the raft storage
+  ([Raft snapshots](#raft-snapshots)). It names `external-secrets`, `openbao`, `openbao-store` and
+  `prometheus-operator-crds` in `dependsOn`, and does not wait.
 
-`tests/openbao.bats` builds the three as Flux applies them and renders the chart with its values;
-`tests/openbao-recipes.bats` runs the recipes below against fakes of the cluster and of OpenBao.
+`tests/openbao.bats` builds the first three as Flux applies them and renders the chart with its
+values; `tests/openbao-snapshots.bats` builds the fourth and runs its scripts against fakes of
+OpenBao's client and of the object storage; `tests/openbao-recipes.bats` runs the recipes below
+against fakes of the cluster and of OpenBao.
 
 ### What runs
 
@@ -3130,8 +3137,8 @@ with each value in them, every token and every share among them, hashed: no audi
 anything in the clear. Self-initialisation logs its requests and responses, the root token among
 them, only at trace level, which nothing sets.
 
-No snapshot of the raft storage is taken yet. The role `snapshot` exists for the job that will take
-them, which needs the object storage's key, a secret this store will hold.
+A CronJob takes a snapshot of the raft storage every six hours and uploads it encrypted
+([Raft snapshots](#raft-snapshots)).
 
 ### How it unseals
 
@@ -3207,17 +3214,20 @@ recovery keys (`just bao-root`).
 |------|------------|-----|
 | `external-secrets` | `openbao-store` in `external-secrets` | read and list every key of `secrets/`; look up and revoke its own token |
 | `operator` | `openbao-operator` in `openbao` | create keys of `secrets/` and change them, never read them; make the recovery keys while none exist, and rotate them with three of the current shares; start a root token generation, which completes only with three shares; revoke its own token |
-| `snapshot` | `openbao-snapshot` in `openbao` | take a snapshot of the raft storage; no job logs in as it yet |
+| `snapshot` | `openbao-snapshot` in `openbao` | take a snapshot of the raft storage; the snapshot job logs in as it ([Raft snapshots](#raft-snapshots)) |
 
 Each role checks the audience `openbao`, carries one policy and not OpenBao's `default` policy, and
-gives ten-minute tokens, which `external-secrets` may renew for up to an hour. No pod mounts a token
-of the three accounts; a token for one is minted through the Kubernetes API by a subject allowed to
-create `serviceaccounts/token` for it:
+gives ten-minute tokens, which `external-secrets` may renew for up to an hour. None of the three
+accounts has its token mounted into a pod automatically. A token for one is minted through the
+Kubernetes API by a subject allowed to create `serviceaccounts/token` for it, and the snapshot job's
+pod holds one for `openbao-snapshot` that its kubelet projects for the audience `openbao`
+([Raft snapshots](#raft-snapshots)):
 
 - `openbao-store`: External Secrets' controller, through the Role `openbao-store-token`, for this
   account alone; its chart's grant to create every account's token is off.
 - `openbao-operator` and `openbao-snapshot`: cluster administrators, as the operator's kubeconfig
-  is, and the Flux Operator and Flux's controllers, which hold cluster-admin to apply the tree.
+  is, and the Flux Operator and Flux's controllers, which hold cluster-admin to apply the tree;
+  for `openbao-snapshot` also the kubelet, for the one pod that runs as it.
 
 No other chart the tree installs grants creating service account tokens; the Piraeus operator's
 one wildcard rule is confined to LINSTOR's own API group.
@@ -3310,6 +3320,118 @@ The store serves every namespace. Creating an ExternalSecret is reserved to clus
 and Flux, which applies those in Git after review; no RoleBinding grants `edit` or `admin`. A
 namespace delegated to anyone else first gets its own store restricted with `conditions`.
 
+### Raft snapshots
+
+The CronJob `openbao-snapshots` (`apps/base/openbao/openbao-snapshots/`) takes a snapshot of the
+raft storage every six hours (`43 */6 * * *`, a minute the etcd snapshot job's runs, at 17, never
+share), encrypts it to the Talos age key's recipient before it leaves the pod, and uploads only that
+file to the OpenBao bucket, `BACKUP_BUCKET_PREFIX` followed by `-openbao`
+([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)), as
+`<cluster>/<UTC time>.snapshot.age`, the name the etcd snapshot job and the operator's recipes give
+theirs. It is the etcd snapshot job's pattern
+([cluster.md](cluster.md#scheduled-etcd-snapshots)): a run never starts while another runs, a 20
+minute deadline, two retries, one successful and three failed runs kept, the same four steps in the
+same order, and the same retention. The private half of the age key is never in the cluster, so the
+job can encrypt and cannot decrypt.
+
+**Where it runs.** In the namespace `openbao`, because the role `snapshot` binds the account
+`openbao-snapshot` in that namespace and no other (`app/initialize/initialize.json`); a job in a
+namespace of its own would need the role changed with a root token, which the initial configuration
+never does again. The namespace enforces the restricted level, which the job's pod meets.
+
+**What the role permits.** The policy `snapshot` holds one path, `sys/storage/raft/snapshot`, with
+the capability `read`: the request that takes a snapshot, which is the policy OpenBao's own
+documentation of a snapshot job gives. It does not permit restoring a snapshot (an update of that
+path), forcing one (`snapshot-force`), reading or writing any key of `secrets/`, or revoking the
+token it is given, so a token lives out its ten minutes. The role gives no `default` policy. Nothing
+in it is wider than taking a snapshot, and `tests/openbao-snapshots.bats` holds it to that one path
+and capability.
+
+**How it logs in.** The pod runs as `openbao-snapshot`, which no RoleBinding gives a right in the
+Kubernetes API, and mounts no token for that API. Its one token is projected by the kubelet for the
+audience `openbao` and for 600 seconds, the shortest the kubelet gives, into a volume only the step
+that logs in mounts, read-only. The step `snapshot` logs in to the Kubernetes auth method as the
+role `snapshot` with it, and saves the snapshot from the active member with the token OpenBao
+returns. That token is in a shell variable and in the environment of the one command that uses it:
+never in an argument, a file or the output, and the step writes only to memory-backed volumes, its
+scratch directory one that the upload container, which holds the S3 key, does not mount.
+OpenBao's client reaches `openbao-active` over TLS, verified against the CA, by that Service's name,
+which the listener's certificate holds; the pod gets the CA, the one file `ca.crt` of the
+certificate's Secret, and never the listener's key. The test runs the script against a client that
+records its calls, and the step makes two: the login and the save.
+
+**The steps, and the images.** `fetch-age`, `encrypt` and `upload` run in rclone's image, as the
+etcd snapshot job's do, and `snapshot` in `quay.io/openbao/openbao`, the image the servers run.
+Every image is pinned by tag and digest. The client's tag is the servers' tag, which the pinned
+chart names, and `tests/openbao-snapshots.bats` renders the chart with the repository's values and
+fails when the job's repository and tag differ from the servers'; Renovate moves the chart and the
+image in one pull request. The plain snapshot is written to a memory-backed volume of 256 MiB that
+only `snapshot` and `encrypt` mount, so it never reaches a disk and is never given to the upload; a
+store of a few hundred small secrets is far below it, and a snapshot that outgrows it fails the run,
+which `OpenBaoSnapshotJobFailing` reports. The scripts `fetch-age.sh` and `upload.sh` are copies of
+the etcd snapshot job's, and `encrypt.sh` differs from its copy by a message: the artifact an
+application is reconciled from carries its own `app/` and the shared `components/` only, so scripts
+shared by both jobs would need a component of their own and both jobs' tests pointed at it, which
+costs more than the copies do. `tests/openbao-snapshots.bats` runs each of them as its container
+does, with the same checks as the etcd snapshot job's.
+
+**What a snapshot is worth.** A snapshot is the raft state of the store: a gzip-compressed tar
+archive of `meta.json`, `state.bin`, `SHA256SUMS` and `SHA256SUMS.sealed` (OpenBao's source, in the
+pinned release's `internal/physical/raft/snapshot`). It holds everything the store holds: every key
+of `secrets/`, every version, the policies, the roles and the auth methods' configuration. OpenBao
+keeps that data encrypted with a keyring that a root key protects, which the seal protects
+([seal](https://openbao.org/docs/concepts/seal/)), so a snapshot is ciphertext until it is restored
+into a store that unseals with the same seal key; the archive's checksums are sealed with the
+store's seal, which is how a restore checks that the snapshot was sealed with the seal key the store
+unseals with; a new store with the same seal key passes. A restore that skips that check, `snapshot-force`, installs data that still opens only with the seal key
+([API](https://openbao.org/docs/api/system/storage/raft/)). The age layer keeps a copy that leaves
+the cluster unreadable to anyone who holds the S3 key without the operator's age key.
+
+This backup covers the loss of the three volumes, or of the cluster, while the seal key is kept in
+the operator's file, which `just bao-recovery` writes with the recovery keys: the store is started
+again with that key and the snapshot restored into it
+([runbook](runbooks/openbao.md#restoring-a-snapshot)). It does not cover the loss of the seal key,
+which makes every snapshot as unreadable as the volumes; of the Talos age key, which leaves every
+snapshot undecryptable; or of the bucket's contents. What was written after the newest snapshot, up
+to six hours, is lost; the alerts below say when the newest is older than 13 hours.
+
+**The S3 key.** An ExternalSecret reads the two properties of the secret store's key `volsync`, the
+cluster's S3 key, which `just bao-seed-volsync` has written for the volume backups
+([Volume backups](#what-an-operator-does-once-and-what-then-happens-by-itself)); nothing more is
+seeded, and the restic master password in the same key is never read. Only the uploading container
+takes the key, as environment variables from the Secret `openbao-snapshots-s3`. The key lets the job
+delete and overwrite objects, as it lets every holder of it: it reaches every bucket of the project,
+the etcd bucket and the state bucket among them. The job itself deletes only snapshots of its own
+cluster's prefix beyond the newest 56, two weeks, once the new one is listed, and never overwrites an
+object (an upload fails on a name that exists). That the key reaches more than the job needs is the
+residual risk of [ADR 0008](adr/0008-state-and-backups-are-encrypted-before-they-leave.md), stated in
+[the infrastructure document](infrastructure.md#s3-keys-and-backup-buckets); what the key cannot do
+is read a snapshot. Whoever can read Secrets in `openbao` reads this key too, and already holds the
+seal key.
+
+**What it needs.** The pod reaches `openbao-active`, the object storage's endpoint and, for the age
+release, the release host of age's project over the pod network, and runs on a worker, as it
+tolerates no taint. The recipient, `OPENBAO_SNAPSHOT_AGE_RECIPIENT` in the application's `ks.yaml`, is
+`talos/.sops.yaml`'s, as the artifact holds `kubernetes/` only; `tests/openbao-snapshots.bats` fails
+when it differs from that file's or from the etcd snapshot job's, so a new Talos age key
+(`just cluster-age-key`) changes all three; the snapshots already in the bucket stay encrypted to
+the old key.
+
+**Selecting it.** The overlay of a cluster lists the application's `ks.yaml`; the namespace is the
+store's. A cluster whose overlay leaves it out builds none of it. Its Kustomization waits for
+`openbao`, for `openbao-store`, which is Ready once the ClusterSecretStore is, for External Secrets
+and for the monitoring definitions.
+
+**Seeing and taking a snapshot.** `kubectl --namespace openbao get cronjob,job` shows the runs and
+`kubectl --namespace openbao logs job/<job> --all-containers` says which step failed (`fetch-age`,
+`snapshot`, `encrypt` or `upload`). To take one now,
+`kubectl --namespace openbao create job --from=cronjob/openbao-snapshots <name>`. The runbook lists
+what the bucket holds and checks that a snapshot opens
+([runbook](runbooks/openbao.md#listing-and-checking-snapshots)). The alerts are
+[`OpenBaoSnapshotStale`](runbooks/alerts.md#openbaosnapshotstale) and
+[`OpenBaoSnapshotJobFailing`](runbooks/alerts.md#openbaosnapshotjobfailing)
+([Alerts](#alerts)).
+
 ### When something is lost
 
 - **The seal Secret, with the volumes intact**: the members that run keep serving, unsealed; one that
@@ -3319,19 +3441,23 @@ namespace delegated to anyone else first gets its own store restricted with `con
 - **The volume backups' key `volsync`, or the master's file**:
   [the runbook](runbooks/volume-backups.md) says what each loss means, and how the key is seeded
   again from the file.
-- **The seal Secret and every copy of it**: every runtime secret is lost. OpenBao starts again empty
-  only once its three claims, the Secret and the ExternalSecret `openbao-seal-1` are deleted: the
+- **The seal Secret and every copy of it**: every runtime secret is lost, the snapshots in the bucket
+  with them, as they are ciphertext that only the seal key opens. OpenBao starts again empty only
+  once its three claims, the Secret and the ExternalSecret `openbao-seal-1` are deleted: the
   ExternalSecret has synced once and never makes a missing Secret again, so Flux makes it anew, it
   makes a new key, and every secret is written again.
 - **The operator's file**: nothing is lost while the roles work. If a role or policy breaks, the way
   back to privileged access is gone, and new recovery keys need a threshold of the old ones; what is
-  left is a new OpenBao with every secret written again.
+  left is a new OpenBao with every secret written again. The seal key in the file is the key a
+  snapshot needs, so without the file and the Secret a snapshot restores nothing either.
 - **One member's volume**: the member starts empty, does not initialise, and joins the others, which
   hold every secret; [the runbook](runbooks/openbao.md#a-member-that-does-not-rejoin) says what to do
   when it does not rejoin.
-
-A restore of a snapshot of the raft storage, once they are taken, will need the seal key it was
-taken under, which the operator's file holds.
+- **The three volumes, or the whole cluster, while the operator's file is kept**: the snapshots cover
+  this loss. The store is started again empty with the seal key of the file in its Secret, and the
+  newest snapshot is restored into it ([the runbook](runbooks/openbao.md#restoring-a-snapshot)); what
+  was written after that snapshot, up to six hours of it, is lost. The snapshots do not cover the loss
+  of the seal key, of the Talos age key that opens them, or of the object storage's bucket.
 
 ## Applications
 

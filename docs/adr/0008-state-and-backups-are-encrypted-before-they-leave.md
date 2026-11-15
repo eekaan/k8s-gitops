@@ -13,6 +13,9 @@
   by the operator's recipe; the job encrypts each to the Talos age key before upload, and uploads
   and prunes them with the cluster's S3 key, which reaches every bucket of the project
   ([Scheduled etcd snapshots](../cluster.md#scheduled-etcd-snapshots))
+- Note: 2026-11-15, OpenBao's raft storage is snapshotted every six hours by a CronJob in the
+  cluster, encrypted to the Talos age key before upload; it uploads and prunes with the cluster's S3
+  key as the etcd job does ([Raft snapshots](../kubernetes.md#raft-snapshots))
 
 ## Context
 

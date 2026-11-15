@@ -1,0 +1,60 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/prometheusrule-monitoring-v1.json
+# Alerts on the snapshot CronJob, from kube-state-metrics' CronJob metrics, which Prometheus already
+# scrapes: kube_cronjob_status_last_successful_time, kube_cronjob_status_last_schedule_time and
+# kube_cronjob_created, each labelled cronjob and namespace, as v2.20, the version the pinned
+# kube-prometheus-stack chart runs, documents them. Times are Unix times in seconds. The namespace
+# holds no other CronJob, so the rules read every CronJob in it. Tests: tests/rules/openbao-snapshots.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: openbao-snapshots-alerts
+  namespace: openbao
+spec:
+  groups:
+    - name: openbao-snapshots
+      rules:
+        # 13 hours is two runs, six hours apart, and an hour of grace. A CronJob that has never
+        # succeeded has no last-success series, so it is stale 13 hours after it was created: its
+        # first runs all failed.
+        - alert: OpenBaoSnapshotStale
+          expr: |
+            (
+              time() - max by (namespace, cronjob) (kube_cronjob_status_last_successful_time{namespace="openbao"}) > 13 * 3600
+            )
+            or
+            (
+              time() - max by (namespace, cronjob) (kube_cronjob_created{namespace="openbao"}) > 13 * 3600
+              unless on (namespace, cronjob)
+              kube_cronjob_status_last_successful_time{namespace="openbao"}
+            )
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: No OpenBao snapshot has succeeded for 13 hours
+            description: The CronJob {{ $labels.cronjob }} in {{ $labels.namespace }} has had no successful run for 13 hours, so the newest snapshot of the store in the bucket is too old to restore from without losing a day of secrets.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#openbaosnapshotstale
+        # The latest run was scheduled after the last success, and has had half an hour, which is
+        # longer than the job's deadline of twenty minutes: it ended without succeeding. It clears
+        # once a run succeeds.
+        - alert: OpenBaoSnapshotJobFailing
+          expr: |
+            (
+              max by (namespace, cronjob) (kube_cronjob_status_last_schedule_time{namespace="openbao"})
+              > on (namespace, cronjob)
+              max by (namespace, cronjob) (kube_cronjob_status_last_successful_time{namespace="openbao"})
+            )
+            or
+            (
+              max by (namespace, cronjob) (kube_cronjob_status_last_schedule_time{namespace="openbao"})
+              unless on (namespace, cronjob)
+              kube_cronjob_status_last_successful_time{namespace="openbao"}
+            )
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: The OpenBao snapshot job's latest run did not succeed
+            description: The latest run of the CronJob {{ $labels.cronjob }} in {{ $labels.namespace }}, scheduled more than 30 minutes ago, has not succeeded, so no new snapshot of the store has been taken since the last good one.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#openbaosnapshotjobfailing

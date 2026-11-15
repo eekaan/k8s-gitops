@@ -49,7 +49,7 @@ Feature: OpenBao
   Scenario: Each OpenBao role binds one account to one policy, without OpenBao's default policy
     Given OpenBao's initial configuration and the openbao application built as Flux applies it
     When its roles, their policies and the application's service accounts are read
-    Then external-secrets binds openbao-store, operator binds openbao-operator and snapshot binds openbao-snapshot, each with OpenBao's audience, one policy, no default policy and ten-minute tokens, the snapshot role may only take a raft snapshot, and no pod mounts the accounts' tokens
+    Then external-secrets binds openbao-store, operator binds openbao-operator and snapshot binds openbao-snapshot, each with OpenBao's audience, one policy, no default policy and ten-minute tokens, the snapshot role may only take a raft snapshot, and no account's token is mounted into a pod automatically
 
   Scenario: The operator role allows every request its recipes and runbook make, and nothing more
     Given the operator role's policy, the requests the recipes send with the operator's token read from their scripts, and the requests of the runbook's CLI steps

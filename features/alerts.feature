@@ -274,3 +274,15 @@ Feature: Alerts
     Given the dump CronJob of a database whose latest scheduled run ended without success, one that was scheduled and never succeeded, one whose latest run succeeded, and one not yet scheduled
     When the rule is evaluated over time
     Then the alert fires after its time for the first two and never for the others
+
+  @by:rules-check
+  Scenario: The alert OpenBaoSnapshotStale fires after its time in the failing case and stays quiet in the healthy one
+    Given the OpenBao snapshot CronJob whose last success is older than 13 hours, one that has never succeeded, and one that succeeded within 13 hours
+    When the rule is evaluated over time
+    Then the alert fires after its time for the first two and never for the third
+
+  @by:rules-check
+  Scenario: The alert OpenBaoSnapshotJobFailing fires after its time in the failing case and stays quiet in the healthy one
+    Given the OpenBao snapshot CronJob whose latest scheduled run ended without success, and one whose latest run succeeded
+    When the rule is evaluated over time
+    Then the alert fires after its time for the first and never for the second

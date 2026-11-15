@@ -1,0 +1,264 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/cronjob-batch-v1.json
+# A snapshot of OpenBao's raft storage every six hours, taken as the role snapshot, which permits
+# that one request and nothing else in the store, encrypted to the Talos age key's recipient before
+# it leaves the pod, and uploaded under the name the etcd snapshot job and the operator's recipes
+# give theirs, to the OpenBao bucket. docs/kubernetes.md, OpenBao, Snapshots.
+#
+# The pod runs four steps in turn, each in the one image that has its tool, so no image is built
+# here and the plain snapshot is in reach of the first three only:
+#   fetch-age  age, the pinned release's, checked against its SHA-256: no public image carries it;
+#   snapshot   bao, the image of the version the servers run, logs in as the role snapshot with the
+#              pod's projected token and writes the snapshot into the memory-backed volume "plain";
+#   encrypt    age encrypts it into "out" and removes the plain file;
+#   upload     rclone sends the one file of "out" to the OpenBao bucket with the cluster's S3 key,
+#              which no earlier step holds, and keeps the newest KEEP_SNAPSHOTS.
+# A snapshot holds the storage as OpenBao writes it, ciphertext under the keyring that the seal key
+# protects, and is encrypted again here: nothing leaves the cluster protected by a key the cluster
+# itself holds (ADR 0008).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: openbao-snapshots
+spec:
+  # A minute the etcd snapshot job's runs, at 17, never share.
+  schedule: "43 */6 * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 1800
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 1200
+      template:
+        spec:
+          restartPolicy: Never
+          # The account the role snapshot binds (openbao/app/initialize/initialize.json). It has no
+          # right in the Kubernetes API, and the pod mounts no token for that API: the one token
+          # it holds is projected below, for OpenBao's audience.
+          serviceAccountName: openbao-snapshot
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+            - name: fetch-age
+              image: docker.io/rclone/rclone:1.76.0@sha256:7cbeec24a44f206067597c0368be4de90ae19a64d5113c7d1938bd737a81e466
+              command: ["/bin/sh", "/scripts/fetch-age.sh"]
+              env:
+                # The age pin of mise.toml, which tests/openbao-snapshots.bats holds this to, and
+                # the checksums the etcd snapshot job pins for the same release; .renovate/by-hand.tsv
+                # says how they follow the version.
+                - name: AGE_VERSION
+                  value: "1.3.2"
+                - name: AGE_SHA256_AMD64
+                  value: cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10
+                - name: AGE_SHA256_ARM64
+                  value: 6b8dc4333c53a5a57c9e5834e3a48f92605d7154014cd07269ff3327db5d37f4
+                - name: TOOLS_DIR
+                  value: /tools
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                limits:
+                  memory: 128Mi
+              securityContext: &container-security
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                capabilities:
+                  drop: ["ALL"]
+                seccompProfile:
+                  type: RuntimeDefault
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+                - name: tools
+                  mountPath: /tools
+            - name: snapshot
+              # The servers' own image: its tag is the one the pinned chart gives the servers,
+              # which tests/openbao-snapshots.bats holds it to, and Renovate moves it with the chart.
+              image: quay.io/openbao/openbao:2.7.2@sha256:5046911075e137e154ce49ab051502f4ec7cf367d484ae4a4dce665d9b90561f
+              command: ["/bin/sh", "/scripts/snapshot.sh"]
+              env:
+                # The active member's Service, whose name the listener's certificate holds, and the
+                # CA that signed it, the only file of the certificate's Secret the pod gets.
+                - name: BAO_ADDR
+                  value: https://openbao-active.openbao.svc:8200
+                - name: BAO_CACERT
+                  value: /openbao/ca/ca.crt
+                - name: BAO_ROLE
+                  value: snapshot
+                - name: JWT_FILE
+                  value: /var/run/secrets/openbao/token
+                - name: PLAIN_SNAPSHOT
+                  value: /plain/raft.snap
+                # bao keeps its token helper's file under HOME, which the root filesystem, read-only,
+                # does not offer; it writes none, but looks for one.
+                - name: HOME
+                  value: /tmp
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  memory: 512Mi
+              securityContext: *container-security
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+                - name: openbao-ca
+                  mountPath: /openbao/ca
+                  readOnly: true
+                - name: openbao-token
+                  mountPath: /var/run/secrets/openbao
+                  readOnly: true
+                - name: plain
+                  mountPath: /plain
+                - name: snapshot-tmp
+                  mountPath: /tmp
+            - name: encrypt
+              image: docker.io/rclone/rclone:1.76.0@sha256:7cbeec24a44f206067597c0368be4de90ae19a64d5113c7d1938bd737a81e466
+              command: ["/bin/sh", "/scripts/encrypt.sh"]
+              env:
+                - name: PLAIN_SNAPSHOT
+                  value: /plain/raft.snap
+                - name: OUT_DIR
+                  value: /out
+                - name: AGE
+                  value: /tools/age/age
+                - name: AGE_RECIPIENT
+                  value: ${OPENBAO_SNAPSHOT_AGE_RECIPIENT}
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  memory: 256Mi
+              securityContext: *container-security
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+                - name: tools
+                  mountPath: /tools
+                  readOnly: true
+                - name: plain
+                  mountPath: /plain
+                - name: out
+                  mountPath: /out
+          containers:
+            - name: upload
+              image: docker.io/rclone/rclone:1.76.0@sha256:7cbeec24a44f206067597c0368be4de90ae19a64d5113c7d1938bd737a81e466
+              command: ["/bin/sh", "/scripts/upload.sh"]
+              env:
+                - name: OUT_DIR
+                  value: /out
+                - name: SNAPSHOT_BUCKET
+                  value: ${BACKUP_BUCKET_PREFIX}-openbao
+                - name: SNAPSHOT_CLUSTER
+                  value: ${OPENBAO_SNAPSHOT_CLUSTER}
+                # Two weeks of snapshots, every six hours. The job holds the right to delete: the
+                # bucket's lifecycle rules are not set by any stack, and the cluster's S3 key
+                # reaches every object of the project in any case (docs/kubernetes.md, OpenBao).
+                - name: KEEP_SNAPSHOTS
+                  value: "56"
+                - name: HOME
+                  value: /tmp
+                # rclone's store, in its environment as the operator's recipes give it theirs:
+                # the object storage of the project, any S3-compatible provider.
+                - name: RCLONE_CONFIG
+                  value: /dev/null
+                - name: RCLONE_CONFIG_STORE_TYPE
+                  value: s3
+                - name: RCLONE_CONFIG_STORE_PROVIDER
+                  value: Other
+                - name: RCLONE_CONFIG_STORE_ENV_AUTH
+                  value: "false"
+                - name: RCLONE_CONFIG_STORE_ENDPOINT
+                  value: ${S3_ENDPOINT}
+                - name: RCLONE_CONFIG_STORE_REGION
+                  value: ${S3_REGION}
+                - name: RCLONE_CONFIG_STORE_FORCE_PATH_STYLE
+                  value: "true"
+                - name: RCLONE_CONFIG_STORE_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: openbao-snapshots-s3
+                      key: AWS_ACCESS_KEY_ID
+                - name: RCLONE_CONFIG_STORE_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: openbao-snapshots-s3
+                      key: AWS_SECRET_ACCESS_KEY
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  memory: 256Mi
+              securityContext: *container-security
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+                - name: out
+                  mountPath: /out
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: scripts
+              configMap:
+                name: openbao-snapshots-scripts
+            # The listener's CA and nothing else of its certificate's Secret: the listener's key
+            # never reaches this pod.
+            - name: openbao-ca
+              secret:
+                secretName: openbao-tls
+                defaultMode: 0444
+                items:
+                  - key: ca.crt
+                    path: ca.crt
+            # The pod's own token for OpenBao's audience, which the role snapshot checks and the
+            # Kubernetes API does not accept, valid for the shortest time the kubelet allows and
+            # kept in memory by the kubelet.
+            - name: openbao-token
+              projected:
+                defaultMode: 0444
+                sources:
+                  - serviceAccountToken:
+                      audience: openbao
+                      expirationSeconds: 600
+                      path: token
+            # The plain snapshot lives here and nowhere else: memory-backed, so it never reaches a
+            # disk, and sized, so a snapshot that outgrows it fails the run instead of the node. The
+            # store holds a few hundred small secrets, far below it (docs/kubernetes.md, OpenBao).
+            - name: plain
+              emptyDir:
+                medium: Memory
+                sizeLimit: 256Mi
+            - name: out
+              emptyDir:
+                sizeLimit: 256Mi
+            # The step that holds the token has a scratch volume of its own, in memory, that the
+            # upload container, which holds the S3 key, does not mount.
+            - name: snapshot-tmp
+              emptyDir:
+                medium: Memory
+                sizeLimit: 8Mi
+            - name: tools
+              emptyDir:
+                medium: Memory
+                sizeLimit: 64Mi
+            - name: tmp
+              emptyDir:
+                medium: Memory
+                sizeLimit: 32Mi
