@@ -15,14 +15,26 @@ tests:
       # The source "data" is in sync for 10 minutes and out of sync from the 11th as the replica
       # volsync-a reports it; volsync-b, which did not run the sync, reports it in sync throughout,
       # so the alert takes the largest of the replicas' values. "other" is in sync throughout.
-      - series: 'volsync_volume_out_of_sync{obj_name="data", obj_namespace="demo", role="source", method="restic", pod="volsync-a", instance="a:8443", job="volsync-metrics", namespace="volsync-system", service="volsync-metrics", endpoint="https"}'
+      - series: >-
+          volsync_volume_out_of_sync{obj_name="data", obj_namespace="demo", role="source",
+          method="restic", pod="volsync-a", instance="a:8443", job="volsync-metrics",
+          namespace="volsync-system", service="volsync-metrics", endpoint="https"}
         values: '0x9 1x80'
-      - series: 'volsync_volume_out_of_sync{obj_name="data", obj_namespace="demo", role="source", method="restic", pod="volsync-b", instance="b:8443", job="volsync-metrics", namespace="volsync-system", service="volsync-metrics", endpoint="https"}'
+      - series: >-
+          volsync_volume_out_of_sync{obj_name="data", obj_namespace="demo", role="source",
+          method="restic", pod="volsync-b", instance="b:8443", job="volsync-metrics",
+          namespace="volsync-system", service="volsync-metrics", endpoint="https"}
         values: '0x90'
-      - series: 'volsync_volume_out_of_sync{obj_name="other", obj_namespace="demo", role="source", method="restic", pod="volsync-a", instance="a:8443", job="volsync-metrics", namespace="volsync-system", service="volsync-metrics", endpoint="https"}'
+      - series: >-
+          volsync_volume_out_of_sync{obj_name="other", obj_namespace="demo", role="source",
+          method="restic", pod="volsync-a", instance="a:8443", job="volsync-metrics",
+          namespace="volsync-system", service="volsync-metrics", endpoint="https"}
         values: '0x90'
       # A destination out of sync is no backup's concern.
-      - series: 'volsync_volume_out_of_sync{obj_name="restore", obj_namespace="demo", role="destination", method="restic", pod="volsync-a", instance="a:8443", job="volsync-metrics", namespace="volsync-system", service="volsync-metrics", endpoint="https"}'
+      - series: >-
+          volsync_volume_out_of_sync{obj_name="restore", obj_namespace="demo", role="destination",
+          method="restic", pod="volsync-a", instance="a:8443", job="volsync-metrics",
+          namespace="volsync-system", service="volsync-metrics", endpoint="https"}
         values: '1x90'
     alert_rule_test:
       # Healthy: every source is in sync.
@@ -49,9 +61,15 @@ tests:
     interval: 1m
     input_series:
       # The counter of "data" rises by one at minute 10; the counter of "other" never moves.
-      - series: 'volsync_missed_intervals_total{obj_name="data", obj_namespace="demo", role="source", method="restic", pod="volsync-a", instance="a:8443", job="volsync-metrics", namespace="volsync-system", service="volsync-metrics", endpoint="https"}'
+      - series: >-
+          volsync_missed_intervals_total{obj_name="data", obj_namespace="demo", role="source",
+          method="restic", pod="volsync-a", instance="a:8443", job="volsync-metrics",
+          namespace="volsync-system", service="volsync-metrics", endpoint="https"}
         values: '0x9 1x80'
-      - series: 'volsync_missed_intervals_total{obj_name="other", obj_namespace="demo", role="source", method="restic", pod="volsync-a", instance="a:8443", job="volsync-metrics", namespace="volsync-system", service="volsync-metrics", endpoint="https"}'
+      - series: >-
+          volsync_missed_intervals_total{obj_name="other", obj_namespace="demo", role="source",
+          method="restic", pod="volsync-a", instance="a:8443", job="volsync-metrics",
+          namespace="volsync-system", service="volsync-metrics", endpoint="https"}
         values: '0x90'
     alert_rule_test:
       - eval_time: 5m
