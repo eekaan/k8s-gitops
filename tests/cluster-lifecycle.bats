@@ -114,7 +114,7 @@ EOF
     'OPERATOR_CIDRS=["203.0.113.77/32"]'
   )
   reset_environment
-  CHECKS=('/readyz' 'nodes Ready' 'node count' 'no kube-proxy' 'pods in kube-system' 'pods in flux-system'
+  CHECKS=('/readyz' 'nodes Ready' 'node count' 'workers in BGP' 'no kube-proxy' 'pods in kube-system' 'pods in flux-system'
     'certificate requests' 'pod logs' 'scrape targets')
 }
 
@@ -836,7 +836,9 @@ kube-system/node-agent-cp-1' ]
     [ -e "$STATE/cordoned.worker-2" ]
     [ -z "$(calls '^kubectl uncordon ')" ]
     [ -z "$(calls '^kubectl delete ')" ]
-    last=$(script_lines | tail -1)
+    # worker-2 is out of BGP too, which the last line says; the one before it is about the cordon.
+    last=$(script_lines | tail -2 | head -1)
+    [[ $(script_lines | tail -1) == *"worker-2 is out of BGP"* ]]
     if [[ $case == cordoned-before ]]; then
       [[ $last == *"worker-2 stays cordoned, as it was before"* ]]
     else
@@ -867,8 +869,344 @@ kube-system/node-agent-cp-1' ]
     done
     # Nothing was rebooted, and the node is left cordoned and said to be.
     [ -z "$(calls '^talman ')" ]
-    [[ $(script_lines | tail -1) == *"worker-2 is left cordoned"* ]]
+    [[ $(script_lines | tail -2 | head -1) == *"worker-2 is left cordoned"* ]]
+    [[ $(script_lines | tail -1) == *"worker-2 is out of BGP"* ]]
   done
+}
+
+# OUT_LABEL: the label that takes a node out of BGP, as the recipes set it.
+OUT_LABEL="node-restriction.kubernetes.io/bgp-out"
+
+@test "A planned reboot takes the worker out of BGP, waits until it announces nothing, and puts it back once it is Ready" {
+  # The operator and the agent take two reads of the node's BGP configuration to follow the label,
+  # out and in.
+  echo 2 > "$STATE/bgp-slow"
+
+  recipe cluster-reboot worker-2 --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  labelled=$(call_line "^kubectl label node worker-2 $OUT_LABEL=true( |\$)")
+  cordoned=$(call_line '^kubectl cordon worker-2$')
+  rebooted=$(call_line '^talman reboot -n worker-2 ')
+  uncordoned=$(call_line '^kubectl uncordon worker-2$')
+  restored=$(call_line "^kubectl label node worker-2 $OUT_LABEL-\$")
+  for call in "$labelled" "$cordoned" "$rebooted" "$uncordoned" "$restored"; do
+    [ -n "$call" ]
+  done
+  [ "$labelled" -lt "$cordoned" ]
+  [ "$uncordoned" -lt "$restored" ]
+  # It asked the node's BGP configuration until it was gone, before it cordoned the node, and until
+  # the peers were established again after it put the node back.
+  reads() {
+    awk -v from="$1" -v to="$2" 'NR > from && NR < to && /^kubectl get ciliumbgpnodeconfig worker-2 /' "$RECORD/argv" | wc -l
+  }
+  [ "$(reads "$labelled" "$cordoned")" -ge 3 ]
+  [ "$(reads "$restored" 1000000)" -ge 3 ]
+  # The node announced nothing when it was drained and when it went down, and nothing else was
+  # taken out of BGP.
+  [ "$(cat "$RECORD/drained-bgp")" = 'worker-2 withdrawn' ]
+  [ "$(cat "$RECORD/reboot-bgp")" = 'worker-2 out' ]
+  [ "$(calls '^kubectl label ' | grep -Ecv ' worker-2 ')" -eq 0 ]
+  [ "$(calls '^kubectl label ' | wc -l)" -eq 2 ]
+  [ ! -e "$STATE/bgp-out.worker-2" ]
+  [[ $output == *"the BGP configuration of worker-2 is gone"* ]]
+  [[ $output == *"worker-2 announces again"* ]]
+
+  recipe cluster-check
+
+  [ "$status" -eq 0 ]
+
+  # A worker is back once the sessions that were established before are: one that is established at
+  # once does not end the wait while the other is not.
+  reset_cluster
+  echo 2 > "$STATE/bgp-slow"
+  : > "$STATE/bgp-peer-late"
+
+  recipe cluster-reboot worker-2 --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  restored=$(call_line "^kubectl label node worker-2 $OUT_LABEL-\$")
+  [ "$(awk -v from="$restored" 'NR > from && /^kubectl get ciliumbgpnodeconfig worker-2 /' "$RECORD/argv" | wc -l)" -ge 3 ]
+
+  # With no session established before the node was taken out, as while the edge stack is not built
+  # or an edge is stopped, none is waited for after: the reboot succeeds all the same, the node is
+  # uncordoned and back in BGP, and the pods the shutdown left are removed.
+  reset_cluster
+  : > "$STATE/bgp-peers-down"
+  with BGP_WAIT=0
+
+  recipe cluster-reboot worker-2 --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ ! -e "$STATE/bgp-out.worker-2" ]
+  [ -n "$(calls '^kubectl uncordon worker-2$')" ]
+  [ -n "$(calls '^kubectl delete ')" ]
+  [[ $output == *"worker-2 had no established BGP session before it was taken out, so it does not wait for one"* ]]
+  [[ $output != *"does not announce again"* ]]
+  [[ $output != *"is out of BGP"* ]]
+
+  # A worker cordoned before the run stays cordoned, and is put back in BGP once it is Ready all the
+  # same.
+  reset_cluster
+  reset_environment
+  : > "$STATE/cordoned.worker-2"
+
+  recipe cluster-reboot worker-2 --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ -z "$(calls '^kubectl uncordon ')" ]
+  [ -e "$STATE/cordoned.worker-2" ]
+  [ -n "$(calls "^kubectl label node worker-2 $OUT_LABEL-\$")" ]
+  [ ! -e "$STATE/bgp-out.worker-2" ]
+  [[ $output == *"worker-2 was cordoned before the reboot and stays cordoned"* ]]
+  [[ $output == *"worker-2 announces again"* ]]
+
+  # BGP_WAIT is read in base 10: with 08, a configuration that takes three reads, six seconds, to go
+  # is waited for, and the node is cordoned and drained only once it is gone.
+  reset_cluster
+  reset_environment
+  echo 3 > "$STATE/bgp-slow"
+  with BGP_WAIT=08
+
+  recipe cluster-reboot worker-2 --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  labelled=$(call_line "^kubectl label node worker-2 $OUT_LABEL=true( |\$)")
+  cordoned=$(call_line '^kubectl cordon worker-2$')
+  [ -n "$labelled" ] && [ -n "$cordoned" ]
+  [ "$(awk -v from="$labelled" -v to="$cordoned" 'NR > from && NR < to && /^kubectl get ciliumbgpnodeconfig worker-2 /' "$RECORD/argv" | wc -l)" -ge 4 ]
+  [ "$(cat "$RECORD/drained-bgp")" = 'worker-2 withdrawn' ]
+  [[ $output == *"the BGP configuration of worker-2 is gone"* ]]
+}
+
+@test "A recipe that stops while a worker is out says so last, with the command that puts it back" {
+  for case in drain-fails reboot-fails never-back withdrawal-never already-out terminated; do
+    echo "$case"
+    reset_cluster
+    reset_environment
+    case $case in
+      # SIGTERM while talman reboots the worker ends the run as Ctrl-C does.
+      terminated) echo TERM > "$STATE/interrupt" ;;
+      never-back)
+        : > "$STATE/never-back"
+        with REBOOT_WAIT=0
+        ;;
+      withdrawal-never)
+        : > "$STATE/bgp-stays"
+        with BGP_WAIT=0
+        ;;
+      already-out)
+        # A rerun after a recipe that stopped: the label is there, and the node stays out until the
+        # run that finds it puts it back.
+        : > "$STATE/bgp-out.worker-2"
+        : > "$STATE/drain-fails"
+        ;;
+      *) : > "$STATE/$case" ;;
+    esac
+
+    recipe cluster-reboot worker-2 --yes < /dev/null
+
+    [ "$status" -ne 0 ]
+    [ -e "$STATE/bgp-out.worker-2" ]
+    last=$(script_lines | tail -1)
+    [[ $last == *"worker-2 is out of BGP"*"kubectl label node worker-2 $OUT_LABEL-"* ]]
+    if [[ $case == withdrawal-never ]]; then
+      # What was seen, not what it would mean: a node whose agent is not running announces nothing.
+      [[ $output == *"the CiliumBGPNodeConfig of worker-2 is still there after 0s, as when its Cilium agent is not running to take up the label"* ]]
+      [[ $output != *"announces"* ]]
+      [ -z "$(calls '^kubectl (cordon|drain) ')" ]
+      [ -z "$(calls '^talman ')" ]
+    fi
+    if [[ $case == already-out ]]; then
+      [[ $output == *"worker-2 is out of BGP already"* ]]
+      [ -z "$(calls "^kubectl label node worker-2 $OUT_LABEL=")" ]
+    fi
+    if [[ $case == terminated ]]; then
+      [[ $(script_lines | grep -n 'failed while rebooting worker-2 with talman$' | cut -d: -f1) -eq $(($(script_lines | wc -l) - 2)) ]]
+      [[ $(script_lines | tail -2 | head -1) == *"worker-2 is left cordoned"* ]]
+    fi
+  done
+
+  # A BGP configuration that cannot be read says so, and is not taken for one that is gone: before
+  # the label nothing is changed; after it the node is left out, said last, and not drained.
+  for case in unreadable unreadable-out; do
+    echo "$case"
+    reset_cluster
+    reset_environment
+    : > "$STATE/bgp-$case"
+    with BGP_WAIT=0
+
+    recipe cluster-reboot worker-2 --yes < /dev/null
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"could not read the BGP configuration of worker-2"* ]]
+    [[ $output != *"still announces"* ]]
+    [ -z "$(calls '^kubectl (cordon|drain|uncordon) ')" ]
+    [ -z "$(calls '^talman ')" ]
+    if [[ $case == unreadable ]]; then
+      [ -z "$(calls '^kubectl label ')" ]
+      [ ! -e "$STATE/bgp-out.worker-2" ]
+      [[ $(script_lines | tail -1) != *"is out of BGP"* ]]
+    else
+      [ -e "$STATE/bgp-out.worker-2" ]
+      [[ $(script_lines | tail -1) == *"worker-2 is out of BGP"*"kubectl label node worker-2 $OUT_LABEL-"* ]]
+    fi
+  done
+
+  # A second worker is not taken out while one is out: nothing is labelled, cordoned, drained or
+  # rebooted, and the run says last which worker is out and how to put it back.
+  reset_cluster
+  reset_environment
+  : > "$STATE/bgp-out.worker-1"
+
+  recipe cluster-reboot worker-2 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [ -z "$(calls '^kubectl (label|cordon|drain) ')" ]
+  [ -z "$(calls '^talman ')" ]
+  [ -e "$STATE/bgp-out.worker-1" ]
+  [[ $(script_lines | tail -1) == *"worker-1 is out of BGP"*"kubectl label node worker-1 $OUT_LABEL-"* ]]
+
+  # A rerun that succeeds puts back a node a stopped run left out, and waits until its BGP
+  # configuration, which takes two reads to come back, is there again; which of its sessions were
+  # established before is not known, so none is waited for.
+  reset_cluster
+  reset_environment
+  : > "$STATE/bgp-out.worker-2"
+  echo 2 > "$STATE/bgp-slow"
+  : > "$STATE/bgp-back-late"
+
+  recipe cluster-reboot worker-2 --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ ! -e "$STATE/bgp-out.worker-2" ]
+  [[ $output == *"worker-2 is out of BGP already"* ]]
+  restored=$(call_line "^kubectl label node worker-2 $OUT_LABEL-\$")
+  [ -n "$restored" ]
+  [ "$(awk -v from="$restored" 'NR > from && /^kubectl get ciliumbgpnodeconfig worker-2 /' "$RECORD/argv" | wc -l)" -ge 3 ]
+  [[ $output == *"the BGP configuration of worker-2 is back; which of its sessions were established before it was taken out is not known, so none is waited for"* ]]
+
+  # A node whose peers do not come back after the label is removed is not out of BGP: the label is
+  # gone, and the run says it did not announce again, not that the node is out.
+  reset_cluster
+  reset_environment
+  : > "$STATE/bgp-not-back"
+  with BGP_WAIT=0
+
+  recipe cluster-reboot worker-2 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [ ! -e "$STATE/bgp-out.worker-2" ]
+  [[ $output == *"worker-2 does not announce again"* ]]
+  [[ $(script_lines | tail -1) != *"is out of BGP"* ]]
+}
+
+@test "cluster-check fails while a Ready worker is out of BGP" {
+  : > "$STATE/bgp-out.worker-1"
+
+  recipe cluster-check
+
+  [ "$status" -ne 0 ]
+  [[ $(line_of 'workers in BGP') == "FAIL  workers in BGP: "*worker-1*"kubectl label node worker-1 $OUT_LABEL-"* ]]
+  [ "$(grep -c '^FAIL ' <<< "$output")" -eq 1 ]
+
+  # A worker that is not Ready is down for another reason, which another check names.
+  reset_cluster
+  : > "$STATE/bgp-out.worker-1"
+  echo worker-1 > "$STATE/not-ready"
+
+  recipe cluster-check
+
+  [[ $(line_of 'workers in BGP') == "pass  workers in BGP: "* ]]
+  [[ $(line_of 'nodes Ready') == "FAIL  nodes Ready: "* ]]
+
+  # A control plane carrying the label is no worker left out: it has no BGP to leave.
+  reset_cluster
+  : > "$STATE/bgp-out.cp-1"
+
+  recipe cluster-check
+
+  [ "$status" -eq 0 ]
+  [[ $(line_of 'workers in BGP') == "pass  workers in BGP: "* ]]
+}
+
+@test "A worker whose BGP configuration does not go is rebooted with --no-bgp-wait, which skips only the wait for its withdrawal" {
+  # worker-2's BGP configuration stays although it carries the label, as when its Cilium agent is not
+  # running to take the label up; once the label is removed, it takes two reads to come back.
+  : > "$STATE/bgp-stays"
+  echo 2 > "$STATE/bgp-slow"
+  : > "$STATE/bgp-back-late"
+  with BGP_WAIT=0
+
+  # Without the flag the bounded wait stops the run before the drain, saying what it saw.
+  recipe cluster-reboot worker-2 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"the CiliumBGPNodeConfig of worker-2 is still there after 0s, as when its Cilium agent is not running to take up the label"* ]]
+  [ -z "$(calls '^kubectl (cordon|drain) ')" ]
+  [ -z "$(calls '^talman ')" ]
+  [[ $(script_lines | tail -1) == *"worker-2 is out of BGP"*"kubectl label node worker-2 $OUT_LABEL-"* ]]
+
+  # With it, the worker is labelled, then cordoned and drained with no read of its configuration
+  # before; one line says what was skipped and what it can cost. It goes down out of BGP, and once
+  # it is Ready the label is removed and its configuration is read until it is back.
+  reset_cluster
+  reset_environment
+  : > "$STATE/bgp-stays"
+  echo 2 > "$STATE/bgp-slow"
+  : > "$STATE/bgp-back-late"
+
+  recipe cluster-reboot worker-2 --yes --no-bgp-wait < /dev/null
+
+  [ "$status" -eq 0 ]
+  labelled=$(call_line "^kubectl label node worker-2 $OUT_LABEL=true( |\$)")
+  cordoned=$(call_line '^kubectl cordon worker-2$')
+  drained=$(call_line '^kubectl drain worker-2 ')
+  restored=$(call_line "^kubectl label node worker-2 $OUT_LABEL-\$")
+  for call in "$labelled" "$cordoned" "$drained" "$restored"; do
+    [ -n "$call" ]
+  done
+  [ "$labelled" -lt "$cordoned" ]
+  [ "$(awk -v to="$drained" 'NR < to && /^kubectl get ciliumbgpnodeconfig /' "$RECORD/argv" | wc -l)" -eq 0 ]
+  [ "$(cat "$RECORD/reboot-bgp")" = 'worker-2 out' ]
+  [ "$drained" -lt "$restored" ]
+  [ "$(awk -v from="$restored" 'NR > from && /^kubectl get ciliumbgpnodeconfig worker-2 /' "$RECORD/argv" | wc -l)" -ge 3 ]
+  [ "$(grep -c -- '--no-bgp-wait' <<< "$output")" -eq 1 ]
+  [[ $output == *"not waiting for the CiliumBGPNodeConfig of worker-2 to be gone (--no-bgp-wait), so the edge routers may keep its paths as stale for up to the restart time"* ]]
+  [ ! -e "$STATE/bgp-out.worker-2" ]
+  [ -n "$(calls '^kubectl uncordon worker-2$')" ]
+
+  # With it, a run that stops after the label, as when the drain fails, still says last that the
+  # worker is out, with the command that puts it back.
+  reset_cluster
+  reset_environment
+  : > "$STATE/bgp-stays"
+  : > "$STATE/drain-fails"
+
+  recipe cluster-reboot worker-2 --yes --no-bgp-wait < /dev/null
+
+  [ "$status" -ne 0 ]
+  [ -e "$STATE/bgp-out.worker-2" ]
+  [[ $(script_lines | tail -1) == *"worker-2 is out of BGP"*"kubectl label node worker-2 $OUT_LABEL-"* ]]
+
+  # A control plane has no BGP, so the flag changes nothing for it.
+  reset_cluster
+  reset_environment
+
+  recipe cluster-reboot cp-2 --yes --no-bgp-wait < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ -z "$(calls '^kubectl label ')" ]
+  [[ $output != *"BGP"* ]]
+}
+
+@test "A control plane is rebooted without any BGP step" {
+  recipe cluster-reboot cp-2 --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ -z "$(calls '^kubectl label ')" ]
+  [ -z "$(calls 'ciliumbgp')" ]
+  [[ $output != *"BGP"* ]]
 }
 
 @test "A cluster that still owns a load balancer or a volume is not destroyed, and they are named" {

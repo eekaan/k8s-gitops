@@ -89,12 +89,37 @@ Feature: Cluster lifecycle
   Scenario: A failed reboot leaves the node cordoned and says so
     Given a drain that cannot evict a pod, a reboot talman fails, or a node that does not come back
     When cluster-reboot runs for each, and for a node that was cordoned before and fails to reboot
-    Then it exits non-zero, the node is not uncordoned, no pod is deleted, and the recipe's last line says the node is left cordoned and how to uncordon it, or that it stays cordoned as it was
+    Then it exits non-zero, the node is not uncordoned, no pod is deleted, and the recipe says the node is left cordoned and how to uncordon it, or that it stays cordoned as it was, in the line before the one that says the node is out of BGP
 
   Scenario: A failed drain says why without the API's address
     Given a drain that fails because kubectl cannot reach the API, its error naming the API server's address, and an API address in the environment
     When cluster-reboot runs for a node, without CI and with CI set
-    Then it exits non-zero showing the reason, connection refused, with neither the address nor the port, reboots nothing, and says the node is left cordoned
+    Then it exits non-zero showing the reason, connection refused, with neither the address nor the port, reboots nothing, and says the node is left cordoned and then that it is out of BGP
+
+  Scenario: A planned reboot takes the worker out of BGP, waits until it announces nothing, and puts it back once it is Ready
+    Given a worker whose BGP node configuration follows the opt-out label only after a few reads, out and in, one of whose two peers is established late; and a cluster whose workers' sessions are never established; a worker cordoned before the run; and BGP_WAIT=08 with a configuration that takes three reads, six seconds, to go
+    When cluster-reboot runs for each
+    Then it sets the label, reads the node's BGP configuration until it is gone, and only then cordons and drains the node, which announces nothing when it is drained and when it goes down; once the node is Ready and uncordoned it removes the label and reads the configuration until it is back with both peers established; no other node is labelled, and cluster-check passes afterwards; with no session established before or after, it succeeds all the same, saying it does not wait for one, with the node uncordoned and the label removed; the worker cordoned before stays cordoned and has its label removed once it is Ready; and with BGP_WAIT=08, read in base 10, the configuration is read until it is gone before the node is cordoned and drained
+
+  Scenario: A recipe that stops while a worker is out says so last, with the command that puts it back
+    Given a drain that fails, a reboot talman fails, SIGTERM while talman reboots, a node that does not come back, a node whose BGP configuration never goes, a node already out from an earlier run, a node that does not announce again once put back, a BGP configuration that cannot be read before the label and after it, and another worker that is out
+    When cluster-reboot runs for each, and once more for the node left out by an earlier run
+    Then each exits non-zero with the node still out and the last line saying it is out of BGP and the kubectl command that puts it back, except that a node that never withdraws is neither cordoned nor drained nor rebooted and is said to keep its BGP configuration, as when its Cilium agent is not running, a node already out is recognised and not labelled again, the node that does not announce again has its label removed and is said not to announce again, a configuration that cannot be read is said so and not taken for one that is gone, and nothing is labelled, cordoned, drained or rebooted for a worker while another is out, which the last line names; the rerun that succeeds puts the node back and reads its BGP configuration until it is back, saying that which of its sessions were established before is not known; the run that SIGTERM ends names the step it failed in, then that the node is left cordoned, and last that it is out of BGP
+
+  Scenario: cluster-check fails while a Ready worker is out of BGP
+    Given a Ready worker carrying the opt-out label, then one that is not Ready, and then a control plane carrying it
+    When cluster-check runs for each
+    Then the first fails the check of workers in BGP, naming the worker and the command that puts it back, and no other check fails; neither the second nor the third fails that check
+
+  Scenario: A control plane is rebooted without any BGP step
+    Given a control plane of talman.yaml
+    When cluster-reboot runs for it
+    Then it is rebooted, nothing is labelled, no BGP configuration is read and the recipe says nothing of BGP
+
+  Scenario: A worker whose BGP configuration does not go is rebooted with --no-bgp-wait, which skips only the wait for its withdrawal
+    Given a worker whose BGP configuration stays although it carries the opt-out label, as when its Cilium agent is not running to take the label up, and that takes a few reads to come back once the label is removed; and a control plane
+    When cluster-reboot runs for the worker without --no-bgp-wait and with it, and with it and a drain that fails, and for the control plane with it
+    Then without it the run stops before the drain, saying the configuration is still there after BGP_WAIT seconds, as when the node's Cilium agent is not running, and last that the worker is out of BGP; with it the worker is labelled and then cordoned and drained with no read of its BGP configuration before the drain, one line says the wait was skipped and that the edge routers may keep its paths as stale for up to the restart time, it goes down out of BGP, and once it is Ready and uncordoned the label is removed and the configuration read until it is back; with it and a drain that fails, the last line says the worker is out of BGP and gives the command that puts it back; the control plane is rebooted with no BGP step
 
   Scenario: A cluster that still owns a load balancer or a volume is not destroyed, and they are named
     Given a Service of type LoadBalancer, a PersistentVolume of a CSI driver other than LINSTOR's, or both, beside Services and volumes of other kinds, LINSTOR's among them
