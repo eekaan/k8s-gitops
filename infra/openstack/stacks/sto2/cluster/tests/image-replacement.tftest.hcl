@@ -40,10 +40,11 @@ override_data {
         schematic_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
       }
       bgp = {
-        cluster_asn    = 64496
-        edge_asn       = 64497
-        edge_addresses = ["192.0.2.7", "192.0.2.8"]
-        service_range  = "203.0.113.16/28"
+        cluster_asn     = 64496
+        edge_asn        = 64497
+        edge_addresses  = ["192.0.2.7", "192.0.2.8"]
+        service_range   = "203.0.113.16/28"
+        gateway_address = "203.0.113.21"
       }
     }
   }
@@ -86,10 +87,11 @@ run "a_new_image_replaces_no_server_and_no_boot_volume" {
           schematic_id = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
         }
         bgp = {
-          cluster_asn    = 64496
-          edge_asn       = 64497
-          edge_addresses = ["192.0.2.7", "192.0.2.8"]
-          service_range  = "203.0.113.16/28"
+          cluster_asn     = 64496
+          edge_asn        = 64497
+          edge_addresses  = ["192.0.2.7", "192.0.2.8"]
+          service_range   = "203.0.113.16/28"
+          gateway_address = "203.0.113.21"
         }
       }
     }

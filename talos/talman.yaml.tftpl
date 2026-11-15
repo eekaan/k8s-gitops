@@ -22,6 +22,9 @@ values:
     clusterASN: ${bgp.cluster_asn}
     edgeASN: ${bgp.edge_asn}
     edgeAddresses: ${jsonencode(bgp.edge_addresses)}
+    # The public Gateway's address, a host of the service range, which the edge routers forward
+    # public traffic to.
+    gatewayAddress: ${bgp.gateway_address}
   # The ingress firewall's rules for each role (talos/patches/all/firewall.yaml): every listener of
   # talos/firewall.yaml the role has, accepting the networks of its sources. A port is written as a
   # range, the one form in which a rule takes it quoted.
@@ -84,4 +87,7 @@ nodes:
     ipAddress: ${node.address}
     values:
       floatingIP: ${node.floating_ip}
+      # The node's own address on the node network; no patch reads it: scripts/edge-check knows a
+      # worker's BGP sessions by it.
+      privateAddress: ${node.private_address}
 %{ endfor ~}

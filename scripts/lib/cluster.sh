@@ -676,7 +676,9 @@ declare -A cluster_config=()
 #   BGP_EDGE_ASN
 #   BGP_EDGE_ADDRESS_1,   the edge routers' two addresses, values.bgp
 #   BGP_EDGE_ADDRESS_2
-# The last five the cluster stack renders from the plumbing stack's numbers for BGP (ADR 0013).
+#   GATEWAY_ADDRESS       the public Gateway's address, a host of the service range, which the edge
+#                         routers forward public traffic to, values.bgp.gatewayAddress
+# The last six the cluster stack renders from the plumbing stack's numbers for BGP (ADR 0013).
 # A missing talman.yaml leaves its keys to the caller's require_cluster, which names the file.
 fill_cluster_config() {
   local cluster=$1 talman=$2 example value keys key complete=1 i
@@ -685,7 +687,7 @@ fill_cluster_config() {
   local -a listed=() edges=()
   local -A sources=([CLUSTER_DOMAIN]=1 [BACKUP_BUCKET_PREFIX]=1 [S3_ENDPOINT]=1 [S3_REGION]=1
     [NODE_CIDR]=1 [NODE_NAME_REGEX]=1 [SERVICE_RANGE]=1 [BGP_CLUSTER_ASN]=1 [BGP_EDGE_ASN]=1
-    [BGP_EDGE_ADDRESS_1]=1 [BGP_EDGE_ADDRESS_2]=1) wanted=()
+    [BGP_EDGE_ADDRESS_1]=1 [BGP_EDGE_ADDRESS_2]=1 [GATEWAY_ADDRESS]=1) wanted=()
   example=$infra_root/kubernetes/clusters/$cluster/cluster-config.example.yaml
   cluster_config=()
   if [[ ! -f $example ]]; then
@@ -753,6 +755,13 @@ fill_cluster_config() {
       done
     else
       infra_error "cannot fill BGP_EDGE_ADDRESS_1 and BGP_EDGE_ADDRESS_2 of cluster-config: ${talman#"$infra_root"/} gives no two IPv4 addresses in values.bgp.edgeAddresses"
+      complete=0
+    fi
+    value=$(yq '.values.bgp.gatewayAddress // ""' "$talman" 2> /dev/null) || value=
+    if [[ $value =~ ^$ipv4$ ]]; then
+      cluster_config[GATEWAY_ADDRESS]=$value
+    else
+      infra_error "cannot fill GATEWAY_ADDRESS of cluster-config: ${talman#"$infra_root"/} gives no IPv4 address in values.bgp.gatewayAddress"
       complete=0
     fi
   fi

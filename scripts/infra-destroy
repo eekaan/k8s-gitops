@@ -4,10 +4,12 @@
 # name is typed back, or with --yes (CI). The plumbing stack is left alone when the cluster stack
 # is not destroyed. State objects stay. Once the cluster stack is destroyed, the files generated for
 # its cluster that hold the nodes' and the API's addresses are removed, as the cloud may give those
-# addresses to someone else. Given one of the two stacks, or the ci stack, it destroys that one
-# only, the same way, as cluster-destroy does with the cluster stack. The ci stack is destroyed by
-# name only: the CI host outlives the cluster, and is destroyed before the plumbing stack, whose
-# network it is on.
+# addresses to someone else. Given one of the two stacks, or the ci or edge stack, it destroys that
+# one only, the same way, as cluster-destroy does with the cluster stack. The ci and edge stacks are
+# destroyed by name only: the CI host and the edge routers outlive the cluster, and are destroyed
+# before the plumbing stack, whose network they are on. Once the edge stack is destroyed, the edges'
+# recorded SSH host keys are dropped, as an edge built again at the same floating address has keys
+# of its own.
 # The load balancers that Services of type LoadBalancer get and the volumes behind PersistentVolumes
 # of a CSI driver are made by the cluster, not by OpenTofu, so the cluster stack's destroy would
 # leave them in the cloud. Before it plans that destroy, this recipe asks the cluster for them, as
@@ -27,9 +29,11 @@ here=$(dirname "$0")
 . "$here/lib/infra.sh"
 # shellcheck source=scripts/lib/cluster.sh
 . "$here/lib/cluster.sh"
+# shellcheck source=scripts/lib/edge.sh
+. "$here/lib/edge.sh"
 
 stacks=(sto2/cluster sto2/plumbing)
-named=("${stacks[@]}" sto2/ci)
+named=("${stacks[@]}" sto2/ci sto2/edge)
 
 usage() {
   infra_error "usage: infra-destroy [stack] [--yes] [--unreachable]; the stack is one of ${named[*]}"
@@ -116,6 +120,13 @@ for stack in "${stacks[@]}"; do
       cluster=$(stack_cluster_name)
       require_cluster_owns_nothing "$cluster" "$stack" "$unreachable"
     fi
+    # The edges' addresses, read before the destroy takes the outputs with it: an edge built again
+    # at the same floating address has host keys of its own, which the old ones would refuse.
+    forget_edges=0
+    if [[ $stack == */edge ]] && edge_applied; then
+      edge_load
+      forget_edges=1
+    fi
     echo "$stack:"
     plan_destroy
     ((confirmed)) || confirm "$stack" destroy destroyed
@@ -123,6 +134,10 @@ for stack in "${stacks[@]}"; do
     echo "$stack destroyed"
     if [[ -n $cluster ]]; then
       remove_generated "$cluster"
+    fi
+    if ((forget_edges)); then
+      edge_forget_keys 1 2
+      echo "the edges' SSH host keys are no longer recorded"
     fi
   )
 done

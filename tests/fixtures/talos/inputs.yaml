@@ -41,6 +41,7 @@ bgp:
   edge_addresses:
     - 192.0.2.7
     - 192.0.2.8
+  gateway_address: 192.0.2.133
 # Each node at its floating address, and with its own address on the node network.
 nodes:
   - hostname: cp-1

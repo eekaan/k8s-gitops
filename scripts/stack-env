@@ -3,7 +3,8 @@
 #   . scripts/stack-env sto2/plumbing
 # Resolves the stack's directory, reads .env when there is one, checks by name every variable the
 # stack needs, and exports the state encryption settings and the inputs the stack takes from the
-# environment: the operator allowlist, and the ci stack's image and public key. Sets stack, stack_dir, plan_file, errors_file and backend_config, the
+# environment: the operator allowlist, the ci stack's image and public key, and the edge stack's
+# image and public key. Sets stack, stack_dir, plan_file, errors_file and backend_config, the
 # -backend-config arguments of tofu init: the committed backend file, the bucket and a state key
 # from the stack's path. Returns non-zero, naming what is missing or refused, before anything else
 # happens. The functions below then lock, initialise, plan and apply that stack.
@@ -22,6 +23,26 @@ export_input() {
   stack_takes "$1" || return 0
   require_env "$2" || return 1
   export "TF_VAR_$1=${!2}"
+}
+
+# export_public_key_file VARIABLE NAME: when the stack declares the input VARIABLE, requires NAME, the
+# absolute path of a private key, and exports the public key in the file beside it, NAME's value and
+# .pub, as TF_VAR_<VARIABLE>. The private key itself is never read.
+export_public_key_file() {
+  local file public
+  stack_takes "$1" || return 0
+  require_env "$2" || return 1
+  file=${!2}
+  if [[ $file != /* ]]; then
+    infra_error "$2 is not an absolute path"
+    return 1
+  fi
+  public=$file.pub
+  if [[ ! -f $public ]]; then
+    infra_error "$public does not exist; just edge-ssh-key creates the key pair"
+    return 1
+  fi
+  export "TF_VAR_$1=$(< "$public")"
 }
 
 # Exports TF_VAR_plumbing_state: where the plumbing stack of the stack's region keeps its state,
@@ -118,6 +139,9 @@ infra_stack_env() {
   # The CI host's image and the operator's public key, the ci stack's deployment values.
   export_input image_name CI_HOST_IMAGE || complete=0
   export_input ssh_public_key CI_HOST_SSH_PUBLIC_KEY || complete=0
+  # The edge stack's image, and the public half of the key just edge-ssh-key makes.
+  export_input edge_image_name EDGE_IMAGE || complete=0
+  export_public_key_file edge_ssh_public_key EDGE_SSH_KEY_FILE || complete=0
   ((complete)) || return 1
 
   export_state_encryption || return 1

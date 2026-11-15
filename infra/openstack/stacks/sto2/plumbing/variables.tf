@@ -54,6 +54,17 @@ variable "service_range" {
   }
 }
 
+variable "gateway_host" {
+  description = "Host number in service_range of the public Gateway's address: the one address the edge routers translate their public traffic to. Neither the range's network address nor its last address. The cluster's Gateway is to ask the LoadBalancer pool for this address by annotation; the pool does not set it aside."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = try(floor(var.gateway_host) == var.gateway_host && var.gateway_host >= 1 && var.gateway_host < pow(2, 32 - tonumber(split("/", var.service_range)[1])) - 1, false)
+    error_message = "gateway_host must be a whole host number inside service_range, other than its network address (0) and its last address."
+  }
+}
+
 # eBGP between two private 16-bit AS numbers (RFC 6996: 64512 to 65534).
 variable "cluster_asn" {
   description = "Autonomous system number of the cluster's workers, from the private 16-bit range."

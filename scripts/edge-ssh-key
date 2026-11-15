@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Creates the SSH key pair of the edge routers at EDGE_SSH_KEY_FILE, an absolute path from .env or
+# the environment: an ed25519 key without a passphrase, as the recipes that use it run without a
+# terminal, with the private key at mode 0600 and the public key beside it as <path>.pub. Does
+# nothing when a key is there. Says only whether it created one, never the path or the key; the
+# edge stack reads the public half from the file beside the private one.
+# Usage: scripts/edge-ssh-key
+set -euo pipefail
+
+# shellcheck source=scripts/lib/infra.sh
+. "$(dirname "$0")/lib/infra.sh"
+load_env
+require_env EDGE_SSH_KEY_FILE
+file=$EDGE_SSH_KEY_FILE
+if [[ $file != /* ]]; then
+  infra_error "EDGE_SSH_KEY_FILE is not an absolute path"
+  exit 1
+fi
+if ! type -P ssh-keygen > /dev/null; then
+  infra_error "ssh-keygen is not on PATH; edge-ssh-key needs OpenSSH's client"
+  exit 1
+fi
+
+if [[ -e $file || -L $file ]]; then
+  if [[ ! -f $file.pub ]]; then
+    infra_error "EDGE_SSH_KEY_FILE names a file but its public half, beside it, does not exist; remove the file, or restore the public half, and run this again"
+    exit 1
+  fi
+  echo "the edge routers' SSH key pair exists; nothing was created"
+  exit 0
+fi
+if [[ -e $file.pub || -L $file.pub ]]; then
+  infra_error "a public key is beside EDGE_SSH_KEY_FILE but no private key is; remove it, or restore the private key, and run this again"
+  exit 1
+fi
+if [[ ! -d ${file%/*} ]]; then
+  infra_error "the directory EDGE_SSH_KEY_FILE is in does not exist"
+  exit 1
+fi
+(umask 077 && ssh-keygen -q -t ed25519 -N '' -C edge-routers -f "$file")
+echo "created the edge routers' SSH key pair"
