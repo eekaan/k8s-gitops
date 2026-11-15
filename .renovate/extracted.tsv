@@ -105,6 +105,7 @@ mise.toml	mise	gitleaks	-
 mise.toml	mise	helm	-
 mise.toml	mise	jq	-
 mise.toml	mise	just	-
+mise.toml	mise	kubeconform	-
 mise.toml	mise	kubectl	-
 mise.toml	mise	kustomize	-
 mise.toml	mise	opentofu	-
@@ -115,6 +116,7 @@ mise.toml	mise	talosctl	-
 mise.toml	mise	yamllint	-
 mise.toml	mise	yq	-
 versions.yaml	regex	actions/runner	actions_runner
+versions.yaml	regex	https://github.com/yannh/kubernetes-json-schema	kubernetes_schemas
 versions.yaml	regex	jdxcode/mise	ci_tools_base
 versions.yaml	regex	kubernetes/kubernetes	kubernetes
 versions.yaml	regex	siderolabs/talos	talos
