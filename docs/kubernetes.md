@@ -1582,9 +1582,24 @@ A `ClusterIssuer` reads its Secrets from the controller's cluster resource names
 - **Staging and production.** Both issuers exist whenever the application is enabled, so that moving
   from one to the other is a change of the choice below and nothing else. Staging's certificates are
   signed by a chain no client trusts, and its rate limits are far above production's: a setup that is
-  broken spends staging's. Production's are trusted by every client and are the limits a broken
-  setup can exhaust, so a cluster chooses production once staging has issued its certificate. Both
-  issuers register their account with the CA as soon as they exist.
+  broken spends staging's. Production's are trusted by a client with the usual public roots, and its
+  limits are the ones a broken setup can exhaust. The procedure for a new cluster is to choose staging first, move to production
+  once staging has issued the certificate and `just gateway-check` passes, and go back to staging
+  to test anything again. Both issuers register their account with the CA as soon as they exist.
+- **Production's rate limits.** Let's Encrypt's [rate limits](https://letsencrypt.org/docs/rate-limits/)
+  as Let's Encrypt publishes them: 50 certificates per registered domain every 7 days; 5
+  certificates for the exact same set of names every 7 days, which no override raises; and 5
+  failed validations per name per account every hour, after which the account places no new order
+  for that name until the limit refills. Here, deleting the `public-wildcard-tls` Secret (the
+  certificate is issued again), changing `PUBLIC_ISSUER` back and forth (each move to production
+  issues again) and rebuilding a cluster from this tree each request the same names again, so
+  each spends the limit of 5 per exact set of names. The limit of 50 per registered domain counts
+  a set of names not issued before, because a renewal of the same set is exempt from it. Failed
+  validations count only when Let's Encrypt validates and fails, which cert-manager asks for only
+  once its own self-check sees the record: a token the provider refuses, or a record that never
+  becomes visible, waits and retries without spending one. To test anything that issues, whether
+  the token, the zone, the solver or a rebuild, change the choice to `letsencrypt-staging` first,
+  and return to production once it works.
 - **Ready.** The application waits for `cert-manager` and `openbao-store`, and is Ready only once the
   `ExternalSecret` and both issuers report Ready, which kstatus does not read from these kinds by
   itself. Until the operator has written the token, the `ExternalSecret` reports the missing key and
@@ -1607,7 +1622,7 @@ patches:
         value: {name: acme-issuers}
       - op: add
         path: /spec/postBuild
-        value: {substitute: {PUBLIC_ISSUER: letsencrypt-staging}}
+        value: {substitute: {PUBLIC_ISSUER: letsencrypt-production}}
 ```
 
 It is a patch and not a `cluster-config` key because the choice is part of the tree and reviewed in
@@ -1617,15 +1632,17 @@ Gateway's certificate is requested only once the issuer exists, and `just kubern
 a cluster that chooses an issuer other than `cluster-ca` without that dependency, and one whose
 overlay names the dependency without listing the application.
 
-`lab-sto2` chooses staging. To move to production, once the staging certificate is Ready and
-`just gateway-check` passes, change the one line `PUBLIC_ISSUER: letsencrypt-staging` to
+`lab-sto2` chooses production. A new cluster starts with `PUBLIC_ISSUER: letsencrypt-staging`, and
+once the staging certificate is Ready and `just gateway-check` passes, changes that one line to
 `PUBLIC_ISSUER: letsencrypt-production` in a pull request of its own. cert-manager then issues the
 certificate again from production, with a new private key, into the same Secret, and the listener
-serves the new certificate when it is Ready; the old one is served until then.
+serves the new certificate when it is Ready; the old one is served until then. Going back to
+staging for testing is the same one-line change the other way (the rate limits in [The ACME
+issuers](#the-acme-issuers)).
 
-- **What a client sees.** With the cluster's own CA or staging, a client outside refuses the
-  certificate: no store trusts either chain. With production, every client trusts it, with nothing
-  to hand it.
+- **What a client sees.** `lab-sto2` serves the production certificate, which a client with the usual
+  public roots trusts with nothing to hand it. With the cluster's own CA or staging, a client outside refuses the
+  certificate: no store trusts either chain.
 - **When it fails.** A wrong or missing token, a zone the token cannot edit, or a challenge whose
   record never becomes visible leaves the `Certificate` not Ready with cert-manager's own reason,
   and the Gateway keeps serving the Secret it has, the previous certificate or none. Look down the
@@ -1633,7 +1650,7 @@ serves the new certificate when it is Ready; the old one is served until then.
   public-wildcard`, then `get certificaterequest,order,challenge` in the same namespace; the
   Challenge's `status.reason` says what the provider or the CA refused. `kubectl --namespace
   cert-manager get externalsecret cloudflare-api-token` says whether the token came through, and
-  `kubectl describe clusterissuer letsencrypt-staging` whether the account registered. A DNS-01
+  `kubectl describe clusterissuer` of the chosen issuer whether the account registered. A DNS-01
   challenge usually takes a minute or two to be visible and verified, and cert-manager retries
   with a growing delay after a failure. Until the self-check passes, the Challenge's reason is
   `Waiting for DNS-01 challenge propagation:` and what ended its last round, which asks the zone's
@@ -2130,14 +2147,15 @@ cannot be listed without it: `just kubernetes-check` refuses the dependency.
   makes a certificate for each listener's hostname only, so it would leave out the domain itself.
 - **TLS.** A `ClientTrafficPolicy` sets 1.2 as the least version a client may use, the
   controller's default stated rather than relied on.
-- **What a client outside sees.** With the cluster's own authority or the staging issuer the
-  certificate is signed by a chain nothing outside trusts, so a client refuses it unless it is
-  given the authority's certificate; with the production issuer every client trusts it.
-  `just gateway-check` connects to each edge router's public address with the name the route has,
-  and verifies against the trust the issuer implies, which is public material (below), so each
-  edge is proved on its own; the names are in DNS, which [DNS records](#dns-records) describes,
-  and the check also asks for one. Only the networks the edge stack admits reach the edge's public
-  ports ([The edge routers](infrastructure.md#the-edge-routers)), so it is run from one of them.
+- **What a client outside sees.** `lab-sto2` chooses the production issuer, so a client with the
+  usual public roots trusts the certificate; with the cluster's own authority or the staging issuer
+  it is signed by a chain nothing outside trusts, so a client refuses it unless it is given the
+  authority's certificate. `just gateway-check` connects to each edge router's public address with
+  the name the route has, and verifies against the trust the issuer implies, which is public
+  material (below), so each edge is proved on its own; the names are in DNS, which
+  [DNS records](#dns-records) describes, and the check also asks for one. Only the networks the
+  edge stack admits reach the edge's public ports
+  ([The edge routers](infrastructure.md#the-edge-routers)), so it is run from one of them.
 - **Where the records point.** The Gateway's annotation `external-dns.kubernetes.io/target` holds
   `${EDGE_PUBLIC_ADDRESS_1},${EDGE_PUBLIC_ADDRESS_2}`, which external-dns publishes for every route
   that attaches to it ([DNS records](#dns-records)).
@@ -2910,9 +2928,9 @@ to do it. external-dns publishes `n8n.<domain>` at both edge routers within a mi
 route being accepted ([DNS records](#dns-records)), and `just gateway-check` says when the name
 resolves to them; until it does, a browser reaches n8n only where the operator's machine resolves
 the name to an edge router's public address, which the edge stack's outputs give.
-While the certificate comes from the cluster's own authority or Let's Encrypt's staging issuer, as
-lab-sto2's does, the browser warns about it unless it is given the root of that chain; with the
-production issuer it does not ([What a client outside sees](#the-public-gateway)).
+When the certificate comes from Let's Encrypt's production issuer, as lab-sto2's does, the browser
+does not warn about it; with the cluster's own authority or the staging issuer it would, unless it
+were given the root of that chain ([What a client outside sees](#the-public-gateway)).
 
 ### Porting an application from the reference catalogue
 

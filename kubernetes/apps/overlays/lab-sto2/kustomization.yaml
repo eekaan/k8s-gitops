@@ -66,9 +66,8 @@ resources:
   - ../../base/volsync-system/volsync/ks.yaml
 
 patches:
-  # The issuer of the public Gateway's certificate, the one place this cluster chooses it: Let's
-  # Encrypt's staging CA, whose certificates no client trusts, until the staging certificate is
-  # issued; then letsencrypt-production, which every client trusts. Without this patch the
+  # The issuer of the public Gateway's certificate, the one place this cluster chooses it:
+  # letsencrypt-production, whose certificates a client with the usual public roots trusts. Without this patch the
   # certificate comes from the cluster's own CA. Choosing an issuer of acme-issuers names that
   # application in dependsOn, which scripts/kubernetes-check requires.
   - target:
@@ -85,7 +84,7 @@ patches:
         path: /spec/postBuild
         value:
           substitute:
-            PUBLIC_ISSUER: letsencrypt-staging
+            PUBLIC_ISSUER: letsencrypt-production
   # The cluster's name, which owns the DNS records external-dns makes: two clusters that share a
   # zone never touch each other's records. Selected by target, so an overlay that leaves the
   # application out still builds.
