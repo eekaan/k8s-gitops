@@ -14,7 +14,8 @@
 # generated (see excluded below), and named as the Renovate manager that reads it names the
 # dependency, so that it counts only when the record holds that dependency:
 #   - an image reference with a registry host and a tag, or any reference with a digest, and an
-#     image: or imageName: value with a tag, whatever the registry: the image (kubernetes, helm-values)
+#     image: or imageName: value with a tag, whatever the registry: the image (kubernetes,
+#     helm-values)
 #   - oci://host/path:tag: host/path
 #   - uses: owner/repo[/path]@ref in a workflow: owner/repo (github-actions)
 #   - any value of a workflow that has a version's shape (version_shape below), and any sha256:
@@ -22,23 +23,25 @@
 #     dependency Renovate reads from that action's inputs (known_inputs below) or as
 #     "<action> input <key>", which no extraction holds; a matrix value as "matrix <key>"; any other
 #     by its key. On the tree today every such value is a mise-action input.
-#   - a tag: or version: value with a version in kubernetes/, in block or flow style: the chart of
-#     a HelmRelease, the URL of an OCIRepository, the name of a GitRepository (flux); the chart of a
-#     kustomization's helmCharts entry (kustomize); in a values file or a HelmRelease's values, the
-#     image of a map under a key ending in "image" by its registry and repository, or the image a
-#     key ending in "image" names beside the tag (helm-values); else the key
-#   - version = "..." in OpenTofu files: a required provider or provider block by the provider's name,
-#     a module by its registry source (else its label), a helm_release by its chart (terraform)
+#   - a tag: or version: value with a version in kubernetes/, or one of a key ending in -version
+#     such as a label's, in block or flow style: the chart of a HelmRelease, the URL of an
+#     OCIRepository, the name of a GitRepository (flux); the chart of a kustomization's helmCharts
+#     entry (kustomize); in a values file or a HelmRelease's values, the image of a map under a key
+#     ending in "image" by its registry and repository, or the image a key ending in "image" names
+#     beside the tag (helm-values); else the key
+#   - version = "..." in OpenTofu files: a required provider or provider block by the provider's
+#     name, a module by its registry source (else its label), a helm_release by its chart (terraform)
 #   - versions.yaml's top-level values that are a version, a digest or a commit: the key
 #   - TOML lines that set a version, name = "1.2.3" or name = { version = "1.2.3", ... }: the name
 #     without options in brackets (mise)
+#   - a record that a check reads, a comment line that is only "# name: <version>": the name
 # and any of them on the line under a "# renovate:" or "# renovate-ref:" comment by the comment's
 # depName, with the key its line starts with (the custom managers).
-# It does not see a version in prose or a comment, one assembled from parts, an image with neither
-# a tag nor a digest, one with a tag and no registry host under another key than image: or
+# It does not see a version in prose or in another comment, one assembled from parts, an image with
+# neither a tag nor a digest, one with a tag and no registry host under another key than image: or
 # imageName:, a kustomization's newTag:, a digest in a key of its own (digest: sha256:...), an action
-# named by a URL, or a second untracked pin of a name that its file already has extracted; a pin of
-# any of those forms is listed by hand where it matters, or not at all.
+# named by a URL, a file under tests/, or a second untracked pin of a name that its file already has
+# extracted; a pin of any of those forms is listed by hand where it matters, or not at all.
 #
 # A pin is covered when .renovate/extracted.tsv holds its name for its file: a versions.yaml key in
 # the key column, a pin under a custom manager's comment with the key of its line, any other in the
@@ -46,8 +49,9 @@
 # its dependency's tags is one that Renovate looks a checksum up by and cannot find: where the step
 # has a checksum, Renovate moves nothing; in a workflow whose step has none, it would move the
 # version alone, without the others. Both are held, and listed in .renovate/by-hand.tsv like a pin
-# that is not covered. An entry there must name text on a line of its file that is no comment in a
-# YAML, TOML or HCL file, and must not name a pin that Renovate extracts and can move, or text of one.
+# that is not covered. An entry there must name a pin found by that name in its file, or text on a
+# line of its file that is no comment in a YAML, TOML or HCL file, and must not name a pin that
+# Renovate extracts and can move, or text of one.
 #
 # Prints one line per problem, path:line: what is wrong, and exits non-zero; otherwise one line with
 # the counts.
@@ -230,8 +234,8 @@ for key in "${!input_version[@]}"; do
   [[ -z ${held[$key]-} && -n ${stuck_in[$dep]-} ]] && held[$key]=alone$'\t'${stuck_in[$dep]# }
 done
 
-# A tag: or version: value with a version's shape under kubernetes/, in block or flow style, named as
-# the manager that reads it names it: the chart of a HelmRelease, the URL of an OCIRepository, the
+# A tag: or version: value with a version's shape under kubernetes/, or one of a key ending in
+# -version such as a label's, in block or flow style, named as the manager that reads it names it: the chart of a HelmRelease, the URL of an OCIRepository, the
 # name of a GitRepository (flux), the chart of a kustomization's helmCharts (kustomize); in a values
 # file or a HelmRelease's values (helm-values, which flux applies to those), the image of a map
 # under a key ending in "image" that has a repository, by its registry and repository, of which the
@@ -239,7 +243,7 @@ done
 # beside a tag (else a version) that is a string; any other by its key.
 # shellcheck disable=SC2016 # $doc and $p are yq variables.
 yq_read '(select(tag == "!!map") // {}) as $doc
-  | .. | select((key == "tag" or key == "version") and (tag == "!!str" or tag == "!!float" or tag == "!!int") and (tostring | test("^v?[0-9]+\\.[0-9]+")))
+  | .. | select((key == "tag" or (key | tostring | test("(^|[-_./])version$"))) and (tag == "!!str" or tag == "!!float" or tag == "!!int") and (tostring | test("^v?[0-9]+\\.[0-9]+")))
   | parent as $p
   | [filename, line, key, tag, (path | join(".")), ($doc.kind // "-"),
      ($p | key // "-" | tostring), ($p.repository // "-" | tostring), ($p.registry // "-" | tostring),
@@ -335,6 +339,9 @@ scan '^("[^"]+"|[\w.-]+)\s*=\s*(?:\{\s*version\s*=\s*)?"v?\d+\.\d+' name_toml - 
 if printf '%s\n' "${files[@]}" | grep -qxF versions.yaml; then
   scan '^[a-z0-9_]+(?=:\s*(?:v?\d+\.\d+\.\d+|[0-9a-f]{64}$|[0-9a-f]{40}$|\S+@sha256:))' 's/.*/&/' = versions.yaml
 fi
+# A record a check reads, a comment line that is only "# name: <version>", by its name.
+mapfile -t all < <(of '.*')
+scan '^\s*#\s*\K[a-z][a-z0-9-]*(?=:\s*v?\d+\.\d+(?:\.\d+)?\s*$)' 's/.*/&/' - "${all[@]}"
 
 # What Renovate extracts, by file: the name column, the key column, and the two together.
 declare -A by_name=() by_key=() by_name_key=()
@@ -358,7 +365,13 @@ in_file() {
 
 # What is listed by hand, by file and name, checked on its own: four columns, the pin in its file, and
 # not one that Renovate extracts and can move, so the list does not hold a pin that something else
-# moves.
+# moves. The pin is in its file when the finder found it there by that name, as a record in a
+# comment is, or the name is on a line that is no comment.
+declare -A found_names=()
+for pin in "${pins[@]}"; do
+  IFS=$'\t' read -r file _ name _ <<< "$pin"
+  found_names["$file"$'\t'"$name"]=1
+done
 declare -A listed=()
 n=0
 while IFS=$'\t' read -r file name why how extra || [[ -n ${file-} ]]; do
@@ -368,7 +381,7 @@ while IFS=$'\t' read -r file name why how extra || [[ -n ${file-} ]]; do
     problem "$by_hand:$n: an entry is a file, the pin's name, why Renovate does not move it and how it is moved, four columns separated by tabs"
     continue
   fi
-  if [[ ! -f $file ]] || ! in_file "$file" "$name"; then
+  if [[ ! -f $file ]] || { [[ -z ${found_names["$file"$'\t'"$name"]-} ]] && ! in_file "$file" "$name"; }; then
     problem "$by_hand:$n: $file has no $name; remove the entry or correct it"
     continue
   fi

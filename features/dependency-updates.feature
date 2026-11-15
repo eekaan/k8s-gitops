@@ -42,7 +42,7 @@ Feature: Dependency updates
 
   @test
   Scenario: A pin added where no manager looks, and not listed, is refused, naming the file and line
-    Given a file that holds an image reference, an OCI artifact tag, a digest, an action pin, a tool version, a provider version, a mise version or checksum, an action's input or a matrix value with a version's shape, or a tag that no manager extracts
+    Given a file that holds an image reference, an OCI artifact tag, a digest, an action pin, a tool version, a provider version, a mise version or checksum, an action's input or a matrix value with a version's shape, a label whose key ends in version, a record in a comment line of its own, or a tag that no manager extracts
     And a file that Renovate extracts other pins from holds an image reference, a chart's tag, a provider's version, another action's input or a values file's tag that it does not extract
     And the pin is not in .renovate/by-hand.tsv
     When the check runs

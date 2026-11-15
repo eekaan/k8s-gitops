@@ -63,6 +63,10 @@ EOF
   printf '%s\n' 'apiVersion: v1' 'kind: Pod' 'spec:' '  containers:' '    - image: tool:2.0.1' > "$WORK/apps/added-pod.yaml"
   printf '%s\n' '# tools' 'newtool = "3.2.1"' > "$WORK/added-tools.toml"
   printf '%s\n' 'spec:' '  ref:' '    tag: v9.9.9' > "$WORK/kubernetes/added-source.yaml"
+  # A label whose key ends in version, and a record that a check reads in a comment of its own,
+  # beside a comment that only mentions a version.
+  printf '%s\n' 'apiVersion: v1' 'kind: Namespace' 'metadata:' '  labels:' '    pod-security.kubernetes.io/audit-version: v1.37' > "$WORK/kubernetes/added-namespace.yaml"
+  printf '%s\n' '# Read at the release below, as the 1.2 notes say.' '# example-templates: v1.2.3' 'echo start' > "$WORK/scripts/added-record"
   # A pin in a file Renovate already extracts from is no more covered than one in a new file.
   printf '%s\n' '    extra: ghcr.io/example-org/untracked:1.2.3' >> "$WORK/kubernetes/apps/base/openbao/openbao/app/values.yaml"
   values_line=$(wc -l < "$WORK/kubernetes/apps/base/openbao/openbao/app/values.yaml")
@@ -160,6 +164,8 @@ EOF
   grep -q '^apps/added-pod.yaml:5: tool is a pin that no Renovate manager extracts' <<< "$output"
   grep -q '^added-tools.toml:2: newtool is a pin that no Renovate manager extracts' <<< "$output"
   grep -q '^kubernetes/added-source.yaml:3: tag is a pin that no Renovate manager extracts' <<< "$output"
+  grep -q '^kubernetes/added-namespace.yaml:5: pod-security.kubernetes.io/audit-version is a pin that no Renovate manager extracts' <<< "$output"
+  grep -q '^scripts/added-record:2: example-templates is a pin that no Renovate manager extracts' <<< "$output"
   # What no manager reads of those: a version beside the tag that an image takes, a tag with no
   # image beside it, a tag under a key that is not an image's, a chart whose source Renovate does not
   # find, and the workflow's values.
@@ -180,7 +186,7 @@ EOF
   [ "$(grep -cE '^(kubernetes/added/kustomization.yaml|infra/openstack/modules/network/added.tf|mise.toml):' <<< "$output")" -eq 0 ]
   [ "$(grep -cE '^kubernetes/added/helmrelease.yaml:14:|^.github/workflows/added-inputs.yaml:(7|9|12):' <<< "$output")" -eq 0 ]
   # Nothing else is refused: the tree's own pins pass.
-  [ "$(wc -l <<< "$output")" -eq 28 ]
+  [ "$(wc -l <<< "$output")" -eq 30 ]
 }
 
 @test "A listed pin that a manager now extracts is refused" {
