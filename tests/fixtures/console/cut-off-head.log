@@ -1,0 +1,5 @@
+256 SHA256:CutOffEd25519AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA root@lab-edge-1 (ED25519)
+3072 SHA256:CutOffRsaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA root@lab-edge-1 (RSA)
+-----END SSH HOST KEY FINGERPRINTS-----
+#############################################################
+lab-edge-1 login: 

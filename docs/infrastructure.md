@@ -647,9 +647,12 @@ keys of its own at the floating address the old one had, and the connection chec
 against the recorded ones. The recorded keys of an edge whose instance a plan creates are therefore
 dropped before the apply, by the rollout and by `just infra-apply sto2/edge` alike (`ssh-keygen -R`
 on the edges' `known_hosts` file), and `just infra-destroy sto2/edge` drops both edges' keys. The
-new ones are recorded the way the first build's were: their fingerprints are shown and `yes` is
-typed. The rollout does it once the new instance answers on SSH, before the edge's check, and stops
-at once when the keys are not accepted; after `just infra-apply sto2/edge` the next
+new ones are recorded the way the first build's were, from the instance's console
+([SSH and host keys](#ssh-and-host-keys)): with no prompt when every key the address offers is one
+its instance printed, refused when one is not, and shown for the operator's `yes` only when the
+console holds no fingerprints by the end of the wait. The rollout does it once the new instance
+answers on SSH, before the edge's check, reading the console within `EDGE_ROLLOUT_WAIT`, and stops
+at once when a key is refused or not accepted; after `just infra-apply sto2/edge` the next
 `just edge-check` does. An edge whose part of the plan does not create its instance keeps its
 recorded keys.
 
@@ -678,13 +681,17 @@ host's are, it prints pass, FAIL or skip for each edge:
 - The SSH daemon runs with the settings the first boot wrote
   ([SSH and host keys](#ssh-and-host-keys)): each setting of `sshd.conf` is compared, whole, with
   what the daemon reports for a connection of the user the check connects as,
-  `sudo -n sshd -T -C user=<EDGE_SSH_USER>,host=operator.example.org,addr=198.51.100.1`, and a FAIL
-  names the settings that differ, never their values. `-C` makes `sshd -T` apply the `Match` blocks
-  that connection matches, so a `Match` on that user, or on a group the user is in, is in what is
-  compared. Its source address and host name are of the ranges kept for documentation (RFC 5737,
-  RFC 2606): a `Match` on an address, a host name, or a local address or port is matched against
-  those, not against the operator's own connection, and what it changes for that connection is not
-  checked.
+  `sudo -n sshd -T -C user=<EDGE_SSH_USER>,host=operator.example.org,addr=198.51.100.1,laddr=203.0.113.1,lport=22`,
+  and a FAIL names the settings that differ, never their values. `-C` makes `sshd -T` apply the
+  `Match` blocks that connection matches, so a `Match` on that user, or on a group the user is in,
+  is in what is compared, as is a `Match LocalPort 22`: the port is the one the security group
+  admits. Without a local port and address `sshd -T -C` refuses a configuration with a `Match` on
+  either ([`sshd(8)`](https://man.openbsd.org/sshd#C), the daemon's `'Match LocalPort' in
+  configuration but 'lport' not in connection test specification`), and the check would fail on
+  it. The source address, host name and local address are of the ranges kept for documentation
+  (RFC 5737, RFC 2606): a `Match` on an address or a host name is matched against those, a `Match
+  LocalAddress` is matched against `203.0.113.1`, not the edge's own address, and what such a block
+  changes for the operator's own connection is not checked.
 
 The commands run on an edge are those of the ordinary user, whose `PATH` on Debian has no `sbin`
 directory (`ENV_PATH` in `login.defs`, and the `PATH` OpenSSH's server gives a command run over
@@ -746,9 +753,29 @@ prove only that the file's name sorts first, and the check's reading of a `Match
 daemon.
 
 `just edge-ssh-key` creates the key pair at `EDGE_SSH_KEY_FILE`, and the stack reads the public half
-from the file beside it. An edge's host key is recorded on first contact, in
-`~/.local/state/k8s-gitops/edge.known_hosts`, after the fingerprints it offers are shown and `yes`
-is typed, as for the CI host. A key pair reaches an instance only when it is created, so a new pair
+from the file beside it. A host's key, an edge's in `~/.local/state/k8s-gitops/edge.known_hosts` and
+the CI host's in `ci-host.known_hosts` beside it, is recorded on first contact, checked against the
+host's instance's console. The recipe scans the address once, hashed (`ssh-keyscan -H`), and reads
+the console, `openstack console log show --lines 1000`, by the instance identifier the stack's
+outputs give (`instances` for the edges, by number, `instance` for the CI host), for the `SHA256:`
+fingerprints in the latest complete block cloud-init's `keys_to_console` module printed between
+`BEGIN SSH HOST KEY FINGERPRINTS` and `END SSH HOST KEY FINGERPRINTS`. The console is the
+instance's word, read through the cloud's API with the operator's credentials and not through the
+address being verified; a cloud whose API lies is outside what this defends against. With F the
+fingerprints the scan offers and C the console's:
+
+- F is not empty and every member of F is in C: the scanned keys are recorded, with no prompt, and
+  one line says how many and that they match.
+- C is not empty and a member of F is not in C: refused. Nothing is recorded, no prompt is offered,
+  `--yes` and a typed `yes` change nothing, and the recipe exits non-zero. No flag overrides it.
+  [The runbook](runbooks/edge.md#a-new-hosts-ssh-key) lists what to check.
+- C is empty, or the client failed, the instance is not found or the block is not there yet: the
+  recipe tries again for `EDGE_ROLLOUT_WAIT` seconds in `just edge-rollout`, `HOST_CONSOLE_WAIT`,
+  30 by default, elsewhere, and then says why and asks as it always did: the fingerprints are
+  shown and the keys recorded only once `yes` is typed.
+
+What is compared is what is recorded: there is no second scan between. The CI host is covered the
+same way, by the `instance` output of the ci stack. A key pair reaches an instance only when it is created, so a new pair
 at `EDGE_SSH_KEY_FILE` replaces the stack's key pair and no instance, and the running edges admit
 the old key alone until `just edge-rollout --replace` replaces them
 ([runbooks/edge.md](runbooks/edge.md#replacing-one-edge)).
@@ -889,7 +916,10 @@ docker of `vector-check` has only the scan.
   `EDGE_SSH_USER`: the image's default user, `debian` when unset. `TF_VAR_public_allowed_cidrs`: the
   networks that may reach the edges' public ports, a JSON list of IPv4 CIDRs, unset for the operator
   allowlist. `EDGE_ROLLOUT_WAIT` and `EDGE_ROLLOUT_INTERVAL`: how long `just edge-rollout` waits for
-  an edge to pass its check, 900 seconds when unset, and how often it tries, 15.
+  an edge to pass its check, 900 seconds when unset, and how often it tries, 15; the wait also
+  bounds how long it reads a new instance's console for its host keys. `HOST_CONSOLE_WAIT`: how
+  long the other recipes that connect to an edge or the CI host for the first time wait for the
+  console to hold the fingerprints of its host keys before they ask, 30 seconds when unset.
 - `TF_VAR_security_group_rules`: the cluster stack's `security_group_rules`, `full` unless set to
   `reduced` ([The nodes' security group](#the-nodes-security-group)).
 - `TF_VAR_worker_first_host`: the host number of the first worker, 20 when unset, for the cluster

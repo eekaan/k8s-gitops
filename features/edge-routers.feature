@@ -108,6 +108,36 @@ Feature: Edge routers
     When just edge-check runs
     Then it fails naming that setting and no value, and passes when the settings are the tree's for the edge's user's connection
 
+  Scenario: The settings check asks the daemon as the configured user
+    Given EDGE_SSH_USER set to another name than the image's default, and Match blocks for that name and for the default, in the fake daemon and in this machine's own
+    When just edge-check runs
+    Then a Match block for the configured user fails the check and one for the default user does not
+
+  Scenario: A new edge whose offered keys are all on its console is trusted without a prompt
+    Given a replaced edge whose address offers two host keys, and whose instance printed both fingerprints on its console, read through the OpenStack client by the identifier the stack's outputs give
+    When just edge-rollout records its new host keys with nothing typed
+    Then both keys are recorded without a prompt, in one line that says how many and that they match the console, and the rollout goes on
+
+  Scenario: An address that offers a key its instance did not print is refused, and nothing is recorded
+    Given a replaced edge whose address offers a key its instance's console does not hold, once beside a key it does hold and once with none of its own, and a first connection of edge-check to such an edge
+    When just edge-rollout and just edge-check run with yes typed and --yes given
+    Then each exits non-zero saying the address offers a key its instance did not print, records nothing, offers no prompt, and the rollout touches no later edge
+
+  Scenario: A console that holds no fingerprints yet is waited for, and then the operator is asked
+    Given a replaced edge whose console holds the fingerprints for its second read, never, and cannot be read
+    When just edge-rollout records its new host keys
+    Then it reads again within the rollout's wait and records without a prompt once they are there; when they never are, or the console cannot be read, it says so and asks, and yes records the keys and anything else declines
+
+  Scenario: Only the fingerprints cloud-init printed at the latest boot count
+    Given console logs with one boot, two boots, a block cut off at its start and at its end, and fingerprint-shaped lines outside cloud-init's markers or not of the SHA256 form
+    When the console's fingerprints are read, and a rollout compares an address's keys with a console whose earlier boot's block holds them
+    Then only the complete block of the latest boot counts, and the rollout refuses the key
+
+  Scenario: What is compared with the console is what is recorded
+    Given an address whose second scan would answer with another key
+    When just edge-rollout records its new host keys
+    Then the address is scanned once, hashed, and the keys that were compared are the keys recorded
+
   Scenario: The Gateway's address is the service range's host at the number the plumbing stack is given
     Given the plumbing stack's service range and a Gateway host number other than the default
     When the plumbing stack is planned against mocked providers

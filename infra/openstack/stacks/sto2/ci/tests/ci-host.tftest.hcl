@@ -244,6 +244,12 @@ run "_the_ci_host_sits_at_a_fixed_address_outside_the_dhcp_pool_and_the_nodes_ad
     error_message = "The CI host must be lab-ci, of the flavor b.4c8gb, and the runner must be named after it."
   }
 
+  # scripts/lib/ci-host.sh names the console its SSH host key is checked against by this identifier.
+  assert {
+    condition     = output.instance.id == "ci-instance-fixture"
+    error_message = "The instance output must carry the CI host's instance id."
+  }
+
   assert {
     condition     = output.instance.key_pair == "lab-ci"
     error_message = "The CI host must take the operator's public key from its key pair, not from its user data."

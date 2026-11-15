@@ -7,6 +7,9 @@
 # alone cannot keep a fork's job off the host, so the host decides as well: the runner's job-started
 # hook, written from ci_host_admits below, fails every other job before any of its steps runs.
 
+# shellcheck source=scripts/lib/host-keys.sh
+. "$(dirname "${BASH_SOURCE[0]}")/host-keys.sh"
+
 # ci_host_admits: whether the job GitHub Actions' default variables describe may run on the CI host:
 # a job of this repository's CI workflow, .github/workflows/ci.yaml, for a push to main or a pull
 # request whose head is a branch of this repository. Says on stderr what it refuses. Reads the
@@ -55,13 +58,15 @@ EOF
 
 # ci_host_connect: once scripts/stack-env has been sourced with sto2/ci and the stack is locked and
 # initialised, reads the host from the stack's outputs and makes sure its SSH host key is recorded.
-# Sets ci_host_address, ci_host_runner_name, ci_host_runner_user and ci_host_cache. The address is
-# never printed.
+# Sets ci_host_address, ci_host_instance (empty when the outputs hold no instance identifier),
+# ci_host_runner_name, ci_host_runner_user and ci_host_cache. The address is never printed.
 ci_host_connect() {
   local outputs
   outputs=$(stack_tofu output -json) || return 1
   # tofu's JSON holds every output's value, sensitive ones included; only jq reads it.
   ci_host_address=$(jq -r '.address.value // "" | strings' <<< "$outputs")
+  ci_host_instance=$(jq -r '.instance.value.id // "" | strings' <<< "$outputs")
+  [[ $ci_host_instance =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]] || ci_host_instance=
   ci_host_runner_name=$(jq -r '.runner_name.value // "" | strings' <<< "$outputs")
   ci_host_runner_user=$(jq -r '.runner_user.value // "" | strings' <<< "$outputs")
   ci_host_cache=$(jq -r '.cache_mountpoint.value // "" | strings' <<< "$outputs")
@@ -75,39 +80,15 @@ ci_host_connect() {
   ci_host_trust
 }
 
-# ssh_host_trust ADDRESS KNOWN_HOSTS LABEL: when the host's key is not in KNOWN_HOSTS, shows the
-# fingerprints of the keys the host offers and records them only once yes is typed. Never trusts a
-# key on its own. LABEL names the host in what it prints, such as "CI host". Returns 2 when the keys
-# were not accepted, 1 when the host does not answer. Shared with scripts/lib/edge.sh.
-ssh_host_trust() {
-  local address=$1 known_hosts=$2 label=$3 scanned answer=
-  if [[ -s $known_hosts ]] && ssh-keygen -F "$address" -f "$known_hosts" > /dev/null 2>&1; then
-    return 0
-  fi
-  # Hashed, so the file does not list the address.
-  scanned=$(ssh-keyscan -H -T 15 "$address" 2> /dev/null) || scanned=
-  if [[ -z $scanned ]]; then
-    infra_error "the $label does not answer on SSH; it may still be booting"
+# ci_host_trust: ssh_host_trust for the CI host, reading its instance's console for up to
+# HOST_CONSOLE_WAIT seconds, 30 when unset.
+ci_host_trust() {
+  local wait=${HOST_CONSOLE_WAIT:-30}
+  if [[ ! $wait =~ ^[0-9]+$ ]]; then
+    infra_error "HOST_CONSOLE_WAIT is a whole number of seconds"
     return 1
   fi
-  echo "The $label's SSH host key is not recorded. The keys it offers:"
-  ssh-keygen -l -f /dev/stdin <<< "$scanned" | awk '{ print "  " $2 " " $NF }'
-  echo "Compare them with the fingerprints the host printed on its console when it first booted."
-  printf 'Type yes to record them and connect: ' >&2
-  read -r answer || true
-  if [[ $answer != yes ]]; then
-    infra_error "the host key was not accepted; nothing was done on the host"
-    return 2
-  fi
-  mkdir -p "${known_hosts%/*}"
-  chmod 700 "${known_hosts%/*}"
-  (umask 077 && printf '%s\n' "$scanned" >> "$known_hosts")
-  echo "recorded the $label's key in ${known_hosts/#"$HOME"/\~}"
-}
-
-# ci_host_trust: ssh_host_trust for the CI host.
-ci_host_trust() {
-  ssh_host_trust "$ci_host_address" "$ci_host_known_hosts" "CI host"
+  ssh_host_trust "$ci_host_address" "$ci_host_known_hosts" "CI host" "$ci_host_instance" "$wait"
 }
 
 # ci_host_ssh COMMAND: runs COMMAND, one string, on the host as CI_HOST_SSH_USER, with strict host key

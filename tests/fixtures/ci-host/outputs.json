@@ -9,6 +9,14 @@
     "type": "string",
     "value": "/var/lib/dagger"
   },
+  "instance": {
+    "sensitive": true,
+    "type": "object",
+    "value": {
+      "id": "5b9d7e21-6c34-4f08-a1d2-93e0c4b7f158",
+      "name": "lab-ci"
+    }
+  },
   "runner_name": {
     "sensitive": false,
     "type": "string",

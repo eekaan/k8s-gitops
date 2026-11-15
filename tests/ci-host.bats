@@ -30,6 +30,7 @@ setup() {
 
   KNOWN_HOSTS="$HOME_DIR/.local/state/k8s-gitops/ci-host.known_hosts"
   ADDRESS=$(jq -r .address.value "$FIXTURES/outputs.json")
+  INSTANCE=$(jq -r .instance.value.id "$FIXTURES/outputs.json")
   HOST_KEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureHostKeyOfTheCiHostFixtureFixture'
   TOKEN=MARKERREGISTRATIONTOKEN0123456789
   REMOVE_TOKEN=MARKERREMOVETOKEN0123456789
@@ -74,18 +75,29 @@ EOF
 printf '%s\n' "ssh-keygen \$*" >> "$RECORD/argv"
 case \$1 in
   -F) [[ -s \$4 ]] ;;
-  -l) while read -r line; do [[ -z \$line ]] || echo "256 SHA256:FixtureFingerprintOfTheCiHost0123456789abcdefgh \${line%% *} (ED25519)"; done < "\$3" ;;
+  -l) while read -r line; do [[ -z \$line ]] || echo "256 SHA256:FixtureFingerprintOfTheCiHost0123456789abcd \${line%% *} (ED25519)"; done < "\$3" ;;
   *) echo "unexpected call: ssh-keygen \$*" >&2; exit 1 ;;
 esac
 EOF
   # Nothing else may reach a host, a cloud or a container runtime from this machine.
-  for tool in scp sftp openstack curl docker; do
+  for tool in scp sftp curl docker; do
     fake "$tool" <<EOF
 printf '%s\n' "$tool \$*" >> "$RECORD/argv"
 echo "unexpected call: $tool \$*" >&2
 exit 1
 EOF
   done
+  # The OpenStack client: its version, and an instance's console log, from the file console-ID in
+  # the record's directory; an instance without a file is not found, as the client says it.
+  fake openstack <<EOF
+printf '%s\n' "openstack \$*" >> "$RECORD/argv"
+if [[ \$* == --version ]]; then echo "openstack 7.1.0"; exit 0; fi
+if [[ "\$1 \$2 \$3 \$4" == 'console log show --lines' && \$# -eq 6 && -f "$RECORD/console-\$6" ]]; then
+  exec cat "$RECORD/console-\$6"
+fi
+echo "No server with a name or ID of '\${*: -1}' exists." >&2
+exit 1
+EOF
   fake_host
 
   ENVIRONMENT=(
@@ -98,6 +110,7 @@ EOF
     CI_HOST_IMAGE=fixture-image
     'CI_HOST_SSH_PUBLIC_KEY=ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOperatorKey fixture'
     CI_HOST_SSH_USER=fixture-admin
+    HOST_CONSOLE_WAIT=0
     # Secrets of the other stacks and the cluster, which neither gh nor ssh may be given.
     OS_APPLICATION_CREDENTIAL_SECRET=marker-credential
     TF_ENCRYPTION=marker-encryption
@@ -450,7 +463,7 @@ absent() {
   recipe ci-host-setup <<< no
 
   [ "$status" -ne 0 ]
-  [[ $output == *"SHA256:FixtureFingerprintOfTheCiHost0123456789abcdefgh"* ]]
+  [[ $output == *"SHA256:FixtureFingerprintOfTheCiHost0123456789abcd"* ]]
   [[ $output == *"not accepted"* ]]
   [[ $output != *"$ADDRESS"* ]]
   [ ! -s "$KNOWN_HOSTS" ]
@@ -490,6 +503,47 @@ absent() {
   [ "$status" -ne 0 ]
   [[ $output == *"Host key verification failed"* ]]
   [ ! -s "$RECORD/host" ]
+}
+
+# console FINGERPRINT: the CI host's console, as cloud-init leaves it after the first boot, holding
+# FINGERPRINT.
+console() {
+  {
+    echo "Cloud-init v. 22.4.2 running 'modules:final' at Mon, 01 Jan 2024 00:00:09 +0000. Up 9.9 seconds."
+    echo '-----BEGIN SSH HOST KEY FINGERPRINTS-----'
+    echo "256 $1 root@lab-ci (ED25519)"
+    echo '-----END SSH HOST KEY FINGERPRINTS-----'
+  } > "$RECORD/console-$INSTANCE"
+}
+
+@test "A CI host whose offered keys are on its console is trusted without a prompt, and one that offers another is refused" {
+  # The host offers the key whose fingerprint the fake ssh-keygen prints, and its instance printed it.
+  console SHA256:FixtureFingerprintOfTheCiHost0123456789abcd
+
+  recipe ci-host-setup < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output != *"Type yes"* ]]
+  [[ $output == *"CI host: the 1 SSH host key it offers matches its instance's console; recorded in "* ]]
+  grep -qF -- "${HOST_KEY#* }" "$KNOWN_HOSTS"
+  grep -qx "openstack console log show --lines 1000 $INSTANCE" "$RECORD/argv"
+  [[ $output != *"$ADDRESS"* ]]
+
+  # Its instance printed another key's fingerprint: refused, whatever is typed, and the host is
+  # never connected to.
+  rm "$KNOWN_HOSTS"
+  console SHA256:SomeoneElsesFingerprint0123456789abcdefghij
+  : > "$RECORD/argv"
+
+  recipe ci-host-setup <<< yes
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"offers a key its instance did not print"* ]]
+  [[ $output != *"Type yes"* ]]
+  [[ $output != *"$ADDRESS"* ]]
+  [ ! -s "$KNOWN_HOSTS" ]
+  run grep -c '^ssh ' "$RECORD/argv"
+  [ "$output" = 0 ]
 }
 
 @test "setup installs nothing from a runner package whose checksum is not its pin" {

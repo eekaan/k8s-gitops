@@ -182,8 +182,11 @@ skip() { say skip "$1" "$2"; }
 # starts with, and the sections after it are asked all the same.
 # The SSH daemon's settings are those of a connection of the user the check connects as, edge_ssh's,
 # so a Match block for that user is in them: sshd -T applies the Match blocks a connection described
-# with -C matches. Its source address and host name are of the ranges kept for documentation
-# (RFC 5737, RFC 2606), which a Match on the operator's own address or name does not match.
+# with -C matches. Its source address, host name and local address are of the ranges kept for
+# documentation (RFC 5737, RFC 2606), which a Match on the operator's own address or name, or on the
+# edge's own address, does not match. The daemon refuses a configuration with a Match on the local
+# address or port when -C gives none, so the connection has a local port, 22, which a Match
+# LocalPort 22 matches, as the edge's connections do.
 printf -v remote 'edge_user=%q\n' "${EDGE_SSH_USER:-debian}"
 IFS= read -r -d '' asked << 'REMOTE' || true
 ask() {
@@ -218,7 +221,7 @@ ask forward sudo -n nft list chain inet edge forward
 ask default ip -4 -o route show default
 ask forwarding cat /proc/sys/net/ipv4/ip_forward
 ask upgrades apt-config dump APT::Periodic::Unattended-Upgrade
-ask sshd sudo -n sshd -T -C "user=$edge_user,host=operator.example.org,addr=198.51.100.1"
+ask sshd sudo -n sshd -T -C "user=$edge_user,host=operator.example.org,addr=198.51.100.1,laddr=203.0.113.1,lport=22"
 REMOTE
 remote+=$asked
 
@@ -246,8 +249,8 @@ check_edge() {
   section_upgrades=$(section upgrades)
   # The daemon prints a keyword in lower case or in its own case, by version.
   section_sshd=$(section sshd | awk '{ $1 = tolower($1) } 1')
-  # unread NAME: whether the edge did not answer section NAME, as its command was not found or failed,
-  # or the report has no such section.
+  # unread NAME: whether the edge did not answer section NAME, as its command was not found or
+  # failed, or the report has no such section.
   unread() {
     grep -qx "== $1" <<< "$report" || return 0
     [[ $(section "$1") == '!! '* ]]
@@ -397,7 +400,8 @@ check_edge() {
   else
     fail "$edge" "unattended upgrades are on, and would upgrade and restart FRR in place"
   fi
-  # Each setting the first boot writes, compared as the daemon reports it, and named, never its value.
+  # Each setting the first boot writes, compared as the daemon reports it, and named, never its
+  # value.
   if unread sshd; then
     unreadable sshd "the SSH daemon's settings"
   else

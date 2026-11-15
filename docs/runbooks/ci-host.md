@@ -55,12 +55,20 @@ The owner sets these once, in the repository's settings on GitHub:
 
 `just ci-host-setup`, once the host has booted. It waits for the host's first boot to finish.
 
-The first time, the host's SSH key is not recorded. The recipe prints the fingerprints of the keys
-the host offers. Compare them with the ones the host printed at its first boot, between
-`BEGIN SSH HOST KEY FINGERPRINTS` and `END SSH HOST KEY FINGERPRINTS` in the instance's console
-log in the cloud's dashboard, and type `yes` only if they match. The key is then recorded in
-`~/.local/state/k8s-gitops/ci-host.known_hosts`, and every later connection is refused if the host
-offers another.
+The first time, the host's SSH key is not recorded. The recipe scans the host once for the keys it
+offers and reads the instance's console through the OpenStack client, by the instance identifier
+in the stack's `instance` output, for the fingerprints cloud-init printed between
+`BEGIN SSH HOST KEY FINGERPRINTS` and `END SSH HOST KEY FINGERPRINTS` at its first boot. It waits
+for them for `HOST_CONSOLE_WAIT` seconds, 30 by default, as the first boot prints them late. When
+every key the host offers is one the instance printed, the keys are recorded in
+`~/.local/state/k8s-gitops/ci-host.known_hosts` without a prompt, and every later connection is
+refused if the host offers another. When one is not, nothing is recorded, nothing overrides that,
+and the recipe stops: check that the floating address is still associated with this instance and
+that something else did not rebuild the instance, and otherwise treat it as someone else
+answering. When the console holds no fingerprints or cannot be read, the recipe says so, prints the
+fingerprints the host offers and asks: compare them with the console's by eye, and type `yes` only
+if they match. The details, and what the console is trusted for, are in
+[the edge runbook](edge.md#a-new-hosts-ssh-key).
 
 It then prints a line per step, `ci-host: started the pinned engine`, `installed the runner`,
 `wrote the job-started hook`, `wrote the runner's service`, registers the runner with a token from
@@ -91,8 +99,8 @@ Push to a branch of this repository and open a pull request, or merge one. In th
 - **A new instance**: changing the image or the user data replaces the instance at the next
   `just infra-apply sto2/ci`. The cache volume stays. The new instance has a new SSH key, so the
   recorded one no longer matches and setup is refused: remove
-  `~/.local/state/k8s-gitops/ci-host.known_hosts`, then run `just ci-host-setup` and compare the new
-  fingerprints. Registering under the same name replaces the old runner.
+  `~/.local/state/k8s-gitops/ci-host.known_hosts`, then run `just ci-host-setup`, which records the
+  new keys when they are on the new instance's console. Registering under the same name replaces the old runner.
 
 ## Removing it
 
