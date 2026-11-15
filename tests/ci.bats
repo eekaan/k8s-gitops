@@ -77,7 +77,7 @@ runs_of() {
   checkout
   mapfile -t groups < <(groups_of "$WORK/justfile")
   [ "${#groups[@]}" -gt 1 ]
-  tests=$(bats --count --filter-tags '!hermetic' "$WORK/tests")
+  tests=$(bats --count --filter-tags '!hermetic,!namespace' "$WORK/tests")
 
   run_ci
 

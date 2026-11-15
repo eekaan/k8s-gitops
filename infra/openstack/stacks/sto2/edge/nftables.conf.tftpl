@@ -5,9 +5,14 @@ flush ruleset
 # translation below moves their destination to the Gateway first, so they are forwarded, and only to
 # it. The networks the public ports and SSH admit are the security group's to hold; these rules take
 # those by port only, as they are in the user data, which holds no operator allowlist.
-# A translated connection is forwarded only when its route's next hop is a worker's address. With
-# no worker's route to the Gateway's address, before FRR has learned one or once FRR stops and its
-# routes go, it is dropped here and does not follow the default route to the cloud's router.
+# A translated connection's packets toward the Gateway are forwarded only when their route's next
+# hop is a worker's address: the first rule of the forward chain, ahead of what belongs to a
+# connection, holds it for an established connection as for a new one. With no worker's route to
+# the Gateway's address, before FRR has learned one or once FRR stops and zebra takes its routes out
+# of the kernel, they are dropped here and do not follow the default route to the cloud's router.
+# Replies come from the Gateway to the edge's own address, are translated back to the client's, and
+# leave by the default route, the one way to the client, whatever FRR does. Nothing of IPv6 is
+# forwarded: the kernel's IPv6 forwarding stays off, and no rule admits it.
 table inet edge {
   chain input {
     type filter hook input priority filter; policy drop;
@@ -22,6 +27,7 @@ table inet edge {
 
   chain forward {
     type filter hook forward priority filter; policy drop;
+    ip daddr ${gateway} ct direction original ct status dnat rt ip nexthop != { ${workers} } drop
     ct state established,related accept
     ct state invalid drop
     ip daddr ${gateway} tcp dport { ${ports} } ct state new ct status dnat rt ip nexthop { ${workers} } accept

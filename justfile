@@ -67,7 +67,7 @@ check-conflict-markers:
 scenarios-check:
     scripts/scenarios-check
 
-# Run the bats tests, except those tagged hermetic: they run just ci, which needs a container runtime. A shard such as 2/3 runs the second of three parts of the test files, split by their number of tests
+# Run the bats tests, except those tagged hermetic, which run just ci and need a container runtime, and those tagged namespace, which need unprivileged user namespaces (just edge-forward-check). A shard such as 2/3 runs the second of three parts of the test files, split by their number of tests
 [script]
 test shard='1/1':
     set -o pipefail
@@ -99,7 +99,7 @@ test shard='1/1':
     if ((cpus > 1)) && { command -v flock || command -v shlock; } > /dev/null; then
       jobs=(--jobs "$cpus" --no-parallelize-across-files)
     fi
-    bats "${jobs[@]}" --filter-tags '!hermetic' "${files[@]}"
+    bats "${jobs[@]}" --filter-tags '!hermetic,!namespace' "${files[@]}"
 
 # Run the bats tests that run just ci
 test-hermetic:
@@ -216,6 +216,10 @@ edge-policy-render dir:
 # Check what the edge routing policy's proof printed, a file: pass or FAIL per item
 edge-policy-assert file:
     scripts/edge-policy-assert {{ quote(file) }}
+
+# Prove what an edge forwards: its rendered rules loaded with nft into network namespaces of a user namespace, beside a client, a worker and the cloud's router, where a translated connection, new or established, leaves only through a worker's route; needs unprivileged user namespaces, nft and socat, which the CI containers do not allow, so it runs on a developer's machine and skips, saying why, where they are missing
+edge-forward-check:
+    bats --filter-tags namespace tests/edge-forward.bats
 
 # Publish kubernetes/ as the signed artifact Flux follows, and move its main tag; runs only in the publish workflow
 publish:

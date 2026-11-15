@@ -5,6 +5,14 @@ Feature: Edge routers
   its own public address to the cluster's public Gateway address and back. Either edge can be
   lost or rebuilt while the other keeps serving.
 
+  One scenario needs unprivileged user namespaces with networks of their own, which the CI
+  containers refuse: "A translated connection leaves an edge only through a worker's route, new or
+  established". Its proof loads the edge's rendered rules with nft into network namespaces beside a
+  client, a worker and the cloud's router, is tagged namespace and runs with just
+  edge-forward-check on a developer's machine, where it skips, saying why, when the host lacks what
+  it needs; just ci and CI run every other proof, and the stack's tests compare the forward chain's
+  rules as text.
+
   Scenario: The stack makes two edges at the reserved addresses, apart from each other, each with a public address, and plans without the cluster stack
     Given the plumbing stack's outputs and no state of the cluster stack
     When the edge stack is planned against mocked providers
@@ -34,6 +42,11 @@ Feature: Edge routers
     Given the public ports and the Gateway's address
     When an edge's nftables rules are rendered
     Then connections to the edge's own address on those ports are translated to the Gateway's address, from the edge's own address, the forward chain drops everything else, and the input chain admits only SSH, BGP from the workers' addresses and the ICMP path MTU needs
+
+  Scenario: A translated connection leaves an edge only through a worker's route, new or established
+    Given the edge's rendered rules, a client, a worker that holds the Gateway's address and announces it, and the cloud's router as the default route
+    When a connection is established through the worker, and the worker's route then goes, as when FRR stops, and new connections are opened with the default route only and with no route at all
+    Then the established connection's packets and the new connections reach neither the router nor anything else, and with the worker's route back a new connection is answered
 
   Scenario: The public ports admit only the operator allowlist by default, and SSH admits only the operator allowlist
     Given an operator allowlist and no public source networks set

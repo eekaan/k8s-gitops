@@ -353,11 +353,12 @@ run "traffic_to_an_edges_public_ports_is_forwarded_to_the_gateways_address_and_n
   assert {
     condition = regex("(?s)  chain forward \\{\\n(.*?)  \\}\\n", output.config["1"].nftables_conf)[0] == join("", [
       "    type filter hook forward priority filter; policy drop;\n",
+      "    ip daddr 203.0.113.21 ct direction original ct status dnat rt ip nexthop != { 192.0.2.20/30, 192.0.2.24/29, 192.0.2.32/27, 192.0.2.64/27, 192.0.2.96/30 } drop\n",
       "    ct state established,related accept\n",
       "    ct state invalid drop\n",
       "    ip daddr 203.0.113.21 tcp dport { 80, 443 } ct state new ct status dnat rt ip nexthop { 192.0.2.20/30, 192.0.2.24/29, 192.0.2.32/27, 192.0.2.64/27, 192.0.2.96/30 } accept\n",
     ])
-    error_message = "The forward chain must drop by default and admit only new translated connections to the Gateway on the public ports whose route goes through a worker, and what belongs to them."
+    error_message = "The forward chain must drop by default, drop first every packet of a translated connection toward the Gateway whose route does not go through a worker, and admit only new translated connections to the Gateway on the public ports through a worker, and what belongs to them."
   }
 
   assert {

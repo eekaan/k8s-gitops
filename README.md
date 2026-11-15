@@ -42,9 +42,10 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
 - The groups are the dependencies of the `checks` recipe, and a group's checks are its own
   dependencies; a new check goes into exactly one group, and then runs in `just checks`, in
   `just ci` and in CI.
-- `just test` runs the bats tests but the hermetic ones, the tests of each file side by side (a file
-  whose tests share state runs them one at a time, and says why); `just test 2/3` runs the second
-  of three parts of the test files, which are split by their number of tests.
+- `just test` runs the bats tests but the hermetic ones and the namespace one, the tests of each file
+  side by side (a file whose tests share state runs them one at a time, and says why);
+  `just test 2/3` runs the second of three parts of the test files, which are split by their number
+  of tests.
 - `just ci` runs the same groups through the Dagger module in `.dagger/modules/ci`, side by side,
   each in containers of its own: Renovate's validator in its own image, Vector in the log
   collector's image, the speakers of the edge routers' routing policy in FRR's image, every other
@@ -62,7 +63,9 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
   each showing its own result on the pull request, the render job renders the change for its
   comment (`just ci-render`), and the job named `ci`, the required check on `main`, passes only when
   every one of them succeeded (`just ci-passed`).
-- `just test-hermetic` runs the bats tests that drive `just ci` itself.
+- `just test-hermetic` runs the bats tests that drive `just ci` itself, and `just edge-forward-check`
+  the one that loads the edge routers' rules into network namespaces of a user namespace, which
+  the CI containers refuse; both run on a developer's machine.
 - `just render <out>` renders what Flux would apply, charts expanded, one file per object, and
   `just render-diff <base> <head>` prints what changes between two renders, as the comment every
   pull request gets ([docs/kubernetes.md](docs/kubernetes.md#the-render-diff)).
@@ -81,6 +84,8 @@ that publish the cluster's Services have recipes of their own, each described in
   checking each before the next; `--replace` replaces them when only the image is new, and `--edge`
   one named edge.
 - `just edge-policy-check` proves the edge routers' routing policy with real BGP speakers.
+- `just edge-forward-check` proves what an edge router forwards, in network namespaces, on a
+  developer's machine.
 
 `docs/kubernetes.md`
 covers the tree Flux reconciles and how the publish workflow pushes, signs and verifies it before
