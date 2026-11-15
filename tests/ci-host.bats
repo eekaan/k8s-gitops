@@ -571,7 +571,7 @@ console() {
   [ "$output" = 0 ]
 }
 
-@test "HOST_CONSOLE_WAIT is read in base 10 for the CI host, and refused, named, before anything runs when it is not a whole number of at most 9 digits" {
+@test "the CI host's HOST_CONSOLE_WAIT is read in base 10, and refused, named, before anything runs when it is not a whole number of at most 9 digits" {
   local value
   # setup_with VALUE: ci-host-setup as recipe runs it, with HOST_CONSOLE_WAIT=VALUE.
   setup_with() {
