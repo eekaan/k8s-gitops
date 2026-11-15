@@ -35,6 +35,8 @@
 #
 # Usage: scripts/kubernetes-validate [DIR]   (DIR holds kubernetes/ and versions.yaml; defaults to this repository)
 set -euo pipefail
+# Text is matched, sorted and shown byte by byte, whatever the caller's locale.
+export LC_ALL=C
 shopt -s nullglob
 
 # shellcheck source=scripts/lib/tools.sh

@@ -350,6 +350,20 @@ EOF
   [[ $output == *"kubernetes-validate: passed"* ]]
 }
 
+@test "the check runs kubeconform in the C locale, whatever the caller's" {
+  local bin="$BATS_TEST_TMPDIR/locale-bin" log="$BATS_TEST_TMPDIR/locale.log" real
+  mkdir -p "$bin"
+  real="$(type -P kubeconform)"
+  # shellcheck disable=SC2016 # ${LC_ALL:-unset} is the stand-in's own.
+  printf '#!/usr/bin/env bash\necho "${LC_ALL:-unset}" >>%q\nexec %q "$@"\n' "$log" "$real" >"$bin/kubeconform"
+  chmod +x "$bin/kubeconform"
+  run env LC_ALL=C.UTF-8 PATH="$bin:$PATH" "$VALIDATE" "$TREE"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ -s "$log" ]
+  [ "$(grep -cvx C "$log")" -eq 0 ]
+}
+
 # schemas_ref_manager: the custom manager of .renovate/managers.json5 that reads a git ref from
 # versions.yaml, as JSON (the file is JSON5 with comments, which YAML reads once they are dropped).
 schemas_ref_manager() {

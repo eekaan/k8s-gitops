@@ -12,12 +12,14 @@
 # a '|' in it read as '?'. Before it reads or builds anything else, the check refuses a tree from
 # which a build would read outside kubernetes/, or that a tool would read otherwise than the check,
 # and then builds nothing (scripts/lib/tree-paths.sh): a link that resolves outside it; a
-# kustomization that is not one mapping, that names a remote source, an absolute path or one that
-# leaves the tree, or that holds a key that is not exactly a field kustomize reads there; a root
-# whose spec.path is not a directory of the tree as it resolves; a ks.yaml the check builds that
-# holds a key flux build would read as a field it is not spelled as, or whose spec.components names
-# a path outside the tree. An application's spec.path is compared with the one its directory
-# fixes, and what is built is that directory.
+# kustomization that is not one mapping, that names an entry that is not a plain relative path of
+# the tree, or that holds a key that is not exactly a field kustomize reads there; a root whose
+# spec.path is not a plain path of a directory of the tree as it resolves; a ks.yaml the check
+# builds that holds a key flux build would read as a field it is not spelled as, or whose
+# spec.components names anything but a plain path of the tree. Its builds run where nothing can be
+# fetched: git is a stand-in that refuses and every proxy a closed port of the loopback. An
+# application's spec.path is compared with the one its directory fixes, and what is built is that
+# directory.
 #
 # KUBERNETES_CHECK_BUILT, an existing empty directory, receives what each Flux build yielded, for
 # scripts/kubernetes-validate: N.yaml, and in its file builds the record N.yaml, LABEL and APP_DIR,
@@ -26,6 +28,8 @@
 #
 # Usage: scripts/kubernetes-check [DIR]   (DIR holds kubernetes/; defaults to this repository)
 set -euo pipefail
+# Text is matched, sorted and shown byte by byte, whatever the caller's locale.
+export LC_ALL=C
 shopt -s nullglob
 
 # shellcheck source=scripts/lib/tree-paths.sh
@@ -51,6 +55,10 @@ for tool in kustomize yq jq flux; do
 done
 [[ -d kubernetes && ! -L kubernetes ]] || { echo "kubernetes-check: no kubernetes/ directory in $PWD" >&2; exit 1; }
 tree_root="$(realpath -e kubernetes)"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+# kustomize and flux build run where nothing can be fetched.
+tree_paths_offline "$tmp/offline"
 
 failures=0
 fail() {
@@ -286,7 +294,7 @@ for dir in kubernetes/clusters/*/; do
   fi
   # A build that fails is reported with the other kustomize builds below, and a ks.yaml that
   # cannot be read with the ks.yaml rules above.
-  built="$(kustomize build --load-restrictor LoadRestrictionsNone "$dir" 2>/dev/null)" || continue
+  built="$(offline kustomize build --load-restrictor LoadRestrictionsNone "$dir" 2>/dev/null)" || continue
   # Compared by API group, so a new Kustomization API version still counts.
   if ! found="$(yq -N '(.apiVersion | sub("/[^/]*$"; "")) + " " + .kind + "/" + .metadata.name' <<<"$built" 2>&1)"; then
     fail "$dir: cannot read what kustomize build yields: $found"
@@ -309,7 +317,7 @@ build_list="$(find kubernetes -name kustomization.yaml -exec dirname {} \; | sor
 while IFS= read -r dir; do
   [[ -n $dir ]] || continue
   kustomize_builds=$((kustomize_builds + 1))
-  if err="$(kustomize build --load-restrictor LoadRestrictionsNone "$dir" 2>&1 >/dev/null)"; then
+  if err="$(offline kustomize build --load-restrictor LoadRestrictionsNone "$dir" 2>&1 >/dev/null)"; then
     echo "built $dir"
   else
     broken[$dir]=1
@@ -321,8 +329,6 @@ done <<<"$build_list"
 # it leaves comments, $${VAR} and objects marked kustomize.toolkit.fluxcd.io/substitute: disabled
 # alone. The example key lists stand in for cluster-config and cluster-secrets, which --dry-run
 # cannot read; an application's own postBuild.substitute is added to them.
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
 values="$tmp/values.yaml"
 examples=(kubernetes/clusters/*/cluster-config.example.yaml kubernetes/clusters/*/cluster-secrets.example.yaml)
 echo '{}' >"$values"
@@ -373,7 +379,7 @@ flux_build() {
     return 0
   fi
   flux_builds=$((flux_builds + 1))
-  if err="$(flux build kustomization "$name" --path "$path" --kustomization-file "$tmp/ks.yaml" \
+  if err="$(offline flux build kustomization "$name" --path "$path" --kustomization-file "$tmp/ks.yaml" \
     --dry-run --strict-substitute --in-memory-build 2>&1 >"$tmp/built/$flux_builds.yaml")"; then
     echo "built $label"
     last_built="$tmp/built/$flux_builds.yaml"

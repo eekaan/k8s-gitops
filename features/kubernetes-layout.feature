@@ -46,6 +46,16 @@ Feature: Kubernetes tree layout
     When the checks read a document that sets each by its own name, naming a file outside the tree where the field names a file
     Then each field that names a file is refused for it, each field the checks refuse is refused, every other is accepted, a key a kustomization's type does not have is refused, and each list is that of the pinned tools' versions and of the checks
 
+  Scenario: A path that is not a plain relative path of the tree is refused, under every locale
+    Given kustomizations, a Flux Kustomization and a cluster's root that name, in every field that names a file, entries holding a letter outside ASCII, a control character, a tab or a space, an empty segment, a leading slash, dash or tilde, or an ASCII character other than letters, digits, ".", "_", "-" and "/"
+    When the checks read them in the C locale and in C.UTF-8
+    Then each entry is refused, naming the file, the field and the entry, each byte outside printable ASCII shown as \xHH
+
+  Scenario: The check's builds reach no network, whatever a kustomization names
+    Given a copy of the checks without the guard, and a kustomization that names a repository on github.com or a file over https
+    When the kubernetes check and the render run on each
+    Then each fails without running the caller's git or looking up a host: kustomize runs the check's own git, which refuses, and sends a request for a file to a closed port of the loopback
+
   Scenario: A key that a tool reads under another spelling is refused, and nothing it names is read
     Given trees in which a kustomization, an application's or a root's Flux Kustomization, a HelmRelease, the source it names or a FluxInstance holds, at each position a tool decodes, each field's name in other letter cases and with the characters encoding/json folds into s and k, naming a file outside the tree
     When the kubernetes check, the render and the Pod Security check run on each that they read

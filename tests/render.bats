@@ -69,6 +69,11 @@ render() {
   run just --justfile "$REPO/justfile" render "$BATS_TEST_TMPDIR/$1.out" "$BATS_TEST_TMPDIR/$1"
 }
 
+# render_locale NAME: just render for the tree NAME, as render does, in the locale LOCALE.
+render_locale() {
+  run env LC_ALL="${LOCALE:-C}" just --justfile "$REPO/justfile" render "$BATS_TEST_TMPDIR/$1.out" "$BATS_TEST_TMPDIR/$1"
+}
+
 # render_direct NAME: the same without just, which puts the pinned tools ahead of the stand-in for
 # helm's pull from a repository on PATH.
 render_direct() {
@@ -134,13 +139,117 @@ outside_marker() {
 # anything it wrote.
 reads_outside() {
   rm -f "$PULL_LOG"
-  render "$1"
+  render_locale "$1"
   echo "$output"
   [ "$status" -ne 0 ]
   grep -F -- "$2" <<<"$output" | grep -qF -- "$3" || { echo "no line names $2 and $3"; return 1; }
   [[ $output != *"$MARKER"* ]]
   [ -z "$(find "$BATS_TEST_TMPDIR/$1.out" -mindepth 1 -print -quit 2>/dev/null)" ]
   [ ! -e "$PULL_LOG" ]
+}
+
+# shown TEXT: TEXT as the render shows a value of the tree: each byte that is not printable ASCII
+# as \xHH, read from od, whatever the locale.
+shown() {
+  local LC_ALL=C byte char out=""
+  if [[ $1 != *[!\ -~]* ]]; then
+    printf '%s' "$1"
+    return
+  fi
+  for byte in $(printf '%s' "$1" | od -An -v -tx1); do
+    if ((16#$byte >= 32 && 16#$byte < 127)); then
+      printf -v char '%b' "\\x$byte"
+      out+=$char
+    else
+      out+="\\x$byte"
+    fi
+  done
+  printf '%s' "$out"
+}
+
+# outside_cases: the cases of the scenario of a tree from which a build would read outside it, in
+# the locale LOCALE.
+outside_cases() {
+  rm -rf "${BATS_TEST_TMPDIR:?}"/*
+  outside_marker
+  local kfile=kubernetes/apps/base/web/greeter/app/kustomization.yaml expression entry n=0
+  # A generator's file, a resource, a patch and an env file, each by an absolute path and by a path
+  # that climbs out of the tree.
+  for expression in '.configMapGenerator += [{"name": "leak", "files": ["leak=" + strenv(P)]}]' \
+    '.resources += [strenv(P)]' '.patches += [{"path": strenv(P)}]' \
+    '.configMapGenerator += [{"name": "leak", "envs": [strenv(P)]}]'; do
+    for entry in "$OUTSIDE" "$CLIMB"; do
+      greeter_app "outside-$((++n))"
+      P="$entry" yq -i "$expression" "$GREETER/kustomization.yaml"
+      reads_outside "outside-$n" "$kfile" "$entry"
+    done
+  done
+
+  # A generator's file that is a link in the tree to the file outside: the link and the entry are
+  # each refused.
+  greeter_app linked-file
+  ln -s "$OUTSIDE" "$GREETER/linked.yaml"
+  yq -i '.configMapGenerator += [{"name": "leak", "files": ["leak=linked.yaml"]}]' "$GREETER/kustomization.yaml"
+  reads_outside linked-file "$kfile" "leak=linked.yaml"
+  grep -F -- kubernetes/apps/base/web/greeter/app/linked.yaml <<<"$output" | grep -qF link
+
+  # A kustomization file that is itself a link to one outside the tree, which names the file.
+  greeter_app linked-kustomization
+  printf '%s\n' 'apiVersion: kustomize.config.k8s.io/v1beta1' 'kind: Kustomization' 'resources:' "  - $OUTSIDE" \
+    >"$BATS_TEST_TMPDIR/outside/kustomization.yaml"
+  rm "$GREETER/kustomization.yaml"
+  ln -s "$BATS_TEST_TMPDIR/outside/kustomization.yaml" "$GREETER/kustomization.yaml"
+  reads_outside linked-kustomization "$kfile" link
+
+  # A Component that names it, which the application takes.
+  greeter_app component
+  mkdir -p "$BATS_TEST_TMPDIR/component/kubernetes/components/leaky"
+  cat >"$BATS_TEST_TMPDIR/component/kubernetes/components/leaky/kustomization.yaml" <<EOF
+---
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+configMapGenerator:
+  - name: leak
+    files:
+      - leak=$OUTSIDE
+EOF
+  yq -i '.components += ["../../../../../components/leaky"]' "$GREETER/kustomization.yaml"
+  reads_outside component kubernetes/components/leaky/kustomization.yaml "leak=$OUTSIDE"
+
+  # A remote source, which the render does not fetch.
+  for entry in https://example.invalid/leak.yaml git::https://example.invalid/leak.git file:///leak; do
+    greeter_app "remote-$((++n))"
+    P="$entry" yq -i '.resources += [strenv(P)]' "$GREETER/kustomization.yaml"
+    reads_outside "remote-$n" "$kfile" "$entry"
+  done
+
+  # The application's Kustomization takes a component outside the tree, which names the file.
+  greeter_app flux-component
+  mkdir -p "$BATS_TEST_TMPDIR/outside/component"
+  printf '%s\n' 'apiVersion: kustomize.config.k8s.io/v1alpha1' 'kind: Component' 'resources:' '  - ../marker.yaml' \
+    >"$BATS_TEST_TMPDIR/outside/component/kustomization.yaml"
+  entry="$(printf '../%.0s' {1..20})${BATS_TEST_TMPDIR#/}/outside/component"
+  P="$entry" yq -i '.spec.components = [strenv(P)]' "$GREETER/../ks.yaml"
+  render_locale flux-component
+  echo "$output"
+  [ "$status" -ne 0 ]
+  grep -F -- "demo/greeter" <<<"$output" | grep -F -- "spec.components" | grep -qF -- "$entry"
+  [[ $output != *"$MARKER"* ]]
+  [ -z "$(find "$BATS_TEST_TMPDIR/flux-component.out" -mindepth 1 -print -quit)" ]
+
+  # A release's post-renderer patch that names a file, by its path or a URL, which helm-controller's
+  # post-renderer, a patch and its target, does not have: refused by the key, before anything is
+  # pulled.
+  for entry in "$OUTSIDE" https://example.invalid/patch.yaml; do
+    greeter_app "post-render-$((++n))"
+    P="$entry" yq -i '.spec.postRenderers[0].kustomize.patches += [{"path": strenv(P)}]' "$GREETER/helmrelease.yaml"
+    render_locale "post-render-$n"
+    echo "$output"
+    [ "$status" -ne 0 ]
+    grep -F -- "demo/greeter: kubernetes/apps/base/web/greeter/app/helmrelease.yaml: spec.postRenderers[0].kustomize.patches[1].path " <<<"$output" |
+      grep -qF -- "is not one of the fields kustomize"
+    [[ $output != *"$MARKER"* ]]
+  done
 }
 
 @test "Every enabled application is rendered to the objects Flux would apply, charts expanded" {
@@ -904,84 +1013,11 @@ YAML
 }
 
 @test "A tree from which a build would read outside it is refused, and nothing of what it names is rendered" {
-  outside_marker
-  local kfile=kubernetes/apps/base/web/greeter/app/kustomization.yaml expression entry n=0
-  # A generator's file, a resource, a patch and an env file, each by an absolute path and by a path
-  # that climbs out of the tree.
-  for expression in '.configMapGenerator += [{"name": "leak", "files": ["leak=" + strenv(P)]}]' \
-    '.resources += [strenv(P)]' '.patches += [{"path": strenv(P)}]' \
-    '.configMapGenerator += [{"name": "leak", "envs": [strenv(P)]}]'; do
-    for entry in "$OUTSIDE" "$CLIMB"; do
-      greeter_app "outside-$((++n))"
-      P="$entry" yq -i "$expression" "$GREETER/kustomization.yaml"
-      reads_outside "outside-$n" "$kfile" "$entry"
-    done
-  done
-
-  # A generator's file that is a link in the tree to the file outside: the link and the entry are
-  # each refused.
-  greeter_app linked-file
-  ln -s "$OUTSIDE" "$GREETER/linked.yaml"
-  yq -i '.configMapGenerator += [{"name": "leak", "files": ["leak=linked.yaml"]}]' "$GREETER/kustomization.yaml"
-  reads_outside linked-file "$kfile" "leak=linked.yaml"
-  grep -F -- kubernetes/apps/base/web/greeter/app/linked.yaml <<<"$output" | grep -qF link
-
-  # A kustomization file that is itself a link to one outside the tree, which names the file.
-  greeter_app linked-kustomization
-  printf '%s\n' 'apiVersion: kustomize.config.k8s.io/v1beta1' 'kind: Kustomization' 'resources:' "  - $OUTSIDE" \
-    >"$BATS_TEST_TMPDIR/outside/kustomization.yaml"
-  rm "$GREETER/kustomization.yaml"
-  ln -s "$BATS_TEST_TMPDIR/outside/kustomization.yaml" "$GREETER/kustomization.yaml"
-  reads_outside linked-kustomization "$kfile" link
-
-  # A Component that names it, which the application takes.
-  greeter_app component
-  mkdir -p "$BATS_TEST_TMPDIR/component/kubernetes/components/leaky"
-  cat >"$BATS_TEST_TMPDIR/component/kubernetes/components/leaky/kustomization.yaml" <<EOF
----
-apiVersion: kustomize.config.k8s.io/v1alpha1
-kind: Component
-configMapGenerator:
-  - name: leak
-    files:
-      - leak=$OUTSIDE
-EOF
-  yq -i '.components += ["../../../../../components/leaky"]' "$GREETER/kustomization.yaml"
-  reads_outside component kubernetes/components/leaky/kustomization.yaml "leak=$OUTSIDE"
-
-  # A remote source, which the render does not fetch.
-  for entry in https://example.invalid/leak.yaml git::https://example.invalid/leak.git file:///leak; do
-    greeter_app "remote-$((++n))"
-    P="$entry" yq -i '.resources += [strenv(P)]' "$GREETER/kustomization.yaml"
-    reads_outside "remote-$n" "$kfile" "$entry"
-  done
-
-  # The application's Kustomization takes a component outside the tree, which names the file.
-  greeter_app flux-component
-  mkdir -p "$BATS_TEST_TMPDIR/outside/component"
-  printf '%s\n' 'apiVersion: kustomize.config.k8s.io/v1alpha1' 'kind: Component' 'resources:' '  - ../marker.yaml' \
-    >"$BATS_TEST_TMPDIR/outside/component/kustomization.yaml"
-  entry="$(printf '../%.0s' {1..20})${BATS_TEST_TMPDIR#/}/outside/component"
-  P="$entry" yq -i '.spec.components = [strenv(P)]' "$GREETER/../ks.yaml"
-  render flux-component
-  echo "$output"
-  [ "$status" -ne 0 ]
-  grep -F -- "demo/greeter" <<<"$output" | grep -F -- "spec.components" | grep -qF -- "$entry"
-  [[ $output != *"$MARKER"* ]]
-  [ -z "$(find "$BATS_TEST_TMPDIR/flux-component.out" -mindepth 1 -print -quit)" ]
-
-  # A release's post-renderer patch that names a file, by its path or a URL, which helm-controller's
-  # post-renderer, a patch and its target, does not have: refused by the key, before anything is
-  # pulled.
-  for entry in "$OUTSIDE" https://example.invalid/patch.yaml; do
-    greeter_app "post-render-$((++n))"
-    P="$entry" yq -i '.spec.postRenderers[0].kustomize.patches += [{"path": strenv(P)}]' "$GREETER/helmrelease.yaml"
-    render "post-render-$n"
-    echo "$output"
-    [ "$status" -ne 0 ]
-    grep -F -- "demo/greeter: kubernetes/apps/base/web/greeter/app/helmrelease.yaml: spec.postRenderers[0].kustomize.patches[1].path " <<<"$output" |
-      grep -qF -- "is not one of the fields kustomize"
-    [[ $output != *"$MARKER"* ]]
+  local text
+  text="$(printf '\xc4\xb0')"
+  [ "$(LC_ALL=C.UTF-8 bash -c 'printf %s "${#1}"' bash "$text" 2>/dev/null)" = 1 ]
+  for LOCALE in C C.UTF-8; do
+    outside_cases
   done
 }
 
@@ -1002,4 +1038,32 @@ EOF
   grep -F kubernetes/apps/base/web/greeter/ks.yaml <<<"$output" | grep -qF ' spec.Components '
   [[ $output != *"$MARKER"* ]]
   [ -z "$(find "$BATS_TEST_TMPDIR/spelled.out" -mindepth 1 -print -quit)" ]
+}
+
+@test "a path that names a remote source in any case or letter is refused by the render under every locale" {
+  # The review's reproduction and the forms of a scheme and an scp-style address, in the C locale and
+  # in C.UTF-8. git, first on the path and fetching nothing, records any run.
+  local text locale entry log="$BATS_TEST_TMPDIR/git.log"
+  text="$(printf '\xc4\xb0')"
+  [ "$(LC_ALL=C.UTF-8 bash -c 'printf %s "${#1}"' bash "$text" 2>/dev/null)" = 1 ]
+  mkdir -p "$BATS_TEST_TMPDIR/recording"
+  printf '#!/bin/sh\necho "$*" >>%q\nexit 1\n' "$log" >"$BATS_TEST_TMPDIR/recording/git"
+  chmod +x "$BATS_TEST_TMPDIR/recording/git"
+  for locale in C C.UTF-8; do
+    for entry in "g${text}thub.com/example/none" "f${text}le:///leak" HTTPS://example.invalid/x.yaml \
+      Git@example.invalid:example/none GitHub.com/example/none; do
+      greeter_app remote
+      P="$entry" yq -i '.resources += [strenv(P)]' "$GREETER/kustomization.yaml"
+      rm -rf "$BATS_TEST_TMPDIR/remote.out" "$log"
+      run env LC_ALL="$locale" PATH="$BATS_TEST_TMPDIR/recording:$PATH" HTTP_PROXY=http://127.0.0.1:0 \
+        HTTPS_PROXY=http://127.0.0.1:0 NO_PROXY= no_proxy= "$REPO/scripts/render" "$BATS_TEST_TMPDIR/remote.out" "$BATS_TEST_TMPDIR/remote"
+      echo "$locale $entry: $output"
+      [ "$status" -ne 0 ]
+      grep -F -- kubernetes/apps/base/web/greeter/app/kustomization.yaml <<<"$output" | grep -F -- ' resources ' |
+        grep -qF -- "\"$(shown "$entry")\""
+      [ -z "$(find "$BATS_TEST_TMPDIR/remote.out" -mindepth 1 -print -quit)" ]
+      [ ! -e "$log" ] || { echo "git ran: $(cat "$log")"; return 1; }
+      rm -rf "$BATS_TEST_TMPDIR/remote"
+    done
+  done
 }

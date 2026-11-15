@@ -34,7 +34,9 @@
 # spec.components leaves it or that holds a key flux build would read as a field it is not spelled
 # as, and a HelmRelease or a source with a key that folds to a field the render reads without being
 # it, or a post-renderer with more than a patch, its target and an image, which is all
-# helm-controller's has. Never contacts a cluster, and reads no registry login. A chart's URL and
+# helm-controller's has. flux build, helm template and kustomize run where nothing can be fetched
+# (git a stand-in that refuses, every proxy a closed port of the loopback); helm pull alone fetches.
+# Never contacts a cluster, and reads no registry login. A chart's URL and
 # name come from the tree, a pull request's included: they are checked against a strict shape and
 # passed to helm as arguments, a pull adds no repository to any Helm configuration, and a hostile
 # URL makes the runner fetch the repository and its index direct, and what the index points to:
@@ -48,6 +50,8 @@
 #        scripts/render --forms [DIR]   builds the tree and checks that every HelmRelease is of a form
 #                                       this render accepts, without pulling or rendering a chart
 set -euo pipefail
+# Text is matched, sorted and shown byte by byte, whatever the caller's locale.
+export LC_ALL=C
 shopt -s nullglob
 
 # flux, helm and kustomize are run with none of the secrets a recipe's environment may hold.
@@ -101,6 +105,8 @@ fi
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+# flux build, helm template and kustomize run where nothing can be fetched; helm pull alone fetches.
+tree_paths_offline "$tmp/offline"
 
 # No kubeconfig and no in-cluster address: a tool that tried to reach a cluster fails instead.
 export KUBECONFIG=/dev/null
@@ -141,7 +147,7 @@ refuse "$(
     tree_paths_inside "$tree_root" "$(realpath -e -- "${cluster_dir}ks.yaml" 2>/dev/null)" || continue
     root_dir=$(yq ea '[select(. != null)] | .[0].spec.path // "" | tostring' "${cluster_dir}ks.yaml")
     while IFS= read -r line; do
-      [[ -z $line ]] || echo "$(tree_paths_clean "${cluster_dir}ks.yaml"): $line"
+      [[ -z $line ]] || echo "$(tree_paths_show "${cluster_dir}ks.yaml"): $line"
     done <<<"$(kustomization_refused "${cluster_dir}ks.yaml" "$(realpath -e -- "kubernetes/${root_dir#./}")" "$tree_root")"
   done
 )"
@@ -174,14 +180,14 @@ object_file() {
       | if index("exact") then "exact" elif index("loose") then "loose" else "" end' 2>/dev/null) || match=""
     case $match in
       exact)
-        echo "${file//[[:cntrl:]]/?}"
+        tree_paths_show "$file"
         return
         ;;
       loose) loose=${loose:-$file} ;;
     esac
   done < <(find "$dir" -type f \( -name '*.yaml' -o -name '*.yml' \) -print0 2>/dev/null | sort -z)
   loose=${loose:-$dir}
-  echo "${loose//[[:cntrl:]]/?}"
+  tree_paths_show "$loose"
 }
 
 # build CLUSTER APP KS: builds the Kustomization in the file KS, the application APP, from its
@@ -192,8 +198,8 @@ build() {
   path=$(yq '.spec.path // ""' "$ks")
   path=${path#./}
   path=${path%/}
-  if [[ ! $path =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ || /$path/ == */../* || /$path/ == */./* ]]; then
-    die "$cluster/$app: spec.path $(tree_paths_clean "${path:-(none)}") is not a directory of the tree"
+  if ! tree_paths_plain "$path" || [[ /$path/ == */../* || /$path/ == */./* ]]; then
+    die "$cluster/$app: spec.path $(tree_paths_show "${path:-(none)}") is not a directory of the tree"
   fi
   # A link inside the tree may point anywhere; the directory built is the one the path resolves to.
   real=$(realpath -m -- "kubernetes/$path")
@@ -212,7 +218,7 @@ build() {
     [[ $app == flux-system ]] || file=$(object_file kubernetes "$(yq -o json -I0 '.' "$ks")")
     refuse "$refused" "$cluster/$app: $file: "
   fi
-  if ! err=$(flux build kustomization "$app" --path "kubernetes/$path" --kustomization-file "$tmp/ks.yaml" \
+  if ! err=$(offline flux build kustomization "$app" --path "kubernetes/$path" --kustomization-file "$tmp/ks.yaml" \
     --dry-run --strict-substitute --in-memory-build --cache-dir "$tmp/kube-cache" 2>&1 >"$tmp/built/$cluster/$app.yaml"); then
     die "$cluster/$app: flux build of $path failed: $err"
   fi
@@ -417,7 +423,7 @@ template() {
   for file in "$work"/values-[0-9]*.yaml "$work/values-inline.yaml"; do
     args+=(--values "$file")
   done
-  if ! err=$(helm template "$release" "$(cat "$work/chart")" --namespace "$namespace" --kube-version "$kube" \
+  if ! err=$(offline helm template "$release" "$(cat "$work/chart")" --namespace "$namespace" --kube-version "$kube" \
     --include-crds "${args[@]}" 2>&1 >"$dest"); then
     die "$where: helm template failed: $err"
   fi
@@ -435,7 +441,7 @@ post_render() {
     cp "$file" "$patched/rendered.yaml"
     jq --argjson i "$i" '{"apiVersion": "kustomize.config.k8s.io/v1beta1", "kind": "Kustomization",
       "resources": ["rendered.yaml"]} + .[$i].kustomize' "$work/post-renderers.json" >"$patched/kustomization.yaml"
-    kustomize build "$patched" >"$file" 2>"$work/post-render.log" ||
+    offline kustomize build "$patched" >"$file" 2>"$work/post-render.log" ||
       die "$where: post-renderer $((i + 1)) failed: $(cat "$work/post-render.log")"
   done
 }

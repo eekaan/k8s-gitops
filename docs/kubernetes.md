@@ -140,44 +140,66 @@ On what Flux builds:
 - **Paths** (`kubernetes-check` and `scripts/render`). `flux build` reads with kustomize's load
   restrictions off (`LoadRestrictionsNone`, its own setting), and so does `kubernetes-check`'s
   `kustomize`, as an overlay lists `ks.yaml` files outside its own directory: either reads any path
-  a kustomization names and follows any link, and kustomize fetches a remote source. Both read a
-  kustomization, and `flux build` the Flux Kustomization it is given, with Go's `encoding/json`,
-  which reads a key into a field when the key is the field's name or folds to it: ASCII letters
-  without regard to case, `ſ` (U+017F) as `s` and `K` (U+212A) as `k`. So `spec.Components` is
-  `spec.components` to `flux build`. Before they read or build anything else, both checks refuse a
-  tree from which a build would read outside `kubernetes/`, or that a tool would read otherwise than
-  they do, naming each file and the key or entry, and build nothing (`scripts/lib/tree-paths.sh`):
+  a kustomization names and follows any link. Both read a kustomization, and `flux build` the Flux
+  Kustomization it is given, with Go's `encoding/json`, which reads a key into a field when the key
+  is the field's name or folds to it, so `spec.Components` is `spec.components` to `flux build`.
+  Before they read or build anything else, both checks refuse a tree from which a build would read
+  outside `kubernetes/`, or that a tool would read otherwise than they do, naming each file and the
+  key or entry, and build nothing (`scripts/lib/tree-paths.sh`):
   - a link in the tree that resolves outside it, or to nothing;
   - a kustomization file (`kustomization.yaml`, `kustomization.yml` or `Kustomization`, a
     Component's included, used or not) that is not one mapping (empty, a list, text, or more than
     one document), or that holds a key twice, an anchor, an alias, a merge key, a tag outside YAML's
     core schema or a NUL character, which kustomize's decoder may read otherwise than the checks;
   - a kustomization file with a key, at any position kustomize decodes into a type, that is not
-    exactly one of that type's fields, or with a field the checks refuse (`generators`,
-    `transformers` and `validators`, whose plugin configurations name files of their own, and the
-    Helm chart fields, as neither Flux nor the checks inflate a chart);
-  - a kustomization file that names, in a field that names files, a remote source (a URL, an
-    scp-style address or a `github.com` path), an absolute path, or a path that leaves the tree,
-    read as text or with every link on it resolved;
-  - a root whose `spec.path` is not a directory of the tree under `kubernetes/` as it resolves;
-  - a Flux Kustomization with a key, at any position `flux build` decodes into a type, that folds
-    to one of that type's fields without being it, or whose `spec.components` names a path outside
-    the tree. `kubernetes-check` checks each `ks.yaml` it builds before it builds any, and the file
-    it hands `flux build` as it builds; the render checks each cluster's root before it builds
-    anything and each Kustomization as it hands it to `flux build`. `flux build` reads no key that
-    matches no field, and the schema check below refuses one.
+    ASCII or not exactly one of that type's fields, or with a field the checks refuse
+    (`generators`, `transformers` and `validators`, whose plugin configurations name files of their
+    own, and the Helm chart fields, as neither Flux nor the checks inflate a chart);
+  - an entry of a field that names a file or a directory that is not a plain path, or that leaves
+    the tree, read as text or with every link on it resolved;
+  - a root whose `spec.path` is not a plain path of a directory of the tree under `kubernetes/`, as
+    it resolves;
+  - a Flux Kustomization with a key, at any position `flux build` decodes into a type, that is not
+    ASCII, or that folds to one of that type's fields without being it, or whose `spec.components`
+    names anything but a plain path of the tree. `kubernetes-check` checks each `ks.yaml` it builds
+    before it builds any, and the file it hands `flux build` as it builds; the render checks each
+    cluster's root before it builds anything and each Kustomization as it hands it to
+    `flux build`. `flux build` reads no key that matches no field, and the schema check below
+    refuses one.
+
+  A plain path is relative, and made of segments of the ASCII letters, digits, `.`, `_` and `-`
+  alone, separated by single `/`: none empty, none that starts with `-`, and `..` only as a whole
+  segment, with the path still inside the tree; a generator's `KEY=PATH` has a key of the same
+  characters. So no entry holds `:`, `@`, `?`, `#`, `%`, `\`, `~`, a space, a control character or
+  a byte outside ASCII, and none is a URL, an scp-style address or a `git::` form. kustomize reads
+  one remote form without those, a path whose first segment is `github.com` in any case
+  (`isStandardGithubHost` in its `api/internal/git/repospec.go`), and the checks refuse that too.
+  The checks judge the tree's text with `jq`, which reads it as Unicode code points, and run their
+  scripts and every function of the guard in the C locale, so the caller's locale changes nothing
+  they decide; a value of the tree in a message shows each byte outside printable ASCII as `\xHH`.
 
   The free-form positions are not checked by key: labels, annotations, `commonLabels`,
   `commonAnnotations`, a label's `pairs`, generator options' labels and annotations,
   `postBuild.substitute`, the text of a patch, generator literals, a release's `values` and a
-  ConfigMap's data are maps or text, which the decoders read by exact key or not at all, so no
-  spelling of a key there becomes a field. The fields the checks know are recorded with the types
-  they come from: `tests/fixtures/kustomization-fields` (kustomize's `Kustomization` and every type
-  it holds), `flux-kustomization-fields` (Flux's `Kustomization` and every type it holds) and
-  `read-fields`. `tests/kubernetes-check.bats` fails when either pinned tool moves to another
-  version of these types until they are read again, and when the checks and a list disagree; it
-  writes every case and `encoding/json` fold of every field at every position into a tree and
-  requires each to be refused, naming the file and the key, by every check that reads it.
+  ConfigMap's data are maps or text, which the decoders read by exact key or not at all and never
+  as a path, a host or a field. The fields the checks know are recorded with the types they come
+  from: `tests/fixtures/kustomization-fields` (kustomize's `Kustomization` and every type it holds),
+  `flux-kustomization-fields` (Flux's `Kustomization` and every type it holds) and `read-fields`.
+  `tests/kubernetes-check.bats` fails when either pinned tool moves to another version of these
+  types until they are read again, and when the checks and a list disagree; it writes every case
+  and `encoding/json` fold of every field at every position, and every kind of character a plain
+  path holds none of in every field that names a file, into a tree, and requires each to be
+  refused, naming the file and the key or entry, by every check that reads it, in the C locale and
+  in C.UTF-8.
+
+  The builds of the checks run where nothing can be fetched: `kustomize`, `flux build`,
+  `helm template` and the Pod Security check's `flux install` see a `git` first on their path that
+  refuses, which is what kustomize runs for a remote base (`exec.LookPath("git")`), git's protocols
+  and prompts off, and `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` in both cases naming port 0 of
+  the loopback, where nothing listens, which Go's HTTP client uses for a remote file, with
+  `NO_PROXY` empty. `kubernetes-check`, the gate of the publish run, so fetches nothing even for an
+  entry its guard let through. The processes that fetch are `helm pull` in the render, for the
+  charts, and `kubernetes-validate`'s `curl` and `kubeconform`, for the schemas.
 
   The `spec.path` of an application's `ks.yaml` is compared with the one its directory fixes, and
   what is built is that directory's `app/`. The render builds a copy of `kubernetes/` alone and
@@ -189,11 +211,12 @@ On what Flux builds:
   values files the render writes, and kustomize a kustomization the render writes from the
   release's post-renderers; the Pod Security check a `FluxInstance`, from whose patches it writes a
   kustomization. The API server drops a field of a custom resource that its schema does not name,
-  by exact name, so the cluster ignores the same spellings the checks do not read; a key that folds
-  to a field they read without being it is refused (`tests/fixtures/read-fields`). What they hand
-  kustomize, a post-renderer's or the instance's patches and a post-renderer's images, holds a
-  patch, its target and an image's fields by their exact names alone: any other key there, such as
-  a `path` kustomize would read or fetch, is refused.
+  by exact name, so the cluster ignores the same spellings the checks do not read; a key that is not
+  ASCII, or that folds to a field they read without being it, is refused
+  (`tests/fixtures/read-fields`). What they hand kustomize, a post-renderer's or the instance's
+  patches and a post-renderer's images, holds a patch, its target and an image's fields by their
+  exact names alone: any other key there, such as a `path` kustomize would read or fetch, is
+  refused.
 - **Schemas** (`kubernetes-validate`). Everything Flux builds as `kubernetes-check` builds it,
   each application from its own `ks.yaml` (enabled or not), each cluster's root and each cluster
   directory, is validated by kubeconform with unknown fields refused, against the first schema

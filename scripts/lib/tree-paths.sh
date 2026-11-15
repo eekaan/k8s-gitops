@@ -2,33 +2,40 @@
 # What a tool is handed of a kubernetes/ tree, bounded to the tree, and read by the checks under the
 # names the tool reads. flux build reads with kustomize's load restrictions off (LoadRestrictionsNone,
 # its own setting), and so does scripts/kubernetes-check's kustomize, as an overlay lists ks.yaml
-# files outside its own directory: either reads any path a kustomization names and follows any link,
-# and kustomize fetches a remote source. Both decode a kustomization, and flux build the Flux
-# Kustomization it is given, with encoding/json, which reads a key into a field when the key is the
-# field's name or folds to it: ASCII letters without regard to case, U+017F as s and U+212A as k
-# (encoding/json's fold.go and decode.go). scripts/render and scripts/kubernetes-check therefore
-# refuse, before they build or read anything else of it, a tree in which
+# files outside its own directory: either reads any path a kustomization names and follows any link.
+# Both decode a kustomization, and flux build the Flux Kustomization it is given, with encoding/json,
+# which reads a key into a field when the key is the field's name or folds to it (encoding/json's
+# fold.go and decode.go). scripts/render and scripts/kubernetes-check therefore refuse, before they
+# build or read anything else of it, a tree in which
 #   - a link resolves outside the tree, or to nothing: then nothing in the tree leads outside it
 #     but the text of a path;
 #   - a kustomization file (kustomization.yaml, kustomization.yml or Kustomization, a Component's
 #     included) is not one mapping; holds YAML that kustomize's decoder may read otherwise than
 #     yq (a key twice, an anchor, an alias, a merge key, a tag outside YAML's core schema, a NUL
-#     character); sets, at any typed position, a key that is not exactly one of the fields
-#     kustomize reads there (tree_paths_kustomize_fields), or one of those the checks refuse; or
-#     names, in a field that names files, a remote source (a URL, an scp-style address or a
-#     github.com path, as kustomize reads one), an absolute path, or a path that leaves the tree,
-#     read as text, as kustomize joins it to the file's directory, or with every link on it
-#     resolved;
-#   - a cluster's root Kustomization's spec.path is not a directory of the tree as it resolves.
+#     character); holds, at any typed position, a key that is not ASCII, or not exactly one of the
+#     fields kustomize reads there (tree_paths_kustomize_fields), or one of those the checks refuse;
+#     or names, in a field that names files, an entry that is not a plain path (tree_paths_plain_jq)
+#     or names a repository on github.com, or a path that leaves the tree, read as text, as
+#     kustomize joins it to the file's directory, or with every link on it resolved;
+#   - a cluster's root Kustomization's spec.path is not a plain path, nor a directory of the tree as
+#     it resolves.
 # Every kustomization file the builds read is one of the tree's, so the checks read each of them,
 # used or not. A Flux Kustomization is checked as it is handed to flux build
-# (kustomization_refused): at every typed position (tree_paths_flux_fields), a key that folds to a
-# field's name without being it is refused, as is a Component outside the tree. A document no tool
-# decodes, which the checks read and derive a tool's input from (a HelmRelease, its sources, a
-# FluxInstance), is checked by read_refused against the fields they read (tree_paths_read_fields).
+# (kustomization_refused): at every typed position (tree_paths_flux_fields), a key that is not ASCII,
+# or that folds to a field's name without being it, is refused, as is a Component that is not a
+# plain path of the tree. A document no tool decodes, which the checks read and derive a tool's input
+# from (a HelmRelease, its sources, a FluxInstance), is checked by read_refused against the fields
+# they read (tree_paths_read_fields).
 #
-# Each refusal is one line, FILE: what is refused, FILE a path from the tree's parent; a value from
-# the tree has every control character read as '?'.
+# The text of the tree is judged by jq, which reads it as Unicode code points whatever the locale,
+# and every function here that matches, sorts or shows text runs in the C locale, so that what the
+# caller's locale is changes nothing. Each refusal is one line, FILE: what is refused, FILE a path
+# from the tree's parent; a value from the tree is shown with each byte that is not printable ASCII
+# as \xHH (tree_paths_show).
+#
+# The builds of the checks run where nothing can be fetched (tree_paths_offline): git resolves to a
+# stand-in that refuses, which is what kustomize runs for a remote base, and every proxy variable
+# names a closed port of the loopback, which Go's HTTP client uses for a remote file.
 
 # The recorded field lists, one field a line: the type, the field and what it holds (value, map,
 # path, paths, dirs, files, refused, a type, or a list of a type), and TYPE * open for a type at
@@ -379,23 +386,43 @@ tree_paths_fields() {
   printf '%s\n' "${!list}"
 }
 
+# A plain path: relative, of segments of ASCII letters, digits, ".", "_" and "-", none empty and
+# none that starts with "-"; ".." only as a whole segment, and the path still has to name a path of
+# the tree. It holds no ":", "@", "?", "#", "%", "\", "~", space, control character or byte outside
+# ASCII, so it is no URL, no scp-style address and no git:: form, and the one remote kustomize reads
+# in what remains is a path whose first segment is github.com, in any case of its ASCII letters
+# (api/internal/git/repospec.go at v0.21.2: isStandardGithubHost lowers with strings.ToLower; no
+# other host is read as remote without a scheme or a user). A KEY=PATH entry of a generator's files
+# has a key of the same characters, without "/".
+# shellcheck disable=SC2016 # jq regular expressions, not expansions.
+tree_paths_plain_jq='
+  def plain: type == "string" and test("\\A[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*\\z") and (test("(\\A|/)-") | not);
+  def github: ascii_downcase | startswith("github.com/");'
+
 # The walk of a document against a field list: jq, on one JSON document of the type $root, writes a
 # record for each key it refuses and each path a field names, four values each ended by a NUL:
-# field, where the key is, why it is refused, and nothing; path, where it is, the entry, and the
-# path the entry names; doc, nothing, why the document is refused, and nothing. A record is written
-# whole, so jq failing leaves no part of one. A document that holds a NUL, which no key and no path
-# does, is refused whole, so that no value can end a record early.
+# field, where the key is, why it is refused, and nothing; bad, where it is, the entry, and why it
+# is refused; path, where it is, the entry, and the path the entry names; doc, nothing, why the
+# document is refused, and nothing. A record is written whole, so jq failing leaves no part of one.
+# A document that holds a NUL, which no key and no path does, is refused whole, so that no value
+# can end a record early.
 # shellcheck disable=SC2016 # $reg, $root, $tool, $folded and $refused are jq variables.
-tree_paths_walk_jq='
+tree_paths_walk_jq="$tree_paths_plain_jq"'
   def record: map(tostring + "\u0000") | add;
-  def fold: gsub("\u017f"; "S") | gsub("\u212a"; "K") | ascii_upcase;
+  def ascii: explode | all(. < 128);
   def object_type($c): ($c | ltrimstr("[]")) as $t | if ($reg.types | has($t)) then $t else null end;
   def walk($c; $where):
     if $c == "value" or $c == "map" then empty
     elif $c == "refused" then ["field", $where, $refused, ""]
     elif ($c | IN("path", "paths", "dirs", "files")) then
       (if type == "array" then .[] else . end) | select(type == "string" or type == "number") | tostring
-      | ["path", $where, ., (if $c == "files" and test("=") then sub("^[^=]*="; "") else . end)]
+      | . as $entry
+      | (if $c == "files" and test("=") then [capture("\\A(?<key>[^=]*)=(?<path>.*)\\z"; "m") | .key, .path]
+         else [null, .] end) as [$key, $path]
+      | if ($key != null and ($key | test("\\A[A-Za-z0-9._-]+\\z") | not)) or ($path | plain | not) then
+          ["bad", $where, $entry, "which is not a plain path: one relative path of segments of A-Z, a-z, 0-9, \".\", \"_\" and \"-\", none empty and none that starts with \"-\"\(if $c == "files" then ", after a KEY= of the same characters" else "" end)"]
+        elif $path | github then ["bad", $where, $entry, "a repository on github.com, which the checks do not fetch"]
+        else ["path", $where, $entry, $path] end
     elif object_type($c) == null then empty
     elif ($c | startswith("[]")) then
       select(type == "array") | to_entries[] | .key as $i | .value | walk($c[2:]; "\($where)[\($i)]")
@@ -405,8 +432,9 @@ tree_paths_walk_jq='
       | (($f["*"] // "") == "open") as $open
       | to_entries[] | .key as $k | .value as $v
       | (if $where == "" then $k else $where + "." + $k end) as $w
-      | if $k != "*" and ($f | has($k)) then $v | walk($f[$k]; $w)
-        else ([$f | keys[] | select(. != "*" and fold == ($k | fold))] | first) as $name
+      | if ($k | ascii | not) then ["field", $w, "is not ASCII: the checks accept keys of ASCII alone", ""]
+        elif $k != "*" and ($f | has($k)) then $v | walk($f[$k]; $w)
+        else ([$f | keys[] | select(. != "*" and ascii_upcase == ($k | ascii_upcase))] | first) as $name
           | if $name != null then
               ["field", $w, "folds to \($name) without being it: \(if $open then $folded else "\($tool) would read it as that field" end)", ""]
             elif $open then empty
@@ -430,27 +458,49 @@ tree_paths_walk() {
 # tree_paths_lines NAME DIR ROOT: reads the records of a walk on stdin and writes a line for each
 # refusal, NAME: what is refused; a path is read from DIR and must name a path in ROOT.
 tree_paths_lines() {
+  local -x LC_ALL=C
   local name=$1 dir=$2 root=$3 kind where text path reason
   while IFS= read -r -d '' kind && IFS= read -r -d '' where && IFS= read -r -d '' text && IFS= read -r -d '' path; do
-    where=$(tree_paths_clean "$where")
+    [[ $where != *[!\ -~]* ]] || where=$(tree_paths_show "$where")
+    [[ $text != *[!\ -~]* ]] || text=$(tree_paths_show "$text")
     case $kind in
       field) echo "${name}$where $text" ;;
+      bad) echo "${name}$where names \"$text\", $path" ;;
       path)
         reason=$(path_refusal "$dir" "$path" "$root")
-        [[ -z $reason ]] || echo "${name}$where names \"$(tree_paths_clean "$text")\", $reason"
+        [[ -z $reason ]] || echo "${name}$where names \"$text\", $reason"
         ;;
       *) echo "${name%: }: $text" ;;
     esac
   done
 }
 
-# tree_paths_clean TEXT: TEXT with every control character read as '?'.
-tree_paths_clean() {
-  printf '%s' "${1//[[:cntrl:]]/?}"
+# tree_paths_show TEXT: TEXT with each byte that is not printable ASCII written as \xHH, as the
+# checks show a value of the tree.
+tree_paths_show() {
+  local -x LC_ALL=C
+  local text=$1 out="" byte i
+  for ((i = 0; i < ${#text}; i++)); do
+    byte=${text:i:1}
+    if [[ $byte == [\ -~] ]]; then
+      out+=$byte
+    else
+      printf -v byte '\\x%02x' "'$byte"
+      out+=$byte
+    fi
+  done
+  printf '%s' "$out"
+}
+
+# tree_paths_plain PATH: whether PATH is a plain path, as tree_paths_plain_jq says.
+tree_paths_plain() {
+  local -x LC_ALL=C
+  [[ $1 =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ && ! $1 =~ (^|/)- ]]
 }
 
 # tree_paths_inside ROOT PATH: whether PATH is ROOT or below it.
 tree_paths_inside() {
+  local -x LC_ALL=C
   [[ -n $2 && ($2 == "$1" || $2 == "$1"/*) ]]
 }
 
@@ -467,43 +517,61 @@ tree_paths_odd() {
   [[ -n ${count//[0$'\n']/} ]]
 }
 
-# path_refusal DIR ENTRY ROOT: why ENTRY, a path kustomize reads from the directory DIR, is refused,
-# or nothing when it names a path in ROOT. Both DIR and ROOT are absolute, with no link in them. A
-# remote source is what kustomize fetches, as a file (a URL whose scheme is http or https) or as a
-# repository (after an optional git::, a URL whose scheme is ssh, https, http or file, an
-# scp-style user@host, or a github.com path), whichever the field reads it as.
+# path_refusal DIR ENTRY ROOT: why ENTRY, a plain path kustomize reads from the directory DIR, is
+# refused, or nothing when it names a path in ROOT. Both DIR and ROOT are absolute, with no link in
+# them.
 path_refusal() {
-  local dir=$1 entry=$2 root=$3 source resolved
-  source=${entry,,}
-  source=${source#git::}
-  if [[ $source =~ ^(https?|ssh|file): || $source =~ ^[a-z][a-z0-9-]*@ || $source =~ ^github\.com[/:] ]]; then
-    echo "a remote source, which the checks do not fetch"
-  elif [[ $entry == /* ]]; then
-    echo "an absolute path"
-  else
-    resolved=$(realpath -m -s -- "$dir/$entry" 2>/dev/null) || resolved=""
-    if ! tree_paths_inside "$root" "$resolved"; then
-      echo "a path that leaves kubernetes/"
-      return
-    fi
-    resolved=$(realpath -m -- "$dir/$entry" 2>/dev/null) || resolved=""
-    tree_paths_inside "$root" "$resolved" || echo "a path that leaves kubernetes/ through a link"
+  local -x LC_ALL=C
+  local dir=$1 entry=$2 root=$3 resolved
+  resolved=$(realpath -m -s -- "$dir/$entry" 2>/dev/null) || resolved=""
+  if ! tree_paths_inside "$root" "$resolved"; then
+    echo "a path that leaves kubernetes/"
+    return
   fi
+  resolved=$(realpath -m -- "$dir/$entry" 2>/dev/null) || resolved=""
+  tree_paths_inside "$root" "$resolved" || echo "a path that leaves kubernetes/ through a link"
+}
+
+# tree_paths_offline DIR: makes DIR the place the checks' builds run from where nothing can be
+# fetched, and sets tree_paths_offline_env to their environment: DIR, first on the path, holds a git
+# that refuses, which kustomize runs for a remote base (exec.LookPath("git"),
+# api/internal/git/gitrunner.go), with git's own protocols and prompts off; HTTP_PROXY, HTTPS_PROXY
+# and ALL_PROXY, in both cases, name port 0 of the loopback, where nothing listens, which Go's HTTP
+# client uses for a remote file (http.ProxyFromEnvironment; api/internal/loader/fileloader.go), and
+# NO_PROXY exempts no host.
+tree_paths_offline() {
+  local dir=$1 proxy=http://127.0.0.1:0
+  mkdir -p "$dir"
+  printf '%s\n' '#!/bin/sh' 'echo "git is not run by the checks: a build of the tree fetches nothing" >&2' 'exit 1' >"$dir/git"
+  chmod +x "$dir/git"
+  tree_paths_offline_env=("PATH=$dir:$PATH" "HTTP_PROXY=$proxy" "HTTPS_PROXY=$proxy" "ALL_PROXY=$proxy"
+    "http_proxy=$proxy" "https_proxy=$proxy" "all_proxy=$proxy" "NO_PROXY=" "no_proxy="
+    "GIT_ALLOW_PROTOCOL=" "GIT_TERMINAL_PROMPT=0" "GIT_CONFIG_NOSYSTEM=1" "GIT_CONFIG_GLOBAL=/dev/null")
+}
+
+# offline COMMAND...: runs COMMAND in tree_paths_offline_env, a shell function such as a wrapped tool
+# included.
+offline() {
+  (
+    export "${tree_paths_offline_env[@]}"
+    "$@"
+  )
 }
 
 # tree_paths_refused ROOT: a line for each thing of the tree ROOT, an absolute path with no link in
 # it whose last component is kubernetes, that the checks refuse; nothing when there is none.
 tree_paths_refused() {
+  local -x LC_ALL=C
   local root=$1 base link target file name dir odd tags json
   base=${root%/*}
   while IFS= read -r -d '' link; do
     target=$(realpath -e -- "$link" 2>/dev/null) || target=""
     tree_paths_inside "$root" "$target" ||
-      echo "$(tree_paths_clean "${link#"$base"/}"): a link to $(tree_paths_clean "$(readlink -- "$link")"), which is no path in kubernetes/"
+      echo "$(tree_paths_show "${link#"$base"/}"): a link to $(tree_paths_show "$(readlink -- "$link")"), which is no path in kubernetes/"
   done < <(find "$root" -type l -print0 | sort -z)
 
   while IFS= read -r -d '' file; do
-    name=$(tree_paths_clean "${file#"$base"/}")
+    name=$(tree_paths_show "${file#"$base"/}")
     # A link that leads outside the tree is refused above, and not read.
     target=$(realpath -e -- "$file" 2>/dev/null) || target=""
     tree_paths_inside "$root" "$target" && [[ -f $target ]] || continue
@@ -537,23 +605,24 @@ tree_paths_refused() {
 # of the tree ROOT as it resolves. A KS that leads outside the tree is refused by
 # tree_paths_refused, and not read.
 root_path_refused() {
+  local -x LC_ALL=C
   local ks=$1 root=$2 path real
   real=$(realpath -e -- "$ks" 2>/dev/null) || real=""
   tree_paths_inside "$root" "$real" || return 0
   path=$(yq ea '[select(. != null)] | .[0].spec.path // "" | tostring' "$ks" 2>/dev/null) || return 0
   path="kubernetes/${path#./}"
   path=${path%/}
-  if [[ $path =~ ^kubernetes(/[A-Za-z0-9._-]+)+$ && /$path/ != */../* && /$path/ != */./* ]]; then
+  if tree_paths_plain "$path" && [[ /$path/ != */../* && /$path/ != */./* ]]; then
     # The textual rules above are not enough: a link inside the tree may point outside it, whether
     # or not what it points to exists.
     real=$(realpath -m -- "$path" 2>/dev/null) || real=""
     if ! tree_paths_inside "$root" "$real" || [[ $real == "$root" ]]; then
-      echo "$(tree_paths_clean "$ks"): spec.path ${path#kubernetes/} leaves the tree through a link"
+      echo "$(tree_paths_show "$ks"): spec.path ${path#kubernetes/} leaves the tree through a link"
       return
     fi
     [[ ! -d $real ]] || return 0
   fi
-  echo "$(tree_paths_clean "$ks"): spec.path must be a directory of the tree under kubernetes/, found $(tree_paths_clean "${path#kubernetes/}")"
+  echo "$(tree_paths_show "$ks"): spec.path must be a plain path of a directory of the tree under kubernetes/, found $(tree_paths_show "${path#kubernetes/}")"
 }
 
 # kustomization_refused KS DIR ROOT: a line for each thing of the Flux Kustomization in the file KS
@@ -563,6 +632,7 @@ root_path_refused() {
 # the kustomization it builds there. A file yq cannot read is never built: the checks read every
 # Kustomization they build with yq.
 kustomization_refused() {
+  local -x LC_ALL=C
   local ks=$1 dir=$2 root=$3 json odd
   json=$(yq -o json -I0 'select(. != null)' "$ks" 2>/dev/null) || return 0
   tree_paths_odd "$ks" && odd=0 || odd=$?
@@ -579,6 +649,7 @@ kustomization_refused() {
 # tree_paths_read_fields, that the checks refuse: one that folds to a field they read without being
 # it, and at a type they hand a tool whole, any key that is not one of its fields.
 read_refused() {
+  local -x LC_ALL=C
   tree_paths_walk "$tree_paths_read" "$1" "kustomize, which the checks hand it to," \
     "the checks read that field alone, and the API server drops this spelling of it" "" | tree_paths_lines "" / /
 }
