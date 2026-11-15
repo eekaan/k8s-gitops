@@ -96,6 +96,10 @@ encryption:
 enableLBIPAM: true
 bgpControlPlane:
   enabled: true
+  # The agent reports each peer's session in the status of the node's CiliumBGPNodeConfig, which
+  # scripts/lib/cluster.sh reads to wait until a worker's sessions are established again.
+  statusReport:
+    enabled: true
 l2announcements:
   enabled: false
 

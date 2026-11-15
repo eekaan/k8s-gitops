@@ -6,6 +6,10 @@
 #   nodes Ready           every node is Ready; a FAIL names those that are not;
 #   node count            there are as many nodes as the cluster's talman.yaml lists; a FAIL names
 #                         those it lists that are missing and those there that it does not list;
+#   workers in BGP        no Ready worker carries the label that takes it out of BGP
+#                         (bgp_out_label in scripts/lib/cluster.sh), which the recipes that drain or
+#                         reboot a worker set and remove; a FAIL names the workers and the command
+#                         that puts each back, as a worker left out silently is capacity lost;
 #   no kube-proxy         no kube-proxy pod runs in any namespace, as Cilium takes its place;
 #   pods in kube-system   every pod there is Running or Succeeded; a FAIL names the others;
 #   pods in flux-system   the same, skipped, saying so, while the namespace does not exist, as before
@@ -96,9 +100,27 @@ if nodes=$(get nodes); then
     [[ -z $unlisted ]] || why+="; not in talman.yaml: $unlisted"
     result FAIL "node count" "$why"
   fi
+  # A worker left out of BGP announces nothing, so its share of the traffic goes to the others: capacity
+  # lost without a sign unless it is looked for. A worker that is not Ready is down for another reason,
+  # which the check above names.
+  out=$(jq -r --arg key "$bgp_out_label" '.items[]
+    | select((.metadata.labels // {}) | has("node-role.kubernetes.io/control-plane") | not)
+    | select((.metadata.labels // {}) | has($key))
+    | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))
+    | .metadata.name' <<< "$nodes")
+  if [[ -z $out ]]; then
+    result pass "workers in BGP" "no Ready worker carries the label that takes it out of BGP"
+  else
+    why="out of BGP: $(joined <<< "$out"); put back with"
+    while read -r node; do
+      why+=" kubectl label node $node $bgp_out_label-;"
+    done <<< "$out"
+    result FAIL "workers in BGP" "${why%;}"
+  fi
 else
   result FAIL "nodes Ready" "kubectl could not read the nodes"
   result FAIL "node count" "kubectl could not read the nodes"
+  result FAIL "workers in BGP" "kubectl could not read the nodes"
 fi
 
 # pods_not_running NAMESPACE: each pod in NAMESPACE that is neither Running nor Succeeded, as

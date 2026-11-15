@@ -21,7 +21,8 @@
 # talman, it asks first unless --yes, and names the nodes it reaches by address. It records
 # "talman ARGS" in <tmp>/record/argv when it starts and "talman reboot finished" when it is done,
 # and whether each node was cordoned when it went down, as "<hostname> cordoned" or
-# "<hostname> schedulable", in <tmp>/record/reboot-state.
+# "<hostname> schedulable", in <tmp>/record/reboot-state, and whether it was out of BGP, as
+# "<hostname> out" or "<hostname> in", in <tmp>/record/reboot-bgp.
 #
 # Like a kubelet shutting down, it leaves pods in phase Failed on each node it reboots, in the fake
 # kubectl's pods file: one terminated by the shutdown (reason Terminated) and one bound to the node
@@ -124,6 +125,11 @@ while IFS= read -r node; do
     echo "$node cordoned" >> "$record/reboot-state"
   else
     echo "$node schedulable" >> "$record/reboot-state"
+  fi
+  if [[ -e $state/bgp-out.$node ]]; then
+    echo "$node out" >> "$record/reboot-bgp"
+  else
+    echo "$node in" >> "$record/reboot-bgp"
   fi
 done < "$state/rebooted"
 
