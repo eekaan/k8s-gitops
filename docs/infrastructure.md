@@ -675,9 +675,16 @@ host's are, it prints pass, FAIL or skip for each edge:
   ([ip-sysctl](https://docs.kernel.org/networking/ip-sysctl.html)), as the edge's ordinary user and
   without `sudo`.
 - Unattended upgrades are off.
-- The SSH daemon runs with the settings the first boot wrote ([SSH and host keys](#ssh-and-host-keys)):
-  each setting of `sshd.conf` is compared with what `sudo -n sshd -T` reports, and a FAIL names the
-  settings that differ, never their values.
+- The SSH daemon runs with the settings the first boot wrote
+  ([SSH and host keys](#ssh-and-host-keys)): each setting of `sshd.conf` is compared, whole, with
+  what the daemon reports for a connection of the user the check connects as,
+  `sudo -n sshd -T -C user=<EDGE_SSH_USER>,host=operator.example.org,addr=198.51.100.1`, and a FAIL
+  names the settings that differ, never their values. `-C` makes `sshd -T` apply the `Match` blocks
+  that connection matches, so a `Match` on that user, or on a group the user is in, is in what is
+  compared. Its source address and host name are of the ranges kept for documentation (RFC 5737,
+  RFC 2606): a `Match` on an address, a host name, or a local address or port is matched against
+  those, not against the operator's own connection, and what it changes for that connection is not
+  checked.
 
 The commands run on an edge are those of the ordinary user, whose `PATH` on Debian has no `sbin`
 directory (`ENV_PATH` in `login.defs`, and the `PATH` OpenSSH's server gives a command run over
@@ -698,9 +705,11 @@ unset, so the addresses never reach a CI log.
 ### SSH and host keys
 
 SSH admits the operator allowlist only, by key only, as the image's default user (`EDGE_SSH_USER`,
-`debian` by default). The SSH daemon's own settings are the tree's, `sshd.conf`, which the first boot
-installs as `/etc/ssh/sshd_config.d/00-edge.conf`; an edge is a public host, so what its daemon
-accepts is stated and checked, like its firewall, and is not whatever the image came with:
+`debian` by default). The SSH daemon's own settings are the tree's, `sshd.conf`, which the first
+boot installs as `/etc/ssh/sshd_config.d/00-edge.conf`. An edge is a public host, so what its daemon
+accepts is stated and checked, like its firewall: the edge states its daemon's key exchange,
+ciphers, MACs and authentication itself, and none of them depends on what an image's own
+configuration holds.
 
 - Key exchange is limited to `mlkem768x25519-sha256`, `sntrup761x25519-sha512` and
   `curve25519-sha256`: the post-quantum hybrid key exchanges OpenSSH added in 9.9 under these names
@@ -708,6 +717,11 @@ accepts is stated and checked, like its firewall, and is not whatever the image 
   classical one a client that has no hybrid still offers. The client, `edge_ssh`, sets no key
   exchange of its own: an OpenSSH client from 10.0 offers `mlkem768x25519-sha256` first and
   negotiates it with these settings, and one older than 9.9 negotiates `curve25519-sha256`.
+- Ciphers are limited to the authenticated encryption (AEAD) ones, `chacha20-poly1305@openssh.com`,
+  `aes256-gcm@openssh.com` and `aes128-gcm@openssh.com`, and MACs, which those ciphers do not use,
+  to the encrypt-then-MAC `hmac-sha2-512-etm@openssh.com` and `hmac-sha2-256-etm@openssh.com`.
+  OpenSSH's own default lists hold each of them, and its client, which offers
+  `chacha20-poly1305@openssh.com` first, negotiates that.
 - Public key authentication only: `PasswordAuthentication no`, `KbdInteractiveAuthentication no`,
   `PermitRootLogin no` and `AuthenticationMethods publickey`.
 - No forwarding of any kind: `AllowTcpForwarding no`, `AllowAgentForwarding no`,
@@ -717,12 +731,19 @@ accepts is stated and checked, like its firewall, and is not whatever the image 
 The drop-in wins over the image's own settings because of the order `sshd_config(5)` gives: an
 `Include` reads the files that match in lexical order, and for each keyword the first value read is
 used. Debian's main configuration includes `sshd_config.d` ahead of its own lines, so the file whose
-name sorts first decides. The first boot validates the whole configuration with `sshd -t` before it
+name sorts first decides. That order decides the settings outside a `Match` block only: a `Match`
+block, even one in a file read after the drop-in, changes a setting for the connections it matches,
+and the drop-in cannot prevent it. The check reads the settings as the edge's user's connection
+gets them ([Checking and reading](#checking-and-reading)), so such a block that turns passwords on
+for that user is a FAIL. The first boot validates the whole configuration with `sshd -t` before it
 tells the daemon to reload (`systemctl try-reload-or-restart ssh`, which leaves a daemon that is not
 running to read it when it starts); a configuration the daemon refuses is taken out again, so the
-daemon can start at the next boot, and fails the first boot like any other step. The tests prove the
-precedence with a real `sshd -T` against an image configuration that says otherwise where the machine
-has an OpenSSH server, and otherwise prove only that the file's name sorts first.
+daemon can start at the next boot, and fails the first boot like any other step. Where the machine
+that runs the tests has an OpenSSH server, they read the tree's settings with it, `sshd -T`:
+settings it refuses fail them, the tree's win against an image configuration that says otherwise,
+and the check's reading of a `Match` for the edge's user is proved against it. Without one, they
+prove only that the file's name sorts first, and the check's reading of a `Match` against a fake
+daemon.
 
 `just edge-ssh-key` creates the key pair at `EDGE_SSH_KEY_FILE`, and the stack reads the public half
 from the file beside it. An edge's host key is recorded on first contact, in
@@ -733,9 +754,8 @@ the old key alone until `just edge-rollout --replace` replaces them
 ([runbooks/edge.md](runbooks/edge.md#replacing-one-edge)).
 
 Outputs, all sensitive but `names`: `addresses` (the floating addresses), `private_addresses`,
-`instances`, `config` (each edge's rendered FRR configuration, nftables rules, kernel settings and SSH
-daemon's settings),
-`user_data`, `server_group`, `security_group` and `floating_ips`.
+`instances`, `config` (each edge's rendered FRR configuration, nftables rules, kernel settings and
+SSH daemon's settings), `user_data`, `server_group`, `security_group` and `floating_ips`.
 
 ## The generated talman.yaml
 

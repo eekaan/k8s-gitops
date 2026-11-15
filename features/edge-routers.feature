@@ -94,9 +94,9 @@ Feature: Edge routers
     Then it fails with a line that says it cannot read that state on the edge and what the edge said with the address left out, and it does not draw the unhealthy conclusion from the missing answer
 
   Scenario: The first boot gives the SSH daemon the settings the tree holds, and they win over the image's
-    Given the image's SSH daemon configuration, which includes its drop-in directory ahead of its own lines, and drop-ins that say password login, root login and forwarding are on
+    Given the image's SSH daemon configuration, which includes its drop-in directory ahead of its own key exchange, ciphers and MACs, and drop-ins that say password login, root login and forwarding are on
     When the first boot runs
-    Then the daemon's settings are installed as the first drop-in in lexical order, key exchange limited to the post-quantum hybrids and curve25519-sha256, public key authentication only, and no forwarding, and the daemon is validated before it is reloaded
+    Then the daemon's settings are installed as the first drop-in in lexical order, key exchange limited to the post-quantum hybrids and curve25519-sha256, AEAD ciphers and encrypt-then-MAC MACs, public key authentication only, and no forwarding, which the daemon accepts and reports as its effective settings, and the daemon is validated before it is reloaded
 
   Scenario: A daemon configuration that does not validate fails the first boot
     Given settings the SSH daemon refuses
@@ -104,9 +104,9 @@ Feature: Edge routers
     Then it fails saying why, on the console and in the log, leaves no drop-in behind and does not reload the daemon, and the edge is disarmed
 
   Scenario: The check fails an edge whose SSH daemon accepts another key exchange or a password
-    Given an edge whose SSH daemon's effective settings differ from the tree's in one setting at a time, each setting of the tree in turn
+    Given an edge whose SSH daemon's effective settings differ from the tree's in one setting at a time, each setting of the tree in turn, by another value, none, or the tree's value with more after it, or by a Match block for the edge's user
     When just edge-check runs
-    Then it fails naming that setting and no value, and passes when the settings are the tree's
+    Then it fails naming that setting and no value, and passes when the settings are the tree's for the edge's user's connection
 
   Scenario: The Gateway's address is the service range's host at the number the plumbing stack is given
     Given the plumbing stack's service range and a Gateway host number other than the default

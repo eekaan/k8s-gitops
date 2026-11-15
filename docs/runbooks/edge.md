@@ -60,12 +60,16 @@ In this order, after the plumbing stack is applied ([rebuild.md](rebuild.md)):
   its clients' connections end, and a client that retries can reach the other edge.
 - **Unattended upgrades are off**: the first boot turns them off, as they would upgrade FRR in
   place.
-- **The SSH daemon runs with the settings the first boot wrote**: `sudo -n sshd -T` on the edge
-  reports the key exchange list, the authentication methods and the forwarding settings of
-  `infra/openstack/stacks/sto2/edge/sshd.conf`. A FAIL names the settings that differ and never
-  their values: read them on the edge with `sudo sshd -T`, and the drop-in
-  `/etc/ssh/sshd_config.d/00-edge.conf` and the files beside it. An edge is rebuilt, not patched, so
-  the way out is `just edge-rollout --replace --edge N`.
+- **The SSH daemon runs with the settings the first boot wrote**: `sudo -n sshd -T -C user=...` on
+  the edge, the settings as the edge's user's connection gets them, `Match` blocks for that user
+  applied, reports the key exchange, ciphers, MACs, authentication and forwarding settings of
+  `infra/openstack/stacks/sto2/edge/sshd.conf`, each with the same value. A FAIL names the settings
+  that differ and never their values: read them on the edge with
+  `sudo sshd -T -C user=debian,host=operator.example.org,addr=198.51.100.1` (with the user
+  `EDGE_SSH_USER` names), and look for a `Match` block in the files of `/etc/ssh/sshd_config.d`
+  beside the drop-in `00-edge.conf` and in `/etc/ssh/sshd_config`. What a `Match` on the
+  operator's own address or host name changes is not read by the check. An edge is rebuilt, not
+  patched, so the way out is `just edge-rollout --replace --edge N`.
 - **cannot read X on the edge**: a line that says the edge did not answer for one state, as its
   command was not found or failed, with what the edge said, any address left out. It is a FAIL of
   its own and says nothing about the state itself: run the command on the edge, as its ordinary

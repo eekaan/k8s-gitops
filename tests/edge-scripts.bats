@@ -215,13 +215,39 @@ EOF
   host_sbin_fake sysctl << 'EOF'
 cat "$EDGE_FIXTURE/forwarding"
 EOF
-  host_sbin_fake sshd << 'EOF'
-[[ $* == -T ]] || { echo "fake sshd: unexpected $*" >&2; exit 1; }
-if [[ -f $EDGE_FIXTURE/broken-sshd ]]; then
-  cat "$EDGE_FIXTURE/broken-sshd" >&2
+  # sshd -T prints the settings in the fixture's file sshd, and, for a connection -C names the user
+  # of, those of a Match for that user, the file sshd-match-user-NAME, in their place. A fixture
+  # with an sshd_config of its own is read by this machine's OpenSSH server instead, as the edge's
+  # would.
+  host_sbin_fake sshd << EOF
+[[ \${1-} == -T ]] || { echo "fake sshd: unexpected \$*" >&2; exit 1; }
+shift
+if [[ -f \$EDGE_FIXTURE/broken-sshd ]]; then
+  cat "\$EDGE_FIXTURE/broken-sshd" >&2
   exit 1
 fi
-cat "$EDGE_FIXTURE/sshd"
+if [[ -f \$EDGE_FIXTURE/sshd_config ]]; then
+  exec "$(type -P sshd)" -T -f "\$EDGE_FIXTURE/sshd_config" -h "\$EDGE_FIXTURE/ssh-host-key" "\$@"
+fi
+user=
+while ((\$#)); do
+  case \$1 in
+    -C)
+      [[ ,\${2-}, =~ ,user=([^,]+), ]] && user=\${BASH_REMATCH[1]}
+      shift 2
+      ;;
+    *) echo "fake sshd: unexpected \$1" >&2; exit 1 ;;
+  esac
+done
+declare -A matched=()
+if [[ -n \$user && -f \$EDGE_FIXTURE/sshd-match-user-\$user ]]; then
+  while read -r keyword value; do
+    [[ -n \$keyword ]] && matched[\$keyword]="\$keyword \$value"
+  done < "\$EDGE_FIXTURE/sshd-match-user-\$user"
+fi
+while read -r keyword value; do
+  [[ -n \$keyword ]] && echo "\${matched[\$keyword]:-\$keyword \$value}"
+done < "\$EDGE_FIXTURE/sshd"
 EOF
   host_fake ip << 'EOF'
 case $* in
@@ -596,10 +622,24 @@ on_edge() {
   [[ $output == *"pass  lab-edge-1: FRR is running"* ]]
   [[ $output == *"pass  lab-edge-1: unattended upgrades are off"* ]]
   [[ $output != *"the kernel does not forward"* ]]
+
+  # The edge cannot make the file a command's standard error is kept in: every section says why.
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  rm -f "$HOST"/edge-1/broken-* "$HOST_BIN/mktemp"
+  host_fake mktemp << 'EOF'
+echo "mktemp: failed to create file via template '/tmp/tmp.XXXXXXXXXX': No space left on device" >&2
+exit 1
+EOF
+  edge_check --edge 1
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL  lab-edge-1: cannot read FRR's state on the edge: not asked, as mktemp failed: "*"No space left on device"* ]]
+  [[ $output == *"FAIL  lab-edge-1: cannot read the SSH daemon's settings on the edge: not asked, as mktemp failed: "*"No space left on device"* ]]
+  [[ $output != *"pass "* && $output != *"the kernel does not forward"* ]]
 }
 
 @test "The check fails an edge whose SSH daemon accepts another key exchange or a password" {
-  local keyword keywords
+  local keyword keywords entry weak
   mapfile -t keywords < <(awk '!/^[[:space:]]*(#|$)/ { print tolower($1) }' "$ROOT/infra/openstack/stacks/sto2/edge/sshd.conf")
   edge_state 1 active "$WORKERS" 203.0.113.17/32
   edge_state 2 active "$WORKERS" 203.0.113.17/32
@@ -617,6 +657,30 @@ on_edge() {
   [[ $output$'\n' == *"FAIL  lab-edge-1: the SSH daemon's effective settings differ from the first boot's: kexalgorithms"$'\n'* ]]
   [[ $output != *"diffie-hellman"* ]]
   [[ $output == *"pass  lab-edge-2: the SSH daemon runs with the settings the first boot wrote"* ]]
+
+  # The tree's list and a weak one after it, for the key exchange, the ciphers and the MACs: the
+  # daemon accepts every one the tree names and one more, which only a comparison of the whole value
+  # tells.
+  for entry in kexalgorithms,diffie-hellman-group14-sha1 ciphers,aes128-cbc macs,hmac-sha1; do
+    keyword=${entry%%,*} weak=${entry#*,}
+    edge_state 1 active "$WORKERS" 203.0.113.17/32
+    sed -i "s/^$keyword .*/&,$weak/" "$HOST/edge-1/sshd"
+    grep -q "^$keyword [^ ]*,$weak\$" "$HOST/edge-1/sshd"
+    edge_check --edge 1
+    echo "$keyword and $weak: $output"
+    [ "$status" -ne 0 ]
+    [[ $output$'\n' == *"FAIL  lab-edge-1: the SSH daemon's effective settings differ from the first boot's: $keyword"$'\n'* ]]
+    [[ $output != *"$weak"* ]]
+  done
+
+  # A public key, or a password instead: the tree's method and another after it.
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  sed -i 's/^authenticationmethods .*/& password/' "$HOST/edge-1/sshd"
+  grep -qx 'authenticationmethods publickey password' "$HOST/edge-1/sshd"
+  edge_check --edge 1
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output$'\n' == *"FAIL  lab-edge-1: the SSH daemon's effective settings differ from the first boot's: authenticationmethods"$'\n'* ]]
 
   # A password accepted, and nothing else wrong.
   edge_state 1 active "$WORKERS" 203.0.113.17/32
@@ -650,6 +714,43 @@ on_edge() {
   edge_check --edge 1
   [[ $output$'\n' == *"differ from the first boot's: passwordauthentication, permitrootlogin"$'\n'* ]]
   no_address "$output"
+
+  # A Match block that turns passwords on for another user leaves the edge's user's connection as
+  # the tree says; one for the edge's user is a password accepted, though the daemon's settings
+  # outside any Match are the tree's.
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  echo 'passwordauthentication yes' > "$HOST/edge-1/sshd-match-user-someone-else"
+  edge_check --edge 1
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *"pass  lab-edge-1: the SSH daemon runs with the settings the first boot wrote"* ]]
+  echo 'passwordauthentication yes' > "$HOST/edge-1/sshd-match-user-debian"
+  edge_check --edge 1
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output$'\n' == *"FAIL  lab-edge-1: the SSH daemon's effective settings differ from the first boot's: passwordauthentication"$'\n'* ]]
+
+  # The same, read by the machine's own OpenSSH server where it has one: the tree's settings as the
+  # drop-in an image's main file includes, and the image's Match block in a drop-in after it.
+  if type -P sshd ssh-keygen > /dev/null; then
+    edge_state 1 active "$WORKERS" 203.0.113.17/32
+    mkdir -p "$HOST/edge-1/sshd_config.d"
+    ssh-keygen -q -t ed25519 -N '' -f "$HOST/edge-1/ssh-host-key"
+    printf 'Include %s/*.conf\n' "$HOST/edge-1/sshd_config.d" > "$HOST/edge-1/sshd_config"
+    cp "$ROOT/infra/openstack/stacks/sto2/edge/sshd.conf" "$HOST/edge-1/sshd_config.d/00-edge.conf"
+    printf 'Match User someone-else\n  PasswordAuthentication yes\n' > "$HOST/edge-1/sshd_config.d/50-image.conf"
+    edge_check --edge 1
+    echo "real sshd, another user's Match: $output"
+    [ "$status" -eq 0 ]
+    [[ $output == *"pass  lab-edge-1: the SSH daemon runs with the settings the first boot wrote"* ]]
+    printf 'Match User debian\n  PasswordAuthentication yes\n' > "$HOST/edge-1/sshd_config.d/50-image.conf"
+    edge_check --edge 1
+    echo "real sshd, the edge's user's Match: $output"
+    [ "$status" -ne 0 ]
+    [[ $output$'\n' == *"FAIL  lab-edge-1: the SSH daemon's effective settings differ from the first boot's: passwordauthentication"$'\n'* ]]
+  else
+    echo "not proved here: no sshd on this machine, so the Match for the edge's user is read by the fake sshd only"
+  fi
 }
 
 # rollout: scripts/edge-rollout --yes in the copy, the operator typing yes for every host key the
@@ -1337,20 +1438,26 @@ disarmed() {
 }
 
 # image_ssh_config: what an image's SSH daemon is configured with: its main file includes the
-# drop-in directory ahead of its own lines, as Debian's does, and drop-ins on either side of the
-# edge's name say what an image may ship, each against the edge's settings.
+# drop-in directory ahead of its own lines, as Debian's does, and sets its own key exchange, ciphers
+# and MACs after it, and drop-ins on either side of the edge's name say what an image may ship, each
+# against the edge's settings.
 image_ssh_config() {
   local root="$BATS_TEST_TMPDIR/edge-root" dir="$BATS_TEST_TMPDIR/edge-root/etc/ssh/sshd_config.d"
   mkdir -p "$dir"
-  printf 'Include %s/*.conf\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\n' "$dir" > "$root/etc/ssh/sshd_config"
+  {
+    printf 'Include %s/*.conf\n' "$dir"
+    printf 'KexAlgorithms diffie-hellman-group14-sha256,curve25519-sha256\n'
+    printf 'Ciphers aes128-ctr,aes256-ctr\nMACs hmac-sha2-256,hmac-sha2-512\n'
+    printf 'PasswordAuthentication yes\nKbdInteractiveAuthentication yes\n'
+  } > "$root/etc/ssh/sshd_config"
   printf 'KexAlgorithms curve25519-sha256@libssh.org\nAuthenticationMethods password\n' > "$dir/10-image.conf"
   printf 'PasswordAuthentication yes\nPermitRootLogin yes\nAllowTcpForwarding yes\nAllowAgentForwarding yes\nX11Forwarding yes\nPermitTunnel yes\n' > "$dir/50-cloud-init.conf"
 }
 
-# effective ROOT: what the real sshd reports for the configuration under ROOT, one keyword and its
-# value per line, when the machine has an OpenSSH server; fails when it has none.
+# effective ROOT: what the machine's OpenSSH server reports for the configuration under ROOT, one
+# keyword and its value per line; fails, with the daemon's error on standard error, when the daemon
+# refuses the configuration.
 effective() {
-  type -P sshd > /dev/null && type -P ssh-keygen > /dev/null || return 1
   [[ -f $BATS_TEST_TMPDIR/ssh-host-key ]] || ssh-keygen -q -t ed25519 -N '' -f "$BATS_TEST_TMPDIR/ssh-host-key"
   sshd -T -f "$1/etc/ssh/sshd_config" -h "$BATS_TEST_TMPDIR/ssh-host-key"
 }
@@ -1370,8 +1477,11 @@ effective() {
   [ "$(first_line "^install -m 0644 $root/etc/edge/sshd.conf $root/etc/ssh/sshd_config.d/00-edge.conf\$")" -gt 0 ]
   [ "$(first_line '^sshd -t')" -gt "$(first_line "^install -m 0644 $root/etc/edge/sshd.conf ")" ]
   [ "$(first_line '^systemctl try-reload-or-restart ssh$')" -gt "$(first_line '^sshd -t')" ]
-  # The tree's keywords are the ones the post-quantum hybrids, public keys and no forwarding need.
+  # The tree's keywords are the ones the post-quantum hybrids, AEAD ciphers, encrypt-then-MAC MACs,
+  # public keys and no forwarding need.
   grep -qx 'KexAlgorithms mlkem768x25519-sha256,sntrup761x25519-sha512,curve25519-sha256' "$tree"
+  grep -qx 'Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com' "$tree"
+  grep -qx 'MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com' "$tree"
   for line in 'PasswordAuthentication no' 'KbdInteractiveAuthentication no' 'PermitRootLogin no' \
     'AuthenticationMethods publickey' 'AllowTcpForwarding no' 'AllowAgentForwarding no' \
     'X11Forwarding no' 'PermitTunnel no'; do
@@ -1380,12 +1490,17 @@ effective() {
   absent -i '^AllowUsers' "$tree"
 
   # sshd reads the drop-ins in lexical order, ahead of the main file's own lines, and takes the first
-  # value of a keyword: the edge's file is the first the glob names.
-  names=$(LC_ALL=C; cd "$dir" && printf '%s\n' *.conf | sort | head -1)
+  # value of a keyword: the edge's file is the first the glob names, in byte order.
+  names=$(cd "$dir" && printf '%s\n' *.conf | LC_ALL=C sort | head -1)
   [ "$names" = 00-edge.conf ]
-  [ "$(cd "$dir" && LC_ALL=C printf '%s\n' *.conf | head -1)" = 00-edge.conf ]
 
-  if effective "$root" > "$BATS_TEST_TMPDIR/effective"; then
+  # Where the machine has an OpenSSH server, the real daemon reads the configuration: settings it
+  # refuses fail this test with its error, as they would fail the first boot on an edge.
+  if type -P sshd ssh-keygen > /dev/null; then
+    if ! effective "$root" > "$BATS_TEST_TMPDIR/effective"; then
+      echo "sshd refuses the configuration with the tree's settings"
+      return 1
+    fi
     # The real daemon's effective settings are the tree's, against an image that says otherwise.
     awk '{ $1 = tolower($1) } 1' "$BATS_TEST_TMPDIR/effective" > "$BATS_TEST_TMPDIR/effective-lower"
     while read -r keyword value; do

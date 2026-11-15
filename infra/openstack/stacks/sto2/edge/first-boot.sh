@@ -71,9 +71,11 @@ fi
 
 # The SSH daemon's settings: a drop-in that sorts first. The image's main configuration includes
 # sshd_config.d ahead of its own lines, files in lexical order, and the daemon takes the first value
-# it reads for a keyword (sshd_config(5)), so 00- wins over the image's files. The daemon validates
-# the whole configuration before it is told to read it: one that does not validate is taken out
-# again, as the daemon would refuse to start on it at the next boot, and the first boot fails.
+# it reads for a keyword (sshd_config(5)), so 00- wins over the image's settings outside a Match
+# block; scripts/edge-check reads them as the edge's user's connection gets them. The daemon
+# validates the whole configuration before it is told to read it: one that does not validate is
+# taken out again, as the daemon would refuse to start on it at the next boot, and the first boot
+# fails.
 install -m 0644 "$root/etc/edge/sshd.conf" "$root/etc/ssh/sshd_config.d/00-edge.conf"
 # sshd -t refuses to run without its privilege separation directory, which the service creates when
 # it starts and a daemon that has not started yet has not.
