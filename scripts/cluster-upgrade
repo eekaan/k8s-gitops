@@ -8,9 +8,12 @@
 # upgraded with talman, and uncordoned once its kubelet has reported Ready since the upgrade began,
 # before the next is drained. A node already on its version is not drained. A worker is taken out of
 # BGP before its drain, waiting for up to BGP_WAIT seconds (120) until its CiliumBGPNodeConfig is
-# gone, so the edge routers withdraw its paths at once, and put back once it is uncordoned, so no
-# more than one worker is out at a time; --no-bgp-wait skips the first wait for every worker the run
-# takes out, as for a worker whose Cilium agent is not running. A worker out of BGP by a label this
+# gone, so the edge routers withdraw its paths at once, and put back once it is uncordoned and its
+# Cilium agent has stayed Ready, since the upgrade, for FORWARD_SETTLE seconds (30) within
+# FORWARD_WAIT seconds (300): forward first, announce second (join_bgp in scripts/lib/cluster.sh).
+# So no more than one worker is out at a time; --no-bgp-wait skips the first wait, for the
+# withdrawal, for every worker the run takes out, as for a worker whose Cilium agent is not running,
+# and not the wait for the agent. A worker out of BGP by a label this
 # run did not set is dealt with only once the run is confirmed: one Ready and schedulable is put back
 # before the first node is upgraded, and taken out again like any other when it is behind; any
 # other, when it is the first worker behind, is taken through as out already: drained, upgraded,
@@ -24,8 +27,9 @@
 # on the node network, which only the nodes reach. When a run stops after draining a node, the node
 # stays cordoned until it is uncordoned by hand; a second run skips it once it is on its version.
 # It holds the cluster's lock (lock_cluster in scripts/lib/cluster.sh) for the whole run, and
-# refuses while another recipe that drains, reboots, upgrades or applies to the cluster's nodes
-# holds it.
+# refuses while another of cluster-reboot, cluster-upgrade, cluster-upgrade-k8s and cluster-talos
+# holds it. BGP_WAIT, FORWARD_WAIT and FORWARD_SETTLE are whole numbers of seconds of at most nine
+# digits; a longer one is refused before anything runs.
 # Usage: scripts/cluster-upgrade [cluster] [--yes] [--no-bgp-wait]
 set -euo pipefail
 
@@ -51,7 +55,10 @@ done
 # shellcheck source=scripts/cluster-env
 . "$here/cluster-env" "$cluster"
 require_cluster talman secrets age-key api-address
-require_bgp_wait
+complete=1
+require_bgp_wait || complete=0
+require_forward_waits || complete=0
+((complete))
 step="locking $cluster"
 lock_cluster
 
@@ -167,6 +174,9 @@ for node in "${nodes[@]}"; do
   step="draining $node"
   drain_node "$node"
   step="upgrading $node, which is drained"
+  # talman returns only once the node is Ready again, so its Cilium agent turned Ready, and a pod's
+  # Ready does not refresh, before then: the agent is asked for a Ready since the upgrade began.
+  began=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   cluster_talman_drain_off upgrade -n "$node"
   # A Ready condition from before talman returned is the one etcd kept while the node was away, or
   # one the kubelet posted as the upgrade began; only a report after it shows the upgraded node.
@@ -176,7 +186,7 @@ for node in "${nodes[@]}"; do
   step="uncordoning $node"
   kubectl uncordon "$node"
   if [[ $role == worker ]]; then
-    join_bgp "$node"
+    join_bgp "$node" "$began" "the upgrade"
   fi
 done
 

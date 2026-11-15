@@ -225,11 +225,17 @@ they stay; the next ones are spread over the others.
   excludes, wait until its `CiliumBGPNodeConfig` is gone, after which the Cilium agent closes the
   node's sessions with a notification and the edges withdraw its paths
   ([how, in Cilium's source](../infrastructure.md#the-edge-routers)), and only then drain it; the
-  label is removed once the node is Ready. A kubelet cannot set or remove a label under
+  label is removed once the node is Ready, uncordoned and its Cilium agent has stayed Ready since
+  the reboot for `FORWARD_SETTLE` seconds (30), so the worker announces again only once it forwards
+  and no new connection hashed to it fails (the agent's readiness is not proof that the datapath
+  forwards to a backend on another node, so that margin is the control, and a worker whose agent
+  does not get there within `FORWARD_WAIT` stays out of BGP, said last, with the command that puts
+  it back). A kubelet cannot set or remove a label under
   `node-restriction.kubernetes.io/` on its own Node; the node's Cilium agent copies its Node's
   labels to its `CiliumNode`, which the selector is matched against, so a worker whose agent is not
   running keeps its `CiliumBGPNodeConfig` and the wait runs out: `--no-bgp-wait` reboots or
-  upgrades it without the wait. No second worker is taken out while one is. `just cluster-reboot`,
+  upgrades it without the wait for the withdrawal, and not without the wait for the agent before the
+  worker is put back. No second worker is taken out while one is. `just cluster-reboot`,
   `just cluster-talos --reboot` and `just cluster-upgrade` that stop with a worker out say so last
   and print the command that puts it back,
   `kubectl label node <node> node-restriction.kubernetes.io/bgp-out-`, and `just cluster-check`
@@ -247,8 +253,14 @@ reached through both edges:
    stay in `just edge-routes`: about the hold time, 9 seconds. Unpause it.
 3. **A worker, planned**: run `just edge-routes` on an edge, then `just cluster-reboot <worker>`
    and run it again while the worker drains and reboots, and once it is back. The worker's /32
-   paths are gone before the drain starts, no path of it is stale at any point, no new connection
-   hashed to it fails, and its paths are back once the recipe ends.
+   paths are gone before the drain starts, no path of it is stale at any point, and its paths are
+   back once the recipe ends, and not before its Cilium agent has stayed Ready since the reboot for
+   the settle time. The expectation is that no new connection hashed to it fails at any point, a
+   connection loop through the edge to a published address included, from before the recipe starts
+   until after the worker's paths are back. The control is the recipe's order: withdrawal before the
+   drain, and the label removed only once the agent has stayed Ready; a connection that fails after
+   the paths are back shows that the settle time, a margin and not a proof, was too short, and
+   `FORWARD_SETTLE` is the knob.
 4. **A worker, graceful, with no step before it**: stop the worker's instance in the cloud, and
    time the same: its paths stay, stale, for up to the restart time, 120 seconds, and connections
    hashed to it fail meanwhile.

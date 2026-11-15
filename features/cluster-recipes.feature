@@ -76,6 +76,21 @@ Feature: Cluster recipes
     When cluster-upgrade runs, without the cluster's name typed back and then with it
     Then the first shows talman's dry run and changes nothing; the second takes an etcd snapshot to the bucket, then for cp-2 and then worker-1 only drains the node with kubectl through the kubeconfig served at KUBE_API_ADDRESS, upgrades it with talman with talosctl's own drain off, waits for it to report Ready after the upgrade and uncordons it before the next is drained; with the API not answering nothing is drained, and with every node on its version it exits zero without asking
 
+  Scenario: An upgrade waits for each worker to forward before it announces again and before the next worker is taken out
+    Given talman reporting worker-1 and worker-2 behind the Talos version, worker-1's Cilium agent pod reporting the Ready it posted before the upgrade, then not Ready, then Ready, worker-2's Ready, not Ready and Ready again; and then worker-1's agent never Ready
+    When cluster-upgrade runs, and again with the agent that never is, with and without --no-bgp-wait
+    Then each worker is uncordoned, its agent read until it has stayed Ready since the upgrade for FORWARD_SETTLE seconds, 30 on the clock, counted from its last read that was not Ready, and only then is its label removed, before the next worker is labelled; no agent is read for a control plane; with the agent that never is Ready the worker stays out, is uncordoned, the next worker is neither labelled nor drained, and the run says what was waited for and for how long and, last, that the worker is out of BGP and how to put it back, with --no-bgp-wait too
+
+  Scenario: A wait given as a number too long to hold is refused before anything runs
+    Given BGP_WAIT, REBOOT_WAIT, FORWARD_WAIT, FORWARD_SETTLE, TALOS_WAIT and --tolerate each given a number of ten, nineteen or twenty digits, and the same with a leading zero
+    When each recipe that reads it runs: cluster-reboot, cluster-upgrade, cluster-talos with and without --reboot, and cluster-bootstrap
+    Then each refuses with a non-zero exit, naming the variable and the bound of nine digits, before the lock is taken and before kubectl, talman, rclone or another recipe is called; a leading zero is read in base 10, so the run goes on, and a settle time longer than the wait is refused too
+
+  Scenario: The lock makes the cluster's directory private when it creates it
+    Given a checkout that has no clusterconfig directory for the cluster, and then one that has it with its own mode
+    When cluster-talos runs under a umask of 022, and again
+    Then the directory it creates has mode 0700 and holds the lock file, what git sees is unchanged, and an existing directory keeps its mode
+
   Scenario: A reboot that cluster-talos makes and that stops with a worker out says so last, with the command that puts it back
     Given a worker that needs a reboot for a change to its configuration, and a cluster-reboot that labels it out of BGP and stops, then one that labels it and sends cluster-talos SIGTERM; and then talman failing to reboot it, under the real cluster-reboot
     When cluster-talos runs with --first and --reboot, and then with --reboot alone, twice
@@ -86,9 +101,9 @@ Feature: Cluster recipes
     When cluster-upgrade runs, and again with a worker whose upgrade fails, and in reruns with a worker left out and cordoned or schedulable, with a worker behind or none, with the cluster's name not typed back, with only cp-2 behind, with a worker left out, cordoned or schedulable, that is itself behind, and with a role that is neither controlplane nor worker
     Then each worker is labelled out of BGP, waited for until its BGP configuration is gone, drained, upgraded, uncordoned and put back, waited for until it is back, in that order, before the next worker is labelled; cp-2 is drained and upgraded with no BGP step; at most one worker is ever out; the worker whose upgrade fails stays out, the last line saying so and how to put it back; a worker left out and cordoned stops the run before another is taken out, in the step that takes that one out; with nothing behind a worker left out, cordoned or schedulable, is only reported, nothing being asked: the run changes nothing and fails in the step that checks for one, saying why it is not put back and, last, how to put it back; before the run is confirmed nothing is put back, and once it is, one left out and schedulable is put back before another is taken out; with only cp-2 behind, cp-2 is upgraded and a worker left out and cordoned fails the run in the same way; a worker left out that is itself behind is taken through, the cordoned one as out already and the schedulable one put back first and taken out again, and either drained, upgraded, uncordoned and put back; and a node of another role is not drained
 
-  Scenario: Only one recipe at a time drains, reboots, upgrades or applies to a cluster's nodes
-    Given a cluster whose lock another run holds, and a descriptor open on the lock file that does not hold the lock
-    When cluster-reboot, cluster-upgrade, cluster-upgrade-k8s and cluster-talos --reboot run, each without CLUSTER_LOCK_FD and with it naming that descriptor, and then, once the lock is free, a cluster-reboot that fails and a cluster-upgrade-k8s that succeeds
+  Scenario: Only one of cluster-reboot, cluster-upgrade, cluster-upgrade-k8s and cluster-talos runs at a time on a cluster
+    Given a cluster whose lock another run holds, and a descriptor open on the lock file that does not hold the lock and one open on another file
+    When cluster-reboot, cluster-upgrade, cluster-upgrade-k8s and cluster-talos --reboot run, each without CLUSTER_LOCK_FD and with it naming each descriptor, and then, once the lock is free, a cluster-reboot that fails and a cluster-upgrade-k8s that succeeds
     Then each of the first refuses, saying the cluster is busy because another operation on it is running, and calls no kubectl, talman, rclone or cluster-reboot; the lock is free after each of the last two
 
   Scenario: BGP_WAIT is a number of seconds in base 10, a leading zero included, and bounds the wait for a worker's withdrawal

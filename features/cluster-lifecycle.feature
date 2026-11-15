@@ -99,7 +99,22 @@ Feature: Cluster lifecycle
   Scenario: A planned reboot takes the worker out of BGP, waits until it announces nothing, and puts it back once it is Ready
     Given a worker whose BGP node configuration follows the opt-out label only after a few reads, out and in, one of whose two peers is established late; and a cluster whose workers' sessions are never established; a worker cordoned before the run; and BGP_WAIT=08 with a configuration that takes three reads, six seconds, to go
     When cluster-reboot runs for each
-    Then it sets the label, reads the node's BGP configuration until it is gone, and only then cordons and drains the node, which announces nothing when it is drained and when it goes down; once the node is Ready and uncordoned it removes the label and reads the configuration until it is back with both peers established; no other node is labelled, and cluster-check passes afterwards; with no session established before or after, it succeeds all the same, saying it does not wait for one, with the node uncordoned and the label removed; the worker cordoned before stays cordoned and has its label removed once it is Ready; and with BGP_WAIT=08, read in base 10, the configuration is read until it is gone before the node is cordoned and drained
+    Then it sets the label, reads the node's BGP configuration until it is gone, and only then cordons and drains the node, which announces nothing when it is drained and when it goes down; once the node is Ready and uncordoned and its Cilium agent forwards it removes the label and reads the configuration until it is back with both peers established; no other node is labelled, and cluster-check passes afterwards; with no session established before or after, it succeeds all the same, saying it does not wait for one, with the node uncordoned and the label removed; the worker cordoned before stays cordoned and has its label removed once it is Ready; and with BGP_WAIT=08, read in base 10, the configuration is read until it is gone before the node is cordoned and drained
+
+  Scenario: A rebooted worker is put back into BGP only after its Cilium agent reports that it forwards
+    Given a worker whose Cilium agent pod still reports the Ready it posted before the node went down, then is not Ready twice, and then is Ready since the reboot; and a control plane
+    When cluster-reboot runs for the worker, and for the control plane
+    Then once the node is Ready and uncordoned the agent's pod is read until it is Ready since the reboot, and only then is the label removed, after which the BGP configuration is awaited as before; the run says the agent has been Ready since the reboot for the settle time and that the worker is put back; no agent is read for the control plane
+
+  Scenario: A worker whose agent never reports that it forwards stays out of BGP, and the run says so last
+    Given a worker whose Cilium agent pod is never Ready after the reboot, keeps the Ready it posted before the node went down, does not exist, cannot be read, or is never Ready while the run has --no-bgp-wait and the worker's BGP configuration stays
+    When cluster-reboot runs for the worker with FORWARD_WAIT=4
+    Then each exits non-zero after the node is rebooted, Ready and uncordoned, with the label still on it and never removed, saying what was waited for and for how long, or that the agent could not be read and so it is not known whether the node forwards, and the last line says the worker is out of BGP and gives the kubectl command that puts it back; --no-bgp-wait does not skip the wait
+
+  Scenario: A recipe killed outright does not leave the cluster locked
+    Given a cluster-reboot that is sent SIGKILL while talman reboots a control plane and its probe of /readyz runs
+    When the lock's file is locked afterwards, and cluster-reboot runs again for a node the cluster does not have
+    Then the probe runs on, the lock is free, and the second run is not refused as busy
 
   Scenario: A recipe that stops while a worker is out says so last, with the command that puts it back
     Given a drain that fails, a reboot talman fails, SIGTERM while talman reboots, a node that does not come back, a node whose BGP configuration never goes, a node already out from an earlier run, a node that does not announce again once put back, a BGP configuration that cannot be read before the label and after it, and another worker that is out

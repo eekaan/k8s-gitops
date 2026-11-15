@@ -20,7 +20,7 @@
 #   api-address the API load balancer's floating address, exported as KUBE_API_ADDRESS: from the
 #               environment when it sets one, and otherwise values.apiAddress in the cluster's
 #               talman.yaml, which the cluster stack renders. yq reads it; it is never printed.
-#   wait        TALOS_WAIT, when set, as a number of seconds
+#   wait        TALOS_WAIT, when set, as a whole number of seconds of at most nine digits
 require_cluster() {
   local need from complete=1
   for need; do
@@ -64,10 +64,7 @@ require_cluster() {
         fi
         ;;
       wait)
-        if [[ ! ${TALOS_WAIT:-600} =~ ^[0-9]+$ ]]; then
-          infra_error "TALOS_WAIT is not a whole number of seconds"
-          complete=0
-        fi
+        require_seconds TALOS_WAIT "${TALOS_WAIT:-600}" || complete=0
         ;;
     esac
   done

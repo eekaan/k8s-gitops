@@ -33,6 +33,20 @@ failed_step() {
   fi
 }
 
+# require_seconds NAME VALUE: fails, naming NAME, unless VALUE is a whole number of seconds of at
+# most nine digits. Nine digits keep every sum the recipes make of one far inside 64-bit arithmetic,
+# which wraps a value of nineteen digits or more into a short, a negative or an endless wait. A
+# leading zero is no octal: callers read a value that has passed with 10#, as in $((10#$value)).
+# NAME is a variable, or an option such as --tolerate, which takes its value.
+require_seconds() {
+  local verb='is not'
+  [[ $1 != -* ]] || verb=takes
+  if [[ ! $2 =~ ^[0-9]{1,9}$ ]]; then
+    infra_error "$1 $verb a whole number of seconds of at most 9 digits"
+    return 1
+  fi
+}
+
 # require_commands NAME...: fails naming each NAME that is not on PATH.
 require_commands() {
   local name complete=1
@@ -375,16 +389,18 @@ wait_for_talos_api() {
 }
 
 # lock_cluster: holds, until the run ends, the lock of the cluster scripts/cluster-env set up, which
-# each recipe that drains, reboots, upgrades or applies to its nodes takes, so no two run at once:
-# one could put back a worker the other is taking out, or reboot a node the other is draining.
-# Fails, saying the cluster is busy, while another run holds it. It is flock's lock on
+# cluster-reboot, cluster-upgrade, cluster-upgrade-k8s and cluster-talos take, so no two of them run
+# at once: one could put back a worker the other is taking out, or reboot a node the other is
+# draining. Fails, saying the cluster is busy, while another run holds it. It is flock's lock on
 # clusterconfig/cluster.lock in the cluster's directory, which git ignores, and goes when the run
-# ends, however it ends, as its descriptor closes then. A run hands the descriptor to the recipes it
-# runs, as cluster-talos --reboot runs cluster-reboot, in CLUSTER_LOCK_FD: the child locks that
-# descriptor, which is granted as it shares the parent's lock, and does so only when it is open on
-# this lock file; locking it fails while another run holds the lock, so the variable alone never
-# lets a run past. The lock is a file in the checkout: it does not exclude another checkout or
-# another machine.
+# ends, however it ends, as its descriptor closes then; a child the run starts that outlives it
+# therefore closes that descriptor first (scripts/cluster-reboot's probe of /readyz does), or it
+# would hold the lock on. A directory that is missing is made private, as every recipe makes the one
+# it writes secrets in. A run hands the descriptor to the recipes it runs, as cluster-talos --reboot
+# runs cluster-reboot, in CLUSTER_LOCK_FD: the child locks that descriptor, which is granted as it
+# shares the parent's lock, and does so only when it is open on this lock file; locking it fails
+# while another run holds the lock, so the variable alone never lets a run past. The lock is a file
+# in the checkout: it does not exclude another checkout or another machine.
 lock_cluster() {
   # shellcheck disable=SC2154 # scripts/cluster-env sets cluster_dir
   local file=$cluster_dir/clusterconfig/cluster.lock
@@ -394,7 +410,7 @@ lock_cluster() {
   fi
   if [[ ${CLUSTER_LOCK_FD-} =~ ^[0-9]+$ && /dev/fd/$CLUSTER_LOCK_FD -ef $file ]]; then
     cluster_lock_fd=$CLUSTER_LOCK_FD
-  elif ! { mkdir -p "${file%/*}" && exec {cluster_lock_fd}> "$file"; } 2> /dev/null; then
+  elif ! { (umask 077 && mkdir -p "${file%/*}") && exec {cluster_lock_fd}> "$file"; } 2> /dev/null; then
     infra_error "cannot lock $cluster: its lock file cannot be made in talos/$cluster/clusterconfig"
     return 1
   fi
@@ -452,22 +468,40 @@ bgp_left_out=()
 declare -gA bgp_had_config=() bgp_had_peers=()
 
 # require_bgp_wait: fails unless BGP_WAIT, how long the recipes wait for a node's BGP state to follow
-# its label, is a whole number of seconds, and sets it to that number in base 10: arithmetic would
-# read a leading zero as octal, and 08 as an error that drops the rest of the command it is in.
+# its label, is a whole number of seconds (require_seconds), and sets it to that number in base 10:
+# arithmetic would read a leading zero as octal, and 08 as an error that drops the rest of the
+# command it is in.
 require_bgp_wait() {
-  if [[ ! ${BGP_WAIT:-120} =~ ^[0-9]+$ ]]; then
-    infra_error "BGP_WAIT is not a whole number of seconds"
-    return 1
-  fi
+  require_seconds BGP_WAIT "${BGP_WAIT:-120}" || return 1
   BGP_WAIT=$((10#${BGP_WAIT:-120}))
 }
 
-# bgp_clock: the time in seconds since the epoch, from date +%s; fails, saying so, when date gives
-# anything but a whole number, which arithmetic could not be trusted with.
+# require_forward_waits: fails unless FORWARD_WAIT, how long a recipe waits, once a worker is Ready
+# again, for its Cilium agent to report that the node forwards (300 seconds), and FORWARD_SETTLE, for
+# how long the agent must have stayed Ready within it (30 seconds), are whole numbers of seconds
+# (require_seconds) and FORWARD_SETTLE does not exceed FORWARD_WAIT, which could never be met. Sets
+# both to their numbers in base 10.
+require_forward_waits() {
+  local complete=1
+  require_seconds FORWARD_WAIT "${FORWARD_WAIT:-300}" || complete=0
+  require_seconds FORWARD_SETTLE "${FORWARD_SETTLE:-30}" || complete=0
+  ((complete)) || return 1
+  FORWARD_WAIT=$((10#${FORWARD_WAIT:-300}))
+  FORWARD_SETTLE=$((10#${FORWARD_SETTLE:-30}))
+  if ((FORWARD_SETTLE > FORWARD_WAIT)); then
+    infra_error "FORWARD_SETTLE is $FORWARD_SETTLE seconds, longer than FORWARD_WAIT, $FORWARD_WAIT, so an agent could never have stayed Ready that long within it"
+    return 1
+  fi
+}
+
+# bgp_clock [WHAT]: the time in seconds since the epoch, from date +%s; fails, saying so, when date
+# gives anything but a whole number, which arithmetic could not be trusted with. WHAT is the wait
+# the time is for, a node's BGP state when it is not given.
 bgp_clock() {
-  local now
+  local now what=${1-}
+  [[ -n $what ]] || what="a node's BGP state"
   if ! now=$(date +%s) || [[ ! $now =~ ^[0-9]+$ ]]; then
-    infra_error "date +%s does not give the time, so the wait for a node's BGP state cannot be timed"
+    infra_error "date +%s does not give the time, so the wait for $what cannot be timed"
     return 1
   fi
   printf '%s' "$now"
@@ -507,10 +541,7 @@ bgp_established_peers() {
 wait_bgp() {
   local node=$1 want=$2 now deadline config established peer missing result
   shift 2
-  if [[ ! ${BGP_WAIT:-120} =~ ^[0-9]+$ ]]; then
-    infra_error "BGP_WAIT is not a whole number of seconds"
-    return 3
-  fi
+  require_seconds BGP_WAIT "${BGP_WAIT:-120}" || return 3
   now=$(bgp_clock) || return 3
   deadline=$((now + 10#${BGP_WAIT:-120}))
   while :; do
@@ -552,6 +583,57 @@ bgp_note_out() {
     [[ $each != "$1" ]] || return 0
   done
   bgp_left_out+=("$1")
+}
+
+# agent_forwarding NODE SINCE: whether the Cilium agent pods on NODE, which kubectl reads through the
+# kubeconfig, are all Running and Ready with a Ready condition that turned true at or after SINCE, a
+# UTC time as Kubernetes writes it; and at least one is. Returns 0 when so, 1 when not, and 2 when
+# kubectl cannot read them. A pod's Ready from before the node went down is the one it posted before,
+# which SINCE leaves out. The agent's readiness probe is /healthz, which answers once every probe of
+# the agent has run, none is stale and writing the CNI configuration has not failed (daemon/healthz
+# in Cilium's source; the check that the API server is reachable applies only to a request with the
+# require-k8s-connectivity header, which the readiness probe does not send); it does not say that the node's endpoints are regenerated or
+# its ipcache and tunnel map are in step, which a connection to a backend on another node needs.
+# docs/cluster.md says why that is covered with a settle time.
+agent_forwarding() {
+  local pods
+  if ! pods=$(kubectl get pods --namespace kube-system --selector k8s-app=cilium \
+    --field-selector "spec.nodeName=$1" --output json --request-timeout=10s 2> /dev/null); then
+    return 2
+  fi
+  jq -e --arg since "$2" '($since | fromdateiso8601) as $since
+    | (.items | length) > 0 and all(.items[]; .metadata.deletionTimestamp == null and .status.phase == "Running"
+      and any(.status.conditions[]?; .type == "Ready" and .status == "True"
+        and (.lastTransitionTime | fromdateiso8601) >= $since))' <<< "$pods" > /dev/null 2>&1 || return 1
+}
+
+# wait_forwarding NODE SINCE: waits for up to FORWARD_WAIT seconds (300), checked every two and once
+# at least, until the Cilium agent on NODE has been Ready since SINCE (agent_forwarding) for
+# FORWARD_SETTLE seconds (30) without a read that says otherwise. That the agent is Ready says that
+# it has started and every probe of it has run; the settle time is the margin for what its readiness does not cover,
+# not a proof of it. Fails with 1 when the time runs out, with 2 when it runs out with the last read
+# having failed, and with 3, saying why, when the clock cannot be read as a number. The time is read
+# with date +%s, so a test's clock bounds the wait.
+wait_forwarding() {
+  local node=$1 since=$2 now deadline steady='' result
+  now=$(bgp_clock "the wait for a node's Cilium agent") || return 3
+  deadline=$((now + 10#${FORWARD_WAIT:-300}))
+  while :; do
+    result=0
+    agent_forwarding "$node" "$since" || result=$?
+    now=$(bgp_clock "the wait for a node's Cilium agent") || return 3
+    if ((result == 0)); then
+      [[ -n $steady ]] || steady=$now
+      ((now - steady >= 10#${FORWARD_SETTLE:-30})) && return 0
+    else
+      steady=''
+    fi
+    if ((now >= deadline)); then
+      ((result == 2)) && return 2
+      return 1
+    fi
+    sleep 2
+  done
 }
 
 # leave_bgp NODE WAIT: takes the worker NODE out of BGP and, unless WAIT is 0, waits until its
@@ -623,12 +705,34 @@ leave_bgp() {
   bgp_say "the BGP configuration of $node is gone, so its agent closes its sessions with a notification and the edge routers withdraw its paths at once (just edge-routes shows their side)"
 }
 
-# join_bgp NODE: puts the worker NODE back in BGP and waits until its CiliumBGPNodeConfig is back and
-# the peers that were established before leave_bgp took it out are again; when that is not known, as
-# for a node that was out already or one taken out with --no-bgp-wait, only until its configuration
-# is back. Once the label is gone the node is no longer out, whether or not it announces yet.
+# join_bgp NODE [SINCE [WHAT]]: puts the worker NODE back in BGP once its Cilium agent reports that
+# the node forwards, and waits until its CiliumBGPNodeConfig is back and the peers that were
+# established before leave_bgp took it out are again; when that is not known, as for a node that was
+# out already or one taken out with --no-bgp-wait, only until its configuration is back. Announcing
+# is the last step, as an edge hashes a share of new connections to a worker the moment it announces
+# its addresses, and a node that is Ready may not yet forward a Service's connection to a backend on
+# another node: the agent must have stayed Ready since SINCE, the time the reboot or upgrade WHAT
+# names began (wait_forwarding), or at all when they are not given, as for a node this run did not take
+# out. A node whose agent does not get there keeps its label and stays in bgp_left_out. --no-bgp-wait
+# does not skip this wait. Once the label is gone the node is no longer out, whether or not it
+# announces yet.
 join_bgp() {
-  local node=$1 still_out=() each peers waited=0
+  local node=$1 since=${2:-1970-01-01T00:00:00Z} what=${3-} still_out=() each peers waited=0
+  step="waiting for the Cilium agent on $node to forward"
+  wait_forwarding "$node" "$since" || waited=$?
+  case $waited in
+    0) bgp_say "the Cilium agent on $node has been Ready${what:+ since $what} for ${FORWARD_SETTLE:-30}s, so $node is put back in BGP" ;;
+    1)
+      infra_error "the Cilium agent on $node has not been Ready${what:+ since $what} for ${FORWARD_SETTLE:-30}s within ${FORWARD_WAIT:-300}s, so $node stays out of BGP; FORWARD_WAIT sets how long to wait and FORWARD_SETTLE how long the agent must have stayed Ready"
+      return 1
+      ;;
+    2)
+      infra_error "kubectl could not read the Cilium agent of $node through the kubeconfig, so it is not known whether $node forwards"
+      return 1
+      ;;
+    *) return 1 ;;
+  esac
+  waited=0
   step="putting $node back in BGP"
   if ! kubectl label node "$node" "$bgp_out_label-" > /dev/null 2>&1; then
     infra_error "kubectl could not remove the label that has $node out of BGP"

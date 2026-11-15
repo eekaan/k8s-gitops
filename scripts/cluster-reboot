@@ -14,8 +14,9 @@
 #      withdraw its paths at once; it first records which of the node's sessions are established,
 #      and stops, changing nothing, while another worker is out of BGP or when the configuration
 #      cannot be read. --no-bgp-wait, for a worker whose Cilium agent is not running to take the
-#      label up, sets it without reading the configuration or waiting, and says what that can cost;
-#      a control plane has no BGP, and nothing here changes for it;
+#      label up, sets it without reading the configuration or waiting for it to go, and says what that
+#      can cost; the wait for the agent before the worker is put back stays; a control plane has no
+#      BGP, and nothing here changes for it;
 #   1. cordons the node and drains it with kubectl, as cluster-upgrade drains, so that nothing new
 #      is placed on it while it goes down: a kubelet that is shutting down rejects every pod it is
 #      given, and the scheduler would go on giving it the same replica. talosctl's own drain, which
@@ -30,8 +31,13 @@
 #      quorum.
 # Then it prints how many probes it made, how many failed and the longest run of failures, in
 # seconds; uncordons the node, unless it was unschedulable before the recipe ran, which it says;
-# puts a worker back in BGP, waiting until its CiliumBGPNodeConfig is back and the sessions that were
-# established before are again, or only until it is back when they are not known;
+# puts a worker back in BGP only once its Cilium agent has stayed Ready, since the reboot, for
+# FORWARD_SETTLE seconds (30), within FORWARD_WAIT seconds (300): forward first, announce second, as
+# an edge hashes a share of new connections to a worker the moment it announces, and a node that is
+# Ready does not yet forward a Service's connection to a backend on another node (join_bgp in
+# scripts/lib/cluster.sh says what the agent's readiness covers); --no-bgp-wait does not skip this
+# wait; then waits until its CiliumBGPNodeConfig is back and the sessions that were established
+# before are again, or only until it is back when they are not known;
 # and deletes the pods the shutdown left in phase Failed on it, rejected (NodeShutdown) or
 # terminated (Terminated) as the node went down, which nothing else removes, saying how many. It
 # exits 0 only when the node is Ready again, a control plane with its etcd member, and no probe
@@ -46,8 +52,11 @@
 # output only the drain's passes through, as in cluster-upgrade: it names the pods it evicts and
 # those it cannot. The rest is not printed, as it can name the API server's or the nodes' addresses.
 # It holds the cluster's lock (lock_cluster in scripts/lib/cluster.sh) for the whole run, sharing it
-# with cluster-talos --reboot when that runs it, and refuses while another recipe that drains,
-# reboots, upgrades or applies to the cluster's nodes holds it.
+# with cluster-talos --reboot when that runs it, and refuses while another of cluster-reboot,
+# cluster-upgrade, cluster-upgrade-k8s and cluster-talos holds it. The probe, which a recipe that is
+# killed outright leaves running, closes the lock's descriptor, so it does not hold the lock on.
+# --tolerate, REBOOT_WAIT, BGP_WAIT, FORWARD_WAIT and FORWARD_SETTLE are whole numbers of seconds of
+# at most nine digits; a longer one is refused before anything runs.
 # Usage: scripts/cluster-reboot <node> [cluster] [--yes] [--tolerate <seconds>] [--no-bgp-wait]
 set -euo pipefail
 
@@ -92,15 +101,10 @@ complete=1
 require_cluster talman secrets age-key || complete=0
 require_kubeconfig || complete=0
 require_commands talman kubectl jq yq || complete=0
-if [[ ! $tolerate =~ ^[0-9]+$ ]]; then
-  infra_error "--tolerate takes a whole number of seconds"
-  complete=0
-fi
-if [[ ! ${REBOOT_WAIT:-600} =~ ^[0-9]+$ ]]; then
-  infra_error "REBOOT_WAIT is not a whole number of seconds"
-  complete=0
-fi
+require_seconds --tolerate "$tolerate" || complete=0
+require_seconds REBOOT_WAIT "${REBOOT_WAIT:-600}" || complete=0
 require_bgp_wait || complete=0
+require_forward_waits || complete=0
 ((complete))
 step="locking $cluster"
 lock_cluster
@@ -178,6 +182,9 @@ etcd_whole() {
 # handled at once, and they are stopped with it.
 probe_api() {
   local probe='' tick='' started
+  # A recipe that is killed outright, which no trap sees, leaves this running, and a descriptor of the
+  # cluster's lock open here would keep the lock held for every later recipe.
+  exec {cluster_lock_fd}>&-
   probes=0 failed=0 longest=0 down_since=''
   trap 'end_probe' TERM
   while :; do
@@ -401,7 +408,7 @@ else
 fi
 
 if ((!member)); then
-  join_bgp "$node"
+  join_bgp "$node" "$since" "the reboot"
 fi
 
 step="removing the pods the shutdown left Failed on $node"
