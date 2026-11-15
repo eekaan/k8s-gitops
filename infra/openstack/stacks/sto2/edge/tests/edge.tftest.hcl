@@ -389,6 +389,12 @@ run "traffic_to_an_edges_public_ports_is_forwarded_to_the_gateways_address_and_n
     condition     = strcontains(output.config["1"].sysctl, "net.ipv4.ip_forward = 1\n") && strcontains(output.config["1"].sysctl, "net.ipv4.conf.all.send_redirects = 0\n")
     error_message = "Forwarding must be on, and ICMP redirects off, as the edge forwards between hosts on one subnet."
   }
+
+  # IPv6 forwarding stays as the kernel starts, off: nothing of IPv6 is forwarded.
+  assert {
+    condition     = length(regexall("(?m)^net\\.ipv6\\..*forwarding", output.config["1"].sysctl)) == 0
+    error_message = "The kernel settings must not turn IPv6 forwarding on."
+  }
 }
 
 run "the_public_ports_admit_only_the_operator_allowlist_by_default_and_ssh_admits_only_the_operator_allowlist" {
