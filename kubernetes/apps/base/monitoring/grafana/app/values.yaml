@@ -5,8 +5,8 @@
 # off and keeps only the dashboards the chart renders for what the cluster scrapes: the Kubernetes
 # mixin's, node-exporter's on Linux nodes, and those of Prometheus, Alertmanager and Grafana
 # itself. Each is a ConfigMap and a GrafanaDashboard that loads it into the Grafana, so Grafana
-# fetches nothing at run time. tests/grafana.bats fails when the release renders anything else, or
-# a dashboard that differs from the one the monitoring application's values would render.
+# fetches no dashboard at run time. tests/grafana.bats fails when the release renders anything
+# else, or a dashboard that differs from the one the monitoring application's values would render.
 
 # Object names start with this instead of the release's name and the chart's, cut to 26 letters.
 fullnameOverride: grafana-dashboards
