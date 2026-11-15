@@ -460,11 +460,11 @@ run "the_user_data_holds_no_secret_and_the_edges_port_allows_exactly_the_address
         !strcontains(output.user_data[key], "marker-key-comment") &&
         !strcontains(output.user_data[key], "203.0.113.192") &&
         !strcontains(output.user_data[key], "198.51.100.0/24") &&
-        !strcontains(lower(output.user_data[key]), "password") &&
+        !strcontains(replace(lower(output.user_data[key]), "passwordauthentication no", ""), "password") &&
         !strcontains(lower(output.user_data[key]), "secret")
       )
     ])
-    error_message = "The user data must hold neither the SSH key, nor the operator allowlist, nor a password."
+    error_message = "The user data must hold neither the SSH key, nor the operator allowlist, nor a password; the word is allowed only as the SSH daemon's setting that turns password login off."
   }
 
   # What cloud-init writes is what the stack renders: the cloud-config parses, and its files hold
@@ -477,6 +477,7 @@ run "the_user_data_holds_no_secret_and_the_edges_port_allows_exactly_the_address
         "/etc/edge/frr.conf"              = output.config[key].frr_conf
         "/etc/edge/nftables.conf"         = output.config[key].nftables_conf
         "/etc/edge/sysctl.conf"           = output.config[key].sysctl
+        "/etc/edge/sshd.conf"             = output.config[key].sshd_conf
         "/etc/edge/daemons"               = file("frr-daemons")
         "/usr/local/sbin/edge-first-boot" = file("first-boot.sh")
       }

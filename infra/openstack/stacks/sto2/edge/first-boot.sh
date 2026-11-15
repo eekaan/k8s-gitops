@@ -1,7 +1,8 @@
 #!/bin/bash
 # The first boot of an edge router: checks the release, turns unattended upgrades off, installs FRR
 # and nftables from the distribution's repositories, checks the configuration cloud-init wrote under
-# /etc/edge with each tool's own check before anything of it is installed under /etc, loads the
+# /etc/edge with each tool's own check before anything of it is installed under /etc, gives the SSH
+# daemon its settings as the first of its drop-ins, validated before the daemon reloads, loads the
 # firewall, starts FRR, and turns forwarding on last, once FRR answers and its reject route for the
 # service range is in the kernel. It fails loudly, on the console and in the log, as the first boot
 # is the only time anything configures an edge: an edge is rebuilt, not patched. A failed first boot
@@ -67,6 +68,23 @@ if ! checked=$(vtysh -C -f "$root/etc/edge/frr.conf" 2>&1); then
   printf '%s\n' "$checked"
   fail "FRR's dry run refuses /etc/edge/frr.conf; nothing of it was installed, rebuild this edge with a configuration FRR accepts"
 fi
+
+# The SSH daemon's settings: a drop-in that sorts first. The image's main configuration includes
+# sshd_config.d ahead of its own lines, files in lexical order, and the daemon takes the first value
+# it reads for a keyword (sshd_config(5)), so 00- wins over the image's files. The daemon validates
+# the whole configuration before it is told to read it: one that does not validate is taken out
+# again, as the daemon would refuse to start on it at the next boot, and the first boot fails.
+install -m 0644 "$root/etc/edge/sshd.conf" "$root/etc/ssh/sshd_config.d/00-edge.conf"
+# sshd -t refuses to run without its privilege separation directory, which the service creates when
+# it starts and a daemon that has not started yet has not.
+mkdir -p "$root/run/sshd"
+if ! checked=$(sshd -t -f "$root/etc/ssh/sshd_config" 2>&1); then
+  printf '%s\n' "$checked"
+  rm -f "$root/etc/ssh/sshd_config.d/00-edge.conf"
+  fail "sshd refuses the settings in /etc/edge/sshd.conf; they were not kept, rebuild this edge with settings sshd accepts"
+fi
+# A daemon that is not running is left alone, and reads the settings when it starts.
+systemctl try-reload-or-restart ssh
 
 install -m 0640 -o frr -g frr "$root/etc/edge/frr.conf" "$root/etc/frr/frr.conf"
 install -m 0640 -o frr -g frr "$root/etc/edge/daemons" "$root/etc/frr/daemons"

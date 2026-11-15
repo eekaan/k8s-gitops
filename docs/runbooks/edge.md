@@ -22,8 +22,9 @@ In this order, after the plumbing stack is applied ([rebuild.md](rebuild.md)):
    port and network. Type the stack's name to apply it. The public ports admit the operator
    allowlist only, until `TF_VAR_public_allowed_cidrs` says otherwise.
 4. Wait for the first boot, a minute or two: it turns unattended upgrades off, installs FRR and
-   nftables, checks both files, starts them and turns forwarding on last; a first boot that fails
-   says why on the console and leaves forwarding off and FRR stopped. `just edge-check` then reads
+   nftables, checks both files, gives the SSH daemon its settings, starts FRR and nftables and turns
+   forwarding on last; a first boot that fails says why on the console and leaves forwarding off and
+   FRR stopped. `just edge-check` then reads
    both edges over SSH, showing the host key's fingerprints the first time for each edge and asking
    for `yes`; compare them with the ones the instances printed on their console. Until the cluster's
    workers peer, the sessions line says how many of the workers have none.
@@ -59,6 +60,18 @@ In this order, after the plumbing stack is applied ([rebuild.md](rebuild.md)):
   its clients' connections end, and a client that retries can reach the other edge.
 - **Unattended upgrades are off**: the first boot turns them off, as they would upgrade FRR in
   place.
+- **The SSH daemon runs with the settings the first boot wrote**: `sudo -n sshd -T` on the edge
+  reports the key exchange list, the authentication methods and the forwarding settings of
+  `infra/openstack/stacks/sto2/edge/sshd.conf`. A FAIL names the settings that differ and never
+  their values: read them on the edge with `sudo sshd -T`, and the drop-in
+  `/etc/ssh/sshd_config.d/00-edge.conf` and the files beside it. An edge is rebuilt, not patched, so
+  the way out is `just edge-rollout --replace --edge N`.
+- **cannot read X on the edge**: a line that says the edge did not answer for one state, as its
+  command was not found or failed, with what the edge said, any address left out. It is a FAIL of
+  its own and says nothing about the state itself: run the command on the edge, as its ordinary
+  user as the check does (`sudo -n` for `vtysh`, `nft` and `sshd`; `nft` and `sshd` are in
+  `/usr/sbin`, which that user's `PATH` does not reach), and read why it fails; a stopped FRR is one
+  cause for the BGP lines.
 
 To learn what the edge sees, `just edge-routes` (or `just edge-routes 2`) prints the sessions and
 the table, with addresses, in a terminal only: it refuses in CI and when its output is piped. In the

@@ -8,7 +8,10 @@
 # rules are loaded, and their forward chain passes a translated connection's packets toward the
 # Gateway, new or established, only through a worker, its guard holding every worker's address and
 # not the default route's next hop; the kernel forwards, and not without the rules; and unattended
-# upgrades are off, as an edge is rebuilt, not patched. Prints pass, FAIL or skip per line, never an
+# upgrades are off, as an edge is rebuilt, not patched; and the SSH daemon's effective settings are
+# those the first boot writes from sshd.conf. A command the edge could not run, or that failed, is a
+# FAIL of its own line, saying it could not be read and what the edge said, never the unhealthy
+# conclusion drawn from an answer that did not come. Prints pass, FAIL or skip per line, never an
 # address, and exits non-zero on any FAIL.
 # A check that needs the cluster's talman.yaml is skipped while it does not exist.
 # Usage: scripts/edge-check [--edge 1|2] [cluster]
@@ -148,6 +151,20 @@ guard() {
   done
 }
 
+# The settings the first boot writes for the SSH daemon, each as sshd -T reports it: the keyword in
+# lower case, then its value.
+sshd_tree=$infra_root/infra/openstack/stacks/sto2/edge/sshd.conf
+if [[ ! -f $sshd_tree ]]; then
+  infra_error "$sshd_tree does not exist"
+  exit 1
+fi
+sshd_keywords=() sshd_lines=()
+while read -r keyword value; do
+  [[ -z $keyword || $keyword == '#'* ]] && continue
+  sshd_keywords+=("${keyword,,}")
+  sshd_lines+=("${keyword,,} $value")
+done < "$sshd_tree"
+
 failed=0
 say() { printf '%-5s %s: %s\n' "$1" "$2" "$3"; }
 pass() { say pass "$1" "$2"; }
@@ -157,22 +174,41 @@ fail() {
 }
 skip() { say skip "$1" "$2"; }
 
-# What an edge is asked, as one command, in sections.
-remote='echo "== frr"; systemctl is-active frr || true
-echo "== sessions"; sudo -n vtysh -c "show bgp ipv4 unicast summary json" || true
-echo "== table"; sudo -n vtysh -c "show bgp ipv4 unicast json" || true
-echo "== config"; sudo -n vtysh -c "show running-config" || true
-echo "== unreachable"; ip -4 -o route show type unreachable || true
-echo "== rules"; sudo -n nft list tables || true
-echo "== forward"; sudo -n nft list chain inet edge forward || true
-echo "== default"; ip -4 -o route show default || true
-echo "== forwarding"; sysctl -n net.ipv4.ip_forward || true
-echo "== upgrades"; apt-config dump APT::Periodic::Unattended-Upgrade || true'
+# What an edge is asked, as one command, in sections, each run as the edge's ordinary user, whose
+# PATH on Debian has no sbin directory (login.defs' ENV_PATH, and the PATH OpenSSH's server gives a
+# command run over SSH): what is in /usr/sbin (nft, sshd) runs through sudo, whose secure_path has
+# them, and the kernel's forwarding state is read from the file it is. A section's command that is
+# not found or fails leaves a line that starts "!! " and what the command said, which no answer
+# starts with, and the sections after it are asked all the same.
+IFS= read -r -d '' remote << 'REMOTE' || true
+ask() {
+  echo "== $1"
+  shift
+  if out=$("$@" 2>&1); then
+    [ -z "$out" ] || printf '%s\n' "$out"
+  else
+    printf '!! %s\n' "${out:-exited with status $?}"
+  fi
+}
+# systemctl is-active exits 3, printing inactive or failed, for a unit that does not run: an answer.
+frr_state() { systemctl is-active frr || [ $? -eq 3 ]; }
+ask frr frr_state
+ask sessions sudo -n vtysh -c 'show bgp ipv4 unicast summary json'
+ask table sudo -n vtysh -c 'show bgp ipv4 unicast json'
+ask config sudo -n vtysh -c 'show running-config'
+ask unreachable ip -4 -o route show type unreachable
+ask rules sudo -n nft list tables
+ask forward sudo -n nft list chain inet edge forward
+ask default ip -4 -o route show default
+ask forwarding cat /proc/sys/net/ipv4/ip_forward
+ask upgrades apt-config dump APT::Periodic::Unattended-Upgrade
+ask sshd sudo -n sshd -T
+REMOTE
 
 check_edge() {
   local index=$1 edge=${edge_names[$1]} report section_frr section_sessions section_table section_rules section_forwarding
   local section_config section_unreachable section_forward section_default section_upgrades reject loaded=0
-  local default_hop wrong i
+  local default_hop wrong i section_sshd differ names
   local -a established=() prefixes=() missing=() outside=() fewer=()
   local prefix hops address
   if ! report=$(edge_ssh "$index" "$remote" 2> /dev/null); then
@@ -191,8 +227,34 @@ check_edge() {
   section_forward=$(section forward)
   section_default=$(section default)
   section_upgrades=$(section upgrades)
+  # The daemon prints a keyword in lower case or in its own case, by version.
+  section_sshd=$(section sshd | awk '{ $1 = tolower($1) } 1')
+  # unread NAME: whether the edge did not answer section NAME, as its command was not found or failed,
+  # or the report has no such section.
+  unread() {
+    grep -qx "== $1" <<< "$report" || return 0
+    [[ $(section "$1") == '!! '* ]]
+  }
+  # said NAME: what the edge said under NAME, on one line, without an address, as much as fits.
+  said() {
+    local text
+    text=$(section "$1")
+    if [[ $text != '!! '* ]]; then
+      echo "the edge did not report it"
+      return
+    fi
+    text=${text#'!! '}
+    text=$(sed -E 's/[0-9]{1,3}(\.[0-9]{1,3}){3}/<address>/g; s/([0-9a-fA-F]{0,4}:){2,}[0-9a-fA-F]{0,4}/<address>/g' <<< "${text//$'\n'/ }")
+    echo "${text:0:200}"
+  }
+  # unreadable NAME WHAT: the edge's line for a state it did not report.
+  unreadable() {
+    fail "$edge" "cannot read $2 on the edge: $(said "$1")"
+  }
 
-  if [[ $section_frr == active ]]; then
+  if unread frr; then
+    unreadable frr "FRR's state"
+  elif [[ $section_frr == active ]]; then
     pass "$edge" "FRR is running"
   else
     fail "$edge" "FRR is not running"
@@ -201,6 +263,8 @@ check_edge() {
   mapfile -t established < <(jq -r '.peers // {} | to_entries[] | select(.value.state == "Established") | .key' <<< "$section_sessions" 2> /dev/null)
   if ((${#workers[@]} == 0)); then
     skip "$edge" "sessions: talos/$cluster/talman.yaml lists no workers, so none is expected"
+  elif unread sessions; then
+    unreadable sessions "the BGP sessions"
   else
     for i in "${!workers[@]}"; do
       address=${worker_addresses[i]-}
@@ -222,6 +286,8 @@ check_edge() {
   mapfile -t prefixes < <(jq -r '.routes // {} | keys[]' <<< "$section_table" 2> /dev/null)
   if [[ -z $service_range ]]; then
     skip "$edge" "routes: talos/$cluster/talman.yaml gives no service range"
+  elif unread table; then
+    unreadable table "the BGP table"
   else
     for prefix in "${prefixes[@]}"; do
       in_range "$prefix" || outside+=("$prefix")
@@ -232,6 +298,7 @@ check_edge() {
       pass "$edge" "the table holds ${#prefixes[@]} routes, each a /32 inside the service range"
     fi
     for prefix in "${prefixes[@]}"; do
+      ! unread sessions || break
       hops=$(jq -r --arg prefix "$prefix" '[.routes[$prefix][] | select(.multipath == true or .bestpath == true)] | length' <<< "$section_table")
       if ((hops > ${#established[@]})); then
         fail "$edge" "a route has more next hops than there are sessions"
@@ -240,7 +307,9 @@ check_edge() {
         fewer+=("$prefix")
       fi
     done
-    if ((${#prefixes[@]} == 0)); then
+    if unread sessions; then
+      skip "$edge" "next hops: not compared with the sessions, which could not be read"
+    elif ((${#prefixes[@]} == 0)); then
       skip "$edge" "next hops: no Service address is announced"
     elif ((${#fewer[@]} > 0)); then
       skip "$edge" "next hops: ${#fewer[@]} of ${#prefixes[@]} routes have fewer next hops than sessions, as a Service that is local-only has"
@@ -252,17 +321,24 @@ check_edge() {
   # The reject route FRR is configured with, and that it is in the kernel: with it, a translated
   # connection with no worker's route is refused on the edge instead of following its default route.
   reject=$(sed -n 's/^ip route \([^ ]*\) reject$/\1/p' <<< "$section_config" | head -1)
-  if [[ -z $reject ]]; then
+  if unread config; then
+    unreadable config "FRR's running configuration"
+  elif [[ -z $reject ]]; then
     fail "$edge" "FRR's configuration holds no reject route for the service range"
   elif [[ -n $service_range && $reject != "$service_range" ]]; then
     fail "$edge" "FRR's reject route is not for the cluster's service range"
+  elif unread unreachable; then
+    unreadable unreachable "the kernel's unreachable routes"
   elif ! awk -v range="$reject" '$1 == "unreachable" && $2 == range { found = 1 } END { exit !found }' <<< "$section_unreachable"; then
     fail "$edge" "the service range's reject route is not in the kernel"
   else
     pass "$edge" "the service range is unreachable on the edge but through a worker's route"
   fi
 
-  if grep -qx 'table inet edge' <<< "$section_rules" && grep -qx 'table ip edge-nat' <<< "$section_rules"; then
+  if unread rules; then
+    unreadable rules "the nftables tables"
+    loaded=-1
+  elif grep -qx 'table inet edge' <<< "$section_rules" && grep -qx 'table ip edge-nat' <<< "$section_rules"; then
     pass "$edge" "the nftables rules are loaded"
     loaded=1
   else
@@ -271,23 +347,53 @@ check_edge() {
   # The next hop must be a worker's for the forward chain to pass a translated connection's packets
   # toward the Gateway, new or established, which holds whether FRR runs or not.
   default_hop=$(sed -n 's/^default via \([0-9.]*\) .*/\1/p' <<< "$section_default" | head -1)
-  wrong=$(guard "$section_forward")
-  if [[ -z $wrong ]]; then
-    pass "$edge" "the forward chain sends a translated connection, new or established, toward the Gateway only through a worker"
-  elif ((loaded)); then
-    fail "$edge" "$wrong"
+  if unread forward; then
+    # Without the tables the chain is not there to be read, which the rules' line has said.
+    if ((loaded != 0)); then
+      unreadable forward "the forward chain"
+    fi
+  elif unread default; then
+    unreadable default "the default route"
+  else
+    wrong=$(guard "$section_forward")
+    if [[ -z $wrong ]]; then
+      pass "$edge" "the forward chain sends a translated connection, new or established, toward the Gateway only through a worker"
+    elif ((loaded == 1)); then
+      fail "$edge" "$wrong"
+    fi
   fi
-  if [[ $section_forwarding == 1 ]] && ((loaded)); then
+  if unread forwarding; then
+    unreadable forwarding "the kernel's forwarding state"
+  elif [[ $section_forwarding == 1 ]] && ((loaded == 1)); then
     pass "$edge" "the kernel forwards"
-  elif [[ $section_forwarding == 1 ]]; then
+  elif [[ $section_forwarding == 1 ]] && ((loaded == 0)); then
     fail "$edge" "the kernel forwards without the nftables rules"
+  elif [[ $section_forwarding == 1 ]]; then
+    fail "$edge" "the kernel forwards, and whether the nftables rules are loaded could not be read"
   else
     fail "$edge" "the kernel does not forward"
   fi
-  if [[ $section_upgrades == 'APT::Periodic::Unattended-Upgrade "0";' ]]; then
+  if unread upgrades; then
+    unreadable upgrades "the unattended upgrades setting"
+  elif [[ $section_upgrades == 'APT::Periodic::Unattended-Upgrade "0";' ]]; then
     pass "$edge" "unattended upgrades are off"
   else
     fail "$edge" "unattended upgrades are on, and would upgrade and restart FRR in place"
+  fi
+  # Each setting the first boot writes, compared as the daemon reports it, and named, never its value.
+  if unread sshd; then
+    unreadable sshd "the SSH daemon's settings"
+  else
+    differ=()
+    for i in "${!sshd_lines[@]}"; do
+      grep -qxF -- "${sshd_lines[i]}" <<< "$section_sshd" || differ+=("${sshd_keywords[i]}")
+    done
+    if ((${#differ[@]} == 0)); then
+      pass "$edge" "the SSH daemon runs with the settings the first boot wrote"
+    else
+      printf -v names '%s, ' "${differ[@]}"
+      fail "$edge" "the SSH daemon's effective settings differ from the first boot's: ${names%, }"
+    fi
   fi
 }
 

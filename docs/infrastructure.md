@@ -593,11 +593,12 @@ they would upgrade FRR and restart it in place; the first boot sets
 a lock an upgrade already running holds. It installs `frr` and `nftables` from the repositories of
 the image's release, keeps FRR stopped, checks both files as cloud-init wrote them under
 `/etc/edge`, the rules with `nft --check` and FRR's file with FRR's dry run (`vtysh -C -f`), before
-anything of them is installed under `/etc`, then loads the rules, starts FRR, waits until it answers
-and its reject route for the service range is in the kernel, and turns forwarding on last. A file
-either check refuses, or any other failure, fails the first boot, saying why on the console and in
-the log, and leaves forwarding off with its setting removed and FRR stopped and disabled, so the
-edge forwards nothing until it is rebuilt. The release pins the packages' versions only as far as
+anything of them is installed under `/etc`, then gives the SSH daemon its settings
+([SSH and host keys](#ssh-and-host-keys)), loads the rules, starts FRR, waits until it answers and
+its reject route for the service range is in the kernel, and turns forwarding on last. A file
+either check refuses, settings the SSH daemon refuses, or any other failure, fails the first boot,
+saying why on the console and in the log, and leaves forwarding off with its setting removed and FRR
+stopped and disabled, so the edge forwards nothing until it is rebuilt. The release pins the packages' versions only as far as
 the image's repositories do: a rebuild installs whatever the release holds then, so a new edge may
 have newer packages than the one it replaces, and nothing pins them further.
 
@@ -668,8 +669,22 @@ host's are, it prints pass, FAIL or skip for each edge:
   toward the Gateway, new or established, only through a worker: its first rule drops the rest
   ahead of what belongs to a connection, and both its guarded rules are for the cluster's Gateway,
   hold every worker's address of `talman.yaml` and not the edge's default route's next hop.
-- The kernel forwards, which is a FAIL when it forwards without the rules.
+- The kernel forwards, which is a FAIL when it forwards without the rules. The state is read from
+  `/proc/sys/net/ipv4/ip_forward`, the file the kernel exposes it as
+  ([ip-sysctl](https://docs.kernel.org/networking/ip-sysctl.html)), as the edge's ordinary user and
+  without `sudo`.
 - Unattended upgrades are off.
+- The SSH daemon runs with the settings the first boot wrote ([SSH and host keys](#ssh-and-host-keys)):
+  each setting of `sshd.conf` is compared with what `sudo -n sshd -T` reports, and a FAIL names the
+  settings that differ, never their values.
+
+The commands run on an edge are those of the ordinary user, whose `PATH` on Debian has no `sbin`
+directory (`ENV_PATH` in `login.defs`, and the `PATH` OpenSSH's server gives a command run over
+SSH), so a program that lives in `/usr/sbin` is run through `sudo -n`, whose `secure_path` has
+them: `nft` and `sshd`. `vtysh`, `ip`, `systemctl` and `apt-config` are in `/usr/bin`. An answer the
+edge could not give, as its command was not found or failed, is a FAIL of its own line, `cannot read
+<what> on the edge: <what the edge said>`, with any address in the edge's words left out, and not
+the unhealthy conclusion drawn from an empty answer; the other lines are still checked.
 
 A worker that is down fails the sessions line on both edges, so no rollout gets past its first
 check until the worker is back or the cluster stack no longer has it; the line counts every worker
@@ -682,7 +697,31 @@ unset, so the addresses never reach a CI log.
 ### SSH and host keys
 
 SSH admits the operator allowlist only, by key only, as the image's default user (`EDGE_SSH_USER`,
-`debian` by default). `just edge-ssh-key` creates the key pair at `EDGE_SSH_KEY_FILE`, and the stack
+`debian` by default). The SSH daemon's own settings are the tree's, `sshd.conf`, which the first boot
+installs as `/etc/ssh/sshd_config.d/00-edge.conf`; an edge is a public host, so what its daemon
+accepts is stated and checked, like its firewall, and is not whatever the image came with:
+
+- Key exchange is limited to `mlkem768x25519-sha256`, `sntrup761x25519-sha512` and
+  `curve25519-sha256`: the post-quantum hybrid key exchanges OpenSSH added in 9.9 under these names
+  and made its default in 10.0 ([release notes](https://www.openssh.com/releaseNotes.html)), and the
+  classical one a client that has no hybrid still offers. The client, `edge_ssh`, sets no key
+  exchange of its own: an OpenSSH client from 10.0 offers `mlkem768x25519-sha256` first and
+  negotiates it with these settings, and one without the hybrids negotiates `curve25519-sha256`.
+- Public key authentication only: `PasswordAuthentication no`, `KbdInteractiveAuthentication no`,
+  `PermitRootLogin no` and `AuthenticationMethods publickey`.
+- No forwarding of any kind: `AllowTcpForwarding no`, `AllowAgentForwarding no`,
+  `X11Forwarding no` and `PermitTunnel no`. Nothing the scripts do over SSH needs one.
+- `AllowUsers` is not set: the user is the image's default user, which the tree does not know.
+
+The drop-in wins over the image's own settings because of the order `sshd_config(5)` gives: an
+`Include` reads the files that match in lexical order, and for each keyword the first value read is
+used. Debian's main configuration includes `sshd_config.d` ahead of its own lines, so the file whose
+name sorts first decides. The first boot validates the whole configuration with `sshd -t` before it
+tells the daemon to reload (`systemctl try-reload-or-restart ssh`, which leaves a daemon that is not
+running to read it when it starts); a configuration the daemon refuses is taken out again, so the
+daemon can start at the next boot, and fails the first boot like any other step. The tests prove the
+precedence with a real `sshd -T` against an image configuration that says otherwise where the machine
+has an OpenSSH server, and otherwise prove only that the file's name sorts first. `just edge-ssh-key` creates the key pair at `EDGE_SSH_KEY_FILE`, and the stack
 reads the public half from the file beside it. An edge's host key is recorded on first contact, in
 `~/.local/state/k8s-gitops/edge.known_hosts`, after the fingerprints it offers are shown and `yes`
 is typed, as for the CI host. A key pair reaches an instance only when it is created, so a new pair
@@ -691,7 +730,8 @@ the old key alone until `just edge-rollout --replace` replaces them
 ([runbooks/edge.md](runbooks/edge.md#replacing-one-edge)).
 
 Outputs, all sensitive but `names`: `addresses` (the floating addresses), `private_addresses`,
-`instances`, `config` (each edge's rendered FRR configuration, nftables rules and kernel settings),
+`instances`, `config` (each edge's rendered FRR configuration, nftables rules, kernel settings and SSH
+daemon's settings),
 `user_data`, `server_group`, `security_group` and `floating_ips`.
 
 ## The generated talman.yaml

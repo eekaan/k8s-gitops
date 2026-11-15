@@ -83,6 +83,31 @@ Feature: Edge routers
     When just edge-check runs against a complete table, a table with a missing session, and one with a route outside the range
     Then the first run passes, each of the others fails naming the worker or the route's problem, and no output line holds an address
 
+  Scenario: A healthy edge passes the check with only what its ordinary user can run
+    Given a fake edge that runs the check's command with the commands of its ordinary user's PATH, and the programs in the sbin directories only through sudo, as on Debian
+    When just edge-check runs against a healthy edge
+    Then every line passes, the kernel's forwarding state is read from /proc/sys/net/ipv4/ip_forward without sudo, and no output line holds an address
+
+  Scenario: A state the edge did not report is a failure that says it could not be read
+    Given an edge whose command for one section of the report is missing or fails, in turn for every section, with a message that holds an address
+    When just edge-check runs
+    Then it fails with a line that says it cannot read that state on the edge and what the edge said with the address left out, and it does not draw the unhealthy conclusion from the missing answer
+
+  Scenario: The first boot gives the SSH daemon the settings the tree holds, and they win over the image's
+    Given the image's SSH daemon configuration, which includes its drop-in directory ahead of its own lines, and drop-ins that say password login, root login and forwarding are on
+    When the first boot runs
+    Then the daemon's settings are installed as the first drop-in in lexical order, key exchange limited to the post-quantum hybrids and curve25519-sha256, public key authentication only, and no forwarding, and the daemon is validated before it is reloaded
+
+  Scenario: A daemon configuration that does not validate fails the first boot
+    Given settings the SSH daemon refuses
+    When the first boot runs
+    Then it fails saying why, on the console and in the log, leaves no drop-in behind and does not reload the daemon, and the edge is disarmed
+
+  Scenario: The check fails an edge whose SSH daemon accepts another key exchange or a password
+    Given an edge whose SSH daemon's effective settings differ from the tree's in one setting at a time, each setting of the tree in turn
+    When just edge-check runs
+    Then it fails naming that setting and no value, and passes when the settings are the tree's
+
   Scenario: The Gateway's address is the service range's host at the number the plumbing stack is given
     Given the plumbing stack's service range and a Gateway host number other than the default
     When the plumbing stack is planned against mocked providers
