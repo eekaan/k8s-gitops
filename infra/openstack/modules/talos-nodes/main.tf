@@ -1,8 +1,11 @@
 # The machines of a Talos cluster. Every node boots the Talos image without machine configuration
-# and waits in maintenance mode, with a fixed private address and a floating IP whose Talos and
-# Kubernetes APIs answer only the operator allowlist; machine configuration is applied over the
-# Talos API. Workers can be given more: allowed address pairs, and a security group of their own
-# for traffic to Services.
+# and waits in maintenance mode, with a fixed private address and a floating IP whose Talos API
+# answers only the operator allowlist; machine configuration is applied over the Talos API, and with
+# it the node's own firewall (talos/firewall.yaml). The nodes' security group also admits the
+# Kubernetes API only from the allowlist and nothing else from outside the nodes. With the reduced
+# rules, the control planes get a group of their own that leaves every other port to their firewall
+# but the NodePort range. Workers can be given more: allowed address pairs, and a security group of
+# their own for traffic to Services; security_group_rules changes neither.
 
 locals {
   # Fixed addresses below the node subnet's DHCP pool: control planes from host number 10,
@@ -19,6 +22,22 @@ locals {
   # Sorted, so the same networks given in another order change no rule, and without duplicates,
   # as Neutron refuses a rule that already exists.
   api_sources = sort(distinct(var.api_allowed_cidrs))
+
+  # What the reduced rules open to all, besides the full rules, which they keep, so switching between
+  # the two adds or removes these alone. A Neutron rule only admits, so the ports left closed lie
+  # between ranges: the Talos API, as a node in maintenance mode has no firewall and takes a
+  # configuration from anyone who reaches it, and the NodePort range, as Cilium serves a NodePort
+  # from its eBPF datapath before the node's firewall sees the packet.
+  open = {
+    for key, range in {
+      "tcp-1-29999"     = { protocol = "tcp", min = 1, max = 29999 }
+      "tcp-32768-49999" = { protocol = "tcp", min = 32768, max = 49999 }
+      "tcp-50001-65535" = { protocol = "tcp", min = 50001, max = 65535 }
+      "udp-1-29999"     = { protocol = "udp", min = 1, max = 29999 }
+      "udp-32768-65535" = { protocol = "udp", min = 32768, max = 65535 }
+      "icmp"            = { protocol = "icmp", min = null, max = null }
+    } : key => range if var.security_group_rules == "reduced"
+  }
 }
 
 resource "openstack_networking_secgroup_v2" "this" {
@@ -84,6 +103,32 @@ resource "openstack_networking_secgroup_rule_v2" "api_from_subnet" {
   remote_ip_prefix  = var.network.cidr
 }
 
+# The control planes' own group, with the reduced rules only: what those open to all. Not the nodes'
+# group, which the workers carry too: a rule matches a packet's protocol, port and source, never its
+# destination, so on a worker it would open every port of the service range as well, which Cilium
+# serves before the worker's firewall sees the packet.
+resource "openstack_networking_secgroup_v2" "controlplanes" {
+  count = var.security_group_rules == "reduced" ? 1 : 0
+
+  name        = "${var.name}-controlplanes"
+  description = "Control planes of ${var.name}: every port but the Talos API and the NodePort range, from all; their own firewall filters it."
+  # Ingress rules only; the nodes' group keeps Neutron's default egress rules for the control planes.
+  delete_default_rules = true
+  tags                 = var.tags
+}
+
+resource "openstack_networking_secgroup_rule_v2" "open" {
+  for_each = local.open
+
+  security_group_id = openstack_networking_secgroup_v2.controlplanes[0].id
+  direction         = "ingress"
+  ethertype         = "IPv4"
+  protocol          = each.value.protocol
+  port_range_min    = each.value.min
+  port_range_max    = each.value.max
+  remote_ip_prefix  = "0.0.0.0/0"
+}
+
 # The workers' own group, on top of the nodes': only the rules for traffic to Services. A rule
 # matches a packet's protocol, port and source, never its destination, so it admits the same
 # traffic to the worker's own address and to every address its allowed address pairs carry.
@@ -135,6 +180,7 @@ module "node" {
   security_group_ids = concat(
     [openstack_networking_secgroup_v2.this.id],
     each.value.role == "worker" ? [openstack_networking_secgroup_v2.workers.id] : [],
+    each.value.role == "controlplane" ? openstack_networking_secgroup_v2.controlplanes[*].id : [],
   )
   allowed_address_pairs = concat(
     var.allowed_address_pairs,

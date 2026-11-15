@@ -50,7 +50,7 @@ cluster-flux *args:
 cluster-kubeconfig cluster='lab-sto2':
     scripts/cluster-kubeconfig {{ quote(cluster) }}
 
-# Roll a cluster's configuration out: show what would change, then apply once its name is typed back (--yes: without asking; --onboard: configure new nodes too)
+# Roll a cluster's configuration out: show what would change, then apply once its name is typed back (--yes: without asking; --onboard: configure new nodes too; --first <node>: apply to that node and then each other one alone in Talos' try mode, which reverts by itself, and keep it only once the paths into it from the other nodes, its readiness and cluster-check pass)
 [positional-arguments]
 cluster-talos *args:
     scripts/cluster-talos "$@"
@@ -75,6 +75,11 @@ cluster-check cluster='lab-sto2':
 # Forward a local port, GRAFANA_PORT or 3000, on 127.0.0.1 only, to Grafana on a cluster through its kubeconfig until Ctrl-C; prints the local URL and where the admin password is kept, never the password
 grafana cluster='lab-sto2':
     scripts/grafana {{ quote(cluster) }}
+
+# Print the logs a LogsQL query matches, one line per record, the oldest first, through the Kubernetes API's service proxy to VictoriaLogs: just logs 'kubernetes.pod_namespace:monitoring error' [--since 15m] [--limit 200] [cluster]; --since is a number with s, m, h, d or w; fails with the reason when the API does not answer or the store refuses the query
+[positional-arguments]
+logs *args:
+    scripts/logs "$@"
 
 # Reboot one node, by its hostname in talman.yaml, once its name is typed back (--yes: without asking), asking /readyz through the kubeconfig once a second until the node is Ready again; fails when a probe failed (--tolerate <seconds>: accept a gap that long)
 [positional-arguments]

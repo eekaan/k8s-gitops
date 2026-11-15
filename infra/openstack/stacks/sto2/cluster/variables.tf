@@ -105,6 +105,17 @@ variable "api_allowed_cidrs" {
   }
 }
 
+variable "security_group_rules" {
+  description = "What the nodes' security groups hold: full, the default, admits from outside the nodes only the Talos and Kubernetes APIs, from the allowlist, the nodes' floating IPs and the CI host, the Kubernetes API from the node subnet, and to the workers the service ports from the edge routers; reduced keeps those and gives the control planes a group of their own that opens every other port to all, but the Talos API, which a node without machine configuration cannot protect, and the NodePort range, which Cilium serves before Talos' firewall sees it. The workers, which carry the service range, get nothing more."
+  type        = string
+  default     = "full"
+
+  validation {
+    condition     = contains(["full", "reduced"], var.security_group_rules)
+    error_message = "security_group_rules must be full or reduced."
+  }
+}
+
 variable "ci_host_number" {
   description = "Host number on the node subnet of the CI host the ci stack makes, its host_number, 6 by default, never one of the plumbing stack's edge_hosts: its fixed address then reaches the nodes' Talos API (TCP 50000) and Kubernetes API (TCP 6443). Null, the default, while there is no CI host: the nodes admit nothing for it, and the stack plans without the ci stack."
   type        = number

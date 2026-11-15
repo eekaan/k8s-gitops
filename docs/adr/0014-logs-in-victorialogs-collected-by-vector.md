@@ -80,7 +80,13 @@ time they were sent.
 
 ## Consequences
 
-- Grafana, once installed, needs the VictoriaLogs plugin to read logs, and queries are LogsQL.
+- Grafana needs the VictoriaLogs plugin to read logs, and queries are LogsQL. Grafana does not ship
+  the plugin and the cluster's Grafana makes no other call to the internet, so the plugin is the one
+  exception: the operator hands it to Grafana's container, which is set to install it at start with
+  `grafana cli plugins install`, at an exact version, from grafana.com's plugin catalogue, and
+  Grafana loads it only if its signature verifies. The install makes two requests to grafana.com,
+  for the plugin's versions and for that version's archive, which grafana.com redirects to its
+  catalogue's storage; either failing stops Grafana from starting.
 - Talos's lines reach the store within about 15 seconds of being written, as Talos flushes its
   files that often.
 - One store replica: while it starts again on another worker, nothing is stored or queried, and each

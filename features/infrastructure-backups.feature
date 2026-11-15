@@ -55,3 +55,8 @@ Feature: Backup buckets and the cluster's S3 key
     Given an environment without one of the names a recipe needs, or with it empty or a placeholder
     When infra-backup-buckets, infra-backup-check or infra-s3-key runs
     Then it exits non-zero naming the variable, and neither the S3 client nor the openstack client is started
+
+  Scenario: A failed credential request says why, without a project, an address or a key
+    Given an openstack client that fails to create an EC2 credential as unauthorized, naming the identity endpoint, the project and a request ID, and on a name lookup that fails
+    When just infra-s3-key runs, without CI and with CI set
+    Then it exits non-zero and writes no .env; without CI it shows the reason the client gave with no endpoint, address, project ID or request ID; with CI set it shows none of the client's words and names the file git ignores that holds them

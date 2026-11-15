@@ -447,7 +447,7 @@ seconds() {
   local labels datasources url service namespace port found
   built grafana
   labels="$(grafana_labels)"
-  datasources="$(yq -N -o json -I0 'select(.kind == "GrafanaDatasource")' "$BUILT")"
+  datasources="$(yq -N -o json -I0 'select(.kind == "GrafanaDatasource" and .spec.datasource.type == "prometheus")' "$BUILT")"
   echo "Grafana labels: $labels"
   echo "datasources: ${datasources:-none}"
   [ "$(grep -c . <<<"$datasources")" -eq 1 ]
@@ -525,6 +525,13 @@ seconds() {
   fetched="$(yq -N 'select(.kind == "GrafanaDashboard" or .kind == "GrafanaDatasource")
     | select((.spec | has("url") or has("urlAuthorization") or has("grafanaCom") or has("oci") or has("jsonnet")
         or has("jsonnetLib")) or (.spec.plugins // [] | length) > 0)
+    # The one exception, documented in docs/kubernetes.md: the datasource for VictoriaLogs asks for
+    # its own plugin, once; tests/logs.bats checks that it is pinned to an exact version.
+    | select((.kind == "GrafanaDatasource" and .metadata.name == "victoria-logs"
+        and .spec.datasource.type == "victoriametrics-logs-datasource"
+        and (.spec.plugins // [] | length) == 1 and .spec.plugins[0].name == "victoriametrics-logs-datasource"
+        and (.spec | has("url") or has("urlAuthorization") or has("grafanaCom") or has("oci") or has("jsonnet")
+          or has("jsonnetLib") | not)) | not)
     | .kind + "/" + .metadata.name' "$BUILT" "$RENDERED")"
   echo "fetched at run time: ${fetched:-none}"
   [ -z "$fetched" ]

@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# Prints the cluster's logs that a LogsQL query matches, one line per record: its time, the
+# namespace and pod it came from or, for a Talos service's record, its node, and its message, the
+# oldest first. The query goes to VictoriaLogs' /select/logsql/query through the Kubernetes API's
+# service proxy, kubectl get --raw on the cluster's kubeconfig as scripts/cluster-env finds it, so
+# no port is forwarded and none is left behind. It changes nothing on the cluster and reads no
+# Secret. Of what kubectl prints, only the message of an error the API server or the store answered
+# with is shown, as kubectl words it or, for a query the store refuses, the store's own, without an
+# address or a control character; the rest, warnings and the error of a connection that failed
+# among it, can name the API server's address and is never shown: an API that does not answer is
+# reported with a reason of its own.
+# --since DURATION (a whole number with s, m, h, d or w; 15m when unset) is the window, ending now;
+# --limit N (200 when unset) is how many records at most.
+#
+# The endpoint's arguments are those of VictoriaLogs' querying documentation,
+# https://docs.victoriametrics.com/victorialogs/querying/ : query, start (an RFC 3339 time here)
+# and limit. With the limit, the store answers with the records with the largest _time, newest
+# first, unless the query's pipes change the records' order, as stats and sort do: then with the
+# first the pipes give, in their order (app/vlselect/logsql/logsql.go, ProcessQueryRequest, in
+# VictoriaLogs v1.54.0). So the records are sorted here, oldest first. The answer is JSON lines, one
+# record each, with _time, _msg and _stream and the record's other fields beside them, and a refused
+# query is an HTTP error with the reason as its body.
+#
+# The answer goes to a file, not through a pipe: a reader that closes early, as head or grep -q do,
+# ends its writer with SIGPIPE, which pipefail turns into a failure of a large answer that is fine.
+# Usage: scripts/logs QUERY [--since DURATION] [--limit N] [cluster]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/cluster.sh
+. "$here/lib/cluster.sh"
+
+query='' since=15m limit=200 cluster='' have_query=0
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case ${args[i]} in
+    --since | --limit)
+      if ((i + 1 >= ${#args[@]})); then
+        infra_error "${args[i]} needs a value"
+        exit 2
+      fi
+      if [[ ${args[i]} == --since ]]; then since=${args[i + 1]}; else limit=${args[i + 1]}; fi
+      i=$((i + 1))
+      ;;
+    --*)
+      infra_error "unknown option ${args[i]}; usage: logs QUERY [--since DURATION] [--limit N] [cluster]"
+      exit 2
+      ;;
+    *)
+      if ((!have_query)); then
+        query=${args[i]} have_query=1
+      elif [[ -z $cluster ]]; then
+        cluster=${args[i]}
+      else
+        infra_error "usage: logs QUERY [--since DURATION] [--limit N] [cluster]"
+        exit 2
+      fi
+      ;;
+  esac
+done
+if [[ -z $query ]]; then
+  infra_error "usage: logs QUERY [--since DURATION] [--limit N] [cluster]"
+  exit 2
+fi
+
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "$cluster"
+complete=1
+require_kubeconfig || complete=0
+require_commands kubectl jq date || complete=0
+if [[ ! $since =~ ^([1-9][0-9]{0,8})([smhdw])$ ]]; then
+  infra_error "--since is not a duration: a whole number with s, m, h, d or w, such as 90s or 2h"
+  complete=0
+else
+  case ${BASH_REMATCH[2]} in
+    s) factor=1 ;;
+    m) factor=60 ;;
+    h) factor=3600 ;;
+    d) factor=86400 ;;
+    w) factor=604800 ;;
+  esac
+  seconds=$((BASH_REMATCH[1] * factor))
+fi
+if [[ ! $limit =~ ^[1-9][0-9]{0,8}$ ]]; then
+  infra_error "--limit is not a whole number of records, 1 or more"
+  complete=0
+fi
+((complete))
+
+# What is printed has its newlines made spaces and its other control characters left out, C0 and
+# C1, the escape of a terminal's colours and its single-character form among them, so that a record
+# or a message stays one line and cannot drive the operator's terminal.
+clean='def clean: gsub("[\r\n]+"; " ") | gsub("[\\x00-\\x08\\x0b-\\x1f\\x7f\u0080-\u009f]"; "");'
+
+work=$(mktemp -d -t logs.XXXXXXXXXX)
+# A failing script names the step it failed in, as in every cluster recipe, once the private
+# directory is gone.
+# shellcheck disable=SC2329 # It runs from the EXIT trap.
+finish() {
+  local code=$1
+  rm -rf -- "$work"
+  failed_step "$code"
+  exit "$code"
+}
+trap 'finish $?' EXIT
+step="asking the Kubernetes API for the logs"
+
+start=$(date -u -d "@$(($(date -u +%s) - seconds))" +%Y-%m-%dT%H:%M:%SZ)
+encoded=$(jq -rn --arg q "$query" '$q | @uri')
+path="/api/v1/namespaces/monitoring/services/victoria-logs:9428/proxy/select/logsql/query"
+if ! kubectl get --raw "$path?query=$encoded&start=$start&limit=$limit" > "$work/answer" 2> "$work/error"; then
+  # For an answer the API server or the store gave, kubectl prints, after any warning lines, one of
+  # the lines StandardErrorMessage in its cmd/util/helpers.go (Kubernetes v1.37.1) makes: Error
+  # from server (<reason>): <message>, or Error from server: <message> for a Status without a
+  # reason, error: You must be logged in to the server (<message>) when the API server refuses the
+  # credentials, or Server returned an unexpected response: <message>. Any other failure is the
+  # connection to the API server, whose message names its address.
+  failure=$(grep -m1 -E '^(Error from server( \([A-Za-z]+\))?: |error: You must be logged in to the server \(|Server returned an unexpected response: )' \
+    "$work/error" || true)
+  if [[ -n $failure ]]; then
+    message=${failure#*: } hint=''
+    [[ $failure != 'error: You must be logged in'* ]] || hint='; just cluster-kubeconfig fetches a current kubeconfig'
+    # The Kubernetes API relays the store's 400 with a plain-text body, which kubectl keeps out of
+    # its message ("the server rejected our request for an unknown reason"). It keeps the body's
+    # first 2048 bytes as the message of the cause, UnexpectedServerResponse, of the Status it makes
+    # of the answer, and logs that Status from -v=4 on, as indented JSON after "server response
+    # object: " up to a line that is "}" (newUnstructuredResponseError in client-go's
+    # rest/request.go, StandardErrorMessage in kubectl's cmd/util/helpers.go, Kubernetes v1.37.1).
+    # The query is read-only, so it is asked again to read that log, which is never shown, as its
+    # other lines can name the API server's address.
+    if [[ $failure == *'(BadRequest): the server rejected our request for an unknown reason' ]] \
+      && ! kubectl -v=4 get --raw "$path?query=$encoded&start=$start&limit=$limit" > /dev/null 2> "$work/verbose"; then
+      body=$(awk '/\] server response object: \{$/ { print "{"; inside = 1; next }
+        inside { print; if ($0 == "}") exit }' "$work/verbose" | jq -r '
+          [.details.causes[]? | select(.reason == "UnexpectedServerResponse") | .message // empty] | first // empty
+          | if utf8bytelength >= 2048 then . + " [kubectl keeps only the first 2048 bytes of the store'"'"'s answer]"
+            else . end' 2> /dev/null || true)
+      [[ -z $body ]] || message=$body
+    fi
+    # A control character or an address the message happens to carry is left out as well, in that
+    # order, so that no control character in an address hides it.
+    message=$(jq -rn --arg message "$message" "$clean"' $message | clean')
+    message=$(sed -E 's/[0-9]{1,3}(\.[0-9]{1,3}){3}(:[0-9]+)?/<address>/g' <<< "$message")
+    infra_error "VictoriaLogs or the Kubernetes API refused the query: $message$hint"
+  else
+    infra_error "the Kubernetes API did not answer; check that the cluster is up and that just cluster-kubeconfig has fetched a current kubeconfig"
+  fi
+  exit 1
+fi
+
+# shellcheck disable=SC2034 # failed_step in scripts/lib/cluster.sh names it
+step="reading the answer"
+# Stats queries answer without _time or _msg: such a record is printed as it is.
+if ! jq -rs "$clean"'
+  # VictoriaLogs writes _time as RFC 3339 with trailing zeros of the fraction dropped, so
+  # a whole second has none and .12 is shorter than .123: the fraction is padded to nine digits
+  # for the sort, which as a string would put 01.123Z before 01.12Z and 01Z last.
+  def key: (._time // "") | capture("^(?<d>[^.Z+]*)(\\.(?<f>[0-9]*))?(?<z>.*)$")
+    | .d + "." + ((.f // "") + "000000000" | .[:9]) + .z;
+  sort_by(key)[]
+  | if has("_time") and has("_msg") then
+      [._time,
+       (if (.["kubernetes.pod_namespace"] // "") != "" then
+          .["kubernetes.pod_namespace"] + "/" + (.["kubernetes.pod_name"] // "?")
+        else (.node // "-") end),
+       (._msg | tostring | clean)] | join(" ")
+    else tojson | clean end' "$work/answer" > "$work/lines" 2> /dev/null; then
+  infra_error "VictoriaLogs answered with something that is not JSON lines"
+  exit 1
+fi
+# A reader that stops early, such as head, ends cat with SIGPIPE: that is not a failure.
+cat "$work/lines" || {
+  code=$?
+  ((code == 141)) || exit "$code"
+}

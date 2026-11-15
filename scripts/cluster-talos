@@ -7,31 +7,96 @@
 # added, is configured only with --onboard: the maintenance service authenticates nothing, and a
 # node's configuration carries the cluster's keys. With nothing to change, nothing is asked or
 # applied. No health check runs, for the reason scripts/cluster-bootstrap gives.
-# Usage: scripts/cluster-talos [cluster] [--onboard] [--yes]
+#
+# With --first <node>, a change that could cut the nodes off, such as their firewall, is tried before
+# it is kept: once scripts/cluster-check passes, the named node and then every other node the
+# configuration changes, in talman.yaml's order, is applied alone in Talos' try mode, which reverts
+# it by itself after try_minutes unless another configuration is applied first. Within that window,
+# from this machine, check_tried must pass: the paths from the other nodes to the tried one, its
+# readiness and the cluster. Only then, and only before the window is about to close, is the same
+# configuration applied again to keep it. A failed check stops the rollout there: the node reverts,
+# the nodes before it keep theirs and those after it are untouched.
+# Usage: scripts/cluster-talos [cluster] [--onboard] [--yes] [--first <node>]
 set -euo pipefail
 
 here=$(dirname "$0")
 # shellcheck source=scripts/lib/cluster.sh
 . "$here/lib/cluster.sh"
 
-cluster='' confirmed=0 onboard=()
-for arg; do
-  case $arg in
+# How long Talos keeps a configuration applied in try mode before it reverts it, and how long talman
+# waits for the node to answer again, less than that, so a node that no longer answers fails the
+# rollout before it reverts. A node is kept only while more than keep_margin seconds of its window
+# are left, so the configuration that is kept is the one the checks saw.
+try_minutes=5 answer_timeout=2m keep_margin=60
+# How long after the try a node must still be Ready: Kubernetes' node lifecycle controller marks a
+# node whose kubelet has not renewed its lease for node-monitor-grace-period, 50 seconds by default,
+# not Ready, and looks every node-monitor-period, 5 seconds; the kubelet renews its lease every 10
+# seconds, a quarter of its 40-second lease. Talos sets none of them.
+ready_after=65
+# How long a tried control plane's API server has to become ready at its own address, asked every
+# readyz_poll seconds: a configuration that changes the API server's own settings, such as its
+# admission plugins, makes Talos restart it, and a server that has just started answers /readyz with
+# an error until its post-start hooks are done, which can take a minute.
+readyz_wait=90 readyz_poll=5
+# How many fresh requests through the load balancer, in one round, may go to other control planes
+# before one must reach the tried one: it gives each new connection to the next member in turn, so
+# with three members and other clients' connections between ours, fifteen leave a member in rotation
+# unseen only by a rare chance, which fails safe, as the node then reverts. A round is repeated every
+# lb_poll seconds for lb_wait: the load balancer's TCP health monitor takes out a member that fails
+# three checks five seconds apart, as a restarting API server can, and takes it back after two that
+# pass, five seconds apart, within ten seconds of the server listening again (the defaults of
+# infra/openstack/modules/api-lb, which the cluster stack keeps).
+lb_attempts=15 lb_wait=20 lb_poll=5
+# The checks of a node end, and it is kept, by 240 seconds after the try, while more than keep_margin
+# of its window is left. They reach the Ready wait at ready_after at the earliest; a control plane's
+# API server then has up to readyz_wait to become ready and the load balancer up to lb_wait to take it
+# back. Neither wait starts a request after its bound, and a request gives up after 10 seconds, so
+# they end within 100 and, after one more request at the node's own address, 40 seconds: 205 in all,
+# which leaves 35 for cluster-check and the last dry run, which take a few. Checks that end later
+# than 240 seconds after the try, as when earlier ones ran long, keep nothing: the node reverts.
+
+usage() {
+  infra_error "usage: cluster-talos [cluster] [--onboard] [--yes] [--first <node>]"
+  exit 2
+}
+
+cluster='' confirmed=0 onboard=() first=''
+while (($#)); do
+  case $1 in
     --yes) confirmed=1 ;;
     --onboard) onboard=(--onboard-new-nodes) ;;
+    --first)
+      (($# > 1)) && [[ $2 != -* ]] || usage
+      first=$2
+      shift
+      ;;
     *)
-      if [[ $arg == -* || -n $cluster ]]; then
-        infra_error "usage: cluster-talos [cluster] [--onboard] [--yes]"
-        exit 2
+      if [[ $1 == -* || -n $cluster ]]; then
+        usage
       fi
-      cluster=$arg
+      cluster=$1
       ;;
   esac
+  shift
 done
+if [[ -n $first && ${#onboard[@]} -gt 0 ]]; then
+  infra_error "--first does not onboard: a node in maintenance mode has nothing to revert to; onboard new nodes with --onboard first"
+  exit 2
+fi
 
 # shellcheck source=scripts/cluster-env
 . "$here/cluster-env" "$cluster"
-require_cluster talman secrets age-key wait
+complete=1
+require_cluster talman secrets age-key wait || complete=0
+if [[ -n $first ]]; then
+  require_kubeconfig || complete=0
+  require_commands kubectl jq yq || complete=0
+  if [[ -f $talman_file ]] && ! grep -qxF -- "$first" <<< "$(talman_nodes "$talman_file" | cut -d' ' -f1)"; then
+    infra_error "$first is not a node of talos/$cluster/talman.yaml; name one by its hostname"
+    complete=0
+  fi
+fi
+((complete))
 
 step="waiting for every node to answer on the Talos API port"
 wait_for_talos_api "$talman_file"
@@ -51,6 +116,381 @@ esac
 step="waiting for $cluster to be typed back"
 ((confirmed)) || confirm "$cluster" "apply this configuration to" changed
 
-step="applying the configuration"
-cluster_talman apply "${onboard[@]}"
-echo "cluster-talos: the configuration of $cluster is applied"
+if [[ -z $first ]]; then
+  step="applying the configuration"
+  cluster_talman apply "${onboard[@]}"
+  echo "cluster-talos: the configuration of $cluster is applied"
+  exit 0
+fi
+
+# Under pipefail a pipeline fails with the status of any command in it, so no check pipes a tool into
+# a reader that stops at its match, such as grep -q or head: the reader would close the pipe while a
+# tool with a long answer, such as metrics, is still writing it, and the tool, killed by SIGPIPE, would
+# fail the check whatever the reader found. A check's reader takes captured output or reads to the
+# end.
+
+# on_exit STATUS: removes said; then, when STATUS is a failure, names the step the rollout failed in,
+# as report_failed_step has it do.
+on_exit() {
+  local status=$1
+  rm -f -- "$said"
+  failed_step "$status"
+  exit "$status"
+}
+
+# now: the time, in seconds since the epoch.
+now() {
+  date +%s
+}
+
+# masked: the last line on standard input that is not blank, with every address in it masked; it
+# reads all of its input. An IPv6 address is a run of hex digits and colons with :: in it or three
+# colons or more, which a port between colons, as in "<address>:9100: i/o timeout", is not.
+masked() {
+  awk 'NF { line = $0 } END {
+    gsub(/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/, "<address>", line)
+    gsub(/[0-9A-Fa-f]*(::|:[0-9A-Fa-f]*:[0-9A-Fa-f]*:)[0-9A-Fa-f:]*/, "<address>", line)
+    print line
+  }'
+}
+
+# tool_said TOOL STATUS LINE: puts in said what TOOL, ended with STATUS, said: nothing when it
+# succeeded, otherwise LINE, its last line of error with addresses masked, or its status when LINE
+# is empty.
+tool_said() {
+  if (($2 == 0)); then
+    : > "$said"
+  elif [[ -n $3 ]]; then
+    printf '%s said: %s\n' "$1" "$3" > "$said"
+  else
+    printf '%s failed with status %s and said nothing\n' "$1" "$2" > "$said"
+  fi
+}
+
+# quietly TOOL ARG...: TOOL ARG..., its standard output as it is and its standard error, which names
+# addresses, out of the output, and in said as tool_said puts it. Returns TOOL's status.
+quietly() {
+  local status=0
+  # Standard error goes down the pipe, standard output to descriptor 3, which is where it was.
+  { "$@" 2>&1 1>&3 3>&- | masked > "$said"; } 3>&1 || status=$?
+  tool_said "$1" "$status" "$(< "$said")"
+  return "$status"
+}
+
+# metric NAME: the value of the first sample of the metric NAME in the Prometheus text on standard
+# input; fails when there is none. It reads its input to the end, so the command writing it is never
+# cut off, and a pipeline into it fails only when that command fails or the sample is missing.
+metric() {
+  awk -v name="$1" '!found && ($1 == name || index($1, name "{") == 1) { value = $NF; found = 1 }
+    END { if (found) print value; exit !found }'
+}
+
+# joined: the lines on standard input, joined with commas.
+joined() {
+  paste -sd, - | sed 's/,/, /g'
+}
+
+# changes_on NODE: whether the configuration would change NODE, asked of NODE through its Talos API:
+# 0 when it would not, 2 when it would, anything else when the node could not say.
+changes_on() {
+  local status=0
+  cluster_talman apply -n "$1" --dry-run --detailed-exit-code --redact-secrets > /dev/null || status=$?
+  return "$status"
+}
+
+# silent_nodes: the hostnames of the nodes that do not answer on the Talos API port, asked once each,
+# comma-separated; nothing when every one answers.
+silent_nodes() {
+  local hostname address
+  local -a silent=()
+  while read -r hostname address; do
+    talos_api_answers "$address" || silent+=("$hostname")
+  done < <(talman_nodes "$talman_file")
+  ((${#silent[@]} == 0)) || printf '%s\n' "${silent[@]}" | joined
+}
+
+# role_of NODE: NODE's role in talman.yaml, controlplane or worker.
+role_of() {
+  yq ".nodes[] | select(.hostname == \"$1\") | .role" "$talman_file"
+}
+
+# address_of NODE: the address talman reaches NODE on, which for a control plane is also a name of
+# its API server's certificate. Never printed.
+address_of() {
+  yq ".nodes[] | select(.hostname == \"$1\") | .ipAddress" "$talman_file"
+}
+
+# get_through NODE ARG...: kubectl get ARG... through the API server on the control plane NODE rather
+# than the load balancer, so what that API server reaches comes from NODE's address.
+get_through() {
+  local via=$1
+  shift
+  quietly kubectl --server "https://$(address_of "$via"):6443" get "$@" --request-timeout=10s
+}
+
+# cilium_health NODE TARGET: whether the Cilium agent on NODE, probing now, reaches TARGET's host on
+# Cilium's health port and TARGET's health endpoint through the overlay.
+cilium_health() {
+  local pod health
+  pod=$(quietly kubectl --namespace kube-system get pods --selector k8s-app=cilium --field-selector "spec.nodeName=$1" \
+    --output 'jsonpath={.items[0].metadata.name}' --request-timeout=10s) || return 1
+  [[ -n $pod ]] || return 1
+  health=$(quietly kubectl --namespace kube-system exec "$pod" --container cilium-agent --request-timeout=90s -- \
+    cilium-health status --probe --output json) || return 1
+  jq -e --arg target "$2" '[.nodes[]? | select(.name == $target or (.name | endswith("/" + $target)))]
+    | length == 1 and all(.[];
+      (.host["primary-address"].http != null and (.host["primary-address"].http.status // "") == "")
+      and (.["health-endpoint"]["primary-address"].http != null
+        and (.["health-endpoint"]["primary-address"].http.status // "") == ""))' <<< "$health" > /dev/null
+}
+
+# etcd_healthy NODE OTHER: whether the etcd members of the control planes NODE and OTHER, each asked
+# through its own Talos API, follow the same leader in the same term, are voting members and report
+# no error, such as having no leader, and whether OTHER's member lists NODE's.
+etcd_healthy() {
+  local status members
+  status=$(quietly talman talosctl -n "$1" -n "$2" etcd status) || return 1
+  # Columns are padded with three spaces or more; a value holds single spaces only. The columns are
+  # read by position, so the table must be the one talosctl 1.14 prints: twelve columns, ERRORS last.
+  awk -F '   +' 'NR == 1 { if (NF != 12 || $1 != "NODE" || $5 != "LEADER" || $NF != "ERRORS") { unknown = 1; exit } next }
+    { rows++; leader[rows] = $5; term[rows] = $7
+      if ($5 ~ /^0+$/ || $9 != "false" || $12 != "") bad = 1 }
+    END { exit unknown || !(rows == 2 && !bad && leader[1] == leader[2] && term[1] == term[2]) }' <<< "$status" || return 1
+  members=$(quietly talman talosctl -n "$2" etcd members) || return 1
+  awk -F '   +' -v node="$1" 'NR > 1 && $3 == node { found = 1 } END { exit !found }' <<< "$members"
+}
+
+# apiserver_started VIA...: the start time of the API server that answers a fresh request for
+# its metrics, through the API server on the control plane VIA, or through the load balancer
+# without VIA. Each API server process has its own, so it tells which control plane answered: Talos
+# turns the API server's profiling off, and nothing else it serves names its member.
+apiserver_started() {
+  if (($# > 0)); then
+    get_through "$1" --raw /metrics
+  else
+    quietly kubectl get --raw /metrics --request-timeout=10s
+  fi | metric process_start_time_seconds
+}
+
+# apiserver_ready NODE: whether the API server on the control plane NODE, at NODE's own address,
+# answers /readyz with ok within readyz_wait seconds. When it does not, failure says whether it never
+# answered, as when a firewall drops or refuses the connection, with kubectl's own line in said, or
+# which of its checks it still failed when it last answered.
+apiserver_ready() {
+  local node=$1 deadline errors status answered=0 failing=''
+  deadline=$(($(now) + readyz_wait))
+  while :; do
+    status=0
+    errors=$(kubectl --server "https://$(address_of "$node"):6443" get --raw /readyz --request-timeout=10s 2>&1 > /dev/null) ||
+      status=$?
+    if ((status == 0)); then
+      : > "$said"
+      return 0
+    fi
+    # kubectl quotes an answer the server sent, such as /readyz's list of its checks, the failed ones
+    # marked [-]; any other error is its own, about the connection.
+    failing=''
+    if [[ $errors == *"Error from server"* ]]; then
+      answered=1
+      failing=$(awk '{ while (match($0, /\[-\][^ ]+/)) { print substr($0, RSTART + 3, RLENGTH - 3); $0 = substr($0, RSTART + RLENGTH) } }' \
+        <<< "$errors" | joined)
+    fi
+    if [[ -n $failing ]]; then
+      : > "$said"
+    else
+      tool_said kubectl "$status" "$(masked <<< "$errors")"
+    fi
+    (($(now) + readyz_poll <= deadline)) || break
+    sleep "$readyz_poll"
+  done
+  if ((!answered)); then
+    failure="$node's Kubernetes API did not answer at its own address within ${readyz_wait}s"
+  else
+    failure="$node's Kubernetes API answered at its own address but was not ready within ${readyz_wait}s${failing:+; still failing: $failing}"
+  fi
+  return 1
+}
+
+# behind_load_balancer STARTED: whether the load balancer sends fresh connections to the API server
+# that started at STARTED within lb_wait seconds: one of a round of lb_attempts requests through its
+# address, each on a connection of its own, which the load balancer gives the control planes in its
+# rotation in turn, is answered by that server. No request starts after lb_wait, so the wait ends
+# within one request's timeout of it.
+behind_load_balancer() {
+  local seen attempt deadline
+  deadline=$(($(now) + lb_wait))
+  while :; do
+    for ((attempt = 0; attempt < lb_attempts; attempt++)); do
+      (($(now) <= deadline)) || return 1
+      seen=$(apiserver_started) || continue
+      [[ $seen != "$1" ]] || return 0
+    done
+    (($(now) + lb_poll <= deadline)) || return 1
+    sleep "$lb_poll"
+  done
+}
+
+# node_ready NODE: whether NODE's Ready condition is True.
+node_ready() {
+  quietly kubectl get node "$1" --output json --request-timeout=10s |
+    jq -e 'any(.status.conditions[]?; .type == "Ready" and .status == "True")' > /dev/null
+}
+
+# check_tried NODE TRIED_AT: the checks of NODE, applied in try mode at TRIED_AT, from this machine.
+# Each fails with the reason in failure. Another node is the first in talman.yaml that is not NODE,
+# and another control plane the first control plane that is not NODE: a pod's traffic to a node is
+# masqueraded to its own node's address, so a request a control plane's API server sends to NODE
+# arrives as a pod on that control plane would.
+check_tried() {
+  local node=$1 tried_at=$2 other via status wait unanswered started
+  other=$(yq "[.nodes[] | select(.hostname != \"$node\") | .hostname] | .[0] // \"\"" "$talman_file")
+  via=$(yq "[.nodes[] | select(.role == \"controlplane\" and .hostname != \"$node\") | .hostname] | .[0] // \"\"" "$talman_file")
+  if [[ -z $other || -z $via ]]; then
+    failure="talos/$cluster/talman.yaml holds no other node, or no other control plane, to check $node from"
+    return 1
+  fi
+
+  # Talos reverts a tried configuration once and for all, so a configuration still in effect after
+  # the checks was in effect while they ran; it is asked again before the node is kept.
+  status=0
+  changes_on "$node" || status=$?
+  if ((status == 2)); then
+    failure="$node runs the configuration it had: Talos reverted the one applied in try mode before the checks could end"
+    return 1
+  elif ((status != 0)); then
+    failure="$node's Talos API did not say whether it runs the configuration applied in try mode"
+    return 1
+  fi
+  unanswered=$(silent_nodes)
+  if [[ -n $unanswered ]]; then
+    failure="no answer on the Talos API port from $unanswered once $node was applied in try mode"
+    return 1
+  fi
+  if [[ $(get_through "$via" --raw "/api/v1/nodes/$node/proxy/healthz") != ok ]]; then
+    failure="the API server on $via does not reach $node's kubelet"
+    return 1
+  fi
+  if ! get_through "$via" --raw "/api/v1/nodes/http:$node:9100/proxy/metrics" | metric node_exporter_build_info > /dev/null; then
+    failure="$via does not reach node-exporter on $node, as a pod on $via would"
+    return 1
+  fi
+  if ! cilium_health "$node" "$other" || ! cilium_health "$other" "$node"; then
+    failure="Cilium's health probes between $node and $other fail, through the overlay or on its health port"
+    return 1
+  fi
+  if [[ $(role_of "$node") == controlplane ]] && ! etcd_healthy "$node" "$via"; then
+    failure="$node's etcd member is not healthy as $node and $via see it"
+    return 1
+  fi
+  wait=$((tried_at + ready_after - $(now)))
+  if ((wait > 0)); then
+    echo "cluster-talos: waiting ${wait}s, so a kubelet that cannot report has made $node not Ready"
+    sleep "$wait"
+  fi
+  if ! node_ready "$node"; then
+    failure="$node is not Ready ${ready_after}s after it was applied in try mode"
+    return 1
+  fi
+  # A control plane's own API server, at its own address and behind the load balancer, whose health
+  # monitor has by now taken out a member it cannot reach: the load balancer connects from its own
+  # addresses, which only this node's firewall judges, and routes around a member it cannot reach,
+  # which a check through it alone would not see. Both are given the time a restarted API server
+  # takes to become ready and to be taken back.
+  if [[ $(role_of "$node") == controlplane ]]; then
+    apiserver_ready "$node" || return 1
+    if ! started=$(apiserver_started "$node"); then
+      failure="$node's API server was ready at its own address, then did not answer there for its metrics"
+      return 1
+    fi
+    if ! behind_load_balancer "$started"; then
+      failure="no fresh request through the load balancer reached $node's API server within ${lb_wait}s, $lb_attempts every ${lb_poll}s, so the load balancer does not reach it"
+      return 1
+    fi
+  fi
+  if ! "$here/cluster-check" "$cluster"; then
+    failure="cluster-check failed once $node was applied in try mode"
+    return 1
+  fi
+  status=0
+  changes_on "$node" || status=$?
+  if ((status != 0)); then
+    failure="$node does not run the configuration applied in try mode any longer, so the checks did not see it throughout"
+    return 1
+  fi
+}
+
+# progress: which nodes kept the configuration, and which were not touched, from position on.
+progress() {
+  local rest
+  rest=$(printf '%s\n' "${order[@]:position+1}" | joined)
+  if ((${#kept[@]} > 0)); then
+    infra_error "kept before it: $(printf '%s\n' "${kept[@]}" | joined)"
+  fi
+  infra_error "untouched: ${rest:-no other node}"
+}
+
+# stop NODE WHY: ends the rollout after NODE was applied in try mode and not kept, saying why, how
+# NODE reverts and which nodes it leaves as they were.
+stop() {
+  infra_error "$2"
+  [[ ! -s $said ]] || infra_error "$(< "$said")"
+  infra_error "$1 is not kept: Talos applied its configuration in try mode, so $1 reverts by itself to the configuration it had $try_minutes minutes after it was applied, without a reboot; just cluster-talos $cluster then shows the change again"
+  progress
+  exit 1
+}
+
+# said: what the tool of the last check said when it failed, its addresses masked, for stop to print.
+step="making a file for what the checks' tools say"
+said=$(mktemp -t cluster-talos.XXXXXXXXXX)
+trap 'on_exit $?' EXIT
+
+step="checking $cluster before anything is applied"
+if ! "$here/cluster-check" "$cluster"; then
+  infra_error "$cluster is not healthy before the rollout, so a check after it could not tell what the configuration did; nothing is applied"
+  exit 1
+fi
+
+# The named node first, then the others in talman.yaml's order.
+mapfile -t order < <(printf '%s\n' "$first"; talman_nodes "$talman_file" | cut -d' ' -f1 | grep -vxF -- "$first")
+kept=()
+for position in "${!order[@]}"; do
+  node=${order[position]}
+
+  step="asking $node what the configuration would change"
+  status=0
+  changes_on "$node" || status=$?
+  case $status in
+    0)
+      echo "cluster-talos: nothing to change on $node"
+      continue
+      ;;
+    2) ;;
+    *)
+      infra_error "$node did not say what the configuration would change, so it is not applied"
+      ((position--)) || true
+      progress
+      exit "$status"
+      ;;
+  esac
+
+  step="applying the configuration to $node in try mode"
+  tried_at=$(now)
+  if ! cluster_talman apply -n "$node" --mode try --timeout "$answer_timeout" --extra-flags="--timeout=${try_minutes}m"; then
+    stop "$node" "$node did not take the configuration in try mode, or did not answer on the Talos API within $answer_timeout after it"
+  fi
+
+  step="checking $node and the cluster"
+  failure=
+  check_tried "$node" "$tried_at" || stop "$node" "$failure"
+
+  step="keeping the configuration on $node"
+  if (($(now) > tried_at + try_minutes * 60 - keep_margin)); then
+    stop "$node" "the checks of $node ended less than ${keep_margin}s before Talos reverts it, so it has reverted or is about to"
+  fi
+  if ! cluster_talman apply -n "$node"; then
+    stop "$node" "applying the configuration to $node again, to keep it, failed"
+  fi
+  kept+=("$node")
+  echo "cluster-talos: $node keeps the configuration"
+done
+echo "cluster-talos: the configuration of $cluster is applied, node by node, each checked before it was kept"
