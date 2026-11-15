@@ -22,7 +22,7 @@ resources:
   - ../../base/cnpg-system/cloudnative-pg/ks.yaml
   - ../../base/demo/hello-secret/ks.yaml
   - ../../base/demo/hello/ks.yaml
-  # - ../../base/demo/volsync-demo/ks.yaml  # Disabled: no ClusterSecretStore openbao holds the repository's password and S3 key yet, so its movers have no Secret to read
+  - ../../base/demo/volsync-demo/ks.yaml
   - ../../base/envoy-gateway-system/envoy-gateway-crds/ks.yaml
   - ../../base/envoy-gateway-system/envoy-gateway/ks.yaml
   - ../../base/external-secrets/external-secrets/ks.yaml

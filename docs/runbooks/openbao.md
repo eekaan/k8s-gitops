@@ -33,6 +33,8 @@ After the merge, Flux does everything up to the recovery keys, in this order:
    role `external-secrets` and reports the ClusterSecretStore `openbao` Ready, and the Kustomization
    with it.
 6. Flux applies `hello-secret`. Its ExternalSecret reports that `demo/hello` does not exist yet.
+   Flux applies `volsync-demo` too, once `openbao-store` is Ready: its ExternalSecret reports that
+   the key `volsync` does not exist yet, and its claim stays Pending until step 9.
 
 Then the operator, right away, before anything else logs in as the role `operator`:
 
@@ -46,6 +48,18 @@ Then the operator, right away, before anything else logs in as the role `operato
    secret yet, and run this step again.
 8. `just bao-put demo/hello greeting`, and type a value at the prompt. Within the ExternalSecret's
    refresh interval, 15 minutes, the Secret `hello` in `demo` holds it under `greeting`.
+9. `just bao-seed-volsync <file>`, with `<file>` a new file beside the Talos age key on a store that
+   never held the key, and the existing custody file of the volume backups' master on a store that
+   did, as after a rebuild. It seeds the key `volsync` the volume backups read
+   ([volume-backups.md](volume-backups.md)); the demo's ExternalSecret syncs at its next refresh,
+   its first restore runs and its claim is Bound.
+
+The recipes read a custody file only where no one but the operator can have written it: the file
+owned by the operator and writable by no one else, in directories only the operator or root can
+write to, or whose sticky bit keeps others from replacing what they do not own; and `bao-recovery`
+and `bao-seed-volsync` write a new one only in such a place. age does not say who wrote a file, and
+the Talos age key's recipient is public, so the file's place is what vouches for it: keep the
+custody files in a directory only the operator can write, beside the Talos age key.
 
 ## Checking it
 
