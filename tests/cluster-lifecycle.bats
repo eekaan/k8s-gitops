@@ -112,6 +112,9 @@ EOF
     TF_STATE_PASSPHRASE=marker-state-passphrase
     OS_AUTH_URL=https://identity.example.invalid/v3
     'OPERATOR_CIDRS=["203.0.113.77/32"]'
+    # The settle time is real seconds here, as these tests run on the real clock;
+    # tests/cluster-recipes.bats proves it on a fake one.
+    FORWARD_SETTLE=0
   )
   reset_environment
   CHECKS=('/readyz' 'nodes Ready' 'node count' 'workers in BGP' 'no kube-proxy' 'pods in kube-system' 'pods in flux-system'
@@ -977,6 +980,112 @@ OUT_LABEL="node-restriction.kubernetes.io/bgp-out"
   [ "$(awk -v from="$labelled" -v to="$cordoned" 'NR > from && NR < to && /^kubectl get ciliumbgpnodeconfig worker-2 /' "$RECORD/argv" | wc -l)" -ge 4 ]
   [ "$(cat "$RECORD/drained-bgp")" = 'worker-2 withdrawn' ]
   [[ $output == *"the BGP configuration of worker-2 is gone"* ]]
+}
+
+@test "A rebooted worker is put back into BGP only after its Cilium agent reports that it forwards" {
+  # The agent's pod still reports the Ready it posted before the node went down, then is not Ready
+  # twice, and then is Ready since the reboot.
+  echo 'stale not not ready' > "$STATE/agent-sequence.worker-2"
+
+  recipe cluster-reboot worker-2 --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  rebooted=$(call_line '^talman reboot -n worker-2 ')
+  uncordoned=$(call_line '^kubectl uncordon worker-2$')
+  first=$(call_line '^agent worker-2 ')
+  last=$(last_call_line '^agent worker-2 ')
+  restored=$(call_line "^kubectl label node worker-2 $OUT_LABEL-\$")
+  for call in "$rebooted" "$uncordoned" "$first" "$last" "$restored"; do
+    [ -n "$call" ]
+  done
+  # Ready and uncordoned, then the agent is read until it answers Ready since the reboot, and only
+  # then is the label removed.
+  [ "$rebooted" -lt "$uncordoned" ]
+  [ "$uncordoned" -lt "$first" ]
+  [ "$last" -lt "$restored" ]
+  [ "$(calls '^agent worker-2 ' | paste -sd' ')" = 'agent worker-2 stale agent worker-2 not agent worker-2 not agent worker-2 ready' ]
+  [ "$(cat "$RECORD/label-removed")" = 'worker-2 ready' ]
+  [ "$(calls '^kubectl get pods --namespace kube-system --selector k8s-app=cilium --field-selector spec.nodeName=worker-2 ' | wc -l)" -eq 4 ]
+  # The BGP configuration is awaited after the label, as before.
+  [ "$(awk -v from="$restored" 'NR > from && /^kubectl get ciliumbgpnodeconfig worker-2 /' "$RECORD/argv" | wc -l)" -ge 1 ]
+  [[ $output == *"the Cilium agent on worker-2 has been Ready since the reboot for 0s, so worker-2 is put back in BGP"* ]]
+  [[ $output == *"worker-2 announces again"* ]]
+
+  # A control plane has no BGP, so no agent is waited for.
+  reset_cluster
+  reset_environment
+
+  recipe cluster-reboot cp-2 --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ -z "$(calls '^agent ')" ]
+  [ -z "$(calls 'k8s-app=cilium')" ]
+}
+
+@test "A worker whose agent never reports that it forwards stays out of BGP, and the run says so last" {
+  for case in not-ready stale missing no-bgp-wait unreadable; do
+    echo "$case"
+    reset_cluster
+    reset_environment
+    with FORWARD_WAIT=4
+    args=(worker-2 --yes)
+    case $case in
+      not-ready) echo not > "$STATE/agent-sequence.worker-2" ;;
+      # The pod keeps the Ready it posted before the node went down.
+      stale) echo stale > "$STATE/agent-sequence.worker-2" ;;
+      missing) : > "$STATE/agent-missing" ;;
+      # --no-bgp-wait skips the wait for the withdrawal, not the wait for the agent.
+      no-bgp-wait)
+        echo not > "$STATE/agent-sequence.worker-2"
+        : > "$STATE/bgp-stays"
+        args+=(--no-bgp-wait)
+        ;;
+      # An agent that cannot be read is not taken for one that forwards.
+      unreadable) : > "$STATE/agent-unreadable" ;;
+    esac
+
+    recipe cluster-reboot "${args[@]}" < /dev/null
+
+    [ "$status" -ne 0 ]
+    # The node was rebooted, is Ready and uncordoned, and stays out.
+    [ -n "$(calls '^talman reboot -n worker-2 ')" ]
+    [ -n "$(calls '^kubectl uncordon worker-2$')" ]
+    [ -e "$STATE/bgp-out.worker-2" ]
+    [ -z "$(calls "^kubectl label node worker-2 $OUT_LABEL-\$")" ]
+    [ ! -e "$RECORD/label-removed" ]
+    if [[ $case == unreadable ]]; then
+      [[ $output == *"kubectl could not read the Cilium agent of worker-2 through the kubeconfig, so it is not known whether worker-2 forwards"* ]]
+    else
+      # What the run waited for, and for how long.
+      [[ $output == *"the Cilium agent on worker-2 has not been Ready since the reboot for 0s within 4s"* ]]
+      [[ $output == *"FORWARD_WAIT"* ]]
+    fi
+    if [[ $case == not-ready || $case == stale || $case == no-bgp-wait ]]; then
+      [ "$(calls '^agent worker-2 ' | wc -l)" -ge 2 ]
+    fi
+    last=$(script_lines | tail -1)
+    [[ $last == *"worker-2 is out of BGP"*"kubectl label node worker-2 $OUT_LABEL-"* ]]
+  done
+}
+
+@test "A recipe killed outright does not leave the cluster locked" {
+  # SIGKILL, which no trap sees, while talman reboots the node and the probe of /readyz runs.
+  echo KILL > "$STATE/interrupt"
+
+  recipe cluster-reboot cp-2 --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  # The probe, which the recipe that was killed started in the background, runs on; the lock is not
+  # held by it.
+  [ -n "$(leftovers)" ]
+  flock -n "$CLUSTER/clusterconfig/cluster.lock" true
+
+  rm -f "$STATE/interrupt"
+  recipe cluster-reboot no-such-node --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"no-such-node is not a node of lab-sto2"* ]]
+  [[ $output != *"is busy"* ]]
 }
 
 @test "A recipe that stops while a worker is out says so last, with the command that puts it back" {

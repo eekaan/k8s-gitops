@@ -8,7 +8,7 @@
 # node's configuration carries the cluster's keys. With nothing to change, nothing is asked or
 # applied. No health check runs, for the reason scripts/cluster-bootstrap gives.
 # It holds the cluster's lock (lock_cluster in scripts/lib/cluster.sh) for the whole run, and
-# refuses while another recipe that drains, reboots, upgrades or applies to the cluster's nodes
+# refuses while another of cluster-reboot, cluster-upgrade, cluster-upgrade-k8s and cluster-talos
 # holds it.
 #
 # With --first <node>, a change that could cut the nodes off, such as their firewall, is tried before
@@ -29,8 +29,11 @@
 # rollout stops after some took it, as a later run finds nothing to change on them. With --reboot it
 # reboots the nodes itself, one at a time, through scripts/cluster-reboot, which takes a worker out
 # of BGP first, drains each and waits for it to be Ready again, a control plane with its etcd member,
-# and stops at the first that does not come back, saying last which worker is out of BGP and the
-# command that puts it back; --tolerate <seconds> and --no-bgp-wait are passed on to it. A reboot is
+# and puts a worker back only once its Cilium agent forwards, and stops at the first that does not
+# come back, saying last which worker is out of BGP and the command that puts it back; --tolerate
+# <seconds> and --no-bgp-wait, which skips only the wait for a worker's withdrawal, are passed on to
+# it; REBOOT_WAIT, BGP_WAIT, FORWARD_WAIT and FORWARD_SETTLE are checked before anything is applied.
+# TALOS_WAIT and --tolerate are whole numbers of seconds of at most nine digits. A reboot is
 # not the default: a control plane leaves its etcd and the API load balancer for the time it takes,
 # which the operator, not the recipe, decides to accept.
 # Usage: scripts/cluster-talos [cluster] [--onboard] [--yes] [--reboot [--tolerate <seconds>] [--no-bgp-wait]] [--first <node>]
@@ -83,7 +86,8 @@ while (($#)); do
     --yes) confirmed=1 ;;
     --reboot) reboot=1 ;;
     --tolerate)
-      (($# > 1)) && [[ $2 =~ ^[0-9]+$ ]] || usage
+      (($# > 1)) || usage
+      require_seconds --tolerate "$2" || exit 2
       tolerate=(--tolerate "$2")
       shift
       ;;
@@ -136,6 +140,13 @@ if [[ -z $first ]]; then
     tools+=(kubectl)
   fi
   require_commands "${tools[@]}" || complete=0
+fi
+if ((reboot)); then
+  # The reboots read these themselves; a value they would refuse stops the run before the
+  # configuration is applied rather than after.
+  require_seconds REBOOT_WAIT "${REBOOT_WAIT:-600}" || complete=0
+  require_bgp_wait || complete=0
+  require_forward_waits || complete=0
 fi
 ((complete))
 step="locking $cluster"

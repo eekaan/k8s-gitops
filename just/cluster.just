@@ -50,7 +50,7 @@ cluster-flux *args:
 cluster-kubeconfig cluster='lab-sto2':
     scripts/cluster-kubeconfig {{ quote(cluster) }}
 
-# Roll a cluster's configuration out: show what would change, then apply once its name is typed back (--yes: without asking; --onboard: configure new nodes too; --reboot: afterwards reboot, one at a time, the nodes whose change takes effect only at a reboot, such as etcd's arguments, which are otherwise only named, with --tolerate <seconds> and --no-bgp-wait passed to each reboot, so --no-bgp-wait applies to every worker it reboots; --first <node>: apply to that node and then each other one alone in Talos' try mode, which reverts by itself, and keep it only once the paths into it from the other nodes, its readiness and cluster-check pass)
+# Roll a cluster's configuration out: show what would change, then apply once its name is typed back (--yes: without asking; --onboard: configure new nodes too; --reboot: afterwards reboot, one at a time, the nodes whose change takes effect only at a reboot, such as etcd's arguments, which are otherwise only named, with --tolerate <seconds> and --no-bgp-wait passed to each reboot, so --no-bgp-wait, which skips only the wait for a worker's withdrawal, applies to every worker it reboots; --first <node>: apply to that node and then each other one alone in Talos' try mode, which reverts by itself, and keep it only once the paths into it from the other nodes, its readiness and cluster-check pass)
 [positional-arguments]
 cluster-talos *args:
     scripts/cluster-talos "$@"
@@ -81,7 +81,7 @@ grafana cluster='lab-sto2':
 logs *args:
     scripts/logs "$@"
 
-# Reboot one node, by its hostname in talman.yaml, once its name is typed back (--yes: without asking), asking /readyz through the kubeconfig once a second until the node is Ready again, a control plane with its etcd member, which is rebooted only while etcd has every control plane as a healthy member, a worker taken out of BGP first and put back once it is Ready; fails when a probe failed (--tolerate <seconds>: accept a gap that long; --no-bgp-wait: do not wait for a worker's BGP configuration to go, as when its Cilium agent is not running)
+# Reboot one node, by its hostname in talman.yaml, once its name is typed back (--yes: without asking), asking /readyz through the kubeconfig once a second until the node is Ready again, a control plane with its etcd member, which is rebooted only while etcd has every control plane as a healthy member, a worker taken out of BGP first and put back once it is Ready and its Cilium agent has stayed Ready since the reboot; fails when a probe failed (--tolerate <seconds>: accept a gap that long; --no-bgp-wait: do not wait for a worker's BGP configuration to go, as when its Cilium agent is not running, and still wait for the agent before the worker is put back)
 [positional-arguments]
 cluster-reboot node *args:
     scripts/cluster-reboot "$@"
@@ -91,7 +91,7 @@ cluster-reboot node *args:
 cluster-destroy *args:
     scripts/cluster-destroy "$@"
 
-# Upgrade Talos to the version talman.yaml gives: show which nodes are behind, then snapshot etcd and drain, upgrade and uncordon each in turn once the cluster's name is typed back, a worker taken out of BGP first and put back once it is Ready (--yes: without asking; --no-bgp-wait: do not wait for the BGP configuration of any worker the run takes out to go, as when a worker's Cilium agent is not running)
+# Upgrade Talos to the version talman.yaml gives: show which nodes are behind, then snapshot etcd and drain, upgrade and uncordon each in turn once the cluster's name is typed back, a worker taken out of BGP first and put back once it is Ready and its Cilium agent has stayed Ready since the upgrade (--yes: without asking; --no-bgp-wait: do not wait for the BGP configuration of any worker the run takes out to go, as when a worker's Cilium agent is not running, and still wait for the agent before the worker is put back)
 [positional-arguments]
 cluster-upgrade *args:
     scripts/cluster-upgrade "$@"
