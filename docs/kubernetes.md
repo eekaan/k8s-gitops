@@ -1290,6 +1290,20 @@ kubeconfig it needs to create `serviceaccounts/token` for `openbao-operator`, to
 pods of `openbao-active`, and to read the Secret `openbao-ca`. A file it reads, the operator's, opens
 with the Talos age key from `SOPS_AGE_KEY_FILE`, or `SOPS_AGE_KEY`, into memory only.
 
+- A custody file is read only where no one but the operator can have written it, as age does not say
+  who wrote a file and the recipient is public: the file is the operator's and writable by no one
+  else, and each directory above it, on its path and as it resolves, is the operator's or root's and
+  writable by no one else unless its sticky bit is set. A recipe that writes one, `bao-recovery` or
+  `bao-seed-volsync`, writes it only to such a place, which is a directory only the operator can
+  write, beside the Talos age key.
+- A recipe refuses to run while the shell traces its commands, as bash would print every secret it
+  reads: under `bash -x`, with `SHELLOPTS=xtrace` or a `BASH_ENV` that sets `-x`. A command it
+  starts, such as the one `bao-root` or `bao-volsync-password` runs, gets no `BASH_ENV` or `ENV`.
+- OpenBao's error messages are printed with each byte that is not printable ASCII as a question
+  mark, so no control character reaches the terminal, and kubectl's errors through the same
+  redaction as the other recipes', without the API server's address
+  ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)).
+
 - `just bao-put <path> <key>` writes one value, read from standard input, typed without echo at a
   terminal or piped in without the newlines that end it, as the key `<key>` of the secret at
   `secrets/<path>` in `lab-sto2`. The secret keeps its other keys, or is created. It takes exactly

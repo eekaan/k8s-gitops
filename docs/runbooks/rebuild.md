@@ -41,10 +41,15 @@ step it failed in ([cluster.md](../cluster.md#recipes)).
 
 ## Taking it down
 
-1. **`just cluster-snapshot`**, when the cluster's state matters: an etcd snapshot, encrypted, in
+1. **The volume backups' custody file**, while the cluster still runs: check that it holds the
+   master the store holds, as [volume-backups.md](volume-backups.md#opening-a-repository-by-hand)
+   compares the hash of an application's derived password with that of its Secret. Once the
+   cluster is gone, the file is the only copy of the master, and nothing compares it any more.
+
+2. **`just cluster-snapshot`**, when the cluster's state matters: an etcd snapshot, encrypted, in
    the etcd bucket, which the rebuild leaves alone.
 
-2. **`just cluster-destroy`**. It asks the cluster, through its kubeconfig, for every Service of
+3. **`just cluster-destroy`**. It asks the cluster, through its kubeconfig, for every Service of
    type LoadBalancer and every PersistentVolume of a CSI driver. A cloud load balancer or volume
    behind one is the cluster's own and not in the cluster stack's state: its destroy would leave it
    in the cloud, where it keeps the network from being deleted. A Service whose addresses all come
@@ -60,7 +65,7 @@ step it failed in ([cluster.md](../cluster.md#recipes)).
    typed back, and removes the cluster's `talman.yaml`, talosconfig and kubeconfig. The plumbing
    stack, the secrets bundle and the buckets stay.
 
-3. **`just infra-destroy sto2/plumbing`**, when the network and the Talos image should go too. The
+4. **`just infra-destroy sto2/plumbing`**, when the network and the Talos image should go too. The
    CI host, the `sto2/ci` stack, is on the plumbing stack's network, and the network cannot be
    removed while its port and floating IP exist. So first, in the state of every other stack, the
    recipe looks for a resource, and while it finds one it plans and destroys nothing, naming the

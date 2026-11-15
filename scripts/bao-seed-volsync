@@ -16,6 +16,9 @@
 # The cluster's S3 key is read from CLUSTER_S3_ACCESS_KEY_ID and CLUSTER_S3_SECRET_ACCESS_KEY, the
 # in-cluster key and not the operator's state key; an empty one, a placeholder, or the state key's
 # stops the run before anything is made.
+# An existing FILE is read only where no one but this user can have written it (bao_custody_trusted in
+# scripts/lib/openbao.sh): age authenticates no writer, so the place vouches for the file, and a new
+# one goes only where it would be read.
 # A run that fails after FILE is written and before OpenBao holds the key says so, and the next run
 # with the same FILE reads the master back from it, makes no other, and goes on. So does any run
 # given an existing FILE while OpenBao holds no key, as on a rebuilt cluster, whose store is new: the
@@ -37,7 +40,7 @@ here=$(dirname "$0")
 volsync_key=volsync
 
 usage() {
-  echo "bao-seed-volsync: give the file to write, outside the repository: just bao-seed-volsync <file> [cluster], or just bao-seed-volsync --rotate-s3 [cluster]" >&2
+  echo "bao-seed-volsync: give the file to write, outside the repository: just bao-seed-volsync <file> [cluster], or just bao-seed-volsync --rotate-s3 [cluster]. For a store that held the key before, as on a rebuilt cluster, <file> is the existing custody file, never a new one" >&2
   exit 1
 }
 
@@ -69,7 +72,7 @@ require_kubeconfig || complete=0
 # The master of a run that goes on from FILE, and whether this run goes on from it.
 master="" resume=0 recipient="" dir=""
 if ((!rotate)); then
-  require_commands age od head tr sha256sum date || complete=0
+  require_commands age od head tr sha256sum date stat || complete=0
   # The operator's Talos age key, which FILE must open with before OpenBao holds the key.
   require_age_key || complete=0
   recipient=$(sops_recipient)
@@ -85,8 +88,11 @@ if ((!rotate)); then
     infra_error "$file is not a file"
     complete=0
   elif [[ -f $file ]]; then
-    # An earlier run wrote it: this run goes on from it, if it is this recipe's, for this cluster.
-    if ((complete)) && custody=$(bao_decrypt "$file" 2> /dev/null) &&
+    # An earlier run wrote it: this run goes on from it, if it is where only this user can have
+    # written it, and this recipe's, for this cluster.
+    if ! bao_custody_trusted "$file"; then
+      complete=0
+    elif ((complete)) && custody=$(bao_decrypt "$file" 2> /dev/null) &&
       printf '%s' "$custody" | jq -e --arg cluster "$cluster" \
         '.cluster == $cluster and (.volsync.master // "" | test("^[0-9a-f]{64}$"))' > /dev/null; then
       master=$(printf '%s' "$custody" | jq -r '.volsync.master')
@@ -98,6 +104,9 @@ if ((!rotate)); then
     custody=
   elif [[ ! -d $dir || ! -w $dir ]]; then
     infra_error "$dir is not a directory this user can write to"
+    complete=0
+  elif ! bao_custody_place "$file"; then
+    # A later run reads the file only from such a place.
     complete=0
   fi
 fi
@@ -210,5 +219,6 @@ if ((resume)); then
   echo "bao-seed-volsync: wrote the key $volsync_key of $bao_mount with the master in $file, which an earlier run wrote, and the cluster's S3 key"
 else
   echo "bao-seed-volsync: wrote the key $volsync_key of $bao_mount with a new master and the cluster's S3 key; the master is also in $file, encrypted to the Talos age key's recipient $recipient"
+  echo "bao-seed-volsync: if a store of this cluster held the key before, as before a rebuild, its repositories open only with the master in the custody file written then: docs/runbooks/volume-backups.md says how to seed the store again from that file"
 fi
 echo "bao-seed-volsync: keep $file outside the cluster; it holds the only copy of the master that outlives it (docs/runbooks/volume-backups.md)"

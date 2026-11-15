@@ -94,17 +94,17 @@ Feature: OpenBao
   Scenario: bao-recovery hands out the recovery keys once, encrypted to the operator's age key
     Given a fake OpenBao that has no recovery keys yet, and the Talos age key's recipient
     When bao-recovery writes the recovery keys to a file outside the repository
-    Then the file decrypts with the Talos age key to the recovery key shares and the seal key, the rotation is committed only after the file is written and proved to decrypt, nothing of either is printed or passed on a command line, and a second run, a run against existing recovery keys, a path inside the repository or an existing file is refused
+    Then the file decrypts with the Talos age key to the recovery key shares and the seal key, the rotation is committed only after the file is written and proved to decrypt, nothing of either is printed or passed on a command line, and a second run, a run against existing recovery keys, a path inside the repository, an existing file or a directory others can write is refused
 
   Scenario: bao-recovery never commits recovery keys it did not keep
     Given a fake OpenBao that has no recovery keys yet
-    When bao-recovery is interrupted while the keys are verified, before and after OpenBao commits them, finds a rotation left in progress, finds its file made by someone else, can make no hard link to its file, or writes to a recipient the operator's age key does not open
-    Then a rotation it did not complete is cancelled and its file removed, a file holding committed keys is kept, a rotation left in progress is cancelled before a new one starts, a file made by someone else is never replaced, a file it can make no hard link to is put in place no other way and ln's own error says why, and keys the operator's age key cannot read are never committed
+    When bao-recovery is interrupted while the keys are verified, before and after OpenBao commits them, finds a rotation left in progress, finds its file made by someone else, can make no hard link to its file, is interrupted right after the link is made, or writes to a recipient the operator's age key does not open
+    Then a rotation it did not complete is cancelled and its file removed, linked in place or not, as the run says, a file holding committed keys is kept, a rotation left in progress is cancelled before a new one starts, a file made by someone else is never replaced, a file it can make no hard link to is put in place no other way and ln's own error says why, and keys the operator's age key cannot read are never committed
 
   Scenario: bao-root runs one command with a fifteen-minute token made from the recovery keys, and revokes it
     Given a fake OpenBao holding recovery keys, answering as OpenBao does, and the operator's custody file
     When bao-root runs a command, the command is killed, the recipe is interrupted while it runs, minting the command's token is refused, a share is refused, the root token's lookup fails, and revoking the root token, then the command's token, fails
-    Then the shares reach OpenBao only in request bodies read from standard input, the root token made from them is first looked up for its accessor, mints a fifteen-minute orphan token with the root policy and is revoked before the command runs, the command gets that token, the address and the CA in its environment, the token is revoked however the command ends, so is the operator's, a token OpenBao does not revoke is named by its accessor with the step that revokes it and the recipe fails even when the command succeeded, no command runs while the root token lives, nothing prints a share or a token, an unfinished generation is cancelled, and the port-forward is closed
+    Then the shares reach OpenBao only in request bodies read from standard input, the root token made from them is first looked up for its accessor, mints a fifteen-minute orphan token with the root policy and is revoked before the command runs, the command gets that token, the address and the CA in its environment and no BASH_ENV or ENV, the token is revoked however the command ends, so is the operator's, a token OpenBao does not revoke is named by its accessor with the step that revokes it and the recipe fails even when the command succeeded, no command runs while the root token lives, nothing prints a share or a token, an unfinished generation is cancelled, and the port-forward is closed
 
   Scenario: bao-seal-restore writes the seal key back from the custody file and never replaces a key unasked
     Given a fake cluster without the seal Secret, with it holding the file's key, and with it holding another key
@@ -128,8 +128,8 @@ Feature: OpenBao
 
   Scenario: A rebuilt store is seeded from the existing custody file, never with a new master
     Given the custody file of a seeding, and a fake OpenBao that holds no key volsync, as the store of a rebuilt cluster, and the cluster's S3 key in the environment
-    When bao-seed-volsync runs with that file
-    Then the store's key holds the master the file holds and the cluster's S3 key, created only as the patch of no data with check-and-set 0 found no key, no master is made, the file is left as it was, the recipe says it wrote the file's master and prints neither, and the port-forward is closed
+    When bao-seed-volsync runs with that file, without a file, and with a new file given by mistake, and the runbook's way back runs: bao-root deleting the key's metadata, then bao-seed-volsync with the existing file
+    Then the store's key holds the master the file holds and the cluster's S3 key, created only as the patch of no data with check-and-set 0 found no key, no master is made, the file is left as it was, the recipe says it wrote the file's master and prints neither, and the port-forward is closed; the usage, and the last line of the seeding that makes a new master, say that a store that held the key before takes the existing file; and the root-policy token bao-root mints deletes the key's metadata, which the operator's token may not, after which the store holds the existing file's master again
 
   Scenario: An S3 key variable that is empty or a placeholder stops the recipe before anything is generated
     Given the environment the cluster recipes load, with each of the cluster's S3 key variables empty, unset, a placeholder, or the state key's
@@ -139,9 +139,24 @@ Feature: OpenBao
   Scenario: Nothing of the master or the S3 key is printed, passed as an argument or written unencrypted
     Given a fake cluster and a fake OpenBao, and recording fakes of every command the recipes run but the shell
     When bao-seed-volsync seeds, rotates, runs again, is refused by OpenBao and is interrupted
-    Then no output, command line or file but the encrypted custody file holds the master or the S3 key, files the recipe removed or replaced and its private directory included, the recipe runs every command by its name, so each command line is in the record, and the master and the key travel only in the body of the write that creates the key
+    Then no output, command line or file but the encrypted custody file holds the master or the S3 key, files the recipe removed or replaced and its private directory included, the recipe runs every command by its name and none as a shell, so each command line is in the record, every output redirection of the seeding scripts and their library goes to /dev/null, a file descriptor or a file that holds no secret and the one file they have a tool write is age's encrypted partial file, and the master and the key travel only in the body of the write that creates the key
 
   Scenario: One application's repository password is derived from the custody file without printing it
     Given the custody file bao-seed-volsync wrote
     When bao-volsync-password runs a command for an application, for another application, without a command, with a name that is no application's, with another custody file and with a file that is missing
-    Then the command gets the application's repository, the SHA-256 digest of the master, a slash and the application's name as its password, and the cluster's S3 key, in its environment, no other secret of the environment reaches the command, neither the Talos age key's location, the cluster's key under its own names, the state key, its passphrase nor the cloud credential, the other application's password differs, nothing is printed or passed on a command line, neither the cluster nor OpenBao is reached, every refusal runs no command, and the command's status is the recipe's
+    Then the command gets the application's repository, the SHA-256 digest of the master, a slash and the application's name as its password, and the cluster's S3 key, in its environment, no other secret of the environment reaches the command, neither the Talos age key's location, the cluster's key under its own names, the state key, its passphrase nor the cloud credential, nor a BASH_ENV or ENV, the other application's password differs, nothing is printed or passed on a command line, neither the cluster nor OpenBao is reached, every refusal runs no command, and the command's status is the recipe's
+
+  Scenario: A custody file is read only where no one but the operator can have written it
+    Given the custody file of a seeding, a fake OpenBao that holds no key volsync, and the custody file of the recovery keys
+    When bao-seed-volsync goes on from the file while it is writable by its group or others, owned by another user, in a directory writable by its group or another user's, under a directory writable by others with and without the sticky bit, or given as a symbolic link, writes a new file into a directory its group can write, and bao-volsync-password, bao-root and bao-seal-restore read a file writable by its group or a symbolic link
+    Then each refuses before it reaches the cluster or OpenBao, naming the file or directory and why, nothing is written to the store or the shared directory and no command runs, and the file under a directory others can write but whose sticky bit is set is read and seeds the store
+
+  Scenario: A recipe refuses to run while the shell traces its commands
+    Given the environment the cluster recipes load, the custody files and a fake cluster
+    When each of bao-put, bao-recovery, bao-root, bao-seal-restore, bao-seed-volsync and bao-volsync-password runs with SHELLOPTS=xtrace, with SHELLOPTS=xtrace and the tests' trace directory named, with a BASH_ENV that sets -x, and under bash -x
+    Then each refuses, saying the shell traces each command, before it reads a secret, opens a custody file or reaches the cluster or OpenBao, no secret of the environment, the custody files or standard input is printed, and the tests' own trace into a file of theirs still lets a recipe run
+
+  Scenario: What the recipes print of OpenBao's and kubectl's errors holds no control character and no address
+    Given a fake OpenBao whose error text holds terminal escape sequences, and a fake kubectl that cannot reach the API server and names its address with control characters
+    When bao-seed-volsync and bao-put run
+    Then OpenBao's error is printed with each control character as a question mark, and kubectl's error says why without the address or a control character

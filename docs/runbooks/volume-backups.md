@@ -5,7 +5,9 @@ fills a new volume from the latest backup ([kubernetes.md](../kubernetes.md#volu
 [ADR 0015](../adr/0015-volume-backups-with-volsyncs-restic-mover.md)). Every repository's password
 is derived from one master password, which `just bao-seed-volsync` keeps in a custody file outside
 the cluster: encrypted with age to the Talos age key's recipient, opened with the Talos age key from
-`SOPS_AGE_KEY_FILE`, or `SOPS_AGE_KEY`, into memory only. This runbook covers checking the first
+`SOPS_AGE_KEY_FILE`, or `SOPS_AGE_KEY`, into memory only, and read only where no one but the
+operator can have written it, as [openbao.md](openbao.md#first-initialisation) says: its place is
+what vouches for it. This runbook covers checking the first
 backup, restoring a claim from its repository, opening a repository by hand, replacing the cluster's
 S3 key, seeding the store again from the file once it lost the key, as on a rebuilt cluster, and
 losing the master's file, or the file and the store's key both. `<file>` is the custody file.
@@ -101,6 +103,23 @@ the store is seeded from it, never with a new one:
    `SecretSynced`, each ReplicationDestination's `status.latestImage` set by a restore of the latest
    backup, each claim `Bound`, and `just bao-volsync-password <file> <app> restic snapshots` listing
    the backups the application had.
+
+An empty store cannot tell a rebuilt cluster from a new one, so a seeding given a new file there
+makes a new master; its usage and the last line it prints say that a store that held the key before
+takes the existing file. To go back, delete the key's versions and metadata with a token of the root
+policy, which the `operator` role does not hold, and seed again from the existing file:
+
+```sh
+just bao-root <recovery file> bao kv metadata delete -mount=secrets volsync
+just bao-seed-volsync <file>
+```
+
+The tests run these two against fakes of OpenBao and of the CLI's request, a DELETE of the key's
+metadata path, as OpenBao documents `kv metadata delete`. External Secrets writes the restored
+master's passwords into each application's Secret at its next refresh. A repository a mover created
+with the new master meanwhile, for an application that had none, opens only with that master:
+delete its objects, as when [both are lost](#the-file-and-the-stores-key-are-both-lost), and the
+mover creates it again. Delete the file made by mistake.
 
 ## The master's file is lost and the store still holds the key
 
