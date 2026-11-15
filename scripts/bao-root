@@ -5,6 +5,8 @@
 # (docs/runbooks/openbao.md). As the role operator, through the session of scripts/lib/openbao.sh,
 # it starts OpenBao's authenticated root token generation, gives it a threshold of the shares,
 # decrypted from FILE with the Talos age key into memory only, and has OpenBao decode the result.
+# FILE is read only where no one but this user can have written it (bao_custody_trusted in
+# scripts/lib/openbao.sh).
 # A root token made so never expires, so it serves only to read its own accessor and to mint an
 # orphan token with the root policy, which expires after fifteen minutes and cannot be renewed, and
 # is revoked at once; no command runs while it lives. The command runs with the orphan token in
@@ -34,11 +36,13 @@ shift
 # shellcheck source=scripts/cluster-env
 . "$here/cluster-env" ""
 complete=1
-require_commands kubectl curl jq base64 age || complete=0
+require_commands kubectl curl jq base64 age stat || complete=0
 require_kubeconfig || complete=0
 require_age_key || complete=0
 if [[ ! -f $file ]]; then
   infra_error "$file is not a file; give the custody file bao-recovery wrote"
+  complete=0
+elif ! bao_custody_trusted "$file"; then
   complete=0
 fi
 ((complete))
