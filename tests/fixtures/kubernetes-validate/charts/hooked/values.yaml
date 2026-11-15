@@ -16,3 +16,7 @@ definitionKind: ""
 definitionVersion: ""
 # Whether the chart renders a definition whose schema does not compile.
 brokenDefinition: false
+# Whether the chart renders a Pod that is no hook, which runs probeImage.
+probe: false
+# The image of that Pod; it has no tag, so a release that does not set one is refused.
+probeImage: busybox

@@ -26,6 +26,16 @@ Feature: Kubernetes tree layout
     When the kubernetes validation runs
     Then it exits non-zero and names the file, the object and the field, and prints how many objects of each kind without a schema it could not validate
 
+  Scenario: A definition whose name ends in a line break is refused, not skipped
+    Given an application with an object of a custom kind with a field no schema gives it, and a release whose chart renders a definition of that kind whose group, kind or version ends in a line break
+    When the kubernetes validation runs
+    Then it exits non-zero and names the definition and its file, where it would otherwise pass with the object counted as one without a schema
+
+  Scenario: A root path that leaves the tree through a link is refused
+    Given a root Kustomization whose spec.path is a link inside the tree to a directory outside it, by an absolute and by a relative path
+    When the kubernetes check runs
+    Then it exits non-zero, names the file and the rule, and builds nothing from outside the tree
+
   Scenario: A manifest an application keeps where the artifact does not carry it is refused
     Given an application directory with a manifest beside ks.yaml, and one in app/ that no kustomization.yaml reaches
     When the kubernetes check runs

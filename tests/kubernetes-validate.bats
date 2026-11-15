@@ -549,3 +549,71 @@ EOF
   refused_line "$store" "ClusterSecretStore openbao" role
   [[ $output != *mountPath* ]]
 }
+
+@test "A definition whose name ends in a line break is refused, not skipped" {
+  local value
+  # An object of the definition's kind, with a field no schema could give it, is in the tree: a
+  # definition the check silently dropped would leave it counted as one without a schema.
+  put kubernetes/apps/base/demo/hello/app/escape.yaml <<'EOF'
+---
+apiVersion: example.invalid/v1
+kind: Escape
+metadata:
+  name: escape
+unknown: 1
+EOF
+  yq -i '.resources += ["escape.yaml"]' "$TREE/kubernetes/apps/base/demo/hello/app/kustomization.yaml"
+
+  for value in $'definitionGroup: "example.invalid\\n"' \
+    $'definitionGroup: example.invalid\ndefinitionKind: "Escape\\n"' \
+    $'definitionGroup: example.invalid\ndefinitionVersion: "v1\\n"'; do
+    hooked_app "$value"
+    validate
+    [ "$status" -ne 0 ]
+    refused_line kubernetes/apps/base/demo/hooked/ks.yaml "CustomResourceDefinition escapes.example.invalid" "the API server"
+  done
+}
+
+@test "an image that ends in a line break is refused, not read as pinned" {
+  hooked_app 'testImage: "busybox:1.37.0\n"'
+  validate
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/hooked/ks.yaml "Job hooked-test-connection" "busybox:1.37.0" "tag"
+  hooked_app 'testImage: "busybox@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"'
+  validate
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/hooked/ks.yaml "Job hooked-test-connection" "busybox@sha256:"
+}
+
+# values_source NAME: the hooked application takes the values of the ConfigMap x-extra, which pins
+# the probe's image, through a valuesFrom entry with the name NAME.
+values_source() {
+  hooked_app 'probe: true'
+  put kubernetes/apps/base/demo/hooked/app/extra.yaml <<'EOF'
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: x-extra
+data:
+  values.yaml: |
+    probeImage: busybox:1.37.0
+EOF
+  yq -i '.resources = (.resources + ["extra.yaml"] | unique)' "$TREE/kubernetes/apps/base/demo/hooked/app/kustomization.yaml"
+  yq -i ".spec.valuesFrom = [{\"kind\": \"ConfigMap\", \"name\": \"$1\", \"optional\": true}]" \
+    "$TREE/kubernetes/apps/base/demo/hooked/app/helmrelease.yaml"
+}
+
+@test "a values source named by a pattern leaves the chart's untagged image to the image rule" {
+  # helm-controller finds no ConfigMap of that name and deploys the chart's defaults, whose probe
+  # runs an image without a tag.
+  values_source 'x-*'
+  validate
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/hooked/ks.yaml "Pod hooked-probe" busybox "tag"
+
+  # The ConfigMap by its exact name pins it.
+  values_source x-extra
+  validate
+  [ "$status" -eq 0 ]
+}

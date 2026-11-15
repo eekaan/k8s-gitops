@@ -22,6 +22,21 @@ Feature: The render diff of a pull request
     When just render runs on each
     Then each fails, naming the release and what is refused, and nothing is pulled
 
+  Scenario: A values source named by a pattern selects nothing the cluster would not select
+    Given a HelmRelease with an optional valuesFrom ConfigMap whose name holds a wildcard character, beside a ConfigMap the name would match as a pattern, a required one, one with the exact name, and chart sources named by a pattern
+    When just render runs on each
+    Then the optional one is skipped as helm-controller skips it and the chart renders with the values it has left, the required one and the chart sources are refused, naming the release, and only the exact name selects its ConfigMap
+
+  Scenario: An object that only claims to be a definition does not change what a chart renders
+    Given a tree with no definition of the monitoring API, and objects called CustomResourceDefinition of another API group, of another API version, with a version that is not served and with a group the API server would refuse, each naming that API, and a real definition of it
+    When just render runs on each
+    Then the chart that renders its monitor only where the API is served renders it for the real definition alone
+
+  Scenario: A release whose name the API server would refuse is refused by the render
+    Given HelmReleases whose name or namespace holds a line break, an upper-case letter or an underscore
+    When just render runs on each
+    Then each fails in one line naming the file of the release, before anything is pulled
+
   Scenario: Every release the cluster's overlay enables is one the render accepts
     Given this repository's tree
     When the render checks the form of every HelmRelease the cluster's overlay enables, without pulling a chart

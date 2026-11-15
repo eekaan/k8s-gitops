@@ -9,7 +9,9 @@
 # Reports every failure, naming the file and the rule, then exits non-zero. Never contacts a
 # cluster and fetches nothing: the publish run runs it in the job that signs (scripts/publish).
 # What the tree holds is data: each value read from a ks.yaml is one field, a control character or
-# a '|' in it read as '?', and a root's spec.path must be a directory of the tree.
+# a '|' in it read as '?', and a root's spec.path must be a directory of the tree, as the path
+# resolves: a link that leads outside kubernetes/ is refused. An application's spec.path is
+# compared with the one its directory fixes, and what is built is that directory.
 #
 # KUBERNETES_CHECK_BUILT, an existing empty directory, receives what each Flux build yielded, for
 # scripts/kubernetes-validate: N.yaml, and in its file builds the record N.yaml, LABEL and APP_DIR,
@@ -39,6 +41,7 @@ for tool in kustomize yq jq flux; do
   command -v "$tool" >/dev/null || { echo "kubernetes-check: $tool not found on PATH" >&2; exit 1; }
 done
 [[ -d kubernetes ]] || { echo "kubernetes-check: no kubernetes/ directory in $PWD" >&2; exit 1; }
+tree_root="$(realpath -e kubernetes)"
 
 failures=0
 fail() {
@@ -363,6 +366,13 @@ for ks in kubernetes/clusters/*/ks.yaml; do
   # elsewhere.
   if [[ ! $path =~ ^kubernetes(/[A-Za-z0-9._-]+)+$ || /$path/ == */../* || /$path/ == */./* || ! -d $path ]]; then
     fail "$ks: spec.path must be a directory of the tree under kubernetes/, found ${path#kubernetes/}"
+    continue
+  fi
+  # The textual rules above are not enough: a link inside the tree may point outside it. The path
+  # is built as it resolves.
+  real="$(realpath -e -- "$path")"
+  if [[ $real != "$tree_root"/* ]]; then
+    fail "$ks: spec.path must be a directory of the tree under kubernetes/, found ${path#kubernetes/}, which leads outside it through a link"
     continue
   fi
   [[ -z ${broken[$path]:-} ]] || continue

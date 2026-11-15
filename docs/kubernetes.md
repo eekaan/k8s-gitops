@@ -123,6 +123,16 @@ On what Flux builds:
   patches: `wait: true`, `healthChecks` or `healthCheckExprs`. Otherwise the dependent never
   reconciles, or starts before its dependency's objects are ready. The message names both
   Kustomizations and the overlay.
+- **Paths** (`kubernetes-check`). A root's `spec.path` is a directory of the tree under
+  `kubernetes/` as the path resolves: a link inside the tree that leads outside it is refused, not
+  built. The `spec.path` of an application's `ks.yaml` is compared with the one its directory
+  fixes, and what is built is that directory's `app/`. `scripts/render` resolves the path of every
+  Kustomization it builds the same way. Both build with kustomize's load restrictions off
+  (`LoadRestrictionsNone`, as Flux's kustomize-controller does, because an overlay lists `ks.yaml`
+  files outside its own directory), so a kustomization may name a file outside its own directory.
+  That is bounded by what is built from: the artifact the cluster applies holds only `kubernetes/`,
+  so a path that leaves it finds nothing there, and the render builds a copy of `kubernetes/`
+  alone, in which `flux build` reads only paths below its working directory.
 - **Schemas** (`kubernetes-validate`). Everything Flux builds as `kubernetes-check` builds it,
   each application from its own `ks.yaml` (enabled or not), each cluster's root and each cluster
   directory, is validated by kubeconform with unknown fields refused, against the first schema
@@ -197,7 +207,11 @@ What the tree and the charts hold is data to the validation, a chart's definitio
 pull request that bumps a chart's version does not show. A group, version or kind reaches a path or
 a schema location only once it has the shape the API server requires of it (a group a DNS subdomain,
 a version a DNS-1035 label, a kind a letter followed by letters and digits); a definition or an
-object without that shape is refused, naming its file, and nothing is made of it. Every record the
+object without that shape is refused, naming its file, and nothing is made of it. The shapes
+(`scripts/lib/shapes.sh`, which `scripts/render` uses as well) are anchored at the true end of the
+string, so a value that ends in a line break does not pass, and a control character fails them. A
+definition for which no schema can be written is an error naming it, never one left out, and an
+image that ends in a line break after its tag or digest is not pinned. Every record the
 validation reads from a tool's output has each field cleaned of control characters, so no value
 starts another field or record, and an index in it is checked to be a number before it is used.
 `kubernetes-check` hands its builds on as records ended by a NUL byte, which no path or label holds,
@@ -888,7 +902,10 @@ with host paths.
   each at the generation the object holds. That is what the applications that name it in
   `dependsOn` wait for. It does not wait for every satellite to run, so a node down does not hold
   them back; a satellite that never starts shows as the storage cluster's `Configured` condition,
-  which the check leaves out, and in the satellite counts of its status.
+  which the check leaves out, and in the satellite counts of its status. It carries
+  `k8s-gitops/timeout: long`: on a first install the storage controller can take longer than the
+  root's default 3m to report `Available`, and the health check would fail every minute until it
+  does.
 
 ### What runs
 
@@ -1714,6 +1731,13 @@ the chart its OCIRepository names at its tag, or the one its `chart.spec` names 
 the version the tree pins, with the values of its ConfigMaps and its own values over them, the
 release name and namespace helm-controller gives it, the Kubernetes version in `versions.yaml`, every
 API version a definition in the render serves, its post-renderers and helm-controller's labels. A
+definition is an `apiextensions.k8s.io/v1` `CustomResourceDefinition` whose group, kind and versions
+have the shapes the API server requires, and only its served versions count; an object that is only
+called one names no API. A well-shaped definition in the tree, or in a chart, does name its
+versions, which is what the cluster would serve once it is applied. Objects are selected by their
+exact name and namespace, as the controllers look them up: a `valuesFrom` or chart source named
+`x-*` selects nothing that is not called `x-*`. A HelmRelease whose name is not a DNS subdomain or
+whose namespace is not a DNS label is refused, naming its file (or its application's directory), before anything is read from it. A
 chart version bump therefore shows the objects that change. An application may take its chart only
 from an `OCIRepository` (at a tag) or a `HelmRepository` (at an exact version), from a source that
 names no credential (the render has no secrets), with values from ConfigMaps of the application; any

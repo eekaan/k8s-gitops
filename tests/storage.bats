@@ -229,6 +229,14 @@ replicas() {
     | .metadata.labels["pod-security.kubernetes.io/enforce"]' "$OVERLAY")" = privileged ]
 }
 
+@test "The storage cluster's Kustomization waits long enough for a first install" {
+  overlay
+  # The root's defaults give a child 3m to become ready, and a child with this label 10m
+  # (tests/kubernetes-check.bats); the storage cluster may take longer than 3m to report Available.
+  [ "$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "linstor-cluster")
+    | .metadata.labels["k8s-gitops/timeout"]' "$OVERLAY")" = long ]
+}
+
 @test "Satellites run with the Talos settings, on the workers only" {
   local pod='select(.kind == "DaemonSet") | .spec.template.spec' inits loaders hostpaths lvm config node
   satellite

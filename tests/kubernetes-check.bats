@@ -1249,3 +1249,24 @@ kept_builds() {
   refused_line kubernetes/clusters/test/ks.yaml "spec.path" "a directory of the tree"
   [[ $output != *"built kubernetes/clusters/test/ks.yaml"* ]]
 }
+
+@test "A root path that leaves the tree through a link is refused" {
+  valid_tree
+  # A directory beside the tree, which a link inside the tree points to, by an absolute path and by
+  # a relative one, at the path's last component and at one in its middle.
+  mkdir -p "$BATS_TEST_TMPDIR/outside/sub"
+  printf '%s\n' '---' 'apiVersion: v1' 'kind: ConfigMap' 'metadata:' '  name: outside' >"$BATS_TEST_TMPDIR/outside/configmap.yaml"
+  cp "$BATS_TEST_TMPDIR/outside/configmap.yaml" "$BATS_TEST_TMPDIR/outside/sub/configmap.yaml"
+  local target path
+  for path in ./apps/overlays/linked ./apps/overlays/linked/sub; do
+    for target in "$BATS_TEST_TMPDIR/outside" ../../../../outside; do
+      ln -sfn "$target" "$TREE/kubernetes/apps/overlays/linked"
+      path="$path" yq -i '.spec.path = env(path)' "$TREE/kubernetes/clusters/test/ks.yaml"
+
+      check
+      [ "$status" -ne 0 ]
+      refused_line kubernetes/clusters/test/ks.yaml "spec.path" "through a link"
+      [[ $output != *"built kubernetes/clusters/test/ks.yaml"* ]]
+    done
+  done
+}
