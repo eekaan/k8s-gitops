@@ -12,6 +12,8 @@
 # at once can leave the rewritten file behind.
 export BATS_NO_PARALLELIZE_WITHIN_FILE=true
 
+load fixtures/edge-stack
+
 setup() {
   REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   SCRIPT="$REPO/scripts/install-cilium"
@@ -446,8 +448,11 @@ bgp_inputs() {
   encoded=$(tofu -chdir="$COPY/tests/fixtures/talos" console -no-color <<< 'base64encode(local.talman_yaml)')
   base64 -d <<< "${encoded//\"/}" > "$TALMAN"
   CONFIG="$BATS_TEST_TMPDIR/cluster-config.json"
+  # The edges' public addresses come from the edge stack's outputs, which a fake of tofu answers.
+  edge_stack_fixture "$COPY" "$BATS_TEST_TMPDIR/edge-bin" "$BATS_TEST_TMPDIR/edge-state"
   # shellcheck disable=SC2016 # $1 and $2 are the inner shell's.
-  env -i PATH="$PATH" HOME="$BATS_TEST_TMPDIR" CLUSTER_DOMAIN=example.com BACKUP_BUCKET_PREFIX=marker-backups bash -c \
+  env -i PATH="$BATS_TEST_TMPDIR/edge-bin:$PATH" HOME="$BATS_TEST_TMPDIR" "${EDGE_STACK_ENVIRONMENT[@]}" \
+    CLUSTER_DOMAIN=example.com BACKUP_BUCKET_PREFIX=marker-backups bash -c \
     '. "$1/scripts/lib/cluster.sh" && fill_cluster_config lab-sto2 "$2" && cluster_config_manifest' _ "$COPY" "$TALMAN" |
     jq '.data' > "$CONFIG"
   [ "$(jq length "$CONFIG")" -gt 0 ]

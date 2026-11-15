@@ -1,0 +1,31 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: external-dns
+  namespace: flux-system
+spec:
+  path: ./apps/base/external-dns/external-dns/app
+  targetNamespace: external-dns
+  # The ExternalSecret names the secret store, which its application makes Ready; the records are
+  # those of the public Gateway's routes, so there is nothing to publish without it; and the
+  # chart's ServiceMonitor and the alert rules need the monitoring definitions.
+  dependsOn:
+    - name: openbao-store
+    - name: gateway-public
+    - name: prometheus-operator-crds
+  # Ready once the release is, which helm-controller waits for until the pod is, and that needs the
+  # token: the key exists once an operator writes it with just bao-put, and until then the
+  # ExternalSecret reports the missing key and tries again.
+  wait: true
+  postBuild:
+    substitute:
+      # The owner of the DNS records, which a cluster sets to its name in one place, a patch in its
+      # overlay (apps/overlays/<cluster>/kustomization.yaml) on this Kustomization, as it chooses
+      # the public Gateway's issuer; tests/external-dns.bats fails while lab-sto2's overlay leaves
+      # this placeholder, which no two clusters should share.
+      DNS_OWNER_ID: set-by-the-overlay
+  sourceRef:
+    kind: ExternalArtifact
+    name: external-dns

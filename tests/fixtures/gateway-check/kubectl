@@ -39,6 +39,8 @@
 #                            the Gateway
 #   http-routes              the number of routes the Gateway reports on its http listener, 1
 #                            without it
+#   no-dns-app               the Kustomization external-dns does not exist, as where the cluster's
+#                            overlay does not select DNS records
 # Every object it answers with holds addresses from the documentation ranges, and the CA's Secret a
 # private key marker, none of which the recipe may print. Like kubectl, it takes every argument after
 # -- as a name or a type, never as a flag. It records "kubectl ARGS" in <tmp>/record/argv.
@@ -211,7 +213,8 @@ routes() {
     def route($namespace; $name; $section; $accepted): {
       apiVersion: "gateway.networking.k8s.io/v1", kind: "HTTPRoute",
       metadata: {namespace: $namespace, name: $name},
-      spec: {parentRefs: [{name: "public", namespace: "envoy-gateway-system", sectionName: $section}]},
+      spec: ({parentRefs: [{name: "public", namespace: "envoy-gateway-system", sectionName: $section}]}
+        + (if $section == "https" then {hostnames: [$name + ".example.com"]} else {} end)),
       status: {parents: [{parentRef: {group: "gateway.networking.k8s.io", kind: "Gateway", name: "public",
           namespace: "envoy-gateway-system", sectionName: $section},
         controllerName: "gateway.envoyproxy.io/gatewayclass-controller",
@@ -336,6 +339,14 @@ case $kind in
   namespaces)
     has --selector=k8s-gitops/gateway=public || { echo "fake kubectl: unexpected flags$flags" >&2; exit 1; }
     jq -n '{items: [{apiVersion: "v1", kind: "Namespace", metadata: {name: "demo", labels: {"k8s-gitops/gateway": "public"}}}]}'
+    ;;
+  kustomizations.kustomize.toolkit.fluxcd.io)
+    [[ $object == external-dns ]] && has --namespace=flux-system || not_found "kustomizations.kustomize.toolkit.fluxcd.io \"$object\""
+    # --ignore-not-found: nothing, and success, for a Kustomization that is not there.
+    listed no-dns-app && { has --ignore-not-found && exit 0 || not_found "kustomizations.kustomize.toolkit.fluxcd.io \"$object\""; }
+    jq -n '{apiVersion: "kustomize.toolkit.fluxcd.io/v1", kind: "Kustomization",
+      metadata: {name: "external-dns", namespace: "flux-system"},
+      status: {conditions: [{type: "Ready", status: "True"}]}}'
     ;;
   httproutes.gateway.networking.k8s.io)
     has --all-namespaces || { echo "fake kubectl: unexpected flags$flags" >&2; exit 1; }

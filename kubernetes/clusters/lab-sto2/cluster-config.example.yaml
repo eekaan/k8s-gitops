@@ -5,6 +5,8 @@
 # Flux, so a variable listed in neither fails the check unless the application sets it or it has a
 # default. A plain map rather than a ConfigMap, so it cannot be applied over the real one.
 CLUSTER_DOMAIN: example.com
+# The zone at the DNS provider that holds CLUSTER_DOMAIN: the domain itself, or a name it is under.
+CLUSTER_DNS_ZONE: example.com
 # The start of the backup buckets' names: each bucket is this, a hyphen and its role, such as
 # example-backups-volsync.
 BACKUP_BUCKET_PREFIX: example-backups
@@ -27,3 +29,7 @@ BGP_EDGE_ADDRESS_2: 192.0.2.8
 # The public Gateway's address, one host of the service range, which the edge routers forward public
 # traffic to, and which the public Gateway's Service asks for.
 GATEWAY_ADDRESS: 198.51.100.1
+# The edge routers' two public addresses, which every route's DNS records point at: the Gateway's
+# own address is private, and the edge routers translate public traffic to it.
+EDGE_PUBLIC_ADDRESS_1: 203.0.113.11
+EDGE_PUBLIC_ADDRESS_2: 203.0.113.12

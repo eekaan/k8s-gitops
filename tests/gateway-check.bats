@@ -88,6 +88,9 @@ EOF
       LINES+=("$edge $line")
     done
   done
+  # The name's lines, which follow the edges': its records, and a request by the name alone.
+  DNS_LINES=('DNS hello' 'name hello')
+  LINES+=("${DNS_LINES[@]}")
 }
 
 # fake NAME: a binary first on the recipe's PATH, its body read from stdin.
@@ -161,11 +164,16 @@ calls() {
   [ "$(calls '^kubectl get ' | grep -vE ' (services|pods|certificates\.cert-manager\.io|namespaces|httproutes\.gateway\.networking\.k8s\.io) ' | grep -vc ' -- [a-z]')" -eq 0 ]
   # Every request through an edge's address, with no configuration file, proxy or redirect followed,
   # bounded in time; every HTTPS one verifies against the CA's certificate.
-  [ "$(calls '^curl ' | wc -l)" -eq 6 ]
+  # Six of them through an edge's address, one to the public resolver for the name's records and
+  # one by the name alone.
+  [ "$(calls '^curl ' | wc -l)" -eq 8 ]
+  [ "$(calls '^curl .* --resolve ' | wc -l)" -eq 6 ]
   [ "$(calls '^curl ' | grep -vcE '^curl --disable .* --connect-timeout [0-9]+ --max-time [0-9]+ ')" -eq 0 ]
   [ "$(calls '^curl ' | grep -vcF -- ' --noproxy * ')" -eq 0 ]
   [ "$(calls '^curl ' | grep -cE -- ' (-k|--insecure|-L|--location)( |$)')" -eq 0 ]
-  [ "$(calls '^curl .*https://' | grep -vcE -- ' --cacert [^ ]+ --capath [^ ]+ ')" -eq 0 ]
+  # Every HTTPS request to the cluster verifies against the CA's certificate alone; the public
+  # resolver's is verified against the system's authorities, as any public site's is.
+  [ "$(calls '^curl .*https://' | grep -v 'https://dns\.google/' | grep -vcE -- ' --cacert [^ ]+ --capath [^ ]+ ')" -eq 0 ]
   for edge in 203.0.113.51 203.0.113.52; do
     [ "$(calls "^curl .* --resolve hello\.example\.com:80:$edge .* http://hello\.example\.com/gateway-check$" | wc -l)" -eq 1 ]
     [ "$(calls "^curl .* --resolve hello\.example\.com:443:$edge .* https://hello\.example\.com/$" | wc -l)" -eq 1 ]
@@ -441,6 +449,136 @@ calls() {
   [ "$(line_of Gateway)" = "FAIL  Gateway: Accepted, not Programmed: $(printf 'A%.0s' {1..120})..." ]
 }
 
+@test "The Gateway check proves a routed hostname resolves to the edges" {
+  local condition file content check why lookup
+  # Healthy: the name resolves, through the public resolver, to exactly the two edges' addresses,
+  # and a request by the name alone, with no --resolve, reaches the demo.
+  recipe
+
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(verdict 'DNS hello')" = pass ]
+  [ "$(verdict 'name hello')" = pass ]
+  nothing_secret
+  # The one name asked for is the demo's, validated under the domain: the route that was refused and
+  # the one from a namespace that did not opt in are not looked up.
+  [ "$(calls '^curl ' | grep -c 'dns\.google/')" -eq 1 ]
+  [ "$(calls '^curl ' | grep -c 'https://dns\.google/resolve?name=hello\.example\.com&type=A$')" -eq 1 ]
+  [ "$(calls '^curl ' | grep -vc -- '--resolve ')" -eq 2 ]
+  [ "$(calls '^curl .* https://hello\.example\.com/$' | grep -v -- '--resolve ' | grep -c -- ' --cacert [^ ]* --capath [^ ]* ')" -eq 1 ]
+  [ "$(calls '^kubectl get .*kustomizations')" = 'kubectl get --output=json --request-timeout=10s --ignore-not-found kustomizations.kustomize.toolkit.fluxcd.io --namespace=flux-system -- external-dns' ]
+
+  # Each way the name can fail to resolve to the edges fails its own line, without an address, and
+  # the request by the name alone is not made: the state file, its content, the failing line and
+  # what its reason says.
+  local -a conditions=(
+    $'dns-answer|203.0.113.51|DNS hello|not both'
+    $'dns-answer|203.0.113.52|DNS hello|not both'
+    $'dns-answer|203.0.113.99|DNS hello|not exactly'
+    'dns-answer|203.0.113.51,203.0.113.99|DNS hello|not exactly'
+    'dns-answer|203.0.113.51,203.0.113.52,203.0.113.99|DNS hello|not exactly'
+    $'dns-nxdomain||DNS hello|no address record'
+    $'dns-garbage||DNS hello|not readable'
+    $'doh-down||DNS hello|could not be asked'
+  )
+  for condition in "${conditions[@]}"; do
+    IFS='|' read -r file content check why <<< "$condition"
+    echo "condition: $file $content"
+    find "$STATE" -mindepth 1 -delete
+    : > "$RECORD/argv"
+    # The addresses the resolver gives are comma-separated here, one per line in the file.
+    printf '%s\n' "${content//,/$'\n'}" > "$STATE/$file"
+
+    recipe
+
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    nothing_secret || { echo "$output"; return 1; }
+    [ "$(sed -nE 's/^(pass|FAIL|skip)  ([^:]+): .*/\2/p' <<< "$output" | sort)" = "$(printf '%s\n' "${LINES[@]}" | sort)" ] ||
+      { echo "$output"; echo "not the lines expected"; return 1; }
+    [ "$(sed -nE 's/^FAIL  ([^:]+): .*/\1/p' <<< "$output")" = "$check" ] || { echo "$output"; echo "not the failure expected"; return 1; }
+    [[ $(line_of "$check") == *"$why"* ]] || { echo "$output"; echo "not the reason expected"; return 1; }
+    [ "$(verdict 'name hello')" = skip ] || { echo "$output"; return 1; }
+    [ "$(calls '^curl .* https://hello\.example\.com/$' | grep -vc -- '--resolve ')" -eq 0 ]
+  done
+
+  # The resolver's answer counts only as one JSON document with the status NOERROR whose records are
+  # all A records of the name itself, each one address: a CNAME to a name whose A records are the
+  # edges', the edges' addresses as records of another name, an error status with them attached, two
+  # documents, and one record that holds both addresses each fail, though both edges' addresses are
+  # in every one. Each: the resolver's body, and what the reason says.
+  local body
+  local -a bodies=(
+    '{"Status": 0, "Answer": [{"name": "hello.example.com.", "type": 5, "TTL": 300, "data": "edge.example.net."}, {"name": "edge.example.net.", "type": 1, "TTL": 300, "data": "203.0.113.51"}, {"name": "edge.example.net.", "type": 1, "TTL": 300, "data": "203.0.113.52"}]}|not an A record of the name itself'
+    '{"Status": 0, "Answer": [{"name": "other.example.com.", "type": 1, "TTL": 300, "data": "203.0.113.51"}, {"name": "other.example.com.", "type": 1, "TTL": 300, "data": "203.0.113.52"}]}|not an A record of the name itself'
+    '{"Status": 2, "Answer": [{"name": "hello.example.com.", "type": 1, "TTL": 300, "data": "203.0.113.51"}, {"name": "hello.example.com.", "type": 1, "TTL": 300, "data": "203.0.113.52"}]}|status 2, not NOERROR'
+    '{"Status": 0, "Answer": [{"name": "hello.example.com.", "type": 1, "TTL": 300, "data": "203.0.113.51"}]} {"Status": 0, "Answer": [{"name": "hello.example.com.", "type": 1, "TTL": 300, "data": "203.0.113.52"}]}|not readable'
+    '{"Status": 0, "Answer": [{"name": "hello.example.com.", "type": 1, "TTL": 300, "data": "203.0.113.51\n203.0.113.52"}]}|not readable'
+  )
+  for body in "${bodies[@]}"; do
+    echo "the resolver's body: ${body%|*}"
+    find "$STATE" -mindepth 1 -delete
+    : > "$RECORD/argv"
+    printf '%s\n' "${body%|*}" > "$STATE/dns-json"
+
+    recipe
+
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+    nothing_secret || { echo "$output"; return 1; }
+    [ "$(sed -nE 's/^FAIL  ([^:]+): .*/\1/p' <<< "$output")" = 'DNS hello' ] || { echo "$output"; echo "not the failure expected"; return 1; }
+    [[ $(line_of 'DNS hello') == *"${body##*|}"* ]] || { echo "$output"; echo "not the reason expected"; return 1; }
+    [ "$(verdict 'name hello')" = skip ] || { echo "$output"; return 1; }
+  done
+  # The same answer as one document, with the status NOERROR and the two A records of the name, passes.
+  find "$STATE" -mindepth 1 -delete
+  printf '%s\n' '{"Status": 0, "Answer": [{"name": "hello.example.com.", "type": 1, "TTL": 300, "data": "203.0.113.52"}, {"name": "hello.example.com.", "type": 1, "TTL": 300, "data": "203.0.113.51"}]}' > "$STATE/dns-json"
+  recipe
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(verdict 'DNS hello')" = pass ]
+
+  # A request by the name alone that gets nowhere fails its own line, and the records' stays.
+  find "$STATE" -mindepth 1 -delete
+  : > "$STATE/by-name-down"
+  recipe
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [ "$(verdict 'DNS hello')" = pass ]
+  [ "$(sed -nE 's/^FAIL  ([^:]+): .*/\1/p' <<< "$output")" = 'name hello' ]
+  nothing_secret
+
+  # Where the cluster does not select DNS records there is nothing to look up: one line says so,
+  # the resolver is never asked and the run passes.
+  find "$STATE" -mindepth 1 -delete
+  : > "$RECORD/argv"
+  : > "$STATE/no-dns-app"
+  recipe
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $(line_of 'DNS records') == "skip  DNS records: "*"external-dns"*"not selected"* ]]
+  [ -z "$(line_of 'DNS hello')" ]
+  [ -z "$(calls 'dns\.google/')" ]
+  [ "$(calls '^curl ' | wc -l)" -eq 6 ]
+  [[ ${output##*$'\n'} == "gateway-check: every check of the public Gateway of lab-sto2 passes; skipped: DNS records" ]]
+  nothing_secret
+
+  # The lookup trusts the system's public trust store as curl has it: the variables that would make
+  # curl trust a bundle or directory of the caller's choosing do not reach it, whatever the
+  # environment holds. Each curl records its arguments and, on the same line of its own record, the
+  # variables it saw.
+  find "$STATE" -mindepth 1 -delete
+  : > "$RECORD/argv"
+  : > "$RECORD/curl-env"
+  # shellcheck disable=SC2030,SC2031 # Each test starts from the setup's ENVIRONMENT.
+  ENVIRONMENT+=(CURL_CA_BUNDLE=/nonexistent/bundle.pem SSL_CERT_FILE=/nonexistent/file.pem SSL_CERT_DIR=/nonexistent/dir)
+  recipe
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(verdict 'DNS hello')" = pass ]
+  lookup=$(paste -d '|' <(grep '^curl ' "$RECORD/argv") "$RECORD/curl-env" | grep -F 'https://dns.google/resolve?')
+  echo "the lookup: $lookup"
+  [ "$(grep -c . <<< "$lookup")" -eq 1 ]
+  [ -z "$(tr -d ' ' <<< "${lookup##*|}")" ]
+}
+
 # acme KIND: the Gateway's certificate is issued by the ACME issuer KIND, production or staging, and
 # the edges serve a certificate that issuer's chain signed; STATE and the record of calls are emptied.
 acme() {
@@ -452,9 +590,11 @@ acme() {
   ACME_LINES=("${LINES[@]/#cluster CA/issuer trust}")
 }
 
-# https_calls: the HTTPS requests the recipe made through the edges.
+# https_calls: the HTTPS requests the recipe made through the edges: by each edge's address, and by
+# the demo's name alone, which this machine's resolver sends to an edge; not the lookups at the
+# public resolver.
 https_calls() {
-  calls '^curl .*https://'
+  calls '^curl .*https://' | grep -vF 'https://dns.google/'
 }
 
 @test "The Gateway check verifies the certificate against the trust its issuer implies, and says which" {
@@ -480,9 +620,10 @@ https_calls() {
   for edge in lab-edge-1 lab-edge-2; do
     [ "$(line_of "$edge TLS")" = "pass  $edge TLS: HTTPS for hello verifies against the system's public trust store" ]
   done
-  # No Secret is read, and curl is given no authority of its own and is never told to skip the check.
+  # No Secret is read, and curl is given no authority of its own and is never told to skip the check:
+  # two requests through each edge and the one by the demo's name alone.
   [ -z "$(calls ' secret ')" ]
-  [ "$(https_calls | wc -l)" -eq 4 ]
+  [ "$(https_calls | wc -l)" -eq 5 ]
   [ "$(https_calls | grep -cE -- ' (--cacert|--capath|-k|--insecure)( |$)')" -eq 0 ]
   nothing_secret
 

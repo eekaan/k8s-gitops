@@ -435,6 +435,7 @@ scrapes=(
   '^volsync_|volsync|ServiceMonitor.monitoring.coreos.com__volsync|Service__volsync-metrics|volsync-system'
   '^vector_|vector|PodMonitor.monitoring.coreos.com_monitoring_vector|DaemonSet.apps_monitoring_vector|monitoring'
   '^certmanager_|cert-manager|ServiceMonitor.monitoring.coreos.com_cert-manager_cert-manager|Service_cert-manager_cert-manager|cert-manager'
+  '^external_dns_|external-dns|ServiceMonitor.monitoring.coreos.com_external-dns_external-dns|Service_external-dns_external-dns|external-dns'
   '^flux_|flux-monitoring|ServiceMonitor.monitoring.coreos.com_monitoring_flux-operator|flux-operator/Service_flux-system_flux-operator|monitoring'
   '^cilium_|cilium-monitoring|PodMonitor.monitoring.coreos.com_kube-system_cilium-agent|cilium/DaemonSet.apps_kube-system_cilium|kube-system'
   '^linstor_|linstor-monitoring|ServiceMonitor.monitoring.coreos.com_piraeus-datastore_linstor-controller|recorded:Service/linstor-controller|piraeus-datastore'

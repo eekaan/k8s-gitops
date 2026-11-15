@@ -378,7 +378,10 @@ again around it; it is destroyed by name only ([Recipes](#recipes)).
   `/var/log/edge-first-boot.log`, on any other; nothing is refused at plan time. Each edge's port is
   at its reserved address on the node subnet, from the plumbing stack's output `bgp`. Each has a
   floating IP of its own from the plumbing stack's external network. A public hostname publishes
-  both, and the sensitive output `addresses` gives them.
+  both, and the sensitive output `addresses` gives them: `just cluster-config` reads it into
+  `EDGE_PUBLIC_ADDRESS_1` and `EDGE_PUBLIC_ADDRESS_2`, the targets of the DNS records
+  external-dns makes ([kubernetes.md](kubernetes.md#dns-records)), and `just gateway-check` reads
+  it to compare them with what the public resolver answers.
 - Both are scheduled into one server group of the policy soft anti-affinity: the cloud keeps them on
   different hypervisors where it can and still places them where it cannot. A hard policy would
   refuse to place the replacement of one edge on a host that has room only beside the other, which

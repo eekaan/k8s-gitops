@@ -117,6 +117,18 @@ Feature: Alerts
     When the rule is evaluated over time
     Then the alert fires after its time for the first and never for the second
 
+  @by:rules-check
+  Scenario: The alert ExternalDNSSyncStale fires after its time in the failing case and stays quiet in the healthy one
+    Given external-dns that syncs with the DNS provider for ten minutes, then has no series for ten minutes, as when it exits at a refused pass and crash-loops, then syncs again and then runs on without a successful sync
+    When the rule is evaluated over time
+    Then the alert is quiet while the last sync is recent, fires once the series has been gone for its time, is quiet again once external-dns syncs, and fires once the last sync is ten minutes old and has stayed so for its time
+
+  @by:rules-check
+  Scenario: The alert ExternalDNSSyncStale stays quiet while external-dns restarts
+    Given external-dns that syncs every minute and whose pod is replaced: two scrapes find no pod, and the new pod's first scrape finds the gauge at 0, before its first sync
+    When the rule is evaluated over time
+    Then the alert never fires
+
   Scenario: Flux's controllers and the state of its resources are scraped
     Given the flux-monitoring application, enabled in the cluster's overlay after the monitoring definitions, the Flux Operator's chart as the cluster directory installs it, and Flux's controllers as the instance installs them
     When it is built as Flux applies it and the monitors are matched against what they select

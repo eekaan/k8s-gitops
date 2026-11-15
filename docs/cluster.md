@@ -10,15 +10,21 @@ and the kubeconfig.
 
 ## From nothing to a Ready cluster
 
-1. `just infra-apply sto2/plumbing`, then `just infra-apply sto2/cluster`
-   ([infrastructure.md](infrastructure.md)): the nodes boot and wait in maintenance mode, and
-   the cluster's `talman.yaml` is written. `just infra-talman` writes it again from the stack's
-   state, without applying.
+1. `just infra-apply sto2/plumbing`, then `just infra-apply sto2/cluster` and
+   `just infra-apply sto2/edge` ([infrastructure.md](infrastructure.md)): the nodes boot and wait
+   in maintenance mode, the cluster's `talman.yaml` is written, and the edge routers start. The
+   edge stack's first build, with `EDGE_IMAGE`, `EDGE_SSH_KEY_FILE` and `OPERATOR_CIDRS` in the
+   environment, is in [runbooks/edge.md](runbooks/edge.md#first-build). `just infra-talman` writes
+   `talman.yaml` again from the cluster stack's state, without applying.
 2. `just cluster-age-key`, once: the Talos age key. Commit `talos/.sops.yaml`.
 3. `just cluster-secrets`, once per cluster: the secrets bundle. Commit it.
 4. `just cluster-flux-age-key`, once: the Flux age key. Commit `.sops.yaml`.
 5. `just cluster-bootstrap`: every node configured, Cilium installed, what Flux needs before it
-   starts applied, the kubelet serving-certificate approver installed, every node Ready.
+   starts applied, the kubelet serving-certificate approver installed, every node Ready. What Flux
+   needs includes `cluster-config`, whose two keys of the edge routers' public addresses come from
+   the edge stack's outputs, so this step and the next need the edge stack applied in step 1 and
+   its environment ([infrastructure.md](infrastructure.md#environment)), and refuse, naming the
+   stack, without them.
 6. `just cluster-flux`: what Flux needs before it starts applied, and Flux installed
    ([kubernetes.md](kubernetes.md#installing-flux)). To see Flux take over Cilium without a node
    leaving Ready, start `just app-adoption kubernetes/apps/base/kube-system/cilium` in a second
@@ -937,7 +943,11 @@ take one now, `kubectl --namespace etcd-snapshots create job --from=cronjob/etcd
   storage's endpoint or region in `infra/openstack/backend.hcl`, the Flux age key or its recipient in
   `.sops.yaml` is missing, when the Flux age key is not the key of that recipient or is the Talos
   age key, and when a key of `cluster-config` or `cluster-secrets` cannot be filled or is not
-  listed. A second run changes nothing.
+  listed. `CLUSTER_DNS_ZONE` is read when set, the domain standing in for it when not, and refused
+  when it is not the domain or a name the domain is under. The two edge addresses of
+  `cluster-config` come from the edge stack's outputs, so it also needs the environment of the edge
+  stack's recipes ([infrastructure.md](infrastructure.md#environment)) and refuses, naming the
+  stack, while `sto2/edge` is not applied. A second run changes nothing.
 - `just cluster-flux [cluster] [--reapply]` installs Flux on a cluster that runs none
   ([kubernetes.md](kubernetes.md#installing-flux)). It needs what `cluster-config` needs.
 - `just app-adoption <application directory> [cluster]` watches Flux adopt an application that
@@ -966,8 +976,9 @@ take one now, `kubectl --namespace etcd-snapshots create job --from=cronjob/etcd
   cluster's `talman.yaml` and kubeconfig.
 - `just gateway-check [cluster]` says, reading only, whether the cluster's public Gateway serves:
   its objects through the kubeconfig, then requests through each edge router's floating address
-  with `curl --resolve`, verified against the cluster CA's certificate, with pass, FAIL or skip and
-  one line of why per check, never an address
+  with `curl --resolve`, verified against the cluster CA's certificate, then the DNS records of the
+  routes' names through a public resolver and one request by a name alone, with pass, FAIL or skip
+  and one line of why per check, never an address
   ([kubernetes.md](kubernetes.md#checking-the-public-gateway)). It needs the cluster's kubeconfig
   and what the edge stack's recipes need to read its outputs.
 - `just grafana [cluster]` forwards a local port to Grafana through the cluster's kubeconfig until
@@ -1243,6 +1254,10 @@ to hand it to kubectl and age-keygen on standard input.
 - `CLUSTER_DOMAIN`: the domain the cluster's applications are published under, a lower-case DNS
   name, which becomes `CLUSTER_DOMAIN` in `cluster-config`; `cluster-bootstrap`, `cluster-config`
   and `cluster-flux` need it.
+- `CLUSTER_DNS_ZONE`: the zone at the DNS provider that holds `CLUSTER_DOMAIN`, a lower-case DNS
+  name that is the domain or one it is under, which becomes `CLUSTER_DNS_ZONE` in `cluster-config`
+  ([kubernetes.md](kubernetes.md#dns-records)); the domain itself when unset. Set it when the
+  domain is a name under its zone, such as `lab.example.com` in the zone `example.com`.
 - `ADOPTION_INTERVAL` and `ADOPTION_WAIT`: how many seconds `app-adoption` waits between two
   polls, 10 when unset, and in all, 900 when unset.
 - `GRAFANA_PORT` and `GRAFANA_WAIT`: the local port `grafana` forwards from, 3000 when unset, and how

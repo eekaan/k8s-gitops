@@ -79,7 +79,12 @@ step it failed in ([cluster.md](../cluster.md#recipes)).
 
 1. The build order in [cluster.md](../cluster.md#from-nothing-to-a-ready-cluster), from the start,
    leaving out the steps that make the age keys and the secrets bundle: they survived, and
-   `just cluster-secrets` refuses to replace a bundle.
+   `just cluster-secrets` refuses to replace a bundle. The edge stack is applied before
+   `just cluster-bootstrap` whether it was destroyed or not, with its environment: the bootstrap
+   reads the edge routers' public addresses from its outputs into `cluster-config`, and an apply of
+   a stack that stands changes nothing. Edge routers built again have new public addresses, which
+   the records external-dns makes follow once `cluster-config` holds them
+   ([kubernetes.md](../kubernetes.md#dns-records)).
 
 2. **`just cluster-check`**: every check passes. Before the namespace `flux-system` exists, the
    check of its pods is skipped, and the recipe says so.

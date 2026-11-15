@@ -13,6 +13,7 @@ resources:
   - ../../base/demo
   - ../../base/envoy-gateway-system
   - ../../base/etcd-snapshots
+  - ../../base/external-dns
   - ../../base/external-secrets
   - ../../base/keda
   - ../../base/kube-system
@@ -33,6 +34,7 @@ resources:
   - ../../base/envoy-gateway-system/envoy-gateway/ks.yaml
   - ../../base/envoy-gateway-system/gateway-public/ks.yaml
   - ../../base/etcd-snapshots/etcd-snapshots/ks.yaml
+  - ../../base/external-dns/external-dns/ks.yaml
   - ../../base/external-secrets/external-secrets/ks.yaml
   - ../../base/external-secrets/openbao-store/ks.yaml
   - ../../base/keda/keda/ks.yaml
@@ -84,3 +86,19 @@ patches:
         value:
           substitute:
             PUBLIC_ISSUER: letsencrypt-staging
+  # The cluster's name, which owns the DNS records external-dns makes: two clusters that share a
+  # zone never touch each other's records. Selected by target, so an overlay that leaves the
+  # application out still builds.
+  - target:
+      group: kustomize.toolkit.fluxcd.io
+      kind: Kustomization
+      name: external-dns
+    patch: |-
+      apiVersion: kustomize.toolkit.fluxcd.io/v1
+      kind: Kustomization
+      metadata:
+        name: external-dns
+      spec:
+        postBuild:
+          substitute:
+            DNS_OWNER_ID: lab-sto2
