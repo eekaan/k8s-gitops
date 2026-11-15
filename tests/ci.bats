@@ -70,6 +70,8 @@ runs_of() {
   [ "$status" -eq 0 ]
   # The tools check passes only where every pinned tool is installed, and the host PATH holds none of them.
   [[ $output == *"pinned tools match mise.toml"* ]]
+  # The run resolved the Prometheus image for rules-check, which Dagger records in dagger.lock.
+  [ -z "$(git -C "$WORK" status --porcelain)" ]
 }
 
 # bats test_tags=hermetic
@@ -178,6 +180,8 @@ runs_of() {
   [[ $output == *"rules-refusal: promtool's check rules refuses the tree's own alert"*"defined twice, naming it"* ]]
   # ... and the tests of the rules pass on it, with no file edited by hand.
   [[ $output == *"ok "*" The rules are checked with the Prometheus image the chart deploys, in the static group of just ci"* ]]
+  # The run resolved the moved tag, and Dagger's record of it stays out of the tree.
+  [ -z "$(git -C "$WORK" status --porcelain -- dagger.lock)" ]
 }
 
 # bats test_tags=hermetic
@@ -215,6 +219,218 @@ runs_of() {
   grep -qx -- '--progress=plain' "$BATS_TEST_TMPDIR/dagger.args"
   run grep -xE -- '--silent|-s|--quiet|-q+' "$BATS_TEST_TMPDIR/dagger.args"
   [ "$status" -ne 0 ]
+}
+
+# stand_in MODE: puts a mise that installs nothing and a dagger that stands in for the real one on
+# a PATH of its own, as BIN. The stand-in writes dagger.lock as Dagger does, then ends as MODE says:
+# append adds a line and passes, truncate empties the file and passes, fail adds a line and exits 3.
+# int, term and hup signal the process that started them, the recipe's own mechanism, and write the
+# line only when that process has passed the signal on, as Dagger's shutdown writes the lock, after
+# which they exit 2 (tests/fixtures/dagger-lock/signalled-dagger, which records the signal it got).
+stand_in() {
+  BIN="$BATS_TEST_TMPDIR/stand-in"
+  mkdir -p "$BIN"
+  printf '#!/usr/bin/env bash\n' > "$BIN/mise"
+  add='printf '"'"'\n["","oci-sha",["example.invalid/prometheus/prometheus:v0.0.0"],"sha256:00"]'"'"' >> dagger.lock'
+  case $1 in
+    append) body=$add ;;
+    truncate) body=': > dagger.lock' ;;
+    fail) body="$add; exit 3" ;;
+    int | term | hup)
+      cp "$BATS_TEST_DIRNAME/fixtures/dagger-lock/signalled-dagger" "$BIN/dagger"
+      chmod +x "$BIN/mise" "$BIN/dagger"
+      return 0 ;;
+    *) return 1 ;;
+  esac
+  printf '#!/usr/bin/env bash\n%s\n' "$body" > "$BIN/dagger"
+  chmod +x "$BIN/mise" "$BIN/dagger"
+}
+
+# with_lock: commits in the checkout a dagger.lock of the fixture's, whatever the checkout holds: the
+# containers of just ci hold the files git would commit but Dagger's own, this one among them.
+with_lock() {
+  cp -p "$BATS_TEST_DIRNAME/fixtures/dagger-lock/dagger.lock" "$WORK/dagger.lock"
+  git -C "$WORK" add dagger.lock
+  commit "dagger.lock of the fixture"
+}
+
+# run_stand_in MODE: runs the checkout's just ci with the stand-in of that MODE for Dagger.
+# A stand-in that writes after a signal is still writing when the run returns, if the recipe did not
+# wait for it, so the file is read once it has finished.
+run_stand_in() {
+  local waited=0
+  stand_in "$1"
+  rm -f "$BATS_TEST_TMPDIR/flushed"
+  run env PATH="$BIN:/usr/bin:/bin" STAND_IN_SIGNAL="${1^^}" STAND_IN_MARK="$BATS_TEST_TMPDIR/flushed" \
+    "$(command -v just)" --justfile "$WORK/justfile" --working-directory "$WORK" ci
+  case $1 in
+    int | term | hup)
+      while [[ ! -e $BATS_TEST_TMPDIR/flushed ]] && ((waited++ < 100)); do sleep 0.1; done ;;
+  esac
+}
+
+# expect_ended MODE STATUS OUTPUT: fails unless the run of the stand-in of MODE, which ended with
+# STATUS and printed OUTPUT, ended as scripts/restore-after documents: with the command's status, or
+# 128 plus the signal's number when a signal stopped the run, the command having received that signal
+# and no other.
+expect_ended() {
+  local want
+  case $1 in
+    append | truncate) want=0 ;;
+    fail) want=3 ;;
+    int) want=130 ;;
+    term) want=143 ;;
+    hup) want=129 ;;
+  esac
+  [ "$2" -eq "$want" ] || { echo "$1: exit $2, want $want: $3"; return 1; }
+  case $1 in
+    int | term | hup)
+      [ "$(cat "$BATS_TEST_TMPDIR/flushed")" = "${1^^}" ] || { echo "$1: the command received $(cat "$BATS_TEST_TMPDIR/flushed")"; return 1; } ;;
+  esac
+}
+
+@test "A run of the checks leaves every tracked file as it found it, whether it passes, fails or is interrupted" {
+  local mode
+  checkout
+  with_lock
+  cp -p "$WORK/dagger.lock" "$BATS_TEST_TMPDIR/before"
+  [ -z "$(git -C "$WORK" status --porcelain)" ]
+
+  for mode in append truncate fail int term hup; do
+    run_stand_in "$mode"
+
+    expect_ended "$mode" "$status" "$output"
+    cmp "$BATS_TEST_TMPDIR/before" "$WORK/dagger.lock" || { echo "$mode: dagger.lock differs"; return 1; }
+    [ -z "$(git -C "$WORK" status --porcelain)" ] || { echo "$mode: $(git -C "$WORK" status --porcelain)"; return 1; }
+  done
+}
+
+@test "A change made to the lock file before the run is still there after it" {
+  local mode
+  checkout
+  with_lock
+  # The developer's change: an entry dropped from the middle and one added at the end, with no
+  # newline after it.
+  sed -i '5d' "$WORK/dagger.lock"
+  printf '\n["","git-latest",["example.invalid/mine"],"refs/tags/v9"]' >> "$WORK/dagger.lock"
+  cp -p "$WORK/dagger.lock" "$BATS_TEST_TMPDIR/before"
+  [ "$(git -C "$WORK" status --porcelain)" = " M dagger.lock" ]
+
+  for mode in append truncate fail int term hup; do
+    run_stand_in "$mode"
+
+    cmp "$BATS_TEST_TMPDIR/before" "$WORK/dagger.lock" || { echo "$mode: dagger.lock differs from the developer's"; return 1; }
+    [ "$(git -C "$WORK" status --porcelain)" = " M dagger.lock" ] || { echo "$mode: $(git -C "$WORK" status --porcelain)"; return 1; }
+  done
+}
+
+@test "restore-after removes a file the run created, whether the command passes or fails" {
+  local file="$BATS_TEST_TMPDIR/created"
+  run "$REPO/scripts/restore-after" "$file" sh -c "echo made > '$file'"
+  [ "$status" -eq 0 ]
+  [ ! -e "$file" ]
+  run "$REPO/scripts/restore-after" "$file" sh -c "echo made > '$file'; exit 3"
+  [ "$status" -eq 3 ]
+  [ ! -e "$file" ]
+}
+
+@test "restore-after says where the file's bytes are kept when it cannot put them back" {
+  local file="$BATS_TEST_TMPDIR/lock" kept
+  printf 'before the run\n' > "$file"
+  cp -p "$file" "$BATS_TEST_TMPDIR/before"
+  # The command leaves a directory where the file was, which no bytes can be written into.
+  run "$REPO/scripts/restore-after" "$file" sh -c "rm '$file' && mkdir '$file'"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  kept=$(sed -n 's/^restore-after: .* could not be put back; its bytes from before the run are kept in //p' <<< "$output")
+  [ -n "$kept" ]
+  cmp "$BATS_TEST_TMPDIR/before" "$kept"
+  rm -rf -- "${kept%/*}"
+}
+
+# lock_check_repo: sets WORK to a repository of its own with the lock check, committed with the
+# fixture's dagger.lock and a list of its own that names one repository, example.invalid/derived/image.
+# The lock holds no entry for it, only for names close to it, which are other images: another
+# repository of the same organisation, one that merely begins with its name, and a tag of one under it.
+lock_check_repo() {
+  local near
+  WORK="$BATS_TEST_TMPDIR/lock-repo"
+  mkdir -p "$WORK/scripts/lib"
+  cp -p "$REPO/scripts/check-lock-entries" "$WORK/scripts/"
+  printf '# shellcheck shell=bash\nderived_images=(\n  example.invalid/derived/image\n)\n' > "$WORK/scripts/lib/derived-images.sh"
+  cp -p "$BATS_TEST_DIRNAME/fixtures/dagger-lock/dagger.lock" "$WORK/dagger.lock"
+  for near in example.invalid/derived/other:v1 example.invalid/derived/image-config-reloader:v1 example.invalid/derived/images:v1; do
+    printf '\n["","oci-sha",["%s"],"sha256:0000000000000000000000000000000000000000000000000000000000000000"]' "$near" >> "$WORK/dagger.lock"
+  done
+  git -C "$WORK" init -q -b main
+  git -C "$WORK" add -A
+  commit "lock without entries of derived images"
+}
+
+@test "A committed lock entry for an image the tree takes by a derived tag fails the checks" {
+  local image entry line rendered repository listed=0
+  lock_check_repo
+  # The images are those of scripts/lib/derived-images.sh, so the repository of the one rules-check
+  # takes from the render is an entry of the real list, whole: a longer name that begins with it is
+  # another image. The check is one of the static group's, and runs scripts/check-lock-entries.
+  rendered=$("$REPO/scripts/rules-image")
+  repository=${rendered%%[:@]*}
+  # shellcheck source=scripts/lib/derived-images.sh
+  . "$REPO/scripts/lib/derived-images.sh"
+  for entry in "${derived_images[@]}"; do
+    if [ "$entry" = "$repository" ]; then listed=1; fi
+  done
+  [ "$listed" -eq 1 ] || { echo "scripts/lib/derived-images.sh does not list $repository: ${derived_images[*]}"; return 1; }
+  run just --justfile "$REPO/justfile" --dump --dump-format json
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.recipes.static.dependencies[].recipe | select(. == "lock-check")' <<< "$output")" = lock-check ]
+  run just --justfile "$REPO/justfile" --dry-run lock-check
+  [ "$status" -eq 0 ]
+  [ "$output" = scripts/check-lock-entries ]
+
+  # The committed lock holds none of the list's, only near misses: the check passes.
+  run "$WORK/scripts/check-lock-entries"
+  [ "$status" -eq 0 ]
+
+  # An uncommitted entry is the working copy's: the check reads what is committed.
+  image=example.invalid/derived/image:v1
+  entry="[\"\",\"oci-sha\",[\"$image\"],\"sha256:0000000000000000000000000000000000000000000000000000000000000000\"]"
+  printf '\n%s' "$entry" >> "$WORK/dagger.lock"
+  run "$WORK/scripts/check-lock-entries"
+  [ "$status" -eq 0 ]
+
+  # Committed, the entry fails the check, which names its line, and a working copy without it does
+  # not hide it.
+  git -C "$WORK" add dagger.lock
+  commit "lock with an entry of a derived image"
+  line=$(grep -nF "$image" "$WORK/dagger.lock" | cut -d: -f1)
+  head -n -1 "$WORK/dagger.lock" > "$BATS_TEST_TMPDIR/clean"
+  cp "$BATS_TEST_TMPDIR/clean" "$WORK/dagger.lock"
+  run "$WORK/scripts/check-lock-entries"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"dagger.lock:$line: "*"$image"* ]]
+  [[ $output == *"scripts/lib/derived-images.sh"* ]]
+  # Only its own line is named, not the near misses above it.
+  [ "$(grep -c '^dagger.lock:' <<< "$output")" -eq 1 ]
+
+  # A list entry that only begins with the committed entry's repository is another image too.
+  printf '# shellcheck shell=bash\nderived_images=(\n  example.invalid/derived/image-exporter\n)\n' > "$WORK/scripts/lib/derived-images.sh"
+  run "$WORK/scripts/check-lock-entries"
+  [ "$status" -eq 0 ]
+
+  # With the real list, a committed entry for the image rules-check takes fails the check, naming
+  # its line alone.
+  cp -p "$REPO/scripts/lib/derived-images.sh" "$WORK/scripts/lib/derived-images.sh"
+  printf '\n["","oci-sha",["%s"],"sha256:0000000000000000000000000000000000000000000000000000000000000000"]' "$rendered" >> "$WORK/dagger.lock"
+  git -C "$WORK" add dagger.lock
+  commit "lock with an entry of the image rules-check takes"
+  line=$(grep -nF "\"$rendered\"" "$WORK/dagger.lock" | cut -d: -f1)
+  run "$WORK/scripts/check-lock-entries"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"dagger.lock:$line: "*"\"$rendered\""* ]]
+  [ "$(grep -c '^dagger.lock:' <<< "$output")" -eq 1 ]
 }
 
 @test "The hermetic run validates the Renovate configuration with the image renovate-check uses" {

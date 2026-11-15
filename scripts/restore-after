@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Runs a command and leaves FILE as it was before the run, byte for byte, whether the command
+# passes, fails or is stopped by INT, TERM or HUP: a check must not modify the tree it checks.
+# What the file held when the run started is put back, so a change made to it before the run
+# stays and a change the command made does not; a file the run created is removed, and a file it
+# truncated or deleted is written back. A change made to it while the command runs, by the command
+# or by anything else, is replaced too. The command's exit status is the script's, 128 plus the
+# signal's number when a signal stopped the run. When the file cannot be written back, the script
+# says where its bytes from before the run are kept, leaves them there and exits non-zero. A run
+# killed outright (KILL) cannot put anything back.
+# The pinned Dagger has no switch that stops it from writing dagger.lock, and it writes there an
+# entry for every image it resolves without one, such as the Prometheus image of rules-check.
+# Usage: scripts/restore-after FILE COMMAND [ARG...]
+set -euo pipefail
+
+if (($# < 2)); then
+  echo "restore-after: usage: restore-after FILE COMMAND [ARG...]" >&2
+  exit 2
+fi
+file=$1
+shift
+
+keep=$(mktemp -d)
+existed=0
+if [[ -e $file ]]; then
+  existed=1
+  cat -- "$file" >"$keep/bytes"
+fi
+
+child=
+status=0
+
+restore() {
+  trap - EXIT
+  if ((existed)); then
+    # Written only when it differs, so an untouched file keeps its modification time.
+    if ! cmp -s -- "$keep/bytes" "$file" 2>/dev/null && ! cat -- "$keep/bytes" >"$file"; then
+      echo "restore-after: $file could not be put back; its bytes from before the run are kept in $keep/bytes" >&2
+      ((status)) || status=1
+      exit "$status"
+    fi
+  else
+    rm -f -- "$file"
+  fi
+  rm -rf -- "$keep"
+  exit "$status"
+}
+trap restore EXIT
+
+# The signal is passed on as it came. One sent to the process group, such as a Ctrl-C, reaches the
+# command directly too, unless the command ignores it, and the command was started in the
+# background, where a non-interactive shell leaves INT ignored for it: the signal passed on is what
+# reaches a command that ignores INT, or one signalled only through this script. Dagger catches INT,
+# which Go turns on again even where it was ignored, and cancels, writing dagger.lock as its session
+# ends; TERM and HUP it does not catch, so they end it at once, with no cancel. Either way the file
+# is put back only once the command has ended, so nothing it writes while ending is left. A signal
+# that arrives after the command started but before child is set finds the command's process in $!.
+stop() {
+  local pid=${child:-${!:-}}
+  status=$((128 + $2))
+  if [[ -n $pid ]]; then
+    kill -"$1" "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+  exit "$status"
+}
+trap 'stop INT 2' INT
+trap 'stop TERM 15' TERM
+trap 'stop HUP 1' HUP
+
+"$@" <&0 &
+child=$!
+wait "$child" || status=$?

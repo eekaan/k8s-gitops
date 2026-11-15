@@ -736,9 +736,20 @@ in that image in a container with no network; `just ci` copies promtool out of t
 tools container, which has the network the render needs. The image is the chart's, by the tag the
 chart names, which Renovate moves with the chart; nothing else in the tree pins it. `dagger.lock`
 holds no entry for it, so Dagger resolves the tag when it pulls the image, and a chart update that
-moves the tag needs no other change. A local `just ci` records the digest it resolved in
-`dagger.lock`, as Dagger does for any lookup without an entry, and reuses it while the render names
-that tag; that line is not committed, and one for a tag the render no longer names is never read.
+moves the tag needs no other change. Dagger records the digest it resolved in `dagger.lock`, as
+it does for any lookup without an entry, so `just ci` puts the file back as it found it, whether the
+run passes, fails or is stopped by `INT`, `TERM` or `HUP` (`scripts/restore-after`, which passes the
+signal on, waits for Dagger to end, as it writes the lock while it does, and then puts the file back;
+`INT` gives Dagger its own cancel, `TERM` and `HUP` end it at once; a run killed outright with
+`SIGKILL` cannot: Dagger writes the lock when its session ends, so a Dagger killed with it leaves no
+line, and one that goes on after only `restore-after` was killed leaves it, which `git diff`
+shows). A change a developer made to the file before the run is what is put back, and an edit made
+to it while a run is going, such as by `dagger lock update` in another terminal, is replaced by the
+bytes from before the run. When the file cannot be written back, the run says where those bytes are
+kept and fails. `just lock-check`, in the `static` group, fails when the committed `dagger.lock`
+holds an entry for an image the tree takes by a tag it derives at run time, naming the line; it
+reads the commit at `HEAD`, not the working copy. An image of that kind is added to the list in
+`scripts/lib/derived-images.sh`; `scripts/rules-image` derives this one.
 
 Each run also proves that the check refuses what only `check rules` reads: in rule files no unit
 test loads, a chart's rule and an own alert with an expression promtool cannot parse, and an own

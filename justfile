@@ -63,6 +63,10 @@ check-commit-literals:
 check-conflict-markers:
     scripts/check-conflict-markers
 
+# Fail when the committed dagger.lock holds an entry for an image the tree takes by a tag it derives at run time, such as the Prometheus image of rules-check
+lock-check:
+    scripts/check-lock-entries
+
 # Fail on a scenario in features/ without its proof, or a test claiming a scenario that is not there
 scenarios-check:
     scripts/scenarios-check
@@ -110,7 +114,7 @@ checks: static tests-1 tests-2 tests-3
 
 # The groups of checks are the dependencies of checks, and each group's checks its own dependencies: just ci runs every group side by side in containers of its own, and CI runs each as a job of its own. A check, with whatever it depends on, belongs to one group only, or it would run twice.
 # The checks other than the bats tests, the cheapest and most basic first
-static: tools-check check-literals check-commit-literals check-conflict-markers cluster-secrets-check lint renovate-check renovate-pins edge-policy-check scenarios-check infra-check talos-check kubernetes-check render-check kubernetes-validate vector-check rules-check secrets-scan
+static: tools-check check-literals check-commit-literals check-conflict-markers lock-check cluster-secrets-check lint renovate-check renovate-pins edge-policy-check scenarios-check infra-check talos-check kubernetes-check render-check kubernetes-validate vector-check rules-check secrets-scan
 
 # The first of three parts of the bats tests
 tests-1: (test '1/3')
@@ -122,7 +126,7 @@ tests-2: (test '2/3')
 tests-3: (test '3/3')
 
 # Without a terminal, as in CI, Dagger's default progress is a line every 30 seconds; plain prints every step and each check's output as it happens.
-# Run the checks inside containers built from the pins, as CI does: every group side by side, or only the group named, such as just ci tests-2; renovate-check's validator, vector-check's Vector and edge-policy-check's FRR each in its own image, rules-check's promtool, taken from the image of the Prometheus the chart deploys, in the tools container, the other checks in a container with the tools pinned in mise.toml, the tools image versions.yaml records when it was built for these pins
+# Run the checks inside containers built from the pins, as CI does: every group side by side, or only the group named, such as just ci tests-2; renovate-check's validator, vector-check's Vector and edge-policy-check's FRR each in its own image, rules-check's promtool, taken from the image of the Prometheus the chart deploys, in the tools container, the other checks in a container with the tools pinned in mise.toml, the tools image versions.yaml records when it was built for these pins. Dagger records in dagger.lock each image it resolves without an entry there, such as the Prometheus image of rules-check, so the run puts the file back as it found it, whether it passes, fails or is stopped by INT, TERM or HUP; lock-check refuses such an entry in the committed file
 [script]
 ci group='':
     set -o pipefail
@@ -131,7 +135,7 @@ ci group='':
     tools=$(scripts/tools-image ci-args)
     mapfile -t tools <<< "$tools"
     if [[ -t 2 ]]; then progress=auto; else progress=plain; fi
-    dagger api call --progress="$progress" ci checks --base="$base" --renovate-image='{{ renovate_image }}' --vector-image='{{ vector_image }}' --frr-image='{{ frr_image }}' "${tools[@]}" --group={{ quote(group) }}
+    scripts/restore-after dagger.lock dagger api call --progress="$progress" ci checks --base="$base" --renovate-image='{{ renovate_image }}' --vector-image='{{ vector_image }}' --frr-image='{{ frr_image }}' "${tools[@]}" --group={{ quote(group) }}
 
 # Print the groups of checks as a JSON list, the CI workflow's matrix of jobs; in a GitHub Actions step, also set it as the step's output groups
 [script]

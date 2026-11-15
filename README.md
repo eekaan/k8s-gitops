@@ -160,7 +160,10 @@ current. A new version alone leaves the record as it is. With [mise](https://mis
   `failed`, followed by its checks, and a line naming the groups that failed. Dagger shows every
   step and each check's output while it runs: its live view in a terminal, and line by line where
   there is none, as in CI. The live view can name the checkout's path on the machine, so paste the
-  checks' own lines into a pull request, not the whole of it.
+  checks' own lines into a pull request, not the whole of it. The run leaves every tracked file as
+  it found it: Dagger records in `dagger.lock` each image it resolves without an entry there, and
+  the run puts the file back, whatever its bytes were, whether it passes, fails or is stopped by
+  `INT`, `TERM` or `HUP`; `just lock-check` fails on such an entry in the committed file.
 - In CI, a first job lists the groups (`just ci-groups`), one job per group runs `just ci <group>`,
   each showing its own result on the pull request, the render job renders the change for its
   comment (`just ci-render`), and the job named `ci`, the required check on `main`, passes only when

@@ -5,6 +5,8 @@
 # its OCIRepository, rendered offline with the values helm-controller gives it. It is the image
 # scripts/rules-config finds in the whole render; the module of just ci needs it before that render
 # exists, to take promtool from it. Never contacts a cluster, and reads no registry login.
+# The image's repository is listed in scripts/lib/derived-images.sh, as a tag derived here must have no
+# entry in dagger.lock.
 # Usage: scripts/rules-image
 set -euo pipefail
 

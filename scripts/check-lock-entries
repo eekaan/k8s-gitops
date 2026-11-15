@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Fails when the committed dagger.lock holds an entry for an image the tree takes by a tag it
+# derives at run time, naming the line. Such an entry would pin a digest for a tag Renovate moves
+# with the chart that names it, and a stale one is never read. just ci's Dagger runs record one
+# there for every image it resolves, which scripts/restore-after takes out again; this check is
+# what stops one that got committed anyway, such as by git commit -a.
+# The images are the repositories listed in scripts/lib/derived-images.sh. It reads the
+# commit, not the working copy: an uncommitted change is the developer's own.
+# Usage: scripts/check-lock-entries
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+lock=$(git show HEAD:dagger.lock) || { echo "check-lock-entries: no dagger.lock in the commit at HEAD" >&2; exit 1; }
+# The entries as Dagger writes them are JSON arrays, so a repository is a string of its own in
+# one: followed by a tag, a digest or its closing quote.
+# shellcheck source=scripts/lib/derived-images.sh
+. scripts/lib/derived-images.sh
+patterns=()
+for repository in "${derived_images[@]}"; do
+  patterns+=(-e "\"$repository:" -e "\"$repository@" -e "\"$repository\"")
+done
+if ((${#patterns[@]} == 0)); then
+  echo "check-lock-entries: scripts/lib/derived-images.sh lists no image" >&2
+  exit 1
+fi
+
+status=0
+found=$(grep -n -F "${patterns[@]}" <<<"$lock") || status=$?
+if ((status == 0)); then
+  while IFS= read -r line; do
+    echo "dagger.lock:${line%%:*}: ${line#*:}"
+  done <<<"$found"
+  echo "check-lock-entries: dagger.lock holds an entry for an image the tree takes by a tag it derives at run time, so it pins a digest for a tag Renovate moves; take the line out (the images are listed in scripts/lib/derived-images.sh)" >&2
+  exit 1
+elif ((status != 1)); then
+  echo "check-lock-entries: grep failed" >&2
+  exit 1
+fi
+echo "dagger.lock holds no entry for an image taken by a derived tag."
