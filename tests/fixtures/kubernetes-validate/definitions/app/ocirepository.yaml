@@ -1,0 +1,14 @@
+---
+# A chart's packaged layer, unpacked, as Envoy Gateway's definitions come.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: sprocket-crds
+spec:
+  interval: 12h
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: extract
+  url: oci://registry.example.invalid/charts/sprocket
+  ref:
+    tag: 1.0.0

@@ -1,0 +1,13 @@
+---
+# A repository at a release tag, as the Gateway API's is: only config/crd is checked out.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: gizmo-crds
+spec:
+  interval: 12h
+  url: https://github.com/example-org/gizmo-crds
+  ref:
+    tag: v1.0.0
+  sparseCheckout:
+    - config/crd

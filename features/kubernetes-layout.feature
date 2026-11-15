@@ -9,7 +9,7 @@ Feature: Kubernetes tree layout
   Scenario: The tree passes the schema and image rules
     Given the kubernetes directory, the charts it names and the schemas from their public sources, and no cluster
     When the kubernetes validation runs
-    Then every object Flux builds validates against its schema, the kinds without one are counted, every image of the render is pinned, and the validation exits zero
+    Then every object Flux builds validates against its schema or is of a kind the tree lists as having none, every image of the render is pinned, and the validation exits zero
 
   Scenario: A dependency on an application the cluster does not enable is refused
     Given an enabled application whose Kustomization names, in dependsOn, an application that the cluster's overlay does not list
@@ -21,15 +21,70 @@ Feature: Kubernetes tree layout
     When the kubernetes check runs
     Then it exits non-zero and names both Kustomizations and the overlay
 
-  Scenario: An object with a field its schema does not have is refused, and objects without a schema are counted by kind
-    Given an application whose Deployment has a field the Deployment schema lacks, a Flux Kustomization with one its schema lacks, a custom resource with one its rendered definition lacks, and custom resources of kinds that have no definition
+  Scenario: An object with a field its schema does not have is refused, and objects of listed kinds without a schema are counted by kind
+    Given an application whose Deployment has a field the Deployment schema lacks, a Flux Kustomization with one its schema lacks, a custom resource with one its rendered definition lacks, and custom resources of kinds that have no definition and are listed with their reasons
     When the kubernetes validation runs
-    Then it exits non-zero and names the file, the object and the field, and prints how many objects of each kind without a schema it could not validate
+    Then it exits non-zero and names the file, the object and the field, and prints how many objects of each listed kind it could not validate
+
+  Scenario: An object of a kind whose definition a chart or a definitions application brings is validated against that definition
+    Given custom resources of a kind whose definition a chart's templates render, of a kind whose definition a Kustomization applies from a GitRepository at a tag, and of a kind whose definition a Kustomization applies from an OCIRepository's unpacked chart
+    When the kubernetes validation runs
+    Then each object is validated against the schema of its definition at the version the tree pins, a field under one that keeps unknown fields is no fault, and moving the pin moves the schema
+
+  Scenario: A field the definition does not have fails the check, naming the object and the field
+    Given custom resources of those kinds with a misspelt field, a field of the wrong type, and no value for a required field
+    When the kubernetes validation runs
+    Then it exits non-zero and names the file, the object and the field of each
+
+  Scenario: An object of a kind without a schema fails the check unless the kind is listed with its reason
+    Given a custom resource of a kind that no definition of the tree describes
+    When the kubernetes validation runs
+    Then it exits non-zero and names the object, its kind and its file, and it passes once schema-exceptions.yaml lists the kind's group and kind with a reason
+
+  Scenario: A listed kind that has a schema, or that no object uses, fails the check
+    Given schema-exceptions.yaml lists a kind whose definition a source of the tree brings, and another that no object of the tree is of
+    When the kubernetes validation runs
+    Then it exits non-zero and names each entry and says it has a schema, or that no object uses it
+
+  Scenario: The tree passes, and the check says how many objects it validated and how many are of listed kinds
+    Given a tree whose objects are validated against schemas or are of listed kinds
+    When the kubernetes validation runs
+    Then it exits zero, names each listed kind with the number of its objects, and says how many objects it validated and how many are of listed kinds
+
+  Scenario: An object of a Gateway API or Envoy Gateway kind is validated against the definitions the tree pins, and a wrong one fails
+    Given a Gateway, an HTTPRoute, a GatewayClass, an EnvoyProxy and a ClientTrafficPolicy, then the same with a misspelt field, a field of the wrong type and a missing required field
+    When the kubernetes validation runs on the repository's own tree
+    Then the right ones are validated against the Gateway API's and Envoy Gateway's definitions at the versions the tree pins, and each wrong one fails, naming the object and the field
+
+  Scenario: An object of a kind an operator defines is validated against the definitions published for the version the tree pins
+    Given an application with the source object of an operator's chart at a tag, custom resources of a kind the operator defines when it starts, and operator-definitions.yaml, which says that the definitions of the kind's group are published in a repository on github.com, in a directory, at the tag of that source object with a prefix, or at the version versions.yaml holds under a key the entry names, with a prefix
+    When the kubernetes validation runs
+    Then each object is validated against the definition published at that tag, a misspelt field, a field of the wrong type and a missing required field each fail naming the object and the field, moving the source object's tag, or the version versions.yaml holds for an entry that names its key, moves the schema, and a definition of another group in the directory is not read
+
+  Scenario: A declaration of where an operator's definitions are published that is malformed, or that nothing uses, fails the check
+    Given operator-definitions.yaml with an entry that has a field it does not know, a repository not on github.com, a path that is not plain, a group of Kubernetes or Flux, a tag prefix that is no part of a tag, a source object of another kind, both a source object and a key of versions.yaml or a key that is none, or a group and path declared twice; then one whose source object is not in the tree, one whose key versions.yaml holds no version under, and one whose definitions no object is of
+    When the kubernetes validation runs
+    Then it exits non-zero and names the file, the entry and what is wrong with it
+
+  Scenario: An object of a Cilium kind is validated against the definitions of the Cilium release the tree pins, and a wrong one fails
+    Given the repository's own tree with CiliumBGPPeerConfig and CiliumLoadBalancerIPPool objects with a misspelt field, a field of the wrong type and a missing required field
+    When the kubernetes validation runs on it
+    Then each wrong one fails naming the object and the field, the tree's own Cilium objects pass, and the operator the pinned chart runs is of the release the definitions are read at
+
+  Scenario: A Talos ServiceAccount is validated against Talos' definition at the version the tree pins, and a wrong one fails
+    Given the repository's own tree with Talos ServiceAccount objects with a misspelt field and a field of the wrong type
+    When the kubernetes validation runs on it
+    Then each wrong one fails naming the object and the field, and the tree's own ServiceAccount of the snapshot job passes, validated against the definition read at the Talos version versions.yaml pins
+
+  Scenario: A definition of one of Kubernetes' own groups or Flux's is refused, whatever brings it
+    Given a source a Kustomization applies definitions from that brings a definition of Deployment in the apps group that keeps unknown fields, a Deployment with a field Kubernetes' schema does not have, and a chart that renders a definition in the apps group, in one of Kubernetes' dotted groups or in a group of Flux's
+    When the kubernetes validation runs
+    Then it exits non-zero, names each such definition and its file, makes no schema of it, and validates the Deployment against Kubernetes' schema, naming the field
 
   Scenario: A definition whose name ends in a line break is refused, not skipped
     Given an application with an object of a custom kind with a field no schema gives it, and a release whose chart renders a definition of that kind whose group, kind or version ends in a line break
     When the kubernetes validation runs
-    Then it exits non-zero and names the definition and its file, where it would otherwise pass with the object counted as one without a schema
+    Then it exits non-zero and names the definition and its file, where skipping the definition would fail only the object, for want of a schema, and leave the definition unnamed
 
   Scenario: A root path that leaves the tree through a link is refused
     Given a root Kustomization whose spec.path is a link inside the tree to a directory outside it, by an absolute and by a relative path

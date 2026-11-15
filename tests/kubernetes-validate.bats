@@ -40,9 +40,10 @@ put() {
   cat >"$TREE/$1"
 }
 
-# validate: runs the check on the fixture tree; its output shows when a test fails.
+# validate: runs the check on the fixture tree, reading nothing from the test's own input; its output
+# shows when a test fails.
 validate() {
-  run "$VALIDATE" "$TREE"
+  run "$VALIDATE" "$TREE" </dev/null
   echo "$output"
 }
 
@@ -80,6 +81,198 @@ hooked_app() {
   yq -i ".spec.values = $values" "$TREE/$dir/app/helmrelease.yaml"
 }
 
+# definitions_app: the enabled application defs, whose app/ applies definitions from a GitRepository
+# (Gizmo, in a Kustomization's directory) and from an OCIRepository's unpacked chart (Sprocket, in a
+# directory of plain manifests). The sources are the fixtures' schemas/sources, in place of the
+# network.
+definitions_app() {
+  local dir=kubernetes/apps/base/demo/defs
+  cp -R "$FIXTURES/definitions" "$TREE/$dir"
+  overlay_add ../../base/demo/defs/ks.yaml
+}
+
+# definitions_app_reset: the definitions application as the fixtures hold it.
+definitions_app_reset() {
+  rm -rf "$TREE/kubernetes/apps/base/demo/defs"
+  cp -R "$FIXTURES/definitions" "$TREE/kubernetes/apps/base/demo/defs"
+}
+
+# operator_app: the enabled application operator, which holds the OCIRepository doohickey of an
+# operator's chart at the tag 1.0.0 and no definition: the operator installs its own, Doohickey of
+# operator.example.invalid, when it starts, from the files it embeds, which the fixtures' sources
+# publish in github.com/example-org/doohickey, under deploy/crds, at the tag v1.0.0.
+operator_app() {
+  cp -R "$FIXTURES/operator" "$TREE/kubernetes/apps/base/demo/operator"
+  overlay_add ../../base/demo/operator/ks.yaml
+}
+
+# declare_operator: operator-definitions.yaml in the fixture tree, which says where the operator
+# application's operator publishes its definitions.
+declare_operator() {
+  put operator-definitions.yaml <<'EOF'
+---
+definitions:
+  - group: operator.example.invalid
+    repository: https://github.com/example-org/doohickey
+    path: deploy/crds
+    tagPrefix: v
+    sourceRef:
+      kind: OCIRepository
+      namespace: demo
+      name: doohickey
+EOF
+}
+
+# objects NAME: writes stdin to the file NAME of the hello application and lists it there.
+objects() {
+  local dir=kubernetes/apps/base/demo/hello/app
+  put "$dir/$1"
+  yq -i ".resources = ((.resources // []) + [\"$1\"] | unique)" "$TREE/$dir/kustomization.yaml"
+}
+
+# unlist NAME: the hello application no longer holds its file NAME.
+unlist() {
+  yq -i "del(.resources[] | select(. == \"$1\"))" "$TREE/kubernetes/apps/base/demo/hello/app/kustomization.yaml"
+  rm "$TREE/kubernetes/apps/base/demo/hello/app/$1"
+}
+
+# fetch_recorders: stand-ins first on PATH for the tools that fetch, and the fixtures' schemas unset,
+# so that the sources would be fetched: curl writes each URL it is asked for to FETCHED and hands back
+# ARCHIVE when the test has made it, and an empty archive otherwise; helm writes each pull there and
+# fails it, running any other command as itself; kubeconform reports nothing; and kustomize writes
+# each run to BUILT and runs as itself. versions.yaml pins a schemas commit, which nothing fetches.
+fetch_recorders() {
+  local bin="$BATS_TEST_TMPDIR/fetchers" helm kustomize
+  helm="$(type -P helm)"
+  kustomize="$(type -P kustomize)"
+  FETCHED="$BATS_TEST_TMPDIR/fetched"
+  BUILT="$BATS_TEST_TMPDIR/built"
+  ARCHIVE="$BATS_TEST_TMPDIR/archive.tar.gz"
+  mkdir -p "$bin"
+  cat >"$bin/curl" <<EOF
+#!/usr/bin/env bash
+out=""
+for arg; do [[ \$arg != https://* ]] || echo "curl \$arg" >>"$FETCHED"; done
+while ((\$#)); do [[ \$1 == --output ]] && out=\$2; shift; done
+if [[ -f "$ARCHIVE" ]]; then
+  cp "$ARCHIVE" "\$out"
+else
+  tar -czf "\$out" -T /dev/null
+fi
+EOF
+  cat >"$bin/helm" <<EOF
+#!/usr/bin/env bash
+if [[ \${1:-} == pull ]]; then
+  echo "helm \$*" >>"$FETCHED"
+  exit 1
+fi
+exec "$helm" "\$@"
+EOF
+  cat >"$bin/kustomize" <<EOF
+#!/usr/bin/env bash
+echo "kustomize \$*" >>"$BUILT"
+exec "$kustomize" "\$@"
+EOF
+  printf '#!/usr/bin/env bash\necho %q\n' '{"resources": []}' >"$bin/kubeconform"
+  chmod +x "$bin/curl" "$bin/helm" "$bin/kubeconform" "$bin/kustomize"
+  printf '%s\n' '---' 'kubernetes: v1.37.1' 'kubernetes_schemas: 0123456789abcdef0123456789abcdef01234567' >"$TREE/versions.yaml"
+  unset KUBERNETES_VALIDATE_SCHEMAS
+}
+
+# recorded_validate: runs the check on the fixture tree with fetch_recorders' stand-ins, FETCHED and
+# BUILT emptied first, reading nothing from the test's own input.
+recorded_validate() {
+  : >"$FETCHED"
+  : >"$BUILT"
+  run env PATH="$BATS_TEST_TMPDIR/fetchers:$PATH" "$VALIDATE" "$TREE" </dev/null
+  echo "$output"
+  echo "fetched:"
+  cat "$FETCHED"
+}
+
+# not_fetched TEXT: nothing the last recorded run fetched names TEXT.
+not_fetched() {
+  ! grep -F -- "$1" "$FETCHED" || { echo "fetched before it was refused: $1"; return 1; }
+}
+
+# gizmo_archive [EDIT [LINK]]: ARCHIVE, as GitHub serves the archive of a tag of gizmo-crds, one top
+# directory holding config/crd as the fixtures' sources hold it at v1.0.0, its kustomization.yaml
+# changed by the yq expression EDIT, and with LINK a link there to /dev/null.
+gizmo_archive() {
+  local top="$BATS_TEST_TMPDIR/archive/gizmo-crds-1.0.0"
+  rm -rf "$BATS_TEST_TMPDIR/archive"
+  mkdir -p "$top/config"
+  cp -R "$FIXTURES/schemas/sources/github.com/example-org/gizmo-crds/v1.0.0/config/crd" "$top/config/"
+  [ -z "${1:-}" ] || yq -i "$1" "$top/config/crd/kustomization.yaml"
+  [ -z "${2:-}" ] || ln -s /dev/null "$top/config/crd/$2"
+  tar -czf "$ARCHIVE" -C "$BATS_TEST_TMPDIR/archive" gizmo-crds-1.0.0
+}
+
+# shown TEXT: TEXT as the checks show a value of the tree: each byte that is not printable ASCII as
+# \xHH, read from od, whatever the locale.
+shown() {
+  local LC_ALL=C byte char out=""
+  for byte in $(printf '%s' "$1" | od -An -v -tx1); do
+    if ((16#$byte >= 32 && 16#$byte < 127)); then
+      printf -v char '%b' "\\x$byte"
+      out+=$char
+    else
+      out+="\\x$byte"
+    fi
+  done
+  printf '%s' "$out"
+}
+
+# with_folded TYPE FILE: FILE, a YAML document, with every spelling that folds to a field of TYPE
+# in tree_paths_read_fields without being it, at every position of the fields the checks read, each
+# holding x; KEYS is where each is, as the checks name it. The spellings are those encoding/json's
+# folding reads as the field: its first letter, all of it or its last letter in upper case, and each
+# s as U+017F and each k as U+212A.
+with_folded() {
+  local reg
+  reg="$(bash -c '. "$1/scripts/lib/tree-paths.sh" && printf "%s" "$tree_paths_read"' bash "$REPO")"
+  # shellcheck disable=SC2016 # jq variables.
+  local jq_folded='
+    def variants: . as $n
+      | [($n[:1] | ascii_upcase) + $n[1:], ($n | ascii_upcase), $n[:-1] + ($n[-1:] | ascii_upcase)]
+        + (if ($n | test("s")) then [$n | gsub("s"; "ſ")] else [] end)
+        + (if ($n | test("k")) then [$n | gsub("k"; "K")] else [] end)
+      | unique | map(select(. != $n)) | .[];
+    def sub($c): ($c | ltrimstr("[]")) as $t | if ($reg.types | has($t)) then $t else null end;
+    def gen($t): $reg.types[$t] as $f
+      | reduce ($f | keys[] | select(. != "*")) as $k ({};
+          reduce ($k | variants) as $v (.; .[$v] = "x")
+          | sub($f[$k]) as $s
+          | if $s == null then . else .[$k] = (gen($s) | if ($f[$k] | startswith("[]")) then [.] else . end) end);
+    def where($t; $w): $reg.types[$t] as $f
+      | ($f | keys[] | select(. != "*")) as $k
+      | (if $w == "" then $k else $w + "." + $k end) as $p
+      | ((($k | variants) | if $w == "" then . else $w + "." + . end),
+         (sub($f[$k]) as $s | if $s == null then empty
+          elif ($f[$k] | startswith("[]")) then where($s; $p + "[0]") else where($s; $p) end));'
+  yq -o json -I0 '.' "$2" | jq -c --argjson reg "$reg" --arg t "$1" "$jq_folded"' . * gen($t)' >"$2.json"
+  mv "$2.json" "$2"
+  KEYS="$(jq -rn --argjson reg "$reg" --arg t "$1" "$jq_folded"' where($t; "")')"
+}
+
+# names_every FILE: the run failed, and for each key in KEYS a line names FILE and the key, as the
+# check shows it.
+names_every() {
+  local key lines missing=""
+  [ "$status" -ne 0 ] || { echo "the run passed"; return 1; }
+  lines="$(grep -F -- "$1" <<<"$output")" || { echo "no line names $1"; return 1; }
+  while IFS= read -r key; do
+    grep -qF -- " $(shown "$key") " <<<"$lines" || missing+=" $key"
+  done <<<"$KEYS"
+  [ -z "$missing" ] || { echo "not named with $1:$missing"; return 1; }
+}
+
+# validated: the number of objects the last run validated against a schema.
+validated() {
+  [[ $output =~ ([0-9]+)\ objects\ validated ]] || { echo "the check says how many objects it validated"; return 1; }
+  echo "${BASH_REMATCH[1]}"
+}
+
 @test "The tree passes the schema and image rules" {
   # The repository's own tree is validated against the real schemas and its charts are pulled from
   # their publishers: the fixtures' schema location is left unset.
@@ -88,15 +281,20 @@ hooked_app() {
   echo "$output"
   [ "$status" -eq 0 ]
 
-  # Every rule had something to look at: objects validated against a schema, the ones without a
-  # schema counted by kind, and the images of the rendered releases looked at.
+  # Every rule had something to look at: objects validated against a schema and the images of the
+  # rendered releases. Every object of the tree has a schema: the kinds whose definitions a
+  # definitions application's source brings, and those Cilium's operator installs, are validated,
+  # and no kind is listed as having none.
   [[ $output =~ ([1-9][0-9]*)\ flux\ builds ]]
   [[ $output =~ ([1-9][0-9]*)\ objects\ validated ]]
+  [[ $output =~ ,\ ([0-9]+)\ of\ listed\ kinds ]]
+  [ "${BASH_REMATCH[1]}" -eq 0 ]
   [[ $output =~ ([1-9][0-9]*)\ images ]]
-  grep -qE '^kubernetes-validate: no schema for [A-Za-z]+ \([^)]+\): [1-9][0-9]* objects?$' <<<"$output"
+  [[ $output != *"listed without a schema"* ]]
+  [[ $output != *"GatewayClass"* && $output != *"VolumeSnapshotClass"* && $output != *"CiliumBGPPeerConfig"* ]]
 }
 
-@test "An object with a field its schema does not have is refused, and objects without a schema are counted by kind" {
+@test "An object with a field its schema does not have is refused, and objects of listed kinds without a schema are counted by kind" {
   local dir=kubernetes/apps/base/demo/hello/app
   put "$dir/deployment.yaml" <<'EOF'
 ---
@@ -126,31 +324,49 @@ metadata:
 EOF
   yq -i '.resources += ["deployment.yaml", "widgets.yaml"]' "$TREE/$dir/kustomization.yaml"
   yq -i '.spec.waitt = true' "$TREE/kubernetes/apps/base/demo/hello/ks.yaml"
+  put schema-exceptions.yaml <<'EOF2'
+---
+exceptions:
+  - group: example.invalid
+    kind: Widget
+    reason: the fixture has no definition of it until a chart brings one
+  - group: example.invalid
+    kind: Gadget
+    reason: the fixture has no definition of it
+EOF2
 
   validate
   [ "$status" -ne 0 ]
   refused_line kubernetes/apps/base/demo/hello/app/deployment.yaml "Deployment hello" replicaz
   refused_line kubernetes/apps/base/demo/hello/ks.yaml "Kustomization hello" waitt
-  # The kinds with no schema are not failures, and none is passed over unnamed.
-  grep -qxF "kubernetes-validate: no schema for Widget (example.invalid/v1): 2 objects" <<<"$output"
-  grep -qxF "kubernetes-validate: no schema for Gadget (example.invalid/v1): 1 object" <<<"$output"
+  # The listed kinds with no schema are not failures, and none is passed over unnamed.
+  grep -qxF "kubernetes-validate: listed without a schema: Widget (example.invalid/v1): 2 objects" <<<"$output"
+  grep -qxF "kubernetes-validate: listed without a schema: Gadget (example.invalid/v1): 1 object" <<<"$output"
 
   yq -i 'del(.spec.waitt)' "$TREE/kubernetes/apps/base/demo/hello/ks.yaml"
   yq -i 'del(.spec.replicaz) | .spec.replicas = 2' "$TREE/$dir/deployment.yaml"
   validate
   [ "$status" -eq 0 ]
-  grep -qxF "kubernetes-validate: no schema for Widget (example.invalid/v1): 2 objects" <<<"$output"
-  grep -qxF "kubernetes-validate: no schema for Gadget (example.invalid/v1): 1 object" <<<"$output"
+  grep -qxF "kubernetes-validate: listed without a schema: Widget (example.invalid/v1): 2 objects" <<<"$output"
+  grep -qxF "kubernetes-validate: listed without a schema: Gadget (example.invalid/v1): 1 object" <<<"$output"
 
   # A definition the render holds, here the fixture chart's for Widget, gives its kind a schema,
-  # unknown fields refused at every level, the object's own top level included.
+  # unknown fields refused at every level, the object's own top level included. The kind is no
+  # longer listed.
+  put schema-exceptions.yaml <<'EOF2'
+---
+exceptions:
+  - group: example.invalid
+    kind: Gadget
+    reason: the fixture has no definition of it
+EOF2
   hooked_app '{}'
   yq -i 'select(.metadata.name == "second") |= (.spec.colour = "red" | .spec.size = 1)' "$TREE/$dir/widgets.yaml"
   validate
   [ "$status" -ne 0 ]
   refused_line kubernetes/apps/base/demo/hello/app/widgets.yaml "Widget second" colour
-  [[ $output != *"no schema for Widget"* ]]
-  grep -qxF "kubernetes-validate: no schema for Gadget (example.invalid/v1): 1 object" <<<"$output"
+  [[ $output != *"Widget (example.invalid/v1)"* ]]
+  grep -qxF "kubernetes-validate: listed without a schema: Gadget (example.invalid/v1): 1 object" <<<"$output"
   yq -i 'select(.metadata.name == "second") |= (del(.spec.colour) | .spek = {})' "$TREE/$dir/widgets.yaml"
   validate
   [ "$status" -ne 0 ]
@@ -158,7 +374,7 @@ EOF
   yq -i 'select(.metadata.name == "second") |= del(.spek)' "$TREE/$dir/widgets.yaml"
   validate
   [ "$status" -eq 0 ]
-  [[ $output != *"no schema for Widget"* ]]
+  [[ $output != *"Widget (example.invalid/v1)"* ]]
   # A field the definition types is held to its type.
   yq -i 'select(.metadata.name == "second") |= .spec.size = "large"' "$TREE/$dir/widgets.yaml"
   validate
@@ -505,7 +721,8 @@ EOF
   local sentinel="$BATS_TEST_TMPDIR/sentinel" scratch="$BATS_TEST_TMPDIR/scratch/a" value
   mkdir -p "$sentinel" "$scratch"
   echo '{}' >"$sentinel/settings.json"
-  for value in 'definitionGroup: ../../../../sentinel/escaped' \
+  # A group with no dot is a shape the API server refuses of a definition, not of every group.
+  for value in 'definitionGroup: ../../../../sentinel/escaped' 'definitionGroup: widgets' \
     $'definitionGroup: example.invalid\ndefinitionVersion: v1/../../../../../../sentinel/settings' \
     $'definitionGroup: example.invalid\ndefinitionKind: ../Escape'; do
     hooked_app "$value"
@@ -589,7 +806,8 @@ EOF
 @test "A definition whose name ends in a line break is refused, not skipped" {
   local value
   # An object of the definition's kind, with a field no schema could give it, is in the tree: a
-  # definition the check silently dropped would leave it counted as one without a schema.
+  # definition the check silently dropped would leave the object failing for want of a schema, and
+  # the definition that is at fault unnamed.
   put kubernetes/apps/base/demo/hello/app/escape.yaml <<'EOF'
 ---
 apiVersion: example.invalid/v1
@@ -652,4 +870,1090 @@ EOF
   values_source x-extra
   validate
   [ "$status" -eq 0 ]
+}
+
+@test "An object of a kind whose definition a chart or a definitions application brings is validated against that definition" {
+  local things=kubernetes/apps/base/demo/hello/app/things.yaml before
+  hooked_app '{}'
+  definitions_app
+  validate
+  [ "$status" -eq 0 ]
+  before=$(validated)
+
+  # One kind of each source: a chart's templates, a repository's directory at a tag, and a chart
+  # unpacked from an OCI artifact. Under a field that keeps unknown fields, and in a condition that
+  # lists some fields of an object, others are no fault.
+  objects things.yaml <<'EOF'
+---
+apiVersion: example.invalid/v1
+kind: Widget
+metadata:
+  name: from-a-chart
+spec:
+  size: 2
+---
+apiVersion: example.invalid/v1
+kind: Gizmo
+metadata:
+  name: from-a-repository
+spec:
+  size: 3
+  extra:
+    anything:
+      at: all
+  parts:
+    - label: first
+  addresses:
+    - type: Hostname
+      value: gizmo.example.invalid
+---
+apiVersion: example.invalid/v1alpha1
+kind: Sprocket
+metadata:
+  name: from-an-artifact
+spec:
+  teeth: 12
+EOF
+  validate
+  [ "$status" -eq 0 ]
+  [ "$(validated)" -eq $((before + 3)) ]
+  [[ $output != *"no schema"* ]]
+
+  # The schema is the one of the version the tree pins: the release that requires a colour refuses
+  # the object that has none, and accepts one that has it; the release before it refuses the colour.
+  yq -i '.spec.ref.tag = "v2.0.0"' "$TREE/kubernetes/apps/base/demo/defs/app/gitrepository.yaml"
+  validate
+  [ "$status" -ne 0 ]
+  refused_line "$things" "Gizmo from-a-repository" colour
+  objects things.yaml <<'EOF'
+---
+apiVersion: example.invalid/v1
+kind: Gizmo
+metadata:
+  name: from-a-repository
+spec:
+  size: 3
+  colour: red
+EOF
+  validate
+  [ "$status" -eq 0 ]
+  yq -i '.spec.ref.tag = "v1.0.0"' "$TREE/kubernetes/apps/base/demo/defs/app/gitrepository.yaml"
+  validate
+  [ "$status" -ne 0 ]
+  refused_line "$things" "Gizmo from-a-repository" colour
+
+  # A release the sources hold nothing of fails the check, naming the source, and leaves nothing
+  # unvalidated unnoticed.
+  yq -i '.spec.ref.tag = "v9.9.9"' "$TREE/kubernetes/apps/base/demo/defs/app/gitrepository.yaml"
+  validate
+  [ "$status" -ne 0 ]
+  fails_naming kubernetes/apps/base/demo/defs/app/gizmo-crds.yaml "Kustomization gizmo-crds"
+  fails_naming kubernetes/apps/base/demo/defs/app/gizmo-crds.yaml "v9.9.9"
+}
+
+@test "A field the definition does not have fails the check, naming the object and the field" {
+  local bad=kubernetes/apps/base/demo/hello/app/bad.yaml case kind api spec word
+  hooked_app '{}'
+  definitions_app
+  # A misspelt field, a wrong type and a missing required field, of a kind of each source, and of
+  # the levels below the top that list their fields.
+  for case in \
+    'Widget|example.invalid/v1|{"size": 1, "colour": "red"}|colour' \
+    'Widget|example.invalid/v1|{"size": "large"}|size' \
+    'Gizmo|example.invalid/v1|{"size": 1, "sise": 2}|sise' \
+    'Gizmo|example.invalid/v1|{"size": "big"}|size' \
+    'Gizmo|example.invalid/v1|{"name": "no size"}|size' \
+    'Gizmo|example.invalid/v1|{"size": 1, "parts": [{"label": "a", "labell": "b"}]}|labell' \
+    'Gizmo|example.invalid/v1|{"size": 1, "parts": [{}]}|label' \
+    'Gizmo|example.invalid/v1|{"size": 1, "extra": {"known": 5}}|known' \
+    'Gizmo|example.invalid/v1|{"size": 1, "addresses": [{"type": "Hostname", "valu": "x"}]}|valu' \
+    'Sprocket|example.invalid/v1alpha1|{"teeth": 12, "tooth": 1}|tooth' \
+    'Sprocket|example.invalid/v1alpha1|{"teeth": "many"}|teeth' \
+    'Sprocket|example.invalid/v1alpha1|{}|teeth'; do
+    IFS='|' read -r kind api spec word <<<"$case"
+    objects bad.yaml <<<"---
+apiVersion: $api
+kind: $kind
+metadata:
+  name: bad
+spec: $spec"
+    validate
+    [ "$status" -ne 0 ]
+    refused_line "$bad" "$kind bad" "$word"
+  done
+  # The object's own top level lists its fields too.
+  objects bad.yaml <<'EOF'
+---
+apiVersion: example.invalid/v1alpha1
+kind: Sprocket
+metadata:
+  name: bad
+specs:
+  teeth: 1
+EOF
+  validate
+  [ "$status" -ne 0 ]
+  refused_line "$bad" "Sprocket bad" specs
+}
+
+@test "An object of a kind without a schema fails the check unless the kind is listed with its reason" {
+  local gadgets=kubernetes/apps/base/demo/hello/app/gadgets.yaml
+  objects gadgets.yaml <<'EOF'
+---
+apiVersion: example.invalid/v1
+kind: Gadget
+metadata:
+  name: only
+EOF
+  validate
+  [ "$status" -ne 0 ]
+  refused_line "$gadgets" "Gadget only" "example.invalid/v1" "no schema" schema-exceptions.yaml
+  [[ $output != *"kubernetes-validate: passed"* ]]
+
+  # Listed with its reason, the kind is counted, not failed.
+  put schema-exceptions.yaml <<'EOF'
+---
+exceptions:
+  - group: example.invalid
+    kind: Gadget
+    reason: the fixture has no definition of it, and nothing else proves its objects
+EOF
+  validate
+  [ "$status" -eq 0 ]
+  grep -qxF "kubernetes-validate: listed without a schema: Gadget (example.invalid/v1): 1 object" <<<"$output"
+
+  # An entry names a group, a kind and a reason, and covers that kind of that group alone.
+  put schema-exceptions.yaml <<'EOF'
+---
+exceptions:
+  - group: example.invalid
+    kind: Gadget
+EOF
+  validate
+  [ "$status" -ne 0 ]
+  fails_naming "schema-exceptions.yaml: entry 1 (Gadget of example.invalid)" "no reason"
+  local reason
+  for reason in '""' '"  "'; do
+    put schema-exceptions.yaml <<EOF
+---
+exceptions:
+  - group: example.invalid
+    kind: Gadget
+    reason: $reason
+EOF
+    validate
+    [ "$status" -ne 0 ]
+    fails_naming "schema-exceptions.yaml: entry 1 (Gadget of example.invalid)" "no reason"
+  done
+  put schema-exceptions.yaml <<'EOF'
+---
+exceptions:
+  - group: other.invalid
+    kind: Gadget
+    reason: another group's kind of that name
+EOF
+  validate
+  [ "$status" -ne 0 ]
+  refused_line "$gadgets" "Gadget only" "no schema"
+  # A kind of Kubernetes' own groups or Flux's is never listed: no schema there is a wrong
+  # apiVersion or old schemas.
+  put schema-exceptions.yaml <<'EOF'
+---
+exceptions:
+  - group: example.invalid
+    kind: Gadget
+    reason: the fixture has no definition of it
+  - group: apps
+    kind: StatefulSet
+    reason: no schema for it
+  - group: kustomize.toolkit.fluxcd.io
+    kind: Kustomization
+    reason: no schema for it
+EOF
+  validate
+  [ "$status" -ne 0 ]
+  fails_naming "schema-exceptions.yaml: entry 2 (StatefulSet of apps)" "never listed"
+  fails_naming "schema-exceptions.yaml: entry 3 (Kustomization of kustomize.toolkit.fluxcd.io)" "never listed"
+}
+
+@test "A listed kind that has a schema, or that no object uses, fails the check" {
+  hooked_app '{}'
+  definitions_app
+  objects things.yaml <<'EOF'
+---
+apiVersion: example.invalid/v1
+kind: Gizmo
+metadata:
+  name: first
+spec:
+  size: 1
+---
+apiVersion: example.invalid/v1
+kind: Gadget
+metadata:
+  name: only
+EOF
+  put schema-exceptions.yaml <<'EOF'
+---
+exceptions:
+  - group: example.invalid
+    kind: Gadget
+    reason: the fixture has no definition of it
+EOF
+  validate
+  [ "$status" -eq 0 ]
+
+  # A kind a definition now describes: the entry has no use, and the object is validated.
+  put schema-exceptions.yaml <<'EOF'
+---
+exceptions:
+  - group: example.invalid
+    kind: Gadget
+    reason: the fixture has no definition of it
+  - group: example.invalid
+    kind: Gizmo
+    reason: listed before a repository brought its definition
+EOF
+  validate
+  [ "$status" -ne 0 ]
+  refused_line schema-exceptions.yaml Gizmo example.invalid "has a schema"
+  [[ $output != *"Gadget of"* ]]
+
+  # A kind no object of the tree is of.
+  put schema-exceptions.yaml <<'EOF'
+---
+exceptions:
+  - group: example.invalid
+    kind: Gadget
+    reason: the fixture has no definition of it
+  - group: example.invalid
+    kind: Gimcrack
+    reason: nothing in the fixture is of it
+EOF
+  validate
+  [ "$status" -ne 0 ]
+  refused_line schema-exceptions.yaml Gimcrack example.invalid "no object"
+  [[ $output != *"Gadget of"* ]]
+
+  # Without the entry that has no use, the tree passes.
+  put schema-exceptions.yaml <<'EOF'
+---
+exceptions:
+  - group: example.invalid
+    kind: Gadget
+    reason: the fixture has no definition of it
+EOF
+  validate
+  [ "$status" -eq 0 ]
+}
+
+@test "The tree passes, and the check says how many objects it validated and how many are of listed kinds" {
+  hooked_app '{}'
+  definitions_app
+  objects things.yaml <<'EOF'
+---
+apiVersion: example.invalid/v1
+kind: Gizmo
+metadata:
+  name: first
+spec:
+  size: 1
+---
+apiVersion: example.invalid/v1alpha1
+kind: Sprocket
+metadata:
+  name: first
+spec:
+  teeth: 1
+---
+apiVersion: example.invalid/v1
+kind: Gadget
+metadata:
+  name: first
+---
+apiVersion: example.invalid/v1
+kind: Gadget
+metadata:
+  name: second
+EOF
+  put schema-exceptions.yaml <<'EOF'
+---
+exceptions:
+  - group: example.invalid
+    kind: Gadget
+    reason: the fixture has no definition of it
+EOF
+  validate
+  [ "$status" -eq 0 ]
+  grep -qxF "kubernetes-validate: listed without a schema: Gadget (example.invalid/v1): 2 objects" <<<"$output"
+  [[ $output =~ kubernetes-validate:\ passed\ \([0-9]+\ flux\ builds,\ ([0-9]+)\ objects\ validated,\ ([0-9]+)\ of\ listed\ kinds,\ ([0-9]+)\ images\) ]]
+  [ "${BASH_REMATCH[2]}" -eq 2 ]
+}
+
+@test "An object of a Gateway API or Envoy Gateway kind is validated against the definitions the tree pins, and a wrong one fails" {
+  # The repository's own tree with objects of the Gateway API's and Envoy Gateway's kinds added to
+  # an application: the definitions are fetched from the sources the tree pins, the Gateway API's
+  # release and Envoy Gateway's chart, as the cluster gets them.
+  unset KUBERNETES_VALIDATE_SCHEMAS
+  local tree="$BATS_TEST_TMPDIR/real" app=kubernetes/apps/base/demo/hello/app file=kubernetes/apps/base/demo/hello/app/gateway.yaml
+  mkdir -p "$tree"
+  cp -R "$REPO/kubernetes" "$REPO/versions.yaml" "$REPO/schema-exceptions.yaml" "$REPO/operator-definitions.yaml" "$tree/"
+  cat >"$tree/$app/gateway.yaml" <<'EOF'
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: right
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: right
+spec:
+  gatewayClassName: right
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: right
+spec:
+  parentRefs:
+    - name: right
+  hostnames:
+    - www.example.com
+  rules:
+    - backendRefs:
+        - name: hello
+          port: 80
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: right
+spec:
+  logging:
+    level:
+      default: warn
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: right
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: right
+  connection:
+    connectionLimit:
+      value: 100
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: misspelt
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  descriptionn: a misspelt field
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: required
+spec:
+  description: no controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: misspelt
+spec:
+  gatewayClassName: right
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      hostnamee: www.example.com
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: wrongtype
+spec:
+  gatewayClassName: right
+  listeners:
+    - name: http
+      port: eighty
+      protocol: HTTP
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: required
+spec:
+  gatewayClassName: right
+  listeners:
+    - name: http
+      port: 80
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: misspelt
+spec:
+  parentRefs:
+    - name: right
+  hostnamess:
+    - www.example.com
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: wrongtype
+spec:
+  parentRefs:
+    - name: right
+  hostnames: www.example.com
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: required
+spec:
+  parentRefs:
+    - name: right
+  rules:
+    - backendRefs:
+        - port: 80
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: misspelt
+spec:
+  loging:
+    level:
+      default: warn
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: wrongtype
+spec:
+  concurrency: four
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: misspelt
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: right
+  conection: {}
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: wrongtype
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: right
+  connection:
+    connectionLimit:
+      value: many
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: required
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      name: right
+EOF
+  yq -i '.resources += ["gateway.yaml"]' "$tree/$app/kustomization.yaml"
+
+  run "$VALIDATE" "$tree"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  # Each wrong object fails naming the object and the field; the right ones are not named.
+  fails_naming "GatewayClass misspelt" descriptionn
+  fails_naming "GatewayClass required" controllerName
+  fails_naming "Gateway misspelt" hostnamee
+  fails_naming "Gateway wrongtype" port
+  fails_naming "Gateway required" protocol
+  fails_naming "HTTPRoute misspelt" hostnamess
+  fails_naming "HTTPRoute wrongtype" hostnames
+  fails_naming "HTTPRoute required" name
+  fails_naming "EnvoyProxy misspelt" loging
+  fails_naming "EnvoyProxy wrongtype" concurrency
+  fails_naming "ClientTrafficPolicy misspelt" conection
+  fails_naming "ClientTrafficPolicy wrongtype" value
+  fails_naming "ClientTrafficPolicy required" kind
+  local kind
+  for kind in GatewayClass Gateway HTTPRoute EnvoyProxy ClientTrafficPolicy; do
+    [[ $output != *"$kind right"* ]]
+  done
+  [ "$(grep -c "$file" <<<"$output")" -eq 13 ]
+  # None of them is counted as an object without a schema.
+  [[ $output != *"no schema"* ]]
+}
+
+@test "An object of a kind an operator defines is validated against the definitions published for the version the tree pins" {
+  local things=kubernetes/apps/base/demo/hello/app/things.yaml bad=kubernetes/apps/base/demo/hello/app/bad.yaml case spec word
+  local repository=kubernetes/apps/base/demo/operator/app/ocirepository.yaml
+  operator_app
+  objects things.yaml <<'EOF'
+---
+apiVersion: operator.example.invalid/v1
+kind: Doohickey
+metadata:
+  name: right
+spec:
+  size: 2
+  peers:
+    - name: first
+      port: 179
+EOF
+  # Nothing in the tree describes the kind until operator-definitions.yaml says where its operator
+  # publishes its definition.
+  validate
+  [ "$status" -ne 0 ]
+  refused_line "$things" "Doohickey right" "no schema"
+  declare_operator
+  validate
+  [ "$status" -eq 0 ]
+  [[ $output != *"no schema"* ]]
+
+  # A misspelt field, a wrong type and a missing required field, at the top of the spec and in the
+  # objects of a list.
+  for case in '{"size": 1, "sise": 2}|sise' '{"size": "big"}|size' '{"peers": []}|size' \
+    '{"size": 1, "peers": [{"name": "a", "portt": 1}]}|portt' '{"size": 1, "peers": [{"port": 1}]}|name'; do
+    IFS='|' read -r spec word <<<"$case"
+    objects bad.yaml <<<"---
+apiVersion: operator.example.invalid/v1
+kind: Doohickey
+metadata:
+  name: bad
+spec: $spec"
+    validate
+    [ "$status" -ne 0 ]
+    refused_line "$bad" "Doohickey bad" "$word"
+  done
+  unlist bad.yaml
+
+  # The definition is the one of the release the source object's tag pins, with the prefix: the
+  # release of 2.0.0 requires a colour and has no peers, and the one of 1.0.0 has no colour.
+  yq -i '.spec.ref.tag = "2.0.0"' "$TREE/$repository"
+  validate
+  [ "$status" -ne 0 ]
+  refused_line "$things" "Doohickey right" colour
+  objects things.yaml <<'EOF'
+---
+apiVersion: operator.example.invalid/v1
+kind: Doohickey
+metadata:
+  name: right
+spec:
+  size: 2
+  colour: red
+EOF
+  validate
+  [ "$status" -eq 0 ]
+  yq -i '.spec.ref.tag = "1.0.0"' "$TREE/$repository"
+  validate
+  [ "$status" -ne 0 ]
+  refused_line "$things" "Doohickey right" colour
+  # A release whose definitions the repository does not hold fails, naming the declaration and the
+  # tag it was read at.
+  yq -i '.spec.ref.tag = "9.9.9"' "$TREE/$repository"
+  validate
+  [ "$status" -ne 0 ]
+  refused_line operator-definitions.yaml "entry 1" v9.9.9
+  yq -i '.spec.ref.tag = "2.0.0"' "$TREE/$repository"
+  validate
+  [ "$status" -eq 0 ]
+
+  # Only the definitions of the group declared are read from the directory: at 1.0.0 it also holds
+  # a definition of another group, which gives the object of that group no schema.
+  yq -i '.spec.ref.tag = "1.0.0"' "$TREE/$repository"
+  objects other.yaml <<'EOF'
+---
+apiVersion: other.example.invalid/v1
+kind: Thingamajig
+metadata:
+  name: other
+EOF
+  validate
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/hello/app/other.yaml "Thingamajig other" "no schema"
+  unlist other.yaml
+  yq -i '.spec.ref.tag = "2.0.0"' "$TREE/$repository"
+
+  # For what no source object pins, the tag is the version versions.yaml holds under the key the
+  # entry names, with the prefix, and the source object's tag is not read: moving that version
+  # moves the schema.
+  yq -i 'del(.definitions[0].sourceRef) | .definitions[0].versionsKey = "doohickey"' "$TREE/operator-definitions.yaml"
+  yq -i '.doohickey = "2.0.0"' "$TREE/versions.yaml"
+  validate
+  [ "$status" -eq 0 ]
+  yq -i '.doohickey = "1.0.0"' "$TREE/versions.yaml"
+  validate
+  [ "$status" -ne 0 ]
+  refused_line "$things" "Doohickey right" colour
+  yq -i '.doohickey = "9.9.9"' "$TREE/versions.yaml"
+  validate
+  [ "$status" -ne 0 ]
+  refused_line operator-definitions.yaml "entry 1" v9.9.9
+}
+
+@test "A declaration of where an operator's definitions are published that is malformed, or that nothing uses, fails the check" {
+  local file="$TREE/operator-definitions.yaml" edit word
+  operator_app
+  objects things.yaml <<'EOF'
+---
+apiVersion: operator.example.invalid/v1
+kind: Doohickey
+metadata:
+  name: right
+spec:
+  size: 2
+EOF
+  declare_operator
+  validate
+  [ "$status" -eq 0 ]
+
+  # An entry is a group, a repository on github.com, a plain path in it, a prefix of the tag, and the
+  # source object whose tag the prefix goes before, by kind, namespace and name, or in its place the
+  # key of versions.yaml whose version it goes before; nothing else.
+  while IFS='|' read -r edit word; do
+    declare_operator
+    yq -i "$edit" "$file"
+    validate
+    [ "$status" -ne 0 ]
+    refused_line operator-definitions.yaml "$word"
+  done <<'EOF'
+.definitions[0].tag = "v1.0.0"|entry 1 (operator.example.invalid): an entry has no field but
+.definitions[0].repository = "https://gitlab.example.invalid/example-org/doohickey"|entry 1 (operator.example.invalid): its repository is not
+.definitions[0].repository = "http://github.com/example-org/doohickey"|entry 1 (operator.example.invalid): its repository is not
+.definitions[0].repository = "https://github.com/example-org/doohickey/tree/main"|entry 1 (operator.example.invalid): its repository is not
+.definitions[0].repository = "https://github.com/example-org/.."|entry 1 (operator.example.invalid): its repository is not
+.definitions[0].path = "../crds"|entry 1 (operator.example.invalid): its path
+.definitions[0].path = "/deploy/crds"|entry 1 (operator.example.invalid): its path
+.definitions[0].path = "deploy/../../crds"|entry 1 (operator.example.invalid): its path
+.definitions[0].path = "deploy//crds"|entry 1 (operator.example.invalid): its path
+del(.definitions[0].path)|entry 1 (operator.example.invalid): its path
+.definitions[0].group = "apps"|entry 1 (apps): a group of Kubernetes' own or Flux's
+.definitions[0].group = "Operator.Example"|entry 1 (Operator.Example): its group is not an API group
+.definitions[0].tagPrefix = "v/"|entry 1 (operator.example.invalid): its tagPrefix
+.definitions[0].tagPrefix = 1|entry 1 (operator.example.invalid): its tagPrefix
+.definitions[0].sourceRef.kind = "HelmRelease"|entry 1 (operator.example.invalid): its sourceRef
+.definitions[0].sourceRef.url = "x"|entry 1 (operator.example.invalid): its sourceRef
+del(.definitions[0].sourceRef)|entry 1 (operator.example.invalid): its sourceRef
+.definitions[0].sourceRef.name = "Doohickey"|entry 1 (operator.example.invalid): its sourceRef
+.definitions[0].versionsKey = "doohickey"|entry 1 (operator.example.invalid): it names both a sourceRef and a versionsKey
+.definitions[0] = {"group": "operator.example.invalid", "repository": "https://github.com/example-org/doohickey", "path": "deploy/crds", "versionsKey": "Doohickey"}|entry 1 (operator.example.invalid): its versionsKey is not
+.definitions[0] = {"group": "operator.example.invalid", "repository": "https://github.com/example-org/doohickey", "path": "deploy/crds", "versionsKey": ["doohickey"]}|entry 1 (operator.example.invalid): its versionsKey is not
+.definitions += [.definitions[0]]|entry 2 (operator.example.invalid): the group and path are declared twice
+.definitions = {}|the file is a map of one key, definitions, a list of entries
+EOF
+
+  # The source object's tag is what pins the definitions: a ref other than a tag pins nothing read.
+  declare_operator
+  yq -i '.spec.ref = {"semver": "1.x"}' "$TREE/kubernetes/apps/base/demo/operator/app/ocirepository.yaml"
+  validate
+  [ "$status" -ne 0 ]
+  refused_line operator-definitions.yaml "OCIRepository demo/doohickey" "a ref other than a tag"
+  yq -i '.spec.ref = {"tag": "1.0.0"}' "$TREE/kubernetes/apps/base/demo/operator/app/ocirepository.yaml"
+
+  # A declaration whose source object is not in the tree, or whose definitions no object is of, has
+  # no use.
+  for edit in '.definitions[0].sourceRef.name = "gone"' '.definitions[0].sourceRef.namespace = "elsewhere"'; do
+    declare_operator
+    yq -i "$edit" "$file"
+    validate
+    [ "$status" -ne 0 ]
+    refused_line operator-definitions.yaml "entry 1 (operator.example.invalid)" "no object of the tree is the OCIRepository"
+  done
+  # So has one whose key versions.yaml does not hold, or holds no version under.
+  for edit in 'del(.doohickey)' '.doohickey = ["1.0.0"]'; do
+    declare_operator
+    yq -i 'del(.definitions[0].sourceRef) | .definitions[0].versionsKey = "doohickey"' "$file"
+    yq -i "$edit" "$TREE/versions.yaml"
+    validate
+    [ "$status" -ne 0 ]
+    refused_line operator-definitions.yaml "entry 1 (operator.example.invalid)" "versions.yaml holds no version under doohickey" "remove"
+  done
+  declare_operator
+  unlist things.yaml
+  validate
+  [ "$status" -ne 0 ]
+  refused_line operator-definitions.yaml "entry 1 (operator.example.invalid)" "no object of the tree is of a kind" "remove"
+}
+
+@test "An object of a Cilium kind is validated against the definitions of the Cilium release the tree pins, and a wrong one fails" {
+  # The repository's own tree with Cilium objects added to an application: the definitions are read
+  # where operator-definitions.yaml says Cilium publishes them, at the tag of the chart the tree pins.
+  unset KUBERNETES_VALIDATE_SCHEMAS
+  local tree="$BATS_TEST_TMPDIR/real" app=kubernetes/apps/base/demo/hello/app file=kubernetes/apps/base/demo/hello/app/cilium.yaml
+  mkdir -p "$tree"
+  cp -R "$REPO/kubernetes" "$REPO/versions.yaml" "$REPO/schema-exceptions.yaml" "$REPO/operator-definitions.yaml" "$tree/"
+  cat >"$tree/$file" <<'EOF'
+---
+apiVersion: cilium.io/v2
+kind: CiliumBGPPeerConfig
+metadata:
+  name: misspelt
+spec:
+  timers:
+    holdTimeSecondz: 9
+---
+apiVersion: cilium.io/v2
+kind: CiliumBGPPeerConfig
+metadata:
+  name: wrongtype
+spec:
+  timers:
+    holdTimeSeconds: nine
+---
+apiVersion: cilium.io/v2
+kind: CiliumBGPPeerConfig
+metadata:
+  name: required
+spec:
+  families:
+    - safi: unicast
+---
+apiVersion: cilium.io/v2
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: misspelt
+spec:
+  blockz:
+    - cidr: 192.0.2.0/28
+---
+apiVersion: cilium.io/v2
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: wrongtype
+spec:
+  disabled: "no"
+---
+apiVersion: cilium.io/v2
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: required
+EOF
+  yq -i '.resources += ["cilium.yaml"]' "$tree/$app/kustomization.yaml"
+
+  run "$VALIDATE" "$tree"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  # Each wrong object fails naming the object and the field; the tree's own Cilium objects pass.
+  fails_naming "CiliumBGPPeerConfig misspelt" holdTimeSecondz
+  fails_naming "CiliumBGPPeerConfig wrongtype" holdTimeSeconds
+  fails_naming "CiliumBGPPeerConfig required" afi
+  fails_naming "CiliumLoadBalancerIPPool misspelt" blockz
+  fails_naming "CiliumLoadBalancerIPPool wrongtype" disabled
+  fails_naming "CiliumLoadBalancerIPPool required" spec
+  [ "$(grep -c "$file" <<<"$output")" -eq 6 ]
+  [[ $output != *"kube-system/cilium-bgp/"* && $output != *"no schema"* && $output != *"listed without a schema"* ]]
+
+  # The definitions are read at the tag prefix followed by the tag of the Cilium chart the tree pins,
+  # and the operator that chart runs, with the tree's values, is that release: Cilium tags a chart
+  # with the version it runs, and the chart's operator image with that version after a v.
+  local tag prefix image
+  local -a tgz
+  tag="$(yq '.spec.ref.tag' "$REPO/kubernetes/apps/base/kube-system/cilium/app/ocirepository.yaml")"
+  prefix="$(yq '.definitions[] | select(.group == "cilium.io") | .tagPrefix // ""' "$REPO/operator-definitions.yaml")"
+  [ "$(yq '.definitions[] | select(.group == "cilium.io") | .sourceRef.name' "$REPO/operator-definitions.yaml")" = cilium ]
+  tgz=("$RENDER_CHART_CACHE/quay.io/cilium/charts/cilium/$tag"/*.tgz)
+  [ "${#tgz[@]}" -eq 1 ]
+  [ "$(helm show chart "${tgz[0]}" | yq '.version')" = "$tag" ]
+  image="$(helm template cilium "${tgz[0]}" --namespace kube-system --kube-version "$(yq '.kubernetes' "$REPO/versions.yaml")" \
+    --values "$REPO/kubernetes/apps/base/kube-system/cilium/app/values.yaml" |
+    yq 'select(.kind == "Deployment" and .metadata.name == "cilium-operator") | .spec.template.spec.containers[] | select(.name == "cilium-operator") | .image')"
+  echo "operator image: $image"
+  [[ ${image%@sha256:*} == *":$prefix$tag" ]]
+}
+
+@test "A Talos ServiceAccount is validated against Talos' definition at the version the tree pins, and a wrong one fails" {
+  # The repository's own tree with Talos ServiceAccounts added to an application: the definition is
+  # read where operator-definitions.yaml says Talos' repository holds it, at the tag that is the
+  # Talos version versions.yaml pins.
+  unset KUBERNETES_VALIDATE_SCHEMAS
+  local tree="$BATS_TEST_TMPDIR/real" app=kubernetes/apps/base/demo/hello/app file=kubernetes/apps/base/demo/hello/app/talos.yaml
+  mkdir -p "$tree"
+  cp -R "$REPO/kubernetes" "$REPO/versions.yaml" "$REPO/schema-exceptions.yaml" "$REPO/operator-definitions.yaml" "$tree/"
+  cat >"$tree/$file" <<'EOF'
+---
+apiVersion: talos.dev/v1alpha1
+kind: ServiceAccount
+metadata:
+  name: misspelt
+spec:
+  role:
+    - os:reader
+---
+apiVersion: talos.dev/v1alpha1
+kind: ServiceAccount
+metadata:
+  name: wrongtype
+spec:
+  roles: os:reader
+EOF
+  yq -i '.resources += ["talos.yaml"]' "$tree/$app/kustomization.yaml"
+  [ "$(yq '.definitions[] | select(.group == "talos.dev") | .versionsKey' "$REPO/operator-definitions.yaml")" = talos ]
+
+  run "$VALIDATE" "$tree"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  # Each wrong one fails naming the object and the field; the snapshot job's own passes.
+  fails_naming "ServiceAccount misspelt" role
+  fails_naming "ServiceAccount wrongtype" roles
+  [ "$(grep -c "$file" <<<"$output")" -eq 2 ]
+  [[ $output != *"etcd-snapshots"* && $output != *"no schema"* && $output != *"listed without a schema"* ]]
+}
+
+@test "A definition of one of Kubernetes' own groups or Flux's is refused, whatever brings it" {
+  local schemas="$BATS_TEST_TMPDIR/schemas" crd value deployment=kubernetes/apps/base/demo/hello/app/deployment.yaml
+  local refusal="a group of Kubernetes' own or Flux's"
+  # The fixtures' sources, where the directory the definitions application applies at the tag it
+  # pins holds, beside Gizmo's, a definition of Deployment in the apps group whose top level keeps
+  # unknown fields: a schema made of it would pass any Deployment.
+  cp -R "$FIXTURES/schemas" "$schemas"
+  export KUBERNETES_VALIDATE_SCHEMAS="$schemas"
+  crd="$schemas/sources/github.com/example-org/gizmo-crds/v1.0.0/config/crd"
+  cat >"$crd/deployments.yaml" <<'EOF'
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: deployments.apps
+spec:
+  group: apps
+  names:
+    kind: Deployment
+    listKind: DeploymentList
+    plural: deployments
+    singular: deployment
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true
+EOF
+  yq -i '.resources += ["deployments.yaml"]' "$crd/kustomization.yaml"
+  definitions_app
+  objects deployment.yaml <<'EOF'
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello
+spec:
+  replicas: 1
+  bogusField: true
+EOF
+  validate
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/defs/ks.yaml "CustomResourceDefinition deployments.apps" "$refusal" "no schema is made of it"
+  # Kubernetes' schema is the Deployment's still.
+  refused_line "$deployment" "Deployment hello" bogusField
+
+  # A chart's definition in the apps group, in one of Kubernetes' dotted groups or in one of Flux's
+  # is refused too. Its schema lists no field but the top level's, so a schema made of it would
+  # refuse the Deployment, which Kubernetes' passes.
+  export KUBERNETES_VALIDATE_SCHEMAS="$FIXTURES/schemas"
+  yq -i 'del(.spec.bogusField)' "$TREE/$deployment"
+  for value in $'definitionGroup: apps\ndefinitionKind: Deployment' \
+    $'definitionGroup: networking.k8s.io\ndefinitionKind: Ingress' \
+    $'definitionGroup: kustomize.toolkit.fluxcd.io\ndefinitionKind: Kustomization'; do
+    hooked_app "$value"
+    validate
+    [ "$status" -ne 0 ]
+    refused_line kubernetes/apps/base/demo/hooked/ks.yaml "CustomResourceDefinition escapes.example.invalid" "$refusal" "no schema is made of it"
+    [[ $output != *"$deployment"* ]]
+  done
+  hooked_app '{}'
+  validate
+  [ "$status" -eq 0 ]
+}
+
+@test "a source the check cannot pin or read is refused, naming the file and the Kustomization, before anything is fetched" {
+  local defs=kubernetes/apps/base/demo/defs/app edit
+  definitions_app
+  fetch_recorders
+  # Both sources are fetched when nothing is refused; the stand-ins give nothing back.
+  recorded_validate
+  grep -qxF "curl https://github.com/example-org/gizmo-crds/archive/refs/tags/v1.0.0.tar.gz" "$FETCHED"
+  grep -qF "helm pull oci://registry.example.invalid/charts/sprocket --version 1.0.0" "$FETCHED"
+
+  # A GitRepository's URL, tag, ref and sparseCheckout, and the path of the Kustomization that
+  # applies from it.
+  while IFS='|' read -r edit word; do
+    definitions_app_reset
+    yq -i "$edit" "$TREE/$defs/gitrepository.yaml"
+    recorded_validate
+    [ "$status" -ne 0 ]
+    refused_line "$defs/gizmo-crds.yaml" "Kustomization gizmo-crds" "$word"
+    not_fetched gizmo-crds
+  done <<'EOF'
+.spec.url = "https://gitlab.example.invalid/example-org/gizmo-crds"|URL is not that of a repository on github.com
+.spec.url = "https://github.com/example-org/gizmo-crds/../other"|URL is not that of a repository on github.com
+.spec.url = "https://github.com/example-org/gizmo-crds.git"|URL ends in .git
+.spec.ref.tag = "v1..0"|tag v1..0 has not the shape of a tag
+.spec.ref.tag = "../v1.0.0"|tag ../v1.0.0 has not the shape of a tag
+.spec.ref = {}|names no tag
+.spec.ref = {"branch": "main"}|a ref other than a tag
+.spec.ref = {"tag": "v1.0.0", "commit": "0123456789abcdef0123456789abcdef01234567"}|a ref other than a tag
+.spec.sparseCheckout = ["config/../.."]|sparseCheckout entry config/../.. is not a plain path
+.spec.sparseCheckout = ["/config"]|sparseCheckout entry /config is not a plain path
+EOF
+  while IFS='|' read -r edit word; do
+    definitions_app_reset
+    yq -i "$edit" "$TREE/$defs/gizmo-crds.yaml"
+    recorded_validate
+    [ "$status" -ne 0 ]
+    refused_line "$defs/gizmo-crds.yaml" "Kustomization gizmo-crds" "$word"
+    not_fetched gizmo-crds
+  done <<'EOF'
+.spec.path = "./config/../../outside"|spec.path ./config/../../outside is not a plain path
+.spec.path = "/config/crd"|spec.path /config/crd is not a plain path
+.spec.sourceRef.name = "gone"|the GitRepository it applies from is not an object of the application
+EOF
+
+  # An OCIRepository's URL, tag and layerSelector.
+  while IFS='|' read -r edit word; do
+    definitions_app_reset
+    yq -i "$edit" "$TREE/$defs/ocirepository.yaml"
+    recorded_validate
+    [ "$status" -ne 0 ]
+    refused_line "$defs/sprocket-crds.yaml" "Kustomization sprocket-crds" "$word"
+    not_fetched sprocket
+  done <<'EOF'
+.spec.url = "https://registry.example.invalid/charts/sprocket"|URL is not an OCI chart URL
+.spec.url = "oci://registry.example.invalid/charts/../sprocket"|URL is not an OCI chart URL
+.spec.ref.tag = "1.0.0/../x"|tag 1.0.0/../x has not the shape of a tag
+.spec.ref = {"digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}|a ref other than a tag
+.spec.layerSelector.operation = "copy"|layerSelector
+del(.spec.layerSelector)|layerSelector
+EOF
+
+  # The repository operator-definitions.yaml names, and the tag of its source object.
+  definitions_app_reset
+  operator_app
+  objects things.yaml <<'EOF'
+---
+apiVersion: operator.example.invalid/v1
+kind: Doohickey
+metadata:
+  name: right
+spec:
+  size: 2
+EOF
+  declare_operator
+  recorded_validate
+  grep -qxF "curl https://github.com/example-org/doohickey/archive/refs/tags/v1.0.0.tar.gz" "$FETCHED"
+  yq -i '.definitions[0].repository = "https://gitlab.example.invalid/example-org/doohickey"' "$TREE/operator-definitions.yaml"
+  recorded_validate
+  [ "$status" -ne 0 ]
+  refused_line operator-definitions.yaml "entry 1 (operator.example.invalid)" "its repository is not"
+  not_fetched doohickey
+  declare_operator
+  yq -i '.definitions[0].repository = "https://github.com/example-org/doohickey.git"' "$TREE/operator-definitions.yaml"
+  recorded_validate
+  [ "$status" -ne 0 ]
+  refused_line operator-definitions.yaml "entry 1 (operator.example.invalid)" "its repository ends in .git"
+  not_fetched doohickey
+  declare_operator
+  yq -i '.spec.ref.tag = "1..0"' "$TREE/kubernetes/apps/base/demo/operator/app/ocirepository.yaml"
+  recorded_validate
+  [ "$status" -ne 0 ]
+  refused_line operator-definitions.yaml "entry 1 (operator.example.invalid)" "v1..0 has not the shape of a tag"
+  not_fetched doohickey
+  # So is the version versions.yaml holds, for an entry that takes its tag from there.
+  yq -i '.spec.ref.tag = "1.0.0"' "$TREE/kubernetes/apps/base/demo/operator/app/ocirepository.yaml"
+  yq -i 'del(.definitions[0].sourceRef) | .definitions[0].versionsKey = "doohickey"' "$TREE/operator-definitions.yaml"
+  yq -i '.doohickey = "2.0.0"' "$TREE/versions.yaml"
+  recorded_validate
+  grep -qxF "curl https://github.com/example-org/doohickey/archive/refs/tags/v2.0.0.tar.gz" "$FETCHED"
+  yq -i '.doohickey = "1..0"' "$TREE/versions.yaml"
+  recorded_validate
+  [ "$status" -ne 0 ]
+  refused_line operator-definitions.yaml "entry 1 (operator.example.invalid)" "v1..0 has not the shape of a tag"
+  not_fetched doohickey
+}
+
+@test "a source that holds what the checks refuse in a tree is refused before anything of it is built" {
+  local defs=kubernetes/apps/base/demo/defs/app edit word link
+  local source="https://github.com/example-org/gizmo-crds at v1.0.0"
+  definitions_app
+  fetch_recorders
+  # The release as the fixtures hold it is fetched, unpacked and built.
+  gizmo_archive
+  recorded_validate
+  grep -qxF "curl https://github.com/example-org/gizmo-crds/archive/refs/tags/v1.0.0.tar.gz" "$FETCHED"
+  grep -q '/sources/[0-9]*/config/crd$' "$BUILT"
+  [[ $output != *"Kustomization gizmo-crds"* ]]
+
+  # A kustomization of it that names a URL, which kustomize would fetch, the loopback's directly,
+  # past the closed proxy; one that names a path that climbs out of it, or a field the checks
+  # refuse; and a link in it that leads out of it.
+  while IFS='|' read -r edit link word; do
+    gizmo_archive "$edit" "$link"
+    recorded_validate
+    [ "$status" -ne 0 ]
+    refused_line "$defs/gizmo-crds.yaml" "Kustomization gizmo-crds" "$source holds what the checks refuse in a tree" "$word"
+    [[ $output != *"kustomize does not build"* ]]
+    ! grep -F /sources/ "$BUILT" || { echo "built before it was refused"; return 1; }
+  done <<'EOF'
+.resources += ["http://127.0.0.1:9/x.yaml"]||config/crd/kustomization.yaml: resources names "http://127.0.0.1:9/x.yaml", which is not a plain path
+.resources += ["../../../outside"]||config/crd/kustomization.yaml: resources names "../../../outside", a path that leaves the source
+.transformers = ["transformer.yaml"]||config/crd/kustomization.yaml: transformers is a field the checks refuse
+.resources += ["linked.yaml"]|linked.yaml|config/crd/linked.yaml: a link to /dev/null, which is no path in the source
+EOF
+}
+
+@test "a key of a source or of the Kustomization that applies from it, read under another spelling, is refused before anything is fetched" {
+  local defs=kubernetes/apps/base/demo/defs/app kind file
+  definitions_app
+  fetch_recorders
+  # The Kustomization applied from a GitRepository and that GitRepository, and the OCIRepository a
+  # Kustomization applies from.
+  for kind in Kustomization:gizmo-crds.yaml GitRepository:gitrepository.yaml OCIRepository:ocirepository.yaml; do
+    file="$defs/${kind#*:}"
+    definitions_app_reset
+    with_folded "${kind%%:*}" "$TREE/$file"
+    recorded_validate
+    names_every "$file"
+    case ${kind%%:*} in
+      OCIRepository) not_fetched sprocket ;;
+      *) not_fetched gizmo-crds ;;
+    esac
+  done
+
+  # The source object operator-definitions.yaml reads the tag of.
+  definitions_app_reset
+  operator_app
+  declare_operator
+  file=kubernetes/apps/base/demo/operator/app/ocirepository.yaml
+  with_folded OCIRepository "$TREE/$file"
+  recorded_validate
+  names_every "$file"
+  not_fetched doohickey
 }

@@ -6,9 +6,16 @@
 #   - every object Flux builds, for every application, enabled or not, each cluster's root and each
 #     cluster directory, validates with unknown fields refused, against Kubernetes' schemas for the
 #     version in versions.yaml, Flux's for the pinned release, and schemas made from the
-#     CustomResourceDefinitions the render holds; the HelmReleases of an enabled application as the
-#     render builds them, with the root's patches applied; objects of other kinds have no schema
-#     and are counted by kind, so a pass never silently means a skip;
+#     CustomResourceDefinitions the render holds, those a Kustomization of the tree applies from
+#     a GitRepository or an OCIRepository (fetched at the tag the tree pins and read as Flux builds
+#     it), and those operator-definitions.yaml says an operator or Talos has (fetched at the tag of
+#     the source object that pins the operator's chart, or at the version versions.yaml holds), a
+#     definition of one of Kubernetes' own groups or Flux's, or of a group without a dot, among
+#     them refused; the HelmReleases of an enabled application as the
+#     render builds them, with the root's patches applied; an object of a kind none of them
+#     describes fails, unless schema-exceptions.yaml lists the kind with its reason, and a listed
+#     kind that has a schema or that no object is of fails too, so the count of objects without a
+#     schema is of listed kinds only;
 #   - in what scripts/render writes, hooks included, every image of a container, init container or
 #     ephemeral container of a pod spec, wherever an object holds one, and every image an object
 #     names in its own spec.image, has a tag other than latest or a digest, unless .image-allowlist
@@ -18,8 +25,11 @@
 # Reports every failure, naming the file and the rule, then exits non-zero. Never contacts a
 # cluster. Fetches only public files with plain GET requests, at exact versions: the Flux release's
 # crd-schemas archive, Kubernetes' schemas a kind at a time (the request paths name the kind, group
-# and version of each object whose kind no rendered definition describes, and nothing else from
-# the tree), and the charts scripts/render pulls (RENDER_CHART_CACHE, as there). curl, kubeconform,
+# and version of each object whose kind no definition describes, and nothing else from the tree),
+# the archive of each GitHub repository at a tag that a GitRepository of the tree applies definitions
+# from or operator-definitions.yaml names, the chart of each OCIRepository that a Kustomization
+# applies definitions from (helm pull), and the charts scripts/render pulls (RENDER_CHART_CACHE, as
+# there, a directory of the run's own when it is not set). curl, helm, kubeconform,
 # kubernetes-check and the render's flux, helm and kustomize run with none of the secrets of the
 # caller's environment (scripts/lib/tools.sh).
 #
@@ -29,11 +39,16 @@
 # of control characters, so no value starts another field or record, and an index in it is
 # checked to be a number before it is used.
 #
-# KUBERNETES_VALIDATE_SCHEMAS, a directory, replaces both schema sources and nothing is fetched for
-# them: kubernetes/<version>-standalone-strict/<kind>-<group>-<version>.json beside
-# flux/<kind>-<group>-<version>.json. The tests point it at fixtures.
+# KUBERNETES_VALIDATE_SCHEMAS, a directory, replaces every source and nothing is fetched for
+# schemas: kubernetes/<version>-standalone-strict/<kind>-<group>-<version>.json beside
+# flux/<kind>-<group>-<version>.json, and the sources of definitions as directories,
+# sources/github.com/<owner>/<repository>/<tag>/ for a GitHub repository's checkout and
+# sources/<registry>/<repository>/<tag>/ for an OCIRepository's unpacked chart. The tests point it
+# at fixtures.
 #
-# Usage: scripts/kubernetes-validate [DIR]   (DIR holds kubernetes/ and versions.yaml; defaults to this repository)
+# Usage: scripts/kubernetes-validate [DIR]   (DIR holds kubernetes/ and versions.yaml, and may hold
+#        schema-exceptions.yaml, operator-definitions.yaml and .image-allowlist; defaults to this
+#        repository)
 set -euo pipefail
 # Text is matched, sorted and shown byte by byte, whatever the caller's locale.
 export LC_ALL=C
@@ -41,6 +56,9 @@ shopt -s nullglob
 
 # shellcheck source=scripts/lib/tools.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/tools.sh"
+# The builds of the definitions a source brings run as the checks' builds do.
+# shellcheck source=scripts/lib/tree-paths.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/tree-paths.sh"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 schemas="${KUBERNETES_VALIDATE_SCHEMAS:-}"
@@ -65,6 +83,18 @@ fail() {
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+# kustomize runs with a git that refuses and a closed proxy; helm pull alone fetches.
+tree_paths_offline "$tmp/offline"
+# Helm's settings and the Docker configuration it reads registry logins from are the run's own, as
+# the render's are, and the charts it pulls are kept for the run: the render's and the ones the
+# definitions are read from, which are often the same chart.
+export HELM_CACHE_HOME="$tmp/helm/cache" HELM_CONFIG_HOME="$tmp/helm/config" HELM_DATA_HOME="$tmp/helm/data"
+export HELM_REPOSITORY_CONFIG="$tmp/helm/repositories.yaml" HELM_REGISTRY_CONFIG="$tmp/helm/registry.json"
+export HELM_PLUGINS="$tmp/helm/plugins"
+export DOCKER_CONFIG="$tmp/docker"
+mkdir -p "$DOCKER_CONFIG" "${RENDER_CHART_CACHE:-$tmp/charts}"
+charts="$(cd "${RENDER_CHART_CACHE:-$tmp/charts}" && pwd)"
+export RENDER_CHART_CACHE="$charts"
 
 # Records that jq writes for this script to read: fields joined by the unit separator, each field
 # cleaned so that it holds no control character, the separator and line breaks included.
@@ -165,41 +195,47 @@ flux_group_re='(\.toolkit\.fluxcd\.io|^source\.extensions\.fluxcd\.io)$'
 
 # crd_schemas DIR: a JSON Schema at DIR/<group>/<kind>_<version>.json, the kind in lower case, the
 # layout kubeconform reads from {{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json, for each
-# version of each CustomResourceDefinition the render holds whose group, kind and versions have the
-# shapes the API server requires; one that has not is refused, and nothing is made of it. The
-# schema is the version's openAPIV3Schema, made as strict as Kubernetes' own schemas are here:
-# every level that lists its fields refuses others (additionalProperties: false), unless it keeps
-# unknown fields (x-kubernetes-preserve-unknown-fields) or says what others may be; a field the
-# definition defaults is not required, as the API server fills it in before it validates; the top
-# level lists apiVersion, kind and metadata, which the API server adds to every definition;
-# OpenAPI's nullable becomes JSON Schema's null type. Two definitions that differ for one kind and
-# version leave it without one. Each schema is compiled once, by kubeconform on an object of its
-# kind: one that does not compile fails the check, as kubeconform would otherwise take it for none.
+# version of each CustomResourceDefinition the render holds or definition_sources and
+# operator_definitions read, whose group, kind and versions have the shapes the API server requires
+# and whose group is none of Kubernetes' own or Flux's and holds a dot; one that is not so is
+# refused, and nothing is made of it. The schema is the version's openAPIV3Schema, made as strict as
+# Kubernetes' own schemas are here: every level that lists its fields refuses others
+# (additionalProperties: false), unless it keeps unknown fields
+# (x-kubernetes-preserve-unknown-fields) or says what others may be, and the conditions of allOf,
+# anyOf, oneOf and not, which state what a value must satisfy and list no fields an object has,
+# refuse none; a field the definition defaults is not required, as the API server fills it in before
+# it validates; the top level lists apiVersion, kind and metadata, which the API server adds to
+# every definition; OpenAPI's nullable becomes JSON Schema's null type. The rules the definition
+# states as CEL (x-kubernetes-validations) are not evaluated: they are the API server's. Two
+# definitions that differ for one kind and version leave it without one. Each schema is compiled
+# once, by kubeconform on an object of its kind: one that does not compile fails the check, as
+# kubeconform would otherwise take it for none.
 crd_schemas() {
-  local dir=$1 status from crd_name kind api path schema file where n
-  local -a crds=("$out"/*/*/CustomResourceDefinition.apiextensions.k8s.io_*.yaml) probe_where=()
+  local dir=$1 status from crd_name kind api path schema file where n group
+  local -a crds=("$out"/*/*/CustomResourceDefinition.apiextensions.k8s.io_*.yaml "$tmp"/source-defs/*/*.yaml) probe_where=()
+  local origin
   local -A made=() made_by=() made_kind=() made_api=()
   mkdir -p "$dir"
   ((${#crds[@]} > 0)) || return 0
   if ! yq -N -o json -I0 'select(. != null) | {"from": filename, "crd": .}' "${crds[@]}" >"$tmp/crds.jsonl" 2>"$tmp/crds.err" ||
     ! jq -r "$jq_clean$(shapes_jq)"'
-      def strict:
+      def strict($inj):
         if type != "object" then .
         else
           (if .nullable == true and (.type | type) == "string" then .type = [.type, "null"] else . end)
           | del(.nullable)
-          | (if (.properties | type) == "object" and (has("additionalProperties") | not)
+          | (if $inj and (.properties | type) == "object" and (has("additionalProperties") | not)
                 and (.["x-kubernetes-preserve-unknown-fields"] != true)
              then .additionalProperties = false else . end)
           | (if (.required | type) == "array" and (.properties | type) == "object"
              then .properties as $p | .required |= map(select(($p[.] // {}) | has("default") | not))
                | if .required == [] then del(.required) else . end
              else . end)
-          | (if (.properties | type) == "object" then .properties |= map_values(strict) else . end)
-          | (if (.items | type) == "object" then .items |= strict else . end)
-          | (if (.additionalProperties | type) == "object" then .additionalProperties |= strict else . end)
-          | reduce ("allOf", "anyOf", "oneOf") as $k (.; if (.[$k] | type) == "array" then .[$k] |= map(strict) else . end)
-          | (if (.not | type) == "object" then .not |= strict else . end)
+          | (if (.properties | type) == "object" then .properties |= map_values(strict($inj)) else . end)
+          | (if (.items | type) == "object" then .items |= strict($inj) else . end)
+          | (if (.additionalProperties | type) == "object" then .additionalProperties |= strict($inj) else . end)
+          | reduce ("allOf", "anyOf", "oneOf") as $k (.; if (.[$k] | type) == "array" then .[$k] |= map(strict(false)) else . end)
+          | (if (.not | type) == "object" then .not |= strict(false) else . end)
         end;
       (.from | split("/") | .[-3:-1] | join("/") | clean) as $from
       | .crd | select(.kind == "CustomResourceDefinition" and .apiVersion == "apiextensions.k8s.io/v1")
@@ -212,23 +248,40 @@ crd_schemas() {
              (.schema.openAPIV3Schema
                | .properties = ({"apiVersion": {"type": "string"}, "kind": {"type": "string"}, "metadata": {"type": "object"}}
                    + (.properties // {}))
-               | strict | tojson)]
+               | strict(true) | tojson)]
         else ["bad", $from, $name, ({"group": $spec.group, "kind": $spec.names.kind, "versions": [($spec.versions // [])[] | .name]} | tojson)]
         end
       | map(clean) | join("\u001f")' "$tmp/crds.jsonl" >"$tmp/crd-schemas.records"; then
-    fail "the CustomResourceDefinitions scripts/render wrote cannot be read, so no schema was made of them: $(cat "$tmp/crds.err")"
+    fail "the CustomResourceDefinitions scripts/render wrote and the sources hold cannot be read, so no schema was made of them: $(cat "$tmp/crds.err")"
     return
   fi
   while IFS=$sep read -r status from crd_name kind api path schema; do
-    file="${ks_name_file[${from#*/}]:-$from}"
+    file="${operator_label[${from#*/}]:-${ks_name_file[${from#*/}]:-$from}}"
+    origin="rendered for ${from%%/*}"
+    [[ ${from%%/*} != source-defs ]] || origin="applied from a source"
+    [[ -z ${operator_label[${from#*/}]:-} ]] || origin="published for its operator"
     if [[ $status == bad ]]; then
-      fail "$file: CustomResourceDefinition $crd_name, rendered for ${from%%/*}: its group, kind or a version has not the shape the API server requires, so no schema is made of it: $kind"
+      fail "$file: CustomResourceDefinition $crd_name, $origin: its group, kind or a version has not the shape the API server requires, so no schema is made of it: $kind"
       continue
     fi
     # Built from the checked group, kind and version alone; checked again before it is written, and
     # a path that fails it is an error naming the definition, never a definition left out.
     if [[ $status != ok || ! $path =~ ^[a-z0-9.-]+/[a-z][a-z0-9]*_[a-z][-a-z0-9]*\.json$ || $path == *..* ]]; then
-      fail "$file: CustomResourceDefinition $crd_name, rendered for ${from%%/*}: no schema can be written for $kind $api, so its objects would go unvalidated"
+      fail "$file: CustomResourceDefinition $crd_name, $origin: no schema can be written for $kind $api, so its objects would go unvalidated"
+      continue
+    fi
+    # The API server serves Kubernetes' kinds itself and Flux's definitions come with its release,
+    # so a definition of their groups is not what the cluster validates by; its schema would come
+    # before Kubernetes' in the lookup.
+    group="${api%/*}"
+    if [[ $group =~ $builtin_group_re || $group =~ $flux_group_re ]]; then
+      fail "$file: CustomResourceDefinition $crd_name, $origin: $kind $api is of a group of Kubernetes' own or Flux's, whose kinds are validated against Kubernetes' schemas and the pinned Flux release's alone, so no schema is made of it"
+      continue
+    fi
+    # The API server requires a dot in a definition's group; Kubernetes' own groups without one are
+    # refused above.
+    if [[ $group != *.* ]]; then
+      fail "$file: CustomResourceDefinition $crd_name, $origin: $kind $api is of a group without a dot, which the API server refuses of a definition, so no schema is made of it"
       continue
     fi
     where="$file: CustomResourceDefinition $crd_name, $kind $api"
@@ -269,18 +322,500 @@ crd_schemas() {
   done <"$tmp/probes.records"
 }
 
+# The sources a Kustomization of the tree applies definitions from. A Kustomization whose sourceRef
+# is a GitRepository, or an OCIRepository other than the cluster's own artifact, is not built from
+# the tree: its objects come from a repository's checkout or a chart's unpacked layer, which the
+# render does not hold, so the definitions among them reach the cluster by a path the render does
+# not read. They are read here from the pin the cluster gets them from, the tag of the source object
+# in the same build: a GitRepository's archive from github.com at that tag, restricted to its
+# sparseCheckout, and an OCIRepository's chart, pulled at that tag and unpacked, which is what its
+# layerSelector has Flux extract; what was unpacked is held to the tree's rules for links and
+# kustomization files before anything of it is built. The directory the Kustomization's spec.path
+# names is built as Flux builds it, with its kustomization.yaml or, with none, from every YAML file
+# of it; only the CustomResourceDefinitions of what that yields are kept, written to
+# source-defs/<application>/ for crd_schemas. The Kustomization's own patches are not applied: they
+# act on what the cluster applies, not on the schemas of the definitions. A source that cannot be
+# had, that the rules refuse or that does not build is an error naming the Kustomization, as the
+# definitions it brings would otherwise go unvalidated unseen. Each source is fetched once, however
+# many Kustomizations name it.
+src_count=0
+declare -A src_dir_of=() src_error_of=()
+source_dir="" source_error=""
+
+# The shapes of what a source names, which it must have before it is part of a request or a path: a
+# repository on github.com, as its owner and name (a name that ends in .git is refused where one is
+# read, as GitHub serves a repository's archive under its name alone); a Git tag, which never
+# climbs, ends in a slash or holds an empty segment; an OCI chart's URL; and an OCI tag.
+github_repo_re='^https://github\.com/([A-Za-z0-9_][A-Za-z0-9_.-]*)/([A-Za-z0-9_][A-Za-z0-9_.-]*)$'
+oci_url_re='^oci://[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+$'
+oci_tag_re='^[A-Za-z0-9_][A-Za-z0-9._+-]*$'
+git_tag_shaped() {
+  [[ $1 =~ ^[A-Za-z0-9_][A-Za-z0-9._+/-]*$ && $1 != *..* && $1 != */ && $1 != *//* ]]
+}
+
+# fetch_source_once KIND URL TAG MEDIATYPE OPERATION SPARSE: puts the directory that holds the
+# source at TAG in source_dir, or why it cannot be had in source_error. SPARSE is the entries of the
+# GitRepository's sparseCheckout, comma-separated. URL and TAG come from the tree, so each must have
+# the shape of what it names before it is part of a request or a path. With
+# KUBERNETES_VALIDATE_SCHEMAS the directories of the schemas directory stand in for the network.
+fetch_source_once() {
+  local kind=$1 url=$2 tag=$3 media=$4 op=$5 sparse=$6 owner repo root entry refused
+  local -a tgz members=() entries=() tar_args=()
+  source_dir="" source_error=""
+  case $kind in
+    GitRepository)
+      if [[ ! $url =~ $github_repo_re ]]; then
+        source_error="its GitRepository's URL is not that of a repository on github.com"
+        return 1
+      fi
+      owner=${BASH_REMATCH[1]} repo=${BASH_REMATCH[2]}
+      if [[ ${repo,,} == *.git ]]; then
+        source_error="its GitRepository's URL ends in .git, and GitHub serves a repository's archive under its name alone: write it as https://github.com/<owner>/<repository>"
+        return 1
+      elif [[ -z $tag ]]; then
+        source_error="its GitRepository names no tag, which is what pins what the definitions are (a branch, a commit or a range is not read)"
+        return 1
+      elif ! git_tag_shaped "$tag"; then
+        source_error="its GitRepository's tag $(tree_paths_show "$tag") has not the shape of a tag, so it pins nothing that can be read"
+        return 1
+      fi
+      if [[ -n $schemas ]]; then
+        root="$schemas/sources/github.com/$owner/$repo/$tag"
+        [[ -d $root ]] || { source_error="the schemas directory holds no source for $url at $tag"; return 1; }
+      else
+        src_count=$((src_count + 1))
+        root="$tmp/sources/$src_count"
+        mkdir -p "$root"
+        IFS=, read -ra entries <<<"$sparse"
+        for entry in "${entries[@]}"; do
+          [[ -z $entry ]] && continue
+          if ! tree_paths_plain "$entry" || [[ /$entry/ == */../* ]]; then
+            source_error="its GitRepository's sparseCheckout entry $(tree_paths_show "$entry") is not a plain path"
+            return 1
+          fi
+          members+=("*/$entry")
+        done
+        if ! source_error="$(curl --fail --silent --show-error --location --retry 3 --max-time 300 \
+          --output "$tmp/source-$src_count.tar.gz" "https://github.com/$owner/$repo/archive/refs/tags/$tag.tar.gz" 2>&1)"; then
+          source_error="cannot fetch $url at $tag: $source_error"
+          return 1
+        fi
+        ((${#members[@]} == 0)) || tar_args=(--wildcards -- "${members[@]}")
+        if ! source_error="$(tar -xzf "$tmp/source-$src_count.tar.gz" -C "$root" --strip-components=1 "${tar_args[@]}" 2>&1)"; then
+          source_error="cannot unpack $url at $tag: $source_error"
+          return 1
+        fi
+        rm -f "$tmp/source-$src_count.tar.gz"
+        source_error=""
+      fi
+      ;;
+    OCIRepository)
+      if [[ ! $url =~ $oci_url_re || /$url/ == */../* ]]; then
+        source_error="its OCIRepository's URL is not an OCI chart URL"
+        return 1
+      fi
+      if [[ -z $tag ]]; then
+        source_error="its OCIRepository names no tag, which is what pins what the definitions are (a digest alone or a range is not read)"
+        return 1
+      elif [[ ! $tag =~ $oci_tag_re ]]; then
+        source_error="its OCIRepository's tag $(tree_paths_show "$tag") has not the shape of a tag, so it pins nothing that can be read"
+        return 1
+      fi
+      if [[ $media != application/vnd.cncf.helm.chart.content.v1.tar+gzip || $op != extract ]]; then
+        source_error="its OCIRepository does not unpack a Helm chart's layer (layerSelector: mediaType application/vnd.cncf.helm.chart.content.v1.tar+gzip, operation extract), the one kind of artifact read here"
+        return 1
+      fi
+      if [[ -n $schemas ]]; then
+        root="$schemas/sources/${url#oci://}/$tag"
+        [[ -d $root ]] || { source_error="the schemas directory holds no source for $url at $tag"; return 1; }
+      else
+        # Where the render keeps the charts it pulls, so that a chart both read is pulled once.
+        tgz=("$charts/${url#oci://}/$tag"/*.tgz)
+        if ((${#tgz[@]} == 0)); then
+          mkdir -p "$charts/${url#oci://}/$tag"
+          if ! source_error="$(helm pull "$url" --version "$tag" --destination "$charts/${url#oci://}/$tag" 2>&1)"; then
+            source_error="helm pull $url --version $tag failed: $source_error"
+            return 1
+          fi
+          tgz=("$charts/${url#oci://}/$tag"/*.tgz)
+        fi
+        if ((${#tgz[@]} != 1)); then
+          source_error="$url at $tag holds no single chart"
+          return 1
+        fi
+        src_count=$((src_count + 1))
+        root="$tmp/sources/$src_count"
+        mkdir -p "$root"
+        if ! source_error="$(tar -xzf "${tgz[0]}" -C "$root" 2>&1)"; then
+          source_error="cannot unpack $url at $tag: $source_error"
+          return 1
+        fi
+        source_error=""
+      fi
+      ;;
+    *) source_error="a $kind is not read"; return 1 ;;
+  esac
+  # The source is held to the rules of the tree before anything of it is built: no kustomization of
+  # it names a URL, a path out of it or a field the checks refuse, and no link in it leads out of
+  # it. So its build fetches nothing, the loopback included, which the closed proxy does not cover,
+  # and reads nothing but the source.
+  root="$(realpath -e -- "$root")" || { source_error="what was unpacked of $url at $tag cannot be found"; return 1; }
+  refused="$(tree_paths_refused "$root" "the source")"
+  if [[ -n $refused ]]; then
+    source_error="$url at $tag holds what the checks refuse in a tree: ${refused//$'\n'/; }"
+    return 1
+  fi
+  source_dir="$root"
+}
+
+# fetch_source KIND URL TAG MEDIATYPE OPERATION SPARSE: fetch_source_once, once for each source.
+fetch_source() {
+  local key="$1 $2 $3 $4 $5 $6"
+  if [[ -z ${src_dir_of[$key]+set} ]]; then
+    fetch_source_once "$@" || true
+    src_dir_of[$key]=$source_dir
+    src_error_of[$key]=$source_error
+  fi
+  source_dir=${src_dir_of[$key]}
+  source_error=${src_error_of[$key]}
+  [[ -n $source_dir ]]
+}
+
+# source_definitions DIR OUT GROUP WHAT: the CustomResourceDefinitions of DIR, a directory of a
+# fetched source, of the API group GROUP alone when it is set, written to OUT; the directory is built
+# as Flux builds a Kustomization's path, with its kustomization.yaml, in the closed environment, or,
+# with none, from every YAML file in it. When it cannot be read, it fails, and source_error says why,
+# naming the directory as WHAT.
+source_definitions() {
+  local dir=$1 out=$2 group=$3 what=$4 file
+  local -a files=()
+  source_error=""
+  : >"$out"
+  if [[ -f $dir/kustomization.yaml || -f $dir/kustomization.yml || -f $dir/Kustomization ]]; then
+    if ! offline kustomize build "$dir" >"$tmp/source-built.yaml" 2>"$tmp/source-built.err"; then
+      source_error="kustomize does not build $what: $(head -c 300 "$tmp/source-built.err" | tr -c '[:print:]' '?')"
+      return 1
+    fi
+    files=("$tmp/source-built.yaml")
+  else
+    while IFS= read -r -d '' file; do
+      files+=("$file")
+    done < <(find "$dir" -type f \( -name '*.yaml' -o -name '*.yml' \) -print0 | sort -z)
+  fi
+  ((${#files[@]} > 0)) || return 0
+  # shellcheck disable=SC2016 # tag is a yq operator.
+  if ! group="$group" yq 'select(tag == "!!map") | select(.kind == "CustomResourceDefinition")
+    | select(strenv(group) == "" or .spec.group == strenv(group))' "${files[@]}" >"$out" 2>"$tmp/source-built.err"; then
+    source_error="the YAML of $what cannot be read: $(head -c 300 "$tmp/source-built.err" | tr -c '[:print:]' '?')"
+    return 1
+  fi
+}
+
+# refused_spellings WHERE WHAT KIND JSON: a failure for each key of JSON, an object of KIND in
+# tree_paths_read_fields, that folds to a field this check reads without being it, as WHERE: WHAT:
+# the key; fails when there is one. The API server drops such a key of a custom resource, so the
+# cluster reads the field by its exact name, as this check does; the check refuses the key rather
+# than read past it.
+refused_spellings() {
+  local where=$1 what=$2 kind=$3 json=$4 line found=0
+  while IFS= read -r line; do
+    [[ -n $line ]] || continue
+    fail "$where: $what: $line, so nothing is fetched for it and the definitions it leads to are not read"
+    found=1
+  done <<<"$(read_refused "$kind" <<<"$json")"
+  return "$found"
+}
+
+# definition_sources: the definitions of every source a Kustomization of a build applies from, in
+# source-defs/<application>/ for crd_schemas. A key of the Kustomization or of its source that folds
+# to a field read here is refused first, and nothing is fetched for it.
+definition_sources() {
+  local i n=0 app_dir app name path kind url tag media op nosource otherref sparse kjson sname sjson
+  local where swhere reason rel root real refused
+  mkdir -p "$tmp/source-defs" "$tmp/sources"
+  for i in "${!built_files[@]}"; do
+    app_dir="${built_app_dirs[i]}"
+    app="${app_dir##*/}"
+    [[ -n $app ]] || app=root
+    # shellcheck disable=SC2016 # $all and $k are jq variables.
+    if ! yq -N -o json -I0 '.' "${built_files[i]}" 2>/dev/null | jq -rs "$jq_clean"'
+      . as $all
+      | $all[] | select(type == "object" and .kind == "Kustomization" and ((.apiVersion // "") | test("^kustomize\\.toolkit\\.fluxcd\\.io/"))
+          and (.spec.sourceRef.kind | IN("GitRepository", "OCIRepository"))
+          and ((.spec.sourceRef.kind == "OCIRepository" and .spec.sourceRef.name == "flux-system") | not))
+      | . as $k
+      | ($k.spec.sourceRef.namespace // $k.metadata.namespace // "") as $ns
+      | ($all | map(select(type == "object" and .kind == $k.spec.sourceRef.kind and .metadata.name == $k.spec.sourceRef.name
+          and (.metadata.namespace // "") == $ns)) | first) as $s
+      | [$k.metadata.name, ($k.spec.path // ""), $k.spec.sourceRef.kind, ($s.spec.url // ""), ($s.spec.ref.tag // ""),
+         ($s.spec.layerSelector.mediaType // ""), ($s.spec.layerSelector.operation // ""), ($s == null),
+         (($s.spec.ref // {}) | if type == "object" then keys - ["tag"] | length else 1 end),
+         (($s.spec.sparseCheckout // []) | if type == "array" then map(tostring) | join(",") else "" end),
+         ($k | tojson), ($k.spec.sourceRef.name // ""), ($s | tojson)]
+      | map(clean) | join("\u001f")' >"$tmp/source-records"; then
+      fail "${built_labels[i]}: cannot read the Kustomizations that apply from a source, so the definitions they bring were not read"
+      continue
+    fi
+    while IFS=$sep read -r name path kind url tag media op nosource otherref sparse kjson sname sjson; do
+      where="$(source_of "$app_dir" Kustomization "$name" "${built_labels[i]}")"
+      refused=0
+      refused_spellings "$where" "Kustomization $name" Kustomization "$kjson" || refused=1
+      if [[ $nosource != true ]]; then
+        swhere="$(source_of "$app_dir" "$kind" "$sname" "${built_labels[i]}")"
+        refused_spellings "$swhere" "$kind $sname, which Kustomization $name applies from" "$kind" "$sjson" || refused=1
+      fi
+      ((refused == 0)) || continue
+      reason=""
+      rel="${path#./}"
+      rel="${rel%/}"
+      if [[ $nosource == true ]]; then
+        reason="the $kind it applies from is not an object of the application"
+      elif [[ $otherref != 0 ]]; then
+        reason="its $kind names a ref other than a tag, and only a tag pins what the definitions are"
+      elif [[ -n $rel ]] && { ! tree_paths_plain "$rel" || [[ /$rel/ == */../* ]]; }; then
+        reason="its spec.path $(tree_paths_show "$path") is not a plain path"
+      elif fetch_source "$kind" "$url" "$tag" "$media" "$op" "$sparse"; then
+        root="$(realpath -e -- "$source_dir")"
+        real="$(realpath -e -- "$root${rel:+/$rel}" 2>/dev/null)" || real=""
+        if [[ -z $real ]] || ! tree_paths_inside "$root" "$real" || [[ ! -d $real ]]; then
+          reason="$(tree_paths_show "$path") is not a directory of $url at $tag"
+        else
+          n=$((n + 1))
+          mkdir -p "$tmp/source-defs/$app"
+          source_definitions "$real" "$tmp/source-defs/$app/$n.yaml" "" "$(tree_paths_show "$path") of $url at $tag" ||
+            reason="$source_error"
+        fi
+      else
+        reason="$source_error"
+      fi
+      if [[ -n $reason ]]; then
+        fail "$where: Kustomization $name: $reason, so the definitions it applies are not read and its objects would go unvalidated"
+      fi
+    done <"$tmp/source-records"
+  done
+}
+
+# operator_definitions: the definitions operator-definitions.yaml says where to read, for an
+# operator that installs its own when it starts and whose chart ships none, or for Talos, written to
+# source-defs/_operator_<entry>/ for crd_schemas, with the group and kind of each in
+# operator_kinds[entry]. An entry is a group (never one of Kubernetes' own or Flux's), a repository
+# on github.com, a plain path in it, a tagPrefix, and either the kind, namespace and name of the
+# source object that pins the operator's chart or the key of versions.yaml that holds the version,
+# and no other field; that object must be in what Flux builds, once, with a tag as its one ref and
+# no key that folds to a field read here, and that key must hold a string. The repository's archive
+# is fetched at tagPrefix followed by that tag or version, as a GitRepository's is, with the path
+# its one sparse entry, and the path is read as a source's directory is, keeping the definitions of
+# the group. Every refusal comes before anything is fetched for the entry.
+declare -A operator_label=() operator_kinds=()
+operator_definitions() {
+  local status n group repo path prefix skind sns sname key found count stag otherref sjson sapp sfile
+  local where derived root real pin
+  local -A declared=()
+  [[ -f operator-definitions.yaml ]] || return 0
+  if ! yq -o json -I0 '. // {}' operator-definitions.yaml >"$tmp/operators.json" 2>"$tmp/operators.err"; then
+    fail "operator-definitions.yaml: cannot be read as YAML: $(cat "$tmp/operators.err")"
+    return
+  fi
+  # shellcheck disable=SC2016 # $e and $r are jq variables.
+  if ! jq -r "$jq_clean$(shapes_jq)"'
+    if type != "object" or ((keys - ["definitions"]) | length) > 0 or ((.definitions // []) | type) != "array"
+    then ["bad", 0, "", "the file is a map of one key, definitions, a list of entries"]
+    else (.definitions // []) | to_entries[] | .key as $i | .value as $e
+      | if ($e | type) != "object"
+        then ["bad", $i + 1, "", "an entry is a map of a group, a repository, a path, a tagPrefix, and a sourceRef or a versionsKey"]
+        else ($e.group // "" | tostring) as $group | ($e.sourceRef // null) as $r
+          | (($e | keys) - ["group", "repository", "path", "tagPrefix", "sourceRef", "versionsKey"]) as $extra
+          | if ($extra | length) > 0
+            then ["bad", $i + 1, $group, "an entry has no field but group, repository, path, tagPrefix, and sourceRef or versionsKey: " + ($extra | join(", "))]
+            elif ($e.group | shaped(env.group_re) | not) then ["bad", $i + 1, $group, "its group is not an API group"]
+            elif (($e.repository // null) | type) != "string"
+            then ["bad", $i + 1, $group, "its repository is not https://github.com/<owner>/<repository>"]
+            elif (($e.path // null) | type) != "string" then ["bad", $i + 1, $group, "its path is not a plain path in the repository"]
+            elif (($e.tagPrefix // "") | type) != "string" then ["bad", $i + 1, $group, "its tagPrefix is not the start of a tag"]
+            elif ($e | has("sourceRef")) and ($e | has("versionsKey"))
+            then ["bad", $i + 1, $group, "it names both a sourceRef and a versionsKey, and its version comes from one of them"]
+            elif ($e | has("versionsKey"))
+            then if ($e.versionsKey | shaped("\\A[a-z][a-z0-9_]{0,62}\\z"))
+              then ["ok", $i + 1, $group, $e.repository, $e.path, ($e.tagPrefix // ""), "", "", $e.versionsKey]
+              else ["bad", $i + 1, $group, "its versionsKey is not a key of versions.yaml, a name in lower case"] end
+            elif ($r | type) != "object" or (($r | keys) - ["kind", "namespace", "name"] | length) > 0
+              or (($r.kind // null) | IN("OCIRepository", "GitRepository") | not)
+              or (($r.name // null) | type) != "string" or (($r.namespace // "") | type) != "string"
+            then ["bad", $i + 1, $group, "its sourceRef is not the kind (OCIRepository or GitRepository), namespace and name of a source object, with no other field, and it has no versionsKey in its place"]
+            else ["ok", $i + 1, $group, $e.repository, $e.path, ($e.tagPrefix // ""), $r.kind, ($r.namespace // ""), $r.name] end
+        end
+    end
+    | map(clean) | join("\u001f")' "$tmp/operators.json" >"$tmp/operators.records" 2>"$tmp/operators.err"; then
+    fail "operator-definitions.yaml: cannot be read: $(cat "$tmp/operators.err")"
+    return
+  fi
+  # The Flux source objects of every build, with the build each comes from, read once.
+  # shellcheck disable=SC2016 # $i is a jq variable.
+  for n in "${!built_files[@]}"; do
+    yq -N -o json -I0 'select(. != null)' "${built_files[n]}" 2>/dev/null |
+      jq -c --argjson i "$n" 'select(type == "object" and (.kind | IN("OCIRepository", "GitRepository"))
+        and ((.apiVersion // "") | test("^source\\.toolkit\\.fluxcd\\.io/"))) | {"build": $i, "object": .}'
+  done >"$tmp/source-objects.jsonl"
+  mkdir -p "$tmp/source-defs" "$tmp/sources"
+  # A refused entry's record is its status, number, group and why, in place of the repository.
+  while IFS=$sep read -r status n group repo path prefix skind sns sname; do
+    where="operator-definitions.yaml: entry $n (${group:-no group})"
+    [[ $n != 0 ]] || where=operator-definitions.yaml
+    if [[ $status == bad ]]; then
+      fail "$where: $repo"
+      continue
+    elif [[ $group =~ $builtin_group_re || $group =~ $flux_group_re ]]; then
+      fail "$where: a group of Kubernetes' own or Flux's, whose definitions are no operator's to publish, is never declared"
+      continue
+    elif [[ ! $repo =~ $github_repo_re ]]; then
+      fail "$where: its repository is not https://github.com/<owner>/<repository>: $(tree_paths_show "$repo")"
+      continue
+    elif [[ ${repo,,} == *.git ]]; then
+      fail "$where: its repository ends in .git, and GitHub serves a repository's archive under its name alone: write it as https://github.com/<owner>/<repository>"
+      continue
+    elif ! tree_paths_plain "$path" || [[ /$path/ == */../* || /$path/ == */./* ]]; then
+      fail "$where: its path $(tree_paths_show "$path") is not a plain path in the repository"
+      continue
+    elif [[ -n $prefix && ! $prefix =~ ^[A-Za-z0-9_][A-Za-z0-9._+-]*$ ]]; then
+      fail "$where: its tagPrefix $(tree_paths_show "$prefix") is not the start of a tag"
+      continue
+    elif [[ -n $skind ]] && [[ ! $sname =~ ^[a-z0-9]([-.a-z0-9]{0,251}[a-z0-9])?$ || ! $sns =~ ^([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)?$ ]]; then
+      fail "$where: its sourceRef names no Kubernetes namespace and name: $(tree_paths_show "$sns/$sname")"
+      continue
+    fi
+    key="$group $path"
+    if [[ -n ${declared[$key]:-} ]]; then
+      fail "$where: the group and path are declared twice"
+      continue
+    fi
+    declared[$key]=1
+    if [[ -z $skind ]]; then
+      # What no source object of the tree pins, versions.yaml does: the string under its key.
+      # shellcheck disable=SC2016 # tag is a yq operator.
+      stag="$(key="$sname" yq '.[strenv(key)] | select(tag == "!!str")' versions.yaml 2>/dev/null | tr -c '[:print:]\n' '?')" || stag=""
+      if [[ -z $stag ]]; then
+        fail "$where: versions.yaml holds no version under $sname, the key it takes the tag from, so the entry has no use: remove it, or name the key of versions.yaml that holds the version"
+        continue
+      fi
+      pin="the version versions.yaml holds under $sname"
+    else
+      # shellcheck disable=SC2016 # $kind, $ns and $name are jq variables.
+      found="$(jq -c --arg kind "$skind" --arg ns "$sns" --arg name "$sname" \
+        'select(.object.kind == $kind and .object.metadata.name == $name and (.object.metadata.namespace // "") == $ns)' \
+        "$tmp/source-objects.jsonl")"
+      count="$(jq -s 'map(.object) | unique | length' <<<"$found")"
+      if [[ $count == 0 ]]; then
+        fail "$where: no object of the tree is the $skind $sns/$sname it takes the tag from, so the entry has no use: remove it, or name the source object that pins the operator's chart"
+        continue
+      elif [[ $count != 1 ]]; then
+        fail "$where: the tree holds more than one $skind $sns/$sname, so it pins no one tag"
+        continue
+      fi
+      # shellcheck disable=SC2016 # clean is a jq function.
+      IFS=$sep read -r sapp stag otherref sjson < <(jq -rs "$jq_clean"'first | [.build, (.object.spec.ref.tag // ""),
+        ((.object.spec.ref // {}) | if type == "object" then keys - ["tag"] | length else 1 end), (.object | tojson)]
+        | map(clean) | join("\u001f")' <<<"$found")
+      [[ $sapp =~ ^[0-9]+$ ]] || { fail "$where: the $skind $sns/$sname it takes the tag from cannot be read"; continue; }
+      sfile="$(source_of "${built_app_dirs[sapp]}" "$skind" "$sname" "${built_labels[sapp]}")"
+      refused_spellings "$sfile" "$skind $sname, whose tag operator-definitions.yaml entry $n reads" "$skind" "$sjson" || continue
+      if [[ $otherref != 0 ]]; then
+        fail "$where: the $skind $sns/$sname it takes the tag from names a ref other than a tag, and only a tag pins what the definitions are"
+        continue
+      elif [[ -z $stag ]]; then
+        fail "$where: the $skind $sns/$sname it takes the tag from names no tag, which is what pins what the definitions are"
+        continue
+      fi
+      pin="the tag of $skind $sns/$sname"
+    fi
+    derived="$prefix$stag"
+    if ! git_tag_shaped "$derived"; then
+      fail "$where: its tag $(tree_paths_show "$derived") has not the shape of a tag: it is its tagPrefix followed by $pin"
+      continue
+    fi
+    if ! fetch_source GitRepository "$repo" "$derived" "" "" "$path"; then
+      fail "$where: $source_error, so the definitions it declares are not read"
+      continue
+    fi
+    root="$(realpath -e -- "$source_dir")"
+    real="$(realpath -e -- "$root/$path" 2>/dev/null)" || real=""
+    if [[ -z $real ]] || ! tree_paths_inside "$root" "$real" || [[ ! -d $real ]]; then
+      fail "$where: $(tree_paths_show "$path") is not a directory of $repo at $derived, so the definitions it declares are not read"
+      continue
+    fi
+    mkdir -p "$tmp/source-defs/_operator_$n"
+    if ! source_definitions "$real" "$tmp/source-defs/_operator_$n/1.yaml" "$group" "$(tree_paths_show "$path") of $repo at $derived"; then
+      fail "$where: $source_error, so the definitions it declares are not read"
+      continue
+    fi
+    # shellcheck disable=SC2016 # tag is a yq operator.
+    operator_kinds[$n]="$(yq -N '.spec.group + " " + .spec.names.kind' "$tmp/source-defs/_operator_$n/1.yaml" 2>/dev/null | tr -c '[:print:]\n' '?')"
+    if [[ -z ${operator_kinds[$n]//[[:space:]]/} ]]; then
+      unset 'operator_kinds[$n]'
+      fail "$where: $(tree_paths_show "$path") of $repo at $derived holds no definition of $group, so the entry declares nothing"
+      continue
+    fi
+    operator_label[_operator_$n]="$where"
+  done <"$tmp/operators.records"
+}
+
+# load_exceptions: the kinds schema-exceptions.yaml lists as having no schema, in exception_reason by
+# "GROUP KIND", with the reason each gives. An entry is a group, a kind and a reason, and no other
+# field; the group is never one of Kubernetes' own or Flux's, whose kinds always have a schema.
+declare -A exception_reason=()
+load_exceptions() {
+  local status n egroup ekind text
+  [[ -f schema-exceptions.yaml ]] || return 0
+  if ! yq -o json -I0 '. // {}' schema-exceptions.yaml >"$tmp/exceptions.json" 2>"$tmp/exceptions.err"; then
+    fail "schema-exceptions.yaml: cannot be read as YAML: $(cat "$tmp/exceptions.err")"
+    return
+  fi
+  # shellcheck disable=SC2016 # $e is a jq variable.
+  if ! jq -r "$jq_clean$(shapes_jq)"'
+    if type != "object" or ((keys - ["exceptions"]) | length) > 0 or ((.exceptions // []) | type) != "array"
+    then ["bad", 0, "", "", "the file is a map of one key, exceptions, a list of entries"]
+    else (.exceptions // []) | to_entries[] | .key as $i | .value as $e
+      | if ($e | type) != "object" then ["bad", $i + 1, "", "", "an entry is a map of a group, a kind and a reason"]
+        else ($e.kind // "" | tostring) as $kind | ($e.group // "" | tostring) as $group
+          | if (($e | keys) - ["group", "kind", "reason"] | length) > 0
+            then ["bad", $i + 1, $group, $kind, "an entry has no field but group, kind and reason: " + (($e | keys) - ["group", "kind", "reason"] | join(", "))]
+            elif ($e.group | shaped(env.group_re) | not) then ["bad", $i + 1, $group, $kind, "its group is not an API group"]
+            elif ($e.kind | shaped(env.kind_re) | not) then ["bad", $i + 1, $group, $kind, "its kind is not a kind"]
+            elif (($e.reason // null) | type) != "string" or ($e.reason | test("[[:graph:]]") | not)
+            then ["bad", $i + 1, $group, $kind, "has no reason, which says why no schema can be made and what proves the kind'"'"'s objects instead"]
+            else ["ok", $i + 1, $group, $kind, $e.reason] end
+        end
+    end
+    | map(clean) | join("\u001f")' "$tmp/exceptions.json" >"$tmp/exceptions.records" 2>"$tmp/exceptions.err"; then
+    fail "schema-exceptions.yaml: cannot be read: $(cat "$tmp/exceptions.err")"
+    return
+  fi
+  while IFS=$sep read -r status n egroup ekind text; do
+    if [[ $status == bad ]]; then
+      fail "schema-exceptions.yaml: entry $n${ekind:+ ($ekind of ${egroup:-no group})}: $text"
+    elif [[ $egroup =~ $builtin_group_re || $egroup =~ $flux_group_re ]]; then
+      fail "schema-exceptions.yaml: entry $n ($ekind of $egroup): a kind of Kubernetes' own groups or Flux's always has a schema, so it is never listed"
+    elif [[ -n ${exception_reason["$egroup $ekind"]:-} ]]; then
+      fail "schema-exceptions.yaml: entry $n ($ekind of $egroup): the kind is listed twice"
+    else
+      exception_reason["$egroup $ekind"]=$text
+    fi
+  done <"$tmp/exceptions.records"
+}
+
 # schema_check: validates everything the offline check built, with unknown fields refused, against
 # Flux's CRD schemas, the schemas crd_schemas makes and Kubernetes' schemas for the version in
-# versions.yaml, the first that has the kind; counts the objects of the kinds none has, and prints
-# each kind with its count. An object whose kind or apiVersion has not the shape the API server
-# requires is refused and not handed on.
+# versions.yaml, the first that has the kind. An object of a kind none has fails, unless the kind is
+# in schema-exceptions.yaml, whose objects are counted and printed with their kind; a listed kind
+# that has a schema, or that no object is of, fails as well, and so does an entry of
+# operator-definitions.yaml whose definitions no object is of. An object whose kind or apiVersion has
+# not the shape the API server requires is refused and not handed on.
 schema_valid=0
-schema_skipped=0
+schema_listed=0
 schema_check() {
-  local kube flux_dir kube_location flux_version url err tool i n key status index kind api name msg group where
+  local kube flux_dir kube_location flux_version url err tool i n key status index kind api name msg group where used
   local cluster_app app app_dir rendered misshapen
   local -a releases
-  local -A skipped=()
+  local -A listed=() seen=()
   kube="$(yq '.kubernetes // ""' versions.yaml 2>/dev/null)" || kube=""
   if [[ ! $kube =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     fail "versions.yaml: kubernetes is not a version: ${kube:-none}; the schemas are the Kubernetes version's"
@@ -315,6 +850,9 @@ schema_check() {
     kube_location="https://raw.githubusercontent.com/yannh/kubernetes-json-schema/$kubernetes_schemas_ref/{{.NormalizedKubernetesVersion}}-standalone{{.StrictSuffix}}/{{.ResourceKind}}{{.KindSuffix}}.json"
   fi
 
+  load_exceptions
+  definition_sources
+  operator_definitions
   crd_schemas "$tmp/crd-schemas"
 
   # The HelmReleases of an application the render holds are validated as the render builds them,
@@ -379,32 +917,56 @@ schema_check() {
       continue
     fi
     where="${built_labels[index]}"
+    group=""
+    [[ $api != */* ]] || group="${api%%/*}"
     case $status in
-      statusValid) schema_valid=$((schema_valid + 1)) ;;
       statusSkipped)
-        group=""
-        [[ $api != */* ]] || group="${api%%/*}"
         if [[ $group =~ $builtin_group_re || $group =~ $flux_group_re ]]; then
           where="$(source_of "${built_app_dirs[index]}" "$kind" "$name" "$where")"
           fail "$where: $kind $name: no schema for $api in the Kubernetes or Flux schemas: the apiVersion or kind is wrong, or the schemas are older than this API"
-        else
+        elif [[ -n ${exception_reason["$group $kind"]:-} ]]; then
+          seen["$group $kind"]=skipped
           key="$kind ($api)"
-          n=${skipped[$key]:-0}
-          skipped[$key]=$((n + 1))
-          schema_skipped=$((schema_skipped + 1))
+          n=${listed[$key]:-0}
+          listed[$key]=$((n + 1))
+          schema_listed=$((schema_listed + 1))
+        else
+          where="$(source_of "${built_app_dirs[index]}" "$kind" "$name" "$where")"
+          fail "$where: $kind $name: no schema for $api: no definition of the kind is in what the render holds, in a source the tree applies definitions from or where operator-definitions.yaml says an operator publishes them, and it is not listed in schema-exceptions.yaml: bring its definition, declare where its operator publishes it, or list the group and kind there with the reason no schema can exist"
         fi
         ;;
-      statusInvalid | statusError)
-        where="$(source_of "${built_app_dirs[index]}" "$kind" "$name" "$where")"
-        fail "$where: $kind $name${built_notes[index]}: ${msg:-$status}"
+      statusValid | statusInvalid | statusError)
+        [[ -n ${seen["$group $kind"]:-} ]] || seen["$group $kind"]=schema
+        if [[ $status == statusValid ]]; then
+          schema_valid=$((schema_valid + 1))
+        else
+          where="$(source_of "${built_app_dirs[index]}" "$kind" "$name" "$where")"
+          fail "$where: $kind $name${built_notes[index]}: ${msg:-$status}"
+        fi
         ;;
     esac
   done <"$tmp/verdicts"
-  ((${#skipped[@]} > 0)) || return 0
+  # An entry that has no use is stale: the kind has a schema now, or no object is of it, and a list
+  # that keeps such entries says things that are no longer so.
+  for key in "${!exception_reason[@]}"; do
+    case ${seen[$key]:-} in
+      schema) fail "schema-exceptions.yaml: ${key#* } of ${key%% *} has a schema, so it is no exception: remove the entry" ;;
+      "") fail "schema-exceptions.yaml: no object of the tree is of ${key#* } of ${key%% *}, so the entry has no use: remove it" ;;
+    esac
+  done
+  # So is a declaration of an operator's definitions that no object of the tree is of a kind of.
+  for n in "${!operator_kinds[@]}"; do
+    used=false
+    while IFS= read -r key; do
+      [[ ${seen[$key]:-} != schema ]] || used=true
+    done <<<"${operator_kinds[$n]}"
+    $used || fail "${operator_label[_operator_$n]}: no object of the tree is of a kind its definitions describe, so the entry has no use: remove it"
+  done
+  ((${#listed[@]} > 0)) || return 0
   while IFS= read -r key; do
-    n=${skipped[$key]}
-    echo "kubernetes-validate: no schema for $key: $n object$( ((n == 1)) || echo s)"
-  done < <(printf '%s\n' "${!skipped[@]}" | sort)
+    n=${listed[$key]}
+    echo "kubernetes-validate: listed without a schema: $key: $n object$( ((n == 1)) || echo s)"
+  done < <(printf '%s\n' "${!listed[@]}" | sort)
 }
 flux_builds=${#built_files[@]}
 if ((flux_builds > 0)); then
@@ -488,4 +1050,4 @@ if ((failures > 0)); then
   echo "kubernetes-validate: $failures failure(s)" >&2
   exit 1
 fi
-echo "kubernetes-validate: passed ($flux_builds flux builds, $schema_valid objects validated, $schema_skipped without a schema, $images images)"
+echo "kubernetes-validate: passed ($flux_builds flux builds, $schema_valid objects validated, $schema_listed of listed kinds, $images images)"

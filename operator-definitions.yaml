@@ -1,0 +1,43 @@
+---
+# Where the CustomResourceDefinitions that an operator installs itself when it starts, or that Talos
+# installs on the control planes, are held as files, so that scripts/kubernetes-validate (just
+# kubernetes-validate) validates the objects of their kinds against the definitions of the release
+# the tree runs. No chart of the tree ships them, so the render holds none of them.
+# docs/kubernetes.md, What the checks refuse (Schemas), says how the check reads this file.
+#
+# An entry says that the definitions of one API group are the YAML files of a directory of a
+# repository on github.com, at the tag made of the prefix followed by the version the tree pins:
+# the tag of a source object of the tree, the one that pins the operator's chart, or, for what no
+# source object pins, a version versions.yaml holds. The check fetches the repository's archive at
+# that tag, unpacks that directory alone and reads the definitions of that group in it. An entry
+# whose source object is not in the tree, whose key versions.yaml holds no version under, or whose
+# definitions no object of the tree is of, fails the check: remove it. An entry has:
+#   group        the API group, never one of Kubernetes' own or Flux's
+#   repository   https://github.com/<owner>/<repository>
+#   path         the directory, a plain path in the repository
+#   tagPrefix    what goes before the version to make the repository's tag; may be left out
+#   sourceRef    the kind (OCIRepository or GitRepository), namespace and name of the source object,
+#                as the application builds it, whose tag is the version
+#   versionsKey  in place of sourceRef: the key of versions.yaml whose value is the version
+definitions:
+  # Cilium's operator installs the definitions it embeds from this directory
+  # (pkg/k8s/apis/cilium.io/client/register.go), and the chart of a Cilium release, tagged with
+  # that release's version, runs the operator image tagged with the version after a v.
+  - group: cilium.io
+    repository: https://github.com/cilium/cilium
+    path: pkg/k8s/apis/cilium.io/client/crds/v2
+    tagPrefix: v
+    sourceRef:
+      kind: OCIRepository
+      namespace: kube-system
+      name: cilium
+  # Talos builds the definition of its ServiceAccount kind in code
+  # (internal/app/machined/pkg/controllers/k8s/internal/k8stemplates/crds.go) and applies it on the
+  # control planes once a KubeTalosAPIAccessConfig document is in their machine configuration
+  # (talos/patches/controlplane/talos-api-access.yaml). It publishes no file of it: the one file is
+  # the golden file of that package's unit test, which requires it to equal what the code builds,
+  # read at the tag that is the Talos version of the cluster.
+  - group: talos.dev
+    repository: https://github.com/siderolabs/talos
+    path: internal/app/machined/pkg/controllers/k8s/internal/k8stemplates/testdata
+    versionsKey: talos

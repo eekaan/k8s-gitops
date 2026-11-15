@@ -1,0 +1,40 @@
+---
+# Doohickey as the operator of release v1.0.0 installs it, from the file it embeds.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: doohickeys.operator.example.invalid
+spec:
+  group: operator.example.invalid
+  names:
+    kind: Doohickey
+    listKind: DoohickeyList
+    plural: doohickeys
+    singular: doohickey
+  scope: Cluster
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - size
+              properties:
+                size:
+                  type: integer
+                peers:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - name
+                    properties:
+                      name:
+                        type: string
+                      port:
+                        type: integer

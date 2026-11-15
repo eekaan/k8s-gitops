@@ -1,0 +1,67 @@
+---
+# Gizmo as the release v1.0.0 defines it: a size and a name under spec, an extra that keeps unknown
+# fields beside the one it types, a list of parts whose items list their fields, and addresses.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: gizmos.example.invalid
+spec:
+  group: example.invalid
+  names:
+    kind: Gizmo
+    listKind: GizmoList
+    plural: gizmos
+    singular: gizmo
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - size
+              properties:
+                size:
+                  type: integer
+                name:
+                  type: string
+                extra:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  properties:
+                    known:
+                      type: string
+                parts:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - label
+                    properties:
+                      label:
+                        type: string
+                # Conditions on a field are no declaration of the fields an object has: the Gateway
+                # API's addresses are written so, and an address of another type has a value.
+                addresses:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      value:
+                        type: string
+                    allOf:
+                      - anyOf:
+                          - properties:
+                              type:
+                                enum: [IPAddress]
+                          - properties:
+                              type:
+                                not:
+                                  enum: [IPAddress]

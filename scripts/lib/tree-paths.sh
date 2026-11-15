@@ -19,13 +19,16 @@
 #     kustomize joins it to the file's directory, or with every link on it resolved;
 #   - a cluster's root Kustomization's spec.path is not a plain path, nor a directory of the tree as
 #     it resolves.
+# scripts/kubernetes-validate holds each source it builds definitions from, a repository's checkout
+# or a chart's unpacked layer, to the first two before it builds any of it, the source for the tree.
 # Every kustomization file the builds read is one of the tree's, so the checks read each of them,
 # used or not. A Flux Kustomization is checked as it is handed to flux build
 # (kustomization_refused): at every typed position (tree_paths_flux_fields), a key that is not ASCII,
 # or that folds to a field's name without being it, is refused, as is a Component that is not a
 # plain path of the tree. A document no tool decodes, which the checks read and derive a tool's input
-# from (a HelmRelease, its sources, a FluxInstance), is checked by read_refused against the fields
-# they read (tree_paths_read_fields).
+# from (a HelmRelease, its sources, a FluxInstance, a Kustomization that applies from a GitRepository
+# or an OCIRepository and that source), is checked by read_refused against the fields they read
+# (tree_paths_read_fields).
 #
 # The text of the tree is judged by jq, which reads it as Unicode code points whatever the locale,
 # and every function here that matches, sorts or shows text runs in the C locale, so that what the
@@ -348,8 +351,12 @@ OCIRepository spec OCIRepositorySpec
 OCIRepositorySpec * open
 OCIRepositorySpec url value
 OCIRepositorySpec ref OCIRepositoryRef
+OCIRepositorySpec layerSelector LayerSelector
 OCIRepositoryRef * open
 OCIRepositoryRef tag value
+LayerSelector * open
+LayerSelector mediaType value
+LayerSelector operation value
 HelmRepository * open
 HelmRepository apiVersion value
 HelmRepository kind value
@@ -370,7 +377,26 @@ FluxInstanceSpec * open
 FluxInstanceSpec components value
 FluxInstanceSpec kustomize FluxInstanceKustomize
 FluxInstanceKustomize * open
-FluxInstanceKustomize patches []Patch'
+FluxInstanceKustomize patches []Patch
+GitRepository * open
+GitRepository apiVersion value
+GitRepository kind value
+GitRepository metadata Metadata
+GitRepository spec GitRepositorySpec
+GitRepositorySpec * open
+GitRepositorySpec url value
+GitRepositorySpec ref GitRepositoryRef
+GitRepositorySpec sparseCheckout value
+GitRepositoryRef * open
+GitRepositoryRef tag value
+Kustomization * open
+Kustomization apiVersion value
+Kustomization kind value
+Kustomization metadata Metadata
+Kustomization spec KustomizationSpec
+KustomizationSpec * open
+KustomizationSpec path value
+KustomizationSpec sourceRef SourceReference'
 
 # tree_paths_registry LINES: the field list LINES as JSON, {"types": {TYPE: {FIELD: CLASS}}}.
 tree_paths_registry() {
@@ -457,11 +483,12 @@ tree_paths_walk() {
     printf '%s\0' doc "" "cannot be read" ""
 }
 
-# tree_paths_lines NAME DIR ROOT: reads the records of a walk on stdin and writes a line for each
-# refusal, NAME: what is refused; a path is read from DIR and must name a path in ROOT.
+# tree_paths_lines NAME DIR ROOT [SHOWN]: reads the records of a walk on stdin and writes a line for
+# each refusal, NAME: what is refused; a path is read from DIR and must name a path in ROOT, which
+# the lines call SHOWN, kubernetes/ unless given.
 tree_paths_lines() {
   local -x LC_ALL=C
-  local name=$1 dir=$2 root=$3 kind where text path reason
+  local name=$1 dir=$2 root=$3 shown=${4:-kubernetes/} kind where text path reason
   while IFS= read -r -d '' kind && IFS= read -r -d '' where && IFS= read -r -d '' text && IFS= read -r -d '' path; do
     [[ $where != *[!\ -~]* ]] || where=$(tree_paths_show "$where")
     [[ $text != *[!\ -~]* ]] || text=$(tree_paths_show "$text")
@@ -469,7 +496,7 @@ tree_paths_lines() {
       field) echo "${name}$where $text" ;;
       bad) echo "${name}$where names \"$text\", $path" ;;
       path)
-        reason=$(path_refusal "$dir" "$path" "$root")
+        reason=$(path_refusal "$dir" "$path" "$root" "$shown")
         [[ -z $reason ]] || echo "${name}$where names \"$text\", $reason"
         ;;
       *) echo "${name%: }: $text" ;;
@@ -519,19 +546,19 @@ tree_paths_odd() {
   [[ -n ${count//[0$'\n']/} ]]
 }
 
-# path_refusal DIR ENTRY ROOT: why ENTRY, a plain path kustomize reads from the directory DIR, is
-# refused, or nothing when it names a path in ROOT. Both DIR and ROOT are absolute, with no link in
-# them.
+# path_refusal DIR ENTRY ROOT [SHOWN]: why ENTRY, a plain path kustomize reads from the directory
+# DIR, is refused, or nothing when it names a path in ROOT, which it calls SHOWN, kubernetes/ unless
+# given. Both DIR and ROOT are absolute, with no link in them.
 path_refusal() {
   local -x LC_ALL=C
-  local dir=$1 entry=$2 root=$3 resolved
+  local dir=$1 entry=$2 root=$3 shown=${4:-kubernetes/} resolved
   resolved=$(realpath -m -s -- "$dir/$entry" 2>/dev/null) || resolved=""
   if ! tree_paths_inside "$root" "$resolved"; then
-    echo "a path that leaves kubernetes/"
+    echo "a path that leaves $shown"
     return
   fi
   resolved=$(realpath -m -- "$dir/$entry" 2>/dev/null) || resolved=""
-  tree_paths_inside "$root" "$resolved" || echo "a path that leaves kubernetes/ through a link"
+  tree_paths_inside "$root" "$resolved" || echo "a path that leaves $shown through a link"
 }
 
 # tree_paths_offline DIR: makes DIR the place the checks' builds run from, a second layer under the
@@ -561,16 +588,22 @@ offline() {
   )
 }
 
-# tree_paths_refused ROOT: a line for each thing of the tree ROOT, an absolute path with no link in
-# it whose last component is kubernetes, that the checks refuse; nothing when there is none.
+# tree_paths_refused ROOT [NAME]: a line for each thing of the tree ROOT, an absolute path with no
+# link in it whose last component is kubernetes, that the checks refuse; nothing when there is none.
+# With NAME, ROOT may be any directory, an absolute path with no link in it, such as a source's
+# checkout that kubernetes-validate builds; the lines call it NAME and name each file by its path
+# below it.
 tree_paths_refused() {
   local -x LC_ALL=C
-  local root=$1 base link target file name dir odd tags json
+  local root=$1 base shown=kubernetes/ link target file name dir odd tags json
   base=${root%/*}
+  if (($# > 1)); then
+    base=$root shown=$2
+  fi
   while IFS= read -r -d '' link; do
     target=$(realpath -e -- "$link" 2>/dev/null) || target=""
     tree_paths_inside "$root" "$target" ||
-      echo "$(tree_paths_show "${link#"$base"/}"): a link to $(tree_paths_show "$(readlink -- "$link")"), which is no path in kubernetes/"
+      echo "$(tree_paths_show "${link#"$base"/}"): a link to $(tree_paths_show "$(readlink -- "$link")"), which is no path in $shown"
   done < <(find "$root" -type l -print0 | sort -z)
 
   while IFS= read -r -d '' file; do
@@ -599,7 +632,7 @@ tree_paths_refused() {
     json=$(yq -o json -I0 'select(. != null)' "$file" 2>/dev/null) || { echo "$name: cannot be read as YAML"; continue; }
     tree_paths_walk "$tree_paths_kustomize" Kustomization kustomize "kustomize would read it as that field" \
       "is a field the checks refuse: a plugin configuration names files of its own, and neither Flux nor the checks inflate a Helm chart" \
-      <<<"$json" | tree_paths_lines "$name: " "$dir" "$root"
+      <<<"$json" | tree_paths_lines "$name: " "$dir" "$root" "$shown"
   done < <(find "$root" \( -name kustomization.yaml -o -name kustomization.yml -o -name Kustomization \) ! -type d -print0 | sort -z)
 }
 

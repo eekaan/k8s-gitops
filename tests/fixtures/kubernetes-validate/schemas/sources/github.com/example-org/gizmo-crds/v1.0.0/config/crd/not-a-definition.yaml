@@ -1,0 +1,7 @@
+---
+# Something a release ships beside its definitions, as the Gateway API ships an admission policy:
+# only definitions are read from a source.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: not-a-definition

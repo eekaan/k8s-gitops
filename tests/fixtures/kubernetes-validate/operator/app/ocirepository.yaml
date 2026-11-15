@@ -1,0 +1,15 @@
+---
+# The chart of an operator that installs its definitions itself when it starts, as Cilium's does:
+# the chart ships none, and its release runs the operator of the version the tag names.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: doohickey
+spec:
+  interval: 12h
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy
+  url: oci://registry.example.invalid/charts/doohickey
+  ref:
+    tag: 1.0.0

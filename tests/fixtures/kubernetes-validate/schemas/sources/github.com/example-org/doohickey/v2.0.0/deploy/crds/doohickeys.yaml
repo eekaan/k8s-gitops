@@ -1,0 +1,33 @@
+---
+# Doohickey as the operator of release v2.0.0 installs it: a colour is required beside the size, and
+# the peers are gone.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: doohickeys.operator.example.invalid
+spec:
+  group: operator.example.invalid
+  names:
+    kind: Doohickey
+    listKind: DoohickeyList
+    plural: doohickeys
+    singular: doohickey
+  scope: Cluster
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - size
+                - colour
+              properties:
+                size:
+                  type: integer
+                colour:
+                  type: string
