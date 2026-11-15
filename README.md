@@ -25,11 +25,12 @@ announce that address to both edges over BGP, so the edge sends it to a worker, 
 to an Envoy Gateway proxy, and the proxy routes it by hostname to a pod
 ([the edge routers](docs/infrastructure.md#the-edge-routers),
 [Service addresses](docs/kubernetes.md#service-addresses),
-[the public Gateway](docs/kubernetes.md#the-public-gateway)). The tree has no external-dns, so no
-DNS record follows the routes. The Gateway's certificate comes from the issuer the cluster's overlay
-chooses: the cluster's own CA by default, or Let's Encrypt through a DNS-01 challenge against
-Cloudflare. `lab-sto2` chooses Let's Encrypt's staging issuer, whose chain no client outside the
-cluster trusts ([the ACME issuers](docs/kubernetes.md#the-acme-issuers)).
+[the public Gateway](docs/kubernetes.md#the-public-gateway)). external-dns publishes each route's
+name at both edge routers' public addresses ([DNS records](docs/kubernetes.md#dns-records)). The
+Gateway's certificate comes from the issuer the cluster's overlay chooses: the cluster's own CA by
+default, or Let's Encrypt through a DNS-01 challenge against Cloudflare. `lab-sto2` chooses Let's
+Encrypt's staging issuer, whose chain no client outside the cluster trusts
+([the ACME issuers](docs/kubernetes.md#the-acme-issuers)).
 
 ## Where state lives
 

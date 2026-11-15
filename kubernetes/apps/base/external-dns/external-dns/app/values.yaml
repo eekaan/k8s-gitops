@@ -1,0 +1,58 @@
+---
+# Values for the external-dns chart, read by the HelmRelease through a ConfigMap generated without
+# substitution; what comes from a variable is the HelmRelease's own spec.values. Keys not set here
+# keep the chart's defaults, which run the pod as a non-root user with the runtime's default
+# seccomp profile, a read-only root filesystem, no capabilities and no privilege escalation.
+
+provider:
+  name: cloudflare
+
+# The API token, from the Secret the ExternalSecret makes. Nothing else is set in the environment,
+# so the provider reads no key and no e-mail address.
+env:
+  - name: CF_API_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: external-dns-cloudflare
+        key: api-token
+
+# Routes of the public Gateway only: no Service, no Ingress, no other Gateway. The chart gives the
+# source read access to Gateways, HTTPRoutes and Namespaces, cluster-wide as the routes are in
+# every namespace that opts in, and to nothing else.
+sources:
+  - gateway-httproute
+gatewayNamespace: envoy-gateway-system
+extraArgs:
+  gateway-name: public
+  # Where a route gives no TTL, five minutes. The provider's proxy is off, which is its default and
+  # is not set: the edge routers take the traffic directly, and with the proxy on the provider
+  # would answer for the names with its own addresses, hide the edges and terminate TLS itself,
+  # which the certificate of the Gateway is not made for.
+  min-ttl: 300s
+  # A route's change triggers a sync, at most one in 30 seconds.
+  min-event-sync-interval: 30s
+
+# A records only: the edges' addresses are IPv4, and nothing else is written.
+managedRecordTypes:
+  - A
+
+# A removed route removes its records, and only those the registry says this owner made. The
+# registry's TXT records carry the owner id, which is the cluster's name, and the prefix keeps them
+# from a record of the same name that is made by hand.
+policy: sync
+registry: txt
+txtPrefix: "extdns-%{record_type}."
+
+# A sync every minute and one when a route changes: a new route's record is in the zone within a
+# minute, and the provider's API, which allows 1200 requests in five minutes, is asked for the
+# zone's records a few times per sync at most.
+interval: 1m
+triggerLoopOnEvent: true
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+
+serviceMonitor:
+  enabled: true

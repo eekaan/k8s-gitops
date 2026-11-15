@@ -17,6 +17,13 @@
 #   hello-status        the status the demo answers with, 200 without it
 #   hello-page          the page the demo answers with, the one of its ConfigMap without it
 #   unrouted-status     the status a host no route serves is answered with, 404 without it
+#   dns-answer          the addresses the public resolver gives for hello, one per line, both edges'
+#                       without it
+#   dns-nxdomain        the public resolver answers that the name does not exist
+#   dns-garbage         the public resolver answers with something that is not JSON
+#   dns-json            the public resolver answers for hello with this file's content, as it is
+#   doh-down            nothing answers at the public resolver
+#   by-name-down        the name does not resolve for a request that names no address
 # Verification is curl's: the chain against the --cacert file, which must be the cluster CA's
 # certificate in <tmp>/fixtures/ca.crt, and against the CA path, the one it was built with unless
 # --capath names another, and the host against the certificate's names, both skipped with -k or
@@ -38,6 +45,8 @@ listed() {
 
 edges=(203.0.113.51 203.0.113.52)
 domain=example.com
+# The public resolver's DNS-over-HTTPS endpoint scripts/gateway-check asks, in the JSON form.
+doh_json=https://dns.google/resolve
 
 insecure=0 cacert='' capath=built-in output=/dev/stdout format='' url=''
 resolve=()
@@ -67,6 +76,26 @@ write_out() {
   printf '%s' "$text"
 }
 
+# The public resolver: a name's A records as JSON, from a certificate the system trusts; a request
+# for the resolver is not through an edge, so it takes no --resolve and no cluster CA.
+if [[ $url == "$doh_json?"* ]]; then
+  listed doh-down && { echo "curl: (28) Connection timed out after 5001 milliseconds" >&2; exit 28; }
+  [[ -z $cacert && ${#resolve[@]} -eq 0 && $insecure -eq 0 ]] || { echo "fake curl: the resolver is asked with no cluster CA and no --resolve" >&2; exit 2; }
+  [[ $url == "$doh_json?name=hello.$domain&type=A" ]] || { echo '{"Status": 3}' > "$output"; exit 0; }
+  if listed dns-garbage; then
+    echo 'not JSON {' > "$output"
+  elif listed dns-json; then
+    cat "$state/dns-json" > "$output"
+  elif listed dns-nxdomain; then
+    echo '{"Status": 3, "Question": [{"name": "hello.example.com.", "type": 1}]}' > "$output"
+  else
+    answers=("${edges[@]}")
+    listed dns-answer && mapfile -t answers < "$state/dns-answer"
+    jq -n --args '{Status: 0, Answer: [$ARGS.positional[] | {name: "hello.example.com.", type: 1, TTL: 300, data: .}]}' "${answers[@]}" > "$output"
+  fi
+  exit 0
+fi
+
 [[ $url =~ ^(https?)://([^/:]+)(/.*)?$ ]] || { echo "fake curl: unexpected URL $url" >&2; exit 3; }
 scheme=${BASH_REMATCH[1]} host=${BASH_REMATCH[2]} path=${BASH_REMATCH[3]:-/}
 port=80
@@ -77,6 +106,10 @@ for entry in "${resolve[@]}"; do
     address=${entry#"$host:$port:"}
   fi
 done
+if [[ -z $address && ${#resolve[@]} -eq 0 ]]; then
+  # No --resolve: the system's resolver, which gives an edge's address for the demo's name.
+  listed by-name-down || [[ $host != "hello.$domain" ]] || address=${edges[0]}
+fi
 if [[ -z $address ]]; then
   write_out
   echo "curl: (6) Could not resolve host: $host" >&2

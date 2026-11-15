@@ -7,6 +7,8 @@
 # applied and installed in the test's directory and answer from it; so are talman, timeout and
 # install-cilium where cluster-bootstrap would reach the nodes.
 
+load fixtures/edge-stack
+
 setup_file() {
   # The Talos check's fixture cluster: talos/talman.yaml.tftpl rendered from tests/fixtures/talos,
   # as talos/<cluster>/talman.yaml is rendered from the cluster stack.
@@ -56,6 +58,10 @@ setup() {
     BACKUP_BUCKET_PREFIX="$PREFIX"
     TMPDIR="$BATS_TEST_TMPDIR"
   )
+  # The edges' public addresses in cluster-config come from the edge stack's outputs, which a fake
+  # of tofu answers.
+  edge_stack_fixture "$REPO" "$BIN" "$BATS_TEST_TMPDIR/edge-state"
+  BASE_ENVIRONMENT+=("${EDGE_STACK_ENVIRONMENT[@]}")
   reset_environment
   fake_cluster
   record age-keygen sops yq jq flux

@@ -192,14 +192,23 @@ says why, and the operator is asked at once.
   passed; Cilium reports them as not established and keeps retrying. The edge advertises nothing,
   so the workers have no route of its to keep or withdraw. Nothing in the cluster changes and no
   Service is affected, as the other edge keeps its sessions.
-- **From a client's**: a hostname that publishes both floating IPs answers half of the connections
-  with a timeout while one edge is down, until its address is taken out of DNS; a client that
-  retries reaches the other. The connections that were on the dead edge are lost.
+- **From a client's**: every name a route publishes resolves to both floating IPs for as long as
+  one edge is down, so about half of the new connections go to the dead edge's address and time
+  out; a client that retries, or tries the name's other address, reaches the other edge. The
+  connections that were on the dead edge are lost.
 
-Take a dead edge's address out of DNS while it is down, and put it back when `just edge-check`
-passes. An instance that is gone from the cloud is created again by `just infra-apply sto2/edge`,
-which creates what is missing and drops its recorded host keys. A broken one is replaced by
-`just edge-rollout --replace --edge N` ([Replacing one edge](#replacing-one-edge)).
+The records are external-dns's ([DNS records](../kubernetes.md#dns-records)): it publishes both
+edges' addresses for every route, and its next sync, within a minute, puts back what was removed by
+hand: an address deleted from a name is added again, and a name whose records are all deleted is
+made again. There is no way in this tree to take one edge's address out of DNS, and resolvers keep
+an answer for its TTL, five minutes, in any case; the timeouts end when the edge is back.
+Meanwhile `just gateway-check` fails the dead edge's lines, passes the DNS lines, as the records
+hold both addresses, and skips `name hello`. An instance that is gone from the cloud is created
+again by `just infra-apply sto2/edge`, which creates what is missing and drops its recorded host
+keys; a floating IP made again has a new address, which reaches the records only once
+`just cluster-config` has written it to the cluster. A broken one is replaced by
+`just edge-rollout --replace --edge N` ([Replacing one edge](#replacing-one-edge)), which keeps its
+floating IP.
 
 ## A worker that goes
 

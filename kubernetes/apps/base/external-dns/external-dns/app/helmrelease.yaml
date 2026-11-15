@@ -1,0 +1,29 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/helmrelease-helm-v2.json
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: external-dns
+spec:
+  interval: 30m
+  chartRef:
+    kind: OCIRepository
+    name: external-dns
+  valuesFrom:
+    - kind: ConfigMap
+      name: external-dns-values
+  # What comes from a variable is set here, where Flux substitutes it; the values ConfigMap is not
+  # substituted.
+  values:
+    # Never a name outside the cluster's domain, whatever a route asks for. external-dns matches the
+    # DNS provider's zones and every record's name against this one filter, which takes the place of
+    # a domain filter: it admits the domain and the names under it, and the name of the zone the
+    # domain is in, without which no zone would be selected for a domain under its zone. The chart
+    # passes extraArgs through tpl: regexQuoteMeta makes each dot a dot, and required fails the
+    # release, naming the key, while cluster-config holds no zone.
+    extraArgs:
+      regex-domain-filter: '\A({{ regexQuoteMeta (required "cluster-config holds no CLUSTER_DNS_ZONE, which just cluster-config fills" "${CLUSTER_DNS_ZONE}") }}|(.+\.)?{{ regexQuoteMeta "${CLUSTER_DOMAIN}" }})\z'
+    # The cluster's own name, which the cluster's overlay sets in this application's Kustomization:
+    # two clusters that share a zone each touch only the records they made, and a record made by
+    # hand, which has no registry entry, is never taken over.
+    txtOwnerId: ${DNS_OWNER_ID}

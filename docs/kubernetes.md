@@ -778,14 +778,16 @@ The own alerts, each with its runbook section in [docs/runbooks/alerts.md](runbo
 | `LogCollectorOutsizedShare` | One node's collector sends at least ten times the median node's rate of events, and at least 10 a second, for 30 minutes. | info | [LogCollectorOutsizedShare](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectoroutsizedshare) |
 | `LogCollectorDiscardingEvents` | A collector's component discards events it was not set to drop, for 15 minutes. | warning | [LogCollectorDiscardingEvents](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectordiscardingevents) |
 | `LogCollectorSendFailing` | A collector's sink to the store reports errors for 15 minutes. | warning | [LogCollectorSendFailing](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectorsendfailing) |
+| `ExternalDNSSyncStale` | external-dns' last successful sync with the DNS provider is more than 10 minutes old, or no external-dns reports one, for 5 minutes. | warning | [ExternalDNSSyncStale](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#externaldnssyncstale) |
 
 The alerts read only what Prometheus scrapes: kube-state-metrics' pod readiness for OpenBao's
 members, Prometheus' own `up` for OpenBao's active Service, VolSync's controller metrics and
-Vector's internal metrics, cert-manager's certificate metrics, and kube-state-metrics' CronJob
-metrics for the etcd snapshot job ([cluster.md](cluster.md#scheduled-etcd-snapshots)). Nothing reads
-Flux, Cilium's BGP sessions or the storage operator, as none of them is scraped
-([Monitoring](#monitoring)). The alerts have no destination yet: Alertmanager sends them nowhere, so
-they show in Prometheus and Alertmanager only.
+Vector's internal metrics, cert-manager's certificate metrics, kube-state-metrics' CronJob
+metrics for the etcd snapshot job ([cluster.md](cluster.md#scheduled-etcd-snapshots)), and
+external-dns' gauge of its last successful sync, and its absence. Nothing reads Flux, Cilium's BGP
+sessions or the storage operator, as none of them is scraped ([Monitoring](#monitoring)). The
+alerts have no destination yet: Alertmanager sends them nowhere, so they show in Prometheus and
+Alertmanager only.
 
 ### Dashboards
 
@@ -863,9 +865,9 @@ data" or no upstream file exists:
 | Vector | An upstream dashboard: its repository ships none |
 | VolSync | An upstream dashboard: its repository ships none, and the one shared on grafana.com states no licence |
 
-The other applications the render holds a monitor for, the descheduler, KEDA, the kubelet CSR
-approver, metrics-server, the reloader, Spegel, the Vertical Pod Autoscaler and the Grafana operator,
-have no dashboard.
+The other applications the render holds a monitor for, the descheduler, external-dns, KEDA, the
+kubelet CSR approver, metrics-server, the reloader, Spegel, the Vertical Pod Autoscaler and the
+Grafana operator, have no dashboard.
 
 An upstream dashboard declares the datasource it reads as an input in its `__inputs`, and its
 `GrafanaDashboard`'s `spec.datasources` maps that input to the name of the tree's Prometheus. Before
@@ -1824,28 +1826,36 @@ cannot be listed without it: `just kubernetes-check` refuses the dependency.
   controller's default stated rather than relied on.
 - **What a client outside sees.** With the cluster's own authority or the staging issuer the
   certificate is signed by a chain nothing outside trusts, so a client refuses it unless it is
-  given the authority's certificate; with the production issuer every client trusts it. The
-  hostnames are not in DNS yet, so `just gateway-check` connects to each edge router's public
-  address with the name the route has, and verifies against the trust the issuer implies, which is
-  public material (below). Only the networks the edge stack
-  admits reach the edge's public ports ([The edge routers](infrastructure.md#the-edge-routers)), so
-  it is run from one of them.
+  given the authority's certificate; with the production issuer every client trusts it.
+  `just gateway-check` connects to each edge router's public address with the name the route has,
+  and verifies against the trust the issuer implies, which is public material (below), so each
+  edge is proved on its own; the names are in DNS, which [DNS records](#dns-records) describes,
+  and the check also asks for one. Only the networks the edge stack admits reach the edge's public
+  ports ([The edge routers](infrastructure.md#the-edge-routers)), so it is run from one of them.
+- **Where the records point.** The Gateway's annotation `external-dns.kubernetes.io/target` holds
+  `${EDGE_PUBLIC_ADDRESS_1},${EDGE_PUBLIC_ADDRESS_2}`, which external-dns publishes for every route
+  that attaches to it ([DNS records](#dns-records)).
 
 #### Checking the public Gateway
 
 `just gateway-check [cluster]` reads, and changes nothing: the objects through the cluster's
 kubeconfig with `kubectl get`, then the edge stack's outputs for the edge routers' names and
-floating addresses, then requests through each edge with `curl --resolve`, as a client outside
-would make them once the names are in DNS. It prints pass, FAIL or skip and one line of why for
+floating addresses, then requests through each edge with `curl --resolve`, which proves each edge
+on its own whatever DNS says, then the DNS records of the routes' names and one request by a name
+alone. It prints pass, FAIL or skip and one line of why for
 each check, and exits 0 only when none fails. It never prints an address, a host name under the
 domain or a tool's own errors: kubectl's and jq's go nowhere, and tofu's to the edge stack's
 errors file, `.terraform/tofu-errors.log` in its directory, which the line about the edges names.
 A name it reads from the cluster is printed, or handed to kubectl, only once it is a valid name of
 its kind, and always after `--`, so it cannot become a flag; any other text it shows from the
 cluster or an answer has its control characters replaced. kubectl waits at most 10 seconds for an
-answer and curl 15, and curl reads no `.curlrc`, uses no proxy and follows no redirect. It needs
-curl 7.88 or newer. A failure that is none of the checks, such as an answer it cannot read, names
-the step it happened in, and so does Ctrl-C or SIGTERM, which stops the run there.
+answer and curl 15, and curl reads no `.curlrc`, uses no proxy and follows no redirect. Every
+request through the edges trusts what the `cluster CA` or `issuer trust` line names, and the
+lookups of DNS records go to a public resolver (below) and trust the system's public trust store
+as curl has it; the variables that add trust, `CURL_CA_BUNDLE`, `SSL_CERT_FILE` and
+`SSL_CERT_DIR`, reach neither, as the recipe unsets them. It needs curl 7.88 or newer. A failure
+that is none of the checks, such as an answer it cannot read, names the step it happened in, and
+so does Ctrl-C or SIGTERM, which stops the run there.
 
 - `cluster-config`: the ConfigMap holds `CLUSTER_DOMAIN` and `GATEWAY_ADDRESS`, which the lines
   below compare with. Without it, those lines are skipped.
@@ -1905,23 +1915,179 @@ says they are skipped, and it fails when they cannot be read:
 - `<edge> unrouted host`: a host under the domain that no route serves,
   `gateway-check-unrouted.${CLUSTER_DOMAIN}`, answers 404.
 
-The last two are skipped when TLS fails. `tests/gateway-check.bats` runs the recipe against fakes of
-kubectl, curl and the edge stack, every answer holding addresses.
+The last two are skipped when TLS fails. Then, with the edge stack's outputs, the names the routes
+publish ([DNS records](#dns-records)), none of which is looked up while the edge lines are skipped:
+
+- `DNS records`: one line, in place of the two below, when there is nothing to look up: skipped
+  when the cluster does not select external-dns, which is whether its Kustomization exists in
+  `flux-system`, and when no route accepted on `public` from a namespace that opts in names a host
+  under the domain; FAIL when the Kustomization cannot be read, and skipped when the routes cannot
+  be, which the `routes` line has already failed.
+- `DNS <label>`: for each host under the domain that such a route names, by its first label, the
+  public resolver's A records are exactly the two edge routers' addresses. The answer counts only
+  as one JSON document with the status NOERROR whose records are all A records of the host itself,
+  each one address: a CNAME, a record of another name, an error status and a second document each
+  fail, whatever addresses come with them. A FAIL says which: the resolver could not be asked, its
+  answer is not readable, the name does not exist, the status is another error, a record is not an
+  A record of the name, there is no address record, it gives one of the two addresses, or it gives
+  others. The lines never print an address.
+- `name hello`: a request for `https://hello.${CLUSTER_DOMAIN}/` by that name alone, with no
+  `--resolve`, so curl resolves it as this machine does and reaches whichever edge its resolver
+  names, verifies against the trust the issuer implies, as the edge lines do, and gets the demo's
+  page. It is made only
+  once `DNS hello` passes and every edge line passed, so it never repeats another line's failure,
+  and is skipped otherwise, saying why.
+
+The lookup is one `curl` request to Google Public DNS's JSON interface over HTTPS,
+`https://dns.google/resolve?name=<host>&type=A`, which a resolver outside the cluster and outside
+the DNS provider answers, as a client outside would be answered. It sends each host name it
+checks to that resolver, which is the one disclosure of the check; no cluster object, address or
+key goes with it. The recipe uses curl because it needs no tool that is not already on the machine
+(`dig` and `getent` are not pinned tools, and `getent` would ask the machine's own resolver, which
+caches a name that did not exist for as long as the zone's negative TTL). curl's own `--doh-url`
+would verify the resolver's certificate with the options of the request it serves, which trust what
+the issuer implies, the cluster's authority alone for a CA issuer, so the lookup is a request of
+its own, verified against the system's public trust store with nothing added. A name made a
+minute ago can still be missing from the resolver for as long as the answer it gave before was to
+be cached, which the FAIL says.
+
+`tests/gateway-check.bats` runs the recipe against fakes of kubectl, curl and the edge stack, every
+answer holding addresses.
 
 #### Giving an application a public hostname
 
 1. Label the application's namespace in its `namespace.yaml` with `k8s-gitops/gateway: public`.
 2. Add an `HTTPRoute` whose `parentRefs` name the Gateway `public` of `envoy-gateway-system` and its
    `https` listener, and whose `hostnames` are under the domain: `<name>.${CLUSTER_DOMAIN}`. The
-   listener and the certificate cover that domain only, so a name outside it is not served.
+   listener and the certificate cover that domain only, so a name outside it is not served, and
+   external-dns makes no record for one. Name at least one host: a route without a hostname would
+   publish the listener's wildcard.
 3. Name `gateway-public` in the `dependsOn` of the application that holds the route, so a cluster
    without the Gateway cannot enable it: an application of its own, as `apps/base/demo/hello-route/`
    is, or the application that owns the Service, as `ai-system/n8n` does
    ([Applications](#applications)).
 
+The record for the name is made by external-dns within a minute or two of the route being accepted,
+and removed when the route is; there is no DNS step to do by hand ([DNS records](#dns-records)).
+
 `hello`, the demo's workload, answers this way at `hello.${CLUSTER_DOMAIN}`: two replicas of
 busybox's web server, spread over the workers and held by a disruption budget of one, as an
 unprivileged user, serving a page from its ConfigMap.
+
+### DNS records
+
+`external-dns` runs in its own namespace, `external-dns`, at the restricted Pod Security level its
+pod meets: `apps/base/external-dns/external-dns/`, from the publisher's chart through the public
+OCI mirror metrics-server's comes from, as the publisher releases it only to a classic Helm
+repository. It names `openbao-store`, `gateway-public` and `prometheus-operator-crds` in
+`dependsOn`, so a cluster whose overlay lists it without the Gateway is refused by
+`just kubernetes-check`, and it is Ready once its release is. One replica runs, as the chart allows
+no more, with a request of 10m of CPU and 32Mi of memory and no limit. The chart also installs two
+cluster-wide definitions, `dnsendpoints.externaldns.k8s.io` and `dnsrecords.externaldns.k8s.io`,
+from its `crds/` directory, which no value of the chart turns off and the root's release defaults
+create and replace as every chart's; nothing in the tree uses them, the source reads none, and
+removing the application leaves them, as Helm never deletes what `crds/` installed.
+
+- **What creates a record.** A route of the public Gateway: external-dns reads `HTTPRoute`s only
+  (`--source=gateway-httproute`, no Service and no Ingress) and only those attached to the Gateway
+  `public` of `envoy-gateway-system` (`--gateway-namespace`, `--gateway-name`). For each host the
+  route names it makes an A record at the DNS provider, Cloudflare. Its permissions are the chart's
+  for that source and no more: a ClusterRole that reads Gateways, HTTPRoutes and Namespaces,
+  cluster-wide because the routes are in every namespace that opts in
+  ([The public Gateway](#the-public-gateway)). A route that names no host, or a wildcard, is the
+  only way the listener's wildcard `*.${CLUSTER_DOMAIN}` would be published, so
+  `tests/external-dns.bats` fails for a route on the Gateway without a concrete hostname.
+- **Where it points.** At both edge routers' public addresses, not at the Gateway's address: the
+  Gateway's status holds `GATEWAY_ADDRESS`, a private address of the service range, which
+  external-dns would publish if nothing said otherwise, and which no client outside reaches. The
+  Gateway's annotation `external-dns.kubernetes.io/target` holds
+  `${EDGE_PUBLIC_ADDRESS_1},${EDGE_PUBLIC_ADDRESS_2}`, and the source takes that in place of the
+  status. The pinned version reads the annotation under the prefix `external-dns.kubernetes.io/`,
+  not the `alpha` prefix of earlier releases. `tests/external-dns.bats` fails when the annotation
+  is missing or holds one address, and when anything else in the tree sets a target or names
+  either address. The two keys of `cluster-config` come from the edge stack's outputs
+  ([Before Flux starts](#before-flux-starts)); `just cluster-config` refuses while the stack has
+  none, as it refuses while the BGP numbers are missing, so a cluster without an edge stack cannot
+  enable this application. A `cluster-config` that does not hold the two keys, as one written
+  before they existed, leaves the annotation a lone comma once Flux substitutes, which is no YAML
+  value: `gateway-public` then fails to build and holds back what names it, this application
+  among them, while the Gateway as last applied keeps serving. So `just cluster-config` runs, with
+  the edge stack applied, before a change that adds a key to it reaches the cluster.
+- **What is never touched.** A name outside the cluster's domain. external-dns matches the DNS
+  provider's zones and every record's name against one filter, `--regex-domain-filter`, which the
+  HelmRelease builds from `${CLUSTER_DOMAIN}` and `${CLUSTER_DNS_ZONE}` with their dots escaped:
+  `\A(<zone>|(.+\.)?<domain>)\z`. It admits the domain and the names under it, and the zone's own
+  name, and nothing else: not the zone's other names, not the domain's siblings or parent, not a
+  name that only ends like the domain. The zone's name is in it because the provider chooses the
+  zones it works in with the same filter, and a filter of the domain alone matches no zone when the
+  domain is a name under its zone: every sync would then succeed and change nothing. So when the
+  two differ, the zone's own name is the one name outside the domain the filter lets through. No
+  record is made there: a route on `https` publishes only names its listener's
+  `*.${CLUSTER_DOMAIN}` covers, as the source intersects a route's hostnames with its listener's;
+  `http` takes the redirect alone, which names no host, and `tests/gateway.bats` fails for any
+  other route on it; and a record of the zone's own name that this cluster's registry does not own
+  is never changed or deleted (Ownership). `CLUSTER_DNS_ZONE` is a key of `cluster-config`, which
+  `just cluster-config` fills from the environment variable of that name, or from `CLUSTER_DOMAIN`
+  when that is unset, and refuses when the domain is neither the zone nor a name under it
+  ([Before Flux starts](#before-flux-starts)). While the cluster's `cluster-config` holds no
+  `CLUSTER_DNS_ZONE`, the chart refuses to render, naming the key, so the release fails rather than
+  run with a filter that selects no zone. `tests/external-dns.bats` checks the rendered filter for a
+  domain that is its zone and for one two labels under its zone, against names on both sides of
+  it. A route that names a host outside the domain makes no record. Only A records are managed
+  (`--managed-record-types=A`): the edges' addresses are IPv4, and nothing else in the zone is
+  written. The provider's proxy is off, its default (`--cloudflare-proxied` is not set): the edge
+  routers take the traffic directly, with the cluster's certificate, whereas with the proxy on the
+  provider would answer for the name with its own addresses, hide the edges, and terminate TLS
+  with a certificate of its own. A TTL is set where a route sets none: 300 seconds (`--min-ttl`).
+- **Ownership.** The registry is TXT records (`--registry=txt`) beside each record, named with the
+  prefix `extdns-<type>.`, whose owner is `--txt-owner-id`, the cluster's name. A cluster sets it
+  in one place, a patch in its overlay on the Kustomization `external-dns` that substitutes
+  `DNS_OWNER_ID`, as it chooses the Gateway's issuer
+  ([Choosing the public Gateway's issuer](#choosing-the-public-gateways-issuer)); the base holds a
+  placeholder, which `tests/external-dns.bats` fails while lab-sto2's overlay leaves it.
+  external-dns changes or deletes only a record that has a registry entry of its owner, so two
+  clusters that share a zone never touch each other's records, and a record made by hand, which has
+  none, is never taken over, even when a route asks for the same name.
+- **Removal.** The policy is `sync`: external-dns creates, updates and deletes, so a removed
+  route removes its records. `upsert-only` would never delete: every route removed or renamed
+  would leave its record at the edges, naming a host no route serves, for good. `sync` is safe
+  here because the registry confines what it deletes to this owner's records. Removing the
+  application itself deletes nothing: it stops, and the records and their TXT entries stay in the
+  zone, to be taken over by an instance with the same owner or deleted by hand.
+- **The token.** An `ExternalSecret` in `external-dns` reads the key `api-token` of
+  `cert-manager/cloudflare` from the ClusterSecretStore `openbao`, which serves every namespace
+  ([How an application gets a secret out](#how-an-application-gets-a-secret-out)), into the Secret
+  `external-dns-cloudflare`. It is the store entry the ACME issuers' `ExternalSecret`
+  `cloudflare-api-token` reads into cert-manager's namespace ([The ACME issuers](#the-acme-issuers)):
+  one token, whose Secrets are in those two namespaces and in no other, which
+  `tests/external-dns.bats` checks over everything the overlay applies. The pod takes it as
+  `CF_API_TOKEN` by reference; no value is in the tree. The token is a requirement on the
+  operator: one Cloudflare API token with Zone read and DNS edit on the cluster's one zone, which
+  `just bao-put cert-manager/cloudflare api-token` writes. Without the key the ExternalSecret
+  reports it missing and the pod does not start; a token the provider refuses, revoked or without
+  the scope, ends the process at its first sync, so the pod crash-loops. `ExternalDNSSyncStale`
+  reports both, as no external-dns reports a sync. No zone identifier is set (`--zone-id-filter`),
+  as one is a deployment value: the filter above selects the zone by its name. A `CLUSTER_DNS_ZONE`
+  that names no zone the token can read selects none, and every sync then succeeds and changes
+  nothing, which the alert does not see; `just gateway-check`'s DNS lines fail then, as no name
+  resolves to the edges.
+- **How soon.** A sync every minute (`--interval=1m`) and one when a route changes
+  (`--events`), at most one in 30 seconds (`--min-event-sync-interval`), so a new route's record is
+  in the zone within a minute or two, once the route is accepted. A sync that changes nothing asks
+  the provider for the zone's records, a few requests of the 1200 per five minutes the provider
+  allows; with a route changing every 30 seconds, as often as it is allowed, it is a few requests
+  per sync and under a hundred in five minutes. Resolvers cache an earlier answer: a name looked
+  up before its record existed can stay missing for as long as the zone's negative TTL.
+- **Seeing what it did.** Its log: `just logs 'kubernetes.pod_namespace:external-dns' --since 15m`
+  prints each record it creates, updates and deletes, and each error the provider gives, and
+  `just gateway-check` says whether the names resolve to the edges
+  ([Checking the public Gateway](#checking-the-public-gateway)). Its metrics are scraped through the
+  chart's ServiceMonitor, and the alert `ExternalDNSSyncStale` fires when its last successful sync
+  is more than 10 minutes old or when no external-dns reports one ([Alerts](#alerts)).
+
+`tests/external-dns.bats` builds the application as Flux applies it, renders the chart with its
+values, and checks the arguments, the permissions, the targets, the owner, the token's path and the
+dependencies; `tests/gateway-check.bats` the check's lines.
 
 ## PostgreSQL
 
@@ -2434,9 +2600,10 @@ allowlist on the public ports until `public_allowed_cidrs` widens it
 ([The edge routers](infrastructure.md#the-edge-routers)). So the step right after the first rollout
 is to open `https://n8n.<domain>` from an allowed network and create the owner, before the allowlist
 is widened. A cluster whose allowlist is open must not enable the application until someone is ready
-to do it. Until the names are in DNS, `n8n.<domain>` resolves nowhere: `just gateway-check` proves
-the path through each edge router to the Gateway, and a browser reaches n8n once the operator's
-machine resolves the name to an edge router's public address, which the edge stack's outputs give.
+to do it. external-dns publishes `n8n.<domain>` at both edge routers within a minute or two of the
+route being accepted ([DNS records](#dns-records)), and `just gateway-check` says when the name
+resolves to them; until it does, a browser reaches n8n only where the operator's machine resolves
+the name to an edge router's public address, which the edge stack's outputs give.
 While the certificate comes from the cluster's own authority or Let's Encrypt's staging issuer, as
 lab-sto2's does, the browser warns about it unless it is given the root of that chain; with the
 production issuer it does not ([What a client outside sees](#the-public-gateway)).
@@ -2764,6 +2931,10 @@ starts to use is listed in the example and given its source in `fill_cluster_con
 
 - `CLUSTER_DOMAIN`: the environment variable of that name, the domain the cluster's applications are
   published under, a lower-case DNS name.
+- `CLUSTER_DNS_ZONE`: the environment variable of that name, the zone at the DNS provider that
+  holds the domain, which external-dns selects by its name ([DNS records](#dns-records)): the
+  domain itself or a name it is under, and `CLUSTER_DOMAIN` when it is unset or empty. A zone the
+  domain is not under is refused.
 - `BACKUP_BUCKET_PREFIX`: the environment variable of that name, the start of the backup buckets'
   names ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)).
 - `S3_ENDPOINT` and `S3_REGION`: the object storage's S3 endpoint and region, `endpoints.s3` and
@@ -2783,8 +2954,18 @@ starts to use is listed in the example and given its source in `fill_cluster_con
   there, the edge routers'.
 - `GATEWAY_ADDRESS`: `values.bgp.gatewayAddress` there, the public Gateway's address in the service
   range, which the edge routers forward public traffic to.
+- `EDGE_PUBLIC_ADDRESS_1` and `EDGE_PUBLIC_ADDRESS_2`: the two entries of the output `addresses`
+  of the edge stack `sto2/edge`, the edge routers' public floating addresses, in the order the
+  output gives them. They are the targets of every route's DNS records
+  ([DNS records](#dns-records)). The recipe reads the output as `just gateway-check` does, and
+  never prints it: it is sensitive, so only `tofu output -json` and `jq` see it, and tofu's errors
+  go to the stack's errors file. It therefore needs what the edge stack's recipes need
+  ([infrastructure.md](infrastructure.md#environment)), and refuses, naming both keys and the
+  stack, while the stack has no outputs, as it refuses while `talman.yaml` has no BGP numbers: the
+  stack is applied before the cluster's `cluster-config`. The recipe reads `sto2/edge` by that
+  name, as `just gateway-check` does, whatever the cluster.
 
-The cluster stack renders the last six from the plumbing stack's numbers for BGP
+The cluster stack renders the six before the last two from the plumbing stack's numbers for BGP
 ([infrastructure.md](infrastructure.md#services-announced-over-bgp)).
 
 `cluster-secrets` is decrypted from `clusters/<cluster>/secrets/cluster-secrets.sops.yaml` by sops,

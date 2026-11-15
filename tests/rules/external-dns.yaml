@@ -1,0 +1,99 @@
+---
+# Unit tests of the external-dns application's own alert, run by just rules-check with promtool. The
+# series is shaped as external-dns writes its gauge of the last successful sync, the time in
+# seconds, and as the chart's ServiceMonitor scrapes it: the job is the release's name, with the
+# namespace, pod, instance, service and endpoint of the scrape. promtool's time() is the seconds
+# since the test's start, and the series follows it one minute at a time while the controller syncs,
+# as the gauge does every minute. Each group's name is the title of its scenario in
+# features/alerts.feature.
+rule_files:
+  - external-dns.rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: The alert ExternalDNSSyncStale fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # The controller syncs every minute for the first 10 minutes, so the gauge is the time of the
+      # last sync, 540 seconds at the 9th minute. Then the process ends, as it does at the first pass
+      # the provider refuses with a 4xx, such as for a revoked token, or that cannot reach it, and
+      # crash-loops: its target is gone, so the series ends with a stale marker and is absent for 10
+      # minutes, as it is for a pod that never starts. From minute 20 a pod syncs again, every minute
+      # until minute 29, and from minute 30 it runs on while its passes fail with errors it retries,
+      # the provider's 429 or 5xx: the gauge keeps its last value, 1740 seconds, while the scrapes go
+      # on.
+      - series: >-
+          external_dns_controller_last_sync_timestamp_seconds{namespace="external-dns",
+          pod="external-dns-7d9f-abcde", instance="198.51.100.31:7979", job="external-dns",
+          service="external-dns", endpoint="http"}
+        values: '0+60x9 stale _x9 1200+60x9 1740x60'
+    alert_rule_test:
+      # Syncing: the last success is under a minute old.
+      - eval_time: 5m
+        alertname: ExternalDNSSyncStale
+        exp_alerts: []
+      # No series from minute 10, so the alert is pending from minute 10 and fires after 5 minutes,
+      # at minute 15.
+      - eval_time: 14m
+        alertname: ExternalDNSSyncStale
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: ExternalDNSSyncStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: external-dns
+            exp_annotations:
+              summary: external-dns has not synced with the DNS provider for 10 minutes, or is not running
+              description: external-dns in external-dns reports no successful sync with the DNS provider in the last 10 minutes, or is not running to report one, so new routes get no records and removed ones keep theirs.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#externaldnssyncstale
+      # Syncing again from minute 20: quiet.
+      - eval_time: 25m
+        alertname: ExternalDNSSyncStale
+        exp_alerts: []
+      # The last success, at minute 29, is 10 minutes old at minute 39 and older from minute 40, so
+      # the alert is pending from minute 40 and fires after 5 minutes, at minute 45.
+      - eval_time: 44m
+        alertname: ExternalDNSSyncStale
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: ExternalDNSSyncStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: external-dns
+            exp_annotations:
+              summary: external-dns has not synced with the DNS provider for 10 minutes, or is not running
+              description: external-dns in external-dns reports no successful sync with the DNS provider in the last 10 minutes, or is not running to report one, so new routes get no records and removed ones keep theirs.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#externaldnssyncstale
+  - name: The alert ExternalDNSSyncStale stays quiet while external-dns restarts
+    interval: 1m
+    input_series:
+      # The pod syncs every minute until minute 19 and is then replaced, as on a rollout or a drain:
+      # its target goes at minute 20, so its series ends with a stale marker, and the scrape at
+      # minute 21 finds no pod either. The new pod's first scrape, at minute 22, comes before its
+      # first sync and finds the gauge at 0, 22 minutes old; from minute 23 it syncs every minute.
+      - series: >-
+          external_dns_controller_last_sync_timestamp_seconds{namespace="external-dns",
+          pod="external-dns-7d9f-abcde", instance="198.51.100.31:7979", job="external-dns",
+          service="external-dns", endpoint="http"}
+        values: '0+60x19 stale'
+      - series: >-
+          external_dns_controller_last_sync_timestamp_seconds{namespace="external-dns",
+          pod="external-dns-7d9f-fghij", instance="198.51.100.32:7979", job="external-dns",
+          service="external-dns", endpoint="http"}
+        values: '_x22 0 1380+60x17'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ExternalDNSSyncStale
+        exp_alerts: []
+      # The expression holds for three evaluations, minutes 20 to 22, no series and then the new
+      # pod's gauge at 0, and not from minute 23: the 5 minutes of `for` are never reached.
+      - eval_time: 22m
+        alertname: ExternalDNSSyncStale
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: ExternalDNSSyncStale
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: ExternalDNSSyncStale
+        exp_alerts: []

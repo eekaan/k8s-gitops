@@ -257,8 +257,9 @@ rendered() {
   echo "chosen: $chosen"
   [ "$chosen" = letsencrypt-staging ]
   [ "$(yq -N 'select(.kind == "Kustomization" and .spec.postBuild.substitute.PUBLIC_ISSUER != null) | .metadata.name' "$OVERLAY")" = gateway-public ]
-  [ "$(yq '.patches | length' "$REPO/kubernetes/apps/overlays/lab-sto2/kustomization.yaml")" -eq 1 ]
-  [ "$(yq '.patches[0].target.name' "$REPO/kubernetes/apps/overlays/lab-sto2/kustomization.yaml")" = gateway-public ]
+  # The overlay's patches are this one and the one that names external-dns' record owner, each of
+  # its own Kustomization.
+  [ "$(yq -o json -I0 '[.patches[].target.name]' "$REPO/kubernetes/apps/overlays/lab-sto2/kustomization.yaml")" = '["gateway-public","external-dns"]' ]
   # It is not a cluster-config key: the tree's builds see it, and no cluster's key list holds it.
   [ -z "$(grep -rl PUBLIC_ISSUER "$REPO"/kubernetes/clusters || true)" ]
   # The Certificate follows the choice, and the choice names an issuer the cluster applies.
@@ -288,8 +289,8 @@ rendered() {
   # The cluster applies the issuers and chooses one, with no dependency on them: either of the two.
   for chosen in letsencrypt-staging letsencrypt-production; do
     tree_copy
-    yq -i '.patches[0].patch |= (from_yaml | map(select(.path != "/spec/dependsOn/-")) | to_yaml)' "$TREE_OVERLAY"
-    CHOSEN="$chosen" yq -i '.patches[0].patch |= (from_yaml | (.[] | select(.path == "/spec/postBuild").value.substitute.PUBLIC_ISSUER) = strenv(CHOSEN) | to_yaml)' "$TREE_OVERLAY"
+    yq -i '(.patches[] | select(.target.name == "gateway-public")).patch |= (from_yaml | map(select(.path != "/spec/dependsOn/-")) | to_yaml)' "$TREE_OVERLAY"
+    CHOSEN="$chosen" yq -i '(.patches[] | select(.target.name == "gateway-public")).patch |= (from_yaml | (.[] | select(.path == "/spec/postBuild").value.substitute.PUBLIC_ISSUER) = strenv(CHOSEN) | to_yaml)' "$TREE_OVERLAY"
     run "$REPO/scripts/kubernetes-check" "$TREE"
     echo "$output"
     [ "$status" -ne 0 ]
@@ -299,7 +300,7 @@ rendered() {
 
   # The cluster chooses a name acme-issuers does not make, with the dependency in place.
   tree_copy
-  yq -i '.patches[0].patch |= (from_yaml | (.[] | select(.path == "/spec/postBuild").value.substitute.PUBLIC_ISSUER) = "letsencrypt-stagin" | to_yaml)' "$TREE_OVERLAY"
+  yq -i '(.patches[] | select(.target.name == "gateway-public")).patch |= (from_yaml | (.[] | select(.path == "/spec/postBuild").value.substitute.PUBLIC_ISSUER) = "letsencrypt-stagin" | to_yaml)' "$TREE_OVERLAY"
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -ne 0 ]
@@ -308,7 +309,7 @@ rendered() {
 
   # A cluster that chooses nothing needs no issuers.
   tree_copy
-  yq -i 'del(.patches) | .resources |= map(select(test("/acme-issuers/ks.yaml$") | not))' "$TREE_OVERLAY"
+  yq -i 'del(.patches[] | select(.target.name == "gateway-public")) | .resources |= map(select(test("/acme-issuers/ks.yaml$") | not))' "$TREE_OVERLAY"
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]
