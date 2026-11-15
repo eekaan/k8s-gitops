@@ -69,7 +69,7 @@ Feature: Cluster recipes
   Scenario: A failed snapshot stops an upgrade before any node is touched
     Given talman failing once it has started the etcd snapshot, and an upload that fails
     When cluster-upgrade and cluster-upgrade-k8s run
-    Then each exits non-zero naming the step it failed in, without what the S3 client reported, drains, cordons, upgrades and uncordons nothing, and leaves nothing on disk
+    Then each exits non-zero naming the step it failed in; a failed upload shows the reason the S3 client gave, without the endpoint, bucket or keys it names, and a failed snapshot shows none of the S3 client's words; it drains, cordons, upgrades and uncordons nothing, and leaves nothing on disk
 
   Scenario: An upgrade waits for a Ready the node reports after it was upgraded
     Given a node whose Ready condition is the one from before its upgrade for some reads, and one whose kubelet never reports again

@@ -37,6 +37,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
+          # The Dagger module reads the workspace's Git history, which a shallow clone cannot give.
+          fetch-depth: 0
           persist-credentials: false
       - uses: jdx/mise-action@d5574b52816a478f9d4e6529a3f6ff17a8a36785  # v5.2.8
         with:

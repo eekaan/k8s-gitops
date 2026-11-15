@@ -43,8 +43,12 @@ lock_stack() {
     infra_error "flock is required to lock $stack and is not on PATH; it comes with util-linux"
     return 1
   fi
-  mkdir -p "$stack_dir/.terraform"
-  exec {infra_lock_fd}> "$stack_dir/.terraform/infra.lock"
+  # Neither the directory nor the file is taken for granted: a lock that was never taken must not
+  # read as one that was.
+  if ! { mkdir -p "$stack_dir/.terraform" && exec {infra_lock_fd}> "$stack_dir/.terraform/infra.lock"; } 2> /dev/null; then
+    infra_error "cannot lock $stack: its lock file cannot be made in ${stack_dir#"$infra_root"/}/.terraform"
+    return 1
+  fi
   if ! flock -n "$infra_lock_fd"; then
     infra_error "$stack is busy: another operation on it is running"
     return 1

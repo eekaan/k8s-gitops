@@ -51,8 +51,8 @@ step it failed in ([cluster.md](../cluster.md#recipes)).
    from the service range has none behind it and does not count. LINSTOR's volumes do not count
    either: their data is on the workers' data volumes, which go with the stack, and the recipe says
    how many of them the destroy takes before it asks. While there are any others, the recipe names
-   each and destroys nothing; remove them first. A cluster whose API does not
-   answer, or that has no kubeconfig, may still own some and is not destroyed either.
+   each and destroys nothing; remove them first. A cluster whose API does not answer, or that has no
+   kubeconfig, may still own some and is not destroyed either.
    `just cluster-destroy --unreachable` destroys it anyway; whatever it owned stays in the cloud
    until it is removed by hand.
 
@@ -60,9 +60,14 @@ step it failed in ([cluster.md](../cluster.md#recipes)).
    typed back, and removes the cluster's `talman.yaml`, talosconfig and kubeconfig. The plumbing
    stack, the secrets bundle and the buckets stay.
 
-3. **`just infra-destroy sto2/plumbing`**, when the network and the Talos image should go too. It
-   plans the plumbing stack's destroy, prints the summary and destroys once `sto2/plumbing` is typed
-   back. Images left from earlier Talos versions are removed by hand
+3. **`just infra-destroy sto2/plumbing`**, when the network and the Talos image should go too. The
+   CI host, the `sto2/ci` stack, is on the plumbing stack's network, and the network cannot be
+   removed while its port and floating IP exist. So first, in the state of every other stack, the
+   recipe looks for a resource, and while it finds one it plans and destroys nothing, naming the
+   stack and the recipe that destroys it: `just infra-destroy sto2/ci` for the CI host, which also
+   takes the runner away until [ci-host.md](ci-host.md) sets a new host up. Then it plans the
+   plumbing stack's destroy, prints the summary and destroys once `sto2/plumbing` is typed back.
+   Images left from earlier Talos versions are removed by hand
    ([image-replacement.md](image-replacement.md#removing-old-images)).
 
 ## Building it again

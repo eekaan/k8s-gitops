@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Whether the state of a stack holds a managed resource, for a caller that does not hold the stack's
+# lock: prints holds or empty and exits 0 when it read the state, and prints nothing otherwise. A
+# caller takes anything but one of those words with status 0 as a state it could not read; exit
+# status 1 says nothing, as bash itself exits with it when a command of this script fails.
+# It is a script of its own, so that what stack-env sets, the lock it takes and any failure of
+# sourcing it stay in a process the caller can tell from an answer; a subshell function in
+# lib/cluster.sh would do the same, but it would need shellcheck's source directive to be switched
+# off for stack-env there, and shellcheck would no longer check how the library uses it. Reading state evaluates no variable, but stack-env requires every
+# input the stack declares, so the ci stack's two that come from the environment take a placeholder
+# when unset; a .env that holds the placeholders stack-env refuses makes the read fail and say why.
+# Nothing of the state is printed.
+# Usage: scripts/stack-state STACK
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/cluster.sh
+. "$here/lib/cluster.sh"
+export CI_HOST_IMAGE=${CI_HOST_IMAGE:-state-read-only}
+export CI_HOST_SSH_PUBLIC_KEY=${CI_HOST_SSH_PUBLIC_KEY:-state-read-only}
+stack=${1:-}
+[[ -n $stack ]] || exit 2
+# Whatever these print is not the answer, so it goes to standard error.
+{
+  # shellcheck source=scripts/stack-env
+  . "$here/stack-env" "$stack" &&
+    lock_stack &&
+    init_stack
+} >&2 || exit 2
+answer=$(stack_holds_resources) || exit 2
+printf '%s\n' "$answer"

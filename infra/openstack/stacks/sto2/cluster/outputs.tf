@@ -75,6 +75,12 @@ output "worker_security_group" {
   value       = module.nodes.worker_security_group
 }
 
+output "controlplane_security_group" {
+  description = "With security_group_rules reduced, the control planes' own security group: its ID, that it holds no egress rule of its own, and every ingress rule in it, each open to all; null otherwise."
+  sensitive   = true
+  value       = module.nodes.controlplane_security_group
+}
+
 output "server_group" {
   description = "The server group every node is scheduled into: its ID and policies."
   sensitive   = true
