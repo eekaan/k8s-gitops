@@ -1,0 +1,346 @@
+---
+# Unit tests of the linstor-monitoring application's own alerts, run by just rules-check with promtool.
+# The DRBD series are shaped as drbd-reactor v1.12.0's prometheus plugin writes them with enums on, as
+# the Piraeus operator configures it: one drbd_device_state series per device and disk state, 1 for
+# the state the device is in and 0 for the others, labelled name (the resource), volume, minor and the
+# state itself under the metric's name, and drbd_device_quorum and drbd_device_client per device
+# (doc/prometheus.md and src/plugin/prometheus.rs of drbd-reactor); the PodMonitor's scrape adds job,
+# namespace, pod, container, endpoint, instance and the node. The LINSTOR series are shaped as the
+# controller writes them (PrometheusBuilder.java of linstor-server v1.35.3): linstor_node_state is 2
+# for an online node and carries the satellite's address, encryption and port, and the storage pool
+# metrics carry storage_pool, node, driver and backing_pool; the ServiceMonitor's scrape adds job,
+# namespace, pod, container, service, endpoint and instance. The addresses are the documentation
+# ranges. Each group's name is the title of its scenario in features/alerts.feature.
+rule_files:
+  - linstor-monitoring.rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: The alert DrbdReplicaNotUpToDate fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # One volume has a replica on each of two workers and a diskless client on a third, which is no replica.
+      # The replica on worker-1 is UpToDate throughout; the one on worker-2 is UpToDate for 10 minutes and
+      # then Outdated.
+      - series: >-
+          drbd_device_state{name="pvc-6f1c2a52-7d0e-4c1b-9a43-0e3f5b8d2c71", volume="0", minor="1000",
+          drbd_device_state="UpToDate", job="linstor-satellite", namespace="piraeus-datastore",
+          pod="linstor-satellite.worker-1-x7k2p", container="drbd-reactor", endpoint="prometheus",
+          instance="192.0.2.51:9942", node="worker-1"}
+        values: '1x90'
+      - series: >-
+          drbd_device_client{name="pvc-6f1c2a52-7d0e-4c1b-9a43-0e3f5b8d2c71", volume="0", minor="1000",
+          job="linstor-satellite", namespace="piraeus-datastore", pod="linstor-satellite.worker-1-x7k2p",
+          container="drbd-reactor", endpoint="prometheus", instance="192.0.2.51:9942", node="worker-1"}
+        values: '0x90'
+      - series: >-
+          drbd_device_state{name="pvc-6f1c2a52-7d0e-4c1b-9a43-0e3f5b8d2c71", volume="0", minor="1000",
+          drbd_device_state="UpToDate", job="linstor-satellite", namespace="piraeus-datastore",
+          pod="linstor-satellite.worker-2-b9m4d", container="drbd-reactor", endpoint="prometheus",
+          instance="192.0.2.52:9942", node="worker-2"}
+        values: '1x9 0x80'
+      - series: >-
+          drbd_device_state{name="pvc-6f1c2a52-7d0e-4c1b-9a43-0e3f5b8d2c71", volume="0", minor="1000",
+          drbd_device_state="Outdated", job="linstor-satellite", namespace="piraeus-datastore",
+          pod="linstor-satellite.worker-2-b9m4d", container="drbd-reactor", endpoint="prometheus",
+          instance="192.0.2.52:9942", node="worker-2"}
+        values: '0x9 1x80'
+      - series: >-
+          drbd_device_client{name="pvc-6f1c2a52-7d0e-4c1b-9a43-0e3f5b8d2c71", volume="0", minor="1000",
+          job="linstor-satellite", namespace="piraeus-datastore", pod="linstor-satellite.worker-2-b9m4d",
+          container="drbd-reactor", endpoint="prometheus", instance="192.0.2.52:9942", node="worker-2"}
+        values: '0x90'
+      - series: >-
+          drbd_device_state{name="pvc-6f1c2a52-7d0e-4c1b-9a43-0e3f5b8d2c71", volume="0", minor="1000",
+          drbd_device_state="UpToDate", job="linstor-satellite", namespace="piraeus-datastore",
+          pod="linstor-satellite.worker-3-h2c8n", container="drbd-reactor", endpoint="prometheus",
+          instance="192.0.2.53:9942", node="worker-3"}
+        values: '0x90'
+      - series: >-
+          drbd_device_state{name="pvc-6f1c2a52-7d0e-4c1b-9a43-0e3f5b8d2c71", volume="0", minor="1000",
+          drbd_device_state="Diskless", job="linstor-satellite", namespace="piraeus-datastore",
+          pod="linstor-satellite.worker-3-h2c8n", container="drbd-reactor", endpoint="prometheus",
+          instance="192.0.2.53:9942", node="worker-3"}
+        values: '1x90'
+      - series: >-
+          drbd_device_client{name="pvc-6f1c2a52-7d0e-4c1b-9a43-0e3f5b8d2c71", volume="0", minor="1000",
+          job="linstor-satellite", namespace="piraeus-datastore", pod="linstor-satellite.worker-3-h2c8n",
+          container="drbd-reactor", endpoint="prometheus", instance="192.0.2.53:9942", node="worker-3"}
+        values: '1x90'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DrbdReplicaNotUpToDate
+        exp_alerts: []
+      - eval_time: 24m
+        alertname: DrbdReplicaNotUpToDate
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: DrbdReplicaNotUpToDate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              name: pvc-6f1c2a52-7d0e-4c1b-9a43-0e3f5b8d2c71
+              volume: "0"
+              minor: "1000"
+              drbd_device_state: UpToDate
+              job: linstor-satellite
+              namespace: piraeus-datastore
+              pod: linstor-satellite.worker-2-b9m4d
+              container: drbd-reactor
+              endpoint: prometheus
+              instance: 192.0.2.52:9942
+              node: worker-2
+            exp_annotations:
+              summary: A DRBD replica is not UpToDate
+              description: The replica of the DRBD resource pvc-6f1c2a52-7d0e-4c1b-9a43-0e3f5b8d2c71 on worker-2 has not been UpToDate for 15 minutes, so the volume has one current copy fewer.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#drbdreplicanotuptodate
+  - name: The alert DrbdResourceWithoutQuorum fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # The devices of one volume on three workers have quorum for 10 minutes; then the one on worker-2 has
+      # none.
+      - series: >-
+          drbd_device_quorum{name="pvc-6f1c2a52-7d0e-4c1b-9a43-0e3f5b8d2c71", volume="0", minor="1000",
+          job="linstor-satellite", namespace="piraeus-datastore", pod="linstor-satellite.worker-1-x7k2p",
+          container="drbd-reactor", endpoint="prometheus", instance="192.0.2.51:9942", node="worker-1"}
+        values: '1x90'
+      - series: >-
+          drbd_device_quorum{name="pvc-6f1c2a52-7d0e-4c1b-9a43-0e3f5b8d2c71", volume="0", minor="1000",
+          job="linstor-satellite", namespace="piraeus-datastore", pod="linstor-satellite.worker-2-b9m4d",
+          container="drbd-reactor", endpoint="prometheus", instance="192.0.2.52:9942", node="worker-2"}
+        values: '1x9 0x80'
+      - series: >-
+          drbd_device_quorum{name="pvc-6f1c2a52-7d0e-4c1b-9a43-0e3f5b8d2c71", volume="0", minor="1000",
+          job="linstor-satellite", namespace="piraeus-datastore", pod="linstor-satellite.worker-3-h2c8n",
+          container="drbd-reactor", endpoint="prometheus", instance="192.0.2.53:9942", node="worker-3"}
+        values: '1x90'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: DrbdResourceWithoutQuorum
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: DrbdResourceWithoutQuorum
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: DrbdResourceWithoutQuorum
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              name: pvc-6f1c2a52-7d0e-4c1b-9a43-0e3f5b8d2c71
+              volume: "0"
+              minor: "1000"
+              job: linstor-satellite
+              namespace: piraeus-datastore
+              pod: linstor-satellite.worker-2-b9m4d
+              container: drbd-reactor
+              endpoint: prometheus
+              instance: 192.0.2.52:9942
+              node: worker-2
+            exp_annotations:
+              summary: A DRBD resource has lost quorum
+              description: The DRBD resource pvc-6f1c2a52-7d0e-4c1b-9a43-0e3f5b8d2c71 on worker-2 has had no quorum for 5 minutes, so its I/O is suspended and the pod that uses the volume can neither read nor write it.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#drbdresourcewithoutquorum
+  - name: The alert LinstorSatelliteOffline fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # The controller reports two satellites online, 2, for 10 minutes; then one is offline, 0.
+      - series: >-
+          linstor_node_state{address="192.0.2.31", encryption="SSL", port="3367", node="worker-1",
+          nodetype="SATELLITE", job="linstor-controller", namespace="piraeus-datastore",
+          pod="linstor-controller-5d9c7b7f9-q4v2j", container="linstor-controller",
+          service="linstor-controller", endpoint="api", instance="192.0.2.40:3370"}
+        values: '2x90'
+      - series: >-
+          linstor_node_state{address="192.0.2.32", encryption="SSL", port="3367", node="worker-2",
+          nodetype="SATELLITE", job="linstor-controller", namespace="piraeus-datastore",
+          pod="linstor-controller-5d9c7b7f9-q4v2j", container="linstor-controller",
+          service="linstor-controller", endpoint="api", instance="192.0.2.40:3370"}
+        values: '2x9 0x80'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: LinstorSatelliteOffline
+        exp_alerts: []
+      - eval_time: 19m
+        alertname: LinstorSatelliteOffline
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: LinstorSatelliteOffline
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              address: 192.0.2.32
+              encryption: SSL
+              port: "3367"
+              node: worker-2
+              nodetype: SATELLITE
+              job: linstor-controller
+              namespace: piraeus-datastore
+              pod: linstor-controller-5d9c7b7f9-q4v2j
+              container: linstor-controller
+              service: linstor-controller
+              endpoint: api
+              instance: 192.0.2.40:3370
+            exp_annotations:
+              summary: A LINSTOR satellite is offline
+              description: The LINSTOR satellite on worker-2 has not been online for 10 minutes, so its replicas are not kept in sync and no volume can be placed on it.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#linstorsatelliteoffline
+  - name: The alert LinstorStoragePoolFilling fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # Three workers' pools of 1000 bytes: worker-1's is half full, worker-2's goes from half to 90 percent
+      # after 10 minutes, and worker-3's is 98 percent full, which is the other alert's. The satellite's
+      # diskless pool has no capacity.
+      - series: >-
+          linstor_storage_pool_capacity_free_bytes{storage_pool="data", node="worker-1",
+          driver="LVM_THIN", backing_pool="linstor_data/data", job="linstor-controller",
+          namespace="piraeus-datastore", pod="linstor-controller-5d9c7b7f9-q4v2j",
+          container="linstor-controller", service="linstor-controller", endpoint="api",
+          instance="192.0.2.40:3370"}
+        values: '500x90'
+      - series: >-
+          linstor_storage_pool_capacity_total_bytes{storage_pool="data", node="worker-1",
+          driver="LVM_THIN", backing_pool="linstor_data/data", job="linstor-controller",
+          namespace="piraeus-datastore", pod="linstor-controller-5d9c7b7f9-q4v2j",
+          container="linstor-controller", service="linstor-controller", endpoint="api",
+          instance="192.0.2.40:3370"}
+        values: '1000x90'
+      - series: >-
+          linstor_storage_pool_capacity_free_bytes{storage_pool="data", node="worker-2",
+          driver="LVM_THIN", backing_pool="linstor_data/data", job="linstor-controller",
+          namespace="piraeus-datastore", pod="linstor-controller-5d9c7b7f9-q4v2j",
+          container="linstor-controller", service="linstor-controller", endpoint="api",
+          instance="192.0.2.40:3370"}
+        values: '500x9 100x80'
+      - series: >-
+          linstor_storage_pool_capacity_total_bytes{storage_pool="data", node="worker-2",
+          driver="LVM_THIN", backing_pool="linstor_data/data", job="linstor-controller",
+          namespace="piraeus-datastore", pod="linstor-controller-5d9c7b7f9-q4v2j",
+          container="linstor-controller", service="linstor-controller", endpoint="api",
+          instance="192.0.2.40:3370"}
+        values: '1000x90'
+      - series: >-
+          linstor_storage_pool_capacity_free_bytes{storage_pool="data", node="worker-3",
+          driver="LVM_THIN", backing_pool="linstor_data/data", job="linstor-controller",
+          namespace="piraeus-datastore", pod="linstor-controller-5d9c7b7f9-q4v2j",
+          container="linstor-controller", service="linstor-controller", endpoint="api",
+          instance="192.0.2.40:3370"}
+        values: '20x90'
+      - series: >-
+          linstor_storage_pool_capacity_total_bytes{storage_pool="data", node="worker-3",
+          driver="LVM_THIN", backing_pool="linstor_data/data", job="linstor-controller",
+          namespace="piraeus-datastore", pod="linstor-controller-5d9c7b7f9-q4v2j",
+          container="linstor-controller", service="linstor-controller", endpoint="api",
+          instance="192.0.2.40:3370"}
+        values: '1000x90'
+      - series: >-
+          linstor_storage_pool_capacity_free_bytes{storage_pool="DfltDisklessStorPool", node="worker-1",
+          driver="DISKLESS", backing_pool="", job="linstor-controller", namespace="piraeus-datastore",
+          pod="linstor-controller-5d9c7b7f9-q4v2j", container="linstor-controller",
+          service="linstor-controller", endpoint="api", instance="192.0.2.40:3370"}
+        values: '0x90'
+      - series: >-
+          linstor_storage_pool_capacity_total_bytes{storage_pool="DfltDisklessStorPool", node="worker-1",
+          driver="DISKLESS", backing_pool="", job="linstor-controller", namespace="piraeus-datastore",
+          pod="linstor-controller-5d9c7b7f9-q4v2j", container="linstor-controller",
+          service="linstor-controller", endpoint="api", instance="192.0.2.40:3370"}
+        values: '0x90'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: LinstorStoragePoolFilling
+        exp_alerts: []
+      - eval_time: 24m
+        alertname: LinstorStoragePoolFilling
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: LinstorStoragePoolFilling
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              storage_pool: data
+              node: worker-2
+              driver: LVM_THIN
+              backing_pool: linstor_data/data
+              job: linstor-controller
+              namespace: piraeus-datastore
+              pod: linstor-controller-5d9c7b7f9-q4v2j
+              container: linstor-controller
+              service: linstor-controller
+              endpoint: api
+              instance: 192.0.2.40:3370
+            exp_annotations:
+              summary: A storage pool is above 85 percent full
+              description: The storage pool data on worker-2 has been 90% full for 15 minutes.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#linstorstoragepoolfilling
+  - name: The alert LinstorStoragePoolFull fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # Three workers' pools of 1000 bytes: worker-1's is half full, worker-2's goes from half to 98 percent
+      # after 10 minutes, and worker-3's is 90 percent full, which is the other alert's.
+      - series: >-
+          linstor_storage_pool_capacity_free_bytes{storage_pool="data", node="worker-1",
+          driver="LVM_THIN", backing_pool="linstor_data/data", job="linstor-controller",
+          namespace="piraeus-datastore", pod="linstor-controller-5d9c7b7f9-q4v2j",
+          container="linstor-controller", service="linstor-controller", endpoint="api",
+          instance="192.0.2.40:3370"}
+        values: '500x90'
+      - series: >-
+          linstor_storage_pool_capacity_total_bytes{storage_pool="data", node="worker-1",
+          driver="LVM_THIN", backing_pool="linstor_data/data", job="linstor-controller",
+          namespace="piraeus-datastore", pod="linstor-controller-5d9c7b7f9-q4v2j",
+          container="linstor-controller", service="linstor-controller", endpoint="api",
+          instance="192.0.2.40:3370"}
+        values: '1000x90'
+      - series: >-
+          linstor_storage_pool_capacity_free_bytes{storage_pool="data", node="worker-2",
+          driver="LVM_THIN", backing_pool="linstor_data/data", job="linstor-controller",
+          namespace="piraeus-datastore", pod="linstor-controller-5d9c7b7f9-q4v2j",
+          container="linstor-controller", service="linstor-controller", endpoint="api",
+          instance="192.0.2.40:3370"}
+        values: '500x9 20x80'
+      - series: >-
+          linstor_storage_pool_capacity_total_bytes{storage_pool="data", node="worker-2",
+          driver="LVM_THIN", backing_pool="linstor_data/data", job="linstor-controller",
+          namespace="piraeus-datastore", pod="linstor-controller-5d9c7b7f9-q4v2j",
+          container="linstor-controller", service="linstor-controller", endpoint="api",
+          instance="192.0.2.40:3370"}
+        values: '1000x90'
+      - series: >-
+          linstor_storage_pool_capacity_free_bytes{storage_pool="data", node="worker-3",
+          driver="LVM_THIN", backing_pool="linstor_data/data", job="linstor-controller",
+          namespace="piraeus-datastore", pod="linstor-controller-5d9c7b7f9-q4v2j",
+          container="linstor-controller", service="linstor-controller", endpoint="api",
+          instance="192.0.2.40:3370"}
+        values: '100x90'
+      - series: >-
+          linstor_storage_pool_capacity_total_bytes{storage_pool="data", node="worker-3",
+          driver="LVM_THIN", backing_pool="linstor_data/data", job="linstor-controller",
+          namespace="piraeus-datastore", pod="linstor-controller-5d9c7b7f9-q4v2j",
+          container="linstor-controller", service="linstor-controller", endpoint="api",
+          instance="192.0.2.40:3370"}
+        values: '1000x90'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: LinstorStoragePoolFull
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: LinstorStoragePoolFull
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: LinstorStoragePoolFull
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              storage_pool: data
+              node: worker-2
+              driver: LVM_THIN
+              backing_pool: linstor_data/data
+              job: linstor-controller
+              namespace: piraeus-datastore
+              pod: linstor-controller-5d9c7b7f9-q4v2j
+              container: linstor-controller
+              service: linstor-controller
+              endpoint: api
+              instance: 192.0.2.40:3370
+            exp_annotations:
+              summary: A storage pool is above 95 percent full
+              description: The storage pool data on worker-2 is 98% full; no volume can grow or be placed on it once it is full.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#linstorstoragepoolfull

@@ -392,6 +392,7 @@ BGP sessions to it, and ICMP at up to five packets a second.
 | `cilium-health` | TCP 4240 | all | `members` | Cilium's health checks between nodes; the ICMP echo they send as well is admitted by Talos itself. |
 | `hubble` | TCP 4244 | all | `members`, `pods` | The Hubble server in each node's Cilium agent, from which Hubble Relay reads the node's flows. |
 | `node-exporter` | TCP 9100 | all | `members`, `pods` | node-exporter, on the host network, which Prometheus scrapes. |
+| `cilium-agent-metrics` | TCP 9962 | all | `members`, `pods` | The Cilium agent's metrics, on the host network, which Prometheus scrapes: the workers' BGP sessions among them ([kubernetes.md](kubernetes.md#monitoring)). |
 
 ### What gets no rule
 
@@ -406,7 +407,7 @@ BGP sessions to it, and ICMP at up to five packets a second.
   ([Piraeus](https://github.com/piraeusdatastore/piraeus-operator/blob/v2.12.1/pkg/resources/cluster/csi-node/csi-node-daemon-set.yaml)).
 - The Cilium operator and Cilium's Envoy can serve metrics on the host network. Nothing scrapes
   them, as their monitors are off ([kubernetes.md](kubernetes.md#monitoring)), so nothing off the
-  node reaches them.
+  node reaches them. The agent's metrics are the exception, with a rule of their own above.
 - Spegel runs on the pod network: its peers reach each other, and Prometheus its metrics, at pod
   addresses, and its registry is a NodePort that each node's own containerd reaches at the node's
   own address
@@ -730,7 +731,8 @@ cluster that lists the job while its control planes lack the patch builds none o
 creates the `ServiceAccount` kind of `talos.dev` only when the document is applied, and Flux
 dry-runs every object of the application together and applies none when one fails, so neither the
 CronJob nor the alerts exist and no alert fires. The only sign is the Kustomization `etcd-snapshots`
-not Ready (`flux get kustomization etcd-snapshots`), which nothing scrapes.
+not Ready (`flux get kustomization etcd-snapshots`), which `FluxApplierNotReady` reports after 15
+minutes ([kubernetes.md](kubernetes.md#alerts)).
 
 **The recipient.** The recipient, `ETCD_SNAPSHOT_AGE_RECIPIENT` in the application's `ks.yaml`, is
 `talos/.sops.yaml`'s, as the artifact holds `kubernetes/` only. `tests/etcd-snapshots.bats` fails

@@ -1,0 +1,82 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/prometheusrule-monitoring-v1.json
+# Alerts on the storage layer, from the DRBD reactor's metrics, one series for each device of each
+# DRBD resource on the node that holds it (a resource is named after its volume, pvc-<id>), and the
+# LINSTOR controller's. The operator publishes alert rules of its own, config/extras/monitoring/alerts.yaml
+# of its repository, that are not loaded here: they set no summary, no runbook and, for some, no
+# `for`, which every own alert of the tree needs (docs/kubernetes.md, Alerts), and their thresholds
+# and severities are not the ones these alerts are for; a rule of theirs left on beside these would
+# fire twice for a failure. The failures they cover that these do not are not alerted on here, and
+# docs/kubernetes.md lists them under what no alert covers.
+#
+# DRBD names a device's state with a series for each state, 1 for the one it is in
+# (drbd_device_state{drbd_device_state="UpToDate"}), and a device that is diskless on purpose, a
+# client or a tiebreaker, is marked by drbd_device_client, which is no replica. LINSTOR's
+# linstor_node_state is 2 for a satellite that is online; its series carry the satellite's address,
+# which the alerts never print. Tests: tests/rules/linstor-monitoring.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: linstor-alerts
+  namespace: piraeus-datastore
+spec:
+  groups:
+    - name: drbd
+      rules:
+        - alert: DrbdReplicaNotUpToDate
+          expr: |
+            drbd_device_state{job="linstor-satellite", drbd_device_state="UpToDate"} == 0
+            unless ignoring (drbd_device_state)
+            drbd_device_client{job="linstor-satellite"} == 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: A DRBD replica is not UpToDate
+            description: The replica of the DRBD resource {{ $labels.name }} on {{ $labels.node }} has not been UpToDate for 15 minutes, so the volume has one current copy fewer.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#drbdreplicanotuptodate
+        - alert: DrbdResourceWithoutQuorum
+          expr: drbd_device_quorum{job="linstor-satellite"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: A DRBD resource has lost quorum
+            description: The DRBD resource {{ $labels.name }} on {{ $labels.node }} has had no quorum for 5 minutes, so its I/O is suspended and the pod that uses the volume can neither read nor write it.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#drbdresourcewithoutquorum
+    - name: linstor
+      rules:
+        - alert: LinstorSatelliteOffline
+          expr: linstor_node_state{job="linstor-controller", nodetype="SATELLITE"} != 2
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: A LINSTOR satellite is offline
+            description: The LINSTOR satellite on {{ $labels.node }} has not been online for 10 minutes, so its replicas are not kept in sync and no volume can be placed on it.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#linstorsatelliteoffline
+        # A pool without capacity of its own, such as the diskless one, reports 0 of 0, which is not a
+        # number, so no comparison holds for it. Between 85 and 95 percent is this alert's, above is
+        # the next one's, so one failure is one alert.
+        - alert: LinstorStoragePoolFilling
+          expr: |
+            (1 - linstor_storage_pool_capacity_free_bytes{job="linstor-controller"} / linstor_storage_pool_capacity_total_bytes{job="linstor-controller"}) > 0.85
+            unless
+            (1 - linstor_storage_pool_capacity_free_bytes{job="linstor-controller"} / linstor_storage_pool_capacity_total_bytes{job="linstor-controller"}) > 0.95
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: A storage pool is above 85 percent full
+            description: The storage pool {{ $labels.storage_pool }} on {{ $labels.node }} has been {{ $value | humanizePercentage }} full for 15 minutes.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#linstorstoragepoolfilling
+        - alert: LinstorStoragePoolFull
+          expr: |
+            (1 - linstor_storage_pool_capacity_free_bytes{job="linstor-controller"} / linstor_storage_pool_capacity_total_bytes{job="linstor-controller"}) > 0.95
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: A storage pool is above 95 percent full
+            description: The storage pool {{ $labels.storage_pool }} on {{ $labels.node }} is {{ $value | humanizePercentage }} full; no volume can grow or be placed on it once it is full.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#linstorstoragepoolfull

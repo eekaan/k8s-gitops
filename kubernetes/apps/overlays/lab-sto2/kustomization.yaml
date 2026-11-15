@@ -38,6 +38,7 @@ resources:
   - ../../base/keda/keda/ks.yaml
   - ../../base/kube-system/cilium/ks.yaml
   - ../../base/kube-system/cilium-bgp/ks.yaml
+  - ../../base/kube-system/cilium-monitoring/ks.yaml
   - ../../base/kube-system/descheduler/ks.yaml
   - ../../base/kube-system/gateway-api-crds/ks.yaml
   - ../../base/kube-system/kubelet-csr-approver/ks.yaml
@@ -49,6 +50,7 @@ resources:
   - ../../base/kube-system/snapshot-controller/ks.yaml
   - ../../base/kube-system/spegel/ks.yaml
   - ../../base/kube-system/vpa/ks.yaml
+  - ../../base/monitoring/flux-monitoring/ks.yaml
   - ../../base/monitoring/grafana-operator/ks.yaml
   - ../../base/monitoring/grafana/ks.yaml
   - ../../base/monitoring/kube-prometheus-stack/ks.yaml
@@ -57,6 +59,7 @@ resources:
   - ../../base/monitoring/victoria-logs/ks.yaml
   - ../../base/openbao/openbao/ks.yaml
   - ../../base/piraeus-datastore/linstor-cluster/ks.yaml
+  - ../../base/piraeus-datastore/linstor-monitoring/ks.yaml
   - ../../base/piraeus-datastore/piraeus-operator/ks.yaml
   - ../../base/volsync-system/volsync/ks.yaml
 

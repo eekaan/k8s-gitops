@@ -1,11 +1,16 @@
 #!/usr/bin/env bats
 # Proves features/alerts.feature; each test carries its scenario's title. The scenarios whose title
 # starts with "The alert" are proved by promtool unit tests in tests/rules/, through just rules-check;
-# the last test here checks that those names and the scenarios agree.
+# the last but one test here checks that those names and the scenarios agree, and the last that every
+# metric they read is scraped.
 # Needs helm, flux, kustomize, yq and jq on PATH (the versions pinned for the repository). The tree
 # is rendered once per run, charts pulled from their public registries; every fixture is a copy of
 # that render or of tests/rules and docs/runbooks with one thing broken, so nothing here drifts from
 # the rules the tree has. A rule promtool refuses is proved where promtool is, by rules-check itself.
+
+# selected, which matches a monitor with what it selects, and the operator-made targets of the storage
+# layer.
+load fixtures/monitors
 
 setup_file() {
   local repo
@@ -414,4 +419,204 @@ promtool_calls() {
     grep -q "^  Scenario: The alert $alert fires after its time in the failing case and stays quiet in the healthy one\$" "$REPO/features/alerts.feature"
   done < <(own_alerts "$RENDER")
   [ "$(grep -c . <<<"$names")" -eq "$(sed -n 's/^  Scenario: \(The alert .*\)$/\1/p' "$REPO/features/alerts.feature" | wc -l)" ]
+}
+
+# The metrics of the tree's own alerts and where each is scraped, one entry for each source:
+#   METRIC REGEX|APPLICATION|MONITOR FILE|TARGET FILE|NAMESPACE
+# where the monitor and the target are files of the render of the application, without .yaml, and
+# NAMESPACE is where an object the render holds without one lands. The target is a Service of a
+# ServiceMonitor or the workload of a PodMonitor, or recorded:NAME, the operator's object of that name
+# in linstor_targets, which the operator makes at run time and the render therefore does not hold.
+# Metrics of the same source share an entry; an alert on a metric no entry matches fails.
+scrapes=(
+  # Prometheus' own series of each scrape: its target is up or it is not.
+  '^up$|-|-|-|-'
+  '^kube_|kube-prometheus-stack|ServiceMonitor.monitoring.coreos.com_monitoring_kube-prometheus-stack-kube-state-metrics|Service_monitoring_kube-prometheus-stack-kube-state-metrics|monitoring'
+  '^volsync_|volsync|ServiceMonitor.monitoring.coreos.com__volsync|Service__volsync-metrics|volsync-system'
+  '^vector_|vector|PodMonitor.monitoring.coreos.com_monitoring_vector|DaemonSet.apps_monitoring_vector|monitoring'
+  '^certmanager_|cert-manager|ServiceMonitor.monitoring.coreos.com_cert-manager_cert-manager|Service_cert-manager_cert-manager|cert-manager'
+  '^flux_|flux-monitoring|ServiceMonitor.monitoring.coreos.com_monitoring_flux-operator|flux-operator/Service_flux-system_flux-operator|monitoring'
+  '^cilium_|cilium-monitoring|PodMonitor.monitoring.coreos.com_kube-system_cilium-agent|cilium/DaemonSet.apps_kube-system_cilium|kube-system'
+  '^linstor_|linstor-monitoring|ServiceMonitor.monitoring.coreos.com_piraeus-datastore_linstor-controller|recorded:Service/linstor-controller|piraeus-datastore'
+  '^drbd_|linstor-monitoring|PodMonitor.monitoring.coreos.com_piraeus-datastore_linstor-satellite|recorded:Pod/linstor-satellite|piraeus-datastore'
+)
+
+# own_metrics RENDER: the metrics each own alert of the render reads, as APPLICATION ALERT METRIC per
+# line: the names left in its expression once strings, label matchers, ranges, the label lists of
+# by, on and the like, and PromQL's own words are taken out.
+own_metrics() {
+  local file app
+  while IFS= read -r file; do
+    app="$(basename "$(dirname "$file")")"
+    yq -N -o json -I0 '.spec.groups[].rules[] | select(has("alert")) | {"alert": .alert, "expr": .expr}' "$file" |
+      jq -r --arg app "$app" --argjson words '["sum","count","avg","min","max","quantile","rate","increase","delta","absent","last_over_time","label_replace","vector","scalar","time","and","or","unless","bool","by","without","on","ignoring","group_left","group_right"]' '
+        .alert as $alert | .expr
+        | gsub("\"[^\"]*\""; "") | gsub("\\{[^}]*\\}"; "") | gsub("\\[[^\\]]*\\]"; "")
+        | gsub("(by|without|on|ignoring|group_left|group_right)[ \t\n]*\\([^)]*\\)"; "")
+        | [scan("[a-zA-Z_:][a-zA-Z0-9_:]*")] | map(select(. as $word | $words | index($word) | not)) | unique[]
+        | $app + " " + $alert + " " + .'
+  done < <(own_files "$1")
+}
+
+# scrape_problem RENDER ENTRY: what is wrong with where an entry of scrapes says a metric is scraped,
+# nothing when it is right: the monitor is in the render and selects the target through a port the
+# target exposes.
+scrape_problem() {
+  local render="$1/$CLUSTER" regex app monitor target namespace file candidates json scraped pods
+  IFS='|' read -r regex app monitor target namespace <<<"$2"
+  [ "$app" = - ] && return 0
+  file="$render/$app/$monitor.yaml"
+  [ -f "$file" ] || { echo "no monitor $monitor in $app"; return 0; }
+  json="$(yq -o json -I0 ".metadata.namespace = (.metadata.namespace // \"$namespace\")" "$file")"
+  if [[ $target == recorded:* ]]; then
+    candidates="$(linstor_targets)"
+    candidates="$(jq -c "[.[] | select(.name == \"${target#recorded:}\")]" <<<"$candidates")"
+  else
+    [[ $target == */* ]] || target="$app/$target"
+    file="$render/$target.yaml"
+    [ -f "$file" ] || { echo "no target ${target#*/} in ${target%%/*}"; return 0; }
+    candidates="$(yq -N -o json -I0 '(select(.kind == "Service") | {"name": ("Service/" + .metadata.name),
+      "ns": (.metadata.namespace // "'"$namespace"'"), "labels": .metadata.labels, "ports": [.spec.ports[].name],
+      "selector": .spec.selector, "targets": [.spec.ports[] | .targetPort // .port]}),
+      (select(.kind == "DaemonSet" or .kind == "Deployment" or .kind == "StatefulSet") | {"name": (.kind + "/" + .metadata.name),
+      "ns": (.metadata.namespace // "'"$namespace"'"), "labels": .spec.template.metadata.labels,
+      "ports": [.spec.template.spec.containers[].ports[]? | .name]})' "$file" | jq -s 'map(select(.name != null))')"
+    # A Service leads to the container ports, of the workloads its application renders, that its
+    # selector picks and its ports target, and a monitor's endpoint that names a targetPort is matched
+    # there alone. That is stricter than Prometheus, whose endpointslice discovery also makes targets
+    # for the container ports of those pods that no Service port targets, so this can report a gap
+    # that is not one but never misses one that is.
+    pods="$(yq -N -o json -I0 'select(.kind == "DaemonSet" or .kind == "Deployment" or .kind == "StatefulSet")
+      | {"ns": (.metadata.namespace // "'"$namespace"'"), "labels": .spec.template.metadata.labels,
+      "ports": [.spec.template.spec.containers[].ports[]?]}' "$(dirname "$file")"/*.yaml | jq -s .)"
+    # shellcheck disable=SC2016 # $pods, $svc and $pod are jq variables.
+    candidates="$(jq -c --argjson pods "$pods" 'map(. as $svc | if ($svc.selector // {}) == {} then . else . + {"targetPorts": [
+      $pods[] | . as $pod | select($pod.ns == $svc.ns and ($svc.selector | to_entries | all(.value == $pod.labels[.key])))
+      | $pod.ports[] | select(. as $port | $svc.targets | any(. == $port.name or . == $port.containerPort))
+      | .name, .containerPort]} end)' <<<"$candidates")"
+  fi
+  scraped="$(selected "$json" "$candidates")"
+  [ -n "$scraped" ] || echo "the monitor $monitor selects nothing that exposes the port it scrapes of $(jq -r '.[0].name' <<<"$candidates")"
+  return 0
+}
+
+# scrape_gaps RENDER: one line for each metric an own alert of the render reads that no monitor of the
+# render scrapes, or whose monitor selects nothing of its target, naming the application and the
+# alert.
+scrape_gaps() {
+  local app alert metric entry regex candidate problem
+  while read -r app alert metric; do
+    entry=""
+    for candidate in "${scrapes[@]}"; do
+      IFS='|' read -r regex _ <<<"$candidate"
+      if [[ $metric =~ $regex ]]; then
+        entry=$candidate
+        break
+      fi
+    done
+    if [ -z "$entry" ]; then
+      echo "$app: alert $alert reads $metric, which no monitor scrapes"
+      continue
+    fi
+    problem="$(scrape_problem "$1" "$entry")"
+    [ -z "$problem" ] || echo "$app: alert $alert reads $metric: $problem"
+  done < <(own_metrics "$1")
+}
+
+@test "Every alert in the tree is on a metric a monitor in the render scrapes" {
+  local gaps shown
+  # Every own alert reads metrics that a monitor of the render scrapes, from a target that exposes the
+  # port the monitor names.
+  gaps="$(scrape_gaps "$RENDER")"
+  echo "gaps in the tree: ${gaps:-none}"
+  [ -z "$gaps" ]
+  shown="$(own_metrics "$RENDER" | awk '{ print $1 }' | sort -u | xargs)"
+  echo "applications with alerts: $shown"
+  [[ $shown == *flux-monitoring* && $shown == *cilium-monitoring* && $shown == *linstor-monitoring* ]]
+
+  # An alert on a metric nothing scrapes is refused, naming the alert and the metric.
+  fixture
+  yq -i '.spec.groups[0].rules += [{"alert": "NothingScrapesThis", "expr": "unscraped_thing_total > 0", "for": "5m"}]' \
+    "$(own_file vector)"
+  gaps="$(scrape_gaps "$FX/render")"
+  echo "$gaps"
+  [ "$gaps" = "vector: alert NothingScrapesThis reads unscraped_thing_total, which no monitor scrapes" ]
+
+  # A monitor that selects nothing of its target, whether its selector or the port it names is wrong,
+  # is refused, naming the alert that reads what it should scrape.
+  fixture
+  yq -i '.spec.selector.matchLabels."app.kubernetes.io/name" = "not-the-operator"' \
+    "$FX/render/$CLUSTER/flux-monitoring/ServiceMonitor.monitoring.coreos.com_monitoring_flux-operator.yaml"
+  gaps="$(scrape_gaps "$FX/render")"
+  echo "$gaps"
+  [ "$(grep -c 'selects nothing' <<<"$gaps")" -eq "$(grep -c . <<<"$gaps")" ]
+  [ "$(grep -c 'flux-monitoring: alert Flux' <<<"$gaps")" -ge 1 ]
+  [ "$(grep -c -v 'flux-monitoring' <<<"$gaps")" -eq 0 ]
+  fixture
+  yq -i '.spec.podMetricsEndpoints[0].port = "renamed"' \
+    "$FX/render/$CLUSTER/cilium-monitoring/PodMonitor.monitoring.coreos.com_kube-system_cilium-agent.yaml"
+  gaps="$(scrape_gaps "$FX/render")"
+  echo "$gaps"
+  [ "$(grep -c 'cilium-monitoring: alert Cilium.*selects nothing' <<<"$gaps")" -ge 1 ]
+  [ "$(grep -c -v 'cilium-monitoring' <<<"$gaps")" -eq 0 ]
+  # Each names the target it was matched with.
+  [ "$(grep -c 'selects nothing that exposes the port it scrapes of DaemonSet/cilium$' <<<"$gaps")" -eq "$(grep -c . <<<"$gaps")" ]
+  # The same for the operator-made targets.
+  fixture
+  yq -i '.spec.podMetricsEndpoints[0].port = "renamed"' \
+    "$FX/render/$CLUSTER/linstor-monitoring/PodMonitor.monitoring.coreos.com_piraeus-datastore_linstor-satellite.yaml"
+  gaps="$(scrape_gaps "$FX/render")"
+  echo "$gaps"
+  [ "$(grep -c 'linstor-monitoring: alert Drbd.*selects nothing' <<<"$gaps")" -ge 1 ]
+  [ "$(grep -c -v 'linstor-monitoring' <<<"$gaps")" -eq 0 ]
+  # The same for a monitor that selects by expressions and scrapes a container port behind the Service:
+  # one whose expressions leave the controller out, and one that names a container port it lacks.
+  fixture
+  yq -i '(.spec.selector.matchExpressions[] | select(.key == "app.kubernetes.io/component") | .values) = ["cainjector", "webhook"]' \
+    "$FX/render/$CLUSTER/cert-manager/ServiceMonitor.monitoring.coreos.com_cert-manager_cert-manager.yaml"
+  gaps="$(scrape_gaps "$FX/render")"
+  echo "$gaps"
+  [ "$(grep -c '^cert-manager: alert CertManager' <<<"$gaps")" -ge 1 ]
+  [ "$(grep -c -v 'selects nothing that exposes the port it scrapes of Service/cert-manager$' <<<"$gaps")" -eq 0 ]
+  fixture
+  yq -i '.spec.endpoints[0].targetPort = "renamed"' \
+    "$FX/render/$CLUSTER/cert-manager/ServiceMonitor.monitoring.coreos.com_cert-manager_cert-manager.yaml"
+  gaps="$(scrape_gaps "$FX/render")"
+  echo "$gaps"
+  [ "$(grep -c '^cert-manager: alert CertManager' <<<"$gaps")" -ge 1 ]
+  [ "$(grep -c -v 'selects nothing that exposes the port it scrapes of Service/cert-manager$' <<<"$gaps")" -eq 0 ]
+  # The same when only the Service no longer leads to the container port: the controller's port renamed,
+  # or the Service's selector pointing away from the controller. The Service's own port keeps the name
+  # the monitor's targetPort gives, so these hold only if the targetPort is matched behind the Service.
+  fixture
+  yq -i '(.spec.template.spec.containers[].ports[] | select(.name == "http-metrics") | .name) = "renamed"' \
+    "$FX/render/$CLUSTER/cert-manager/Deployment.apps_cert-manager_cert-manager.yaml"
+  gaps="$(scrape_gaps "$FX/render")"
+  echo "$gaps"
+  [ "$(grep -c '^cert-manager: alert CertManager' <<<"$gaps")" -ge 1 ]
+  [ "$(grep -c -v 'selects nothing that exposes the port it scrapes of Service/cert-manager$' <<<"$gaps")" -eq 0 ]
+  fixture
+  yq -i '.spec.selector."app.kubernetes.io/component" = "not-the-controller"' \
+    "$FX/render/$CLUSTER/cert-manager/Service_cert-manager_cert-manager.yaml"
+  gaps="$(scrape_gaps "$FX/render")"
+  echo "$gaps"
+  [ "$(grep -c '^cert-manager: alert CertManager' <<<"$gaps")" -ge 1 ]
+  [ "$(grep -c -v 'selects nothing that exposes the port it scrapes of Service/cert-manager$' <<<"$gaps")" -eq 0 ]
+  # A monitor whose selector needs an operator the matcher does not know, NotIn here, is reported as
+  # selecting nothing, whatever its values: one that Kubernetes reads as keeping the controller, and one
+  # that it reads as leaving it out.
+  fixture
+  yq -i '(.spec.selector.matchExpressions[] | select(.key == "app.kubernetes.io/component")) |= {"key": .key, "operator": "NotIn", "values": ["cainjector", "webhook"]}' \
+    "$FX/render/$CLUSTER/cert-manager/ServiceMonitor.monitoring.coreos.com_cert-manager_cert-manager.yaml"
+  gaps="$(scrape_gaps "$FX/render")"
+  echo "$gaps"
+  [ "$(grep -c '^cert-manager: alert CertManager' <<<"$gaps")" -ge 1 ]
+  [ "$(grep -c -v 'selects nothing that exposes the port it scrapes of Service/cert-manager$' <<<"$gaps")" -eq 0 ]
+  fixture
+  yq -i '(.spec.selector.matchExpressions[] | select(.key == "app.kubernetes.io/component") | .operator) = "NotIn"' \
+    "$FX/render/$CLUSTER/cert-manager/ServiceMonitor.monitoring.coreos.com_cert-manager_cert-manager.yaml"
+  gaps="$(scrape_gaps "$FX/render")"
+  echo "$gaps"
+  [ "$(grep -c '^cert-manager: alert CertManager' <<<"$gaps")" -ge 1 ]
+  [ "$(grep -c -v 'selects nothing that exposes the port it scrapes of Service/cert-manager$' <<<"$gaps")" -eq 0 ]
 }

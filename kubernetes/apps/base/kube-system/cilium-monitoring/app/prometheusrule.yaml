@@ -1,0 +1,65 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/prometheusrule-monitoring-v1.json
+# Alerts on the workers' BGP sessions to the edge routers, from the agents' metric
+# cilium_bgp_control_plane_session_state: one series for each configured peer of each node's BGP
+# instance, 1 while the session is established and 0 otherwise, labelled with the peer's address and
+# port, which the alerts never print. The node label is the PodMonitor's. A worker taken out of BGP on
+# purpose, by the label the reboot recipes set, has no instance and so no series: its sessions are
+# not configured, and nothing here counts them. The control planes have no instance either.
+#
+# The metrics expose each session's number of advertised routes, not the routes, so which Service
+# address is announced by how many workers cannot be read from them, and no alert is on it
+# (docs/kubernetes.md, Alerts). Tests: tests/rules/cilium-monitoring.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: cilium-alerts
+  namespace: kube-system
+spec:
+  groups:
+    - name: cilium-bgp
+      rules:
+        # The sessions a node is configured for are the series it reports, so the sessions that are
+        # not established are those, less the ones whose value is 1.
+        - alert: CiliumBGPSessionsDown
+          expr: |
+            count by (node) (cilium_bgp_control_plane_session_state{job="cilium-agent"})
+              - sum by (node) (cilium_bgp_control_plane_session_state{job="cilium-agent"}) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: A worker's BGP sessions are not all established
+            description: The Cilium agent on {{ $labels.node }} has {{ $value }} of its BGP sessions to the edge routers not established for 5 minutes, so it carries less of the public traffic.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#ciliumbgpsessionsdown
+        # The sum is 0 while every session is down, and no series is reported while no worker has a
+        # BGP instance, which the second operand makes a 0 too; it counts only while a worker's agent
+        # is scraped, so an outage of the scrape is no outage of the sessions. The control planes'
+        # agents never report a session, so they do not count: kube-state-metrics' kube_node_role
+        # names a node's role from its node-role.kubernetes.io/ labels, by the node's name, which is
+        # the PodMonitor's node label, and Talos gives that role to every control plane and to no worker.
+        # While kube-state-metrics is not scraped, every scraped agent counts.
+        - alert: CiliumBGPNoSessionEstablished
+          expr: |
+            (
+              (
+                sum by (job) (cilium_bgp_control_plane_session_state{job="cilium-agent"})
+                or
+                label_replace(vector(0), "job", "cilium-agent", "", "")
+              ) == 0
+            )
+            and on (job)
+            (
+              count by (job) (
+                up{job="cilium-agent"} == 1
+                unless on (node)
+                kube_node_role{job="kube-state-metrics", role="control-plane"}
+              ) > 0
+            )
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: No BGP session is established from any worker
+            description: No worker's {{ $labels.job }} reports an established BGP session for 5 minutes, so no Service address is announced to the edge routers.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#ciliumbgpnosessionestablished

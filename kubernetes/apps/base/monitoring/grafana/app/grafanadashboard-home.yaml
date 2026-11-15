@@ -2,8 +2,9 @@
 # The Grafana's home: whether the cluster is healthy, at a glance. Nodes Ready and not, firing alerts
 # by severity, scrape targets down, volumes VolSync reports out of sync and missed scheduled syncs,
 # and what the log store ingests. Every metric it queries is one the stack scrapes or a rule writes
-# (tests/dashboards.bats). Panels for the public Gateway and for Flux are not here: no monitor scrapes
-# either (docs/kubernetes.md, Dashboards). The Grafana's spec.preferences names its uid as the home.
+# (tests/dashboards.bats). It has no panel of the public Gateway, which no monitor scrapes, or of
+# Flux, whose alerts it counts (docs/kubernetes.md, Dashboards). The Grafana's spec.preferences names
+# its uid as the home.
 # Without a folder the operator files a dashboard under its namespace, monitoring; the home is in General.
 apiVersion: grafana.integreatly.org/v1beta1
 kind: GrafanaDashboard

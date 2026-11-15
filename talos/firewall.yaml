@@ -83,3 +83,8 @@ listeners:
     ports: [9100]
     nodes: all
     from: [members, pods]
+  - name: cilium-agent-metrics
+    protocol: tcp
+    ports: [9962]
+    nodes: all
+    from: [members, pods]

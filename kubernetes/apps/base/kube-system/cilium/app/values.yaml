@@ -5,7 +5,9 @@
 #
 # ServiceMonitors and Grafana dashboards are off wherever the chart has them. scripts/install-cilium
 # installs from this file before Flux runs, when no monitoring resource definition exists yet, and
-# the chart refuses a ServiceMonitor without its definition; dashboards wait for a Grafana.
+# the chart refuses a ServiceMonitor without its definition; dashboards wait for a Grafana. The
+# agents' metrics endpoint needs no definition, so it is on here, and the cilium-monitoring
+# application scrapes it once the definitions are there.
 
 # Talos runs without kube-proxy, so Cilium serves Services itself.
 kubeProxyReplacement: true
@@ -52,6 +54,9 @@ securityContext:
 # A changed configuration takes effect only when the pods restart, so the chart rolls them.
 rollOutCiliumPods: true
 prometheus:
+  # The agents serve their metrics, the BGP sessions' among them, on port 9962 of the node they run
+  # on, as they run on the host's network.
+  enabled: true
   serviceMonitor:
     enabled: false
 dashboards:

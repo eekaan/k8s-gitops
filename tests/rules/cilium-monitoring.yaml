@@ -1,0 +1,241 @@
+---
+# Unit tests of the cilium-monitoring application's own alerts, run by just rules-check with promtool.
+# The series are shaped as Cilium's agent writes the BGP control plane's session state, one series per
+# configured peer of each BGP instance of the node, 1 while the session is established and 0 otherwise,
+# with the labels instance_name, local_asn, neighbor (the peer's address and port) and neighbor_asn
+# (Documentation/observability/metrics.rst and pkg/bgp/metrics/metrics.go of Cilium
+# v1.20.4), under the prefix cilium_; and as the PodMonitor's scrape adds job, namespace, pod,
+# container, endpoint, instance and the node. A worker taken out of BGP has no instance, so its agent
+# writes no series; the control plane's agent never has one. kube_node_role is kube-state-metrics',
+# one series for each node-role.kubernetes.io/ label of a node, labelled node and role
+# (internal/store/node.go of kube-state-metrics v2.20.0, the chart's), with the labels its
+# ServiceMonitor's scrape adds; Talos gives a control plane the role control-plane and a worker none.
+# The addresses are the documentation ranges. Each group's name is the title of its scenario in
+# features/alerts.feature.
+rule_files:
+  - cilium-monitoring.rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: The alert CiliumBGPSessionsDown fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # Each of two workers has a session to each of two edge routers. One worker's session to edge-2 is
+      # established for 10 minutes and then is not; the other worker's are established throughout.
+      - series: >-
+          cilium_bgp_control_plane_session_state{instance_name="cluster", local_asn="64496",
+          neighbor="198.51.100.1:179", neighbor_asn="64497", job="cilium-agent", namespace="kube-system",
+          pod="cilium-7xk2p", container="cilium-agent", endpoint="prometheus", instance="192.0.2.21:9962",
+          node="worker-1"}
+        values: '1x90'
+      - series: >-
+          cilium_bgp_control_plane_session_state{instance_name="cluster", local_asn="64496",
+          neighbor="198.51.100.2:179", neighbor_asn="64497", job="cilium-agent", namespace="kube-system",
+          pod="cilium-7xk2p", container="cilium-agent", endpoint="prometheus", instance="192.0.2.21:9962",
+          node="worker-1"}
+        values: '1x9 0x80'
+      - series: >-
+          cilium_bgp_control_plane_session_state{instance_name="cluster", local_asn="64496",
+          neighbor="198.51.100.1:179", neighbor_asn="64497", job="cilium-agent", namespace="kube-system",
+          pod="cilium-m9d4q", container="cilium-agent", endpoint="prometheus", instance="192.0.2.22:9962",
+          node="worker-2"}
+        values: '1x90'
+      - series: >-
+          cilium_bgp_control_plane_session_state{instance_name="cluster", local_asn="64496",
+          neighbor="198.51.100.2:179", neighbor_asn="64497", job="cilium-agent", namespace="kube-system",
+          pod="cilium-m9d4q", container="cilium-agent", endpoint="prometheus", instance="192.0.2.22:9962",
+          node="worker-2"}
+        values: '1x90'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CiliumBGPSessionsDown
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: CiliumBGPSessionsDown
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: CiliumBGPSessionsDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              node: worker-1
+            exp_annotations:
+              summary: A worker's BGP sessions are not all established
+              description: The Cilium agent on worker-1 has 1 of its BGP sessions to the edge routers not established for 5 minutes, so it carries less of the public traffic.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#ciliumbgpsessionsdown
+  - name: The alert CiliumBGPSessionsDown stays quiet while a worker is out of BGP on purpose
+    interval: 1m
+    input_series:
+      # A worker's sessions are established for 10 minutes, are shut down for 2, as when the label that
+      # takes it out of BGP is set, and then its agent reports no session at all, as it has no BGP instance.
+      # The other worker's sessions are established throughout, and the control plane's agent has none.
+      - series: >-
+          cilium_bgp_control_plane_session_state{instance_name="cluster", local_asn="64496",
+          neighbor="198.51.100.1:179", neighbor_asn="64497", job="cilium-agent", namespace="kube-system",
+          pod="cilium-7xk2p", container="cilium-agent", endpoint="prometheus", instance="192.0.2.21:9962",
+          node="worker-1"}
+        values: '1x9 0x1 stale'
+      - series: >-
+          cilium_bgp_control_plane_session_state{instance_name="cluster", local_asn="64496",
+          neighbor="198.51.100.2:179", neighbor_asn="64497", job="cilium-agent", namespace="kube-system",
+          pod="cilium-7xk2p", container="cilium-agent", endpoint="prometheus", instance="192.0.2.21:9962",
+          node="worker-1"}
+        values: '1x9 0x1 stale'
+      - series: >-
+          cilium_bgp_control_plane_session_state{instance_name="cluster", local_asn="64496",
+          neighbor="198.51.100.1:179", neighbor_asn="64497", job="cilium-agent", namespace="kube-system",
+          pod="cilium-m9d4q", container="cilium-agent", endpoint="prometheus", instance="192.0.2.22:9962",
+          node="worker-2"}
+        values: '1x90'
+      - series: >-
+          cilium_bgp_control_plane_session_state{instance_name="cluster", local_asn="64496",
+          neighbor="198.51.100.2:179", neighbor_asn="64497", job="cilium-agent", namespace="kube-system",
+          pod="cilium-m9d4q", container="cilium-agent", endpoint="prometheus", instance="192.0.2.22:9962",
+          node="worker-2"}
+        values: '1x90'
+      - series: >-
+          up{job="cilium-agent", namespace="kube-system", pod="cilium-c1h8z", container="cilium-agent",
+          endpoint="prometheus", instance="192.0.2.11:9962", node="cp-1"}
+        values: '1x90'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CiliumBGPSessionsDown
+        exp_alerts: []
+      # The sessions are down for two minutes, less than the alert's time.
+      - eval_time: 11m
+        alertname: CiliumBGPSessionsDown
+        exp_alerts: []
+      # The worker's series are gone.
+      - eval_time: 30m
+        alertname: CiliumBGPSessionsDown
+        exp_alerts: []
+      - eval_time: 80m
+        alertname: CiliumBGPSessionsDown
+        exp_alerts: []
+  - name: The alert CiliumBGPNoSessionEstablished fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # Both workers' sessions are established for 10 minutes, all down for 10, established for 10, and then
+      # the agents report none while every agent is still scraped, as when nothing selects a worker for BGP.
+      # Each worker has a role other than control-plane, as a node labelled node-role.kubernetes.io/worker
+      # has, and its agent still counts: only the control planes' role leaves an agent out.
+      - series: >-
+          cilium_bgp_control_plane_session_state{instance_name="cluster", local_asn="64496",
+          neighbor="198.51.100.1:179", neighbor_asn="64497", job="cilium-agent", namespace="kube-system",
+          pod="cilium-7xk2p", container="cilium-agent", endpoint="prometheus", instance="192.0.2.21:9962",
+          node="worker-1"}
+        values: '1x9 0x9 1x9 stale'
+      - series: >-
+          cilium_bgp_control_plane_session_state{instance_name="cluster", local_asn="64496",
+          neighbor="198.51.100.2:179", neighbor_asn="64497", job="cilium-agent", namespace="kube-system",
+          pod="cilium-7xk2p", container="cilium-agent", endpoint="prometheus", instance="192.0.2.21:9962",
+          node="worker-1"}
+        values: '1x9 0x9 1x9 stale'
+      - series: >-
+          cilium_bgp_control_plane_session_state{instance_name="cluster", local_asn="64496",
+          neighbor="198.51.100.1:179", neighbor_asn="64497", job="cilium-agent", namespace="kube-system",
+          pod="cilium-m9d4q", container="cilium-agent", endpoint="prometheus", instance="192.0.2.22:9962",
+          node="worker-2"}
+        values: '1x9 0x9 1x9 stale'
+      - series: >-
+          cilium_bgp_control_plane_session_state{instance_name="cluster", local_asn="64496",
+          neighbor="198.51.100.2:179", neighbor_asn="64497", job="cilium-agent", namespace="kube-system",
+          pod="cilium-m9d4q", container="cilium-agent", endpoint="prometheus", instance="192.0.2.22:9962",
+          node="worker-2"}
+        values: '1x9 0x9 1x9 stale'
+      - series: >-
+          up{job="cilium-agent", namespace="kube-system", pod="cilium-c1h8z", container="cilium-agent",
+          endpoint="prometheus", instance="192.0.2.11:9962", node="cp-1"}
+        values: '1x90'
+      - series: >-
+          up{job="cilium-agent", namespace="kube-system", pod="cilium-7xk2p", container="cilium-agent",
+          endpoint="prometheus", instance="192.0.2.21:9962", node="worker-1"}
+        values: '1x90'
+      - series: >-
+          up{job="cilium-agent", namespace="kube-system", pod="cilium-m9d4q", container="cilium-agent",
+          endpoint="prometheus", instance="192.0.2.22:9962", node="worker-2"}
+        values: '1x90'
+      - series: >-
+          kube_node_role{node="cp-1", role="control-plane", job="kube-state-metrics", namespace="monitoring",
+          pod="kube-prometheus-stack-kube-state-metrics-5d8f7c6b9-q2w4e", container="kube-state-metrics",
+          instance="192.0.2.3:8080", service="kube-prometheus-stack-kube-state-metrics", endpoint="http"}
+        values: '1x90'
+      - series: >-
+          kube_node_role{node="worker-1", role="worker", job="kube-state-metrics", namespace="monitoring",
+          pod="kube-prometheus-stack-kube-state-metrics-5d8f7c6b9-q2w4e", container="kube-state-metrics",
+          instance="192.0.2.3:8080", service="kube-prometheus-stack-kube-state-metrics", endpoint="http"}
+        values: '1x90'
+      - series: >-
+          kube_node_role{node="worker-2", role="worker", job="kube-state-metrics", namespace="monitoring",
+          pod="kube-prometheus-stack-kube-state-metrics-5d8f7c6b9-q2w4e", container="kube-state-metrics",
+          instance="192.0.2.3:8080", service="kube-prometheus-stack-kube-state-metrics", endpoint="http"}
+        values: '1x90'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CiliumBGPNoSessionEstablished
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: CiliumBGPNoSessionEstablished
+        exp_alerts: []
+      # All sessions are down from minute 10.
+      - eval_time: 15m
+        alertname: CiliumBGPNoSessionEstablished
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: cilium-agent
+            exp_annotations:
+              summary: No BGP session is established from any worker
+              description: No worker's cilium-agent reports an established BGP session for 5 minutes, so no Service address is announced to the edge routers.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#ciliumbgpnosessionestablished
+      # They are established again from minute 20.
+      - eval_time: 25m
+        alertname: CiliumBGPNoSessionEstablished
+        exp_alerts: []
+      # No session is reported from minute 30.
+      - eval_time: 34m
+        alertname: CiliumBGPNoSessionEstablished
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: CiliumBGPNoSessionEstablished
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: cilium-agent
+            exp_annotations:
+              summary: No BGP session is established from any worker
+              description: No worker's cilium-agent reports an established BGP session for 5 minutes, so no Service address is announced to the edge routers.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#ciliumbgpnosessionestablished
+  - name: The alert CiliumBGPNoSessionEstablished stays quiet while only the control planes' agents are scraped
+    interval: 1m
+    input_series:
+      # The control plane's agent is scraped and, like every control plane's, has no BGP instance and so
+      # no session; kube-state-metrics gives its node the role control-plane, as Talos labels it. The
+      # workers' agents are not scraped, as when the nodes' firewall admits the agents' port on the
+      # control planes first, so nothing says whether the workers' sessions are established.
+      - series: >-
+          up{job="cilium-agent", namespace="kube-system", pod="cilium-c1h8z", container="cilium-agent",
+          endpoint="prometheus", instance="192.0.2.11:9962", node="cp-1"}
+        values: '1x90'
+      - series: >-
+          up{job="cilium-agent", namespace="kube-system", pod="cilium-7xk2p", container="cilium-agent",
+          endpoint="prometheus", instance="192.0.2.21:9962", node="worker-1"}
+        values: '0x90'
+      - series: >-
+          up{job="cilium-agent", namespace="kube-system", pod="cilium-m9d4q", container="cilium-agent",
+          endpoint="prometheus", instance="192.0.2.22:9962", node="worker-2"}
+        values: '0x90'
+      - series: >-
+          kube_node_role{node="cp-1", role="control-plane", job="kube-state-metrics", namespace="monitoring",
+          pod="kube-prometheus-stack-kube-state-metrics-5d8f7c6b9-q2w4e", container="kube-state-metrics",
+          instance="192.0.2.3:8080", service="kube-prometheus-stack-kube-state-metrics", endpoint="http"}
+        values: '1x90'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CiliumBGPNoSessionEstablished
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: CiliumBGPNoSessionEstablished
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: CiliumBGPNoSessionEstablished
+        exp_alerts: []

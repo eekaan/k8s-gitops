@@ -223,8 +223,8 @@ overlapping() {
       checked=$((checked + 1))
     done
   done
-  # Twelve rules on each control plane, six on each worker.
-  [ "$checked" -eq 54 ]
+  # Thirteen rules on each control plane, seven on each worker.
+  [ "$checked" -eq 60 ]
 }
 
 @test "etcd accepts control planes only" {
@@ -251,7 +251,7 @@ overlapping() {
   members=$(yq '.nodes[].private_address' "$FIXTURE")
   [ "$(wc -l <<< "$members")" -eq 6 ]
   reached=$(yq '.listeners[] | select(.from[] == "pods") | .name' "$INVENTORY" | sort -u)
-  for listener in etcd-metrics kube-controller-manager kube-scheduler kubelet hubble node-exporter; do
+  for listener in etcd-metrics kube-controller-manager kube-scheduler kubelet hubble node-exporter cilium-agent-metrics; do
     grep -qxF "$listener" <<< "$reached"
   done
 
@@ -274,8 +274,8 @@ overlapping() {
       checked=$((checked + 1))
     done
   done
-  # Seven on each control plane, three on each worker.
-  [ "$checked" -eq 30 ]
+  # Eight on each control plane, four on each worker.
+  [ "$checked" -eq 36 ]
 }
 
 @test "Cilium's overlay and health checks accept the nodes' own addresses only" {

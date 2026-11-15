@@ -116,3 +116,137 @@ Feature: Alerts
     Given the snapshot CronJob whose latest scheduled run ended without success, and one whose latest run succeeded
     When the rule is evaluated over time
     Then the alert fires after its time for the first and never for the second
+
+  Scenario: Flux's controllers and the state of its resources are scraped
+    Given the flux-monitoring application, enabled in the cluster's overlay after the monitoring definitions, the Flux Operator's chart as the cluster directory installs it, and Flux's controllers as the instance installs them
+    When it is built as Flux applies it and the monitors are matched against what they select
+    Then a ServiceMonitor selects the operator's metrics Service, whose port serves the state of every Flux resource, and a PodMonitor selects the four controllers' metrics port and the source-watcher's, and the operator reports on an interval the alerts' times can rely on
+
+  @by:rules-check
+  Scenario: The alert FluxRootSyncNotReady fires after its time in the failing case and stays quiet in the healthy one
+    Given the Kustomizations flux-system and cluster and the OCIRepository flux-system, the root sync, one of which is not Ready, and one set that is Ready
+    When the rule is evaluated over time
+    Then the alert fires after its time for each root object that is not Ready, whatever the reason, and never while all of them are Ready
+
+  @by:rules-check
+  Scenario: The alert FluxRootSyncNotReady fires while the root sync alternates between failing and progressing
+    Given the Kustomization flux-system, which the operator reports False for three minutes and Unknown, progressing, for one at each retry, with every label it writes, and the OCIRepository flux-system, Ready and progressing for a minute each time main moves
+    When the rule is evaluated over time
+    Then the alert fires after its time for the Kustomization, once, and keeps firing, and never for the OCIRepository
+
+  @by:rules-check
+  Scenario: The alert FluxApplierNotReady fires after its time in the failing case and stays quiet in the healthy one
+    Given a Kustomization and a HelmRelease that are not Ready, one that waits for another, the root sync that is not Ready, and ones that are Ready
+    When the rule is evaluated over time
+    Then the alert fires after its time for the Kustomization and the HelmRelease that are not Ready, and never for the one that waits for a dependency, for the root sync, which has its own alert, or for the Ready ones
+
+  @by:rules-check
+  Scenario: The alert FluxApplierNotReady fires while a Kustomization alternates between progressing and failing its health checks
+    Given a Kustomization that fails its health checks, which the operator reports Unknown, progressing, for three minutes and False for one at each retry, with every label it writes, and a Ready Kustomization that is progressing for two minutes each time its artifact has a new revision
+    When the rule is evaluated over time
+    Then the alert fires after its time for the failing one, once, and keeps firing, and never for the Ready one
+
+  @by:rules-check
+  Scenario: The alert FluxSourceNotReady fires after its time in the failing case and stays quiet in the healthy one
+    Given an OCIRepository, a HelmRepository and an ArtifactGenerator that are not Ready, the root sync's OCIRepository that is not Ready, and ones that are Ready
+    When the rule is evaluated over time
+    Then the alert fires after its time for each source that is not Ready, and never for the root sync's, which has its own alert, or for the Ready ones
+
+  @by:rules-check
+  Scenario: The alert FluxSourceNotReady fires while a source alternates between failing and progressing
+    Given an OCIRepository that cannot be fetched, which the operator reports False for two minutes and Unknown, progressing, for one at each retry, with every label it writes, and a Ready OCIRepository
+    When the rule is evaluated over time
+    Then the alert fires after its time for the failing one, once, and keeps firing, and never for the Ready one
+
+  @by:rules-check
+  Scenario: The alert FluxResourceSuspended fires after its time in the failing case and stays quiet in the healthy one
+    Given a Flux resource that is suspended, the FluxInstance suspended by its reconcile annotation, and a resource that is not suspended
+    When the rule is evaluated over time
+    Then the alert fires after a day for the suspended resource and the FluxInstance and never for the one that is not
+
+  @by:rules-check
+  Scenario: The alert FluxResourceSuspended keeps its time while the operator restarts
+    Given a Kustomization suspended from the start, whose series the operator's restart leaves stale for two minutes before the new pod reports it with its own labels, and which is resumed after a day
+    When the rule is evaluated over time
+    Then the alert fires a day after the suspension, and is gone within 10 minutes of the resume
+
+  @by:rules-check
+  Scenario: The alert FluxInstanceNotReady fires after its time in the failing case and stays quiet in the healthy one
+    Given a FluxInstance that is not Ready and one that is Ready
+    When the rule is evaluated over time
+    Then the alert fires after its time for the one that is not Ready and never for the one that is
+
+  @by:rules-check
+  Scenario: The alert FluxOperatorNotReady fires after its time in the failing case and stays quiet in the healthy one
+    Given a Flux Operator Deployment with no available replica, and one with an available replica
+    When the rule is evaluated over time
+    Then the alert fires after its time for the Deployment with none and never for the one with a replica
+
+  Scenario: The workers' BGP sessions are scraped without changing how Cilium is first installed
+    Given the cilium-monitoring application, enabled in the cluster's overlay after Cilium and the monitoring definitions, and the Cilium chart rendered with the values scripts/install-cilium installs from
+    When the application is built as Flux applies it, the chart is rendered with the monitoring APIs present, and the monitor is matched against what it selects
+    Then a PodMonitor selects the agents' metrics port, the install values make the chart render no monitor of any kind and the agents serve their metrics, and the agents' metrics port is one the nodes' firewall admits from the nodes and the pods
+
+  @by:rules-check
+  Scenario: The alert CiliumBGPSessionsDown fires after its time in the failing case and stays quiet in the healthy one
+    Given two workers each with a session to each of two edge routers, one of which is not established on one worker
+    When the rule is evaluated over time
+    Then the alert fires after its time for the worker with the session down, naming the worker and the count and no address, and never while every session is established
+
+  @by:rules-check
+  Scenario: The alert CiliumBGPSessionsDown stays quiet while a worker is out of BGP on purpose
+    Given a worker whose sessions are shut down and whose agent then reports no session at all, as when the label that takes it out of BGP is set, and a worker whose sessions are established
+    When the rule is evaluated over time
+    Then the alert does not fire
+
+  @by:rules-check
+  Scenario: The alert CiliumBGPNoSessionEstablished fires after its time in the failing case and stays quiet in the healthy one
+    Given workers whose sessions all go down, then recover, then whose agents report no session while the workers' agents are scraped
+    When the rule is evaluated over time
+    Then the alert fires after its time in each of the two failing cases and never while a session is established
+
+  @by:rules-check
+  Scenario: The alert CiliumBGPNoSessionEstablished stays quiet while only the control planes' agents are scraped
+    Given a control plane's agent that is scraped and reports no session, as no control plane has a BGP instance, its node's role control-plane from kube-state-metrics, and workers' agents that are not scraped
+    When the rule is evaluated over time
+    Then the alert does not fire
+
+  Scenario: The storage layer is scraped
+    Given the linstor-monitoring application, enabled in the cluster's overlay after the monitoring definitions, and the Piraeus operator at the version whose templates the monitors' selectors were read from
+    When it is built as Flux applies it and the monitors are matched against the labels and ports the operator gives the LINSTOR controller and the satellites
+    Then a ServiceMonitor selects the controller's metrics port, which serves LINSTOR's own state, and a PodMonitor selects the satellites' DRBD reactor port, which serves each DRBD resource's state, and the monitors carry the node that runs a satellite
+
+  @by:rules-check
+  Scenario: The alert DrbdReplicaNotUpToDate fires after its time in the failing case and stays quiet in the healthy one
+    Given a volume with a replica that is no longer UpToDate, one whose replicas are UpToDate, and a diskless client of a volume
+    When the rule is evaluated over time
+    Then the alert fires after its time for the replica that is not UpToDate and never for the replicas that are, or for the diskless client
+
+  @by:rules-check
+  Scenario: The alert DrbdResourceWithoutQuorum fires after its time in the failing case and stays quiet in the healthy one
+    Given a volume whose device on one node loses quorum, and one that keeps it
+    When the rule is evaluated over time
+    Then the alert fires after its time for the device without quorum and never for the one with it
+
+  @by:rules-check
+  Scenario: The alert LinstorSatelliteOffline fires after its time in the failing case and stays quiet in the healthy one
+    Given a satellite that LINSTOR reports offline, and one that it reports online
+    When the rule is evaluated over time
+    Then the alert fires after its time for the offline satellite, naming the node and no address, and never for the online one
+
+  @by:rules-check
+  Scenario: The alert LinstorStoragePoolFilling fires after its time in the failing case and stays quiet in the healthy one
+    Given a storage pool above 85 percent full and one below, and one that has no capacity of its own
+    When the rule is evaluated over time
+    Then the alert fires after its time for the pool above 85 percent and at most 95 percent and never for the others
+
+  @by:rules-check
+  Scenario: The alert LinstorStoragePoolFull fires after its time in the failing case and stays quiet in the healthy one
+    Given a storage pool above 95 percent full and one below
+    When the rule is evaluated over time
+    Then the alert fires after its time for the pool above 95 percent and never for the one below
+
+  Scenario: Every alert in the tree is on a metric a monitor in the render scrapes
+    Given the tree's own alerts, the render of the tree and, for what an operator makes at run time, the labels and ports its pinned version gives
+    When each metric an alert reads is matched with the monitor that scrapes it, and the monitor with what it selects
+    Then every metric is one a monitor of the render scrapes, from a Service or pod that exposes the port the monitor names, or is Prometheus' own series of the scrape, and an alert on a metric nothing scrapes fails
