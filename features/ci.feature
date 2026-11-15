@@ -27,6 +27,21 @@ Feature: Continuous integration
     When just ci runs
     Then the run exits non-zero and names the commit and the literal
 
+  Scenario: A run of the checks leaves every tracked file as it found it, whether it passes, fails or is interrupted
+    Given a clean checkout, and a Dagger that records a line in dagger.lock as it does for an image it resolves, empties it, fails, or is stopped with INT, TERM or HUP and records its line only once the signal reaches it
+    When just ci runs with each
+    Then every run leaves dagger.lock as it was, byte for byte, and git status lists nothing
+
+  Scenario: A change made to the lock file before the run is still there after it
+    Given a checkout whose dagger.lock a developer changed before the run, with a line dropped and one added
+    When just ci runs with a Dagger that records a line, empties the file, fails, or is stopped with INT, TERM or HUP
+    Then dagger.lock holds the developer's bytes after each run, not the committed ones
+
+  Scenario: A committed lock entry for an image the tree takes by a derived tag fails the checks
+    Given the images scripts/lib/derived-images.sh lists, which holds the repository of the one rules-check takes from the render as an entry of its own, and a repository whose committed dagger.lock holds no entry for any of them, only for other images whose names begin with theirs or that theirs begin with
+    When lock-check runs with the entry only in the working copy, and again with the entry committed and the working copy without it
+    Then the first passes, the second fails naming the line, a committed entry for the image rules-check takes fails it too, and lock-check is a check of the static group
+
   Scenario: The hermetic run validates the Renovate configuration with the image renovate-check uses
     Given the justfile and the Dagger module
     When the commands renovate-check and just ci run are read

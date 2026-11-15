@@ -1,0 +1,25 @@
+#!/usr/bin/perl
+# Stands in for Dagger in tests/ci.bats when the run is stopped by a signal: signals the process that
+# started it, STAND_IN_SIGNAL, then does what Dagger's shutdown does, which is to write the lock only
+# once the signal has arrived, after a pause, and exit 2. It records the signal it received in
+# STAND_IN_MARK once the lock is written. Perl, because a shell cannot catch a signal that its
+# background start ignored, and Go catches it again. The pause of two seconds leaves the line behind
+# a put-back that waits less than that after passing the signal on instead of waiting for the command
+# to end; one that waits a fixed time longer passes here, as nothing bounds how long the real
+# Dagger's shutdown takes.
+use strict;
+use warnings;
+
+$SIG{$_} = sub {
+    sleep 2;
+    open(my $lock, '>>', 'dagger.lock') or die;
+    print $lock "\n[\"\",\"oci-sha\",[\"example.invalid/prometheus/prometheus:v0.0.0\"],\"sha256:00\"]";
+    close($lock);
+    open(my $mark, '>', "$ENV{STAND_IN_MARK}.part") or die;
+    print $mark $_[0];
+    close($mark);
+    rename("$ENV{STAND_IN_MARK}.part", $ENV{STAND_IN_MARK}) or die;
+    exit 2;
+} for qw(INT TERM HUP);
+kill($ENV{STAND_IN_SIGNAL}, getppid());
+sleep 5;

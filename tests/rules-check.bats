@@ -331,15 +331,18 @@ promtool_calls() {
   grep -q 'scripts/rules-image' "$REPO/.dagger/modules/ci/main.dang"
   # The image is the chart's, by the tag the chart names, which Renovate moves with the chart:
   # nothing else git would commit names it, so there is no pin for Renovate to miss. The docs, tests
-  # and features name it as text. dagger.lock is Dagger's record of the lookups it made: a local
-  # just ci writes there the digest it resolved for the tag, which the tree does not commit and
-  # nothing reads once the tag moves.
+  # and features name it as text. dagger.lock is Dagger's record of the lookups it made: just ci
+  # puts the file back after each run, and just lock-check fails on a committed entry for the
+  # image, so the working copy's is the one file left out here. scripts/lib/derived-images.sh names the
+  # repository for that check, with no tag or digest to pin.
   # The list is written first, so a git that fails fails the test, and must hold the justfile.
-  (cd "$REPO" && git ls-files -z --cached --others --exclude-standard -- . ':!docs/' ':!tests/' ':!features/' ':!dagger.lock') > "$BATS_TEST_TMPDIR/files"
+  (cd "$REPO" && git ls-files -z --cached --others --exclude-standard -- . ':!docs/' ':!tests/' ':!features/' ':!dagger.lock' ':!scripts/lib/derived-images.sh') > "$BATS_TEST_TMPDIR/files"
   tr '\0' '\n' < "$BATS_TEST_TMPDIR/files" | grep -qx justfile
   named="$(cd "$REPO" && while IFS= read -r -d '' file; do [ ! -f "$file" ] || grep -Il -- 'prometheus/prometheus' "$file" || true; done < "$BATS_TEST_TMPDIR/files")"
   echo "files that name the image: $named"
   [ -z "$named" ]
+  run grep -E 'prometheus/prometheus[:@]' "$REPO/scripts/lib/derived-images.sh"
+  [ "$status" -eq 1 ]
   # A chart update that moves the tag moves the image with it: a copy of the tree whose chart names
   # another tag gives the module that tag, with nothing else changed.
   moved="$BATS_TEST_TMPDIR/moved"
