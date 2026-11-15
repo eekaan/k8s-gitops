@@ -2694,9 +2694,8 @@ cannot be listed without it: `just kubernetes-check` refuses the dependency.
   route that went away; with `Local` only the workers that run a proxy would announce it, and each
   rollout would withdraw and add routes. `Local` would keep the source of a connection, but the edge
   routers translate every client's address to their own (ADR 0018), so there is no client address to
-  keep. A proxy therefore sees as the client the address of an edge router, or of the worker that
-  forwarded the connection from another node, never the client's, and its access logs carry that
-  address.
+  keep in the source: what a proxy takes as the client's address is decided as the entry on the
+  client's address below says.
 - **The proxies.** Two replicas, spread over the workers with a skew of one and never scheduled
   where that fails, under a disruption budget that keeps one running, with requests of 100m of CPU
   and 128Mi of memory and no limits. They run as a non-root user with the runtime's default seccomp
@@ -2733,7 +2732,44 @@ cannot be listed without it: `just kubernetes-check` refuses the dependency.
   little. A `Certificate` rather than the Gateway annotation cert-manager reads, as the annotation
   makes a certificate for each listener's hostname only, so it would leave out the domain itself.
 - **TLS.** A `ClientTrafficPolicy` sets 1.2 as the least version a client may use, the
-  controller's default stated rather than relied on.
+  controller's default stated rather than relied on. The same policy sets the PROXY protocol, below.
+- **The client's address.** The policy accepts the PROXY protocol on both listeners, as `optional`:
+  a connection that begins with a header takes the header's source as the client's address, and one
+  that begins with anything else, a TLS handshake or an HTTP request, is served with the
+  connection's own address as the client's. What a proxy takes as the client's address is therefore
+  decided by the connection: the source of the header its sender wrote, the client's when that is
+  an edge router, or else the connection's own address, an edge router's or that of the worker that
+  forwarded it from another node. That address is the one in the access log's `client_address` and
+  the one the proxy appends to `x-forwarded-for`, whose client-supplied entries stay to its left:
+  no `clientIPDetection` is set, so the controller has the proxies take the connection's remote
+  address, which the header replaces, and never the client's own `x-forwarded-for`. The pinned
+  controller has `proxyProtocol.optional`, which maps to Envoy's
+  `allow_requests_without_proxy_protocol`; the deprecated `enableProxyProtocol` can only require
+  the header, and a requirement resets every connection that carries none. `tests/gateway.bats`
+  asserts the policy's fields on the rendered objects and not the translated listener: `egctl` is
+  not a pinned tool, so the xDS is not rendered. A header is a claim, which Envoy does not check:
+  whoever writes the first bytes of a connection to a proxy can name any address, which a client
+  cannot through an edge router that writes its own header and can through a sender that forwards
+  plain TCP. Of senders inside the cluster, `public-proxy`
+  ([What the namespaces let through](#what-the-namespaces-let-through)) admits none to the
+  listeners, but only once the agents enforce it rather than audit it
+  ([Service addresses](#service-addresses)), and the local host of a proxy's node reaches that
+  proxy whatever the policies say; the access log's `peer_address` is the socket's own, so a claim
+  shows beside its sender. The trust model is in
+  [ADR 0020](adr/0020-the-client-address-reaches-the-gateway-in-a-proxy-protocol-header.md).
+- **Access log.** The `EnvoyProxy` sets one JSON line per request to standard output, which the
+  collector reads with the container's other lines ([Logs](#logs)): `client_address`, the address
+  Envoy took as the client's; `peer_address`, the connection's own; `host`; `method`; `path`,
+  without its query string, which can hold a secret; `status`; `response_flags`; `duration_ms`;
+  `bytes_received` and `bytes_sent`. A request no route took is logged as well. It is about 250
+  bytes, so a request a second is about 20 MB a day before the store compresses it. Where none is
+  set the controller writes a line per request in a format of its own, with the full path including
+  its query string, the user agent and the client's `x-forwarded-for`. `tests/gateway.bats` asserts
+  the format's keys and that no field names the query or the client's `x-forwarded-for`. Read it
+  with
+  `just logs 'kubernetes.pod_namespace:envoy-gateway-system kubernetes.container_name:envoy client_address'`,
+  which prints each line whole, or count requests by address with
+  `just logs 'kubernetes.pod_namespace:envoy-gateway-system kubernetes.container_name:envoy client_address | unpack_json | stats by (client_address) count()'`.
 - **What a client outside sees.** `lab-sto2` chooses the production issuer, so a client with the
   usual public roots trusts the certificate; with the cluster's own authority or the staging issuer
   it is signed by a chain nothing outside trusts, so a client refuses it unless it is given the
@@ -3538,7 +3574,8 @@ once n8n answers its readiness endpoint.
   `N8N_WEBHOOK_URL` are that name over https, set from the variable, and `N8N_PROXY_HOPS` is 1: the
   Gateway's proxy adds the forwarding headers, and the edge routers in front of it translate the
   source address and add none ([ADR 0018](adr/0018-own-edge-routers-translate-public-traffic-to-the-gateway.md)),
-  so n8n trusts one proxy. n8n sees the address of an edge router or a worker as the client's.
+  so n8n trusts one proxy. n8n sees as the client's the address the Gateway's proxy took as the
+  client's ([The public Gateway](#the-public-gateway)).
 - **The task runners.** Code nodes run in n8n's external mode, as n8n's documentation recommends:
   the container `runners`, from n8n's runners image of n8n's own version, which
   `tests/applications.bats` holds, runs the launcher that starts a JavaScript or Python runner when

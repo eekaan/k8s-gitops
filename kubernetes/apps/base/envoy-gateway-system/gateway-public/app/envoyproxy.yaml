@@ -8,6 +8,30 @@ kind: EnvoyProxy
 metadata:
   name: public
 spec:
+  # One JSON line per request to standard output, where the log collector reads the container's
+  # lines (docs/kubernetes.md, Logs). It names the address Envoy took as the client's and the
+  # socket's own peer, and leaves out the query string, which can hold a secret, and the client's
+  # own x-forwarded-for.
+  telemetry:
+    accessLog:
+      settings:
+        - format:
+            type: JSON
+            json:
+              client_address: "%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%"
+              peer_address: "%DOWNSTREAM_DIRECT_REMOTE_ADDRESS_WITHOUT_PORT%"
+              host: "%REQ(:AUTHORITY)%"
+              method: "%REQ(:METHOD)%"
+              path: "%REQ_WITHOUT_QUERY(X-ENVOY-ORIGINAL-PATH?:PATH)%"
+              status: "%RESPONSE_CODE%"
+              response_flags: "%RESPONSE_FLAGS%"
+              duration_ms: "%DURATION%"
+              bytes_received: "%BYTES_RECEIVED%"
+              bytes_sent: "%BYTES_SENT%"
+          sinks:
+            - type: File
+              file:
+                path: /dev/stdout
   provider:
     type: Kubernetes
     kubernetes:
@@ -24,7 +48,8 @@ spec:
         # forwards a connection to a proxy on any node, so a proxy that is replaced or moves
         # leaves the routes the edge routers hold as they are, and no connection is reset by a
         # route that went away. Local would keep a proxy's source address, but there is none worth
-        # keeping: the edge routers translate the client's address to their own (ADR 0018).
+        # keeping: the edge routers translate the client's address to their own (ADR 0018), and
+        # the client's travels in the PROXY protocol header an edge router writes (ADR 0020).
         externalTrafficPolicy: Cluster
       envoyDeployment:
         replicas: 2

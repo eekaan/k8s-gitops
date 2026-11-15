@@ -332,14 +332,14 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   [ -z "$(yq -N 'select(.kind == "Secret") | .metadata.name' "$BATS_TEST_TMPDIR/issuers.yaml" "$BUILT")" ]
   [ -z "$(grep -rl 'PRIVATE KEY' "$REPO/$APP_DIR" "$REPO/kubernetes/apps/base/envoy-gateway-system/gateway-public" || true)" ]
   # TLS 1.2 at least, which the Gateway's client traffic policy says rather than leaving to the
-  # controller's default, and nothing more: another field, such as proxyProtocol, would change what
-  # every client must send.
+  # controller's default, and the PROXY protocol as optional, and nothing more: any other field
+  # would change what every client must send.
   local policy namespace targeting
   namespace="$(object "$BUILT" Gateway "$gateway" | yq '.metadata.namespace')"
   policy="$(object "$BUILT" ClientTrafficPolicy "$(only "$BUILT" ClientTrafficPolicy)" | yq -o json -I0 '.spec' | jq -cS .)"
   echo "ClientTrafficPolicy: $policy"
   [ "$policy" = "$(jq -cnS --arg gateway "$gateway" '{targetRefs: [{group: "gateway.networking.k8s.io", kind: "Gateway", name: $gateway}],
-    tls: {minVersion: "1.2"}}')" ]
+    proxyProtocol: {optional: true}, tls: {minVersion: "1.2"}}')" ]
   # It is the one policy on the Gateway or on a route attached to it: of everything the cluster
   # applies, no other object's targetRef, targetRefs or targetSelectors names the Gateway or such a
   # route, and none selects a Gateway or a route by its labels.
@@ -360,6 +360,31 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
     | "\($p.kind)/\($own)/\($p.metadata.name)"')"
   echo "policies on the Gateway or its routes: $targeting"
   [ "$targeting" = "ClientTrafficPolicy/$namespace/$(only "$BUILT" ClientTrafficPolicy)" ]
+  # Nor does anything patch around it: no EnvoyPatchPolicy anywhere, which rewrites the translated
+  # configuration of a Gateway, or of every Gateway of its class, whatever the policies say.
+  local patches forwarded
+  patches="$(yq -N 'select(.kind == "EnvoyPatchPolicy") | .kind + "/" + .metadata.namespace + "/" + .metadata.name' "$EVERYTHING")"
+  echo "patch policies: ${patches:-none}"
+  [ -z "$patches" ]
+  # And no filter of a route attached to the Gateway, on a rule or on a backend, sets, adds or
+  # removes x-forwarded-for, which would change what a backend reads as the client's address: a
+  # request header modifier, or an extension filter that injects a credential into that header.
+  # shellcheck disable=SC2016 # $gateway, $namespace, $all, $own, $route and $ref are jq variables.
+  forwarded="$(yq -N -o json -I0 '.' "$EVERYTHING" | jq -rs --arg gateway "$gateway" --arg namespace "$namespace" '
+    [.[] | objects] as $all
+    | $all[] | select(.spec.parentRefs? != null) | . as $route | .metadata.namespace as $own
+    | select(any(.spec.parentRefs[]; .name == $gateway and (.kind // "Gateway") == "Gateway"
+        and (.namespace // $own) == $namespace))
+    | [.spec.rules[]? | .filters[]?, .backendRefs[]?.filters[]?] as $filters
+    | [($filters[].requestHeaderModifier // empty | .set[]?.name, .add[]?.name, .remove[]?),
+        ($filters[] | select(.type == "ExtensionRef") | .extensionRef as $ref
+          | $all[] | select(.kind == "HTTPRouteFilter" and .kind == $ref.kind
+              and .metadata.namespace == $own and .metadata.name == $ref.name)
+          | .spec.credentialInjection.header // empty)]
+    | select(any(.[]; ascii_downcase == "x-forwarded-for"))
+    | "\($route.kind)/\($own)/\($route.metadata.name)"')"
+  echo "routes whose filters set or remove x-forwarded-for: ${forwarded:-none}"
+  [ -z "$forwarded" ]
 }
 
 @test "A route attaches to the public Gateway only from a namespace that opts in" {
@@ -560,4 +585,76 @@ tree_without() {
   deployment="$(yq '.envoyDeployment | has("patch")' "$spec")"
   # No patch that could undo any of this.
   [ "$deployment" = false ]
+}
+
+@test "The public Gateway takes a client's address from a PROXY protocol header and still serves a connection without one" {
+  local gateway policy spec
+  built gateway-public
+  gateway="$(only "$BUILT" Gateway)"
+  policy="$(only "$BUILT" ClientTrafficPolicy)"
+  spec="$BATS_TEST_TMPDIR/policy.yaml"
+  object "$BUILT" ClientTrafficPolicy "$policy" | yq '.spec' >"$spec"
+  echo "ClientTrafficPolicy $policy: $(yq -o json -I0 '.' "$spec")"
+  # Accepted, not required: Envoy's PROXY protocol listener filter lets a connection through that
+  # does not start with a header only when the listener allows requests without one, which is
+  # `optional`. Required, a connection from a sender that writes no header would be cut.
+  [ "$(yq '.proxyProtocol.optional' "$spec")" = true ]
+  # Nothing else of it: forwardProtoConfig would set x-forwarded-proto from the header's
+  # destination port, which the listeners' own protocols already decide.
+  [ "$(yq -o json -I0 '.proxyProtocol | keys' "$spec")" = '["optional"]' ]
+  # The deprecated boolean can only require the header.
+  [ "$(yq 'has("enableProxyProtocol")' "$spec")" = false ]
+  # On the Gateway as a whole, so both listeners take it: a section name would leave the other
+  # without the filter, which then reads a sender's header as the start of a request and refuses it.
+  [ "$(yq '.targetRefs | length' "$spec")" -eq 1 ]
+  [ "$(yq '.targetRefs[0] | .kind + "/" + .name + "/" + (.sectionName // "")' "$spec")" = "Gateway/$gateway/" ]
+  [ "$(yq 'has("targetRef") or has("targetSelectors")' "$spec")" = false ]
+  [ "$(object "$BUILT" Gateway "$gateway" | yq '.spec.listeners | map(.name) | sort | join(" ")')" = "http https" ]
+  # No client IP detection: without it the controller has the connection manager use the
+  # connection's remote address, which the PROXY header replaces when there is one, and never read
+  # the client's own x-forwarded-for for it. Any xForwardedFor setting, trusted hops or CIDRs, or a
+  # custom header, would hand that choice to the request.
+  [ "$(yq 'has("clientIPDetection")' "$spec")" = false ]
+}
+
+@test "The proxies' access log names the client address, host, method, path, status and duration of each request, and no query string" {
+  local proxy log key value
+  built gateway-public
+  proxy="$(only "$BUILT" EnvoyProxy)"
+  log="$BATS_TEST_TMPDIR/accesslog.yaml"
+  object "$BUILT" EnvoyProxy "$proxy" | yq '.spec.telemetry.accessLog' >"$log"
+  echo "access log of $proxy: $(yq -o json -I0 '.' "$log")"
+  [ "$(yq '.disable // false' "$log")" = false ]
+  # One setting that matches everything: no type, which logs every route's requests and, through
+  # the listener, those no route took; no CEL match.
+  [ "$(yq '.settings | length' "$log")" -eq 1 ]
+  [ "$(yq '.settings[0] | has("type") or has("matches")' "$log")" = false ]
+  # JSON, to standard output, where the log collector reads the container's lines.
+  [ "$(yq '.settings[0].format.type' "$log")" = JSON ]
+  [ "$(yq '.settings[0].sinks | length' "$log")" -eq 1 ]
+  [ "$(yq '.settings[0].sinks[0].type + " " + .settings[0].sinks[0].file.path' "$log")" = "File /dev/stdout" ]
+  # The fields, with the operator that fills each. The client address is the one Envoy took, which
+  # is the PROXY header's source when the connection carried one; the peer is the socket's, the
+  # sender of that claim.
+  [ "$(yq -o json -I0 '.settings[0].format.json | keys' "$log")" \
+    = '["bytes_received","bytes_sent","client_address","duration_ms","host","method","path","peer_address","response_flags","status"]' ]
+  field() { yq ".settings[0].format.json.$1" "$log"; }
+  [ "$(field client_address)" = '%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%' ]
+  [ "$(field peer_address)" = '%DOWNSTREAM_DIRECT_REMOTE_ADDRESS_WITHOUT_PORT%' ]
+  [ "$(field host)" = '%REQ(:AUTHORITY)%' ]
+  [ "$(field method)" = '%REQ(:METHOD)%' ]
+  [ "$(field status)" = '%RESPONSE_CODE%' ]
+  [ "$(field duration_ms)" = '%DURATION%' ]
+  [ "$(field bytes_sent)" = '%BYTES_SENT%' ]
+  [ "$(field bytes_received)" = '%BYTES_RECEIVED%' ]
+  [ "$(field response_flags)" = '%RESPONSE_FLAGS%' ]
+  # The path leaves out the query string, which can hold a secret.
+  [ "$(field path)" = '%REQ_WITHOUT_QUERY(X-ENVOY-ORIGINAL-PATH?:PATH)%' ]
+  # No field carries a query string or the client's own x-forwarded-for: whatever names the path
+  # does so through the operator that drops the query, and none names the header.
+  while IFS=$'\t' read -r key value; do
+    echo "$key: $value"
+    if [[ ${value^^} == *PATH* ]]; then [[ $value == '%REQ_WITHOUT_QUERY('* ]]; fi
+    [[ ${value^^} != *FORWARDED-FOR* ]]
+  done < <(yq '.settings[0].format.json | to_entries | .[] | .key + "\t" + .value' "$log")
 }
