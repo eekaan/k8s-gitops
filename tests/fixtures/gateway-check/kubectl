@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+# A stand-in for kubectl against a cluster with the public Gateway, installed by
+# tests/gateway-check.bats as <tmp>/bin/kubectl. It finds its files from its own path and answers the
+# reads scripts/gateway-check makes, with the CA's certificate and the demo's page from
+# <tmp>/fixtures, from a healthy cluster unless a file in <tmp>/state says otherwise:
+#   api-down                 nothing answers; kubectl's error names the API server's address
+#   no-config                the ConfigMap cluster-config does not exist
+#   not-programmed           the Gateway is Accepted but not Programmed
+#   other-address            the Gateway's status names another address than GATEWAY_ADDRESS
+#   service-cluster-ip       the proxies' Service is of type ClusterIP
+#   service-unlabelled       the proxies' Service lacks the label k8s-gitops/announce: bgp
+#   service-pending          the proxies' Service holds no address yet
+#   one-proxy                one of the two proxy pods is not Ready
+#   proxies-one-node         both proxy pods run on one node
+#   certificate-not-ready    the Gateway's Certificate is not Ready
+#   no-ca                    the Secret of the cluster's CA cannot be read
+#   unlabelled-route-accepted  an HTTPRoute in a namespace without the opt-in label is Accepted on
+#                            the Gateway
+#   http-routes              the number of routes the Gateway reports on its http listener, 1
+#                            without it
+# Every object it answers with holds addresses from the documentation ranges, and the CA's Secret a
+# private key marker, none of which the recipe may print. It records "kubectl ARGS" in
+# <tmp>/record/argv.
+set -uo pipefail
+
+root=${0%/bin/*}
+state=$root/state
+fixtures=$root/fixtures
+printf '%s\n' "kubectl $*" >> "$root/record/argv"
+
+# The values of the cluster's cluster-config the answers agree with.
+gateway_address=198.51.100.21
+domain=example.com
+namespace=envoy-gateway-system
+
+listed() {
+  [[ -e $state/$1 ]]
+}
+
+if listed api-down; then
+  echo "Unable to connect to the server: dial tcp 203.0.113.80:6443: connect: connection refused" >&2
+  exit 1
+fi
+
+args=" $* "
+# has ARG: whether the command line holds ARG as one argument.
+has() {
+  [[ $args == *" $1 "* ]]
+}
+
+# condition TYPE STATUS: one status condition.
+condition() {
+  jq -nc --arg type "$1" --arg status "$2" '{type: $type, status: $status, reason: (if $status == "True" then $type else "Not" + $type end),
+    message: "fixture message naming 198.51.100.99"}'
+}
+
+not_found() {
+  echo "Error from server (NotFound): $1 not found" >&2
+  exit 1
+}
+
+gateway() {
+  local address=$gateway_address programmed=True http=1
+  listed other-address && address=198.51.100.99
+  listed not-programmed && programmed=False
+  listed http-routes && http=$(< "$state/http-routes")
+  jq -n --arg address "$address" --argjson accepted "$(condition Accepted True)" \
+    --argjson programmed "$(condition Programmed "$programmed")" --argjson http "$http" '{
+    apiVersion: "gateway.networking.k8s.io/v1", kind: "Gateway",
+    metadata: {name: "public", namespace: "envoy-gateway-system"},
+    spec: {gatewayClassName: "envoy-gateway", listeners: [
+      {name: "http", port: 80, protocol: "HTTP"},
+      {name: "https", port: 443, protocol: "HTTPS", hostname: "*.example.com",
+       tls: {mode: "Terminate", certificateRefs: [{name: "public-wildcard-tls"}]}}]},
+    status: {addresses: [{type: "IPAddress", value: $address}], conditions: [$accepted, $programmed],
+      listeners: [{name: "http", attachedRoutes: $http}, {name: "https", attachedRoutes: 1}]}}'
+}
+
+service() {
+  local type=LoadBalancer labels='{"k8s-gitops/announce": "bgp"}' ingress
+  ingress=$(jq -nc --arg address "$gateway_address" '[{ip: $address, ipMode: "VIP"}]')
+  listed service-cluster-ip && type=ClusterIP
+  listed service-unlabelled && labels='{}'
+  listed service-pending && ingress='[]'
+  jq -n --arg type "$type" --argjson labels "$labels" --argjson ingress "$ingress" '{items: [{
+    apiVersion: "v1", kind: "Service",
+    metadata: {name: "envoy-envoy-gateway-system-public-1a2b3c4d", namespace: "envoy-gateway-system",
+      labels: ({"app.kubernetes.io/component": "proxy", "gateway.envoyproxy.io/owning-gateway-name": "public",
+        "gateway.envoyproxy.io/owning-gateway-namespace": "envoy-gateway-system"} + $labels)},
+    spec: {type: $type, clusterIP: "198.51.100.200", externalTrafficPolicy: "Cluster",
+      ports: [{name: "http-80", port: 80}, {name: "https-443", port: 443}]},
+    status: {loadBalancer: {ingress: $ingress}}}]}'
+}
+
+pods() {
+  local second_ready=True second_node=worker-2
+  listed one-proxy && second_ready=False
+  listed proxies-one-node && second_node=worker-1
+  jq -n --arg ready "$second_ready" --arg node "$second_node" '
+    def pod($name; $node; $ready; $ip; $host): {
+      apiVersion: "v1", kind: "Pod",
+      metadata: {name: $name, namespace: "envoy-gateway-system",
+        labels: {"app.kubernetes.io/component": "proxy", "gateway.envoyproxy.io/owning-gateway-name": "public"}},
+      spec: {nodeName: $node},
+      status: {phase: "Running", podIP: $ip, hostIP: $host, conditions: [{type: "Ready", status: $ready}]}};
+    {items: [pod("envoy-public-7d9f-abcde"; "worker-1"; "True"; "198.51.100.31"; "192.0.2.20"),
+             pod("envoy-public-7d9f-fghij"; $node; $ready; "198.51.100.32"; "192.0.2.30")]}'
+}
+
+certificates() {
+  local ready=True
+  listed certificate-not-ready && ready=False
+  jq -n --argjson ready "$(condition Ready "$ready")" '{items: [{
+    apiVersion: "cert-manager.io/v1", kind: "Certificate",
+    metadata: {name: "public-wildcard", namespace: "envoy-gateway-system"},
+    spec: {secretName: "public-wildcard-tls", dnsNames: ["*.example.com", "example.com"],
+      issuerRef: {group: "cert-manager.io", kind: "ClusterIssuer", name: "cluster-ca"}},
+    status: {conditions: [$ready]}}]}'
+}
+
+routes() {
+  local others='[]'
+  if listed unlabelled-route-accepted; then
+    others='[{"namespace": "other", "name": "sneaky", "accepted": "True"}]'
+  fi
+  jq -n --argjson others "$others" '
+    def route($namespace; $name; $section; $accepted): {
+      apiVersion: "gateway.networking.k8s.io/v1", kind: "HTTPRoute",
+      metadata: {namespace: $namespace, name: $name},
+      spec: {parentRefs: [{name: "public", namespace: "envoy-gateway-system", sectionName: $section}]},
+      status: {parents: [{parentRef: {group: "gateway.networking.k8s.io", kind: "Gateway", name: "public",
+          namespace: "envoy-gateway-system", sectionName: $section},
+        controllerName: "gateway.envoyproxy.io/gatewayclass-controller",
+        conditions: [{type: "Accepted", status: $accepted,
+          reason: (if $accepted == "True" then "Accepted" else "NotAllowedByListeners" end)}]}]}};
+    {items: ([route("envoy-gateway-system"; "https-redirect"; "http"; "True"),
+              route("demo"; "hello"; "https"; "True"),
+              route("unlabelled"; "refused"; "https"; "False")]
+             + [$others[] | route(.namespace; .name; "https"; .accepted)])}'
+}
+
+secret() {
+  local crt key
+  listed no-ca && { echo "Error from server (Forbidden): secrets is forbidden: 198.51.100.66" >&2; exit 1; }
+  crt=$(base64 -w0 < "$fixtures/ca.crt")
+  key=$(printf 'MARKER-CA-PRIVATE-KEY\n' | base64 -w0)
+  if has '--output=jsonpath={.data.tls\.crt}'; then
+    printf '%s' "$crt"
+  elif [[ $args == *jsonpath* ]]; then
+    # Any other path, the private key's among them, is answered as the API would.
+    jq -nr --arg crt "$crt" --arg key "$key" '{"tls.crt": $crt, "tls.key": $key}
+      | to_entries | map(.value) | join(" ")'
+  else
+    jq -n --arg crt "$crt" --arg key "$key" '{apiVersion: "v1", kind: "Secret",
+      metadata: {name: "cluster-ca", namespace: "cert-manager"}, type: "kubernetes.io/tls",
+      data: {"tls.crt": $crt, "tls.key": $key, "ca.crt": $crt}}'
+  fi
+}
+
+[[ $1 == get ]] || { echo "fake kubectl: unexpected $*" >&2; exit 1; }
+case $2 in
+  configmap)
+    case $3 in
+      cluster-config)
+        has --namespace=flux-system || not_found 'configmaps "cluster-config"'
+        listed no-config && not_found 'configmaps "cluster-config"'
+        jq -n --arg domain "$domain" --arg address "$gateway_address" '{apiVersion: "v1", kind: "ConfigMap",
+          metadata: {name: "cluster-config", namespace: "flux-system"},
+          data: {CLUSTER_DOMAIN: $domain, GATEWAY_ADDRESS: $address, SERVICE_RANGE: "198.51.100.16/28",
+            BGP_EDGE_ADDRESS_1: "192.0.2.251", BGP_EDGE_ADDRESS_2: "192.0.2.252"}}'
+        ;;
+      hello)
+        has --namespace=demo || not_found 'configmaps "hello"'
+        if has '--output=jsonpath={.data.index\.html}'; then
+          cat "$fixtures/page.html"
+        else
+          echo "fake kubectl: unexpected $*" >&2
+          exit 1
+        fi
+        ;;
+      *) not_found "configmaps \"$3\"" ;;
+    esac
+    ;;
+  gateways.gateway.networking.k8s.io)
+    [[ $3 == public ]] && has --namespace=$namespace || not_found "gateways.gateway.networking.k8s.io \"$3\""
+    gateway
+    ;;
+  services)
+    has --namespace=$namespace || { echo '{"items": []}'; exit 0; }
+    has --selector=app.kubernetes.io/component=proxy,gateway.envoyproxy.io/owning-gateway-name=public,gateway.envoyproxy.io/owning-gateway-namespace=$namespace ||
+      { echo '{"items": []}'; exit 0; }
+    service
+    ;;
+  pods)
+    has --namespace=$namespace || { echo '{"items": []}'; exit 0; }
+    has --selector=app.kubernetes.io/component=proxy,gateway.envoyproxy.io/owning-gateway-name=public,gateway.envoyproxy.io/owning-gateway-namespace=$namespace ||
+      { echo '{"items": []}'; exit 0; }
+    pods
+    ;;
+  certificates.cert-manager.io)
+    has --namespace=$namespace || { echo '{"items": []}'; exit 0; }
+    certificates
+    ;;
+  clusterissuers.cert-manager.io)
+    [[ $3 == cluster-ca ]] || not_found "clusterissuers.cert-manager.io \"$3\""
+    jq -n '{apiVersion: "cert-manager.io/v1", kind: "ClusterIssuer", metadata: {name: "cluster-ca"},
+      spec: {ca: {secretName: "cluster-ca"}}, status: {conditions: [{type: "Ready", status: "True"}]}}'
+    ;;
+  secret)
+    [[ $3 == cluster-ca ]] && has --namespace=cert-manager || not_found "secrets \"$3\""
+    secret
+    ;;
+  namespaces)
+    has --selector=k8s-gitops/gateway=public || { echo "fake kubectl: unexpected $*" >&2; exit 1; }
+    jq -n '{items: [{apiVersion: "v1", kind: "Namespace", metadata: {name: "demo", labels: {"k8s-gitops/gateway": "public"}}}]}'
+    ;;
+  httproutes.gateway.networking.k8s.io)
+    has --all-namespaces || { echo "fake kubectl: unexpected $*" >&2; exit 1; }
+    routes
+    ;;
+  *)
+    echo "fake kubectl: unexpected $*" >&2
+    exit 1
+    ;;
+esac

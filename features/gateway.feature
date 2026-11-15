@@ -40,3 +40,18 @@ Feature: Public Gateway
     Given the public Gateway's EnvoyProxy, which the controller turns into the proxies' Deployment at run time
     When its replicas, spread, disruption budget, requests and security context are read
     Then two replicas spread over the nodes run under a budget that keeps one, with requests, as a non-root user with no added privileges, in a namespace that enforces the restricted level
+
+  Scenario: A healthy public Gateway passes every line of gateway-check, which reads only and prints no address
+    Given a cluster whose Gateway public is Accepted and Programmed at the GATEWAY_ADDRESS of cluster-config, with its proxies' labelled LoadBalancer Service holding that address, two proxies Ready on two nodes, its certificate Ready and only labelled namespaces' routes accepted, and two edges that forward to it
+    When just gateway-check runs against fakes of kubectl, curl and the edge stack's outputs, every answer holding addresses
+    Then every line passes, plain HTTP through each edge answers 301 to https on the same host and path, HTTPS verifies against the cluster CA's public certificate and serves the demo's page and a 404 for a host no route serves, kubectl only reads and curl and kubectl are bounded in time, and no address, private key or host name under the domain is printed
+
+  Scenario: Each unhealthy condition of the public Gateway fails its own line of gateway-check
+    Given the healthy cluster and edges, with one condition made unhealthy at a time
+    When just gateway-check runs
+    Then the line of that condition fails, saying why without an address, no other line fails, and the recipe exits non-zero
+
+  Scenario: Without the edge stack's outputs gateway-check skips the edge lines and says why
+    Given a healthy cluster and an edge stack with no outputs
+    When just gateway-check runs
+    Then the cluster's lines pass, one line says the edge lines are skipped because the stack has no outputs, curl is never run, and the recipe exits 0

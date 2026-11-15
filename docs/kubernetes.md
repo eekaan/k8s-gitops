@@ -1402,19 +1402,61 @@ cannot be listed without it: `just kubernetes-check` refuses the dependency.
   controller's default stated rather than relied on.
 - **What a client outside sees.** The certificate is signed by the cluster's own authority, which
   nothing outside trusts, until the public issuer exists, so a client refuses it unless it is given
-  the authority's certificate. The hostnames are not in DNS yet, so an operator checks the Gateway
-  by connecting to an edge router's public address with the name the route has, and the
-  authority's certificate, which is public material, from the `ca.crt` of the certificate's Secret:
+  the authority's certificate. The hostnames are not in DNS yet, so `just gateway-check` connects
+  to each edge router's public address with the name the route has, and verifies against the
+  authority's certificate, which is public material (below). Only the networks the edge stack
+  admits reach the edge's public ports ([The edge routers](infrastructure.md#the-edge-routers)), so
+  it is run from one of them.
 
-  ```sh
-  kubectl -n envoy-gateway-system get secret public-wildcard-tls -o jsonpath='{.data.ca\.crt}' | base64 -d > cluster-ca.crt
-  curl --cacert cluster-ca.crt --resolve hello.example.com:443:<an edge's public address> https://hello.example.com/
-  curl --resolve hello.example.com:80:<an edge's public address> -I http://hello.example.com/
-  ```
+#### Checking the public Gateway
 
-  The first answers with the demo's page, the second with a `301` whose `location` is the `https`
-  address. Only the networks the edge stack admits reach the edge's public ports
-  ([The edge routers](infrastructure.md#the-edge-routers)).
+`just gateway-check [cluster]` reads, and changes nothing: the objects through the cluster's
+kubeconfig with `kubectl get`, then the edge stack's outputs for the edge routers' names and
+floating addresses, then requests through each edge with `curl --resolve`, as a client outside
+would make them once the names are in DNS. It prints pass, FAIL or skip and one line of why for
+each check, never an address, a host name under the domain or a tool's own errors, and exits 0 only
+when none fails. kubectl waits at most 10 seconds for an answer and curl 15, and curl reads no
+`.curlrc`, uses no proxy and follows no redirect. It needs curl 7.88 or newer.
+
+- `cluster-config`: the ConfigMap holds `CLUSTER_DOMAIN` and `GATEWAY_ADDRESS`, which the lines
+  below compare with. Without it, those lines are skipped.
+- `Gateway`: `public` is Accepted and Programmed; a FAIL gives the condition's reason.
+- `Gateway address`: the Gateway's status gives the `GATEWAY_ADDRESS`.
+- `proxy Service`: the Service Envoy Gateway makes for the proxies, selected by its labels for the
+  Gateway, is of type `LoadBalancer` and carries `k8s-gitops/announce: bgp`, without which no
+  worker announces it.
+- `proxy Service address`: that Service holds the `GATEWAY_ADDRESS`. While another Service holds
+  the address, Cilium gives this one none.
+- `proxies`: two proxies or more are Ready, on different nodes; a FAIL names the nodes.
+- `certificate`: the `Certificate` whose Secret the `https` listener serves is Ready.
+- `cluster CA`: the authority's certificate is read: `tls.crt` of the Secret the `ClusterIssuer`
+  the `Certificate` names signs with, in `cert-manager`, by a path that names that key alone, so
+  the private key beside it is never asked for. cert-manager's own documentation calls the
+  `ca.crt` of an issued Secret a best guess, while the issuer's `tls.crt` is the authority's
+  certificate itself. It is kept in a file of the run, never printed, and removed at its end.
+- `routes`: no `HTTPRoute` is Accepted on `public` from a namespace without
+  `k8s-gitops/gateway: public`, but for the redirect in the Gateway's own namespace; a FAIL names
+  the routes. A route in such a namespace is reported by the controller as not accepted, which is
+  the Gateway API's rule; this line reads that status for every route.
+- `http listener`: the Gateway reports one route on `http`, the redirect.
+
+Then, for each edge router, by its name; while the edge stack has no outputs, one line, `edges`,
+says they are skipped, and it fails when they cannot be read:
+
+- `<edge> http`: plain HTTP on 80 for `hello.${CLUSTER_DOMAIN}/gateway-check` answers 301, and its
+  `Location` is `https://hello.${CLUSTER_DOMAIN}/gateway-check`: the same host and path, the
+  default port. Any other status or place fails.
+- `<edge> TLS`: HTTPS on 443 for `hello.${CLUSTER_DOMAIN}` verifies against the authority's
+  certificate alone, the chain and the name, as curl verifies them.
+- `<edge> certificate names`: the certificate served names `hello.${CLUSTER_DOMAIN}`, read from
+  what curl shows of it. When TLS fails, this line says whether the names are the cause or the
+  chain is.
+- `<edge> hello`: the demo answers 200 with the page of its ConfigMap `demo/hello`.
+- `<edge> unrouted host`: a host under the domain that no route serves,
+  `gateway-check-unrouted.${CLUSTER_DOMAIN}`, answers 404.
+
+The last two are skipped when TLS fails. `tests/gateway-check.bats` runs the recipe against fakes of
+kubectl, curl and the edge stack, every answer holding addresses.
 
 #### Giving an application a public hostname
 
