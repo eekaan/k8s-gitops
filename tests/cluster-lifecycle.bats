@@ -427,12 +427,28 @@ no_tofu() {
   recipe cluster-check
   [ "$status" -eq 0 ]
   [[ $(line_of 'scrape targets') == "pass  scrape targets: "* ]]
+  # The pass says how many targets of the jobs it saw: 1 + 3 * 3 + 2 * 6.
+  [[ $(line_of 'scrape targets') == *"22 targets"* ]]
+
+  # An answer too large for a pipe to hold, read to the end, is still read right.
+  echo 3000 > "$STATE/many-targets"
+  recipe cluster-check
+  [ "$status" -eq 0 ]
+  [[ $(line_of 'scrape targets') == "pass  scrape targets: "*"22 targets"* ]]
+  echo 'kube-etcd cp-1' > "$STATE/targets-down"
+  recipe cluster-check
+  [ "$status" -ne 0 ]
+  [[ $(line_of 'scrape targets') == "FAIL  scrape targets: "*"kube-etcd on cp-1"* ]]
 }
 
 @test "cluster-check skips the scrape check, saying why, without the monitoring stack or without an answer from Prometheus" {
-  for condition in no-monitoring prometheus-silent prometheus-error; do
+  for condition in no-monitoring prometheus-silent prometheus-error targets-none etcd-unscraped; do
     reset_cluster
-    : > "$STATE/$condition"
+    if [[ $condition == etcd-unscraped ]]; then
+      echo kube-etcd > "$STATE/unscraped"
+    else
+      : > "$STATE/$condition"
+    fi
     # What a skip must not hide: a target down is not seen, but nothing is passed either.
     echo 'kube-etcd cp-1' > "$STATE/targets-down"
 
@@ -443,6 +459,9 @@ no_tofu() {
     [[ $line == "skip  scrape targets: "* ]]
     case $condition in
       no-monitoring) [[ $line == *"monitoring stack is not installed"* ]] ;;
+      # An answer without a target of a job names the job: nothing scrapes it, which is no pass.
+      targets-none) [[ $line == *"no active target"* && $line == *apiserver* && $line == *kube-etcd* && $line == *node-exporter* ]] ;;
+      etcd-unscraped) [[ $line == *"no active target"* && $line == *kube-etcd* && $line != *kubelet* ]] ;;
       *) [[ $line == *"Prometheus did not answer"* ]] ;;
     esac
     [[ ${output##*$'\n'} == *"skipped: scrape targets"* ]]

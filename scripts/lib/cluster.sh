@@ -417,79 +417,71 @@ prometheus_namespace=monitoring prometheus_service=kube-prometheus-stack-prometh
 # shellcheck disable=SC2034 # read by scripts/cluster-check and tests/monitoring.bats
 scrape_jobs=(apiserver kube-controller-manager kube-scheduler kube-etcd kubelet node-exporter)
 
-# The parts of a node's configuration that take effect only when the node reboots, one per line as
-# PATH|WHAT, PATH being where the change shows in a diff of the configuration: a dotted path, or
-# kind:NAME for a document of that kind, and WHAT being what the node runs until then. Talos'
-# documentation of editing the machine configuration, for the version in versions.yaml
+# The parts of a node's configuration that take effect only when the node reboots, as a jq program
+# that compares what the node runs, $old, with what talman renders for it, $new, each the array of
+# the documents of a machine configuration, and prints, for each part that differs, what the node
+# runs until it reboots. Talos' documentation of editing the machine configuration, for the version
+# in versions.yaml
 # (https://docs.siderolabs.com/talos/v1.14/configure-your-talos-cluster/system-configuration/editing-machine-configuration),
 # says a configuration is always applied to the running node without a reboot, and names what that
 # leaves unchanged until a restart: .cluster.etcd, whose settings, extra arguments among them, are
 # read when etcd starts and which Talos does not restart on a change; environment variables
-# (.machine.env, EnvironmentConfig), which running services keep until they restart; and the sandbox
-# (SecurityProfileConfig), read when its service starts. It names no other section the patches set,
-# the kubelet, API server, controller manager and scheduler among them, as needing one, and Talos
-# restarts those itself. Not listed, as a diff does not show them as a change of a section: removing
-# a kernel module or changing a loaded one's parameters, and rotating a volume encryption key; each
-# needs a reboot too.
-reboot_only_sections='cluster.etcd|etcd with the arguments it had
-machine.env|its services with the environment they had
-kind:EnvironmentConfig|its services with the environment they had
-kind:SecurityProfileConfig|its sandbox with the setting it had'
+# (.machine.env, EnvironmentConfig), which running services keep until they restart; kernel modules
+# (.machine.kernel.modules, KernelModuleConfig), of which a removed one stays loaded and a loaded
+# one keeps its parameters, while a module added is loaded at once; and the sandbox
+# (SecurityProfileConfig), read when its service starts. Its list is not exhaustive, by its own
+# words, and it names no other section the patches set, the kubelet, API server, controller manager
+# and scheduler among them: those are not on this list, and a section found to need a reboot that
+# is missing here is to be added. Rotating a volume encryption key needs one too, and is not
+# compared here: the keys are not in a section a patch sets.
+#
+# The comparison is of the configuration, not of the diff the dry run prints: a unified diff has
+# three lines of context around a change, so the section a changed line belongs to is not in it.
+# shellcheck disable=SC2016 # a jq program
+reboot_only_program='
+  def documents: map(select(type == "object"));
+  def machine: documents | map(select(has("machine") or has("cluster"))) | first // {};
+  def kinds($kind): documents | map(select(.kind == $kind) | del(.apiVersion)) | sort_by(tojson);
+  def modules: ((machine | .machine.kernel.modules // []) + kinds("KernelModuleConfig"))
+    | map({key: .name, value: ((.parameters // []) | sort)}) | from_entries;
+  def environment: "its services with the environment they had";
+  [
+    (if ($old | machine | .cluster.etcd) != ($new | machine | .cluster.etcd) then "etcd with the arguments it had" else empty end),
+    (if ($old | machine | .machine.env) != ($new | machine | .machine.env) then environment else empty end),
+    (if ($old | kinds("EnvironmentConfig")) != ($new | kinds("EnvironmentConfig")) then environment else empty end),
+    (if ($old | kinds("SecurityProfileConfig")) != ($new | kinds("SecurityProfileConfig")) then "its sandbox with the setting it had" else empty end),
+    (($old | modules) as $before | ($new | modules) as $after
+      | if any($before | keys[]; . as $name | ($after | has($name) | not) or $after[$name] != $before[$name])
+        then "its kernel modules as they were loaded" else empty end)
+  ] | unique | .[]'
 
-# reboot_pending DIFF: the nodes the dry run DIFF, as talman prints it, shows a change to in a part
-# of the configuration that takes effect only at a reboot, one per line as the hostname and what it
-# runs until then, for each. A node's part of DIFF starts at a line "== NODE"; its diff at "Config
-# diff:", whose indentation is the margin before the marker column of each line after it, a space for
-# a line around a change, + or - for a changed one. The rest of such a line is the configuration's
-# own YAML, whose indentation gives each changed line its place. Nothing here prints DIFF.
+# reboot_pending RUNNING RENDERED: what a node runs until it reboots, one per line, when RENDERED, the
+# configuration talman renders for it, differs from RUNNING, the one it runs, in a part that takes
+# effect only at a reboot; nothing when it does not. Both are the configurations' text, which can
+# hold secrets: nothing here prints them.
 reboot_pending() {
-  awk -v sections="$reboot_only_sections" '
-    BEGIN {
-      count = split(sections, entries, "\n")
-      for (i = 1; i <= count; i++) {
-        split(entries[i], parts, "|")
-        path[i] = parts[1]
-        what[i] = parts[2]
-      }
-    }
-    function reset() { depth = 0; kind = "" }
-    /^== / { node = $2; margin = -1; next }
-    {
-      trimmed = $0
-      sub(/^ +/, "", trimmed)
-    }
-    trimmed ~ /^Config diff:/ { margin = length($0) - length(trimmed); reset(); next }
-    margin < 0 { next }
-    {
-      marker = substr($0, margin + 1, 1)
-      content = substr($0, margin + 2)
-      if (marker != " " && marker != "+" && marker != "-") next
-      if (content ~ /^ *$/) next
-      indent = match(content, /[^ ]/) - 1
-      text = substr(content, indent + 1)
-    }
-    text == "---" { reset(); next }
-    {
-      key = ""
-      if (match(text, /^[A-Za-z0-9_.\/-]+:/)) key = substr(text, 1, RLENGTH - 1)
-      while (depth > 0 && stack_indent[depth] >= indent) depth--
-      if (key == "") next
-      depth++
-      stack_indent[depth] = indent
-      stack_key[depth] = key
-      if (indent == 0 && key == "kind") {
-        kind = text
-        sub(/^kind: */, "", kind)
-      }
-      if (marker == " ") next
-      full = stack_key[1]
-      for (i = 2; i <= depth; i++) full = full "." stack_key[i]
-      for (i = 1; i <= count; i++) {
-        if (path[i] ~ /^kind:/ ? (kind == substr(path[i], 6)) : (full == path[i] || index(full, path[i] ".") == 1)) {
-          if (!((node, what[i]) in seen)) { seen[node, what[i]] = 1; print node "\t" what[i] }
-        }
-      }
-    }' <<< "$1"
+  jq -nr --slurpfile old <(yq -o=json -I=0 '.' <<< "$1") --slurpfile new <(yq -o=json -I=0 '.' <<< "$2") \
+    "$reboot_only_program"
+}
+
+# running_config NODE: the machine configuration NODE runs, asked of its Talos API through talman,
+# as text. Failing, it says nothing: what talosctl says names addresses.
+running_config() {
+  local resource
+  resource=$(talman talosctl -n "$1" get machineconfig --output yaml 2> /dev/null) || return 1
+  yq '.spec // ""' <<< "$resource"
+}
+
+# changed_nodes DRY_RUN: the hostnames of the nodes whose block of the dry run DRY_RUN, as talman
+# prints it, shows a diff, one per line, not those that are new, which run no configuration to
+# change. A block starts at a header "== [i/n] HOSTNAME (ADDRESS)", with a note after the address
+# for a new node, and has "Config diff:" and then the diff, or "No changes.". The address is not
+# printed.
+changed_nodes() {
+  awk '
+    /^== \[[0-9?]+\/[0-9]+\] / { node = $3; note = ($0 ~ /\) ·/); seen = 0; next }
+    /^ +Config diff:/ { seen = 1; next }
+    seen && node != "" && !note && NF && $0 !~ /^ +No changes\.$/ { print node; node = "" }' <<< "$1"
 }
 
 # flux_recipient: the age recipient .sops.yaml encrypts the SOPS files under kubernetes/ to.

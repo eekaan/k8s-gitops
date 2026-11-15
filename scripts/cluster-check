@@ -184,13 +184,27 @@ scrape_targets_down() {
     "${scrape_jobs[@]}" <<< "$targets"
 }
 
+# scrape_targets_unscraped: the component jobs, one per line, that no active target in targets
+# belongs to. Prometheus that has just started, or a monitor that selects nothing, answers
+# successfully without them, and a job nothing scrapes is not a job whose targets are up.
+scrape_targets_unscraped() {
+  jq -r --args '[.data.activeTargets[].labels.job] as $seen | $ARGS.positional[] | select(IN($seen[]) | not)' \
+    "${scrape_jobs[@]}" <<< "$targets"
+}
+
+# scrape_targets_seen: how many active targets belong to the component jobs.
+scrape_targets_seen() {
+  jq -r --args '[.data.activeTargets[] | select(.labels.job | IN($ARGS.positional[]))] | length' \
+    "${scrape_jobs[@]}" <<< "$targets"
+}
+
 # Prometheus is asked through the API server's service proxy, as nothing reaches it from outside the
 # cluster. The answer is read into a variable whole, so that no reader of kubectl's output ends the
 # pipe early.
 targets_path=/api/v1/namespaces/$prometheus_namespace/services/$prometheus_service:$prometheus_port/proxy/api/v1/targets
 if ! service=$(kubectl get service "$prometheus_service" --namespace "$prometheus_namespace" --ignore-not-found \
   --output name --request-timeout=10s 2> /dev/null); then
-  result skip "scrape targets" "Prometheus did not answer: kubectl could not look for its Service"
+  result skip "scrape targets" "kubectl could not look for Prometheus's Service, so it was not asked"
 elif [[ -z $service ]]; then
   result skip "scrape targets" "the monitoring stack is not installed: no Service $prometheus_service in $prometheus_namespace"
 elif ! targets=$(kubectl get --raw "$targets_path?state=active" --request-timeout=20s 2> /dev/null) ||
@@ -198,10 +212,14 @@ elif ! targets=$(kubectl get --raw "$targets_path?state=active" --request-timeou
   result skip "scrape targets" "Prometheus did not answer through the API server's service proxy with its targets"
 elif ! down=$(scrape_targets_down); then
   result skip "scrape targets" "Prometheus did not answer with targets this check could read"
-elif [[ -z $down ]]; then
-  result pass "scrape targets" "no target of the ${#scrape_jobs[@]} component jobs is down"
-else
+elif [[ -n $down ]]; then
   result FAIL "scrape targets" "down: $(paste -sd';' - <<< "$down" | sed 's/;/; /g')"
+elif ! unscraped=$(scrape_targets_unscraped) || ! target_count=$(scrape_targets_seen); then
+  result skip "scrape targets" "Prometheus did not answer with targets this check could read"
+elif [[ -n $unscraped ]]; then
+  result skip "scrape targets" "Prometheus has no active target for $(joined <<< "$unscraped"), so nothing says whether they are up"
+else
+  result pass "scrape targets" "none of the $target_count targets of the ${#scrape_jobs[@]} component jobs is down"
 fi
 
 if ((failures > 0)); then

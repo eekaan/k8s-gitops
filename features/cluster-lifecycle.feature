@@ -24,10 +24,10 @@ Feature: Cluster lifecycle
   Scenario: cluster-check fails, naming job and node, while a component's scrape target is down
     Given Prometheus reporting down the etcd targets on cp-1 and cp-2 and the node-exporter target on worker-3, and one of an application that is none of the cluster's own components
     When cluster-check runs
-    Then the scrape check prints FAIL naming each job and its nodes and no address, every other check passes, the run exits non-zero, and Prometheus was asked through the API server's service proxy with kubectl get; with every component's target up it passes
+    Then the scrape check prints FAIL naming each job and its nodes and no address, every other check passes, the run exits non-zero, and Prometheus was asked through the API server's service proxy with kubectl get; with every component's target up it passes, saying how many targets it saw
 
   Scenario: cluster-check skips the scrape check, saying why, without the monitoring stack or without an answer from Prometheus
-    Given a cluster without Prometheus's Service, one whose Prometheus does not answer through the service proxy, and one whose Prometheus answers with an error
+    Given a cluster without Prometheus's Service, one whose Prometheus does not answer through the service proxy, one whose Prometheus answers with an error, and ones whose answer holds no target of a component's job
     When cluster-check runs for each
     Then the scrape check prints skip with the reason, never pass, the last line names it among the skipped checks, no address is printed and the run exits zero
 

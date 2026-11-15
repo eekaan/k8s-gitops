@@ -260,23 +260,35 @@ but some of it is read only when a service starts, and nothing restarts the serv
   it reboots.
 - Environment variables (`machine.env`, `EnvironmentConfig`): running services keep theirs until
   they restart.
+- Kernel modules (`machine.kernel.modules`, `KernelModuleConfig`): a module removed stays loaded and
+  a loaded one keeps its parameters until the node reboots. A module added is loaded at once.
 - The sandbox (`SecurityProfileConfig`).
 
-Removing a kernel module, changing a loaded module's parameters and rotating a volume encryption
-key need a reboot too; the rollout does not recognise those in a diff. The kubelet, the API server,
-the controller manager and the scheduler, which the patches in `talos/patches/` also configure,
-are not on the list: Talos restarts them itself. The list is `reboot_only_sections` in
-`scripts/lib/cluster.sh`, with the citation.
+Rotating a volume encryption key needs a reboot too; the rollout does not look for it, as no patch
+here sets one. The kubelet, the API server, the controller manager and the scheduler, which the
+patches in `talos/patches/` also configure, are not on the list: Talos' page names none of them,
+but it calls its own list not exhaustive, so a section found to need a reboot that is missing from
+the list is added to `reboot_only_program` in `scripts/lib/cluster.sh`, which holds the list with
+the citation. A test fails when the version in that citation is not the Talos minor version in
+`versions.yaml`.
 
-`just cluster-talos` reads the dry run's diff of each node, and once the nodes keep the
-configuration it names each node whose change is on that list, saying what it runs until it
-reboots and the recipe that reboots it, for example `cp-1 runs etcd with the arguments it had until
-it reboots; reboot it with: just cluster-reboot cp-1`. Reboot the control planes one at a time, each
-once the one before is Ready again. A change to nothing on the list prints nothing about a reboot.
+`just cluster-talos` finds the nodes whose dry run shows a change and, for each, compares the
+sections on the list in the configuration talman rendered for it with those in the configuration
+the node runs now, which it reads from the node's Talos API through `talman talosctl`. The diff
+does not decide it: a unified diff shows three lines around a change, not the section that holds
+them. Once the nodes keep the configuration it names each node that differs, saying what it runs
+until it reboots and the recipe that reboots it, for example `cp-1 runs etcd with the arguments it
+had until it reboots; reboot it with: just cluster-reboot cp-1`. Reboot the control planes one at a
+time, each once the one before is Ready again. A change to nothing on the list prints nothing about
+a reboot. A node it cannot read the running configuration of is named as one it could not compare,
+not passed over. With `--first` a run that stops after some nodes kept the configuration names
+those that need a reboot, as a later run finds nothing to change and would not.
 With `--reboot` the recipe reboots those nodes itself, through `scripts/cluster-reboot`, one at a
-time, and stops at the first that does not come back, naming the nodes it did not reboot. A reboot
-is not the default: it takes a control plane out of etcd and the API load balancer for a few
-minutes, and the operator says so by passing `--reboot`.
+time, once every node has kept the configuration, and stops at the first that does not come back,
+naming the nodes it did not reboot; `--tolerate <seconds>` is passed to each `cluster-reboot`, for
+the interruption of the API a control plane's reboot causes behind its load balancer. A reboot is
+not the default: it takes a control plane out of etcd and the API load balancer for a few minutes,
+and the operator says so by passing `--reboot`.
 
 ## The node firewall
 
@@ -671,11 +683,11 @@ out of the artifact, which is built from `kubernetes/`.
   `clusterconfig/kubeconfig`, with mode 0600, and points it at `https://KUBE_API_ADDRESS:6443`:
   talman writes the cluster endpoint, the load balancer's address on the node network, which only
   the nodes reach. It prints the file's path. The recipes that use the cluster read it from there.
-- `just cluster-talos [cluster] [--onboard] [--yes] [--reboot]` rolls the configuration out: the cluster's
-  `talman.yaml` and the patches it lists, as they are now. It waits for every node as
-  `cluster-bootstrap` does, then shows what `talman apply --dry-run` says would change on each
-  node, with the cluster's secrets redacted, and applies once the cluster's name is typed back;
-  `--yes` does not ask. talman applies one node at a time, control planes always alone, rebooting
+- `just cluster-talos [cluster] [--onboard] [--yes] [--reboot [--tolerate <seconds>]]` rolls the
+  configuration out: the cluster's `talman.yaml` and the patches it lists, as they are now. It
+  waits for every node as `cluster-bootstrap` does, then shows what `talman apply --dry-run` says
+  would change on each node, with the cluster's secrets redacted, and applies once the cluster's
+  name is typed back; `--yes` does not ask. talman applies one node at a time, control planes always alone, rebooting
   a node only when the change needs it and waiting for each to come back before the next. A node
   in maintenance mode, such as one OpenTofu has just added, is configured only with `--onboard`:
   the maintenance service authenticates nothing, and a node's configuration carries the cluster's
@@ -794,11 +806,14 @@ out of the artifact, which is built from `kubernetes/`.
   certificate; and no scrape target of the cluster's own components is down: the jobs of the API
   server, the controller manager, the scheduler, etcd, the kubelets and node-exporter, asked of
   Prometheus through the API server's service proxy, a FAIL naming each job and the nodes it is
-  down on, never an address. While the namespace `flux-system` does not exist, as before
+  down on, never an address; the pass says how many targets it saw. A job with no active target,
+  as while Prometheus has just started or a monitor selects nothing, is skipped, naming the job,
+  not passed. While the namespace `flux-system` does not exist, as before
   `just cluster-config` has run, the check of its pods is skipped, and its line and the last line
   say so. The scrape check is skipped, saying why, while Prometheus's Service does not exist, as
-  before the monitoring application is installed, and when Prometheus does not answer; its
-  silence is never a pass. It runs `kubectl get` and `kubectl logs` only. It needs the cluster's `talman.yaml` and kubeconfig.
+  before the monitoring application is installed, and when it cannot be asked or does not answer;
+  its silence is never a pass. It runs `kubectl get` and `kubectl logs` only. It needs the
+  cluster's `talman.yaml` and kubeconfig.
 - `just grafana [cluster]` forwards a local port to Grafana through the cluster's kubeconfig until
   Ctrl-C ([kubernetes.md](kubernetes.md#grafana)): `kubectl port-forward`, listening on 127.0.0.1
   only, from `GRAFANA_PORT` to port 3000 of the Service `grafana-service` in `monitoring`. Once

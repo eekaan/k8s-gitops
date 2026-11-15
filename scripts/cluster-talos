@@ -18,14 +18,16 @@
 # the nodes before it keep theirs and those after it are untouched.
 #
 # Talos applies a configuration to a running node without a reboot, but some of it, such as etcd's
-# arguments, is read only when the service starts (reboot_only_sections in scripts/lib/cluster.sh
-# says which, and why). From the dry run's diff, once the nodes keep the configuration, the recipe
-# names each node that runs the old setting until it reboots and the recipe that reboots it. With
-# --reboot it reboots those nodes itself, one at a time, through scripts/cluster-reboot, which drains
-# each and waits for it to be Ready again, and stops at the first that does not come back. A reboot
-# is not the default: a control plane leaves its etcd and the API load balancer for the time it
-# takes, which the operator, not the recipe, decides to accept.
-# Usage: scripts/cluster-talos [cluster] [--onboard] [--yes] [--reboot] [--first <node>]
+# arguments, is read only when the service starts (reboot_only_program in scripts/lib/cluster.sh
+# says which, and why). For each node whose dry run shows a change, the recipe compares what the node
+# runs with the configuration talman rendered for it, and once the nodes keep the configuration it
+# names each node that runs the old setting until it reboots and the recipe that reboots it; a run
+# that stops after some nodes kept it names those. With --reboot it reboots the nodes itself, one at
+# a time, through scripts/cluster-reboot, which drains each and waits for it to be Ready again, and
+# stops at the first that does not come back; --tolerate <seconds> is passed on to it. A reboot is
+# not the default: a control plane leaves its etcd and the API load balancer for the time it takes,
+# which the operator, not the recipe, decides to accept.
+# Usage: scripts/cluster-talos [cluster] [--onboard] [--yes] [--reboot [--tolerate <seconds>]] [--first <node>]
 set -euo pipefail
 
 here=$(dirname "$0")
@@ -65,15 +67,20 @@ lb_attempts=15 lb_wait=20 lb_poll=5
 # than 240 seconds after the try, as when earlier ones ran long, keep nothing: the node reverts.
 
 usage() {
-  infra_error "usage: cluster-talos [cluster] [--onboard] [--yes] [--reboot] [--first <node>]"
+  infra_error "usage: cluster-talos [cluster] [--onboard] [--yes] [--reboot [--tolerate <seconds>]] [--first <node>]"
   exit 2
 }
 
-cluster='' confirmed=0 onboard=() first='' reboot=0
+cluster='' confirmed=0 onboard=() first='' reboot=0 tolerate=()
 while (($#)); do
   case $1 in
     --yes) confirmed=1 ;;
     --reboot) reboot=1 ;;
+    --tolerate)
+      (($# > 1)) && [[ $2 =~ ^[0-9]+$ ]] || usage
+      tolerate=(--tolerate "$2")
+      shift
+      ;;
     --onboard) onboard=(--onboard-new-nodes) ;;
     --first)
       (($# > 1)) && [[ $2 != -* ]] || usage
@@ -89,6 +96,10 @@ while (($#)); do
   esac
   shift
 done
+if ((${#tolerate[@]} > 0 && !reboot)); then
+  infra_error "--tolerate is for the reboots --reboot makes: it is passed to scripts/cluster-reboot"
+  exit 2
+fi
 if [[ -n $first && ${#onboard[@]} -gt 0 ]]; then
   infra_error "--first does not onboard: a node in maintenance mode has nothing to revert to; onboard new nodes with --onboard first"
   exit 2
@@ -126,7 +137,6 @@ say_reboots() {
     what=$(awk -F '\t' -v node="$node" '$1 == node { print $2 }' <<< "$pending" | paste -sd '|' - | sed 's/|/ and /g')
     echo "cluster-talos: $node runs $what until it reboots; reboot it with: just cluster-reboot $node$suffix"
   done
-  echo "cluster-talos: reboot them one at a time, each once the one before is Ready again; --reboot does that"
 }
 
 # reboot_nodes NODE...: reboots each NODE through scripts/cluster-reboot, which asks nothing more as
@@ -137,7 +147,7 @@ reboot_nodes() {
     step="rebooting $node"
     echo "cluster-talos: rebooting $node"
     rest=("${rest[@]:1}")
-    if ! "$here/cluster-reboot" "$node" "$cluster" --yes; then
+    if ! "$here/cluster-reboot" "$node" "$cluster" --yes "${tolerate[@]}"; then
       infra_error "$node did not come back, or the API did not ride it out: cluster-reboot $node failed, as its output above says"
       infra_error "not rebooted: $( ((${#rest[@]} > 0)) && printf '%s\n' "${rest[@]}" | joined || echo 'no other node')"
       exit 1
@@ -154,7 +164,31 @@ kept_reboots() {
     reboot_nodes "${needing[@]}"
   else
     say_reboots "${needing[@]}"
+    echo "cluster-talos: reboot them one at a time, each once the one before is Ready again; --reboot does that"
   fi
+}
+
+# pending_reboots DRY_RUN: sets pending, one line per node and what it runs until it reboots, a tab
+# between them, for each node whose block of DRY_RUN shows a change, by comparing what the node runs
+# with the configuration talman rendered for it; and undecided, the nodes of which that could not be
+# read, which it says.
+pending_reboots() {
+  local node rendered running what
+  pending='' undecided=()
+  while IFS= read -r node; do
+    rendered=$cluster_dir/clusterconfig/$node.yaml
+    if [[ -f $rendered ]] && running=$(running_config "$node"); then
+      what=$(reboot_pending "$running" "$(< "$rendered")") || what=unreadable
+    else
+      what=unreadable
+    fi
+    if [[ $what == unreadable ]]; then
+      undecided+=("$node")
+      echo "cluster-talos: could not compare what $node runs with its configuration, so it is not said whether it needs a reboot"
+    elif [[ -n $what ]]; then
+      pending+=$(awk -v node="$node" '{ print node "\t" $0 }' <<< "$what")$'\n'
+    fi
+  done < <(changed_nodes "$1")
 }
 
 step="waiting for every node to answer on the Talos API port"
@@ -162,10 +196,8 @@ wait_for_talos_api "$talman_file"
 
 step="asking each node what the configuration would change"
 changes=0
-diff_file=$(umask 077 && mktemp -t cluster-talos-diff.XXXXXXXXXX)
-cluster_talman apply --dry-run --detailed-exit-code --redact-secrets "${onboard[@]}" > "$diff_file" || changes=$?
-dry_run=$(< "$diff_file")
-rm -f -- "$diff_file"
+# talman writes each node's block to standard error, and talosctl's own output with it.
+dry_run=$(cluster_talman apply --dry-run --detailed-exit-code --redact-secrets "${onboard[@]}" 2>&1) || changes=$?
 [[ -z $dry_run ]] || printf '%s\n' "$dry_run"
 case $changes in
   0)
@@ -178,11 +210,14 @@ esac
 
 # With CI set the diff went to talman's log, which only this reads, and prints nothing of.
 [[ -z ${CI:-} ]] || dry_run=$(< "$talman_log")
-pending=$(reboot_pending "$dry_run")
+step="comparing what each changed node runs with its configuration"
+pending_reboots "$dry_run"
 # The nodes that need a reboot, in talman.yaml's order.
-mapfile -t needing < <(talman_nodes "$talman_file" | awk -v pending="$pending" '
+step="reading the nodes of talos/$cluster/talman.yaml"
+listing=$(talman_nodes "$talman_file")
+mapfile -t needing < <(awk -v pending="$pending" '
   BEGIN { n = split(pending, lines, "\n"); for (i = 1; i <= n; i++) { split(lines[i], fields, "\t"); if (fields[1] != "") want[fields[1]] = 1 } }
-  $1 in want { print $1 }')
+  $1 in want { print $1 }' <<< "$listing")
 if ((reboot && ${#needing[@]} > 0)); then
   echo "cluster-talos: once the nodes keep the configuration, $(printf '%s\n' "${needing[@]}" | joined) are rebooted, one at a time"
 fi
@@ -491,10 +526,18 @@ check_tried() {
 
 # progress: which nodes kept the configuration, and which were not touched, from position on.
 progress() {
-  local rest
+  local rest node
   rest=$(printf '%s\n' "${order[@]:position+1}" | joined)
   if ((${#kept[@]} > 0)); then
     infra_error "kept before it: $(printf '%s\n' "${kept[@]}" | joined)"
+    # A later run finds nothing to change on them, so it would not name these.
+    local -a rebooting=()
+    for node in "${needing[@]}"; do
+      [[ " ${kept[*]} " != *" $node "* ]] || rebooting+=("$node")
+    done
+    if ((${#rebooting[@]} > 0)); then
+      say_reboots "${rebooting[@]}" >&2
+    fi
   fi
   infra_error "untouched: ${rest:-no other node}"
 }

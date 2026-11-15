@@ -34,6 +34,10 @@
 #   prometheus-silent Prometheus does not answer through the service proxy, and kubectl's error names
 #                     an address
 #   prometheus-error  Prometheus answers its targets request with an error status
+#   targets-none      Prometheus answers successfully with no active target at all, as just started
+#   unscraped         the jobs that file names, one per line, have no active target
+#   many-targets      Prometheus's answer carries that many more targets of another job, enough to
+#                     fill a pipe many times over
 #   linstor-volumes   as many PersistentVolumes of LINSTOR's CSI driver as the file's number
 # Every object it answers with holds addresses from the documentation ranges, as do its errors and the
 # log line, which the recipes must never print. It records "kubectl ARGS" in <tmp>/record/argv, and
@@ -219,18 +223,24 @@ list() {
 targets() {
   local job node
   {
-    for job in kube-controller-manager kube-scheduler kube-etcd; do
-      for node in cp-1 cp-2 cp-3; do echo "$job $node"; done
-    done
-    for job in kubelet node-exporter; do
-      for node in cp-1 cp-2 cp-3 worker-1 worker-2 worker-3; do echo "$job $node"; done
-    done
-    echo "apiserver"
-    echo "coredns"
-    if listed other-down; then echo "my-app down"; fi
-  } | jq -R -s --rawfile down <(cat "$state/targets-down" 2> /dev/null) '
+    if ! listed targets-none; then
+      for job in kube-controller-manager kube-scheduler kube-etcd; do
+        for node in cp-1 cp-2 cp-3; do echo "$job $node"; done
+      done
+      for job in kubelet node-exporter; do
+        for node in cp-1 cp-2 cp-3 worker-1 worker-2 worker-3; do echo "$job $node"; done
+      done
+      echo "apiserver"
+      echo "coredns"
+      if listed other-down; then echo "my-app down"; fi
+      if listed many-targets; then
+        for ((n = 0; n < $(< "$state/many-targets"); n++)); do echo "coredns-$n"; done
+      fi
+    fi
+  } | jq -R -s --rawfile down <(cat "$state/targets-down" 2> /dev/null) --rawfile unscraped <(cat "$state/unscraped" 2> /dev/null) '
     ($down | split("\n") | map(select(. != ""))) as $down
-    | {status: "success", data: {activeTargets: [split("\n")[] | select(. != "") | split(" ") as $t
+    | ($unscraped | split("\n") | map(select(. != ""))) as $unscraped
+    | {status: "success", data: {activeTargets: [split("\n")[] | select(. != "") | split(" ") as $t | select($t[0] | IN($unscraped[]) | not)
       | {discoveredLabels: ({"__address__": "198.51.100.31:9100"}
           + (if ($t | length) > 1 and $t[0] != "my-app" then {"__meta_kubernetes_endpoint_node_name": $t[1]} else {} end)),
         labels: {job: $t[0], instance: "198.51.100.31:9100"},
