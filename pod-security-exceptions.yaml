@@ -43,22 +43,6 @@ exceptions:
     workload: Pod/spegel-cleanup-wait
     level: baseline
     reason: the hook pod takes the pod and container context of the Spegel DaemonSet, which runs as root to reach the container runtime's socket and registry configuration, so no value gives it the non-root user restricted requires
-  - namespace: kube-system
-    workload: Deployment/reflector
-    level: baseline
-    reason: it needs a seccomp profile and privilege escalation off, podSecurityContext.seccompProfile and securityContext.allowPrivilegeEscalation, keys the chart's values do not define, which tests/autoscaling.bats keeps out of its values
-  - namespace: kube-system
-    workload: Pod/vpa-test-crds-available
-    level: baseline
-    reason: the chart's test pod needs a seccomp profile, tests.securityContext.seccompProfile, a key the chart's values do not define, which tests/autoscaling.bats keeps out of its values
-  - namespace: kube-system
-    workload: Pod/vpa-test-create-vpa
-    level: baseline
-    reason: the chart's test pod needs a seccomp profile, tests.securityContext.seccompProfile, a key the chart's values do not define, which tests/autoscaling.bats keeps out of its values
-  - namespace: kube-system
-    workload: Pod/vpa-test-metrics-api-available
-    level: baseline
-    reason: the chart's test pod needs a seccomp profile, tests.securityContext.seccompProfile, a key the chart's values do not define, which tests/autoscaling.bats keeps out of its values
   - namespace: monitoring
     workload: DaemonSet/kube-prometheus-stack-prometheus-node-exporter
     level: privileged
@@ -67,14 +51,6 @@ exceptions:
     workload: DaemonSet/vector
     level: privileged
     reason: it reads each node's log files through a host path and keeps its buffers in another
-  - namespace: monitoring
-    workload: StatefulSet/victoria-logs
-    level: baseline
-    reason: it needs a seccomp profile, server.podSecurityContext.seccompProfile, a key the chart's values do not define, which tests/logs.bats keeps out of its values
-  - namespace: piraeus-datastore
-    workload: Deployment/piraeus-operator-controller-manager
-    level: baseline
-    reason: it needs privilege escalation off, operator.securityContext.allowPrivilegeEscalation, a key the chart's values do not define, which tests/storage.bats keeps out of its values
   - namespace: piraeus-datastore
     workload: DaemonSet/linstor-satellite
     created-by: LinstorCluster/linstorcluster

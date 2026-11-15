@@ -176,8 +176,10 @@ An application's namespace is its `apps/base/<namespace>/namespace.yaml` with th
 level its workloads pass; a workload that needs more is a new entry in the exceptions file in the
 same change, and the namespace's level and its audit and warn labels follow it. A chart value that
 brings a workload to `restricted`, a seccomp profile or a container context, goes in the
-application's values instead of an entry, where the chart's values define the key or leave its map
-empty, as the application's tests require of every key; an entry's reason says why no value does.
+application's values instead of an entry. The tests that hold an application's values keys to
+those its chart's values define accept, under a `securityContext`, `podSecurityContext` or
+`containerSecurityContext` map, any field of Kubernetes' security context types
+(`tests/fixtures/security-context-fields`); an entry's reason says why no value does.
 
 ## Variables
 
@@ -404,9 +406,8 @@ Alertmanager, kube-state-metrics and node-exporter in the namespace `monitoring`
 prometheus-community `kube-prometheus-stack` chart. The namespace's Pod Security level is
 privileged, as node-exporter reads each node through the host's network and process namespaces and
 through host paths, and the log collector ([Logs](#logs)) reads the nodes' log files through a
-host path; those two DaemonSets are its entries in `pod-security-exceptions.yaml`, with
-VictoriaLogs, which needs baseline, and every other pod of it that the render holds passes
-restricted. The pods the operators make from the
+host path; those two DaemonSets are its entries in `pod-security-exceptions.yaml`, and every
+other pod of it that the render holds passes restricted. The pods the operators make from the
 Prometheus, Alertmanager and Grafana resources are not in the render; each resource sets the
 security context restricted requires ([Pod Security](#pod-security)). The chart installs no
 resource definitions: `prometheus-operator-crds` does
@@ -800,8 +801,8 @@ the chart makes no disruption budget. Its chart serves no metrics and has no mon
 Persistent volumes come from LINSTOR, run by the Piraeus operator, on the workers' data volumes
 (ADR 0011). Two applications in `apps/base/piraeus-datastore/` hold it; their namespace admits
 privileged pods, as LINSTOR's satellites, the CSI node plugin, the NFS server and the HA controller
-run privileged with host paths; they are its entries in `pod-security-exceptions.yaml`, with the
-operator's own pod, the only one the render holds, which needs baseline. The LinstorCluster gives
+run privileged with host paths; they are its entries in `pod-security-exceptions.yaml`. The
+operator's own pod, the only one the render holds, passes restricted, and the LinstorCluster gives
 the LINSTOR controller, the CSI controller and the affinity controller the security context
 restricted requires ([Pod Security](#pod-security)).
 

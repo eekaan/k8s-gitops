@@ -362,7 +362,10 @@ real_render() {
   run "$REPO/scripts/pod-security-check" --list "$REAL" "$REPO/pod-security-exceptions.yaml" "$REPO/versions.yaml"
   [ "$status" -eq 0 ]
   local workload
-  for workload in kube-system/Deployment/descheduler kube-system/Deployment/reloader-reloader monitoring/Deployment/grafana-operator; do
+  for workload in kube-system/Deployment/descheduler kube-system/Deployment/reloader-reloader kube-system/Deployment/reflector \
+    kube-system/Pod/vpa-test-crds-available kube-system/Pod/vpa-test-create-vpa kube-system/Pod/vpa-test-metrics-api-available \
+    monitoring/Deployment/grafana-operator monitoring/StatefulSet/victoria-logs \
+    piraeus-datastore/Deployment/piraeus-operator-controller-manager; do
     [[ $output == *"$workload restricted"* ]] || { echo "$workload does not pass restricted"; return 1; }
   done
 }
