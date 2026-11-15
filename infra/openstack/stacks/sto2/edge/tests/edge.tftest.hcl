@@ -477,6 +477,12 @@ run "the_user_data_holds_no_secret_and_the_edges_port_allows_exactly_the_address
     error_message = "The cloud-config must write exactly the rendered FRR configuration, nftables rules and kernel settings, the daemon list and the first-boot script."
   }
 
+  # Written files configure nothing until the first-boot script runs them in place.
+  assert {
+    condition     = alltrue([for key in ["1", "2"] : yamldecode(output.user_data[key]).runcmd == [["/usr/local/sbin/edge-first-boot"]]])
+    error_message = "The cloud-config must run the first-boot script, and nothing else."
+  }
+
   assert {
     condition     = alltrue([for key in ["1", "2"] : output.instances[key].port.port_security_enabled && length(output.instances[key].port.allowed_address_pairs) == 0])
     error_message = "An edge's port keeps port security on and, as the edge sends only from its own address, needs no allowed address pair."

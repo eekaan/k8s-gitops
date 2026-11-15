@@ -559,6 +559,8 @@ EOF
   [ "$(recorded 1)" = "$original_1" ]
   [ "$(recorded 2)" = "$original_2" ]
   [[ $output == *"edge 1: applied; its instance was not replaced"* ]]
+  [[ $output == *"no edge was replaced, and edge 1 2 passes"* ]]
+  [[ $output != *"edge 1 2 replaced"* ]]
 }
 
 # sequence: what a rollout did, in order, one step per line: every plan with what it targets and
