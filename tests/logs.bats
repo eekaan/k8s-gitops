@@ -984,8 +984,9 @@ window_seconds() {
 
 # Vector's unit tests run the collector's transforms and cannot see a source or a sink, so what
 # reaches the store is what leaves the transforms its sink reads, given what the sources hand them.
-# Each source's events reach a sink along one path only: Talos's lines through talos_files and
-# drop_audit, the pods' records through pod_fields, and Vector's own metrics to its exporter. Each
+# Each source's events reach a sink along one path only: Talos's lines through talos_files,
+# drop_audit and drop_auditd_log, the pods' records through pod_fields, and Vector's own metrics to
+# its exporter. Each
 # scenario's unit test starts at the first transform of its path and watches the last, so what it
 # proves is what the store gets. The sources keep the field names they have by default, the ones
 # the unit tests' records carry: a pod's labels in kubernetes.pod_labels, its node's in
@@ -993,6 +994,8 @@ window_seconds() {
 @test "every Vector unit test the scenarios name is in tests/vector and runs a whole path to the store" {
   local tests="$REPO/tests/vector/talos-lines.yaml" title paths
   for title in "Kernel audit records are dropped and counted" \
+    "The audit log's records of a permissive denial do not reach the store, and are counted" \
+    "No record of the audit log reaches the store, and a line of another service does" \
     "A pod's record carries the named labels and no field per other label"; do
     echo "$title"
     [ "$(title="$title" yq -N '[.tests[] | select(.name == strenv(title))] | length' "$tests")" -eq 1 ]
@@ -1001,6 +1004,7 @@ window_seconds() {
   render "$COLLECTOR"
   collector_config
   [ "$(jq -r '.transforms.drop_audit.type' "$CONFIG")" = filter ]
+  [ "$(jq -r '.transforms.drop_auditd_log.type' "$CONFIG")" = filter ]
   echo "settings that rename the sources' fields: $(jq -c '[.sources[] | to_entries[]
     | select((.key | test("annotation_fields$")) or .key == "file_key" or .key == "host_key")]' "$CONFIG")"
   [ "$(jq '[.sources[] | to_entries[]
@@ -1012,7 +1016,7 @@ window_seconds() {
       | if $c.transforms[$n] == null then [$n] else ($c.transforms[$n].inputs // [])[] | route($c) + [$n] end;
     . as $c | .sinks | to_entries[] | .key as $sink | .value.inputs[] | route($c) + [$sink] | join(">")' "$CONFIG" | sort)"
   echo "paths to the sinks: $(paste -sd' ' - <<<"$paths")"
-  [ "$paths" = "$(printf '%s\n' 'pods>pod_fields>victoria_logs' 'talos>talos_files>drop_audit>victoria_logs' \
+  [ "$paths" = "$(printf '%s\n' 'pods>pod_fields>victoria_logs' 'talos>talos_files>drop_audit>drop_auditd_log>victoria_logs' \
     'vector_metrics>prometheus' | sort)" ]
   echo "sinks: $(jq -r '.sinks | to_entries[] | "\(.key) \(.value.type)"' "$CONFIG" | paste -sd, -)"
   [ "$(jq -r '.sinks | to_entries[] | "\(.key) \(.value.type)"' "$CONFIG" | sort)" \
@@ -1021,9 +1025,34 @@ window_seconds() {
   [ "$(title="$title" yq -N '.tests[] | select(.name == strenv(title))
     | ([.inputs[].insert_at] | unique) + [.outputs[].extract_from] + (.no_outputs_from // []) | join(" ")' "$tests")" \
     = "talos_files drop_audit" ]
+  for title in "The audit log's records of a permissive denial do not reach the store, and are counted" \
+    "No record of the audit log reaches the store, and a line of another service does"; do
+    [ "$(title="$title" yq -N '.tests[] | select(.name == strenv(title))
+      | ([.inputs[].insert_at] | unique) + [(.outputs // [])[].extract_from] + (.no_outputs_from // []) | join(" ")' "$tests")" \
+      = "talos_files drop_auditd_log" ]
+  done
   title="A pod's record carries the named labels and no field per other label"
   [ "$(title="$title" yq -N '.tests[] | select(.name == strenv(title))
     | [.inputs[].insert_at] + [.outputs[].extract_from] | join(" ")' "$tests")" = "pod_fields pod_fields" ]
+}
+
+@test "The store's own writes cannot add records to the store" {
+  local paths
+  render "$COLLECTOR"
+  collector_config
+  # The audit log is a file of the Talos source, so what it carries leaves that source through
+  # talos_files only. Every route from it to a sink is listed, and there is one, which ends in the
+  # filter whose discards Vector counts.
+  # shellcheck disable=SC2016 # $c, $n and $sink are jq variables.
+  paths="$(jq -r 'def route($c): . as $n
+      | if $c.transforms[$n] == null then [$n] else ($c.transforms[$n].inputs // [])[] | route($c) + [$n] end;
+    . as $c | .sinks | to_entries[] | .key as $sink | .value.inputs[] | route($c) + [$sink] | join(">")
+    | select(startswith("talos>"))' "$CONFIG")"
+  echo "paths from the Talos source to a sink: $(paste -sd' ' - <<<"$paths")"
+  [ "$paths" = "talos>talos_files>drop_audit>drop_auditd_log>victoria_logs" ]
+  echo "drop_auditd_log: $(jq -c '.transforms.drop_auditd_log | {type, inputs, condition}' "$CONFIG")"
+  [ "$(jq -r '.transforms.drop_auditd_log | .type + " " + (.inputs | join(","))' "$CONFIG")" = "filter drop_audit" ]
+  jq -e '.transforms.drop_auditd_log.condition.source | test("auditd")' "$CONFIG"
 }
 
 @test "every values key of victoria-logs is one its pinned chart defines" {

@@ -456,14 +456,31 @@ What is collected, by a collector on every node, control planes included, from f
   etcd's, logfmt such as containerd's and the kubelet's klog. Any other line keeps the time it was
   read.
 
-Two kinds of record are made smaller before they are sent:
+Three kinds of record are made smaller or left out before they are sent:
 
 - the kernel's audit records, the lines of the service `kernel` that the kernel prints as `audit:`
   or `auditd:`, which the kernel's audit subsystem writes, are dropped by the filter
   transform `drop_audit`. Vector counts what a filter drops in
   `vector_component_discarded_events_total` of its own metrics, which Prometheus scrapes from the
-  PodMonitor, so the drop is visible as the series with `component_id="drop_audit"`. The log of
-  Talos's `auditd` service, `/var/log/auditd.log`, is another file and is still shipped;
+  PodMonitor, so the drop is visible as the series with `component_id="drop_audit"`;
+- the audit log of the node, the log of Talos's `auditd` service, `/var/log/auditd.log` and its
+  rotated file, is dropped whole, every record type of it, by the filter transform
+  `drop_auditd_log`, counted the same way as the series with `component_id="drop_auditd_log"`.
+  Talos runs SELinux in permissive mode, which [its documentation](https://docs.siderolabs.com/talos/v1.12/security/selinux)
+  gives as the default because some CNI and CSI solutions and extensions are incompatible with
+  enforcing, so nothing is denied and every access the policy would deny is written to the audit
+  log as an AVC record, with `permissive=1`, together with the `SYSCALL`, `PATH`, `PROCTITLE` and
+  `EOE` records of the same audit event, record types the kernel defines in
+  [`include/uapi/linux/audit.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/audit.h).
+  The records of one event are separate lines that share an `msg=audit(<time>:<serial>)` id. A pod that writes to a
+  volume whose filesystem carries no SELinux labels causes such an event for every file it creates
+  or writes, and the log store is such a pod, so a store that received the audit records of its own
+  writes would amplify them: storing them writes more. The collector therefore does not ship them.
+  Dropping only the denials' events would need a `reduce` transform keyed on that id, holding every
+  open event in memory until its `EOE` record or an expiry, and an event cut in two by a restart of
+  the collector would leave records that no longer say what they belong to; dropping the file costs
+  what else it holds, which stays on the node and is read with `talosctl --nodes <node> logs auditd`
+  (through `talman talosctl`, as the repository's scripts run it; no recipe reads it);
 - a pod's labels and annotations, its node's labels and its namespace's labels and annotations are
   not stored one field each: VictoriaLogs makes a field of every name, these maps hold dozens of
   names that say nothing about a line, and labels such as `pod-template-hash` and
@@ -474,7 +491,7 @@ Two kinds of record are made smaller before they are sent:
   `kubernetes.pod_annotations`, `kubernetes.node_labels`, `kubernetes.namespace_labels` and
   `kubernetes.namespace_annotations`, and sets `node` on a pod's record to the node's name, as
   Talos's lines have it. The store's sink takes a pod's records only from `pod_fields` and Talos's
-  lines only from `drop_audit`.
+  lines only from `drop_auditd_log`, which takes them from `drop_audit`.
 
 A record has the fields `_time`, `_msg` and `_stream`. A pod's also has `node`,
 `kubernetes.pod_namespace`, `kubernetes.pod_name`, `kubernetes.pod_node_name`,
@@ -501,9 +518,9 @@ read every file there. On a control plane that includes the API server's audit l
 `Metadata` level: who did what to which object, and when, without request or response bodies, so
 without Secret values. The collector does not ship it: its file source's patterns, `/var/log/*.log`
 and `/var/log/*.log.1`, match files at the top of `/var/log` only, and its pod-log source reads only
-`/var/log/pods`. It does ship the log of Talos's `auditd` service, which every node writes at the
-top, `/var/log/auditd.log`. What keeps the audit log out of the store is this reviewed
-configuration, which `tests/logs.bats` matches against Talos's layout of `/var/log`; who can read it
+`/var/log/pods`. The node's own audit log, which every node writes at the top, as
+`/var/log/auditd.log`, matches the patterns and is dropped by `drop_auditd_log` above. What keeps
+the API server's audit log out of the store is this reviewed configuration, which `tests/logs.bats` matches against Talos's layout of `/var/log`; who can read it
 through the collector is whoever may run commands in the pods of `monitoring`.
 
 The collector also mounts `/var/lib/vector`, where it keeps its place in each file and a disk buffer
@@ -571,8 +588,8 @@ Reading the logs, with the cluster's kubeconfig:
 `tests/logs.bats` builds both applications as Flux applies them, renders their pinned charts and
 checks each of these. `just vector-check` renders the collector's configuration with
 `scripts/vector-config` and has Vector itself, in the image the collector runs, validate it and run
-its unit tests, `tests/vector/talos-lines.yaml`, which hold a line of each format above, an audit
-line and a pod's record with many labels, and many of its node's. Vector's unit tests cannot see a
+its unit tests, `tests/vector/talos-lines.yaml`, which hold a line of each format above, a kernel
+audit line, the records of one event of the node's audit log and a pod's record with many labels, and many of its node's. Vector's unit tests cannot see a
 sink, so `tests/logs.bats` checks that each source reaches a sink along one path only, the store's
 through the transforms the unit tests run, and that each scenario's unit test starts at the first
 transform on its path and watches the last. `just logs` runs in `tests/logs.bats` against a

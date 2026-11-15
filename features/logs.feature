@@ -88,3 +88,20 @@ Feature: Logs
     Given the collector's rendered configuration, whose pod source names a record's fields as Vector's unit tests of it do and whose sink to the store takes a pod's records only from its pod transform, and those unit tests
     When a pod's record with many labels and annotations, from a node with many labels and a namespace with many labels and annotations, is sent through the collector's pod transform
     Then it goes on to the store with the app.kubernetes.io name, instance and component labels it has and no other label or annotation, the pod's, the node's or the namespace's, with the node's name in node and the pod's and its container's single fields, their time and their message as they came
+
+  @by:vector-check
+  Scenario: The audit log's records of a permissive denial do not reach the store, and are counted
+    Given the collector's rendered configuration, whose Talos source names a line's fields as Vector's unit tests of it do and whose sink to the store takes Talos's lines only from the last of its Talos transforms, and those unit tests
+    When the records of one audit event, an AVC record with permissive=1 and its SYSCALL, PATH, PROCTITLE and EOE records, are sent through the collector's Talos transforms as lines of the node's audit log
+    Then every one of them leaves the pipeline at a filter transform, which Vector counts as discarded events in its own metrics, so the store never gets any
+
+  @by:vector-check
+  Scenario: No record of the audit log reaches the store, and a line of another service does
+    Given the collector's rendered configuration, whose Talos source names a line's fields as Vector's unit tests of it do and whose sink to the store takes Talos's lines only from the last of its Talos transforms, and those unit tests
+    When a record of the audit log of a type no event above has, a kernel line and a line of another service that mentions an audit record type are sent through the collector's Talos transforms
+    Then the audit log's record is dropped and the other two go on to the store, with the node's name and their service's
+
+  Scenario: The store's own writes cannot add records to the store
+    Given the collector's rendered configuration
+    When every path from a source to a sink is read
+    Then the only path from the Talos source to the store runs through the filter that drops the audit log's records, after the filter that drops the kernel's audit lines, and no other transform or sink takes Talos's lines before it
