@@ -30,6 +30,11 @@ variable "allowed_cidrs" {
   description = "IPv4 networks, in CIDR form, that may reach the Kubernetes API through the load balancer besides the node subnet: the operator allowlist."
   type        = list(string)
   sensitive   = true
+
+  validation {
+    condition     = alltrue([for cidr in var.allowed_cidrs : can(cidrnetmask(cidr))])
+    error_message = "Every entry of allowed_cidrs must be an IPv4 network in CIDR form."
+  }
 }
 
 variable "external_network" {

@@ -79,6 +79,18 @@ them is a `just` recipe.
 - `just edge-policy-check` proves the edge routers' routing policy against real BGP speakers, with
   docker; `just ci` does the same inside its Dagger module ([Routing](#routing)).
 
+Each module of `infra/openstack/modules` has its rules proved by `tests/*.tftest.hcl` beside it,
+against mocked providers, so they need no credentials, state or cloud: valid inputs give the
+resources and attributes the scenarios name, and each validation is shown refusing an invalid
+input by a run that names its variable. A plan test reads the resources of the module under test
+and the outputs it exports, so a rule added in a resource the outputs do not list is not caught, and
+the tags on the nodes' group, the volume type of the nodes' boot volumes and the image's tags and
+properties are not proved. The scenarios are in `features/infrastructure-modules.feature`, and `just infra-check`
+runs every module's tests with the stacks'. To run one module's, run `tofu -chdir=<module> init
+-backend=false` once and `tofu -chdir=<module> test`. Where a provider computes an attribute, a
+plan shows only the mock's value for it, so a rule about an attribute left unset cannot be proved
+there.
+
 Apply `plumbing` before `cluster`, `ci` and `edge`, as all three read the plumbing stack's state.
 Destroy goes the other way round: `ci` and `edge` by name, before `plumbing`, whose network their
 ports are on, and which the recipe refuses to destroy while the `ci` or the `edge` stack holds
