@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+# Fails unless every version pin in the repository's files is either extracted by a Renovate manager
+# or listed as moved by hand, and the lists hold nothing stale. Reads three files under .renovate/:
+#   extracted.tsv  what Renovate itself extracts, file, manager, name, key; renovate-check proves it
+#                  is current by running Renovate's extraction in its image on every run
+#   by-hand.tsv    each pin Renovate does not move: file, a string naming it in that file, why, how
+#   tag-forms.tsv  the form of the tags a custom manager's datasource lists for each pin it reads
+# Needs only bash, git and grep: no container, so it runs in the tests' own container.
+#
+# A pin is found by its form, in the files git sees except documentation, tests and what is
+# generated (see excluded below):
+#   - an image reference with a registry host and a tag, or any reference with a digest
+#   - an image: or imageName: value with a tag, whatever the registry
+#   - oci://host/path:tag
+#   - uses: owner/repo@ref in a workflow
+#   - tag: and version: lines with a version, in kubernetes/ and the workflows, and version = "..."
+#     in OpenTofu files (OCIRepository, GitRepository and HelmRelease versions, a provider's)
+#   - sha256: lines in the workflows
+#   - versions.yaml's top-level values that are a version or a digest
+#   - TOML lines that set a version: name = "1.2.3", name = { version = "1.2.3", ... }
+# It does not see a version in prose or a comment, one assembled from parts, an image with no
+# registry host, tag or digest, or a second untracked pin of a name that its file already has
+# extracted; a pin of any of those forms is listed by hand where it matters, or not at all.
+#
+# A pin is covered when .renovate/extracted.tsv holds its name for its file, in the name column or the
+# key column. Pins found by a line form that carries no name (tag:, version = ) are covered by any
+# extraction in their file. Otherwise it must be in .renovate/by-hand.tsv.
+#
+# Prints one line per problem, path:line: what is wrong, and exits non-zero; otherwise one line with
+# the counts.
+# Usage: scripts/check-renovate-pins [ROOT]
+set -euo pipefail
+export LC_ALL=C
+
+root=${1:-$(dirname "${BASH_SOURCE[0]}")/..}
+cd "$root"
+root=$(pwd)
+
+extracted=.renovate/extracted.tsv
+by_hand=.renovate/by-hand.tsv
+tag_forms=.renovate/tag-forms.tsv
+
+problems=()
+problem() {
+  problems+=("$1")
+}
+
+for f in "$extracted" "$by_hand" "$tag_forms"; do
+  [[ -f $f ]] || { echo "$f: missing" >&2; exit 1; }
+done
+
+# What is not scanned: documentation, which shows versions as examples; tests and fixtures, which
+# Renovate ignores too; lock files, which tools write and the by-hand list names; encrypted files.
+excluded=(':!*.md' ':!tests/' ':!features/' ':!docs/' ':!**/tests/**' ':!*.lock.hcl' ':!dagger.lock'
+  ':!*.sops.*' ':!.renovate/' ':!renovate.json5' ':!.gitleaks.toml' ':!LICENSE')
+mapfile -d '' -t files < <(git ls-files -z --cached --others --exclude-standard -- . "${excluded[@]}")
+
+# found FILE LINE NAME: a pin the forms below found.
+pins=()
+found() {
+  pins+=("$1"$'\t'"$2"$'\t'"$3")
+}
+
+# scan PATTERN NAMER [FILE...]: every match of the PCRE PATTERN in the files, as found pins named by
+# NAMER, a sed expression applied to the match.
+scan() {
+  local pattern=$1 namer=$2 hit file line match
+  shift 2
+  [[ $# -gt 0 ]] || return 0
+  while IFS= read -r hit; do
+    file=${hit%%:*}
+    line=${hit#*:}
+    match=${line#*:}
+    line=${line%%:*}
+    found "$file" "$line" "$(sed -E "$namer" <<< "$match")"
+  done < <(grep -HnoP -- "$pattern" "$@" || true)
+}
+
+# The files of a kind: those of the scanned files that match a pattern.
+of() {
+  local f
+  for f in "${files[@]}"; do
+    [[ -f $f && $f =~ $1 ]] && printf '%s\n' "$f"
+  done
+  return 0
+}
+mapfile -t not_versions < <(of '.*' | grep -vxF versions.yaml || true)
+mapfile -t not_toml < <(printf '%s\n' "${not_versions[@]}" | grep -v '\.toml$' || true)
+mapfile -t k8s < <(of '^kubernetes/.*\.ya?ml$')
+mapfile -t workflows < <(of '^\.github/workflows/.*\.ya?ml$')
+mapfile -t tofu < <(of '\.(tf|tofu)$')
+mapfile -t toml < <(of '\.toml$')
+
+strip_ref='s/@sha256:[0-9a-f]{64}$//; s/:[^:\/]*$//'
+host='(?:[a-z0-9-]+\.)+[a-z]{2,}'
+tag='[\w][\w.-]*'
+before='(?<![\w./:@-])'
+
+# Image references. A tag counts when it holds a digit, so a port or a word is not one.
+scan "$before$host(?::\d+)?/[\w./-]+:(?=[\w.-]*\d)$tag(?:@sha256:[0-9a-f]{64})?" "$strip_ref" "${not_toml[@]}"
+scan "${before}[\w][\w./-]*(?::${tag})?@sha256:[0-9a-f]{64}" "$strip_ref" "${not_toml[@]}"
+scan "^\s*(?:-\s+)?(?:image|imageName):\s*[\"']?\K[\w./-]+:(?=[\w.-]*\d)$tag" "$strip_ref" "${not_toml[@]}"
+scan "oci://[\w./-]+:(?=[\w.-]*\d)$tag" 's/^oci:\/\///; s/:[^:\/]*$//' "${not_toml[@]}"
+scan "uses:\s+\K[\w.-]+/[\w./-]+(?=@)" 's/ //g' "${workflows[@]}"
+# Lines whose name is not on them.
+scan '^\s*(?:tag|version):\s*["'\'']?v?\d+\.\d+' 's/.*/*/' "${k8s[@]}"
+scan '^\s*version\s*=\s*"[^"]*\d' 's/.*/*/' "${tofu[@]}"
+scan '^\s*version:\s*["'\'']?\d+\.\d+' 's/.*/jdx\/mise/' "${workflows[@]}"
+scan '^\s*sha256:\s*[0-9a-f]{64}' 's/:.*//; s/^ *//' "${workflows[@]}"
+scan '^("[^"]+"|[\w.-]+)\s*=\s*(?:\{\s*version\s*=\s*)?"v?\d+\.\d+' 's/\s*=.*//; s/"//g' "${toml[@]}"
+if printf '%s\n' "${files[@]}" | grep -qxF versions.yaml; then
+  scan '^[a-z0-9_]+(?=:\s*(?:v?\d+\.\d+\.\d+|[0-9a-f]{64}$|\S+@sha256:))' 's/.*/&/' versions.yaml
+fi
+
+# What Renovate extracts, by file and name: the name column and the key column.
+declare -A tracked=() has_extraction=()
+while IFS=$'\t' read -r file manager name key; do
+  [[ -z $file ]] && continue
+  tracked["$file"$'\t'"$name"]=$manager
+  tracked["$file"$'\t'"$key"]=$manager
+  has_extraction[$file]=$manager
+done < "$extracted"
+
+# What is listed by hand, by file and name, checked on its own: four columns, the pin in its file, and
+# not one that Renovate extracts, so the list does not hold a pin that something else moves.
+declare -A listed=()
+n=0
+while IFS=$'\t' read -r file name why how extra || [[ -n ${file-} ]]; do
+  n=$((n + 1))
+  [[ -z ${file-} || $file == '#'* ]] && continue
+  if [[ -z ${name-} || -z ${why-} || -z ${how-} || -n ${extra-} ]]; then
+    problem "$by_hand:$n: an entry is a file, the pin's name, why Renovate does not move it and how it is moved, four columns separated by tabs"
+    continue
+  fi
+  if [[ ! -f $file ]] || ! grep -qF -- "$name" "$file"; then
+    problem "$by_hand:$n: $file has no $name; remove the entry or correct it"
+    continue
+  fi
+  if [[ -n ${tracked["$file"$'\t'"$name"]-} ]]; then
+    problem "$by_hand:$n: $name in $file is extracted by Renovate's ${tracked["$file"$'\t'"$name"]} manager; remove it from the list"
+    continue
+  fi
+  listed["$file"$'\t'"$name"]=$n
+done < "$by_hand"
+
+# Every pin found is extracted or listed.
+checked=0
+if [[ ${#pins[@]} -gt 0 ]]; then
+  while IFS=$'\t' read -r file line name; do
+    checked=$((checked + 1))
+    if [[ $name == '*' ]]; then
+      [[ -n ${has_extraction[$file]-} ]] && continue
+    else
+      [[ -n ${tracked["$file"$'\t'"$name"]-} || -n ${listed["$file"$'\t'"$name"]-} ]] && continue
+    fi
+    problem "$file:$line: $name is a pin that no Renovate manager extracts ($extracted) and $by_hand does not list"
+  done < <(printf '%s\n' "${pins[@]}" | sort -u -t$'\t' -k1,1 -k2,2n -k3,3)
+fi
+
+# The value of each custom-manager pin is the form its datasource's tags have.
+declare -A form=() form_used=()
+n=0
+while IFS=$'\t' read -r datasource dep pattern listing extra || [[ -n ${datasource-} ]]; do
+  n=$((n + 1))
+  [[ -z ${datasource-} || $datasource == '#'* ]] && continue
+  if [[ -z ${dep-} || -z ${pattern-} || -z ${listing-} || -n ${extra-} ]]; then
+    problem "$tag_forms:$n: an entry is a datasource, a name, an extended regular expression for the pinned value and where the tags were read, four columns separated by tabs"
+    continue
+  fi
+  form["$datasource"$'\t'"$dep"]=$pattern
+  form_used["$datasource"$'\t'"$dep"]=$n
+done < "$tag_forms"
+
+annotated=0
+for file in "${files[@]}"; do
+  [[ -f $file ]] || continue
+  while IFS=: read -r line text; do
+    [[ $text =~ \#\ renovate:\ datasource=([^[:space:]]+)\ depName=([^[:space:]]+) ]] || continue
+    datasource=${BASH_REMATCH[1]} dep=${BASH_REMATCH[2]}
+    annotated=$((annotated + 1))
+    # The value is the last one on the next line after a ':' or '=', without its quotes and digest.
+    value=$(sed -n "$((line + 1))p" "$file" | sed -E 's/@sha256:[0-9a-f]+//; s/^.*[:=][[:space:]]*//; s/^["'\'']//; s/["'\''[:space:]]*$//')
+    key=$datasource$'\t'$dep
+    if [[ -z ${form[$key]-} ]]; then
+      problem "$file:$line: $dep ($datasource) has no recorded tag form in $tag_forms"
+      continue
+    fi
+    unset "form_used[$key]"
+    if [[ ! $value =~ ${form[$key]} ]]; then
+      problem "$file:$((line + 1)): \"$value\" is not the form the tags of $dep have under $datasource (${form[$key]}), so Renovate would never match it"
+    fi
+  done < <(grep -n '# renovate: datasource=' "$file" || true)
+done
+for key in "${!form_used[@]}"; do
+  problem "$tag_forms:${form_used[$key]}: no pin reads ${key//$'\t'/ } any more; remove the entry"
+done
+
+if [[ ${#problems[@]} -gt 0 ]]; then
+  printf '%s\n' "${problems[@]}" | sort -t: -k1,1 -k2,2n
+  exit 1
+fi
+echo "check-renovate-pins: $checked pins are extracted by Renovate or listed as moved by hand, and the $annotated custom-manager pins have the form of their tags"

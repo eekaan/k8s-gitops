@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Runs in Renovate's own image, in the root of a copy of the repository's files, with no network:
+#   renovate-check         validate the configuration, then fail unless the dependencies Renovate
+#                          extracts from the files are the ones .renovate/extracted.tsv records
+#   renovate-check record  print what Renovate extracts, as that file holds it
+#
+# The extraction is Renovate's own: its local platform, `dryRun: extract` and the file report
+# (https://docs.renovatebot.com/self-hosted-configuration/#dryrun,
+# https://docs.renovatebot.com/modules/platform/local/,
+# https://docs.renovatebot.com/self-hosted-configuration/#reporttype). It reads the files and
+# contacts no registry and no platform, so the same run works under `docker run --network none`.
+# Without a GitHub token it marks every GitHub-hosted dependency "github-token-required"; those
+# are extracted all the same, and a lookup with a token would find them.
+#
+# The local platform cannot fetch the "local>" presets renovate.json5 extends, so the copy's
+# renovate.json5 holds them inline instead, merged the way Renovate merges a preset into its
+# parent: lists are joined in order, objects replace. The presets hold only the keys the merge
+# below handles; any other key fails the run rather than being left out of the extraction.
+set -euo pipefail
+export LC_ALL=C
+
+mode=${1:-check}
+tree=$PWD
+record=.renovate/extracted.tsv
+
+if [[ $mode != check && $mode != record ]]; then
+  echo "usage: renovate-check [record]" >&2
+  exit 2
+fi
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+if [[ $mode == check ]]; then
+  renovate-config-validator --strict --no-global renovate.json5 .renovate/*.json5 >&2
+fi
+
+json() {
+  node -e 'console.log(JSON.stringify(require("/usr/local/renovate/node_modules/json5").parse(require("fs").readFileSync(process.argv[1], "utf8"))))' "$1"
+}
+
+mkdir "$work/tree"
+cp -a "$tree/." "$work/tree/"
+cd "$work/tree"
+
+config=$(json renovate.json5)
+mapfile -t presets < <(jq -r '.extends[] | select(startswith("local>")) | sub(".*//"; "")' <<< "$config")
+config=$(jq '.extends |= map(select(startswith("local>") | not))' <<< "$config")
+for preset in "${presets[@]}"; do
+  config=$(jq --argjson preset "$(json "$preset")" '
+    ($preset | del(."$schema", .description) | keys - ["packageRules", "customManagers", "flux", "kubernetes"]) as $other
+    | if ($other | length) > 0 then error("the preset " + $other[0] + " is not one the merge handles") else . end
+    | reduce ($preset | del(."$schema", .description) | to_entries[]) as $e
+        (.; .[$e.key] = (if (.[$e.key] | type) == "array" then .[$e.key] + $e.value else $e.value end))
+  ' <<< "$config")
+done
+printf '%s\n' "$config" > renovate.json5
+
+if ! env LOG_LEVEL=warn RENOVATE_PLATFORM=local RENOVATE_DRY_RUN=extract \
+  RENOVATE_REPORT_TYPE=file RENOVATE_REPORT_PATH="$work/report.json" \
+  renovate > "$work/renovate.log" 2>&1; then
+  cat "$work/renovate.log" >&2
+  echo "renovate-check: Renovate's extraction failed" >&2
+  exit 1
+fi
+
+# One line per extracted dependency: file, manager, name, then the key the version sits under on a
+# regex manager's line (the pin's own name where the manager reads the whole line), or - . A
+# dependency Renovate reads but cannot track (a local module, a provider without a version, a
+# runner label) is left out, and so are Kubernetes API versions, which are not pins.
+extracted() {
+  jq -r '
+    .repositories.local.packageFiles | to_entries[] | .key as $manager | .value[] | .packageFile as $file | .deps[]
+    | select(.datasource != "kubernetes-api")
+    | select(.skipReason == null or .skipReason == "github-token-required")
+    | [$file, $manager, (.depName // .packageName // "-"),
+       ((try ((.replaceString // "") | split("\n") | map(select(test("\\S"))) | last | capture("^\\s*(?<key>[A-Za-z0-9_.-]+)\\s*[:=]").key) catch null) // "-")]
+    | @tsv' "$work/report.json" | sort -u
+}
+
+if [[ $mode == record ]]; then
+  extracted
+  exit 0
+fi
+
+extracted > "$work/extracted.tsv"
+if ! diff -u "$tree/$record" "$work/extracted.tsv" > "$work/diff"; then
+  cat "$work/diff" >&2
+  echo "renovate-check: what Renovate extracts is not what $record records; if the change is intended, run just renovate-record" >&2
+  exit 1
+fi
+echo "renovate-check: the configuration is valid and Renovate extracts the $(wc -l < "$work/extracted.tsv") dependencies $record records"

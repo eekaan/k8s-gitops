@@ -23,8 +23,12 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
 - `just checks` runs every check that needs no credentials, with the tools on this machine, group
   by group. The group `static` holds tool versions, address literals in the files and the commit
   messages, merge conflict markers, that every Talos secrets bundle is encrypted, shellcheck and
-  yamllint, the Renovate configuration (`just renovate-check`: Renovate's own validator, run from
-  its pinned container image, so it needs a container runtime, Docker), scenario proofs, the
+  yamllint, the Renovate configuration (`just renovate-check`: Renovate's own validator and, offline,
+  its own extraction of the dependencies from the files, which `.renovate/extracted.tsv` records,
+  run from its pinned container image, so it needs a container runtime, Docker; `just
+  renovate-record` rewrites the record after a change to the pins or the configuration), that every
+  version pin is extracted by Renovate or listed in `.renovate/by-hand.tsv` as moved by hand, with
+  where, why and how (`just renovate-pins`), scenario proofs, the
   OpenTofu check (`just infra-check`: formatting, that the Talos schematic lists no QEMU guest
   agent extension, that every stack enforces state encryption, that no stack or module declares a
   bucket, that the default service range overlaps no default node, pod or service subnet,
@@ -44,7 +48,7 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
   whose tests share state runs them one at a time, and says why); `just test 2/3` runs the second
   of three parts of the test files, which are split by their number of tests.
 - `just ci` runs the same groups through the Dagger module in `.dagger/modules/ci`, side by side,
-  each in containers of its own: Renovate's validator in its own image, Vector in the log
+  each in containers of its own: Renovate in its own image, Vector in the log
   collector's image, every other check in a container with the pinned tools, the tools image
   `versions.yaml` records when it was built for these pins and one built from them otherwise
   ([The tools image](#the-tools-image)); the run's first line says which. `just ci tests-2` runs

@@ -13,6 +13,43 @@ Feature: Dependency updates
     Then it exits 0
     And it reports no errors, no warnings and no migration
 
+  @by:renovate-check
+  Scenario: What Renovate extracts is what the extraction record holds
+    Given renovate.json5, the presets under .renovate/ and the repository's files
+    When renovate-check runs Renovate's own extraction on them, offline, with the presets inlined
+    Then the dependencies it extracts are those .renovate/extracted.tsv records
+    And a change to a manager's file patterns, or to where a "# renovate:" comment sits, that adds or drops a dependency is refused with the difference
+
+  @test
+  Scenario: Every pin in the tree is extracted by a Renovate manager or listed as moved by hand
+    Given .renovate/extracted.tsv, what Renovate extracts, and .renovate/by-hand.tsv, the pins moved by hand
+    When the check looks for image references, OCI artifact tags, action pins, tool versions, provider constraints and version values in the repository's files
+    Then every pin it finds is extracted by a manager or listed
+    And every pin that Renovate's custom managers read has the form of its datasource's tags
+
+  @test
+  Scenario: A pin added where no manager looks, and not listed, is refused, naming the file and line
+    Given a file that holds an image reference, an OCI artifact tag, a digest, an action pin, a tool version or a tag that no manager extracts
+    And the pin is not in .renovate/by-hand.tsv
+    When the check runs
+    Then it exits 1
+    And it names each pin's file and line
+
+  @test
+  Scenario: A listed pin that a manager now extracts is refused
+    Given .renovate/by-hand.tsv lists a pin that .renovate/extracted.tsv holds, or one that is not in its file
+    When the check runs
+    Then it exits 1
+    And it names the entry's line in .renovate/by-hand.tsv
+
+  @test
+  Scenario: A custom-manager pin whose value cannot match its datasource's tag form is refused
+    Given a pin under a "# renovate: datasource=… depName=…" comment whose value is not the form .renovate/tag-forms.tsv records for its datasource's tags
+    When the check runs
+    Then it exits 1
+    And it names the pin's file and line
+    And a pin whose package has no recorded tag form is refused too
+
   @test @pending #FND-7
   Scenario: A Renovate configuration with an unknown option is refused
     Given renovate.json5 with the top-level option "automergeEverything" added

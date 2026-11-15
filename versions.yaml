@@ -9,13 +9,13 @@ kubernetes: v1.37.1
 
 # What just ci-host-setup installs on the CI host (docs/runbooks/ci-host.md). The runner's release,
 # and the SHA-256 of its linux-x64 package as the release's notes give it, which setup verifies
-# before it installs anything. Renovate updates the version only: the checksum changes with it by
-# hand, or setup refuses the package.
+# before it installs anything. Renovate updates the version only; .renovate/by-hand.tsv says how the
+# checksum follows it.
 # renovate: datasource=github-releases depName=actions/runner
 actions_runner: 2.338.2
 actions_runner_sha256: baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40
 # The Dagger engine the CI host runs, by digest: the version of the dagger CLI pinned in
-# mise.toml, which the jobs connect to it with. It moves with that pin, by hand.
+# mise.toml, which the jobs connect to it with. .renovate/by-hand.tsv says how it moves with that pin.
 dagger_engine: registry.dagger.io/engine:v1.0.0-beta.27@sha256:ad121f720ed9bfb8e740f99dd783fa8472965a5e262fc64ff3ef2634cea1e6dd
 
 # The container just ci runs the checks in (.dagger/modules/ci): Dagger starts from ci_tools_base,
@@ -23,7 +23,9 @@ dagger_engine: registry.dagger.io/engine:v1.0.0-beta.27@sha256:ad121f720ed9bfb8e
 # pins. mise installs yamllint through its pypi backend, which needs pipx and Python. These two
 # values, the whole module and mise.toml are the inputs whose key just tools-image-key prints.
 # scripts/tools-image reads each value from its one line, without quotes, tabs, a comment or an
-# indented line under it, as just ci runs it where no YAML parser is installed.
+# indented line under it, as just ci runs it where no YAML parser is installed. Renovate moves
+# ci_tools_base's tag and digest through the comment line above it.
+# renovate: datasource=docker depName=jdxcode/mise
 ci_tools_base: jdxcode/mise:2026.11.4-debian@sha256:7769fb680659f7730db5b9c0d245c00ba517dfec9c720f6679248cb32e124095
 ci_tools_packages: apt-get update && apt-get install -y --no-install-recommends pipx && rm -rf /var/lib/apt/lists/*
 # The tools image the tools image workflow published for the inputs whose key is ci_tools_inputs, by

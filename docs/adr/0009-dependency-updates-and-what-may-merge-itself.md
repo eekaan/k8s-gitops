@@ -17,6 +17,10 @@ the release is at least three days old.
 It never merges updates to Talos, Kubernetes, the CNI, Flux, the Flux Operator, OpenTofu or its
 providers, or any major version. Those are merged by a person.
 
+Every version pin in the repository is extracted by one of Renovate's managers or listed in
+`.renovate/by-hand.tsv` with why Renovate does not move it and how it is moved by hand; a pin that
+is neither fails `just renovate-pins`.
+
 The Talos version has one source in the repository, which the image, the machine configuration
 and the installer all read.
 
