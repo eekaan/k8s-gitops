@@ -1,0 +1,113 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/prometheusrule-monitoring-v1.json
+# Alerts on Flux, from the Flux Operator's metrics (flux_resource_info for every Flux resource,
+# flux_instance_info for the FluxInstance: the labels kind, name, exported_namespace, ready, reason
+# and suspended, https://fluxoperator.dev/docs/instance/monitoring/) and kube-state-metrics' state of
+# the operator's Deployment. ready is the status of the resource's Ready condition, True, False or
+# Unknown, and suspended is True or False. The sources the tree uses are OCIRepository, HelmRepository
+# (with the HelmCharts its releases may make) and the ArtifactGenerator; the ExternalArtifacts the
+# generator makes are left out, as their state is the generator's and the Kustomization that reads one
+# that is missing reports it.
+#
+# The root sync is the Kustomization flux-system, which applies the cluster directory, the
+# Kustomization cluster, which applies every application, and the OCIRepository flux-system they read:
+# when one fails, nothing merged reaches the cluster and no other alert here says so for long, so it
+# has an alert of its own, and the alerts on every other Kustomization and source leave it out.
+# A Kustomization that waits for one that is not Ready reports DependencyNotReady, which is the one it
+# waits for that has the alert.
+#
+# A resource's series is one label set, and the operator writes a new one whenever its ready, reason
+# or revision changes, leaving the last one stale. A resource that fails at each retry goes Unknown,
+# Progressing, at the start of each and False when it fails, so no one label set lasts an alert's time;
+# the alerts on a resource that is not Ready therefore keep only kind, name and exported_namespace,
+# which do not change, and the reason is the resource's own, in its conditions. Tests:
+# tests/rules/flux-monitoring.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: flux-alerts
+  namespace: monitoring
+spec:
+  groups:
+    - name: flux
+      rules:
+        - alert: FluxRootSyncNotReady
+          expr: |
+            max by (kind, name, exported_namespace) (
+              flux_resource_info{job="flux-operator", exported_namespace="flux-system", kind="Kustomization", name=~"flux-system|cluster", ready!="True"} == 1
+              or
+              flux_resource_info{job="flux-operator", exported_namespace="flux-system", kind="OCIRepository", name="flux-system", ready!="True"} == 1
+            )
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: The root sync is not Ready
+            description: The root sync {{ $labels.kind }} {{ $labels.name }} in {{ $labels.exported_namespace }} has not been Ready for 10 minutes; until it is, nothing merged to main reaches the cluster.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxrootsyncnotready
+        - alert: FluxApplierNotReady
+          expr: |
+            max by (kind, name, exported_namespace) (
+              flux_resource_info{job="flux-operator", kind=~"Kustomization|HelmRelease", ready!="True", reason!="DependencyNotReady"} == 1
+            )
+            unless on (kind, name, exported_namespace)
+            flux_resource_info{job="flux-operator", exported_namespace="flux-system", kind="Kustomization", name=~"flux-system|cluster"}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: A Kustomization or HelmRelease is not Ready
+            description: The {{ $labels.kind }} {{ $labels.name }} in {{ $labels.exported_namespace }} has not been Ready for 15 minutes, so what it applies is not as Git says.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxappliernotready
+        - alert: FluxSourceNotReady
+          expr: |
+            max by (kind, name, exported_namespace) (
+              flux_resource_info{job="flux-operator", kind=~"OCIRepository|HelmRepository|HelmChart|ArtifactGenerator", ready!="True"} == 1
+            )
+            unless on (kind, name, exported_namespace)
+            flux_resource_info{job="flux-operator", exported_namespace="flux-system", kind="OCIRepository", name="flux-system"}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: A Flux source is not Ready
+            description: The {{ $labels.kind }} {{ $labels.name }} in {{ $labels.exported_namespace }} has not been Ready for 15 minutes, so nothing that reads it gets a new revision.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxsourcenotready
+        # The FluxInstance is suspended by its reconcile annotation, which flux_instance_info reports as
+        # suspended. A day is longer than the operator is ever away: when it restarts, its series go
+        # stale and come back with the new pod's labels, so each resource's last sample of the last 10
+        # minutes counts, and a resource that is resumed stops counting 10 minutes later.
+        - alert: FluxResourceSuspended
+          expr: |
+            max by (kind, name, exported_namespace) (
+              last_over_time(flux_resource_info{job="flux-operator", suspended="True"}[10m])
+              or
+              last_over_time(flux_instance_info{job="flux-operator", suspended="True"}[10m])
+            ) == 1
+          for: 1d
+          labels:
+            severity: info
+          annotations:
+            summary: A Flux resource has been suspended for a day
+            description: The {{ $labels.kind }} {{ $labels.name }} in {{ $labels.exported_namespace }} has been suspended for a day, so it is not reconciled.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxresourcesuspended
+        - alert: FluxInstanceNotReady
+          expr: flux_instance_info{job="flux-operator", ready!="True"} == 1
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: The FluxInstance is not Ready
+            description: The FluxInstance {{ $labels.name }} in {{ $labels.exported_namespace }} has not been Ready for 10 minutes (reason {{ $labels.reason }}), so the operator is not installing or updating Flux's controllers.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxinstancenotready
+        # The operator exports the state of the FluxInstance and of every resource, so while it is
+        # down those alerts see nothing; its Deployment's availability is kube-state-metrics'.
+        - alert: FluxOperatorNotReady
+          expr: kube_deployment_status_replicas_available{namespace="flux-system", deployment="flux-operator"} < 1
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: The Flux Operator has no available replica
+            description: The Deployment {{ $labels.deployment }} in {{ $labels.namespace }} has had no available replica for 5 minutes, so nothing reconciles the FluxInstance and no Flux resource's state is exported.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxoperatornotready

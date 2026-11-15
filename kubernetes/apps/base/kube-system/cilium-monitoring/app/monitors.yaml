@@ -1,0 +1,33 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/podmonitor-monitoring-v1.json
+# The Cilium agents' metrics: the agents run on the host's network, so each is scraped at its node's
+# address on port 9962, which the Cilium chart names prometheus on the agents' pods once
+# prometheus.enabled is set in the cilium application's values. The nodes' firewall admits the port
+# from the nodes and the pods (talos/firewall.yaml), as it does node-exporter's. The chart's own
+# ServiceMonitor stays off, as Cilium is installed before the monitoring definitions exist.
+#
+# The BGP control plane's metrics are among them: cilium_bgp_control_plane_session_state, one series
+# for each configured peer of a node, 1 while the session is established
+# (Documentation/observability/metrics.rst and pkg/bgp/metrics/metrics.go of Cilium v1.20.4). Tests:
+# tests/rules/cilium-monitoring.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: cilium-agent
+spec:
+  selector:
+    matchLabels:
+      k8s-app: cilium
+  podMetricsEndpoints:
+    - port: prometheus
+      path: /metrics
+      interval: 30s
+      relabelings:
+        # The alerts name the job and the node, which is the label that names a worker.
+        - action: replace
+          targetLabel: job
+          replacement: cilium-agent
+        - action: replace
+          sourceLabels:
+            - __meta_kubernetes_pod_node_name
+          targetLabel: node

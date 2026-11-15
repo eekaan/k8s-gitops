@@ -3,3 +3,8 @@
 # The priority class the chart recommends: the operator keeps Flux running, so it is not among the
 # first pods evicted when a node runs short.
 priorityClassName: system-cluster-critical
+# The operator exports the state of every Flux resource as metrics, flux_resource_info, which the
+# flux-monitoring application scrapes, and refreshes them with its report; the metrics' documentation
+# recommends 30s, where the default is 5m, which the alerts' times of minutes could not rely on.
+reporting:
+  interval: 30s

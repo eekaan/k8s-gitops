@@ -606,6 +606,9 @@ restarts every agent, node by node, and the operator.
   endpoint goes away withdraws a `Local` address; a `Cluster` address stays announced while the
   Service has no endpoint at all.
 
+The sessions' state is scraped and alerted on ([Cilium's metrics](#ciliums-metrics)): a worker with
+a session down for 5 minutes, and no worker with any session.
+
 Every object there is of a kind that Cilium's operator defines once it leads, the BGP kinds only
 while the BGP control plane is on, so the Cilium application holds none of them:
 `scripts/install-cilium` installs Cilium before any of those definitions exists. `cilium-bgp` names
@@ -696,16 +699,24 @@ every namespace, and evaluates the chart's default alerting and recording rules.
   and of the log store and collector ([Logs](#logs));
 - OpenBao's active member, through its chart's ServiceMonitor ([OpenBao](#openbao));
 - cert-manager's controller, webhook and CA injector, through its chart's ServiceMonitor
-  ([cert-manager](#cert-manager)).
+  ([cert-manager](#cert-manager));
+- Flux, through the `flux-monitoring` application: the Flux Operator's own metrics, which give the
+  Ready and suspended state of every Flux resource and of the FluxInstance, and the controllers'
+  ([Flux monitoring](#flux-monitoring));
+- the Cilium agents, whose metrics include the workers' BGP sessions, through the `cilium-monitoring`
+  application ([Cilium's metrics](#ciliums-metrics));
+- the storage layer, through the `linstor-monitoring` application: the LINSTOR controller's metrics
+  and the satellites' DRBD reactor ([Storage monitoring](#storage-monitoring)).
 
 It does not scrape:
 
 - kube-proxy, which Cilium replaces: its target and its alert rule are off, so nothing fires for
   its absence;
-- Cilium, whose ServiceMonitors stay off: `scripts/install-cilium` installs Cilium from the same
-  values before any monitoring definition exists, and its chart refuses a ServiceMonitor without
-  one;
-- Flux's controllers, for which nothing defines a monitor.
+- the Cilium operator, Envoy and Hubble: their monitors stay off, as does every ServiceMonitor of
+  the Cilium chart, because `scripts/install-cilium` installs Cilium from the same values before any
+  monitoring definition exists, and its chart refuses a ServiceMonitor without one; the agents'
+  metrics endpoint needs no definition, so it is on and a PodMonitor of its own application scrapes
+  it.
 
 Alertmanager routes every alert to its one receiver, `null`, which sends nothing: alerts show in
 Prometheus and Alertmanager and go nowhere else.
@@ -717,6 +728,126 @@ storage class, which neither names; without one, the claims and the two pods sta
 `tests/monitoring.bats` builds the application as Flux applies it, renders the pinned chart with
 its values, and checks the namespace, the targets, the rules, the receivers, the claims and that
 each values key is one the chart or a subchart reads.
+
+### Flux monitoring
+
+`apps/base/monitoring/flux-monitoring/` makes the monitors and the alerts for Flux. It names
+`prometheus-operator-crds` in `dependsOn` and is not part of Flux's own two applications, as Flux is
+installed before the monitoring definitions exist and an object of their kinds would stop that
+install: the operator's chart has a ServiceMonitor of its own, `serviceMonitor.create`, which stays off
+for that reason.
+
+- A ServiceMonitor, `flux-operator`, scrapes the Flux Operator's Service, `flux-operator` in
+  `flux-system`, on its port `http`, 8080. The operator exports the state of every Flux resource as
+  `flux_resource_info`, with the labels `kind`, `name`, `exported_namespace`, `ready` (the status of
+  the Ready condition: `True`, `False` or `Unknown`), `reason`, `suspended` and, by kind, `revision`,
+  `source_name`, `path`, `url` and `ref`, and of the FluxInstance as `flux_instance_info`
+  ([Flux Operator monitoring](https://fluxoperator.dev/docs/instance/monitoring/), and
+  `internal/reporter/metrics.go` of the operator at the pinned version). That is the mechanism for
+  the state of Flux's resources, chosen over kube-state-metrics' custom resource state: it covers
+  every kind, the FluxInstance and the suspended state in one metric, and asks nothing of the
+  monitoring stack, where kube-state-metrics would need a configuration and read permission for each
+  Flux kind. The operator refreshes the metric with its report, which its values set to every 30
+  seconds, the interval its documentation recommends for these metrics, where the default is five
+  minutes; `tests/monitoring.bats` holds that the report and the scrape are no longer than a minute.
+- A PodMonitor, `flux-controllers`, scrapes the controllers of the instance, source-watcher
+  included, on the port `http-prom` of every pod labelled `app.kubernetes.io/part-of: flux`, which the
+  operator gives every pod it installs. Flux's network policy `allow-scraping`, which the instance
+  turns on, admits every namespace to that port on every pod of `flux-system`. The controllers'
+  metrics, `gotk_*` and controller-runtime's, are scraped and no alert reads them.
+  `tests/monitoring.bats` matches both monitors against the Service the operator's chart renders and
+  the Deployments of the pinned operator's manifests artifact.
+
+The root sync, the Kustomizations `flux-system` and `cluster` and the OCIRepository `flux-system`,
+has an alert of its own, `FluxRootSyncNotReady`, critical after 10 minutes, named in its expression;
+the alerts on every other Kustomization, HelmRelease and source leave it out, so one failure is one
+alert. They also leave out a Kustomization that reports `DependencyNotReady`, as the dependency it
+waits for is the one that has the alert. A resource's series is one set of those labels, and the
+operator writes a new one whenever its `ready`, `reason` or `revision` changes: a resource that fails
+at each retry goes `Unknown`, progressing, at the start of each and `False` when it fails, as a
+Kustomization whose health checks time out does every few minutes, so no one set lasts an alert's
+time. The three alerts on a resource that is not Ready therefore keep only `kind`, `name` and
+`exported_namespace`, and the reason is read from the resource itself. The sources the tree uses
+are OCIRepository, HelmRepository, the HelmCharts a release from a HelmRepository makes and the
+ArtifactGenerator; the ExternalArtifacts the generator makes are left out, as their state is the
+generator's. While the operator is down its metrics are gone, so `FluxOperatorNotReady` reads the
+availability of its Deployment instead.
+
+### Cilium's metrics
+
+The agents serve their metrics on port 9962 of the node they run on, as they run on the host's
+network, once `prometheus.enabled` is set in the Cilium application's values. That key creates no
+monitor and needs no resource definition, so `scripts/install-cilium`, which installs Cilium from the
+same values file before any definition exists, is unchanged, and the chart's ServiceMonitors stay off
+([Monitoring](#monitoring)). It adds the port 9962 to the agents' container ports, beside the host
+ports 9879 and 4244 they already declare; the DaemonSet's exception in `pod-security-exceptions.yaml`
+already allows host ports, and no new workload and no new Pod Security level comes with it.
+
+`apps/base/kube-system/cilium-monitoring/` holds a PodMonitor, `cilium-agent`, which selects the pods
+labelled `k8s-app: cilium` and scrapes the port `prometheus` every 30 seconds, naming the job
+`cilium-agent` and adding the node's name as the label `node`. The application names `cilium` and
+`prometheus-operator-crds` in `dependsOn`: Cilium and `cilium-bgp` are unchanged, and a from-nothing
+bootstrap installs Cilium, then Flux, as before, and the monitor follows once the definitions are
+there. The port is open in the nodes' firewall to the nodes and the pods only, with node-exporter's
+rule ([cluster.md](cluster.md#what-each-node-admits)): Prometheus's scrape from a pod on another
+node arrives from that node's address, and from the same node from the pod range. Until a node has
+that rule its agent's target is down and reports nothing. `CiliumBGPSessionsDown` counts only the
+sessions an agent reports, and `CiliumBGPNoSessionEstablished` only while a worker's agent is scraped:
+the control planes' agents never report a session, so an agent counts unless kube-state-metrics'
+`kube_node_role` gives its node, by the PodMonitor's `node` label, the role `control-plane`, which
+Talos gives every control plane and no worker. Control planes that admit the port before the workers
+do therefore raise neither alert, unless kube-state-metrics is not scraped then either, when every
+scraped agent counts. `just cluster-check`'s scrape targets are the cluster's own components and
+the agents' are not among them: a node that does not yet admit the port would fail the check that
+`just cluster-talos --first` runs before it applies the rule.
+
+The BGP control plane's metrics are `cilium_bgp_control_plane_session_state`, one series for each
+configured peer of a node's BGP instance, 1 while the session is established, labelled
+`instance_name`, `local_asn`, `neighbor` (the peer's address and port) and `neighbor_asn`, and
+`cilium_bgp_control_plane_advertised_routes`, the number of routes advertised to a peer, with the
+address family
+([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/observability/metrics.rst),
+`pkg/bgp/metrics/metrics.go` at the pinned version). The only label that tells the peers apart is an
+address, so the alerts name the worker and a count and print no address. A worker taken out of BGP, by
+the label the reboot and upgrade recipes set ([Service addresses](#service-addresses)), has no BGP
+instance, so its agent reports no series for it: it is configured for no session, and
+`CiliumBGPSessionsDown` counts the sessions a node reports against those established, so it does not
+fire for it. The control planes have no instance and report none.
+
+### Storage monitoring
+
+`apps/base/piraeus-datastore/linstor-monitoring/` makes the monitors and the alerts for the storage
+layer, with `prometheus-operator-crds` in `dependsOn` and nothing else: the storage cluster is
+installed without any monitoring definition. The Piraeus operator makes the LINSTOR controller's
+Service and the satellites' pods at run time, so they are not in the render, and the monitors select
+them by the labels and ports the operator's templates give at its version, which the monitors' file
+records (`piraeus-operator-templates`) and `tests/monitoring.bats` holds equal to the version the
+cluster runs.
+
+- A ServiceMonitor, `linstor-controller`, scrapes the controller's `api` port, 3370, at `/metrics`,
+  over plain HTTP, as the `LinstorCluster` sets no TLS for its REST API: LINSTOR's own state,
+  `linstor_node_state` (2 for a satellite that is online), the storage pools' free and total
+  capacity, `linstor_storage_pool_capacity_free_bytes` and `linstor_storage_pool_capacity_total_bytes`,
+  with the labels `node`, `nodetype`, `storage_pool`, `driver` and `backing_pool`, and for a node
+  also the satellite's address, which no alert prints
+  (`PrometheusBuilder.java` of linstor-server, the controller image of the operator's version).
+- A PodMonitor, `linstor-satellite`, scrapes the DRBD reactor that runs in each satellite's pod, on
+  the port `prometheus`, 9942, which the operator configures with enumerated states: for each device,
+  a `drbd_device_state` series for each disk state, 1 for the state it is in, labelled `name` (the
+  DRBD resource, which is the volume's `pvc-<id>`), `volume`, `minor` and the state, and
+  `drbd_device_quorum` and `drbd_device_client`, which is 1 for a device that is diskless on purpose, a
+  client or a tiebreaker (`doc/prometheus.md` and `src/plugin/prometheus.rs` of drbd-reactor). The
+  monitor names the job `linstor-satellite` and adds the node. The satellites run on the pod
+  network, so no rule of the nodes' firewall is involved.
+
+The operator publishes alert rules of its own, `config/extras/monitoring/alerts.yaml` in its
+repository, to be applied by hand. They are not loaded: they set no summary and no runbook, and some
+no `for`, which every own alert of the tree needs, and their severities and thresholds are not the
+ones these alerts have, so a rule of theirs beside these would fire twice for one failure. The
+alerts here cover the replicas that are not UpToDate, a device without quorum, a satellite that is
+offline and a pool at 85 and 95 percent, and `DrbdReplicaNotUpToDate` leaves out a diskless client,
+which is no replica. What theirs cover and these do not is listed under what no alert covers
+([Alerts](#alerts)).
 
 ### Alerts
 
@@ -790,14 +921,50 @@ The own alerts, each with its runbook section in [docs/runbooks/alerts.md](runbo
 | `LogCollectorDiscardingEvents` | A collector's component discards events it was not set to drop, for 15 minutes. | warning | [LogCollectorDiscardingEvents](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectordiscardingevents) |
 | `LogCollectorSendFailing` | A collector's sink to the store reports errors for 15 minutes. | warning | [LogCollectorSendFailing](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectorsendfailing) |
 | `ExternalDNSSyncStale` | external-dns' last successful sync with the DNS provider is more than 10 minutes old, or no external-dns reports one, for 5 minutes. | warning | [ExternalDNSSyncStale](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#externaldnssyncstale) |
+| `FluxRootSyncNotReady` | One of the root sync's three objects, the Kustomizations `flux-system` and `cluster` and the OCIRepository `flux-system`, has not been Ready for 10 minutes. | critical | [FluxRootSyncNotReady](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxrootsyncnotready) |
+| `FluxApplierNotReady` | A Kustomization or HelmRelease other than the root sync has not been Ready for 15 minutes, for a reason other than waiting for a dependency. | warning | [FluxApplierNotReady](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxappliernotready) |
+| `FluxSourceNotReady` | An OCIRepository, HelmRepository, HelmChart or ArtifactGenerator other than the root sync's has not been Ready for 15 minutes. | warning | [FluxSourceNotReady](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxsourcenotready) |
+| `FluxResourceSuspended` | A Flux resource, or the FluxInstance by its reconcile annotation, has been suspended for a day. | info | [FluxResourceSuspended](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxresourcesuspended) |
+| `FluxInstanceNotReady` | The FluxInstance has not been Ready for 10 minutes. | critical | [FluxInstanceNotReady](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxinstancenotready) |
+| `FluxOperatorNotReady` | The Flux Operator's Deployment has had no available replica for 5 minutes. | critical | [FluxOperatorNotReady](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxoperatornotready) |
+| `CiliumBGPSessionsDown` | A worker has had fewer BGP sessions established than it is configured for, for 5 minutes; a worker out of BGP on purpose has none configured. | warning | [CiliumBGPSessionsDown](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#ciliumbgpsessionsdown) |
+| `CiliumBGPNoSessionEstablished` | No worker has an established BGP session, or none has a BGP instance, for 5 minutes, while a worker's agent is scraped. | critical | [CiliumBGPNoSessionEstablished](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#ciliumbgpnosessionestablished) |
+| `DrbdReplicaNotUpToDate` | A DRBD replica that is not a diskless client has not been UpToDate for 15 minutes. | warning | [DrbdReplicaNotUpToDate](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#drbdreplicanotuptodate) |
+| `DrbdResourceWithoutQuorum` | A DRBD device has had no quorum for 5 minutes. | critical | [DrbdResourceWithoutQuorum](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#drbdresourcewithoutquorum) |
+| `LinstorSatelliteOffline` | LINSTOR has not seen a satellite online for 10 minutes. | warning | [LinstorSatelliteOffline](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#linstorsatelliteoffline) |
+| `LinstorStoragePoolFilling` | A storage pool has been above 85 percent full, and at most 95, for 15 minutes. | warning | [LinstorStoragePoolFilling](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#linstorstoragepoolfilling) |
+| `LinstorStoragePoolFull` | A storage pool has been above 95 percent full for 5 minutes. | critical | [LinstorStoragePoolFull](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#linstorstoragepoolfull) |
 
 The alerts read only what Prometheus scrapes: kube-state-metrics' pod readiness for OpenBao's
-members, Prometheus' own `up` for OpenBao's active Service, VolSync's controller metrics and
-Vector's internal metrics, cert-manager's certificate metrics, kube-state-metrics' CronJob
-metrics for the etcd snapshot job ([cluster.md](cluster.md#scheduled-etcd-snapshots)), and
-external-dns' gauge of its last successful sync, and its absence. Nothing reads Flux, Cilium's BGP
-sessions or the storage operator, as none of them is scraped ([Monitoring](#monitoring)). The
-alerts have no destination yet: Alertmanager sends them nowhere, so they show in Prometheus and
+members, its Deployment availability for the Flux Operator, its nodes' roles, which tell the
+control planes' Cilium agents from the workers', and its CronJob metrics for the etcd snapshot job
+([cluster.md](cluster.md#scheduled-etcd-snapshots)), Prometheus' own `up` for OpenBao's active
+Service and the Cilium agents, VolSync's controller metrics, Vector's internal metrics,
+cert-manager's certificate metrics, the Flux Operator's state of Flux's resources, the Cilium
+agents' BGP session state, LINSTOR's own metrics, the DRBD reactor's, and external-dns' gauge of
+its last successful sync and its absence. `tests/rules-check.bats` fails when an alert reads a
+metric that no monitor of the render scrapes, or whose monitor selects nothing of the Service or
+pod that serves it.
+
+What no alert covers, and why:
+
+- A Service's address announced by fewer than two workers: Cilium's metrics give the number of
+  routes advertised on each session and no address, so an address that one worker has stopped
+  announcing is not told apart from another announced twice.
+- Flux's controllers' own metrics are scraped, and no alert reads them: a controller that is down
+  shows in the state of the resources it reconciles, and in `just cluster-check`'s pods.
+- What the Piraeus operator's own alert rules cover and these do not
+  ([Storage monitoring](#storage-monitoring)), as those rules are not loaded: a DRBD connection that
+  is not connected; a suspended DRBD resource (`drbd_resource_suspended`); a storage pool that
+  reports errors (`linstor_storage_pool_error_count`); the LINSTOR controller's and the satellites'
+  error reports; the LINSTOR controller's target and a satellite's DRBD reactor target being down,
+  which also leaves the alerts on what they serve quiet; and whether a resync progresses, as a
+  replica that resyncs raises `DrbdReplicaNotUpToDate` after 15 minutes whether it progresses or
+  not. A volume none of whose replicas is UpToDate raises `DrbdReplicaNotUpToDate`, a warning, for
+  each replica, and no critical alert of its own.
+- The Cilium operator, Envoy and Hubble, which nothing scrapes.
+
+The alerts have no destination yet: Alertmanager sends them nowhere, so they show in Prometheus and
 Alertmanager only.
 
 ### Dashboards
@@ -859,18 +1026,27 @@ in a ConfigMap, with its record.
 The `Grafana`'s `spec.preferences.homeDashboardUid` names the home dashboard's `uid`, which is how
 the operator sets an instance's home. VolSync exposes whether a volume is out of sync and how many
 scheduled syncs were missed, and no time of the last sync, so those are what the home shows of a
-backup's age. It shows nothing of the public Gateway or of Flux, as no monitor scrapes either.
+backup's age. It has no panel of the public Gateway, which no monitor scrapes, or of Flux, which the
+monitors of `flux-monitoring` scrape: Flux's alerts are among the firing alerts it counts.
 
-**Waiting on a scrape or an upstream.** Each of these has no dashboard, because it would show "No
+**Scraped, without a dashboard.** The tree holds no dashboard of these; what their monitors scrape
+is in Prometheus, where the alerts ([Alerts](#alerts)) and a query read it:
+
+| Component | Scraped by |
+| --- | --- |
+| Flux | `flux-monitoring`'s ServiceMonitor `flux-operator`, the Flux Operator's state of every Flux resource, and its PodMonitor `flux-controllers`, the controllers' own metrics ([Flux monitoring](#flux-monitoring)) |
+| The Cilium agents | `cilium-monitoring`'s PodMonitor `cilium-agent` ([Cilium's metrics](#ciliums-metrics)) |
+| The LINSTOR controller and the satellites' DRBD reactors | `linstor-monitoring`'s ServiceMonitor `linstor-controller` and its PodMonitor `linstor-satellite` ([Storage monitoring](#storage-monitoring)) |
+| cert-manager | The chart's ServiceMonitor, which the application turns on ([cert-manager](#cert-manager)) |
+
+**Missing a scrape or an upstream.** Each of these has no dashboard, because it would show "No
 data" or no upstream file exists:
 
-| Component | Waiting for |
+| Component | Missing |
 | --- | --- |
-| Flux | A monitor of its controllers: nothing defines one |
-| Cilium | Its ServiceMonitors, which stay off ([Monitoring](#monitoring)) |
-| The storage operator and its cluster | A monitor of the Piraeus operator and LINSTOR |
-| cert-manager | Its ServiceMonitor, which the application leaves off |
-| Envoy Gateway and its proxies | A monitor of the controller and of the proxies the Gateway starts: the render holds none |
+| The Cilium operator, Envoy and Hubble | Their ServiceMonitors, which stay off ([Monitoring](#monitoring)) |
+| The Piraeus operator | A monitor of the operator itself: the render holds none; `linstor-monitoring` scrapes only the LINSTOR cluster the operator makes |
+| Envoy Gateway and its proxies, the public Gateway's among them | A monitor of the controller and of the proxies the Gateway starts: the render holds none |
 | External Secrets | Its ServiceMonitors, which the application leaves off |
 | CloudNativePG | A PostgreSQL cluster whose instances `components/cnpg-cluster`'s PodMonitor scrapes: no application of the overlay uses the component, and the operator's own PodMonitor is all the render holds |
 | Vector | An upstream dashboard: its repository ships none |
@@ -1480,6 +1656,10 @@ restricted requires ([Pod Security](#pod-security)).
   `k8s-gitops/timeout: long`: on a first install the storage controller can take longer than the
   root's default 3m to report `Available`, and the health check would fail every minute until it
   does.
+
+The controller's and the satellites' metrics are scraped, and the replicas, the quorum, the
+satellites and the pools alerted on, by the `linstor-monitoring` application
+([Storage monitoring](#storage-monitoring)).
 
 ### What runs
 
@@ -2690,6 +2870,10 @@ artifact generator publishes only `apps/base`, and `path` is
   artifact's keyless signature: issued by GitHub Actions to this repository's
   `.github/workflows/publish.yaml` on `refs/heads/main`. An artifact signed by a run on another
   branch or tag, or by another workflow, is refused (ADR 0003).
+- **Metrics**: the operator's values set its report, and with it the metrics of the state of every
+  Flux resource, to every 30 seconds. The monitors and the alerts are the `flux-monitoring`
+  application's, not these two applications': Flux is installed before the monitoring definitions
+  exist ([Flux monitoring](#flux-monitoring)).
 
 ### One root
 

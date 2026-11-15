@@ -1,0 +1,19 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: linstor-monitoring
+  namespace: flux-system
+spec:
+  path: ./apps/base/piraeus-datastore/linstor-monitoring/app
+  targetNamespace: piraeus-datastore
+  # The storage cluster is installed without any monitoring definition, as the operator makes no
+  # monitor: this application makes the monitors of the LINSTOR controller and the satellites, and
+  # needs only the definitions of the monitoring kinds. A monitor of pods that do not exist yet scrapes
+  # nothing until they do.
+  dependsOn:
+    - name: prometheus-operator-crds
+  sourceRef:
+    kind: ExternalArtifact
+    name: linstor-monitoring

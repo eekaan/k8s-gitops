@@ -1,0 +1,19 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: cilium-monitoring
+  namespace: flux-system
+spec:
+  path: ./apps/base/kube-system/cilium-monitoring/app
+  targetNamespace: kube-system
+  # Cilium is installed before Flux and before any monitoring definition exists, so its chart makes
+  # no monitor: this application makes the agents' once Cilium runs and the definitions of the
+  # monitoring kinds are in place.
+  dependsOn:
+    - name: cilium
+    - name: prometheus-operator-crds
+  sourceRef:
+    kind: ExternalArtifact
+    name: cilium-monitoring

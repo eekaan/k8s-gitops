@@ -1,0 +1,52 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/servicemonitor-monitoring-v1.json
+# The Flux Operator's metrics, on port 8080 of its Service flux-operator in flux-system: for each Flux
+# resource, flux_resource_info with its Ready condition's status (ready) and whether it is suspended
+# (suspended), and the same for the FluxInstance as flux_instance_info
+# (https://fluxoperator.dev/docs/instance/monitoring/). The operator's exporter is the mechanism for
+# the state of Flux's resources: it covers every kind Flux has, the FluxInstance and the suspended
+# state in one metric, with no change to the monitoring stack, where kube-state-metrics' custom
+# resource state would need a configuration and read permissions for each kind. The operator
+# refreshes the metric with its report, every reporting.interval, which the operator's values set
+# to the 30s its documentation recommends for these metrics.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: flux-operator
+spec:
+  namespaceSelector:
+    matchNames:
+      - flux-system
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: flux-operator
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/podmonitor-monitoring-v1.json
+# Flux's controllers: the controllers of the instance's components, source-watcher among them, serve
+# their own metrics, gotk_* and controller-runtime's, on the port http-prom of their pods. The
+# operator labels every pod of the instance app.kubernetes.io/part-of: flux, as its monitoring
+# configuration for Prometheus selects them (config/monitoring/flux-controllers.yaml of the operator),
+# and the instance's network policy allow-scraping admits every namespace to the port.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: flux-controllers
+spec:
+  namespaceSelector:
+    matchNames:
+      - flux-system
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: flux
+  podMetricsEndpoints:
+    - port: http-prom
+      path: /metrics
+      interval: 30s
+      relabelings:
+        - action: replace
+          targetLabel: job
+          replacement: flux-controllers

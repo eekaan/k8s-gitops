@@ -1,0 +1,727 @@
+---
+# Unit tests of the flux-monitoring application's own alerts, run by just rules-check with promtool.
+# The series are shaped as the Flux Operator writes flux_resource_info and flux_instance_info, one
+# series per resource with the labels uid, kind, name, exported_namespace (the resource's own
+# namespace), ready (its Ready condition's status: True, False or Unknown), reason and suspended
+# (True or False), and those of its kind: revision for every kind that has one, source_name and path
+# for a Kustomization, source_name for a HelmRelease, url and ref for an OCIRepository, url for a
+# HelmRepository, and registry and revision for the FluxInstance; and as the ServiceMonitor's scrape
+# adds job, instance, namespace, pod, service and endpoint. Labels the operator leaves empty, such as a
+# Kustomization's url, are no labels to Prometheus (https://fluxoperator.dev/docs/instance/monitoring/,
+# internal/reporter/metrics.go of the operator). The operator writes a new label set whenever one of
+# them changes, and Prometheus marks the one it left stale. The Deployment's series are
+# kube-state-metrics'. Each group's name is the title of its scenario in features/alerts.feature.
+rule_files:
+  - flux-monitoring.rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: The alert FluxRootSyncNotReady fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # The Kustomization cluster is Ready. The Kustomization flux-system is not Ready and the OCIRepository
+      # flux-system is Unknown, so both are pending from the start. A Kustomization of the same name in
+      # another namespace is not the root.
+      - series: >-
+          flux_resource_info{uid="u-cluster", kind="Kustomization", name="cluster",
+          exported_namespace="flux-system", ready="True", reason="ReconciliationSucceeded",
+          suspended="False", revision="main@sha256:3e1f5d1d5a6c171b5e756be9cf0dad04b9806cbdd4c17543eab91e1af4d1ad48",
+          source_name="flux-system", path="./apps/overlays/lab-sto2", job="flux-operator",
+          instance="192.0.2.5:8080", namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1",
+          service="flux-operator", endpoint="http"}
+        values: '1x90'
+      - series: >-
+          flux_resource_info{uid="u-root", kind="Kustomization", name="flux-system",
+          exported_namespace="flux-system", ready="False", reason="BuildFailed", suspended="False",
+          revision="main@sha256:3e1f5d1d5a6c171b5e756be9cf0dad04b9806cbdd4c17543eab91e1af4d1ad48",
+          source_name="flux-system", path="./clusters/lab-sto2", job="flux-operator", instance="192.0.2.5:8080",
+          namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1", service="flux-operator", endpoint="http"}
+        values: '1x90'
+      - series: >-
+          flux_resource_info{uid="u-src", kind="OCIRepository", name="flux-system",
+          exported_namespace="flux-system", ready="Unknown", reason="Progressing", suspended="False",
+          revision="main@sha256:3e1f5d1d5a6c171b5e756be9cf0dad04b9806cbdd4c17543eab91e1af4d1ad48",
+          url="oci://ghcr.io/eekaan/k8s-gitops/manifests", ref="main", job="flux-operator",
+          instance="192.0.2.5:8080", namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1",
+          service="flux-operator", endpoint="http"}
+        values: '1x90'
+      - series: >-
+          flux_resource_info{uid="u-other", kind="Kustomization", name="cluster",
+          exported_namespace="other", ready="False", reason="BuildFailed", suspended="False",
+          revision="main@sha256:3e1f5d1d5a6c171b5e756be9cf0dad04b9806cbdd4c17543eab91e1af4d1ad48",
+          source_name="other", path="./other", job="flux-operator", instance="192.0.2.5:8080",
+          namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1", service="flux-operator", endpoint="http"}
+        values: '1x90'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: FluxRootSyncNotReady
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: FluxRootSyncNotReady
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: FluxRootSyncNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              kind: Kustomization
+              name: flux-system
+              exported_namespace: flux-system
+            exp_annotations:
+              summary: The root sync is not Ready
+              description: The root sync Kustomization flux-system in flux-system has not been Ready for 10 minutes; until it is, nothing merged to main reaches the cluster.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxrootsyncnotready
+          - exp_labels:
+              severity: critical
+              kind: OCIRepository
+              name: flux-system
+              exported_namespace: flux-system
+            exp_annotations:
+              summary: The root sync is not Ready
+              description: The root sync OCIRepository flux-system in flux-system has not been Ready for 10 minutes; until it is, nothing merged to main reaches the cluster.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxrootsyncnotready
+  - name: The alert FluxRootSyncNotReady fires while the root sync alternates between failing and progressing
+    interval: 1m
+    input_series:
+      # The Kustomization flux-system fails at each retry: the operator reports it False for three
+      # minutes and Unknown, progressing, for one, and the series of the label set it leaves is stale.
+      # The OCIRepository flux-system is Ready, and progressing for a minute each time main moves, which
+      # gives it a new revision.
+      - series: >-
+          flux_resource_info{uid="u-root", kind="Kustomization", name="flux-system",
+          exported_namespace="flux-system", ready="False", reason="ReconciliationFailed", suspended="False",
+          revision="main@sha256:3e1f5d1d5a6c171b5e756be9cf0dad04b9806cbdd4c17543eab91e1af4d1ad48",
+          source_name="flux-system", path="./clusters/lab-sto2", job="flux-operator", instance="192.0.2.5:8080",
+          namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1", service="flux-operator", endpoint="http"}
+        values: >-
+          1x2 stale 1x2 stale 1x2 stale 1x2 stale 1x2 stale 1x2 stale 1x2 stale 1x2 stale 1x2 stale 1x2 stale
+          1x2 stale 1x2 stale 1x2 stale 1x2 stale 1x2 stale 1x2 stale
+      - series: >-
+          flux_resource_info{uid="u-root", kind="Kustomization", name="flux-system",
+          exported_namespace="flux-system", ready="Unknown", reason="Progressing", suspended="False",
+          revision="main@sha256:3e1f5d1d5a6c171b5e756be9cf0dad04b9806cbdd4c17543eab91e1af4d1ad48",
+          source_name="flux-system", path="./clusters/lab-sto2", job="flux-operator", instance="192.0.2.5:8080",
+          namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1", service="flux-operator", endpoint="http"}
+        values: >-
+          _x3 1 stale _x2 1 stale _x2 1 stale _x2 1 stale _x2 1 stale _x2 1 stale _x2 1 stale _x2 1 stale
+          _x2 1 stale _x2 1 stale _x2 1 stale _x2 1 stale _x2 1 stale _x2 1 stale _x2 1 stale _x2 1
+      - series: >-
+          flux_resource_info{uid="u-src", kind="OCIRepository", name="flux-system",
+          exported_namespace="flux-system", ready="True", reason="Succeeded", suspended="False",
+          revision="main@sha256:3e1f5d1d5a6c171b5e756be9cf0dad04b9806cbdd4c17543eab91e1af4d1ad48",
+          url="oci://ghcr.io/eekaan/k8s-gitops/manifests", ref="main", job="flux-operator",
+          instance="192.0.2.5:8080", namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1",
+          service="flux-operator", endpoint="http"}
+        values: '1x11 stale'
+      - series: >-
+          flux_resource_info{uid="u-src", kind="OCIRepository", name="flux-system",
+          exported_namespace="flux-system", ready="Unknown", reason="Progressing", suspended="False",
+          revision="main@sha256:3e1f5d1d5a6c171b5e756be9cf0dad04b9806cbdd4c17543eab91e1af4d1ad48",
+          url="oci://ghcr.io/eekaan/k8s-gitops/manifests", ref="main", job="flux-operator",
+          instance="192.0.2.5:8080", namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1",
+          service="flux-operator", endpoint="http"}
+        values: '_x12 1 stale'
+      - series: >-
+          flux_resource_info{uid="u-src", kind="OCIRepository", name="flux-system",
+          exported_namespace="flux-system", ready="True", reason="Succeeded", suspended="False",
+          revision="main@sha256:6e375de3fbe89b096bd5b743d53dceb09819080080f6c39124608e748791f9cb",
+          url="oci://ghcr.io/eekaan/k8s-gitops/manifests", ref="main", job="flux-operator",
+          instance="192.0.2.5:8080", namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1",
+          service="flux-operator", endpoint="http"}
+        values: '_x13 1x14 stale'
+      - series: >-
+          flux_resource_info{uid="u-src", kind="OCIRepository", name="flux-system",
+          exported_namespace="flux-system", ready="Unknown", reason="Progressing", suspended="False",
+          revision="main@sha256:6e375de3fbe89b096bd5b743d53dceb09819080080f6c39124608e748791f9cb",
+          url="oci://ghcr.io/eekaan/k8s-gitops/manifests", ref="main", job="flux-operator",
+          instance="192.0.2.5:8080", namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1",
+          service="flux-operator", endpoint="http"}
+        values: '_x28 1 stale'
+      - series: >-
+          flux_resource_info{uid="u-src", kind="OCIRepository", name="flux-system",
+          exported_namespace="flux-system", ready="True", reason="Succeeded", suspended="False",
+          revision="main@sha256:dae0f8808b4eeefd95f5cd7e0b96a3d469f17cb99a75489cbf27e7bfe4d1dc51",
+          url="oci://ghcr.io/eekaan/k8s-gitops/manifests", ref="main", job="flux-operator",
+          instance="192.0.2.5:8080", namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1",
+          service="flux-operator", endpoint="http"}
+        values: '_x29 1x34'
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: FluxRootSyncNotReady
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: FluxRootSyncNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              kind: Kustomization
+              name: flux-system
+              exported_namespace: flux-system
+            exp_annotations:
+              summary: The root sync is not Ready
+              description: The root sync Kustomization flux-system in flux-system has not been Ready for 10 minutes; until it is, nothing merged to main reaches the cluster.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxrootsyncnotready
+      - eval_time: 30m
+        alertname: FluxRootSyncNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              kind: Kustomization
+              name: flux-system
+              exported_namespace: flux-system
+            exp_annotations:
+              summary: The root sync is not Ready
+              description: The root sync Kustomization flux-system in flux-system has not been Ready for 10 minutes; until it is, nothing merged to main reaches the cluster.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxrootsyncnotready
+      - eval_time: 60m
+        alertname: FluxRootSyncNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              kind: Kustomization
+              name: flux-system
+              exported_namespace: flux-system
+            exp_annotations:
+              summary: The root sync is not Ready
+              description: The root sync Kustomization flux-system in flux-system has not been Ready for 10 minutes; until it is, nothing merged to main reaches the cluster.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxrootsyncnotready
+  - name: The alert FluxApplierNotReady fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # A Kustomization and a HelmRelease are not Ready. Another Kustomization waits for a dependency, the
+      # root's two are not Ready and have their own alert, a HelmRelease is Ready, and a source that is not
+      # Ready is another alert's.
+      - series: >-
+          flux_resource_info{uid="ks-a", kind="Kustomization", name="app-a",
+          exported_namespace="flux-system", ready="False", reason="BuildFailed", suspended="False",
+          revision="latest@sha256:529d129b7d4abc80ba93612dd303d15f360c1ef24583de237ed926f7619f4edb",
+          source_name="app-a", path="./apps/base/demo/app-a/app", job="flux-operator", instance="192.0.2.5:8080",
+          namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1", service="flux-operator", endpoint="http"}
+        values: '1x90'
+      - series: >-
+          flux_resource_info{uid="hr-b", kind="HelmRelease", name="app-b", exported_namespace="demo",
+          ready="False", reason="UpgradeFailed", suspended="False", revision="1.2.0", source_name="app-b",
+          job="flux-operator", instance="192.0.2.5:8080", namespace="flux-system",
+          pod="flux-operator-6f7c9d5b8-x1", service="flux-operator", endpoint="http"}
+        values: '1x90'
+      - series: >-
+          flux_resource_info{uid="ks-c", kind="Kustomization", name="app-c",
+          exported_namespace="flux-system", ready="False", reason="DependencyNotReady", suspended="False",
+          revision="latest@sha256:529d129b7d4abc80ba93612dd303d15f360c1ef24583de237ed926f7619f4edb",
+          source_name="app-c", path="./apps/base/demo/app-c/app", job="flux-operator", instance="192.0.2.5:8080",
+          namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1", service="flux-operator", endpoint="http"}
+        values: '1x90'
+      - series: >-
+          flux_resource_info{uid="ks-root", kind="Kustomization", name="flux-system",
+          exported_namespace="flux-system", ready="False", reason="BuildFailed", suspended="False",
+          revision="main@sha256:3e1f5d1d5a6c171b5e756be9cf0dad04b9806cbdd4c17543eab91e1af4d1ad48",
+          source_name="flux-system", path="./clusters/lab-sto2", job="flux-operator", instance="192.0.2.5:8080",
+          namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1", service="flux-operator", endpoint="http"}
+        values: '1x90'
+      - series: >-
+          flux_resource_info{uid="ks-cluster", kind="Kustomization", name="cluster",
+          exported_namespace="flux-system", ready="False", reason="BuildFailed", suspended="False",
+          revision="main@sha256:3e1f5d1d5a6c171b5e756be9cf0dad04b9806cbdd4c17543eab91e1af4d1ad48",
+          source_name="flux-system", path="./apps/overlays/lab-sto2", job="flux-operator",
+          instance="192.0.2.5:8080", namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1",
+          service="flux-operator", endpoint="http"}
+        values: '1x90'
+      - series: >-
+          flux_resource_info{uid="hr-d", kind="HelmRelease", name="app-d", exported_namespace="demo",
+          ready="True", reason="UpgradeSucceeded", suspended="False", revision="0.4.1", source_name="app-d",
+          job="flux-operator", instance="192.0.2.5:8080", namespace="flux-system",
+          pod="flux-operator-6f7c9d5b8-x1", service="flux-operator", endpoint="http"}
+        values: '1x90'
+      - series: >-
+          flux_resource_info{uid="oci-a", kind="OCIRepository", name="app-a",
+          exported_namespace="flux-system", ready="False", reason="AuthenticationFailed",
+          suspended="False", url="oci://ghcr.io/example/charts/app-a", ref="1.2.0", job="flux-operator",
+          instance="192.0.2.5:8080", namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1",
+          service="flux-operator", endpoint="http"}
+        values: '1x90'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: FluxApplierNotReady
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: FluxApplierNotReady
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: FluxApplierNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              kind: Kustomization
+              name: app-a
+              exported_namespace: flux-system
+            exp_annotations:
+              summary: A Kustomization or HelmRelease is not Ready
+              description: The Kustomization app-a in flux-system has not been Ready for 15 minutes, so what it applies is not as Git says.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxappliernotready
+          - exp_labels:
+              severity: warning
+              kind: HelmRelease
+              name: app-b
+              exported_namespace: demo
+            exp_annotations:
+              summary: A Kustomization or HelmRelease is not Ready
+              description: The HelmRelease app-b in demo has not been Ready for 15 minutes, so what it applies is not as Git says.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxappliernotready
+  - name: The alert FluxApplierNotReady fires while a Kustomization alternates between progressing and failing its health checks
+    interval: 1m
+    input_series:
+      # The Kustomization cilium-monitoring fails its health checks: with the children's timeout of 3
+      # minutes and retry of 1, the operator reports it Unknown, progressing, for three minutes and False
+      # for one at each retry, and the series of the label set it leaves is stale. The Kustomization
+      # volsync is Ready, and progressing for two minutes each time its artifact has a new revision.
+      - series: >-
+          flux_resource_info{uid="ks-cm", kind="Kustomization", name="cilium-monitoring",
+          exported_namespace="flux-system", ready="Unknown", reason="Progressing", suspended="False",
+          revision="latest@sha256:acb32462c0d3da3a94c755ea50f7d53cd090792bd55271d02cec914b70f8e9cc",
+          source_name="cilium-monitoring", path="./apps/base/kube-system/cilium-monitoring/app",
+          job="flux-operator", instance="192.0.2.5:8080", namespace="flux-system",
+          pod="flux-operator-6f7c9d5b8-x1", service="flux-operator", endpoint="http"}
+        values: >-
+          1x2 stale 1x2 stale 1x2 stale 1x2 stale 1x2 stale 1x2 stale 1x2 stale 1x2 stale 1x2 stale 1x2 stale
+          1x2 stale 1x2 stale 1x2 stale 1x2 stale 1x2 stale 1x2 stale
+      - series: >-
+          flux_resource_info{uid="ks-cm", kind="Kustomization", name="cilium-monitoring",
+          exported_namespace="flux-system", ready="False", reason="HealthCheckFailed", suspended="False",
+          revision="latest@sha256:acb32462c0d3da3a94c755ea50f7d53cd090792bd55271d02cec914b70f8e9cc",
+          source_name="cilium-monitoring", path="./apps/base/kube-system/cilium-monitoring/app",
+          job="flux-operator", instance="192.0.2.5:8080", namespace="flux-system",
+          pod="flux-operator-6f7c9d5b8-x1", service="flux-operator", endpoint="http"}
+        values: >-
+          _x3 1 stale _x2 1 stale _x2 1 stale _x2 1 stale _x2 1 stale _x2 1 stale _x2 1 stale _x2 1 stale
+          _x2 1 stale _x2 1 stale _x2 1 stale _x2 1 stale _x2 1 stale _x2 1 stale _x2 1 stale _x2 1
+      - series: >-
+          flux_resource_info{uid="ks-vs", kind="Kustomization", name="volsync", exported_namespace="flux-system",
+          ready="True", reason="ReconciliationSucceeded", suspended="False",
+          revision="latest@sha256:b5a4fb34ef8f2aba480df826dfcef3feea4de2d5a9bb759cd4ec8559e3ae0913",
+          source_name="volsync", path="./apps/base/volsync-system/volsync/app", job="flux-operator",
+          instance="192.0.2.5:8080", namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1",
+          service="flux-operator", endpoint="http"}
+        values: '1x19 stale'
+      - series: >-
+          flux_resource_info{uid="ks-vs", kind="Kustomization", name="volsync", exported_namespace="flux-system",
+          ready="Unknown", reason="Progressing", suspended="False",
+          revision="latest@sha256:b5a4fb34ef8f2aba480df826dfcef3feea4de2d5a9bb759cd4ec8559e3ae0913",
+          source_name="volsync", path="./apps/base/volsync-system/volsync/app", job="flux-operator",
+          instance="192.0.2.5:8080", namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1",
+          service="flux-operator", endpoint="http"}
+        values: '_x20 1x1 stale'
+      - series: >-
+          flux_resource_info{uid="ks-vs", kind="Kustomization", name="volsync", exported_namespace="flux-system",
+          ready="True", reason="ReconciliationSucceeded", suspended="False",
+          revision="latest@sha256:a3c5a0c1d2a24efc623d782f06df9377307f26092dfdb8929d5f4c52eccff4a4",
+          source_name="volsync", path="./apps/base/volsync-system/volsync/app", job="flux-operator",
+          instance="192.0.2.5:8080", namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1",
+          service="flux-operator", endpoint="http"}
+        values: '_x22 1x22 stale'
+      - series: >-
+          flux_resource_info{uid="ks-vs", kind="Kustomization", name="volsync", exported_namespace="flux-system",
+          ready="Unknown", reason="Progressing", suspended="False",
+          revision="latest@sha256:a3c5a0c1d2a24efc623d782f06df9377307f26092dfdb8929d5f4c52eccff4a4",
+          source_name="volsync", path="./apps/base/volsync-system/volsync/app", job="flux-operator",
+          instance="192.0.2.5:8080", namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1",
+          service="flux-operator", endpoint="http"}
+        values: '_x45 1x1 stale'
+      - series: >-
+          flux_resource_info{uid="ks-vs", kind="Kustomization", name="volsync", exported_namespace="flux-system",
+          ready="True", reason="ReconciliationSucceeded", suspended="False",
+          revision="latest@sha256:de7ebac2b554babd7816b80c7952c4626f6de7fe541fbe3a481b84edc0755965",
+          source_name="volsync", path="./apps/base/volsync-system/volsync/app", job="flux-operator",
+          instance="192.0.2.5:8080", namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1",
+          service="flux-operator", endpoint="http"}
+        values: '_x47 1x16'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: FluxApplierNotReady
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: FluxApplierNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              kind: Kustomization
+              name: cilium-monitoring
+              exported_namespace: flux-system
+            exp_annotations:
+              summary: A Kustomization or HelmRelease is not Ready
+              description: The Kustomization cilium-monitoring in flux-system has not been Ready for 15 minutes, so what it applies is not as Git says.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxappliernotready
+      - eval_time: 30m
+        alertname: FluxApplierNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              kind: Kustomization
+              name: cilium-monitoring
+              exported_namespace: flux-system
+            exp_annotations:
+              summary: A Kustomization or HelmRelease is not Ready
+              description: The Kustomization cilium-monitoring in flux-system has not been Ready for 15 minutes, so what it applies is not as Git says.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxappliernotready
+      - eval_time: 60m
+        alertname: FluxApplierNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              kind: Kustomization
+              name: cilium-monitoring
+              exported_namespace: flux-system
+            exp_annotations:
+              summary: A Kustomization or HelmRelease is not Ready
+              description: The Kustomization cilium-monitoring in flux-system has not been Ready for 15 minutes, so what it applies is not as Git says.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxappliernotready
+  - name: The alert FluxSourceNotReady fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # An OCIRepository, a HelmRepository and an ArtifactGenerator are not Ready. The root sync's
+      # OCIRepository is not Ready and has its own alert, another OCIRepository is Ready, and a
+      # Kustomization that is not Ready is another alert's.
+      - series: >-
+          flux_resource_info{uid="oci-cilium", kind="OCIRepository", name="cilium",
+          exported_namespace="flux-system", ready="False", reason="AuthenticationFailed",
+          suspended="False", revision="1.20.4@sha256:8fb88247e62b876c37ad489bc355df32e87ffb453a70129bfbd94809b380fba3",
+          url="oci://quay.io/cilium/charts/cilium", ref="1.20.4", job="flux-operator", instance="192.0.2.5:8080",
+          namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1", service="flux-operator", endpoint="http"}
+        values: '1x90'
+      - series: >-
+          flux_resource_info{uid="hrepo-charts", kind="HelmRepository", name="charts",
+          exported_namespace="flux-system", ready="Unknown", reason="Progressing", suspended="False",
+          url="https://charts.example.org", job="flux-operator", instance="192.0.2.5:8080",
+          namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1", service="flux-operator", endpoint="http"}
+        values: '1x90'
+      - series: >-
+          flux_resource_info{uid="ag-apps", kind="ArtifactGenerator", name="apps",
+          exported_namespace="flux-system", ready="False", reason="BuildFailed", suspended="False",
+          job="flux-operator", instance="192.0.2.5:8080", namespace="flux-system",
+          pod="flux-operator-6f7c9d5b8-x1", service="flux-operator", endpoint="http"}
+        values: '1x90'
+      - series: >-
+          flux_resource_info{uid="oci-root", kind="OCIRepository", name="flux-system",
+          exported_namespace="flux-system", ready="False", reason="AuthenticationFailed",
+          suspended="False", revision="main@sha256:3e1f5d1d5a6c171b5e756be9cf0dad04b9806cbdd4c17543eab91e1af4d1ad48",
+          url="oci://ghcr.io/eekaan/k8s-gitops/manifests", ref="main", job="flux-operator",
+          instance="192.0.2.5:8080", namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1",
+          service="flux-operator", endpoint="http"}
+        values: '1x90'
+      - series: >-
+          flux_resource_info{uid="oci-volsync", kind="OCIRepository", name="volsync",
+          exported_namespace="flux-system", ready="True", reason="Succeeded", suspended="False",
+          revision="0.15.0@sha256:b5a4fb34ef8f2aba480df826dfcef3feea4de2d5a9bb759cd4ec8559e3ae0913",
+          url="oci://ghcr.io/example/charts/volsync", ref="0.15.0", job="flux-operator",
+          instance="192.0.2.5:8080", namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1",
+          service="flux-operator", endpoint="http"}
+        values: '1x90'
+      - series: >-
+          flux_resource_info{uid="ks-a", kind="Kustomization", name="app-a",
+          exported_namespace="flux-system", ready="False", reason="BuildFailed", suspended="False",
+          revision="latest@sha256:529d129b7d4abc80ba93612dd303d15f360c1ef24583de237ed926f7619f4edb",
+          source_name="app-a", path="./apps/base/demo/app-a/app", job="flux-operator", instance="192.0.2.5:8080",
+          namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1", service="flux-operator", endpoint="http"}
+        values: '1x90'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: FluxSourceNotReady
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: FluxSourceNotReady
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: FluxSourceNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              kind: ArtifactGenerator
+              name: apps
+              exported_namespace: flux-system
+            exp_annotations:
+              summary: A Flux source is not Ready
+              description: The ArtifactGenerator apps in flux-system has not been Ready for 15 minutes, so nothing that reads it gets a new revision.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxsourcenotready
+          - exp_labels:
+              severity: warning
+              kind: HelmRepository
+              name: charts
+              exported_namespace: flux-system
+            exp_annotations:
+              summary: A Flux source is not Ready
+              description: The HelmRepository charts in flux-system has not been Ready for 15 minutes, so nothing that reads it gets a new revision.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxsourcenotready
+          - exp_labels:
+              severity: warning
+              kind: OCIRepository
+              name: cilium
+              exported_namespace: flux-system
+            exp_annotations:
+              summary: A Flux source is not Ready
+              description: The OCIRepository cilium in flux-system has not been Ready for 15 minutes, so nothing that reads it gets a new revision.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxsourcenotready
+  - name: The alert FluxSourceNotReady fires while a source alternates between failing and progressing
+    interval: 1m
+    input_series:
+      # The OCIRepository kube-prometheus-stack cannot be fetched: the operator reports it False for two
+      # minutes and Unknown, progressing, for one at each retry, and the series of the label set it leaves
+      # is stale. The OCIRepository cilium is Ready.
+      - series: >-
+          flux_resource_info{uid="oci-kps", kind="OCIRepository", name="kube-prometheus-stack",
+          exported_namespace="monitoring", ready="False", reason="AuthenticationFailed", suspended="False",
+          revision="93.3.0@sha256:e1aa9f411701bc2a0a19c119a828b3f14f07045e68ed6357ab4369aa0c25d895",
+          url="oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack", ref="93.3.0",
+          job="flux-operator", instance="192.0.2.5:8080", namespace="flux-system",
+          pod="flux-operator-6f7c9d5b8-x1", service="flux-operator", endpoint="http"}
+        values: >-
+          1x1 stale 1x1 stale 1x1 stale 1x1 stale 1x1 stale 1x1 stale 1x1 stale 1x1 stale 1x1 stale 1x1 stale
+          1x1 stale 1x1 stale 1x1 stale 1x1 stale 1x1 stale 1x1 stale 1x1 stale 1x1 stale 1x1 stale 1x1 stale
+          1x1 stale 1
+      - series: >-
+          flux_resource_info{uid="oci-kps", kind="OCIRepository", name="kube-prometheus-stack",
+          exported_namespace="monitoring", ready="Unknown", reason="Progressing", suspended="False",
+          revision="93.3.0@sha256:e1aa9f411701bc2a0a19c119a828b3f14f07045e68ed6357ab4369aa0c25d895",
+          url="oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack", ref="93.3.0",
+          job="flux-operator", instance="192.0.2.5:8080", namespace="flux-system",
+          pod="flux-operator-6f7c9d5b8-x1", service="flux-operator", endpoint="http"}
+        values: >-
+          _x2 1 stale _ 1 stale _ 1 stale _ 1 stale _ 1 stale _ 1 stale _ 1 stale _ 1 stale _ 1 stale _ 1 stale
+          _ 1 stale _ 1 stale _ 1 stale _ 1 stale _ 1 stale _ 1 stale _ 1 stale _ 1 stale _ 1 stale _ 1 stale
+          _ 1 stale
+      - series: >-
+          flux_resource_info{uid="oci-cilium", kind="OCIRepository", name="cilium", exported_namespace="kube-system",
+          ready="True", reason="Succeeded", suspended="False",
+          revision="1.20.4@sha256:8fb88247e62b876c37ad489bc355df32e87ffb453a70129bfbd94809b380fba3",
+          url="oci://quay.io/cilium/charts/cilium", ref="1.20.4", job="flux-operator", instance="192.0.2.5:8080",
+          namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1", service="flux-operator", endpoint="http"}
+        values: '1x63'
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: FluxSourceNotReady
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: FluxSourceNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              kind: OCIRepository
+              name: kube-prometheus-stack
+              exported_namespace: monitoring
+            exp_annotations:
+              summary: A Flux source is not Ready
+              description: The OCIRepository kube-prometheus-stack in monitoring has not been Ready for 15 minutes, so nothing that reads it gets a new revision.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxsourcenotready
+      - eval_time: 30m
+        alertname: FluxSourceNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              kind: OCIRepository
+              name: kube-prometheus-stack
+              exported_namespace: monitoring
+            exp_annotations:
+              summary: A Flux source is not Ready
+              description: The OCIRepository kube-prometheus-stack in monitoring has not been Ready for 15 minutes, so nothing that reads it gets a new revision.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxsourcenotready
+      - eval_time: 60m
+        alertname: FluxSourceNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              kind: OCIRepository
+              name: kube-prometheus-stack
+              exported_namespace: monitoring
+            exp_annotations:
+              summary: A Flux source is not Ready
+              description: The OCIRepository kube-prometheus-stack in monitoring has not been Ready for 15 minutes, so nothing that reads it gets a new revision.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxsourcenotready
+  - name: The alert FluxResourceSuspended fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # A Kustomization is suspended from the start, and so is the FluxInstance, by its reconcile
+      # annotation; a HelmRelease is not.
+      - series: >-
+          flux_resource_info{uid="ks-demo", kind="Kustomization", name="demo",
+          exported_namespace="flux-system", ready="True", reason="ReconciliationSucceeded",
+          suspended="True", revision="latest@sha256:529d129b7d4abc80ba93612dd303d15f360c1ef24583de237ed926f7619f4edb",
+          source_name="demo", path="./apps/base/demo/app", job="flux-operator", instance="192.0.2.5:8080",
+          namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1", service="flux-operator", endpoint="http"}
+        values: '1x1600'
+      - series: >-
+          flux_instance_info{uid="fi-flux", kind="FluxInstance", name="flux",
+          exported_namespace="flux-system", ready="True", reason="ReconciliationSucceeded", suspended="True",
+          registry="ghcr.io/fluxcd", revision="v2.7.3@sha256:e1aa9f411701bc2a0a19c119a828b3f14f07045e68ed6357ab4369aa0c25d895",
+          job="flux-operator", instance="192.0.2.5:8080", namespace="flux-system",
+          pod="flux-operator-6f7c9d5b8-x1", service="flux-operator", endpoint="http"}
+        values: '1x1600'
+      - series: >-
+          flux_resource_info{uid="hr-hello", kind="HelmRelease", name="hello", exported_namespace="demo",
+          ready="True", reason="UpgradeSucceeded", suspended="False", revision="0.4.1", source_name="hello",
+          job="flux-operator", instance="192.0.2.5:8080", namespace="flux-system",
+          pod="flux-operator-6f7c9d5b8-x1", service="flux-operator", endpoint="http"}
+        values: '1x1600'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: FluxResourceSuspended
+        exp_alerts: []
+      - eval_time: 1439m
+        alertname: FluxResourceSuspended
+        exp_alerts: []
+      - eval_time: 1440m
+        alertname: FluxResourceSuspended
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              kind: Kustomization
+              name: demo
+              exported_namespace: flux-system
+            exp_annotations:
+              summary: A Flux resource has been suspended for a day
+              description: The Kustomization demo in flux-system has been suspended for a day, so it is not reconciled.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxresourcesuspended
+          - exp_labels:
+              severity: info
+              kind: FluxInstance
+              name: flux
+              exported_namespace: flux-system
+            exp_annotations:
+              summary: A Flux resource has been suspended for a day
+              description: The FluxInstance flux in flux-system has been suspended for a day, so it is not reconciled.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxresourcesuspended
+  - name: The alert FluxResourceSuspended keeps its time while the operator restarts
+    interval: 1m
+    input_series:
+      # A Kustomization is suspended from the start. At minute 600 the operator restarts: its old pod's
+      # series is stale, and two minutes later the new pod reports it, with that pod's labels. At minute
+      # 1500 it is resumed.
+      - series: >-
+          flux_resource_info{uid="ks-demo", kind="Kustomization", name="demo",
+          exported_namespace="flux-system", ready="True", reason="ReconciliationSucceeded",
+          suspended="True", revision="latest@sha256:529d129b7d4abc80ba93612dd303d15f360c1ef24583de237ed926f7619f4edb",
+          source_name="demo", path="./apps/base/demo/app", job="flux-operator", instance="192.0.2.5:8080",
+          namespace="flux-system", pod="flux-operator-6f7c9d5b8-x1", service="flux-operator", endpoint="http"}
+        values: '1x599 stale'
+      - series: >-
+          flux_resource_info{uid="ks-demo", kind="Kustomization", name="demo",
+          exported_namespace="flux-system", ready="True", reason="ReconciliationSucceeded",
+          suspended="True", revision="latest@sha256:529d129b7d4abc80ba93612dd303d15f360c1ef24583de237ed926f7619f4edb",
+          source_name="demo", path="./apps/base/demo/app", job="flux-operator", instance="192.0.2.6:8080",
+          namespace="flux-system", pod="flux-operator-6f7c9d5b8-y2", service="flux-operator", endpoint="http"}
+        values: '_x602 1x897 stale'
+      - series: >-
+          flux_resource_info{uid="ks-demo", kind="Kustomization", name="demo",
+          exported_namespace="flux-system", ready="True", reason="ReconciliationSucceeded",
+          suspended="False", revision="latest@sha256:529d129b7d4abc80ba93612dd303d15f360c1ef24583de237ed926f7619f4edb",
+          source_name="demo", path="./apps/base/demo/app", job="flux-operator", instance="192.0.2.6:8080",
+          namespace="flux-system", pod="flux-operator-6f7c9d5b8-y2", service="flux-operator", endpoint="http"}
+        values: '_x1500 1x100'
+    alert_rule_test:
+      - eval_time: 1439m
+        alertname: FluxResourceSuspended
+        exp_alerts: []
+      - eval_time: 1440m
+        alertname: FluxResourceSuspended
+        exp_alerts:
+          - exp_labels:
+              severity: info
+              kind: Kustomization
+              name: demo
+              exported_namespace: flux-system
+            exp_annotations:
+              summary: A Flux resource has been suspended for a day
+              description: The Kustomization demo in flux-system has been suspended for a day, so it is not reconciled.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxresourcesuspended
+      # Resumed at minute 1500, it is no longer suspended within 10 minutes.
+      - eval_time: 1510m
+        alertname: FluxResourceSuspended
+        exp_alerts: []
+  - name: The alert FluxInstanceNotReady fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # The FluxInstance flux is not Ready; another is Ready.
+      - series: >-
+          flux_instance_info{uid="fi-flux", kind="FluxInstance", name="flux",
+          exported_namespace="flux-system", ready="False", reason="ArtifactFailed", suspended="False",
+          registry="ghcr.io/fluxcd", revision="v2.7.3@sha256:e1aa9f411701bc2a0a19c119a828b3f14f07045e68ed6357ab4369aa0c25d895",
+          job="flux-operator", instance="192.0.2.5:8080", namespace="flux-system",
+          pod="flux-operator-6f7c9d5b8-x1", service="flux-operator", endpoint="http"}
+        values: '1x90'
+      - series: >-
+          flux_instance_info{uid="fi-spare", kind="FluxInstance", name="spare",
+          exported_namespace="flux-system", ready="True", reason="ReconciliationSucceeded",
+          suspended="False", registry="ghcr.io/fluxcd",
+          revision="v2.7.3@sha256:e1aa9f411701bc2a0a19c119a828b3f14f07045e68ed6357ab4369aa0c25d895",
+          job="flux-operator", instance="192.0.2.5:8080", namespace="flux-system",
+          pod="flux-operator-6f7c9d5b8-x1", service="flux-operator", endpoint="http"}
+        values: '1x90'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: FluxInstanceNotReady
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: FluxInstanceNotReady
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: FluxInstanceNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              uid: fi-flux
+              kind: FluxInstance
+              name: flux
+              exported_namespace: flux-system
+              ready: "False"
+              reason: ArtifactFailed
+              suspended: "False"
+              registry: ghcr.io/fluxcd
+              revision: v2.7.3@sha256:e1aa9f411701bc2a0a19c119a828b3f14f07045e68ed6357ab4369aa0c25d895
+              job: flux-operator
+              instance: 192.0.2.5:8080
+              namespace: flux-system
+              pod: flux-operator-6f7c9d5b8-x1
+              service: flux-operator
+              endpoint: http
+            exp_annotations:
+              summary: The FluxInstance is not Ready
+              description: The FluxInstance flux in flux-system has not been Ready for 10 minutes (reason ArtifactFailed), so the operator is not installing or updating Flux's controllers.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxinstancenotready
+  - name: The alert FluxOperatorNotReady fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # The operator's Deployment has a replica for 10 minutes and then none. A controller's Deployment with
+      # none, and a Deployment of that name in another namespace, are not the operator.
+      - series: >-
+          kube_deployment_status_replicas_available{namespace="flux-system", deployment="flux-operator",
+          job="kube-state-metrics", instance="192.0.2.3:8080",
+          service="kube-prometheus-stack-kube-state-metrics", endpoint="http"}
+        values: '1x9 0x80'
+      - series: >-
+          kube_deployment_status_replicas_available{namespace="flux-system",
+          deployment="kustomize-controller", job="kube-state-metrics", instance="192.0.2.3:8080",
+          service="kube-prometheus-stack-kube-state-metrics", endpoint="http"}
+        values: '0x90'
+      - series: >-
+          kube_deployment_status_replicas_available{namespace="monitoring", deployment="flux-operator",
+          job="kube-state-metrics", instance="192.0.2.3:8080",
+          service="kube-prometheus-stack-kube-state-metrics", endpoint="http"}
+        values: '0x90'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: FluxOperatorNotReady
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: FluxOperatorNotReady
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: FluxOperatorNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              namespace: flux-system
+              deployment: flux-operator
+              job: kube-state-metrics
+              instance: 192.0.2.3:8080
+              service: kube-prometheus-stack-kube-state-metrics
+              endpoint: http
+            exp_annotations:
+              summary: The Flux Operator has no available replica
+              description: The Deployment flux-operator in flux-system has had no available replica for 5 minutes, so nothing reconciles the FluxInstance and no Flux resource's state is exported.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxoperatornotready
