@@ -1211,6 +1211,29 @@ EOF
   tofu_only_reads
 }
 
+@test "the plumbing stack is not destroyed while the edge stack holds resources, and is once it holds none" {
+  # The edge stack beside the others, read with none of its own inputs in the environment, as an
+  # operator who never built the edges has none.
+  mkdir -p "$REPO/infra/openstack/stacks/sto2/edge"
+  cp "$ROOT"/infra/openstack/stacks/sto2/edge/*.tf "$REPO/infra/openstack/stacks/sto2/edge/"
+  state_tofu
+  holds sto2/edge state-with-resources.json
+  rm -f "$RECORD/tofu"
+  recipe infra-destroy sto2/plumbing --yes < /dev/null
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"sto2/edge still holds resources"*"just infra-destroy sto2/edge"* ]]
+  tofu_only_reads
+  tofu_calls init | grep -qF -- "-backend-config=key=sto2/edge.tfstate"
+
+  holds sto2/edge state-never-applied.json
+  rm -f "$RECORD/tofu"
+  recipe infra-destroy sto2/plumbing --yes < /dev/null
+
+  [ "$status" -eq 0 ]
+  [ "$(tofu_calls apply | awk '{ print $1 }')" = "-chdir=$PLUMBING" ]
+}
+
 @test "the ci stack takes the allowlist, the image and the public key from the environment" {
   with CI_HOST_IMAGE=fixture-image 'CI_HOST_SSH_PUBLIC_KEY=ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureOperatorKey fixture'
 

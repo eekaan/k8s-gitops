@@ -21,6 +21,16 @@ Feature: Cluster lifecycle
     When cluster-check runs
     Then the check of the pods in flux-system prints skip, saying the namespace does not exist as before Flux is installed, the last line names the skipped check, and the run exits zero; a failing pod in kube-system still fails
 
+  Scenario: cluster-check fails, naming job and node, while a component's scrape target is down
+    Given Prometheus reporting down the etcd targets on cp-1 and cp-2 and the node-exporter target on worker-3, and one of an application that is none of the cluster's own components
+    When cluster-check runs
+    Then the scrape check prints FAIL naming each job and its nodes and no address, every other check passes, the run exits non-zero, and Prometheus was asked through the API server's service proxy with kubectl get; with every component's target up it passes, saying how many targets it saw
+
+  Scenario: cluster-check skips the scrape check, saying why, without the monitoring stack or without an answer from Prometheus
+    Given a cluster without Prometheus's Service, one whose Prometheus does not answer through the service proxy, one whose Prometheus answers with an error, and ones whose answer holds no target of a component's job
+    When cluster-check runs for each
+    Then the scrape check prints skip with the reason, never pass, the last line names it among the skipped checks, no address is printed and the run exits zero
+
   Scenario: A reboot that the API rides out passes
     Given a node of talman.yaml and an API that answers throughout
     When cluster-reboot runs for it and its name is typed back, and with --yes
@@ -40,6 +50,16 @@ Feature: Cluster lifecycle
     Given a node whose kubelet never reports again after talman reboots it, while its Ready condition from before stays
     When cluster-reboot runs with a short REBOOT_WAIT
     Then it asks for the node more than once, stops when the wait runs out, reports the probes and exits non-zero saying the node has not reported Ready since its reboot
+
+  Scenario: A control plane that is Ready again without its etcd member fails the reboot
+    Given a control plane whose etcd member does not come back after talman reboots it, while its kubelet reports Ready
+    When cluster-reboot runs for it with a short REBOOT_WAIT, then for one whose member comes back a few seconds late, for one after whose reboot etcd holds a member that is no control plane of talman.yaml, and for a worker
+    Then the first asks etcd status of every control plane through the Talos API more than once, exits non-zero naming the node and saying not every control plane's member answered, leaves it cordoned and prints no address; the second waits for the member and passes; the third fails naming the other member by its hostname; the worker's reboot asks etcd nothing
+
+  Scenario: A control plane is not rebooted while etcd lacks a healthy member or holds one that is no control plane
+    Given etcd whose member on another control plane is down before anything is rebooted, and then etcd holding a member, by the hostname cp-old, that talman.yaml does not list
+    When cluster-reboot runs for a control plane, with --yes and with its name to be typed back, and then for a worker
+    Then for the control plane it exits non-zero before it asks for the name, saying etcd is not whole and why, naming cp-old by its hostname and printing no address, and nothing is cordoned, drained or rebooted; the worker is rebooted, and etcd is not asked
 
   Scenario: A node that is not in the cluster is refused before anything is rebooted
     Given a hostname talman.yaml does not list, a node's address, two nodes in one argument and a prefix of a hostname

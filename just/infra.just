@@ -24,7 +24,7 @@ infra-talman stack='sto2/cluster':
 infra-output stack name:
     scripts/infra-output {{ quote(stack) }} {{ quote(name) }}
 
-# Destroy the cluster stack, then the plumbing stack, each once its name is typed back (--yes: without asking); the cluster is asked first for the load balancers and volumes it owns outside the stack, and is not destroyed while it owns any or cannot be asked (--unreachable: unless the API does not answer); given one stack, or sto2/ci, which only its name destroys, that one only; the plumbing stack is not destroyed while another stack still holds a resource
+# Destroy the cluster stack, then the plumbing stack, each once its name is typed back (--yes: without asking); the cluster is asked first for the load balancers and volumes it owns outside the stack, and is not destroyed while it owns any or cannot be asked (--unreachable: unless the API does not answer); given one stack, or sto2/ci or sto2/edge, which only their names destroy, that one only; the plumbing stack is not destroyed while another stack still holds a resource
 [positional-arguments]
 infra-destroy *args:
     scripts/infra-destroy "$@"
@@ -80,3 +80,25 @@ infra-backup-buckets:
 # Check that the cluster's S3 key is not the state key and lists each backup bucket; pass or FAIL per item, no names or keys
 infra-backup-check:
     scripts/infra-backup-check
+
+# List the names of the public images the cloud offers, one per line, optionally only those containing a pattern, so that EDGE_IMAGE and CI_HOST_IMAGE can be chosen without a console; reads only and prints nothing but names
+os-images pattern='':
+    scripts/os-images {{ quote(pattern) }}
+
+# Create the SSH key pair of the edge routers at EDGE_SSH_KEY_FILE, mode 0600 and without a passphrase, unless a key is there; says only whether it created one
+edge-ssh-key:
+    scripts/edge-ssh-key
+
+# Check, reading only and over SSH, that both edge routers serve (or only edge 1 or 2): FRR runs, every worker has an established session, the table holds only /32s inside the service range, the reject route for the range is configured and in the kernel, the rules are loaded with their forwarding guard, the kernel forwards, and unattended upgrades are off; pass, FAIL or skip per line, no address; see docs/runbooks/edge.md
+[positional-arguments]
+edge-check *args:
+    scripts/edge-check "$@"
+
+# Print an edge router's BGP sessions and learned routes, with addresses, for a person learning the protocol; to a terminal only, refused in CI and in a pipe
+edge-routes edge='1':
+    scripts/edge-routes {{ quote(edge) }}
+
+# Replace the edge routers one at a time after a change to their configuration, once the stack's name is typed back (--yes: without asking): replace one, wait until edge-check passes for it, then the other; stops at the first edge that does not pass. --replace replaces each edge's instance and boot volume even when the configuration is unchanged, which is how a new image reaches them; --edge N replaces edge N alone, and --other-down goes on with the other edge down once a sentence naming both is typed back
+[positional-arguments]
+edge-rollout *flags:
+    scripts/edge-rollout "$@"

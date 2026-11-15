@@ -1,8 +1,9 @@
 # Infrastructure
 
 The OpenStack resources are OpenTofu stacks under `infra/openstack/stacks/<region>/`: `plumbing`
-(the node network, its router and the Talos image), `cluster`, which builds on it, and `ci`, the
-CI host, which builds on `plumbing` too ([The CI host](#the-ci-host)). Every command that runs
+(the node network, its router and the Talos image), `cluster`, which builds on it, `ci`, the
+CI host, and `edge`, the two edge routers, which build on `plumbing` too
+([The CI host](#the-ci-host), [The edge routers](#the-edge-routers)). Every command that runs
 them is a `just` recipe.
 
 ## Recipes
@@ -67,11 +68,22 @@ them is a `just` recipe.
   too.
 - `just ci-host-setup` and `just ci-host-remove` set up and deregister the CI host's runner
   ([runbooks/ci-host.md](runbooks/ci-host.md)).
+- `just os-images [pattern]` lists, reading only, the names of the public images the cloud offers,
+  one per line and nothing else, those containing the pattern when one is given, so that
+  `EDGE_IMAGE` and `CI_HOST_IMAGE` can be chosen without a console.
+- `just edge-ssh-key` creates the edge routers' SSH key pair at `EDGE_SSH_KEY_FILE`, mode 0600 and
+  without a passphrase, unless a key is there, and says only whether it did.
+  `just edge-check [--edge 1|2]`, `just edge-routes [1|2]` and
+  `just edge-rollout [--replace] [--yes]` check, show and roll out the edge routers
+  ([The edge routers](#the-edge-routers), [runbooks/edge.md](runbooks/edge.md)).
+- `just edge-policy-check` proves the edge routers' routing policy against real BGP speakers, with
+  docker; `just ci` does the same inside its Dagger module ([Routing](#routing)).
 
-Apply `plumbing` before `cluster` and `ci`, as both read the plumbing stack's state. Destroy goes
-the other way round: `ci` by name, before `plumbing`, whose network its port is on, and which the
-recipe refuses to destroy while the `ci` stack holds anything. State objects
-stay in the bucket after a destroy.
+Apply `plumbing` before `cluster`, `ci` and `edge`, as all three read the plumbing stack's state.
+Destroy goes the other way round: `ci` and `edge` by name, before `plumbing`, whose network their
+ports are on, and which the recipe refuses to destroy while the `ci` or the `edge` stack holds
+anything. `just infra-destroy sto2/edge` destroys the edge stack the same way as the ci stack;
+`just infra-destroy` without a stack leaves both. State objects stay in the bucket after a destroy.
 
 ## Before the first plan
 
@@ -143,9 +155,9 @@ address below it, by host number:
 | 1 | the gateway, the router's port | Neutron |
 | 5 | the Kubernetes API's load balancer | the cluster stack |
 | 6 | the CI host ([The CI host](#the-ci-host)) | the ci stack's `host_number` |
-| 7 and 8 | the two edge routers ([Services announced over BGP](#services-announced-over-bgp)) | the plumbing stack's `edge_hosts` |
+| 7 and 8 | the two edge routers ([The edge routers](#the-edge-routers)) | the plumbing stack's `edge_hosts`, built by the edge stack |
 | 10 and up | the control planes | the cluster stack |
-| 20 and up | the workers | the cluster stack |
+| 20 and up | the workers, of whom the edge routers take BGP sessions from 20 to 99 | the cluster stack's `worker_first_host`; the edge stack's `worker_first_host` and `max_workers` |
 | 100 to 200 | the DHCP pool | the plumbing stack |
 
 These collisions are refused when a stack is planned:
@@ -154,13 +166,15 @@ These collisions are refused when a stack is planned:
 - the CI host outside 2 to 9, on 5, or on an edge router (the ci stack, and the cluster stack for
   `ci_host_number`);
 - a node or the API load balancer on an edge router (the cluster stack);
+- a worker in the DHCP pool, or a first worker below host number 20 (the cluster stack);
+- the edge routers' block of workers in the DHCP pool, on an edge router or below host number 20
+  (the edge stack);
 - the default service range on the default node, pod or service subnet (`just infra-check`,
   offline), and a configured one on the node subnet (the plumbing stack) or on the pod or service
   subnet (the cluster stack).
 
-Nothing else is checked. The control planes and the workers keep apart from each other and below
-the DHCP pool by their numbering alone, as long as there are at most ten control planes and eighty
-workers.
+Nothing else is checked. The control planes keep below the workers by their numbering alone, as
+long as there are at most ten of them.
 
 ## The workers' data volumes
 
@@ -192,11 +206,19 @@ output `bgp`:
   or `service_subnet` that overlaps it. Only BGP makes it reachable, through the edge routers.
 - `edge_hosts`, 7 and 8 by default: the host numbers of the edge routers' two addresses on the node
   subnet ([The node subnet](#the-node-subnet)), below the DHCP pool and above the gateway. They are
-  reserved for the edge routers; no stack creates an instance at them yet, and until one does, the
-  workers' BGP sessions stay down. The cluster stack refuses a plan in which a node, the API load
+  reserved for the edge routers, which the edge stack makes there; until it is applied the workers'
+  BGP sessions stay down. The cluster stack refuses a plan in which a node, the API load
   balancer or `ci_host_number` takes one, and the ci stack one in which its `host_number` does.
 - `cluster_asn` and `edge_asn`, 64513 and 64512 by default: the workers' and the edge routers'
   autonomous system numbers, two different private 16-bit numbers (64512 to 65534), for eBGP.
+- `gateway_host`, 1 by default: the host number in the service range of the public Gateway's
+  address, the one address the edge routers forward public traffic to. It is neither the range's
+  network address nor its last, and the plan fails naming the variable otherwise. The output `bgp`
+  carries the address as `gateway_address`, and the cluster stack hands it on in `talman.yaml` as
+  `values.bgp.gatewayAddress`, from which `just cluster-config` fills `GATEWAY_ADDRESS`. The
+  LoadBalancer pool holds the whole range and does not set the address aside: keeping another
+  Service from being given it first is for the change that adds the Gateway, which asks the pool
+  for it by annotation.
 
 The cluster stack hands them on in `talman.yaml` ([below](#the-generated-talmanyaml)) and makes
 the node network carry the range:
@@ -325,6 +347,353 @@ The cluster stack's nodes admit the CI host's fixed address on TCP 50000 (Talos)
 `TF_VAR_ci_host_number` in `.env` or the environment. Without it, the default, the nodes admit
 nothing for it, and the cluster stack plans whether the ci stack exists or not.
 
+## The edge routers
+
+The `edge` stack makes two small Linux VMs on the plumbing stack's node network that publish the
+cluster's Services: the workers open BGP sessions to them and announce every `LoadBalancer`
+Service's address as a /32, and each edge forwards traffic that arrives at its own public address to
+the public Gateway's address, through the workers, and back
+([ADR 0018](adr/0018-own-edge-routers-translate-public-traffic-to-the-gateway.md)). It reads the
+plumbing stack's state and nothing of the cluster stack's, so the cluster can be destroyed and built
+again around it; it is destroyed by name only ([Recipes](#recipes)).
+
+- `<prefix>-edge-1` and `<prefix>-edge-2`, `lab-edge-1` and `lab-edge-2` by default, of the flavor
+  `flavor`, each booting from a volume of `root_volume_size_gb` GB made from the image `EDGE_IMAGE`
+  names. The configuration is written for Debian 13 (trixie), whose FRR is 10.3 and whose nftables
+  is 1.1. The first boot checks the release and fails, on the console and in
+  `/var/log/edge-first-boot.log`, on any other; nothing is refused at plan time. Each edge's port is
+  at its reserved address on the node subnet, from the plumbing stack's output `bgp`. Each has a
+  floating IP of its own from the plumbing stack's external network. A public hostname publishes
+  both, and the sensitive output `addresses` gives them.
+- Both are scheduled into one server group of the policy soft anti-affinity: the cloud keeps them on
+  different hypervisors where it can and still places them where it cannot. A hard policy would
+  refuse to place the replacement of one edge on a host that has room only beside the other, which
+  is when a rebuild is needed. After a build, compare the hosts the two instances are on.
+- Each port keeps port security on and has **no allowed address pair**. The Neutron API reference
+  gives a port's allowed address pairs as the addresses it may send from when port security is on.
+  An edge sends only from its own address, because it translates the source of what it forwards, and
+  receives only for its own address, so nothing is added. Without the source translation it would
+  send from every client's address and receive the answers for them: that takes a pair for every
+  address, which the reference warns bypasses the source restrictions of rules that name a remote
+  group, or port security off, and either removes the port's anti-spoofing.
+
+### Routing
+
+Each edge runs FRR's `bgpd`, which its daemon list turns on, and what FRR's start script starts
+whatever the list says: `watchfrr`, `zebra`, which puts routes in the kernel, `mgmtd` and `staticd`.
+Every other routing daemon is off in the list. Its configuration, `frr.conf`, is rendered from
+`frr.conf.tftpl`, and each statement below is documented for FRR 10.3
+([BGP](https://docs.frrouting.org/en/stable-10.3/bgp.html),
+[prefix lists](https://docs.frrouting.org/en/stable-10.3/filter.html),
+[static routes](https://docs.frrouting.org/en/stable-10.3/static.html),
+[route maps](https://docs.frrouting.org/en/stable-10.3/routemap.html)):
+
+- It runs in the plumbing stack's `edge_asn`, with the edge's own address as router ID. The peer
+  group `workers` has the cluster's AS as its remote AS, and one `bgp listen range` per network of
+  the workers' block names the peer group, so a worker's address that opens a session in the
+  cluster's AS is a dynamic neighbour and no other source is (`bgp listen range`,
+  `neighbor PEER peer-group`; the peer group is declared before the ranges that name it). The
+  workers open the sessions and never listen. `bgp listen limit` is `max_workers`, 80 by default,
+  the most workers the numbering of the cluster stack leaves room for
+  ([The node subnet](#the-node-subnet)); FRR's default is 100.
+- **Who may peer.** The workers' block is the host numbers from `worker_first_host`, 20 by default,
+  for `max_workers`, 20 to 99: where the cluster stack numbers its workers, from its own
+  `worker_first_host`, whose default a test holds equal to the edge stack's, and which one
+  `TF_VAR_worker_first_host` sets for both. Both stacks refuse a value below 20. The stack writes it
+  as the fewest networks that hold exactly those addresses, and refuses at plan time a block that
+  reaches the DHCP pool or holds an edge's address. The node subnet also holds the control planes,
+  the CI host and the other edge, and none of them may open a session: FRR's listen ranges, the
+  nftables input rule for TCP 179 and the security group's rules for TCP 179 each admit the block
+  and nothing else.
+- Inbound, `neighbor workers route-map SERVICES-IN in` applies a route map that permits what the
+  prefix list `SERVICES` matches: `permit <service range> ge 32 le 32`, a /32 inside the range and
+  nothing shorter, then `deny any`. It also sets each accepted path's next hop to the worker that
+  announced it (`set ip next-hop peer-address`), whatever next hop the announcement carries, so a
+  worker can send the edge's traffic for a Service nowhere but to itself. Cilium announces its own
+  address as next hop anyway, so this changes nothing while the workers behave. A route map in each
+  direction is what `bgp ebgp-requires-policy`, on by default, asks of an eBGP session.
+  `neighbor workers maximum-prefix` is the number of addresses of the range. FRR counts the prefixes
+  it accepts (without `force`), and the list lets in no more than the range holds, so the limit is
+  reached only if the list is loosened: it guards against that and tears the session down then. It
+  does not cap what a peer sends and the list denies.
+- Outbound, `neighbor workers route-map NOTHING-OUT out` applies a route map that denies everything,
+  and the configuration has no `network` statement, no `default-originate` and redistributes
+  nothing: an edge advertises nothing. A stack test compares the whole address family block, so a
+  statement added to it fails.
+- `ip route <service range> reject`, installed by `staticd`, makes the whole service range
+  unreachable on the edge. A Service's /32 learned over BGP is more specific and wins. With no
+  route for the Gateway's address, as right after a build before any worker announces it, a
+  translated connection is refused on the edge and does not follow the edge's default route to the
+  cloud's router, toward a private address of the provider's external side.
+- The timers and the graceful restart time are those of the workers' `CiliumBGPPeerConfig`, which
+  `main.tf` reads from `kubernetes/apps/base/kube-system/cilium-bgp/app/bgp-peer.yaml`:
+  `neighbor workers timers <keepalive> <hold>`, `timers connect <retry>`, `bgp graceful-restart` and
+  `bgp graceful-restart restart-time <seconds>`. They are written in the manifest alone, so a change
+  there changes the edges' rendered configuration, which replaces both edges
+  ([Rolling out a change](#rolling-out-a-change)); a stack test compares them with the manifest.
+- `no bgp graceful-restart notification` turns off the notification bit of RFC 8538, which FRR 10.3
+  sets by default. With it negotiated, graceful restart would also start when a session ends on a
+  NOTIFICATION or an expired hold timer, and FRR would keep a dead worker's paths, as stale, for the
+  restart time after its hold time: Cilium's operation guide says a peer "may need hold time +
+  restart time to withdraw routes received from the node", about 129 seconds here, while new
+  connections hashed to it go nowhere. How long the edges keep a worker's paths, by how its sessions
+  end ([RFC 4724](https://www.rfc-editor.org/rfc/rfc4724),
+  [RFC 8538](https://www.rfc-editor.org/rfc/rfc8538),
+  [Cilium's BGP operation guide](https://docs.cilium.io/en/stable/network/bgp-control-plane/bgp-control-plane-operation/)):
+  - **A dead or partitioned worker**, and a hung agent whose datapath still forwards: no keepalive
+    comes, the hold time, 9 seconds, passes, and as the bit is not negotiated, its paths go then. A
+    hung agent's go though its node could still serve; the other workers take its share.
+  - **A Cilium agent that restarts**: Cilium 1.20 stops its BGP server without a NOTIFICATION to a
+    peer that does graceful restart
+    ([manager.go](https://github.com/cilium/cilium/blob/v1.20.4/pkg/bgp/manager/manager.go#L158-L161),
+    [server.go](https://github.com/cilium/cilium/blob/v1.20.4/pkg/bgp/gobgp/server.go#L374-L390)),
+    so the edges keep the worker's paths, stale, until the agent is back and has sent End-of-RIB, or
+    for the restart time, 120 seconds, at most.
+  - **A worker shut down or rebooted gracefully**: its agent stops the same way, so its paths stay
+    stale for up to the restart time, and a shut-down worker's for all of it, with new connections
+    hashed to it failing, unless the node leaves BGP first: taken out of the
+    `CiliumBGPClusterConfig`'s node selector, Cilium sends a Cease, and an edge that has not
+    negotiated the bit withdraws its paths at once (the guide's "Shutting Down a Node"). The
+    selector takes every worker and no recipe takes one out, so a reboot or a stop leaves the
+    window as it is; the restart time in the workers' `CiliumBGPPeerConfig` bounds it.
+- `maximum-paths` is `max_workers`: as many equal-cost paths to one address as there can be workers.
+  The most FRR takes is what its build allows: 128 by its manual, 256 in Debian's package. The
+  kernel setting `net.ipv4.fib_multipath_hash_policy = 1` hashes a flow's layer 4 fields, so every
+  packet of a connection takes one path
+  ([ip-sysctl](https://docs.kernel.org/networking/ip-sysctl.html)). Kernel multipath is not
+  resilient: when the set of next hops changes, some flows are hashed again.
+- There is no session between the two edges. One would give each edge the routes the other learns,
+  so that an edge whose session with a worker is down could still reach the worker through the other
+  edge, at the cost of an iBGP policy to write and test and of paths that loop through both.
+
+The routing policy is proved against real BGP speakers (`just edge-policy-check`, and the `static`
+group of `just ci`). The edge's configuration, as the stack's template renders it for fixture
+values, runs in FRR's own container, FRR's upstream build of 10.3.4, where trixie packages
+10.3-3+deb13u1, the same 10.3 release with Debian's patches, with no capability beyond the runtime's
+default; under `just edge-policy-check` it has no network but its loopback, and under `just ci`'s
+Dagger module it has the engine's default network, which the proof does not use: it binds and dials
+loopback addresses only. Three speakers open sessions to it, each offering a /32 inside the service
+range, a /32 outside it, a /30 inside it, the range itself and a default route. The check asserts
+that the speaker in the cluster's AS at a worker's address is accepted and only its /32 inside the
+range is in the edge's table, that the speaker in another AS and the one of the node subnet outside
+the workers' block have no session, that the edge advertised nothing back, that the speaker holds no
+path learned from the edge (which a `default-originate` would add and no count of advertised routes
+shows), and that both ends' session was established once and never dropped, so the readings are not
+of a session that is reset over and over. The proof reads nothing before it holds: it polls, once a
+second, until every daemon answers (30 seconds at most), the accepted speaker's session is
+established with its five prefixes offered (120), the edge has accepted one (60), and each refused
+speaker has been refused (60 each); a wait that runs out is a FAIL that names it and what it last
+saw, and a daemon that has stopped by then is shown with its own log. The proof runs to its end
+whatever it finds, and when any check fails, the check prints everything the proof printed, in
+`just edge-policy-check` as in `just ci`, whether the proof's container ended well or not. The
+daemons keep the proof's own user, as FRR's own change to its `frr` user needs capabilities a
+container is not given, and write only under one directory the proof makes in `/tmp`, a directory of
+its own per daemon for its configuration, pid file, log and vty socket; the proof checks first that
+each takes a new file, and nothing is written under `/etc/frr`, `/run/frr` or `/var/lib/frr`.
+The daemons run the image's bgpd from a copy in that directory, the same binary byte for byte, so a
+security profile a host attaches to FRR's installed path does not decide where a test instance may
+write. `just edge-policy-check` runs it with no capability, no new privileges and the image's files
+read-only, its `/tmp` letting the copy run, and a failed proof's report starts with the user it ran
+as, its capabilities, its security label and its user namespace, and gives the label each daemon
+ran under and, once, the label of FRR's installed bgpd. Each speaker announces its prefixes with a
+next hop that is not its own address, and the check asserts that the accepted /32's path has the
+speaker's address as next hop instead; and that the edge offers graceful restart without the
+notification bit, as the speaker sees its capabilities. Before any of that, FRR's dry run (`vtysh -C -f`) reads the edge's
+file as rendered, whole, and must accept it, and must refuse a copy with a command FRR does not
+have, so the check is known to catch one. The static route is taken out of the file the proof's BGP
+daemon reads, which has no `zebra` or `staticd` beside it; the stack's tests check it. The speakers
+sit on loopback addresses, which FRR refuses as next hops (martian next hops), so the proof's copy
+of the file also has `bgp allow-martian-nexthop`, and the routing policy alone decides what is
+accepted; the workers' addresses on the node subnet are no martians. The proof does not show the
+routes reaching the kernel, equal-cost paths across several workers, graceful restart across a
+restart or the nftables rules, which the stack's tests compare as text and `nft --check` reads for
+syntax at first boot: `nft` is in neither of the proof's containers, and `unshare` is not permitted
+in either, so no network namespace of its own could hold the rules. The container's FRR takes 64
+equal-cost paths where Debian's takes 256, so the proof renders with 64.
+
+### The data path
+
+Each edge's nftables rules, `nftables.conf` rendered from `nftables.conf.tftpl`, and its kernel
+settings, `sysctl.conf`, are written once at first boot:
+
+- A connection to the edge's own address on a port of `public_ports`, 80 and 443 by default, the
+  same as the cluster stack's `service_ports`, which a test keeps equal, is destination translated
+  to the public Gateway's address and source translated to the edge's own address
+  ([nftables NAT](https://wiki.nftables.org/wiki-nftables/index.php/Performing_Network_Address_Translation_(NAT))).
+  Forwarding is on in the kernel. The forward chain's first rule, ahead of what belongs to a
+  connection, drops every packet of a translated connection toward the Gateway whose route's next
+  hop is not a worker's address; then it admits what belongs to connections it has accepted, and a
+  new translated connection to the Gateway on those ports through a worker; everything else is
+  dropped. So with no worker's route to the Gateway's address, before FRR has learned one, or once
+  FRR stops and zebra takes its routes out of the kernel (it does on exit; the edges run it without
+  `-r`, which would leave them), a new connection is refused and an established one's packets are
+  dropped at the edge, whether or not FRR's reject route is in place, and none of them follows the
+  default route to the cloud's router
+  ([nftables](https://wiki.nftables.org/wiki-nftables/index.php/Matching_routing_information); the
+  kernel takes `rt nexthop` in any hook, the forward hook among them,
+  [nft_rt.c](https://github.com/torvalds/linux/blob/v6.12/net/netfilter/nft_rt.c#L173-L178)).
+  Replies come from the Gateway to the edge's own address, are translated back to the client's, and
+  leave by the default route, the one way to a client, whatever FRR does. Nothing of IPv6 is
+  forwarded: the kernel's IPv6 forwarding stays off, as `sysctl.conf` turns on IPv4's alone, and no
+  rule admits it. `just edge-forward-check` proves this with the rendered rules in network
+  namespaces on a developer's machine; the CI containers refuse the user namespaces it needs, and
+  the stack's tests compare the chain's rules as text.
+- zebra runs without `-r` (FRR's [zebra](https://docs.frrouting.org/en/stable-10.3/zebra.html):
+  "When program terminates, do not flush routes installed by zebra from the kernel"). With it, an
+  FRR that stops would leave its last routes to the workers in the kernel with nothing to withdraw
+  them, and a worker that went meanwhile would keep its share of new connections for as long as
+  FRR is down. Without it, an edge whose FRR stops forwards nothing, `just edge-check` fails it,
+  and a client that retries can reach the other edge.
+- The input chain drops everything addressed to the edge except what belongs to its own connections,
+  loopback, TCP 22, TCP 179 from the workers' block and the ICMP destination unreachable,
+  fragmentation needed, that path MTU discovery needs. IPv6 is dropped but for the ICMPv6 that
+  neighbour discovery and path MTU discovery need.
+- **The source translation is deliberate.** A worker answers a packet to the address it came from,
+  through its default route, the cloud's router, unless that address is on the node subnet. Without
+  the translation the answer to a client would leave by that router and never meet the connection it
+  belongs to. Pods therefore see an edge's address, not the client's; ADR 0018 names the two ways to
+  restore the client's address later and what each costs.
+- ICMP redirects are off, as the edge forwards between hosts of one subnet.
+- **What an edge can reach.** An edge is internet-facing on the public ports and sits on the node
+  subnet, so the nodes' group rule for TCP 6443 from that subnet lets its packets reach every node,
+  as [Services announced over BGP](#services-announced-over-bgp) states. Behind the group, each
+  node's own firewall admits no listener from an edge's address, the Kubernetes API included
+  ([cluster.md](cluster.md#sources)), so an edge reaches the service ports on the workers and
+  nothing else. Beyond that, an edge holds no kubeconfig, token or client certificate, its first
+  boot is given none, and its only inbound path from the internet is the two public ports,
+  forwarded to the Gateway, and SSH from the operator allowlist.
+
+The security group `<prefix>-edge` holds the rules the cloud enforces, and the cloud's default rules
+are deleted. It admits TCP on each public port from each network of `public_allowed_cidrs`, which is
+null by default and then the operator allowlist, so nothing is open to the world until that variable
+is deliberately widened, for instance to `0.0.0.0/0`; TCP 22 from each network of the operator
+allowlist, the same `OPERATOR_CIDRS` or `operator-cidrs.json` the other stacks take, as
+`TF_VAR_ssh_allowed_cidrs`; TCP 179 from each network of the workers' block; ICMP destination
+unreachable with code 4 from anywhere; and all egress. The nftables rules take the public ports and
+SSH by port only: the allowlist and the public networks are in the security group and out of the
+user data, which is kept in state and served by the metadata service. A packet
+is admitted only when both the group and the rules admit it.
+
+### First boot, packages and secrets
+
+The configuration is delivered once, as cloud-init user data, which holds no secret: the routing
+configuration and the firewall rules name the node subnet and the service range, and nothing names
+the operator allowlist, the SSH key or a password. A BGP session password would have to be
+generated and kept where both ends can read it. The cluster's side can hold it as a secret
+(ADR 0005); an edge could only get it from its user data, which is kept in state and served by the
+metadata service, or from a secret store it can reach, which does not exist for it yet. The sessions
+carry none (ADR 0013).
+
+The first boot checks the release, then turns unattended upgrades off: Debian's cloud images install
+`unattended-upgrades`
+([debian-cloud-images](https://salsa.debian.org/cloud-team/debian-cloud-images/-/blob/master/config_space/13/package_config/SYSTEM_BOOT)),
+whose package turns them on by default (its `enable_auto_updates` template defaults to true), and
+they would upgrade FRR and restart it in place; the first boot sets
+`APT::Periodic::Unattended-Upgrade "0"` and disables `apt-daily-upgrade.timer`, and `apt` waits for
+a lock an upgrade already running holds. It installs `frr` and `nftables` from the repositories of
+the image's release, keeps FRR stopped, checks both files as cloud-init wrote them under
+`/etc/edge`, the rules with `nft --check` and FRR's file with FRR's dry run (`vtysh -C -f`), before
+anything of them is installed under `/etc`, then loads the rules, starts FRR, waits until it answers
+and its reject route for the service range is in the kernel, and turns forwarding on last. A file
+either check refuses, or any other failure, fails the first boot, saying why on the console and in
+the log, and leaves forwarding off with its setting removed and FRR stopped and disabled, so the
+edge forwards nothing until it is rebuilt. The release pins the packages' versions only as far as
+the image's repositories do: a rebuild installs whatever the release holds then, so a new edge may
+have newer packages than the one it replaces, and nothing pins them further.
+
+Changing anything the user data renders replaces that edge, as the OpenStack provider creates a
+new instance when its `user_data` changes: an edge is rebuilt, not patched. Both edges render from
+one template, so a change to it replaces both. The image is another matter: the `vm` module ignores
+a change to an instance's boot device, as the Talos nodes need it to, so a new `EDGE_IMAGE`, or a
+newer image under the same name, which the stack's `most_recent` lookup picks, plans no change by
+itself. An edge takes it up only when its instance is replaced: whatever replaces an instance, the
+new one is planned from the configuration alone and boots a new volume made from the image the name
+resolves to then. A changed template replaces the edges anyway; for a new image alone,
+`just edge-rollout --replace` replaces them ([Rolling out a change](#rolling-out-a-change)).
+
+### Rolling out a change
+
+`just infra-apply sto2/edge` refuses a plan that replaces or deletes both edges' instances, saying
+so, as both would be down until the new ones answered, and a plan that replaces or deletes one while
+the other does not pass `just edge-check`, which it runs first, naming the rollout instead.
+`just edge-rollout` rolls such a change out. It plans and summarises the stack, and once the stack's
+name is typed back (`--yes`: without asking) it checks that edge 2 passes `just edge-check`, plans
+and applies edge 1 and its floating IP association alone (`-target`), records the new instance's
+SSH host keys, and waits until `just edge-check --edge 1` passes, trying every
+`EDGE_ROLLOUT_INTERVAL` seconds, 15 by default, for `EDGE_ROLLOUT_WAIT`, 900 by default. Then it
+does the same for edge 2 and plans the whole stack once more. An edge whose check does not pass in
+time stops the rollout there, and the edge after it is not touched; an edge is never replaced while
+the other fails its check. As each edge's plan holds that edge's own resources alone, a change to
+another resource, such as a rule of the security group, is left for `just infra-apply sto2/edge`,
+which the last plan's summary is printed for.
+
+`just edge-rollout --replace` does the same, and each edge's plan also replaces that edge's
+instance, `-replace=module.edge["N"].openstack_compute_instance_v2.this`, whether the configuration
+changed or not: the way a new image reaches the edges. Replacing the instance replaces its boot
+volume, which Nova makes from the image and deletes with the instance (`delete_on_termination`). The
+port is not replaced: it holds the fixed address and the floating IP's association, and the new
+instance is attached to it, so the edge comes back at the same addresses, behind the same security
+group, and the workers' sessions and the published address need nothing. A first boot on a new
+volume is a clean one: cloud-init runs the user data again for the new instance. `--edge N` replaces
+edge N alone, after the same check of the other edge; with `--other-down` it goes on when the other
+edge does not pass either, once `replace edge N with edge M down` is typed back, `--yes` or not, as
+with both down nothing serves anyway and replacing one is the way back
+([runbooks/edge.md](runbooks/edge.md#replacing-one-edge)).
+
+A new instance, a replacement or one created again for an instance gone from the cloud, has SSH host
+keys of its own at the floating address the old one had, and the connection checks them strictly
+against the recorded ones. The recorded keys of an edge whose instance a plan creates are therefore
+dropped before the apply, by the rollout and by `just infra-apply sto2/edge` alike (`ssh-keygen -R`
+on the edges' `known_hosts` file), and `just infra-destroy sto2/edge` drops both edges' keys. The
+new ones are recorded the way the first build's were: their fingerprints are shown and `yes` is
+typed. The rollout does it once the new instance answers on SSH, before the edge's check, and stops
+at once when the keys are not accepted; after `just infra-apply sto2/edge` the next
+`just edge-check` does. An edge whose part of the plan does not create its instance keeps its
+recorded keys.
+
+### Checking and reading
+
+`just edge-check` is read-only. Over SSH, with the edges' key and host keys recorded as the CI
+host's are, it prints pass, FAIL or skip for each edge:
+
+- FRR is running.
+- As many sessions are established as the cluster's `talman.yaml` lists workers, and which worker
+  has none otherwise, by each worker's own address, which the cluster stack writes there.
+- The table holds only /32s inside the service range, the range from the same file.
+- Each route has as many next hops as sessions, or fewer, which is a skip, as a Service that is
+  local-only is announced by some workers only.
+- FRR is configured with its reject route for the service range, for the range of the same file
+  when there is one, and the kernel has it.
+- The nftables tables are loaded, and the forward chain sends a translated connection's packets
+  toward the Gateway, new or established, only through a worker: its first rule drops the rest
+  ahead of what belongs to a connection, and both its guarded rules are for the cluster's Gateway,
+  hold every worker's address of `talman.yaml` and not the edge's default route's next hop.
+- The kernel forwards, which is a FAIL when it forwards without the rules.
+- Unattended upgrades are off.
+
+A worker that is down fails the sessions line on both edges, so no rollout gets past its first
+check until the worker is back or the cluster stack no longer has it; the line counts every worker
+of `talman.yaml`, as it cannot tell a worker that is away on purpose from one that is broken.
+Without `talman.yaml` the checks that need it are skipped. It prints no address. `just edge-routes`
+prints an edge's sessions and routes as FRR shows them, with addresses, for someone learning the
+protocol: it refuses unless its standard output is a terminal and `CI` and `GITHUB_ACTIONS` are
+unset, so the addresses never reach a CI log.
+
+### SSH and host keys
+
+SSH admits the operator allowlist only, by key only, as the image's default user (`EDGE_SSH_USER`,
+`debian` by default). `just edge-ssh-key` creates the key pair at `EDGE_SSH_KEY_FILE`, and the stack
+reads the public half from the file beside it. An edge's host key is recorded on first contact, in
+`~/.local/state/k8s-gitops/edge.known_hosts`, after the fingerprints it offers are shown and `yes`
+is typed, as for the CI host. A key pair reaches an instance only when it is created, so a new pair
+at `EDGE_SSH_KEY_FILE` replaces the stack's key pair and no instance, and the running edges admit
+the old key alone until `just edge-rollout --replace` replaces them
+([runbooks/edge.md](runbooks/edge.md#replacing-one-edge)).
+
+Outputs, all sensitive but `names`: `addresses` (the floating addresses), `private_addresses`,
+`instances`, `config` (each edge's rendered FRR configuration, nftables rules and kernel settings),
+`user_data`, `server_group`, `security_group` and `floating_ips`.
+
 ## The generated talman.yaml
 
 The cluster stack renders `talos/talman.yaml.tftpl` from its own values into the sensitive output
@@ -417,6 +786,7 @@ docker of `vector-check` has only the scan.
 | `SOPS_AGE_KEY`, `SOPS_AGE_KEY_CMD` | `talman`, `sops` |
 | `SOPS_AGE_KEY_FILE` | `talman`, `sops`, `age` |
 | `FLUX_AGE_KEY`, `FLUX_AGE_KEY_FILE` | none; `flux_sops` gives sops the one it uses |
+| `EDGE_SSH_KEY_FILE` | none; ssh is given the key by its path on the command line |
 | `OPERATOR_CIDRS` | none; it reaches tofu as `TF_VAR_api_allowed_cidrs` and `TF_VAR_ssh_allowed_cidrs` |
 
 - `TF_STATE_BUCKET`: the bucket that holds state.
@@ -431,24 +801,36 @@ docker of `vector-check` has only the scan.
   application-credential variables: OpenStack authentication, which tofu's provider and the
   `openstack` client read themselves. `os-smoke` and `infra-s3-key` need only this.
 - `OPERATOR_CIDRS`, or else `operator-cidrs.json` at the repository root (gitignored): the
-  operator allowlist of the cluster stack's APIs and the CI host's SSH, a JSON list of IPv4 CIDRs.
+  operator allowlist of the cluster stack's APIs and the SSH of the CI host and the edge routers, a
+  JSON list of IPv4 CIDRs.
   A network is no wider than `/16`, 65,536 addresses, the widest an operator's own allowlist
   reasonably holds, and is written by its own address, as `192.0.2.0/24` and not `192.0.2.5/24`.
   IPv6 networks are refused, as the stacks' rules and the load balancer's listener take IPv4 only,
   so no IPv6 prefix limit applies. An entry that breaks a rule is refused, named by its position in
   the list and the rule, not by its value. The `api_allowed_cidrs` variable of the cluster stack and
-  the `ssh_allowed_cidrs` variable of the ci stack hold the same rule, so a `tofu` run outside the
-  recipes cannot open the APIs or SSH wider either. The list reaches tofu only in its environment,
-  as `TF_VAR_api_allowed_cidrs` for the cluster stack and `TF_VAR_ssh_allowed_cidrs` for the ci
-  stack, as given: nothing is added to it, such as the address of the machine the recipes run on.
+  the `ssh_allowed_cidrs` variable of the ci and edge stacks hold the same rule, so a `tofu` run
+  outside the recipes cannot open the APIs or SSH wider either. The list reaches tofu only in its
+  environment, as `TF_VAR_api_allowed_cidrs` for the cluster stack and `TF_VAR_ssh_allowed_cidrs`
+  for the ci and edge stacks, as given: nothing is added to it, such as the address of the machine
+  the recipes run on.
 - `CI_HOST_IMAGE` and `CI_HOST_SSH_PUBLIC_KEY`: the ci stack's image name and the operator's SSH
   public key, which reach tofu as `TF_VAR_image_name` and `TF_VAR_ssh_public_key`; only the ci stack
   needs them. `CI_HOST_SSH_USER`: the image's default user, whom `just ci-host-setup` and
   `just ci-host-remove` log in as.
 - `TF_VAR_ci_host_number`: the cluster stack's `ci_host_number`, set once the CI host exists
   ([The CI host](#the-ci-host)).
+- `EDGE_IMAGE`: the edge stack's image name, a Debian 13 cloud image, which reaches tofu as
+  `TF_VAR_edge_image_name`; `just os-images debian` lists the names. `EDGE_SSH_KEY_FILE`: the
+  absolute path of the edge routers' private SSH key, whose public half beside it, with `.pub`
+  added, reaches tofu as `TF_VAR_edge_ssh_public_key`; `just edge-ssh-key` creates both.
+  `EDGE_SSH_USER`: the image's default user, `debian` when unset. `TF_VAR_public_allowed_cidrs`: the
+  networks that may reach the edges' public ports, a JSON list of IPv4 CIDRs, unset for the operator
+  allowlist. `EDGE_ROLLOUT_WAIT` and `EDGE_ROLLOUT_INTERVAL`: how long `just edge-rollout` waits for
+  an edge to pass its check, 900 seconds when unset, and how often it tries, 15.
 - `TF_VAR_security_group_rules`: the cluster stack's `security_group_rules`, `full` unless set to
   `reduced` ([The nodes' security group](#the-nodes-security-group)).
+- `TF_VAR_worker_first_host`: the host number of the first worker, 20 when unset, for the cluster
+  stack and the edge stack alike ([The node subnet](#the-node-subnet)).
 - `CI`: when set, tofu's errors go to a file instead of the output; see below.
 
 ## State

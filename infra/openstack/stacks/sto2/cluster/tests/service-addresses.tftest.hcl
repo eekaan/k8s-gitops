@@ -40,10 +40,11 @@ override_data {
         schematic_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
       }
       bgp = {
-        cluster_asn    = 64496
-        edge_asn       = 64497
-        edge_addresses = ["192.0.2.7", "192.0.2.8"]
-        service_range  = "203.0.113.16/28"
+        cluster_asn     = 64496
+        edge_asn        = 64497
+        edge_addresses  = ["192.0.2.7", "192.0.2.8"]
+        service_range   = "203.0.113.16/28"
+        gateway_address = "203.0.113.21"
       }
     }
   }
@@ -78,11 +79,12 @@ run "the_edge_addresses_and_the_service_range_overlap_nothing" {
   # talman.yaml carries the numbers on to cluster-config, from which the Cilium objects take them.
   assert {
     condition = yamldecode(output.talman_yaml).values.serviceRange == var.range && yamldecode(output.talman_yaml).values.bgp == {
-      clusterASN    = 64496
-      edgeASN       = 64497
-      edgeAddresses = var.edges
+      clusterASN     = 64496
+      edgeASN        = 64497
+      edgeAddresses  = var.edges
+      gatewayAddress = "203.0.113.21"
     }
-    error_message = "talman.yaml must carry the service range, both AS numbers and both edge addresses as the plumbing stack's state gives them."
+    error_message = "talman.yaml must carry the service range, both AS numbers, both edge addresses and the Gateway's address as the plumbing stack's state gives them."
   }
 
   assert {
@@ -157,10 +159,11 @@ run "_an_edge_address_on_a_node_is_rejected" {
           schematic_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         }
         bgp = {
-          cluster_asn    = 64496
-          edge_asn       = 64497
-          edge_addresses = ["192.0.2.7", "192.0.2.20"]
-          service_range  = "203.0.113.16/28"
+          cluster_asn     = 64496
+          edge_asn        = 64497
+          edge_addresses  = ["192.0.2.7", "192.0.2.20"]
+          service_range   = "203.0.113.16/28"
+          gateway_address = "203.0.113.21"
         }
       }
     }
@@ -191,10 +194,11 @@ run "_an_edge_address_on_the_api_load_balancer_is_rejected" {
           schematic_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         }
         bgp = {
-          cluster_asn    = 64496
-          edge_asn       = 64497
-          edge_addresses = ["192.0.2.5", "192.0.2.8"]
-          service_range  = "203.0.113.16/28"
+          cluster_asn     = 64496
+          edge_asn        = 64497
+          edge_addresses  = ["192.0.2.5", "192.0.2.8"]
+          service_range   = "203.0.113.16/28"
+          gateway_address = "203.0.113.21"
         }
       }
     }

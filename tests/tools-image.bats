@@ -526,15 +526,15 @@ verdicts() {
   [ "$(printf '%s\n' "${keys[@]}" | sort -u | wc -l)" -eq 8 ]
 
   # Nothing else does: another line of versions.yaml, the recorded image and its key among them, the
-  # justfile, the images of the checks that run in images of their own, Renovate's and Vector's,
-  # among it, the docs, the comments around the inputs, or a new file.
+  # justfile, the images of the checks that run in images of their own, Renovate's, Vector's and
+  # FRR's, among it, the docs, the comments around the inputs, or a new file.
   rm -rf "$WORK"
   cp -R "$pristine" "$WORK"
   sed -i -E 's/^talos: .*/talos: v0.0.1/' "$WORK/versions.yaml"
   record "$(printf 'other inputs' | sha256sum | cut -d' ' -f1)" "$IMAGE@$DIGEST"
   sed -i '1a # a comment that is not an input' "$WORK/versions.yaml"
-  sed -i -E "s/^((renovate|vector)_image := \"[^@]+@sha256:)[0-9a-f]{64}\"$/\\1$(printf 'other image' | sha256sum | cut -d' ' -f1)\"/" "$WORK/justfile"
-  [ "$(grep -c "$(printf 'other image' | sha256sum | cut -d' ' -f1)" "$WORK/justfile")" -eq 2 ]
+  sed -i -E "s/^((renovate|vector|frr)_image := \"[^@]+@sha256:)[0-9a-f]{64}\"$/\\1$(printf 'other image' | sha256sum | cut -d' ' -f1)\"/" "$WORK/justfile"
+  [ "$(grep -c "$(printf 'other image' | sha256sum | cut -d' ' -f1)" "$WORK/justfile")" -eq 3 ]
   printf '\n# a comment\n' >> "$WORK/justfile"
   printf '\nmore words\n' >> "$WORK/README.md"
   printf 'new\n' > "$WORK/new-file"

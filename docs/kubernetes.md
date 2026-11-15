@@ -472,8 +472,14 @@ restarts every agent, node by node, and the operator.
 - **What is advertised.** The `CiliumBGPAdvertisement` the peer configuration selects advertises
   the `LoadBalancer` address of each labelled Service, as a /32, and nothing else: no pod range and
   no cluster IP.
-- **Before the edge routers exist** the sessions stay down: a labelled Service gets an address, but
-  nothing outside the cluster reaches it.
+- **Without the edge routers** (the `edge` stack not applied, [infrastructure.md](infrastructure.md#the-edge-routers))
+  the sessions stay down: a labelled Service gets an address, but nothing outside the cluster
+  reaches it.
+- **The Gateway's address.** The edge routers forward public traffic to one address of the service
+  range, `GATEWAY_ADDRESS` in `cluster-config`, a host the plumbing stack picks. Nothing in the tree
+  uses it yet: the public Gateway is to ask the pool for it with the `lbipam.cilium.io/ips`
+  annotation. The pool does not set it aside, so any other labelled Service may be given it first;
+  keeping that from happening is for the change that adds the Gateway.
 - **`externalTrafficPolicy`.** With `Cluster`, the default, every worker announces every labelled
   address, the edge routers spread connections over all of them, and a worker forwards each to an
   endpoint on any node, translating the source to its own address when the endpoint is elsewhere.
@@ -1940,8 +1946,10 @@ starts to use is listed in the example and given its source in `fill_cluster_con
   workers' and the edge routers' AS numbers.
 - `BGP_EDGE_ADDRESS_1` and `BGP_EDGE_ADDRESS_2`: the two addresses of `values.bgp.edgeAddresses`
   there, the edge routers'.
+- `GATEWAY_ADDRESS`: `values.bgp.gatewayAddress` there, the public Gateway's address in the service
+  range, which the edge routers forward public traffic to.
 
-The cluster stack renders the last five from the plumbing stack's numbers for BGP
+The cluster stack renders the last six from the plumbing stack's numbers for BGP
 ([infrastructure.md](infrastructure.md#services-announced-over-bgp)).
 
 `cluster-secrets` is decrypted from `clusters/<cluster>/secrets/cluster-secrets.sops.yaml` by sops,

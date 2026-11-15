@@ -37,10 +37,11 @@ override_data {
         schematic_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
       }
       bgp = {
-        cluster_asn    = 64496
-        edge_asn       = 64497
-        edge_addresses = ["192.0.2.7", "192.0.2.8"]
-        service_range  = "203.0.113.16/28"
+        cluster_asn     = 64496
+        edge_asn        = 64497
+        edge_addresses  = ["192.0.2.7", "192.0.2.8"]
+        service_range   = "203.0.113.16/28"
+        gateway_address = "203.0.113.21"
       }
     }
   }
@@ -613,4 +614,30 @@ run "_an_unknown_set_of_security_group_rules_is_rejected" {
   }
 
   expect_failures = [var.security_group_rules]
+}
+
+# The workers are numbered from worker_first_host, 20 by default, one host number each, below the
+# node subnet's DHCP pool, which starts at host number 100 here: an 81st worker would take one of
+# the pool's addresses, which Neutron hands to other ports. The edge stack takes BGP sessions from
+# the same block.
+run "_a_worker_count_that_reaches_the_dhcp_pool_is_rejected" {
+  command = plan
+
+  variables {
+    worker_count = 81
+  }
+
+  expect_failures = [var.worker_count]
+}
+
+# Host numbers below 20 hold the gateway, the load balancer, the CI host, the edge routers and the
+# control planes.
+run "_a_first_worker_host_below_20_is_rejected" {
+  command = plan
+
+  variables {
+    worker_first_host = 19
+  }
+
+  expect_failures = [var.worker_first_host]
 }

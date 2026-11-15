@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Writes what the real-speaker proof of the edge routers' routing policy runs, into DIR: edge.conf,
+# the FRR configuration the edge stack's template renders from tests/fixtures/edge-policy, and the
+# proof's script and speaker template beside it. Needs tofu only, no credentials, no network.
+# Usage: scripts/edge-policy-render DIR
+set -euo pipefail
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+if (($# != 1)); then
+  echo "usage: edge-policy-render DIR" >&2
+  exit 2
+fi
+dir=$1
+mkdir -p "$dir"
+encoded=$(tofu -chdir="$root/tests/fixtures/edge-policy" console -no-color <<< 'base64encode(local.frr_conf)')
+base64 -d <<< "${encoded//\"/}" > "$dir/edge.conf"
+cp "$root/tests/fixtures/edge-policy/proof.sh" "$root/tests/fixtures/edge-policy/speaker.conf.in" "$dir/"

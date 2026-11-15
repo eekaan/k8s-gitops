@@ -1,0 +1,53 @@
+frr defaults traditional
+hostname ${hostname}
+log syslog informational
+service integrated-vtysh-config
+!
+! The workers open the sessions and never listen, so the edge takes dynamic neighbours: a worker's
+! address that opens a session in the cluster's AS joins the one peer group, and no other address
+! does. The peer group is declared before the listen ranges that name it. Graceful restart is on without the notification
+! bit (RFC 8538), which FRR sets by default: a session that ends on a NOTIFICATION or an expired hold
+! timer, as a dead worker's does, then withdraws the worker's paths at once instead of keeping them
+! for the restart time.
+router bgp ${edge_asn}
+ bgp router-id ${router_id}
+ no bgp default ipv4-unicast
+ bgp graceful-restart
+ bgp graceful-restart restart-time ${restart_time}
+ no bgp graceful-restart notification
+ neighbor workers peer-group
+ neighbor workers remote-as ${cluster_asn}
+ bgp listen limit ${max_workers}
+%{ for block in worker_blocks ~}
+ bgp listen range ${block} peer-group workers
+%{ endfor ~}
+ neighbor workers timers ${keepalive} ${hold}
+ neighbor workers timers connect ${connect}
+ !
+ address-family ipv4 unicast
+  maximum-paths ${max_workers}
+  neighbor workers activate
+  neighbor workers maximum-prefix ${max_prefix}
+  neighbor workers route-map SERVICES-IN in
+  neighbor workers route-map NOTHING-OUT out
+ exit-address-family
+exit
+!
+! Only a host route inside the service range is accepted; everything else is denied. Its next hop
+! is the worker that announced it, whatever next hop the announcement carries.
+ip prefix-list SERVICES seq 10 permit ${service_range} ge 32 le 32
+ip prefix-list SERVICES seq 20 deny any
+!
+route-map SERVICES-IN permit 10
+ match ip address prefix-list SERVICES
+ set ip next-hop peer-address
+exit
+!
+! Nothing is announced to the workers.
+route-map NOTHING-OUT deny 10
+exit
+!
+! The service range is unreachable on the edge itself. A Service's /32, learned over BGP, is more
+! specific and wins; with none for the Gateway's address, a translated connection is refused here
+! and does not follow the default route to the cloud's router, toward a private address.
+ip route ${service_range} reject
