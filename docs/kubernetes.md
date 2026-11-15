@@ -107,11 +107,11 @@ by what a rule needs:
   every pull request and every push to `main`, and not in the publish run.
 
 That split is the design, and its cost is this: a tree with a misspelt field or an untagged image
-fails every pull request's `static` group, but the publish run does not refuse it again. The ruleset
-does not require a branch to be up to date with `main` before it merges (`strict` is off), so two
-pull requests that pass apart can still merge into such a tree, and the run that publishes it
-passes. The control is the next run of the validation: the `static` group of that push to `main`,
-and of every pull request after it, fails, naming the file, until a pull request fixes the tree.
+fails every pull request's `static` group, but the publish run does not refuse it again. Where the
+ruleset does not require a branch to be up to date with `main` before it merges, two pull requests
+that pass apart can still merge into such a tree, and the run that publishes it passes. The control
+is the next run of the validation: the `static` group of that push to `main`, and of every pull
+request after it, fails, naming the file, until a pull request fixes the tree.
 
 On what Flux builds:
 
@@ -128,18 +128,24 @@ On what Flux builds:
   directory, is validated by kubeconform with unknown fields refused, against the first schema
   that has its kind: Flux's for the Flux release pinned in `mise.toml`, one made from a
   CustomResourceDefinition the render holds, or Kubernetes' for the Kubernetes version in
-  `versions.yaml`. A misspelt field fails, naming the file, the object and the field. A
-  definition's schema is its version's `openAPIV3Schema`, made as strict as Kubernetes' own:
-  wherever it lists the fields of an object, it refuses any other, unless that object keeps
-  unknown fields (`x-kubernetes-preserve-unknown-fields`) or says what other fields may be; at the
+  `versions.yaml`. The HelmReleases of an application a cluster enables are validated as the
+  render builds them, with the patches the root gives each child, the release defaults among them;
+  those of an application no cluster enables, as its own `ks.yaml` builds them. A misspelt field
+  fails, naming the file, the object and the field. A definition's schema is its version's
+  `openAPIV3Schema`, made as strict as Kubernetes' own: wherever it lists the fields of an object,
+  it refuses any other, unless that object keeps unknown fields
+  (`x-kubernetes-preserve-unknown-fields`) or says what other fields may be; a field the
+  definition defaults is not required, as the API server fills it in before it validates; at the
   top it also lists `apiVersion`, `kind` and `metadata`, which the API server adds to every
-  definition; OpenAPI's `nullable` becomes JSON Schema's null type. Two different definitions of
-  one kind and version in the render fail the check, and neither is used. Objects of a kind that
-  no schema describes, those whose definition is not in the render (one an operator creates at run
-  time, as Cilium's does, or one applied from a source outside the tree, which the render does not
-  fetch), are counted: the check prints each kind with the number of objects it could not validate
-  (`no schema for GatewayClass (gateway.networking.k8s.io/v1): 1 object`), so a pass never
-  silently means a skip. A kind of a group Kubernetes serves itself (the core group, `apps`,
+  definition; OpenAPI's `nullable` becomes JSON Schema's null type. Each schema made is compiled
+  once, by kubeconform on an object of its kind: one that does not compile fails the check, naming
+  the definition, as kubeconform would otherwise take it for no schema. Two different definitions
+  of one kind and version in the render fail the check, and neither is used. Objects of a kind
+  that no schema describes, those whose definition is not in the render (one an operator creates
+  at run time, as Cilium's does, or one applied from a source outside the tree, which the render
+  does not fetch), are counted: the check prints each kind with the number of objects it could not
+  validate (`no schema for GatewayClass (gateway.networking.k8s.io/v1): 1 object`), so a pass
+  never silently means a skip. A kind of a group Kubernetes serves itself (the core group, `apps`,
   `batch`, `policy`, `autoscaling`, and the `*.k8s.io` groups `rbac.authorization`, `networking`,
   `storage`, `admissionregistration`, `apiextensions`, `scheduling`, `node`, `coordination`,
   `certificates`, `discovery`, `events`, `apiregistration`, `flowcontrol.apiserver`, `resource`,
@@ -163,25 +169,39 @@ On what Flux builds:
   kubeconform run with none of the secrets of the caller's environment (`scripts/lib/tools.sh`).
   `KUBERNETES_VALIDATE_SCHEMAS`, a directory with `kubernetes/<version>-standalone-strict/` and
   `flux/`, replaces both sources, as the tests do with their fixtures.
-- **Images** (`kubernetes-validate`). Every container image of a pod spec, wherever an object
-  holds one, and every image an object names in its own `spec.image`, as Prometheus and
-  Alertmanager name the one their operator runs, in what `scripts/render` writes, which builds
-  each application as the root patches it, the Helm hooks of the enabled releases included, has a
-  tag other than `latest` or a digest. A mutable or missing tag is pulled anew at every upgrade,
-  and a failed pull in a Helm test fails the upgrade, which the default remediation rolls back. A
-  test hook the release does not run (`test.enable` unset or false, or the test excluded by name
-  in `test.filters`) is not pulled and is left out; a hook that is no test runs whatever the
-  release's tests do. The root's defaults set `test.enable: true` on every release and overwrite a
-  release's own value, so a release that must not run a test excludes it by name, as
-  `kubelet-csr-approver` does with its chart's `test-connection`. An exception is one line of
-  `.image-allowlist`: the application, the image as rendered, and the reason, which the check
-  requires.
+- **Images** (`kubernetes-validate`). In what `scripts/render` writes, which builds each
+  application as the root patches it, the Helm hooks of the enabled releases included, every image
+  of a container, init container or ephemeral container of a pod spec, wherever an object holds
+  one, and every image an object names in its own `spec.image`, as Prometheus and Alertmanager
+  name the one their operator runs, has a tag other than `latest` or a digest: `sha256` and 64
+  hexadecimal digits, as a reference with any other digest pins nothing. A mutable or missing tag
+  is pulled anew at every upgrade, and a failed pull in a Helm test fails the upgrade, which the
+  default remediation rolls back. A test hook the release does not run (`test.enable` unset or
+  false, or the test excluded by name in `test.filters`) is not pulled and is left out; a hook
+  that is no test runs whatever the release's tests do. The root's defaults set
+  `test.enable: true` on every release and overwrite a release's own value, so a release that must
+  not run a test excludes it by name, as `kubelet-csr-approver` does with its chart's `test-connection`. An
+  exception is one line of `.image-allowlist`: the application, the image as rendered, and the
+  reason, which the check requires. Images an object names anywhere else are not read, and their
+  pins are Renovate's or a change by hand to keep: the image list of the Piraeus operator's
+  ConfigMap, Envoy Gateway's configuration ConfigMap, the Grafana resource's `spec.version` and
+  the FluxInstance's `spec.distribution`.
 
 `kubernetes-validate` runs the render once, so it pulls the charts as `just render-check` does, and
 the `static` group runs both, each pulling them. Sharing them would take a directory that outlives
 one recipe: `just` has none that lasts exactly one run of the group, and a cache kept beyond a run,
 on the CI host's persistent engine, would be one a pull request's code could write for the runs
 after it, so neither keeps one. `RENDER_CHART_CACHE`, set by hand, serves both.
+
+What the tree and the charts hold is data to the validation, a chart's definitions included, which a
+pull request that bumps a chart's version does not show. A group, version or kind reaches a path or
+a schema location only once it has the shape the API server requires of it (a group a DNS subdomain,
+a version a DNS-1035 label, a kind a letter followed by letters and digits); a definition or an
+object without that shape is refused, naming its file, and nothing is made of it. Every record the
+validation reads from a tool's output has each field cleaned of control characters, so no value
+starts another field or record, and an index in it is checked to be a number before it is used.
+`kubernetes-check` hands its builds on as records ended by a NUL byte, which no path or label holds,
+into an empty directory it refuses otherwise.
 
 ## Every child Kustomization is in flux-system
 
@@ -274,10 +294,13 @@ does not define itself.
   `NODE_CIDR` becomes a value the approver cannot parse, so it stops rather than read an empty
   list as every address. Nothing in this repository makes node names resolvable in the cluster's
   DNS, so the approver does not look them up.
-- `metrics-server` serves resource metrics. It verifies each kubelet's serving certificate
-  against the cluster CA, and starts only once `kubelet-csr-approver` is ready, which it names in
+- `metrics-server` serves resource metrics. It verifies each kubelet's serving certificate against
+  the cluster CA, and starts only once `kubelet-csr-approver` is ready, which it names in
   `dependsOn`. Its own `/metrics` is served without authorization, as its chart's ServiceMonitor
-  carries no credential.
+  carries no credential. Its `ks.yaml` sets `wait` and the long timeout: on a new cluster its pods
+  turn ready only once the approver has signed each kubelet's serving certificate, which can take
+  most of the 10m the release defaults give the install, and with the default 3m the Kustomization
+  would report its health check failed and retry every minute until the release is Ready.
 - `spegel` shares images between nodes, serving the image layers containerd keeps on each node,
   which every node's machine configuration has it keep;
   [cluster.md](cluster.md#image-layers-for-spegel) says which images that is, and how a change to
@@ -741,9 +764,15 @@ with host paths.
   `LinstorSatelliteConfiguration`s, the StorageClasses and the VolumeSnapshotClass. It names
   `piraeus-operator` and `snapshot-controller` in `dependsOn`, as the operator's webhooks validate
   its objects and every StorageClass of LINSTOR's driver, and the VolumeSnapshotClass needs the
-  snapshot definitions ([Resource definitions](#resource-definitions)). Its `ks.yaml` sets `wait`,
-  so it is Ready once the storage cluster and its satellite configurations are healthy, which is
-  what the applications that name it in `dependsOn` wait for.
+  snapshot definitions ([Resource definitions](#resource-definitions)). Its `ks.yaml` sets `wait`
+  and health check expressions, as the operator gives these kinds no Ready condition and no
+  `status.observedGeneration`, so kstatus alone would count them Current at once: it is Ready once
+  what it applies exists, the operator reports the `LinstorCluster` `Available`, its controller
+  answering, and every `LinstorSatelliteConfiguration` `Applied` to the satellites it selects,
+  each at the generation the object holds. That is what the applications that name it in
+  `dependsOn` wait for. It does not wait for every satellite to run, so a node down does not hold
+  them back; a satellite that never starts shows as the storage cluster's `Configured` condition,
+  which the check leaves out, and in the satellite counts of its status.
 
 ### What runs
 

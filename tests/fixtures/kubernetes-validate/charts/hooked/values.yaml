@@ -10,3 +10,9 @@ podTestImage: ""
 initImage: ""
 # The image a Widget names in its own spec.image; empty renders none.
 widgetImage: ""
+# A definition the chart renders of the group, kind and version given; empty renders none.
+definitionGroup: ""
+definitionKind: ""
+definitionVersion: ""
+# Whether the chart renders a definition whose schema does not compile.
+brokenDefinition: false

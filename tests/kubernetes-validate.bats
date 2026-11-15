@@ -165,6 +165,20 @@ EOF
   [ "$status" -ne 0 ]
   refused_line kubernetes/apps/base/demo/hello/app/widgets.yaml "Widget second" size
   yq -i 'select(.metadata.name == "second") |= .spec.size = 1' "$TREE/$dir/widgets.yaml"
+  # What the API server fills in or allows passes: a required field the definition defaults, null
+  # where it allows null, and any field under one that keeps unknown fields; a field the definition
+  # types under it is still held to its type.
+  local spec
+  for spec in '{}' '{"size": 1, "note": null}' '{"size": 1, "extra": {"anything": {"at": "all"}}}'; do
+    yq -i "select(.metadata.name == \"second\") |= .spec = $spec" "$TREE/$dir/widgets.yaml"
+    validate
+    [ "$status" -eq 0 ]
+  done
+  yq -i 'select(.metadata.name == "second") |= .spec = {"size": 1, "extra": {"known": 5}}' "$TREE/$dir/widgets.yaml"
+  validate
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/hello/app/widgets.yaml "Widget second" known
+  yq -i 'select(.metadata.name == "second") |= .spec = {"size": 1}' "$TREE/$dir/widgets.yaml"
 
   # A kind of Kubernetes' own or Flux's that the schemas lack is an error, never a skip: the schemas
   # would be out of date, or the apiVersion wrong.
@@ -257,6 +271,11 @@ initImage: busybox:1.37.0'
   hooked_app "testImage: busybox@$digest"
   validate
   [ "$status" -eq 0 ]
+  # A digest is sha256 and 64 hexadecimal digits, or it pins nothing.
+  hooked_app 'testImage: busybox@sha256:0123456789abcdef'
+  validate
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/hooked/ks.yaml "Job hooked-test-connection" "busybox@sha256:0123456789abcdef"
 
   # A test the release does not run pulls nothing: tests off, or this one excluded by name.
   hooked_app 'testImage: busybox'
@@ -432,4 +451,101 @@ EOF
   run env FAIL_ON='def strict' PATH="$shims:$PATH" "$VALIDATE" "$TREE"
   echo "$output"
   fails_naming CustomResourceDefinition "no schema was made"
+}
+
+@test "an image that holds a '|' is read whole, and an exception for another image does not cover it" {
+  put .image-allowlist <<'EOF'
+hooked busybox  # the fixture's probe, pulled from a registry the fixture controls
+EOF
+  hooked_app 'testImage: busybox|latest'
+  validate
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/hooked/ks.yaml "Job hooked-test-connection" "busybox|latest"
+}
+
+@test "a definition whose group, kind or version the API server would refuse is refused, and nothing is written outside the check's own directory" {
+  # The check's scratch directory is four levels under the test's own, where a sentinel directory
+  # holds one file a definition's path could overwrite.
+  local sentinel="$BATS_TEST_TMPDIR/sentinel" scratch="$BATS_TEST_TMPDIR/scratch/a" value
+  mkdir -p "$sentinel" "$scratch"
+  echo '{}' >"$sentinel/settings.json"
+  for value in 'definitionGroup: ../../../../sentinel/escaped' \
+    $'definitionGroup: example.invalid\ndefinitionVersion: v1/../../../../../../sentinel/settings' \
+    $'definitionGroup: example.invalid\ndefinitionKind: ../Escape'; do
+    hooked_app "$value"
+    run env TMPDIR="$scratch" "$VALIDATE" "$TREE"
+    echo "$output"
+    [ "$status" -ne 0 ]
+    refused_line kubernetes/apps/base/demo/hooked/ks.yaml "CustomResourceDefinition escapes.example.invalid" "the API server"
+    [ "$(find "$sentinel" -mindepth 1 | wc -l)" -eq 1 ]
+    [ "$(cat "$sentinel/settings.json")" = '{}' ]
+  done
+}
+
+@test "an object whose kind or name holds a line break and a command runs nothing, and is refused naming its file" {
+  local sentinel="$BATS_TEST_TMPDIR/sentinel" dir=kubernetes/apps/base/demo/later
+  mkdir -p "$sentinel"
+  # later is an application no overlay enables, so only the offline check's build holds it.
+  cp -R "$TREE/kubernetes/apps/base/demo/hello" "$TREE/$dir"
+  yq -i '.metadata.name = "later" | .spec.path = "./apps/base/demo/later/app" | .spec.sourceRef.name = "later"' "$TREE/$dir/ks.yaml"
+  put "$dir/app/odd.yaml" <<EOF
+---
+apiVersion: v1
+kind: "ConfigMap\n0|built_labels[\$(touch $sentinel/kind)0]|x"
+metadata:
+  name: odd
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: "odd\nstatusInvalid|built_labels[\$(touch $sentinel/name)0]|ConfigMap|v1|x|y"
+unknown: 1
+EOF
+  yq -i '.resources += ["odd.yaml"]' "$TREE/$dir/app/kustomization.yaml"
+
+  validate
+  [ "$status" -ne 0 ]
+  ls -A "$sentinel"
+  [ -z "$(ls -A "$sentinel")" ]
+  refused_line "$dir/app/odd.yaml" "a kind or apiVersion the API server would refuse"
+  # The other is validated, its name read as one field, and refused for its unknown field.
+  refused_line "$dir/ks.yaml" "ConfigMap odd?statusInvalid" "'unknown' not allowed"
+}
+
+@test "a definition whose schema does not compile fails the check, naming it" {
+  hooked_app 'brokenDefinition: true'
+  validate
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/hooked/ks.yaml "Broken example.invalid/v1" "does not compile"
+}
+
+@test "a HelmRelease is validated as the root's patches build it" {
+  hooked_app '{}'
+  local root=kubernetes/clusters/test/ks.yaml
+  # The root gives each child a patch that gives each of its HelmReleases a field the schema lacks.
+  yq -i '.spec.patches = [{"target": {"group": "kustomize.toolkit.fluxcd.io", "kind": "Kustomization"},
+    "patch": "apiVersion: kustomize.toolkit.fluxcd.io/v1\nkind: Kustomization\nmetadata:\n  name: _\nspec:\n  patches:\n    - target:\n        kind: HelmRelease\n      patch: |-\n        apiVersion: helm.toolkit.fluxcd.io/v2\n        kind: HelmRelease\n        metadata:\n          name: _\n        spec:\n          instal:\n            timeout: 10m\n"}]' \
+    "$TREE/$root"
+  validate
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/hooked/app/helmrelease.yaml "HelmRelease hooked" instal "the root's patches"
+  sed -i 's/instal:/install:/' "$TREE/$root"
+  validate
+  [ "$status" -eq 0 ]
+}
+
+@test "a field the definition requires and defaults may be left out, as the API server fills it in" {
+  # The repository's own tree, its ClusterSecretStore without the mount path, which the definition
+  # requires and defaults to kubernetes, and with a role that is not a string, which it types.
+  unset KUBERNETES_VALIDATE_SCHEMAS
+  local tree="$BATS_TEST_TMPDIR/real" store=kubernetes/apps/base/external-secrets/openbao-store/app/clustersecretstore.yaml
+  mkdir -p "$tree"
+  cp -R "$REPO/kubernetes" "$REPO/versions.yaml" "$tree/"
+  yq -i 'del(.spec.provider.vault.auth.kubernetes.mountPath) | .spec.provider.vault.auth.kubernetes.role = 5' "$tree/$store"
+
+  run env RENDER_CHART_CACHE="$BATS_TEST_TMPDIR/charts" "$VALIDATE" "$tree"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  refused_line "$store" "ClusterSecretStore openbao" role
+  [[ $output != *mountPath* ]]
 }
