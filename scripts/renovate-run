@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Runs scripts/renovate-check in Renovate's image, on a copy of the files git would commit, with
+# no network, for renovate-check and renovate-record. Whatever .gitignore leaves out (a local
+# kubeconfig, .env) is never copied, so Renovate never reads it.
+# Usage: scripts/renovate-run IMAGE [record]
+set -euo pipefail
+
+# docker is run with none of the secrets a recipe's environment may hold.
+# shellcheck source=scripts/lib/tools.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/tools.sh"
+
+[[ $# -ge 1 && -n $1 ]] || { echo "usage: scripts/renovate-run IMAGE [record]" >&2; exit 2; }
+image=$1
+shift
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+dir=$(mktemp -d)
+trap 'rm -rf "$dir"' EXIT
+# A file deleted here but still in the index has nothing to copy.
+git ls-files -z --cached --others --exclude-standard | tar --null --ignore-failed-read -T - -cf - | tar -xf - -C "$dir"
+# The image runs as a user of its own, which must be able to read the copy.
+chmod -R a+rX "$dir"
+docker run --rm --network none -v "$dir":/usr/src/app:ro -w /usr/src/app "$image" bash scripts/renovate-check "$@"

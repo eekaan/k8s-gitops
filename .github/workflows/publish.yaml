@@ -37,8 +37,9 @@ jobs:
         with:
           version: 2026.11.4
           # The checksum of that release's linux-x64 binary, which the hosted runner this job
-          # names runs. The job signs, so it restores no cache entry either: the action chooses an
-          # entry by its key alone, and a hit would put tools another job saved in front of cosign.
+          # names runs; it moves with the version, by hand (.renovate/by-hand.tsv). The job signs,
+          # so it restores no cache entry either: the action chooses an entry by its key alone, and
+          # a hit would put tools another job saved in front of cosign.
           sha256: 0296d9cba9324106d4e0962bb94a2072902f3658813aeb3b09504947bb8ddc2b
           cache: false
           install_args: just flux2 cosign jq kustomize yq
