@@ -39,6 +39,21 @@ instance:
     interval: 1m
   kustomize:
     patches:
+      # The operator applies the namespace with this label, as the Flux Operator's documentation
+      # describes (fluxoperator.dev, FluxInstance customization, Namespace Pod Security Standards):
+      # it owns the namespace, and Flux's own controllers are built for the restricted level, as
+      # Flux's security documentation states (fluxcd.io/flux/security, Pod security standard).
+      # tests/pod-security.bats evaluates the controllers this instance installs against it.
+      - target:
+          kind: Namespace
+          name: flux-system
+        patch: |
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: flux-system
+            labels:
+              pod-security.kubernetes.io/enforce: restricted
       # The synced artifact is applied only when it was signed keyless by this repository's publish
       # workflow running on main; a run on any other branch or tag has another subject. Flux reads
       # the patterns as Go regular expressions; they keep to syntax POSIX extended expressions

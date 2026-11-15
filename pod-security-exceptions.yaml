@@ -1,0 +1,88 @@
+---
+# The workloads that need a Pod Security level above restricted, and the namespaces that therefore
+# enforce a level below it. scripts/pod-security-check (just pod-security-check, and tests/pod-security.bats
+# for the tree) reads this file together with the render of kubernetes/; docs/kubernetes.md, Pod
+# Security, says what it requires.
+#
+# A namespace enforces restricted unless it has an entry here, and then the least strict level of its
+# entries; every other pod in it must pass restricted. An entry has:
+#   namespace   the workload's namespace
+#   workload    Kind/name of the workload as the render holds it
+#   level       baseline or privileged: the strictest level the workload passes, which the check
+#               evaluates, so a level that is too high or too low fails it
+#   reason      a sentence: what the workload does that restricted refuses
+#   created-by  only for a pod an operator creates at run time, which the render does not hold: the
+#               Kind/name of the custom resource in the render that makes the operator create it.
+#               The check cannot evaluate such a pod; the level is taken as written.
+exceptions:
+  - namespace: kube-system
+    workload: DaemonSet/cilium
+    level: privileged
+    reason: the agent programs each node's networking, so it runs in the host's network namespace, on host ports and with host paths and added capabilities, and its init container is privileged
+  - namespace: kube-system
+    workload: DaemonSet/cilium-envoy
+    level: privileged
+    reason: the proxy runs in the host's network namespace, on a host port, with host paths and added capabilities
+  - namespace: kube-system
+    workload: Deployment/cilium-operator
+    level: privileged
+    reason: the chart runs the operator in the host's network namespace and on host ports
+  - namespace: kube-system
+    workload: DaemonSet/spegel
+    level: privileged
+    reason: it reads and writes the container runtime's content store, socket and registry configuration through host paths
+  - namespace: kube-system
+    workload: DaemonSet/spegel-cleanup
+    level: privileged
+    reason: the hook removes the registry configuration Spegel wrote on each node, which it reaches through a host path
+  - namespace: kube-system
+    workload: Pod/spegel-cleanup-wait
+    level: baseline
+    reason: the chart's hook pod sets no seccomp profile, user or capabilities, and the chart has no value for them
+  - namespace: kube-system
+    workload: Deployment/reflector
+    level: baseline
+    reason: the chart's values define no seccomp profile and its container context leaves privilege escalation to the image
+  - namespace: kube-system
+    workload: Pod/vpa-test-crds-available
+    level: baseline
+    reason: the chart's test pod sets no seccomp profile, and the chart's values define none for it
+  - namespace: kube-system
+    workload: Pod/vpa-test-create-vpa
+    level: baseline
+    reason: the chart's test pod sets no seccomp profile, and the chart's values define none for it
+  - namespace: kube-system
+    workload: Pod/vpa-test-metrics-api-available
+    level: baseline
+    reason: the chart's test pod sets no seccomp profile, and the chart's values define none for it
+  - namespace: monitoring
+    workload: DaemonSet/kube-prometheus-stack-prometheus-node-exporter
+    level: privileged
+    reason: it reads each node's metrics through the host's network and process namespaces and host paths
+  - namespace: monitoring
+    workload: DaemonSet/vector
+    level: privileged
+    reason: it reads each node's log files through a host path and keeps its buffers in another
+  - namespace: monitoring
+    workload: StatefulSet/victoria-logs
+    level: baseline
+    reason: the chart's values define no seccomp profile for its pod or container
+  - namespace: piraeus-datastore
+    workload: Deployment/piraeus-operator-controller-manager
+    level: baseline
+    reason: the chart's values define no seccomp profile and leave privilege escalation to the image
+  - namespace: piraeus-datastore
+    workload: DaemonSet/linstor-satellite
+    created-by: LinstorCluster/linstorcluster
+    level: privileged
+    reason: the satellites manage each node's storage devices and the DRBD kernel module, so they run privileged, in the host's IPC namespace and with host paths
+  - namespace: piraeus-datastore
+    workload: DaemonSet/linstor-csi-node
+    created-by: LinstorCluster/linstorcluster
+    level: privileged
+    reason: the CSI node plugin mounts volumes on its node, so it runs privileged, in the host's network namespace and with host paths
+  - namespace: piraeus-datastore
+    workload: DaemonSet/ha-controller
+    created-by: LinstorCluster/linstorcluster
+    level: privileged
+    reason: the high-availability controller runs privileged on each node

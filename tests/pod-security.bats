@@ -1,0 +1,356 @@
+#!/usr/bin/env bats
+# Proves features/pod-security.feature; each test carries its scenario's title.
+# Needs kyverno (its podSecurity rule runs the Pod Security admission policy library), flux, kustomize,
+# helm, yq and jq on PATH (the versions pinned for the repository). The tests on a fixture render are
+# offline; the two on the tree render it with its charts pulled from their public registries.
+
+# The tests run one at a time even where bats runs a file's tests side by side: the tests on the
+# tree share one render, made by whichever of them comes first.
+export BATS_NO_PARALLELIZE_WITHIN_FILE=true
+
+setup_file() {
+  # Helm's settings, and the Docker configuration it reads registry logins from, stay in the run's
+  # own directory.
+  export HELM_CACHE_HOME="$BATS_FILE_TMPDIR/helm/cache"
+  export HELM_CONFIG_HOME="$BATS_FILE_TMPDIR/helm/config"
+  export HELM_DATA_HOME="$BATS_FILE_TMPDIR/helm/data"
+  export DOCKER_CONFIG="$BATS_FILE_TMPDIR/docker"
+  mkdir -p "$DOCKER_CONFIG"
+}
+
+setup() {
+  REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  FIXTURE="$BATS_TEST_DIRNAME/fixtures/pod-security"
+  # Nothing to connect to: a step that needed a cluster fails instead of finding one.
+  export KUBECONFIG="$BATS_TEST_TMPDIR/no-kubeconfig"
+  unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
+}
+
+# tree NAME: a copy of the fixture in $BATS_TEST_TMPDIR/NAME, for the test to change.
+tree() {
+  mkdir -p "$BATS_TEST_TMPDIR/$1"
+  cp -R "$FIXTURE/render" "$FIXTURE/exceptions.yaml" "$FIXTURE/versions.yaml" "$BATS_TEST_TMPDIR/$1/"
+}
+
+# check NAME [OPTION...]: runs the check on the tree NAME.
+check() {
+  local name=$1
+  shift
+  run "$REPO/scripts/pod-security-check" "$@" "$BATS_TEST_TMPDIR/$name/render" \
+    "$BATS_TEST_TMPDIR/$name/exceptions.yaml" "$BATS_TEST_TMPDIR/$name/versions.yaml"
+}
+
+# object NAME FILE: the path of the one file named FILE in the tree NAME.
+object() {
+  local files=("$BATS_TEST_TMPDIR/$1"/render/*/*/"$2")
+  [ "${#files[@]}" -eq 1 ] || { echo "$2 is not one file of $1: ${files[*]}"; return 1; }
+  echo "${files[0]}"
+}
+
+# real_render: the render of this repository's tree, charts pulled, in $BATS_FILE_TMPDIR/render,
+# made once for the file.
+real_render() {
+  REAL="$BATS_FILE_TMPDIR/render"
+  if [ ! -d "$REAL" ]; then
+    "$REPO/scripts/render" "$REAL.partial" >/dev/null
+    mv "$REAL.partial" "$REAL"
+  fi
+}
+
+@test "A namespace's enforced level is the lowest its workloads pass" {
+  tree good
+  check good
+  [ "$status" -eq 0 ]
+  [[ $output == *"web restricted"* ]]
+  [[ $output == *"legacy baseline"* ]]
+  [[ $output == *"agents privileged"* ]]
+  # The same, with every workload's own level.
+  check good --list
+  [ "$status" -eq 0 ]
+  [[ $output == *"web/Deployment/site restricted"* ]]
+  [[ $output == *"web/CronJob/nightly restricted"* ]]
+  [[ $output == *"legacy/Deployment/ledger baseline"* ]]
+  [[ $output == *"agents/DaemonSet/collector privileged"* ]]
+}
+
+@test "A pod that needs more than its namespace enforces is refused, naming the checks it fails" {
+  tree hostpath
+  yq -i '.spec.template.spec.volumes = [{"name": "data", "hostPath": {"path": "/var/data"}}]
+    | .spec.template.spec.containers[0].volumeMounts = [{"name": "data", "mountPath": "/data"}]' \
+    "$(object hostpath Deployment.apps_web_site.yaml)"
+  check hostpath
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace web enforces restricted, but Deployment/site fails it"* ]]
+  [[ $output == *hostPathVolumes* ]]
+  # A pod that passes baseline only, in a namespace that enforces restricted.
+  tree baseline-pod
+  yq -i '.metadata.labels["pod-security.kubernetes.io/enforce"] = "restricted"
+    | del(.metadata.labels["pod-security.kubernetes.io/audit"], .metadata.labels["pod-security.kubernetes.io/audit-version"],
+      .metadata.labels["pod-security.kubernetes.io/warn"], .metadata.labels["pod-security.kubernetes.io/warn-version"])' \
+    "$(object baseline-pod Namespace__legacy.yaml)"
+  check baseline-pod
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace legacy enforces restricted, but Deployment/ledger fails it"* ]]
+  [[ $output == *"allowPrivilegeEscalation"* ]]
+  [[ $output != *"could enforce"* ]]
+}
+
+@test "a privileged init container of a DaemonSet and a hook Job are evaluated" {
+  # Only the init container asks for privilege, in a namespace that enforces privileged for others.
+  tree init
+  yq '.metadata.name = "unlisted"
+    | .spec.selector.matchLabels.app = "unlisted"
+    | .spec.template.metadata.labels.app = "unlisted"
+    | .spec.template.spec.initContainers[0].securityContext.privileged = true
+    | .spec.template.spec.securityContext = {"runAsNonRoot": true, "seccompProfile": {"type": "RuntimeDefault"}}
+    | del(.spec.template.spec.hostNetwork, .spec.template.spec.volumes, .spec.template.spec.containers[0].volumeMounts)
+    | .spec.template.spec.containers[0].securityContext = {"allowPrivilegeEscalation": false, "capabilities": {"drop": ["ALL"]}}' \
+    "$(object init DaemonSet.apps_agents_collector.yaml)" >"$BATS_TEST_TMPDIR/init/render/lab/agents/DaemonSet.apps_agents_unlisted.yaml"
+  check init
+  [ "$status" -eq 1 ]
+  [[ $output == *"agents: DaemonSet/unlisted needs privileged"* ]]
+  tree hook
+  yq -i 'del(.spec.template.spec.containers[0].securityContext) | del(.spec.template.spec.securityContext)' \
+    "$(object hook Job.batch_web_site-migrate.yaml)"
+  check hook
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace web enforces restricted, but Job/site-migrate fails it"* ]]
+}
+
+@test "A namespace that could enforce a lower level is refused" {
+  # Every workload passes restricted, and the namespace enforces baseline.
+  tree lenient
+  yq -i '.metadata.labels["pod-security.kubernetes.io/enforce"] = "baseline"
+    | .metadata.labels["pod-security.kubernetes.io/audit"] = "restricted"
+    | .metadata.labels["pod-security.kubernetes.io/audit-version"] = "v1.37"
+    | .metadata.labels["pod-security.kubernetes.io/warn"] = "restricted"
+    | .metadata.labels["pod-security.kubernetes.io/warn-version"] = "v1.37"' "$(object lenient Namespace__web.yaml)"
+  check lenient
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace web enforces baseline, but could enforce restricted"* ]]
+  # The levels are ordered by what they permit, not by their names: privileged permits more than
+  # baseline, although it sorts after it.
+  tree privileged-ledger
+  yq -i '.metadata.labels["pod-security.kubernetes.io/enforce"] = "privileged"' "$(object privileged-ledger Namespace__legacy.yaml)"
+  check privileged-ledger
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace legacy enforces privileged, but could enforce baseline"* ]]
+  [[ $output != *"fails it"* ]]
+  # A namespace whose only privileged workload is gone.
+  tree gone
+  rm "$(object gone DaemonSet.apps_agents_collector.yaml)"
+  yq -i 'del(.exceptions[] | select(.workload == "DaemonSet/collector" or .workload == "DaemonSet/scanner"))' "$BATS_TEST_TMPDIR/gone/exceptions.yaml"
+  rm "$(object gone Scanner.example.com_agents_main.yaml)"
+  check gone
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace agents enforces privileged, but could enforce restricted"* ]]
+}
+
+@test "A workload above restricted is allowed only when it is listed with its reason" {
+  tree unlisted
+  yq -i 'del(.exceptions[] | select(.workload == "DaemonSet/collector"))' "$BATS_TEST_TMPDIR/unlisted/exceptions.yaml"
+  check unlisted
+  [ "$status" -eq 1 ]
+  [[ $output == *"agents: DaemonSet/collector needs privileged"* ]]
+  [[ $output == *"is not listed in the exceptions file"* ]]
+  tree no-reason
+  yq -i '(.exceptions[] | select(.workload == "DaemonSet/collector") | .reason) = ""' "$BATS_TEST_TMPDIR/no-reason/exceptions.yaml"
+  check no-reason
+  [ "$status" -eq 1 ]
+  [[ $output == *"DaemonSet/collector"*"has no reason"* ]]
+  tree missing-reason
+  yq -i 'del(.exceptions[] | select(.workload == "Deployment/ledger") | .reason)' "$BATS_TEST_TMPDIR/missing-reason/exceptions.yaml"
+  check missing-reason
+  [ "$status" -eq 1 ]
+  [[ $output == *"Deployment/ledger"*"has no reason"* ]]
+  # An entry for a level the workload does not need, either way.
+  tree too-high
+  yq -i '(.exceptions[] | select(.workload == "Deployment/ledger") | .level) = "privileged"' "$BATS_TEST_TMPDIR/too-high/exceptions.yaml"
+  check too-high
+  [ "$status" -eq 1 ]
+  [[ $output == *"lists Deployment/ledger at privileged, but it passes baseline"* ]]
+  tree too-low
+  yq -i '(.exceptions[] | select(.workload == "DaemonSet/collector") | .level) = "baseline"' "$BATS_TEST_TMPDIR/too-low/exceptions.yaml"
+  check too-low
+  [ "$status" -eq 1 ]
+  [[ $output == *"lists DaemonSet/collector at baseline, but it needs privileged"* ]]
+  # An entry for a workload the render does not hold, and for a pod an operator creates whose
+  # custom resource is gone.
+  tree stale
+  yq -i '.exceptions += [{"namespace": "web", "workload": "Deployment/gone", "level": "baseline", "reason": "was removed"}]' "$BATS_TEST_TMPDIR/stale/exceptions.yaml"
+  check stale
+  [ "$status" -eq 1 ]
+  [[ $output == *"lists Deployment/gone in web, which the render does not hold"* ]]
+  tree orphan
+  rm "$(object orphan Scanner.example.com_agents_main.yaml)"
+  check orphan
+  [ "$status" -eq 1 ]
+  [[ $output == *"DaemonSet/scanner"*"Scanner/main"*"not in the render"* ]]
+  # A pod made at run time is made by a custom resource: naming a workload the check evaluates
+  # itself would lower that workload's level without evaluating it.
+  tree borrowed
+  yq -i '.exceptions += [{"namespace": "web", "workload": "Pod/sidecar", "created-by": "Deployment/site", "level": "privileged", "reason": "claims the level of a workload that is evaluated"}]' "$BATS_TEST_TMPDIR/borrowed/exceptions.yaml"
+  check borrowed
+  [ "$status" -eq 1 ]
+  [[ $output == *"Pod/sidecar"*"Deployment/site"*"workload the check evaluates itself"* ]]
+}
+
+@test "An application that deploys into an undeclared namespace is refused" {
+  tree ghost
+  yq -i '.spec.targetNamespace = "ghost"' "$(object ghost Kustomization.kustomize.toolkit.fluxcd.io_flux-system_site.yaml)"
+  check ghost
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace ghost has no Namespace manifest with a pod-security.kubernetes.io/enforce label"* ]]
+  [[ $output == *"Kustomization/site"* ]]
+  # A Namespace manifest without the label does not declare a level.
+  tree unlabelled
+  yq -i 'del(.metadata.labels["pod-security.kubernetes.io/enforce"])' "$(object unlabelled Namespace__web.yaml)"
+  check unlabelled
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace web has no Namespace manifest with a pod-security.kubernetes.io/enforce label"* ]]
+  # A workload in a namespace nothing declares, which a chart may name without any Kustomization.
+  tree stray
+  yq -i '.metadata.namespace = "stray"' "$(object stray Deployment.apps_agents_console.yaml)"
+  check stray
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace stray has no Namespace manifest"* ]]
+  [[ $output == *"Deployment/console"* ]]
+  # A namespace only an exception names has nothing deploying into it to name.
+  tree nowhere
+  yq -i '.exceptions += [{"namespace": "nowhere", "workload": "DaemonSet/ghost", "created-by": "Scanner/main", "level": "privileged", "reason": "made by an operator"}]' "$BATS_TEST_TMPDIR/nowhere/exceptions.yaml"
+  check nowhere
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace nowhere has no Namespace manifest with a pod-security.kubernetes.io/enforce label"* ]]
+  [[ $output != *"and  deploys"* && $output != *"label, and"* ]]
+}
+
+@test "An object in an undeclared namespace is refused" {
+  # A Role says nothing of pods, but a custom resource in the same namespace may make them: the
+  # namespace of every namespaced object is in use.
+  tree role
+  mkdir -p "$BATS_TEST_TMPDIR/role/render/lab/ghost"
+  printf -- '---\napiVersion: rbac.authorization.k8s.io/v1\nkind: Role\nmetadata:\n  name: reader\n  namespace: ghost\nrules: []\n' \
+    >"$BATS_TEST_TMPDIR/role/render/lab/ghost/Role.rbac.authorization.k8s.io_ghost_reader.yaml"
+  check role
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace ghost has no Namespace manifest with a pod-security.kubernetes.io/enforce label"* ]]
+  [[ $output == *"Role/reader"* ]]
+  # With the Namespace declared the same render passes.
+  printf -- '---\napiVersion: v1\nkind: Namespace\nmetadata:\n  name: ghost\n  labels:\n    pod-security.kubernetes.io/enforce: restricted\n' \
+    >"$BATS_TEST_TMPDIR/role/render/lab/ghost/Namespace__ghost.yaml"
+  check role
+  [ "$status" -eq 0 ]
+}
+
+@test "A namespace below restricted audits and warns at restricted at the cluster's minor" {
+  local label=pod-security.kubernetes.io
+  tree no-audit
+  yq -i "del(.metadata.labels[\"$label/audit\"])" "$(object no-audit Namespace__legacy.yaml)"
+  check no-audit
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace legacy enforces baseline and must audit and warn at restricted"* ]]
+  tree no-warn
+  yq -i "del(.metadata.labels[\"$label/warn\"])" "$(object no-warn Namespace__agents.yaml)"
+  check no-warn
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace agents enforces privileged and must audit and warn at restricted"* ]]
+  tree weak-audit
+  yq -i ".metadata.labels[\"$label/audit\"] = \"baseline\"" "$(object weak-audit Namespace__legacy.yaml)"
+  check weak-audit
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace legacy enforces baseline and must audit and warn at restricted"* ]]
+  # The versions name the cluster's minor, each of them.
+  tree old-audit
+  yq -i ".metadata.labels[\"$label/audit-version\"] = \"v1.36\"" "$(object old-audit Namespace__agents.yaml)"
+  check old-audit
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace agents enforces privileged and must pin audit and warn to the cluster minor"*"v1.37"* ]]
+  tree old-warn
+  yq -i ".metadata.labels[\"$label/warn-version\"] = \"latest\"" "$(object old-warn Namespace__legacy.yaml)"
+  check old-warn
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace legacy enforces baseline and must pin audit and warn to the cluster minor"* ]]
+  tree no-version
+  yq -i "del(.metadata.labels[\"$label/warn-version\"])" "$(object no-version Namespace__legacy.yaml)"
+  check no-version
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace legacy enforces baseline and must pin audit and warn to the cluster minor"* ]]
+  # A namespace that enforces restricted needs neither.
+  tree strict
+  check strict
+  [ "$status" -eq 0 ]
+  [ "$(yq ".metadata.labels | has(\"$label/audit\")" "$(object strict Namespace__web.yaml)")" = false ]
+}
+
+@test "A cluster minor newer than the one the evaluator covers is refused" {
+  # The evaluator is the Pod Security library of the Kyverno CLI pinned in mise.toml, whose record
+  # there names the newest Kubernetes minor whose checks it is known to apply no more loosely than
+  # the API server does.
+  tree newer
+  yq -i '.kubernetes = "v1.99.0"' "$BATS_TEST_TMPDIR/newer/versions.yaml"
+  check newer
+  [ "$status" -eq 1 ]
+  [[ $output == *"versions.yaml names Kubernetes v1.99, newer than v1.37, the newest minor the Pod Security evaluator pinned in mise.toml covers"* ]]
+}
+
+@test "a ReplicaSet and a ReplicationController are evaluated" {
+  tree good
+  check good --list
+  [ "$status" -eq 0 ]
+  [[ $output == *"web/ReplicaSet/worker restricted"* ]]
+  [[ $output == *"web/ReplicationController/pool restricted"* ]]
+  local kind file
+  for kind in ReplicaSet:ReplicaSet.apps_web_worker.yaml ReplicationController:ReplicationController__web_pool.yaml; do
+    file=${kind#*:}
+    kind=${kind%%:*}
+    tree "$kind"
+    yq -i '.spec.template.spec.volumes = [{"name": "data", "hostPath": {"path": "/var/data"}}]' "$(object "$kind" "$file")"
+    check "$kind"
+    [ "$status" -eq 1 ]
+    [[ $output == *"namespace web enforces restricted, but $kind/"*"fails it"* ]]
+    [[ $output == *hostPathVolumes* ]]
+  done
+}
+
+@test "a pod without a verdict from the evaluator fails the check" {
+  # A run of the evaluator that reports on fewer pods than it was given leaves some pod unjudged,
+  # which must not read as a pass.
+  mkdir "$BATS_TEST_TMPDIR/bin"
+  printf '#!/bin/sh\necho "{\\"results\\": []}"\n' >"$BATS_TEST_TMPDIR/bin/kyverno"
+  chmod +x "$BATS_TEST_TMPDIR/bin/kyverno"
+  tree silent
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" check silent
+  [ "$status" -eq 1 ]
+  [[ $output == *"kyverno gave no verdict on every one of the"* ]]
+}
+
+@test "The Flux controllers' namespace enforces a level and its controllers pass it" {
+  real_render
+  run "$REPO/scripts/pod-security-check" --list "$REAL" "$REPO/pod-security-exceptions.yaml" "$REPO/versions.yaml"
+  [ "$status" -eq 0 ]
+  [[ $output == *"flux-system restricted"* ]]
+  local controller
+  for controller in source-controller kustomize-controller helm-controller notification-controller source-watcher flux-operator; do
+    [[ $output == *"flux-system/Deployment/$controller restricted"* ]] || { echo "$controller is not evaluated at restricted"; return 1; }
+  done
+  # The level is the FluxInstance's patch of the namespace: without it nothing declares it.
+  rm -rf "$BATS_TEST_TMPDIR/unpatched"
+  cp -R "$REAL" "$BATS_TEST_TMPDIR/unpatched"
+  local instance=("$BATS_TEST_TMPDIR"/unpatched/*/*/FluxInstance*.yaml)
+  [ "${#instance[@]}" -eq 1 ]
+  yq -i '.spec.kustomize.patches |= map(select((.target.kind // "") != "Namespace"))' "${instance[0]}"
+  run "$REPO/scripts/pod-security-check" "$BATS_TEST_TMPDIR/unpatched" "$REPO/pod-security-exceptions.yaml" "$REPO/versions.yaml"
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace flux-system has no Namespace manifest with a pod-security.kubernetes.io/enforce label"* ]]
+}
+
+@test "The tree passes" {
+  run just --justfile "$REPO/justfile" pod-security-check
+  echo "$output"
+  [ "$status" -eq 0 ]
+  # The recipe reports what it checked, so one that checks nothing fails here.
+  [[ $output == *"flux-system restricted"* ]]
+  [[ $output == *"kube-system privileged"* ]]
+  [[ $output == *"monitoring privileged"* ]]
+  [[ $output == *"piraeus-datastore privileged"* ]]
+}
