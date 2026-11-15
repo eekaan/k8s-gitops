@@ -1161,3 +1161,91 @@ EOF
   echo "$output"
   fails_naming kubernetes/clusters/test/ks.yaml "dependsOn were not checked"
 }
+
+@test "a ks.yaml value holding a '|' or a line break is read as one value" {
+  valid_tree
+  local ks=kubernetes/apps/base/demo/hello/ks.yaml
+  yq -i '.spec.targetNamespace = "de|mo"' "$TREE/$ks"
+
+  check
+  [ "$status" -ne 0 ]
+  refused_line "$ks" "targetNamespace must be demo"
+  # The fields after it are read as what they are.
+  [[ $output != *"sourceRef.name must be"* ]]
+  [[ $output != *"spec.path must be"* ]]
+  [[ $output != *"is overwritten by the root"* ]]
+
+  # A line break does not start a document of its own.
+  yq -i '.spec.targetNamespace = "demo\n0|kustomize.toolkit.fluxcd.io/v1|Kustomization|phantom|elsewhere"' "$TREE/$ks"
+  check
+  [ "$status" -ne 0 ]
+  # One failure, the value shown whole on its line, and no document made of what follows the break.
+  refused_line "$ks" "targetNamespace must be demo" "found demo?0?kustomize.toolkit.fluxcd.io/v1?Kustomization?phantom?elsewhere"
+  [[ $output == *"kubernetes-check: 1 failure(s)"* ]]
+}
+
+# kept_builds DIR: the records of DIR/builds as kubernetes-validate reads them, one per line as
+# FILE, LABEL and APP_DIR, each shown with printf %q.
+kept_builds() {
+  local file label app_dir
+  while IFS= read -r -d '' file && IFS= read -r -d '' label && IFS= read -r -d '' app_dir; do
+    printf '%q %q %q\n' "$file" "$label" "$app_dir"
+  done <"$1/builds"
+}
+
+@test "the builds the check keeps hold each build once and whole, whatever its path holds" {
+  valid_tree
+  # A cluster directory whose name holds a '|' and a line break: the root still builds, from the
+  # overlay its ks.yaml names, under a label that holds both.
+  local cluster=$'te|st\nx'
+  mv "$TREE/kubernetes/clusters/test" "$TREE/kubernetes/clusters/$cluster"
+  local keep="$BATS_TEST_TMPDIR/keep"
+  mkdir "$keep"
+
+  run env KUBERNETES_CHECK_BUILT="$keep" "$CHECK" "$TREE"
+  echo "$output"
+  local records files
+  records="$(kept_builds "$keep")"
+  echo "$records"
+  files="$(find "$keep" -name '*.yaml' | wc -l)"
+  [ "$files" -gt 0 ]
+  [ "$(wc -l <<<"$records")" -eq "$files" ]
+  # Every record names a file the check wrote, and the root's carries its label whole.
+  local file label app_dir
+  while IFS= read -r -d '' file && IFS= read -r -d '' label && IFS= read -r -d '' app_dir; do
+    [[ $file =~ ^[0-9]+\.yaml$ ]]
+    [ -f "$keep/$file" ]
+  done <"$keep/builds"
+  grep -qxF "$(printf '%q' "kubernetes/clusters/$cluster/ks.yaml")" <<<"$(cut -d' ' -f2 <<<"$records")"
+}
+
+@test "the check keeps its builds only in an empty directory that exists" {
+  valid_tree
+  run env KUBERNETES_CHECK_BUILT="$BATS_TEST_TMPDIR/missing" "$CHECK" "$TREE"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"KUBERNETES_CHECK_BUILT"*"empty directory"* ]]
+
+  local keep="$BATS_TEST_TMPDIR/keep"
+  mkdir "$keep"
+  run env KUBERNETES_CHECK_BUILT="$keep" "$CHECK" "$TREE"
+  [ "$status" -eq 0 ]
+  # A directory used once already holds builds; a second run into it would add to them.
+  run env KUBERNETES_CHECK_BUILT="$keep" "$CHECK" "$TREE"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"KUBERNETES_CHECK_BUILT"*"empty directory"* ]]
+}
+
+@test "a root whose path leaves the tree fails the check, and nothing outside it is built" {
+  valid_tree
+  # A directory beside the tree, which a path of ../../outside from the root reaches.
+  mkdir -p "$BATS_TEST_TMPDIR/outside"
+  printf '%s\n' '---' 'apiVersion: v1' 'kind: ConfigMap' 'metadata:' '  name: outside' >"$BATS_TEST_TMPDIR/outside/configmap.yaml"
+  yq -i '.spec.path = "../../outside"' "$TREE/kubernetes/clusters/test/ks.yaml"
+
+  check
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/clusters/test/ks.yaml "spec.path" "a directory of the tree"
+  [[ $output != *"built kubernetes/clusters/test/ks.yaml"* ]]
+}

@@ -8,18 +8,27 @@
 #     patches are applied).
 # Reports every failure, naming the file and the rule, then exits non-zero. Never contacts a
 # cluster and fetches nothing: the publish run runs it in the job that signs (scripts/publish).
+# What the tree holds is data: each value read from a ks.yaml is one field, a control character or
+# a '|' in it read as '?', and a root's spec.path must be a directory of the tree.
 #
-# KUBERNETES_CHECK_BUILT, an empty directory, receives what each Flux build yielded, for
-# scripts/kubernetes-validate: N.yaml, and the line "N.yaml<TAB>LABEL<TAB>APP_DIR" in its file
-# builds, LABEL being what the output calls the build and APP_DIR the application directory the
-# objects come from, empty for a cluster directory or root.
+# KUBERNETES_CHECK_BUILT, an existing empty directory, receives what each Flux build yielded, for
+# scripts/kubernetes-validate: N.yaml, and in its file builds the record N.yaml, LABEL and APP_DIR,
+# each ended by a NUL byte, which no path holds: LABEL is what the output calls the build and APP_DIR
+# the application directory the objects come from, empty for a cluster directory or root.
 #
 # Usage: scripts/kubernetes-check [DIR]   (DIR holds kubernetes/; defaults to this repository)
 set -euo pipefail
 shopt -s nullglob
 
 keep="${KUBERNETES_CHECK_BUILT:-}"
-[[ -z $keep ]] || keep="$(cd "$keep" && pwd)"
+if [[ -n $keep ]]; then
+  # A directory that already holds builds would get a second set added to them.
+  if [[ ! -d $keep || -n $(find "$keep" -mindepth 1 -print -quit) ]]; then
+    echo "kubernetes-check: KUBERNETES_CHECK_BUILT must name an existing empty directory, not $keep" >&2
+    exit 1
+  fi
+  keep="$(cd "$keep" && pwd)"
+fi
 cd "${1:-$(dirname "${BASH_SOURCE[0]}")/..}"
 
 # No kubeconfig and no in-cluster address: a tool that tried to reach a cluster fails instead.
@@ -46,7 +55,8 @@ ks_list="$(find kubernetes -name ks.yaml | sort)"
 while IFS= read -r ks; do
   [[ -n $ks ]] || continue
   ks_files=$((ks_files + 1))
-  # Empty documents, such as one after a trailing ---, hold nothing to check.
+  # Empty documents, such as one after a trailing ---, hold nothing to check. Each value is one
+  # field of one line: a control character or a '|' in it reads as '?'.
   if ! docs="$(yq -N 'select(. != null) | [document_index, .apiVersion // "", .kind // "",
     .metadata.name // "", .metadata.namespace // "", .spec.targetNamespace // "",
     .spec.sourceRef.kind // "", .spec.sourceRef.name // "", .spec.path // "",
@@ -55,12 +65,13 @@ while IFS= read -r ks; do
         . == "timeout" or . == "prune" or . == "deletionPolicy" or . == "decryption" or
         . == "patches")),
       ((.spec.postBuild // {}) | keys | .[] | select(. == "substituteFrom") | "postBuild." + .)]
-      | join(","))] | join("|")' "$ks" 2>&1)"; then
+      | join(","))] | map(tostring | sub("[\x00-\x1f\x7f|]"; "?")) | join("|")' "$ks" 2>&1)"; then
     fail "$ks: not valid YAML: $docs"
     continue
   fi
   while IFS='|' read -r doc api kind name ns target src_kind src_name ks_path defaults overridden; do
-    [[ -n $doc ]] || continue
+    # The document's index goes into yq expressions below.
+    [[ $doc =~ ^[0-9]+$ ]] || continue
     if [[ $api != kustomize.toolkit.fluxcd.io/* || $kind != Kustomization ]]; then
       fail "$ks: document $doc must be a Flux Kustomization (kustomize.toolkit.fluxcd.io), found ${api:-no apiVersion} ${kind:-no kind}"
       continue
@@ -310,7 +321,7 @@ flux_build() {
     last_built="$tmp/built/$flux_builds.yaml"
     if [[ -n $keep ]]; then
       cp "$last_built" "$keep/$flux_builds.yaml"
-      printf '%s\t%s\t%s\n' "$flux_builds.yaml" "$label" "$app_dir" >>"$keep/builds"
+      printf '%s\0%s\0%s\0' "$flux_builds.yaml" "$label" "$app_dir" >>"$keep/builds"
     fi
   elif [[ $err =~ variable\ not\ set\ \(strict\ mode\):\ \"([A-Za-z_][A-Za-z0-9_]*)\" ]]; then
     var="${BASH_REMATCH[1]}"
@@ -347,6 +358,13 @@ done
 for ks in kubernetes/clusters/*/ks.yaml; do
   path="$(yq ea '[select(. != null)] | .[0].spec.path' "$ks" 2>/dev/null)" || continue
   path="kubernetes/${path#./}"
+  path="${path%/}"
+  # The overlay is a directory of the tree; a path that leaves it would have Flux build files from
+  # elsewhere.
+  if [[ ! $path =~ ^kubernetes(/[A-Za-z0-9._-]+)+$ || /$path/ == */../* || /$path/ == */./* || ! -d $path ]]; then
+    fail "$ks: spec.path must be a directory of the tree under kubernetes/, found ${path#kubernetes/}"
+    continue
+  fi
   [[ -z ${broken[$path]:-} ]] || continue
   hints=()
   for dir in kubernetes/apps kubernetes/components; do
