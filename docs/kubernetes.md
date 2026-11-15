@@ -303,9 +303,11 @@ level is declared in the tree, never left to the API server's default.
     `spec.provider.kubernetes.envoyDeployment.pod.securityContext`, and the proxy container's
     non-root user, seccomp profile, no privilege escalation and no capabilities in
     `envoyDeployment.container.securityContext`; the controller adds its shutdown manager container
-    with the same hardened defaults. `tests/gateway.bats` requires these fields in the built `EnvoyProxy`:
-    the render holds no definition of the proxy's pod to check the paths against, as the controller
-    makes its Deployment at run time ([The public Gateway](#the-public-gateway)).
+    with the same hardened defaults. `tests/gateway.bats` requires these fields in the built
+    `EnvoyProxy`, and this list's check of the paths cannot: the render holds no definition of
+    `EnvoyProxy` to read them against, as `envoy-gateway-crds` applies Envoy Gateway's definitions
+    from the chart through an inner `Kustomization`, outside the render
+    ([The public Gateway](#the-public-gateway)).
   - The ReplicationSource `<app>` and ReplicationDestination `<app>-restore` of each application
     with a backed-up volume, `volsync-demo` in `demo` among them: the movers' non-root user and
     seccomp profile, in `spec.restic.moverSecurityContext`, from `components/volsync`; VolSync
@@ -1378,12 +1380,16 @@ cannot be listed without it: `just kubernetes-check` refuses the dependency.
   translate ([The edge routers](infrastructure.md#the-edge-routers)): `tests/gateway.bats` fails,
   naming both files, when the Gateway's listeners and the edge stack's `public_ports` differ.
 - **Redirect.** The `HTTPRoute` `https-redirect`, in the Gateway's namespace, is the only route
-  that attaches to `http`, whose `allowedRoutes` admit that namespace alone. It sends every request
-  to `https` with status 301, on the scheme's default port, and has no backend: plain HTTP is never
-  forwarded.
-- **Who may attach.** To `https`, routes of the namespaces that carry the label
+  that attaches to `http`, whose `allowedRoutes` admit that namespace alone and `HTTPRoute`s only:
+  an HTTP listener that names no kinds takes `GRPCRoute`s too. It has one rule, for every path,
+  that sends the request to `https` on the same host and the scheme's default port with status 301,
+  and no backend: plain HTTP is never forwarded. `tests/gateway.bats` builds every application the
+  overlay enables and fails when a route of any kind other than the redirect names `http`, by its
+  section or its port, when a route in the Gateway's namespace names the Gateway without a section,
+  which would attach it to `http` as well, or when the redirect is anything but that rule.
+- **Who may attach.** To `https`, `HTTPRoute`s of the namespaces that carry the label
   `k8s-gitops/gateway: public`, and of no other: the listener's `allowedRoutes` select them by that
-  label. A route in a namespace without it is not accepted, which is the Gateway API's rule and the
+  label and name the one kind. A route in a namespace without it is not accepted, which is the Gateway API's rule and the
   controller's to apply; it shows in the route's status, and `tests/gateway.bats` proves the
   selector on the objects. `demo` is the one namespace that carries the label.
 - **The certificate.** The `Certificate` `public-wildcard` asks the `ClusterIssuer` `cluster-ca`

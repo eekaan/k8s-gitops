@@ -64,6 +64,41 @@ overlay() {
   kustomize build --load-restrictor LoadRestrictionsNone "$REPO/kubernetes/apps/overlays/lab-sto2" >"$OVERLAY"
 }
 
+# everything: the lab-sto2 overlay's build and every application it enables, each built as Flux
+# applies it from the overlay's Kustomization, with the example key lists and its own substitutions,
+# all in one file. Writes $EVERYTHING.
+everything() {
+  local name ks path
+  overlay
+  EVERYTHING="$BATS_TEST_TMPDIR/everything.yaml"
+  cp "$OVERLAY" "$EVERYTHING"
+  for name in $(yq -N 'select(.kind == "Kustomization") | .metadata.name' "$OVERLAY"); do
+    ks="$BATS_TEST_TMPDIR/overlay-$name-ks.yaml"
+    # shellcheck disable=SC2016 # $vars is a yq variable.
+    NAME="$name" yq ea 'select(fileIndex == 0) as $vars
+      | select(fileIndex == 1 and .kind == "Kustomization" and .metadata.name == strenv(NAME))
+      | .spec.postBuild.substitute = ($vars * (.spec.postBuild.substitute // {}))' "${VARS:-$EXAMPLE}" "$OVERLAY" >"$ks"
+    path="$(yq '.spec.path' "$ks")"
+    echo --- >>"$EVERYTHING"
+    (cd "$REPO" && flux build kustomization "$name" --path "./kubernetes/${path#./}" \
+      --kustomization-file "$ks" --dry-run --strict-substitute) >>"$EVERYTHING"
+  done
+}
+
+# parents_of FILE GATEWAY NAMESPACE SELECT: kind/namespace/name of every object in FILE, of any
+# kind, with a parentRef to the Gateway GATEWAY in NAMESPACE that the yq condition SELECT, applied
+# to the parentRef, holds for.
+parents_of() {
+  # shellcheck disable=SC2016 # $own is a yq variable.
+  GATEWAY="$2" NS="$3" yq -N 'select(.spec.parentRefs != null) | (.metadata.namespace // "") as $own
+    | select(.spec.parentRefs | map(select(.name == strenv(GATEWAY)
+        and (.group // "gateway.networking.k8s.io") == "gateway.networking.k8s.io"
+        and (.kind // "Gateway") == "Gateway"
+        and (.namespace // $own) == strenv(NS)
+        and ('"$4"'))) | length > 0)
+    | .kind + "/" + .metadata.namespace + "/" + .metadata.name' "$1"
+}
+
 # object FILE KIND NAME: the one object of that kind and name in FILE.
 object() {
   KIND="$2" NAME="$3" yq -N 'select(.kind == strenv(KIND) and .metadata.name == strenv(NAME))' "$1"
@@ -124,8 +159,9 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   # Every worker announces it and forwards to a proxy on any node, so a proxy that moves, or is
   # replaced in a rollout, does not change what the edge routers see.
   [ "$(yq '.externalTrafficPolicy' "$service")" = Cluster ]
-  # Nothing patches the Service after the fields above.
-  [ "$(yq 'has("patch")' "$service")" = false ]
+  # Nothing else is set on the Service: no patch over the fields above, and nothing, such as a
+  # loadBalancerClass or a loadBalancerIP, that would take its address from anything but the pool.
+  [ "$(yq -o json -I0 'keys | sort' "$service")" = '["annotations","externalTrafficPolicy","labels","type"]' ]
   # The address comes from the variable: built with another value, the annotation follows it.
   other_vars
   VARS="$OTHER" built gateway-public
@@ -136,7 +172,7 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
 }
 
 @test "Plain HTTP is answered only with a redirect to HTTPS" {
-  local gateway http routes route namespace dir app
+  local gateway http named unnamed spec expected namespace
   built gateway-public
   gateway="$(only "$BUILT" Gateway)"
   namespace="$(object "$BUILT" Gateway "$gateway" | yq '.metadata.namespace')"
@@ -146,39 +182,28 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   [ "$(jq -r '.protocol' <<<"$http")" = HTTP ]
   # Every hostname.
   [ "$(jq -r 'has("hostname")' <<<"$http")" = false ]
-  # One route attached to it, in the Gateway's own namespace. A parentRef attaches to the http
-  # listener when it names the Gateway and neither its sectionName nor its port rules the listener
-  # out: it is not enough to look for sectionName: http, as a parentRef without one attaches to
-  # every listener that allows the route's namespace, and http allows the Gateway's own. The
-  # routes counted are those of every application that applies objects to that namespace.
-  : >"$BATS_TEST_TMPDIR/namespace-routes.yaml"
-  for dir in "$REPO"/kubernetes/apps/base/*/*/; do
-    app="$(basename "$dir")"
-    [ -f "$dir/ks.yaml" ] || continue
-    [ "$(yq '.spec.targetNamespace' "$dir/ks.yaml")" = "$namespace" ] || continue
-    built "$app"
-    NS="$namespace" yq -N 'select(.kind == "HTTPRoute" and ((.metadata.namespace // strenv(NS)) == strenv(NS)))' "$BUILT" \
-      >>"$BATS_TEST_TMPDIR/namespace-routes.yaml"
-    echo --- >>"$BATS_TEST_TMPDIR/namespace-routes.yaml"
-  done
-  routes="$(GATEWAY="$gateway" NS="$namespace" yq -N 'select(.kind == "HTTPRoute" and (.spec.parentRefs
-    | map(select(.name == strenv(GATEWAY)
-        and ((.namespace // strenv(NS)) == strenv(NS))
-        and ((.sectionName // "http") == "http")
-        and ((.port // 80) == 80))) | length > 0)) | .metadata.name' "$BATS_TEST_TMPDIR/namespace-routes.yaml")"
-  echo "routes on the http listener: ${routes:-none}"
-  [ "$routes" = https-redirect ]
-  built gateway-public
-  route="$(object "$BUILT" HTTPRoute "$routes")"
-  [ "$(yq '.metadata.namespace' <<<"$route")" = "$(object "$BUILT" Gateway "$gateway" | yq '.metadata.namespace')" ]
-  # It redirects to https with a 301 and forwards nowhere: no backend, no other filter.
-  [ "$(yq '.spec.rules | length' <<<"$route")" -eq 1 ]
-  [ "$(yq '.spec.rules[0].filters | length' <<<"$route")" -eq 1 ]
-  [ "$(yq '.spec.rules[0].filters[0].type' <<<"$route")" = RequestRedirect ]
-  [ "$(yq '.spec.rules[0].filters[0].requestRedirect.scheme' <<<"$route")" = https ]
-  [ "$(yq '.spec.rules[0].filters[0].requestRedirect.statusCode' <<<"$route")" -eq 301 ]
-  [ "$(yq '.spec.rules[0] | has("backendRefs")' <<<"$route")" = false ]
-  [ "$(yq '.spec | has("hostnames")' <<<"$route")" = false ]
+  # HTTPRoutes only: an HTTP listener that names no kinds admits GRPCRoutes as well.
+  [ "$(jq -c '.allowedRoutes.kinds // [] | map({group: (.group // "gateway.networking.k8s.io"), kind})' <<<"$http")" \
+    = '[{"group":"gateway.networking.k8s.io","kind":"HTTPRoute"}]' ]
+  # Of everything the cluster applies, routes of any kind (whatever has parentRefs), one names the
+  # http listener, by its section or its port: the redirect, in the Gateway's own namespace.
+  everything
+  named="$(parents_of "$EVERYTHING" "$gateway" "$namespace" '.sectionName == "http" or (.sectionName == null and .port == 80)')"
+  echo "routes that name the http listener: ${named:-none}"
+  [ "$named" = "HTTPRoute/$namespace/https-redirect" ]
+  # A parentRef that names no section attaches to every listener that allows its namespace, and
+  # http allows the Gateway's own: no route there names the Gateway without a section.
+  unnamed="$(parents_of "$EVERYTHING" "$gateway" "$namespace" '.sectionName == null' | grep "^[^/]*/$namespace/" || true)"
+  echo "routes in $namespace that name no listener: ${unnamed:-none}"
+  [ -z "$unnamed" ]
+  # It redirects every path to https on the same host and the scheme's default port, with a 301,
+  # and forwards nowhere: one rule, matching everything, with that one filter and no backend.
+  spec="$(object "$BUILT" HTTPRoute https-redirect | yq -o json -I0 '.spec' \
+    | jq -cS '.rules |= map(if .matches == [{"path": {"type": "PathPrefix", "value": "/"}}] then del(.matches) else . end)')"
+  expected="$(jq -cnS --arg gateway "$gateway" '{parentRefs: [{name: $gateway, sectionName: "http"}],
+    rules: [{filters: [{type: "RequestRedirect", requestRedirect: {scheme: "https", statusCode: 301}}]}]}')"
+  echo "redirect: $spec"
+  [ "$spec" = "$expected" ]
 }
 
 @test "The HTTPS listener serves a wildcard certificate for the cluster's domain from the cluster's issuer" {
@@ -276,6 +301,12 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   label="$(jq -r '.allowedRoutes.namespaces.selector.matchLabels["k8s-gitops/gateway"]' <<<"$https")"
   [ "$label" = public ]
   [ "$(jq -r '.allowedRoutes.namespaces.from' <<<"$http")" = Same ]
+  # Each listener names the one kind of route it takes, HTTPRoute, rather than every kind its
+  # protocol admits.
+  [ "$(jq -c '.allowedRoutes.kinds // [] | map({group: (.group // "gateway.networking.k8s.io"), kind})' <<<"$https")" \
+    = '[{"group":"gateway.networking.k8s.io","kind":"HTTPRoute"}]' ]
+  [ "$(jq -c '.allowedRoutes.kinds // [] | map({group: (.group // "gateway.networking.k8s.io"), kind})' <<<"$http")" \
+    = '[{"group":"gateway.networking.k8s.io","kind":"HTTPRoute"}]' ]
   # A namespace of the cluster attaches to https when its labels, as the overlay builds them,
   # carry the selector's pair, and the demo namespace is the only one that does.
   overlay

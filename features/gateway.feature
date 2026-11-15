@@ -4,12 +4,12 @@ Feature: Public Gateway
   Scenario: The public Gateway asks for the Gateway address and is announced over BGP
     Given the public Gateway application built offline with the example cluster-config
     When its Gateway, its EnvoyProxy and the BGP objects are read
-    Then the proxies' Service is of type LoadBalancer, carries the label the pool and the BGP advertisement select and asks for the Gateway address by annotation, and the Gateway names that EnvoyProxy for its infrastructure
+    Then the proxies' Service is of type LoadBalancer, carries the label the pool and the BGP advertisement select, asks for the Gateway address by annotation and sets nothing else, and the Gateway names that EnvoyProxy for its infrastructure
 
   Scenario: Plain HTTP is answered only with a redirect to HTTPS
-    Given the public Gateway application built offline
-    When its http listener and the routes attached to it are read
-    Then the listener takes every hostname, one route in the Gateway's own namespace is attached to it, and that route only redirects to https with status 301 and forwards nowhere
+    Given the public Gateway application and every application the overlay enables, built offline
+    When the http listener and every route of any kind that names the public Gateway are read
+    Then the listener takes HTTPRoutes for every hostname, the one route that names it is the redirect in the Gateway's own namespace, no route there names the Gateway without a listener, and the redirect's one rule sends every path to https on the same host and the default port with status 301 and forwards nowhere
 
   Scenario: The HTTPS listener serves a wildcard certificate for the cluster's domain from the cluster's issuer
     Given the public Gateway and the issuer application, built offline with the example cluster-config
@@ -19,7 +19,7 @@ Feature: Public Gateway
   Scenario: A route attaches to the public Gateway only from a namespace that opts in
     Given the public Gateway's listeners and the namespaces of the tree
     When each namespace's labels are matched against the https listener's selector and the http listener's scope
-    Then only namespaces labelled k8s-gitops/gateway: public attach to https, and only the Gateway's own namespace to http
+    Then only namespaces labelled k8s-gitops/gateway: public attach to https, only the Gateway's own namespace to http, and each listener takes HTTPRoutes only
 
   Scenario: The Gateway listens on exactly the ports the edge routers translate
     Given the Gateway's listeners and the edge stack's public ports
