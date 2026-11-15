@@ -85,3 +85,38 @@ Feature: etcd snapshots
     Given the Talos age key in a file SOPS_AGE_KEY_FILE names, or only in SOPS_AGE_KEY
     When cluster-snapshot and cluster-restore run
     Then cluster-snapshot hands age no key, cluster-restore hands it the key file's path or the key on its standard input, and the key appears in no recorded argument list and nothing printed
+
+  Scenario: Only the snapshot job's namespace may reach the Talos API, and only to back up etcd
+    Given every node's machine configuration rendered offline, and the snapshot application's namespace and Talos service account
+    When the control planes' and the workers' configurations are read
+    Then the control planes enable Kubernetes' access to the Talos API with the role os:etcd:backup alone and the snapshot job's namespace alone, the service account asks for that role alone, and the workers enable none of it
+
+  Scenario: The job uploads only an encrypted snapshot, named as the operator's recipe names its own
+    Given the job's scripts as the application ships them, a snapshot, the Talos age key's recipient and an S3 client that records what it is handed
+    When the scripts that encrypt and upload run in the order the job runs them
+    Then the plain snapshot is gone before the upload starts, the upload is handed one file that starts with the age header and that the Talos age key decrypts to the snapshot, under the cluster's name and a name the operator's recipes list, and the recipient is the one the operator's recipe encrypts to
+
+  Scenario: The job keeps the newest snapshots and deletes no other object
+    Given the cluster's prefix in the etcd bucket holding more snapshots than the job keeps, and objects that are not snapshots
+    When the job's upload script runs
+    Then the oldest snapshots beyond the count it keeps are deleted, after the new one is listed, and nothing else is
+
+  Scenario: The job's Talos tool is the cluster's Talos version
+    Given the application's talosctl image and the Talos version of versions.yaml
+    When the image's tag is compared with the version, and with the talosctl pin of mise.toml
+    Then they are the same version, and the image is pinned by tag and digest
+
+  Scenario: The S3 key reaches the job from the secret store and is nowhere in the tree
+    Given the application as Flux builds it
+    When its objects are read
+    Then an ExternalSecret reads the S3 key's two properties from the secret store, the job takes them from the Secret it writes into the one container that uploads, and no object or file of the application holds a key
+
+  Scenario: A snapshot the job took is listed and restored by the operator's recipes
+    Given a snapshot the job's scripts encrypted and uploaded, beside one the operator's recipe took
+    When cluster-snapshots runs, and cluster-restore runs for latest
+    Then both are listed newest first, and the restore recovers from the newest, whichever took it
+
+  Scenario: A cluster that does not select the job builds none of it
+    Given the cluster's overlay with the snapshot application listed, and with it left out
+    When the overlay is built
+    Then the namespace and the application's Kustomization are built only while it is listed

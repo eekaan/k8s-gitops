@@ -306,6 +306,39 @@ EOF
   done
 }
 
+@test "Only the snapshot job's namespace may reach the Talos API, and only to back up etcd" {
+  run "$SCRIPT" "$RENDERED"
+
+  [ "$status" -eq 0 ]
+  namespace=$(yq '.metadata.name' "$ROOT/kubernetes/apps/base/etcd-snapshots/namespace.yaml")
+  [ "$namespace" = etcd-snapshots ]
+  # Flux puts the application's objects in the namespace its Kustomization targets.
+  [ "$(yq '.spec.targetNamespace' "$ROOT/kubernetes/apps/base/etcd-snapshots/etcd-snapshots/ks.yaml")" = "$namespace" ]
+  # The service account the job's Secret comes from asks for the same role and no other.
+  [ "$(yq -N 'select(.kind == "ServiceAccount" and .apiVersion == "talos.dev/v1alpha1") | .spec.roles | join(",")' \
+    "$ROOT"/kubernetes/apps/base/etcd-snapshots/etcd-snapshots/app/*.yaml)" = os:etcd:backup ]
+  mapfile -t controlplanes < <(nodes controlplane)
+  mapfile -t workers < <(nodes worker)
+  [ "${#controlplanes[@]}" -eq 3 ]
+  [ "${#workers[@]}" -eq 3 ]
+  # An etcd snapshot holds every Secret of the cluster in the clear, so the grant is exactly this.
+  for hostname in "${controlplanes[@]}"; do
+    config="$RENDERED/$hostname.yaml"
+    [ "$(yq 'select(.kind == "KubeTalosAPIAccessConfig") | .apiVersion' "$config")" = v1alpha1 ]
+    [ "$(yq 'select(.kind == "KubeTalosAPIAccessConfig") | .allowedRoles | join(",")' "$config")" = os:etcd:backup ]
+    [ "$(yq 'select(.kind == "KubeTalosAPIAccessConfig") | .allowedKubernetesNamespaces | join(",")' "$config")" = "$namespace" ]
+    [ "$(yq 'select(.kind == "KubeTalosAPIAccessConfig") | .allowedRoles | length' "$config")" -eq 1 ]
+    [ "$(yq 'select(.kind == "KubeTalosAPIAccessConfig") | .allowedKubernetesNamespaces | length' "$config")" -eq 1 ]
+  done
+  for hostname in "${workers[@]}"; do
+    [ -z "$(yq 'select(.kind == "KubeTalosAPIAccessConfig") | .kind' "$RENDERED/$hostname.yaml")" ]
+  done
+  # The deprecated field of the machine configuration is not the way the grant is made.
+  for hostname in "${controlplanes[@]}" "${workers[@]}"; do
+    [ -z "$(yq 'select(.version == "v1alpha1") | .machine.features.kubernetesTalosAPIAccess // ""' "$RENDERED/$hostname.yaml")" ]
+  done
+}
+
 @test "Cilium replaces the bundled CNI and kube-proxy" {
   run "$SCRIPT" "$RENDERED"
 

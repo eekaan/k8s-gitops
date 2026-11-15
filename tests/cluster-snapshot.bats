@@ -8,7 +8,10 @@
 # probe of the Talos API port, and the steps before Flux that a restore must not run again. openstack
 # and helm are fakes that fail, so a run that starts either shows in the record.
 
+load fixtures/etcd-snapshots/job
+
 setup_file() {
+  job_setup_file
   # The Talos check's fixture cluster: talos/talman.yaml.tftpl rendered from tests/fixtures/talos,
   # as talos/<cluster>/talman.yaml is rendered from the cluster stack.
   local encoded
@@ -1222,4 +1225,39 @@ EOF
     links=$(grep -o 'piraeus-operator/blob/[^/]*/' "$ROOT/$file" | sort -u)
     [ "$links" = "piraeus-operator/blob/v$pinned/" ]
   done
+}
+
+@test "A snapshot the job took is listed and restored by the operator's recipes" {
+  # The job's own scripts encrypt and upload a snapshot to the key the operator's recipes read: the
+  # bucket of this test's prefix, under the cluster's name.
+  job_build BACKUP_BUCKET_PREFIX=marker-prefix
+  JOB_SCRIPTS="$BATS_TEST_TMPDIR/job-scripts"
+  job_scripts "$JOB_SCRIPTS"
+  mkdir -p "$BATS_TEST_TMPDIR/plain" "$BATS_TEST_TMPDIR/out"
+  printf 'marker-job-snapshot-content\n' > "$BATS_TEST_TMPDIR/plain/etcd.db"
+  job_run encrypt encrypt.sh PLAIN_SNAPSHOT="$BATS_TEST_TMPDIR/plain/etcd.db" OUT_DIR="$BATS_TEST_TMPDIR/out" \
+    AGE="$(command -v age)" AGE_RECIPIENT="$RECIPIENT"
+  [ "$status" -eq 0 ]
+  job_run upload upload.sh OUT_DIR="$BATS_TEST_TMPDIR/out"
+  [ "$status" -eq 0 ]
+  job_name=$(find "$BATS_TEST_TMPDIR/out" -type f -printf '%f\n')
+  [ -f "$STORE/$BUCKET/lab-sto2/$job_name" ]
+  # The operator's recipe took one earlier; the job's is the newest.
+  put_snapshot 20200101T000000Z.snapshot.age
+  clear_record
+
+  recipe cluster-snapshots
+
+  [ "$status" -eq 0 ]
+  [ "${#lines[@]}" -eq 2 ]
+  [[ ${lines[0]} == "$job_name "* ]]
+  [[ ${lines[1]} == "20200101T000000Z.snapshot.age "* ]]
+
+  clear_record
+
+  recipe cluster-restore latest <<< lab-sto2
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$STATE/recovered")" = marker-job-snapshot-content ]
+  [[ $output == *"$job_name"* ]]
 }

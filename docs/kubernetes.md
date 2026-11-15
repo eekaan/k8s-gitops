@@ -761,15 +761,19 @@ The own alerts, each with its runbook section in [docs/runbooks/alerts.md](runbo
 | `VolSyncSourceMissedIntervals` | A ReplicationSource missed a scheduled interval within the last hour. | warning | [VolSyncSourceMissedIntervals](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#volsyncsourcemissedintervals) |
 | `CertManagerCertificateNotReady` | A Certificate has not been Ready for an hour. | warning | [CertManagerCertificateNotReady](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#certmanagercertificatenotready) |
 | `CertManagerCertificateExpiringSoon` | A Certificate's certificate ends within 14 days, for 15 minutes. | warning | [CertManagerCertificateExpiringSoon](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#certmanagercertificateexpiringsoon) |
+| `EtcdSnapshotStale` | No run of the etcd snapshot CronJob has succeeded for 13 hours. | critical | [EtcdSnapshotStale](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#etcdsnapshotstale) |
+| `EtcdSnapshotJobFailing` | The etcd snapshot CronJob's latest scheduled run has not succeeded after 30 minutes. | warning | [EtcdSnapshotJobFailing](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#etcdsnapshotjobfailing) |
 | `LogCollectorOutsizedShare` | One node's collector sends at least ten times the median node's rate of events, and at least 10 a second, for 30 minutes. | info | [LogCollectorOutsizedShare](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectoroutsizedshare) |
 | `LogCollectorDiscardingEvents` | A collector's component discards events it was not set to drop, for 15 minutes. | warning | [LogCollectorDiscardingEvents](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectordiscardingevents) |
 | `LogCollectorSendFailing` | A collector's sink to the store reports errors for 15 minutes. | warning | [LogCollectorSendFailing](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectorsendfailing) |
 
 The alerts read only what Prometheus scrapes: kube-state-metrics' pod readiness for OpenBao's
 members, Prometheus' own `up` for OpenBao's active Service, VolSync's controller metrics and
-Vector's internal metrics, and cert-manager's certificate metrics. Nothing reads Flux, Cilium's BGP
-sessions or the storage operator, as none of them is scraped ([Monitoring](#monitoring)). The alerts have no destination
-yet: Alertmanager sends them nowhere, so they show in Prometheus and Alertmanager only.
+Vector's internal metrics, cert-manager's certificate metrics, and kube-state-metrics' CronJob
+metrics for the etcd snapshot job ([cluster.md](cluster.md#scheduled-etcd-snapshots)). Nothing reads
+Flux, Cilium's BGP sessions or the storage operator, as none of them is scraped
+([Monitoring](#monitoring)). The alerts have no destination yet: Alertmanager sends them nowhere, so
+they show in Prometheus and Alertmanager only.
 
 ### Dashboards
 

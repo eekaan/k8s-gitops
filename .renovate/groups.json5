@@ -3,8 +3,9 @@
   description: "Dependencies that move together in one pull request.",
   packageRules: [
     {
-      description: "Talos: versions.yaml and the talosctl pin in mise.toml",
-      matchPackageNames: ["siderolabs/talos"],
+      // tests/etcd-snapshots.bats holds the etcd snapshot job's talosctl image to versions.yaml's version.
+      description: "Talos: versions.yaml, the talosctl pin in mise.toml and the talosctl image of the etcd snapshot job",
+      matchPackageNames: ["siderolabs/talos", "ghcr.io/siderolabs/talosctl"],
       groupName: "Talos",
       // A patch gets its own pull request, so the running minor can reach its latest patch
       // before the next minor is taken.

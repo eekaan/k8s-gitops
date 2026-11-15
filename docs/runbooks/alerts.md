@@ -146,3 +146,40 @@ the Certificate's `Issuing` condition and the CertificateRequest, Order and Chal
 Usually: what makes a Certificate not Ready, for a longer time than the Certificate showed, as it
 stays Ready while its current certificate is valid.
 
+## EtcdSnapshotStale
+
+The CronJob `etcd-snapshots` has had no successful run for 13 hours, two runs and an hour of grace,
+or it has never succeeded and was created more than 13 hours ago. The newest etcd snapshot in the
+bucket is then older than that, and a lost control plane is restored from it
+([etcd-restore.md](etcd-restore.md)). The alert reads kube-state-metrics' record of the CronJob, so
+it cannot fire for a CronJob that does not exist.
+
+Look at first: `just cluster-snapshots` for the newest snapshot the bucket holds, and
+`kubectl --namespace etcd-snapshots get cronjob,job,pod` for what the runs did. A failed run says
+which step failed: `kubectl --namespace etcd-snapshots logs job/<job> --all-containers`
+(`fetch-age`, `snapshot`, `encrypt` or `upload`). A pod stuck in `ContainerCreating` names its
+missing Secret in `kubectl --namespace etcd-snapshots describe pod <pod>`.
+
+Usually: the Secret `etcd-snapshots-s3` is missing, because the secret store lacks the key `volsync`
+or the External Secrets operator cannot read it (`just bao-seed-volsync`); the S3 key was replaced
+and the store's copy was not (`just bao-seed-volsync --rotate-s3`); the etcd bucket does not exist
+(`just infra-backup-buckets`); the pod cannot download age, which needs the pod network to reach its
+release host, or the archive no longer matches the checksum the manifest pins; or the Talos API
+refuses the pod, which the `snapshot` step's log says. Once a run succeeds, take a snapshot by hand
+to clear the alert at once: `kubectl --namespace etcd-snapshots create job
+--from=cronjob/etcd-snapshots <name>`.  A cluster whose control planes lack
+`talos/patches/controlplane/talos-api-access.yaml`, which `just cluster-talos` rolls out, never
+raises this alert, as Flux builds none of the application there: the `ServiceAccount` kind of
+`talos.dev` does not exist, so Flux's dry run fails and the Kustomization `etcd-snapshots` stays not
+Ready (`flux get kustomization etcd-snapshots`), which nothing scrapes.
+
+## EtcdSnapshotJobFailing
+
+The latest scheduled run of the CronJob `etcd-snapshots` has not succeeded, half an hour after it
+was scheduled, which is longer than the run's 20 minute deadline: it failed, or its pod never
+started. The alert clears once a run succeeds. The previous snapshot is still in the bucket, so
+nothing is lost yet; [EtcdSnapshotStale](#etcdsnapshotstale) fires when it is 13 hours old.
+
+Look at first, and usually: as for [EtcdSnapshotStale](#etcdsnapshotstale). A snapshot that has
+outgrown the memory-backed volume it is written to (1 GiB) fails the `snapshot` step with a write
+error: the volume's `sizeLimit` and the step's memory limit in the CronJob then grow together.

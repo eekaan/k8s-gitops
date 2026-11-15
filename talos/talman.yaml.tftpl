@@ -74,6 +74,7 @@ patches:
     - ../patches/controlplane/etcd.yaml
     - ../patches/controlplane/metrics.yaml
     - ../patches/controlplane/deny-service-external-ips.yaml
+    - ../patches/controlplane/talos-api-access.yaml
     - ../patches/cni/cilium.yaml
 %{ if contains([for node in nodes : node.role], "worker") ~}
   worker:

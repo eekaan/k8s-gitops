@@ -1,0 +1,16 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/namespace-v1.json
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: etcd-snapshots
+  annotations:
+    # Removing the namespace from the tree must not delete the Secret Talos made for the job.
+    kustomize.toolkit.fluxcd.io/prune: disabled
+  labels:
+    # The one namespace the machine configuration lets reach the Talos API (talos/patches/controlplane/
+    # talos-api-access.yaml): nothing else runs here, so whoever may read its Secrets, which hold a
+    # talosconfig that takes an etcd snapshot, is the cluster's administrators alone. The job's pod
+    # runs as a non-root user with every capability dropped, no privilege escalation and the
+    # runtime's seccomp profile, which the restricted level requires.
+    pod-security.kubernetes.io/enforce: restricted
