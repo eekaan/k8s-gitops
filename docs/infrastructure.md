@@ -40,21 +40,37 @@ them is a `just` recipe.
 - `just infra-destroy` destroys `sto2/cluster`, then `sto2/plumbing`. Each destroy is planned and
   summarised first, and runs once the stack's name is typed back; `just infra-destroy --yes` does
   not ask. When the cluster stack is not destroyed, the plumbing stack is left as it is. The load
-  balancers and volumes the cluster creates itself, outside OpenTofu, are not removed, and the
-  recipe says so; while any are left, the plumbing network cannot be deleted. Once the cluster
-  stack is destroyed, the recipe removes the files generated for its cluster that hold the nodes'
-  and the API's addresses, which the cloud may give to someone else: `talos/<cluster>/talman.yaml`
+  balancers and volumes the cluster creates itself, outside OpenTofu, are not in the stack's state,
+  so its destroy would leave them in the cloud, where they keep the plumbing network from being
+  deleted. So before it plans the cluster stack's destroy, whichever way it is asked for, the
+  recipe asks the cluster, through its kubeconfig, for them, as `just cluster-destroy` does
+  ([cluster.md](cluster.md#recipes) says what it lists and counts): while the cluster owns any, or
+  cannot be asked, nothing is destroyed, unless `--unreachable` is given. A cluster stack whose
+  state holds no resource, destroyed already or never applied, is not asked and is skipped with a
+  line saying so, so a re-run ends as the first run did; a state that cannot be read, or that is
+  not a state, refuses the run, and so does one whose lock cannot be taken. Once the cluster stack
+  is destroyed, the recipe removes the files generated for its cluster that hold the nodes' and the
+  API's addresses, which the cloud may give to someone else: `talos/<cluster>/talman.yaml`
   and the talosconfig and kubeconfig in its `clusterconfig/`. It names each file it removes and
   removes only files git ignores; the secrets bundle and etcd snapshots stay.
   `just infra-destroy sto2/cluster`, or `sto2/plumbing`, destroys that stack only, the same way.
   `just cluster-destroy` ([cluster.md](cluster.md#recipes)) destroys the cluster stack so, once the
   cluster owns none of those load balancers and volumes. The `ci` stack is destroyed by its name
   only, `just infra-destroy sto2/ci`, the same way; `just infra-destroy` without a stack leaves it.
+  The plumbing stack's subnet and router interface cannot be removed while a port or a floating IP
+  of another stack uses them, so a run that would destroy the plumbing stack, with no stack or with
+  `sto2/plumbing`, first reads the state of every other stack of its region that the run does not
+  destroy before it, and plans and destroys nothing while one holds a resource: it exits non-zero
+  naming that stack and the recipe that destroys it, `just infra-destroy sto2/ci` or
+  `just cluster-destroy`, and prints no resource's address. A stack that was never applied, or holds
+  data sources only, holds nothing; a state that cannot be read, for any reason, refuses the run
+  too.
 - `just ci-host-setup` and `just ci-host-remove` set up and deregister the CI host's runner
   ([runbooks/ci-host.md](runbooks/ci-host.md)).
 
 Apply `plumbing` before `cluster` and `ci`, as both read the plumbing stack's state. Destroy goes
-the other way round: `ci` by name, before `plumbing`, whose network its port is on. State objects
+the other way round: `ci` by name, before `plumbing`, whose network its port is on, and which the
+recipe refuses to destroy while the `ci` stack holds anything. State objects
 stay in the bucket after a destroy.
 
 ## Before the first plan
@@ -86,7 +102,14 @@ storage container or an S3 bucket.
   printed. Nothing is created while `.env` is a symlink or a file git does not ignore, or while one
   of the names there holds a value; a name that is empty or a placeholder is filled in, an absent
   one is appended after a comment, and every other line stays as it is. `.env` is written to a
-  temporary file beside it, mode 0600, and renamed into place.
+  temporary file beside it, mode 0600, and renamed into place. When the client fails, the recipe
+  shows the reason it gave, a few lines at most, after each line has passed through the filter
+  `redact_stream` in `scripts/lib/errors.sh`: the values of the variables that hold keys, the bucket
+  prefix, the endpoint and the cloud's address are replaced as written, and every URL, address, host
+  name with a dot in it and long token by pattern, so an unauthorized request and a name that does
+  not resolve read differently without naming the endpoint, a project or a request. With `CI` set
+  none of the client's words is shown: they go to `.env.infra-s3-key.errors` beside `.env`, which
+  git ignores, and only its name is printed.
 - `just infra-backup-buckets` creates the four buckets unless they exist, through the object
   storage's S3 API with the state key, and names each by its role, never by its name. A second run
   creates nothing. A name another project owns fails, naming the role.
@@ -101,10 +124,12 @@ why state and snapshots are encrypted before they are uploaded
 These recipes, `just infra-state-bucket` and the etcd snapshot recipes `just cluster-snapshot`,
 `cluster-snapshots` and `cluster-restore` ([cluster.md](cluster.md#recipes)) reach the object
 storage with rclone, pinned in `mise.toml`, at the endpoint, region and addressing that
-`infra/openstack/backend.hcl` gives OpenTofu's state. rclone is configured through its environment only and reads no config file; the
-operator's own rclone configuration, its `RCLONE_` and `AWS_` variables and every other variable
-but `PATH`, `HOME`, `TMPDIR` and the proxy variables stay out of its environment. What rclone
-prints names the buckets and the endpoint, so it is not shown.
+`infra/openstack/backend.hcl` gives OpenTofu's state. rclone is configured through its environment
+only and reads no config file; the operator's own rclone configuration, its `RCLONE_` and `AWS_`
+variables and every other variable but `PATH`, `HOME`, `TMPDIR` and the proxy variables stay out of
+its environment. What rclone prints names the buckets and the endpoint, so it is not shown; of its
+errors the etcd recipes show the reason only, with places and keys replaced, as
+[cluster.md](cluster.md#what-the-recipes-print) says.
 
 ## The node subnet
 

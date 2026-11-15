@@ -2,7 +2,9 @@
 # Lists a cluster's etcd snapshots in the etcd backup bucket, <BACKUP_BUCKET_PREFIX>-etcd, with the
 # state key, reading only: one per line, newest first, by the name cluster-restore takes and the
 # size in bytes, and nothing else, neither the bucket's name nor what rclone reports. A cluster
-# without snapshots lists nothing and says so on standard error.
+# without snapshots lists nothing and says so on standard error. Of rclone's errors only the reason
+# is shown, with places and keys replaced, and with CI set none of it, but the name of the file that
+# keeps it (scripts/lib/errors.sh).
 # Usage: scripts/cluster-snapshots [cluster]
 set -euo pipefail
 
@@ -14,6 +16,7 @@ here=$(dirname "$0")
 require_env BACKUP_BUCKET_PREFIX AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
 s3_bucket_name_ok BACKUP_BUCKET_PREFIX prefix
 s3_require_client
+start_errors_log "$cluster_dir/clusterconfig/${0##*/}.errors.log"
 
 step="listing the etcd bucket"
 if ! listing=$(s3_etcd_snapshots "$cluster"); then
