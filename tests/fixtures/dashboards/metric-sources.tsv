@@ -1,0 +1,14 @@
+# Where the series the home dashboard queries come from, for tests/dashboards.bats: a metric name
+# (an anchored regular expression), a tab, then the monitor of the render that scrapes the target that
+# serves it as Kind/name, any-monitor for the series Prometheus writes for every target it scrapes, or
+# alerting-rule for the series it writes for every alerting rule. A series a recording rule of the
+# render writes needs no row. The test fails when a monitor named here is not in the render, and a
+# metric the dashboard queries that no row names has no known source.
+kube_node_info	ServiceMonitor/kube-prometheus-stack-kube-state-metrics
+kube_node_status_condition	ServiceMonitor/kube-prometheus-stack-kube-state-metrics
+up	any-monitor
+ALERTS	alerting-rule
+volsync_volume_out_of_sync	ServiceMonitor/volsync
+volsync_missed_intervals_total	ServiceMonitor/volsync
+vl_rows_ingested_total	ServiceMonitor/victoria-logs
+vl_bytes_ingested_total	ServiceMonitor/victoria-logs

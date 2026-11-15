@@ -1,9 +1,14 @@
 ---
-# Lets kustomize write the generated ConfigMap's hashed name into the HelmRelease's valuesFrom, so
-# a change to values.yaml produces a new ConfigMap and a new release.
+# Lets kustomize write the generated ConfigMaps' hashed names into the HelmRelease's valuesFrom, so
+# a change to values.yaml produces a new ConfigMap and a new release, and into the dashboard's
+# configMapRef, so a change to its JSON produces a new ConfigMap for the operator to load.
 nameReference:
   - kind: ConfigMap
     version: v1
     fieldSpecs:
       - path: spec/valuesFrom/name
         kind: HelmRelease
+      - path: spec/configMapRef/name
+        group: grafana.integreatly.org
+        version: v1beta1
+        kind: GrafanaDashboard

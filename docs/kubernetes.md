@@ -770,6 +770,114 @@ Vector's internal metrics, and cert-manager's certificate metrics. Nothing reads
 sessions or the storage operator, as none of them is scraped ([Monitoring](#monitoring)). The alerts have no destination
 yet: Alertmanager sends them nowhere, so they show in Prometheus and Alertmanager only.
 
+### Dashboards
+
+A dashboard is configuration: its JSON is in the tree and is loaded into [Grafana](#grafana) by a
+`GrafanaDashboard`, which the Grafana operator applies. Nothing is fetched when it is loaded: no
+dashboard uses the operator's `url`, `grafanaCom`, `oci` or Jsonnet sources or asks for a plugin,
+and the tree's checks fetch none either. The cost is that an upstream dashboard is a copy: it is as
+large as its JSON, it changes only when someone fetches the file again, and a new release of what
+it describes does not reach it by itself. What the tree records for each makes that a step of the
+pull request that moves the release.
+
+**Where one lives.** An application whose namespace is `monitoring` keeps its dashboard beside its
+manifests: `app/grafanadashboard.yaml`, with the JSON in `app/dashboards/<name>.json`, which the
+application's `kustomization.yaml` turns into a ConfigMap with a `configMapGenerator`, with
+`kustomize.toolkit.fluxcd.io/substitute: disabled` so Flux leaves the `${...}` of Grafana's
+variables alone, and a `kustomizeconfig.yaml` that writes the ConfigMap's hashed name into the
+`GrafanaDashboard`'s `configMapRef`. The operator acts in `monitoring` only
+([Grafana](#grafana)) and an application's `targetNamespace` puts everything it applies in its own
+namespace, so an application in another namespace has its dashboard as an application of its own in
+`apps/base/monitoring/<application>-dashboard/`, laid out the same way. That application names the
+one it describes and `grafana-operator` in `dependsOn`: `just kubernetes-check` fails for a cluster
+that enables the dashboard without the application, so a dashboard leaves with its application.
+The `GrafanaDashboard` selects the Grafana by its label `app.kubernetes.io/instance: grafana`,
+loads into a folder of the `Folder` column below, which its `spec.folder` names (the operator files a
+dashboard that names none under its namespace, `monitoring`), and is applied again every minute, as
+the datasource is. The dashboards of the Grafana itself, the logs and the cluster's home, are the
+Grafana application's own: `grafanadashboard-logs.yaml`, whose JSON is a ConfigMap, and
+`grafanadashboard-home.yaml`, whose JSON is in the object.
+
+**What the tree records.** Beside each upstream dashboard's `GrafanaDashboard`, in comments: the
+`Source:` URL of the file at a revision, its `Licence:` and its `SHA-256:`, and a record line
+`# dashboard-<name>: <revision>`. The revision is the release of what it describes that the
+application's pinned chart is at, either the chart's own version or its application's, and the file
+is kept as upstream publishes it, so the SHA-256 is that of the committed file. Renovate moves none
+of it: each record is a row of `.renovate/by-hand.tsv`, which `just renovate-pins` checks.
+`tests/dashboards.bats` fails when a record, its source, its licence or its hash is missing, when
+the file is not what the hash says, when the revision is not that of the pinned chart, or when the
+row is missing.
+
+**Adding or updating one.** Fetch the file from the source at the revision of the pinned chart, put
+it in `dashboards/`, write the four lines and the by-hand row, and add the application to
+`DASHBOARD_APPS` in `tests/dashboards.bats`. When Renovate moves the chart, the test fails until the
+file is fetched again at the new release and the record, source and hash move with it, in the same
+pull request. A dashboard written for this tree is one of the Grafana application's and has no
+record; it reads only datasources the tree defines. Every other application's is an upstream file
+in a ConfigMap, with its record.
+
+**What runs, and what each is for.** Folder is where Grafana lists it.
+
+| Dashboard | For | Source, revision, licence | Folder | Datasource |
+| --- | --- | --- | --- | --- |
+| Kubernetes, nodes, API server, kubelet, controller manager, scheduler, etcd, CoreDNS, Prometheus, Alertmanager, Grafana | The cluster and the stack's own components | The monitoring chart's own, as [Grafana](#grafana) describes, at the monitoring application's chart version; Apache-2.0 | Kubernetes | Prometheus |
+| Cluster health (the home) | Nodes Ready, firing alerts by severity, scrape targets down, volumes VolSync reports out of sync and scheduled syncs it missed, and the log store's ingest | Written for this tree; Apache-2.0 | General | Prometheus |
+| Logs | Log volume by namespace and by node, and the logs of the namespaces and pods chosen | Written for this tree; Apache-2.0 | Logs | VictoriaLogs |
+| VictoriaLogs - single-node | The log store's ingestion, storage, queries and resource use | `dashboards/victorialogs.json` of the VictoriaLogs repository at v1.54.0, the release the pinned chart deploys; Apache-2.0 | Logs | Prometheus |
+| OpenBao | The members, tokens, leases, requests and runtime | `grafana/dashboards/dashboard.json` of the OpenBao Helm chart's repository at 0.30.7, the chart the application pins; MPL-2.0, whose text is at https://mozilla.org/MPL/2.0/ | OpenBao | Prometheus |
+
+The `Grafana`'s `spec.preferences.homeDashboardUid` names the home dashboard's `uid`, which is how
+the operator sets an instance's home. VolSync exposes whether a volume is out of sync and how many
+scheduled syncs were missed, and no time of the last sync, so those are what the home shows of a
+backup's age. It shows nothing of the public Gateway or of Flux, as no monitor scrapes either.
+
+**Waiting on a scrape or an upstream.** Each of these has no dashboard, because it would show "No
+data" or no upstream file exists:
+
+| Component | Waiting for |
+| --- | --- |
+| Flux | A monitor of its controllers: nothing defines one |
+| Cilium | Its ServiceMonitors, which stay off ([Monitoring](#monitoring)) |
+| The storage operator and its cluster | A monitor of the Piraeus operator and LINSTOR |
+| cert-manager | Its ServiceMonitor, which the application leaves off |
+| Envoy Gateway and its proxies | A monitor of the controller and of the proxies the Gateway starts: the render holds none |
+| External Secrets | Its ServiceMonitors, which the application leaves off |
+| CloudNativePG | A PostgreSQL cluster whose instances `components/cnpg-cluster`'s PodMonitor scrapes: no application of the overlay uses the component, and the operator's own PodMonitor is all the render holds |
+| Vector | An upstream dashboard: its repository ships none |
+| VolSync | An upstream dashboard: its repository ships none, and the one shared on grafana.com states no licence |
+
+The other applications the render holds a monitor for, the descheduler, KEDA, the kubelet CSR
+approver, metrics-server, the reloader, Spegel, the Vertical Pod Autoscaler and the Grafana operator,
+have no dashboard.
+
+An upstream dashboard declares the datasource it reads as an input in its `__inputs`, and its
+`GrafanaDashboard`'s `spec.datasources` maps that input to the name of the tree's Prometheus. Before
+it loads the dashboard, the operator replaces every `${<input>}` in the JSON with that name, and
+changes nothing else. OpenBao's panels name `${DS_PROMXY}`, so they name Prometheus. VictoriaLogs'
+panels read the variable `$DS_PROMETHEUS`, without braces, which the operator leaves as it is: the
+variable lists the datasources of type prometheus, and only its current value becomes Prometheus.
+
+`tests/dashboards.bats` builds the applications that deliver a dashboard as Flux applies them, checks
+that every `GrafanaDashboard` the cluster's render holds is one of those or the monitoring chart's,
+whatever its file is named, and checks that each `GrafanaDashboard` is in the namespace the operator
+watches, selects the Grafana and has its JSON in the tree, and that an overlay without the
+application it describes has none of its dashboards and a cluster that keeps the dashboard without
+it is refused; that no dashboard uses a source that fetches or asks for a plugin, that each outside
+the Grafana application loads a ConfigMap and has the records above, and that the render holds a
+monitor of the application it describes; that every dashboard of the tree, the monitoring chart's
+included, has a title and a `uid` no other has, maps only inputs its JSON names and only to
+datasources the tree defines, and, with its inputs replaced as the operator replaces them, reads
+only datasources the tree defines: a variable that lists the type of one, or its name or `uid`;
+that every metric the home dashboard queries is written by a recording rule of the render or
+served by a monitor of the render named in `tests/fixtures/dashboards/metric-sources.tsv`; and that
+a ConfigMap, or a `GrafanaDashboard` carrying its JSON, holds at most 1 MiB, which it proves
+refuses a padded dashboard. The metrics are read from the `expr` fields of the home dashboard's
+panels: the parser takes out strings, label matchers, ranges, variables and the label lists of
+`by`, `without`, `on`, `ignoring` and the group modifiers, and reads every identifier left that is
+not a function, a keyword or a number as a metric; it refuses an expression that selects by
+`__name__`. It cannot tell which target serves a metric: that is the table's claim, and the table
+is the one place to change when a panel reads a new metric.
+
 ## Grafana
 
 The Grafana operator runs one Grafana in `monitoring`, with the cluster's Prometheus as its
