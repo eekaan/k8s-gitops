@@ -1,12 +1,15 @@
 # shellcheck shell=bash
-# Shared by scripts/lib/s3.sh and scripts/lib/cluster.sh: what the recipes show of the errors of the
-# S3 client, the cloud client and kubectl, whose messages can name an endpoint, a bucket, an API
-# server, a project or a key. Builds on scripts/lib/infra.sh.
+# Shared by scripts/lib/s3.sh, scripts/lib/cluster.sh and scripts/lib/openbao.sh: what the recipes
+# show of the errors of the S3 client, the cloud client, kubectl and OpenBao, whose messages can name
+# an endpoint, a bucket, an API server, a project or a key, or carry control characters a terminal
+# acts on. Builds on scripts/lib/infra.sh.
 #
 # What is shown is the reason, never the places. Every line passes through redact_stream first, which
 # replaces, before anything is printed:
 #   - the value of each variable in error_secret_variables, and of each value a recipe adds to
 #     error_secrets, matched literally, in bash, so none of them reaches a command line;
+#   - every byte that is not printable ASCII or a tab, the C0 and C1 control characters among them,
+#     by a question mark, as printable shows text;
 #   - every URL, IPv4 and IPv6 address, host name with a dot in it, and every run of 20 or more
 #     letters, digits and +/=_- that holds a digit, or of 20 or more hexadecimal digits and hyphens (a
 #     key, a token, an ID), by pattern. A long word of letters only, such as an S3 error code, stays.
@@ -35,6 +38,16 @@ start_errors_log() {
   fi
 }
 
+# printable: the lines on standard input with every byte that is not printable ASCII or a tab shown as
+# a question mark. A control character, C0 or C1, would reach the terminal as an instruction, to move
+# the cursor, clear the screen or set the window's title; text outside ASCII is shown so too.
+printable() {
+  local LC_ALL=C line
+  while IFS= read -r line || [[ -n $line ]]; do
+    printf '%s\n' "${line//[^[:print:]$'\t']/?}"
+  done
+}
+
 # redact_stream: the lines on standard input with every secret and every place replaced, as the
 # header says.
 redact_stream() {
@@ -52,7 +65,7 @@ redact_stream() {
       fi
     done
     printf '%s\n' "${line:0:300}"
-  done | sed -E \
+  done | printable | sed -E \
     -e 's#[A-Za-z][A-Za-z0-9+.-]*://[^[:space:]"'"'"')]+#<url>#g' \
     -e 's#\[?([0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}\]?#<address>#g' \
     -e 's#[0-9]{1,3}(\.[0-9]{1,3}){3}(:[0-9]+)?#<address>#g' \

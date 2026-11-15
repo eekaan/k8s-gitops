@@ -2,10 +2,11 @@
 # Hands OpenBao's recovery keys to the operator, once (ADR 0016). OpenBao initialises itself without
 # recovery keys; the first rotation of them returns new shares at once, and every later one needs a
 # threshold of the shares that exist. So this runs only while OpenBao holds none, and writes the
-# shares, with the seal key, to FILE outside the repository, encrypted with age to the Talos age
-# key's recipient in talos/.sops.yaml: a key the cluster does not hold. The rotation asks for
-# verification, so OpenBao commits the shares only once the script has written FILE, opened it
-# again with the operator's Talos age key to what it wrote, and given a threshold of them back. A
+# shares, with the seal key, to FILE outside the repository, in a place where bao-root and
+# bao-seal-restore will read it (bao_custody_place in scripts/lib/openbao.sh), encrypted with age to
+# the Talos age key's recipient in talos/.sops.yaml: a key the cluster does not hold. The rotation
+# asks for verification, so OpenBao commits the shares only once the script has written FILE, opened
+# it again with the operator's Talos age key to what it wrote, and given a threshold of them back. A
 # rotation it started and did not complete is cancelled, and its file removed; a rotation left in
 # progress by an earlier run is cancelled first; a file someone makes at the path meanwhile is
 # never replaced. Nothing of the shares is printed, passed as an argument or written unencrypted;
@@ -31,7 +32,7 @@ file=$1
 # shellcheck source=scripts/cluster-env
 . "$here/cluster-env" "${2-}"
 complete=1
-require_commands kubectl curl jq base64 age mktemp sha256sum || complete=0
+require_commands kubectl curl jq base64 age mktemp sha256sum stat || complete=0
 require_kubeconfig || complete=0
 # The operator's Talos age key, which the file must open with before OpenBao commits the shares.
 require_age_key || complete=0
@@ -50,6 +51,9 @@ elif [[ -e $file || -L $file ]]; then
 elif [[ ! -d $dir || ! -w $dir ]]; then
   infra_error "$dir is not a directory this user can write to"
   complete=0
+elif ! bao_custody_place "$file"; then
+  # bao-root and bao-seal-restore read the file only from such a place.
+  complete=0
 fi
 ((complete))
 
@@ -64,7 +68,11 @@ bao_abort() {
   local held
   ((pending)) || return 0
   bao_request DELETE sys/rotate/recovery/init > /dev/null 2>&1 || true
-  [[ -z $partial ]] || rm -f -- "$partial"
+  if [[ -n $partial ]]; then
+    # Stopped right after the link: FILE is the partial file under its own name.
+    [[ ! $partial -ef $file ]] || placed=1
+    rm -f -- "$partial"
+  fi
   ((placed)) || return 0
   held=$(bao_request GET sys/seal-status 2> /dev/null | jq -r '.n // "unknown"') || held=unknown
   if [[ $held == 0 ]]; then
@@ -132,12 +140,8 @@ if [[ $(bao_decrypt "$partial" | sha256sum) != "$(printf '%s' "$custody" | sha25
   exit 1
 fi
 custody=
-# A hard link fails where a file exists, so one made after the check above is never replaced.
 step="putting $file in place"
-if ! ln -- "$partial" "$file"; then
-  infra_error "$file exists now; the recovery keys go into a new file"
-  exit 1
-fi
+bao_place "$partial" "$file" "no recovery keys are committed" || exit 1
 placed=1
 rm -- "$partial"
 partial=""
