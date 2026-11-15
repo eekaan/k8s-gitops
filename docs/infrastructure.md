@@ -156,7 +156,7 @@ address below it, by host number:
 | 6 | the CI host ([The CI host](#the-ci-host)) | the ci stack's `host_number` |
 | 7 and 8 | the two edge routers ([The edge routers](#the-edge-routers)) | the plumbing stack's `edge_hosts`, built by the edge stack |
 | 10 and up | the control planes | the cluster stack |
-| 20 and up | the workers, of whom the edge routers take BGP sessions from 20 to 99 | the cluster stack's nodes module, from `worker_first_host`; the edge stack's `worker_first_host` and `max_workers` |
+| 20 and up | the workers, of whom the edge routers take BGP sessions from 20 to 99 | the cluster stack's `worker_first_host`; the edge stack's `worker_first_host` and `max_workers` |
 | 100 to 200 | the DHCP pool | the plumbing stack |
 
 These collisions are refused when a stack is planned:
@@ -165,14 +165,15 @@ These collisions are refused when a stack is planned:
 - the CI host outside 2 to 9, on 5, or on an edge router (the ci stack, and the cluster stack for
   `ci_host_number`);
 - a node or the API load balancer on an edge router (the cluster stack);
-- the edge routers' block of workers in the DHCP pool or on an edge router (the edge stack);
+- a worker in the DHCP pool, or a first worker below host number 20 (the cluster stack);
+- the edge routers' block of workers in the DHCP pool, on an edge router or below host number 20
+  (the edge stack);
 - the default service range on the default node, pod or service subnet (`just infra-check`,
   offline), and a configured one on the node subnet (the plumbing stack) or on the pod or service
   subnet (the cluster stack).
 
-Nothing else is checked. The control planes and the workers keep apart from each other and below
-the DHCP pool by their numbering alone, as long as there are at most ten control planes and eighty
-workers.
+Nothing else is checked. The control planes keep below the workers by their numbering alone, as
+long as there are at most ten of them.
 
 ## The workers' data volumes
 
@@ -395,8 +396,9 @@ Every other routing daemon is off in the list. Its configuration, `frr.conf`, is
   the most workers the numbering of the cluster stack leaves room for
   ([The node subnet](#the-node-subnet)); FRR's default is 100.
 - **Who may peer.** The workers' block is the host numbers from `worker_first_host`, 20 by default,
-  for `max_workers`, 20 to 99: where the cluster stack's nodes module numbers its workers, from its
-  own `worker_first_host`, whose default a test holds equal to the edge stack's. The stack writes it
+  for `max_workers`, 20 to 99: where the cluster stack numbers its workers, from its own
+  `worker_first_host`, whose default a test holds equal to the edge stack's, and which one
+  `TF_VAR_worker_first_host` sets for both. Both stacks refuse a value below 20. The stack writes it
   as the fewest networks that hold exactly those addresses, and refuses at plan time a block that
   reaches the DHCP pool or holds an edge's address. The node subnet also holds the control planes,
   the CI host and the other edge, and none of them may open a session: FRR's listen ranges, the
@@ -450,8 +452,9 @@ Every other routing daemon is off in the list. Its configuration, `frr.conf`, is
     stale for up to the restart time, and a shut-down worker's for all of it, with new connections
     hashed to it failing, unless the node leaves BGP first: taken out of the
     `CiliumBGPClusterConfig`'s node selector, Cilium sends a Cease, and an edge that has not
-    negotiated the bit withdraws its paths at once (the guide's "Shutting Down a Node"). The cluster
-    recipes that drain a node take it out that way in a change of their own.
+    negotiated the bit withdraws its paths at once (the guide's "Shutting Down a Node"). The selector
+    takes every worker and no recipe takes one out, so a reboot or a stop leaves the window as it
+    is; the restart time in the workers' `CiliumBGPPeerConfig` bounds it.
 - `maximum-paths` is `max_workers`: as many equal-cost paths to one address as there can be workers.
   The most FRR takes is what its build allows: 128 by its manual, 256 in Debian's package. The
   kernel setting `net.ipv4.fib_multipath_hash_policy = 1` hashes a flow's layer 4 fields, so every
@@ -500,14 +503,30 @@ settings, `sysctl.conf`, are written once at first boot:
   same as the cluster stack's `service_ports`, which a test keeps equal, is destination translated
   to the public Gateway's address and source translated to the edge's own address
   ([nftables NAT](https://wiki.nftables.org/wiki-nftables/index.php/Performing_Network_Address_Translation_(NAT))).
-  Forwarding is on in the kernel, and the forward chain drops everything except new, translated
-  connections to the Gateway on those ports whose route's next hop is a worker's address, and what
-  belongs to connections it has accepted. With no worker's route to the Gateway's address, before
-  FRR has learned one or once FRR stops and zebra takes its routes out of the kernel, a translated
-  connection is dropped there, whether or not FRR's reject route is in place
+  Forwarding is on in the kernel. The forward chain's first rule, ahead of what belongs to a
+  connection, drops every packet of a translated connection toward the Gateway whose route's next
+  hop is not a worker's address; then it admits what belongs to connections it has accepted, and a
+  new translated connection to the Gateway on those ports through a worker; everything else is
+  dropped. So with no worker's route to the Gateway's address, before FRR has learned one, or once
+  FRR stops and zebra takes its routes out of the kernel (it does on exit; the edges run it without
+  `-r`, which would leave them), a new connection is refused and an established one's packets are
+  dropped at the edge, whether or not FRR's reject route is in place, and none of them follows the
+  default route to the cloud's router
   ([nftables](https://wiki.nftables.org/wiki-nftables/index.php/Matching_routing_information); the
   kernel takes `rt nexthop` in any hook, the forward hook among them,
   [nft_rt.c](https://github.com/torvalds/linux/blob/v6.12/net/netfilter/nft_rt.c#L173-L178)).
+  Replies come from the Gateway to the edge's own address, are translated back to the client's,
+  and leave by the default route, the one way to a client, whatever FRR does. Nothing of IPv6 is
+  forwarded: the kernel's IPv6 forwarding stays off, as `sysctl.conf` turns on IPv4's alone, and
+  no rule admits it. `just edge-forward-check` proves this with the rendered rules in network
+  namespaces on a developer's machine; the CI containers refuse the user namespaces it needs, and
+  the stack's tests compare the chain's rules as text.
+- zebra runs without `-r` (FRR's [zebra](https://docs.frrouting.org/en/stable-10.3/zebra.html):
+  "When program terminates, do not flush routes installed by zebra from the kernel"). With it, an
+  FRR that stops would leave its last routes to the workers in the kernel with nothing to withdraw
+  them, and a worker that went meanwhile would keep its share of new connections for as long as
+  FRR is down. Without it, an edge whose FRR stops forwards nothing, `just edge-check` fails it,
+  and a client that retries can reach the other edge.
 - The input chain drops everything addressed to the edge except what belongs to its own connections,
   loopback, TCP 22, TCP 179 from the workers' block and the ICMP destination unreachable,
   fragmentation needed, that path MTU discovery needs. IPv6 is dropped but for the ICMPv6 that
@@ -519,12 +538,13 @@ settings, `sysctl.conf`, are written once at first boot:
   restore the client's address later and what each costs.
 - ICMP redirects are off, as the edge forwards between hosts of one subnet.
 - **What an edge can reach.** An edge is internet-facing on the public ports and sits on the node
-  subnet, so the nodes' group rule for TCP 6443 from that subnet admits it to the Kubernetes API of
-  every node, as [Services announced over BGP](#services-announced-over-bgp) states. The control is
-  the API's own authentication and authorisation: an edge holds no kubeconfig, token or client
-  certificate, its first boot is given none, and its only inbound path from the internet is the two
-  public ports, forwarded to the Gateway, and SSH from the operator allowlist. The group rule is not
-  narrowed to exclude the edges' addresses.
+  subnet, so the nodes' group rule for TCP 6443 from that subnet lets its packets reach every node,
+  as [Services announced over BGP](#services-announced-over-bgp) states. Behind the group, each
+  node's own firewall admits no listener from an edge's address, the Kubernetes API included
+  ([cluster.md](cluster.md#sources)), so an edge reaches the service ports on the workers and
+  nothing else. Beyond that, an edge holds no kubeconfig, token or client certificate, its first
+  boot is given none, and its only inbound path from the internet is the two public ports,
+  forwarded to the Gateway, and SSH from the operator allowlist.
 
 The security group `<prefix>-edge` holds the rules the cloud enforces, and the cloud's default rules
 are deleted. It admits TCP on each public port from each network of `public_allowed_cidrs`, which is
@@ -621,15 +641,16 @@ host's are, it prints pass, FAIL or skip for each edge:
 
 - FRR is running.
 - As many sessions are established as the cluster's `talman.yaml` lists workers, and which worker
-  has none otherwise. The cluster stack puts the first worker at host number 20 of the node subnet
-  and the next ones after it, so a worker is known by its number.
+  has none otherwise, by each worker's own address, which the cluster stack writes there.
 - The table holds only /32s inside the service range, the range from the same file.
 - Each route has as many next hops as sessions, or fewer, which is a skip, as a Service that is
   local-only is announced by some workers only.
 - FRR is configured with its reject route for the service range, for the range of the same file
   when there is one, and the kernel has it.
-- The nftables tables are loaded, and the forward chain admits a translated connection only through
-  a worker's address.
+- The nftables tables are loaded, and the forward chain sends a translated connection's packets
+  toward the Gateway, new or established, only through a worker: its first rule drops the rest
+  ahead of what belongs to a connection, and both its guarded rules are for the cluster's Gateway,
+  hold every worker's address of `talman.yaml` and not the edge's default route's next hop.
 - The kernel forwards, which is a FAIL when it forwards without the rules.
 - Unattended upgrades are off.
 
@@ -791,6 +812,8 @@ docker of `vector-check` has only the scan.
   an edge to pass its check, 900 seconds when unset, and how often it tries, 15.
 - `TF_VAR_security_group_rules`: the cluster stack's `security_group_rules`, `full` unless set to
   `reduced` ([The nodes' security group](#the-nodes-security-group)).
+- `TF_VAR_worker_first_host`: the host number of the first worker, 20 when unset, for the cluster
+  stack and the edge stack alike ([The node subnet](#the-node-subnet)).
 - `CI`: when set, tofu's errors go to a file instead of the output; see below.
 
 ## State

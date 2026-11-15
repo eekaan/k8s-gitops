@@ -52,9 +52,11 @@ In this order, after the plumbing stack is applied ([rebuild.md](rebuild.md)):
   with its reject route for the range, for the range `talman.yaml` names, and the kernel has it. A
   FAIL that no reject route is configured means FRR runs without the edge's configuration, as after
   a first boot that failed: rebuild the edge.
-- **The nftables rules are loaded**, **the forward chain forwards a translated connection only
-  through a worker**, and **the kernel forwards**, which is a FAIL when it forwards without the
-  rules.
+- **The nftables rules are loaded**; **the forward chain sends a translated connection, new or
+  established, toward the Gateway only through a worker**, read from the rules as loaded; and **the
+  kernel forwards**, which is a FAIL when it forwards without the rules. While FRR is stopped, a new
+  connection through this edge is refused and an established one's packets are dropped here, so
+  its clients' connections end, and a client that retries can reach the other edge.
 - **Unattended upgrades are off**: the first boot turns them off, as they would upgrade FRR in
   place.
 
@@ -145,8 +147,9 @@ they stay; the next ones are spread over the others.
 - **A worker shut down or rebooted gracefully**: its agent stops the same way, so its paths stay,
   stale, for up to the restart time, 120 seconds, and a shut-down worker's for all of it, unless the
   worker leaves BGP first: taken out of the `CiliumBGPClusterConfig`'s node selector, Cilium sends
-  a Cease, and the edges withdraw its paths at once. The cluster recipes that drain a node gain that
-  step in a change of their own.
+  a Cease, and the edges withdraw its paths at once. The selector takes every worker and no recipe
+  takes one out, so `just cluster-reboot` and a stop leave the window as it is; the restart time in
+  the workers' `CiliumBGPPeerConfig` bounds it.
 
 ### Failover tests
 
