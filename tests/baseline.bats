@@ -671,7 +671,7 @@ envoy_gateway_config() {
   [ -z "$violations" ]
 }
 
-@test "Envoy Gateway has a GatewayClass and no Gateway" {
+@test "Envoy Gateway has a GatewayClass and no Gateway of its own" {
   local app overlay enabled dependencies controller classes
   # Both applications run in the cluster: its overlay applies their Kustomizations.
   overlay="$BATS_TEST_TMPDIR/overlay.yaml"
@@ -696,7 +696,8 @@ envoy_gateway_config() {
   [ -n "$classes" ]
   [ "$(wc -l <<<"$classes")" -eq 1 ]
   [ "${classes#* }" = "$controller" ]
-  # No Gateway yet: each needs a load balancer and a certificate.
+  # The controller's applications make no Gateway: the cluster's public one is the application
+  # gateway-public's, which tests/gateway.bats proves.
   [ -z "$(yq -N 'select(.kind == "Gateway") | .metadata.name' "$BUILT" "$RENDERED")" ]
 }
 

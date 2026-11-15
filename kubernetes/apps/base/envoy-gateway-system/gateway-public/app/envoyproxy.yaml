@@ -1,0 +1,68 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/gateway.envoyproxy.io/envoyproxy_v1alpha1.json
+# How the controller runs the public Gateway's proxies and their Service, which the Gateway names in
+# infrastructure.parametersRef. The controller makes their Deployment at run time in this namespace,
+# which enforces the restricted level, so the fields below are what keeps its pods within it.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: public
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyService:
+        type: LoadBalancer
+        # Cilium gives a Service the pool's address, and the workers announce it, only with this
+        # label (docs/kubernetes.md, Service addresses).
+        labels:
+          k8s-gitops/announce: bgp
+        annotations:
+          # The one address of the service range the edge routers forward public traffic to.
+          lbipam.cilium.io/ips: "${GATEWAY_ADDRESS}"
+        # Cluster, where the controller's default is Local. Every worker announces the address and
+        # forwards a connection to a proxy on any node, so a proxy that is replaced or moves
+        # leaves the routes the edge routers hold as they are, and no connection is reset by a
+        # route that went away. Local would keep a proxy's source address, but there is none worth
+        # keeping: the edge routers translate the client's address to their own (ADR 0018).
+        externalTrafficPolicy: Cluster
+      envoyDeployment:
+        replicas: 2
+        pod:
+          # Two proxies never on one worker. Only nodes the pods may run on count, so tainted
+          # control planes do not.
+          topologySpreadConstraints:
+            - maxSkew: 1
+              topologyKey: kubernetes.io/hostname
+              whenUnsatisfiable: DoNotSchedule
+              nodeTaintsPolicy: Honor
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: envoy
+                  app.kubernetes.io/component: proxy
+                  app.kubernetes.io/managed-by: envoy-gateway
+                  gateway.envoyproxy.io/owning-gateway-name: public
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+        container:
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+      # A drain evicts a proxy only while the other keeps running.
+      envoyPDB:
+        minAvailable: 1
