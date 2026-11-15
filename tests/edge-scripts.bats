@@ -23,16 +23,19 @@ setup() {
   KEY="$BATS_TEST_TMPDIR/keys/edge"
   echo 'fixture private key, never read' > "$KEY"
   echo 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureEdgePublicKeyFixtureFixtureFix fixture' > "$KEY.pub"
-  # The cluster: three workers on the node subnet at host numbers 20, 21 and 22.
+  # The cluster: three workers with their own addresses on the node subnet, the second of them away
+  # from host number 21, where a worker numbered after the first would be: the check reads each
+  # worker's address from talman.yaml rather than working it out from its name.
   cat > "$REPO/talos/lab-sto2/talman.yaml" << YAML
 values:
   nodeSubnet: 192.0.2.0/24
   serviceRange: 203.0.113.16/28
+  bgp: {gatewayAddress: 203.0.113.21}
 nodes:
-  - {hostname: lab-cp-1, role: controlplane, ipAddress: 203.0.113.61}
-  - {hostname: lab-w-1, role: worker, ipAddress: 203.0.113.71}
-  - {hostname: lab-w-2, role: worker, ipAddress: 203.0.113.72}
-  - {hostname: lab-w-3, role: worker, ipAddress: 203.0.113.73}
+  - {hostname: lab-cp-1, role: controlplane, ipAddress: 203.0.113.61, values: {privateAddress: 192.0.2.10}}
+  - {hostname: lab-w-1, role: worker, ipAddress: 203.0.113.71, values: {privateAddress: 192.0.2.20}}
+  - {hostname: lab-w-2, role: worker, ipAddress: 203.0.113.72, values: {privateAddress: 192.0.2.30}}
+  - {hostname: lab-w-3, role: worker, ipAddress: 203.0.113.73, values: {privateAddress: 192.0.2.22}}
 YAML
   cat > "$BATS_TEST_TMPDIR/outputs.json" << JSON
 {"addresses": {"sensitive": true, "value": ["$ADDRESS_1", "$ADDRESS_2"]},
@@ -171,8 +174,11 @@ EOF
 cat "$EDGE_FIXTURE/forwarding"
 EOF
   host_fake ip << 'EOF'
-[[ $* == '-4 -o route show type unreachable' ]] || { echo "fake ip: unexpected $*" >&2; exit 1; }
-cat "$EDGE_FIXTURE/unreachable"
+case $* in
+  '-4 -o route show type unreachable') cat "$EDGE_FIXTURE/unreachable" ;;
+  '-4 -o route show default') cat "$EDGE_FIXTURE/default" ;;
+  *) echo "fake ip: unexpected $*" >&2; exit 1 ;;
+esac
 EOF
   host_fake apt-config << 'EOF'
 [[ $* == 'dump APT::Periodic::Unattended-Upgrade' ]] || { echo "fake apt-config: unexpected $*" >&2; exit 1; }
@@ -194,7 +200,7 @@ EOF
     EDGE_ROLLOUT_WAIT=0
     EDGE_ROLLOUT_INTERVAL=0
   )
-  WORKERS='192.0.2.20 192.0.2.21 192.0.2.22'
+  WORKERS='192.0.2.20 192.0.2.30 192.0.2.22'
 }
 
 # fake NAME: a binary first on the scripts' PATH, its body read from stdin.
@@ -238,8 +244,21 @@ edge_state() {
   # upgrades.
   printf 'router bgp 64497\nexit\nip route 203.0.113.16/28 reject\n' > "$dir/config"
   echo 'unreachable 203.0.113.16/28 proto static metric 20' > "$dir/unreachable"
-  printf 'table inet edge {\n\tchain forward {\n\t\tip daddr 203.0.113.21 tcp dport { 80, 443 } ct state new ct status dnat rt ip nexthop { 192.0.2.20/30 } accept\n\t}\n}\n' > "$dir/forward"
+  forward_chain '192.0.2.20-192.0.2.99' first > "$dir/forward"
+  echo 'default via 192.0.2.1 dev ens3 proto dhcp src 192.0.2.7 metric 100' > "$dir/default"
   echo 'APT::Periodic::Unattended-Upgrade "0";' > "$dir/upgrades"
+}
+
+# forward_chain SET ORDER [GATEWAY]: the forward chain as nft lists it once loaded, its guard's set
+# SET, as nft writes the workers' block, and the rule that drops what does not go through a worker
+# first, ahead of what belongs to a connection, or last, after it, or none.
+forward_chain() {
+  local drop="ip daddr ${3:-203.0.113.21} ct direction original ct status dnat rt ip nexthop != { $1 } drop"
+  printf 'table inet edge {\n\tchain forward {\n\t\ttype filter hook forward priority filter; policy drop;\n'
+  [[ $2 != first ]] || printf '\t\t%s\n' "$drop"
+  printf '\t\tct state established,related accept\n\t\tct state invalid drop\n'
+  [[ $2 != last ]] || printf '\t\t%s\n' "$drop"
+  printf '\t\tip daddr %s tcp dport { 80, 443 } ct state new ct status dnat rt ip nexthop { %s } accept\n\t}\n}\n' "${3:-203.0.113.21}" "$1"
 }
 
 # edge_check [ARG...]: scripts/edge-check in the copy, in the environment above.
@@ -320,7 +339,7 @@ no_address() {
   echo "$output"
   [ "$status" -eq 0 ]
   [[ $output == *"pass  lab-edge-1: the service range is unreachable on the edge but through a worker's route"* ]]
-  [[ $output == *"pass  lab-edge-1: the forward chain forwards a translated connection only through a worker"* ]]
+  [[ $output == *"pass  lab-edge-1: the forward chain sends a translated connection, new or established, toward the Gateway only through a worker"* ]]
   [[ $output == *"pass  lab-edge-1: unattended upgrades are off"* ]]
 
   # FRR runs its package's defaults, as after a first boot that failed: no reject route is configured.
@@ -346,12 +365,32 @@ no_address() {
   [ "$status" -ne 0 ]
   [[ $output == *"FAIL  lab-edge-1: FRR's reject route is not for the cluster's service range"* ]]
 
-  # A forward chain that forwards a translated connection wherever its route goes.
+  # The forward chain's guard, by the rules' content: missing, after what belongs to a connection,
+  # for another Gateway, without a worker's address, or holding the default route's next hop.
+  for chain in "192.0.2.20-192.0.2.99 none" "192.0.2.20-192.0.2.99 last" \
+    "192.0.2.20-192.0.2.99 first 203.0.113.22" "192.0.2.20-192.0.2.29 first" \
+    "192.0.2.0/24 first" "192.0.2.1, 192.0.2.20-192.0.2.99 first"; do
+    edge_state 1 active "$WORKERS" 203.0.113.17/32
+    # shellcheck disable=SC2086 # the set, the order and the Gateway, as words
+    forward_chain $chain > "$HOST/edge-1/forward"
+    edge_check --edge 1
+    echo "$chain: $output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"FAIL  lab-edge-1: the forward chain"* ]]
+  done
   edge_state 1 active "$WORKERS" 203.0.113.17/32
-  printf 'table inet edge {\n\tchain forward {\n\t\tip daddr 203.0.113.21 tcp dport { 80, 443 } ct state new ct status dnat accept\n\t}\n}\n' > "$HOST/edge-1/forward"
+  forward_chain '192.0.2.20-192.0.2.99' last > "$HOST/edge-1/forward"
   edge_check --edge 1
-  [ "$status" -ne 0 ]
-  [[ $output == *"FAIL  lab-edge-1: the forward chain forwards a translated connection wherever its route goes"* ]]
+  [[ $output == *"FAIL  lab-edge-1: the forward chain does not drop an established connection's packets toward the Gateway that do not go through a worker"* ]]
+  forward_chain '192.0.2.0/24' first > "$HOST/edge-1/forward"
+  edge_check --edge 1
+  [[ $output == *"FAIL  lab-edge-1: the forward chain's guard admits the default route's next hop"* ]]
+  forward_chain '192.0.2.20-192.0.2.29' first > "$HOST/edge-1/forward"
+  edge_check --edge 1
+  [[ $output == *"FAIL  lab-edge-1: the forward chain's guard leaves out a worker's address"* ]]
+  forward_chain '192.0.2.20-192.0.2.99' first 203.0.113.22 > "$HOST/edge-1/forward"
+  edge_check --edge 1
+  [[ $output == *"FAIL  lab-edge-1: the forward chain's guard is not for the cluster's Gateway address"* ]]
 
   # Forwarding on with no rules loaded.
   edge_state 1 active "$WORKERS" 203.0.113.17/32

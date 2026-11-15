@@ -87,4 +87,7 @@ nodes:
     ipAddress: ${node.address}
     values:
       floatingIP: ${node.floating_ip}
+      # The node's own address on the node network; no patch reads it: scripts/edge-check knows a
+      # worker's BGP sessions by it.
+      privateAddress: ${node.private_address}
 %{ endfor ~}

@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Checks, reading only, over SSH, that both edge routers (or the one named with --edge) are serving:
-# FRR runs; as many BGP sessions are established as the cluster's talman.yaml lists workers, and the
-# table says which worker has none; the table holds only /32s inside the service range; each has as
-# many next hops as there are sessions, or fewer, which is for a person to read, as a Service that
-# is local-only is announced by some workers only; FRR is configured with the reject route for the
-# service range, which is in the kernel; the nftables rules are loaded, and their forward chain
-# admits a translated connection only through a worker; the kernel forwards, and not without the
-# rules; and unattended upgrades are off, as an edge is rebuilt, not patched. Prints pass, FAIL or
-# skip per line, never an address, and exits non-zero on any FAIL.
+# FRR runs; as many BGP sessions are established as the cluster's talman.yaml lists workers, and,
+# from each worker's own address there, which worker has none; the table holds only /32s inside
+# the service range; each has as many next hops as there are sessions, or fewer, which is for a
+# person to read, as a Service that is local-only is announced by some workers only; FRR is
+# configured with the reject route for the service range, which is in the kernel; the nftables
+# rules are loaded, and their forward chain passes a translated connection's packets toward the
+# Gateway, new or established, only through a worker, its guard holding every worker's address and
+# not the default route's next hop; the kernel forwards, and not without the rules; and unattended
+# upgrades are off, as an edge is rebuilt, not patched. Prints pass, FAIL or skip per line, never an
+# address, and exits non-zero on any FAIL.
 # A check that needs the cluster's talman.yaml is skipped while it does not exist.
 # Usage: scripts/edge-check [--edge 1|2] [cluster]
 set -euo pipefail
@@ -51,20 +53,20 @@ init_stack
 edge_connect "$only"
 
 talman=$infra_root/talos/$cluster/talman.yaml
-workers=() service_range='' node_subnet=''
+# The workers, each with its own address on the node subnet, which the cluster stack writes into
+# talman.yaml, and the Gateway's address.
+workers=() worker_addresses=() service_range='' gateway=''
 if [[ -f $talman ]]; then
   mapfile -t workers < <(yq '.nodes[] | select(.role == "worker") | .hostname' "$talman")
+  mapfile -t worker_addresses < <(yq '.nodes[] | select(.role == "worker") | .values.privateAddress // ""' "$talman")
   service_range=$(yq '.values.serviceRange // ""' "$talman")
-  node_subnet=$(yq '.values.nodeSubnet // ""' "$talman")
+  gateway=$(yq '.values.bgp.gatewayAddress // ""' "$talman")
 fi
 
 ipv4_number() {
   local -a octets
   IFS=. read -r -a octets <<< "$1"
   echo $(((10#${octets[0]} << 24) | (10#${octets[1]} << 16) | (10#${octets[2]} << 8) | 10#${octets[3]}))
-}
-ipv4_string() {
-  echo "$(($1 >> 24 & 255)).$(($1 >> 16 & 255)).$(($1 >> 8 & 255)).$(($1 & 255))"
 }
 # in_range PREFIX: whether PREFIX is a /32 inside the service range.
 in_range() {
@@ -73,12 +75,66 @@ in_range() {
   mask=$(((0xffffffff << (32 - bits)) & 0xffffffff))
   ((($(ipv4_number "${1%/*}") & mask) == ($(ipv4_number "${service_range%/*}") & mask)))
 }
-# worker_address NAME: where the cluster stack puts a worker on the node subnet: the host number 20
-# for <prefix>-w-1, 21 for -w-2, and so on (docs/infrastructure.md, the node subnet). Prints nothing
-# for a name of another form.
-worker_address() {
-  [[ $1 =~ -w-([0-9]+)$ ]] || return 0
-  ipv4_string $(($(ipv4_number "${node_subnet%/*}") + 20 + 10#${BASH_REMATCH[1]} - 1))
+# in_set ADDRESS SET: whether ADDRESS is in SET, the elements of an nftables set as nft lists them,
+# separated by commas: addresses, networks and ranges.
+in_set() {
+  local element number first last
+  number=$(ipv4_number "$1")
+  while IFS= read -r element; do
+    element=${element// /}
+    if [[ $element =~ ^([0-9.]+)-([0-9.]+)$ ]]; then
+      first=$(ipv4_number "${BASH_REMATCH[1]}") last=$(ipv4_number "${BASH_REMATCH[2]}")
+    elif [[ $element =~ ^([0-9.]+)/([0-9]+)$ ]]; then
+      first=$(($(ipv4_number "${BASH_REMATCH[1]}") & ((0xffffffff << (32 - BASH_REMATCH[2])) & 0xffffffff)))
+      last=$((first + (1 << (32 - BASH_REMATCH[2])) - 1))
+    elif [[ $element =~ ^[0-9.]+$ ]]; then
+      first=$(ipv4_number "$element") last=$first
+    else
+      continue
+    fi
+    ((number >= first && number <= last)) && return 0
+  done <<< "${2//,/$'\n'}"
+  return 1
+}
+
+# guard CHAIN: what the forward chain CHAIN, as nft lists it, does with a translated connection
+# toward the Gateway: says what is wrong with its guard, as a line for check_edge, or nothing.
+# The guard is a rule ahead of what belongs to a connection that drops every packet of one whose
+# route does not go through a worker, and the rule that admits a new one only through a worker;
+# each holds every worker's address and not the default route's next hop.
+guard() {
+  local chain=$1 line drop='' accept='' drop_at=0 established_at=0 at=0 address set
+  while IFS= read -r line; do
+    line=${line#"${line%%[![:space:]]*}"}
+    at=$((at + 1))
+    if [[ $line =~ ^ip\ daddr\ ([0-9.]+)\ ct\ direction\ original\ ct\ status\ dnat\ rt\ ip\ nexthop\ !=\ \{\ (.+)\ \}\ drop$ ]]; then
+      drop="${BASH_REMATCH[1]} ${BASH_REMATCH[2]}" drop_at=$at
+    elif [[ $line == 'ct state established,related accept' ]]; then
+      established_at=$at
+    elif [[ $line =~ ^ip\ daddr\ ([0-9.]+)\ tcp\ dport\ .+\ ct\ state\ new\ ct\ status\ dnat\ rt\ ip\ nexthop\ \{\ (.+)\ \}\ accept$ ]]; then
+      accept="${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"
+    fi
+  done <<< "$chain"
+  if [[ -z $drop || -z $accept || $established_at -eq 0 || $drop_at -gt $established_at ]]; then
+    echo "the forward chain does not drop an established connection's packets toward the Gateway that do not go through a worker"
+    return
+  fi
+  for set in "$drop" "$accept"; do
+    if [[ -n $gateway && ${set%% *} != "$gateway" ]]; then
+      echo "the forward chain's guard is not for the cluster's Gateway address"
+      return
+    fi
+    for address in "${worker_addresses[@]}"; do
+      if [[ -n $address ]] && ! in_set "$address" "${set#* }"; then
+        echo "the forward chain's guard leaves out a worker's address"
+        return
+      fi
+    done
+    if [[ -n $default_hop ]] && in_set "$default_hop" "${set#* }"; then
+      echo "the forward chain's guard admits the default route's next hop"
+      return
+    fi
+  done
 }
 
 failed=0
@@ -98,14 +154,16 @@ echo "== config"; sudo -n vtysh -c "show running-config" || true
 echo "== unreachable"; ip -4 -o route show type unreachable || true
 echo "== rules"; sudo -n nft list tables || true
 echo "== forward"; sudo -n nft list chain inet edge forward || true
+echo "== default"; ip -4 -o route show default || true
 echo "== forwarding"; sysctl -n net.ipv4.ip_forward || true
 echo "== upgrades"; apt-config dump APT::Periodic::Unattended-Upgrade || true'
 
 check_edge() {
   local index=$1 edge=${edge_names[$1]} report section_frr section_sessions section_table section_rules section_forwarding
-  local section_config section_unreachable section_forward section_upgrades reject loaded=0
+  local section_config section_unreachable section_forward section_default section_upgrades reject loaded=0
+  local default_hop wrong i
   local -a established=() prefixes=() missing=() outside=() fewer=()
-  local prefix hops worker address
+  local prefix hops address
   if ! report=$(edge_ssh "$index" "$remote" 2> /dev/null); then
     fail "$edge" "cannot connect over SSH"
     return
@@ -120,6 +178,7 @@ check_edge() {
   section_config=$(section config)
   section_unreachable=$(section unreachable)
   section_forward=$(section forward)
+  section_default=$(section default)
   section_upgrades=$(section upgrades)
 
   if [[ $section_frr == active ]]; then
@@ -132,10 +191,10 @@ check_edge() {
   if ((${#workers[@]} == 0)); then
     skip "$edge" "sessions: talos/$cluster/talman.yaml lists no workers, so none is expected"
   else
-    for worker in "${workers[@]}"; do
-      address=$(worker_address "$worker")
+    for i in "${!workers[@]}"; do
+      address=${worker_addresses[i]-}
       if [[ -n $address && " ${established[*]} " != *" $address "* ]]; then
-        missing+=("$worker")
+        missing+=("${workers[i]}")
       fi
     done
     if ((${#established[@]} == ${#workers[@]} && ${#missing[@]} == 0)); then
@@ -196,12 +255,14 @@ check_edge() {
   else
     fail "$edge" "the nftables rules are not loaded"
   fi
-  # The next hop must be a worker's for the forward chain to admit a translated connection, which
-  # holds whether FRR runs or not.
-  if grep -q 'rt ip nexthop' <<< "$section_forward"; then
-    pass "$edge" "the forward chain forwards a translated connection only through a worker"
+  # The next hop must be a worker's for the forward chain to pass a translated connection's packets
+  # toward the Gateway, new or established, which holds whether FRR runs or not.
+  default_hop=$(sed -n 's/^default via \([0-9.]*\) .*/\1/p' <<< "$section_default" | head -1)
+  wrong=$(guard "$section_forward")
+  if [[ -z $wrong ]]; then
+    pass "$edge" "the forward chain sends a translated connection, new or established, toward the Gateway only through a worker"
   elif ((loaded)); then
-    fail "$edge" "the forward chain forwards a translated connection wherever its route goes"
+    fail "$edge" "$wrong"
   fi
   if [[ $section_forwarding == 1 ]] && ((loaded)); then
     pass "$edge" "the kernel forwards"

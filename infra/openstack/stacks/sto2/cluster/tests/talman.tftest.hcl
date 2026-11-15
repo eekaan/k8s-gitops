@@ -88,12 +88,12 @@ run "the_rendered_talman_yaml_lists_every_node_at_its_floating_address" {
 
   assert {
     condition = yamldecode(output.talman_yaml).nodes == [
-      { hostname = "lab-cp-1", role = "controlplane", ipAddress = "203.0.113.101", values = { floatingIP = "203.0.113.101" } },
-      { hostname = "lab-cp-2", role = "controlplane", ipAddress = "203.0.113.102", values = { floatingIP = "203.0.113.102" } },
-      { hostname = "lab-cp-3", role = "controlplane", ipAddress = "203.0.113.103", values = { floatingIP = "203.0.113.103" } },
-      { hostname = "lab-w-1", role = "worker", ipAddress = "203.0.113.111", values = { floatingIP = "203.0.113.111" } },
-      { hostname = "lab-w-2", role = "worker", ipAddress = "203.0.113.112", values = { floatingIP = "203.0.113.112" } },
-      { hostname = "lab-w-3", role = "worker", ipAddress = "203.0.113.113", values = { floatingIP = "203.0.113.113" } },
+      { hostname = "lab-cp-1", role = "controlplane", ipAddress = "203.0.113.101", values = { floatingIP = "203.0.113.101", privateAddress = "192.0.2.10" } },
+      { hostname = "lab-cp-2", role = "controlplane", ipAddress = "203.0.113.102", values = { floatingIP = "203.0.113.102", privateAddress = "192.0.2.11" } },
+      { hostname = "lab-cp-3", role = "controlplane", ipAddress = "203.0.113.103", values = { floatingIP = "203.0.113.103", privateAddress = "192.0.2.12" } },
+      { hostname = "lab-w-1", role = "worker", ipAddress = "203.0.113.111", values = { floatingIP = "203.0.113.111", privateAddress = "192.0.2.20" } },
+      { hostname = "lab-w-2", role = "worker", ipAddress = "203.0.113.112", values = { floatingIP = "203.0.113.112", privateAddress = "192.0.2.21" } },
+      { hostname = "lab-w-3", role = "worker", ipAddress = "203.0.113.113", values = { floatingIP = "203.0.113.113", privateAddress = "192.0.2.22" } },
     ]
     error_message = "talman.yaml must list the three control planes and then the three workers, each by name, with its role, at its own floating address and with that address as its floating IP."
   }
