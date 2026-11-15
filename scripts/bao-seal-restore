@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Writes OpenBao's seal key back into the Secret openbao-seal-1 from the operator's custody file, for
-# when the Secret is lost (docs/runbooks/openbao.md): decrypted with the Talos age key into memory
-# only, and made immutable, as External Secrets makes it. A Secret that holds the same key is left
-# alone. One that holds another key, which External Secrets makes only when both the Secret and the
-# ExternalSecret's record of its sync are gone, is kept, and replaced only with --replace, once the
-# operator knows the storage was sealed with the file's key; its key is first kept in a new file
+# when the Secret is lost (docs/runbooks/openbao.md): read only where no one but this user can have
+# written it (bao_custody_trusted in scripts/lib/openbao.sh), decrypted with the Talos age key into
+# memory only, and made immutable, as External Secrets makes it. A Secret that holds the same key is
+# left alone. One that holds another key, which External Secrets makes only when both the Secret and
+# the ExternalSecret's record of its sync are gone, is kept, and replaced only with --replace, once
+# the operator knows the storage was sealed with the file's key; its key is first kept in a new file
 # beside the custody file. Nothing of either key is printed or passed as an argument; each reaches
 # kubectl or age on standard input.
 # Usage: scripts/bao-seal-restore <file> [--replace]
@@ -27,11 +28,13 @@ file=$1
 # shellcheck source=scripts/cluster-env
 . "$here/cluster-env" ""
 complete=1
-require_commands kubectl jq age sha256sum || complete=0
+require_commands kubectl jq age sha256sum stat || complete=0
 require_kubeconfig || complete=0
 require_age_key || complete=0
 if [[ ! -f $file ]]; then
   infra_error "$file is not a file; give the custody file bao-recovery wrote"
+  complete=0
+elif ! bao_custody_trusted "$file"; then
   complete=0
 fi
 ((complete))
@@ -77,10 +80,7 @@ if [[ -n $existing ]]; then
     exit 1
   fi
   replaced=
-  if ! ln -- "$partial" "$kept"; then
-    infra_error "$kept exists; nothing is deleted"
-    exit 1
-  fi
+  bao_place "$partial" "$kept" "nothing is deleted" || exit 1
   echo "bao-seal-restore: kept the key the Secret $bao_seal_secret held in $kept"
   step="deleting the Secret $bao_seal_secret, which holds another key"
   kubectl delete secret "$bao_seal_secret" --namespace "$bao_namespace" --wait=true > /dev/null

@@ -105,11 +105,12 @@ storage container or an S3 bucket.
   temporary file beside it, mode 0600, and renamed into place. When the client fails, the recipe
   shows the reason it gave, a few lines at most, after each line has passed through the filter
   `redact_stream` in `scripts/lib/errors.sh`: the values of the variables that hold keys, the bucket
-  prefix, the endpoint and the cloud's address are replaced as written, and every URL, address, host
-  name with a dot in it and long token by pattern, so an unauthorized request and a name that does
-  not resolve read differently without naming the endpoint, a project or a request. With `CI` set
-  none of the client's words is shown: they go to `.env.infra-s3-key.errors` beside `.env`, which
-  git ignores, and only its name is printed.
+  prefix, the endpoint and the cloud's address are replaced as written, every byte that is not
+  printable ASCII or a tab, the control characters among them, by a question mark, and every URL,
+  address, host name with a dot in it and long token by pattern, so an unauthorized request and a
+  name that does not resolve read differently without naming the endpoint, a project or a request.
+  With `CI` set none of the client's words is shown: they go to `.env.infra-s3-key.errors` beside
+  `.env`, which git ignores, and only its name is printed.
 - `just infra-backup-buckets` creates the four buckets unless they exist, through the object
   storage's S3 API with the state key, and names each by its role, never by its name. A second run
   creates nothing. A name another project owns fails, naming the role.
@@ -409,7 +410,7 @@ docker of `vector-check` has only the scan.
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | `tofu`; rclone, as the state key set |
 | `TF_ENCRYPTION` | `tofu` |
 | `TF_STATE_PASSPHRASE` | none, as `TF_ENCRYPTION` carries the key derived from it |
-| `CLUSTER_S3_ACCESS_KEY_ID`, `CLUSTER_S3_SECRET_ACCESS_KEY` | rclone, as the cluster key set |
+| `CLUSTER_S3_ACCESS_KEY_ID`, `CLUSTER_S3_SECRET_ACCESS_KEY` | rclone, as the cluster key set; `bao-seed-volsync` and `bao-volsync-password` read them themselves, so they are in the environment of every command those scripts run unwrapped, such as jq, and are named on no command line; neither passes them to a wrapped tool, and the second gives their values to the command it runs as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` |
 | `OS_*`, the cloud credential | `tofu`, `openstack` |
 | `GH_TOKEN`, `GITHUB_TOKEN` | `gh` |
 | `TF_VAR_*`, the stacks' inputs, among them the allowlist; `TF_TOKEN_*`, registry tokens | `tofu` |

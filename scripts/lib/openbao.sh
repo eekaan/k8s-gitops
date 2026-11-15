@@ -1,11 +1,27 @@
 # shellcheck shell=bash
-# Shared by scripts/bao-put, bao-recovery, bao-root and bao-seal-restore, which source it with
-# scripts/cluster-env: where OpenBao answers and as whom an operator logs in to it, the names a
-# key-value path may hold, opening the operator's custody file, and the session a recipe works in: a
+# Shared by scripts/bao-put, bao-recovery, bao-root, bao-seal-restore, bao-seed-volsync and
+# bao-volsync-password, which source it with scripts/cluster-env: where OpenBao answers and as whom
+# an operator logs in to it, the names a key-value path may hold, opening the operator's custody
+# file and putting a new one in place without replacing a file, and the session a recipe works in: a
 # private directory, a port-forward to OpenBao's active member, a short-lived token, and requests to
 # OpenBao's API through them. Nothing here prints a token, a value or a key, or passes one as an
-# argument: they reach kubectl, curl, jq and age on standard input or through a file descriptor,
-# and leave them on a pipe.
+# argument: they reach kubectl, curl, jq and age on standard input or through a file descriptor, and
+# leave them on a pipe.
+
+# Traced, bash writes every command a recipe runs with the values it holds, the secrets among them,
+# so a recipe refuses to run while the shell traces, however that was turned on (bash -x,
+# SHELLOPTS=xtrace, a BASH_ENV that sets -x), before it reads anything. The one trace that goes on is
+# that of tests/openbao-recipes.bats: its BASH_ENV sets BAO_TESTS_XTRACE_DIR, which nothing else
+# sets, and sends the trace to a file in that directory, as nothing does by accident.
+if [[ $- == *x* ]] && ! [[ -n ${BAO_TESTS_XTRACE_DIR-} && -n ${BASH_XTRACEFD-} &&
+  /proc/$$/fd/$BASH_XTRACEFD -ef $BAO_TESTS_XTRACE_DIR/$$ ]]; then
+  set +x
+  echo "${0##*/}: the shell traces each command, which would print the secrets this recipe reads; run it without bash -x, SHELLOPTS=xtrace or a BASH_ENV that sets -x" >&2
+  exit 1
+fi
+# A shell the recipe starts, such as the command bao-root or bao-volsync-password runs, reads no file
+# the recipe was given for one.
+unset BASH_ENV ENV
 
 bao_namespace=openbao
 bao_service=openbao-active
@@ -19,7 +35,7 @@ bao_seal_secret=openbao-seal-1
 bao_operator_account=openbao-operator
 bao_operator_role=operator
 bao_audience=openbao
-# shellcheck disable=SC2034 # read by scripts/bao-put
+# shellcheck disable=SC2034 # read by scripts/bao-put and bao-seed-volsync
 bao_mount=secrets
 
 # A name in a key-value path or a key: letters, digits, '_', '.' and '-', not starting with '.' or
@@ -47,10 +63,87 @@ bao_decrypt() {
   fi
 }
 
+# bao_custody_trusted FILE: whether FILE may be read as the operator's custody file. age
+# authenticates no writer and the Talos age key's recipient is public, so whoever can write a file at
+# the path could put one there with content of their choosing; only where the file is vouches for
+# it. FILE is a regular file, no symbolic link, owned by this user and writable by no one else, in a
+# place bao_custody_place accepts. Fails naming the first that is not, and why.
+bao_custody_trusted() {
+  local file=$1 info
+  if [[ -L $file ]]; then
+    infra_error "$file is a symbolic link; give the custody file itself"
+    return 1
+  elif [[ ! -f $file ]]; then
+    infra_error "$file is not a regular file; give the custody file itself"
+    return 1
+  fi
+  info=$(stat -c '%u %a' -- "$file") || return 1
+  if [[ ${info%% *} != "$EUID" ]]; then
+    infra_error "$file is owned by another user; a custody file is read only when this user owns it"
+    return 1
+  elif ((8#${info#* } & 8#022)); then
+    infra_error "$file is writable by its group or others, who could have put it there; chmod go-w it once it is known to be the file that was written"
+    return 1
+  fi
+  bao_custody_place "$file"
+}
+
+# bao_custody_place FILE: whether the directories above FILE, which need not exist yet, may hold a
+# custody file: each of them, on FILE's path as given and as it resolves past symbolic links, is
+# owned by this user or root, and writable by no one else unless its sticky bit keeps others from
+# removing or replacing what they do not own. Fails naming the first that is not, and why.
+bao_custody_place() {
+  local path=$1 dir info
+  local -a dirs=()
+  [[ $path == /* ]] || path=$PWD/$path
+  dir=$path
+  while [[ $dir != / ]]; do
+    dir=${dir%/*}
+    dir=${dir:-/}
+    dirs+=("$dir")
+  done
+  if ! dir=$(cd -P -- "${dirs[0]}" 2> /dev/null && pwd -P); then
+    infra_error "${dirs[0]} is not a directory this user can enter"
+    return 1
+  fi
+  dirs+=("$dir")
+  while [[ $dir != / ]]; do
+    dir=${dir%/*}
+    dir=${dir:-/}
+    dirs+=("$dir")
+  done
+  for dir in "${dirs[@]}"; do
+    info=$(stat -L -c '%u %a' -- "$dir") || return 1
+    if [[ ${info%% *} != "$EUID" && ${info%% *} != 0 ]]; then
+      infra_error "$dir is owned by another user than this one or root, who could put a custody file in it; keep custody files where only this user can write, beside the Talos age key"
+      return 1
+    elif ((8#${info#* } & 8#022 && !(8#${info#* } & 8#1000))); then
+      infra_error "$dir is writable by its group or others, who could put a custody file in it; keep custody files where only this user can write, beside the Talos age key"
+      return 1
+    fi
+  done
+}
+
+# bao_place PARTIAL FILE CONSEQUENCE: puts PARTIAL, a file the script wrote beside FILE, in place as
+# FILE with a hard link, which fails where FILE exists, so a file made after the script checked the
+# path is never replaced. When the link fails it says so with CONSEQUENCE: that FILE exists now or,
+# after ln's own error, as on a filesystem without hard links, that FILE is put in place no other
+# way. PARTIAL stays, for the caller to remove.
+bao_place() {
+  ln -- "$1" "$2" && return 0
+  if [[ -e $2 || -L $2 ]]; then
+    infra_error "$2 exists now and is never replaced; $3"
+  else
+    infra_error "$2 is not in place: no hard link to it could be made, and no other way puts it there without the risk of replacing a file; $3"
+  fi
+  return 1
+}
+
 # bao_open: makes work_dir, a directory only this user can enter, opens a port-forward to OpenBao's
 # active member through the cluster's kubeconfig, and reads OpenBao's CA into work_dir. From here on
 # every exit of the script, on success, on failure and on SIGINT, SIGTERM or SIGHUP, runs bao_close.
-# Neither the port-forward's output nor kubectl's errors are printed: they can name the API server.
+# The port-forward's output is not printed, and kubectl's errors only as bao_kubectl shows them: they
+# can name the API server.
 bao_open() {
   local attempt log forwarded='Forwarding from [^ ]*:([0-9]+) ->'
   work_dir=$(umask 077 && mktemp -d -t "${0##*/}.XXXXXXXXXX")
@@ -81,12 +174,21 @@ bao_open() {
     return 1
   fi
   step="reading OpenBao's CA from the Secret $bao_ca_secret"
-  kubectl get secret "$bao_ca_secret" --namespace "$bao_namespace" --output 'jsonpath={.data.ca\.crt}' |
+  bao_kubectl get secret "$bao_ca_secret" --namespace "$bao_namespace" --output 'jsonpath={.data.ca\.crt}' |
     base64 -d > "$work_dir/ca.crt"
   if [[ ! -s $work_dir/ca.crt ]]; then
     infra_error "the Secret $bao_ca_secret in $bao_namespace holds no ca.crt"
     return 1
   fi
+}
+
+# bao_kubectl ARG...: kubectl ARG..., its standard output as it is, and its errors, which can name
+# the API server, through redact_stream (scripts/lib/errors.sh): they say why without its address,
+# and with no control character. Returns kubectl's status.
+bao_kubectl() {
+  local status=0
+  { kubectl "$@" 2>&1 1>&3 3>&- | redact_stream >&2; status=${PIPESTATUS[0]}; } 3>&1 || true
+  return "$status"
 }
 
 # bao_close STATUS: runs bao_abort when the script defines it, revokes the token the script logged in
@@ -119,8 +221,8 @@ bao_close() {
 # port-forward, verifying OpenBao's certificate against its CA under the name the certificate holds.
 # A POST, PUT or PATCH sends standard input as its body, as CONTENT_TYPE, JSON when not given; once
 # logged in, the token goes in a header read from a file descriptor. Prints the response's body.
-# Returns 0 for a 2xx answer and 44 for 404; for any other it names the status and OpenBao's errors
-# and returns 1.
+# Returns 0 for a 2xx answer and 44 for 404; for any other it names the status and OpenBao's errors,
+# as printable (scripts/lib/errors.sh) shows them, and returns 1.
 bao_request() {
   local method=$1 path=$2 type=${3:-application/json} response status body
   local -a args=(--silent --show-error --max-time 30 --request "$method" --cacert "$work_dir/ca.crt"
@@ -143,7 +245,7 @@ bao_request() {
   elif [[ $status == 404 ]]; then
     return 44
   fi
-  infra_error "OpenBao answered $status to $method $path: $(printf '%s' "$body" | jq -r '.errors // [] | join("; ")' 2> /dev/null)"
+  infra_error "OpenBao answered $status to $method $path: $(printf '%s' "$body" | jq -r '.errors // [] | join("; ")' 2> /dev/null | printable)"
   return 1
 }
 
@@ -153,7 +255,7 @@ bao_request() {
 bao_login() {
   local jwt response
   step="minting a token for the service account $bao_operator_account"
-  jwt=$(kubectl create token "$bao_operator_account" --namespace "$bao_namespace" --audience "$bao_audience" --duration 10m)
+  jwt=$(bao_kubectl create token "$bao_operator_account" --namespace "$bao_namespace" --audience "$bao_audience" --duration 10m)
   # shellcheck disable=SC2034 # failed_step in scripts/lib/cluster.sh names it
   step="logging in to OpenBao as the role $bao_operator_role"
   response=$(printf '%s' "$jwt" | jq -Rc --arg role "$bao_operator_role" '{role: $role, jwt: .}' |
