@@ -1764,7 +1764,7 @@ EOF
 
   # The configuration is applied as asked; whether a node needs a reboot is left open, and said so.
   [ "$status" -eq 0 ]
-  [[ $output == *"cannot tell from talman's dry run which nodes the configuration changes, so it cannot say whether any needs a reboot"* ]]
+  [[ $output == *"cannot tell from talman's dry run what nodes the configuration changes, so it cannot say whether any needs a reboot"* ]]
   [ -n "$(applies)" ]
   [[ $output != *"until it reboots"* ]]
 
@@ -1775,7 +1775,7 @@ EOF
   recipe cluster-talos --yes --reboot < /dev/null
 
   [ "$status" -ne 0 ]
-  [[ $output == *"cannot tell from talman's dry run which nodes the configuration changes"* ]]
+  [[ $output == *"cannot tell from talman's dry run what nodes the configuration changes"* ]]
   [[ $output == *"nothing is applied; without --reboot the configuration is applied and the nodes are not rebooted"* ]]
   [ -z "$(applies)" ]
   [ -z "$(calls '^cluster-reboot ')" ]

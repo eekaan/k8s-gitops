@@ -250,13 +250,13 @@ esac
 [[ -z ${CI:-} ]] || dry_run=$(< "$talman_log")
 # A dry run that shows changes in no block of a changed or a new node is in a format this does not
 # read, such as another talman version's: nothing can say which nodes need a reboot.
-step="reading which nodes talman's dry run shows a change on"
+step="reading the nodes talman's dry run shows a change on"
 if [[ -z $(changed_nodes "$dry_run") && -z $(new_nodes "$dry_run") ]]; then
   if ((reboot)); then
-    infra_error "cannot tell from talman's dry run which nodes the configuration changes, so it cannot say whether any needs a reboot, and --reboot does not reboot blind: nothing is applied; without --reboot the configuration is applied and the nodes are not rebooted"
+    infra_error "cannot tell from talman's dry run what nodes the configuration changes, so it cannot say whether any needs a reboot, and --reboot does not reboot blind: nothing is applied; without --reboot the configuration is applied and the nodes are not rebooted"
     exit 1
   fi
-  echo "cluster-talos: cannot tell from talman's dry run which nodes the configuration changes, so it cannot say whether any needs a reboot: no node's block in it reads as the pinned talman prints one"
+  echo "cluster-talos: cannot tell from talman's dry run what nodes the configuration changes, so it cannot say whether any needs a reboot: no node's block in it reads as the pinned talman prints one"
 fi
 step="reading the nodes of talos/$cluster/talman.yaml"
 mapfile -t ordered < <(talman_nodes "$talman_file" | cut -d' ' -f1)
