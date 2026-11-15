@@ -53,7 +53,11 @@ if [[ \${2-} == "\$(cat "$STATE/tofu-fails" 2> /dev/null)" ]]; then
 fi
 case \${2-} in
   init) ;;
-  output) if [[ -e "$STATE/no-edge-outputs" ]]; then echo '{}'; else cat "$BATS_TEST_TMPDIR/outputs.json"; fi ;;
+  output)
+    if [[ -e "$STATE/no-edge-outputs" ]]; then echo '{}'
+    elif [[ -e "$STATE/edge-outputs-garbage" ]]; then echo 'Warning: not JSON at all'
+    else cat "$BATS_TEST_TMPDIR/outputs.json"; fi
+    ;;
   *) echo "unexpected call: tofu \$*" >&2; exit 1 ;;
 esac
 EOF
@@ -97,6 +101,14 @@ fake() {
 recipe() {
   run timeout 120 env -i HOME="$BATS_TEST_TMPDIR" PATH="$BIN:$PATH" "${ENVIRONMENT[@]}" \
     "$JUST" --justfile "$ROOT/justfile" --working-directory "$REPO" gateway-check
+}
+
+# recipe_start OUT: just gateway-check as recipe runs it, in the background, its output to OUT. Sets
+# JUST_PID.
+recipe_start() {
+  env -i HOME="$BATS_TEST_TMPDIR" PATH="$BIN:$PATH" "${ENVIRONMENT[@]}" \
+    "$JUST" --justfile "$ROOT/justfile" --working-directory "$REPO" gateway-check > "$1" 2>&1 3>&- &
+  JUST_PID=$!
 }
 
 # line_of CHECK: the recipe's line for CHECK.
@@ -166,54 +178,59 @@ calls() {
 }
 
 @test "Each unhealthy condition of the public Gateway fails its own line of gateway-check" {
-  local condition file content expected check
-  # Each: the state file and its content, and the lines it fails.
+  local condition file content printed expected check
+  # Each: the state file and its content, the lines the run prints, all of them or the cluster's
+  # with the one line that skips the edges, and the lines it fails, and no other.
   local -a conditions=(
-    'no-config||cluster-config'
-    'not-accepted||Gateway'
-    'not-programmed||Gateway'
-    'other-address||Gateway address'
-    'service-cluster-ip||proxy Service'
-    'service-unlabelled||proxy Service'
-    'service-pending||proxy Service address'
-    'two-services||proxy Service,proxy Service address'
-    'one-proxy||proxies'
-    'proxies-one-node||proxies'
-    'certificate-not-ready||certificate'
-    'no-ca||cluster CA'
-    'unlabelled-route-accepted||routes'
-    'http-routes|2|http listener'
-    'redirect-status|302|lab-edge-1 http,lab-edge-2 http'
-    'redirect-status|308|lab-edge-1 http,lab-edge-2 http'
-    'redirect-location|https://elsewhere.example.net/gateway-check|lab-edge-1 http,lab-edge-2 http'
-    'redirect-location|http://hello.example.com/gateway-check|lab-edge-1 http,lab-edge-2 http'
-    'redirect-location|https://hello.example.com/|lab-edge-1 http,lab-edge-2 http'
-    'untrusted||lab-edge-1 TLS,lab-edge-2 TLS'
-    'wrong-names||lab-edge-1 TLS,lab-edge-1 certificate names,lab-edge-2 TLS,lab-edge-2 certificate names'
-    'hello-status|503|lab-edge-1 hello,lab-edge-2 hello'
-    'hello-page|other page|lab-edge-1 hello,lab-edge-2 hello'
-    'no-page||lab-edge-1 hello,lab-edge-2 hello'
-    'unrouted-status|200|lab-edge-1 unrouted host,lab-edge-2 unrouted host'
-    'edge-down.203.0.113.52||lab-edge-2 http,lab-edge-2 TLS'
+    'no-config||cluster|cluster-config'
+    'not-accepted||all|Gateway'
+    'not-programmed||all|Gateway'
+    'other-address||all|Gateway address'
+    'service-cluster-ip||all|proxy Service'
+    'service-unlabelled||all|proxy Service'
+    'service-pending||all|proxy Service address'
+    'two-services||all|proxy Service,proxy Service address'
+    'one-proxy||all|proxies'
+    'proxies-one-node||all|proxies'
+    'certificate-not-ready||all|certificate'
+    'no-ca||all|cluster CA'
+    'unlabelled-route-accepted||all|routes'
+    'http-routes|2|all|http listener'
+    'redirect-status|302|all|lab-edge-1 http,lab-edge-2 http'
+    'redirect-status|308|all|lab-edge-1 http,lab-edge-2 http'
+    'redirect-location|https://elsewhere.example.net/gateway-check|all|lab-edge-1 http,lab-edge-2 http'
+    'redirect-location|http://hello.example.com/gateway-check|all|lab-edge-1 http,lab-edge-2 http'
+    'redirect-location|https://hello.example.com/|all|lab-edge-1 http,lab-edge-2 http'
+    'untrusted||all|lab-edge-1 TLS,lab-edge-2 TLS'
+    'wrong-names||all|lab-edge-1 TLS,lab-edge-1 certificate names,lab-edge-2 TLS,lab-edge-2 certificate names'
+    'hello-status|503|all|lab-edge-1 hello,lab-edge-2 hello'
+    'hello-page|other page|all|lab-edge-1 hello,lab-edge-2 hello'
+    'no-page||all|lab-edge-1 hello,lab-edge-2 hello'
+    'unrouted-status|200|all|lab-edge-1 unrouted host,lab-edge-2 unrouted host'
+    'edge-down.203.0.113.52||all|lab-edge-2 http,lab-edge-2 TLS'
   )
   for condition in "${conditions[@]}"; do
-    IFS='|' read -r file content expected <<< "$condition"
+    IFS='|' read -r file content printed expected <<< "$condition"
     echo "condition: $file $content"
     find "$STATE" -mindepth 1 -delete
     printf '%s\n' "$content" > "$STATE/$file"
+    # Not lines, which bats' run sets to the output's.
+    local -a wanted=("${LINES[@]}")
+    if [[ $printed == cluster ]]; then
+      wanted=("${CLUSTER_LINES[@]}" edges)
+    fi
 
     recipe
 
     [ "$status" -ne 0 ] || { echo "$output"; return 1; }
     nothing_secret || { echo "$output"; return 1; }
-    for check in "${LINES[@]}"; do
-      if [[ ",$expected," == *",$check,"* ]]; then
-        [ "$(verdict "$check")" = FAIL ] || { echo "$output"; echo "not failed: $check"; return 1; }
-      else
-        [ "$(verdict "$check")" != FAIL ] || { echo "$output"; echo "failed as well: $check"; return 1; }
-      fi
-    done
-    [[ $output == *"gateway-check: $(tr ',' '\n' <<< "$expected" | wc -l) of $(grep -cE '^(pass|FAIL|skip)  ' <<< "$output") checks failed"* ]] ||
+    # Exactly these lines, each once: none left out, none added.
+    [ "$(sed -nE 's/^(pass|FAIL|skip)  ([^:]+): .*/\2/p' <<< "$output" | sort)" = "$(printf '%s\n' "${wanted[@]}" | sort)" ] ||
+      { echo "$output"; echo "not the lines expected"; return 1; }
+    # Exactly these fail.
+    [ "$(sed -nE 's/^FAIL  ([^:]+): .*/\1/p' <<< "$output" | sort)" = "$(tr ',' '\n' <<< "$expected" | sort)" ] ||
+      { echo "$output"; echo "not the failures expected"; return 1; }
+    [[ $output == *"gateway-check: $(tr ',' '\n' <<< "$expected" | wc -l) of ${#wanted[@]} checks failed"* ]] ||
       { echo "$output"; return 1; }
   done
 }
@@ -254,8 +271,20 @@ calls() {
     nothing_secret
   done
 
-  # Without what the stack needs, stack-env says what is missing, in the repository's words.
+  # Outputs that are not JSON cannot be read either, whatever tofu said of them.
   rm "$STATE/tofu-fails"
+  : > "$STATE/edge-outputs-garbage"
+
+  recipe
+
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [ "$(line_of edges)" = "FAIL  edges: the edge stack's outputs could not be read: they are not JSON" ]
+  [ -z "$(calls '^curl ')" ]
+  nothing_secret
+
+  # Without what the stack needs, stack-env says what is missing, in the repository's words.
+  rm "$STATE/edge-outputs-garbage"
   for entry in "${ENVIRONMENT[@]}"; do
     [[ $entry == TF_STATE_BUCKET=* ]] || kept+=("$entry")
   done
@@ -296,7 +325,7 @@ calls() {
     for name in "${names[@]}"; do
       find "$STATE" -mindepth 1 -delete
       : > "$RECORD/argv"
-      printf '%s' "$name" > "$STATE/$file"
+      jq -n --arg name "$name" '$name' > "$STATE/$file"
 
       recipe
 
@@ -313,6 +342,30 @@ calls() {
       [ -z "$(calls ' secret ')" ]
       [ -z "$(calls 'injected|forged|yaml|elsewhere')" ]
     done
+  done
+}
+
+@test "gateway-check fails a name from the cluster that holds a NUL, without a warning" {
+  local condition file check never
+  # Each: the state file that names the object, the line its name fails, and the call that must not
+  # be made with it.
+  local -a conditions=('issuer-name|cluster CA|clusterissuers' 'ca-secret-name|cluster CA| secret '
+    'service-name|proxy Service|' 'tls-secret-name|certificate|')
+  for condition in "${conditions[@]}"; do
+    IFS='|' read -r file check never <<< "$condition"
+    find "$STATE" -mindepth 1 -delete
+    : > "$RECORD/argv"
+    echo '"cluster\u0000-ca"' > "$STATE/$file"
+
+    recipe
+
+    echo "$output"
+    [ "$status" -ne 0 ]
+    [[ $(line_of "$check") == "FAIL  $check: "*"is not a valid name" ]]
+    [[ $output != *warning* && $output != *"null byte"* ]]
+    [ "$(grep -cvE '^(pass|FAIL|skip)  |^gateway-check: |^error: recipe ' <<< "$output")" -eq 0 ]
+    [ -z "$never" ] || [ -z "$(calls "$never")" ]
+    nothing_secret
   done
 }
 
@@ -339,4 +392,50 @@ calls() {
   [[ $output == *"gateway-check: failed while checking the Gateway"* ]]
   [ -z "$(find "$WORK" -mindepth 1)" ]
   nothing_secret
+}
+
+@test "gateway-check stops at Ctrl-C or SIGTERM and names the step it stopped in" {
+  local signal script_pid tick out="$BATS_TEST_TMPDIR/signalled.out"
+  for signal in INT TERM; do
+    find "$STATE" "$WORK" -mindepth 1 -delete
+    rm -f "$RECORD/script-pid"
+    : > "$STATE/hang-pods"
+    recipe_start "$out"
+    for ((tick = 0; tick < 200; tick++)); do
+      [ ! -s "$RECORD/script-pid" ] || break
+      sleep 0.1
+    done
+    script_pid=$(cat "$RECORD/script-pid")
+    [ -n "$script_pid" ]
+    if [[ $signal == INT ]]; then
+      # Ctrl-C: the terminal signals the recipe and just alike.
+      kill -INT "$script_pid" "$JUST_PID"
+    else
+      # SIGTERM, which just passes on to the recipe.
+      kill -TERM "$JUST_PID"
+    fi
+    : > "$STATE/release"
+    status=0
+    wait "$JUST_PID" || status=$?
+    output=$(cat "$out")
+    echo "after SIG$signal: status $status; $output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"gateway-check: failed while checking the Gateway"* ]]
+    # It stopped there: nothing after the proxies was checked.
+    [ -z "$(line_of certificate)" ]
+    [ -z "$(line_of routes)" ]
+    [ -z "$(calls '^curl ')" ]
+    [ -z "$(find "$WORK" -mindepth 1)" ]
+    nothing_secret
+  done
+}
+
+@test "gateway-check cuts a condition's reason at 120 characters" {
+  : > "$STATE/long-reason"
+
+  recipe
+
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [ "$(line_of Gateway)" = "FAIL  Gateway: Accepted, not Programmed: $(printf 'A%.0s' {1..120})..." ]
 }

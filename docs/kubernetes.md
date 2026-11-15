@@ -498,8 +498,13 @@ restarts every agent, node by node, and the operator.
   range, `GATEWAY_ADDRESS` in `cluster-config`, a host the plumbing stack picks. The public Gateway's
   proxies' Service asks the pool for it with the `lbipam.cilium.io/ips` annotation and carries the
   label ([The public Gateway](#the-public-gateway)). The pool does not set it aside, so any other
-  labelled Service may be given it first, and the Gateway's Service would then stay pending; no
-  other Service carries the label.
+  labelled Service may be given it first, and the Gateway's Service would then stay pending.
+  `tests/gateway.bats` holds that, of every object the overlay's applications apply, built offline,
+  only the `EnvoyProxy` `public` carries the label outside a selector, sets an LB-IPAM annotation or
+  names the address; that no text among them, the values a chart takes from a ConfigMap included,
+  holds the label's key or an LB-IPAM key; and that only the Gateway `public` names that
+  `EnvoyProxy`. A chart's own defaults are not read, so a chart that labels a Service by default
+  would go unseen.
 - **`externalTrafficPolicy`.** With `Cluster`, the default, every worker announces every labelled
   address, the edge routers spread connections over all of them, and a worker forwards each to an
   endpoint on any node, translating the source to its own address when the endpoint is elsewhere.
@@ -1423,7 +1428,7 @@ its kind, and always after `--`, so it cannot become a flag; any other text it s
 cluster or an answer has its control characters replaced. kubectl waits at most 10 seconds for an
 answer and curl 15, and curl reads no `.curlrc`, uses no proxy and follows no redirect. It needs
 curl 7.88 or newer. A failure that is none of the checks, such as an answer it cannot read, names
-the step it happened in.
+the step it happened in, and so does Ctrl-C or SIGTERM, which stops the run there.
 
 - `cluster-config`: the ConfigMap holds `CLUSTER_DOMAIN` and `GATEWAY_ADDRESS`, which the lines
   below compare with. Without it, those lines are skipped.

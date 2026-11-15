@@ -7,7 +7,11 @@
 #   no-config                the ConfigMap cluster-config does not exist
 #   not-accepted             the Gateway is not Accepted
 #   not-programmed           the Gateway is Accepted but not Programmed
+#   long-reason              the Gateway is not Programmed, for a reason a word of 300 letters
 #   gateway-garbage          the Gateway is answered with something that is not JSON
+#   hang-pods                the proxies' pods are not answered until <tmp>/state/release exists,
+#                            at most 20 seconds; the PID of the script that asked goes to
+#                            <tmp>/record/script-pid
 #   other-address            the Gateway's status names another address than GATEWAY_ADDRESS
 #   service-cluster-ip       the proxies' Service is of type ClusterIP
 #   service-unlabelled       the proxies' Service lacks the label k8s-gitops/announce: bgp
@@ -17,8 +21,10 @@
 #   proxies-one-node         both proxy pods run on one node
 #   certificate-not-ready    the Gateway's Certificate is not Ready
 #   no-ca                    the Secret of the cluster's CA cannot be read
-#   issuer-name              the Certificate's issuerRef.name, the file's content exactly
-#   ca-secret-name           the ClusterIssuer's spec.ca.secretName, the file's content exactly
+#   issuer-name              the Certificate's issuerRef.name, the JSON string the file holds
+#   ca-secret-name           the ClusterIssuer's spec.ca.secretName, the JSON string the file holds
+#   service-name             the name of the proxies' Service, the JSON string the file holds
+#   tls-secret-name          the Secret the https listener names, the JSON string the file holds
 #   no-page                  the ConfigMap demo/hello cannot be read
 #   unlabelled-route-accepted  an HTTPRoute in a namespace without the opt-in label is Accepted on
 #                            the Gateway
@@ -71,8 +77,15 @@ object=${positional[1]-}
 
 # condition TYPE STATUS: one status condition.
 condition() {
-  jq -nc --arg type "$1" --arg status "$2" '{type: $type, status: $status, reason: (if $status == "True" then $type else "Not" + $type end),
+  jq -nc --arg type "$1" --arg status "$2" --arg reason "${3-}" '{type: $type, status: $status,
+    reason: (if $reason != "" then $reason elif $status == "True" then $type else "Not" + $type end),
     message: "fixture message naming 198.51.100.99"}'
+}
+
+# json_name FILE DEFAULT: the JSON string FILE in the state holds, or DEFAULT as one, so a name can
+# carry any character, a NUL among them.
+json_name() {
+  if listed "$1"; then cat "$state/$1"; else jq -n --arg name "$2" '$name'; fi
 }
 
 not_found() {
@@ -87,17 +100,22 @@ gateway() {
     return
   fi
   listed not-accepted && accepted=False
+  local reason=''
+  if listed long-reason; then
+    programmed=False
+    reason=$(printf 'A%.0s' {1..300})
+  fi
   listed other-address && address=198.51.100.99
   listed not-programmed && programmed=False
   listed http-routes && http=$(< "$state/http-routes")
-  jq -n --arg address "$address" --argjson accepted "$(condition Accepted "$accepted")" \
-    --argjson programmed "$(condition Programmed "$programmed")" --argjson http "$http" '{
+  jq -n --arg address "$address" --argjson accepted "$(condition Accepted "$accepted")" --argjson secret "$(json_name tls-secret-name public-wildcard-tls)" \
+    --argjson programmed "$(condition Programmed "$programmed" "$reason")" --argjson http "$http" '{
     apiVersion: "gateway.networking.k8s.io/v1", kind: "Gateway",
     metadata: {name: "public", namespace: "envoy-gateway-system"},
     spec: {gatewayClassName: "envoy-gateway", listeners: [
       {name: "http", port: 80, protocol: "HTTP"},
       {name: "https", port: 443, protocol: "HTTPS", hostname: "*.example.com",
-       tls: {mode: "Terminate", certificateRefs: [{name: "public-wildcard-tls"}]}}]},
+       tls: {mode: "Terminate", certificateRefs: [{name: $secret}]}}]},
     status: {addresses: [{type: "IPAddress", value: $address}], conditions: [$accepted, $programmed],
       listeners: [{name: "http", attachedRoutes: $http}, {name: "https", attachedRoutes: 1}]}}'
 }
@@ -108,7 +126,8 @@ service() {
   listed service-cluster-ip && type=ClusterIP
   listed service-unlabelled && labels='{}'
   listed service-pending && ingress='[]'
-  jq -n --arg type "$type" --argjson labels "$labels" --argjson ingress "$ingress" --argjson two "$(listed two-services && echo true || echo false)" '
+  jq -n --arg type "$type" --argjson labels "$labels" --argjson ingress "$ingress" --argjson two "$(listed two-services && echo true || echo false)" \
+    --argjson name "$(json_name service-name envoy-envoy-gateway-system-public-1a2b3c4d)" '
     def service($name): {
       apiVersion: "v1", kind: "Service",
       metadata: {name: $name, namespace: "envoy-gateway-system",
@@ -117,10 +136,31 @@ service() {
       spec: {type: $type, clusterIP: "198.51.100.200", externalTrafficPolicy: "Cluster",
         ports: [{name: "http-80", port: 80}, {name: "https-443", port: 443}]},
       status: {loadBalancer: {ingress: $ingress}}};
-    {items: ([service("envoy-envoy-gateway-system-public-1a2b3c4d")] + (if $two then [service("envoy-public-copy")] else [] end))}'
+    {items: ([service($name)] + (if $two then [service("envoy-public-copy")] else [] end))}'
+}
+
+# hang: what an API that does not answer does, until the test releases it, after recording the
+# script that asked: the topmost process above that runs scripts/gateway-check, as its subshells
+# do too.
+hang() {
+  local pid=$PPID script='' tick
+  local -a argv
+  while ((pid > 1)); do
+    mapfile -d '' -t argv 2> /dev/null < "/proc/$pid/cmdline" || break
+    [[ ${argv[1]-} != *scripts/gateway-check ]] || script=$pid
+    pid=$(awk '{ print $4 }' "/proc/$pid/stat")
+  done
+  echo "$script" > "$root/record/script-pid"
+  for ((tick = 0; tick < 200; tick++)); do
+    [[ ! -e $state/release ]] || break
+    sleep 0.1
+  done
+  echo "Unable to connect to the server: dial tcp 203.0.113.80:6443: i/o timeout" >&2
+  exit 1
 }
 
 pods() {
+  listed hang-pods && hang
   local second_ready=True second_node=worker-2
   listed one-proxy && second_ready=False
   listed proxies-one-node && second_node=worker-1
@@ -138,9 +178,7 @@ pods() {
 certificates() {
   local ready=True
   listed certificate-not-ready && ready=False
-  local issuer=cluster-ca
-  listed issuer-name && issuer=$(cat "$state/issuer-name"; printf .) && issuer=${issuer%.}
-  jq -n --argjson ready "$(condition Ready "$ready")" --arg issuer "$issuer" '{items: [{
+  jq -n --argjson ready "$(condition Ready "$ready")" --argjson issuer "$(json_name issuer-name cluster-ca)" '{items: [{
     apiVersion: "cert-manager.io/v1", kind: "Certificate",
     metadata: {name: "public-wildcard", namespace: "envoy-gateway-system"},
     spec: {secretName: "public-wildcard-tls", dnsNames: ["*.example.com", "example.com"],
@@ -234,9 +272,7 @@ case $kind in
     ;;
   clusterissuers.cert-manager.io)
     [[ $object == cluster-ca ]] || not_found "clusterissuers.cert-manager.io \"$object\""
-    secret_name=cluster-ca
-    listed ca-secret-name && secret_name=$(cat "$state/ca-secret-name"; printf .) && secret_name=${secret_name%.}
-    jq -n --arg secret "$secret_name" '{apiVersion: "cert-manager.io/v1", kind: "ClusterIssuer", metadata: {name: "cluster-ca"},
+    jq -n --argjson secret "$(json_name ca-secret-name cluster-ca)" '{apiVersion: "cert-manager.io/v1", kind: "ClusterIssuer", metadata: {name: "cluster-ca"},
       spec: {ca: {secretName: $secret}}, status: {conditions: [{type: "Ready", status: "True"}]}}'
     ;;
   secret)

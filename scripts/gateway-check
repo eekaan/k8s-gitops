@@ -35,7 +35,8 @@
 # kubectl after --, so it can never be taken for a flag. kubectl is bounded by --request-timeout and
 # curl by --connect-timeout and --max-time, and curl reads no configuration file, uses no proxy and
 # trusts nothing but the cluster's CA. Needs curl 7.88 or newer, for its write-out of the
-# certificates. A failure that is not a check's names the step it happened in.
+# certificates. A failure that is not a check's names the step it happened in, and so does Ctrl-C
+# or SIGTERM, which stops the run there.
 # Usage: scripts/gateway-check [cluster]
 set -euo pipefail
 
@@ -56,7 +57,7 @@ fi
 . "$here/cluster-env" "${1-}"
 complete=1
 require_kubeconfig || complete=0
-require_commands kubectl jq curl base64 || complete=0
+require_commands kubectl jq curl base64 sha256sum || complete=0
 ((complete))
 
 # The Gateway and where its parts are, as the tree makes them (docs/kubernetes.md, The public
@@ -84,6 +85,9 @@ finish() {
 }
 reported=0
 trap 'finish $?' EXIT
+# Ctrl-C and SIGTERM end the run where it is, through finish, which names the step.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 # curl's own place for authorities beside the CA's certificate, empty, so nothing else is trusted.
 mkdir "$tmp/no-authorities"
 
@@ -114,14 +118,10 @@ get() {
 # node's, and a DNS label, such as a namespace's or a Service's.
 subdomain='^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
 label='^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-# valid_name KIND VALUE: whether VALUE is a name of KIND, subdomain or label. Anything else read
-# from the cluster is neither printed nor handed to kubectl.
-valid_name() {
-  case $1 in
-    label) ((${#2} <= 63)) && [[ $2 =~ $label ]] ;;
-    *) ((${#2} <= 253)) && [[ $2 =~ $subdomain ]] ;;
-  esac
-}
+# The cluster's domain, a DNS name of two labels or more, and an IPv4 address, for cluster-config.
+dns_name='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
+ipv4='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+# Anything else read from the cluster is neither printed nor handed to kubectl (name_field).
 
 # The same check inside jq: valid($pattern; $most), with \A and \z, as jq's $ also matches before a
 # final newline.
@@ -129,12 +129,28 @@ valid_name() {
 jq_valid='def valid($pattern; $most): type == "string" and length <= $most
   and test("\\A" + ($pattern | ltrimstr("^") | rtrimstr("$")) + "\\z");'
 
-# read_field VAR JSON FILTER: sets VAR to the string jq's FILTER gives for JSON, exactly: a command
-# substitution would drop its trailing newlines, and with them what makes it no valid name.
-read_field() {
-  local value
-  value=$(jq -j "$3" <<< "$2" && printf .) || return 1
-  printf -v "$1" '%s' "${value%.}"
+# name_field VAR KIND JSON FILTER: checks, inside jq, the value FILTER gives for JSON, where a NUL, a
+# newline or any other byte cannot slip past as a command substitution would let it. KIND is label,
+# subdomain, domain or ipv4. Sets VAR to the value when it is one of KIND, and to empty when there
+# is none; returns 1, VAR empty, when there is one that is not.
+name_field() {
+  local answer pattern most
+  case $2 in
+    label) pattern=$label most=63 ;;
+    subdomain) pattern=$subdomain most=253 ;;
+    domain) pattern=$dns_name most=253 ;;
+    ipv4) pattern=$ipv4 most=15 ;;
+  esac
+  # shellcheck disable=SC2016 # $name, $pattern and $most are jq variables.
+  answer=$(jq -r --arg pattern "$pattern" --argjson most "$most" "$jq_valid"' ('"$4"') as $name
+    | if $name == null or $name == "" then "absent"
+      elif ($name | valid($pattern; $most)) then "valid " + $name else "invalid" end' <<< "$3")
+  printf -v "$1" '%s' ''
+  case $answer in
+    absent) ;;
+    "valid "*) printf -v "$1" '%s' "${answer#valid }" ;;
+    *) return 1 ;;
+  esac
 }
 
 # shown TEXT: TEXT from the cluster or an answer as one line that is safe to print.
@@ -155,36 +171,35 @@ condition() {
 # reason JSON TYPE: the reason of the condition TYPE, a word, never its message.
 reason() {
   jq -r --arg type "$2" '[.status.conditions[]? | select(.type == $type) | .reason // "no reason"] | first // "no condition"
-    | if test("^[A-Za-z]+$") then . else "a reason that is not a word" end' <<< "$1"
+    | if test("\\A[A-Za-z]+\\z") | not then "a reason that is not a word"
+      elif length > 120 then .[0:120] + "..." else . end' <<< "$1"
 }
 
 step="checking the Gateway"
 domain='' address=''
-dns_name='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
-ipv4='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
 if ! config=$(get configmap --namespace=flux-system -- cluster-config); then
   result FAIL cluster-config "kubectl could not read flux-system/cluster-config"
 else
-  domain=$(jq -r '.data.CLUSTER_DOMAIN // ""' <<< "$config")
-  address=$(jq -r '.data.GATEWAY_ADDRESS // ""' <<< "$config")
-  if [[ ! $domain =~ $dns_name ]]; then
+  if ! name_field domain domain "$config" '.data.CLUSTER_DOMAIN' || [[ -z $domain ]]; then
     result FAIL cluster-config "its CLUSTER_DOMAIN is not a DNS name"
-    domain=''
-  elif [[ ! $address =~ $ipv4 ]]; then
+  elif ! name_field address ipv4 "$config" '.data.GATEWAY_ADDRESS' || [[ -z $address ]]; then
     result FAIL cluster-config "its GATEWAY_ADDRESS is not an IPv4 address"
-    address=''
+    domain=''
   else
     result pass cluster-config "holds CLUSTER_DOMAIN and GATEWAY_ADDRESS"
   fi
 fi
 
-listeners='' https_secret=''
+listeners=''
+tls_name=''
+tls_name_valid=1
 if ! gateway_json=$(get gateways.gateway.networking.k8s.io --namespace="$namespace" -- "$gateway"); then
   result FAIL Gateway "kubectl could not read $namespace/$gateway"
   result FAIL "Gateway address" "kubectl could not read $namespace/$gateway"
 else
   listeners=$(jq -c '.status.listeners // []' <<< "$gateway_json")
-  https_secret=$(jq -r '[.spec.listeners[]? | select(.name == "https") | .tls.certificateRefs[]? | select((.kind // "Secret") == "Secret") | .name] | first // ""' <<< "$gateway_json")
+  name_field tls_name subdomain "$gateway_json" '[.spec.listeners[]? | select(.name == "https") | .tls.certificateRefs[]?
+    | select((.kind // "Secret") == "Secret") | .name] | first' || tls_name_valid=0
   if [[ $(condition "$gateway_json" Accepted) != True ]]; then
     result FAIL Gateway "not Accepted: $(reason "$gateway_json" Accepted)"
   elif [[ $(condition "$gateway_json" Programmed) != True ]]; then
@@ -209,12 +224,13 @@ if ! services=$(get services --namespace="$namespace" --selector="$proxy_selecto
 else
   count=$(jq '.items | length' <<< "$services")
   service=$(jq -c '.items[0] // {}' <<< "$services")
-  name='' service_type=''
-  read_field name "$service" '.metadata.name // ""'
-  read_field service_type "$service" '.spec.type // ""'
+  name_valid=1
+  name_field name label "$service" '.metadata.name' || name_valid=0
+  # The type only to compare and show, its bytes outside printable ASCII already made question marks.
+  service_type=$(jq -r '.spec.type // "" | tostring | gsub("[^ -~]"; "?")' <<< "$service")
   if ((count != 1)); then
     result FAIL "proxy Service" "$count Services of the Gateway's proxies, not one"
-  elif ! valid_name label "$name"; then
+  elif ((!name_valid)) || [[ -z $name ]]; then
     result FAIL "proxy Service" "the name of the Service of the Gateway's proxies is not a valid name"
     name="the Service of the Gateway's proxies"
   elif [[ $service_type != LoadBalancer ]]; then
@@ -260,23 +276,26 @@ else
   fi
 fi
 
-issuer=''
+issuer='' issuer_valid=1
 if ! certificates=$(get certificates.cert-manager.io --namespace="$namespace"); then
   result FAIL certificate "kubectl could not read the Certificates of $namespace"
 else
-  certificate=$(jq -c --arg secret "$https_secret" '[.items[] | select(.spec.secretName == $secret)] | first // {}' <<< "$certificates")
-  read_field name "$certificate" '.metadata.name // ""'
-  if [[ -z $https_secret || -z $name ]]; then
+  certificate=$(jq -c --arg secret "$tls_name" '[.items[] | select(.spec.secretName == $secret)] | first // {}' <<< "$certificates")
+  name_valid=1
+  name_field name subdomain "$certificate" '.metadata.name' || name_valid=0
+  if ((!tls_name_valid)); then
+    result FAIL certificate "the Secret the https listener serves is not a valid name"
+  elif [[ -z $tls_name ]] || { ((name_valid)) && [[ -z $name ]]; }; then
     result FAIL certificate "no Certificate in $namespace makes the Secret the https listener serves"
-  elif ! valid_name subdomain "$name"; then
+  elif ((!name_valid)); then
     result FAIL certificate "the name of the Certificate the https listener serves is not a valid name"
   elif [[ $(condition "$certificate" Ready) != True ]]; then
     result FAIL certificate "$name is not Ready: $(reason "$certificate" Ready)"
   else
     result pass certificate "$name, the https listener's, is Ready"
   fi
-  read_field issuer "$certificate" 'if (.spec.issuerRef.kind // "Issuer") == "ClusterIssuer" and (.spec.issuerRef.group // "cert-manager.io") == "cert-manager.io"
-    then .spec.issuerRef.name // "" else "" end'
+  name_field issuer subdomain "$certificate" 'if (.spec.issuerRef.kind // "Issuer") == "ClusterIssuer"
+    and (.spec.issuerRef.group // "cert-manager.io") == "cert-manager.io" then .spec.issuerRef.name else null end' || issuer_valid=0
 fi
 
 # The CA's public certificate, the one key of its Secret that holds it: kubectl receives the whole
@@ -284,21 +303,24 @@ fi
 # prints the certificate, and never prints or writes the private key. The certificate goes to a
 # file of this run, removed at its end.
 ca_file=$tmp/ca.crt
-ca=0 ca_secret=''
-if [[ -z $issuer ]]; then
-  result FAIL "cluster CA" "the Gateway's Certificate names no ClusterIssuer to read a CA from"
-elif ! valid_name subdomain "$issuer"; then
+ca=0
+ca_name=''
+ca_name_valid=1
+if ((!issuer_valid)); then
   result FAIL "cluster CA" "the ClusterIssuer the Gateway's Certificate names is not a valid name"
+elif [[ -z $issuer ]]; then
+  result FAIL "cluster CA" "the Gateway's Certificate names no ClusterIssuer to read a CA from"
 elif ! issuer_json=$(get clusterissuers.cert-manager.io -- "$issuer") ||
-  ! read_field ca_secret "$issuer_json" '.spec.ca.secretName // ""' || [[ -z $ca_secret ]]; then
+  ! { name_field ca_name subdomain "$issuer_json" '.spec.ca.secretName' || ca_name_valid=0; } ||
+  { ((ca_name_valid)) && [[ -z $ca_name ]]; }; then
   result FAIL "cluster CA" "the ClusterIssuer $issuer is not a CA issuer kubectl could read"
-elif ! valid_name subdomain "$ca_secret"; then
+elif ((!ca_name_valid)); then
   result FAIL "cluster CA" "the Secret the ClusterIssuer $issuer signs with is not a valid name"
-elif ! encoded=$(kubectl get --output='jsonpath={.data.tls\.crt}' --request-timeout=10s secret --namespace="$issuer_namespace" -- "$ca_secret" 2> /dev/null) ||
+elif ! encoded=$(kubectl get --output='jsonpath={.data.tls\.crt}' --request-timeout=10s secret --namespace="$issuer_namespace" -- "$ca_name" 2> /dev/null) ||
   ! base64 -d <<< "$encoded" > "$ca_file" 2> /dev/null || ! grep -q '^-----BEGIN CERTIFICATE-----' "$ca_file"; then
-  result FAIL "cluster CA" "kubectl could not read the certificate of $issuer_namespace/$ca_secret"
+  result FAIL "cluster CA" "kubectl could not read the certificate of $issuer_namespace/$ca_name"
 else
-  result pass "cluster CA" "read the public certificate of $issuer_namespace/$ca_secret, which $issuer signs with"
+  result pass "cluster CA" "read the public certificate of $issuer_namespace/$ca_name, which $issuer signs with"
   ca=1
 fi
 
@@ -334,7 +356,7 @@ fi
 if [[ -z $listeners ]]; then
   result FAIL "http listener" "kubectl could not read $namespace/$gateway"
 else
-  attached=$(jq -r '[.[] | select(.name == "http") | .attachedRoutes] | first // "no"' <<< "$listeners")
+  attached=$(jq -r '[.[] | select(.name == "http") | .attachedRoutes] | first // "no" | tostring | gsub("[^ -~]"; "?")' <<< "$listeners")
   if [[ $attached == 1 ]]; then
     result pass "http listener" "holds one route, the redirect"
   else
@@ -350,9 +372,11 @@ if kubectl get --output='jsonpath={.data.index\.html}' --request-timeout=10s con
 fi
 
 # edges: each edge router's name and floating address, "NAME ADDRESS" per line, from the edge
-# stack's outputs (edge_load). Returns 2 when the stack has none, as before it is applied; 1 when
-# its environment or lock is not ready, which stack-env and lock_stack say in the repository's own
-# words; 3 when tofu init fails, 4 when tofu output does, and 5 when the outputs are not two edges.
+# stack's outputs (edge_load), after a first line "errors FILE", the stack's errors file as
+# stack-env names it, relative to the repository. Returns 2 when the stack has none, as before it is
+# applied; 1 when its environment or lock is not ready, which stack-env and lock_stack say in the
+# repository's own words; 3 when tofu init fails, 4 when tofu output does, 6 when what it gives is
+# not JSON, and 5 when the outputs are not two edges.
 # tofu's errors can name the state backend's endpoint, its bucket or an address, so they go to the
 # stack's errors file, which git ignores, and never to the output. Run in a subshell, so the stack's
 # environment and lock stay in it, and the addresses go to the caller only.
@@ -360,10 +384,12 @@ edges() {
   local outputs i
   # shellcheck source=scripts/stack-env
   . "$here/stack-env" sto2/edge || return 1
-  lock_stack || return 1
   # shellcheck disable=SC2154 # scripts/stack-env sets errors_file
+  printf 'errors %s\n' "${errors_file#"$infra_root"/}"
+  lock_stack || return 1
   init_stack 2>> "$errors_file" || return 3
   outputs=$(stack_tofu output -json 2>> "$errors_file") || return 4
+  jq -e 'type == "object"' <<< "$outputs" > /dev/null || return 6
   jq -e '(.addresses.value // []) | length > 0' <<< "$outputs" > /dev/null || return 2
   edge_load 2>> "$errors_file" || return 5
   for i in 0 1; do
@@ -477,8 +503,9 @@ if [[ -z $domain ]]; then
 else
   edges_status=0
   listing=$(edges) || edges_status=$?
-  # Where tofu's errors went, as stack-env names the file, relative to the repository.
-  errors_log=infra/openstack/stacks/sto2/edge/.terraform/tofu-errors.log
+  # Where tofu's errors went, as stack-env names the file, and the edges.
+  errors_log=$(sed -n '1s/^errors //p' <<< "$listing")
+  listing=$(sed '1d' <<< "$listing")
   unread="the edge stack's outputs could not be read"
   case $edges_status in
     2) result skip edges "the edge stack sto2/edge has no outputs: it is not applied, so no edge is checked" ;;
@@ -489,6 +516,7 @@ else
       result FAIL edges "$unread: tofu $failed failed, and its errors are in $errors_log; just infra-plan sto2/edge shows them"
       ;;
     5) result FAIL edges "$unread: they are not two edges' names and addresses, as $errors_log says" ;;
+    6) result FAIL edges "$unread: they are not JSON" ;;
   esac
   if ((edges_status == 0)); then
     mapfile -t listed <<< "$listing"
