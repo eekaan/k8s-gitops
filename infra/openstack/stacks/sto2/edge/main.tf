@@ -102,6 +102,7 @@ locals {
       frr_conf      = local.frr_conf[key]
       nftables_conf = local.nftables_conf[key]
       sysctl        = file("${path.module}/sysctl.conf")
+      sshd_conf     = file("${path.module}/sshd.conf")
     }
   }
 
@@ -115,6 +116,7 @@ locals {
       frr_conf      = local.config[key].frr_conf
       nftables_conf = local.config[key].nftables_conf
       sysctl        = local.config[key].sysctl
+      sshd_conf     = local.config[key].sshd_conf
       daemons       = file("${path.module}/frr-daemons")
       first_boot    = file("${path.module}/first-boot.sh")
     })
