@@ -461,10 +461,12 @@ absent() {
   done
 }
 
-@test "A host whose key is not known is refused until its fingerprint has been accepted" {
+@test "A host whose key is not known and whose console cannot be read is refused until its fingerprint has been accepted" {
+  # No console is there for the instance: the client finds none.
   recipe ci-host-setup <<< no
 
   [ "$status" -ne 0 ]
+  [[ $output == *"The console of the CI host's instance could not be read, so the comparison is yours."* ]]
   [[ $output == *"SHA256:FixtureFingerprintOfTheCiHost0123456789abcd"* ]]
   [[ $output == *"not accepted"* ]]
   [[ $output != *"$ADDRESS"* ]]
@@ -567,6 +569,33 @@ console() {
   [ ! -s "$KNOWN_HOSTS" ]
   run grep -c '^openstack console' "$RECORD/argv"
   [ "$output" = 0 ]
+}
+
+@test "HOST_CONSOLE_WAIT is read in base 10 for the CI host, and refused, named, before anything runs when it is not a whole number of at most 9 digits" {
+  local value
+  # setup_with VALUE: ci-host-setup as recipe runs it, with HOST_CONSOLE_WAIT=VALUE.
+  setup_with() {
+    run timeout 60 env -i HOME="$HOME_DIR" TMPDIR="$TEMP_DIR" PATH="$BIN:$PATH" "${ENVIRONMENT[@]}" \
+      "HOST_CONSOLE_WAIT=$1" "$JUST" --justfile "$ROOT/justfile" --working-directory "$REPO" ci-host-setup
+  }
+  console SHA256:FixtureFingerprintOfTheCiHost0123456789abcd
+
+  setup_with 08 < /dev/null
+
+  [ "$status" -eq 0 ]
+  [[ $output == *"CI host: the 1 SSH host key it offers matches its instance's console"* ]]
+
+  for value in 12345678901234567890 1000000000 30s; do
+    rm -f "$KNOWN_HOSTS"
+    : > "$RECORD/argv"
+
+    setup_with "$value" < /dev/null
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"HOST_CONSOLE_WAIT is not a whole number of seconds of at most 9 digits"* ]]
+    run grep -cE '^(tofu|ssh|ssh-keyscan|gh|openstack) ' "$RECORD/argv"
+    [ "$output" = 0 ]
+  done
 }
 
 @test "setup installs nothing from a runner package whose checksum is not its pin" {

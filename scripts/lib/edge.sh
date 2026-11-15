@@ -42,11 +42,8 @@ edge_load() {
 # edges, is recorded, as for the CI host: checked against the console of the edge's instance, for up
 # to HOST_CONSOLE_WAIT seconds, 30 when unset.
 edge_connect() {
-  local i wait=${HOST_CONSOLE_WAIT:-30}
-  if [[ ! $wait =~ ^[0-9]+$ ]]; then
-    infra_error "HOST_CONSOLE_WAIT is a whole number of seconds"
-    return 1
-  fi
+  local i
+  host_console_wait || return 1
   require_env EDGE_SSH_KEY_FILE || return 1
   if [[ ! -f $EDGE_SSH_KEY_FILE ]]; then
     infra_error "$EDGE_SSH_KEY_FILE does not exist; just edge-ssh-key creates the key pair"
@@ -56,7 +53,7 @@ edge_connect() {
   for i in 0 1; do
     if [[ -z ${1-} || $1 == $((i + 1)) ]]; then
       ssh_host_trust "${edge_addresses[i]}" "$edge_known_hosts" "edge router ${edge_names[i]}" \
-        "${edge_instances[i]}" "$wait" || return 1
+        "${edge_instances[i]}" "$host_console_wait" || return 1
     fi
   done
 }

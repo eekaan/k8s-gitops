@@ -62,13 +62,22 @@ if [[ -n $only ]]; then
   numbers=("$only")
 fi
 wait_seconds=${EDGE_ROLLOUT_WAIT:-900} interval=${EDGE_ROLLOUT_INTERVAL:-15}
-if [[ ! $wait_seconds =~ ^[0-9]+$ || ! $interval =~ ^[0-9]+$ ]]; then
-  infra_error "EDGE_ROLLOUT_WAIT and EDGE_ROLLOUT_INTERVAL are whole numbers of seconds"
+# Read in base 10, as arithmetic would read a leading zero as octal and 08 as an error, and of at
+# most 9 digits, which arithmetic holds without overflow.
+if [[ ! $wait_seconds =~ ^[0-9]{1,9}$ ]]; then
+  infra_error "EDGE_ROLLOUT_WAIT is not a whole number of seconds of at most 9 digits"
   exit 1
 fi
+if [[ ! $interval =~ ^[0-9]{1,9}$ ]]; then
+  infra_error "EDGE_ROLLOUT_INTERVAL is not a whole number of seconds of at most 9 digits"
+  exit 1
+fi
+wait_seconds=$((10#$wait_seconds)) interval=$((10#$interval))
 
 # shellcheck source=scripts/stack-env
 . "$here/stack-env" sto2/edge
+# The edge-check runs below read it.
+host_console_wait || exit 1
 lock_stack
 export EDGE_STACK_LOCKED=1
 init_stack
@@ -179,7 +188,7 @@ for number in "${numbers[@]}"; do
     # new instance's word.
     edge_load
     if [[ -n $before && ${edge_instances[number - 1]} == "$before" ]]; then
-      infra_error "edge $number's instance was created again, but the stack's outputs still give the identifier of the one before it, so they are stale and its console is not read; nothing was recorded, the rollout stops here and no later edge was touched"
+      infra_error "edge $number's instance was created again, but the stack's outputs still give the identifier of the one before it, so they are stale and its console is not read; nothing was recorded, the rollout stops here and no later edge was touched; once just infra-plan sto2/edge lists no change to output instances, so the outputs name the new instance, just edge-check --edge $number records its keys"
       exit 1
     fi
     status=0

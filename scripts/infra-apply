@@ -50,8 +50,9 @@ if [[ $stack == */edge ]]; then
 fi
 ((confirmed)) || confirm "$stack" apply applied
 # An edge's new instance, a replacement or one created again, has new SSH host keys at the address
-# the old one had, so the recorded ones go before the apply; edge-check records the new ones,
-# showing their fingerprints. A stack applied for the first time has none recorded.
+# the old one had, so the recorded ones go before the apply; edge-check checks the new ones against
+# the instance's console (scripts/lib/host-keys.sh) and records them. A stack applied for the first
+# time has none recorded.
 if ((${#edge_created_numbers[@]} > 0)) && edge_applied; then
   edge_load
   edge_forget_keys "${edge_created_numbers[@]}"
@@ -60,7 +61,7 @@ fi
 apply_plan
 echo "$stack applied"
 for number in "${forgotten[@]}"; do
-  echo "edge $number's SSH host keys are no longer recorded; just edge-check --edge $number shows the new ones and records them once yes is typed"
+  echo "edge $number's SSH host keys are no longer recorded; just edge-check --edge $number checks the new ones against its instance's console and records them, asking for yes only when the console holds none"
 done
 # The apply can change the nodes and their addresses, so talman.yaml is written again from the
 # state it left, under this run's lock.

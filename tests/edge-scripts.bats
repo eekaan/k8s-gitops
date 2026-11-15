@@ -944,8 +944,9 @@ original_keys() {
   plan_replacing 1 2
   original_1=$(recorded 1)
 
-  # The operator types yes once per replaced edge, as the fingerprints are shown. edge-check is the
-  # real script here: its ssh refuses a host whose key is not the recorded one.
+  # The stack's outputs name no instance here, so no console is read: the operator types yes once
+  # per replaced edge, as the fingerprints are shown. edge-check is the real script here: its ssh
+  # refuses a host whose key is not the recorded one.
   : > "$RECORD/argv"
   run bash -c 'printf "yes\nyes\n" | env "$@"' _ "${ENVIRONMENT[@]}" "$REPO/scripts/edge-rollout" --yes
   echo "$output"
@@ -1135,8 +1136,9 @@ instance_plan() {
   [ "$(trail)" = "$(printf '%s\n' 'forget 2' 'apply')" ]
   [ "$(recorded 2)" = "" ]
   [ "$(recorded 1)" = "$original_1" ]
-  [[ $output == *"edge 2's SSH host keys are no longer recorded"* ]]
-  # The new instance's keys are shown and recorded once yes is typed, and its check passes.
+  [[ $output$'\n' == *$'\n'"edge 2's SSH host keys are no longer recorded; just edge-check --edge 2 checks the new ones against its instance's console and records them, asking for yes only when the console holds none"$'\n'* ]]
+  # The stack's outputs name no instance here, so no console is read: the new instance's keys are
+  # shown and recorded once yes is typed, and its check passes.
   run bash -c 'printf "yes\n" | env "$@"' _ "${ENVIRONMENT[@]}" "$REPO/scripts/edge-check" --edge 2
   echo "$output"
   [ "$status" -eq 0 ]
@@ -1688,12 +1690,22 @@ crlf() {
 }
 
 # fake_clock: date +%s reads a clock of the test's own, which sleep moves on instead of waiting,
-# recording each sleep, as in tests/cluster-recipes.bats. A run that sleeps more than 100 times is
-# waiting for a time the clock does not reach, and is stopped.
+# recording each sleep, as in tests/cluster-recipes.bats; with a number in the file clock-answers in
+# the record's directory, date answers that many times and then gives no number. A run that sleeps
+# more than 100 times is waiting for a time the clock does not reach, and is stopped.
 fake_clock() {
   echo 1800000000 > "$RECORD/clock"
+  rm -f "$RECORD/clock-answers"
   fake date << EOF
 if [[ \$* == +%s ]]; then
+  if [[ -f "$RECORD/clock-answers" ]]; then
+    answers=\$(cat "$RECORD/clock-answers")
+    if ((answers <= 0)); then
+      echo 'no time'
+      exit 0
+    fi
+    echo \$((answers - 1)) > "$RECORD/clock-answers"
+  fi
   cat "$RECORD/clock"
   exit 0
 fi
@@ -1783,6 +1795,7 @@ rollout_with_input() {
   echo "$output"
   [ "$status" -ne 0 ]
   [[ $output == *"edge 1's instance was created again, but the stack's outputs still give the identifier of the one before it"* ]]
+  [[ $output == *"once just infra-plan sto2/edge lists no change to output instances, so the outputs name the new instance, just edge-check --edge 1 records its keys"* ]]
   [[ $output != *"Type yes"* ]]
   absent '^openstack console' "$RECORD/argv"
   absent '^ssh-keyscan ' "$RECORD/argv"
@@ -1790,6 +1803,29 @@ rollout_with_input() {
   # The rollout stopped there.
   [ "$(grep -c '^tofu .* apply ' "$RECORD/argv")" -eq 1 ]
   absent 'module.edge\["2"\]' "$RECORD/argv"
+  no_address "$output"
+
+  # Edge 1's outputs follow its replacement, and edge 2's stay stale: edge 1's keys are recorded
+  # from its new console, and the rollout stops at edge 2, its keys unread and unrecorded.
+  original_keys
+  plan_replacing 1 2
+  rm "$HOST/next-id-1"
+  current_instance 2 > "$HOST/next-id-2"
+  console_block "$(fingerprint "$(replacement_key 1)")" | set_console "$(next_instance 1)"
+  console_block "$(fingerprint "$(replacement_key 2)")" | set_console "$(current_instance 2)"
+  : > "$RECORD/argv"
+  rollout_with_input 'yes\nyes\n'
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [ "$(recorded 1)" = "$(replacement_key 1)" ]
+  [[ $output == *"edge router lab-edge-1: the 1 SSH host key it offers matches its instance's console"* ]]
+  [[ $output == *"edge 2's instance was created again, but the stack's outputs still give the identifier of the one before it"* ]]
+  [[ $output == *"just edge-check --edge 2 records its keys"* ]]
+  [[ $output != *"Type yes"* ]]
+  [ "$(recorded 2)" = "" ]
+  absent "^openstack console log show .* $(current_instance 2)\$" "$RECORD/argv"
+  absent "^ssh-keyscan .*$ADDRESS_2\$" "$RECORD/argv"
+  [ "$(grep -c '^tofu .* apply ' "$RECORD/argv")" -eq 2 ]
   no_address "$output"
 }
 
@@ -2030,6 +2066,102 @@ FAKE
   absent '^sleep ' "$RECORD/argv"
   [[ $output == *"date +%s does not give the time, so the wait for the console cannot be timed"* ]]
   [[ $output == *"Type yes to record them and connect"* ]]
+
+  # A clock that stops giving a number part-way ends the wait there: it answers at the start and
+  # after the first read, and not after the second, so the console is read twice, with one sleep
+  # between, and the operator is asked.
+  grep -v "^$ADDRESS_1 " "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts" > "$BATS_TEST_TMPDIR/known"
+  cp "$BATS_TEST_TMPDIR/known" "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts"
+  rm -f "$RECORD/reads-$current"
+  fake_clock
+  echo 2 > "$RECORD/clock-answers"
+  : > "$RECORD/argv"
+  run bash -c 'printf "yes\n" | env "$@"' _ "${environment[@]}" "$REPO/scripts/edge-check" --edge 1
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(console_reads "$current")" -eq 2 ]
+  [ "$(grep -c '^sleep ' "$RECORD/argv")" -eq 1 ]
+  [[ $output == *"date +%s does not give the time, so the wait for the console cannot be timed"* ]]
+  [[ $output == *"held no fingerprints"* ]]
+  [[ $output == *"Type yes to record them and connect"* ]]
+  [ "$(recorded 1)" = "$(cat "$HOST/key-$ADDRESS_1")" ]
+}
+
+@test "the waits are read in base 10, and one that is not a whole number of at most 9 digits is refused, named, before anything runs" {
+  local environment=() entry current row value reads moved wait interval name new
+  with_instances
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_state 2 active "$WORKERS" 203.0.113.17/32
+  for entry in "${ENVIRONMENT[@]}"; do
+    [[ $entry == HOST_CONSOLE_WAIT=* ]] || environment+=("$entry")
+  done
+  current=$(current_instance 1)
+  early_console | set_console "$current"
+  # forget_1: edge 1's key is not recorded, so edge-check reads its console.
+  forget_1() {
+    grep -v "^$ADDRESS_1 " "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts" > "$BATS_TEST_TMPDIR/known" || true
+    cp "$BATS_TEST_TMPDIR/known" "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts"
+  }
+
+  # HOST_CONSOLE_WAIT=08 waits eight seconds, read every 5: at 0, 5 and 10. 012 waits twelve: at 0,
+  # 5, 10 and 15, where octal's ten would stop at 10.
+  for row in '08 3 10' '012 4 15'; do
+    read -r value reads moved <<< "$row"
+    forget_1
+    rm -f "$RECORD/reads-$current"
+    fake_clock
+    : > "$RECORD/argv"
+    run bash -c 'printf "yes\n" | env "$@"' _ "${environment[@]}" "HOST_CONSOLE_WAIT=$value" "$REPO/scripts/edge-check" --edge 1
+    echo "HOST_CONSOLE_WAIT=$value: $output"
+    [ "$status" -eq 0 ]
+    [ "$(console_reads "$current")" -eq "$reads" ]
+    [ "$(clock_moved)" -eq "$moved" ]
+  done
+  # Nine digits are a wait.
+  forget_1
+  console_block "$(fingerprint "$(cat "$HOST/key-$ADDRESS_1")")" | set_console "$current"
+  run env "${environment[@]}" HOST_CONSOLE_WAIT=999999999 "$REPO/scripts/edge-check" --edge 1 < /dev/null
+  echo "HOST_CONSOLE_WAIT=999999999: $output"
+  [ "$status" -eq 0 ]
+  [[ $output == *"match"*"its instance's console"* ]]
+
+  # EDGE_ROLLOUT_WAIT=08 with EDGE_ROLLOUT_INTERVAL=04 reads the console at 0, 4 and 8; 010 with 02
+  # at 0, 2, 4, 6, 8 and 10, where octal's eight would stop at 8.
+  for row in '08 04 3 8' '010 02 6 10'; do
+    read -r wait interval reads moved <<< "$row"
+    original_keys
+    fake_clock
+    plan_replacing 1
+    new=$(next_instance 1)
+    early_console | set_console "$new"
+    : > "$RECORD/argv"
+    rollout_with_input 'yes\n' "EDGE_ROLLOUT_WAIT=$wait" "EDGE_ROLLOUT_INTERVAL=$interval"
+    echo "EDGE_ROLLOUT_WAIT=$wait EDGE_ROLLOUT_INTERVAL=$interval: $output"
+    [ "$status" -eq 0 ]
+    [ "$(console_reads "$new")" -eq "$reads" ]
+    [ "$(clock_moved)" -eq "$moved" ]
+  done
+
+  # Twenty digits, ten, a unit or a sign: refused, naming the variable, before the stack is touched,
+  # an address scanned or a console read.
+  original_keys
+  for value in 12345678901234567890 1000000000 30s -5; do
+    for name in HOST_CONSOLE_WAIT EDGE_ROLLOUT_WAIT EDGE_ROLLOUT_INTERVAL; do
+      : > "$RECORD/argv"
+      rollout_with_input 'yes\n' "$name=$value"
+      echo "edge-rollout, $name=$value: $output"
+      [ "$status" -ne 0 ]
+      [[ $output == *"$name is not a whole number of seconds of at most 9 digits"* ]]
+      absent -E '^(tofu|ssh|ssh-keyscan|openstack) ' "$RECORD/argv"
+    done
+    forget_1
+    : > "$RECORD/argv"
+    run env "${environment[@]}" "HOST_CONSOLE_WAIT=$value" "$REPO/scripts/edge-check" --edge 1 < /dev/null
+    echo "edge-check, HOST_CONSOLE_WAIT=$value: $output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"HOST_CONSOLE_WAIT is not a whole number of seconds of at most 9 digits"* ]]
+    absent -E '^(tofu|ssh|ssh-keyscan|openstack) ' "$RECORD/argv"
+  done
 }
 
 @test "Only the fingerprints cloud-init printed at the latest boot count" {

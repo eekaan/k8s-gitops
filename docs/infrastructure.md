@@ -699,10 +699,12 @@ console holds no fingerprints by the end of the wait. The rollout does it once t
 answers on SSH, before the edge's check, reading the console within `EDGE_ROLLOUT_WAIT`, and stops
 at once when a key is refused or not accepted; after `just infra-apply sto2/edge` the next
 `just edge-check` does. The new instance is a new server with an identifier of its own, so the
-rollout reads the stack's outputs again after each edge's apply and reads the console that
-identifier names; outputs that still give the identifier of the instance before it do not
-describe what the apply made, and the rollout stops there, with nothing read or recorded. An edge
-whose part of the plan does not create its instance keeps its recorded keys.
+rollout reads the stack's outputs again after each apply that creates an edge's instance and
+reads the console that identifier names; outputs that still give the identifier of the instance
+before it do not describe what the apply made, and the rollout stops there, with nothing read or
+recorded, saying that once `just infra-plan sto2/edge` lists no change to `output instances`,
+`just edge-check --edge N` records the keys. An edge whose part of the plan does not create its
+instance keeps its recorded keys.
 
 ### Checking and reading
 
@@ -987,7 +989,9 @@ docker of `vector-check` has only the scan.
   an edge to pass its check, 900 seconds when unset, and how often it tries, 15; the wait also
   bounds how long it reads a new instance's console for its host keys. `HOST_CONSOLE_WAIT`: how
   long the other recipes that connect to an edge or the CI host for the first time wait for the
-  console to hold the fingerprints of its host keys before they ask, 30 seconds when unset.
+  console to hold the fingerprints of its host keys before they ask, 30 seconds when unset. Each
+  is a whole number of seconds of at most 9 digits, read in base 10 (`08` is eight); any other
+  value is refused, naming the variable, before the recipe touches the stack.
 - `TF_VAR_security_group_rules`: the cluster stack's `security_group_rules`, `full` unless set to
   `reduced` ([The nodes' security group](#the-nodes-security-group)).
 - `TF_VAR_worker_first_host`: the host number of the first worker, 20 when unset, for the cluster

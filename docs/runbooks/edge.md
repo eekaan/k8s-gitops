@@ -125,9 +125,10 @@ the new ones are recorded once its first boot is far enough along for SSH, as
 [a new host key](#a-new-hosts-ssh-key) says: from the new instance's console, with no prompt when
 it agrees. The new instance has an identifier of its own, which the rollout reads from the stack's
 outputs after the edge's apply; outputs that still give the old instance's stop the rollout there,
-with nothing read or recorded. A key the console does not hold, or an answer to the prompt that is
-not `yes`, stops the rollout at once, before the edge's check and before the other edge is touched.
-After
+with nothing read or recorded: once `just infra-plan sto2/edge` lists no change to
+`output instances`, so the outputs name the new instance, `just edge-check --edge N` records its
+keys. A key the console does not hold, or an answer to the prompt that is not `yes`, stops the
+rollout at once, before the edge's check and before the other edge is touched. After
 `just infra-apply sto2/edge` has created an edge's instance again, its keys are dropped the same
 way, and the next `just edge-check` records the new ones; `just infra-destroy sto2/edge` drops both
 edges' keys.

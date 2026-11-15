@@ -81,14 +81,10 @@ ci_host_connect() {
 }
 
 # ci_host_trust: ssh_host_trust for the CI host, reading its instance's console for up to
-# HOST_CONSOLE_WAIT seconds, 30 when unset.
+# HOST_CONSOLE_WAIT seconds, 30 when unset (host_console_wait).
 ci_host_trust() {
-  local wait=${HOST_CONSOLE_WAIT:-30}
-  if [[ ! $wait =~ ^[0-9]+$ ]]; then
-    infra_error "HOST_CONSOLE_WAIT is a whole number of seconds"
-    return 1
-  fi
-  ssh_host_trust "$ci_host_address" "$ci_host_known_hosts" "CI host" "$ci_host_instance" "$wait"
+  host_console_wait || return 1
+  ssh_host_trust "$ci_host_address" "$ci_host_known_hosts" "CI host" "$ci_host_instance" "$host_console_wait"
 }
 
 # ci_host_ssh COMMAND: runs COMMAND, one string, on the host as CI_HOST_SSH_USER, with strict host key

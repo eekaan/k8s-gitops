@@ -48,6 +48,7 @@ if [[ ! $cluster =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
 fi
 # shellcheck source=scripts/stack-env
 . "$here/stack-env" sto2/edge
+host_console_wait || exit 1
 # scripts/edge-rollout holds the stack's lock while it runs this.
 if [[ -z ${EDGE_STACK_LOCKED-} ]]; then
   lock_stack

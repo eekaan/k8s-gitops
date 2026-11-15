@@ -23,6 +23,7 @@ here=$(dirname "$0")
 # shellcheck source=scripts/stack-env
 . "$here/stack-env" sto2/ci
 require_env CI_HOST_SSH_USER
+host_console_wait || exit 1
 for tool in ssh ssh-keyscan ssh-keygen gh; do
   if ! type -P "$tool" > /dev/null; then
     infra_error "$tool is not on PATH; ci-host-setup needs OpenSSH's client and the pinned gh (just tools)"

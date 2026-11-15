@@ -88,6 +88,20 @@ console_fingerprints() {
   printf '%s' "$latest" | sort -u
 }
 
+# host_console_wait: sets host_console_wait to HOST_CONSOLE_WAIT, how long the recipes other than
+# scripts/edge-rollout wait for a new host's console to hold its fingerprints, 30 when unset, read
+# in base 10, as arithmetic would read a leading zero as octal and 08 as an error; fails, naming it,
+# unless it is a whole number of seconds of at most 9 digits, which arithmetic holds without
+# overflow. The scripts call it as soon as scripts/stack-env has read .env, before anything runs.
+host_console_wait() {
+  if [[ ! ${HOST_CONSOLE_WAIT:-30} =~ ^[0-9]{1,9}$ ]]; then
+    infra_error "HOST_CONSOLE_WAIT is not a whole number of seconds of at most 9 digits"
+    return 1
+  fi
+  # shellcheck disable=SC2034 # read by scripts/lib/edge.sh and scripts/lib/ci-host.sh
+  host_console_wait=$((10#${HOST_CONSOLE_WAIT:-30}))
+}
+
 # host_clock: the time in seconds since the epoch, from date +%s; fails, saying so, when date gives
 # anything but a whole number, which arithmetic could not be trusted with. The waits below and in
 # scripts/edge-rollout are timed with it.
@@ -104,9 +118,10 @@ host_clock() {
 # not in KNOWN_HOSTS, scans the host once for the keys it offers and decides, with those keys alone,
 # what is recorded. LABEL names the host in what it prints, such as "CI host". With the host's
 # INSTANCE_ID it reads the instance's console (console_fingerprints), trying again every INTERVAL
-# seconds, 5 when unset, for at most WAIT seconds, 0 when unset, while the client fails or the
-# console holds no block yet, which a first boot prints late; a client that cannot be run, or a
-# clock that gives no time, leaves one read. Then:
+# seconds, 5 when unset, for at most WAIT seconds, 0 when unset, both whole numbers of at most 9
+# digits, read in base 10, while the client fails or the console holds no block yet, which a first
+# boot prints late; a client that cannot be run leaves one read, and a clock that gives no time
+# ends the wait where it stops. Then:
 #   every key offered is on the console: they are recorded, with no prompt;
 #   the console holds fingerprints and one offered is not among them: nothing is recorded, no prompt
 #     is offered, and nothing overrides that;
@@ -116,7 +131,7 @@ host_clock() {
 # Returns 2 when the keys were not accepted, 3 when the host offers a key its instance did not
 # print, 1 when the host does not answer. Never prints an address. Shared with scripts/lib/edge.sh.
 ssh_host_trust() {
-  local address=$1 known_hosts=$2 label=$3 instance=${4-} wait=${5-0} interval=${6-5}
+  local address=$1 known_hosts=$2 label=$3 instance=${4-} wait=$((10#${5-0})) interval=$((10#${6-5}))
   local scanned offered console='' console_read=0 now deadline fingerprint count=0 unprinted=() answer='' why=''
   if [[ -s $known_hosts ]] && ssh-keygen -F "$address" -f "$known_hosts" > /dev/null 2>&1; then
     return 0
