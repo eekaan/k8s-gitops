@@ -1,0 +1,35 @@
+---
+# The token the task runners authenticate to n8n's task broker with: 32 characters of letters of
+# both cases, digits and symbols, hex-encoded into 64 hexadecimal digits. Nothing outside the pod
+# needs it and nothing keeps it: it is read only through the cluster's API, so a new one, should the
+# Secret be made again, costs nothing but a restart of the pod.
+apiVersion: generators.external-secrets.io/v1alpha1
+kind: Password
+metadata:
+  name: n8n-runners
+spec:
+  length: 32
+  allowRepeat: true
+  noUpper: false
+  encoding: hex
+  secretKeys:
+    - token
+---
+# Writes the generated token into the Secret n8n-runners once, when the ExternalSecret is first
+# synced: with refreshPolicy CreatedOnce the operator does not sync it after that, so the token
+# never changes under a running pod, whose two containers each read it when they start.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: n8n-runners
+spec:
+  refreshPolicy: CreatedOnce
+  target:
+    name: n8n-runners
+    creationPolicy: Owner
+  dataFrom:
+    - sourceRef:
+        generatorRef:
+          apiVersion: generators.external-secrets.io/v1alpha1
+          kind: Password
+          name: n8n-runners

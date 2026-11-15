@@ -32,8 +32,11 @@ docker	ghcr.io/piraeusdatastore/piraeus-operator/piraeus	^[0-9]+\.[0-9]+\.[0-9]+
 docker	ghcr.io/home-operations/charts-mirror/volsync	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
 docker	ghcr.io/controlplaneio-fluxcd/charts/flux-instance	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
 docker	ghcr.io/controlplaneio-fluxcd/charts/flux-operator	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/bjw-s-labs/helm/app-template	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
 docker	docker.io/grafana/grafana	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
 docker	ghcr.io/renovatebot/renovate	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	docker.io/n8nio/n8n	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list, which holds n8n's betas and its next major as plain versions too (.renovate/managers.json5)
+docker	docker.io/n8nio/runners	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list, which holds n8n's betas and its next major as plain versions too (.renovate/managers.json5)
 docker	ghcr.io/cloudnative-pg/postgresql	^[0-9]+\.[0-9]+-standard-trixie$	registry tag list
 docker	docker.io/timberio/vector	^[0-9]+\.[0-9]+\.[0-9]+-distroless-libc$	registry tag list
 docker	jdxcode/mise	^[0-9]+\.[0-9]+\.[0-9]+-debian$	registry tag list

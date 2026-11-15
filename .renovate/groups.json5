@@ -48,6 +48,12 @@
       separateMajorMinor: false,
     },
     {
+      // tests/applications.bats fails unless the runners image is of n8n's version.
+      description: "n8n: its image and its task runners' image",
+      matchPackageNames: ["docker.io/n8nio/n8n", "docker.io/n8nio/runners"],
+      groupName: "n8n",
+    },
+    {
       description: "The Flux Operator: its image and its operator and instance charts",
       matchPackageNames: ["controlplaneio-fluxcd/**", "ghcr.io/controlplaneio-fluxcd/**"],
       groupName: "Flux Operator",

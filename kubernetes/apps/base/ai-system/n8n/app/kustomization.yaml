@@ -1,0 +1,23 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# The database comes from components/cnpg-cluster, and the volume and its backup from
+# components/volsync, which ks.yaml adds.
+resources:
+  - encryption-key.yaml
+  - helmrelease.yaml
+  - httproute.yaml
+  - ocirepository.yaml
+  - runners-token.yaml
+
+configMapGenerator:
+  - name: n8n-values
+    files:
+      - values.yaml
+generatorOptions:
+  annotations:
+    kustomize.toolkit.fluxcd.io/substitute: disabled
+
+configurations:
+  - kustomizeconfig.yaml

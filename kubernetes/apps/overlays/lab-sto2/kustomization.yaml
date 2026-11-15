@@ -7,6 +7,7 @@ kind: Kustomization
 # enabled application. A disabled application stays listed, commented out with the reason.
 resources:
   - ../../base/flux-system/artifact-generator
+  - ../../base/ai-system
   - ../../base/cert-manager
   - ../../base/cnpg-system
   - ../../base/demo
@@ -18,6 +19,7 @@ resources:
   - ../../base/openbao
   - ../../base/piraeus-datastore
   - ../../base/volsync-system
+  - ../../base/ai-system/n8n/ks.yaml
   - ../../base/cert-manager/acme-issuers/ks.yaml
   - ../../base/cert-manager/cert-manager/ks.yaml
   - ../../base/cert-manager/cluster-ca/ks.yaml

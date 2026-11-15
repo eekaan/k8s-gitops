@@ -85,6 +85,13 @@
       automerge: false,
     },
     {
+      // n8n has marked a few patches of a stable minor as pre-releases, which Docker Hub's tags do
+      // not show: a person checks the version on n8n's releases page (docs/kubernetes.md, n8n).
+      description: "n8n",
+      matchPackageNames: ["docker.io/n8nio/n8n", "docker.io/n8nio/runners"],
+      automerge: false,
+    },
+    {
       description: "Anything pinned in mise.toml or versions.yaml",
       matchFileNames: ["mise.toml", "versions.yaml"],
       automerge: false,

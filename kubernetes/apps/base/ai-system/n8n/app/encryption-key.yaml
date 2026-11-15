@@ -1,0 +1,24 @@
+---
+# The key n8n encrypts the credentials it stores in its database with, from the secret store: the
+# value an operator writes once with `just bao-put ai-system/n8n encryption-key` becomes the key
+# encryption-key of the Secret n8n-encryption-key. n8n also copies the key into its settings file on
+# the volume at its first start and refuses to start when the two differ, so the store must hold the
+# same key before n8n starts on a restored volume (docs/kubernetes.md, n8n, for every place the key
+# lives and the order on a rebuild).
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: n8n-encryption-key
+spec:
+  refreshInterval: 15m
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: openbao
+  target:
+    name: n8n-encryption-key
+    creationPolicy: Owner
+  data:
+    - secretKey: encryption-key
+      remoteRef:
+        key: ai-system/n8n
+        property: encryption-key

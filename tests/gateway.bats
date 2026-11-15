@@ -392,17 +392,21 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   echo "what names the Gateway as its parent: ${listener_sets:-nothing}"
   [ -z "$listener_sets" ]
   # A namespace of the cluster attaches to https when its labels, as the overlay builds them,
-  # carry the selector's pair, and the demo namespace is the only one that does.
+  # carry the selector's pair, and the namespaces of the applications that have a route are the
+  # only ones that do.
   overlay
   while IFS=$'\t' read -r name labels; do
     echo "namespace $name: k8s-gitops/gateway=$labels"
     if [ "$labels" = "$label" ]; then attached+=("$name"); fi
   done < <(yq -N 'select(.kind == "Namespace") | .metadata.name + "\t" + (.metadata.labels["k8s-gitops/gateway"] // "none")' "$OVERLAY")
-  [ "${attached[*]}" = demo ]
+  [ "${attached[*]}" = "ai-system demo" ]
   # Every route that names the Gateway from another namespace is in one that attached.
   built hello-route
   [ "$(yq -N 'select(.kind == "HTTPRoute") | .spec.parentRefs[].name' "$BUILT")" = "$gateway" ]
   [ "$(yq -N 'select(.kind == "HTTPRoute") | .metadata.namespace' "$BUILT")" = demo ]
+  built n8n
+  [ "$(yq -N 'select(.kind == "HTTPRoute") | .spec.parentRefs[].name' "$BUILT")" = "$gateway" ]
+  [ "$(yq -N 'select(.kind == "HTTPRoute") | .metadata.namespace' "$BUILT")" = ai-system ]
 }
 
 @test "The Gateway listens on exactly the ports the edge routers translate" {
@@ -494,8 +498,9 @@ tree_without() {
     [ "$(yq '.resources[] | select(test("/'"$app"'/ks.yaml$"))' "$REPO/kubernetes/apps/overlays/lab-sto2/kustomization.yaml")" ] \
       || { echo "the lab-sto2 overlay does not list $app"; return 1; }
   done
-  # Leaving the Gateway and its route out builds: nothing else names them.
-  tree_without gateway-public hello-route
+  # Leaving the Gateway and the applications that have a route on it out builds: nothing else names
+  # them.
+  tree_without gateway-public hello-route n8n
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]
