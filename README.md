@@ -37,7 +37,10 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
   registries), the schemas and images of what it builds and renders (`just kubernetes-validate`,
   which pulls the charts as well and fetches the schemas), the log collector's configuration
   (`just vector-check`: Vector itself validates it and runs its unit tests, in the image the
-  collector runs, pinned by digest, so it needs Docker too), and gitleaks over the committable
+  collector runs, pinned by digest, so it needs Docker too), the alert rules the tree renders
+  (`just rules-check`: promtool, in the image of the Prometheus the rendered chart deploys, checks
+  every rule and runs the unit tests in `tests/rules`, and each alert of the tree's own has its
+  severity, runbook and a test that fires and one that stays quiet; Docker as well), and gitleaks over the committable
   files and the git history reachable from `HEAD`, so a clone and a CI checkout are judged on the
   same commits. The groups `tests-1` to `tests-3` each run a third of the bats tests.
 - The groups are the dependencies of the `checks` recipe, and a group's checks are its own
@@ -53,7 +56,8 @@ Every tool is pinned to an exact version in `mise.toml`. With [mise](https://mis
   of the bats tests.
 - `just ci` runs the same groups through the Dagger module in `.dagger/modules/ci`, side by side,
   each in containers of its own: Renovate's validator in its own image, Vector in the log
-  collector's image, the speakers of the edge routers' routing policy in FRR's image, every other
+  collector's image, the speakers of the edge routers' routing policy in FRR's image, promtool
+  from the Prometheus image the monitoring chart deploys, every other
   check in a container with the pinned tools, the tools image `versions.yaml` records when it was
   built for these pins and one built from them otherwise
   ([The tools image](#the-tools-image)); the run's first line says which. `just ci tests-2` runs

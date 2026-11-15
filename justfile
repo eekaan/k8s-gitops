@@ -110,7 +110,7 @@ checks: static tests-1 tests-2 tests-3
 
 # The groups of checks are the dependencies of checks, and each group's checks its own dependencies: just ci runs every group side by side in containers of its own, and CI runs each as a job of its own. A check, with whatever it depends on, belongs to one group only, or it would run twice.
 # The checks other than the bats tests, the cheapest and most basic first
-static: tools-check check-literals check-commit-literals check-conflict-markers cluster-secrets-check lint renovate-check edge-policy-check scenarios-check infra-check talos-check kubernetes-check render-check kubernetes-validate vector-check secrets-scan
+static: tools-check check-literals check-commit-literals check-conflict-markers cluster-secrets-check lint renovate-check edge-policy-check scenarios-check infra-check talos-check kubernetes-check render-check kubernetes-validate vector-check rules-check secrets-scan
 
 # The first of three parts of the bats tests
 tests-1: (test '1/3')
@@ -122,7 +122,7 @@ tests-2: (test '2/3')
 tests-3: (test '3/3')
 
 # Without a terminal, as in CI, Dagger's default progress is a line every 30 seconds; plain prints every step and each check's output as it happens.
-# Run the checks inside containers built from the pins, as CI does: every group side by side, or only the group named, such as just ci tests-2; renovate-check's validator, vector-check's Vector and edge-policy-check's FRR each in its own image, the other checks in a container with the tools pinned in mise.toml, the tools image versions.yaml records when it was built for these pins
+# Run the checks inside containers built from the pins, as CI does: every group side by side, or only the group named, such as just ci tests-2; renovate-check's validator, vector-check's Vector and edge-policy-check's FRR each in its own image, rules-check's promtool, taken from the image of the Prometheus the chart deploys, in the tools container, the other checks in a container with the tools pinned in mise.toml, the tools image versions.yaml records when it was built for these pins
 [script]
 ci group='':
     set -o pipefail
@@ -201,6 +201,18 @@ vector-check:
     scripts/vector-config "$dir"
     docker run --rm --network none -e VECTOR_SELF_NODE_NAME=node-1 -v "$dir":/check:ro {{ vector_image }} validate --no-environment /check/vector.yaml
     docker run --rm --network none -e VECTOR_SELF_NODE_NAME=node-1 -v "$dir":/check:ro {{ vector_image }} test /check/vector.yaml /check/tests.yaml
+
+# Check the alert rules the tree renders with promtool, in the image of the Prometheus the rendered chart deploys, which scripts/rules-config finds in the render: every rule of every cluster, the charts' and the applications' own, is valid, every own alert has a severity, a summary, a description, a runbook heading that exists and a test in which it fires and one in which it stays quiet, and the unit tests in tests/rules pass; the image has no pin of its own, as the chart's tag is the pin Renovate moves; needs docker, as vector-check does, which just ci's module does not
+[script]
+rules-check:
+    set -o pipefail
+    dir=$(mktemp -d)
+    trap 'rm -rf "$dir"' EXIT
+    # docker is run with none of the secrets a recipe's environment may hold.
+    . scripts/lib/tools.sh
+    scripts/rules-config "$dir/check"
+    image=$(< "$dir/check/image")
+    scripts/rules-promtool "$dir/check" docker run --rm --network none -v "$dir/check":/check:ro -w /check --entrypoint promtool "$image"
 
 # The image of FRR for edge-policy-check here and for just ci's Dagger module: the upstream build, 10.3.4, of the release the edge routers' Debian image packages, 10.3-3+deb13u1 in trixie, the same release with Debian's patches. Its own build takes 64 equal-cost paths, Debian's 256, which the proof's configuration allows for; it moves with the edge image's release, by hand
 frr_image := "quay.io/frrouting/frr:10.3.4@sha256:c8790a83db3cb105c0823f76afe55de5c9f77d968fb1ebd28174a8ddd49b989c"

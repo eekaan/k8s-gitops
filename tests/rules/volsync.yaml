@@ -1,0 +1,76 @@
+---
+# Unit tests of the volsync application's own alerts, run by just rules-check with promtool. The
+# series are shaped as VolSync's controller writes its metrics: labels obj_name, obj_namespace, role
+# and method, from two replicas that differ in their pod and instance
+# (https://volsync.readthedocs.io/en/stable/usage/metrics/index.html). Each group's name is the title
+# of its scenario in features/alerts.feature.
+rule_files:
+  - volsync.rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: The alert VolSyncSourceOutOfSync fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # The source "data" is in sync for 10 minutes and out of sync from the 11th, as both replicas
+      # report it; "other" is in sync throughout.
+      - series: 'volsync_volume_out_of_sync{obj_name="data", obj_namespace="demo", role="source", method="restic", pod="volsync-a", instance="a:8443", job="volsync"}'
+        values: '0x9 1x80'
+      - series: 'volsync_volume_out_of_sync{obj_name="data", obj_namespace="demo", role="source", method="restic", pod="volsync-b", instance="b:8443", job="volsync"}'
+        values: '0x9 1x80'
+      - series: 'volsync_volume_out_of_sync{obj_name="other", obj_namespace="demo", role="source", method="restic", pod="volsync-a", instance="a:8443", job="volsync"}'
+        values: '0x90'
+      # A destination out of sync is no backup's concern.
+      - series: 'volsync_volume_out_of_sync{obj_name="restore", obj_namespace="demo", role="destination", method="restic", pod="volsync-a", instance="a:8443", job="volsync"}'
+        values: '1x90'
+    alert_rule_test:
+      # Healthy: every source is in sync.
+      - eval_time: 5m
+        alertname: VolSyncSourceOutOfSync
+        exp_alerts: []
+      # Out of sync from minute 10, so the alert is pending until minute 40.
+      - eval_time: 39m
+        alertname: VolSyncSourceOutOfSync
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: VolSyncSourceOutOfSync
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              obj_name: data
+              obj_namespace: demo
+              method: restic
+            exp_annotations:
+              summary: A volume's backup is out of sync
+              description: The ReplicationSource data in demo has been out of sync for 30 minutes, so its newest backup is older than its schedule allows.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#volsyncsourceoutofsync
+  - name: The alert VolSyncSourceMissedIntervals fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # The counter of "data" rises by one at minute 10; the counter of "other" never moves.
+      - series: 'volsync_missed_intervals_total{obj_name="data", obj_namespace="demo", role="source", method="restic", pod="volsync-a", instance="a:8443", job="volsync"}'
+        values: '0x9 1x80'
+      - series: 'volsync_missed_intervals_total{obj_name="other", obj_namespace="demo", role="source", method="restic", pod="volsync-a", instance="a:8443", job="volsync"}'
+        values: '0x90'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: VolSyncSourceMissedIntervals
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: VolSyncSourceMissedIntervals
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: VolSyncSourceMissedIntervals
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              obj_name: data
+              obj_namespace: demo
+              method: restic
+            exp_annotations:
+              summary: A volume's backup missed a scheduled interval
+              description: The ReplicationSource data in demo did not finish a backup before the next was due, within the last hour.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#volsyncsourcemissedintervals
+      # The hour after the miss is over, and the counter has not moved since.
+      - eval_time: 80m
+        alertname: VolSyncSourceMissedIntervals
+        exp_alerts: []

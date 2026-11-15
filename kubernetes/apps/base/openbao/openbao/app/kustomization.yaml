@@ -9,6 +9,7 @@ resources:
   - tls.yaml
   - serviceaccount.yaml
   - rbac.yaml
+  - prometheusrule.yaml
 
 configMapGenerator:
   - name: openbao-values

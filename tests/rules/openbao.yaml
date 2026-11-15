@@ -1,0 +1,71 @@
+---
+# Unit tests of the openbao application's own alerts, run by just rules-check with promtool. The
+# series are shaped as kube-state-metrics writes kube_pod_status_ready, one series per pod and
+# condition with the pod's uid (https://github.com/kubernetes/kube-state-metrics/blob/main/docs/metrics/workload/pod-metrics.md),
+# and as Prometheus writes up for the target of the ServiceMonitor, whose job is the Service's name.
+# Each group's name is the title of its scenario in features/alerts.feature.
+rule_files:
+  - openbao.rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: The alert OpenBaoMemberSealed fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # openbao-0 is Ready throughout; openbao-1 is Ready for 10 minutes and then is not.
+      - series: 'kube_pod_status_ready{namespace="openbao", pod="openbao-0", uid="u0", condition="true"}'
+        values: '1x90'
+      - series: 'kube_pod_status_ready{namespace="openbao", pod="openbao-0", uid="u0", condition="false"}'
+        values: '0x90'
+      - series: 'kube_pod_status_ready{namespace="openbao", pod="openbao-1", uid="u1", condition="true"}'
+        values: '1x9 0x80'
+      - series: 'kube_pod_status_ready{namespace="openbao", pod="openbao-1", uid="u1", condition="false"}'
+        values: '0x9 1x80'
+      # A pod of another namespace that is not Ready is not OpenBao's.
+      - series: 'kube_pod_status_ready{namespace="demo", pod="openbao-9", uid="u9", condition="false"}'
+        values: '1x90'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: OpenBaoMemberSealed
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: OpenBaoMemberSealed
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: OpenBaoMemberSealed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: openbao
+              pod: openbao-1
+              uid: u1
+              condition: "false"
+            exp_annotations:
+              summary: An OpenBao member is not Ready, which means sealed
+              description: The OpenBao member openbao-1 in openbao has not been Ready for 5 minutes; its readiness probe fails while it is sealed.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#openbaomembersealed
+  - name: The alert OpenBaoNoActiveMember fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # The active Service has a target for 10 minutes, which then goes: the member that led is
+      # gone and no other has taken the lead.
+      - series: 'up{job="openbao-active", namespace="openbao", instance="192.0.2.1:8200", pod="openbao-0", service="openbao-active"}'
+        values: '1x10 stale'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: OpenBaoNoActiveMember
+        exp_alerts: []
+      # The target is gone from minute 11, so the alert is pending until minute 16.
+      - eval_time: 15m
+        alertname: OpenBaoNoActiveMember
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: OpenBaoNoActiveMember
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: openbao-active
+              namespace: openbao
+            exp_annotations:
+              summary: OpenBao has no active member
+              description: Nothing answers for the Service openbao-active in openbao that selects the active member, so no member leads and no secret can be read or written.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#openbaonoactivemember

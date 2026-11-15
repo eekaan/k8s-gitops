@@ -1,0 +1,54 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/prometheusrule-monitoring-v1.json
+# Alerts on the collector's own metrics, which the chart's PodMonitor scrapes: one pod on every
+# node, so a pod stands for its node. The metrics are Vector's internal metrics, in the namespace
+# vector that the prometheus_exporter sink gives them
+# (https://vector.dev/docs/reference/configuration/sources/internal_metrics/). The sink that
+# sends to the store is the component victoria_logs. Tests: tests/rules/vector.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: vector-alerts
+  namespace: monitoring
+spec:
+  groups:
+    - name: vector
+      rules:
+        # A node that sends at least ten times the median node's rate of events, and at least 10
+        # events a second: the second condition keeps a quiet cluster, where the median is near
+        # zero, from alerting on noise. Nodes that send alike never alert, as none sends ten times
+        # the median. A looping source on one node, as the audit log's loop was, sends far more
+        # than the others.
+        - alert: LogCollectorOutsizedShare
+          expr: |
+            sum by (pod) (rate(vector_component_sent_events_total{component_id="victoria_logs"}[5m]))
+              >= 10 * scalar(quantile(0.5, sum by (pod) (rate(vector_component_sent_events_total{component_id="victoria_logs"}[5m]))))
+            and
+            sum by (pod) (rate(vector_component_sent_events_total{component_id="victoria_logs"}[5m])) >= 10
+          for: 30m
+          labels:
+            severity: info
+          annotations:
+            summary: One node sends an outsized share of the logs
+            description: The collector {{ $labels.pod }} has sent at least ten times the median node's rate of log events to the store for 30 minutes.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectoroutsizedshare
+        # intentional="false" counts the events a component dropped because of an error; the filter
+        # that drops the audit records counts its own as intentional="true".
+        - alert: LogCollectorDiscardingEvents
+          expr: sum by (pod, component_id) (rate(vector_component_discarded_events_total{intentional="false"}[5m])) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: A log collector loses events
+            description: The component {{ $labels.component_id }} of the collector {{ $labels.pod }} has been discarding events it did not mean to for 15 minutes.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectordiscardingevents
+        - alert: LogCollectorSendFailing
+          expr: sum by (pod, component_id) (rate(vector_component_errors_total{component_kind="sink"}[5m])) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: A log collector cannot send to the store
+            description: The sink {{ $labels.component_id }} of the collector {{ $labels.pod }} has reported errors for 15 minutes, so its lines wait on the node's disk.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectorsendfailing

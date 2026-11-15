@@ -588,6 +588,52 @@ storage class, which neither names; without one, the claims and the two pods sta
 its values, and checks the namespace, the targets, the rules, the receivers, the claims and that
 each values key is one the chart or a subchart reads.
 
+### Alerts
+
+An application's own alert rules are a `PrometheusRule` named `prometheusrule.yaml` in its `app/`
+directory, in the application's namespace, listed in its `kustomization.yaml`. Prometheus selects
+every rule in every namespace, so a rule needs no label, and it leaves with its application: an
+application the cluster's overlay leaves out brings none. The rules' unit tests are promtool's, one
+file per application, `tests/rules/<application>.yaml`, which loads the application's rules as
+`rule_files: [<application>.rules.yaml]` and names each test group after its scenario in
+`features/alerts.feature`.
+
+`just rules-check`, in the `static` group of `just ci`, collects every `PrometheusRule` the tree
+renders for each cluster, those of the charts too, so a chart update that ships a rule promtool
+refuses fails it, and runs promtool's `check rules` and `test rules` on them, from the image of the
+Prometheus the rendered chart deploys, with no network. That image is the chart's: no pin of it
+exists in the tree, and Renovate moves it with the chart, by its tag. A lint finding in a chart's
+rules is printed and does not fail the check; the chart's rules stay as they are. For each of the
+tree's own alerts the check also fails, naming the alert, unless:
+
+- its `severity` label is `critical`, `warning` or `info`: `critical` is a loss of service or of
+  data in progress that an operator acts on at once, `warning` is a failure that needs action
+  within the working day, and `info` points at something to look at when convenient;
+- it has a `summary`, a `description` that names what is affected with `{{ $labels.<name> }}`, and
+  a `for`;
+- its `runbook_url` is `https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/<file>.md#<heading>`
+  and the heading exists in that file of this tree;
+- a unit test of the alert expects it to fire after exactly its `for`, and another expects it
+  quiet: an `alert_rule_test` of its name with `exp_alerts`, and one without.
+
+The own alerts, each with its runbook section in [docs/runbooks/alerts.md](runbooks/alerts.md):
+
+| Alert | What it means | Severity | Runbook |
+| --- | --- | --- | --- |
+| `OpenBaoMemberSealed` | A member of OpenBao has not been Ready for 5 minutes, which means sealed. | warning | [OpenBaoMemberSealed](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#openbaomembersealed) |
+| `OpenBaoNoActiveMember` | No target answers for the Service that selects OpenBao's active member for 5 minutes. | critical | [OpenBaoNoActiveMember](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#openbaonoactivemember) |
+| `VolSyncSourceOutOfSync` | A ReplicationSource's volume has been out of sync for 30 minutes. | warning | [VolSyncSourceOutOfSync](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#volsyncsourceoutofsync) |
+| `VolSyncSourceMissedIntervals` | A ReplicationSource missed a scheduled interval within the last hour. | warning | [VolSyncSourceMissedIntervals](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#volsyncsourcemissedintervals) |
+| `LogCollectorOutsizedShare` | One node's collector sends at least ten times the median node's rate of events, and at least 10 a second, for 30 minutes. | info | [LogCollectorOutsizedShare](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectoroutsizedshare) |
+| `LogCollectorDiscardingEvents` | A collector's component discards events it was not set to drop, for 15 minutes. | warning | [LogCollectorDiscardingEvents](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectordiscardingevents) |
+| `LogCollectorSendFailing` | A collector's sink to the store reports errors for 15 minutes. | warning | [LogCollectorSendFailing](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectorsendfailing) |
+
+The alerts read only what Prometheus scrapes: kube-state-metrics' pod readiness for OpenBao's
+members, Prometheus' own `up` for OpenBao's active Service, VolSync's controller metrics and
+Vector's internal metrics. Nothing reads Flux, Cilium's BGP sessions, cert-manager or the storage
+operator, as none of them is scraped ([Monitoring](#monitoring)). The alerts have no destination
+yet: Alertmanager sends them nowhere, so they show in Prometheus and Alertmanager only.
+
 ## Grafana
 
 The Grafana operator runs one Grafana in `monitoring`, with the cluster's Prometheus as its

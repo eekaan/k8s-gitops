@@ -6,6 +6,7 @@ resources:
   - ocirepository.yaml
   - helmrelease.yaml
   - poddisruptionbudget.yaml
+  - prometheusrule.yaml
 
 configMapGenerator:
   - name: volsync-values

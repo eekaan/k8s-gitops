@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# Writes what just rules-check runs promtool on to DIR, from the PrometheusRule objects the tree
+# renders for each cluster (scripts/render: the objects Flux applies, a HelmRelease's chart
+# expanded), and checks what promtool cannot:
+#   DIR/<cluster>/<application>.rules.yaml   the groups of the application's own PrometheusRule,
+#                                            one that no chart renders, in the file format promtool reads
+#   DIR/<cluster>/<application>.test.yaml    tests/rules/<application>.yaml, promtool's unit tests of them
+#   DIR/<cluster>/stock.<name>.rules.yaml    the groups of every PrometheusRule a chart renders, so a
+#                                            chart update that ships a rule promtool refuses fails too
+#   DIR/image                                the image of the Prometheus the render deploys, which has promtool
+# An own rule is one in an application's app/ directory (docs/kubernetes.md, Monitoring). Every own
+# alert must:
+#   - have a severity of critical, warning or info, a summary, a description that names something
+#     from the alert's labels, and a `for`, which this check requires of every alert, comment or none;
+#   - link a runbook, the heading of a file in docs/runbooks/ of this repository on main, by the
+#     anchor GitHub gives the heading, which must exist in the file in this tree;
+#   - be proved both ways by the unit tests: one test in which it fires, an alert_rule_test of its
+#     name that expects alerts, and one in which it stays quiet, one that expects none.
+# A tests/rules file whose application has no own rules in any cluster fails too, and so does a test
+# file that does not load the application's own rules file, named rule_files: [<application>.rules.yaml].
+# Reports every problem, naming the application and the alert, then exits non-zero. Never contacts a
+# cluster.
+#
+# RULES_RENDER, a directory, is a render of the tree already made by scripts/render, which is used in
+# place of rendering; the tests point it at fixtures. RENDER_CHART_CACHE is scripts/render's.
+# Usage: scripts/rules-config DIR [REPO]   (REPO holds kubernetes/, tests/rules and docs/runbooks, and
+#                                           defaults to this repository; DIR must not exist or be empty)
+set -euo pipefail
+shopt -s nullglob
+
+# helm, flux and kustomize, which scripts/render runs, get none of the secrets of the environment.
+# shellcheck source=scripts/lib/tools.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/tools.sh"
+
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+[[ $# -ge 1 && $# -le 2 && -n $1 ]] || { echo "usage: scripts/rules-config DIR [REPO]" >&2; exit 2; }
+out=$1
+repo=$(cd "${2:-$here/..}" && pwd)
+
+for tool in yq jq; do
+  type -P "$tool" >/dev/null || { echo "rules-config: $tool not found on PATH" >&2; exit 1; }
+done
+if [[ -e $out ]]; then
+  [[ -d $out && -z $(find "$out" -mindepth 1 -print -quit) ]] || { echo "rules-config: $out exists and is not an empty directory" >&2; exit 1; }
+fi
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+# No kubeconfig and no in-cluster address: a tool that tried to reach a cluster fails instead.
+export KUBECONFIG=/dev/null
+unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
+
+render=${RULES_RENDER:-}
+if [[ -z $render ]]; then
+  render=$tmp/render
+  "$here/render" "$render" "$repo" >"$tmp/render.log" 2>&1 || { cat "$tmp/render.log" >&2; exit 1; }
+fi
+[[ -d $render ]] || { echo "rules-config: no render at $render" >&2; exit 1; }
+
+# The public address of this repository's runbooks, on main: a link is to a file there.
+runbooks=https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/
+severities='["critical","warning","info"]'
+failures=0
+fail() {
+  echo "rules-config: $*" >&2
+  failures=$((failures + 1))
+}
+
+# slugs FILE: the anchor GitHub gives each heading of the Markdown file, one per line: lower case,
+# everything but letters, digits, spaces, hyphens and underscores dropped, spaces made hyphens;
+# lines inside a fenced block are not headings.
+slugs() {
+  awk '/^```/ { fence = !fence; next } !fence && /^#+[ \t]+/ { sub(/^#+[ \t]+/, ""); sub(/[ \t]+$/, ""); print }' "$1" |
+    tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9 _-]//g; s/ /-/g'
+}
+
+declare -A has_rules=()
+for cluster_dir in "$render"/*/; do
+  cluster=$(basename "$cluster_dir")
+  mkdir -p "$out/$cluster"
+  declare -A own=()
+  for file in "$cluster_dir"*/PrometheusRule.*.yaml; do
+    app=$(basename "$(dirname "$file")")
+    if [[ -z $(yq '.metadata.labels["helm.toolkit.fluxcd.io/name"] // ""' "$file") ]]; then
+      own[$app]+="$file"$'\n'
+    else
+      name=$(basename "$file" .yaml)
+      name=${name#PrometheusRule.monitoring.coreos.com_}
+      yq '{"groups": .spec.groups}' "$file" >"$out/$cluster/stock.$name.rules.yaml"
+    fi
+  done
+  for app in "${!own[@]}"; do
+    has_rules[$app]=1
+    where="$cluster/$app"
+    mapfile -t files < <(printf '%s' "${own[$app]}")
+    for file in "${files[@]}"; do yq -o json '.spec.groups // []' "$file"; done | jq -s '{"groups": add}' >"$tmp/rules.json"
+    yq -p json -o yaml . "$tmp/rules.json" >"$out/$cluster/$app.rules.yaml"
+
+    tests=$repo/tests/rules/$app.yaml
+    if [[ ! -f $tests ]]; then
+      fail "$where: no unit tests, tests/rules/$app.yaml"
+      tests=
+    else
+      cp "$tests" "$out/$cluster/$app.test.yaml"
+      if [[ $(yq -o json -I0 '.rule_files // []' "$tests") != "[\"$app.rules.yaml\"]" ]]; then
+        fail "$where: tests/rules/$app.yaml must load the application's own rules and no other file, rule_files: [$app.rules.yaml]"
+      fi
+    fi
+
+    while IFS= read -r alert; do
+      name=$(jq -r '.alert' <<<"$alert")
+      if ! jq -e --argjson known "$severities" '.labels.severity as $s | $known | index($s) != null' <<<"$alert" >/dev/null; then
+        fail "$where: alert $name: severity is $(jq -r '.labels.severity // "missing"' <<<"$alert"), not one of critical, warning, info"
+      fi
+      jq -e '(.annotations.summary // "") != ""' <<<"$alert" >/dev/null || fail "$where: alert $name: no summary"
+      if ! jq -e '(.annotations.description // "") | test("\\{\\{ *\\$labels\\.[A-Za-z_][A-Za-z0-9_]* *\\}\\}")' <<<"$alert" >/dev/null; then
+        fail "$where: alert $name: no description that names what is affected from the alert's labels, {{ \$labels.<name> }}"
+      fi
+      jq -e '(.for // "") != ""' <<<"$alert" >/dev/null || fail "$where: alert $name: no for"
+      url=$(jq -r '.annotations.runbook_url // ""' <<<"$alert")
+      if [[ $url =~ ^${runbooks//./\\.}([a-z0-9-]+\.md)#([a-z0-9_-]+)$ ]]; then
+        book=$repo/docs/runbooks/${BASH_REMATCH[1]}
+        if [[ ! -f $book ]]; then
+          fail "$where: alert $name: runbook $url is a file that is not in docs/runbooks"
+        elif ! slugs "$book" | grep -qxF -- "${BASH_REMATCH[2]}"; then
+          fail "$where: alert $name: runbook $url names a heading that is not in docs/runbooks/${BASH_REMATCH[1]}"
+        fi
+      else
+        fail "$where: alert $name: runbook_url is '${url:-missing}', not a link to a file of docs/runbooks on main, ${runbooks}<file>.md#<heading>"
+      fi
+      [[ -n $tests ]] || continue
+      # Fires: a test with the alert expected. Quiet: one with none, for the alert's name.
+      fires=$(NAME=$name yq '[.tests[].alert_rule_test[] | select(.alertname == strenv(NAME) and ((.exp_alerts // []) | length) > 0)] | length > 0' "$tests")
+      quiet=$(NAME=$name yq '[.tests[].alert_rule_test[] | select(.alertname == strenv(NAME) and ((.exp_alerts // []) | length) == 0)] | length > 0' "$tests")
+      [[ $fires == true ]] || fail "$where: alert $name: no test in which it fires, an alert_rule_test of its name with exp_alerts"
+      [[ $quiet == true ]] || fail "$where: alert $name: no test in which it stays quiet, an alert_rule_test of its name with no exp_alerts"
+    done < <(jq -c '.groups[].rules[] | select(has("alert"))' "$tmp/rules.json")
+  done
+  unset own
+done
+
+for tests in "$repo"/tests/rules/*.yaml; do
+  app=$(basename "$tests" .yaml)
+  [[ -n ${has_rules[$app]:-} ]] || fail "tests/rules/$app.yaml: no cluster renders an own rule for the application $app, whose app/ directory holds a prometheusrule.yaml its overlay applies"
+done
+
+prometheuses=("$render"/*/*/Prometheus.monitoring.coreos.com_*.yaml)
+images=none
+if ((${#prometheuses[@]})); then
+  images=$(yq -N 'select(.kind == "Prometheus") | .spec.image // "none"' "${prometheuses[@]}" | sort -u)
+fi
+if [[ $(grep -c . <<<"$images") -ne 1 || $images == none ]]; then
+  fail "the render names Prometheus images ${images:-none}, not exactly one"
+else
+  echo "$images" >"$out/image"
+fi
+
+if ((failures)); then
+  exit 1
+fi
+echo "rules-config: wrote the rules of $(find "$out" -name '*.rules.yaml' | wc -l) PrometheusRules, $(find "$out" -name '*.test.yaml' | wc -l) of them with unit tests, and the image $images to $out"
