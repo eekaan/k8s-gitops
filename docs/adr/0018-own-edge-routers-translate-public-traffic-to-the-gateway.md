@@ -19,8 +19,10 @@ balancer service, the same design runs on other infrastructure, and BGP is learn
   of the cluster stack's, so the cluster can be destroyed and rebuilt around the edges, as the CI
   host's can. They boot a Debian 13 (trixie) cloud image, whose FRR is 10.3.
 - **Routing.** Plain eBGP in the edge AS. The workers open the sessions and never listen, so an edge
-  takes dynamic neighbours from the node subnet only, in one peer group whose remote AS is the
-  cluster's. It accepts a prefix only if it is a /32 inside the service range, denies everything
+  takes dynamic neighbours from the workers' addresses only, the block of host numbers the cluster
+  stack numbers its workers from, in one peer group whose remote AS is the cluster's: the node
+  subnet also holds the control planes, the CI host and the other edge, none of which may announce
+  a Service. The edge's firewall and its security group admit BGP from that block alone. It accepts a prefix only if it is a /32 inside the service range, denies everything
   else, sets the maximum of accepted prefixes to the size of the range (a guard only a loosened
   prefix list can reach, as FRR counts accepted prefixes and the list lets in no more than the range
   holds), takes the worker that announced a path as its next hop, and advertises nothing. The
@@ -33,7 +35,7 @@ balancer service, the same design runs on other infrastructure, and BGP is learn
   public port to the public Gateway's address, a host of the service range that the plumbing stack
   picks and `cluster-config` carries as `GATEWAY_ADDRESS`, and translates its source to the edge's
   own address. Forwarding is allowed between those only; everything else addressed to an edge is
-  dropped but SSH, BGP from the node subnet and the ICMP path MTU discovery needs. **The source
+  dropped but SSH, BGP from the workers' addresses and the ICMP path MTU discovery needs. **The source
   translation is deliberate.** A worker sends its reply to the address a packet came from, through
   its default route, which is the cloud's router, unless that address is on the node subnet; without
   the translation the reply would leave by another path than the connection came in on and would

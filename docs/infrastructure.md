@@ -386,12 +386,21 @@ whatever the list says: `watchfrr`, `zebra`, which puts routes in the kernel, `m
 [route maps](https://docs.frrouting.org/en/stable-10.3/routemap.html)):
 
 - It runs in the plumbing stack's `edge_asn`, with the edge's own address as router ID. The peer
-  group `workers` has the cluster's AS as its remote AS, and `bgp listen range` names the node
-  subnet and the peer group, so any host of the node subnet that opens a session in the cluster's AS
-  is a dynamic neighbour and no other source is (`bgp listen range`, `neighbor PEER peer-group`; the
-  peer group is declared before the range that names it). The workers open the sessions and never
-  listen. `bgp listen limit` is `max_workers`, 80 by default, the most workers the numbering of the
-  cluster stack leaves room for ([The node subnet](#the-node-subnet)); FRR's default is 100.
+  group `workers` has the cluster's AS as its remote AS, and one `bgp listen range` per network of
+  the workers' block names the peer group, so a worker's address that opens a session in the
+  cluster's AS is a dynamic neighbour and no other source is (`bgp listen range`,
+  `neighbor PEER peer-group`; the peer group is declared before the ranges that name it). The
+  workers open the sessions and never listen. `bgp listen limit` is `max_workers`, 80 by default,
+  the most workers the numbering of the cluster stack leaves room for
+  ([The node subnet](#the-node-subnet)); FRR's default is 100.
+- **Who may peer.** The workers' block is the host numbers from `worker_first_host`, 20 by default,
+  for `max_workers`, 20 to 99: where the cluster stack's nodes module numbers its workers, from its
+  own `worker_first_host`, whose default a test holds equal to the edge stack's. The stack writes it
+  as the fewest networks that hold exactly those addresses, and refuses at plan time a block that
+  reaches the DHCP pool or holds an edge's address. The node subnet also holds the control planes,
+  the CI host and the other edge, and none of them may open a session: FRR's listen ranges, the
+  nftables input rule for TCP 179 and the security group's rules for TCP 179 each admit the block
+  and nothing else.
 - Inbound, `neighbor workers route-map SERVICES-IN in` applies a route map that permits what the
   prefix list `SERVICES` matches: `permit <service range> ge 32 le 32`, a /32 inside the range and
   nothing shorter, then `deny any`. It also sets each accepted path's next hop to the worker that
@@ -480,7 +489,7 @@ settings, `sysctl.conf`, are written once at first boot:
   Forwarding is on in the kernel, and the forward chain drops everything except new, translated
   connections to the Gateway on those ports and what belongs to connections it has accepted.
 - The input chain drops everything addressed to the edge except what belongs to its own
-  connections, loopback, TCP 22, TCP 179 from the node subnet and the ICMP destination unreachable,
+  connections, loopback, TCP 22, TCP 179 from the workers' block and the ICMP destination unreachable,
   fragmentation needed, that path MTU discovery needs. IPv6 is dropped but for the ICMPv6 that
   neighbour discovery and path MTU discovery need.
 - **The source translation is deliberate.** A worker answers a packet to the address it came from,
@@ -502,9 +511,10 @@ are deleted. It admits TCP on each public port from each network of `public_allo
 null by default and then the operator allowlist, so nothing is open to the world until that variable
 is deliberately widened, for instance to `0.0.0.0/0`; TCP 22 from each network of the operator
 allowlist, the same `OPERATOR_CIDRS` or `operator-cidrs.json` the other stacks take, as
-`TF_VAR_ssh_allowed_cidrs`; TCP 179 from the node subnet; ICMP destination unreachable with code 4
-from anywhere; and all egress. The nftables rules go by port only: the networks are in the security
-group and out of the user data, which is kept in state and served by the metadata service. A packet
+`TF_VAR_ssh_allowed_cidrs`; TCP 179 from each network of the workers' block; ICMP destination
+unreachable with code 4 from anywhere; and all egress. The nftables rules take the public ports and
+SSH by port only: the allowlist and the public networks are in the security group and out of the
+user data, which is kept in state and served by the metadata service. A packet
 is admitted only when both the group and the rules admit it.
 
 ### First boot, packages and secrets
