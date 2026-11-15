@@ -5,8 +5,10 @@
 # Talos v1.14 writes to /var/log/<service>.log, as the file source hands it on: the line in message,
 # the file it came from in file, the pod's name in host and the time it was read in timestamp. The
 # formats are the kernel's messages, the prefix Go's log package gives machined's, apid's and
-# trustd's lines, etcd's JSON, containerd's logfmt and the kubelet's klog. Each line stays whole,
-# takes its own time and level where they have them, and gets the node's name and its service's.
+# trustd's lines, etcd's JSON, containerd's and cri's logfmt and the kubelet's klog; udevd's lines
+# have none. Each line stays whole, takes its own time and level where it has them, and gets the
+# node's name and its service's, and the tests of the formats find it at the last transform before
+# the store, so a line of each of these services is seen going on to it, as tests/logs.bats checks.
 # The kernel's audit records and the node's audit log are dropped. The last tests start at the pods'
 # transform with a record as the kubernetes_logs source hands it on with its default field names:
 # the pod's labels and annotations in kubernetes.pod_labels and kubernetes.pod_annotations, its
@@ -26,7 +28,7 @@ tests:
           .message = "kern:    warn: [2026-11-14T12:00:01.123456789Z]: drbd: module verification failed"
           .timestamp = t'2026-11-14T13:00:00Z'
     outputs:
-      - extract_from: talos_files
+      - extract_from: drop_auditd_log
         conditions:
           - type: vrl
             source: |
@@ -48,7 +50,7 @@ tests:
           .message = "2026/11/14 12:00:02.234567 [talos] task startAllServices (1/1): done"
           .timestamp = t'2026-11-14T13:00:00Z'
     outputs:
-      - extract_from: talos_files
+      - extract_from: drop_auditd_log
         conditions:
           - type: vrl
             source: |
@@ -56,6 +58,42 @@ tests:
               assert_eq!(.node, "node-1")
               assert_eq!(.timestamp, t'2026-11-14T12:00:02.234567Z')
               assert!(!exists(.level))
+
+  - name: an apid line keeps the time Go's log package wrote
+    inputs:
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/apid.log"
+          .host = "vector-x1y2z"
+          .message = "2026/11/14 12:00:06.678901 service.go:35: starting apid with config: listen address :50000, skip client cert verify false, node routing disabled false, readonly role mode false"
+          .timestamp = t'2026-11-14T13:00:00Z'
+    outputs:
+      - extract_from: drop_auditd_log
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.talos_service, "apid")
+              assert_eq!(.node, "node-1")
+              assert_eq!(.timestamp, t'2026-11-14T12:00:06.678901Z')
+
+  - name: a trustd line keeps the time Go's log package wrote
+    inputs:
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/trustd.log"
+          .host = "vector-x1y2z"
+          .message = "2026/11/14 12:00:07.789012 reg.go:83: removing client auth organization from CSR: [system:masters]"
+          .timestamp = t'2026-11-14T13:00:00Z'
+    outputs:
+      - extract_from: drop_auditd_log
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.talos_service, "trustd")
+              assert_eq!(.node, "node-1")
+              assert_eq!(.timestamp, t'2026-11-14T12:00:07.789012Z')
 
   - name: an etcd line keeps the time and level of its JSON
     inputs:
@@ -66,7 +104,7 @@ tests:
           .message = s'{"level":"warn","ts":"2026-11-14T12:00:03.345678Z","caller":"etcdserver/util.go:170","msg":"apply request took too long"}'
           .timestamp = t'2026-11-14T13:00:00Z'
     outputs:
-      - extract_from: talos_files
+      - extract_from: drop_auditd_log
         conditions:
           - type: vrl
             source: |
@@ -83,13 +121,30 @@ tests:
           .message = s'time="2026-11-14T12:00:04.456789012Z" level=error msg="failed to pull image"'
           .timestamp = t'2026-11-14T13:00:00Z'
     outputs:
-      - extract_from: talos_files
+      - extract_from: drop_auditd_log
         conditions:
           - type: vrl
             source: |
               assert_eq!(.talos_service, "containerd")
               assert_eq!(.level, "error")
               assert_eq!(.timestamp, t'2026-11-14T12:00:04.456789012Z')
+
+  - name: a cri line keeps the time and level of its logfmt
+    inputs:
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/cri.log"
+          .message = s'time="2026-11-14T12:00:08.890123456Z" level=info msg="Start subscribing containerd event"'
+          .timestamp = t'2026-11-14T13:00:00Z'
+    outputs:
+      - extract_from: drop_auditd_log
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.talos_service, "cri")
+              assert_eq!(.level, "info")
+              assert_eq!(.timestamp, t'2026-11-14T12:00:08.890123456Z')
 
   - name: a kubelet line keeps the time and level of its klog header
     inputs:
@@ -100,7 +155,7 @@ tests:
           .message = s'E1114 12:00:05.567890    1234 pod_workers.go:1301] "Error syncing pod, skipping"'
           .timestamp = t'2026-11-14T13:00:00Z'
     outputs:
-      - extract_from: talos_files
+      - extract_from: drop_auditd_log
         conditions:
           - type: vrl
             source: |
@@ -120,7 +175,7 @@ tests:
           .message = s'I1231 23:59:58.123456    1234 kubelet.go:2511] "SyncLoop (housekeeping)"'
           .timestamp = parse_timestamp!(format_timestamp!(now(), "%Y") + "-01-01T00:00:05Z", "%+")
     outputs:
-      - extract_from: talos_files
+      - extract_from: drop_auditd_log
         conditions:
           - type: vrl
             source: |
@@ -136,7 +191,7 @@ tests:
           .message = s'I1231 23:59:58.123456    1234 kubelet.go:2511] "SyncLoop (housekeeping)"'
           .timestamp = parse_timestamp!(to_string(to_int!(format_timestamp!(now(), "%Y")) - 2) + "-01-01T00:00:05Z", "%+")
     outputs:
-      - extract_from: talos_files
+      - extract_from: drop_auditd_log
         conditions:
           - type: vrl
             source: |
@@ -152,7 +207,7 @@ tests:
           .message = "Starting systemd-udevd version 257"
           .timestamp = t'2026-11-14T13:00:00Z'
     outputs:
-      - extract_from: talos_files
+      - extract_from: drop_auditd_log
         conditions:
           - type: vrl
             source: |

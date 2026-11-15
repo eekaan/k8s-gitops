@@ -89,7 +89,7 @@ customConfig:
     # The node's name, from the pod's environment, and the service's, from the file's name. Each
     # line stays whole; its own time and level, where its format has them, replace the time it was
     # read: the kernel's messages, the prefix Go's log package gives machined's, apid's and trustd's
-    # lines, JSON such as etcd's, logfmt such as containerd's, and the kubelet's klog.
+    # lines, JSON such as etcd's, logfmt such as containerd's and cri's, and the kubelet's klog.
     # tests/vector/talos-lines.yaml holds a line of each.
     talos_files:
       type: remap

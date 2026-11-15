@@ -321,8 +321,8 @@ defined_keys() {
   [ "$placement" = '{"nodeSelector":{},"affinity":{},"nodeName":""}' ]
 }
 
-@test "The collector ships every pod's logs and every Talos service's log to the store" {
-  local service name namespace port domain pods restricted files include sinks upstream source
+@test "The collector ships every pod's logs and every Talos service's log but the audit log to the store" {
+  local service name namespace port domain pods restricted files include sinks upstream source talos first last tests found
   render "$STORE"
   service="$(store_service)"
   echo "the store's Service: ${service:-none}"
@@ -361,6 +361,37 @@ defined_keys() {
   for source in "$pods" "$files"; do
     grep -qx -- "$source" <<<"$upstream" || { echo "$source does not reach the store"; return 1; }
   done
+  # Which of Talos's lines go on is decided on the one path from its source to the store, whose
+  # transforms Vector's unit tests run, as just vector-check does in just ci. For each service whose
+  # format the collector reads, as its transform names them, and udevd, whose lines have none, a test
+  # sends a line of its file in at the path's first transform and finds it, with its service's name,
+  # at the last; a test sends only the audit log's lines in there and finds none at the last. A line
+  # of the test's program counts, not a comment.
+  talos="$(config_paths | grep "^$files>")"
+  echo "the Talos path: ${talos:-none}"
+  [ "$(grep -c . <<<"$talos")" -eq 1 ]
+  first="${talos#*>}"
+  first="${first%%>*}"
+  last="${talos%>*}"
+  last="${last##*>}"
+  tests="$(yq -o json '.tests' "$REPO/tests/vector/talos-lines.yaml")"
+  for service in kernel machined apid trustd etcd containerd cri kubelet udevd; do
+    # shellcheck disable=SC2016 # $first, $last and $service are jq variables.
+    found="$(jq --arg first "$first" --arg last "$last" --arg service "$service" 'def lines: split("\n")[] | gsub("^\\s+|\\s+$"; "");
+      [.[] | select([.inputs[].insert_at] | unique == [$first])
+        | select(any(.inputs[].source | lines; . == ".file = \"/var/log/\($service).log\"" or . == ".file = \"/var/log/\($service).log.1\""))
+        | select(any((.outputs // [])[] | select(.extract_from == $last) | .conditions[].source | lines;
+            . == "assert_eq!(.talos_service, \"\($service)\")"))] | length' <<<"$tests")"
+    echo "$service: $found unit tests find its line at $last"
+    [ "$found" -ge 1 ]
+  done
+  # shellcheck disable=SC2016 # $first and $last are jq variables.
+  found="$(jq --arg first "$first" --arg last "$last" 'def lines: split("\n")[] | gsub("^\\s+|\\s+$"; "");
+    [.[] | select([.inputs[].insert_at] | unique == [$first])
+      | select(all(.inputs[]; any(.source | lines; . == ".file = \"/var/log/auditd.log\"" or . == ".file = \"/var/log/auditd.log.1\"")))
+      | select(any((.no_outputs_from // [])[]; . == $last))] | length' <<<"$tests")"
+  echo "auditd: $found unit tests find none of its lines at $last"
+  [ "$found" -ge 1 ]
 }
 
 @test "The collector ships nothing from the API server's audit log directory" {

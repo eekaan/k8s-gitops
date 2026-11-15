@@ -453,8 +453,8 @@ What is collected, by a collector on every node, control planes included, from f
   both. Each line stays whole, with the node's name in `node` and its service's in
   `talos_service`, and keeps its own time and level where its format has them: the kernel's
   messages, the prefix Go's log package gives machined's, apid's and trustd's lines, JSON such as
-  etcd's, logfmt such as containerd's and the kubelet's klog. Any other line keeps the time it was
-  read.
+  etcd's, logfmt such as containerd's and cri's and the kubelet's klog. Any other line keeps the
+  time it was read.
 
 Three kinds of record are made smaller or left out before they are sent:
 
@@ -592,12 +592,14 @@ Reading the logs, with the cluster's kubeconfig:
 `tests/logs.bats` builds both applications as Flux applies them, renders their pinned charts and
 checks each of these. `just vector-check` renders the collector's configuration with
 `scripts/vector-config` and has Vector itself, in the image the collector runs, validate it and run
-its unit tests, `tests/vector/talos-lines.yaml`, which hold a line of each format above, a kernel
-audit line, the records of one event of the node's audit log and a pod's record with many labels,
-and many of its node's. Vector's unit tests cannot see a sink, so `tests/logs.bats` checks that
-each source reaches a sink along one path only, the store's through the transforms the unit tests
-run, and that each scenario's unit test starts at the first transform on its path and watches the
-last, whichever transform that is. `just logs` runs in `tests/logs.bats` against a
+its unit tests, `tests/vector/talos-lines.yaml`, which hold a line of each format above from each
+service named with it, and one of udevd's, a kernel audit line, the records of one event of the
+node's audit log and a pod's record with many labels, and many of its node's. Vector's unit tests
+cannot see a sink, so `tests/logs.bats` checks that each source reaches a sink along one path only,
+the store's through the transforms the unit tests run, that each scenario's unit test starts at the
+first transform on its path and watches the last, whichever transform that is, and that the unit
+tests find a line of each of those services at the last transform on Talos's path and none of the
+audit log's. `just logs` runs in `tests/logs.bats` against a
 recording kubectl shaped like kubectl v1.37's output. The image
 is `vector_image` in the justfile, pinned by the digest of its image index under a
 `# renovate: datasource=docker depName=…` comment: Renovate's custom manager for the justfile moves

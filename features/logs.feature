@@ -1,5 +1,5 @@
 Feature: Logs
-  VictoriaLogs keeps the cluster's logs for two weeks, and Vector on every node ships them: every pod's, and the node's own Talos service and kernel logs, read from the files Talos writes.
+  VictoriaLogs keeps the cluster's logs for two weeks, and Vector on every node ships them: every pod's, and the node's own Talos service and kernel logs but its audit log, read from the files Talos writes.
 
   Scenario: The log store builds with Flux and runs once in the monitoring namespace
     Given the victoria-logs application and its namespace directory, enabled in the cluster's overlay
@@ -16,10 +16,10 @@ Feature: Logs
     When it is built as Flux applies it and its pinned chart is rendered with the repository's values
     Then it yields one DaemonSet in the namespace monitoring that tolerates every taint, the control planes' included, with no node selector or affinity keeping it off a node
 
-  Scenario: The collector ships every pod's logs and every Talos service's log to the store
-    Given the vector and victoria-logs applications' pinned charts and values
+  Scenario: The collector ships every pod's logs and every Talos service's log but the audit log to the store
+    Given the vector and victoria-logs applications' pinned charts and values, and Vector's unit tests of the collector's configuration
     When the collector's rendered configuration is read
-    Then it reads every pod's log files and the log file Talos writes for each of its services, the kernel's included, current and rotated, and sends both to the store's Service on the store's port, by the cluster's DNS domain
+    Then it reads every pod's log files and the log file Talos writes for each of its services, the kernel's included, current and rotated, and sends both to the store's Service on the store's port, by the cluster's DNS domain, Talos's lines along one path, on which the unit tests find a line of each service whose format the collector reads, and of udevd, at the last transform before the store with its service's name, and no line of the audit log, auditd's
 
   Scenario: The collector ships nothing from the API server's audit log directory
     Given the collector's rendered configuration and a directory laid out as Talos lays out /var/log, with the API server's audit logs under audit/kube
