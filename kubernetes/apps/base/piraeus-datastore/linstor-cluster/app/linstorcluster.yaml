@@ -16,3 +16,103 @@ spec:
       - matchExpressions:
           - key: node-role.kubernetes.io/control-plane
             operator: DoesNotExist
+  # The controllers' pods run as the restricted Pod Security level requires: a non-root user, the
+  # runtime's seccomp profile, and no privilege escalation and no capabilities in each container.
+  # The operator applies each podTemplate as a patch to its own template, which drops every
+  # capability but sets none of the rest, so each names every container of its template at the
+  # operator's version. The images run as root unless told otherwise; the controller's publisher
+  # builds its image to run under an arbitrary user with group 1000, and the affinity controller's
+  # image runs as nobody. The satellites, the CSI node plugin, the HA controller and the NFS server
+  # run privileged instead (pod-security-exceptions.yaml).
+  controller:
+    podTemplate:
+      spec:
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          seccompProfile:
+            type: RuntimeDefault
+        initContainers:
+          - name: run-migration
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop:
+                  - ALL
+        containers:
+          - name: linstor-controller
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop:
+                  - ALL
+  csiController:
+    podTemplate:
+      spec:
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          runAsGroup: 1000
+          seccompProfile:
+            type: RuntimeDefault
+        initContainers:
+          - name: linstor-wait-api-online
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop:
+                  - ALL
+        containers:
+          - name: linstor-csi
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop:
+                  - ALL
+          - name: csi-attacher
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop:
+                  - ALL
+          - name: csi-livenessprobe
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop:
+                  - ALL
+          - name: csi-provisioner
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop:
+                  - ALL
+          - name: csi-snapshotter
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop:
+                  - ALL
+          - name: csi-resizer
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop:
+                  - ALL
+  affinityController:
+    podTemplate:
+      spec:
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 65534
+          runAsGroup: 65534
+          seccompProfile:
+            type: RuntimeDefault
+        containers:
+          - name: linstor-affinity-controller
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop:
+                  - ALL

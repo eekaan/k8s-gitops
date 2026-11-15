@@ -342,6 +342,88 @@ real_render() {
   run "$REPO/scripts/pod-security-check" "$BATS_TEST_TMPDIR/unpatched" "$REPO/pod-security-exceptions.yaml" "$REPO/versions.yaml"
   [ "$status" -eq 1 ]
   [[ $output == *"namespace flux-system has no Namespace manifest with a pod-security.kubernetes.io/enforce label"* ]]
+  # The instance's patches of the controllers are evaluated too: one that puts a controller in the
+  # host's network namespace fails the namespace's level.
+  rm -rf "$BATS_TEST_TMPDIR/host-network"
+  cp -R "$REAL" "$BATS_TEST_TMPDIR/host-network"
+  instance=("$BATS_TEST_TMPDIR"/host-network/*/*/FluxInstance*.yaml)
+  [ "${#instance[@]}" -eq 1 ]
+  yq -i '.spec.kustomize.patches += [{"target": {"kind": "Deployment", "name": "source-controller"},
+    "patch": "- op: add\n  path: /spec/template/spec/hostNetwork\n  value: true\n"}]' "${instance[0]}"
+  run "$REPO/scripts/pod-security-check" "$BATS_TEST_TMPDIR/host-network" "$REPO/pod-security-exceptions.yaml" "$REPO/versions.yaml"
+  [ "$status" -eq 1 ]
+  [[ $output == *"namespace flux-system enforces restricted, but Deployment/source-controller fails it: hostNamespaces"* ]]
+}
+
+@test "the workloads whose values set the context restricted requires pass it" {
+  # Each of these fails restricted with its chart's defaults; the application's values set the
+  # seccomp profile or container context the level requires, so none is an exception.
+  real_render
+  run "$REPO/scripts/pod-security-check" --list "$REAL" "$REPO/pod-security-exceptions.yaml" "$REPO/versions.yaml"
+  [ "$status" -eq 0 ]
+  local workload
+  for workload in kube-system/Deployment/descheduler kube-system/Deployment/reloader-reloader monitoring/Deployment/grafana-operator; do
+    [[ $output == *"$workload restricted"* ]] || { echo "$workload does not pass restricted"; return 1; }
+  done
+}
+
+@test "The custom resources that make an operator create pods ask for what restricted requires" {
+  # The operators create these pods at run time, so the check cannot evaluate them. Each resource
+  # sets the pod's security context, and that of every container it names, which are the
+  # containers the operator's templates create at the pinned version where the operator leaves a
+  # field restricted requires unset: the LINSTOR controller's, the CSI controller's and the
+  # affinity controller's. The Grafana and Prometheus operators set those container fields
+  # themselves. Each field must lie under a path the resource's definition declares, or the API
+  # server prunes it.
+  real_render
+  local entries=(
+    "Grafana grafana .spec.deployment.spec.template.spec - -"
+    "Prometheus kube-prometheus-stack-prometheus .spec - -"
+    "Alertmanager kube-prometheus-stack-alertmanager .spec - -"
+    "LinstorCluster linstorcluster .spec.controller.podTemplate.spec run-migration linstor-controller"
+    "LinstorCluster linstorcluster .spec.csiController.podTemplate.spec linstor-wait-api-online linstor-csi,csi-attacher,csi-livenessprobe,csi-provisioner,csi-snapshotter,csi-resizer"
+    "LinstorCluster linstorcluster .spec.affinityController.podTemplate.spec - linstor-affinity-controller"
+  )
+  yq -N -o json -I0 'select(.kind == "CustomResourceDefinition")
+    | {"group": .spec.group, "kind": .spec.names.kind, "versions": [.spec.versions[] | {"name": .name, "schema": .schema.openAPIV3Schema}]}' \
+    "$REAL"/*/*/CustomResourceDefinition.*.yaml >"$BATS_TEST_TMPDIR/crds.jsonl"
+  local entry kind name at init containers files problems=()
+  for entry in "${entries[@]}"; do
+    read -r kind name at init containers <<<"$entry"
+    files=("$REAL"/*/*/"$kind".*_*_"$name".yaml)
+    [ -f "${files[0]}" ] && [ "${#files[@]}" -eq 1 ] || { echo "the render holds no one $kind/$name"; return 1; }
+    mapfile -t -O "${#problems[@]}" problems < <(yq -o json -I0 '.' "${files[0]}" | jq -r --slurpfile crds "$BATS_TEST_TMPDIR/crds.jsonl" \
+      --arg at "$at" --arg init "$init" --arg containers "$containers" '
+      # Whether a schema keeps the field at path $p: it declares it, or keeps unknown fields there.
+      def kept($p):
+        if ($p | length) == 0 then true
+        elif ($p[0] | type) == "number" then
+          (if .items then (.items | kept($p[1:])) else .["x-kubernetes-preserve-unknown-fields"] == true end)
+        elif (.properties // {}) | has($p[0]) then (.properties[$p[0]] | kept($p[1:]))
+        elif (.additionalProperties | type) == "object" then (.additionalProperties | kept($p[1:]))
+        else .["x-kubernetes-preserve-unknown-fields"] == true end;
+      . as $cr | (.kind + "/" + .metadata.name) as $id
+      | (.apiVersion | split("/")) as [$group, $version]
+      | ([$crds[] | select(.group == $group and .kind == $cr.kind) | .versions[] | select(.name == $version) | .schema] | first) as $schema
+      | getpath($at | ltrimstr(".") | split(".")) as $pod
+      | def names($list): $list | split(",") | map(select(. != "-"));
+      if $schema == null then "\($id): the render holds no definition of \($cr.apiVersion) \($cr.kind)"
+      else
+        ($cr.spec | paths(scalars) as $p | select($schema.properties.spec | kept($p) | not)
+          | "\($id): its definition does not declare spec.\($p | map(tostring) | join("."))"),
+        (if $pod.securityContext.runAsNonRoot != true then "\($id): \($at).securityContext.runAsNonRoot is not true" else empty end),
+        (if ($pod.securityContext.runAsUser // 1) == 0 then "\($id): \($at).securityContext.runAsUser is root" else empty end),
+        (if $pod.securityContext.seccompProfile.type != "RuntimeDefault" then "\($id): \($at).securityContext.seccompProfile.type is not RuntimeDefault" else empty end),
+        (["initContainers", names($init)], ["containers", names($containers)]) as [$field, $wanted]
+        | $wanted[] as $c | ([$pod[$field][]? | select(.name == $c)] | first) as $container
+        | if $container == null then "\($id): \($at).\($field) names no \($c)"
+          elif $container.securityContext.allowPrivilegeEscalation != false then "\($id): \($at).\($field) \($c) does not set allowPrivilegeEscalation to false"
+          elif ($container.securityContext.capabilities.drop // [] | index("ALL")) == null then "\($id): \($at).\($field) \($c) does not drop ALL capabilities"
+          else empty end
+      end')
+  done
+  printf '%s\n' "${problems[@]}"
+  [ "${#problems[@]}" -eq 0 ]
 }
 
 @test "The tree passes" {

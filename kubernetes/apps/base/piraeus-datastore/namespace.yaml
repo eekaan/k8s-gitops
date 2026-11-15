@@ -9,10 +9,12 @@ metadata:
     kustomize.toolkit.fluxcd.io/prune: disabled
   labels:
     # LINSTOR's satellites run privileged, in the host's IPC namespace, with the host's /dev and
-    # other host paths, and so do the CSI node plugin and the HA controller the operator runs beside
-    # them; only the privileged level admits them. pod-security-exceptions.yaml lists them, and the
-    # operator's own pod at baseline, and the check that reads it (docs/kubernetes.md, Pod Security)
-    # requires audit and warn at restricted at the cluster's Kubernetes minor.
+    # other host paths, and so do the CSI node plugin, the NFS server and the HA controller the
+    # operator runs beside them; only the privileged level admits them. pod-security-exceptions.yaml
+    # lists them, and the operator's own pod, the only one here the render holds, at baseline, and
+    # the check that reads it (docs/kubernetes.md, Pod Security) requires audit and warn at
+    # restricted at the cluster's Kubernetes minor, which records and reports any pod the operator
+    # creates that fails restricted.
     pod-security.kubernetes.io/enforce: privileged
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/audit-version: v1.37

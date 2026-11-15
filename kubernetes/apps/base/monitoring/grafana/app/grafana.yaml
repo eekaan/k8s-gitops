@@ -52,3 +52,12 @@ spec:
       # Service picks. A drain restarts the one replica on another node, and a disruption budget for
       # it would only block the drain.
       replicas: 1
+      # The pod's part of what the restricted Pod Security level requires; the operator merges it
+      # into the Deployment it makes, whose grafana container it already runs as a non-root user
+      # with no privilege escalation and no capabilities.
+      template:
+        spec:
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault

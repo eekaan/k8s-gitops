@@ -55,7 +55,9 @@ spec:
 - The namespace enforces the strictest Pod Security level the application's workloads pass. A
   workload that needs more than `restricted` is an entry of `pod-security-exceptions.yaml` with its
   reason, and `just pod-security-check` fails when the namespace's labels or the entries do not
-  match what the render holds.
+  match what the render holds. A custom resource whose operator creates pods sets the security
+  context `restricted` requires where the resource has the fields, and `tests/pod-security.bats`
+  lists it; a pod it makes that needs more is an entry with `created-by`.
 
 Enable the application by listing its namespace directory, once, and its `ks.yaml` in
 `apps/overlays/<cluster>/kustomization.yaml`. A disabled application stays in the list,
@@ -108,42 +110,74 @@ level is declared in the tree, never left to the API server's default.
   HelmRelease.
 - **What a namespace enforces.** The strictest level its workloads pass. That is `restricted`,
   unless `pod-security-exceptions.yaml` at the repository root lists workloads in it that need
-  more: the namespace then enforces the least strict level of its entries, and every other pod in
-  it passes `restricted` all the same. Each entry names the namespace, the workload (`Kind/name`),
-  the level it needs, `baseline` or `privileged`, and the reason in a sentence. A pod an operator
-  creates at run time, which the render does not hold, is listed with `created-by`, the custom
-  resource in the render that makes the operator create it, never a workload the check evaluates
-  itself; the check takes its level as written.
+  more: the namespace then enforces the least strict level of its entries, and every other pod of
+  it that the render holds passes `restricted` all the same. Each entry names the namespace, the
+  workload (`Kind/name`), the level it needs, `baseline` or `privileged`, and the reason in a
+  sentence. A pod an operator creates at run time, which the render does not hold, is listed with
+  `created-by`, the custom resource in the render that makes the operator create it, never a
+  workload the check evaluates itself; the check takes its level as written.
 - **Audit and warn.** A namespace that enforces less than `restricted` sets
   `pod-security.kubernetes.io/audit` and `/warn` to `restricted`, with `audit-version` and
   `warn-version` at the cluster's Kubernetes minor, `versions.yaml`'s `kubernetes`; the check fails
-  a namespace whose labels differ.
+  a namespace whose labels differ. Admission then records in the audit log, and returns as a
+  warning, every pod there that fails `restricted`, those an operator creates included. Talos's
+  default admission configuration, which the cluster keeps, exempts `kube-system` from Pod Security
+  admission (Talos documentation, Pod Security): admission neither enforces nor records a level
+  there, and the check is what holds its pods to the level its labels state.
 - **The check.** `just pod-security-check` renders the tree as `just render-check` does, then
   `scripts/pod-security-check` evaluates every Pod, Deployment, StatefulSet, DaemonSet, ReplicaSet,
   ReplicationController, Job and CronJob in it, Helm hooks and tests included, against the
   `baseline` and `restricted` levels, and the controllers of the Flux install the FluxInstance
-  configures (the pinned Flux CLI's manifests for the components it names, with the instance's
-  patches applied), in the same way. The evaluator is Kyverno's `podSecurity` rule, pinned in
-  `mise.toml` with the release's checksums, which runs Kyverno's fork of the Pod Security admission
-  policy library at the 1.36 check set, at the library's latest policy version. `mise.toml` records
-  beside the pin the newest Kubernetes minor whose checks were compared with the evaluator's, and
-  the check fails when `versions.yaml` names a newer one. The check fails, naming the namespace and
-  the workload, when a namespace an object of the render is in has no `enforce` label; when a
-  workload fails the level its namespace enforces,
-  with the checks it fails; when a workload fails `restricted` and is not listed with its reason, or
-  is listed at a level other than the one it needs; when a namespace enforces a level other than
-  the strictest its workloads pass; and when a namespace that enforces less than `restricted` does
-  not audit and warn at `restricted` at the cluster's minor. `tests/pod-security.bats` proves each
-  rule on a small render and runs the check on the tree.
+  configures in the same way. The check fails, naming the namespace and the workload, when a
+  namespace an object of the render is in has no `enforce` label; when a workload fails the level
+  its namespace enforces, with the checks it fails; when a workload fails `restricted` and is not
+  listed with its reason, or is listed at a level other than the one it needs; when a namespace
+  enforces a level other than the strictest its workloads pass; and when a namespace that enforces
+  less than `restricted` does not audit and warn at `restricted` at the cluster's minor.
+  `tests/pod-security.bats` proves each rule on a small render and runs the check on the tree.
+- **The Flux install it evaluates.** The pinned Flux CLI's `flux install --export` for the
+  components the FluxInstance names, with the instance's patches applied: the controllers of the
+  `flux2` release pinned in `mise.toml`. The operator installs the newest Flux 2.x release in its
+  manifests artifact ([Flux itself](#flux-itself)). Renovate moves the CLI pin and the artifact in
+  separate pull requests, so once one has merged and until the other does, the check evaluates
+  another Flux release than the one the cluster runs.
+- **The evaluator.** Kyverno's `podSecurity` rule, pinned in `mise.toml` with the release's
+  checksums, which runs Kyverno's fork of the Pod Security admission policy library at the 1.36
+  check set, at the library's latest policy version. The rule is of Kyverno's legacy policy type,
+  whose execution the 1.20 release removes from Kyverno's controllers, so the pin stays on the 1.19
+  line. `mise.toml` records beside the pin the newest Kubernetes minor whose checks were compared
+  with the evaluator's, and the check fails when `versions.yaml` names a newer one, so a pull
+  request that moves the cluster to a new minor fails it. Whoever moves the minor compares that
+  minor's checks in `k8s.io/pod-security-admission` with the evaluator's: when they are no
+  stricter, the record moves to the new minor in the same pull request; when they are stricter,
+  the minor waits for an evaluator that applies them.
 - **Pods the render does not hold.** An operator creates these at run time from a custom
-  resource: Prometheus and Alertmanager, Grafana, LINSTOR's controllers and node pods, the Envoy
-  proxies a Gateway makes, and the movers a ReplicationSource makes. The check evaluates only what
-  the render holds, so admission evaluates them: the namespace's `enforce` level refuses a pod
-  above it.
+  resource, and the check cannot evaluate them. Where the resource has the fields, it sets the
+  security context `restricted` requires, and `tests/pod-security.bats` requires those fields in
+  the render, under paths the resource's definition declares, so the API server keeps them:
+  - `Grafana/grafana` in `monitoring`: the pod's non-root user and seccomp profile, in
+    `spec.deployment.spec.template.spec.securityContext`; the Grafana operator runs its container
+    with no privilege escalation and no capabilities itself.
+  - `Prometheus/kube-prometheus-stack-prometheus` and
+    `Alertmanager/kube-prometheus-stack-alertmanager` in `monitoring`: `spec.securityContext`, from
+    the kube-prometheus-stack values; the Prometheus operator gives every container it creates no
+    privilege escalation and no capabilities.
+  - `LinstorCluster/linstorcluster` in `piraeus-datastore`: the LINSTOR controller, the CSI
+    controller and the affinity controller, in the `podTemplate` of `spec.controller`,
+    `spec.csiController` and `spec.affinityController`, each naming every container of the
+    operator's template at its pinned version. Its satellites, CSI node plugin, NFS server and HA
+    controller run privileged and are entries of the exceptions file, `created-by` it.
+
+  Admission evaluates each such pod when the operator creates it: a namespace that enforces
+  `restricted` refuses one that fails it, and one that enforces less records and reports it
+  through its audit and warn labels.
 
 An application's namespace is its `apps/base/<namespace>/namespace.yaml` with the label at the
 level its workloads pass; a workload that needs more is a new entry in the exceptions file in the
-same change, and the namespace's level and its audit and warn labels follow it.
+same change, and the namespace's level and its audit and warn labels follow it. A chart value that
+brings a workload to `restricted`, a seccomp profile or a container context, goes in the
+application's values instead of an entry, where the chart's values define the key or leave its map
+empty, as the application's tests require of every key; an entry's reason says why no value does.
 
 ## Variables
 
@@ -371,9 +405,11 @@ prometheus-community `kube-prometheus-stack` chart. The namespace's Pod Security
 privileged, as node-exporter reads each node through the host's network and process namespaces and
 through host paths, and the log collector ([Logs](#logs)) reads the nodes' log files through a
 host path; those two DaemonSets are its entries in `pod-security-exceptions.yaml`, with
-VictoriaLogs, which needs baseline, and every other pod the render holds passes restricted; the
-pods the operators make from the Prometheus, Alertmanager and Grafana resources are not in the
-render ([Pod Security](#pod-security)). The chart installs no resource definitions: `prometheus-operator-crds` does
+VictoriaLogs, which needs baseline, and every other pod of it that the render holds passes
+restricted. The pods the operators make from the
+Prometheus, Alertmanager and Grafana resources are not in the render; each resource sets the
+security context restricted requires ([Pod Security](#pod-security)). The chart installs no
+resource definitions: `prometheus-operator-crds` does
 ([Resource definitions](#resource-definitions)), and the application names it in `dependsOn`. The
 two charts run the same operator version: Renovate moves them in one pull request, and
 `tests/monitoring.bats` fails when the pinned charts name different ones. The application installs
@@ -688,9 +724,11 @@ the chart makes no disruption budget. Its chart serves no metrics and has no mon
 
 Persistent volumes come from LINSTOR, run by the Piraeus operator, on the workers' data volumes
 (ADR 0011). Two applications in `apps/base/piraeus-datastore/` hold it; their namespace admits
-privileged pods, as LINSTOR's satellites, the CSI node plugin and the HA controller run privileged
-with host paths; they are its entries in `pod-security-exceptions.yaml`, with the operator's own
-pod, which needs baseline ([Pod Security](#pod-security)).
+privileged pods, as LINSTOR's satellites, the CSI node plugin, the NFS server and the HA controller
+run privileged with host paths; they are its entries in `pod-security-exceptions.yaml`, with the
+operator's own pod, the only one the render holds, which needs baseline. The LinstorCluster gives
+the LINSTOR controller, the CSI controller and the affinity controller the security context
+restricted requires ([Pod Security](#pod-security)).
 
 - `piraeus-operator` installs the operator from its publisher's chart,
   `oci://ghcr.io/piraeusdatastore/piraeus-operator/piraeus`, with the baseline's shape. The chart
@@ -1286,8 +1324,8 @@ artifact generator publishes only `apps/base`, and `path` is
 - **Instance**: upstream Flux 2.x, with source-watcher beside the four default controllers for
   the per-application artifacts, and Flux's network policies on. A patch of the instance sets the
   namespace `flux-system` to enforce the restricted Pod Security level ([Pod
-  Security](#pod-security)), and `tests/pod-security.bats` evaluates the controllers it installs
-  against it.
+  Security](#pod-security)), and `tests/pod-security.bats` evaluates against it the controllers of
+  the pinned Flux CLI's install, with the instance's patches applied.
 - **Flux versions**: the operator installs the newest Flux 2.x release in its manifests artifact,
   `oci://ghcr.io/controlplaneio-fluxcd/flux-operator-manifests`, which the instance pins to the
   operator chart's version. Flux therefore moves only when that tag moves, in the same Renovate

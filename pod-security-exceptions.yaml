@@ -5,7 +5,11 @@
 # Security, says what it requires.
 #
 # A namespace enforces restricted unless it has an entry here, and then the least strict level of its
-# entries; every other pod in it must pass restricted. An entry has:
+# entries. Every other pod of it that the render holds must pass restricted: the check evaluates the
+# rendered pod templates, Helm hooks and tests included, and the Flux install. A pod an operator
+# creates at run time is not in the render: one above restricted is an entry with created-by, and
+# any other asks for restricted through its custom resource (docs/kubernetes.md, Pod Security).
+# An entry has:
 #   namespace   the workload's namespace
 #   workload    Kind/name of the workload as the render holds it
 #   level       baseline or privileged: the strictest level the workload passes, which the check
@@ -26,7 +30,7 @@ exceptions:
   - namespace: kube-system
     workload: Deployment/cilium-operator
     level: privileged
-    reason: the chart runs the operator in the host's network namespace and on host ports
+    reason: the operator reaches the API server through KubePrism on the node's loopback address, as Cilium's values set it, which only the host's network namespace has, so the chart runs it there and on host ports
   - namespace: kube-system
     workload: DaemonSet/spegel
     level: privileged
@@ -38,23 +42,23 @@ exceptions:
   - namespace: kube-system
     workload: Pod/spegel-cleanup-wait
     level: baseline
-    reason: the chart's hook pod sets no seccomp profile, user or capabilities, and the chart has no value for them
+    reason: the hook pod takes the pod and container context of the Spegel DaemonSet, which runs as root to reach the container runtime's socket and registry configuration, so no value gives it the non-root user restricted requires
   - namespace: kube-system
     workload: Deployment/reflector
     level: baseline
-    reason: the chart's values define no seccomp profile and its container context leaves privilege escalation to the image
+    reason: it needs a seccomp profile and privilege escalation off, podSecurityContext.seccompProfile and securityContext.allowPrivilegeEscalation, keys the chart's values do not define, which tests/autoscaling.bats keeps out of its values
   - namespace: kube-system
     workload: Pod/vpa-test-crds-available
     level: baseline
-    reason: the chart's test pod sets no seccomp profile, and the chart's values define none for it
+    reason: the chart's test pod needs a seccomp profile, tests.securityContext.seccompProfile, a key the chart's values do not define, which tests/autoscaling.bats keeps out of its values
   - namespace: kube-system
     workload: Pod/vpa-test-create-vpa
     level: baseline
-    reason: the chart's test pod sets no seccomp profile, and the chart's values define none for it
+    reason: the chart's test pod needs a seccomp profile, tests.securityContext.seccompProfile, a key the chart's values do not define, which tests/autoscaling.bats keeps out of its values
   - namespace: kube-system
     workload: Pod/vpa-test-metrics-api-available
     level: baseline
-    reason: the chart's test pod sets no seccomp profile, and the chart's values define none for it
+    reason: the chart's test pod needs a seccomp profile, tests.securityContext.seccompProfile, a key the chart's values do not define, which tests/autoscaling.bats keeps out of its values
   - namespace: monitoring
     workload: DaemonSet/kube-prometheus-stack-prometheus-node-exporter
     level: privileged
@@ -66,11 +70,11 @@ exceptions:
   - namespace: monitoring
     workload: StatefulSet/victoria-logs
     level: baseline
-    reason: the chart's values define no seccomp profile for its pod or container
+    reason: it needs a seccomp profile, server.podSecurityContext.seccompProfile, a key the chart's values do not define, which tests/logs.bats keeps out of its values
   - namespace: piraeus-datastore
     workload: Deployment/piraeus-operator-controller-manager
     level: baseline
-    reason: the chart's values define no seccomp profile and leave privilege escalation to the image
+    reason: it needs privilege escalation off, operator.securityContext.allowPrivilegeEscalation, a key the chart's values do not define, which tests/storage.bats keeps out of its values
   - namespace: piraeus-datastore
     workload: DaemonSet/linstor-satellite
     created-by: LinstorCluster/linstorcluster
@@ -82,7 +86,12 @@ exceptions:
     level: privileged
     reason: the CSI node plugin mounts volumes on its node, so it runs privileged, in the host's network namespace and with host paths
   - namespace: piraeus-datastore
+    workload: DaemonSet/linstor-csi-nfs-server
+    created-by: LinstorCluster/linstorcluster
+    level: privileged
+    reason: the NFS server mounts the DRBD devices of the volumes it exports, so it runs privileged and with host paths
+  - namespace: piraeus-datastore
     workload: DaemonSet/ha-controller
     created-by: LinstorCluster/linstorcluster
     level: privileged
-    reason: the high-availability controller runs privileged on each node
+    reason: the high-availability controller listens for the kernel's DRBD events on each node, and the operator's template runs it privileged for that
