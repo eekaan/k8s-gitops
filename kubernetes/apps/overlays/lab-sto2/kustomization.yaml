@@ -16,6 +16,7 @@ resources:
   - ../../base/external-dns
   - ../../base/external-secrets
   - ../../base/keda
+  - ../../base/kromgo
   - ../../base/kube-system
   - ../../base/monitoring
   - ../../base/openbao
@@ -39,6 +40,7 @@ resources:
   - ../../base/external-secrets/external-secrets/ks.yaml
   - ../../base/external-secrets/openbao-store/ks.yaml
   - ../../base/keda/keda/ks.yaml
+  - ../../base/kromgo/kromgo/ks.yaml
   - ../../base/kube-system/cilium/ks.yaml
   - ../../base/kube-system/cilium-bgp/ks.yaml
   - ../../base/kube-system/cilium-monitoring/ks.yaml

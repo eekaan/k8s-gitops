@@ -1,0 +1,108 @@
+---
+# Values for the app-template chart, read by the HelmRelease through a ConfigMap generated without
+# substitution. The configuration kromgo reads is mounted by the HelmRelease's own values, which
+# take the generated ConfigMap's name. Keys not set here keep the chart's defaults.
+
+# The user the image runs as, which it pins none of, with the group and the seccomp profile the
+# restricted Pod Security level requires; the values of the namespace's app-template-defaults
+# ConfigMap (components/common), written out. Nothing in kromgo calls the Kubernetes API, so the
+# pod mounts no token of its service account.
+defaultPodOptions:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  # Two pods never on one node, so a drain or a node's loss leaves one answering.
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: kromgo
+          app.kubernetes.io/instance: kromgo
+
+controllers:
+  kromgo:
+    # A static binary that keeps no state and runs a query per badge request: two replicas cost
+    # a few megabytes and keep the badges up through a drain, which the budget below makes wait
+    # for the other pod.
+    replicas: 2
+    strategy: RollingUpdate
+    podDisruptionBudget:
+      minAvailable: 1
+    containers:
+      app:
+        image:
+          repository: ghcr.io/home-operations/kromgo
+          # renovate: datasource=docker depName=ghcr.io/home-operations/kromgo
+          tag: 0.16.3@sha256:98775a53019250a517a09a0fb716404146d1aaa6fb1f67091c58345663e5b7b5
+        env:
+          # The stack's Prometheus, by the Service its chart puts in front of it. It takes no
+          # credential, so none is given.
+          KROMGO_PROMETHEUS_URL: http://kube-prometheus-stack-prometheus.monitoring.svc:9090
+          # The ports of the Service below, which kromgo's defaults are, written where they are
+          # read from.
+          KROMGO_SERVER_PORT: "8080"
+          KROMGO_METRICS_PORT: "8081"
+        # kromgo's own endpoints, on the port it serves badges on: the process is up, and ready
+        # once it has read its configuration, which it does before it listens.
+        probes:
+          liveness:
+            enabled: true
+            custom: true
+            spec:
+              httpGet:
+                path: /healthz
+                port: 8080
+              periodSeconds: 10
+              timeoutSeconds: 1
+              failureThreshold: 3
+          readiness:
+            enabled: true
+            custom: true
+            spec:
+              httpGet:
+                path: /readyz
+                port: 8080
+              periodSeconds: 10
+              timeoutSeconds: 1
+              failureThreshold: 3
+          startup:
+            enabled: false
+        resources:
+          requests:
+            cpu: 10m
+            memory: 24Mi
+          limits:
+            memory: 64Mi
+        # Nothing writes in the container: the image holds a static binary and kromgo reads its
+        # configuration, its fonts and its icons from the mount and from itself.
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
+
+service:
+  kromgo:
+    controller: kromgo
+    ports:
+      # The badges, which the route names, and kromgo's /metrics on a port of its own, which it
+      # serves apart from the badges so that nothing routes it.
+      http:
+        port: 8080
+      metrics:
+        port: 8081
+
+serviceMonitor:
+  kromgo:
+    serviceName: kromgo
+    endpoints:
+      - port: metrics
+        path: /metrics
+        interval: 1m

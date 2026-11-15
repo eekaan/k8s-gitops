@@ -33,6 +33,7 @@ setup() {
   DNS='kube-system:k8s-app=kube-dns'
   PROMETHEUS='monitoring:app.kubernetes.io/name=prometheus'
   OTHER_APP='other:app.kubernetes.io/name=app'
+  KROMGO=kromgo/Deployment/kromgo
 }
 
 # tree NAME: a copy of the fixture in $BATS_TEST_TMPDIR/NAME, for the test to change.
@@ -258,7 +259,7 @@ proxies_egress() {
   real_render
   run "$REPO/scripts/network-policy-check" "$REAL" "$REPO/network-policy-exceptions.yaml"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [ "$(grep ' denies ingress and egress' <<<"$output" | cut -d' ' -f1 | paste -sd' ')" = "demo envoy-gateway-system" ]
+  [ "$(grep ' denies ingress and egress' <<<"$output" | cut -d' ' -f1 | paste -sd' ')" = "demo envoy-gateway-system kromgo" ]
   [ "$(grep -c ' listed' <<<"$output")" -eq "$(yq '.exceptions | length' "$REPO/network-policy-exceptions.yaml")" ]
 }
 
@@ -527,6 +528,14 @@ E
   # n8n's route sends the proxies to its port in ai-system, which carries the Gateway label: the
   # proxies' egress allows it, and n8n's side takes it unrestricted, as ai-system is listed.
   allowed "$VIEW" "$PROXY" ai-system/Deployment/n8n 5678/tcp
+  # kromgo's route sends them to its badge port in kromgo, which carries the Gateway label and
+  # denies by default: the proxies' egress and kromgo's own ingress both take that port, and
+  # neither takes its metrics port.
+  allowed "$VIEW" "$PROXY" "$KROMGO" 8080/tcp
+  allowed_in "$VIEW" "$PROXY" "$KROMGO" 8080/tcp
+  denied "$VIEW" "$PROXY" "$KROMGO" 8081/tcp
+  denied_in "$VIEW" "$PROXY" "$KROMGO" 8081/tcp
+  denied "$VIEW" "$PROXY" "$KROMGO" 22/tcp
   # The proxies' egress names each routed backend's pods and the port its route sends to, and no
   # other, so in a namespace that is listed, and takes them on every port, they reach neither n8n's
   # other ports, demo's backend's port among them, nor its database on any port.
@@ -564,10 +573,22 @@ E
   denied "$VIEW" envoy-gateway-system/Deployment/envoy-gateway "$hello" 8080/tcp
   denied "$VIEW" @world "$hello" 8080/tcp
   denied "$VIEW" @remote-node "$hello" 8080/tcp
+  denied_in "$VIEW" envoy-gateway-system/Deployment/envoy-gateway "$KROMGO" 8080/tcp
+  denied "$VIEW" @world "$KROMGO" 8080/tcp
   # No monitor of the tree scrapes the Gateway, so Prometheus reaches neither its controller nor
   # its proxies.
   denied "$VIEW" "$PROMETHEUS" envoy-gateway-system/Deployment/envoy-gateway 19001/tcp
   denied "$VIEW" "$PROMETHEUS" "$PROXY" 19001/tcp
+  # kromgo's monitor scrapes the port of its Service it names, so Prometheus reaches that port's
+  # container port, read from the render, and no other port of kromgo; nothing else of monitoring
+  # reaches it.
+  local metrics
+  metrics=$(P="$(yq -N '.spec.endpoints[].port' "$REAL"/*/kromgo/ServiceMonitor.monitoring.coreos.com_kromgo_kromgo.yaml)" \
+    yq '.spec.ports[] | select(.name == strenv(P)) | .targetPort' "$REAL"/*/kromgo/Service_kromgo_kromgo.yaml)
+  [[ $metrics =~ ^[0-9]+$ && $metrics != 8080 ]] || { echo "kromgo's monitor scrapes no one numbered port apart from its badges: $metrics"; return 1; }
+  allowed "$VIEW" "$PROMETHEUS" "$KROMGO" "$metrics/tcp"
+  denied "$VIEW" "$PROMETHEUS" "$KROMGO" 8080/tcp
+  denied "$VIEW" monitoring/Deployment/kube-prometheus-stack-kube-state-metrics "$KROMGO" "$metrics/tcp"
   # The kubelet reaches the probe port of every pod of the namespaces that deny by default,
   # proxies included, which no render holds: Envoy Gateway v1.10.0 probes the envoy container on
   # its readiness port 19003 (internal/xds/bootstrap/bootstrap.go,
@@ -579,7 +600,7 @@ E
   local probes pod port
   probes=$(yq -N -o json -I0 'select(. != null)' "$VIEW"/*/*/*.yaml | jq -r '
     select(.kind | IN("Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"))
-    | select(.metadata.namespace | IN("demo", "envoy-gateway-system"))
+    | select(.metadata.namespace | IN("demo", "envoy-gateway-system", "kromgo"))
     | . as $w
     | (if .kind == "CronJob" then .spec.jobTemplate.spec.template else .spec.template end).spec.containers[]
     | . as $c
@@ -595,6 +616,7 @@ E
   # Each such pod is among those the evaluator knows: a workload the probe list names is not a typo.
   [[ $probes == *"demo/Deployment/hello 8080"* ]]
   [[ $probes == *"envoy-gateway-system/Deployment/envoy-gateway 8081"* ]]
+  [[ $probes == *"kromgo/Deployment/kromgo 8080"* ]]
   # The ports the proxies' egress names in each labelled namespace are exactly the container ports
   # the Gateway's routes send to in that namespace, read from the render. A route to a backend on
   # another port, or in another labelled namespace, fails here until the rules name it.
@@ -602,7 +624,7 @@ E
   routed=$(routed_ports "$REAL")
   named=$(proxies_egress "$VIEW")
   echo "the routes' backends' container ports: $routed; the proxies' egress to the labelled namespaces: ${named:-every port}"
-  [[ " $routed " == *" demo:8080 "* && " $routed " == *" ai-system:5678 "* ]]
+  [[ " $routed " == *" demo:8080 "* && " $routed " == *" ai-system:5678 "* && " $routed " == *" kromgo:8080 "* ]]
   [ "$named" = "$routed" ]
   # A route to a backend in a namespace without the Gateway label, or behind a Service without a
   # selector, has no port the comparison could name, and fails it saying why.
@@ -662,7 +684,7 @@ E
 
 @test "A pod of an application cannot reach the secret store, the storage controller or another application" {
   real_render
-  local pods=(demo/Deployment/hello demo/Deployment/volsync-demo "$MOVER")
+  local pods=(demo/Deployment/hello demo/Deployment/volsync-demo "$MOVER" "$KROMGO")
   local pod
   for pod in "${pods[@]}"; do
     denied "$VIEW" "$pod" openbao/StatefulSet/openbao 8200/tcp
@@ -693,6 +715,35 @@ E
   denied "$VIEW" "$MOVER" demo/Deployment/volsync-demo 8080/tcp
   denied "$VIEW" "$OTHER_APP" demo/Deployment/hello 8080/tcp
   denied "$VIEW" openbao/StatefulSet/openbao demo/Deployment/hello 8080/tcp
+  # kromgo resolves the name of the Prometheus its configuration names and reaches the pods that
+  # Service selects, by its selector, on the port it sends kromgo's queries to, all read from the
+  # render; no other port of them, no other pod of monitoring, nothing outside the cluster.
+  local url name ns port service upstream target
+  url=$(yq '.spec.template.spec.containers[0].env[] | select(.name == "KROMGO_PROMETHEUS_URL") | .value' \
+    "$REAL"/*/kromgo/Deployment.apps_kromgo_kromgo.yaml)
+  [[ $url =~ ^http://([a-z0-9-]+)\.([a-z0-9-]+)\.svc:([0-9]+)$ ]] || { echo "kromgo's Prometheus is no Service of the cluster by its name and port: $url"; return 1; }
+  name=${BASH_REMATCH[1]} ns=${BASH_REMATCH[2]} port=${BASH_REMATCH[3]}
+  service=$(echo "$REAL"/*/*/"Service_${ns}_${name}.yaml")
+  [ -f "$service" ] || { echo "kromgo's Prometheus, $ns/$name, is no Service of the render"; return 1; }
+  upstream="$ns:$(yq -o json -I0 '.spec.selector' "$service" | jq -r 'to_entries | map("\(.key)=\(.value)") | join(",")')"
+  target=$(P=$port yq '.spec.ports[] | select(.port == env(P)) | .targetPort' "$service")
+  [[ $target =~ ^[0-9]+$ ]] || { echo "the Service $ns/$name sends port $port to no one numbered port: $target"; return 1; }
+  allowed "$VIEW" "$KROMGO" "$DNS" 53/udp
+  allowed "$VIEW" "$KROMGO" "$DNS" 53/tcp
+  denied "$VIEW" "$KROMGO" "$DNS" 9153/tcp
+  allowed "$VIEW" "$KROMGO" "$upstream" "$target/tcp"
+  denied "$VIEW" "$KROMGO" "$upstream" 8080/tcp
+  denied "$VIEW" "$KROMGO" "$PROMETHEUS" "$target/tcp"
+  denied "$VIEW" "$KROMGO" monitoring/Deployment/kube-prometheus-stack-kube-state-metrics "$target/tcp"
+  denied "$VIEW" "$KROMGO" monitoring/Deployment/kube-prometheus-stack-kube-state-metrics 8080/tcp
+  denied "$VIEW" "$KROMGO" monitoring/StatefulSet/victoria-logs 9428/tcp
+  denied "$VIEW" "$KROMGO" @world 443/tcp
+  # No other application's pod reaches kromgo, and kromgo reaches none.
+  denied "$VIEW" "$OTHER_APP" "$KROMGO" 8080/tcp
+  denied "$VIEW" demo/Deployment/hello "$KROMGO" 8080/tcp
+  denied "$VIEW" "$MOVER" "$KROMGO" 8080/tcp
+  denied "$VIEW" ai-system/Deployment/n8n "$KROMGO" 8080/tcp
+  denied "$VIEW" "$KROMGO" demo/Deployment/hello 8080/tcp
   # The backup movers reach the object storage on 443 and no other port of the world; the other
   # pods reach none of it.
   allowed "$VIEW" "$MOVER" @world 443/tcp
@@ -888,14 +939,15 @@ E
   [ "$status" -eq 1 ]
   [[ $output == *"cluster-wide CiliumClusterwideNetworkPolicy/nodes selects nodes"* ]]
 
-  # The tree: the agents honour the field, and the allows of demo and envoy-gateway-system let
-  # exactly their flows through with the namespaces' default deny, and every flow without it.
+  # The tree: the agents honour the field, and the allows of demo, envoy-gateway-system and kromgo
+  # let exactly their flows through with the namespaces' default deny, and every flow without it.
   real_render
   [ "$(yq '.data["enable-non-default-deny-policies"]' "$REAL"/*/cilium/ConfigMap_kube-system_cilium-config.yaml)" = true ]
   local open="$BATS_TEST_TMPDIR/open" removed
   cp -R "$VIEW" "$open"
-  removed=("$open"/*/*/NetworkPolicy.networking.k8s.io_demo_default-deny.yaml "$open"/*/*/NetworkPolicy.networking.k8s.io_envoy-gateway-system_default-deny.yaml)
-  [ "${#removed[@]}" -eq 2 ]
+  removed=("$open"/*/*/NetworkPolicy.networking.k8s.io_demo_default-deny.yaml "$open"/*/*/NetworkPolicy.networking.k8s.io_envoy-gateway-system_default-deny.yaml
+    "$open"/*/*/NetworkPolicy.networking.k8s.io_kromgo_default-deny.yaml)
+  [ "${#removed[@]}" -eq 3 ]
   rm -- "${removed[@]}"
   local flow want from to port
   local flows=(
@@ -916,6 +968,13 @@ E
     "allowed envoy-gateway-system/Deployment/envoy-gateway @kube-apiserver 6443/tcp"
     "denied envoy-gateway-system/Deployment/envoy-gateway @world 443/tcp"
     "denied envoy-gateway-system/Job/envoy-gateway-gateway-helm-certgen @world 443/tcp"
+    "allowed $PROXY $KROMGO 8080/tcp"
+    "denied $PROXY $KROMGO 8081/tcp"
+    "allowed $PROMETHEUS $KROMGO 8081/tcp"
+    "denied $OTHER_APP $KROMGO 8080/tcp"
+    "allowed $KROMGO $DNS 53/udp"
+    "denied $KROMGO openbao/StatefulSet/openbao 8200/tcp"
+    "denied $KROMGO @world 443/tcp"
   )
   for flow in "${flows[@]}"; do
     read -r want from to port <<<"$flow"

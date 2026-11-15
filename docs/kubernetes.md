@@ -582,6 +582,7 @@ once it is not, and the agents' rendered configuration agrees.
 | --- | --- | --- |
 | `demo` | default deny | `hello` takes the proxies on 8080; the backup movers resolve names and reach the object storage on 443; `volsync-demo` and the rest open nothing. |
 | `envoy-gateway-system` | default deny | the controller, its webhook, its certificate job and the proxies, below. |
+| `kromgo` | default deny | kromgo takes the proxies and the kubelet's probes on 8080 and Prometheus' scrape on 8081, and reaches the resolver and Prometheus on 9090. |
 | `ai-system` | listed | an application whose allows are not written, not a namespace that cannot have the posture. n8n takes the proxies on 5678 and reaches its database, the resolver and whatever its workflows call outside; the PostgreSQL instances take n8n, each other and the operator, and reach the API server; the backup movers reach the object storage on 443. The proxies reach n8n's 5678 alone there and forward only to n8n's Service, PostgreSQL authenticates every client, Pod Security, node firewall. |
 | `etcd-snapshots` | listed | an application whose allows are not written, not a namespace that cannot have the posture. The snapshot job takes nothing and reaches the Talos API through `talos.default`, the object storage, the hosts age's release is downloaded from (its URL redirects to a second host, which serves the file) and the resolver. Talos' own authorisation of its one role, Pod Security, node firewall. |
 | `external-dns` | listed | an application whose allows are not written, not a namespace that cannot have the posture. external-dns takes Prometheus' scrape and the kubelet's probes on 7979 and nothing else, and reaches the API server, the DNS provider's API on 443 and the resolver. Its token, scoped to zone read and DNS edit on the cluster's one zone, its name filter, a ClusterRole that only reads, Pod Security, node firewall ([DNS records](#dns-records)). |
@@ -607,12 +608,13 @@ once it is not, and the agents' rendered configuration agrees.
   the loopback. They reach the resolver, the controller on 18000 (xDS) and each backend the routes
   attached to the Gateway send to, by one rule each: the pods its Service selects, in its namespace
   while that carries `k8s-gitops/gateway: public`, on the container port the route sends to and no
-  other: `hello` in `demo` on 8080 and n8n in `ai-system` on 5678. `tests/network-policy.bats`
-  reads those ports from the render, from each route's backend through its Service's target port to
-  the container port, and fails unless the rules name, in each labelled namespace, exactly them; it
-  reads the proxies' egress in every form the evaluation reads, and fails on a port entry or a peer
-  it cannot compare, a backend in a namespace without the label and a Service without a selector.
-  What a pod of such a namespace takes is its own namespace's to say: in `demo`, `hello` on 8080. In
+  other: `hello` in `demo` on 8080, kromgo in `kromgo` on 8080 and n8n in `ai-system` on 5678.
+  `tests/network-policy.bats` reads those ports from the render, from each route's backend through
+  its Service's target port to the container port, and fails unless the rules name, in each
+  labelled namespace, exactly them; it reads the proxies' egress in every form the evaluation
+  reads, and fails on a port entry or a peer it cannot compare, a backend in a namespace without
+  the label and a Service without a selector. What a pod of such a namespace takes is its own
+  namespace's to say: in `demo`, `hello` on 8080, and in `kromgo`, kromgo on 8080. In
   `ai-system`, which is listed and so has no pod in default deny, every pod takes them on every
   port, so the proxies' rule is what keeps them from n8n's other ports and from every port of its
   database; PostgreSQL also authenticates every client. The controller takes the proxies on 18000
@@ -631,6 +633,14 @@ once it is not, and the agents' rendered configuration agrees.
   label, so any pod of `demo` that carries it gets the movers' flows, the world on 443 among them:
   the label is no proof of being a mover. What keeps it to the movers is who makes pods in the
   namespace, Flux from the reviewed tree and VolSync's controller.
+- **`kromgo`.** kromgo's pods, by the labels its Service selects, take the proxies by their labels
+  on 8080, the port the route sends to, the kubelet's probes on the same port, and Prometheus
+  (`app.kubernetes.io/name: prometheus` in `monitoring`) on 8081, the metrics port the chart's
+  monitor scrapes. They reach the resolver, and the pods the Service
+  `kube-prometheus-stack-prometheus` selects, by its selector's labels in `monitoring`, on 9090,
+  the container port that Service's port 9090 targets: `monitoring` is listed and takes them on
+  every port, so kromgo's egress is what keeps them from Prometheus' other ports and the
+  namespace's other pods. kromgo opens no other connection; it mounts no service account token.
 - **The object storage's port.** cluster-config holds the object storage's endpoint as a URL, which
   a DNS name rule cannot take, so the movers' rule is the world on 443: the port https uses for an
   endpoint that names none, as cluster-config's example does and `tests/network-policy.bats` holds
@@ -724,8 +734,8 @@ namespace and the policy, when
   own (`pkg/k8s/apis/cilium.io/utils/utils.go`), so that it also selects the world, the hosts and
   the nodes. A reason excuses none of these.
 
-The check reads only what the render holds. Besides the policies of `demo` and
-`envoy-gateway-system`, that is one policy of a listed namespace: `flux-operator-web`, the
+The check reads only what the render holds. Besides the policies of `demo`, `envoy-gateway-system`
+and `kromgo`, that is one policy of a listed namespace: `flux-operator-web`, the
 `NetworkPolicy` the Flux Operator's chart renders in `flux-system`, which lets every pod of every
 namespace (an empty `namespaceSelector`) reach the operator's web interface on 9080. It passes
 because `flux-system` is listed; the day `flux-system` takes the default deny, the check refuses it,
@@ -739,11 +749,14 @@ render for one flow and answers `allowed` or `denied`; the egress of the source 
 the destination both have to allow it, and a pod is in default deny for a direction only when a
 policy that selects it asks for it, as Cilium decides. Over a render that holds what the check
 refuses wherever it is, it gives no answer and exits 2. The tests use it to follow the public path
-hop by hop (the world to the proxies' listener ports, the proxies to `hello`'s port and to n8n's
-but not to n8n's other ports or its database, the kubelet to every probe port), to show that no pod
-of `demo` reaches the secret store, the storage controller, another pod of `demo` or another
-application, n8n among them, and that without their default deny `demo` and `envoy-gateway-system`
-take and send everything. What it
+hop by hop (the world to the proxies' listener ports, the proxies to `hello`'s port, to kromgo's
+and to n8n's but not to kromgo's metrics port, n8n's other ports or its database, the kubelet to
+every probe port, Prometheus to kromgo's metrics port alone), to show that no pod of `demo` or
+`kromgo` reaches the secret store, the storage controller, another pod of `demo` or another
+application, n8n among them, that kromgo reaches the resolver and the port of the Prometheus its
+configuration names, read from the render, and nothing else, and no other application reaches it,
+and that without their default deny `demo`, `envoy-gateway-system` and `kromgo` take and send
+everything. What it
 cannot show: the entity the pinned datapath gives a connection an edge translated and a worker
 forwarded again, read from its source above and confirmed in audit mode; the labels of the pods the
 operators create at run time, taken from the operators' source and observed in audit mode; that an
@@ -790,12 +803,12 @@ does not matter.
    the chart's update strategy).
 2. **The policies merge.** The root applies the default denies, the applications apply their
    allows, and the agents evaluate both and drop nothing they deny; what a policy would drop is
-   reported as `AUDIT`. As the allows land after the denies, `AUDIT` flows of `demo` and
-   `envoy-gateway-system` from before they landed are expected, such as the proxies to `hello` on
-   8080 and to the controller on 18000, and the controller to the API server, and an agent's recent
-   flows can hold them for a while.
+   reported as `AUDIT`. As the allows land after the denies, `AUDIT` flows of `demo`,
+   `envoy-gateway-system` and `kromgo` from before they landed are expected, such as the proxies to
+   `hello` on 8080 and to the controller on 18000, and the controller to the API server, and an
+   agent's recent flows can hold them for a while.
 3. **Watch**, from the moment the Kustomizations that hold the allows, `hello`,
-   `demo-volsync-movers` and `envoy-gateway`, are Ready at the merge's revision
+   `demo-volsync-movers`, `envoy-gateway` and `kromgo`, are Ready at the merge's revision
    (`flux get kustomizations`). `just network-drops` lists what the agents' Hubble holds: the
    `AUDIT` flows a policy would drop, by namespace, pod and port, never an address. It runs each
    agent's own `hubble` through `kubectl exec`, so the kubeconfig needs exec on the Cilium agents'
@@ -803,11 +816,12 @@ does not matter.
    flows asked of each agent and `NETWORK_DROPS_TIMEOUT` (60) the seconds each call may take. Hubble
    keeps only each agent's recent flows (4095 by the chart's default), so run it after each of:
    `just gateway-check`; `just cluster-check`; the secret demo (`just bao-put demo/hello greeting`,
-   then the Secret in `demo`); the nightly backup of `volsync-demo` at 03:17, and a restore of it
-   ([Restoring](#restoring)). Watch a day at least, through one nightly backup. An `AUDIT` flow of
-   `demo` or `envoy-gateway-system` that a check made once the allows were Ready is a missing allow,
-   added beside its application in a pull request while the cluster still audits, or a pod doing
-   what it should not. Confirm also that no `@remote-node` flow reaches the proxies' listener ports
+   then the Secret in `demo`); a badge asked of kromgo by its name, which has kromgo query
+   Prometheus ([Status badges](#status-badges)); the nightly backup of `volsync-demo` at 03:17, and
+   a restore of it ([Restoring](#restoring)). Watch a day at least, through one nightly backup. An
+   `AUDIT` flow of `demo`, `envoy-gateway-system` or `kromgo` that a check made once the allows were
+   Ready is a missing allow, added beside its application in a pull request while the cluster still
+   audits, or a pod doing what it should not. Confirm also that no `@remote-node` flow reaches the proxies' listener ports
    and none to the webhook's 9443 is `AUDIT`. `AUDIT` flows of `flux-system` show too: Flux's own
    policies and the Flux Operator's `flux-operator-web`, which the agents enforced before the value,
    are only audited while it is set, and what they would drop is what they dropped before; they are
@@ -838,9 +852,9 @@ does not matter.
      and its checks of `enable-policy` and the checksum stay as they are, the comment above the
      former becoming "Enforcement stays in its default mode, so the agents enforce the policies:
      never would enforce none."
-   - `docs/roadmap.md`, M8's row: "the namespaces' default deny with their allows in `demo` and
-     `envoy-gateway-system`" gains ", which Cilium enforces", and the clause "; and network policy
-     that drops anything, as Cilium audits every policy, cluster-wide, and drops nothing
+   - `docs/roadmap.md`, M8's row: "the namespaces' default deny with their allows in `demo`,
+     `envoy-gateway-system` and `kromgo`" gains ", which Cilium enforces", and the clause "; and
+     network policy that drops anything, as Cilium audits every policy, cluster-wide, and drops nothing
      ([Service addresses](kubernetes.md#service-addresses))" goes, the row ending at
      "`infra-apply`.".
 
@@ -1547,6 +1561,119 @@ panels: the parser takes out strings, label matchers, ranges, variables and the 
 not a function, a keyword or a number as a metric; it refuses an expression that selects by
 `__name__`. It cannot tell which target serves a metric: that is the table's claim, and the table
 is the one place to change when a panel reads a new metric.
+
+### Status badges
+
+kromgo (`apps/base/kromgo/kromgo/`) serves a few numbers about the cluster as badges, so they can be
+shown without giving anyone Prometheus. Its configuration names each badge and the one PromQL query
+it runs; a request names a badge and gets one number or word back, as an SVG, or as JSON with
+`?format=json` (kromgo's own) or `?format=shields` (shields.io's endpoint schema). It runs from the
+publisher's image, `ghcr.io/home-operations/kromgo`, pinned by tag and digest, in the app-template
+chart as n8n does ([Applications](#applications)): two pods, never on one node, under a disruption
+budget of one, as a non-root user with a read-only root filesystem, no capability and the runtime's
+seccomp profile, requests and a memory limit, and the configuration mounted read only. It holds no
+credential and no volume: Prometheus is reached by the Service of the stack,
+`kube-prometheus-stack-prometheus.monitoring.svc:9090`, which takes none, and the pod mounts no
+token of its service account. Its own metrics are on a port of their own (`8081`), scraped by a
+`ServiceMonitor` the chart makes, and no route names that port.
+
+**Where it is.** `kromgo.${CLUSTER_DOMAIN}` on the public Gateway's `https` listener
+([Giving an application a public hostname](#giving-an-application-a-public-hostname)); the route
+sends only the paths under `/badges/` to kromgo, unchanged, as it has no filter, so its index page
+and its health endpoints answer the Gateway's 404. external-dns publishes the name, as it does for
+every route on the Gateway ([DNS records](#dns-records)). The namespace is `kromgo`, its own, labelled `k8s-gitops/gateway: public`. Labelling `monitoring`
+instead would let any route in it attach to the Gateway, and `monitoring` holds Prometheus,
+Alertmanager and Grafana, whose Services a route for the wrong name would publish; the namespace
+is privileged too, for node-exporter and the log collector. The own namespace is small, enforces
+`restricted`, and is one more entry in the set of namespaces that carry the label, which
+`tests/gateway.bats` pins. A cluster selects kromgo with two entries of its overlay, the namespace
+directory and the application's `ks.yaml`; the application waits for the Prometheus Operator's
+definitions, the Gateway and Cilium, whose kind its network policy is, and is Ready once both pods
+are (`wait: true`), which is once kromgo has read its configuration and listens: a configuration it
+refuses keeps the application from Ready. It queries the stack's Prometheus at each request, not at
+start, so a badge answers with an error until Prometheus does, and the stack's application is not
+waited for.
+
+**What it may reach.** The namespace denies ingress and egress by default, and the policy beside
+the application, `app/ciliumnetworkpolicy.yaml`, lets kromgo's flows through and no other
+([Network policy](#network-policy)): in, the public Gateway's proxies and the kubelet's probes on
+8080 and Prometheus' scrape on 8081; out, the cluster's resolver and the pods of the Service its
+`KROMGO_PROMETHEUS_URL` names, `kube-prometheus-stack-prometheus` in `monitoring`, on 9090. The
+proxies' own egress names kromgo's pods on 8080 alone, so the metrics port is Prometheus' alone.
+Pointing kromgo at another Prometheus moves the egress rule with it: `tests/network-policy.bats`
+reads the URL, the Service it names and that Service's selector and target port from the render,
+and fails until the rule reaches them.
+
+**The list.** A badge is `/badges/<id>`; the ids are these, and no other is served:
+
+| id | What it shows | Where it comes from |
+| --- | --- | --- |
+| `kubernetes_version` | the API server's version | `kubernetes_build_info` of the API server's monitor |
+| `talos_version` | the Talos version of the nodes | `node_os_info` of node-exporter |
+| `cluster_node_count` | nodes | `kube_node_info` of kube-state-metrics |
+| `cluster_pod_count` | pods that run | `kube_pod_status_phase` of kube-state-metrics |
+| `cluster_age_days` | days since the oldest node was created, which a replaced node does not reset until it is the oldest left | `kube_node_created` of kube-state-metrics |
+| `cluster_cpu_usage` | the nodes' mean CPU use, in percent | the chart's recording rule `instance:node_cpu_utilisation:rate5m` |
+| `cluster_memory_usage` | memory in use of all the nodes', in percent | `node_memory_*` of node-exporter |
+| `firing_alerts` | alerts that fire, `Watchdog` and `InfoInhibitor` left out, which fire to show the pipeline works and to inhibit info alerts | `ALERTS` |
+
+Flux is not on the list. The Flux Operator's `flux_instance_info`, which `flux-monitoring` scrapes
+([Flux monitoring](#flux-monitoring)), holds the version only in its `revision` label, with the
+distribution's digest after it (`v<version>@sha256:<digest>`): a badge would keep that label or take
+the version out with `label_replace`, and the rules below allow neither. While nodes run two Talos
+or Kubernetes versions, as during an upgrade, the version badges show one of them.
+
+**A badge's URL** is the cluster's domain from `cluster-config` with the path appended:
+`https://kromgo.<CLUSTER_DOMAIN>/badges/<id>`. Nothing in this repository shows one, so none
+holds the deployment's hostname; whoever embeds a badge writes the URL with their own domain. kromgo
+answers a badge with `Cache-Control: public, max-age=300, s-maxage=300`, so a browser or a shared
+cache between it and the reader, such as an image proxy, may serve it for five minutes. kromgo itself
+keeps no result: every request that reaches it runs the badge's query.
+
+**No request names a query.** kromgo 0.16.3's router serves `/badges/{id}` and `/graphs/{id}`, an
+index page, its assets and, when configured, a favicon (`Handler.Mux` in `internal/kromgo/handler.go`).
+Prometheus is queried from three places, the badge's and the graph's handlers and the range badge's
+window (`internal/kromgo/instant.go`, `internal/kromgo/graph_query.go`), and each passes the query
+the configuration gave the endpoint, found by the `id` of the path. An `id` the configuration does
+not hold is answered before any query (`serveBadge`: `h.badges[id]`) with a Not Found error: a red
+error badge with status 200 in the SVG form, so an image shows the error, and 404 in the JSON forms
+(`errorResponse` in `internal/kromgo/response.go`). The other parameters choose the
+output format, the badge's style and, for a graph, a window, and are never put into a query. The
+configuration defines no graph, which would serve a range of its query, and turns the gallery off,
+which would list the badges. `tests/kromgo.bats` fails unless this document names the image's
+pinned version after the word kromgo, as "kromgo 0.16.3's router" above does, so whoever moves the image reads the router
+and the three call sites again and writes the new version here, and unless `config.yaml` names the
+schema of that version.
+
+**Nothing names a node.** The JSON form of a badge returns the labels of the series its query read,
+so every query keeps no label but a version: each selector is inside a `count`, `sum`, `avg`,
+`min` or `max` that has no `by` but `version_id` or `git_version`, and no query relabels or
+joins, or matches on a node, a pod, a namespace or an address. `tests/kromgo.bats` reads the text of
+each query for that and fails on a bare selector, a `by (node)`, a matcher on `instance`, its label
+name bare or quoted, or a `label_replace`; it cannot see what a version label holds. It also fails
+on a dotted name, as a hostname is, in any value of the configuration and in the strings of its
+queries and expressions; a name without a dot is not seen.
+
+**Adding a badge.** Add an entry to `config.yaml` under `badges:` with an `id` of letters, digits and
+`._-`, a `title`, a query that keeps no label but a version, and `valueExpr` and `colorExpr`
+(kromgo's CEL expressions) for what it shows. Then add its id to `BADGES` in `tests/kromgo.bats`, a
+row in the table above, and, for a metric the file `tests/fixtures/kromgo/metric-sources.tsv` does
+not name, its row there: the monitor of the render that scrapes the target that serves it, or
+`alerting-rule`. A metric a recording rule of the render writes needs no row. The test fails when a
+metric of a query has none, when a monitor named there is not in the render, and when the ids of the
+configuration are not the pinned ones. The check is by name: it cannot see that the target serves
+a metric, which the row states, nor the labels a matcher selects. The test also checks the file
+against the schema kromgo publishes at the image's tag, which `config.yaml` names, with helm,
+offline: a field kromgo does not know or a badge without its query fails, as kromgo refuses both at
+start. kromgo also compiles each expression at start, which no schema describes: a configuration
+with one it cannot compile passes the test and keeps both pods, and so the application, from Ready.
+
+**Limits.** kromgo does not limit requests and keeps no result, so every badge request that reaches
+it runs one query on Prometheus; only a cache downstream of kromgo saves one. The edge routers admit
+only the networks the edge stack allows
+([The edge routers](infrastructure.md#the-edge-routers)), which bounds who can ask. A rate limit on
+the route would be a `BackendTrafficPolicy`, which `tests/gateway.bats` would have to admit: it holds
+the Gateway's `ClientTrafficPolicy` to be the one policy on the Gateway or on a route attached to it.
 
 ## Grafana
 
@@ -2484,8 +2611,9 @@ cannot be listed without it: `just kubernetes-check` refuses the dependency.
   `k8s-gitops/gateway: public`, and of no other: the listener's `allowedRoutes` select them by that
   label and name the one kind. A route in a namespace without it is not accepted, which is the
   Gateway API's rule and the controller's to apply; it shows in the route's status, which
-  `just gateway-check` reads, and `tests/gateway.bats` proves the selector on the objects. `demo`
-  and `ai-system` are the namespaces that carry the label, and `tests/gateway.bats` pins that set.
+  `just gateway-check` reads, and `tests/gateway.bats` proves the selector on the objects. `demo`,
+  `ai-system` and `kromgo` are the namespaces that carry the label, and `tests/gateway.bats` pins
+  that set.
 - **The certificate.** The `Certificate` `public-wildcard` asks the `ClusterIssuer` the cluster
   chose, `cluster-ca` by default, for an ECDSA P-256 certificate for `*.${CLUSTER_DOMAIN}` and
   `${CLUSTER_DOMAIN}`, with a new private key at each renewal and the same Secret, so the listener

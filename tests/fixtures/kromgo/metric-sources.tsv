@@ -1,0 +1,13 @@
+# Where the series the kromgo badges query come from, for tests/kromgo.bats: a metric name (an
+# anchored regular expression), a tab, then the monitor of the render that scrapes the target that
+# serves it as Kind/name, or alerting-rule for the series Prometheus writes for every alerting rule.
+# A series a recording rule of the render writes needs no row. The test fails when a monitor named
+# here is not in the render, and a metric a badge queries that no row names has no known source.
+kubernetes_build_info	ServiceMonitor/kube-prometheus-stack-apiserver
+node_os_info	ServiceMonitor/kube-prometheus-stack-prometheus-node-exporter
+node_memory_MemTotal_bytes	ServiceMonitor/kube-prometheus-stack-prometheus-node-exporter
+node_memory_MemAvailable_bytes	ServiceMonitor/kube-prometheus-stack-prometheus-node-exporter
+kube_node_info	ServiceMonitor/kube-prometheus-stack-kube-state-metrics
+kube_node_created	ServiceMonitor/kube-prometheus-stack-kube-state-metrics
+kube_pod_status_phase	ServiceMonitor/kube-prometheus-stack-kube-state-metrics
+ALERTS	alerting-rule

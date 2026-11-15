@@ -225,3 +225,15 @@ spec:
         - ports:
             - port: "5678"
               protocol: TCP
+    # kromgo's 8080 in kromgo.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kromgo
+            "k8s:io.cilium.k8s.namespace.labels.k8s-gitops/gateway": public
+            app.kubernetes.io/controller: kromgo
+            app.kubernetes.io/instance: kromgo
+            app.kubernetes.io/name: kromgo
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP

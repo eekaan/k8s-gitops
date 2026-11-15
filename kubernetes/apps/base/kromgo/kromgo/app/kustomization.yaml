@@ -1,0 +1,26 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - helmrelease.yaml
+  - httproute.yaml
+  - ocirepository.yaml
+  - ciliumnetworkpolicy.yaml
+
+# The chart's values and kromgo's configuration, each in a file of its own and a ConfigMap whose
+# name carries a hash of it, so a change to either rolls the release. Neither goes through Flux's
+# substitution: a PromQL query is not a place for a variable.
+configMapGenerator:
+  - name: kromgo-values
+    files:
+      - values.yaml
+  - name: kromgo-config
+    files:
+      - config.yaml
+generatorOptions:
+  annotations:
+    kustomize.toolkit.fluxcd.io/substitute: disabled
+
+configurations:
+  - kustomizeconfig.yaml

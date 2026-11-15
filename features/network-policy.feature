@@ -4,7 +4,7 @@ Feature: Network policy
   Scenario: An application namespace denies ingress and egress by default
     Given the render of the tree, with its real charts
     When just network-policy-check runs
-    Then every namespace the overlay deploys into either holds a default deny of both directions that selects every pod, or is listed in network-policy-exceptions.yaml with its reason, and demo and envoy-gateway-system are the namespaces that hold the default deny
+    Then every namespace the overlay deploys into either holds a default deny of both directions that selects every pod, or is listed in network-policy-exceptions.yaml with its reason, and demo, envoy-gateway-system and kromgo are the namespaces that hold the default deny
 
   Scenario: A namespace without the posture fails the check unless it is listed with its reason
     Given a render whose namespaces hold a default deny, or are listed with a reason
@@ -24,12 +24,12 @@ Feature: Network policy
   Scenario: Traffic from the public Gateway reaches a routed backend and nothing else in its namespace
     Given the rendered policies of the tree
     When the flows of the public path are evaluated hop by hop
-    Then traffic from the world reaches the proxies' listener ports and from other nodes' hosts does not, the proxies reach the routed backend's port in demo and n8n's port in ai-system, which is listed and takes them on every port, and no other port of n8n and no port of its database, as their egress names each routed backend's pods and, in each labelled namespace, exactly the container ports the render's routes send to there, which the test reads in every form the evaluation reads and refuses in a form it cannot compare, for a backend in a namespace without the Gateway label and for a Service without a selector, the kubelet reaches every probe port, the controller takes the API server and other nodes' hosts on its webhook's port alone and the world on none, and the proxies reach no other pod of demo, no other port of the backend, and no pod of a namespace that does not carry the Gateway label, and the controller's pods do not reach the backend
+    Then traffic from the world reaches the proxies' listener ports and from other nodes' hosts does not, the proxies reach the routed backends' ports in demo and kromgo, and not kromgo's metrics port, and n8n's port in ai-system, which is listed and takes them on every port, and no other port of n8n and no port of its database, as their egress names each routed backend's pods and, in each labelled namespace, exactly the container ports the render's routes send to there, which the test reads in every form the evaluation reads and refuses in a form it cannot compare, for a backend in a namespace without the Gateway label and for a Service without a selector, the kubelet reaches every probe port, the controller takes the API server and other nodes' hosts on its webhook's port alone and the world on none, and the proxies reach no other pod of demo, no other port of a backend, and no pod of a namespace that does not carry the Gateway label, the controller's pods do not reach the backends, and Prometheus reaches kromgo's metrics port, which its monitor scrapes, and no other port of kromgo
 
   Scenario: A pod of an application cannot reach the secret store, the storage controller or another application
     Given the rendered policies of the tree
-    When the flows from the pods of demo are evaluated
-    Then the application pods reach nothing, the backup movers reach the cluster resolver and the object storage on the port of its endpoint as cluster-config's example gives it, 443, and none of them reaches a pod of the secret store, the storage controller, another pod of demo or another application namespace, n8n's among them
+    When the flows from the pods of demo and kromgo, and to kromgo's, are evaluated
+    Then demo's application pods reach nothing, kromgo's reach the cluster resolver and the pods of the Prometheus Service their configuration names, on the port it sends to, and no other port or pod of monitoring, the backup movers reach the cluster resolver and the object storage on the port of its endpoint as cluster-config's example gives it, 443, and none of them reaches a pod of the secret store, the storage controller, another pod of demo or another application namespace, n8n's among them, nor does another application's pod reach kromgo
 
   Scenario: An allow that names an address fails the check
     Given a policy in a namespace with the default deny
@@ -38,7 +38,7 @@ Feature: Network policy
 
   Scenario: A namespace without its default deny takes and sends everything, whatever its allows say
     Given the rendered policies of the tree, whose allows leave the deny to each namespace's default deny
-    When the flows of demo and envoy-gateway-system are evaluated with the namespaces' default deny and without it, and the check runs on an allow that puts its pods in default deny itself or does not say it leaves that to the namespace, on a second deny beside the default deny, and on a deny rule or a policy of the nodes in a namespace with the default deny, in a listed one and cluster-wide
+    When the flows of demo, envoy-gateway-system and kromgo are evaluated with the namespaces' default deny and without it, and the check runs on an allow that puts its pods in default deny itself or does not say it leaves that to the namespace, on a second deny beside the default deny, and on a deny rule or a policy of the nodes in a namespace with the default deny, in a listed one and cluster-wide
     Then with the default deny exactly the allowed flows pass, without it every flow passes, the check exits non-zero naming the policy, and the evaluation of a flow over a render that holds a deny rule gives no answer
 
   Scenario: The cluster audits or enforces the policies as the docs say
