@@ -28,10 +28,14 @@
 #   EDGE hello             the demo answers 200 with the page of its ConfigMap demo/hello;
 #   EDGE unrouted host     a host under the domain that no route serves answers 404.
 # It runs kubectl get, tofu init and output on the edge stack, and curl. It prints object, node and
-# edge names, never an address, a host name under the domain, what the CA's Secret holds, or a
-# tool's own errors, which can name addresses. kubectl is bounded by --request-timeout and curl by
-# --connect-timeout and --max-time, and curl reads no configuration file and uses no proxy. Needs
-# curl 7.88 or newer, for its write-out of the certificates.
+# edge names, each only once it is a valid name of its kind, and never an address, a host name under
+# the domain, what the CA's Secret holds, or a tool's own errors, which can name addresses: kubectl's
+# go nowhere, and tofu's to the edge stack's errors file. Any other text it shows from the cluster or
+# an answer passes through printable (scripts/lib/errors.sh). A name read from the cluster reaches
+# kubectl after --, so it can never be taken for a flag. kubectl is bounded by --request-timeout and
+# curl by --connect-timeout and --max-time, and curl reads no configuration file, uses no proxy and
+# trusts nothing but the cluster's CA. Needs curl 7.88 or newer, for its write-out of the
+# certificates. A failure that is not a check's names the step it happened in.
 # Usage: scripts/gateway-check [cluster]
 set -euo pipefail
 
@@ -40,6 +44,8 @@ here=$(dirname "$0")
 . "$here/lib/cluster.sh"
 # shellcheck source=scripts/lib/edge.sh
 . "$here/lib/edge.sh"
+# shellcheck source=scripts/lib/errors.sh
+. "$here/lib/errors.sh"
 
 if (($# > 1)) || [[ ${1-} == -* ]]; then
   infra_error "usage: gateway-check [cluster]"
@@ -67,7 +73,19 @@ probe_path=/gateway-check
 unrouted='gateway-check-unrouted'
 
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+# A failure that is not one of the checks, such as an answer jq cannot read, names the step it
+# happened in, as in every cluster recipe; the checks' own failures have their summary instead.
+# shellcheck disable=SC2329 # It runs from the EXIT trap.
+finish() {
+  local code=$1
+  rm -rf -- "$tmp"
+  ((reported)) || failed_step "$code"
+  exit "$code"
+}
+reported=0
+trap 'finish $?' EXIT
+# curl's own place for authorities beside the CA's certificate, empty, so nothing else is trusted.
+mkdir "$tmp/no-authorities"
 
 failures=0 checks=0 skipped=()
 # result VERDICT CHECK WHY: one check's result, pass, FAIL or skip, with its name and why.
@@ -80,10 +98,48 @@ result() {
   esac
 }
 
-# get ARG...: kubectl get ARG... as JSON. Its errors are left out, as they can name the API server's
-# address.
+# jq ARG...: jq with its errors left out, as one about a value it cannot use quotes the value, and a
+# value from the cluster can be an address.
+jq() {
+  command jq "$@" 2> /dev/null
+}
+
+# get ARG...: kubectl get ARG... as JSON, ARG... ending with -- and a name where there is one. Its
+# errors are left out, as they can name the API server's address.
 get() {
-  kubectl get "$@" --output=json --request-timeout=10s 2> /dev/null
+  kubectl get --output=json --request-timeout=10s "$@" 2> /dev/null
+}
+
+# A name of the kinds a cluster's objects have: a DNS subdomain, such as most objects' names and a
+# node's, and a DNS label, such as a namespace's or a Service's.
+subdomain='^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
+label='^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+# valid_name KIND VALUE: whether VALUE is a name of KIND, subdomain or label. Anything else read
+# from the cluster is neither printed nor handed to kubectl.
+valid_name() {
+  case $1 in
+    label) ((${#2} <= 63)) && [[ $2 =~ $label ]] ;;
+    *) ((${#2} <= 253)) && [[ $2 =~ $subdomain ]] ;;
+  esac
+}
+
+# The same check inside jq: valid($pattern; $most), with \A and \z, as jq's $ also matches before a
+# final newline.
+# shellcheck disable=SC2016 # $pattern and $most are jq variables.
+jq_valid='def valid($pattern; $most): type == "string" and length <= $most
+  and test("\\A" + ($pattern | ltrimstr("^") | rtrimstr("$")) + "\\z");'
+
+# read_field VAR JSON FILTER: sets VAR to the string jq's FILTER gives for JSON, exactly: a command
+# substitution would drop its trailing newlines, and with them what makes it no valid name.
+read_field() {
+  local value
+  value=$(jq -j "$3" <<< "$2" && printf .) || return 1
+  printf -v "$1" '%s' "${value%.}"
+}
+
+# shown TEXT: TEXT from the cluster or an answer as one line that is safe to print.
+shown() {
+  printf '%s\n' "$1" | printable | paste -sd' ' -
 }
 
 # joined: the lines on standard input, joined with commas.
@@ -106,7 +162,7 @@ step="checking the Gateway"
 domain='' address=''
 dns_name='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
 ipv4='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
-if ! config=$(get configmap cluster-config --namespace=flux-system); then
+if ! config=$(get configmap --namespace=flux-system -- cluster-config); then
   result FAIL cluster-config "kubectl could not read flux-system/cluster-config"
 else
   domain=$(jq -r '.data.CLUSTER_DOMAIN // ""' <<< "$config")
@@ -123,7 +179,7 @@ else
 fi
 
 listeners='' https_secret=''
-if ! gateway_json=$(get gateways.gateway.networking.k8s.io "$gateway" --namespace="$namespace"); then
+if ! gateway_json=$(get gateways.gateway.networking.k8s.io --namespace="$namespace" -- "$gateway"); then
   result FAIL Gateway "kubectl could not read $namespace/$gateway"
   result FAIL "Gateway address" "kubectl could not read $namespace/$gateway"
 else
@@ -153,11 +209,16 @@ if ! services=$(get services --namespace="$namespace" --selector="$proxy_selecto
 else
   count=$(jq '.items | length' <<< "$services")
   service=$(jq -c '.items[0] // {}' <<< "$services")
-  name=$(jq -r '.metadata.name // ""' <<< "$service")
+  name='' service_type=''
+  read_field name "$service" '.metadata.name // ""'
+  read_field service_type "$service" '.spec.type // ""'
   if ((count != 1)); then
     result FAIL "proxy Service" "$count Services of the Gateway's proxies, not one"
-  elif [[ $(jq -r '.spec.type' <<< "$service") != LoadBalancer ]]; then
-    result FAIL "proxy Service" "$name is of type $(jq -r '.spec.type' <<< "$service"), not LoadBalancer"
+  elif ! valid_name label "$name"; then
+    result FAIL "proxy Service" "the name of the Service of the Gateway's proxies is not a valid name"
+    name="the Service of the Gateway's proxies"
+  elif [[ $service_type != LoadBalancer ]]; then
+    result FAIL "proxy Service" "$name is of type $(shown "$service_type"), not LoadBalancer"
   elif [[ $(jq -r '.metadata.labels["k8s-gitops/announce"] // ""' <<< "$service") != bgp ]]; then
     result FAIL "proxy Service" "$name lacks the label k8s-gitops/announce: bgp, so no worker announces it"
   else
@@ -181,9 +242,16 @@ if ! pods=$(get pods --namespace="$namespace" --selector="$proxy_selector"); the
 else
   total=$(jq '.items | length' <<< "$pods")
   ready=$(jq '[.items[] | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))] | length' <<< "$pods")
-  nodes=$(jq -r '[.items[] | select(any(.status.conditions[]?; .type == "Ready" and .status == "True")) | .spec.nodeName // empty] | unique | .[]' <<< "$pods")
-  node_count=$(grep -c . <<< "$nodes" || true)
-  if ((ready < 2)); then
+  ready_nodes='[.items[] | select(any(.status.conditions[]?; .type == "Ready" and .status == "True")) | .spec.nodeName // empty] | unique'
+  node_count=$(jq "$ready_nodes | length" <<< "$pods")
+  nodes_valid=$(jq --arg subdomain "$subdomain" "$jq_valid $ready_nodes | all(valid(\$subdomain; 253))" <<< "$pods")
+  nodes=''
+  if [[ $nodes_valid == true ]]; then
+    nodes=$(jq -r "$ready_nodes | .[]" <<< "$pods")
+  fi
+  if [[ $nodes_valid != true ]]; then
+    result FAIL proxies "a node a proxy runs on has a name that is not a valid name"
+  elif ((ready < 2)); then
     result FAIL proxies "$ready of $total proxies Ready, fewer than two"
   elif ((node_count < 2)); then
     result FAIL proxies "$ready proxies Ready, all on $(joined <<< "$nodes")"
@@ -197,31 +265,36 @@ if ! certificates=$(get certificates.cert-manager.io --namespace="$namespace"); 
   result FAIL certificate "kubectl could not read the Certificates of $namespace"
 else
   certificate=$(jq -c --arg secret "$https_secret" '[.items[] | select(.spec.secretName == $secret)] | first // {}' <<< "$certificates")
-  name=$(jq -r '.metadata.name // ""' <<< "$certificate")
+  read_field name "$certificate" '.metadata.name // ""'
   if [[ -z $https_secret || -z $name ]]; then
     result FAIL certificate "no Certificate in $namespace makes the Secret the https listener serves"
+  elif ! valid_name subdomain "$name"; then
+    result FAIL certificate "the name of the Certificate the https listener serves is not a valid name"
   elif [[ $(condition "$certificate" Ready) != True ]]; then
     result FAIL certificate "$name is not Ready: $(reason "$certificate" Ready)"
   else
     result pass certificate "$name, the https listener's, is Ready"
   fi
-  if [[ -n $name ]]; then
-    issuer=$(jq -r 'if (.spec.issuerRef.kind // "Issuer") == "ClusterIssuer" and (.spec.issuerRef.group // "cert-manager.io") == "cert-manager.io"
-      then .spec.issuerRef.name else "" end' <<< "$certificate")
-  fi
+  read_field issuer "$certificate" 'if (.spec.issuerRef.kind // "Issuer") == "ClusterIssuer" and (.spec.issuerRef.group // "cert-manager.io") == "cert-manager.io"
+    then .spec.issuerRef.name // "" else "" end'
 fi
 
-# The CA's public certificate, by the one key of its Secret that holds it: the Secret's private key
-# never leaves the API server in kubectl's output, and the certificate is written to a file of this
-# run, never printed.
+# The CA's public certificate, the one key of its Secret that holds it: kubectl receives the whole
+# Secret from the API server and prints only that key, through the jsonpath; this script never
+# prints the certificate, and never prints or writes the private key. The certificate goes to a
+# file of this run, removed at its end.
 ca_file=$tmp/ca.crt
-ca=0
+ca=0 ca_secret=''
 if [[ -z $issuer ]]; then
   result FAIL "cluster CA" "the Gateway's Certificate names no ClusterIssuer to read a CA from"
-elif ! issuer_json=$(get clusterissuers.cert-manager.io "$issuer") ||
-  ! ca_secret=$(jq -re '.spec.ca.secretName // empty' <<< "$issuer_json"); then
+elif ! valid_name subdomain "$issuer"; then
+  result FAIL "cluster CA" "the ClusterIssuer the Gateway's Certificate names is not a valid name"
+elif ! issuer_json=$(get clusterissuers.cert-manager.io -- "$issuer") ||
+  ! read_field ca_secret "$issuer_json" '.spec.ca.secretName // ""' || [[ -z $ca_secret ]]; then
   result FAIL "cluster CA" "the ClusterIssuer $issuer is not a CA issuer kubectl could read"
-elif ! encoded=$(kubectl get secret "$ca_secret" --namespace="$issuer_namespace" --output='jsonpath={.data.tls\.crt}' --request-timeout=10s 2> /dev/null) ||
+elif ! valid_name subdomain "$ca_secret"; then
+  result FAIL "cluster CA" "the Secret the ClusterIssuer $issuer signs with is not a valid name"
+elif ! encoded=$(kubectl get --output='jsonpath={.data.tls\.crt}' --request-timeout=10s secret --namespace="$issuer_namespace" -- "$ca_secret" 2> /dev/null) ||
   ! base64 -d <<< "$encoded" > "$ca_file" 2> /dev/null || ! grep -q '^-----BEGIN CERTIFICATE-----' "$ca_file"; then
   result FAIL "cluster CA" "kubectl could not read the certificate of $issuer_namespace/$ca_secret"
 else
@@ -236,7 +309,9 @@ else
   labelled=$(jq -c '[.items[].metadata.name]' <<< "$namespaces")
   # Every route Accepted on the Gateway, whatever listener, outside the namespaces that opt in, but
   # for the redirect in the Gateway's own.
-  outside=$(jq -r --arg gateway "$gateway" --arg namespace "$namespace" --arg redirect "$redirect" --argjson labelled "$labelled" '
+  # A name that is not one is named only as such.
+  outside=$(jq -r --arg gateway "$gateway" --arg namespace "$namespace" --arg redirect "$redirect" --argjson labelled "$labelled" \
+    --arg label "$label" --arg subdomain "$subdomain" "$jq_valid"'
     .items[] | .metadata as $route
     | select(any(.status.parents[]?; .parentRef.name == $gateway
         and (.parentRef.kind // "Gateway") == "Gateway"
@@ -244,7 +319,8 @@ else
         and any(.conditions[]?; .type == "Accepted" and .status == "True")))
     | select(($route.namespace | IN($labelled[])) | not)
     | select(($route.namespace == $namespace and $route.name == $redirect) | not)
-    | "\($route.namespace)/\($route.name)"' <<< "$routes" | joined)
+    | if ($route.namespace | valid($label; 63)) and ($route.name | valid($subdomain; 253))
+      then "\($route.namespace)/\($route.name)" else "a route whose name is not a valid name" end' <<< "$routes" | joined)
   accepted=$(jq --arg gateway "$gateway" --arg namespace "$namespace" '[.items[] | .metadata as $route
     | select(any(.status.parents[]?; .parentRef.name == $gateway and (.parentRef.namespace // $route.namespace) == $namespace
         and any(.conditions[]?; .type == "Accepted" and .status == "True")))] | length' <<< "$routes")
@@ -262,30 +338,34 @@ else
   if [[ $attached == 1 ]]; then
     result pass "http listener" "holds one route, the redirect"
   else
-    result FAIL "http listener" "holds $attached routes, not the redirect alone"
+    result FAIL "http listener" "holds $(shown "$attached") routes, not the redirect alone"
   fi
 fi
 
-# The page the demo serves, which its answer through an edge must be.
-page=''
+# The page the demo serves, which its answer through an edge must be, byte for byte. Both stay in
+# files: a shell variable would drop a NUL and say so.
 page_read=0
-if page=$(kubectl get configmap hello --namespace=demo --output='jsonpath={.data.index\.html}' --request-timeout=10s 2> /dev/null); then
+if kubectl get --output='jsonpath={.data.index\.html}' --request-timeout=10s configmap --namespace=demo -- hello > "$tmp/expected" 2> /dev/null; then
   page_read=1
 fi
 
 # edges: each edge router's name and floating address, "NAME ADDRESS" per line, from the edge
-# stack's outputs (edge_load): returns 2 when the stack has none, as before it is applied, and 1
-# when they cannot be read. Run in a subshell, so the stack's environment and lock stay in it; the
-# addresses go to the caller only.
+# stack's outputs (edge_load). Returns 2 when the stack has none, as before it is applied; 1 when
+# its environment or lock is not ready, which stack-env and lock_stack say in the repository's own
+# words; 3 when tofu init fails, 4 when tofu output does, and 5 when the outputs are not two edges.
+# tofu's errors can name the state backend's endpoint, its bucket or an address, so they go to the
+# stack's errors file, which git ignores, and never to the output. Run in a subshell, so the stack's
+# environment and lock stay in it, and the addresses go to the caller only.
 edges() {
   local outputs i
   # shellcheck source=scripts/stack-env
   . "$here/stack-env" sto2/edge || return 1
   lock_stack || return 1
-  init_stack || return 1
-  outputs=$(stack_tofu output -json) || return 1
+  # shellcheck disable=SC2154 # scripts/stack-env sets errors_file
+  init_stack 2>> "$errors_file" || return 3
+  outputs=$(stack_tofu output -json 2>> "$errors_file") || return 4
   jq -e '(.addresses.value // []) | length > 0' <<< "$outputs" > /dev/null || return 2
-  edge_load || return 1
+  edge_load 2>> "$errors_file" || return 5
   for i in 0 1; do
     printf '%s %s\n' "${edge_names[i]}" "${edge_addresses[i]}"
   done
@@ -329,7 +409,7 @@ check_edge() {
   if ((status != 0)); then
     result FAIL "$edge http" "no answer on port 80 (curl exit $status)"
   elif [[ $code != 301 ]]; then
-    result FAIL "$edge http" "plain HTTP for hello answered $code, not 301"
+    result FAIL "$edge http" "plain HTTP for hello answered $(shown "$code"), not 301"
   elif [[ $location != "https://$host$probe_path" ]]; then
     result FAIL "$edge http" "plain HTTP for hello is sent elsewhere than https on the same host and path"
   else
@@ -341,7 +421,7 @@ check_edge() {
     result skip "$edge certificate names" "no certificate of the cluster's CA to verify with"
   else
     status=0
-    answer=$(request "$edge_address" 443 "$host" / "$tmp/page" '%{http_code}\n%{certs}' --cacert "$ca_file") || status=$?
+    answer=$(request "$edge_address" 443 "$host" / "$tmp/page" '%{http_code}\n%{certs}' "${trust[@]}") || status=$?
     code=${answer%%$'\n'*}
     certs=${answer#*$'\n'}
     if ((status == 0)); then
@@ -371,34 +451,46 @@ check_edge() {
   if ((!page_read)); then
     result FAIL "$edge hello" "kubectl could not read the page of demo/hello to compare with"
   elif [[ $code != 200 ]]; then
-    result FAIL "$edge hello" "the demo answered $code, not 200"
-  elif [[ $(< "$tmp/page") != "$page" ]]; then
+    result FAIL "$edge hello" "the demo answered $(shown "$code"), not 200"
+  elif [[ $(sha256sum < "$tmp/page") != "$(sha256sum < "$tmp/expected")" ]]; then
     result FAIL "$edge hello" "the demo answered 200 with another page than its ConfigMap's"
   else
     result pass "$edge hello" "the demo answers 200 with its page"
   fi
   status=0
-  answer=$(request "$edge_address" 443 "$unrouted.$domain" / /dev/null '%{http_code}' --cacert "$ca_file") || status=$?
+  answer=$(request "$edge_address" 443 "$unrouted.$domain" / /dev/null '%{http_code}' "${trust[@]}") || status=$?
   if ((status != 0)); then
     result FAIL "$edge unrouted host" "no verified answer for a host no route serves (curl exit $status)"
   elif [[ $answer != 404 ]]; then
-    result FAIL "$edge unrouted host" "a host under the domain that no route serves answered $answer, not 404"
+    result FAIL "$edge unrouted host" "a host under the domain that no route serves answered $(shown "$answer"), not 404"
   else
     result pass "$edge unrouted host" "a host under the domain that no route serves answers 404"
   fi
 }
 
 step="checking through the edge routers"
+# The cluster's CA alone: its certificate, and curl's place for more authorities left empty, so that
+# neither a CA path curl was built with nor one of the system's verifies an answer.
+trust=(--cacert "$ca_file" --capath "$tmp/no-authorities")
 if [[ -z $domain ]]; then
   result skip edges "no CLUSTER_DOMAIN from cluster-config to ask for, so no edge is checked"
 else
   edges_status=0
   listing=$(edges) || edges_status=$?
-  if ((edges_status == 2)); then
-    result skip edges "the edge stack sto2/edge has no outputs: it is not applied, so no edge is checked"
-  elif ((edges_status != 0)); then
-    result FAIL edges "the edge stack's outputs could not be read, for the reason above"
-  else
+  # Where tofu's errors went, as stack-env names the file, relative to the repository.
+  errors_log=infra/openstack/stacks/sto2/edge/.terraform/tofu-errors.log
+  unread="the edge stack's outputs could not be read"
+  case $edges_status in
+    2) result skip edges "the edge stack sto2/edge has no outputs: it is not applied, so no edge is checked" ;;
+    1) result FAIL edges "$unread: its environment or its lock is not ready, as said above" ;;
+    3 | 4)
+      failed=init
+      ((edges_status == 3)) || failed=output
+      result FAIL edges "$unread: tofu $failed failed, and its errors are in $errors_log; just infra-plan sto2/edge shows them"
+      ;;
+    5) result FAIL edges "$unread: they are not two edges' names and addresses, as $errors_log says" ;;
+  esac
+  if ((edges_status == 0)); then
     mapfile -t listed <<< "$listing"
     for entry in "${listed[@]}"; do
       check_edge "${entry%% *}" "${entry#* }"
@@ -406,6 +498,7 @@ else
   fi
 fi
 
+reported=1
 if ((failures > 0)); then
   infra_error "$failures of $checks checks failed"
   exit 1

@@ -45,6 +45,12 @@ EOF
   cp "$BATS_TEST_DIRNAME/fixtures/gateway-check/kubectl" "$BATS_TEST_DIRNAME/fixtures/gateway-check/curl" "$BIN/"
   fake tofu << EOF
 printf '%s\n' "tofu \$*" >> "$RECORD/argv"
+# tofu's own error, when STATE/tofu-fails names the command, names the backend's bucket and an
+# address, as one from an unreachable backend or expired credentials does.
+if [[ \${2-} == "\$(cat "$STATE/tofu-fails" 2> /dev/null)" ]]; then
+  echo "Error: Failed to get existing workspaces: bucket marker-state-bucket-name at https://198.51.100.77:443: connection refused" >&2
+  exit 1
+fi
 case \${2-} in
   init) ;;
   output) if [[ -e "$STATE/no-edge-outputs" ]]; then echo '{}'; else cat "$BATS_TEST_TMPDIR/outputs.json"; fi ;;
@@ -110,7 +116,7 @@ nothing_secret() {
     echo "an address is printed" >&2
     return 1
   fi
-  if grep -nE 'example\.(com|org)|MARKER|PRIVATE|BEGIN CERTIFICATE|fixture message|curl: \(|Unable to connect' <<< "$output"; then
+  if grep -nE 'example\.(com|org)|MARKER|PRIVATE|BEGIN CERTIFICATE|fixture message|curl: \(|jq: |Unable to connect' <<< "$output"; then
     echo "a host name, the CA's Secret or a tool's error is printed" >&2
     return 1
   fi
@@ -138,13 +144,16 @@ calls() {
   [ "$(calls '^kubectl ' | grep -vc '^kubectl get ')" -eq 0 ]
   [ "$(calls '^kubectl ' | grep -vc -- ' --request-timeout=10s')" -eq 0 ]
   # The CA's public certificate only: the one key's path, never the Secret whole or its private key.
-  [ "$(calls '^kubectl get secret ')" = 'kubectl get secret cluster-ca --namespace=cert-manager --output=jsonpath={.data.tls\.crt} --request-timeout=10s' ]
+  [ "$(calls '^kubectl get .* secret ')" = 'kubectl get --output=jsonpath={.data.tls\.crt} --request-timeout=10s secret --namespace=cert-manager -- cluster-ca' ]
+  # Every name reaches kubectl after --, where it cannot be taken for a flag.
+  [ "$(calls '^kubectl get ' | grep -vE ' (services|pods|certificates\.cert-manager\.io|namespaces|httproutes\.gateway\.networking\.k8s\.io) ' | grep -vc ' -- [a-z]')" -eq 0 ]
   # Every request through an edge's address, with no configuration file, proxy or redirect followed,
   # bounded in time; every HTTPS one verifies against the CA's certificate.
   [ "$(calls '^curl ' | wc -l)" -eq 6 ]
   [ "$(calls '^curl ' | grep -vcE '^curl --disable .* --connect-timeout [0-9]+ --max-time [0-9]+ ')" -eq 0 ]
+  [ "$(calls '^curl ' | grep -vcF -- ' --noproxy * ')" -eq 0 ]
   [ "$(calls '^curl ' | grep -cE -- ' (-k|--insecure|-L|--location)( |$)')" -eq 0 ]
-  [ "$(calls '^curl .*https://' | grep -vc -- ' --cacert ')" -eq 0 ]
+  [ "$(calls '^curl .*https://' | grep -vcE -- ' --cacert [^ ]+ --capath [^ ]+ ')" -eq 0 ]
   for edge in 203.0.113.51 203.0.113.52; do
     [ "$(calls "^curl .* --resolve hello\.example\.com:80:$edge .* http://hello\.example\.com/gateway-check$" | wc -l)" -eq 1 ]
     [ "$(calls "^curl .* --resolve hello\.example\.com:443:$edge .* https://hello\.example\.com/$" | wc -l)" -eq 1 ]
@@ -160,11 +169,14 @@ calls() {
   local condition file content expected check
   # Each: the state file and its content, and the lines it fails.
   local -a conditions=(
+    'no-config||cluster-config'
+    'not-accepted||Gateway'
     'not-programmed||Gateway'
     'other-address||Gateway address'
     'service-cluster-ip||proxy Service'
     'service-unlabelled||proxy Service'
     'service-pending||proxy Service address'
+    'two-services||proxy Service,proxy Service address'
     'one-proxy||proxies'
     'proxies-one-node||proxies'
     'certificate-not-ready||certificate'
@@ -180,6 +192,7 @@ calls() {
     'wrong-names||lab-edge-1 TLS,lab-edge-1 certificate names,lab-edge-2 TLS,lab-edge-2 certificate names'
     'hello-status|503|lab-edge-1 hello,lab-edge-2 hello'
     'hello-page|other page|lab-edge-1 hello,lab-edge-2 hello'
+    'no-page||lab-edge-1 hello,lab-edge-2 hello'
     'unrouted-status|200|lab-edge-1 unrouted host,lab-edge-2 unrouted host'
     'edge-down.203.0.113.52||lab-edge-2 http,lab-edge-2 TLS'
   )
@@ -200,7 +213,8 @@ calls() {
         [ "$(verdict "$check")" != FAIL ] || { echo "$output"; echo "failed as well: $check"; return 1; }
       fi
     done
-    [[ $output == *"gateway-check: $(tr ',' '\n' <<< "$expected" | wc -l) of ${#LINES[@]} checks failed"* ]] || { echo "$output"; return 1; }
+    [[ $output == *"gateway-check: $(tr ',' '\n' <<< "$expected" | wc -l) of $(grep -cE '^(pass|FAIL|skip)  ' <<< "$output") checks failed"* ]] ||
+      { echo "$output"; return 1; }
   done
 }
 
@@ -221,8 +235,27 @@ calls() {
   nothing_secret
 }
 
-@test "gateway-check fails the edge line, naming why, when the edge stack's outputs cannot be read" {
+@test "gateway-check fails the edge line, naming why, when the edge stack's outputs cannot be read, and prints none of tofu's errors" {
   local -a kept=()
+  local failing
+  # tofu cannot reach the backend, at its init or at its output: its errors, which name the bucket
+  # and an address, go to the stack's errors file, which the line names.
+  for failing in init output; do
+    echo "$failing" > "$STATE/tofu-fails"
+
+    recipe
+
+    echo "$output"
+    [ "$status" -ne 0 ]
+    [ "$(line_of edges)" = "FAIL  edges: the edge stack's outputs could not be read: tofu $failing failed, and its errors are in infra/openstack/stacks/sto2/edge/.terraform/tofu-errors.log; just infra-plan sto2/edge shows them" ]
+    [[ $output != *marker-state-bucket-name* && $output != *Error:* ]]
+    grep -q marker-state-bucket-name "$REPO/infra/openstack/stacks/sto2/edge/.terraform/tofu-errors.log"
+    [ -z "$(calls '^curl ')" ]
+    nothing_secret
+  done
+
+  # Without what the stack needs, stack-env says what is missing, in the repository's words.
+  rm "$STATE/tofu-fails"
   for entry in "${ENVIRONMENT[@]}"; do
     [[ $entry == TF_STATE_BUCKET=* ]] || kept+=("$entry")
   done
@@ -232,7 +265,7 @@ calls() {
 
   echo "$output"
   [ "$status" -ne 0 ]
-  [[ $(line_of edges) == "FAIL  edges: the edge stack's outputs could not be read"* ]]
+  [ "$(line_of edges)" = "FAIL  edges: the edge stack's outputs could not be read: its environment or its lock is not ready, as said above" ]
   [[ $output == *TF_STATE_BUCKET* ]]
   [ -z "$(calls '^curl ')" ]
   nothing_secret
@@ -251,5 +284,59 @@ calls() {
   [ "$(verdict proxies)" = FAIL ]
   [ "$(verdict certificate)" = FAIL ]
   [ "$(verdict routes)" = FAIL ]
+  nothing_secret
+}
+
+@test "gateway-check neither prints a name from the cluster that is not a valid name nor hands it to kubectl" {
+  local file name
+  # A name that would break the line or forge another, drive the terminal, or become kubectl's flag.
+  local -a names=($'cluster-ca\nFAIL  injected: every line passes' $'\e]0;forged title\a\e[31mred' '-o=yaml'
+    '--kubeconfig=/tmp/elsewhere' $'cluster-ca\n')
+  for file in issuer-name ca-secret-name; do
+    for name in "${names[@]}"; do
+      find "$STATE" -mindepth 1 -delete
+      : > "$RECORD/argv"
+      printf '%s' "$name" > "$STATE/$file"
+
+      recipe
+
+      echo "$output"
+      [ "$status" -ne 0 ]
+      [[ $(line_of 'cluster CA') == "FAIL  cluster CA: "*"is not a valid name" ]]
+      nothing_secret
+      [[ $output != *injected* && $output != *forged* && $output != *-o=yaml* && $output != *elsewhere* ]]
+      [ "$(LC_ALL=C grep -c $'[\x01-\x08\x0b-\x1f\x7f]' <<< "$output")" -eq 0 ]
+      [ "$(grep -c '^FAIL  injected' <<< "$output")" -eq 0 ]
+      if [[ $file == issuer-name ]]; then
+        [ -z "$(calls 'clusterissuers')" ]
+      fi
+      [ -z "$(calls ' secret ')" ]
+      [ -z "$(calls 'injected|forged|yaml|elsewhere')" ]
+    done
+  done
+}
+
+@test "gateway-check compares the demo's page byte for byte, a NUL among them, without a warning" {
+  printf 'hel\0lo\n' > "$STATE/hello-page"
+
+  recipe
+
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [ "$(verdict 'lab-edge-1 hello')" = FAIL ]
+  [ "$(verdict 'lab-edge-2 hello')" = FAIL ]
+  [[ $output != *warning* && $output != *"null byte"* ]]
+  [ "$(grep -cvE '^(pass|FAIL|skip)  |^gateway-check: |^error: recipe ' <<< "$output")" -eq 0 ]
+}
+
+@test "gateway-check names the step it failed in when an answer cannot be read, and leaves nothing behind" {
+  : > "$STATE/gateway-garbage"
+
+  recipe
+
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"gateway-check: failed while checking the Gateway"* ]]
+  [ -z "$(find "$WORK" -mindepth 1)" ]
   nothing_secret
 }

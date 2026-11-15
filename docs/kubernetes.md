@@ -921,15 +921,15 @@ kind CA, that signs with that Secret. The application names `cert-manager` in `d
 `dependsOn` finds an issuer that signs. The bootstrap issuer is namespaced, so no other namespace
 can ask it for a certificate.
 
-This is an interim authority, and the docs say what it is: it is made in the cluster, its private
-key is in a Secret in `cert-manager`, and no tree file holds a key; nothing outside the cluster
-trusts it; and it is lost with the cluster, as a rebuilt cluster makes a new one, which a client
-that had been given the old one must be given again. It is not the decision of ADR 0006, which
-stands unamended: the public certificate comes from the Let's Encrypt DNS-01 issuer of that record
-when its story lands, and each `Certificate` that names `cluster-ca` then changes its `issuerRef`,
-one place for the Gateway's ([The public Gateway](#the-public-gateway)). `tests/gateway.bats` checks
-the three objects, the Gateway's certificate against them, and that neither application's build
-holds a Secret nor its directory a private key; `secrets-scan` covers the rest of the tree.
+This is an interim authority: it is made in the cluster, its private key is in a Secret in
+`cert-manager`, and no tree file holds a key; nothing outside the cluster trusts it; and it is lost
+with the cluster, as a rebuilt cluster makes a new one, which a client that had been given the old
+one must be given again. It is not the decision of ADR 0006, which stands unamended: the public
+certificate comes from the Let's Encrypt DNS-01 issuer of that record when its story lands, and each
+`Certificate` that names `cluster-ca` then changes its `issuerRef`, one place for the Gateway's
+([The public Gateway](#the-public-gateway)). `tests/gateway.bats` checks the three objects, the
+Gateway's certificate against them, and that neither application's build holds a Secret nor its
+directory a private key; `secrets-scan` covers the rest of the tree.
 
 ## Autoscaling and reflection
 
@@ -1415,9 +1415,15 @@ cannot be listed without it: `just kubernetes-check` refuses the dependency.
 kubeconfig with `kubectl get`, then the edge stack's outputs for the edge routers' names and
 floating addresses, then requests through each edge with `curl --resolve`, as a client outside
 would make them once the names are in DNS. It prints pass, FAIL or skip and one line of why for
-each check, never an address, a host name under the domain or a tool's own errors, and exits 0 only
-when none fails. kubectl waits at most 10 seconds for an answer and curl 15, and curl reads no
-`.curlrc`, uses no proxy and follows no redirect. It needs curl 7.88 or newer.
+each check, and exits 0 only when none fails. It never prints an address, a host name under the
+domain or a tool's own errors: kubectl's and jq's go nowhere, and tofu's to the edge stack's
+errors file, `.terraform/tofu-errors.log` in its directory, which the line about the edges names.
+A name it reads from the cluster is printed, or handed to kubectl, only once it is a valid name of
+its kind, and always after `--`, so it cannot become a flag; any other text it shows from the
+cluster or an answer has its control characters replaced. kubectl waits at most 10 seconds for an
+answer and curl 15, and curl reads no `.curlrc`, uses no proxy and follows no redirect. It needs
+curl 7.88 or newer. A failure that is none of the checks, such as an answer it cannot read, names
+the step it happened in.
 
 - `cluster-config`: the ConfigMap holds `CLUSTER_DOMAIN` and `GATEWAY_ADDRESS`, which the lines
   below compare with. Without it, those lines are skipped.
@@ -1431,10 +1437,11 @@ when none fails. kubectl waits at most 10 seconds for an answer and curl 15, and
 - `proxies`: two proxies or more are Ready, on different nodes; a FAIL names the nodes.
 - `certificate`: the `Certificate` whose Secret the `https` listener serves is Ready.
 - `cluster CA`: the authority's certificate is read: `tls.crt` of the Secret the `ClusterIssuer`
-  the `Certificate` names signs with, in `cert-manager`, by a path that names that key alone, so
-  the private key beside it is never asked for. cert-manager's own documentation calls the
-  `ca.crt` of an issued Secret a best guess, while the issuer's `tls.crt` is the authority's
-  certificate itself. It is kept in a file of the run, never printed, and removed at its end.
+  the `Certificate` names signs with, in `cert-manager`. kubectl receives the whole Secret from the
+  API server and prints only that key, through a jsonpath that names it; the recipe never prints
+  or writes the private key. cert-manager's own documentation calls the `ca.crt` of an issued
+  Secret a best guess, while the issuer's `tls.crt` is the authority's certificate itself. The
+  certificate is kept in a file of the run, never printed, and removed at its end.
 - `routes`: no `HTTPRoute` is Accepted on `public` from a namespace without
   `k8s-gitops/gateway: public`, but for the redirect in the Gateway's own namespace; a FAIL names
   the routes. A route in such a namespace is reported by the controller as not accepted, which is
@@ -1448,7 +1455,9 @@ says they are skipped, and it fails when they cannot be read:
   `Location` is `https://hello.${CLUSTER_DOMAIN}/gateway-check`: the same host and path, the
   default port. Any other status or place fails.
 - `<edge> TLS`: HTTPS on 443 for `hello.${CLUSTER_DOMAIN}` verifies against the authority's
-  certificate alone, the chain and the name, as curl verifies them.
+  certificate alone, the chain and the name, as curl verifies them. curl trusts what is in its CA
+  path as well as the file `--cacert` names, and some builds come with one, so the recipe also
+  gives it `--capath`, an empty directory of the run.
 - `<edge> certificate names`: the certificate served names `hello.${CLUSTER_DOMAIN}`, read from
   what curl shows of it. When TLS fails, this line says whether the names are the cause or the
   chain is.
