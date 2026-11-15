@@ -166,6 +166,11 @@ Feature: Infrastructure state and stack recipes
     When a second one starts on the same stack
     Then it exits non-zero saying the stack is busy
 
+  Scenario: A stack whose lock cannot be taken fails naming it and runs nothing
+    Given a stack whose .terraform is no directory, so its lock file cannot be made
+    When infra-plan or infra-destroy runs on it
+    Then it exits non-zero saying it cannot lock the stack and where, without an unbound-variable error, and tofu runs nothing on that stack
+
   Scenario: Apply asks before it applies the saved plan
     Given a stack with changes to apply
     When infra-apply runs without confirmation

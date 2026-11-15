@@ -15,8 +15,13 @@ Feature: CI host
 
   Scenario: The CI host survives a destroy of the cluster stack and is destroyed only by name
     Given the ci stack beside the cluster and plumbing stacks
-    When just infra-destroy runs without a stack, and with sto2/cluster
-    Then neither touches the ci stack, which reads no state but the plumbing stack's, and just infra-destroy sto2/ci destroys the ci stack alone once its name is typed back
+    When just infra-destroy sto2/cluster runs, and just infra-destroy sto2/ci
+    Then the first does not touch the ci stack, which reads no state but the plumbing stack's, and the second destroys the ci stack alone once its name is typed back
+
+  Scenario: The plumbing stack is not destroyed while another stack still has resources on its network
+    Given the state of the ci stack, of the cluster stack, or of both holding resources, and states holding none, only data sources, or no state at all
+    When just infra-destroy runs without a stack, and with sto2/plumbing
+    Then while the ci stack or, with sto2/plumbing, the cluster stack holds a resource, it plans nothing, destroys nothing and exits non-zero naming the recipe that destroys that stack, without a resource's address; with the cluster stack's resources alone and no stack named, the cluster stack is destroyed first and then the plumbing stack; with no resources the plumbing stack is destroyed
 
   Scenario: The engine's cache is on a volume of its own
     Given the default cache volume size

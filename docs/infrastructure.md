@@ -41,16 +41,31 @@ them is a `just` recipe.
 - `just infra-destroy` destroys `sto2/cluster`, then `sto2/plumbing`. Each destroy is planned and
   summarised first, and runs once the stack's name is typed back; `just infra-destroy --yes` does
   not ask. When the cluster stack is not destroyed, the plumbing stack is left as it is. The load
-  balancers and volumes the cluster creates itself, outside OpenTofu, are not removed, and the
-  recipe says so; while any are left, the plumbing network cannot be deleted. Once the cluster
-  stack is destroyed, the recipe removes the files generated for its cluster that hold the nodes'
-  and the API's addresses, which the cloud may give to someone else: `talos/<cluster>/talman.yaml`
+  balancers and volumes the cluster creates itself, outside OpenTofu, are not in the stack's state,
+  so its destroy would leave them in the cloud, where they keep the plumbing network from being
+  deleted. So before it plans the cluster stack's destroy, whichever way it is asked for, the
+  recipe asks the cluster, through its kubeconfig, for them, as `just cluster-destroy` does
+  ([cluster.md](cluster.md#recipes) says what it lists and counts): while the cluster owns any, or
+  cannot be asked, nothing is destroyed, unless `--unreachable` is given. A cluster stack whose
+  state holds no resource, destroyed already or never applied, is not asked and is skipped with a
+  line saying so, so a re-run ends as the first run did; a state that cannot be read, or that is
+  not a state, refuses the run, and so does one whose lock cannot be taken. Once the cluster stack
+  is destroyed, the recipe removes the files generated for its cluster that hold the nodes' and the
+  API's addresses, which the cloud may give to someone else: `talos/<cluster>/talman.yaml`
   and the talosconfig and kubeconfig in its `clusterconfig/`. It names each file it removes and
   removes only files git ignores; the secrets bundle and etcd snapshots stay.
   `just infra-destroy sto2/cluster`, or `sto2/plumbing`, destroys that stack only, the same way.
   `just cluster-destroy` ([cluster.md](cluster.md#recipes)) destroys the cluster stack so, once the
   cluster owns none of those load balancers and volumes. The `ci` stack is destroyed by its name
   only, `just infra-destroy sto2/ci`, the same way; `just infra-destroy` without a stack leaves it.
+  The plumbing stack's subnet and router interface cannot be removed while a port or a floating IP
+  of another stack uses them, so a run that would destroy the plumbing stack, with no stack or with
+  `sto2/plumbing`, first reads the state of every other stack of its region that the run does not
+  destroy before it, and plans and destroys nothing while one holds a resource: it exits non-zero
+  naming that stack and the recipe that destroys it, `just infra-destroy sto2/ci` or
+  `just cluster-destroy`, and prints no resource's address. A stack that was never applied, or holds
+  data sources only, holds nothing; a state that cannot be read, for any reason, refuses the run
+  too.
 - `just ci-host-setup` and `just ci-host-remove` set up and deregister the CI host's runner
   ([runbooks/ci-host.md](runbooks/ci-host.md)).
 - `just os-images [pattern]` lists, reading only, the names of the public images the cloud offers,
@@ -66,7 +81,8 @@ them is a `just` recipe.
 
 Apply `plumbing` before `cluster`, `ci` and `edge`, as all three read the plumbing stack's state.
 Destroy goes the other way round: `ci` and `edge` by name, before `plumbing`, whose network their
-ports are on. `just infra-destroy sto2/edge` destroys the edge stack the same way as the ci stack;
+ports are on, and which the recipe refuses to destroy while the `ci` or the `edge` stack holds
+anything. `just infra-destroy sto2/edge` destroys the edge stack the same way as the ci stack;
 `just infra-destroy` without a stack leaves both. State objects stay in the bucket after a destroy.
 
 ## Before the first plan
@@ -98,7 +114,14 @@ storage container or an S3 bucket.
   printed. Nothing is created while `.env` is a symlink or a file git does not ignore, or while one
   of the names there holds a value; a name that is empty or a placeholder is filled in, an absent
   one is appended after a comment, and every other line stays as it is. `.env` is written to a
-  temporary file beside it, mode 0600, and renamed into place.
+  temporary file beside it, mode 0600, and renamed into place. When the client fails, the recipe
+  shows the reason it gave, a few lines at most, after each line has passed through the filter
+  `redact_stream` in `scripts/lib/errors.sh`: the values of the variables that hold keys, the bucket
+  prefix, the endpoint and the cloud's address are replaced as written, and every URL, address, host
+  name with a dot in it and long token by pattern, so an unauthorized request and a name that does
+  not resolve read differently without naming the endpoint, a project or a request. With `CI` set
+  none of the client's words is shown: they go to `.env.infra-s3-key.errors` beside `.env`, which
+  git ignores, and only its name is printed.
 - `just infra-backup-buckets` creates the four buckets unless they exist, through the object
   storage's S3 API with the state key, and names each by its role, never by its name. A second run
   creates nothing. A name another project owns fails, naming the role.
@@ -113,10 +136,12 @@ why state and snapshots are encrypted before they are uploaded
 These recipes, `just infra-state-bucket` and the etcd snapshot recipes `just cluster-snapshot`,
 `cluster-snapshots` and `cluster-restore` ([cluster.md](cluster.md#recipes)) reach the object
 storage with rclone, pinned in `mise.toml`, at the endpoint, region and addressing that
-`infra/openstack/backend.hcl` gives OpenTofu's state. rclone is configured through its environment only and reads no config file; the
-operator's own rclone configuration, its `RCLONE_` and `AWS_` variables and every other variable
-but `PATH`, `HOME`, `TMPDIR` and the proxy variables stay out of its environment. What rclone
-prints names the buckets and the endpoint, so it is not shown.
+`infra/openstack/backend.hcl` gives OpenTofu's state. rclone is configured through its environment
+only and reads no config file; the operator's own rclone configuration, its `RCLONE_` and `AWS_`
+variables and every other variable but `PATH`, `HOME`, `TMPDIR` and the proxy variables stay out of
+its environment. What rclone prints names the buckets and the endpoint, so it is not shown; of its
+errors the etcd recipes show the reason only, with places and keys replaced, as
+[cluster.md](cluster.md#what-the-recipes-print) says.
 
 ## The node subnet
 
@@ -218,7 +243,66 @@ the node network carry the range:
   6443 from the whole node subnet, for the API load balancer's connections to the API servers, and
   the edge addresses are on that subnet. In total, then, an edge router reaches the service ports
   on the workers, through the workers' group, and TCP 6443 on every node, which only control
-  planes answer; nothing else.
+  planes answer; nothing else. Behind the groups, every node's own firewall admits no listener from
+  an edge address, the Kubernetes API included ([cluster.md](cluster.md#sources)).
+
+## The nodes' security group
+
+The cluster stack's nodes share one security group (`infra/openstack/modules/talos-nodes`), an outer
+ring around the firewall every node keeps itself ([cluster.md](cluster.md#the-node-firewall), ADR
+0017). The variable `security_group_rules`, through `TF_VAR_security_group_rules` in `.env` or the
+environment, selects what the outer ring holds:
+
+- `full`, the default: the nodes' group admits everything between the nodes; TCP 50000 (Talos) and
+  6443 (Kubernetes) from each network of the operator allowlist and from each node's floating
+  address, as a node that reaches another node's floating address arrives from its own; TCP 6443
+  from the node subnet, where the API load balancer connects from; and TCP 50000 and 6443 from the
+  CI host once `ci_host_number` is set ([The CI host](#the-ci-host)). Nothing else is admitted to a
+  control plane from outside the nodes, and to a worker nothing else but what its own group admits.
+- `reduced`: the same, and the control planes get a group of their own, `<prefix>-controlplanes`,
+  with no egress rule, that admits every other TCP and UDP port and ICMP from all addresses but two
+  ranges, which stay closed to everything outside the nodes and the rules above. The control
+  planes' own firewall filters the rest. What it keeps is what a node cannot do for itself:
+  - TCP 50000, the Talos API: a node that has no machine configuration yet, in maintenance mode, has
+    no firewall and takes a configuration from anyone who reaches its Talos API.
+  - TCP and UDP 30000-32767, Kubernetes' NodePort range: Cilium serves a NodePort from its eBPF
+    datapath before the node's firewall sees the packet.
+
+  The workers get nothing more. A rule matches a packet's protocol, port and source, never its
+  destination, and a worker's port carries the service range, whose addresses Cilium serves before
+  the worker's firewall sees the packet: open on a worker, every port of a Service's load-balancer
+  address would be too, to the edge routers and whatever they forward. The workers therefore keep
+  the nodes' group as it is and their own group ([Services announced over BGP](#services-announced-over-bgp)),
+  which admits the edge routers to the service ports and nothing else, with either set.
+
+  Neither set changes the nodes' group or the workers' group, so a switch either way adds or
+  removes the control planes' group, its six rules and its place on their ports, and no apply
+  leaves the Talos API open. Cilium serves a pod's host port the same way as a NodePort, outside
+  that range, so `reduced` suits a cluster where no pod on a control plane declares a host port: Pod
+  Security forbids them at the baseline level, which Talos enforces wherever a namespace sets no
+  other, and only `kube-system`, `monitoring` and `piraeus-datastore` allow them, where the one pod
+  with a host port, node-exporter, runs on the host network, where its port is the node's own and
+  the firewall filters it. What else Cilium serves before the firewall, and what controls each, is
+  in [cluster.md](cluster.md#what-the-firewall-does-not-see).
+
+  With `reduced`, the control planes' group admits an edge router too, on every port it opens to
+  all; the control planes' own firewall admits no listener from it, and a control plane carries no
+  service range.
+
+  What keeps a packet for a service address from being served on a control plane, where `reduced`
+  opens the ports Cilium would serve it on: control planes announce nothing, as `cilium-bgp`
+  selects workers only (`tests/install-cilium.bats` holds it), so no route leads such a packet to
+  them, and their ports carry no allowed address pair for the service range (the cluster stack's
+  tests hold it), so port security does not pass it to them either. A Service's external addresses,
+  which Cilium serves on any node, are refused at admission when new (`DenyServiceExternalIPs`,
+  [cluster.md](cluster.md#what-the-firewall-does-not-see)), but one a Service already holds is
+  kept, so `reduced` suits a cluster where no Service holds one, as no Service under `kubernetes/`
+  does.
+
+Planning with `full` changes no rule of a running cluster. The stack's tests check it offline, for
+the rules' content and their resource addresses, which a plan would replace a rule over; the rest of
+that proof is `just infra-plan sto2/cluster` against the running cluster, which must plan no change
+to a resource.
 
 ## The CI host
 
@@ -523,7 +607,10 @@ balancer's floating address as `values.apiAddress`, where the cluster recipes re
 API ([cluster.md](cluster.md#environment)); the plumbing stack's service range as
 `values.serviceRange` and its AS numbers and edge addresses as `values.bgp`, which
 `just cluster-config` hands to the cluster ([Services announced over BGP](#services-announced-over-bgp));
-and the nodes,
+the rules of the nodes' firewall for each role as `values.firewall`, from the listeners in
+`talos/firewall.yaml` with the operator allowlist, `api_allowed_cidrs`, the subnets, the nodes'
+floating addresses and their fixed addresses ([cluster.md](cluster.md#the-node-firewall)); and the
+nodes,
 control planes first and then workers, each by name and at its floating address, where talman
 reaches it. Planning fails, naming the variable, when the pod or service subnet is not an IPv4
 network, overlaps the other or the node subnet, or when the pod subnet holds fewer /24s than there
@@ -641,6 +728,8 @@ docker of `vector-check` has only the scan.
   may reach the edges' public ports, a JSON list of IPv4 CIDRs, unset for the operator allowlist.
   `EDGE_ROLLOUT_WAIT` and `EDGE_ROLLOUT_INTERVAL`: how long `just edge-rollout` waits for an edge to
   pass its check, 900 seconds when unset, and how often it tries, 15.
+- `TF_VAR_security_group_rules`: the cluster stack's `security_group_rules`, `full` unless set to
+  `reduced` ([The nodes' security group](#the-nodes-security-group)).
 - `CI`: when set, tofu's errors go to a file instead of the output; see below.
 
 ## State

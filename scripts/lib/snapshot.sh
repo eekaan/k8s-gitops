@@ -16,7 +16,9 @@
 #      object's name and its size.
 # Nothing is left on disk, whether the run succeeds, fails or is interrupted: make_private_dir's EXIT
 # trap removes the directory. Neither talman's nor rclone's output is printed: they name the control
-# plane's address, the bucket and the endpoint. Builds on scripts/lib/cluster.sh and scripts/lib/s3.sh.
+# plane's address, the bucket and the endpoint. Of rclone's errors only the reason is shown, with
+# places and keys replaced, and with CI set none of it, but the name of the file that keeps it
+# (scripts/lib/errors.sh). Builds on scripts/lib/cluster.sh and scripts/lib/s3.sh.
 
 # shellcheck source=scripts/lib/cluster.sh
 . "$(dirname "${BASH_SOURCE[0]}")/cluster.sh"
@@ -38,6 +40,8 @@ require_snapshot() {
 prepare_snapshot() {
   s3_bucket_name_ok BACKUP_BUCKET_PREFIX prefix || return 1
   s3_require_client || return 1
+  # shellcheck disable=SC2154 # scripts/cluster-env sets cluster_dir
+  start_errors_log "$cluster_dir/clusterconfig/${0##*/}.errors.log"
   snapshot_recipient=$(sops_recipient)
   if [[ ! $snapshot_recipient =~ ^age1[0-9a-z]+$ ]]; then
     infra_error "talos/.sops.yaml does not name exactly one age recipient"
@@ -70,7 +74,7 @@ take_etcd_snapshot() {
   step="checking that the etcd bucket holds no $name of $cluster yet"
   # Two snapshots taken in the same second share a name, and an upload replaces an object. Without
   # the bucket there is nothing to replace, and the upload below fails without making one.
-  listing=$(s3_etcd_snapshots "$cluster") || list_status=$?
+  listing=$(s3_etcd_snapshots "$cluster" missing-bucket-ok) || list_status=$?
   if ((list_status != 0 && list_status != 3)); then
     infra_error "rclone cannot list the etcd bucket with the state key"
     return 1
@@ -83,8 +87,9 @@ take_etcd_snapshot() {
   done <<< "$listing"
 
   step="uploading the encrypted snapshot to the etcd bucket"
-  if ! s3_rclone state copyto --s3-no-check-bucket "$encrypted" \
-    "store:$BACKUP_BUCKET_PREFIX-etcd/$cluster/$name" > /dev/null 2>&1; then
+  if ! run_keeping_errors s3_rclone state copyto --s3-no-check-bucket "$encrypted" \
+    "store:$BACKUP_BUCKET_PREFIX-etcd/$cluster/$name"; then
+    report_errors rclone
     infra_error "rclone cannot upload the snapshot with the state key; the etcd bucket must exist; just infra-backup-buckets creates it"
     return 1
   fi

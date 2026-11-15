@@ -62,6 +62,11 @@ override_resource {
   values = { id = "workers-group" }
 }
 
+override_resource {
+  target = module.nodes.openstack_networking_secgroup_v2.controlplanes
+  values = { id = "controlplanes-group" }
+}
+
 run "the_edge_addresses_and_the_service_range_overlap_nothing" {
   command = plan
 
@@ -314,6 +319,64 @@ run "the_edge_routers_can_reach_the_workers_for_bgp_and_for_service_traffic_and_
       if rule.port_range_min == 179 || rule.port_range_max == 179
     ]) == 0
     error_message = "No rule may open TCP 179, from any source: the workers open their BGP sessions themselves."
+  }
+}
+
+# The run above pins the workers' own group, and what an edge router reaches on a worker, with the
+# nodes' rules as they are by default. The reduced rules leave both as they are: what the reduced
+# set opens to all goes to the control planes alone, as a rule never matches a packet's destination
+# and would otherwise open every port of the service range on the workers, ahead of their firewall.
+run "the_workers_security_group_is_the_same_with_either_set_of_the_nodes_rules" {
+  command = plan
+
+  variables {
+    security_group_rules = "reduced"
+  }
+
+  assert {
+    condition = toset([
+      for rule in output.worker_security_group.ingress_rules : {
+        direction = rule.direction
+        ethertype = rule.ethertype
+        protocol  = rule.protocol
+        ports     = "${rule.port_range_min}-${rule.port_range_max}"
+        source    = rule.remote_ip_prefix
+      }
+      ]) == toset([
+      for pair in setproduct([80, 443], ["192.0.2.7/32", "192.0.2.8/32"]) : {
+        direction = "ingress"
+        ethertype = "IPv4"
+        protocol  = "tcp"
+        ports     = "${pair[0]}-${pair[0]}"
+        source    = pair[1]
+      }
+    ]) && length(output.worker_security_group.ingress_rules) == 4 && output.worker_security_group.delete_default_rules == true
+    error_message = "With the reduced set, the workers' own group must still admit TCP 80 and 443 from each edge address, once each, and nothing else, with no egress rule of its own."
+  }
+
+  assert {
+    condition = { for name, instance in output.instances : name => join(" ", sort(instance.port.security_group_ids)) if output.nodes[name].role == "worker" } == {
+      "lab-w-1" = "nodes-group workers-group"
+      "lab-w-2" = "nodes-group workers-group"
+      "lab-w-3" = "nodes-group workers-group"
+    }
+    error_message = "With the reduced set, every worker's port must carry the nodes' group and the workers' own group, and no other."
+  }
+
+  # Everything an edge router reaches on a worker, from either group a worker carries: the same as
+  # with the nodes' rules as they are by default.
+  assert {
+    condition = toset(concat(
+      [
+        for rule in output.security_group.ingress_rules : "nodes ${coalesce(rule.protocol, "any")} ${coalesce(rule.port_range_min, 0)}-${coalesce(rule.port_range_max, 65535)}"
+        if anytrue([for edge in ["192.0.2.7", "192.0.2.8"] : try(cidrcontains(rule.remote_ip_prefix, edge), false)])
+      ],
+      [
+        for rule in output.worker_security_group.ingress_rules : "workers ${coalesce(rule.protocol, "any")} ${coalesce(rule.port_range_min, 0)}-${coalesce(rule.port_range_max, 65535)}"
+        if anytrue([for edge in ["192.0.2.7", "192.0.2.8"] : try(cidrcontains(rule.remote_ip_prefix, edge), false)])
+      ],
+    )) == toset(["nodes tcp 6443-6443", "workers tcp 80-80", "workers tcp 443-443"])
+    error_message = "With the reduced set, an edge router may still reach a worker only on TCP 80 and 443 through the workers' own group and TCP 6443 through the nodes' rule for the node subnet."
   }
 }
 

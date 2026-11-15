@@ -1,0 +1,15 @@
+{
+  "format_version": "1.0",
+  "values": {
+    "root_module": {
+      "child_modules": [
+        {
+          "address": "module.fixture",
+          "resources": [
+            { "address": "module.fixture.openstack_compute_instance_v2.host", "mode": "managed", "type": "openstack_compute_instance_v2", "name": "host" }
+          ]
+        }
+      ]
+    }
+  }
+}
