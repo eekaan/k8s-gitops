@@ -107,6 +107,15 @@ collector_config() {
   [ "$(jq -r 'type' "$CONFIG")" = object ] || { echo "no vector.yaml in the ConfigMap $map"; return 1; }
 }
 
+# config_paths: every path from a source to a sink in the collector's configuration, one per line as
+# source>transform>…>sink; a name that is not a transform starts one. Needs collector_config first.
+config_paths() {
+  # shellcheck disable=SC2016 # $c, $n and $sink are jq variables.
+  jq -r 'def route($c): . as $n
+      | if $c.transforms[$n] == null then [$n] else ($c.transforms[$n].inputs // [])[] | route($c) + [$n] end;
+    . as $c | .sinks | to_entries[] | .key as $sink | .value.inputs[] | route($c) + [$sink] | join(">")' "$CONFIG"
+}
+
 # store_service: "name namespace port" of the rendered store's Service and the one port it serves,
 # whose target is the port the store listens on. Needs render victoria-logs first.
 store_service() {
@@ -312,8 +321,8 @@ defined_keys() {
   [ "$placement" = '{"nodeSelector":{},"affinity":{},"nodeName":""}' ]
 }
 
-@test "The collector ships every pod's logs and every Talos service's log to the store" {
-  local service name namespace port domain pods restricted files include sinks upstream source
+@test "The collector ships every pod's logs and every Talos service's log but the audit log to the store" {
+  local service name namespace port domain pods restricted files include sinks upstream source talos first last tests found
   render "$STORE"
   service="$(store_service)"
   echo "the store's Service: ${service:-none}"
@@ -352,6 +361,37 @@ defined_keys() {
   for source in "$pods" "$files"; do
     grep -qx -- "$source" <<<"$upstream" || { echo "$source does not reach the store"; return 1; }
   done
+  # Which of Talos's lines go on is decided on the one path from its source to the store, whose
+  # transforms Vector's unit tests run, as just vector-check does in just ci. For each service whose
+  # format the collector reads, as its transform names them, and udevd, whose lines have none, a test
+  # sends a line of its file in at the path's first transform and finds it, with its service's name,
+  # at the last; a test sends only the audit log's lines in there and finds none at the last. A line
+  # of the test's program counts, not a comment.
+  talos="$(config_paths | grep "^$files>")"
+  echo "the Talos path: ${talos:-none}"
+  [ "$(grep -c . <<<"$talos")" -eq 1 ]
+  first="${talos#*>}"
+  first="${first%%>*}"
+  last="${talos%>*}"
+  last="${last##*>}"
+  tests="$(yq -o json '.tests' "$REPO/tests/vector/talos-lines.yaml")"
+  for service in kernel machined apid trustd etcd containerd cri kubelet udevd; do
+    # shellcheck disable=SC2016 # $first, $last and $service are jq variables.
+    found="$(jq --arg first "$first" --arg last "$last" --arg service "$service" 'def lines: split("\n")[] | gsub("^\\s+|\\s+$"; "");
+      [.[] | select([.inputs[].insert_at] | unique == [$first])
+        | select(any(.inputs[].source | lines; . == ".file = \"/var/log/\($service).log\"" or . == ".file = \"/var/log/\($service).log.1\""))
+        | select(any((.outputs // [])[] | select(.extract_from == $last) | .conditions[].source | lines;
+            . == "assert_eq!(.talos_service, \"\($service)\")"))] | length' <<<"$tests")"
+    echo "$service: $found unit tests find its line at $last"
+    [ "$found" -ge 1 ]
+  done
+  # shellcheck disable=SC2016 # $first and $last are jq variables.
+  found="$(jq --arg first "$first" --arg last "$last" 'def lines: split("\n")[] | gsub("^\\s+|\\s+$"; "");
+    [.[] | select([.inputs[].insert_at] | unique == [$first])
+      | select(all(.inputs[]; any(.source | lines; . == ".file = \"/var/log/auditd.log\"" or . == ".file = \"/var/log/auditd.log.1\"")))
+      | select(any((.no_outputs_from // [])[]; . == $last))] | length' <<<"$tests")"
+  echo "auditd: $found unit tests find none of its lines at $last"
+  [ "$found" -ge 1 ]
 }
 
 @test "The collector ships nothing from the API server's audit log directory" {
@@ -984,15 +1024,17 @@ window_seconds() {
 
 # Vector's unit tests run the collector's transforms and cannot see a source or a sink, so what
 # reaches the store is what leaves the transforms its sink reads, given what the sources hand them.
-# Each source's events reach a sink along one path only: Talos's lines through talos_files and
-# drop_audit, the pods' records through pod_fields, and Vector's own metrics to its exporter. Each
-# scenario's unit test starts at the first transform of its path and watches the last, so what it
-# proves is what the store gets. The sources keep the field names they have by default, the ones
-# the unit tests' records carry: a pod's labels in kubernetes.pod_labels, its node's in
-# kubernetes.node_labels, and a Talos line's file in file and the reader's host in host.
+# Each source's events reach a sink along one path only: Talos's lines through talos_files,
+# drop_audit and drop_auditd_log, the pods' records through pod_fields, and Vector's own metrics to
+# its exporter. Each scenario's unit test starts at the first transform of its path and watches the
+# last, so what it proves is what the store gets. The sources keep the field names they have by
+# default, the ones the unit tests' records carry: a pod's labels in kubernetes.pod_labels, its
+# node's in kubernetes.node_labels, and a Talos line's file in file and the reader's host in host.
 @test "every Vector unit test the scenarios name is in tests/vector and runs a whole path to the store" {
-  local tests="$REPO/tests/vector/talos-lines.yaml" title paths
+  local tests="$REPO/tests/vector/talos-lines.yaml" title paths talos last
   for title in "Kernel audit records are dropped and counted" \
+    "The audit log's records of a permissive denial do not reach the store, and are counted" \
+    "No record of the audit log reaches the store, and a line of another service does" \
     "A pod's record carries the named labels and no field per other label"; do
     echo "$title"
     [ "$(title="$title" yq -N '[.tests[] | select(.name == strenv(title))] | length' "$tests")" -eq 1 ]
@@ -1001,29 +1043,50 @@ window_seconds() {
   render "$COLLECTOR"
   collector_config
   [ "$(jq -r '.transforms.drop_audit.type' "$CONFIG")" = filter ]
+  [ "$(jq -r '.transforms.drop_auditd_log.type' "$CONFIG")" = filter ]
   echo "settings that rename the sources' fields: $(jq -c '[.sources[] | to_entries[]
     | select((.key | test("annotation_fields$")) or .key == "file_key" or .key == "host_key")]' "$CONFIG")"
   [ "$(jq '[.sources[] | to_entries[]
     | select((.key | test("annotation_fields$")) or .key == "file_key" or .key == "host_key")] | length' "$CONFIG")" -eq 0 ]
-  # Every path from a source to a sink, source>transform>…>sink; a name that is not a transform
-  # starts one.
-  # shellcheck disable=SC2016 # $c, $n and $sink are jq variables.
-  paths="$(jq -r 'def route($c): . as $n
-      | if $c.transforms[$n] == null then [$n] else ($c.transforms[$n].inputs // [])[] | route($c) + [$n] end;
-    . as $c | .sinks | to_entries[] | .key as $sink | .value.inputs[] | route($c) + [$sink] | join(">")' "$CONFIG" | sort)"
+  paths="$(config_paths | sort)"
   echo "paths to the sinks: $(paste -sd' ' - <<<"$paths")"
-  [ "$paths" = "$(printf '%s\n' 'pods>pod_fields>victoria_logs' 'talos>talos_files>drop_audit>victoria_logs' \
+  [ "$paths" = "$(printf '%s\n' 'pods>pod_fields>victoria_logs' 'talos>talos_files>drop_audit>drop_auditd_log>victoria_logs' \
     'vector_metrics>prometheus' | sort)" ]
   echo "sinks: $(jq -r '.sinks | to_entries[] | "\(.key) \(.value.type)"' "$CONFIG" | paste -sd, -)"
   [ "$(jq -r '.sinks | to_entries[] | "\(.key) \(.value.type)"' "$CONFIG" | sort)" \
     = "$(printf '%s\n' 'prometheus prometheus_exporter' 'victoria_logs elasticsearch' | sort)" ]
-  title="Kernel audit records are dropped and counted"
-  [ "$(title="$title" yq -N '.tests[] | select(.name == strenv(title))
-    | ([.inputs[].insert_at] | unique) + [.outputs[].extract_from] + (.no_outputs_from // []) | join(" ")' "$tests")" \
-    = "talos_files drop_audit" ]
+  # The Talos scenarios start at its first transform and watch its last, whichever that is: the
+  # path's last transform is the one before the sink.
+  talos="$(grep '^talos>' <<<"$paths")"
+  [ "$(grep -c . <<<"$talos")" -eq 1 ]
+  last="${talos%>*}"
+  last="${last##*>}"
+  echo "the Talos path's last transform: $last"
+  for title in "Kernel audit records are dropped and counted" \
+    "The audit log's records of a permissive denial do not reach the store, and are counted" \
+    "No record of the audit log reaches the store, and a line of another service does"; do
+    [ "$(title="$title" yq -N '.tests[] | select(.name == strenv(title))
+      | ([.inputs[].insert_at] | unique) + [(.outputs // [])[].extract_from] + (.no_outputs_from // []) | join(" ")' "$tests")" \
+      = "talos_files $last" ]
+  done
   title="A pod's record carries the named labels and no field per other label"
   [ "$(title="$title" yq -N '.tests[] | select(.name == strenv(title))
     | [.inputs[].insert_at] + [.outputs[].extract_from] | join(" ")' "$tests")" = "pod_fields pod_fields" ]
+}
+
+@test "The store's own writes cannot add records to the store" {
+  local paths
+  render "$COLLECTOR"
+  collector_config
+  # The audit log is a file of the Talos source, so what it carries leaves that source through
+  # talos_files only. Every route from it to a sink is listed, and there is one, which ends in the
+  # filter whose discards Vector counts. That the audit log's lines are the ones it discards, and
+  # that they pass drop_audit to reach it, Vector's unit tests show.
+  paths="$(config_paths | grep '^talos>')"
+  echo "paths from the Talos source to a sink: $(paste -sd' ' - <<<"$paths")"
+  [ "$paths" = "talos>talos_files>drop_audit>drop_auditd_log>victoria_logs" ]
+  echo "drop_auditd_log: $(jq -c '.transforms.drop_auditd_log | {type, inputs, condition}' "$CONFIG")"
+  [ "$(jq -r '.transforms.drop_auditd_log | .type + " " + (.inputs | join(","))' "$CONFIG")" = "filter drop_audit" ]
 }
 
 @test "every values key of victoria-logs is one its pinned chart defines" {

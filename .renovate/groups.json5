@@ -11,8 +11,8 @@
       separateMinorPatch: true,
     },
     {
-      description: "Kubernetes: versions.yaml and the kubectl pin in mise.toml",
-      matchPackageNames: ["kubernetes/kubernetes"],
+      description: "Kubernetes: versions.yaml, the kubectl pin in mise.toml and the commit of the JSON schemas kubernetes-validate validates against",
+      matchPackageNames: ["kubernetes/kubernetes", "https://github.com/yannh/kubernetes-json-schema"],
       groupName: "Kubernetes",
       separateMinorPatch: true,
     },

@@ -5,16 +5,18 @@
 # Talos v1.14 writes to /var/log/<service>.log, as the file source hands it on: the line in message,
 # the file it came from in file, the pod's name in host and the time it was read in timestamp. The
 # formats are the kernel's messages, the prefix Go's log package gives machined's, apid's and
-# trustd's lines, etcd's JSON, containerd's logfmt and the kubelet's klog. Each line stays whole,
-# takes its own time and level where it has them, and gets the node's name and its service's. The
-# kernel's audit records are dropped. The last tests start at the pods' transform with a record as
-# the kubernetes_logs source hands it on with its default field names: the pod's labels and
-# annotations in kubernetes.pod_labels and kubernetes.pod_annotations, its node's labels in
-# kubernetes.node_labels, its namespace's in kubernetes.namespace_labels and
+# trustd's lines, etcd's JSON, containerd's and cri's logfmt and the kubelet's klog; udevd's lines
+# have none. Each line stays whole, takes its own time and level where it has them, and gets the
+# node's name and its service's, and the tests of the formats find it at the last transform before
+# the store, so a line of each of these services is seen going on to it, as tests/logs.bats checks.
+# The kernel's audit records and the node's audit log are dropped. The last tests start at the pods'
+# transform with a record as the kubernetes_logs source hands it on with its default field names:
+# the pod's labels and annotations in kubernetes.pod_labels and kubernetes.pod_annotations, its
+# node's labels in kubernetes.node_labels, its namespace's in kubernetes.namespace_labels and
 # kubernetes.namespace_annotations, and single fields beside them. The tests named in sentence case
-# are scenarios of features/logs.feature, proved here; each starts at the first transform on its way
-# to the store and watches the last, and the sources keep their default field names, as
-# tests/logs.bats checks against the rendered configuration.
+# are scenarios of features/logs.feature, proved here; each starts at the first transform on its
+# way to the store and watches the last, as tests/logs.bats checks, and the sources keep their
+# default field names, as it also checks against the rendered configuration.
 tests:
   - name: a kernel message keeps the kernel's time and priority
     inputs:
@@ -26,7 +28,7 @@ tests:
           .message = "kern:    warn: [2026-11-14T12:00:01.123456789Z]: drbd: module verification failed"
           .timestamp = t'2026-11-14T13:00:00Z'
     outputs:
-      - extract_from: talos_files
+      - extract_from: drop_auditd_log
         conditions:
           - type: vrl
             source: |
@@ -48,7 +50,7 @@ tests:
           .message = "2026/11/14 12:00:02.234567 [talos] task startAllServices (1/1): done"
           .timestamp = t'2026-11-14T13:00:00Z'
     outputs:
-      - extract_from: talos_files
+      - extract_from: drop_auditd_log
         conditions:
           - type: vrl
             source: |
@@ -56,6 +58,42 @@ tests:
               assert_eq!(.node, "node-1")
               assert_eq!(.timestamp, t'2026-11-14T12:00:02.234567Z')
               assert!(!exists(.level))
+
+  - name: an apid line keeps the time Go's log package wrote
+    inputs:
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/apid.log"
+          .host = "vector-x1y2z"
+          .message = "2026/11/14 12:00:06.678901 service.go:35: starting apid with config: listen address :50000, skip client cert verify false, node routing disabled false, readonly role mode false"
+          .timestamp = t'2026-11-14T13:00:00Z'
+    outputs:
+      - extract_from: drop_auditd_log
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.talos_service, "apid")
+              assert_eq!(.node, "node-1")
+              assert_eq!(.timestamp, t'2026-11-14T12:00:06.678901Z')
+
+  - name: a trustd line keeps the time Go's log package wrote
+    inputs:
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/trustd.log"
+          .host = "vector-x1y2z"
+          .message = "2026/11/14 12:00:07.789012 reg.go:83: removing client auth organization from CSR: [system:masters]"
+          .timestamp = t'2026-11-14T13:00:00Z'
+    outputs:
+      - extract_from: drop_auditd_log
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.talos_service, "trustd")
+              assert_eq!(.node, "node-1")
+              assert_eq!(.timestamp, t'2026-11-14T12:00:07.789012Z')
 
   - name: an etcd line keeps the time and level of its JSON
     inputs:
@@ -66,7 +104,7 @@ tests:
           .message = s'{"level":"warn","ts":"2026-11-14T12:00:03.345678Z","caller":"etcdserver/util.go:170","msg":"apply request took too long"}'
           .timestamp = t'2026-11-14T13:00:00Z'
     outputs:
-      - extract_from: talos_files
+      - extract_from: drop_auditd_log
         conditions:
           - type: vrl
             source: |
@@ -83,13 +121,30 @@ tests:
           .message = s'time="2026-11-14T12:00:04.456789012Z" level=error msg="failed to pull image"'
           .timestamp = t'2026-11-14T13:00:00Z'
     outputs:
-      - extract_from: talos_files
+      - extract_from: drop_auditd_log
         conditions:
           - type: vrl
             source: |
               assert_eq!(.talos_service, "containerd")
               assert_eq!(.level, "error")
               assert_eq!(.timestamp, t'2026-11-14T12:00:04.456789012Z')
+
+  - name: a cri line keeps the time and level of its logfmt
+    inputs:
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/cri.log"
+          .message = s'time="2026-11-14T12:00:08.890123456Z" level=info msg="Start subscribing containerd event"'
+          .timestamp = t'2026-11-14T13:00:00Z'
+    outputs:
+      - extract_from: drop_auditd_log
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.talos_service, "cri")
+              assert_eq!(.level, "info")
+              assert_eq!(.timestamp, t'2026-11-14T12:00:08.890123456Z')
 
   - name: a kubelet line keeps the time and level of its klog header
     inputs:
@@ -100,7 +155,7 @@ tests:
           .message = s'E1114 12:00:05.567890    1234 pod_workers.go:1301] "Error syncing pod, skipping"'
           .timestamp = t'2026-11-14T13:00:00Z'
     outputs:
-      - extract_from: talos_files
+      - extract_from: drop_auditd_log
         conditions:
           - type: vrl
             source: |
@@ -120,7 +175,7 @@ tests:
           .message = s'I1231 23:59:58.123456    1234 kubelet.go:2511] "SyncLoop (housekeeping)"'
           .timestamp = parse_timestamp!(format_timestamp!(now(), "%Y") + "-01-01T00:00:05Z", "%+")
     outputs:
-      - extract_from: talos_files
+      - extract_from: drop_auditd_log
         conditions:
           - type: vrl
             source: |
@@ -136,7 +191,7 @@ tests:
           .message = s'I1231 23:59:58.123456    1234 kubelet.go:2511] "SyncLoop (housekeeping)"'
           .timestamp = parse_timestamp!(to_string(to_int!(format_timestamp!(now(), "%Y")) - 2) + "-01-01T00:00:05Z", "%+")
     outputs:
-      - extract_from: talos_files
+      - extract_from: drop_auditd_log
         conditions:
           - type: vrl
             source: |
@@ -152,7 +207,7 @@ tests:
           .message = "Starting systemd-udevd version 257"
           .timestamp = t'2026-11-14T13:00:00Z'
     outputs:
-      - extract_from: talos_files
+      - extract_from: drop_auditd_log
         conditions:
           - type: vrl
             source: |
@@ -181,7 +236,7 @@ tests:
           .message = "kern:    warn: [2026-11-14T12:00:04.000000000Z]: auditing is not mentioned here: drbd: module verification failed"
           .timestamp = t'2026-11-14T13:00:00Z'
     outputs:
-      - extract_from: drop_audit
+      - extract_from: drop_auditd_log
         expected_event_count: 1
         conditions:
           - type: vrl
@@ -199,7 +254,7 @@ tests:
           .message = "kern:    warn: [2026-11-14T12:00:04.000000000Z]: auditing is not mentioned here: drbd: module verification failed"
           .timestamp = t'2026-11-14T13:00:00Z'
     outputs:
-      - extract_from: drop_audit
+      - extract_from: drop_auditd_log
         conditions:
           - type: vrl
             source: |
@@ -218,12 +273,162 @@ tests:
           .message = "kern:  notice: [2026-11-14T12:00:05.000000000Z]: Console: switching to colour dummy device 80x25"
           .timestamp = t'2026-11-14T13:00:00Z'
     outputs:
-      - extract_from: drop_audit
+      - extract_from: drop_auditd_log
         conditions:
           - type: vrl
             source: |
               assert_eq!(.talos_service, "kernel")
               assert_eq!(.level, "notice")
+
+  # One audit event as the kernel's audit subsystem writes it for a pod's process, which Talos's
+  # policy runs as pod_t, that creates a file with openat in a directory on a filesystem without
+  # SELinux labels, whose files Talos's policy gives unlabeled_t, while SELinux is permissive: an
+  # AVC record with permissive=1 and the SYSCALL, CWD, PATH, PROCTITLE and EOE records that share
+  # its msg=audit(<time>:<serial>) id, each a line of /var/log/auditd.log, as the file source hands
+  # it on. No audit rule is loaded: the AVC record makes the kernel write the system call's records
+  # when it returns, SYSCALL with key=(null), and PATH records only for the names it collected after
+  # the AVC, an unnamed parent and the file to be created, which it records again once the file
+  # exists; those two PATH records are left out here.
+  - name: The audit log's records of a permissive denial do not reach the store, and are counted
+    inputs:
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/auditd.log"
+          .host = "vector-x1y2z"
+          .message = "type=AVC msg=audit(1794571200.123:4242): avc:  denied  { write } for  pid=3141 comm=\"store\" " +
+            "name=\"2026-11-14\" dev=\"drbd1000\" ino=131073 scontext=system_u:system_r:pod_t:s0 " +
+            "tcontext=system_u:object_r:unlabeled_t:s0 tclass=dir permissive=1"
+          .timestamp = t'2026-11-14T13:00:00Z'
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/auditd.log"
+          .host = "vector-x1y2z"
+          .message = "type=SYSCALL msg=audit(1794571200.123:4242): arch=c000003e syscall=257 success=yes exit=7 " +
+            "a0=ffffff9c a1=c000a1b2c0 a2=241 a3=1a4 items=4 ppid=2718 pid=3141 auid=4294967295 uid=0 gid=0 " +
+            "euid=0 suid=0 fsuid=0 egid=0 sgid=0 fsgid=0 tty=(none) ses=4294967295 comm=\"store\" exe=\"/store\" " +
+            "subj=system_u:system_r:pod_t:s0 key=(null)"
+          .timestamp = t'2026-11-14T13:00:00Z'
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/auditd.log"
+          .host = "vector-x1y2z"
+          .message = "type=CWD msg=audit(1794571200.123:4242): cwd=\"/\""
+          .timestamp = t'2026-11-14T13:00:00Z'
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/auditd.log"
+          .host = "vector-x1y2z"
+          .message = "type=PATH msg=audit(1794571200.123:4242): item=0 name=(null) inode=131073 " +
+            "dev=93:3e8 mode=040755 ouid=0 ogid=0 rdev=00:00 obj=system_u:object_r:unlabeled_t:s0 nametype=PARENT " +
+            "cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 cap_frootid=0"
+          .timestamp = t'2026-11-14T13:00:00Z'
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/auditd.log"
+          .host = "vector-x1y2z"
+          .message = "type=PATH msg=audit(1794571200.123:4242): item=1 name=(null) nametype=CREATE " +
+            "cap_fp=0 cap_fi=0 cap_fe=0 cap_fver=0 cap_frootid=0"
+          .timestamp = t'2026-11-14T13:00:00Z'
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/auditd.log"
+          .host = "vector-x1y2z"
+          .message = "type=PROCTITLE msg=audit(1794571200.123:4242): proctitle=\"/store\""
+          .timestamp = t'2026-11-14T13:00:00Z'
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/auditd.log.1"
+          .host = "vector-x1y2z"
+          .message = "type=EOE msg=audit(1794571200.123:4242): "
+          .timestamp = t'2026-11-14T13:00:00Z'
+    no_outputs_from:
+      - drop_auditd_log
+
+  # Vector counts a filter's discards under the filter's own component_id, so the audit log's lines
+  # pass the kernel's filter and leave at drop_auditd_log, the series docs/kubernetes.md names.
+  - name: the audit log's lines are counted as discards of drop_auditd_log
+    inputs:
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/auditd.log"
+          .host = "vector-x1y2z"
+          .message = "audit backlog limit reached, some audit events may have been lost"
+          .timestamp = t'2026-11-14T13:00:00Z'
+    outputs:
+      - extract_from: drop_audit
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.talos_service, "auditd")
+              assert_eq!(.message, "audit backlog limit reached, some audit events may have been lost")
+    no_outputs_from:
+      - drop_auditd_log
+
+  # Every line of the audit log is dropped, whatever its type and whether or not it is a record: an
+  # ANOM_ABEND record, which the kernel writes without an audit rule for a process that dumps core,
+  # and the line Talos's auditd writes when records were lost on their way to it among them. The
+  # kernel's lines and another service's go on, each as it was.
+  - name: No record of the audit log reaches the store, and a line of another service does
+    inputs:
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/auditd.log"
+          .host = "vector-x1y2z"
+          .message = "type=ANOM_ABEND msg=audit(1794571201.000:4243): auid=4294967295 uid=0 gid=0 ses=4294967295 " +
+            "subj=system_u:system_r:pod_t:s0 pid=2718 comm=\"worker\" exe=\"/worker\" sig=11 res=1"
+          .timestamp = t'2026-11-14T13:00:00Z'
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/auditd.log"
+          .host = "vector-x1y2z"
+          .message = "type=CWD msg=audit(1794571201.000:4244): cwd=\"/\""
+          .timestamp = t'2026-11-14T13:00:00Z'
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/auditd.log"
+          .host = "vector-x1y2z"
+          .message = "audit backlog limit reached, some audit events may have been lost"
+          .timestamp = t'2026-11-14T13:00:00Z'
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/kernel.log"
+          .host = "vector-x1y2z"
+          .message = "kern:    warn: [2026-11-14T12:00:04.000000000Z]: drbd: module verification failed"
+          .timestamp = t'2026-11-14T13:00:00Z'
+      - insert_at: talos_files
+        type: vrl
+        source: |
+          .file = "/var/log/kubelet.log"
+          .host = "vector-x1y2z"
+          .message = "type=AVC is only a word in this kubelet line"
+          .timestamp = t'2026-11-14T13:00:00Z'
+    outputs:
+      # Vector passes a condition when any one event satisfies it, so each line has its own.
+      - extract_from: drop_auditd_log
+        expected_event_count: 2
+        conditions:
+          - type: vrl
+            source: |
+              assert_eq!(.talos_service, "kernel")
+              assert_eq!(.node, "node-1")
+              assert_eq!(.message, "kern:    warn: [2026-11-14T12:00:04.000000000Z]: drbd: module verification failed")
+          - type: vrl
+            source: |
+              assert_eq!(.talos_service, "kubelet")
+              assert_eq!(.node, "node-1")
+              assert_eq!(.message, "type=AVC is only a word in this kubelet line")
 
   - name: A pod's record carries the named labels and no field per other label
     inputs:

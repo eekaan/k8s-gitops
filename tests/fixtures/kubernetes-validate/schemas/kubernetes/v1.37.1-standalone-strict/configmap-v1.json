@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {"type": "string"},
+    "kind": {"type": "string"},
+    "metadata": {"type": "object"},
+    "data": {"type": "object", "additionalProperties": {"type": "string"}},
+    "binaryData": {"type": "object"},
+    "immutable": {"type": "boolean"}
+  }
+}

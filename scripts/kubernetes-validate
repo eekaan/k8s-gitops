@@ -1,0 +1,488 @@
+#!/usr/bin/env bash
+# The checks of the kubernetes/ tree that need its render or the network, and so stay out of the
+# offline scripts/kubernetes-check that the publish run gates on (docs/kubernetes.md, What the
+# checks refuse). On top of that check, which it runs first and which must pass, and of
+# scripts/render, whose output it reads:
+#   - every object Flux builds, for every application, enabled or not, each cluster's root and each
+#     cluster directory, validates with unknown fields refused, against Kubernetes' schemas for the
+#     version in versions.yaml, Flux's for the pinned release, and schemas made from the
+#     CustomResourceDefinitions the render holds; the HelmReleases of an enabled application as the
+#     render builds them, with the root's patches applied; objects of other kinds have no schema
+#     and are counted by kind, so a pass never silently means a skip;
+#   - in what scripts/render writes, hooks included, every image of a container, init container or
+#     ephemeral container of a pod spec, wherever an object holds one, and every image an object
+#     names in its own spec.image, has a tag other than latest or a digest, unless .image-allowlist
+#     lists it with its reason. Images an object names anywhere else are not read: a ConfigMap's
+#     data (the Piraeus operator's image list, Envoy Gateway's configuration), the Grafana
+#     resource's spec.version, the FluxInstance's spec.distribution.
+# Reports every failure, naming the file and the rule, then exits non-zero. Never contacts a
+# cluster. Fetches only public files with plain GET requests, at exact versions: the Flux release's
+# crd-schemas archive, Kubernetes' schemas a kind at a time (the request paths name the kind, group
+# and version of each object whose kind no rendered definition describes, and nothing else from
+# the tree), and the charts scripts/render pulls (RENDER_CHART_CACHE, as there). curl, kubeconform,
+# kubernetes-check and the render's flux, helm and kustomize run with none of the secrets of the
+# caller's environment (scripts/lib/tools.sh).
+#
+# What the tree and the charts hold is data: a group, version or kind reaches a path or a schema
+# location only once it has the shape the API server requires of it, a definition or object
+# without that shape is refused, and every record read from a tool's output has each field cleaned
+# of control characters, so no value starts another field or record, and an index in it is
+# checked to be a number before it is used.
+#
+# KUBERNETES_VALIDATE_SCHEMAS, a directory, replaces both schema sources and nothing is fetched for
+# them: kubernetes/<version>-standalone-strict/<kind>-<group>-<version>.json beside
+# flux/<kind>-<group>-<version>.json. The tests point it at fixtures.
+#
+# Usage: scripts/kubernetes-validate [DIR]   (DIR holds kubernetes/ and versions.yaml; defaults to this repository)
+set -euo pipefail
+shopt -s nullglob
+
+# shellcheck source=scripts/lib/tools.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/tools.sh"
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+schemas="${KUBERNETES_VALIDATE_SCHEMAS:-}"
+[[ -z $schemas ]] || schemas="$(cd "$schemas" && pwd)"
+cd "${1:-$repo_root}"
+
+# No kubeconfig and no in-cluster address: a tool that tried to reach a cluster fails instead.
+export KUBECONFIG=/dev/null
+unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
+
+for tool in kustomize yq jq flux helm kubeconform; do
+  type -P "$tool" >/dev/null || { echo "kubernetes-validate: $tool not found on PATH" >&2; exit 1; }
+done
+[[ -d kubernetes ]] || { echo "kubernetes-validate: no kubernetes/ directory in $PWD" >&2; exit 1; }
+[[ -f versions.yaml ]] || { echo "kubernetes-validate: no versions.yaml in $PWD; it names the Kubernetes version the schemas are for" >&2; exit 1; }
+
+failures=0
+fail() {
+  echo "kubernetes-validate: $*" >&2
+  failures=$((failures + 1))
+}
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+# Records that jq writes for this script to read: fields joined by the unit separator, each field
+# cleaned so that it holds no control character, the separator and line breaks included.
+sep=$'\x1f'
+jq_clean='def clean: tostring | gsub("[[:cntrl:]]"; "?");'
+
+# The shapes the API server requires of an API group (a DNS subdomain), a version (a DNS-1035 label)
+# and a kind.
+export group_re='^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*$'
+export version_re='^[a-z]([-a-z0-9]{0,61}[a-z0-9])?$'
+export kind_re='^[A-Za-z][A-Za-z0-9]{0,62}$'
+export api_re='^([a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?(\.[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?)*/)?[a-z]([-a-z0-9]{0,61}[a-z0-9])?$'
+
+# What Flux builds, as the offline check builds it. Its rules come first: on a tree that fails them
+# the objects are not the ones the cluster would get, so nothing is validated.
+mkdir "$tmp/built"
+if ! log="$(KUBERNETES_CHECK_BUILT="$tmp/built" run_tool "$repo_root/scripts/kubernetes-check" "$PWD" 2>&1)"; then
+  printf '%s\n' "$log" | grep -v '^built ' >&2
+  echo "kubernetes-validate: scripts/kubernetes-check fails on this tree, so nothing was validated" >&2
+  exit 1
+fi
+# Each build: the file the objects are in, what the output calls it, the application directory the
+# objects come from (empty for a cluster directory or root), and what a message adds about it.
+built_files=() built_labels=() built_app_dirs=() built_notes=()
+if [[ -f $tmp/built/builds ]]; then
+  while IFS= read -r -d '' file && IFS= read -r -d '' label && IFS= read -r -d '' app_dir; do
+    [[ $file =~ ^[0-9]+\.yaml$ && -f $tmp/built/$file ]] || { fail "kubernetes-check kept a build this check cannot read: $file"; continue; }
+    built_files+=("$tmp/built/$file")
+    built_labels+=("$label")
+    built_app_dirs+=("$app_dir")
+    built_notes+=("")
+  done <"$tmp/built/builds"
+fi
+
+# What the cluster would apply, charts expanded: the definitions the schemas are made from, the
+# HelmReleases as the root's patches build them, and the images. The render writes
+# OUT/<cluster>/<application>/, both names DNS labels it has checked.
+out="$tmp/render"
+if ! log="$("$repo_root/scripts/render" "$out" "$PWD" 2>&1)"; then
+  printf '%s\n' "$log" >&2
+  echo "kubernetes-validate: scripts/render does not render this tree, so nothing was validated" >&2
+  exit 1
+fi
+
+# The file each Flux Kustomization comes from, for the messages; kubernetes-check has checked that
+# every ks.yaml reads. A name that is no Kubernetes name, or a path that holds a line break, names
+# nothing.
+declare -A ks_name_file=()
+while IFS=$'\t' read -r name file; do
+  [[ $name =~ ^[a-z0-9]([-.a-z0-9]{0,251}[a-z0-9])?$ && $file == kubernetes/*/ks.yaml ]] || continue
+  ks_name_file[$name]="$file"
+done < <(find kubernetes -name ks.yaml -print0 | sort -z | xargs -0 -r yq -N 'select(. != null) | (.metadata.name // "" | tostring) + "\t" + filename')
+
+# source_of APP_DIR KIND NAME LABEL: the file an object that a build yielded comes from, when it can
+# be told: the ks.yaml of a Kustomization, or the file of the application's app/ that holds an object
+# of exactly that kind and name (jq compares them as values: yq's == reads * and ? as wildcards);
+# otherwise LABEL.
+source_of() {
+  local app_dir=$1 kind=$2 name=$3 label=$4 file
+  if [[ $kind == Kustomization && -n ${ks_name_file[$name]:-} ]]; then
+    echo "${ks_name_file[$name]}"
+    return
+  fi
+  if [[ -n $app_dir ]]; then
+    while IFS= read -r -d '' file; do
+      if [[ $(yq -o json -I0 '.' "$file" 2>/dev/null |
+        jq -s --arg kind "$kind" --arg name "$name" '[.[] | select(type == "object" and .kind == $kind and .metadata.name == $name)] | length' 2>/dev/null) =~ ^[1-9] ]]; then
+        echo "$file"
+        return
+      fi
+    done < <(find "$app_dir/app" -type f \( -name '*.yaml' -o -name '*.yml' \) -print0 | sort -z)
+  fi
+  echo "$label"
+}
+
+# misshapen_source APP_DIR LABEL: the first file of the application's app/ that holds an object
+# whose kind or apiVersion has not the shape the API server requires; otherwise LABEL.
+misshapen_source() {
+  local app_dir=$1 label=$2 file
+  if [[ -n $app_dir ]]; then
+    while IFS= read -r -d '' file; do
+      if [[ $(yq ea '[select(. != null and ((((.kind // "" | tostring) | test(strenv(kind_re))) and ((.apiVersion // "" | tostring) | test(strenv(api_re)))) | not))] | length' "$file" 2>/dev/null) =~ ^[1-9] ]]; then
+        echo "$file"
+        return
+      fi
+    done < <(find "$app_dir/app" -type f \( -name '*.yaml' -o -name '*.yml' \) -print0 | sort -z)
+  fi
+  echo "$label"
+}
+
+# Kubernetes' schemas come from the public yannh/kubernetes-json-schema repository at the commit
+# versions.yaml names (kubernetes_schemas), so the files never change under an unchanged tree; a
+# Kubernetes version the commit holds no schemas for fails the check until the commit moves. Flux's
+# come with the release the flux2 pin in mise.toml names.
+
+# The objects of Kubernetes' own API groups and of Flux's must have a schema: a kind without one is
+# a wrong apiVersion or schemas older than the cluster, and it would otherwise go unchecked.
+builtin_group_re='^(|apps|batch|policy|autoscaling|(rbac\.authorization|networking|storage|admissionregistration|apiextensions|scheduling|node|coordination|certificates|discovery|events|apiregistration|flowcontrol\.apiserver|resource|authentication|authorization|storagemigration|internal\.apiserver)\.k8s\.io)$'
+flux_group_re='(\.toolkit\.fluxcd\.io|^source\.extensions\.fluxcd\.io)$'
+
+# crd_schemas DIR: a JSON Schema at DIR/<group>/<kind>_<version>.json, the kind in lower case, the
+# layout kubeconform reads from {{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json, for each
+# version of each CustomResourceDefinition the render holds whose group, kind and versions have the
+# shapes the API server requires; one that has not is refused, and nothing is made of it. The
+# schema is the version's openAPIV3Schema, made as strict as Kubernetes' own schemas are here:
+# every level that lists its fields refuses others (additionalProperties: false), unless it keeps
+# unknown fields (x-kubernetes-preserve-unknown-fields) or says what others may be; a field the
+# definition defaults is not required, as the API server fills it in before it validates; the top
+# level lists apiVersion, kind and metadata, which the API server adds to every definition;
+# OpenAPI's nullable becomes JSON Schema's null type. Two definitions that differ for one kind and
+# version leave it without one. Each schema is compiled once, by kubeconform on an object of its
+# kind: one that does not compile fails the check, as kubeconform would otherwise take it for none.
+crd_schemas() {
+  local dir=$1 status from crd_name kind api path schema file where n
+  local -a crds=("$out"/*/*/CustomResourceDefinition.apiextensions.k8s.io_*.yaml) probe_where=()
+  local -A made=() made_by=() made_kind=() made_api=()
+  mkdir -p "$dir"
+  ((${#crds[@]} > 0)) || return 0
+  if ! yq -N -o json -I0 'select(. != null) | {"from": filename, "crd": .}' "${crds[@]}" >"$tmp/crds.jsonl" 2>"$tmp/crds.err" ||
+    ! jq -r "$jq_clean"'
+      def strict:
+        if type != "object" then .
+        else
+          (if .nullable == true and (.type | type) == "string" then .type = [.type, "null"] else . end)
+          | del(.nullable)
+          | (if (.properties | type) == "object" and (has("additionalProperties") | not)
+                and (.["x-kubernetes-preserve-unknown-fields"] != true)
+             then .additionalProperties = false else . end)
+          | (if (.required | type) == "array" and (.properties | type) == "object"
+             then .properties as $p | .required |= map(select(($p[.] // {}) | has("default") | not))
+               | if .required == [] then del(.required) else . end
+             else . end)
+          | (if (.properties | type) == "object" then .properties |= map_values(strict) else . end)
+          | (if (.items | type) == "object" then .items |= strict else . end)
+          | (if (.additionalProperties | type) == "object" then .additionalProperties |= strict else . end)
+          | reduce ("allOf", "anyOf", "oneOf") as $k (.; if (.[$k] | type) == "array" then .[$k] |= map(strict) else . end)
+          | (if (.not | type) == "object" then .not |= strict else . end)
+        end;
+      def shaped($re): type == "string" and test($re);
+      (.from | split("/") | .[-3:-1] | join("/") | clean) as $from
+      | .crd | select(.kind == "CustomResourceDefinition" and .apiVersion == "apiextensions.k8s.io/v1")
+      | (.metadata.name | clean) as $name
+      | .spec as $spec
+      | if ($spec.group | shaped(env.group_re)) and ($spec.group | length) <= 253
+          and ($spec.names.kind | shaped(env.kind_re))
+          and ([($spec.versions // [])[] | .name | shaped(env.version_re)] | all)
+        then ($spec.versions // [])[] | select(.schema.openAPIV3Schema != null)
+          | ["ok", $from, $name, $spec.names.kind, $spec.group + "/" + .name,
+             $spec.group + "/" + ($spec.names.kind | ascii_downcase) + "_" + .name + ".json",
+             (.schema.openAPIV3Schema
+               | .properties = ({"apiVersion": {"type": "string"}, "kind": {"type": "string"}, "metadata": {"type": "object"}}
+                   + (.properties // {}))
+               | strict | tojson)]
+        else ["bad", $from, $name, ({"group": $spec.group, "kind": $spec.names.kind, "versions": [($spec.versions // [])[] | .name]} | tojson)]
+        end
+      | map(clean) | join("\u001f")' "$tmp/crds.jsonl" >"$tmp/crd-schemas.records"; then
+    fail "the CustomResourceDefinitions scripts/render wrote cannot be read, so no schema was made of them: $(cat "$tmp/crds.err")"
+    return
+  fi
+  while IFS=$sep read -r status from crd_name kind api path schema; do
+    file="${ks_name_file[${from#*/}]:-$from}"
+    if [[ $status == bad ]]; then
+      fail "$file: CustomResourceDefinition $crd_name, rendered for ${from%%/*}: its group, kind or a version has not the shape the API server requires, so no schema is made of it: $kind"
+      continue
+    fi
+    # Built from the checked group, kind and version alone; checked again before it is written.
+    [[ $status == ok && $path =~ ^[a-z0-9.-]+/[a-z][a-z0-9]*_[a-z][-a-z0-9]*\.json$ && $path != *..* ]] || continue
+    where="$file: CustomResourceDefinition $crd_name, $kind $api"
+    if [[ -z ${made[$path]:-} ]]; then
+      made[$path]="$schema"
+      made_by[$path]="$where"
+      made_kind[$path]="$kind"
+      made_api[$path]="$api"
+    elif [[ ${made[$path]} != "$schema" ]]; then
+      fail "${made_by[$path]} and $where are definitions of one kind and version that differ, so its objects have no one schema"
+      made[$path]=conflict
+    fi
+  done <"$tmp/crd-schemas.records"
+  n=0
+  : >"$tmp/probes.yaml"
+  for path in "${!made[@]}"; do
+    [[ ${made[$path]} != conflict ]] || continue
+    mkdir -p "$dir/${path%/*}"
+    printf '%s\n' "${made[$path]}" >"$dir/$path"
+    printf -- '---\napiVersion: %s\nkind: %s\nmetadata:\n  name: probe-%d\n' "${made_api[$path]}" "${made_kind[$path]}" "$n" >>"$tmp/probes.yaml"
+    probe_where[n]="${made_by[$path]}"
+    n=$((n + 1))
+  done
+  ((n > 0)) || return 0
+  # Only this location is given, where every probe's schema is: kubeconform reports a schema it
+  # cannot compile as one it cannot find.
+  kubeconform -output json -verbose -schema-location "$dir/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" \
+    "$tmp/probes.yaml" >"$tmp/probes.json" 2>"$tmp/probes.err" || true
+  if ! jq -r "$jq_clean"'.resources[] | [.status, (.name | ltrimstr("probe-")), (.msg // "")] | map(clean) | join("\u001f")' \
+    "$tmp/probes.json" >"$tmp/probes.records" 2>/dev/null; then
+    fail "kubeconform did not compile the schemas made of the CustomResourceDefinitions: $(cat "$tmp/probes.err")"
+    return
+  fi
+  while IFS=$sep read -r status n msg; do
+    [[ $n =~ ^[0-9]+$ && -n ${probe_where[n]:-} ]] || continue
+    [[ $status == statusError ]] || continue
+    fail "${probe_where[n]}: the schema made of it does not compile, so its objects would go unvalidated: $msg"
+  done <"$tmp/probes.records"
+}
+
+# schema_check: validates everything the offline check built, with unknown fields refused, against
+# Flux's CRD schemas, the schemas crd_schemas makes and Kubernetes' schemas for the version in
+# versions.yaml, the first that has the kind; counts the objects of the kinds none has, and prints
+# each kind with its count. An object whose kind or apiVersion has not the shape the API server
+# requires is refused and not handed on.
+schema_valid=0
+schema_skipped=0
+schema_check() {
+  local kube flux_dir kube_location flux_version url err tool i n key status index kind api name msg group where
+  local cluster_app app app_dir rendered misshapen
+  local -a releases
+  local -A skipped=()
+  kube="$(yq '.kubernetes // ""' versions.yaml 2>/dev/null)" || kube=""
+  if [[ ! $kube =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    fail "versions.yaml: kubernetes is not a version: ${kube:-none}; the schemas are the Kubernetes version's"
+    return
+  fi
+  kube="${kube#v}"
+  if [[ -n $schemas ]]; then
+    flux_dir="$schemas/flux"
+    kube_location="$schemas/kubernetes/{{.NormalizedKubernetesVersion}}-standalone{{.StrictSuffix}}/{{.ResourceKind}}{{.KindSuffix}}.json"
+  else
+    flux_version="$(yq -p toml '.tools.flux2 // ""' "$repo_root/mise.toml" 2>/dev/null)" || flux_version=""
+    if [[ ! $flux_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      fail "mise.toml: the flux2 pin is not an exact version: ${flux_version:-none}; Flux's schemas are fetched for that release"
+      return
+    fi
+    url="https://github.com/fluxcd/flux2/releases/download/v$flux_version/crd-schemas.tar.gz"
+    for tool in curl tar; do
+      type -P "$tool" >/dev/null || { fail "$tool not found on PATH, which fetching Flux's schemas needs"; return; }
+    done
+    flux_dir="$tmp/flux-schemas"
+    mkdir "$flux_dir"
+    if ! err="$(curl --fail --silent --show-error --location --retry 3 --max-time 120 --output "$tmp/crd-schemas.tar.gz" "$url" 2>&1)" ||
+      ! err="$(tar -xzf "$tmp/crd-schemas.tar.gz" -C "$flux_dir" 2>&1)"; then
+      fail "cannot fetch Flux's schemas from $url: $err"
+      return
+    fi
+    kubernetes_schemas_ref="$(yq '.kubernetes_schemas // ""' versions.yaml 2>/dev/null)" || kubernetes_schemas_ref=""
+    if [[ ! $kubernetes_schemas_ref =~ ^[0-9a-f]{40}$ ]]; then
+      fail "versions.yaml: kubernetes_schemas is not a commit: ${kubernetes_schemas_ref:-none}; Kubernetes' schemas are fetched at that commit of yannh/kubernetes-json-schema"
+      return
+    fi
+    kube_location="https://raw.githubusercontent.com/yannh/kubernetes-json-schema/$kubernetes_schemas_ref/{{.NormalizedKubernetesVersion}}-standalone{{.StrictSuffix}}/{{.ResourceKind}}{{.KindSuffix}}.json"
+  fi
+
+  crd_schemas "$tmp/crd-schemas"
+
+  # The HelmReleases of an application the render holds are validated as the render builds them,
+  # each time a cluster enables it, with the patches its root gives it, and not as the application's
+  # own ks.yaml builds them.
+  for cluster_app in "$out"/*/*/; do
+    cluster_app="${cluster_app%/}"
+    app="${cluster_app##*/}"
+    releases=("$cluster_app"/HelmRelease.helm.toolkit.fluxcd.io_*.yaml)
+    ((${#releases[@]} > 0)) || continue
+    i=${#built_files[@]}
+    for file in "${releases[@]}"; do
+      printf -- '---\n'
+      cat "$file"
+    done >"$tmp/release-$i.yaml"
+    app_dir=""
+    [[ -z ${ks_name_file[$app]:-} ]] || app_dir="${ks_name_file[$app]%/ks.yaml}"
+    built_files+=("$tmp/release-$i.yaml")
+    built_labels+=("${ks_name_file[$app]:-${cluster_app#"$out"/}}")
+    built_app_dirs+=("$app_dir")
+    built_notes+=(", as built for ${cluster_app#"$out"/} with the root's patches")
+  done
+
+  # What Flux strips at apply, the sops metadata of an encrypted object, is no field of its kind.
+  mkdir "$tmp/validate" "$tmp/schema-cache"
+  for i in "${!built_files[@]}"; do
+    app_dir="${built_app_dirs[i]}"
+    rendered=false
+    if [[ -z ${built_notes[i]} && -n $app_dir ]]; then
+      for cluster_app in "$out"/*/"${app_dir##*/}"/; do
+        rendered=true
+      done
+    fi
+    if ! misshapen="$(yq ea '[select(. != null and ((((.kind // "" | tostring) | test(strenv(kind_re))) and ((.apiVersion // "" | tostring) | test(strenv(api_re)))) | not))] | length' "${built_files[i]}" 2>/dev/null)" ||
+      ! drop="$rendered" yq 'select(. != null)
+        | select(((.kind // "" | tostring) | test(strenv(kind_re))) and ((.apiVersion // "" | tostring) | test(strenv(api_re))))
+        | select(strenv(drop) == "false" or .kind != "HelmRelease" or ((.apiVersion // "") | test("^helm\.toolkit\.fluxcd\.io/") | not))
+        | del(.sops)' "${built_files[i]}" >"$tmp/validate/$i.yaml" 2>/dev/null; then
+      fail "${built_labels[i]}: cannot read what flux build yielded"
+      return
+    fi
+    if [[ $misshapen != 0 ]]; then
+      fail "$(misshapen_source "$app_dir" "${built_labels[i]}"): $misshapen object(s) with a kind or apiVersion the API server would refuse, which no schema is looked up for"
+    fi
+  done
+  kubeconform -strict -ignore-missing-schemas -kubernetes-version "$kube" -cache "$tmp/schema-cache" \
+    -output json -verbose -schema-location "$flux_dir/{{.ResourceKind}}{{.KindSuffix}}.json" \
+    -schema-location "$tmp/crd-schemas/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" \
+    -schema-location "$kube_location" "$tmp"/validate/*.yaml >"$tmp/kubeconform.json" 2>"$tmp/kubeconform.err" || true
+  if ! jq -e '.resources' "$tmp/kubeconform.json" >/dev/null 2>&1; then
+    fail "kubeconform did not validate the built objects: $(cat "$tmp/kubeconform.err" "$tmp/kubeconform.json" 2>/dev/null)"
+    return
+  fi
+  if ! jq -r "$jq_clean"'.resources[] | [.status, (.filename | split("/")[-1] | rtrimstr(".yaml")), .kind, .version, .name,
+    (.msg // "")] | map(clean) | join("\u001f")' "$tmp/kubeconform.json" >"$tmp/verdicts"; then
+    fail "cannot read the verdicts kubeconform gave, so the built objects were not all checked"
+    return
+  fi
+  while IFS=$sep read -r status index kind api name msg; do
+    if [[ ! $index =~ ^[0-9]+$ ]] || ((index >= ${#built_files[@]})); then
+      fail "kubeconform gave a verdict on a file this check did not hand it: $index"
+      continue
+    fi
+    where="${built_labels[index]}"
+    case $status in
+      statusValid) schema_valid=$((schema_valid + 1)) ;;
+      statusSkipped)
+        group=""
+        [[ $api != */* ]] || group="${api%%/*}"
+        if [[ $group =~ $builtin_group_re || $group =~ $flux_group_re ]]; then
+          where="$(source_of "${built_app_dirs[index]}" "$kind" "$name" "$where")"
+          fail "$where: $kind $name: no schema for $api in the Kubernetes or Flux schemas: the apiVersion or kind is wrong, or the schemas are older than this API"
+        else
+          key="$kind ($api)"
+          n=${skipped[$key]:-0}
+          skipped[$key]=$((n + 1))
+          schema_skipped=$((schema_skipped + 1))
+        fi
+        ;;
+      statusInvalid | statusError)
+        where="$(source_of "${built_app_dirs[index]}" "$kind" "$name" "$where")"
+        fail "$where: $kind $name${built_notes[index]}: ${msg:-$status}"
+        ;;
+    esac
+  done <"$tmp/verdicts"
+  ((${#skipped[@]} > 0)) || return 0
+  while IFS= read -r key; do
+    n=${skipped[$key]}
+    echo "kubernetes-validate: no schema for $key: $n object$( ((n == 1)) || echo s)"
+  done < <(printf '%s\n' "${!skipped[@]}" | sort)
+}
+flux_builds=${#built_files[@]}
+if ((flux_builds > 0)); then
+  schema_check
+fi
+
+# image_allowed: "APPLICATION IMAGE" for every exception .image-allowlist lists, with the reason it
+# gives; an entry without one is refused.
+declare -A image_allowed=()
+if [[ -f .image-allowlist ]]; then
+  lineno=0
+  while IFS= read -r line; do
+    lineno=$((lineno + 1))
+    [[ $line =~ ^[[:space:]]*(#.*)?$ ]] && continue
+    if [[ $line =~ ^([^[:space:]#]+)[[:space:]]+([^[:space:]#]+)[[:space:]]*#[[:space:]]*[^[:space:]] ]]; then
+      image_allowed["${BASH_REMATCH[1]} ${BASH_REMATCH[2]}"]=1
+    else
+      fail ".image-allowlist:$lineno: an exception is the application, the image as the chart renders it and the reason, as: APPLICATION IMAGE  # reason"
+    fi
+  done <.image-allowlist
+fi
+
+# In what scripts/render writes, the objects Flux builds and the ones each release's chart renders,
+# hooks included: every image of a container, init container or ephemeral container of a pod spec,
+# wherever an object holds one, and every image an object names in its own spec.image, as
+# Prometheus and Alertmanager name the one their operator runs. A tag that moves, or none, means a
+# pull at a time nobody chose: a failed pull fails a Helm test, which rolls the release back. A test
+# hook of a release that does not run it (tests off, or this one excluded) is never pulled and is
+# left out. A digest is sha256 and 64 hexadecimal digits; a reference with any other digest pins
+# nothing, whatever it holds before it.
+images=0
+image_rule() {
+  local app cluster_app objects verdict kind name image hooks file
+  for cluster_app in "$out"/*/*/; do
+    cluster_app="${cluster_app%/}"
+    app="${cluster_app##*/}"
+    objects="$tmp/objects.jsonl"
+    yq -N -o json -I0 '.' "$cluster_app"/*.yaml >"$objects" 2>/dev/null || { fail "$cluster_app: cannot read what scripts/render wrote"; continue; }
+    if ! jq -rs "$jq_clean"'def pinned:
+        if test("@") then test("@sha256:[0-9a-f]{64}$")
+        else split("/")[-1] | test(":[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$") and (test(":latest$") | not) end;
+      def hooks: ((.metadata.annotations["helm.sh/hook"] // "") | split(",") | map(gsub("^ +| +$"; "")) | map(select(. != "")));
+      def testonly: (hooks | length > 0) and (hooks | all(. == "test" or . == "test-success" or . == "test-failure"));
+      . as $all
+      | def runs($n; $release):
+          ($all | map(select(.kind == "HelmRelease" and .metadata.name == $release.name
+              and (.metadata.namespace // "default") == $release.namespace)) | first) as $hr
+          | if $hr == null then true
+            else ($hr.spec.test.enable // false) == true
+              and (($hr.spec.test.filters // []) as $f
+                | (($f | map(select(.exclude != true) | .name)) as $in
+                  | ($in | length) == 0 or ($in | index($n) != null))
+                  and (($f | map(select(.exclude == true) | .name) | index($n)) == null))
+            end;
+      $all[]
+      | . as $o
+      | select(($o | testonly | not) or runs($o.metadata.name;
+          {"name": ($o.metadata.labels["helm.toolkit.fluxcd.io/name"] // ""),
+           "namespace": ($o.metadata.labels["helm.toolkit.fluxcd.io/namespace"] // "default")}))
+      | [(.. | objects | (.containers?, .initContainers?, .ephemeralContainers?) | arrays | .[] | objects | .image? | strings),
+         (.spec? | objects | .image? | strings)][]
+      | [(if pinned then "ok" else "bad" end), $o.kind, $o.metadata.name, ., (if ($o | hooks | length) > 0 then "hook" else "" end)]
+      | map(clean) | join("\u001f")' "$objects" >"$tmp/image-verdicts"; then
+      fail "$app: cannot read the images of what scripts/render wrote, so none of its images was checked"
+      continue
+    fi
+    while IFS=$sep read -r verdict kind name image hooks; do
+      images=$((images + 1))
+      [[ $verdict == bad ]] || continue
+      [[ -z ${image_allowed["$app $image"]:-} ]] || continue
+      file="${ks_name_file[$app]:-${cluster_app#"$out"/}}"
+      fail "$file: $kind $name${hooks:+ (a Helm hook)} runs image $image, which has no tag other than latest and no digest: pin a tag or a digest in the chart's values or the release's post-renderer, or list it with its reason in .image-allowlist"
+    done <"$tmp/image-verdicts"
+  done
+}
+image_rule
+
+if ((failures > 0)); then
+  echo "kubernetes-validate: $failures failure(s)" >&2
+  exit 1
+fi
+echo "kubernetes-validate: passed ($flux_builds flux builds, $schema_valid objects validated, $schema_skipped without a schema, $images images)"

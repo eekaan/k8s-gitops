@@ -4,7 +4,7 @@ Feature: Storage
   Scenario: The storage applications are enabled and wait for what they need
     Given the cluster's overlay
     When it is built as Flux applies it
-    Then it enables snapshot-controller, piraeus-operator and linstor-cluster, each builds with Flux's strict substitution, the first two are Ready only once what they install is, linstor-cluster waits for both, and the namespace admits the satellites' privileged pods
+    Then it enables snapshot-controller, piraeus-operator and linstor-cluster, each builds with Flux's strict substitution, the first two are Ready only once what they install is, linstor-cluster waits for both and is Ready only once the operator reports the storage cluster Available and every satellite configuration Applied, and the namespace admits the satellites' privileged pods
 
   Scenario: Satellites run with the Talos settings, on the workers only
     Given the operator's satellite DaemonSet at the version the pinned chart runs, and the nodes' machine configurations rendered offline

@@ -1,10 +1,40 @@
 Feature: Kubernetes tree layout
-  Every application has the same shape, and the tree builds without a cluster.
+  Every application has the same shape, the tree builds without a cluster, and what it holds is what the cluster would accept.
 
   Scenario: The tree builds offline
     Given the kubernetes directory and no cluster
     When the kubernetes check runs
-    Then every kustomization builds, Flux builds every ks.yaml with strict substitution, and the check exits zero
+    Then every kustomization builds, Flux builds every ks.yaml with strict substitution, every layout and dependency rule holds, and the check exits zero
+
+  Scenario: The tree passes the schema and image rules
+    Given the kubernetes directory, the charts it names and the schemas from their public sources, and no cluster
+    When the kubernetes validation runs
+    Then every object Flux builds validates against its schema, the kinds without one are counted, every image of the render is pinned, and the validation exits zero
+
+  Scenario: A dependency on an application the cluster does not enable is refused
+    Given an enabled application whose Kustomization names, in dependsOn, an application that the cluster's overlay does not list
+    When the kubernetes check runs
+    Then it exits non-zero and names both Kustomizations and the overlay
+
+  Scenario: A dependency whose target does not wait is refused
+    Given an enabled application whose Kustomization names an enabled application in dependsOn that, once the root's patches are applied, sets neither wait nor health checks
+    When the kubernetes check runs
+    Then it exits non-zero and names both Kustomizations and the overlay
+
+  Scenario: An object with a field its schema does not have is refused, and objects without a schema are counted by kind
+    Given an application whose Deployment has a field the Deployment schema lacks, a Flux Kustomization with one its schema lacks, a custom resource with one its rendered definition lacks, and custom resources of kinds that have no definition
+    When the kubernetes validation runs
+    Then it exits non-zero and names the file, the object and the field, and prints how many objects of each kind without a schema it could not validate
+
+  Scenario: A manifest an application keeps where the artifact does not carry it is refused
+    Given an application directory with a manifest beside ks.yaml, and one in app/ that no kustomization.yaml reaches
+    When the kubernetes check runs
+    Then it exits non-zero and names each file and the rule
+
+  Scenario: An image without a tag or digest in a rendered release or its hooks is refused
+    Given a release whose chart renders a test hook, an upgrade hook, a Deployment and a custom resource naming its own image, whose images have no tag, the tag latest or only a registry's port
+    When the kubernetes validation runs
+    Then it exits non-zero and names the application, the object and the image, unless the release does not run that test or the image is listed with its reason in the image allowlist
 
   Scenario: A Kustomization outside flux-system fails the check
     Given an application whose ks.yaml sets another namespace
