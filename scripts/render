@@ -16,17 +16,31 @@
 #   - the values of its valuesFrom ConfigMaps, then its own spec.values over them;
 #   - helm-controller's release name and namespace, the Kubernetes version in versions.yaml, every
 #     API version a definition in the render serves, as on a cluster where all of them exist, and the
-#     chart's own definitions;
+#     chart's own definitions: an apiextensions.k8s.io/v1 CustomResourceDefinition whose group, kind
+#     and versions have the shapes the API server requires (scripts/lib/shapes.sh), served versions
+#     only;
 #   - its kustomize post-renderers, then helm-controller's labels.
 # A value the chart makes up anew on every render, such as a generated certificate, would show as a
 # change every time: the chart is rendered twice and each value that differs is masked. No Secret's
 # data leaves the render: every value of a Secret's data and stringData is replaced, and the sops
 # metadata Flux strips is removed. Fails naming the application and the step when anything does not
-# render. Never contacts a cluster, and reads no registry login. A chart's URL and name come from the
-# tree, a pull request's included: they are checked against a strict shape and passed to helm as
-# arguments, a pull adds no repository to any Helm configuration, and a hostile URL makes the runner
-# fetch the repository and its index direct, and what the index points to: outbound fetches only,
-# which a registry named by an OCIRepository allows already.
+# render. Objects are selected by their exact name and namespace, compared by jq as values, never as
+# patterns; a HelmRelease whose name or namespace has not the API server's shape is refused before
+# anything is read from it, and what a release's work file holds is one value to a NUL-ended
+# record. Reads DIR's kubernetes/ and versions.yaml alone, neither of them a link: the tree is
+# copied, and the copy refused before anything is built from it when a build would read outside it
+# or a tool would read a kustomization or a root otherwise than the render
+# (scripts/lib/tree-paths.sh), as is each Kustomization handed to flux build whose spec.path or
+# spec.components leaves it or that holds a key flux build would read as a field it is not spelled
+# as, and a HelmRelease or a source with a key that folds to a field the render reads without being
+# it, or a post-renderer with more than a patch, its target and an image, which is all
+# helm-controller's has. flux build, helm template and kustomize run with git a stand-in that
+# refuses and the proxies a closed port of the loopback; helm pull alone fetches.
+# Never contacts a cluster, and reads no registry login. A chart's URL and
+# name come from the tree, a pull request's included: they are checked against a strict shape and
+# passed to helm as arguments, a pull adds no repository to any Helm configuration, and a hostile
+# URL makes the runner fetch the repository and its index direct, and what the index points to:
+# outbound fetches only, which a registry named by an OCIRepository allows already.
 #
 # Writes OUT/<cluster>/<application>/<Kind>[.<group>]_<namespace>_<name>.yaml, the name without the
 # hash kustomize appends to a generated ConfigMap or Secret, so that a changed one compares with
@@ -36,14 +50,34 @@
 #        scripts/render --forms [DIR]   builds the tree and checks that every HelmRelease is of a form
 #                                       this render accepts, without pulling or rendering a chart
 set -euo pipefail
+# Text is matched, sorted and shown byte by byte, whatever the caller's locale.
+export LC_ALL=C
 shopt -s nullglob
 
 # flux, helm and kustomize are run with none of the secrets a recipe's environment may hold.
 # shellcheck source=scripts/lib/tools.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/tools.sh"
+# The shapes the API server requires of a name, which the definitions API versions come from and the
+# releases are checked by, as scripts/kubernetes-validate checks them.
+# shellcheck source=scripts/lib/shapes.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/shapes.sh"
+# What a build of the tree may read.
+# shellcheck source=scripts/lib/tree-paths.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/tree-paths.sh"
 
 die() {
   echo "render: $*" >&2
+  exit 1
+}
+
+# refuse LINES [PREFIX]: fails with each of LINES, one refusal a line, after PREFIX, when there is
+# any.
+refuse() {
+  local line
+  [[ -n $1 ]] || return 0
+  while IFS= read -r line; do
+    echo "render: ${2:-}$line" >&2
+  done <<<"$1"
   exit 1
 }
 
@@ -56,8 +90,8 @@ fi
 (($# >= 1 && $# <= 2)) || die "usage: scripts/render OUT [DIR] | scripts/render --forms [DIR]"
 out=$1
 dir=${2:-$(dirname "${BASH_SOURCE[0]}")/..}
-[[ -d $dir/kubernetes ]] || die "no kubernetes/ directory in $dir"
-[[ -f $dir/versions.yaml ]] || die "no versions.yaml in $dir"
+[[ -d $dir/kubernetes && ! -L $dir/kubernetes ]] || die "no kubernetes/ directory in $dir"
+[[ -f $dir/versions.yaml && ! -L $dir/versions.yaml ]] || die "no versions.yaml in $dir"
 if ((!forms_only)) && [[ -e $out ]]; then
   [[ -d $out && -z $(find "$out" -mindepth 1 -print -quit) ]] || die "$out exists and is not an empty directory"
 fi
@@ -71,6 +105,9 @@ fi
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+# flux build, helm template and kustomize run with a git that refuses and a closed proxy; helm pull
+# alone fetches.
+tree_paths_offline "$tmp/offline"
 
 # No kubeconfig and no in-cluster address: a tool that tried to reach a cluster fails instead.
 export KUBECONFIG=/dev/null
@@ -89,30 +126,100 @@ charts=$(cd "$charts" && pwd)
 kube=$(yq '.kubernetes // ""' "$dir/versions.yaml")
 [[ $kube =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "versions.yaml: kubernetes is not a version: $kube"
 
-# flux build rewrites the kustomization.yaml it builds while it runs, and reads only paths below
-# its working directory: it builds a copy that holds the tree alone.
+# The render builds a copy that holds the tree alone, links copied as links. flux build reads every
+# path a kustomization names and follows every link, so nothing is built from a copy from which a
+# build would read outside it, or that a tool would read otherwise than the render: a link that
+# leads out of it, a kustomization that names a path outside it or a remote source or holds a key
+# kustomize reads otherwise, a root whose spec.path leaves it or that flux build reads otherwise.
 mkdir -p "$tmp/tree"
 cp -R "$dir/kubernetes" "$tmp/tree/"
 cd "$tmp/tree"
+tree_root=$(realpath -e kubernetes)
+# Each cluster's root as flux build reads it, from its spec.path, before anything is built.
+refuse "$(
+  tree_paths_refused "$tree_root"
+  for cluster_dir in kubernetes/clusters/*/; do
+    [[ -f $cluster_dir/kustomization.yaml ]] || continue
+    refused=$(root_path_refused "${cluster_dir}ks.yaml" "$tree_root")
+    if [[ -n $refused ]]; then
+      echo "$refused"
+      continue
+    fi
+    tree_paths_inside "$tree_root" "$(realpath -e -- "${cluster_dir}ks.yaml" 2>/dev/null)" || continue
+    root_dir=$(yq ea '[select(. != null)] | .[0].spec.path // "" | tostring' "${cluster_dir}ks.yaml")
+    while IFS= read -r line; do
+      [[ -z $line ]] || echo "$(tree_paths_show "${cluster_dir}ks.yaml"): $line"
+    done <<<"$(kustomization_refused "${cluster_dir}ks.yaml" "$(realpath -e -- "kubernetes/${root_dir#./}")" "$tree_root")"
+  done
+)"
 
 label='^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+
+# app_dir CLUSTER APP: the directory the application's Kustomization builds.
+app_dir() {
+  local dir
+  dir=$(yq '.spec.path // ""' "$tmp/ks/$1/$2.yaml")
+  dir=kubernetes/${dir#./}
+  echo "${dir%/}"
+}
+
+# release_file CLUSTER APP HR: the file of the application's directory that holds the HelmRelease HR
+# (JSON) as written, for a message; the directory when kustomize built it from something else.
+release_file() {
+  object_file "$(app_dir "$1" "$2")" "$3"
+}
+
+# object_file DIR OBJECT: the file under DIR that holds OBJECT (JSON) as written, by its kind, name
+# and namespace, or its kind and name and no namespace, which a Kustomization's targetNamespace
+# gives it; DIR when there is none.
+object_file() {
+  local dir=$1 file match loose=""
+  while IFS= read -r -d '' file; do
+    match=$(yq -o json -I0 'select(. != null)' "$file" 2>/dev/null | jq -s -r --argjson object "$2" '
+      [.[] | select(type == "object" and .kind == $object.kind and .metadata.name == $object.metadata.name)
+        | if .metadata.namespace == $object.metadata.namespace then "exact" elif .metadata.namespace == null then "loose" else empty end]
+      | if index("exact") then "exact" elif index("loose") then "loose" else "" end' 2>/dev/null) || match=""
+    case $match in
+      exact)
+        tree_paths_show "$file"
+        return
+        ;;
+      loose) loose=${loose:-$file} ;;
+    esac
+  done < <(find "$dir" -type f \( -name '*.yaml' -o -name '*.yml' \) -print0 2>/dev/null | sort -z)
+  loose=${loose:-$dir}
+  tree_paths_show "$loose"
+}
 
 # build CLUSTER APP KS: builds the Kustomization in the file KS, the application APP, from its
 # spec.path in the tree, with the cluster's example values under its own postBuild.substitute, into
 # $tmp/built/CLUSTER/APP.yaml.
 build() {
-  local cluster=$1 app=$2 ks=$3 path err
+  local cluster=$1 app=$2 ks=$3 path real err refused file
   path=$(yq '.spec.path // ""' "$ks")
   path=${path#./}
   path=${path%/}
-  if [[ ! $path =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ || /$path/ == */../* || ! -d kubernetes/$path ]]; then
-    die "$cluster/$app: spec.path ${path:-(none)} is not a directory of the tree"
+  if ! tree_paths_plain "$path" || [[ /$path/ == */../* || /$path/ == */./* ]]; then
+    die "$cluster/$app: spec.path $(tree_paths_show "${path:-(none)}") is not a directory of the tree"
   fi
+  # A link inside the tree may point anywhere; the directory built is the one the path resolves to.
+  real=$(realpath -m -- "kubernetes/$path")
+  [[ $real == "$tree_root"/* ]] || die "$cluster/$app: spec.path $path leaves the tree through a link"
+  [[ -d $real ]] || die "$cluster/$app: spec.path $path is not a directory of the tree"
   # shellcheck disable=SC2016 # $values is a yq variable.
   yq ea 'select(fileIndex == 0) as $values | select(fileIndex == 1)
     | .spec.postBuild.substitute = ($values * (.spec.postBuild.substitute // {}))' \
     "$tmp/values/$cluster.yaml" "$ks" >"$tmp/ks.yaml"
-  if ! err=$(flux build kustomization "$app" --path "kubernetes/$path" --kustomization-file "$tmp/ks.yaml" \
+  # What flux build is handed, as it reads it, and the components it adds to the kustomization it
+  # builds in that directory.
+  refused=$(kustomization_refused "$tmp/ks.yaml" "$real" "$tree_root")
+  if [[ -n $refused ]]; then
+    # The instance's sync Kustomization is made from the cluster's ks.yaml.
+    file=kubernetes/clusters/$cluster/ks.yaml
+    [[ $app == flux-system ]] || file=$(object_file kubernetes "$(yq -o json -I0 '.' "$ks")")
+    refuse "$refused" "$cluster/$app: $file: "
+  fi
+  if ! err=$(offline flux build kustomization "$app" --path "kubernetes/$path" --kustomization-file "$tmp/ks.yaml" \
     --dry-run --strict-substitute --in-memory-build --cache-dir "$tmp/kube-cache" 2>&1 >"$tmp/built/$cluster/$app.yaml"); then
     die "$cluster/$app: flux build of $path failed: $err"
   fi
@@ -167,26 +274,49 @@ for cluster_dir in kubernetes/clusters/*/; do
 done
 ((${#apps[@]} > 0)) || die "no cluster directory with a ks.yaml and a kustomization.yaml under kubernetes/clusters"
 
+# named_objects BUILT KIND REF: the objects of KIND in the build BUILT, as JSON lines, whose name and
+# namespace are exactly those of REF, a JSON object with a name and a namespace. Compared by jq as
+# values: yq's == reads * and ? in what it is compared with as wildcards, and would select an
+# object a controller, which looks a name up exactly, does not.
+named_objects() {
+  yq -N -o json -I0 'select(. != null)' "$1" | jq -c --arg kind "$2" --argjson ref "$3" \
+    'select(type == "object" and .kind == $kind and .metadata.name == $ref.name
+      and (.metadata.namespace // "default") == $ref.namespace)'
+}
+
 # release CLUSTER APP INDEX HR: prepares the INDEXth HelmRelease of the application, HR as JSON: its
 # chart, values and release, in $tmp/releases/CLUSTER/APP/INDEX/.
 release() {
-  local cluster=$1 app=$2 index=$3 hr=$4 name namespace where kind chart_ns repo url tag pulled release target
+  local cluster=$1 app=$2 index=$3 hr=$4 name namespace where repo url tag pulled release target
   local work="$tmp/releases/$cluster/$app/$index" built="$tmp/built/$cluster/$app.yaml" i entry
-  local chart version type field
+  local chart version type field refused
   local -a tgz pull
-  name=$(jq -r '.metadata.name // ""' <<<"$hr")
+  # Every key the render reads, by its own name: one that folds to a field without being it is
+  # refused, and a post-renderer holds only what kustomize is handed.
+  refused=$(read_refused HelmRelease <<<"$hr")
+  [[ -z $refused ]] || refuse "$refused" "$cluster/$app: $(release_file "$cluster" "$app" "$hr"): "
+  # The name and namespace are checked as the values the tree holds, before they are read into a
+  # variable, which would drop a final line break, or written to a file.
+  jq -e "$(shapes_jq)"'.metadata.name | shaped(env.group_re) and length <= 253' <<<"$hr" >/dev/null ||
+    die "$cluster/$app: the HelmRelease in $(release_file "$cluster" "$app" "$hr"): its name $(jq -c '.metadata.name' <<<"$hr") is not a name the API server accepts"
+  jq -e "$(shapes_jq)"'(.metadata.namespace // "default") | shaped(env.label_re)' <<<"$hr" >/dev/null ||
+    die "$cluster/$app: the HelmRelease in $(release_file "$cluster" "$app" "$hr"): its namespace $(jq -c '.metadata.namespace' <<<"$hr") is not a namespace the API server accepts"
+  jq -e '[.spec.releaseName, .spec.targetNamespace] | all(. == null or (type == "string" and (test("[[:cntrl:]]") | not)))' <<<"$hr" >/dev/null ||
+    die "$cluster/$app: the HelmRelease in $(release_file "$cluster" "$app" "$hr"): its releaseName or targetNamespace is not one line of text"
+  name=$(jq -r '.metadata.name' <<<"$hr")
   namespace=$(jq -r '.metadata.namespace // "default"' <<<"$hr")
   where="$cluster/$app: HelmRelease $namespace/$name"
   mkdir -p "$work"
   if jq -e '.spec.chartRef != null and .spec.chart != null' <<<"$hr" >/dev/null; then
     die "$where: names both a chartRef and a chart"
   elif jq -e '.spec.chartRef != null' <<<"$hr" >/dev/null; then
-    kind=$(jq -r '.spec.chartRef.kind // ""' <<<"$hr")
-    [[ $kind == OCIRepository ]] || die "$where: a chartRef to a ${kind:-(no kind)} is not rendered, only one to an OCIRepository"
-    chart_ns=$(jq -r --arg ns "$namespace" '.spec.chartRef.namespace // $ns' <<<"$hr")
-    repo=$(name="$(jq -r '.spec.chartRef.name' <<<"$hr")" ns="$chart_ns" yq -N -o json -I0 \
-      'select(.kind == "OCIRepository" and .metadata.name == strenv(name) and (.metadata.namespace // "default") == strenv(ns))' "$built")
+    jq -e '.spec.chartRef.kind == "OCIRepository"' <<<"$hr" >/dev/null ||
+      die "$where: a chartRef to a $(jq -r '(.spec.chartRef.kind // "(no kind)") | tostring | gsub("[[:cntrl:]]"; "?")' <<<"$hr") is not rendered, only one to an OCIRepository"
+    repo=$(named_objects "$built" OCIRepository "$(jq -c --arg ns "$namespace" \
+      '{"name": .spec.chartRef.name, "namespace": (.spec.chartRef.namespace // $ns)}' <<<"$hr")")
     [[ -n $repo && $repo != *$'\n'* ]] || die "$where: its OCIRepository is not one object of the application"
+    refused=$(read_refused OCIRepository <<<"$repo")
+    [[ -z $refused ]] || refuse "$refused" "$where: its OCIRepository in $(object_file "$(app_dir "$cluster" "$app")" "$repo"): "
     url=$(jq -r '.spec.url // ""' <<<"$repo")
     tag=$(jq -r '.spec.ref.tag // ""' <<<"$repo")
     [[ $url =~ ^oci://[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+$ && /$url/ != */../* ]] || die "$where: not an OCI chart URL: $url"
@@ -194,8 +324,8 @@ release() {
     pulled="$charts/${url#oci://}/$tag"
     pull=("$url" --version "$tag")
   elif jq -e '.spec.chart.spec != null' <<<"$hr" >/dev/null; then
-    kind=$(jq -r '.spec.chart.spec.sourceRef.kind // ""' <<<"$hr")
-    [[ $kind == HelmRepository ]] || die "$where: a chart from a ${kind:-(no kind)} is not rendered, only one from a HelmRepository"
+    jq -e '.spec.chart.spec.sourceRef.kind == "HelmRepository"' <<<"$hr" >/dev/null ||
+      die "$where: a chart from a $(jq -r '(.spec.chart.spec.sourceRef.kind // "(no kind)") | tostring | gsub("[[:cntrl:]]"; "?")' <<<"$hr") is not rendered, only one from a HelmRepository"
     chart=$(jq -r '.spec.chart.spec.chart // ""' <<<"$hr")
     version=$(jq -r '.spec.chart.spec.version // ""' <<<"$hr")
     # A range, a wildcard or no version would let the chart change under an unchanged tree.
@@ -205,10 +335,11 @@ release() {
     [[ $chart =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "$where: not a chart name: ${chart:-(none)}"
     jq -e '(.spec.chart.spec.valuesFiles // []) | length == 0' <<<"$hr" >/dev/null ||
       die "$where: valuesFiles of a chart are not rendered"
-    chart_ns=$(jq -r --arg ns "$namespace" '.spec.chart.spec.sourceRef.namespace // $ns' <<<"$hr")
-    repo=$(name="$(jq -r '.spec.chart.spec.sourceRef.name' <<<"$hr")" ns="$chart_ns" yq -N -o json -I0 \
-      'select(.kind == "HelmRepository" and .metadata.name == strenv(name) and (.metadata.namespace // "default") == strenv(ns))' "$built")
+    repo=$(named_objects "$built" HelmRepository "$(jq -c --arg ns "$namespace" \
+      '{"name": .spec.chart.spec.sourceRef.name, "namespace": (.spec.chart.spec.sourceRef.namespace // $ns)}' <<<"$hr")")
     [[ -n $repo && $repo != *$'\n'* ]] || die "$where: its HelmRepository is not one object of the application"
+    refused=$(read_refused HelmRepository <<<"$repo")
+    [[ -z $refused ]] || refuse "$refused" "$where: its HelmRepository in $(object_file "$(app_dir "$cluster" "$app")" "$repo"): "
     # The render has no secrets, and no cloud identity to log in with.
     for field in secretRef certSecretRef; do
       jq -e --arg field "$field" '.spec[$field] == null' <<<"$repo" >/dev/null ||
@@ -253,31 +384,39 @@ release() {
   while IFS= read -r entry; do
     [[ -n $entry ]] || continue
     i=$((i + 1))
-    kind=$(jq -r '.kind' <<<"$entry")
-    [[ $kind == ConfigMap ]] || die "$where: values from a $kind are not rendered, only from a ConfigMap of the application"
-    [[ $(jq -r '.targetPath // ""' <<<"$entry") == "" ]] || die "$where: values from a ConfigMap into a targetPath are not rendered, only whole values"
-    name="$(jq -r '.name' <<<"$entry")" ns="$namespace" key="$(jq -r '.valuesKey // "values.yaml"' <<<"$entry")" \
-      yq -N 'select(.kind == "ConfigMap" and .metadata.name == strenv(name) and (.metadata.namespace // "default") == strenv(ns))
-        | .data[strenv(key)] // ""' "$built" >"$work/values-$i.yaml"
+    jq -e '.kind == "ConfigMap"' <<<"$entry" >/dev/null ||
+      die "$where: values from a $(jq -r '(.kind // "(no kind)") | tostring | gsub("[[:cntrl:]]"; "?")' <<<"$entry") are not rendered, only from a ConfigMap of the application"
+    jq -e '(.targetPath // "") == ""' <<<"$entry" >/dev/null || die "$where: values from a ConfigMap into a targetPath are not rendered, only whole values"
+    named_objects "$built" ConfigMap "$(jq -c --arg ns "$namespace" '{"name": .name, "namespace": $ns}' <<<"$entry")" |
+      jq -r --argjson entry "$entry" '.data[$entry.valuesKey // "values.yaml"] // ""' >"$work/values-$i.yaml" ||
+      die "$where: the values of ConfigMap $(jq -r '.name | tostring | gsub("[[:cntrl:]]"; "?")' <<<"$entry") cannot be read"
     [[ -s $work/values-$i.yaml || $(jq -r '.optional // false' <<<"$entry") == true ]] ||
-      die "$where: values from ConfigMap $(jq -r '.name' <<<"$entry") are not in the application"
+      die "$where: values from ConfigMap $(jq -r '.name | tostring | gsub("[[:cntrl:]]"; "?")' <<<"$entry") are not in the application"
   done < <(jq -c '.spec.valuesFrom // [] | .[]' <<<"$hr")
   jq '.spec.values // {}' <<<"$hr" >"$work/values-inline.yaml"
   # helm-controller's release: spec.releaseName, or the HelmRelease's name after its targetNamespace.
   target=$(jq -r '.spec.targetNamespace // ""' <<<"$hr")
   release=$(jq -r --arg target "$target" '.spec.releaseName // (if $target != "" then $target + "-" else "" end) + .metadata.name' <<<"$hr")
   [[ $release =~ $label && ${target:-$namespace} =~ $label ]] || die "$where: release $release in ${target:-$namespace} is not a DNS label"
-  printf '%s\n' "$release" "${target:-$namespace}" "$where" "$(jq -r '.metadata.name' <<<"$hr")" "$namespace" >"$work/release"
+  # One value to a record, ended by a NUL byte, which no value holds: none can shift the others.
+  printf '%s\0' "$release" "${target:-$namespace}" "$where" "$name" "$namespace" >"$work/release"
   jq -c '.spec.postRenderers // []' <<<"$hr" >"$work/post-renderers.json"
   jq -e 'all(.[]; keys == ["kustomize"] and (.kustomize | keys - ["images", "patches"] | length == 0))' \
     "$work/post-renderers.json" >/dev/null || die "$where: only kustomize post-renderers with patches and images are rendered"
+}
+
+# release_field WORK N: the Nth value, from 1, of the release record in WORK.
+release_field() {
+  local -a fields
+  mapfile -d '' -t fields <"$1/release"
+  printf '%s' "${fields[$2 - 1]}"
 }
 
 # template WORK OUT [API-VERSIONS]: renders the release prepared in WORK into OUT.
 template() {
   local work=$1 dest=$2 release namespace where err file
   local -a args=() lines
-  mapfile -t lines <"$work/release"
+  mapfile -d '' -t lines <"$work/release"
   release=${lines[0]} namespace=${lines[1]} where=${lines[2]}
   if [[ -n ${3:-} ]]; then
     args+=("--api-versions=$3")
@@ -285,7 +424,7 @@ template() {
   for file in "$work"/values-[0-9]*.yaml "$work/values-inline.yaml"; do
     args+=(--values "$file")
   done
-  if ! err=$(helm template "$release" "$(cat "$work/chart")" --namespace "$namespace" --kube-version "$kube" \
+  if ! err=$(offline helm template "$release" "$(cat "$work/chart")" --namespace "$namespace" --kube-version "$kube" \
     --include-crds "${args[@]}" 2>&1 >"$dest"); then
     die "$where: helm template failed: $err"
   fi
@@ -294,7 +433,7 @@ template() {
 # post_render WORK FILE: applies the release's kustomize post-renderers to the objects in FILE.
 post_render() {
   local work=$1 file=$2 where count i patched
-  where=$(sed -n 3p "$work/release")
+  where=$(release_field "$work" 3)
   count=$(jq 'length' "$work/post-renderers.json")
   for ((i = 0; i < count; i++)); do
     patched="$work/post-render-$i"
@@ -303,7 +442,7 @@ post_render() {
     cp "$file" "$patched/rendered.yaml"
     jq --argjson i "$i" '{"apiVersion": "kustomize.config.k8s.io/v1beta1", "kind": "Kustomization",
       "resources": ["rendered.yaml"]} + .[$i].kustomize' "$work/post-renderers.json" >"$patched/kustomization.yaml"
-    kustomize build "$patched" >"$file" 2>"$work/post-render.log" ||
+    offline kustomize build "$patched" >"$file" 2>"$work/post-render.log" ||
       die "$where: post-renderer $((i + 1)) failed: $(cat "$work/post-render.log")"
   done
 }
@@ -329,18 +468,23 @@ if ((forms_only)); then
 fi
 
 # helm-controller renders with the cluster's API versions; this render takes those of every definition
-# the tree installs, as served once all of them are established.
+# the tree installs, as served once all of them are established. A definition is an object of
+# apiextensions.k8s.io/v1 and kind CustomResourceDefinition whose group, kind and versions have the
+# shapes the API server requires; an object that is only called one, of another API group or of a
+# shape no definition has, names no API.
 definitions=("$tmp"/built/*/*.yaml "$tmp"/releases/*/*/*/first.yaml)
-# shellcheck disable=SC2016 # $spec is a yq variable.
-apis=$(yq -N 'select(.kind == "CustomResourceDefinition") | .spec as $spec | ($spec.versions // [])[] | select(.served)
-  | [$spec.group + "/" + .name, $spec.group + "/" + .name + "/" + $spec.names.kind] | .[]' "${definitions[@]}" | sort -u | paste -sd, -)
+# shellcheck disable=SC2016 # $spec is a jq variable.
+apis=$(yq -N -o json -I0 'select(. != null)' "${definitions[@]}" | jq -r "$(shapes_jq)"'
+  select(type == "object" and .kind == "CustomResourceDefinition" and .apiVersion == "apiextensions.k8s.io/v1" and crd_shaped)
+  | .spec as $spec | ($spec.versions // [])[] | select(.served == true)
+  | [$spec.group + "/" + .name, $spec.group + "/" + .name + "/" + $spec.names.kind] | .[]' | sort -u | paste -sd, -)
 
 # objects WORK: the release's objects as JSON lines, keys sorted: rendered twice, post-rendered and
 # labelled as helm-controller labels them, every value that differs between the two masked.
 objects() {
   local work=$1 run hr_name hr_namespace
-  hr_name=$(sed -n 4p "$work/release")
-  hr_namespace=$(sed -n 5p "$work/release")
+  hr_name=$(release_field "$work" 4)
+  hr_namespace=$(release_field "$work" 5)
   for run in a b; do
     template "$work" "$work/$run.yaml" "$apis"
     post_render "$work" "$work/$run.yaml"
@@ -359,7 +503,7 @@ objects() {
       else "(generated at render time)" end;
     if ($a | length) != ($b | length) then error("the chart renders a different number of objects each time")
     else range($a | length) as $i | mask($a[$i]; $b[$i]) end' ||
-    die "$(sed -n 3p "$work/release"): the chart does not render the same objects twice"
+    die "$(release_field "$work" 3): the chart does not render the same objects twice"
 }
 
 # Each application's objects: what Flux builds, and what its HelmReleases' charts render.
@@ -380,15 +524,19 @@ for app in "${apps[@]}"; do
     die "$app: a Secret's data is still in the render"
   fi
   # One file per object, named after its kind, group, namespace and name, which hold only the
-  # characters Kubernetes allows in them; a generated ConfigMap or Secret without its hash.
-  jq -r '
+  # characters Kubernetes allows in them (\z, as $ would also match before a final line break, which
+  # would shift every name after it); a generated ConfigMap or Secret without its hash.
+  # Slurped, as jq exits with the status of its last input alone: an error on an earlier object
+  # would go unseen.
+  jq -r -s '.[] |
     ((.apiVersion // "") | if test("/") then sub("/[^/]*$"; "") else "" end) as $group
     | (.metadata.name // "") as $name
-    | (if (.kind == "ConfigMap" or .kind == "Secret") and $group == "" then $name | sub("-[2456789bcdfghkmt]{10}$"; "") else $name end) as $base
-    | if ((.kind // "") | test("^[A-Za-z0-9]+$")) and ($group | test("^[a-z0-9.-]*$"))
-        and ((.metadata.namespace // "") | test("^[a-z0-9-]*$")) and ($base | test("^[A-Za-z0-9][A-Za-z0-9._:-]*$"))
+    | (if (.kind == "ConfigMap" or .kind == "Secret") and $group == "" then $name | sub("-[2456789bcdfghkmt]{10}\\z"; "") else $name end) as $base
+    | if ((.kind // "") | test("\\A[A-Za-z0-9]+\\z")) and ($group | test("\\A[a-z0-9.-]*\\z"))
+        and ((.metadata.namespace // "") | test("\\A[a-z0-9-]*\\z")) and ($base | test("\\A[A-Za-z0-9][A-Za-z0-9._:-]*\\z"))
       then .kind + (if $group != "" then "." + $group else "" end) + "_" + (.metadata.namespace // "") + "_" + $base + ".yaml"
-      else error("an object with a kind, group, namespace or name Kubernetes would refuse: \(.kind) \(.apiVersion) \(.metadata.namespace) \(.metadata.name)") end' \
+      else error("an object with a kind, group, namespace or name Kubernetes would refuse: "
+        + ([.kind, .apiVersion, .metadata.namespace, .metadata.name] | map(tostring | gsub("[[:cntrl:]]"; "?")) | join(" "))) end' \
     "$tmp/redacted.jsonl" >"$tmp/names" 2>"$tmp/names.log" || die "$app: $(cat "$tmp/names.log")"
   twice=$(sort "$tmp/names" | uniq -d)
   [[ -z $twice ]] || die "$app: more than one object renders as $twice"

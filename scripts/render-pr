@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # The CI render job's work, which the Dagger module runs for just ci-render: renders the base commit
 # and this checkout, both with the base's render code (scripts/render, scripts/render-diff,
-# scripts/lib/render-comment.sh and scripts/lib/tools.sh as the base holds them), and writes the
-# comment that compares them to OUT. Both trees are only ever input to that code, so a change to
-# the tree alone is shown by the reviewed render code. This script, the recipe, the module and the
-# workflow that run it are the checkout's own, so a pull request that changes them decides what the
-# comment says. A base without the render code, or one its own render code does not render, is
-# rendered with this checkout's.
+# scripts/lib/render-comment.sh, scripts/lib/shapes.sh, scripts/lib/tools.sh and
+# scripts/lib/tree-paths.sh as the base holds them), and writes the comment that compares them to
+# OUT. Both trees are only ever input to that code, so a change to the tree alone is shown by the
+# reviewed render code. This script, the recipe, the module and the workflow that run it are the
+# checkout's own, so a pull request that changes them decides what the comment says. A base
+# without the render code, or one its own render code does not render, is rendered with this
+# checkout's.
 #
 # Usage: scripts/render-pr BASE OUT   (BASE is a commit; the first parent of HEAD when empty)
 set -euo pipefail

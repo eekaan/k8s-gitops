@@ -6,7 +6,11 @@
 # Kyverno's fork of the Pod Security admission policy library; Helm hooks and tests are objects of
 # the render like the rest. The pods of the Flux install the FluxInstance configures (the pinned
 # Flux CLI's manifests for the components it names) are evaluated too, with the FluxInstance's
-# patches applied, and its Namespace patches declare flux-system's labels.
+# patches applied, and its Namespace patches declare flux-system's labels. The FluxInstance is read
+# by its fields' own names, and kustomize is handed its patches as a patch and its target alone: a
+# key that folds to a field the check reads without being it, or a patch, target or other key
+# kustomize would read that the operator's types do not hold, such as a path, is refused
+# (scripts/lib/tree-paths.sh).
 #
 # What must hold, and what fails the check naming the namespace and the workload:
 #   - every namespace an application targets, or an object of the render is in, has a Namespace
@@ -27,11 +31,16 @@
 #
 # Usage: scripts/pod-security-check [--list] RENDER EXCEPTIONS VERSIONS
 set -euo pipefail
+# Text is matched, sorted and shown byte by byte, whatever the caller's locale.
+export LC_ALL=C
 shopt -s nullglob
 
 # flux, kustomize and kyverno are run with none of the secrets a recipe's environment may hold.
 # shellcheck source=scripts/lib/tools.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib/tools.sh"
+# The fields the check reads of a FluxInstance.
+# shellcheck source=scripts/lib/tree-paths.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/tree-paths.sh"
 
 die() {
   echo "pod-security-check: $*" >&2
@@ -58,6 +67,8 @@ unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+# flux install and kustomize run with a git that refuses and a closed proxy (tree_paths_offline).
+tree_paths_offline "$tmp/offline"
 
 kube=$(yq '.kubernetes // ""' "$versions")
 [[ $kube =~ ^v?([0-9]+\.[0-9]+)\.[0-9]+$ ]] || die "$versions: kubernetes is not a version: $kube"
@@ -89,14 +100,26 @@ while IFS= read -r instance; do
   dir="$tmp/flux/$n"
   mkdir -p "$dir"
   flux_namespace=$(jq -r '.metadata.namespace // "flux-system"' <<<"$instance")
+  # A patch the operator applies is a patch and its target, all its type holds; kustomize would
+  # read a path a patch names, or fetch it.
+  name=$(jq -r '"\(.metadata.namespace // "flux-system")/\(.metadata.name)" | gsub("[[:cntrl:]]"; "?")' <<<"$instance")
+  jq -e '(.spec.kustomize.patches // []) | type == "array"' <<<"$instance" >/dev/null ||
+    die "FluxInstance $name: its patches are not a list"
+  refused=$(read_refused FluxInstance <<<"$instance")
+  if [[ -n $refused ]]; then
+    while IFS= read -r line; do
+      echo "pod-security-check: FluxInstance $name: $line" >&2
+    done <<<"$refused"
+    exit 1
+  fi
   components=$(jq -r '(.spec.components // []) | join(",")' <<<"$instance")
   args=(--export --namespace "$flux_namespace")
   [[ -z $components ]] || args+=(--components "$components")
-  flux install "${args[@]}" >"$dir/flux.yaml" 2>"$dir/flux.err" ||
+  offline flux install "${args[@]}" >"$dir/flux.yaml" 2>"$dir/flux.err" ||
     die "flux install --export failed for the FluxInstance: $(cat "$dir/flux.err")"
   jq '{"apiVersion": "kustomize.config.k8s.io/v1beta1", "kind": "Kustomization", "resources": ["flux.yaml"],
     "patches": (.spec.kustomize.patches // [])}' <<<"$instance" >"$dir/kustomization.yaml"
-  kustomize build "$dir" >"$dir/built.yaml" 2>"$dir/kustomize.err" ||
+  offline kustomize build "$dir" >"$dir/built.yaml" 2>"$dir/kustomize.err" ||
     die "the FluxInstance's patches do not apply to the Flux install: $(cat "$dir/kustomize.err")"
   yq -N -o json -I0 'select(. != null)' "$dir/built.yaml" |
     jq -c '.' >>"$tmp/objects.jsonl"
