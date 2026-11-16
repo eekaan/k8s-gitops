@@ -1,0 +1,17 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: gateway-api-crds
+  description: The Gateway API's standard-channel resource definitions, applied from the upstream release.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#resource-definitions
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/kube-system/gateway-api-crds
+      title: Manifests
+spec:
+  type: definitions
+  lifecycle: production
+  owner: group:default/operators
+  system: networking

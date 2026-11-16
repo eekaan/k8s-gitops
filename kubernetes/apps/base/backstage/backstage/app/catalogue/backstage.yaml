@@ -1,0 +1,25 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: backstage
+  description: Backstage, which lists what the cluster runs from files in this repository.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#backstage
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/backstage/backstage
+      title: Manifests
+spec:
+  type: service
+  lifecycle: production
+  owner: group:default/operators
+  system: applications
+  dependsOn:
+    - component:default/cilium
+    - component:default/cloudnative-pg
+    - component:default/external-secrets
+    - resource:default/gateway-public
+    - resource:default/openbao-store
+    - component:default/plugin-barman-cloud
+    - resource:default/prometheus-operator-crds

@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# A stand-in for the container runtime, installed by tests/postgres-dump-recipes.bats as
+# <tmp>/bin/docker, that runs the one thing the dump check runs: pg_restore --list of a dump in a
+# directory mounted read-only, from an image, with no network. It finds its files from its own path:
+#   <tmp>/state/interrupt   the run is interrupted, as by Ctrl-C, while pg_restore reads the dump;
+#                           this fake dies of it when the file says dies, and when it says handles,
+#                           handles it itself, finishes and exits 0
+# The fake pg_restore reads an archive as the tests make one: PGDMP on the first line, then the
+# table of contents as pg_restore --list prints it, then a line -----ROWS----- and the rows. Without
+# PGDMP it fails as pg_restore does for a file that is no archive; the rows are never printed.
+#   <tmp>/state/runtime-exit   the runtime itself fails with this status, saying so on its standard error;
+#                           a status above 127 is a container's, killed by a signal, whose standard
+#                           error is pg_restore's
+# It is installed under the name of the runtime it stands for, docker or podman; as docker it refuses
+# podman's --userns=keep-id, as the runtime itself, with status 125. It records its arguments in
+# <tmp>/record/argv, the environment it was given in <tmp>/record/runtime-env, and what it was given in
+# <tmp>/record/docker-mount: the image, the network, the entrypoint, the host directory mounted and the
+# mount's mode, whether the container is removed and logs nowhere, how it is confined, the user it
+# runs as and the user namespace mode.
+set -uo pipefail
+
+root=${0%/bin/*}
+me=${0##*/}
+printf '%s\n' "$me $*" >> "$root/record/argv"
+env > "$root/record/runtime-env"
+[[ ${1-} == run ]] || { echo "unexpected call: $me $*" >&2; exit 2; }
+shift
+network='' mount='' entrypoint='' image='' list=0 file='' rm=no read_only=no log_driver='' cap_drop='' security_opt='' user='' userns=''
+while (($#)); do
+  case $1 in
+    --network) network=$2 && shift ;;
+    --network=*) network=${1#*=} ;;
+    -v | --volume) mount=$2 && shift ;;
+    --entrypoint) entrypoint=$2 && shift ;;
+    --user) user=$2 && shift ;;
+    --cap-drop) cap_drop=$2 && shift ;;
+    --security-opt) security_opt=$2 && shift ;;
+    --log-driver) log_driver=$2 && shift ;;
+    --log-driver=*) log_driver=${1#*=} ;;
+    --userns=*)
+      userns=${1#*=}
+      if [[ $me == docker && $userns == keep-id ]]; then
+        echo "docker: invalid user namespace mode: $userns" >&2
+        exit 125
+      fi
+      ;;
+    --pids-limit | --memory) shift ;;
+    --rm) rm=yes ;;
+    --read-only) read_only=yes ;;
+    --list) list=1 ;;
+    -*) echo "unexpected option: docker run $1" >&2; exit 2 ;;
+    *)
+      if [[ -z $image ]]; then
+        image=$1
+      else
+        file=$1
+      fi
+      ;;
+  esac
+  shift
+done
+host=${mount%%:*}
+rest=${mount#*:}
+inside=${rest%%:*}
+mode=${rest#*:}
+printf 'image %s\nnetwork %s\nentrypoint %s\nhost %s\nmode %s\nrm %s\nread-only %s\nlog-driver %s\ncap-drop %s\nsecurity-opt %s\nuser %s\nuserns %s\n' \
+  "$image" "$network" "$entrypoint" "$host" "$mode" "$rm" "$read_only" "$log_driver" "$cap_drop" "$security_opt" "$user" "$userns" \
+  > "$root/record/docker-mount"
+[[ $entrypoint == pg_restore && $list -eq 1 && $file == "$inside"/* ]] || { echo "unexpected call: $me run $*" >&2; exit 2; }
+if [[ -f $root/state/runtime-exit ]]; then
+  code=$(cat "$root/state/runtime-exit")
+  if ((code > 127)); then
+    echo "pg_restore: error: marker_pgrestore killed" >&2
+  else
+    echo "Error response from daemon: marker-daemon" >&2
+  fi
+  exit "$code"
+fi
+archive=$host/${file#"$inside"/}
+case $(cat "$root/state/interrupt" 2> /dev/null) in
+  dies | handles)
+    # Ctrl-C reaches the recipe's script, the topmost process that runs it, and this program alike.
+    # The walk ends at the just that runs the recipe, or the timeout the tests run that under, so
+    # nothing above the recipe is signalled, though its arguments name the script.
+    pid=$$ script=
+    while [[ $pid -gt 1 ]]; do
+      pid=$(awk '{print $4}' "/proc/$pid/stat")
+      case $(cat "/proc/$pid/comm") in
+        just | timeout) break ;;
+      esac
+      mapfile -d '' words < "/proc/$pid/cmdline"
+      for word in "${words[@]}"; do
+        # just's own command line names the recipe, without a directory.
+        if [[ $word == */postgres-dump-check ]]; then
+          script=$pid
+        fi
+      done
+    done
+    [[ -z $script ]] || kill -INT "$script"
+    [[ $(cat "$root/state/interrupt") == handles ]] || exit 130
+    ;;
+esac
+if [[ $(head -n 1 "$archive" 2> /dev/null) != PGDMP ]]; then
+  echo "pg_restore: error: marker_pgrestore unsupported version (0.0) in file header" >&2
+  exit 1
+fi
+sed -n '2,/^-----ROWS-----$/p' "$archive" | sed '$d'

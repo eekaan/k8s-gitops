@@ -1,0 +1,95 @@
+---
+# dex's chart values that do not depend on the cluster; the HelmRelease adds the issuer, the
+# connector and the client, which do. The chart's image is dex's own, at the chart's app version.
+
+# Two replicas: with storage in Kubernetes objects each one reads the same state, and dex's key
+# rotation and key creation tolerate several instances racing for the same objects.
+replicaCount: 2
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: dex
+        app.kubernetes.io/instance: dex
+
+# The image's own user, by number as the kubelet cannot verify a name.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# dex's image starts through an entrypoint that expands the configuration with gomplate into a
+# temporary file in /tmp, which the read-only root filesystem refuses.
+volumes:
+  - name: tmp
+    emptyDir: {}
+
+volumeMounts:
+  - name: tmp
+    mountPath: /tmp
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    memory: 128Mi
+
+# Read by reference from Secrets that External Secrets makes (github-client.yaml,
+# client-secret.yaml), never from a value. The pods wait for the Secrets.
+envVars:
+  - name: DEX_GITHUB_CLIENT_ID
+    valueFrom:
+      secretKeyRef:
+        name: dex-github
+        key: client-id
+  - name: DEX_GITHUB_CLIENT_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: dex-github
+        key: client-secret
+  - name: OAUTH2_PROXY_CLIENT_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: dex-oauth2-proxy-client
+        key: client-secret
+
+# The chart's grant to the API group dex keeps its state in and to list and create the definitions
+# of it: dex makes its own custom resource definitions at its first start.
+rbac:
+  create: true
+  createClusterScoped: true
+
+config:
+  # State in Kubernetes objects of dex's own API group, read through the pod's service account.
+  storage:
+    type: kubernetes
+    config:
+      inCluster: true
+  # GitHub is the only way in: no password database, and so no static password.
+  enablePasswordDB: false
+  oauth2:
+    # oauth2-proxy uses the authorisation code flow only.
+    responseTypes:
+      - code
+    # One client, which the owner runs: a person is not asked to approve it at every sign-in.
+    skipApprovalScreen: true
+  logger:
+    level: info
+    format: json

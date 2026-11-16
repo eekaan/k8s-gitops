@@ -34,6 +34,16 @@ setup() {
   PROMETHEUS='monitoring:app.kubernetes.io/name=prometheus'
   OTHER_APP='other:app.kubernetes.io/name=app'
   KROMGO=kromgo/Deployment/kromgo
+  FALCO=security-system/DaemonSet/falco
+  # Backstage's pod and its database's: the instances and the jobs the PostgreSQL operator makes for
+  # the cluster backstage-db at run time, by the labels it gives them (pkg/specs/pods.go and jobs.go
+  # of the pinned operator), its own pods in cnpg-system, and the daily dump job.
+  BACKSTAGE=backstage/Deployment/backstage
+  BACKSTAGE_DB='backstage:cnpg.io/cluster=backstage-db,cnpg.io/instanceName=backstage-db-1,cnpg.io/podRole=instance,app.kubernetes.io/name=postgresql,app.kubernetes.io/instance=backstage-db,app.kubernetes.io/component=database,app.kubernetes.io/managed-by=cloudnative-pg'
+  BACKSTAGE_DB_REPLICA='backstage:cnpg.io/cluster=backstage-db,cnpg.io/instanceName=backstage-db-2,cnpg.io/podRole=instance,app.kubernetes.io/name=postgresql,app.kubernetes.io/instance=backstage-db,app.kubernetes.io/component=database,app.kubernetes.io/managed-by=cloudnative-pg'
+  BACKSTAGE_DB_JOIN='backstage:cnpg.io/cluster=backstage-db,cnpg.io/instanceName=backstage-db-3,cnpg.io/jobRole=join,app.kubernetes.io/name=postgresql,app.kubernetes.io/instance=backstage-db,app.kubernetes.io/component=database,app.kubernetes.io/managed-by=cloudnative-pg'
+  CNPG_OPERATOR=cnpg-system/Deployment/cloudnative-pg
+  PGDUMP=backstage/CronJob/backstage-db-pgdump
 }
 
 # tree NAME: a copy of the fixture in $BATS_TEST_TMPDIR/NAME, for the test to change.
@@ -259,7 +269,7 @@ proxies_egress() {
   real_render
   run "$REPO/scripts/network-policy-check" "$REAL" "$REPO/network-policy-exceptions.yaml"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [ "$(grep ' denies ingress and egress' <<<"$output" | cut -d' ' -f1 | paste -sd' ')" = "demo envoy-gateway-system kromgo" ]
+  [ "$(grep ' denies ingress and egress' <<<"$output" | cut -d' ' -f1 | paste -sd' ')" = "backstage demo envoy-gateway-system kromgo security-system sso-system" ]
   [ "$(grep -c ' listed' <<<"$output")" -eq "$(yq '.exceptions | length' "$REPO/network-policy-exceptions.yaml")" ]
 }
 
@@ -536,6 +546,15 @@ E
   denied "$VIEW" "$PROXY" "$KROMGO" 8081/tcp
   denied_in "$VIEW" "$PROXY" "$KROMGO" 8081/tcp
   denied "$VIEW" "$PROXY" "$KROMGO" 22/tcp
+  # Backstage's route sends them to its port in backstage, which carries the Gateway label and
+  # denies by default: the proxies' egress and Backstage's own ingress both take that port, and
+  # neither reaches its database.
+  allowed "$VIEW" "$PROXY" "$BACKSTAGE" 7007/tcp
+  allowed_in "$VIEW" "$PROXY" "$BACKSTAGE" 7007/tcp
+  denied "$VIEW" "$PROXY" "$BACKSTAGE" 22/tcp
+  denied "$VIEW" "$PROXY" "$BACKSTAGE_DB" 5432/tcp
+  denied_in "$VIEW" "$PROXY" "$BACKSTAGE_DB" 5432/tcp
+  denied "$VIEW" "$PROXY" "$PGDUMP" 7007/tcp
   # The proxies' egress names each routed backend's pods and the port its route sends to, and no
   # other, so in a namespace that is listed, and takes them on every port, they reach neither n8n's
   # other ports, demo's backend's port among them, nor its database on any port.
@@ -547,6 +566,21 @@ E
   # its pod, n8n's among them.
   allowed "$VIEW" "$PROXY" ai-system/Deployment/open-webui 8080/tcp
   denied "$VIEW" "$PROXY" ai-system/Deployment/open-webui 5678/tcp
+  # The sign-in's routes send the proxies to dex's 5556 and oauth2-proxy's 4180 in sso-system, which
+  # carries the Gateway label and denies by default; oauth2-proxy's 4180 is also where the proxies ask
+  # about each request of a route that opts in (components/sso). Each takes them on that port alone,
+  # by their labels, and nothing from outside the cluster.
+  allowed "$VIEW" "$PROXY" sso-system/Deployment/dex 5556/tcp
+  allowed "$VIEW" "$PROXY" sso-system/Deployment/oauth2-proxy 4180/tcp
+  denied "$VIEW" "$PROXY" sso-system/Deployment/dex 5558/tcp
+  denied "$VIEW" "$PROXY" sso-system/Deployment/dex 5557/tcp
+  denied "$VIEW" "$PROXY" sso-system/Deployment/oauth2-proxy 44180/tcp
+  denied "$VIEW" "$PROXY" sso-system/Deployment/oauth2-proxy 5556/tcp
+  denied "$VIEW" @world sso-system/Deployment/dex 5556/tcp
+  denied "$VIEW" @world sso-system/Deployment/oauth2-proxy 4180/tcp
+  denied "$VIEW" @remote-node sso-system/Deployment/oauth2-proxy 4180/tcp
+  denied_in "$VIEW" envoy-gateway-system/Deployment/envoy-gateway sso-system/Deployment/dex 5556/tcp
+  denied_in "$VIEW" envoy-gateway-system/Deployment/envoy-gateway sso-system/Deployment/oauth2-proxy 4180/tcp
   allowed "$VIEW" "$PROXY" envoy-gateway-system/Deployment/envoy-gateway 18000/tcp
   allowed "$VIEW" "$PROXY" "$DNS" 53/udp
   # Nothing but the listener ports reaches the proxies from outside.
@@ -579,6 +613,9 @@ E
   denied "$VIEW" @remote-node "$hello" 8080/tcp
   denied_in "$VIEW" envoy-gateway-system/Deployment/envoy-gateway "$KROMGO" 8080/tcp
   denied "$VIEW" @world "$KROMGO" 8080/tcp
+  denied_in "$VIEW" envoy-gateway-system/Deployment/envoy-gateway "$BACKSTAGE" 7007/tcp
+  denied "$VIEW" @world "$BACKSTAGE" 7007/tcp
+  denied "$VIEW" @remote-node "$BACKSTAGE" 7007/tcp
   # No monitor of the tree scrapes the Gateway, so Prometheus reaches neither its controller nor
   # its proxies.
   denied "$VIEW" "$PROMETHEUS" envoy-gateway-system/Deployment/envoy-gateway 19001/tcp
@@ -604,7 +641,7 @@ E
   local probes pod port
   probes=$(yq -N -o json -I0 'select(. != null)' "$VIEW"/*/*/*.yaml | jq -r '
     select(.kind | IN("Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"))
-    | select(.metadata.namespace | IN("demo", "envoy-gateway-system", "kromgo"))
+    | select(.metadata.namespace | IN("backstage", "demo", "envoy-gateway-system", "kromgo", "security-system", "sso-system"))
     | . as $w
     | (if .kind == "CronJob" then .spec.jobTemplate.spec.template else .spec.template end).spec.containers[]
     | . as $c
@@ -621,6 +658,14 @@ E
   [[ $probes == *"demo/Deployment/hello 8080"* ]]
   [[ $probes == *"envoy-gateway-system/Deployment/envoy-gateway 8081"* ]]
   [[ $probes == *"kromgo/Deployment/kromgo 8080"* ]]
+  [[ $probes == *"sso-system/Deployment/dex 5558"* ]]
+  [[ $probes == *"sso-system/Deployment/oauth2-proxy 4180"* ]]
+  [[ $probes == *"backstage/Deployment/backstage 7007"* ]]
+  [[ $probes == *"security-system/DaemonSet/falco 8765"* ]]
+  # The database's instances, which no render holds, are probed on the status port, where the pinned
+  # operator puts its startup, liveness and readiness probes (pkg/specs/pods.go), and on no other.
+  allowed "$VIEW" @host "$BACKSTAGE_DB" 8000/tcp
+  denied "$VIEW" @host "$BACKSTAGE_DB" 5432/tcp
   # The ports the proxies' egress names in each labelled namespace are exactly the container ports
   # the Gateway's routes send to in that namespace, read from the render. A route to a backend on
   # another port, or in another labelled namespace, fails here until the rules name it.
@@ -629,7 +674,8 @@ E
   named=$(proxies_egress "$VIEW")
   echo "the routes' backends' container ports: $routed; the proxies' egress to the labelled namespaces: ${named:-every port}"
   [[ " $routed " == *" demo:8080 "* && " $routed " == *" ai-system:5678 "* && " $routed " == *" ai-system:8080 "* \
-    && " $routed " == *" kromgo:8080 "* ]]
+    && " $routed " == *" kromgo:8080 "* && " $routed " == *" backstage:7007 "* ]]
+  [[ " $routed " == *" sso-system:4180 "* && " $routed " == *" sso-system:5556 "* ]]
   [ "$named" = "$routed" ]
   # A route to a backend in a namespace without the Gateway label, or behind a Service without a
   # selector, has no port the comparison could name, and fails it saying why.
@@ -689,7 +735,7 @@ E
 
 @test "A pod of an application cannot reach the secret store, the storage controller or another application" {
   real_render
-  local pods=(demo/Deployment/hello demo/Deployment/volsync-demo "$MOVER" "$KROMGO")
+  local pods=(demo/Deployment/hello demo/Deployment/volsync-demo "$MOVER" "$KROMGO" "$BACKSTAGE" "$PGDUMP" "$FALCO")
   local pod
   for pod in "${pods[@]}"; do
     denied "$VIEW" "$pod" openbao/StatefulSet/openbao 8200/tcp
@@ -750,18 +796,119 @@ E
   denied "$VIEW" "$MOVER" "$KROMGO" 8080/tcp
   denied "$VIEW" ai-system/Deployment/n8n "$KROMGO" 8080/tcp
   denied "$VIEW" "$KROMGO" demo/Deployment/hello 8080/tcp
+  # Falco's pods take Prometheus' scrape of the port of its Service that its monitor names, read from
+  # the render, and the kubelet's probes on it, and nothing else; they reach the cluster's resolver
+  # on 53, for the name the image's rule "Contact K8S API Server From Container" compares, and
+  # nothing else, not the API server, the nodes or anything outside the cluster: Falco reads the
+  # runtime's socket and the node's files through host paths, and writes its events to standard
+  # output.
+  local falco_metrics
+  falco_metrics=$(P="$(yq -N '.spec.endpoints[].port' "$REAL"/*/falco/ServiceMonitor.monitoring.coreos.com_security-system_falco.yaml)" \
+    yq '.spec.ports[] | select(.name == strenv(P)) | .targetPort' "$REAL"/*/falco/Service_security-system_falco-metrics.yaml)
+  [[ $falco_metrics =~ ^[0-9]+$ ]] || { echo "Falco's monitor scrapes no one numbered port: $falco_metrics"; return 1; }
+  allowed "$VIEW" "$PROMETHEUS" "$FALCO" "$falco_metrics/tcp"
+  allowed "$VIEW" @host "$FALCO" "$falco_metrics/tcp"
+  denied "$VIEW" "$PROMETHEUS" "$FALCO" 22/tcp
+  denied "$VIEW" monitoring/Deployment/kube-prometheus-stack-kube-state-metrics "$FALCO" "$falco_metrics/tcp"
+  denied "$VIEW" "$OTHER_APP" "$FALCO" "$falco_metrics/tcp"
+  denied "$VIEW" demo/Deployment/hello "$FALCO" "$falco_metrics/tcp"
+  denied "$VIEW" "$KROMGO" "$FALCO" "$falco_metrics/tcp"
+  denied "$VIEW" "$PROXY" "$FALCO" "$falco_metrics/tcp"
+  denied "$VIEW" @world "$FALCO" "$falco_metrics/tcp"
+  denied "$VIEW" @remote-node "$FALCO" "$falco_metrics/tcp"
+  denied "$VIEW" @kube-apiserver "$FALCO" "$falco_metrics/tcp"
+  allowed "$VIEW" "$FALCO" "$DNS" 53/udp
+  allowed "$VIEW" "$FALCO" "$DNS" 53/tcp
+  denied "$VIEW" "$FALCO" "$DNS" 9153/tcp
+  denied "$VIEW" "$FALCO" @kube-apiserver 443/tcp
+  denied "$VIEW" "$FALCO" @world 443/tcp
+  denied "$VIEW" "$FALCO" @world 80/tcp
+  denied "$VIEW" "$FALCO" @remote-node 10250/tcp
+  denied "$VIEW" "$FALCO" "$PROMETHEUS" 9090/tcp
+  denied "$VIEW" "$FALCO" monitoring/StatefulSet/victoria-logs 9428/tcp
   # The backup movers reach the object storage on 443 and no other port of the world; the other
   # pods reach none of it.
   allowed "$VIEW" "$MOVER" @world 443/tcp
   denied "$VIEW" "$MOVER" @world 80/tcp
   # That is the port of the endpoint as cluster-config's example gives it: 443 for one that names
   # none, as the validation of the endpoint (scripts/lib/s3.sh) allows, or the port it names.
-  local endpoint
+  local endpoint s3_port
   endpoint=$(yq '.S3_ENDPOINT' "$REPO/kubernetes/clusters/lab-sto2/cluster-config.example.yaml")
   [[ $endpoint =~ ^https://[^/:]+(:([0-9]+))?$ ]]
-  allowed "$VIEW" "$MOVER" @world "${BASH_REMATCH[2]:-443}/tcp"
+  s3_port=${BASH_REMATCH[2]:-443}
+  allowed "$VIEW" "$MOVER" @world "$s3_port/tcp"
   denied "$VIEW" demo/Deployment/hello @world 443/tcp
   denied "$VIEW" demo/Deployment/volsync-demo @world 443/tcp
+  # Backstage resolves its database's name and reaches the database's instances on PostgreSQL's port,
+  # the one a failover moves the primary between, and nothing else: no other port of them, no other
+  # application's database or pod, not the API server, nothing outside the cluster on any port.
+  allowed "$VIEW" "$BACKSTAGE" "$DNS" 53/udp
+  allowed "$VIEW" "$BACKSTAGE" "$DNS" 53/tcp
+  denied "$VIEW" "$BACKSTAGE" "$DNS" 9153/tcp
+  allowed "$VIEW" "$BACKSTAGE" "$BACKSTAGE_DB" 5432/tcp
+  allowed "$VIEW" "$BACKSTAGE" "$BACKSTAGE_DB_REPLICA" 5432/tcp
+  denied "$VIEW" "$BACKSTAGE" "$BACKSTAGE_DB" 8000/tcp
+  denied "$VIEW" "$BACKSTAGE" "$BACKSTAGE_DB" 9187/tcp
+  denied "$VIEW" "$BACKSTAGE" "$BACKSTAGE_DB_JOIN" 5432/tcp
+  denied "$VIEW" "$BACKSTAGE" "$N8N_DB" 5432/tcp
+  denied "$VIEW" "$BACKSTAGE" "$KROMGO" 8080/tcp
+  denied "$VIEW" "$BACKSTAGE" "$PGDUMP" 5432/tcp
+  local port
+  for port in 443 80 22 5432 53; do
+    denied "$VIEW" "$BACKSTAGE" @world "$port/tcp"
+  done
+  denied "$VIEW" "$BACKSTAGE" @world 53/udp
+  denied "$VIEW" "$BACKSTAGE" @kube-apiserver 443/tcp
+  # No other application's pod, nor the database, reaches Backstage.
+  denied "$VIEW" "$OTHER_APP" "$BACKSTAGE" 7007/tcp
+  denied "$VIEW" "$KROMGO" "$BACKSTAGE" 7007/tcp
+  denied "$VIEW" ai-system/Deployment/n8n "$BACKSTAGE" 7007/tcp
+  denied "$VIEW" "$BACKSTAGE_DB" "$BACKSTAGE" 7007/tcp
+  # The dump job resolves the Services' names, reaches the instances on PostgreSQL's port, and the
+  # world on 443 alone, for the age release and the object storage (docs/kubernetes.md, Dumps).
+  allowed "$VIEW" "$PGDUMP" "$DNS" 53/udp
+  allowed "$VIEW" "$PGDUMP" "$BACKSTAGE_DB" 5432/tcp
+  allowed "$VIEW" "$PGDUMP" "$BACKSTAGE_DB_REPLICA" 5432/tcp
+  denied "$VIEW" "$PGDUMP" "$BACKSTAGE_DB" 8000/tcp
+  denied "$VIEW" "$PGDUMP" "$BACKSTAGE" 7007/tcp
+  allowed "$VIEW" "$PGDUMP" @world 443/tcp
+  denied "$VIEW" "$PGDUMP" @world 80/tcp
+  denied "$VIEW" "$PGDUMP" @world 5432/tcp
+  # The database: the operator reaches every pod of the cluster on the status port and PostgreSQL's,
+  # as its documentation asks, the cluster's pods reach each other, a joining instance among them,
+  # and the API server, and Prometheus scrapes the exporter's port; nothing else reaches them. The
+  # instances, whose pods hold the Barman Cloud plugin's sidecar, reach the object storage, the
+  # world on 443 and on the port cluster-config's example gives the endpoint, for the WAL archive
+  # and the base backups (docs/kubernetes.md, Backups and restores), and no other port of it; a
+  # job that creates or joins an instance holds no sidecar and reaches nothing outside the cluster.
+  allowed "$VIEW" "$CNPG_OPERATOR" "$BACKSTAGE_DB" 8000/tcp
+  allowed "$VIEW" "$CNPG_OPERATOR" "$BACKSTAGE_DB" 5432/tcp
+  allowed "$VIEW" "$CNPG_OPERATOR" "$BACKSTAGE_DB_JOIN" 8000/tcp
+  denied "$VIEW" "$CNPG_OPERATOR" "$BACKSTAGE_DB" 9187/tcp
+  denied "$VIEW" "$CNPG_OPERATOR" "$BACKSTAGE" 7007/tcp
+  denied "$VIEW" cnpg-system:app.kubernetes.io/name=other "$BACKSTAGE_DB" 8000/tcp
+  allowed "$VIEW" "$BACKSTAGE_DB_REPLICA" "$BACKSTAGE_DB" 5432/tcp
+  allowed "$VIEW" "$BACKSTAGE_DB" "$BACKSTAGE_DB_REPLICA" 5432/tcp
+  allowed "$VIEW" "$BACKSTAGE_DB_JOIN" "$BACKSTAGE_DB" 5432/tcp
+  allowed "$VIEW" "$BACKSTAGE_DB" "$DNS" 53/udp
+  allowed "$VIEW" "$BACKSTAGE_DB" @kube-apiserver 6443/tcp
+  allowed "$VIEW" "$BACKSTAGE_DB_JOIN" @kube-apiserver 6443/tcp
+  allowed "$VIEW" "$PROMETHEUS" "$BACKSTAGE_DB" 9187/tcp
+  denied "$VIEW" "$PROMETHEUS" "$BACKSTAGE_DB" 5432/tcp
+  allowed "$VIEW" "$BACKSTAGE_DB" @world 443/tcp
+  allowed "$VIEW" "$BACKSTAGE_DB_REPLICA" @world 443/tcp
+  allowed "$VIEW" "$BACKSTAGE_DB" @world "$s3_port/tcp"
+  denied "$VIEW" "$BACKSTAGE_DB" @world 80/tcp
+  denied "$VIEW" "$BACKSTAGE_DB" @world 5432/tcp
+  denied "$VIEW" "$BACKSTAGE_DB" @world 53/udp
+  denied "$VIEW" "$BACKSTAGE_DB_JOIN" @world 443/tcp
+  denied "$VIEW" "$BACKSTAGE_DB" openbao/StatefulSet/openbao 8200/tcp
+  denied "$VIEW" "$BACKSTAGE_DB" "$N8N_DB" 5432/tcp
+  denied "$VIEW" "$N8N_DB" "$BACKSTAGE_DB" 5432/tcp
+  denied "$VIEW" "$OTHER_APP" "$BACKSTAGE_DB" 5432/tcp
+  denied "$VIEW" ai-system/Deployment/n8n "$BACKSTAGE_DB" 5432/tcp
+  denied "$VIEW" "$MOVER" "$BACKSTAGE_DB" 5432/tcp
+  denied "$VIEW" "$KROMGO" "$BACKSTAGE_DB" 5432/tcp
 }
 
 @test "An allow that names an address fails the check" {
@@ -945,15 +1092,19 @@ E
   [ "$status" -eq 1 ]
   [[ $output == *"cluster-wide CiliumClusterwideNetworkPolicy/nodes selects nodes"* ]]
 
-  # The tree: the agents honour the field, and the allows of demo, envoy-gateway-system and kromgo
-  # let exactly their flows through with the namespaces' default deny, and every flow without it.
+  # The tree: the agents honour the field, and the allows of backstage, demo, envoy-gateway-system,
+  # kromgo, security-system and sso-system let exactly their flows through with the namespaces'
+  # default deny, and every flow without it.
   real_render
   [ "$(yq '.data["enable-non-default-deny-policies"]' "$REAL"/*/cilium/ConfigMap_kube-system_cilium-config.yaml)" = true ]
   local open="$BATS_TEST_TMPDIR/open" removed
   cp -R "$VIEW" "$open"
   removed=("$open"/*/*/NetworkPolicy.networking.k8s.io_demo_default-deny.yaml "$open"/*/*/NetworkPolicy.networking.k8s.io_envoy-gateway-system_default-deny.yaml
-    "$open"/*/*/NetworkPolicy.networking.k8s.io_kromgo_default-deny.yaml)
-  [ "${#removed[@]}" -eq 3 ]
+    "$open"/*/*/NetworkPolicy.networking.k8s.io_kromgo_default-deny.yaml
+    "$open"/*/*/NetworkPolicy.networking.k8s.io_sso-system_default-deny.yaml
+    "$open"/*/*/NetworkPolicy.networking.k8s.io_backstage_default-deny.yaml
+    "$open"/*/*/NetworkPolicy.networking.k8s.io_security-system_default-deny.yaml)
+  [ "${#removed[@]}" -eq 6 ]
   rm -- "${removed[@]}"
   local flow want from to port
   local flows=(
@@ -981,6 +1132,39 @@ E
     "allowed $KROMGO $DNS 53/udp"
     "denied $KROMGO openbao/StatefulSet/openbao 8200/tcp"
     "denied $KROMGO @world 443/tcp"
+    "allowed $PROXY sso-system/Deployment/dex 5556/tcp"
+    "allowed $PROXY sso-system/Deployment/oauth2-proxy 4180/tcp"
+    "denied @world sso-system/Deployment/dex 5556/tcp"
+    "allowed sso-system/Deployment/oauth2-proxy sso-system/Deployment/dex 5556/tcp"
+    "denied sso-system/Deployment/oauth2-proxy sso-system/Deployment/dex 5558/tcp"
+    "denied sso-system/Deployment/dex sso-system/Deployment/oauth2-proxy 4180/tcp"
+    "allowed sso-system/Deployment/dex @kube-apiserver 6443/tcp"
+    "denied sso-system/Deployment/oauth2-proxy @kube-apiserver 6443/tcp"
+    "allowed sso-system/Deployment/dex @world 443/tcp"
+    "denied sso-system/Deployment/dex @world 80/tcp"
+    "denied sso-system/Deployment/oauth2-proxy @world 443/tcp"
+    "allowed sso-system/Deployment/dex $DNS 53/udp"
+    "allowed sso-system/Deployment/oauth2-proxy $DNS 53/udp"
+    "denied sso-system/Deployment/dex openbao/StatefulSet/openbao 8200/tcp"
+    "denied sso-system/Deployment/oauth2-proxy openbao/StatefulSet/openbao 8200/tcp"
+    "denied sso-system/Deployment/oauth2-proxy demo/Deployment/hello 8080/tcp"
+    "denied demo/Deployment/hello sso-system/Deployment/oauth2-proxy 4180/tcp"
+    "denied $OTHER_APP sso-system/Deployment/dex 5556/tcp"
+    "allowed $PROXY $BACKSTAGE 7007/tcp"
+    "denied $PROXY $BACKSTAGE_DB 5432/tcp"
+    "allowed $BACKSTAGE $BACKSTAGE_DB 5432/tcp"
+    "denied $BACKSTAGE @world 443/tcp"
+    "denied $OTHER_APP $BACKSTAGE_DB 5432/tcp"
+    "allowed $BACKSTAGE_DB @world 443/tcp"
+    "denied $BACKSTAGE_DB @world 80/tcp"
+    "denied $BACKSTAGE_DB_JOIN @world 443/tcp"
+    "allowed $PGDUMP @world 443/tcp"
+    "denied $PGDUMP @world 80/tcp"
+    "allowed $PROMETHEUS $FALCO 8765/tcp"
+    "denied $OTHER_APP $FALCO 8765/tcp"
+    "allowed $FALCO $DNS 53/udp"
+    "denied $FALCO @kube-apiserver 6443/tcp"
+    "denied $FALCO @world 443/tcp"
   )
   for flow in "${flows[@]}"; do
     read -r want from to port <<<"$flow"

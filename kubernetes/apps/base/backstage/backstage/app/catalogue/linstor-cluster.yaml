@@ -1,0 +1,22 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: linstor-cluster
+  description: The LINSTOR storage cluster with its StorageClasses and its VolumeSnapshotClass.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#storage
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#linstorsatelliteoffline
+      title: Runbook
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/piraeus-datastore/linstor-cluster
+      title: Manifests
+spec:
+  type: storage
+  lifecycle: production
+  owner: group:default/operators
+  system: storage
+  dependsOn:
+    - component:default/piraeus-operator
+    - component:default/snapshot-controller

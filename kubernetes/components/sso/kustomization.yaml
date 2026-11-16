@@ -1,0 +1,31 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# Puts a public route behind the cluster's sign-in (docs/kubernetes.md, Sign-in): a request answers
+# only once oauth2-proxy has accepted its session. The component makes the SecurityPolicy that asks
+# oauth2-proxy about each request of the route, and the route that sends the sign-in paths on the
+# route's host to oauth2-proxy. An application adds it in its ks.yaml, beside the HTTPRoute it
+# defines in its own manifests:
+#
+#   components:
+#     - ../../../../../components/sso
+#   postBuild:
+#     substitute:
+#       SSO_ROUTE: <the HTTPRoute's name>
+#       SSO_HOSTNAME: <the route's host name, without the cluster's domain>
+#
+#   SSO_ROUTE     the name of the application's HTTPRoute, which the policy covers, and the stem of
+#                 the sign-in route's name, <name>-oauth2
+#   SSO_HOSTNAME  the label under the cluster's domain that the application's route serves, and
+#                 where a person returns after signing in
+#
+# Both objects are in the application's namespace, which must carry the Gateway label. oauth2-proxy
+# is in another namespace, and a reference across namespaces needs a ReferenceGrant from the
+# namespace that is referred to: the opting-in namespace is added to the grant in
+# apps/base/sso-system/oauth2-proxy/app/referencegrant.yaml, for the SecurityPolicy and the
+# HTTPRoute, and tests/sso.bats fails when a namespace has the policy and the grant does not name it.
+resources:
+  - securitypolicy.yaml
+  - httproute.yaml

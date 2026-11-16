@@ -1,0 +1,16 @@
+---
+# The container's own setting wins over the pod's.
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-root-false, namespace: strict}
+spec:
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        runAsNonRoot: false
+        capabilities: {drop: [ALL]}

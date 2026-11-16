@@ -47,6 +47,10 @@ kubernetes/apps/base/ai-system/open-webui/app/ocirepository.yaml	flux	ghcr.io/bj
 kubernetes/apps/base/ai-system/open-webui/app/ocirepository.yaml	regex	ghcr.io/bjw-s-labs/helm/app-template	tag
 kubernetes/apps/base/ai-system/open-webui/app/values.yaml	helm-values	ghcr.io/open-webui/open-webui	-
 kubernetes/apps/base/ai-system/open-webui/app/values.yaml	regex	ghcr.io/open-webui/open-webui	tag
+kubernetes/apps/base/backstage/backstage/app/ocirepository.yaml	flux	ghcr.io/bjw-s-labs/helm/app-template	tag
+kubernetes/apps/base/backstage/backstage/app/ocirepository.yaml	regex	ghcr.io/bjw-s-labs/helm/app-template	tag
+kubernetes/apps/base/backstage/backstage/app/values.yaml	helm-values	ghcr.io/backstage/backstage	-
+kubernetes/apps/base/backstage/backstage/app/values.yaml	regex	ghcr.io/backstage/backstage	tag
 kubernetes/apps/base/cert-manager/cert-manager/app/ocirepository.yaml	flux	quay.io/jetstack/charts/cert-manager	tag
 kubernetes/apps/base/cert-manager/cert-manager/app/ocirepository.yaml	regex	quay.io/jetstack/charts/cert-manager	tag
 kubernetes/apps/base/cnpg-system/cloudnative-pg/app/ocirepository.yaml	flux	ghcr.io/cloudnative-pg/charts/cloudnative-pg	tag
@@ -67,6 +71,7 @@ kubernetes/apps/base/external-dns/external-dns/app/ocirepository.yaml	flux	ghcr.
 kubernetes/apps/base/external-dns/external-dns/app/ocirepository.yaml	regex	ghcr.io/home-operations/charts-mirror/external-dns	tag
 kubernetes/apps/base/external-secrets/external-secrets/app/ocirepository.yaml	flux	ghcr.io/external-secrets/charts/external-secrets	tag
 kubernetes/apps/base/external-secrets/external-secrets/app/ocirepository.yaml	regex	ghcr.io/external-secrets/charts/external-secrets	tag
+kubernetes/apps/base/gatekeeper-system/gatekeeper/app/helmrelease.yaml	flux	gatekeeper	-
 kubernetes/apps/base/keda/keda/app/ocirepository.yaml	flux	ghcr.io/home-operations/charts-mirror/keda	tag
 kubernetes/apps/base/keda/keda/app/ocirepository.yaml	regex	ghcr.io/home-operations/charts-mirror/keda	tag
 kubernetes/apps/base/kromgo/kromgo/app/ocirepository.yaml	flux	ghcr.io/bjw-s-labs/helm/app-template	tag
@@ -94,6 +99,8 @@ kubernetes/apps/base/kube-system/snapshot-controller/app/gitrepository.yaml	rege
 kubernetes/apps/base/kube-system/spegel/app/ocirepository.yaml	flux	ghcr.io/spegel-org/helm-charts/spegel	tag
 kubernetes/apps/base/kube-system/spegel/app/ocirepository.yaml	regex	ghcr.io/spegel-org/helm-charts/spegel	tag
 kubernetes/apps/base/kube-system/vpa/app/helmrelease.yaml	flux	vpa	-
+kubernetes/apps/base/kyverno/kyverno/app/ocirepository.yaml	flux	ghcr.io/kyverno/charts/kyverno	tag
+kubernetes/apps/base/kyverno/kyverno/app/ocirepository.yaml	regex	ghcr.io/kyverno/charts/kyverno	tag
 kubernetes/apps/base/monitoring/grafana-operator/app/ocirepository.yaml	flux	ghcr.io/grafana/helm-charts/grafana-operator	tag
 kubernetes/apps/base/monitoring/grafana-operator/app/ocirepository.yaml	regex	ghcr.io/grafana/helm-charts/grafana-operator	tag
 kubernetes/apps/base/monitoring/grafana/app/grafana.yaml	regex	docker.io/grafana/grafana	version
@@ -116,6 +123,13 @@ kubernetes/apps/base/openbao/openbao/app/values.yaml	helm-values	ghcr.io/fluxcd/
 kubernetes/apps/base/openbao/openbao/app/values.yaml	regex	ghcr.io/fluxcd/flux-cli	image
 kubernetes/apps/base/piraeus-datastore/piraeus-operator/app/ocirepository.yaml	flux	ghcr.io/piraeusdatastore/piraeus-operator/piraeus	tag
 kubernetes/apps/base/piraeus-datastore/piraeus-operator/app/ocirepository.yaml	regex	ghcr.io/piraeusdatastore/piraeus-operator/piraeus	tag
+kubernetes/apps/base/security-system/falco/app/ocirepository.yaml	flux	ghcr.io/falcosecurity/charts/falco	tag
+kubernetes/apps/base/security-system/falco/app/ocirepository.yaml	regex	ghcr.io/falcosecurity/charts/falco	tag
+kubernetes/apps/base/security-system/falco/app/values.yaml	regex	docker.io/falcosecurity/falco	tag
+kubernetes/apps/base/sso-system/dex/app/ocirepository.yaml	flux	ghcr.io/dexidp/helm-charts/dex	tag
+kubernetes/apps/base/sso-system/dex/app/ocirepository.yaml	regex	ghcr.io/dexidp/helm-charts/dex	tag
+kubernetes/apps/base/sso-system/oauth2-proxy/app/ocirepository.yaml	flux	ghcr.io/oauth2-proxy/charts/oauth2-proxy	tag
+kubernetes/apps/base/sso-system/oauth2-proxy/app/ocirepository.yaml	regex	ghcr.io/oauth2-proxy/charts/oauth2-proxy	tag
 kubernetes/apps/base/volsync-system/volsync/app/ocirepository.yaml	flux	ghcr.io/home-operations/charts-mirror/volsync	tag
 kubernetes/apps/base/volsync-system/volsync/app/ocirepository.yaml	regex	ghcr.io/home-operations/charts-mirror/volsync	tag
 kubernetes/clusters/lab-sto2/flux-system/flux-instance/app/ocirepository.yaml	flux	ghcr.io/controlplaneio-fluxcd/charts/flux-instance	tag

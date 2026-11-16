@@ -51,8 +51,8 @@ linstor_targets() {
 
 # cnpg_targets: what the CloudNativePG operator makes at run time that the PodMonitor of
 # components/cnpg-cluster selects, as candidates for selected: the pod of an instance of n8n-db, the
-# one cluster the render makes from the component, with the labels and the container ports the
-# operator gives it at the version the cloudnative-pg chart runs, 1.30 (pkg/specs/pods.go,
+# cluster of the render whose PodMonitor the scrape tests read, with the labels and the container
+# ports the operator gives it at the version the cloudnative-pg chart runs, 1.30 (pkg/specs/pods.go,
 # pkg/utils/labels_annotations.go). The exporter on the port metrics serves the operator's metrics
 # and the Barman Cloud plugin's.
 cnpg_targets() {

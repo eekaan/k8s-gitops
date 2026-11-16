@@ -288,6 +288,36 @@ Feature: Alerts
     Then the alert fires after its time for the first and never for the second
 
   @by:rules-check
+  Scenario: The alert FalcoCriticalRuleMatched fires after its time in the failing case and stays quiet in the healthy one
+    Given nodes whose Falco has matched rules of priority Critical, Alert and Emergency, one rule that matched again, series that came back after a staleness marker or a gap in the scrape of 19 or 45 minutes with the counter they had, one that matched yesterday and has not changed, ones back unchanged a day and a quarter of an hour, a day and 5 minutes, and 23 hours and 50 minutes after their last sample, and rules of lower priority that matched again
+    When the rule is evaluated over time
+    Then the alert fires at once for each rule of priority Critical or above that matched again and holds until the new count is 15 minutes old, fires for the series back after a day and a quarter of an hour from its return until that is 15 minutes old, for the one back after a day and 5 minutes from a day and 15 minutes after its last sample until its return is 15 minutes old, and not before or after either, and never for a rule that matched before the window, for a series that is merely back after a staleness marker or a gap of less than a day, or for one of lower priority
+
+  @by:rules-check
+  Scenario: The alert FalcoCriticalRuleMatched fires for the first match of a new pod and stays quiet for it once the series is a quarter of an hour old
+    Given a rule of priority Critical whose counter first appears in a new pod's series, beside one that has been steady, and rules of priority Error and Notice whose counters first appear in the same pod at the same time
+    When the rule is evaluated over time
+    Then the alert fires from the Critical series' first sample until it is a quarter of an hour old, and not before it or after, and never for the rules of lower priority
+
+  @by:rules-check
+  Scenario: The alert FalcoCriticalRuleMatched fires for a match after Falco restarted in the same pod unless the count comes back to what it was
+    Given a rule of priority Critical in pods whose Falco restarted, keeping every label, whose counter comes back lower than it was after a staleness marker and a gap of more than 15 minutes, after one of less, and between two scrapes with no marker, one whose counter comes back at the count it had, and one whose counter climbs back through 1 and 2 to the 3 it had
+    When the rule is evaluated over time
+    Then the alert fires from the first sample of each counter that stays lower until that sample is 15 minutes old and not before or after, and stays quiet for the counter that came back at its count, the blind spot the docs state, and for the counter that climbs back fires while it is 1 and 2, is quiet once it is 3 though Falco matched, and fires again once the counts of 15 minutes before are 1 and 2
+
+  @by:rules-check
+  Scenario: The alert KyvernoAdmissionControllerDown fires after its time in the failing case and stays quiet in the healthy one
+    Given a Kyverno admission controller Deployment with no available replica, and one with an available replica
+    When the rule is evaluated over time
+    Then the alert fires after its time for the Deployment with none available and never for the one with one
+
+  @by:rules-check
+  Scenario: The alert GatekeeperControllerManagerDown fires after its time in the failing case and stays quiet in the healthy one
+    Given a Gatekeeper controller manager Deployment with no available replica, and one with an available replica
+    When the rule is evaluated over time
+    Then the alert fires after its time for the Deployment with none available and never for the one with one
+
+  @by:rules-check
   Scenario: The alert PostgresWALArchivingFailing fires after its time in the failing case and stays quiet in the healthy one
     Given a PostgreSQL primary whose latest archiving attempt failed, one whose failure was followed by a success, and one that never failed or archived
     When the rule is evaluated over time

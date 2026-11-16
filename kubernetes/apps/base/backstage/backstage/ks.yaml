@@ -1,0 +1,43 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: backstage
+  namespace: flux-system
+  labels:
+    # The database's three instances start one after another, so the first rollout takes longer
+    # than the default.
+    k8s-gitops/timeout: long
+spec:
+  path: ./apps/base/backstage/backstage/app
+  targetNamespace: backstage
+  # The database, from the cnpg-cluster component: the one place Backstage keeps state, none of it
+  # irreplaceable, as the catalogue is the files (docs/kubernetes.md, Backstage).
+  components:
+    - ../../../../../components/cnpg-cluster
+  postBuild:
+    substitute:
+      CNPG_CLUSTER_NAME: backstage-db
+      CNPG_NAMESPACE: backstage
+      # The catalogue is not in the database, only the rows Backstage derives from it and the
+      # search index.
+      CNPG_STORAGE_SIZE: 2Gi
+  # The Cluster and its PodMonitor are of the operator's and Prometheus Operator's kinds, and its
+  # ObjectStore the Barman Cloud plugin's, which archives its WAL; the component's backups and its
+  # dump job read their keys through ExternalSecrets from the secret store; the route names the
+  # public Gateway; the network policies are a kind Cilium's operator defines.
+  dependsOn:
+    - name: cloudnative-pg
+    - name: plugin-barman-cloud
+    - name: prometheus-operator-crds
+    - name: external-secrets
+    - name: openbao-store
+    - name: gateway-public
+    - name: cilium
+  # Ready once the release is, which is once Backstage answers its readiness endpoint with the
+  # database in place.
+  wait: true
+  sourceRef:
+    kind: ExternalArtifact
+    name: backstage

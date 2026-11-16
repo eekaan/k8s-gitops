@@ -1,0 +1,17 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: envoy-gateway-crds
+  description: Envoy Gateway's own resource definitions, applied before the controller that serves them.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#envoy-gateway
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/envoy-gateway-system/envoy-gateway-crds
+      title: Manifests
+spec:
+  type: definitions
+  lifecycle: production
+  owner: group:default/operators
+  system: networking

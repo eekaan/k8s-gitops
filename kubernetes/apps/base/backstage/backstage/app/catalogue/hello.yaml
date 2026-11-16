@@ -1,0 +1,19 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: hello
+  description: A demo workload of two replicas that answers with the page of a ConfigMap.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#giving-an-application-a-public-hostname
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/demo/hello
+      title: Manifests
+spec:
+  type: service
+  lifecycle: experimental
+  owner: group:default/operators
+  system: demo
+  dependsOn:
+    - component:default/cilium

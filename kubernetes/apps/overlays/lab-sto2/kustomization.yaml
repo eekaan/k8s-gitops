@@ -8,6 +8,7 @@ kind: Kustomization
 resources:
   - ../../base/flux-system/artifact-generator
   - ../../base/ai-system
+  - ../../base/backstage
   - ../../base/cert-manager
   - ../../base/cnpg-system
   - ../../base/demo
@@ -15,15 +16,20 @@ resources:
   - ../../base/etcd-snapshots
   - ../../base/external-dns
   - ../../base/external-secrets
+  - ../../base/gatekeeper-system
   - ../../base/keda
   - ../../base/kromgo
   - ../../base/kube-system
+  - ../../base/kyverno
   - ../../base/monitoring
   - ../../base/openbao
   - ../../base/piraeus-datastore
+  - ../../base/security-system
   - ../../base/volsync-system
+  - ../../base/sso-system
   - ../../base/ai-system/n8n/ks.yaml
   - ../../base/ai-system/open-webui/ks.yaml
+  - ../../base/backstage/backstage/ks.yaml
   - ../../base/cert-manager/acme-issuers/ks.yaml
   - ../../base/cert-manager/cert-manager/ks.yaml
   - ../../base/cert-manager/cluster-ca/ks.yaml
@@ -41,6 +47,8 @@ resources:
   - ../../base/external-dns/external-dns/ks.yaml
   - ../../base/external-secrets/external-secrets/ks.yaml
   - ../../base/external-secrets/openbao-store/ks.yaml
+  - ../../base/gatekeeper-system/gatekeeper-policies/ks.yaml
+  - ../../base/gatekeeper-system/gatekeeper/ks.yaml
   - ../../base/keda/keda/ks.yaml
   - ../../base/kromgo/kromgo/ks.yaml
   - ../../base/kube-system/cilium/ks.yaml
@@ -57,6 +65,8 @@ resources:
   - ../../base/kube-system/snapshot-controller/ks.yaml
   - ../../base/kube-system/spegel/ks.yaml
   - ../../base/kube-system/vpa/ks.yaml
+  - ../../base/kyverno/kyverno-policies/ks.yaml
+  - ../../base/kyverno/kyverno/ks.yaml
   - ../../base/monitoring/flux-monitoring/ks.yaml
   - ../../base/monitoring/grafana-operator/ks.yaml
   - ../../base/monitoring/grafana/ks.yaml
@@ -70,7 +80,11 @@ resources:
   - ../../base/piraeus-datastore/linstor-cluster/ks.yaml
   - ../../base/piraeus-datastore/linstor-monitoring/ks.yaml
   - ../../base/piraeus-datastore/piraeus-operator/ks.yaml
+  - ../../base/security-system/falco/ks.yaml
   - ../../base/volsync-system/volsync/ks.yaml
+  - ../../base/sso-system/dex/ks.yaml
+  - ../../base/sso-system/oauth2-proxy/ks.yaml
+  - ../../base/demo/hello-sso/ks.yaml
 
 patches:
   # The issuer of the public Gateway's certificate, the one place this cluster chooses it:

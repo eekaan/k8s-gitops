@@ -1,0 +1,31 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/prometheusrule-monitoring-v1.json
+# An alert on the admission controller, the Kyverno pods that evaluate each admitted object and
+# write its admission report. The webhooks that match workloads fail open, so while none runs no
+# workload is refused and nothing is reported: the alert is the only sign. It reads
+# kube-state-metrics' count of the Deployment's available replicas, which the stack's monitor
+# scrapes, so it holds while Kyverno's own metrics are gone with its pods.
+# Tests: tests/rules/kyverno.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: kyverno-alerts
+spec:
+  groups:
+    - name: kyverno
+      rules:
+        # Two replicas run, so a drained node leaves one available; none for ten minutes is more
+        # than a rollout or a node's drain takes.
+        - alert: KyvernoAdmissionControllerDown
+          expr: kube_deployment_status_replicas_available{namespace="kyverno", deployment="kyverno-admission-controller"} < 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Kyverno's admission controller has no available replica
+            description: >-
+              The Deployment {{ $labels.deployment }} in {{ $labels.namespace }} has had no available replica for 10
+              minutes, so no object is evaluated at admission and no admission report is written; the webhooks
+              that match workloads fail open, so no workload is refused, but a write of a Kyverno policy,
+              PolicyException or GlobalContextEntry is refused.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#kyvernoadmissioncontrollerdown

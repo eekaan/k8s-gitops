@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# A stand-in for stat, installed by tests/postgres-dump-recipes.bats as <tmp>/bin/stat, that says
+# which filesystem a directory is on: tmpfs, unless <tmp>/state/no-memory exists, when it is ext2/ext3
+# for every directory. Every other call goes to the real stat, whose path is in <tmp>/state/real-stat.
+root=${0%/bin/*}
+if [[ ${1-} == -f && ${2-} == -c && ${3-} == %T ]]; then
+  if [[ -e $root/state/no-memory ]]; then
+    echo ext2/ext3
+  else
+    echo tmpfs
+  fi
+  exit 0
+fi
+exec "$(cat "$root/state/real-stat")" "$@"

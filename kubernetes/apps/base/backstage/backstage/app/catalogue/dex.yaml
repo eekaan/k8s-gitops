@@ -1,0 +1,22 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: dex
+  description: dex, the OpenID Connect provider that signs a person in with GitHub for its one client, oauth2-proxy.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#sign-in
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/sso-system/dex
+      title: Manifests
+spec:
+  type: service
+  lifecycle: production
+  owner: group:default/operators
+  system: sign-in
+  dependsOn:
+    - component:default/cilium
+    - component:default/external-secrets
+    - resource:default/gateway-public
+    - resource:default/openbao-store

@@ -1,0 +1,10 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Group
+metadata:
+  name: operators
+  description: Whoever operates the cluster and this repository.
+spec:
+  type: team
+  children: []

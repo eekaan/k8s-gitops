@@ -1,0 +1,25 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: open-webui
+  description: Open WebUI, a chat interface for language-model APIs, whose state is one backed-up volume.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#open-webui
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/volume-backups.md#restoring-a-claim-from-its-repository
+      title: Runbook
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/ai-system/open-webui
+      title: Manifests
+spec:
+  type: service
+  lifecycle: production
+  owner: group:default/operators
+  system: applications
+  dependsOn:
+    - component:default/external-secrets
+    - resource:default/gateway-public
+    - resource:default/linstor-cluster
+    - resource:default/openbao-store
+    - component:default/volsync

@@ -1,0 +1,55 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/policies.kyverno.io/validatingpolicy_v1.json
+# A pod in a namespace that enforces the restricted Pod Security level sets what that level
+# requires of a container: no privilege escalation, every capability dropped, a non-root user and a
+# seccomp profile of the runtime or a local one, the container's own or the pod's. The same rule as
+# just pod-security-check, which holds every workload of the render to its namespace's level; the
+# fields that must be absent (host namespaces, host paths, added capabilities) are Pod Security
+# admission's, which already refuses them in such a namespace. Gatekeeper holds the same rule under
+# the same name (gatekeeper-policies).
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: restricted-security-context
+  annotations:
+    k8s-gitops/offline-check: scripts/pod-security-check
+spec:
+  validationActions:
+    - Audit
+  failurePolicy: Ignore
+  autogen:
+    podControllers:
+      controllers: []
+  matchConstraints:
+    # A namespace's level is the label the tree declares; Talos exempts kube-system from admission
+    # and the tree labels it privileged, so it is not matched.
+    namespaceSelector:
+      matchLabels:
+        pod-security.kubernetes.io/enforce: restricted
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods]
+  variables:
+    - name: containers
+      expression: >-
+        object.spec.containers +
+        object.spec.?initContainers.orValue([]) +
+        object.spec.?ephemeralContainers.orValue([])
+  validations:
+    - expression: >-
+        variables.containers.all(c, c.?securityContext.?allowPrivilegeEscalation.orValue(true) == false)
+      message: every container sets allowPrivilegeEscalation to false
+    - expression: >-
+        variables.containers.all(c, c.?securityContext.?capabilities.?drop.orValue([]).exists(d, d == 'ALL'))
+      message: every container drops ALL capabilities
+    # A container's own setting wins over the pod's, as it does for the kubelet.
+    - expression: >-
+        variables.containers.all(c, c.?securityContext.?runAsNonRoot.orValue(
+        object.spec.?securityContext.?runAsNonRoot.orValue(false)) == true)
+      message: every container sets runAsNonRoot to true, its own or the pod's
+    - expression: >-
+        variables.containers.all(c, c.?securityContext.?seccompProfile.?type.orValue(
+        object.spec.?securityContext.?seccompProfile.?type.orValue('')) in ['RuntimeDefault', 'Localhost'])
+      message: every container has the RuntimeDefault or a Localhost seccomp profile, its own or the pod's

@@ -12,4 +12,19 @@
 #   kind    the kind
 #   reason  a sentence: why no schema can be made at the version the tree pins, and what proves the
 #           kind's objects instead, or that nothing does
-exceptions: []
+exceptions:
+  - group: constraints.gatekeeper.sh
+    kind: K8sImagePinned
+    reason: Gatekeeper makes the kind from its ConstraintTemplate at run time, so no definition of
+      it is in the render or published by the operator; `gator verify` and `gator test`, which
+      tests/admission-policy.bats runs, check the constraint against the schema of its template
+  - group: constraints.gatekeeper.sh
+    kind: K8sRestrictedSecurityContext
+    reason: Gatekeeper makes the kind from its ConstraintTemplate at run time, so no definition of
+      it is in the render or published by the operator; `gator verify` and `gator test`, which
+      tests/admission-policy.bats runs, check the constraint against the schema of its template
+  - group: constraints.gatekeeper.sh
+    kind: K8sNamespacePodSecurityLevel
+    reason: Gatekeeper makes the kind from its ConstraintTemplate at run time, so no definition of
+      it is in the render or published by the operator; `gator verify` and `gator test`, which
+      tests/admission-policy.bats runs, check the constraint against the schema of its template

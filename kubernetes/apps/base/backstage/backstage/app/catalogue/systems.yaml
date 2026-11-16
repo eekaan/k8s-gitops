@@ -1,0 +1,110 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: System
+metadata:
+  name: networking
+  description: How traffic reaches the cluster and its services, through the network plugin, the BGP announcements, the public Gateway and its DNS records.
+spec:
+  owner: group:default/operators
+  domain: cluster
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: System
+metadata:
+  name: certificates
+  description: The authorities and issuers that sign the cluster's TLS certificates.
+spec:
+  owner: group:default/operators
+  domain: cluster
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: System
+metadata:
+  name: secrets
+  description: The secret store and what gets a secret from it into a Kubernetes Secret.
+spec:
+  owner: group:default/operators
+  domain: cluster
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: System
+metadata:
+  name: sign-in
+  description: The sign-in in front of the routes that opt in to it, which admits a person from a list.
+spec:
+  owner: group:default/operators
+  domain: cluster
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: System
+metadata:
+  name: storage
+  description: Persistent volumes, and the backups of volumes, of etcd and of the secret store.
+spec:
+  owner: group:default/operators
+  domain: cluster
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: System
+metadata:
+  name: observability
+  description: Metrics, alerts, dashboards and logs.
+spec:
+  owner: group:default/operators
+  domain: cluster
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: System
+metadata:
+  name: cluster-services
+  description: The small services every other application assumes, and the add-ons that scale and place pods.
+spec:
+  owner: group:default/operators
+  domain: cluster
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: System
+metadata:
+  name: databases
+  description: PostgreSQL for the applications that need it.
+spec:
+  owner: group:default/operators
+  domain: cluster
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: System
+metadata:
+  name: applications
+  description: The applications the cluster runs for people to use.
+spec:
+  owner: group:default/operators
+  domain: cluster
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: System
+metadata:
+  name: demo
+  description: Workloads that exist to prove a piece of the platform works.
+spec:
+  owner: group:default/operators
+  domain: cluster
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: System
+metadata:
+  name: admission-policy
+  description: The two admission policy engines, which report what is applied to the cluster against rules the tree already keeps, and refuse nothing.
+spec:
+  owner: group:default/operators
+  domain: cluster

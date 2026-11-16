@@ -1,0 +1,24 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: kyverno
+  namespace: flux-system
+  labels:
+    # The release installs 22 definitions, and its hooks and tests run in turn.
+    k8s-gitops/timeout: long
+spec:
+  path: ./apps/base/kyverno/kyverno/app
+  targetNamespace: kyverno
+  # Its chart makes ServiceMonitors and the application a PrometheusRule, kinds that exist once
+  # prometheus-operator-crds is Ready. Nothing else depends on this application, and the cluster
+  # runs as well without it: its webhooks fail open.
+  dependsOn:
+    - name: prometheus-operator-crds
+  # Ready only once the release is installed and its pods are ready, so the rules, which name
+  # kinds its release defines, are applied to a cluster that has them.
+  wait: true
+  sourceRef:
+    kind: ExternalArtifact
+    name: kyverno

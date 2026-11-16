@@ -65,6 +65,16 @@
       groupName: "n8n",
     },
     {
+      // tests/falco.bats fails unless the image's version is the chart's appVersion, as the image
+      // carries the rules and plugin the chart's version expects.
+      description: "Falco: its chart and the image the chart runs",
+      matchPackageNames: ["ghcr.io/falcosecurity/charts/falco", "docker.io/falcosecurity/falco"],
+      groupName: "Falco",
+      // The chart and the image number their releases apart, so both move in one pull request
+      // whatever the step of each.
+      separateMajorMinor: false,
+    },
+    {
       // tests/postgresql.bats fails unless the plugin's image and its sidecar's are of the release the
       // chart is made for, its appVersion, so the three move in one pull request whatever the step of each.
       // The oldest operator the release supports is a constant of that test: a release whose

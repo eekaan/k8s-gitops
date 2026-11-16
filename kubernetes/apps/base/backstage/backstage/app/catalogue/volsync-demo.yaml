@@ -1,0 +1,24 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: volsync-demo
+  description: A test workload whose volume is backed up every night and restored from the latest backup when it is created.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#volume-backups
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/volume-backups.md
+      title: Runbook
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/demo/volsync-demo
+      title: Manifests
+spec:
+  type: service
+  lifecycle: experimental
+  owner: group:default/operators
+  system: demo
+  dependsOn:
+    - component:default/external-secrets
+    - resource:default/linstor-cluster
+    - resource:default/openbao-store
+    - component:default/volsync

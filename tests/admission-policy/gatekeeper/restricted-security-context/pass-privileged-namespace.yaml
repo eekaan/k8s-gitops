@@ -1,0 +1,9 @@
+---
+# A namespace that does not enforce the restricted level is not this rule's to judge.
+apiVersion: v1
+kind: Pod
+metadata: {name: pass-privileged-namespace, namespace: loose}
+spec:
+  containers:
+    - name: app
+      image: registry.example/app:1.0

@@ -1,0 +1,19 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: kyverno-policies
+  description: Kyverno's three ValidatingPolicies in audit, an image pinned, the restricted security context and a namespace's Pod Security level, each mirroring a check of the tree.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#the-three-rules
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/kyverno/kyverno-policies
+      title: Manifests
+spec:
+  type: policy
+  lifecycle: production
+  owner: group:default/operators
+  system: admission-policy
+  dependsOn:
+    - component:default/kyverno

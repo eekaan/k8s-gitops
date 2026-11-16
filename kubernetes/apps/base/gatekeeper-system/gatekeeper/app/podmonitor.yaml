@@ -1,0 +1,16 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/podmonitor-monitoring-v1.json
+# Scrapes Gatekeeper's metrics, which its chart serves but makes no monitor for: the audit pod's
+# count of violations by constraint and enforcement action, and the controller managers' webhook
+# request count and latency. Both Deployments carry the label the chart puts on every pod of the
+# release, and name their metrics port metrics.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: gatekeeper
+spec:
+  selector:
+    matchLabels:
+      gatekeeper.sh/system: "yes"
+  podMetricsEndpoints:
+    - port: metrics

@@ -482,6 +482,11 @@ assert_values_keys() {
   assert_values_keys
 }
 
+# The applications of the lab-sto2 overlay that take a cluster from the component, each as its
+# namespace directory and its name, which is also where its ks.yaml is: the tests that read the
+# overlay's own databases read these, and one of them holds the list to the overlay.
+DATABASE_APPS=(ai-system/n8n backstage/backstage)
+
 # archive_path FILE: where the Cluster in the built objects FILE archives to: the destinationPath of
 # the ObjectStore its archiver plugin entry names, and under it the server name that entry gives,
 # which is the directory the plugin keeps the archive in.
@@ -494,7 +499,7 @@ archive_path() {
 
 @test "A PostgreSQL cluster from the component archives its WAL and takes a daily base backup to a path of its own in the object store" {
   local plugins stores backups schedule minute hour taken retention compression endpoint vars dump_schedule dump_start
-  local dump_end deadline
+  local dump_end deadline app
   vars="$BATS_TEST_TMPDIR/example-vars.yaml"
   database orders orders-db
   # The Cluster archives its WAL through the plugin, to the ObjectStore of its own name, in a
@@ -557,6 +562,26 @@ archive_path() {
   endpoint="$(yq -N 'select(.kind == "ObjectStore") | .spec.configuration.endpointURL' "$BUILT")"
   echo "endpoint for another cluster-config: $endpoint"
   [ "$endpoint" = https://s3.marker.invalid ]
+  # The same for each database the cluster's overlay builds, as its application builds it, patches
+  # of the component's objects included: the base backup starts on that minute and outside the run
+  # of the database's own dump job.
+  SET=()
+  for app in "${DATABASE_APPS[@]}"; do
+    built "${app%%/*}" "${app##*/}"
+    schedule="$(yq -N 'select(.kind == "ScheduledBackup") | .spec.schedule' "$BUILT")"
+    dump_schedule="$(yq -N 'select(.kind == "CronJob" and (.metadata.name | test("-pgdump$"))) | .spec.schedule' "$BUILT")"
+    deadline="$(yq -N 'select(.kind == "CronJob" and (.metadata.name | test("-pgdump$"))) | .spec.jobTemplate.spec.activeDeadlineSeconds' "$BUILT")"
+    echo "$app: base backup '$schedule'; dump job '$dump_schedule', deadline $deadline seconds"
+    [[ $schedule =~ ^0\ ([0-9]|[1-5][0-9])\ ([0-9]|1[0-9]|2[0-3])\ \*\ \*\ \*$ ]]
+    minute=${BASH_REMATCH[1]}
+    hour=${BASH_REMATCH[2]}
+    [[ " $taken " != *" $minute:"* ]]
+    [[ $dump_schedule =~ ^([0-9]|[1-5][0-9])\ ([0-9]|1[0-9]|2[0-3])\ \*\ \*\ \*$ ]]
+    dump_start=$((BASH_REMATCH[2] * 60 + BASH_REMATCH[1]))
+    [[ $deadline =~ ^[1-9][0-9]*$ ]]
+    dump_end=$((dump_start + (deadline + 59) / 60))
+    ((hour * 60 + minute < dump_start || hour * 60 + minute > dump_end))
+  done
 }
 
 @test "Every object a database archives is encrypted at the provider with a customer key the provider does not keep" {
@@ -625,7 +650,7 @@ archive_path() {
   # the customer key, is written in a manifest of the component or of an application.
   [ -z "$(find "$REPO/kubernetes" \( -name '*.enc.*' -o -name '*.sops.*' -o -name '*.age*' \))" ]
   literal="$(grep -rnE '(^|[^A-Za-z0-9+/])[A-Za-z0-9+/]{43}=([^A-Za-z0-9+/=]|$)' "$REPO/kubernetes/components/cnpg-cluster" "$REPO/kubernetes/apps/base/cnpg-system" \
-    "$REPO/kubernetes/apps/base/ai-system" || true)"
+    "$REPO/kubernetes/apps/base/ai-system" "$REPO/kubernetes/apps/base/backstage" || true)"
   echo "a base64 key in a manifest: ${literal:-none}"
   [ -z "$literal" ]
 }
@@ -686,17 +711,29 @@ archive_path() {
 }
 
 @test "A cluster that does not select the backup plugin builds no database that needs it, and one that selects a database without it is refused" {
-  local overlay plugin=plugin-barman-cloud dir
-  # n8n takes a cluster from the component, which names the plugin's application in dependsOn of
-  # every user, as it names the operator's.
+  local overlay plugin=plugin-barman-cloud dir app users
+  # The applications of the overlay that take a cluster from the component, each with its ks.yaml:
+  # the component names the plugin's application in dependsOn of every user, as it names the
+  # operator's.
+  local -A files=()
+  for app in "${DATABASE_APPS[@]}"; do
+    files[${app##*/}]="kubernetes/apps/base/$app/ks.yaml"
+  done
   overlay="$(kustomize build --load-restrictor LoadRestrictionsNone "$REPO/kubernetes/apps/overlays/lab-sto2")"
-  [ "$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "n8n") | .spec.dependsOn | map(.name) | map(select(. == "'$plugin'")) | join(",")' <<<"$overlay")" = "$plugin" ]
+  users="$(yq -N 'select(.kind == "Kustomization" and ((.spec.components // []) | map(select(test("/components/cnpg-cluster$"))) | length) > 0)
+    | .metadata.name' <<<"$overlay" | sort | paste -sd' ' -)"
+  echo "applications that take the component: ${users:-none}"
+  [ "$users" = "$(printf '%s\n' "${!files[@]}" | sort | paste -sd' ' -)" ]
+  for app in "${!files[@]}"; do
+    [ "$(APP_NAME="$app" yq -N 'select(.kind == "Kustomization" and .metadata.name == strenv(APP_NAME)) | .spec.dependsOn | map(.name) | map(select(. == "'$plugin'")) | join(",")' <<<"$overlay")" = "$plugin" ] ||
+      { echo "$app does not name $plugin in dependsOn"; return 1; }
+  done
   [ "$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "'$plugin'") | .spec.path + " wait=" + (.spec.wait | tostring)' <<<"$overlay")" \
     = "./apps/base/cnpg-system/$plugin/app wait=true" ]
   run "$REPO/scripts/kubernetes-check" "$REPO"
   echo "$output"
   [ "$status" -eq 0 ]
-  # An overlay that lists n8n without the plugin's application is refused, naming both.
+  # An overlay that lists them without the plugin's application is refused, naming each and it.
   dir="$BATS_TEST_TMPDIR/without-plugin"
   mkdir -p "$dir"
   cp -R "$REPO/kubernetes" "$dir/kubernetes"
@@ -705,28 +742,37 @@ archive_path() {
   run "$REPO/scripts/kubernetes-check" "$dir"
   echo "$output"
   [ "$status" -ne 0 ]
-  [[ $output == *"kubernetes/apps/base/ai-system/n8n/ks.yaml: Kustomization n8n names $plugin"* ]]
+  for app in "${!files[@]}"; do
+    [[ $output == *"${files[$app]}: Kustomization $app names $plugin"* ]]
+  done
   [[ $output == *"does not enable"* ]]
   # A Kustomization that takes the component and does not name the plugin's application is refused
   # although the overlay enables it, so a database cannot start before the plugin's webhooks exist.
-  dir="$BATS_TEST_TMPDIR/without-dependency"
-  mkdir -p "$dir"
-  cp -R "$REPO/kubernetes" "$dir/kubernetes"
-  PLUGIN="$plugin" yq -i '.spec.dependsOn |= map(select(.name != strenv(PLUGIN)))' \
-    "$dir/kubernetes/apps/base/ai-system/n8n/ks.yaml"
-  run "$REPO/scripts/kubernetes-check" "$dir"
-  echo "$output"
-  [ "$status" -ne 0 ]
-  [[ $output == *"kubernetes/apps/base/ai-system/n8n/ks.yaml: Kustomization n8n takes the cnpg-cluster component but does not name $plugin in dependsOn"* ]]
-  # One that lists neither builds neither.
+  for app in "${!files[@]}"; do
+    dir="$BATS_TEST_TMPDIR/without-dependency-$app"
+    mkdir -p "$dir"
+    cp -R "$REPO/kubernetes" "$dir/kubernetes"
+    PLUGIN="$plugin" yq -i '.spec.dependsOn |= map(select(.name != strenv(PLUGIN)))' "$dir/${files[$app]}"
+    run "$REPO/scripts/kubernetes-check" "$dir"
+    echo "$output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"${files[$app]}: Kustomization $app takes the cnpg-cluster component but does not name $plugin in dependsOn"* ]]
+  done
+  # One that lists neither the plugin's application nor any that takes the component builds none
+  # of them.
   dir="$BATS_TEST_TMPDIR/without-plugin"
-  PLUGIN=n8n yq -i '.resources |= map(select(test("/" + strenv(PLUGIN) + "/ks.yaml$") | not))' \
-    "$dir/kubernetes/apps/overlays/lab-sto2/kustomization.yaml"
+  for app in "${!files[@]}"; do
+    FILE="${files[$app]#kubernetes/apps/base/}" yq -i '.resources |= map(select(. != "../../base/" + strenv(FILE)))' \
+      "$dir/kubernetes/apps/overlays/lab-sto2/kustomization.yaml"
+  done
   run "$REPO/scripts/kubernetes-check" "$dir"
   echo "$output"
   [ "$status" -eq 0 ]
   overlay="$(kustomize build --load-restrictor LoadRestrictionsNone "$dir/kubernetes/apps/overlays/lab-sto2")"
-  [ -z "$(yq -N 'select(.kind == "Kustomization" and (.metadata.name == "n8n" or .metadata.name == "'$plugin'")) | .metadata.name' <<<"$overlay")" ]
+  for app in "${!files[@]}" "$plugin"; do
+    [ -z "$(APP_NAME="$app" yq -N 'select(.kind == "Kustomization" and .metadata.name == strenv(APP_NAME)) | .metadata.name' <<<"$overlay")" ] ||
+      { echo "the overlay still builds $app"; return 1; }
+  done
 }
 
 @test "The Barman Cloud plugin runs beside the operator it is made for, signed by the cluster's own CA, and meets the restricted Pod Security level" {

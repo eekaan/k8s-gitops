@@ -154,9 +154,10 @@ backups are encrypted before they are uploaded
 encrypted at the provider with a customer key instead, so the cluster's key alone can list and
 delete the postgres bucket's objects but not read them.
 
-These recipes, `just infra-state-bucket` and the etcd snapshot recipes `just cluster-snapshot`,
-`cluster-snapshots` and `cluster-restore` ([cluster.md](cluster.md#recipes)) reach the object
-storage with rclone, pinned in `mise.toml`, at the endpoint, region and addressing that
+These recipes, `just infra-state-bucket`, the etcd snapshot recipes `just cluster-snapshot`,
+`cluster-snapshots` and `cluster-restore` ([cluster.md](cluster.md#recipes)) and the PostgreSQL
+dump recipes `just postgres-dumps` and `postgres-dump-check` ([kubernetes.md](kubernetes.md#dumps))
+reach the object storage with rclone, pinned in `mise.toml`, at the endpoint, region and addressing that
 `infra/openstack/backend.hcl` gives OpenTofu's state. rclone is configured through its environment
 only and reads no config file; the operator's own rclone configuration, its `RCLONE_` and `AWS_`
 variables and every other variable but `PATH`, `HOME`, `TMPDIR` and the proxy variables stay out of

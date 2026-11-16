@@ -1,0 +1,22 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: plugin-barman-cloud
+  description: The Barman Cloud plugin of CloudNativePG, through which every PostgreSQL cluster archives its WAL and takes its base backups to the object storage.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#backups-and-restores
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/postgres-restore.md
+      title: Runbook
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/cnpg-system/plugin-barman-cloud
+      title: Manifests
+spec:
+  type: service
+  lifecycle: production
+  owner: group:default/operators
+  system: databases
+  dependsOn:
+    - component:default/cloudnative-pg
+    - resource:default/cluster-ca

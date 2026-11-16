@@ -1,0 +1,172 @@
+---
+# Gatekeeper's own test of the three rules, run by gator verify in tests/admission-policy.bats. Each
+# test is named for its rule, which is also the name of its constraint and of Kyverno's policy; each
+# case is an object the rule must accept (violations: no) or refuse (violations: yes, with the
+# message that names what is wrong), named pass- or fail-.
+apiVersion: test.gatekeeper.sh/v1alpha1
+kind: Suite
+tests:
+  - name: image-pinned
+    template: ../../../kubernetes/apps/base/gatekeeper-system/gatekeeper-policies/app/image-pinned-template.yaml
+    constraint: ../../../kubernetes/apps/base/gatekeeper-system/gatekeeper-policies/app/image-pinned.yaml
+    cases:
+      - name: pass-tag
+        object: image-pinned/pass-tag.yaml
+        assertions:
+          - violations: "no"
+      - name: pass-digest
+        object: image-pinned/pass-digest.yaml
+        assertions:
+          - violations: "no"
+      - name: pass-tag-and-digest
+        object: image-pinned/pass-tag-and-digest.yaml
+        assertions:
+          - violations: "no"
+      - name: pass-registry-port
+        object: image-pinned/pass-registry-port.yaml
+        assertions:
+          - violations: "no"
+      - name: fail-latest
+        object: image-pinned/fail-latest.yaml
+        assertions:
+          - violations: 1
+            message: "container app image registry.example/team/app:latest is not pinned"
+      - name: fail-untagged
+        object: image-pinned/fail-untagged.yaml
+        assertions:
+          - violations: 1
+            message: "container app image registry.example/team/app is not pinned"
+      - name: fail-untagged-registry-port
+        object: image-pinned/fail-untagged-registry-port.yaml
+        assertions:
+          - violations: 1
+            message: "container app image registry.example:5000/team/app is not pinned"
+      - name: fail-init-latest
+        object: image-pinned/fail-init-latest.yaml
+        assertions:
+          - violations: 1
+            message: "container init image registry.example/team/init:latest is not pinned"
+      - name: fail-ephemeral-latest
+        object: image-pinned/fail-ephemeral-latest.yaml
+        assertions:
+          - violations: 1
+            message: "container debug image registry.example/team/debug is not pinned"
+      - name: fail-short-digest
+        object: image-pinned/fail-short-digest.yaml
+        assertions:
+          - violations: 1
+            message: "is not pinned"
+  - name: restricted-security-context
+    template: ../../../kubernetes/apps/base/gatekeeper-system/gatekeeper-policies/app/restricted-security-context-template.yaml
+    constraint: ../../../kubernetes/apps/base/gatekeeper-system/gatekeeper-policies/app/restricted-security-context.yaml
+    cases:
+      - name: pass-pod-level
+        object: restricted-security-context/pass-pod-level.yaml
+        inventory: [restricted-security-context/namespaces.yaml]
+        assertions:
+          - violations: "no"
+      - name: pass-container-level
+        object: restricted-security-context/pass-container-level.yaml
+        inventory: [restricted-security-context/namespaces.yaml]
+        assertions:
+          - violations: "no"
+      - name: pass-init-container
+        object: restricted-security-context/pass-init-container.yaml
+        inventory: [restricted-security-context/namespaces.yaml]
+        assertions:
+          - violations: "no"
+      - name: fail-escalation-unset
+        object: restricted-security-context/fail-escalation-unset.yaml
+        inventory: [restricted-security-context/namespaces.yaml]
+        assertions:
+          - violations: 1
+            message: "does not set allowPrivilegeEscalation to false"
+      - name: fail-escalation-true
+        object: restricted-security-context/fail-escalation-true.yaml
+        inventory: [restricted-security-context/namespaces.yaml]
+        assertions:
+          - violations: 1
+            message: "does not set allowPrivilegeEscalation to false"
+      - name: fail-capabilities-unset
+        object: restricted-security-context/fail-capabilities-unset.yaml
+        inventory: [restricted-security-context/namespaces.yaml]
+        assertions:
+          - violations: 1
+            message: "does not drop ALL capabilities"
+      - name: fail-capabilities-other
+        object: restricted-security-context/fail-capabilities-other.yaml
+        inventory: [restricted-security-context/namespaces.yaml]
+        assertions:
+          - violations: 1
+            message: "does not drop ALL capabilities"
+      - name: fail-root-unset
+        object: restricted-security-context/fail-root-unset.yaml
+        inventory: [restricted-security-context/namespaces.yaml]
+        assertions:
+          - violations: 1
+            message: "does not set runAsNonRoot to true"
+      - name: fail-root-false
+        object: restricted-security-context/fail-root-false.yaml
+        inventory: [restricted-security-context/namespaces.yaml]
+        assertions:
+          - violations: 1
+            message: "does not set runAsNonRoot to true"
+      - name: fail-seccomp-unset
+        object: restricted-security-context/fail-seccomp-unset.yaml
+        inventory: [restricted-security-context/namespaces.yaml]
+        assertions:
+          - violations: 1
+            message: "does not have the RuntimeDefault or a Localhost seccomp profile"
+      - name: fail-seccomp-unconfined
+        object: restricted-security-context/fail-seccomp-unconfined.yaml
+        inventory: [restricted-security-context/namespaces.yaml]
+        assertions:
+          - violations: 1
+            message: "does not have the RuntimeDefault or a Localhost seccomp profile"
+      - name: fail-init-container
+        object: restricted-security-context/fail-init-container.yaml
+        inventory: [restricted-security-context/namespaces.yaml]
+        assertions:
+          - violations: 2
+            message: "container init does not"
+      - name: pass-privileged-namespace
+        object: restricted-security-context/pass-privileged-namespace.yaml
+        inventory: [restricted-security-context/namespaces.yaml]
+        assertions:
+          - violations: "no"
+  - name: namespace-pod-security-level
+    template: ../../../kubernetes/apps/base/gatekeeper-system/gatekeeper-policies/app/namespace-pod-security-level-template.yaml
+    constraint: ../../../kubernetes/apps/base/gatekeeper-system/gatekeeper-policies/app/namespace-pod-security-level.yaml
+    cases:
+      - name: pass-restricted
+        object: namespace-pod-security-level/pass-restricted.yaml
+        assertions:
+          - violations: "no"
+      - name: pass-baseline
+        object: namespace-pod-security-level/pass-baseline.yaml
+        assertions:
+          - violations: "no"
+      - name: pass-privileged
+        object: namespace-pod-security-level/pass-privileged.yaml
+        assertions:
+          - violations: "no"
+      - name: fail-no-labels
+        object: namespace-pod-security-level/fail-no-labels.yaml
+        assertions:
+          - violations: 1
+            message: "no pod-security.kubernetes.io/enforce label"
+      - name: fail-other-labels
+        object: namespace-pod-security-level/fail-other-labels.yaml
+        assertions:
+          - violations: 1
+            message: "no pod-security.kubernetes.io/enforce label"
+      - name: fail-unknown-level
+        object: namespace-pod-security-level/fail-unknown-level.yaml
+        assertions:
+          - violations: 1
+            message: "no pod-security.kubernetes.io/enforce label"
+      - name: fail-audit-only
+        object: namespace-pod-security-level/fail-audit-only.yaml
+        assertions:
+          - violations: 1
+            message: "no pod-security.kubernetes.io/enforce label"

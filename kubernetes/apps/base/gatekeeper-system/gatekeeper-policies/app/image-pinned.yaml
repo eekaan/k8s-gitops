@@ -1,0 +1,17 @@
+---
+# The image-pinned rule, as a constraint of the template: the same rule as the image check of just
+# kubernetes-validate, which refuses an image of the render without a digest or a tag other than
+# latest, and which cannot see an image a pod got by another way. In dry-run: a violation is
+# recorded in the constraint's status and counted by the audit, and nothing is refused.
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sImagePinned
+metadata:
+  name: image-pinned
+  annotations:
+    k8s-gitops/offline-check: scripts/kubernetes-validate (images)
+spec:
+  enforcementAction: dryrun
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: [Pod]

@@ -1,0 +1,20 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: cilium-monitoring
+  description: The monitors and alert rules for Cilium's agents, made once the monitoring definitions exist.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#ciliums-metrics
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/kube-system/cilium-monitoring
+      title: Manifests
+spec:
+  type: monitoring-rules
+  lifecycle: production
+  owner: group:default/operators
+  system: networking
+  dependsOn:
+    - component:default/cilium
+    - resource:default/prometheus-operator-crds

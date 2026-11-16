@@ -1,0 +1,25 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/gateway.networking.k8s.io/httproute_v1.json
+# The sign-in paths on the protected route's host go to oauth2-proxy, where a person starts a
+# sign-in and the proxy answers the same-origin requests of the session. The longer path prefix
+# wins over the protected route's, and no policy covers this route: it is the flow itself.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: ${SSO_ROUTE}-oauth2
+spec:
+  parentRefs:
+    - name: public
+      namespace: envoy-gateway-system
+      sectionName: https
+  hostnames:
+    - ${SSO_HOSTNAME}.${CLUSTER_DOMAIN}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /oauth2/
+      backendRefs:
+        - name: oauth2-proxy
+          namespace: sso-system
+          port: 80

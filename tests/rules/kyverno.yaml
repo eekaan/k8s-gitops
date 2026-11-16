@@ -1,0 +1,61 @@
+---
+# Unit tests of the kyverno application's own alert, run by just rules-check with promtool. The
+# series is shaped as kube-state-metrics writes the available replicas of a Deployment, as the
+# monitoring stack's ServiceMonitor scrapes it: the job, instance, service and endpoint of the
+# scrape, and the Deployment's namespace and name. Each group's name is the title of its scenario in
+# features/alerts.feature.
+rule_files:
+  - kyverno.rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: The alert KyvernoAdmissionControllerDown fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # The admission controller's two replicas are available for 10 minutes, and then neither is:
+      # the alert is pending from minute 10 and fires after its 10 minutes, at minute 20. The
+      # reports controller of the same namespace with none available, and a Deployment of the
+      # admission controller's name in another namespace with none, are not the admission controller.
+      - series: >-
+          kube_deployment_status_replicas_available{namespace="kyverno",
+          deployment="kyverno-admission-controller", job="kube-state-metrics",
+          instance="192.0.2.3:8080", service="kube-prometheus-stack-kube-state-metrics",
+          endpoint="http"}
+        values: '2x9 0x80'
+      - series: >-
+          kube_deployment_status_replicas_available{namespace="kyverno",
+          deployment="kyverno-reports-controller", job="kube-state-metrics",
+          instance="192.0.2.3:8080", service="kube-prometheus-stack-kube-state-metrics",
+          endpoint="http"}
+        values: '0x90'
+      - series: >-
+          kube_deployment_status_replicas_available{namespace="monitoring",
+          deployment="kyverno-admission-controller", job="kube-state-metrics",
+          instance="192.0.2.3:8080", service="kube-prometheus-stack-kube-state-metrics",
+          endpoint="http"}
+        values: '0x90'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: KyvernoAdmissionControllerDown
+        exp_alerts: []
+      - eval_time: 19m
+        alertname: KyvernoAdmissionControllerDown
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: KyvernoAdmissionControllerDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: kyverno
+              deployment: kyverno-admission-controller
+              job: kube-state-metrics
+              instance: 192.0.2.3:8080
+              service: kube-prometheus-stack-kube-state-metrics
+              endpoint: http
+            exp_annotations:
+              summary: Kyverno's admission controller has no available replica
+              description: >-
+                The Deployment kyverno-admission-controller in kyverno has had no available replica for 10 minutes,
+                so no object is evaluated at admission and no admission report is written; the webhooks
+                that match workloads fail open, so no workload is refused, but a write of a Kyverno policy,
+                PolicyException or GlobalContextEntry is refused.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#kyvernoadmissioncontrollerdown

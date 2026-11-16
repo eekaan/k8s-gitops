@@ -1,0 +1,63 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What oauth2-proxy lets through, on top of the namespace's default deny: the public Gateway's
+# proxies, for its routes and for the question they ask about each request of a route that opts in
+# (components/sso), and the kubelet's probes; it reaches dex inside the cluster and the cluster's
+# resolver, and nothing outside the cluster. Its metrics are off.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: oauth2-proxy
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: oauth2-proxy
+      app.kubernetes.io/instance: oauth2-proxy
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    # The proxies, selected by their labels and not by their namespace: the routes of the sign-in
+    # host and of each opting route's /oauth2/, and the external authorisation of each opting route,
+    # all through the Service's 80, which targets the container's 4180.
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": envoy-gateway-system
+            app.kubernetes.io/name: envoy
+            app.kubernetes.io/component: proxy
+            app.kubernetes.io/managed-by: envoy-gateway
+            gateway.envoyproxy.io/owning-gateway-name: public
+            gateway.envoyproxy.io/owning-gateway-namespace: envoy-gateway-system
+      toPorts:
+        - ports:
+            - port: "4180"
+              protocol: TCP
+    # The kubelet's probes, /ping and /ready on the same port.
+    - fromEntities:
+        - host
+      toPorts:
+        - ports:
+            - port: "4180"
+              protocol: TCP
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    # dex's Service, where it redeems the sign-in code and reads dex's keys.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": sso-system
+            app.kubernetes.io/name: dex
+            app.kubernetes.io/instance: dex
+      toPorts:
+        - ports:
+            - port: "5556"
+              protocol: TCP

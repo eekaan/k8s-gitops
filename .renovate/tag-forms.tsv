@@ -54,3 +54,9 @@ docker	ghcr.io/home-operations/kromgo	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
 docker	ghcr.io/home-operations/charts-mirror/external-dns	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
 docker	gsoci.azurecr.io/charts/giantswarm/silence-operator	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
 docker	ghcr.io/open-webui/open-webui	^[0-9]+\.[0-9]+\.[0-9]+-slim$	registry tag list, which holds the release tags with and without a v, the slim, cuda and ollama variants of each, and the development builds under dev, main and git-<commit>
+docker	ghcr.io/dexidp/helm-charts/dex	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/oauth2-proxy/charts/oauth2-proxy	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/backstage/backstage	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list, which holds a -next.N pre-release of each coming minor beside the releases (.renovate/managers.json5)
+docker	ghcr.io/falcosecurity/charts/falco	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list, which holds release candidates as 9.2.0-rc1
+docker	docker.io/falcosecurity/falco	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list, which holds release candidates and variants such as 0.45.2-slim as separate tags
+docker	ghcr.io/kyverno/charts/kyverno	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list

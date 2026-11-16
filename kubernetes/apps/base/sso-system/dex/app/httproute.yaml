@@ -1,0 +1,21 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/gateway.networking.k8s.io/httproute_v1.json
+# dex's public name, the issuer's: dex under the cluster's domain, on the public Gateway's https
+# listener, which this namespace reaches through its k8s-gitops/gateway label. A person's browser
+# reaches dex here to sign in with GitHub; oauth2-proxy reads dex's keys and redeems the code
+# through dex's Service inside the cluster instead.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: dex
+spec:
+  parentRefs:
+    - name: public
+      namespace: envoy-gateway-system
+      sectionName: https
+  hostnames:
+    - dex.${CLUSTER_DOMAIN}
+  rules:
+    - backendRefs:
+        - name: dex
+          port: 5556

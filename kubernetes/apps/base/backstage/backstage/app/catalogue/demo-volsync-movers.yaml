@@ -1,0 +1,19 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: demo-volsync-movers
+  description: The network policies of the demo namespace's backup movers, which let them resolve names and reach the object storage.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#what-the-namespaces-let-through
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/demo/demo-volsync-movers
+      title: Manifests
+spec:
+  type: network-policy
+  lifecycle: experimental
+  owner: group:default/operators
+  system: demo
+  dependsOn:
+    - component:default/cilium

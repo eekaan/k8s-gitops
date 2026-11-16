@@ -1,0 +1,7 @@
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-short-digest, namespace: apps}
+spec:
+  containers:
+    - {name: app, image: "registry.example/team/app@sha256:0123"}

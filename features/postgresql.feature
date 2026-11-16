@@ -62,9 +62,9 @@ Feature: PostgreSQL
     Then the chart's tag is an exact version under a renovate comment that names its registry path, and each image is pinned by a tag and a digest under a renovate comment that names its repository
 
   Scenario: A PostgreSQL cluster from the component archives its WAL and takes a daily base backup to a path of its own in the object store
-    Given an application whose Kustomization names the cnpg-cluster component and sets its cluster's name and namespace
-    When it is built as Flux applies it
-    Then the Cluster archives through the plugin's entry that names the application's ObjectStore, a ScheduledBackup of method plugin for that Cluster runs once a day at a minute no other backup of the cluster uses and takes its first backup when it is made, the ObjectStore keeps base backups and WAL for a recovery window, compresses both, and reaches the cluster's object storage at the endpoint of cluster-config, in the postgres bucket, under the cluster's name, the namespace and the database's name
+    Given an application whose Kustomization names the cnpg-cluster component and sets its cluster's name and namespace, and the databases the cluster's overlay builds
+    When each is built as Flux applies it
+    Then the Cluster archives through the plugin's entry that names the application's ObjectStore, a ScheduledBackup of method plugin for that Cluster runs once a day at a minute no other backup of the cluster uses, outside the run of the dump job of each database the overlay builds, and takes its first backup when it is made, the ObjectStore keeps base backups and WAL for a recovery window, compresses both, and reaches the cluster's object storage at the endpoint of cluster-config, in the postgres bucket, under the cluster's name, the namespace and the database's name
 
   Scenario: Every object a database archives is encrypted at the provider with a customer key the provider does not keep
     Given every ObjectStore the component makes for two applications
@@ -92,9 +92,9 @@ Feature: PostgreSQL
     Then each field is defined there, and each value has the type the schema gives and, where it lists them, one of the values it allows
 
   Scenario: A cluster that does not select the backup plugin builds no database that needs it, and one that selects a database without it is refused
-    Given the cluster's overlay, with the application that takes the component and with the plugin's application left out
+    Given the cluster's overlay, with the applications that take the component, n8n and Backstage, and with the plugin's application left out
     When it is built as Flux applies it and checked with scripts/kubernetes-check
-    Then n8n names the plugin's application in dependsOn, a Kustomization that takes the component without naming it is refused, and an overlay that lists n8n without the plugin's application is refused, naming the dependency, while one that lists neither builds neither
+    Then each of the two names the plugin's application in dependsOn, either one that takes the component without naming it is refused, and an overlay that lists them without the plugin's application is refused, naming each and the dependency, while one that lists none of the three builds none of them
 
   Scenario: The restore runbook's manifest is one the pinned operator defines and reads the archive of the cluster it replaces
     Given the Cluster manifest in docs/runbooks/postgres-restore.md and the Cluster definition of the pinned chart
@@ -120,3 +120,23 @@ Feature: PostgreSQL
     Given the component's Cluster and the image of the dump step built for an application
     When their images are read
     Then the dump step runs an image of the operator's registry path whose tag names the same PostgreSQL major version as the Cluster's, and every image of the job is pinned by tag and digest
+
+  Scenario: The dumps of a database are listed newest first by name and size
+    Given the postgres bucket holds dumps of two databases, objects that are not dumps, and another cluster's dumps of the same database
+    When just postgres-dumps runs for one database, for another cluster and with no database named
+    Then it lists that database's dumps under its own path only, newest first, each by name and size and nothing else, or the databases that have a dump, and the output names no bucket, endpoint or key
+
+  Scenario: A dump is checked by decrypting it and reading its archive, and nothing of its contents is printed
+    Given dumps encrypted to the Talos age key's recipient, a stand-in for the object storage and a stand-in for pg_restore that reads a made-up archive whose table names and rows are markers
+    When just postgres-dump-check runs for the newest dump and for a named one
+    Then the dump is downloaded, begins with the age header, is decrypted with the Talos age key into a memory-backed directory and read by pg_restore from the cluster's PostgreSQL image, named by its digest in the component, without a network and from a read-only mount, and the recipe prints the dump's name, its encrypted and plain sizes, the archive's format, PostgreSQL version and time, and the number of tables, and no table name, row or other name from the database
+
+  Scenario: A dump that is not encrypted, does not decrypt or cannot be read fails the check with its reason
+    Given a dump that is a plain archive, one encrypted to another key and one that holds no archive
+    When just postgres-dump-check runs for each
+    Then each exits non-zero with a line that says which of the three it is, the plain archive and the one another key encrypted never reach pg_restore, and nothing of the archive's contents is printed
+
+  Scenario: The check leaves nothing behind, whether it passes, fails or is interrupted
+    Given a dump that checks, dumps that fail the check, a failing download, and a run interrupted while pg_restore reads the dump, whether pg_restore dies of the interruption or handles it
+    When just postgres-dump-check runs for each, with a memory-backed directory and without one
+    Then no run leaves a file or directory in the memory-backed directory or in TMPDIR, the plain dump included

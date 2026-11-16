@@ -1,0 +1,17 @@
+---
+# The namespace-pod-security-level rule, as a constraint of the template: the same rule as just
+# pod-security-check, which fails a namespace an object of the render is in that has no level,
+# because a level is declared in the tree and never left to the API server's default. In dry-run: a
+# violation is recorded in the constraint's status and counted by the audit, and nothing is refused.
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sNamespacePodSecurityLevel
+metadata:
+  name: namespace-pod-security-level
+  annotations:
+    k8s-gitops/offline-check: scripts/pod-security-check
+spec:
+  enforcementAction: dryrun
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: [Namespace]

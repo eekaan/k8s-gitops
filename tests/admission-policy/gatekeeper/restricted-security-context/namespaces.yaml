@@ -1,0 +1,14 @@
+---
+# The namespaces the objects are in, which the constraint's namespaceSelector reads: gator takes
+# them from a case's inventory.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: strict
+  labels: {pod-security.kubernetes.io/enforce: restricted}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: loose
+  labels: {pod-security.kubernetes.io/enforce: privileged}

@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Writes the dependencies of the catalogue's entities from the Kustomizations they describe: for
+# each entity file of kind Component or Resource, spec.dependsOn becomes the entities of the
+# applications its Kustomization names in dependsOn, as the lab-sto2 overlay builds it, patches
+# included. Descriptions, links, systems and owners are written by hand and left as they are.
+# Usage: catalogue-dependencies [ROOT]
+# ROOT is the repository, or a copy of its kubernetes/ and scripts/ trees; the working copy's by
+# default. Exits non-zero, naming both, when an application depends on one that has no entity.
+set -euo pipefail
+export LC_ALL=C
+
+root=${1:-$(git rev-parse --show-toplevel)}
+catalogue="$root/kubernetes/apps/base/backstage/backstage/app/catalogue"
+overlay="$root/kubernetes/apps/overlays/lab-sto2"
+
+built=$(mktemp)
+trap 'rm -f "$built"' EXIT
+kustomize build --load-restrictor LoadRestrictionsNone "$overlay" >"$built"
+
+# The kind of each application's entity, as lower case entity references use it.
+declare -A kind=()
+for file in "$catalogue"/*.yaml; do
+  while IFS=' ' read -r k name; do
+    kind[$name]=${k,,}
+  done < <(yq -N 'select(.kind == "Component" or .kind == "Resource") | .kind + " " + .metadata.name' "$file")
+done
+
+# Every reference is resolved before any file is written, so a refusal leaves the tree as it was.
+status=0
+declare -A written=()
+for file in "$catalogue"/*.yaml; do
+  name=$(yq -N 'select(.kind == "Component" or .kind == "Resource") | .metadata.name' "$file")
+  [[ -n $name ]] || continue
+  refs=()
+  while IFS= read -r dep; do
+    [[ -n $dep ]] || continue
+    if [[ -z ${kind[$dep]-} ]]; then
+      echo "$name depends on $dep, which has no entity in $catalogue" >&2
+      status=1
+      continue
+    fi
+    refs+=("${kind[$dep]}:default/$dep")
+  done < <(NAME="$name" yq -N 'select(.kind == "Kustomization" and .metadata.name == strenv(NAME)) | .spec.dependsOn[]?.name' "$built" | sort -u)
+  written[$file]=$(printf '%s\n' "${refs[@]}")
+done
+((status == 0)) || exit "$status"
+
+for file in "${!written[@]}"; do
+  if [[ -z ${written[$file]} ]]; then
+    yq -i 'del(.spec.dependsOn)' "$file"
+  else
+    REFS=${written[$file]} yq -i '.spec.dependsOn = (strenv(REFS) | split("\n"))' "$file"
+  fi
+done

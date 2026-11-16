@@ -1,0 +1,27 @@
+---
+# The GitHub OAuth App's client ID and secret, which the owner creates on GitHub and writes to the
+# secret store (docs/kubernetes.md, Sign-in): `just bao-put sso-system/dex github-client-id` and
+# `just bao-put sso-system/dex github-client-secret`. They become the keys of the Secret dex-github,
+# which dex's pods read into the environment. Until the store holds both, the ExternalSecret reports
+# the missing key and the pods wait for the Secret.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: dex-github
+spec:
+  refreshInterval: 15m
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: openbao
+  target:
+    name: dex-github
+    creationPolicy: Owner
+  data:
+    - secretKey: client-id
+      remoteRef:
+        key: sso-system/dex
+        property: github-client-id
+    - secretKey: client-secret
+      remoteRef:
+        key: sso-system/dex
+        property: github-client-secret

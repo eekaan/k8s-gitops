@@ -340,9 +340,10 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   echo "ClientTrafficPolicy: $policy"
   [ "$policy" = "$(jq -cnS --arg gateway "$gateway" '{targetRefs: [{group: "gateway.networking.k8s.io", kind: "Gateway", name: $gateway}],
     proxyProtocol: {optional: true}, tls: {minVersion: "1.2"}}')" ]
-  # It is the one policy on the Gateway or on a route attached to it: of everything the cluster
-  # applies, no other object's targetRef, targetRefs or targetSelectors names the Gateway or such a
-  # route, and none selects a Gateway or a route by its labels.
+  # It is the one policy on the Gateway, and the only one on a route attached to it but the sign-in's
+  # below: of everything the cluster applies, no other object's targetRef, targetRefs or
+  # targetSelectors names the Gateway or such a route, and none selects a Gateway or a route by its
+  # labels.
   everything
   # shellcheck disable=SC2016 # $gateway, $namespace, $routes, $p and $own are jq variables.
   targeting="$(yq -N -o json -I0 '.' "$EVERYTHING" | jq -rs --arg gateway "$gateway" --arg namespace "$namespace" '
@@ -359,7 +360,11 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
         or any($p.spec.targetSelectors[]?; .kind == "Gateway" or (.kind | tostring | endswith("Route"))))
     | "\($p.kind)/\($own)/\($p.metadata.name)"')"
   echo "policies on the Gateway or its routes: $targeting"
-  [ "$targeting" = "ClientTrafficPolicy/$namespace/$(only "$BUILT" ClientTrafficPolicy)" ]
+  # The one route that opts in to the cluster's sign-in (features/sso.feature) has the one
+  # SecurityPolicy that asks oauth2-proxy about its requests; it is named here, not found in the
+  # tree, so a policy on the Gateway or on any other route is a failure. A route that opts in later
+  # adds its policy to this list.
+  [ "$(sort <<<"$targeting")" = "$({ printf '%s\n' "ClientTrafficPolicy/$namespace/$(only "$BUILT" ClientTrafficPolicy)" SecurityPolicy/demo/hello-sso; } | sort)" ]
   # Nor does anything patch around it: no EnvoyPatchPolicy anywhere, which rewrites the translated
   # configuration of a Gateway, or of every Gateway of its class, whatever the policies say.
   local patches forwarded
@@ -424,7 +429,7 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
     echo "namespace $name: k8s-gitops/gateway=$labels"
     if [ "$labels" = "$label" ]; then attached+=("$name"); fi
   done < <(yq -N 'select(.kind == "Namespace") | .metadata.name + "\t" + (.metadata.labels["k8s-gitops/gateway"] // "none")' "$OVERLAY")
-  [ "${attached[*]}" = "ai-system demo kromgo" ]
+  [ "${attached[*]}" = "ai-system backstage demo kromgo sso-system" ]
   # Every route that names the Gateway from another namespace is in one that attached.
   built hello-route
   [ "$(yq -N 'select(.kind == "HTTPRoute") | .spec.parentRefs[].name' "$BUILT")" = "$gateway" ]
@@ -438,6 +443,9 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   built open-webui
   [ "$(yq -N 'select(.kind == "HTTPRoute") | .spec.parentRefs[].name' "$BUILT")" = "$gateway" ]
   [ "$(yq -N 'select(.kind == "HTTPRoute") | .metadata.namespace' "$BUILT")" = ai-system ]
+  built backstage
+  [ "$(yq -N 'select(.kind == "HTTPRoute") | .spec.parentRefs[].name' "$BUILT")" = "$gateway" ]
+  [ "$(yq -N 'select(.kind == "HTTPRoute") | .metadata.namespace' "$BUILT")" = backstage ]
 }
 
 @test "The Gateway listens on exactly the ports the edge routers translate" {
@@ -531,7 +539,7 @@ tree_without() {
   done
   # Leaving the Gateway, the applications that have a route on it and the DNS records of their
   # routes out builds: nothing else names them.
-  tree_without gateway-public hello-route n8n kromgo external-dns open-webui
+  tree_without gateway-public hello-route n8n kromgo external-dns open-webui hello-sso dex oauth2-proxy backstage
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]

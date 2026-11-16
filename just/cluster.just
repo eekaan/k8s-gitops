@@ -63,6 +63,15 @@ cluster-snapshot cluster='lab-sto2':
 cluster-snapshots cluster='lab-sto2':
     scripts/cluster-snapshots {{ quote(cluster) }}
 
+# List a PostgreSQL database's dumps in the postgres backup bucket, newest first, by name and size, reading only; with no database named (just postgres-dumps [cluster]) list the databases that have a dump, as <namespace>/<name>; the namespace and name are those of the database's Cluster
+[positional-arguments]
+postgres-dumps *args:
+    scripts/postgres-dumps "$@"
+
+# Prove that a PostgreSQL database's dump can be restored from, printing counts and nothing of its contents: download the dump (latest: the newest) into a private directory on a memory-backed filesystem where there is one, check it begins with the age header, decrypt it with the Talos age key, have pg_restore --list read it from the cluster's PostgreSQL image with docker or podman, no network, and print its name, sizes, format, PostgreSQL version, time and number of tables, empty ones included; an archive without a table fails; everything is removed on every exit; see docs/runbooks/postgres-restore.md
+postgres-dump-check namespace name dump='latest' cluster='lab-sto2':
+    scripts/postgres-dump-check {{ quote(namespace) }} {{ quote(name) }} {{ quote(dump) }} {{ quote(cluster) }}
+
 # Restore a cluster's etcd from a snapshot cluster-snapshots lists, or latest: download and decrypt it, then once the cluster's name is typed back reset the control planes' EPHEMERAL partitions, bootstrap etcd from the snapshot and wait until every node is Ready (--yes: without asking)
 [positional-arguments]
 cluster-restore snapshot *args:

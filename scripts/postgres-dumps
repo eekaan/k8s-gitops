@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Lists a PostgreSQL database's dumps in the postgres bucket, <BACKUP_BUCKET_PREFIX>-postgres, with
+# the state key, reading only: one per line, newest first, by the name postgres-dump-check takes and
+# the size in bytes, and nothing else, neither the bucket's name nor what rclone reports. With no
+# database named it lists the databases that have a dump, as <namespace>/<name>. A database or a
+# cluster without dumps lists nothing and says so on standard error. Of rclone's errors only the
+# reason is shown, with places and keys replaced, and with CI set none of it, but the name of the
+# file that keeps it (scripts/lib/errors.sh).
+# Usage: scripts/postgres-dumps [<namespace> <name>] [cluster]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/postgres-dumps.sh
+. "$here/lib/postgres-dumps.sh"
+
+usage() {
+  infra_error "usage: postgres-dumps [<namespace> <name>] [cluster]; the namespace and name are those of the database's Cluster"
+  exit 2
+}
+
+# One argument is a cluster, two a database, three a database and its cluster.
+namespace='' name='' cluster=''
+case $# in
+  0) ;;
+  1) cluster=$1 ;;
+  2 | 3)
+    namespace=$1 name=$2 cluster=${3-}
+    if [[ ! $namespace =~ $pg_label_re || ! $name =~ $pg_label_re ]]; then
+      usage
+    fi
+    ;;
+  *) usage ;;
+esac
+
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "$cluster"
+require_env BACKUP_BUCKET_PREFIX AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+s3_bucket_name_ok BACKUP_BUCKET_PREFIX prefix
+s3_require_client
+start_errors_log "$cluster_dir/clusterconfig/${0##*/}.errors.log"
+
+step="listing the postgres bucket"
+failed="rclone cannot list the postgres bucket with the state key, or it does not exist; just infra-backup-buckets creates it"
+if [[ -z $namespace ]]; then
+  what="any database of $cluster"
+  listing=$(s3_postgres_databases "$cluster") || {
+    infra_error "$failed"
+    exit 1
+  }
+else
+  what="$namespace/$name on $cluster"
+  listing=$(s3_postgres_dumps "$cluster" "$namespace" "$name") || {
+    infra_error "$failed"
+    exit 1
+  }
+fi
+if [[ -z $listing ]]; then
+  printf '%s: the postgres bucket holds no dump of %s\n' "${0##*/}" "$what" >&2
+  exit 0
+fi
+printf '%s\n' "$listing"

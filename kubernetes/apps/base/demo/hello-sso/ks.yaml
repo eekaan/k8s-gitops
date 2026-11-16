@@ -1,0 +1,28 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: hello-sso
+  namespace: flux-system
+spec:
+  path: ./apps/base/demo/hello-sso/app
+  targetNamespace: demo
+  # The component adds the policy that asks oauth2-proxy and the route for the sign-in paths.
+  components:
+    - ../../../../../components/sso
+  postBuild:
+    substitute:
+      SSO_ROUTE: hello-sso
+      SSO_HOSTNAME: hello-sso
+  # The route names the public Gateway and the hello Service, and the policy names oauth2-proxy's
+  # Service, which the grant in its namespace lets this one reach. A cluster without any of them
+  # cannot enable it.
+  dependsOn:
+    - name: gateway-public
+    - name: hello
+    - name: oauth2-proxy
+  wait: true
+  sourceRef:
+    kind: ExternalArtifact
+    name: hello-sso

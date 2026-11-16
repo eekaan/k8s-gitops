@@ -1,0 +1,17 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: runtime-classes
+  description: The RuntimeClasses gvisor and kata, for the container runtimes the node image adds.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#runtime-classes
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/kube-system/runtime-classes
+      title: Manifests
+spec:
+  type: configuration
+  lifecycle: production
+  owner: group:default/operators
+  system: cluster-services

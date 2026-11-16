@@ -1,0 +1,34 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/gateway.envoyproxy.io/securitypolicy_v1alpha1.json
+# Every request to the route is first sent to oauth2-proxy. Envoy sends the request on to the
+# backend only when oauth2-proxy answers 200, and otherwise answers the client with oauth2-proxy's
+# answer, its status, Location and Set-Cookie included; the policy does not fail open, so an answer
+# that cannot be had is refused as well. oauth2-proxy is asked at its root, which its catch-all
+# handler serves: with a session of an identity on the owner's list it answers 200 from its static
+# upstream, with the identity in the headers named below, which reach the backend; without one it
+# answers with the redirect to dex that starts a sign-in. The request's own path is not passed on:
+# oauth2-proxy answers /ping, /ready and /robots.txt with 200 before it looks for a session, and the
+# policy's path option would append the request's path. The query is where a person returns after
+# signing in, the route's own host: Envoy passes oauth2-proxy no X-Forwarded-Host or -Uri to work it
+# out from.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: ${SSO_ROUTE}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: ${SSO_ROUTE}
+  extAuth:
+    headersToExtAuth:
+      - cookie
+    http:
+      backendRefs:
+        - name: oauth2-proxy
+          namespace: sso-system
+          port: 80
+      pathOverride: /?rd=https://${SSO_HOSTNAME}.${CLUSTER_DOMAIN}/
+      headersToBackend:
+        - x-auth-request-user
+        - x-auth-request-email

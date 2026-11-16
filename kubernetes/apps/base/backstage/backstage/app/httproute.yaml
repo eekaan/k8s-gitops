@@ -1,0 +1,40 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/gateway.networking.k8s.io/httproute_v1.json
+# Backstage's public name: backstage under the cluster's domain, on the public Gateway's https
+# listener, which this namespace reaches through its k8s-gitops/gateway label. The Service is the
+# chart's, named after the release, and the port is the one Backstage listens on. Whatever puts the
+# cluster's sign-in in front of Backstage attaches to this route from an application of its own.
+#
+# The route admits by allowlist: GET and HEAD of any path, which serve the pages and their reads,
+# and POST of /api/catalog/entities/by-refs, matched exactly, the one read the pages need as a POST.
+# No other method matches, nor a path that differs from that one in letter case or by a trailing
+# slash, so the Gateway answers any other request itself, 404, without reaching the pod
+# (docs/kubernetes.md, Backstage).
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: backstage
+spec:
+  parentRefs:
+    - name: public
+      namespace: envoy-gateway-system
+      sectionName: https
+  hostnames:
+    - backstage.${CLUSTER_DOMAIN}
+  rules:
+    - matches:
+        - method: GET
+          path:
+            type: PathPrefix
+            value: /
+        - method: HEAD
+          path:
+            type: PathPrefix
+            value: /
+        - method: POST
+          path:
+            type: Exact
+            value: /api/catalog/entities/by-refs
+      backendRefs:
+        - name: backstage
+          port: 7007
