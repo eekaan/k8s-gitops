@@ -1,0 +1,7 @@
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: pass-registry-port, namespace: apps}
+spec:
+  containers:
+    - {name: app, image: "registry.example:5000/team/app:1.0"}

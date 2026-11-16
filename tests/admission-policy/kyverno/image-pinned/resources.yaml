@@ -1,0 +1,76 @@
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: pass-tag, namespace: apps}
+spec:
+  containers:
+    - {name: app, image: "registry.example/team/app:1.2.3"}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: pass-digest, namespace: apps}
+spec:
+  containers:
+    - {name: app, image: "registry.example/team/app@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: pass-tag-and-digest, namespace: apps}
+spec:
+  containers:
+    - {name: app, image: "registry.example/team/app:latest@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
+  initContainers:
+    - {name: init, image: "registry.example/team/init:v2"}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: pass-registry-port, namespace: apps}
+spec:
+  containers:
+    - {name: app, image: "registry.example:5000/team/app:1.0"}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-latest, namespace: apps}
+spec:
+  containers:
+    - {name: app, image: "registry.example/team/app:latest"}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-untagged, namespace: apps}
+spec:
+  containers:
+    - {name: app, image: "registry.example/team/app"}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-untagged-registry-port, namespace: apps}
+spec:
+  containers:
+    - {name: app, image: "registry.example:5000/team/app"}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-init-latest, namespace: apps}
+spec:
+  containers:
+    - {name: app, image: "registry.example/team/app:1.2.3"}
+  initContainers:
+    - {name: init, image: "registry.example/team/init:latest"}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-ephemeral-latest, namespace: apps}
+spec:
+  containers:
+    - {name: app, image: "registry.example/team/app:1.2.3"}
+  ephemeralContainers:
+    - {name: debug, image: "registry.example/team/debug"}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-short-digest, namespace: apps}
+spec:
+  containers:
+    - {name: app, image: "registry.example/team/app@sha256:0123"}

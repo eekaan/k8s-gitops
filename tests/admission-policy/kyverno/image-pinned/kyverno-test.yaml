@@ -1,0 +1,30 @@
+---
+# Kyverno's own test of the image-pinned rule, run by tests/admission-policy.bats. Each resource is
+# named for what the rule must do with it: pass-, fail- or skip-.
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: image-pinned
+policies:
+  - ../../../../kubernetes/apps/base/kyverno/kyverno-policies/app/image-pinned.yaml
+resources:
+  - resources.yaml
+results:
+  - policy: image-pinned
+    isValidatingPolicy: true
+    resources:
+      - pass-tag
+      - pass-digest
+      - pass-tag-and-digest
+      - pass-registry-port
+    result: pass
+  - policy: image-pinned
+    isValidatingPolicy: true
+    resources:
+      - fail-latest
+      - fail-untagged
+      - fail-untagged-registry-port
+      - fail-init-latest
+      - fail-ephemeral-latest
+      - fail-short-digest
+    result: fail

@@ -1,0 +1,17 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: kyverno-policies
+  namespace: flux-system
+spec:
+  path: ./apps/base/kyverno/kyverno-policies/app
+  # The rules are cluster-scoped, so no object of theirs lands in a namespace.
+  targetNamespace: kyverno
+  # The ValidatingPolicy definition is the release's, and its webhook admits the rules.
+  dependsOn:
+    - name: kyverno
+  sourceRef:
+    kind: ExternalArtifact
+    name: kyverno-policies

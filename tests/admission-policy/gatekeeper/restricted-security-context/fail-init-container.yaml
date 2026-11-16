@@ -1,0 +1,18 @@
+---
+# One container that is right does not cover an init container that is not.
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-init-container, namespace: strict}
+spec:
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  initContainers:
+    - name: init
+      image: registry.example/init:1.0
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}

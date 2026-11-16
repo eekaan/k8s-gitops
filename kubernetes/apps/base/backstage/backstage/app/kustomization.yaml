@@ -53,6 +53,8 @@ configMapGenerator:
       - catalogue/external-secrets.yaml
       - catalogue/falco.yaml
       - catalogue/flux-monitoring.yaml
+      - catalogue/gatekeeper-policies.yaml
+      - catalogue/gatekeeper.yaml
       - catalogue/gateway-api-crds.yaml
       - catalogue/gateway-public.yaml
       - catalogue/grafana-operator.yaml
@@ -65,6 +67,8 @@ configMapGenerator:
       - catalogue/kromgo.yaml
       - catalogue/kube-prometheus-stack.yaml
       - catalogue/kubelet-csr-approver.yaml
+      - catalogue/kyverno-policies.yaml
+      - catalogue/kyverno.yaml
       - catalogue/linstor-cluster.yaml
       - catalogue/linstor-monitoring.yaml
       - catalogue/metrics-server.yaml

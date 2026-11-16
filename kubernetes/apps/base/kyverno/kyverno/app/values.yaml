@@ -1,0 +1,73 @@
+---
+# Values for the Kyverno chart, read by the HelmRelease through a ConfigMap generated without
+# substitution. Keys not set here keep the chart's defaults. Kyverno only reports here: its rules
+# (kyverno-policies) are in audit, and nothing it registers may refuse or hold up an object.
+
+crds:
+  install: true
+  annotations:
+    # Deleting a definition deletes every policy and report of its kind, so Helm leaves the
+    # definitions in place when the release is uninstalled, as it is when this application leaves
+    # the tree.
+    helm.sh/resource-policy: keep
+
+config:
+  # The namespaces whose objects the webhooks that match resources never see: the control plane's
+  # and Flux's, so a Kyverno that is down, slow or wrong cannot hold up what keeps the cluster
+  # reconciled. The chart adds its own namespace to this selector.
+  webhooks:
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - kube-system
+            - flux-system
+
+features:
+  # Whatever a policy's own failurePolicy says, the webhooks that match resources fail open: while
+  # no Kyverno pod answers, or one answers too slowly, the API server admits the object.
+  forceFailurePolicyIgnore:
+    enabled: true
+  # No generation: the webhook that protects the labels of generated resources and the generation
+  # of Kubernetes' own ValidatingAdmissionPolicies, which the API server itself would apply, are
+  # off, so what runs in the cluster is Kyverno's webhook alone.
+  protectGenerationLabels:
+    enabled: false
+  generateValidatingAdmissionPolicy:
+    enabled: false
+
+# Reports come from the admission controller, which evaluates each admitted object, and from the
+# reports controller, which scans what already runs and aggregates both into PolicyReports. The
+# background controller serves generate and mutate-existing rules and the cleanup controller
+# cleanup policies; the rules here are neither, so neither runs.
+backgroundController:
+  enabled: false
+cleanupController:
+  enabled: false
+
+# Two admission controllers, of which both answer the webhooks, on different nodes where the
+# scheduler can, and a budget that keeps one running while a node is drained. The chart's requests
+# and memory limit are kept, with no CPU limit, so the webhook is never throttled while the API
+# server waits for its answer.
+admissionController:
+  replicas: 2
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/component: admission-controller
+          app.kubernetes.io/instance: kyverno
+  serviceMonitor:
+    enabled: true
+
+# One reports controller: it works from the cluster's state and the admission controllers' reports,
+# so a node drain that stops it only delays the next scan.
+reportsController:
+  serviceMonitor:
+    enabled: true

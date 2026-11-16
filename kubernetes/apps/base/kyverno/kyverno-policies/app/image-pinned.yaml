@@ -1,0 +1,42 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/policies.kyverno.io/validatingpolicy_v1.json
+# Every image of a pod is pinned: by a sha256 digest, or by a tag other than latest. The same rule
+# as the image check of just kubernetes-validate, which refuses an image of the render without
+# either, and which cannot see an image a pod got by another way. The pod's containers, init
+# containers and ephemeral containers are read alike. Gatekeeper holds the same rule under the same
+# name (gatekeeper-policies).
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: image-pinned
+  annotations:
+    k8s-gitops/offline-check: scripts/kubernetes-validate (images)
+spec:
+  # Only a report: nothing is denied, and a policy that fails to evaluate is let through.
+  validationActions:
+    - Audit
+  failurePolicy: Ignore
+  # The pod is the one object every controller's pods end in; the pod controllers are not matched,
+  # so a finding is the same one object in both engines.
+  autogen:
+    podControllers:
+      controllers: []
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [pods]
+  variables:
+    - name: images
+      expression: >-
+        object.spec.containers.map(c, c.image) +
+        object.spec.?initContainers.orValue([]).map(c, c.image) +
+        object.spec.?ephemeralContainers.orValue([]).map(c, c.image)
+  validations:
+    # A digest of 64 hexadecimal digits, or a tag: an image name with no digest that ends in a
+    # colon and a tag, where the tag has no slash, which a registry's port has, and is not latest.
+    - expression: >-
+        variables.images.all(i, i.matches('@sha256:[0-9a-f]{64}$') ||
+        (i.matches('^([^@]*/)?[^/@:]+:[^/@:]+$') && !i.endsWith(':latest')))
+      message: every image is pinned by a sha256 digest or by a tag other than latest

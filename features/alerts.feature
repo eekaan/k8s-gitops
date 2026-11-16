@@ -304,3 +304,15 @@ Feature: Alerts
     Given a rule of priority Critical in pods whose Falco restarted, keeping every label, whose counter comes back lower than it was after a staleness marker and a gap of more than 15 minutes, after one of less, and between two scrapes with no marker, one whose counter comes back at the count it had, and one whose counter climbs back through 1 and 2 to the 3 it had
     When the rule is evaluated over time
     Then the alert fires from the first sample of each counter that stays lower until that sample is 15 minutes old and not before or after, and stays quiet for the counter that came back at its count, the blind spot the docs state, and for the counter that climbs back fires while it is 1 and 2, is quiet once it is 3 though Falco matched, and fires again once the counts of 15 minutes before are 1 and 2
+
+  @by:rules-check
+  Scenario: The alert KyvernoAdmissionControllerDown fires after its time in the failing case and stays quiet in the healthy one
+    Given a Kyverno admission controller Deployment with no available replica, and one with an available replica
+    When the rule is evaluated over time
+    Then the alert fires after its time for the Deployment with none available and never for the one with one
+
+  @by:rules-check
+  Scenario: The alert GatekeeperControllerManagerDown fires after its time in the failing case and stays quiet in the healthy one
+    Given a Gatekeeper controller manager Deployment with no available replica, and one with an available replica
+    When the rule is evaluated over time
+    Then the alert fires after its time for the Deployment with none available and never for the one with one

@@ -567,3 +567,42 @@ raises `KubeDaemonSetRolloutStuck` or `KubeDaemonSetNotScheduled`. No recipe che
 `just cluster-check` covers the control plane, the kubelets and node-exporter, not `falco-metrics`.
 Grafana's Explore, behind `just grafana`, shows it with the Prometheus query
 `up{job="falco-metrics"}`: one series per node, each 1.
+
+## KyvernoAdmissionControllerDown
+
+Kyverno's admission controller, `kyverno-admission-controller`, has had no available replica for 10
+minutes. It is the pod that evaluates each admitted object against the rules and writes its
+admission report. Its webhooks that match workloads fail open and it only reports, so no workload is
+refused and nothing else stops. What is missed is the reports of the objects admitted meanwhile,
+which the reports controller's next background scan, within the hour, makes up for. Its webhooks on
+its own kinds fail closed, so while no pod answers, a write of a Kyverno policy, PolicyException or
+GlobalContextEntry is refused: Flux cannot apply or change a rule, and `kyverno-policies` retries
+until a pod answers ([Admission policy](../kubernetes.md#admission-policy)).
+
+Look at first: `kubectl --namespace kyverno get pods` and `kubectl --namespace kyverno describe
+deployment kyverno-admission-controller`; the pod's log, `kubectl --namespace kyverno logs
+deployment/kyverno-admission-controller`, says why it exits. `kubectl --namespace kyverno get
+helmrelease kyverno` says whether the release is installed.
+
+Usually: a node went away with the pods on it, which the Deployment replaces; an upgrade of the chart
+does not start, which Flux rolls back after its retries; the pods cannot be scheduled for lack of
+room; or a pod waits for its webhook certificate, which the controller makes itself on its first
+start.
+
+## GatekeeperControllerManagerDown
+
+Gatekeeper's controller manager, `gatekeeper-controller-manager`, has had no available replica for 10
+minutes. It is the pod set that answers the validating webhook. Gatekeeper fails open and only
+reports, so nothing is refused and nothing else stops: what is missed is the evaluation of the
+objects admitted meanwhile. The audit, a pod of its own, goes on, and finds them at its next pass,
+within the minute ([Admission policy](../kubernetes.md#admission-policy)).
+
+Look at first: `kubectl --namespace gatekeeper-system get pods` and `kubectl --namespace
+gatekeeper-system describe deployment gatekeeper-controller-manager`; the pod's log, `kubectl
+--namespace gatekeeper-system logs deployment/gatekeeper-controller-manager`, says why it exits.
+`kubectl --namespace gatekeeper-system get helmrelease gatekeeper` says whether the release is
+installed.
+
+Usually: a node went away with the pods on it, which the Deployment replaces; an upgrade of the chart
+does not start, which Flux rolls back after its retries; or the pods cannot be scheduled for lack of
+room, as each asks for 512 MiB of memory.

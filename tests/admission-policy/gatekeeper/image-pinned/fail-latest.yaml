@@ -1,0 +1,7 @@
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-latest, namespace: apps}
+spec:
+  containers:
+    - {name: app, image: "registry.example/team/app:latest"}

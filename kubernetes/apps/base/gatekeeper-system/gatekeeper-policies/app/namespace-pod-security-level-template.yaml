@@ -1,0 +1,35 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/templates.gatekeeper.sh/constrainttemplate_v1.json
+# The Rego of the namespace-pod-security-level rule: a namespace carries a Pod Security level, the
+# label pod-security.kubernetes.io/enforce set to privileged, baseline or restricted. Kyverno holds
+# the same rule under the same name (kyverno-policies). Gatekeeper makes the kind
+# K8sNamespacePodSecurityLevel from this template, and no schema of it is in the tree.
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8snamespacepodsecuritylevel
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sNamespacePodSecurityLevel
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8snamespacepodsecuritylevel
+
+        import future.keywords.contains
+        import future.keywords.if
+        import future.keywords.in
+
+        enforced if {
+          level := input.review.object.metadata.labels["pod-security.kubernetes.io/enforce"]
+          level in {"privileged", "baseline", "restricted"}
+        }
+
+        # A label that is missing, or one that names no level, or that only audits or warns, leaves
+        # the level to the API server's default.
+        violation contains {"msg": msg} if {
+          not enforced
+          msg := "the namespace has no pod-security.kubernetes.io/enforce label of privileged, baseline or restricted"
+        }

@@ -1,0 +1,9 @@
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: pass-tag-and-digest, namespace: apps}
+spec:
+  containers:
+    - {name: app, image: "registry.example/team/app:latest@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
+  initContainers:
+    - {name: init, image: "registry.example/team/init:v2"}

@@ -1,0 +1,57 @@
+---
+# Unit tests of the gatekeeper application's own alert, run by just rules-check with promtool. The
+# series is shaped as kube-state-metrics writes the available replicas of a Deployment, as the
+# monitoring stack's ServiceMonitor scrapes it: the job, instance, service and endpoint of the
+# scrape, and the Deployment's namespace and name. Each group's name is the title of its scenario in
+# features/alerts.feature.
+rule_files:
+  - gatekeeper.rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: The alert GatekeeperControllerManagerDown fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # The controller manager's two replicas are available for 10 minutes, and then neither is:
+      # the alert is pending from minute 10 and fires after its 10 minutes, at minute 20. The audit
+      # Deployment of the same namespace with none available, and a Deployment of the controller
+      # manager's name in another namespace with none, are not the controller manager.
+      - series: >-
+          kube_deployment_status_replicas_available{namespace="gatekeeper-system",
+          deployment="gatekeeper-controller-manager", job="kube-state-metrics",
+          instance="192.0.2.3:8080", service="kube-prometheus-stack-kube-state-metrics",
+          endpoint="http"}
+        values: '2x9 0x80'
+      - series: >-
+          kube_deployment_status_replicas_available{namespace="gatekeeper-system",
+          deployment="gatekeeper-audit", job="kube-state-metrics",
+          instance="192.0.2.3:8080", service="kube-prometheus-stack-kube-state-metrics",
+          endpoint="http"}
+        values: '0x90'
+      - series: >-
+          kube_deployment_status_replicas_available{namespace="monitoring",
+          deployment="gatekeeper-controller-manager", job="kube-state-metrics",
+          instance="192.0.2.3:8080", service="kube-prometheus-stack-kube-state-metrics",
+          endpoint="http"}
+        values: '0x90'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: GatekeeperControllerManagerDown
+        exp_alerts: []
+      - eval_time: 19m
+        alertname: GatekeeperControllerManagerDown
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: GatekeeperControllerManagerDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: gatekeeper-system
+              deployment: gatekeeper-controller-manager
+              job: kube-state-metrics
+              instance: 192.0.2.3:8080
+              service: kube-prometheus-stack-kube-state-metrics
+              endpoint: http
+            exp_annotations:
+              summary: Gatekeeper's controller manager has no available replica
+              description: The Deployment gatekeeper-controller-manager in gatekeeper-system has had no available replica for 10 minutes, so no object is evaluated at admission; the webhooks fail open, so nothing is refused.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#gatekeepercontrollermanagerdown

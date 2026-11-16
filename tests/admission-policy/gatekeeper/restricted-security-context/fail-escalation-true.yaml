@@ -1,0 +1,14 @@
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-escalation-true, namespace: strict}
+spec:
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: true
+        capabilities: {drop: [ALL]}

@@ -98,3 +98,13 @@ metadata:
 spec:
   owner: group:default/operators
   domain: cluster
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: System
+metadata:
+  name: admission-policy
+  description: The two admission policy engines, which report what is applied to the cluster against rules the tree already keeps, and refuse nothing.
+spec:
+  owner: group:default/operators
+  domain: cluster

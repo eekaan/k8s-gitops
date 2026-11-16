@@ -1,0 +1,11 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/helmrepository-source-v1.json
+# Gatekeeper's project publishes its chart to a classic Helm repository only, and no public OCI
+# mirror carries it, so Flux reads the repository's index.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: gatekeeper
+spec:
+  interval: 12h
+  url: https://open-policy-agent.github.io/gatekeeper/charts

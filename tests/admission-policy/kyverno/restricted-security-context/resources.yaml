@@ -1,0 +1,188 @@
+---
+# The pod's own context: non-root and the runtime's seccomp profile, with each container's
+# escalation and capabilities set.
+apiVersion: v1
+kind: Pod
+metadata: {name: pass-pod-level, namespace: strict}
+spec:
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+---
+# Everything on the container, a local seccomp profile among it.
+apiVersion: v1
+kind: Pod
+metadata: {name: pass-container-level, namespace: strict}
+spec:
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        runAsNonRoot: true
+        capabilities: {drop: [ALL]}
+        seccompProfile: {type: Localhost, localhostProfile: profiles/app.json}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: pass-init-container, namespace: strict}
+spec:
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  initContainers:
+    - name: init
+      image: registry.example/init:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-escalation-unset, namespace: strict}
+spec:
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        capabilities: {drop: [ALL]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-escalation-true, namespace: strict}
+spec:
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: true
+        capabilities: {drop: [ALL]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-capabilities-unset, namespace: strict}
+spec:
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-capabilities-other, namespace: strict}
+spec:
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [NET_RAW]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-root-unset, namespace: strict}
+spec:
+  securityContext:
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+---
+# The container's own setting wins over the pod's.
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-root-false, namespace: strict}
+spec:
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        runAsNonRoot: false
+        capabilities: {drop: [ALL]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-seccomp-unset, namespace: strict}
+spec:
+  securityContext:
+    runAsNonRoot: true
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-seccomp-unconfined, namespace: strict}
+spec:
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+        seccompProfile: {type: Unconfined}
+---
+# One container that is right does not cover an init container that is not.
+apiVersion: v1
+kind: Pod
+metadata: {name: fail-init-container, namespace: strict}
+spec:
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  initContainers:
+    - name: init
+      image: registry.example/init:1.0
+  containers:
+    - name: app
+      image: registry.example/app:1.0
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+---
+# A namespace that does not enforce the restricted level is not this rule's to judge.
+apiVersion: v1
+kind: Pod
+metadata: {name: skip-privileged-namespace, namespace: loose}
+spec:
+  containers:
+    - name: app
+      image: registry.example/app:1.0

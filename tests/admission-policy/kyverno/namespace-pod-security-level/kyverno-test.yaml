@@ -1,0 +1,27 @@
+---
+# Kyverno's own test of the namespace-pod-security-level rule, run by tests/admission-policy.bats.
+# Each resource is named for what the rule must do with it: pass- or fail-.
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: namespace-pod-security-level
+policies:
+  - ../../../../kubernetes/apps/base/kyverno/kyverno-policies/app/namespace-pod-security-level.yaml
+resources:
+  - resources.yaml
+results:
+  - policy: namespace-pod-security-level
+    isValidatingPolicy: true
+    resources:
+      - pass-restricted
+      - pass-baseline
+      - pass-privileged
+    result: pass
+  - policy: namespace-pod-security-level
+    isValidatingPolicy: true
+    resources:
+      - fail-no-labels
+      - fail-other-labels
+      - fail-unknown-level
+      - fail-audit-only
+    result: fail

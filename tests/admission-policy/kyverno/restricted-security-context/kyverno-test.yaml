@@ -1,0 +1,40 @@
+---
+# Kyverno's own test of the restricted-security-context rule, run by tests/admission-policy.bats.
+# Each resource is named for what the rule must do with it: pass-, fail- or skip-. A pod in a
+# namespace that does not enforce the restricted level is not the rule's to judge, so the engine
+# excludes it, which the test reads as skip.
+apiVersion: cli.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: restricted-security-context
+policies:
+  - ../../../../kubernetes/apps/base/kyverno/kyverno-policies/app/restricted-security-context.yaml
+resources:
+  - resources.yaml
+variables: values.yaml
+results:
+  - policy: restricted-security-context
+    isValidatingPolicy: true
+    resources:
+      - pass-pod-level
+      - pass-container-level
+      - pass-init-container
+    result: pass
+  - policy: restricted-security-context
+    isValidatingPolicy: true
+    resources:
+      - fail-escalation-unset
+      - fail-escalation-true
+      - fail-capabilities-unset
+      - fail-capabilities-other
+      - fail-root-unset
+      - fail-root-false
+      - fail-seccomp-unset
+      - fail-seccomp-unconfined
+      - fail-init-container
+    result: fail
+  - policy: restricted-security-context
+    isValidatingPolicy: true
+    resources:
+      - skip-privileged-namespace
+    result: skip
