@@ -1114,6 +1114,8 @@ declare -A cluster_config=()
 # list. Every value depends on the deployment, and none is printed. The ConfigMap itself is never
 # committed; the object storage's endpoint and region are, in the backend settings OpenTofu's state
 # reads them from.
+#   CLUSTER_NAME          the cluster's own name, CLUSTER, the directory name of
+#                         kubernetes/clusters/<cluster>
 #   CLUSTER_DOMAIN        the domain the cluster's applications are published under, from the
 #                         environment
 #   CLUSTER_DNS_ZONE      the zone at the DNS provider that holds the domain, which external-dns
@@ -1144,7 +1146,8 @@ fill_cluster_config() {
   local dns_name='^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'
   local ipv4='([0-9]{1,3}\.){3}[0-9]{1,3}'
   local -a listed=() edges=()
-  local -A sources=([CLUSTER_DOMAIN]=1 [CLUSTER_DNS_ZONE]=1 [BACKUP_BUCKET_PREFIX]=1 [S3_ENDPOINT]=1 [S3_REGION]=1
+  local -A sources=([CLUSTER_NAME]=1 [CLUSTER_DOMAIN]=1 [CLUSTER_DNS_ZONE]=1 [BACKUP_BUCKET_PREFIX]=1
+    [S3_ENDPOINT]=1 [S3_REGION]=1
     [NODE_CIDR]=1 [NODE_NAME_REGEX]=1 [SERVICE_RANGE]=1 [BGP_CLUSTER_ASN]=1 [BGP_EDGE_ASN]=1
     [BGP_EDGE_ADDRESS_1]=1 [BGP_EDGE_ADDRESS_2]=1 [GATEWAY_ADDRESS]=1 [EDGE_PUBLIC_ADDRESS_1]=1
     [EDGE_PUBLIC_ADDRESS_2]=1) wanted=()
@@ -1154,6 +1157,7 @@ fill_cluster_config() {
     infra_error "${example#"$infra_root"/} does not exist; it lists the keys of cluster-config"
     return 1
   fi
+  cluster_config[CLUSTER_NAME]=$cluster
 
   if require_env CLUSTER_DOMAIN; then
     if [[ $CLUSTER_DOMAIN =~ $dns_name ]]; then

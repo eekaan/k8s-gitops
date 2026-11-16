@@ -1,0 +1,23 @@
+---
+# One base backup a day, through the plugin, and the first as soon as this object is made, so a new
+# cluster has a starting point for a restore at once, the WAL archive being no use without one. The
+# operator waits for the cluster to be ready before it takes it. The schedule has six fields, the
+# first the seconds, and is in UTC: 02:47, a minute that no other backup of the cluster uses (the
+# etcd snapshots run at minute 17 and the volume backups of applications at minutes of their own,
+# such as 23 past 03:00), after the database's dump job, which starts at 02:00 and ends by its
+# deadline at 02:45 (cronjob.yaml), in the hours the databases are least used, so the base backup's
+# reads of the data volume and its upload do not meet another job's. Backups the plugin takes are
+# the ScheduledBackup's own objects, so they go with it.
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: ${CNPG_CLUSTER_NAME}
+spec:
+  schedule: "0 47 2 * * *"
+  immediate: true
+  backupOwnerReference: self
+  method: plugin
+  cluster:
+    name: ${CNPG_CLUSTER_NAME}
+  pluginConfiguration:
+    name: barman-cloud.cloudnative-pg.io

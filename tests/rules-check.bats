@@ -429,7 +429,8 @@ promtool_calls() {
 # where the monitor and the target are files of the render of the application, without .yaml, and
 # NAMESPACE is where an object the render holds without one lands. The target is a Service of a
 # ServiceMonitor or the workload of a PodMonitor, or recorded:NAME, the operator's object of that name
-# in linstor_targets, which the operator makes at run time and the render therefore does not hold.
+# in linstor_targets or cnpg_targets, which the operator makes at run time and the render therefore
+# does not hold.
 # Metrics of the same source share an entry; an alert on a metric no entry matches fails.
 scrapes=(
   # Prometheus' own series of each scrape: its target is up or it is not.
@@ -444,6 +445,12 @@ scrapes=(
   '^linstor_|linstor-monitoring|ServiceMonitor.monitoring.coreos.com_piraeus-datastore_linstor-controller|recorded:Service/linstor-controller|piraeus-datastore'
   '^drbd_|linstor-monitoring|PodMonitor.monitoring.coreos.com_piraeus-datastore_linstor-satellite|recorded:Pod/linstor-satellite|piraeus-datastore'
   '^falcosecurity_falco_|falco|ServiceMonitor.monitoring.coreos.com_security-system_falco|Service_security-system_falco-metrics|security-system'
+  # The exporter of each PostgreSQL instance, which serves the operator's metrics and the Barman Cloud
+  # plugin's: the PodMonitor of components/cnpg-cluster, read in the render as that of n8n's
+  # database. Backstage's database, the other cluster the render makes from the component, has the
+  # same one under its own name.
+  '^cnpg_|n8n|PodMonitor.monitoring.coreos.com_ai-system_n8n-db|recorded:Pod/n8n-db-1|ai-system'
+  '^barman_cloud_|n8n|PodMonitor.monitoring.coreos.com_ai-system_n8n-db|recorded:Pod/n8n-db-1|ai-system'
 )
 
 # own_metrics RENDER: the metrics each own alert of the render reads, as APPLICATION ALERT METRIC per
@@ -475,7 +482,7 @@ scrape_problem() {
   [ -f "$file" ] || { echo "no monitor $monitor in $app"; return 0; }
   json="$(yq -o json -I0 ".metadata.namespace = (.metadata.namespace // \"$namespace\")" "$file")"
   if [[ $target == recorded:* ]]; then
-    candidates="$(linstor_targets)"
+    candidates="$(jq -s 'add' <(linstor_targets) <(cnpg_targets))"
     candidates="$(jq -c "[.[] | select(.name == \"${target#recorded:}\")]" <<<"$candidates")"
   else
     [[ $target == */* ]] || target="$app/$target"
@@ -539,6 +546,7 @@ scrape_gaps() {
   shown="$(own_metrics "$RENDER" | awk '{ print $1 }' | sort -u | xargs)"
   echo "applications with alerts: $shown"
   [[ $shown == *flux-monitoring* && $shown == *cilium-monitoring* && $shown == *linstor-monitoring* ]]
+  [[ $shown == *cloudnative-pg* ]]
 
   # An alert on a metric nothing scrapes is refused, naming the alert and the metric.
   fixture
@@ -583,6 +591,13 @@ scrape_gaps() {
   echo "$gaps"
   [ "$(grep -c 'linstor-monitoring: alert Drbd.*selects nothing' <<<"$gaps")" -ge 1 ]
   [ "$(grep -c -v 'linstor-monitoring' <<<"$gaps")" -eq 0 ]
+  fixture
+  yq -i '.spec.podMetricsEndpoints[0].port = "renamed"' \
+    "$FX/render/$CLUSTER/n8n/PodMonitor.monitoring.coreos.com_ai-system_n8n-db.yaml"
+  gaps="$(scrape_gaps "$FX/render")"
+  echo "$gaps"
+  [ "$(grep -c 'cloudnative-pg: alert Postgres.*selects nothing that exposes the port it scrapes of Pod/n8n-db-1$' <<<"$gaps")" -ge 1 ]
+  [ "$(grep -c -v 'cloudnative-pg' <<<"$gaps")" -eq 0 ]
   # The same for a monitor that selects by expressions and scrapes a container port behind the Service:
   # one whose expressions leave the controller out, and one that names a container port it lacks.
   fixture

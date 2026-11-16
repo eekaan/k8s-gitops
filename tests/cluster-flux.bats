@@ -414,6 +414,7 @@ helm_flag() {
   [ "$(jq -r '.data.BACKUP_BUCKET_PREFIX' <<< "$config")" = "$PREFIX" ]
   [ "$(jq -r '.data.S3_ENDPOINT' <<< "$config")" = "$ENDPOINT" ]
   [ "$(jq -r '.data.S3_REGION' <<< "$config")" = "$REGION" ]
+  [ "$(jq -r '.data.CLUSTER_NAME' <<< "$config")" = lab-sto2 ]
   [ "$(jq -r '.data.NODE_CIDR' <<< "$config")" = "$(yq '.values.nodeSubnet' "$TALMAN")" ]
   regex=$(jq -r '.data.NODE_NAME_REGEX' <<< "$config")
   for name in $(yq '.nodes[].hostname' "$TALMAN"); do

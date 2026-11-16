@@ -26,7 +26,7 @@ the rules below, or when a dependency the cluster would never reconcile passes t
 - `components/`: Kustomize components. `common` adds the `app-template-defaults` ConfigMap, which
   an app-template HelmRelease can opt into through `valuesFrom`, though `scripts/render` reads only an
   application's own ConfigMaps ([n8n](#n8n) writes the defaults out); `cnpg-cluster` adds an application's
-  PostgreSQL cluster ([PostgreSQL](#postgresql)); `volsync` backs an application's volume up
+  PostgreSQL cluster and its backups ([PostgreSQL](#postgresql)); `volsync` backs an application's volume up
   ([Volume backups](#volume-backups)).
 
 ## Adding an application
@@ -589,15 +589,15 @@ once it is not, and the agents' rendered configuration agrees.
 | `envoy-gateway-system` | default deny | the controller, its webhook, its certificate job and the proxies, below. |
 | `kromgo` | default deny | kromgo takes the proxies and the kubelet's probes on 8080 and Prometheus' scrape on 8081, and reaches the resolver and Prometheus on 9090. |
 | `sso-system` | default deny | dex takes the proxies and oauth2-proxy on 5556 and reaches the API server and GitHub on 443; oauth2-proxy takes the proxies on 4180 and reaches dex; below. |
-| `backstage` | default deny | Backstage takes the proxies and the kubelet's probes on 7007 and reaches the resolver and its database on 5432; the database takes the operator, its own pods, Backstage, the dump job, Prometheus and the kubelet's probes, and reaches its own pods, the resolver and the API server; the dump job reaches the resolver, the database and the world on 443. |
+| `backstage` | default deny | Backstage takes the proxies and the kubelet's probes on 7007 and reaches the resolver and its database on 5432; the database takes the operator, its own pods, Backstage, the dump job, Prometheus and the kubelet's probes, and reaches its own pods, the resolver and the API server, and its instances, for their Barman Cloud sidecars, the object storage on 443; the dump job reaches the resolver, the database and the world on 443. |
 | `security-system` | default deny | Falco takes Prometheus' scrape and the kubelet's probes on 8765, and reaches the resolver alone. |
-| `ai-system` | listed | applications whose allows are not written, not a namespace that cannot have the posture. n8n takes the proxies on 5678 and reaches its database, the resolver and whatever its workflows call outside; the PostgreSQL instances take n8n, each other and the operator, and reach the API server; Open WebUI takes the proxies on 8080 and reaches nothing until an administrator turns on a connection that calls out; the backup movers reach the object storage on 443. The proxies reach n8n's 5678 and Open WebUI's 8080 alone there and forward only to their Services, PostgreSQL authenticates every client, Pod Security, node firewall. |
+| `ai-system` | listed | applications whose allows are not written, not a namespace that cannot have the posture. n8n takes the proxies on 5678 and reaches its database, the resolver and whatever its workflows call outside; the PostgreSQL instances take n8n, each other and the operator, and reach the API server, and their Barman Cloud sidecars reach the object storage on 443 and the API server; the dump job reaches the database, the hosts age's release is downloaded from and the object storage; Open WebUI takes the proxies on 8080 and reaches nothing until an administrator turns on a connection that calls out; the backup movers reach the object storage on 443. The proxies reach n8n's 5678 and Open WebUI's 8080 alone there and forward only to their Services, PostgreSQL authenticates every client, Pod Security, node firewall. |
 | `etcd-snapshots` | listed | an application whose allows are not written, not a namespace that cannot have the posture. The snapshot job takes nothing and reaches the Talos API through `talos.default`, the object storage, the hosts age's release is downloaded from (its URL redirects to a second host, which serves the file) and the resolver. Talos' own authorisation of its one role, Pod Security, node firewall. |
 | `external-dns` | listed | an application whose allows are not written, not a namespace that cannot have the posture. external-dns takes Prometheus' scrape and the kubelet's probes on 7979 and nothing else, and reaches the API server, the DNS provider's API on 443 and the resolver. Its token, scoped to zone read and DNS edit on the cluster's one zone, its name filter, a ClusterRole that only reads, Pod Security, node firewall ([DNS records](#dns-records)). |
 | `kube-system` | listed | Cilium's agent, its Envoy and its operator run in the host's network namespace; the resolver takes queries from every namespace; the pod-network workloads' flows are not yet enumerated. Node firewall, Pod Security. |
 | `flux-system` | listed | the controllers' flows are not yet enumerated as allows; Flux's own network policies, which the operator makes at run time, and the operator's for its web interface, `flux-operator-web`, which the check reads and passes because the namespace is listed ([What the check refuses](#what-the-check-refuses)); Pod Security, node firewall. |
 | `monitoring` | listed | Prometheus scrapes every namespace and the nodes, the node exporter runs in the host's network namespace, the API server calls the operator's webhook, the other flows are not yet enumerated. |
-| `openbao`, `external-secrets`, `cert-manager`, `cnpg-system`, `keda`, `volsync-system` | listed | flows not yet enumerated: webhooks and APIs the API server calls, the store's clients, scrapes. Each entry says which, and what covers it. |
+| `openbao`, `external-secrets`, `cert-manager`, `cnpg-system`, `keda`, `volsync-system` | listed | flows not yet enumerated: webhooks and APIs the API server calls, the store's clients, scrapes, the PostgreSQL operator's calls to the Barman Cloud plugin. Each entry says which, and what covers it. |
 | `piraeus-datastore` | listed | the CSI node plugin runs in the host's network namespace; the satellites replicate over the pod network, and their flows are not yet enumerated. |
 | `cilium-secrets` | listed | holds no pod. |
 | `kyverno`, `gatekeeper-system` | listed | flows not yet enumerated: the API server calls each policy engine's webhooks from the control planes' host network, the controllers reach the API server, Prometheus scrapes them ([Admission policy](#admission-policy)). Pod Security, node firewall. |
@@ -674,7 +674,15 @@ once it is not, and the agents' rendered configuration agrees.
   documentation asks (`docs/src/security.md`, Exposed Ports; `docs/src/networking.md`), and reach
   each other, the resolver and the API server on 443 and 6443; its instances take Backstage and the
   dump job on 5432, Prometheus on 9187, the port the PodMonitor names, and the kubelet's probes on
-  8000, where the operator puts them (`pkg/specs/pods.go`). The dump job's pods, by the labels
+  8000, where the operator puts them (`pkg/specs/pods.go`). The instances also reach the world on
+  443, in a policy of its own with its reason: the object storage, whose endpoint is a URL, as for
+  the movers below, where the Barman Cloud plugin's sidecar in each instance's pod archives the WAL
+  and writes the base backups ([Backups and restores](#backups-and-restores)). The sidecar reaches
+  the API server as the instance manager does, and talks to the instance manager over a socket in
+  the pod, which policy does not see; a policy selects pods, not containers, so PostgreSQL's
+  container shares the rule, and the jobs that create and join an instance, which hold no sidecar,
+  are not selected. The operator's own calls to the plugin stay inside `cnpg-system`. The dump
+  job's pods, by the labels
   `app.kubernetes.io/name: pgdump` and `app.kubernetes.io/instance: backstage-db` that
   `app/kustomization.yaml` gives the component's CronJob, reach the resolver, the instances on
   5432, and the world on 443 in a policy of its own with its reason: the age release, whose URL
@@ -694,7 +702,8 @@ once it is not, and the agents' rendered configuration agrees.
   it to. The endpoint's validation (`scripts/lib/s3.sh`) admits a port: with an endpoint on
   another port, the rule refuses the movers, every backup and restore of the namespace fails to
   connect, and `just network-drops` shows the movers' flows to `@world` on that port. The rule's
-  port changes with the endpoint.
+  port changes with the endpoint. The rules of `backstage`'s dump job and of its database's
+  instances are on that port for the same endpoint, and change with it too.
 - **Which entity.** Public traffic is translated by the edge routers, arrives at the address the
   workers announce, and a worker may forward it to a proxy on another node
   (`externalTrafficPolicy: Cluster`, [The public Gateway](#the-public-gateway)). A proxy on the
@@ -803,7 +812,9 @@ Prometheus to kromgo's metrics port alone), to show that no pod of `demo`, `krom
 reaches the secret store, the storage controller, another pod of `demo` or another application, n8n
 and Open WebUI among them, that Backstage reaches the resolver and its database's port and nothing
 outside the cluster, that the database takes the operator, its own pods, Backstage, the dump job and
-Prometheus on their ports and no other application, that kromgo reaches the resolver and the port of
+Prometheus on their ports and no other application, that its instances reach the world on the
+object storage's port and on no other, and a job that joins an instance on none, that kromgo reaches
+the resolver and the port of
 the Prometheus its configuration names, read from the render, and nothing else, and no other
 application reaches it, that Falco's pods take Prometheus and the kubelet on its metrics port alone
 and reach the resolver alone, and that with their default deny `backstage`, `demo`,
@@ -871,9 +882,11 @@ does not matter.
    name, which has kromgo query Prometheus ([Status badges](#status-badges)); a sign-in through the
    route that opts in to it ([Sign-in](#sign-in)); Backstage's catalogue opened by its name, which
    has Backstage read its database; the nightly dump of `backstage-db` from 02:00, which waits up to
-   20 minutes before it starts ([Dumps](#dumps)); the nightly backup of `volsync-demo` at 03:17, and
-   a restore of it ([Restoring](#restoring)). Watch a day at least, through one nightly backup and
-   one dump. An `AUDIT` flow of `backstage`, `demo`, `envoy-gateway-system`, `kromgo`,
+   20 minutes before it starts ([Dumps](#dumps)); the base backup of `backstage-db` at 02:47 UTC,
+   and a WAL segment its primary archives, which `select pg_switch_wal()` there forces
+   ([Backups and restores](#backups-and-restores)); the nightly backup of `volsync-demo` at 03:17, and
+   a restore of it ([Restoring](#restoring)). Watch a day at least, through one nightly backup, one
+   dump and one base backup. An `AUDIT` flow of `backstage`, `demo`, `envoy-gateway-system`, `kromgo`,
    `security-system` or `sso-system` that a check made once the allows were Ready is a missing
    allow, added beside its application in a pull request while the cluster still audits, or a pod
    doing what it should not. Confirm also that no `@remote-node` flow reaches the proxies' listener
@@ -1455,6 +1468,8 @@ The own alerts, each with its runbook section in [docs/runbooks/alerts.md](runbo
 | `EtcdSnapshotJobFailing` | The etcd snapshot CronJob's latest scheduled run has not succeeded after 30 minutes. | warning | [EtcdSnapshotJobFailing](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#etcdsnapshotjobfailing) |
 | `PostgresDumpStale` | No dump of a PostgreSQL database made from the component has succeeded for 36 hours. | warning | [PostgresDumpStale](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#postgresdumpstale) |
 | `PostgresDumpJobFailing` | The latest scheduled run of a database's dump CronJob has not succeeded after an hour. | warning | [PostgresDumpJobFailing](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#postgresdumpjobfailing) |
+| `PostgresWALArchivingFailing` | A PostgreSQL primary's latest attempt to archive a WAL segment has failed after its latest success, for 15 minutes. | critical | [PostgresWALArchivingFailing](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#postgreswalarchivingfailing) |
+| `PostgresBackupTooOld` | A PostgreSQL cluster's newest base backup is older than 36 hours, or it has none and its oldest instance is older than that, for 30 minutes. | warning | [PostgresBackupTooOld](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#postgresbackuptooold) |
 | `LogCollectorOutsizedShare` | One node's collector sends at least ten times the median node's rate of events, and at least 10 a second, for 30 minutes. | info | [LogCollectorOutsizedShare](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectoroutsizedshare) |
 | `LogCollectorDiscardingEvents` | A collector's component discards events it was not set to drop, for 15 minutes. | warning | [LogCollectorDiscardingEvents](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectordiscardingevents) |
 | `LogCollectorSendFailing` | A collector's sink to the store reports errors for 15 minutes. | warning | [LogCollectorSendFailing](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectorsendfailing) |
@@ -1485,11 +1500,14 @@ control planes' Cilium agents from the workers', and its CronJob metrics for the
 ([Raft snapshots](#raft-snapshots)) and for the dump job of every PostgreSQL cluster ([Dumps](#dumps)), Prometheus' own `up` for OpenBao's active Service and the Cilium agents, VolSync's
 controller metrics, Vector's internal metrics, cert-manager's certificate metrics, the Flux
 Operator's state of Flux's resources, the Cilium agents' BGP session state, LINSTOR's own metrics,
-the DRBD reactor's, Falco's counter of the matches of each rule, and external-dns' gauge of its
-last successful sync and its absence. The dump alerts are written once, in the `cloudnative-pg` application's `app/`, whose tests are
-`tests/rules/cloudnative-pg.yaml`, and select the CronJobs by their names' suffix, `-pgdump`:
-kube-state-metrics exposes no CronJob label unless its chart is told to, so a label the component
-set would not reach the metrics. `tests/rules-check.bats` fails when an alert reads a metric that
+the DRBD reactor's, Falco's counter of the matches of each rule, external-dns' gauge of its last
+successful sync and its absence, and the metrics of the PostgreSQL instances and the Barman Cloud
+plugin, which the component's PodMonitor scrapes, with kube-state-metrics' creation times of their
+pods ([PostgreSQL](#postgresql)). The
+PostgreSQL alerts, on the archive and the base backups and on the dumps, are written once, in the
+`cloudnative-pg` application's `app/`, whose tests are `tests/rules/cloudnative-pg.yaml`. The dump
+alerts select the CronJobs by their names' suffix, `-pgdump`: kube-state-metrics exposes no CronJob
+label unless its chart is told to, so a label the component set would not reach the metrics. `tests/rules-check.bats` fails when an alert reads a metric that
 no monitor of the render scrapes, or whose monitor selects nothing of the Service or pod that
 serves it.
 
@@ -3341,7 +3359,29 @@ leaves them, and every cluster, in place.
 Two replicas run on different workers: the leader reconciles, both answer the webhook through which
 the API server admits every change to a CloudNativePG object, and a disruption budget keeps one
 through a drain. Its chart's PodMonitor is on, so it names `prometheus-operator-crds` in `dependsOn`,
-and its `ks.yaml` sets `wait`.
+and its `ks.yaml` sets `wait`. It also carries the alerts on every cluster's WAL archive and base
+backups ([Alerts](#alerts)).
+
+`apps/base/cnpg-system/plugin-barman-cloud/` installs the Barman Cloud plugin, which archives and
+backs up every database to the object storage, beside the operator, in its namespace as the plugin
+requires, from the publisher's chart in the same registry. Its release, plugin v0.16, needs
+CloudNativePG 1.30 or newer, and the operator chart the tree pins installs 1.30: `tests/postgresql.bats`
+fails for an operator older than 1.30, a floor the test holds as a constant from the plugin's
+installation documentation. Nothing reads the floor from a release, so a plugin release whose
+documentation raises it needs the constant raised by hand in its pull request. The chart's tag is
+pinned and tracked by Renovate, and so are the plugin's image and the sidecar image the operator
+injects into every database pod that archives, each by tag and digest in `values.yaml`, in one
+Renovate group with the chart; the test fails unless both images are the release of the chart's
+`appVersion`. Two replicas run on different workers, which the plugin supports for the loss of a
+pod or a node, and a disruption budget keeps one through a drain: while none answers, the operator
+cannot make or change the pod of a database that archives. The plugin's two certificates, which
+authenticate the operator to the plugin and the plugin to the operator, are the application's own,
+signed by the cluster's own CA, `ClusterIssuer` `cluster-ca`, and by no ACME issuer; the chart's
+own, which name an `Issuer` of the namespace and a self-signed one it makes, are off. The
+application names `cloudnative-pg` and `cluster-ca` in `dependsOn` and sets `wait`. Its pods meet
+the restricted level the namespace enforces, and so does the sidecar the plugin injects, which runs
+as a non-root user with a read-only root file system, every capability dropped and the runtime's
+seccomp profile.
 
 An application takes a cluster from the component `components/cnpg-cluster`, in its `ks.yaml`:
 
@@ -3349,6 +3389,7 @@ An application takes a cluster from the component `components/cnpg-cluster`, in 
 spec:
   dependsOn:
     - name: cloudnative-pg
+    - name: plugin-barman-cloud
     - name: prometheus-operator-crds
     - name: external-secrets
     - name: openbao-store
@@ -3357,22 +3398,37 @@ spec:
   postBuild:
     substitute:
       CNPG_CLUSTER_NAME: <app>-db
+      CNPG_NAMESPACE: <the Kustomization's targetNamespace>
       CNPG_STORAGE_SIZE: 10Gi  # each instance's volume; 5Gi when unset
 ```
+
+`CNPG_NAMESPACE` is the namespace the application is applied to: a component cannot read
+`targetNamespace`, and the namespace is a level of the cluster's archive path. The Cluster's
+ObjectStore is of the plugin's kinds, so the application waits for `plugin-barman-cloud`, and the
+credentials of the backups are an ExternalSecret, so it waits for `external-secrets` and
+`openbao-store`. `scripts/kubernetes-check` refuses an overlay that lists an application which names
+`plugin-barman-cloud`, or any other application, in `dependsOn` without listing that one, a
+Kustomization that takes the component without naming `plugin-barman-cloud` in `dependsOn`, and one
+whose `CNPG_NAMESPACE` is not its `targetNamespace`, which would put its archive in the path of a
+database of another namespace. So a cluster that does not select the plugin builds no database that
+needs it: it is refused naming the application and the dependency, and builds neither when it lists
+neither.
 
 The cluster has three instances of PostgreSQL 18, from the operator's standard image, whose tag names
 a minor version that Renovate moves. The publisher rebuilds the image under that tag and a node keeps
 the build it pulled first, so instances can run different builds of one minor version. Each instance
 must run on a different worker, and requests and is limited to 500m CPU and 512Mi memory. The
 operator's disruption budgets move the primary away by switchover before its worker is drained, and
-let drains take one replica at a time. A PodMonitor scrapes every instance. Without
-`CNPG_CLUSTER_NAME` the build fails, and so does the apply of a name longer than 45 characters: the
-dump job's CronJob, `<name>-pgdump`, is named in at most 52, and Flux applies an application whole
-or not at all. The operator creates the database `app`, owned by the user
+let drains take one replica at a time. A PodMonitor scrapes every instance, and labels their series
+with the Cluster's name as `cnpg_io_cluster`. Without `CNPG_CLUSTER_NAME` or `CNPG_NAMESPACE` the
+strict build of `just kubernetes-check` fails; Flux itself substitutes an empty string for a variable
+nothing defines, which is why the check is the guard. The apply of a name longer than 45 characters
+fails as well: the dump job's CronJob, `<name>-pgdump`, is named in at most 52, and Flux applies an
+application whole or not at all. The operator creates the database `app`, owned by the user
 `app`, whose password and connection URI are in the Secret `<name>-app`; the Services `<name>-rw`,
 `<name>-ro` and `<name>-r` reach the primary, the replicas and any instance. The dump job
-([Dumps](#dumps)) needs the External Secrets operator and the secret store, so the application
-names `external-secrets` and `openbao-store` in `dependsOn` as well, and nothing else new.
+([Dumps](#dumps)) takes its S3 key through an ExternalSecret too, so it needs nothing in `dependsOn`
+beyond what the backups need.
 
 A patch in the application's own `kustomization.yaml` changes anything else, as it applies after the
 component. It targets the Cluster by kind alone: Flux substitutes after the build, so when the patch
@@ -3402,13 +3458,88 @@ worker or its data volume is lost for good, the instance's PersistentVolumeClaim
 are deleted, which removes the instance, and the operator clones a new one from the primary. With
 three workers, the new one waits for a worker without an instance.
 
-`tests/postgresql.bats` renders the operator's chart and checks its namespace, definitions,
-replicas, budget, monitor and pods; builds applications that take a cluster from the component, one
-that does not name it and two that patch it, by kind and by name, as Flux applies them; and checks
-each field of the `Cluster` against the pinned chart's definition and its StorageClass against
-LINSTOR's. `tests/postgres-dumps.bats` builds applications that take a cluster from the component and
-runs the dump job's scripts as its containers run them, with stand-ins for `pg_dump`, `pg_isready` and
-the S3 client.
+### Backups and restores
+
+Each cluster archives its WAL continuously and takes a base backup every day to the object storage,
+which, with the instances' replication, is what keeps a database through the loss of the cluster or
+a mistake in its data, to any moment of the last 30 days; a daily dump beside it ([Dumps](#dumps)) is
+the copy that is encrypted before it leaves the cluster. The component's `Cluster` archives through the plugin's entry in
+`spec.plugins`, not through the in-tree `barmanObjectStore` the operator deprecates, and the
+component adds an `ObjectStore`, a `ScheduledBackup` and an ExternalSecret.
+
+- **Where.** The postgres bucket, `<BACKUP_BUCKET_PREFIX>-postgres`
+  ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)), at the endpoint of
+  `cluster-config`, under `<CLUSTER_NAME>/<namespace>/<name>`: the Kubernetes cluster's name, which
+  `cluster-config` holds as `CLUSTER_NAME`, from the directory name of `clusters/<cluster>`, the
+  namespace and the database's `CNPG_CLUSTER_NAME`. The plugin keeps `base/` and `wals/` there, and
+  the daily dumps are the files directly in that directory, whose retention lists and deletes only
+  those ([Dumps](#dumps)). Two databases never share a path, and a restored cluster writes under its
+  own name.
+- **How often.** A base backup is taken at 02:47 UTC every day, and one as soon as the
+  `ScheduledBackup` is made. The minute is one that no other backup uses: the etcd snapshots run at
+  minute 17, the volume backups at minutes of their own, and the dumps start at 02:00 and end by
+  their deadline at 02:45, and 02:47 is a quiet hour for the databases, so a base backup's reads and
+  its upload meet no other job's. WAL is archived as each segment fills.
+- **How long.** Base backups and WAL are kept for a recovery window of 30 days, so a database can
+  be restored to any moment of the last 30 days. After each base backup the plugin deletes what
+  falls outside the window, with the delete right of the key it holds, which is the cluster's S3
+  key and reaches every bucket of the project: a workload that holds it can delete the archive as
+  well, the residual risk [ADR 0008](adr/0008-state-and-backups-are-encrypted-before-they-leave.md)
+  states for every backup. Base backups and WAL are compressed with gzip.
+- **The credentials.** An ExternalSecret in each database's namespace, `<name>-backup`, reads the
+  cluster's S3 key from the secret store's key `volsync`, only its two key fields as the etcd
+  snapshot job does, so nothing new is seeded for it and the restic master never reaches the
+  namespace; the region from `cluster-config`; and the customer key below from the key
+  `postgres-backups`. The S3 key may list, read, write and delete every object of the project's
+  buckets; it cannot read the archive's content without the customer key. The instance's sidecar
+  holds both, as it must, so whoever can read the Secret `<name>-backup` or run a command in a
+  database pod can read the archive. No key is in the tree.
+- **Encryption.** Every object is encrypted at the provider with a customer-provided key, SSE-C,
+  not before it leaves the cluster ([ADR 0008](adr/0008-state-and-backups-are-encrypted-before-they-leave.md)):
+  the `ObjectStore` names the Secret key in `s3Credentials.sseCustomerKey`, a base64 256-bit key,
+  and sets neither `data.encryption` nor `wal.encryption`, which the plugin refuses together with
+  it. SSE-C sends the key with every request that writes or reads an object, inside TLS, and the
+  provider encrypts and decrypts with it without storing it; a read without the key is refused.
+  The plaintext and the key therefore reach the provider on each request, and object names, sizes
+  and times are visible to it. Barman uploads base backups as multipart objects and reads parts by
+  range, which SSE-C supports; it never copies an object, so a provider that leaves out server-side
+  copy of encrypted objects, which needs the source's key in further headers, serves it all the
+  same.
+- **The key and its custody.** One key serves every database of the cluster, as the recipe stays one
+  small file and the databases' archives are kept apart by their paths, not their keys. `just
+  bao-seed-postgres <file>`, once per store, makes it, keeps it in `<file>`, a new file outside the
+  repository encrypted to the Talos age key's recipient and opened again before the store holds
+  anything, then writes it into the store; it refuses a store that holds one, writes the key of an
+  existing file into a store that holds none, as on a rebuilt cluster, and prints nothing of it, as
+  [`just bao-seed-volsync`](#the-repository-and-its-password) does for the volume backups'
+  master. **Losing the key loses every base backup and WAL segment.** It cannot be rotated in
+  place: objects written under one key are unreadable under another, so a new key needs a new
+  destination path or server name. The custody file belongs beside the Talos age key, outside the
+  repository and the cluster ([postgres-restore.md](runbooks/postgres-restore.md#the-customer-key)).
+- **Restoring.** A restore needs the customer key, in the store or in the custody file, the
+  cluster's S3 key, the plugin running and the `ObjectStore` of the old cluster, which the
+  component makes. [postgres-restore.md](runbooks/postgres-restore.md) restores one database to a
+  point in time into a new cluster beside the old one, switches the application over, and says
+  what the old archive needs so that two clusters never write to one path; it also restores a daily
+  dump, the way back when the archive cannot be read. The component has no
+  recovery input: a `bootstrap` section would change nothing for a cluster that is not restoring,
+  but it is a field of the `Cluster` and not a value, so the runbook gives the manifest.
+- **Alerts.** `PostgresWALArchivingFailing` and `PostgresBackupTooOld`
+  ([Alerts](#alerts)), quiet on a healthy cluster and on one less than a day and a half old.
+
+A cluster's data lives on the workers' data volumes, in the archive and in the dumps ([Where the data
+lives](#where-the-data-lives)).
+
+`tests/postgresql.bats` renders the operator's and the plugin's charts and checks their namespace,
+definitions, replicas, budgets, monitors, images, certificates and pods; builds applications that
+take a cluster from the component, one that does not name it and two that patch it, by kind and by
+name, as Flux applies them, and checks their archive paths, schedule, retention, encryption and
+credentials; checks each field of the `Cluster`, the `ObjectStore` and the `ScheduledBackup`
+against the pinned charts' definitions and the restore runbook's manifest against the `Cluster`'s;
+and checks the `StorageClass` against LINSTOR's. `tests/postgres-dumps.bats` builds applications that
+take a cluster from the component and runs the dump job's scripts as its containers run them, with
+stand-ins for `pg_dump`, `pg_isready` and the S3 client. `tests/rules/cloudnative-pg.yaml` tests the
+alerts.
 
 ### Dumps
 
@@ -3478,16 +3609,17 @@ in `cronjob.yaml`, with no network and no log, so the check needs `docker` or `p
 podman keep; rootless Docker and a host that enforces SELinux refuse the mount, and the check then
 says the archive cannot be read.
 
-**What a dump is not.** It is a copy of one day, not a point in time: a restore loses everything
-written since the dump, and a dump holds one database's objects, not the cluster's roles' passwords
-or its settings. The operator's own backups, WAL archiving and base backups through its Barman Cloud
-plugin, would give point-in-time recovery, and are not used: the plugin offers server-side
-encryption only, and [ADR 0008](adr/0008-state-and-backups-are-encrypted-before-they-leave.md) lets
-nothing leave the cluster unencrypted. `PostgresDumpStale` and `PostgresDumpJobFailing`
-([Alerts](#alerts)) fire when the newest dump is too old or the latest run failed, and
-[postgres-restore.md](runbooks/postgres-restore.md) restores a dump into a new cluster. Until the
-first dump has run a database's data lives on the workers' data volumes alone
-([Where the data lives](#where-the-data-lives)).
+**What a dump is not.** It is a copy of one day, not a point in time: a restore from it loses
+everything written since the dump, and a dump holds one database's objects, not the cluster's roles'
+passwords or its settings. Point-in-time recovery comes from the WAL archive and the base backups
+([Backups and restores](#backups-and-restores)), which are encrypted at the provider with the
+customer key; the dump is the copy encrypted before it leaves the cluster, as
+[ADR 0008](adr/0008-state-and-backups-are-encrypted-before-they-leave.md) says, and needs only the
+Talos age key to read, so it is the way back when the customer key is lost. `PostgresDumpStale` and
+`PostgresDumpJobFailing` ([Alerts](#alerts)) fire when the newest dump is too old or the latest run
+failed, and [postgres-restore.md](runbooks/postgres-restore.md#restoring-a-daily-dump) restores a dump
+into a new cluster. Until the first base backup or dump has run a database's data lives on the
+workers' data volumes alone ([Where the data lives](#where-the-data-lives)).
 
 ## OpenBao
 
@@ -3906,11 +4038,11 @@ builds and the chart renders (`features/applications.feature`).
 n8n, the workflow automation tool, runs in `ai-system` (`apps/base/ai-system/n8n/`). The namespace
 enforces the restricted Pod Security level and carries the Gateway label; it holds no default deny,
 and `network-policy-exceptions.yaml` lists it with n8n's flows ([Network policy](#network-policy)).
-n8n's `ks.yaml` names the operator, the Prometheus Operator definitions, External Secrets, the
-store's application, VolSync, LINSTOR and the public Gateway in `dependsOn`, and sets `wait` with
-the long timeout, so a cluster that lacks one of them is refused by `just kubernetes-check`, the
-encryption key's ExternalSecret is applied once the store is Ready, and the application is Ready
-once n8n answers its readiness endpoint.
+n8n's `ks.yaml` names the operator, the Barman Cloud plugin, the Prometheus Operator definitions,
+External Secrets, the store's application, VolSync, LINSTOR and the public Gateway in `dependsOn`,
+and sets `wait` with the long timeout, so a cluster that lacks one of them is refused by
+`just kubernetes-check`, the encryption key's ExternalSecret is applied once the store is Ready, and
+the application is Ready once n8n answers its readiness endpoint.
 
 - **The chart** is app-template, from its publisher's OCI registry, pinned by tag and tracked by
   Renovate, with the images `docker.io/n8nio/n8n` and `docker.io/n8nio/runners` pinned by tag and
@@ -3925,9 +4057,11 @@ once n8n answers its readiness endpoint.
   component's three instances and 5Gi each. n8n reads its host, port, database, user and password
   from the keys `host`, `port`, `dbname`, `username` and `password` of the Secret `n8n-db-app`, which
   the operator makes; no credential is in a values file, and the connection is without TLS, inside
-  the cluster. The component dumps the database once a day, encrypted, to the object storage
+  the cluster. The component archives its WAL and backs the database up daily to the object storage
+  ([Backups and restores](#backups-and-restores)), and dumps it once a day, encrypted
   ([Dumps](#dumps)); the `external-secrets` and `openbao-store` in n8n's `dependsOn` serve the S3
-  key the dump job reads as much as the encryption key.
+  key and the customer key the backups read and the S3 key the dump job reads as much as the
+  encryption key.
 - **The encryption key** `N8N_ENCRYPTION_KEY` encrypts the credentials n8n stores in its database.
   It comes from the secret store, as [How an application gets a secret out](#how-an-application-gets-a-secret-out)
   describes: the ExternalSecret `n8n-encryption-key` reads the property `encryption-key` at
@@ -3982,8 +4116,9 @@ once n8n answers its readiness endpoint.
   restoring the volume brings back files and none of the work, and restoring the database brings
   back the work and not the files that executions refer to. Steps to restore the claim are in
   [the runbook](runbooks/volume-backups.md#restoring-a-claim-from-its-repository); the database is
-  restored from its daily dump ([Dumps](#dumps), [the runbook](runbooks/postgres-restore.md)), which
-  is up to a day old.
+  restored to a point in time from its archive, or from its daily dump, which is up to a day old
+  ([Backups and restores](#backups-and-restores), [Dumps](#dumps),
+  [the runbook](runbooks/postgres-restore.md)).
 - **The hostname** is `n8n.${CLUSTER_DOMAIN}`, an `HTTPRoute` on the public Gateway's `https`
   listener to the Service `n8n` on 5678. `N8N_HOST`, `N8N_PROTOCOL`, `N8N_EDITOR_BASE_URL` and
   `N8N_WEBHOOK_URL` are that name over https, set from the variable, and `N8N_PROXY_HOPS` is 1: the
@@ -4198,8 +4333,9 @@ enter again.
 
 Backstage, the catalogue of what the cluster runs, runs in the namespace `backstage`
 (`apps/base/backstage/backstage/`), which enforces the restricted Pod Security level and carries the
-Gateway label. Its `ks.yaml` names the PostgreSQL operator, the Prometheus Operator definitions,
-External Secrets, the store's application, the public Gateway and Cilium, whose operator defines the
+Gateway label. Its `ks.yaml` names the PostgreSQL operator, the Barman Cloud plugin, the Prometheus
+Operator definitions, External Secrets, the store's application, the public Gateway and Cilium,
+whose operator defines the
 kind of its network policies, in `dependsOn` and sets `wait` with the long timeout, so the
 application is Ready once Backstage answers its readiness endpoint with its database.
 
@@ -4257,9 +4393,12 @@ application is Ready once Backstage answers its readiness endpoint with its data
   database is made again by a start. Backstage reads its host, port, database, user and password
   from the keys of the Secret `backstage-db-app`, which the operator makes. The user may not create
   databases, so `backend.database.pluginDivisionMode` is `schema`: each plugin gets a schema of
-  the one database. Nothing is seeded by a person. The component dumps the database once a day,
-  encrypted, to the object storage ([Dumps](#dumps)), with the S3 key that `external-secrets` and
-  `openbao-store` in `dependsOn` serve. Backstage needs no other secret: its plugins sign the tokens
+  the one database. Nothing is seeded by a person. The component archives its WAL and backs the
+  database up daily to the object storage ([Backups and restores](#backups-and-restores)), and dumps
+  it once a day, encrypted ([Dumps](#dumps)); the `external-secrets` and `openbao-store` in
+  `dependsOn` serve the S3 key and the customer key the backups read and the S3 key the dump job
+  reads, which are the cluster's, seeded once for it and not for Backstage. Backstage needs no other
+  secret: its plugins sign the tokens
   they exchange with keys they keep in the database, so External Secrets makes none for it, and
   `backend.auth.keys`, which would admit callers from outside, is not set.
 - **The hostname** is `backstage.${CLUSTER_DOMAIN}`, an `HTTPRoute` on the public Gateway's `https`
@@ -4273,7 +4412,9 @@ application is Ready once Backstage answers its readiness endpoint with its data
   resolver and to its database's instances on 5432: not to the API server, not to another
   application, nothing outside the cluster. The database's pods take the operator on 8000 and 5432
   and each other, Backstage and the dump job on 5432, Prometheus on 9187 and the kubelet's probes on
-  8000, and send to each other, the resolver and the API server; the dump job sends to the resolver,
+  8000, and send to each other, the resolver and the API server; its instances also send to the
+  world on 443, for the object storage their Barman Cloud sidecars archive to, in a policy of its
+  own with its reason; the dump job sends to the resolver,
   the instances on 5432 and the world on 443, for the age release and the object storage, in a
   policy of its own with its reason. The dump job's pods carry the labels
   `app.kubernetes.io/name: pgdump` and `app.kubernetes.io/instance: backstage-db`, which a patch in
@@ -4386,8 +4527,11 @@ The steps n8n took, in order; the next port does the same and says where it diff
    Where the registry tags betas as plain versions, as n8n's does, a rule in
    `.renovate/managers.json5` keeps Renovate to the line the tree runs; where it does not, say so,
    and add the image to the packages `.renovate/automerge.json5` never merges.
-3. **Database.** `components/cnpg-cluster` in `ks.yaml` with `CNPG_CLUSTER_NAME`, and the connection
-   from the keys of `<name>-app`; `prometheus-operator-crds` and `cloudnative-pg` in `dependsOn`. An
+3. **Database.** `components/cnpg-cluster` in `ks.yaml` with `CNPG_CLUSTER_NAME` and `CNPG_NAMESPACE`
+   (the `targetNamespace`), and the connection from the keys of `<name>-app`; `cloudnative-pg`,
+   `plugin-barman-cloud`, `prometheus-operator-crds`, `external-secrets` and `openbao-store` in
+   `dependsOn`. `just kubernetes-check` refuses a Kustomization that takes the component and leaves
+   out the plugin or sets `CNPG_NAMESPACE` to another namespace than its `targetNamespace`. An
    application whose default is an embedded database on its volume, such as Open WebUI's SQLite,
    takes none of these, and its section says so and what that makes the volume.
 4. **Secrets.** A secret the application keeps a copy of, or that must outlive the cluster, such as
@@ -5207,6 +5351,9 @@ that it cannot fill, and each key it would fill that the example does not list. 
 starts to use is listed in the example and given its source in `fill_cluster_config` in
 `scripts/lib/cluster.sh` in the same change. The values come from:
 
+- `CLUSTER_NAME`: the cluster's own name, the directory name of `clusters/<cluster>` and the
+  argument of the recipes, which keeps the object storage paths of two clusters that share a bucket
+  apart ([Backups and restores](#backups-and-restores)).
 - `CLUSTER_DOMAIN`: the environment variable of that name, the domain the cluster's applications are
   published under, a lower-case DNS name.
 - `CLUSTER_DNS_ZONE`: the environment variable of that name, the zone at the DNS provider that

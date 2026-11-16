@@ -1,14 +1,25 @@
 ---
 # yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/prometheusrule-monitoring-v1.json
-# Alerts on the daily dump of every PostgreSQL cluster made from the cnpg-cluster component, from
-# kube-state-metrics' CronJob metrics, which Prometheus already scrapes:
-# kube_cronjob_status_last_successful_time, kube_cronjob_status_last_schedule_time and
-# kube_cronjob_created, each labelled cronjob and namespace, as v2.20, the version the pinned
-# kube-prometheus-stack chart runs, documents them. Times are Unix times in seconds. The rules are
-# written once, here with the operator, for every database in every namespace: the component names
-# each CronJob <cluster>-pgdump, which they select by, as kube-state-metrics exposes no CronJob's
-# labels unless its chart is told to, and the label the alerts carry, database, is the cluster's name.
-# Tests: tests/rules/cloudnative-pg.yaml.
+# Alerts on the backups of every PostgreSQL cluster made from components/cnpg-cluster, whichever
+# namespace it is in. The rules are written once, here with the operator, for every database in every
+# namespace. Tests: tests/rules/cloudnative-pg.yaml.
+#
+# postgresql-backups, on the WAL archive and the base backups, from the metrics the instance manager
+# of CloudNativePG 1.30 and the Barman Cloud plugin v0.16 export, scraped through the component's
+# PodMonitor, which adds the label cnpg_io_cluster from the pods' cnpg.io/cluster label:
+# cnpg_pg_stat_archiver_last_archived_time and cnpg_pg_stat_archiver_last_failed_time, Unix times in
+# seconds that the primary alone exports and that are -1 where there has been no archival or no
+# failure; barman_cloud_cloudnative_pg_io_last_available_backup_timestamp, the Unix time of the newest
+# base backup in the object store; and cnpg_collector_up, with kube-state-metrics' kube_pod_created,
+# which date a cluster that has no backup yet.
+#
+# postgres-dumps, on the daily dump, from kube-state-metrics' CronJob metrics, which Prometheus
+# already scrapes: kube_cronjob_status_last_successful_time, kube_cronjob_status_last_schedule_time
+# and kube_cronjob_created, each labelled cronjob and namespace, as v2.20, the version the pinned
+# kube-prometheus-stack chart runs, documents them. Times are Unix times in seconds. The component
+# names each CronJob <cluster>-pgdump, which they select by, as kube-state-metrics exposes no
+# CronJob's labels unless its chart is told to, and the label the alerts carry, database, is the
+# cluster's name.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -16,14 +27,64 @@ metadata:
   namespace: cnpg-system
 spec:
   groups:
+    - name: postgresql-backups
+      rules:
+        # The primary's latest attempt to archive a WAL segment failed after its latest success: the
+        # archive_command that the plugin's sidecar serves has been failing since. A transient
+        # failure that the next attempt cures clears at once, and a primary that has archived and
+        # failed nothing reports -1 for both, which is not greater. The segments stay on the primary's
+        # volume until they are archived, so a failure that lasts also fills it.
+        - alert: PostgresWALArchivingFailing
+          expr: |
+            max by (namespace, cnpg_io_cluster) (cnpg_pg_stat_archiver_last_failed_time)
+            > on (namespace, cnpg_io_cluster)
+            max by (namespace, cnpg_io_cluster) (cnpg_pg_stat_archiver_last_archived_time)
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: PostgreSQL is failing to archive its WAL
+            description: The primary of the PostgreSQL cluster {{ $labels.cnpg_io_cluster }} in {{ $labels.namespace }} has failed to archive a WAL segment and archived none since, for 15 minutes, so WAL piles up and the archive has a gap.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#postgreswalarchivingfailing
+        # 36 hours are a daily base backup, a missed one, and twelve hours of grace. The newest base
+        # backup that the plugin reports is older than that, or a cluster has none at all: no series
+        # while no backup exists, or zero, which is not a time. A cluster without one is stale 36
+        # hours after its oldest instance's pod was made, so a cluster less than a day and a half old
+        # is quiet while its first backup is still to come. A collector that cannot reach PostgreSQL
+        # exports 0 for cnpg_collector_up, which the comparison turns into a 1 so the pod still dates
+        # its cluster.
+        - alert: PostgresBackupTooOld
+          expr: |
+            (
+              time() - max by (namespace, cnpg_io_cluster) (barman_cloud_cloudnative_pg_io_last_available_backup_timestamp > 0) > 36 * 3600
+            )
+            or
+            (
+              (
+                time() - min by (namespace, cnpg_io_cluster) (
+                  max by (namespace, pod) (kube_pod_created)
+                  * on (namespace, pod) group_left (cnpg_io_cluster)
+                  (max by (namespace, pod, cnpg_io_cluster) (cnpg_collector_up) >= bool 0)
+                ) > 36 * 3600
+              )
+              unless on (namespace, cnpg_io_cluster)
+              max by (namespace, cnpg_io_cluster) (barman_cloud_cloudnative_pg_io_last_available_backup_timestamp > 0)
+            )
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: A PostgreSQL cluster has no base backup of the last 36 hours
+            description: The PostgreSQL cluster {{ $labels.cnpg_io_cluster }} in {{ $labels.namespace }} has no base backup newer than 36 hours, so a restore would start from an old one and replay days of WAL, or has nothing to start from.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#postgresbackuptooold
     - name: postgres-dumps
       rules:
         # 36 hours is a day's run missed and half a day of grace. A CronJob that has never succeeded
         # has no last-success series, so it is stale 36 hours after it was created, which is after its
         # first schedule: a database younger than that is quiet. The newest dump is then older than
-        # that, which a loss of the cluster costs: warning, not critical, as the data is still in
-        # the cluster three times and a lost dump needs a second failure to matter, so it is a matter
-        # for the working day.
+        # that, which a restore from a dump, the copy that needs no customer key, costs: warning, not
+        # critical, as the data is still in the cluster three times and in its WAL archive, and a
+        # lost dump needs a second failure to matter, so it is a matter for the working day.
         - alert: PostgresDumpStale
           expr: |
             label_replace(
@@ -43,7 +104,7 @@ spec:
             severity: warning
           annotations:
             summary: No dump of a PostgreSQL database has succeeded for 36 hours
-            description: The database {{ $labels.database }} in {{ $labels.namespace }} has had no successful dump, by the CronJob {{ $labels.cronjob }}, for 36 hours, so a lost cluster loses everything written since the newest dump.
+            description: The database {{ $labels.database }} in {{ $labels.namespace }} has had no successful dump, by the CronJob {{ $labels.cronjob }}, for 36 hours, so a restore from a dump loses everything written since the newest one.
             runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#postgresdumpstale
         # The latest run was scheduled after the last success, and has had an hour, which is longer
         # than the job's deadline of 45 minutes: it ended without succeeding. It clears once a run

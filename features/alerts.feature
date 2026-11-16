@@ -316,3 +316,15 @@ Feature: Alerts
     Given a Gatekeeper controller manager Deployment with no available replica, and one with an available replica
     When the rule is evaluated over time
     Then the alert fires after its time for the Deployment with none available and never for the one with one
+
+  @by:rules-check
+  Scenario: The alert PostgresWALArchivingFailing fires after its time in the failing case and stays quiet in the healthy one
+    Given a PostgreSQL primary whose latest archiving attempt failed, one whose failure was followed by a success, and one that never failed or archived
+    When the rule is evaluated over time
+    Then the alert fires after its time for the first and never for the others
+
+  @by:rules-check
+  Scenario: The alert PostgresBackupTooOld fires after its time in the failing case and stays quiet in the healthy one
+    Given a PostgreSQL cluster whose newest base backup is older than 36 hours, one older than 36 hours with none, one with a recent backup, and one under a day old with none
+    When the rule is evaluated over time
+    Then the alert fires after its time for the first two and never for the others

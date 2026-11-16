@@ -21,4 +21,5 @@ spec:
     - component:default/external-secrets
     - resource:default/gateway-public
     - resource:default/openbao-store
+    - component:default/plugin-barman-cloud
     - resource:default/prometheus-operator-crds

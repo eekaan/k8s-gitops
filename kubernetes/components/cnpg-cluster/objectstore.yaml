@@ -1,0 +1,58 @@
+---
+# Where this cluster's WAL archive and base backups go, for the Barman Cloud plugin. The directory
+# the plugin writes is the destination below and, under it, the cluster's name (serverName in the
+# Cluster's plugin entry): s3://<prefix>-postgres/<cluster>/<namespace>/<name>, in the postgres bucket
+# of the object storage, so no two databases of a cluster share a path and two clusters that share a
+# bucket do not either. The bucket's prefix, the endpoint and the Kubernetes cluster's name come from
+# cluster-config, the namespace and the name from the application.
+#
+# Retention: base backups and WAL are kept for a recovery window of 30 days, so the database can be
+# restored to any moment of the last 30 days. After each base backup the plugin deletes what falls
+# outside the window, the backups before the newest one that ends before it and the WAL before that
+# one, with the delete right of the key it holds, the cluster's S3 key. That key reaches every bucket
+# of the project, so a workload that holds it can delete the archive as well (ADR 0008).
+#
+# Every object is encrypted at the provider with a customer key (SSE-C, ADR 0008): sseCustomerKey
+# names the Secret key that holds the base64 of 256 bits, which the provider uses on each request and
+# does not store. The plugin refuses the key together with the bucket-managed encryption of data or
+# wal, which therefore stay unset. The key cannot change in place: objects written under one key are
+# unreadable under another.
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: ${CNPG_CLUSTER_NAME}
+spec:
+  retentionPolicy: 30d
+  # The sidecar the plugin injects into every instance's pod. Requests equal to limits keep the pod
+  # in the guaranteed quality of service class its Cluster's resources give it.
+  instanceSidecarConfiguration:
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 100m
+        memory: 256Mi
+  configuration:
+    destinationPath: s3://${BACKUP_BUCKET_PREFIX}-postgres/${CLUSTER_NAME}/${CNPG_NAMESPACE}
+    endpointURL: ${S3_ENDPOINT}
+    # The bucket is in the request's path, not in the host name, as in the volume backups' restic
+    # repository, s3:<endpoint>/<bucket>/<path>.
+    s3AddressingStyle: path
+    s3Credentials:
+      accessKeyId:
+        name: ${CNPG_CLUSTER_NAME}-backup
+        key: ACCESS_KEY_ID
+      secretAccessKey:
+        name: ${CNPG_CLUSTER_NAME}-backup
+        key: ACCESS_SECRET_KEY
+      region:
+        name: ${CNPG_CLUSTER_NAME}-backup
+        key: REGION
+      sseCustomerKey:
+        name: ${CNPG_CLUSTER_NAME}-backup
+        key: SSE_C_KEY
+    data:
+      compression: gzip
+    wal:
+      compression: gzip

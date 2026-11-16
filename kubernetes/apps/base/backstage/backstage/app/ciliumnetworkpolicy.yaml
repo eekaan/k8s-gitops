@@ -78,7 +78,8 @@ spec:
 # manager's status port, and 5432, PostgreSQL's, and that the cluster's pods connect to each other
 # (docs/src/security.md, Exposed Ports; docs/src/networking.md); a replica streams from the primary
 # through the Service backstage-db-rw. The instance manager reads and writes the Cluster and its
-# Secrets through the API server.
+# Secrets through the API server, and so does the Barman Cloud plugin's sidecar in each instance's
+# pod, for its ObjectStore and the Secret of its credentials.
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
@@ -176,6 +177,40 @@ spec:
       toPorts:
         - ports:
             - port: "8000"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# The instances' one call outside the cluster: the Barman Cloud plugin's sidecar, which the operator
+# puts in every instance's pod, archives the WAL and writes the base backups to the object storage,
+# and reads them back, at the endpoint cluster-config holds as a URL. That cannot be named by a DNS
+# name here, so the policy allows the world on 443, the port https reaches it on (docs/kubernetes.md,
+# Network policy). The sidecar talks to the instance manager over a socket in the pod, which policy
+# does not see, and a policy selects pods, not containers, so PostgreSQL's container shares the
+# rule. The jobs that create and join an instance hold no sidecar and are not selected.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: backstage-db-instances-world
+  annotations:
+    k8s-gitops/network-policy-reason: >-
+      the Barman Cloud plugin's sidecar in each instance's pod writes the WAL archive and the base
+      backups to the object storage outside the cluster, and reads them back, whose endpoint
+      cluster-config holds as a URL and so cannot name a DNS name here; it reaches it on 443 only
+spec:
+  endpointSelector:
+    matchLabels:
+      cnpg.io/cluster: backstage-db
+      cnpg.io/podRole: instance
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
               protocol: TCP
 ---
 # yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json

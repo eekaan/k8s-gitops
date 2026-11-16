@@ -4,13 +4,35 @@ apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 
 # A PostgreSQL cluster for one application, run by the CloudNativePG operator, the PodMonitor that
-# scrapes it, and a CronJob that dumps its database once a day, encrypted, to the object storage,
-# with the ExternalSecret that gives the job's upload the S3 key. An application takes it by naming
-# this component in its ks.yaml's spec.components, the cluster in its postBuild.substitute, and the
-# External Secrets operator and the secret store in its dependsOn (docs/kubernetes.md, PostgreSQL).
+# scrapes it, and its two backups to the object storage, each with the ExternalSecret that gives it
+# the S3 key: the WAL archive and the daily base backup through the Barman Cloud plugin, encrypted at
+# the provider with a customer key, and a CronJob that dumps its database once a day, encrypted
+# before it leaves. An application takes it by naming this component in its ks.yaml's
+# spec.components, the cluster and its namespace in its postBuild.substitute, and the operator's and
+# the plugin's applications in its dependsOn, with external-secrets and openbao-store for the
+# credentials (docs/kubernetes.md, PostgreSQL):
+#
+#   components:
+#     - ../../../../../components/cnpg-cluster
+#   postBuild:
+#     substitute:
+#       CNPG_CLUSTER_NAME: <app>-db
+#       CNPG_NAMESPACE: <the Kustomization's targetNamespace>
+#
+#   CNPG_CLUSTER_NAME  the Cluster's name, and the name of its ObjectStore, its ScheduledBackup, the
+#                      Secret of its backup credentials and the directory of its archive and dumps
+#   CNPG_NAMESPACE     the namespace the application is applied to, which a component cannot read
+#                      from targetNamespace; it is a level of the archive's path, so that two
+#                      databases of one name in two namespaces archive to two places
+#
+# The archive is s3://<BACKUP_BUCKET_PREFIX>-postgres/<CLUSTER_NAME>/<CNPG_NAMESPACE>/<name>, from
+# cluster-config and the two values above: its base backups in base/ and its WAL in wals/ there, the
+# dumps beside them as files of their own names.
 resources:
   - cluster.yaml
   - podmonitor.yaml
+  - objectstore.yaml
+  - scheduledbackup.yaml
   - externalsecret.yaml
   - cronjob.yaml
 

@@ -19,14 +19,17 @@ spec:
   postBuild:
     substitute:
       CNPG_CLUSTER_NAME: backstage-db
+      CNPG_NAMESPACE: backstage
       # The catalogue is not in the database, only the rows Backstage derives from it and the
       # search index.
       CNPG_STORAGE_SIZE: 2Gi
-  # The Cluster and its PodMonitor are of the operator's and Prometheus Operator's kinds, and the
-  # component's dump job reads the S3 key through an ExternalSecret from the secret store; the route
-  # names the public Gateway; the network policies are a kind Cilium's operator defines.
+  # The Cluster and its PodMonitor are of the operator's and Prometheus Operator's kinds, and its
+  # ObjectStore the Barman Cloud plugin's, which archives its WAL; the component's backups and its
+  # dump job read their keys through ExternalSecrets from the secret store; the route names the
+  # public Gateway; the network policies are a kind Cilium's operator defines.
   dependsOn:
     - name: cloudnative-pg
+    - name: plugin-barman-cloud
     - name: prometheus-operator-crds
     - name: external-secrets
     - name: openbao-store

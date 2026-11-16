@@ -1,0 +1,21 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/ocirepository-source-v1.json
+# The Barman Cloud plugin's chart from the CloudNativePG project's public OCI registry. Each chart
+# release is made for one release of the plugin, which needs a CloudNativePG operator of the version
+# its documentation names. tests/postgresql.bats checks the operator chart's against a floor it holds
+# as a constant, which a plugin release that raises it needs raised there by hand.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: plugin-barman-cloud
+spec:
+  # The tag is pinned: a new chart arrives by a change to this file, which Flux applies at once.
+  interval: 12h
+  # The chart's packaged layer, which helm-controller reads as it is.
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy
+  url: oci://ghcr.io/cloudnative-pg/charts/plugin-barman-cloud
+  ref:
+    # renovate: datasource=docker depName=ghcr.io/cloudnative-pg/charts/plugin-barman-cloud
+    tag: 0.9.0

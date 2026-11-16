@@ -832,10 +832,11 @@ E
   denied "$VIEW" "$MOVER" @world 80/tcp
   # That is the port of the endpoint as cluster-config's example gives it: 443 for one that names
   # none, as the validation of the endpoint (scripts/lib/s3.sh) allows, or the port it names.
-  local endpoint
+  local endpoint s3_port
   endpoint=$(yq '.S3_ENDPOINT' "$REPO/kubernetes/clusters/lab-sto2/cluster-config.example.yaml")
   [[ $endpoint =~ ^https://[^/:]+(:([0-9]+))?$ ]]
-  allowed "$VIEW" "$MOVER" @world "${BASH_REMATCH[2]:-443}/tcp"
+  s3_port=${BASH_REMATCH[2]:-443}
+  allowed "$VIEW" "$MOVER" @world "$s3_port/tcp"
   denied "$VIEW" demo/Deployment/hello @world 443/tcp
   denied "$VIEW" demo/Deployment/volsync-demo @world 443/tcp
   # Backstage resolves its database's name and reaches the database's instances on PostgreSQL's port,
@@ -875,8 +876,11 @@ E
   denied "$VIEW" "$PGDUMP" @world 5432/tcp
   # The database: the operator reaches every pod of the cluster on the status port and PostgreSQL's,
   # as its documentation asks, the cluster's pods reach each other, a joining instance among them,
-  # and the API server, and Prometheus scrapes the exporter's port; nothing else reaches them and
-  # they reach nothing outside the cluster.
+  # and the API server, and Prometheus scrapes the exporter's port; nothing else reaches them. The
+  # instances, whose pods hold the Barman Cloud plugin's sidecar, reach the object storage, the
+  # world on 443 and on the port cluster-config's example gives the endpoint, for the WAL archive
+  # and the base backups (docs/kubernetes.md, Backups and restores), and no other port of it; a
+  # job that creates or joins an instance holds no sidecar and reaches nothing outside the cluster.
   allowed "$VIEW" "$CNPG_OPERATOR" "$BACKSTAGE_DB" 8000/tcp
   allowed "$VIEW" "$CNPG_OPERATOR" "$BACKSTAGE_DB" 5432/tcp
   allowed "$VIEW" "$CNPG_OPERATOR" "$BACKSTAGE_DB_JOIN" 8000/tcp
@@ -891,7 +895,13 @@ E
   allowed "$VIEW" "$BACKSTAGE_DB_JOIN" @kube-apiserver 6443/tcp
   allowed "$VIEW" "$PROMETHEUS" "$BACKSTAGE_DB" 9187/tcp
   denied "$VIEW" "$PROMETHEUS" "$BACKSTAGE_DB" 5432/tcp
-  denied "$VIEW" "$BACKSTAGE_DB" @world 443/tcp
+  allowed "$VIEW" "$BACKSTAGE_DB" @world 443/tcp
+  allowed "$VIEW" "$BACKSTAGE_DB_REPLICA" @world 443/tcp
+  allowed "$VIEW" "$BACKSTAGE_DB" @world "$s3_port/tcp"
+  denied "$VIEW" "$BACKSTAGE_DB" @world 80/tcp
+  denied "$VIEW" "$BACKSTAGE_DB" @world 5432/tcp
+  denied "$VIEW" "$BACKSTAGE_DB" @world 53/udp
+  denied "$VIEW" "$BACKSTAGE_DB_JOIN" @world 443/tcp
   denied "$VIEW" "$BACKSTAGE_DB" openbao/StatefulSet/openbao 8200/tcp
   denied "$VIEW" "$BACKSTAGE_DB" "$N8N_DB" 5432/tcp
   denied "$VIEW" "$N8N_DB" "$BACKSTAGE_DB" 5432/tcp
@@ -1145,6 +1155,9 @@ E
     "allowed $BACKSTAGE $BACKSTAGE_DB 5432/tcp"
     "denied $BACKSTAGE @world 443/tcp"
     "denied $OTHER_APP $BACKSTAGE_DB 5432/tcp"
+    "allowed $BACKSTAGE_DB @world 443/tcp"
+    "denied $BACKSTAGE_DB @world 80/tcp"
+    "denied $BACKSTAGE_DB_JOIN @world 443/tcp"
     "allowed $PGDUMP @world 443/tcp"
     "denied $PGDUMP @world 80/tcp"
     "allowed $PROMETHEUS $FALCO 8765/tcp"

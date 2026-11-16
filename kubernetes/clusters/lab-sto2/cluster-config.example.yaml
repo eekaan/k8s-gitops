@@ -7,6 +7,9 @@
 CLUSTER_DOMAIN: example.com
 # The zone at the DNS provider that holds CLUSTER_DOMAIN: the domain itself, or a name it is under.
 CLUSTER_DNS_ZONE: example.com
+# The cluster's own name, the directory name of kubernetes/clusters/<cluster>, which keeps the
+# object storage paths of two clusters that share a bucket apart.
+CLUSTER_NAME: example-cluster
 # The start of the backup buckets' names: each bucket is this, a hyphen and its role, such as
 # example-backups-volsync.
 BACKUP_BUCKET_PREFIX: example-backups

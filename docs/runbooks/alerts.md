@@ -450,10 +450,11 @@ volumes that are no longer needed, then find what grew.
 
 The CronJob `<cluster>-pgdump` of a PostgreSQL cluster has had no successful run for 36 hours, a
 day's run missed and half a day of grace, or it has never succeeded and was created more than 36
-hours ago. The newest dump of the database in the bucket is then older than that, and a loss of the
-cluster loses everything written since ([postgres-restore.md](postgres-restore.md)). The data is
-still in the cluster, on three instances, so this is a missing second copy and not an outage: it
-is a warning for the working day. The alert reads kube-state-metrics' record of the CronJob, so it
+hours ago. The newest dump of the database in the bucket is then older than that, and a restore
+from a dump, the way back when the WAL archive cannot be read, loses everything written since
+([postgres-restore.md](postgres-restore.md#restoring-a-daily-dump)). The data is still in the
+cluster, on three instances, and in its WAL archive, so this is a missing copy and not an outage:
+it is a warning for the working day. The alert reads kube-state-metrics' record of the CronJob, so it
 cannot fire for a CronJob that does not exist, and is quiet for a database younger than 36 hours.
 Its labels name the `namespace` and the `database`, which is the Cluster's name.
 
@@ -606,3 +607,52 @@ installed.
 Usually: a node went away with the pods on it, which the Deployment replaces; an upgrade of the chart
 does not start, which Flux rolls back after its retries; or the pods cannot be scheduled for lack of
 room, as each asks for 512 MiB of memory.
+
+## PostgresWALArchivingFailing
+
+The primary of a PostgreSQL cluster has failed to archive a WAL segment to the object storage and
+has archived none since, for 15 minutes. The primary keeps every segment it has not archived on its
+volume, so the longer this lasts the larger the gap a restore cannot cross and the less room the
+volume has: when it is full the database stops. Base backups are not affected, but a restore is only
+as recent as the last segment that was archived.
+
+Look at first: the cluster named in the alert, `kubectl --namespace <namespace> get cluster <name>`
+and the primary's plugin sidecar, `kubectl --namespace <namespace> logs <name>-<n> --container
+plugin-barman-cloud`, which says why a segment failed, and the Secret the ObjectStore reads,
+`kubectl --namespace <namespace> get externalsecret <name>-backup`. The metric that raised the alert
+is `cnpg_pg_stat_archiver_last_failed_time` against `cnpg_pg_stat_archiver_last_archived_time`.
+
+Usually: the postgres bucket does not exist (`just infra-backup-buckets`); the cluster's S3 key was
+replaced and the store's copy was not (`just bao-seed-volsync --rotate-s3`), or the ExternalSecret
+has not synchronised, so the Secret is missing or old; the key `postgres-backups` of the secret
+store is missing, as on a rebuilt cluster whose store has not been seeded from the custody file
+(`just bao-seed-postgres <file>`, [postgres-restore.md](postgres-restore.md#the-customer-key)), so
+the provider refuses every request for lack of the key it encrypted with, or holds another one; the
+object storage is unreachable from the node; or the Barman Cloud plugin's pods are down, which the
+Kustomization `plugin-barman-cloud` shows (`flux get kustomization plugin-barman-cloud`). Archiving
+resumes by itself once the cause is gone and the alert clears with the next segment that is
+archived.
+
+## PostgresBackupTooOld
+
+The newest base backup of a PostgreSQL cluster in the object storage is older than 36 hours, or the
+cluster has none and its oldest instance is older than that, for 30 minutes. The ScheduledBackup
+takes one a day, so at least one daily backup has failed or not run. The WAL archive may be intact:
+a restore then starts from an older backup and replays more WAL, and only
+[PostgresWALArchivingFailing](#postgreswalarchivingfailing) says the archive itself is broken.
+
+Look at first: `kubectl --namespace <namespace> get scheduledbackup,backup` for the latest backups
+and the phase and error of the failed ones (`kubectl --namespace <namespace> describe backup
+<backup>`), and the plugin's sidecar in the pod that took it, as for
+[PostgresWALArchivingFailing](#postgreswalarchivingfailing). The plugin's own metrics are
+`barman_cloud_cloudnative_pg_io_last_available_backup_timestamp` and
+`barman_cloud_cloudnative_pg_io_last_failed_backup_timestamp`.
+
+Usually: the causes of [PostgresWALArchivingFailing](#postgreswalarchivingfailing), which stop
+backups as they stop the archive; a backup that did not complete because a node or the primary
+restarted while it ran (the next one is taken at 02:47 UTC); a ScheduledBackup that is suspended or
+was deleted with its application; or a cluster whose first backup could not be taken, because the
+object storage refused it, in which case the alert fires 36 hours after its pods were made. Take one
+by hand to clear the alert at once, once the cause is gone: `kubectl --namespace <namespace> create
+-f` a `Backup` of method `plugin` for the cluster, as
+[postgres-restore.md](postgres-restore.md#taking-a-base-backup-by-hand) shows.

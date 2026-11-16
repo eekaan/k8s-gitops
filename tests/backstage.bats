@@ -215,7 +215,7 @@ of_backstage() {
 }
 
 @test "Backstage is selected by overlay entries and builds nothing when it is not" {
-  local dependency dependencies=(cloudnative-pg prometheus-operator-crds external-secrets openbao-store gateway-public cilium)
+  local dependency dependencies=(cloudnative-pg plugin-barman-cloud prometheus-operator-crds external-secrets openbao-store gateway-public cilium)
   # The overlay selects it with two entries, its namespace directory and its ks.yaml, and builds the
   # namespace, the defaults every namespace directory holds, the namespace's default deny, and the
   # Kustomization.

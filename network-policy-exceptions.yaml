@@ -61,8 +61,9 @@ exceptions:
     covered-by: the namespace's Pod Security level and the node firewall (ADR 0017)
   - namespace: cnpg-system
     reason: the API server calls the operator's webhook from the control planes' host network, and
-      the operator reaches the API server and every database pod it manages; its flows are not yet
-      enumerated
+      the operator reaches the API server and every database pod it manages; the operator calls the
+      Barman Cloud plugin's gRPC service on 9090 with mutual TLS, the plugin's two certificates, and
+      the plugin reaches the API server; its flows are not yet enumerated
     covered-by: the namespace's Pod Security level and the node firewall (ADR 0017)
   - namespace: keda
     reason: the API server calls the metrics adapter, as the external metrics API, and the admission
@@ -91,7 +92,11 @@ exceptions:
       talks to its task runners on the pod's loopback, which policy does not see; the three
       PostgreSQL instances take n8n and each other's replication on 5432, the operator in
       cnpg-system and the kubelet on the status port 8000 and Prometheus on 9187, and reach the API
-      server; Open WebUI's pod takes the proxies and the kubelet's probes on 8080, keeps its
+      server; each instance's Barman Cloud sidecar talks to the instance manager over a socket in the
+      pod, which policy does not see, and reaches the object storage on 443, the resolver and the
+      API server, for its ObjectStore and the Secret of its credentials; the dump job reaches the
+      database through n8n-db-ro and n8n-db-rw on 5432, the hosts it downloads age's release from
+      on 443, the object storage on 443 and the resolver; Open WebUI's pod takes the proxies and the kubelet's probes on 8080, keeps its
       database on its volume, and reaches nothing until an administrator turns on a model
       connection or another feature that calls out, then the cluster's resolver and the hosts and
       ports those name, outside the cluster; the backup movers reach the resolver and the object

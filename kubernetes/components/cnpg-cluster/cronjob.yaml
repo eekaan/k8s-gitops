@@ -2,8 +2,9 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/cronjob-batch-v1.json
 # A dump of the cluster's application database once a day, encrypted to the Talos age key's recipient
 # before it leaves the pod and uploaded under <cluster>/<namespace>/<name>/ in the postgres bucket,
-# named <UTC time>.dump.age. It is a daily copy, not a point in time: the changes since the last dump
-# are lost with the cluster (docs/kubernetes.md, PostgreSQL; docs/runbooks/postgres-restore.md). The
+# named <UTC time>.dump.age. It is a daily copy, not a point in time, which the WAL archive beside it
+# gives: a restore from it loses the changes since the dump, and needs only the Talos age key to
+# read it (docs/kubernetes.md, PostgreSQL; docs/runbooks/postgres-restore.md). The
 # alerts on it select the CronJob by its name's suffix, -pgdump (the cloudnative-pg application).
 #
 # The pod runs four steps in turn, each in the one image that has its tool, so no image is built

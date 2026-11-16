@@ -34,6 +34,7 @@ resources:
   - ../../base/cert-manager/cert-manager/ks.yaml
   - ../../base/cert-manager/cluster-ca/ks.yaml
   - ../../base/cnpg-system/cloudnative-pg/ks.yaml
+  - ../../base/cnpg-system/plugin-barman-cloud/ks.yaml
   - ../../base/demo/demo-volsync-movers/ks.yaml
   - ../../base/demo/hello-route/ks.yaml
   - ../../base/demo/hello-secret/ks.yaml

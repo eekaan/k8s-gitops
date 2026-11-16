@@ -1,0 +1,49 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cert-manager.io/certificate_v1.json
+# The certificate the operator presents to the plugin, which the plugin's server verifies against the
+# cluster's CA. The Secrets are those the plugin's Service names for the operator in its annotations
+# cnpg.io/pluginClientSecret and cnpg.io/pluginServerSecret, which the plugin's pods mount. The
+# chart's own certificates are switched off in values.yaml, as they are signed by an Issuer of the
+# namespace, where this one is signed by the cluster's own CA, ClusterIssuer cluster-ca.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: barman-cloud-client
+spec:
+  commonName: barman-cloud-client
+  isCA: false
+  secretName: barman-cloud-client-tls
+  usages:
+    - client auth
+  duration: 2160h
+  renewBefore: 360h
+  privateKey:
+    rotationPolicy: Always
+  issuerRef:
+    group: cert-manager.io
+    kind: ClusterIssuer
+    name: cluster-ca
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cert-manager.io/certificate_v1.json
+# The plugin's server certificate, valid for the name of its Service, barman-cloud, which is fixed:
+# the operator dials the Service by that name.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: barman-cloud-server
+spec:
+  commonName: barman-cloud
+  dnsNames:
+    - barman-cloud
+  isCA: false
+  secretName: barman-cloud-server-tls
+  usages:
+    - server auth
+  duration: 2160h
+  renewBefore: 360h
+  privateKey:
+    rotationPolicy: Always
+  issuerRef:
+    group: cert-manager.io
+    kind: ClusterIssuer
+    name: cluster-ca

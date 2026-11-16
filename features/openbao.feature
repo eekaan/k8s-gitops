@@ -160,3 +160,28 @@ Feature: OpenBao
     Given a fake OpenBao whose error text holds terminal escape sequences, and a fake kubectl that cannot reach the API server and names its address with control characters
     When bao-seed-volsync and bao-put run
     Then OpenBao's error is printed with each control character as a question mark, and kubectl's error says why without the address or a control character
+
+  Scenario: Seeding the PostgreSQL backup key writes it to the custody file, checks it opens, and only then writes the store's key
+    Given a fake cluster and a fake OpenBao that hold no key postgres-backups, and the Talos age key's recipient
+    When bao-seed-postgres writes its custody file outside the repository, again for a second seeding, when the file opens to something else than was written, when the recipient is one the operator's age key does not open, and where no hard link can be made
+    Then the file decrypts with the Talos age key to a key that is the 32 bytes head read once from /dev/urandom, base64 encoded, a second seeding makes another key, the store's key holds that key and nothing else, it is created only if a patch of no data with check-and-set 0 found none and only once the file is in place and opened again to what was written, a file the operator's key cannot open or that opens to other content is removed and the store is never written, no hard link means no file and no write, and OpenBao is reached over TLS verified against its CA with a token that is revoked, through a port-forward that is closed
+
+  Scenario: A store that already holds the PostgreSQL backup key is not seeded again, and a rebuilt store takes the key from the custody file
+    Given a fake OpenBao that holds the key postgres-backups, and the custody file of the run that wrote it, and a fake OpenBao that holds none with that file
+    When bao-seed-postgres runs with that file, with a new file, with an unrelated file, the recovery keys' file and another cluster's custody file, with a path inside the repository, and, for the empty store, with the existing file and with the other cluster's
+    Then the store that holds the key says so and is left as it was, no file is made for it and the existing one stays, each file that is no custody file of this cluster is refused and kept, even for a store with no key, a path inside the repository is refused, and the empty store is given the key the file holds and no other
+
+  Scenario: A run that cannot ask the PostgreSQL backup key's store, or loses a race for the file, makes nothing
+    Given a fake OpenBao that refuses the question whether the key exists by a denied permission, a server error or an unreachable endpoint, and one where another file appears at the custody path after the recipe checked it
+    When bao-seed-postgres runs with a new file
+    Then it says the reason and not that the store holds the key, writes nothing to the store and leaves no file, and the file that appeared is never replaced
+
+  Scenario: A run interrupted between the PostgreSQL backup key's file and its store goes on from the file
+    Given a fake OpenBao that loses the write of the key, takes it without answering, refuses it, or an interrupt as the file is put in place
+    When bao-seed-postgres runs again with the same file
+    Then the first run names the file and says the next goes on from it without printing the key, the next reads the key back from the file and makes no other, and where the store took the write the next says it already holds the key and changes nothing
+
+  Scenario: Nothing of the PostgreSQL backup key is printed, passed as an argument or written unencrypted
+    Given a fake cluster and a fake OpenBao, and recording fakes of every command the recipe runs but the shell
+    When bao-seed-postgres seeds and runs again
+    Then no output, command line or file but the encrypted custody file holds the key, and the key travels only in the body of the write that creates the key

@@ -81,6 +81,7 @@ configMapGenerator:
       - catalogue/openbao.yaml
       - catalogue/operators.yaml
       - catalogue/piraeus-operator.yaml
+      - catalogue/plugin-barman-cloud.yaml
       - catalogue/prometheus-operator-crds.yaml
       - catalogue/reflector.yaml
       - catalogue/reloader.yaml

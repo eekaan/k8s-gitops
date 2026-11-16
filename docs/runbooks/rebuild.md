@@ -19,6 +19,9 @@ step it failed in ([cluster.md](../cluster.md#recipes)).
 - The volume backups' master, in the custody file `just bao-seed-volsync` wrote, which the operator
   holds: it opens the repositories in the VolSync bucket, and the rebuilt cluster's store is seeded
   from it ([Building it again](#building-it-again)).
+- The PostgreSQL backups' customer key, in the custody file `just bao-seed-postgres` wrote, which the
+  operator holds: every base backup and WAL file in the postgres bucket is encrypted with it, and
+  the rebuilt cluster's store is seeded from it ([Building it again](#building-it-again)).
 - Talos images that [image-replacement.md](image-replacement.md) left in the image service: no stack
   holds them, so no destroy removes them. They are removed by hand as that runbook says; once the
   nodes are destroyed, no volume made from them is left.
@@ -112,4 +115,7 @@ steps take the place of step 4's.
    `just bao-seed-volsync <file>` with the existing custody file of their master, never a new one:
    until it runs, every application's restore waits, its claim Pending, and a new master would open
    none of the repositories
-   ([volume-backups.md](volume-backups.md#the-stores-key-is-lost-and-the-file-is-kept)).
+   ([volume-backups.md](volume-backups.md#the-stores-key-is-lost-and-the-file-is-kept)). The same
+   goes for the PostgreSQL backups' customer key, `just bao-seed-postgres <file>` with the existing
+   custody file: until it runs, no database archives, and a new key would make every archive
+   unreadable ([postgres-restore.md](postgres-restore.md#the-customer-key)).

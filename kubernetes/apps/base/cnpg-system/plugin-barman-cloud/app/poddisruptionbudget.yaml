@@ -1,0 +1,15 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/poddisruptionbudget-policy-v1.json
+# Keeps one of the plugin's two pods running while a node is drained; the chart makes no budget. The
+# selector is the chart's selector labels for the release plugin-barman-cloud. While no replica
+# answers, the operator cannot make or change the pod of a database that archives.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: plugin-barman-cloud
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: plugin-barman-cloud
+      app.kubernetes.io/instance: plugin-barman-cloud

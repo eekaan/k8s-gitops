@@ -5,11 +5,11 @@
 # credentials and connection URI in the Secret <name>-app, and the Services <name>-rw for the
 # primary, <name>-ro for the replicas and <name>-r for any instance.
 #
-# The data is copied out of the cluster once a day by the dump job in cronjob.yaml, a logical dump
-# encrypted before it leaves, which is not a point in time. The operator's own backups, WAL
-# archiving and base backups through the Barman Cloud plugin, are not used: the plugin offers
-# server-side encryption only, and nothing leaves the cluster unencrypted (docs/kubernetes.md,
-# PostgreSQL).
+# Its WAL is archived continuously, and base backups are taken daily, to the object storage through
+# the Barman Cloud plugin, encrypted at the provider with a customer key: spec.plugins below, the
+# ObjectStore and the ScheduledBackup beside this file, from which the cluster can be restored to a
+# point in time. Once a day the dump job in cronjob.yaml also copies the application database out as
+# a logical dump, encrypted before it leaves the cluster (docs/kubernetes.md, PostgreSQL).
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -42,6 +42,16 @@ spec:
     enablePodAntiAffinity: true
     topologyKey: kubernetes.io/hostname
     podAntiAffinityType: required
+
+  # Every WAL segment goes to the object storage as the plugin's sidecar in each instance's pod
+  # archives it, to a directory of this cluster's own name (serverName) under the destination the
+  # ObjectStore gives. The plugin, not the in-tree barmanObjectStore the operator deprecates.
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: ${CNPG_CLUSTER_NAME}
+        serverName: ${CNPG_CLUSTER_NAME}
 
   # The operator's two disruption budgets: a drain of the primary's node waits for a switchover to a
   # replica, and drains take one replica at a time.

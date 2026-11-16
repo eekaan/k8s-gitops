@@ -75,6 +75,20 @@
       separateMajorMinor: false,
     },
     {
+      // tests/postgresql.bats fails unless the plugin's image and its sidecar's are of the release the
+      // chart is made for, its appVersion, so the three move in one pull request whatever the step of each.
+      // The oldest operator the release supports is a constant of that test: a release whose
+      // documentation raises it needs the constant raised by hand in this pull request.
+      description: "The Barman Cloud plugin: its chart, its image and its sidecar's image",
+      matchPackageNames: [
+        "ghcr.io/cloudnative-pg/charts/plugin-barman-cloud",
+        "ghcr.io/cloudnative-pg/plugin-barman-cloud",
+        "ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar",
+      ],
+      groupName: "Barman Cloud plugin",
+      separateMajorMinor: false,
+    },
+    {
       description: "The Flux Operator: its image and its operator and instance charts",
       matchPackageNames: ["controlplaneio-fluxcd/**", "ghcr.io/controlplaneio-fluxcd/**"],
       groupName: "Flux Operator",

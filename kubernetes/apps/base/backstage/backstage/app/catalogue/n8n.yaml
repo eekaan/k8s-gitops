@@ -23,5 +23,6 @@ spec:
     - resource:default/gateway-public
     - resource:default/linstor-cluster
     - resource:default/openbao-store
+    - component:default/plugin-barman-cloud
     - resource:default/prometheus-operator-crds
     - component:default/volsync

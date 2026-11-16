@@ -1,12 +1,15 @@
 ---
 # Prometheus scrapes the exporter the operator runs in every instance, on the port named metrics. The
 # operator's documentation recommends a PodMonitor of one's own over the Cluster's
-# monitoring.enablePodMonitor, which it deprecates.
+# monitoring.enablePodMonitor, which it deprecates. Each series carries the Cluster's name as the
+# label cnpg_io_cluster, which the backup alerts (apps/base/cnpg-system/cloudnative-pg) group by.
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
   name: ${CNPG_CLUSTER_NAME}
 spec:
+  podTargetLabels:
+    - cnpg.io/cluster
   selector:
     matchLabels:
       cnpg.io/cluster: ${CNPG_CLUSTER_NAME}

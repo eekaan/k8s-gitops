@@ -4,7 +4,7 @@ Feature: Backstage
   Scenario: Backstage is selected by overlay entries and builds nothing when it is not
     Given the lab-sto2 overlay, which selects Backstage with two entries, the namespace directory backstage and the application's ks.yaml
     When it is built with both entries, with only the namespace directory's and with neither, and then with both and each application Backstage depends on left out in turn
-    Then with both it applies the namespace backstage, its app-template-defaults ConfigMap, its default-deny NetworkPolicy and the Kustomization backstage; with only the namespace directory's, the namespace, the ConfigMap and the NetworkPolicy and nothing else of backstage; with neither, nothing of backstage; and with both but one of cloudnative-pg, prometheus-operator-crds, external-secrets, openbao-store, gateway-public and cilium left out, it is refused, naming backstage and the missing application
+    Then with both it applies the namespace backstage, its app-template-defaults ConfigMap, its default-deny NetworkPolicy and the Kustomization backstage; with only the namespace directory's, the namespace, the ConfigMap and the NetworkPolicy and nothing else of backstage; with neither, nothing of backstage; and with both but one of cloudnative-pg, plugin-barman-cloud, prometheus-operator-crds, external-secrets, openbao-store, gateway-public and cilium left out, it is refused, naming backstage and the missing application
 
   Scenario: The catalogue holds exactly one entity for every application the overlay selects, and every entity's links and dependencies exist in the tree
     Given the lab-sto2 overlay and the directory of entity files beside the Backstage application
