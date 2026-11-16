@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+# Proves that a PostgreSQL database's dump in the postgres bucket can be restored from, without
+# showing or keeping any of it. It finds the dump, by a name postgres-dumps prints or as latest;
+# downloads it with the state key into a private temporary directory, on a memory-backed filesystem
+# where there is one (the user's runtime directory, then /dev/shm) and otherwise under TMPDIR, which
+# it says; checks that the file begins with the age header; decrypts it there with the Talos age key,
+# as cluster-restore does; and has pg_restore --list read the archive's table of contents. Then it
+# prints the dump's name, its encrypted and plain sizes, the archive's format, the PostgreSQL version
+# that dumped it and the time it was taken, and the number of tables, empty ones included, and nothing
+# from the database: not a table's name, a row or any other object's name, which the table of contents
+# holds and which are counted or dropped here, never printed, and pg_restore's own output is not shown.
+# An archive that holds no table fails the check.
+# The directory is removed on every exit, a failed run and one interrupted by Ctrl-C or SIGTERM
+# included (make_private_dir's EXIT trap in scripts/lib/cluster.sh).
+# pg_restore must be of the PostgreSQL major the archive was made with, or newer. It runs from the
+# image of the dump step in the cnpg-cluster component's CronJob, the image and digest read from
+# there, with no network, from a read-only mount of the directory, as the user's own uid, with every
+# capability dropped, removed afterwards and logging nowhere (the table of contents it prints would
+# otherwise reach the runtime's log), by docker or by podman, whichever is on PATH, or by
+# CONTAINER_RUNTIME's, through run_tool, so with none of the secrets of the environment and with the
+# caller's own TMPDIR, not the private directory. The container's user is the caller's uid, which
+# needs a runtime that keeps it: rootful docker, or podman, which is told to; rootless docker maps it
+# to a uid that cannot enter the private directory, and a host with SELinux enforcing needs the
+# mount labelled, so on those the check says the archive cannot be read when it is the mount that is
+# refused.
+# Of rclone's errors only the reason is shown, with places and keys replaced, and with CI set none
+# of it, but the name of the file that keeps it (scripts/lib/errors.sh).
+# Usage: scripts/postgres-dump-check <namespace> <name> [<dump>|latest] [cluster]
+set -euo pipefail
+umask 077
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/postgres-dumps.sh
+. "$here/lib/postgres-dumps.sh"
+
+usage() {
+  infra_error "usage: postgres-dump-check <namespace> <name> [<dump>|latest] [cluster]; <dump> is a name just postgres-dumps prints"
+  exit 2
+}
+
+(($# >= 2 && $# <= 4)) || usage
+namespace=$1 name=$2 dump=${3:-latest} cluster=${4-}
+if [[ ! $namespace =~ $pg_label_re || ! $name =~ $pg_label_re ]]; then
+  usage
+fi
+if [[ $dump != latest && ! $dump =~ $pg_dump_name_re ]]; then
+  usage
+fi
+
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "$cluster"
+
+component=kubernetes/components/cnpg-cluster/cronjob.yaml
+image_re='^[a-z0-9][a-z0-9./-]*:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$'
+
+# find_runtime: sets runtime to the container runtime to run pg_restore with: CONTAINER_RUNTIME's, or
+# the first of docker and podman on PATH. Fails naming what is missing.
+find_runtime() {
+  if [[ -n ${CONTAINER_RUNTIME-} ]]; then
+    runtime=$CONTAINER_RUNTIME
+    require_commands "$runtime"
+    return
+  fi
+  for runtime in docker podman; do
+    if type -P "$runtime" > /dev/null; then
+      return 0
+    fi
+  done
+  infra_error "neither docker nor podman is on PATH; pg_restore runs from the PostgreSQL image of the dump step, which needs one of them"
+  return 1
+}
+
+# find_image: sets image to the image of the dump step in the component's CronJob, by tag and digest.
+find_image() {
+  image=$(yq '.spec.jobTemplate.spec.template.spec.initContainers[] | select(.name == "dump") | .image' \
+    "$infra_root/$component" 2> /dev/null) || image=
+  if [[ ! $image =~ $image_re ]]; then
+    infra_error "$component names no image of the dump step by tag and digest"
+    return 1
+  fi
+}
+
+# memory_backed_dir: prints the first of the runtime directory and /dev/shm that this user can write
+# and that is on a memory-backed filesystem, and fails when there is none.
+memory_backed_dir() {
+  local dir
+  for dir in "${XDG_RUNTIME_DIR-}" /dev/shm; do
+    if [[ -n $dir && -d $dir && -w $dir ]]; then
+      case $(stat -f -c %T "$dir" 2> /dev/null) in
+        tmpfs | ramfs)
+          printf '%s\n' "$dir"
+          return 0
+          ;;
+      esac
+    fi
+  done
+  return 1
+}
+
+# run_runtime ARG...: the container runtime, with none of the secrets and the caller's TMPDIR.
+run_runtime() {
+  TMPDIR=$runtime_tmpdir run_tool "$runtime" "$@"
+}
+
+complete=1
+require_env BACKUP_BUCKET_PREFIX AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY || complete=0
+require_age_key || complete=0
+require_commands age jq yq || complete=0
+find_runtime || complete=0
+find_image || complete=0
+((complete))
+s3_bucket_name_ok BACKUP_BUCKET_PREFIX prefix
+s3_require_client
+start_errors_log "$cluster_dir/clusterconfig/${0##*/}.errors.log"
+database="$namespace/$name on $cluster"
+
+step="making a private directory for the dump"
+# The runtime keeps its own temporary files, such as a pulled image's layers, where the caller's
+# TMPDIR says, not in the private directory, which is on memory and small.
+runtime_tmpdir=${TMPDIR:-/var/tmp}
+if base=$(memory_backed_dir); then
+  scratch="memory-backed"
+else
+  base=${TMPDIR:-/tmp}
+  scratch="disk, as no memory-backed filesystem was found; removed afterwards"
+  infra_error "no memory-backed filesystem was found; the dump is kept on the disk, under TMPDIR, until the check removes it"
+fi
+TMPDIR=$base make_private_dir
+# What rclone and the runtime report is kept in the directory too, so it goes with it.
+export TMPDIR=$work_dir
+
+step="finding the dump in the postgres bucket"
+if ! listing=$(s3_postgres_dumps "$cluster" "$namespace" "$name"); then
+  infra_error "rclone cannot list the postgres bucket with the state key, or it does not exist; just infra-backup-buckets creates it"
+  exit 1
+fi
+found=
+while read -r listed _; do
+  if [[ -n $listed && ($dump == latest || $listed == "$dump") ]]; then
+    found=$listed
+    break
+  fi
+done <<< "$listing"
+if [[ -z $found && $dump == latest ]]; then
+  infra_error "the postgres bucket holds no dump of $database; just postgres-dumps lists them"
+  exit 1
+elif [[ -z $found ]]; then
+  infra_error "the postgres bucket holds no dump $dump of $database; just postgres-dumps lists them"
+  exit 1
+fi
+dump=$found
+encrypted=$work_dir/$dump
+plain=$work_dir/plain.dump
+
+step="downloading $dump"
+# rclone copies nothing, and succeeds, when the object is not there.
+if ! run_keeping_errors s3_rclone state copyto "store:$BACKUP_BUCKET_PREFIX-postgres/$cluster/$namespace/$name/$dump" "$encrypted" ||
+  [[ ! -s $encrypted ]]; then
+  report_errors rclone
+  infra_error "rclone cannot download $dump with the state key"
+  exit 1
+fi
+
+step="decrypting $dump with the Talos age key"
+# tr drops the NUL of a binary file's header, which bash would warn about.
+if [[ $(head -c 21 "$encrypted" | tr -d '\0') != age-encryption.org/v1 ]]; then
+  infra_error "$dump is not an age file"
+  exit 1
+fi
+if ! run_keeping_errors age_decrypt "$encrypted" "$plain"; then
+  # age's other errors, such as a full directory, name the scratch directory, so only this one is told.
+  if [[ $last_errors == *"no identity matched"* ]]; then
+    infra_error "the Talos age key cannot decrypt $dump"
+  else
+    infra_error "age cannot read $dump, for a reason other than the key: it may be damaged, or the scratch directory full"
+  fi
+  exit 1
+fi
+
+step="reading the archive of $dump with pg_restore --list"
+# The log driver keeps the table of contents, which pg_restore prints, out of the runtime's log on disk
+# or in a journal; the attached output still arrives.
+runtime_args=(run --rm --log-driver=none --network none --read-only --cap-drop ALL --security-opt no-new-privileges
+  --user "$(id -u):$(id -g)")
+# A rootless podman maps the user's uid into the container only with this.
+[[ ${runtime##*/} != podman ]] || runtime_args+=(--userns=keep-id)
+status=0
+run_keeping_errors run_runtime "${runtime_args[@]}" --volume "$work_dir:/dump:ro" --entrypoint pg_restore \
+  "$image" --list /dump/plain.dump || status=$?
+if ((status >= 125 && status <= 127)); then
+  # The runtime itself failed, as when it cannot pull the image or reach its daemon. A status above
+  # that is a container killed by a signal, whose standard error is pg_restore's.
+  report_errors "$runtime"
+  infra_error "$runtime cannot run pg_restore from the image of the dump step"
+  exit 1
+elif ((status != 0)); then
+  # pg_restore's errors are not shown: they can name what the archive holds.
+  infra_error "pg_restore cannot read $dump: it is no custom-format archive, or is of a newer PostgreSQL major than the image's"
+  exit 1
+fi
+contents=$last_output
+encrypted_size=$(wc -c < "$encrypted")
+plain_size=$(wc -c < "$plain")
+rm -f -- "$plain"
+
+# The table of contents names every object of the database; of it only the counts and the archive's
+# header facts, each of a known shape, are kept. pg_dump writes a TABLE DATA entry for every table, an
+# empty one too, so their number is the number of tables, and does not say whether any holds a row.
+format=unknown server=unknown pg_dump=unknown taken=unknown tables=0
+format_re='^;[[:space:]]+Format:[[:space:]]+([A-Z]+)$'
+server_re='^;[[:space:]]+Dumped from database version:[[:space:]]+([0-9]+(\.[0-9]+)*)([[:space:]].*)?$'
+pg_dump_re='^;[[:space:]]+Dumped by pg_dump version:[[:space:]]+([0-9]+(\.[0-9]+)*)([[:space:]].*)?$'
+taken_re='^;[[:space:]]+Archive created at[[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}( [A-Za-z0-9+-]+)?)$'
+table_re='^[0-9]+; [0-9]+ [0-9]+ TABLE DATA '
+while IFS= read -r line; do
+  if [[ $line =~ $format_re ]]; then
+    format=${BASH_REMATCH[1]}
+  elif [[ $line =~ $server_re ]]; then
+    server=${BASH_REMATCH[1]}
+  elif [[ $line =~ $pg_dump_re ]]; then
+    pg_dump=${BASH_REMATCH[1]}
+  elif [[ $line =~ $taken_re ]]; then
+    taken=${BASH_REMATCH[1]}
+  elif [[ $line =~ $table_re ]]; then
+    tables=$((tables + 1))
+  fi
+done <<< "$contents"
+if ((tables == 0)); then
+  infra_error "the archive of $dump holds no table"
+  exit 1
+fi
+
+echo "dump: $dump"
+echo "scratch: $scratch"
+echo "encrypted: $encrypted_size bytes"
+echo "plain: $plain_size bytes"
+echo "format: $format"
+echo "PostgreSQL: $server, dumped by pg_dump $pg_dump"
+echo "taken: $taken"
+echo "tables: $tables"

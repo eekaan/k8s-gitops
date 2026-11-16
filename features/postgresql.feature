@@ -70,3 +70,23 @@ Feature: PostgreSQL
     Given the component's Cluster and the image of the dump step built for an application
     When their images are read
     Then the dump step runs an image of the operator's registry path whose tag names the same PostgreSQL major version as the Cluster's, and every image of the job is pinned by tag and digest
+
+  Scenario: The dumps of a database are listed newest first by name and size
+    Given the postgres bucket holds dumps of two databases, objects that are not dumps, and another cluster's dumps of the same database
+    When just postgres-dumps runs for one database, for another cluster and with no database named
+    Then it lists that database's dumps under its own path only, newest first, each by name and size and nothing else, or the databases that have a dump, and the output names no bucket, endpoint or key
+
+  Scenario: A dump is checked by decrypting it and reading its archive, and nothing of its contents is printed
+    Given dumps encrypted to the Talos age key's recipient, a stand-in for the object storage and a stand-in for pg_restore that reads a made-up archive whose table names and rows are markers
+    When just postgres-dump-check runs for the newest dump and for a named one
+    Then the dump is downloaded, begins with the age header, is decrypted with the Talos age key into a memory-backed directory and read by pg_restore from the cluster's PostgreSQL image, named by its digest in the component, without a network and from a read-only mount, and the recipe prints the dump's name, its encrypted and plain sizes, the archive's format, PostgreSQL version and time, and the number of tables, and no table name, row or other name from the database
+
+  Scenario: A dump that is not encrypted, does not decrypt or cannot be read fails the check with its reason
+    Given a dump that is a plain archive, one encrypted to another key and one that holds no archive
+    When just postgres-dump-check runs for each
+    Then each exits non-zero with a line that says which of the three it is, the plain archive and the one another key encrypted never reach pg_restore, and nothing of the archive's contents is printed
+
+  Scenario: The check leaves nothing behind, whether it passes, fails or is interrupted
+    Given a dump that checks, dumps that fail the check, a failing download, and a run interrupted while pg_restore reads the dump, whether pg_restore dies of the interruption or handles it
+    When just postgres-dump-check runs for each, with a memory-backed directory and without one
+    Then no run leaves a file or directory in the memory-backed directory or in TMPDIR, the plain dump included
