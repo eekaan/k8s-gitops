@@ -15,6 +15,14 @@ write_files:
     permissions: "0644"
     content: |
       ${indent(6, nftables_conf)}
+  - path: /etc/edge/haproxy.cfg
+    permissions: "0644"
+    content: |
+      ${indent(6, haproxy_conf)}
+  - path: /etc/edge/haproxy-unit.conf
+    permissions: "0644"
+    content: |
+      ${indent(6, haproxy_unit)}
   - path: /etc/edge/sysctl.conf
     permissions: "0644"
     content: |

@@ -41,7 +41,7 @@ variable "public_allowed_cidrs" {
 }
 
 variable "public_ports" {
-  description = "TCP ports the edges forward from their own addresses to the public Gateway's address. The same ports the cluster stack's service_ports admit at the workers from the edges: a test keeps the defaults equal."
+  description = "TCP ports the edges' proxies listen on, at their own addresses, and connect to on the public Gateway's address. The same ports the cluster stack's service_ports admit at the workers from the edges: a test keeps the defaults equal."
   type        = list(number)
   default     = [80, 443]
 
@@ -73,7 +73,7 @@ variable "edge_ssh_public_key" {
 }
 
 variable "flavor" {
-  description = "Nova flavor of the edges. They forward packets and run a routing daemon, so a small one is enough."
+  description = "Nova flavor of the edges. They run a routing daemon and a TCP proxy, so a small one is enough."
   type        = string
   default     = "b.2c4gb"
 }

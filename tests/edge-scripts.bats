@@ -233,14 +233,44 @@ if [[ \$* == /proc/sys/net/ipv4/ip_forward ]]; then
   fi
   exec "$(type -P cat)" "\$EDGE_FIXTURE/forwarding"
 fi
+if [[ \$* == /etc/haproxy/haproxy.cfg ]]; then
+  if [[ -f "\$EDGE_FIXTURE/broken-proxy-config" ]]; then
+    "$(type -P cat)" "\$EDGE_FIXTURE/broken-proxy-config" >&2
+    exit 1
+  fi
+  exec "$(type -P cat)" "\$EDGE_FIXTURE/proxy-config"
+fi
 exec "$(type -P cat)" "\$@"
 EOF
+  host_fake ps << 'EOF'
+[[ $* == '-C haproxy -o user=' ]] || { echo "fake ps: unexpected $*" >&2; exit 1; }
+if [[ -f $EDGE_FIXTURE/broken-proxy-users ]]; then
+  cat "$EDGE_FIXTURE/broken-proxy-users" >&2
+  exit 2
+fi
+# ps exits 1 when no process matches.
+[[ -s $EDGE_FIXTURE/proxy-users ]] || exit 1
+cat "$EDGE_FIXTURE/proxy-users"
+EOF
+  host_fake ss << 'EOF'
+[[ $* == '-H -ltnp' ]] || { echo "fake ss: unexpected $*" >&2; exit 1; }
+if [[ -f $EDGE_FIXTURE/broken-listening ]]; then
+  cat "$EDGE_FIXTURE/broken-listening" >&2
+  exit 1
+fi
+cat "$EDGE_FIXTURE/listening"
+EOF
   host_fake systemctl << 'EOF'
-if [[ -f $EDGE_FIXTURE/broken-frr ]]; then
-  cat "$EDGE_FIXTURE/broken-frr" >&2
+case $* in
+  'is-active frr') unit=frr ;;
+  'is-active haproxy') unit=proxy ;;
+  *) echo "fake systemctl: unexpected $*" >&2; exit 1 ;;
+esac
+if [[ -f $EDGE_FIXTURE/broken-$unit ]]; then
+  cat "$EDGE_FIXTURE/broken-$unit" >&2
   exit 4
 fi
-state=$(cat "$EDGE_FIXTURE/frr")
+state=$(cat "$EDGE_FIXTURE/$unit")
 echo "$state"
 [[ $state == active ]] || exit 3
 EOF
@@ -261,6 +291,7 @@ EOF
 case $* in
   'list tables') section=rules ;;
   'list chain inet edge forward') section=forward ;;
+  'list chain inet edge output') section=output ;;
   *) echo "fake nft: unexpected $*" >&2; exit 1 ;;
 esac
 if [[ -f $EDGE_FIXTURE/broken-$section ]]; then
@@ -387,14 +418,20 @@ edge_state() {
   jq -n --arg prefixes "$4" --arg addresses "$3" '{routes: ($prefixes | split(" ") | map(select(. != ""))
     | map({key: ., value: ($addresses | split(" ") | map(select(. != "")) | map({valid: true, bestpath: true, multipath: true}))})
     | from_entries)}' > "$dir/table.json"
-  printf 'table inet edge\ntable ip edge-nat\n' > "$dir/rules"
+  printf 'table inet edge\n' > "$dir/rules"
   echo "${5:-1}" > "$dir/forwarding"
   # FRR's configuration with its reject route for the service range, the kernel's route from it, the
-  # forward chain that admits a translated connection only through a worker, and no unattended
-  # upgrades.
+  # forward chain that holds no rule, the output chain that refuses the proxy's packets toward the
+  # Gateway unless they go through a worker, the proxy running as its own user with its listeners
+  # on the edge's own address, and no unattended upgrades.
   printf 'router bgp 64497\nexit\nip route 203.0.113.16/28 reject\n' > "$dir/config"
   echo 'unreachable 203.0.113.16/28 proto static metric 20' > "$dir/unreachable"
-  forward_chain '192.0.2.20-192.0.2.99' first > "$dir/forward"
+  forward_chain > "$dir/forward"
+  output_chain '192.0.2.20-192.0.2.99' > "$dir/output"
+  echo active > "$dir/proxy"
+  printf 'haproxy\nhaproxy\n' > "$dir/proxy-users"
+  proxy_config > "$dir/proxy-config"
+  proxy_listeners > "$dir/listening"
   echo 'default via 192.0.2.1 dev ens3 proto dhcp src 192.0.2.7 metric 100' > "$dir/default"
   echo 'APT::Periodic::Unattended-Upgrade "0";' > "$dir/upgrades"
   # What sshd -T prints: the settings the tree writes, as the daemon names them, among others of its
@@ -407,16 +444,44 @@ edge_state() {
   } > "$dir/sshd"
 }
 
-# forward_chain SET ORDER [GATEWAY]: the forward chain as nft lists it once loaded, its guard's set
-# SET, as nft writes the workers' block, and the rule that drops what does not go through a worker
-# first, ahead of what belongs to a connection, or last, after it, or none.
+# forward_chain [RULE]: the forward chain as nft lists it once loaded: policy drop and, as it is
+# written, no rule, or RULE.
 forward_chain() {
-  local drop="ip daddr ${3:-203.0.113.21} ct direction original ct status dnat rt ip nexthop != { $1 } drop"
-  printf 'table inet edge {\n\tchain forward {\n\t\ttype filter hook forward priority filter; policy drop;\n'
-  [[ $2 != first ]] || printf '\t\t%s\n' "$drop"
-  printf '\t\tct state established,related accept\n\t\tct state invalid drop\n'
-  [[ $2 != last ]] || printf '\t\t%s\n' "$drop"
-  printf '\t\tip daddr %s tcp dport { 80, 443 } ct state new ct status dnat rt ip nexthop { %s } accept\n\t}\n}\n' "${3:-203.0.113.21}" "$1"
+  printf 'table inet edge {\n\tchain forward {\n\t\ttype filter hook forward priority filter; policy %s;\n' "${FORWARD_POLICY:-drop}"
+  [[ -z ${1-} ]] || printf '\t\t%s\n' "$1"
+  printf '\t}\n}\n'
+}
+
+# output_chain SET [GATEWAY]: the output chain as nft lists it once loaded: the rule that refuses a
+# packet toward the Gateway whose route does not go through a worker, with SET the workers' block as
+# nft writes it, or no rule for SET none.
+output_chain() {
+  printf 'table inet edge {\n\tchain output {\n\t\ttype filter hook output priority filter; policy accept;\n'
+  [[ $1 == none ]] || printf '\t\tip daddr %s rt ip nexthop != { %s } reject with icmp port-unreachable\n' "${2:-203.0.113.21}" "$1"
+  printf '\t}\n}\n'
+}
+
+# proxy_config [GATEWAY [OWN [SERVER_OPTIONS]]]: the proxy's configuration as the edge holds it: a
+# listener on each public port at the edge's own address, and for each the Gateway's address with the
+# PROXY protocol header.
+proxy_config() {
+  local gateway=${1:-203.0.113.21} own=${2:-192.0.2.7} options port
+  options=${3-send-proxy-v2 source $own}
+  printf 'global\n    maxconn 4000\n\ndefaults\n    mode tcp\n'
+  for port in 80 443; do
+    printf '\nfrontend public-%s\n    bind %s:%s\n    default_backend gateway-%s\n' "$port" "$own" "$port" "$port"
+    printf '\nbackend gateway-%s\n    server gateway %s:%s %s\n' "$port" "$gateway" "$port" "$options"
+  done
+}
+
+# proxy_listeners [OWN [PROCESS]]: the edge's listening sockets as ss lists them: SSH's and BGP's,
+# and the proxy's on its own address.
+proxy_listeners() {
+  local own=${1:-192.0.2.7} process=${2:-haproxy}
+  printf 'LISTEN 0 4096 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=401,fd=3))\n'
+  printf 'LISTEN 0 4096 0.0.0.0:179 0.0.0.0:* users:(("bgpd",pid=502,fd=22))\n'
+  printf 'LISTEN 0 4096 %s:80 0.0.0.0:* users:(("%s",pid=611,fd=5))\n' "$own" "$process"
+  printf 'LISTEN 0 4096 %s:443 0.0.0.0:* users:(("%s",pid=611,fd=6))\n' "$own" "$process"
 }
 
 # edge_check [ARG...]: scripts/edge-check in the copy, in the environment above.
@@ -491,13 +556,14 @@ no_address() {
   [[ $output == *"skip  lab-edge-1: sessions:"* && $output == *"skip  lab-edge-1: routes:"* ]]
 }
 
-@test "edge-check fails when what keeps a translated connection from the cloud's router is missing, or unattended upgrades are on" {
+@test "edge-check fails when what keeps the proxy's connections from the cloud's router is missing, or unattended upgrades are on" {
   edge_state 1 active "$WORKERS" 203.0.113.17/32
   edge_check --edge 1
   echo "$output"
   [ "$status" -eq 0 ]
   [[ $output == *"pass  lab-edge-1: the service range is unreachable on the edge but through a worker's route"* ]]
-  [[ $output == *"pass  lab-edge-1: the forward chain sends a translated connection, new or established, toward the Gateway only through a worker"* ]]
+  [[ $output == *"pass  lab-edge-1: the output chain keeps the proxy's connections to the Gateway on a worker's route"* ]]
+  [[ $output == *"pass  lab-edge-1: the forward chain forwards nothing"* ]]
   [[ $output == *"pass  lab-edge-1: unattended upgrades are off"* ]]
 
   # FRR runs its package's defaults, as after a first boot that failed: no reject route is configured.
@@ -523,37 +589,47 @@ no_address() {
   [ "$status" -ne 0 ]
   [[ $output == *"FAIL  lab-edge-1: FRR's reject route is not for the cluster's service range"* ]]
 
-  # The forward chain's guard, by the rules' content: missing, after what belongs to a connection,
-  # for another Gateway, without a worker's address, or holding the default route's next hop.
-  for chain in "192.0.2.20-192.0.2.99 none" "192.0.2.20-192.0.2.99 last" \
-    "192.0.2.20-192.0.2.99 first 203.0.113.22" "192.0.2.20-192.0.2.29 first" \
-    "192.0.2.0/24 first" "192.0.2.1, 192.0.2.20-192.0.2.99 first"; do
+  # The output chain's guard, by the rules' content: missing, for another Gateway, without a worker's
+  # address, or holding the default route's next hop.
+  local entry chain gateway_of_chain wrong
+  for entry in \
+    "none||the output chain does not refuse a packet toward the Gateway that does not go through a worker" \
+    "192.0.2.20-192.0.2.99|203.0.113.22|the output chain's guard is not for the cluster's Gateway address" \
+    "192.0.2.20-192.0.2.29||the output chain's guard leaves out a worker's address" \
+    "192.0.2.0/24||the output chain's guard admits the default route's next hop" \
+    "192.0.2.1, 192.0.2.20-192.0.2.99||the output chain's guard admits the default route's next hop"; do
+    IFS='|' read -r chain gateway_of_chain wrong <<< "$entry"
     edge_state 1 active "$WORKERS" 203.0.113.17/32
-    # shellcheck disable=SC2086 # the set, the order and the Gateway, as words
-    forward_chain $chain > "$HOST/edge-1/forward"
+    output_chain "$chain" ${gateway_of_chain:+"$gateway_of_chain"} > "$HOST/edge-1/output"
     edge_check --edge 1
     echo "$chain: $output"
     [ "$status" -ne 0 ]
-    [[ $output == *"FAIL  lab-edge-1: the forward chain"* ]]
+    [[ $output == *"FAIL  lab-edge-1: $wrong"* ]]
   done
+
+  # A rule in the forward chain, and a forward chain that does not drop by default.
   edge_state 1 active "$WORKERS" 203.0.113.17/32
-  forward_chain '192.0.2.20-192.0.2.99' last > "$HOST/edge-1/forward"
+  forward_chain 'ip daddr 203.0.113.21 tcp dport { 80, 443 } accept' > "$HOST/edge-1/forward"
   edge_check --edge 1
-  [[ $output == *"FAIL  lab-edge-1: the forward chain does not drop an established connection's packets toward the Gateway that do not go through a worker"* ]]
-  forward_chain '192.0.2.0/24' first > "$HOST/edge-1/forward"
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL  lab-edge-1: the forward chain holds a rule, so it may forward"* ]]
+  FORWARD_POLICY=accept forward_chain > "$HOST/edge-1/forward"
   edge_check --edge 1
-  [[ $output == *"FAIL  lab-edge-1: the forward chain's guard admits the default route's next hop"* ]]
-  forward_chain '192.0.2.20-192.0.2.29' first > "$HOST/edge-1/forward"
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL  lab-edge-1: the forward chain does not drop by default"* ]]
+
+  # The old translation table still loaded.
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  printf 'table inet edge\ntable ip edge-nat\n' > "$HOST/edge-1/rules"
   edge_check --edge 1
-  [[ $output == *"FAIL  lab-edge-1: the forward chain's guard leaves out a worker's address"* ]]
-  forward_chain '192.0.2.20-192.0.2.99' first 203.0.113.22 > "$HOST/edge-1/forward"
-  edge_check --edge 1
-  [[ $output == *"FAIL  lab-edge-1: the forward chain's guard is not for the cluster's Gateway address"* ]]
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL  lab-edge-1: a translation table is loaded, so a connection to a public port may be translated instead of proxied"* ]]
 
   # Forwarding on with no rules loaded.
   edge_state 1 active "$WORKERS" 203.0.113.17/32
   : > "$HOST/edge-1/rules"
   : > "$HOST/edge-1/forward"
+  : > "$HOST/edge-1/output"
   edge_check --edge 1
   [ "$status" -ne 0 ]
   [[ $output == *"FAIL  lab-edge-1: the kernel forwards without the nftables rules"* ]]
@@ -567,6 +643,123 @@ no_address() {
   no_address "$output"
 }
 
+@test "edge-check fails an edge whose proxy is not running, runs as root, listens beyond its own address or sends no header" {
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_check --edge 1
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *"pass  lab-edge-1: the proxy is running"* ]]
+  [[ $output == *"pass  lab-edge-1: the proxy runs as its own user, not root"* ]]
+  [[ $output == *"pass  lab-edge-1: the proxy listens on the addresses and ports its configuration binds, and on no others"* ]]
+  [[ $output == *"pass  lab-edge-1: the proxy sends each connection to the cluster's Gateway address, with the PROXY protocol version 2 header"* ]]
+  [[ $output == *"pass  lab-edge-1: the proxy's configuration binds the stack's public ports, and no other port"* ]]
+  no_address "$output"
+
+  # Not running.
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  echo inactive > "$HOST/edge-1/proxy"
+  : > "$HOST/edge-1/proxy-users"
+  : > "$HOST/edge-1/listening"
+  edge_check --edge 1
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL  lab-edge-1: the proxy is not running"* ]]
+  [[ $output == *"FAIL  lab-edge-1: the proxy has no process"* ]]
+  [[ $output == *"FAIL  lab-edge-1: the proxy's listeners are not those its configuration binds"* ]]
+
+  # A process of root's among its processes, or all of them root's.
+  for users in 'root' $'haproxy\nroot'; do
+    edge_state 1 active "$WORKERS" 203.0.113.17/32
+    echo "$users" > "$HOST/edge-1/proxy-users"
+    edge_check --edge 1
+    echo "$users: $output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"FAIL  lab-edge-1: the proxy runs as a user other than haproxy"* ]]
+  done
+
+  # Listening on every address, on an address that is not the one configured, on a port that is not
+  # configured, or not listening on one that is.
+  local listeners
+  for listeners in \
+    $'LISTEN 0 4096 0.0.0.0:80 0.0.0.0:* users:(("haproxy",pid=611,fd=5))\nLISTEN 0 4096 192.0.2.7:443 0.0.0.0:* users:(("haproxy",pid=611,fd=6))' \
+    $'LISTEN 0 4096 *:80 *:* users:(("haproxy",pid=611,fd=5))\nLISTEN 0 4096 192.0.2.7:443 0.0.0.0:* users:(("haproxy",pid=611,fd=6))' \
+    $'LISTEN 0 4096 192.0.2.7:80 0.0.0.0:* users:(("haproxy",pid=611,fd=5))\nLISTEN 0 4096 192.0.2.7:443 0.0.0.0:* users:(("haproxy",pid=611,fd=6))\nLISTEN 0 4096 192.0.2.7:8080 0.0.0.0:* users:(("haproxy",pid=611,fd=7))' \
+    $'LISTEN 0 4096 192.0.2.7:80 0.0.0.0:* users:(("haproxy",pid=611,fd=5))' \
+    $'LISTEN 0 4096 192.0.2.99:80 0.0.0.0:* users:(("haproxy",pid=611,fd=5))\nLISTEN 0 4096 192.0.2.99:443 0.0.0.0:* users:(("haproxy",pid=611,fd=6))'; do
+    edge_state 1 active "$WORKERS" 203.0.113.17/32
+    echo "$listeners" > "$HOST/edge-1/listening"
+    edge_check --edge 1
+    echo "$listeners: $output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"FAIL  lab-edge-1: the proxy's listeners are not those its configuration binds"* ]]
+    no_address "$output"
+  done
+
+  # A configuration that binds every address.
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  proxy_config 203.0.113.21 0.0.0.0 > "$HOST/edge-1/proxy-config"
+  proxy_listeners 0.0.0.0 > "$HOST/edge-1/listening"
+  edge_check --edge 1
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL  lab-edge-1: the proxy's configuration binds every address, not the edge's own"* ]]
+
+  # A backend that is another address than the Gateway's, one that sends no header, a header of the
+  # first version, and a second backend.
+  for options in "203.0.113.22|send-proxy-v2 source 192.0.2.7|is not the cluster's Gateway address" \
+    "203.0.113.21|source 192.0.2.7|does not send the PROXY protocol version 2 header" \
+    "203.0.113.21|send-proxy source 192.0.2.7|does not send the PROXY protocol version 2 header"; do
+    IFS='|' read -r gateway opts wrong <<< "$options"
+    edge_state 1 active "$WORKERS" 203.0.113.17/32
+    proxy_config "$gateway" 192.0.2.7 "$opts" > "$HOST/edge-1/proxy-config"
+    edge_check --edge 1
+    echo "$options: $output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"FAIL  lab-edge-1: a backend of the proxy $wrong"* ]]
+  done
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  { proxy_config; printf '    server spare 203.0.113.99:80 send-proxy-v2\n'; } > "$HOST/edge-1/proxy-config"
+  edge_check --edge 1
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL  lab-edge-1: a backend of the proxy is not the cluster's Gateway address"* ]]
+  no_address "$output"
+
+  # A port that is not one of the stack's public ports, bound on the edge's own address with its
+  # listener and a backend of its own, so the configuration agrees with itself; and the public ports
+  # as TF_VAR_public_ports gives the stack fewer of them than the configuration binds.
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  {
+    proxy_config
+    printf '\nfrontend public-8080\n    bind 192.0.2.7:8080\n    default_backend gateway-8080\n'
+    printf '\nbackend gateway-8080\n    server gateway 203.0.113.21:8080 send-proxy-v2 source 192.0.2.7\n'
+  } > "$HOST/edge-1/proxy-config"
+  { proxy_listeners; printf 'LISTEN 0 4096 192.0.2.7:8080 0.0.0.0:* users:(("haproxy",pid=611,fd=7))\n'; } > "$HOST/edge-1/listening"
+  edge_check --edge 1
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"pass  lab-edge-1: the proxy listens on the addresses and ports its configuration binds, and on no others"* ]]
+  [[ $output == *"FAIL  lab-edge-1: the ports the proxy's configuration binds are not the stack's public ports"* ]]
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  run env "${ENVIRONMENT[@]}" TF_VAR_public_ports='[80]' "$REPO/scripts/edge-check" --edge 1
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL  lab-edge-1: the ports the proxy's configuration binds are not the stack's public ports"* ]]
+  no_address "$output"
+
+  # Without the Gateway's address in talman.yaml the backends' address is compared with nothing,
+  # which the check says instead of passing it; the header is still checked.
+  yq -i 'del(.values.bgp)' "$REPO/talos/lab-sto2/talman.yaml"
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_check --edge 1
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *"skip  lab-edge-1: the proxy's backends: not compared with the Gateway's address, which talos/lab-sto2/talman.yaml does not give; each sends the PROXY protocol version 2 header"* ]]
+  [[ $output != *"the cluster's Gateway address"* ]]
+  proxy_config 203.0.113.21 192.0.2.7 'source 192.0.2.7' > "$HOST/edge-1/proxy-config"
+  edge_check --edge 1
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL  lab-edge-1: a backend of the proxy does not send the PROXY protocol version 2 header"* ]]
+}
+
 @test "edge-check fails, naming the worker and the way out, when talman.yaml gives a worker no address" {
   # A talman.yaml written before it carried each node's own address: a session from an address that
   # is no worker's must not pass for a worker's.
@@ -576,7 +769,7 @@ no_address() {
   echo "$output"
   [ "$status" -ne 0 ]
   [[ $output == *"FAIL  lab-edge-1: 3 of 3 worker sessions are established, but talman.yaml has no privateAddress for lab-w-2; run just infra-talman"* ]]
-  [[ $output == *"FAIL  lab-edge-1: the forward chain's guard cannot be checked against every worker: talman.yaml has no privateAddress for lab-w-2; run just infra-talman"* ]]
+  [[ $output == *"FAIL  lab-edge-1: the output chain's guard cannot be checked against every worker: talman.yaml has no privateAddress for lab-w-2; run just infra-talman"* ]]
   [[ $output != *"pass  lab-edge-1: 3 of 3 worker sessions"* ]]
   no_address "$output"
 }
@@ -626,6 +819,10 @@ on_edge() {
     [[ $output == *"pass  $edge: 3 of 3 worker sessions are established"* ]]
     [[ $output == *"pass  $edge: the nftables rules are loaded"* ]]
     [[ $output == *"pass  $edge: the kernel forwards"* ]]
+    [[ $output == *"pass  $edge: the forward chain forwards nothing"* ]]
+    [[ $output == *"pass  $edge: the output chain keeps the proxy's connections to the Gateway on a worker's route"* ]]
+    [[ $output == *"pass  $edge: the proxy is running"* ]]
+    [[ $output == *"pass  $edge: the proxy runs as its own user, not root"* ]]
     [[ $output == *"pass  $edge: unattended upgrades are off"* ]]
     [[ $output == *"pass  $edge: the SSH daemon runs with the settings the first boot wrote"* ]]
   done
@@ -644,8 +841,13 @@ on_edge() {
     "config|FRR's running configuration|FRR's configuration holds no reject route" \
     "unreachable|the kernel's unreachable routes|is not in the kernel" \
     "rules|the nftables tables|the nftables rules are not loaded" \
-    "forward|the forward chain|the forward chain does not drop" \
-    "default|the default route|the forward chain sends" \
+    "forward|the forward chain|the forward chain holds a rule" \
+    "output|the output chain|the output chain does not refuse" \
+    "default|the default route|the output chain keeps" \
+    "proxy|the proxy's state|the proxy is not running" \
+    "proxy-users|the proxy's processes|the proxy has no process" \
+    "proxy-config|the proxy's configuration|a backend of the proxy" \
+    "listening|the listening sockets|the proxy's listeners are not" \
     "forwarding|the kernel's forwarding state|the kernel does not forward" \
     "upgrades|the unattended upgrades setting|unattended upgrades are on" \
     "sshd|the SSH daemon's settings|differ"; do
@@ -1291,7 +1493,7 @@ EOF
 }
 
 @test "the edge stack's public ports default to the cluster stack's service ports" {
-  # The workers admit the service ports from the edges, and the edges forward the public ports.
+  # The workers admit the service ports from the edges, and the edges' proxies serve the public ports.
   edge=$(yq -p hcl -o json "$ROOT/infra/openstack/stacks/sto2/edge/variables.tf" | jq -c '.variable.public_ports.default')
   cluster=$(yq -p hcl -o json "$ROOT/infra/openstack/stacks/sto2/cluster/variables.tf" | jq -c '.variable.service_ports.default')
   [ "$edge" = "$cluster" ]
@@ -1313,13 +1515,14 @@ EOF
 # under EDGE_ROOT, a directory of the test's, and fakes of the system's commands first on PATH, on an
 # image of the release OS_RELEASE names, trixie by default. The fake vtysh's dry run refuses a file
 # with a command FRR does not have, as FRR's does (tests/fixtures/edge-policy/proof.sh checks that of
-# FRR's own); the fake systemctl fails to restart FRR when the file restart-fails says so; the fake
-# ip shows the kernel's unreachable route for the service range once FRR is restarted; the fake
-# sshd's check refuses a configuration with a keyword the daemon does not have, in any file of the
-# drop-in directory.
+# FRR's own); the fake systemctl fails to restart FRR when the file restart-fails says so, and the
+# proxy when proxy-restart-fails does; the fake ip shows the kernel's unreachable route for the
+# service range once FRR is restarted; the fake sshd's check refuses a configuration with a keyword
+# the daemon does not have, in any file of the drop-in directory, as the fake haproxy's does in the
+# proxy's file.
 first_boot() {
   local root="$BATS_TEST_TMPDIR/edge-root" bin="$BATS_TEST_TMPDIR/edge-bin" tool
-  mkdir -p "$root/etc/edge" "$root/etc/sysctl.d" "$root/etc/apt/apt.conf.d" "$root/dev" "$root/var/log" "$bin"
+  mkdir -p "$root/etc/edge" "$root/etc/sysctl.d" "$root/etc/apt/apt.conf.d" "$root/etc/haproxy" "$root/dev" "$root/var/log" "$bin"
   printf 'PRETTY_NAME="Debian GNU/Linux"\nVERSION_CODENAME=%s\n' "${1:-trixie}" > "$root/etc/os-release"
   # A console that cannot be written, when the test asks for one: a directory in its place.
   rm -rf "$root/dev/console"
@@ -1339,6 +1542,16 @@ EOF
 printf '%s\n' "systemctl \$*" >> "$RECORD/argv"
 [[ "\$*" != 'restart frr' || ! -f "$BATS_TEST_TMPDIR/restart-fails" ]] || exit 1
 [[ "\$*" != 'restart frr' ]] || touch "$BATS_TEST_TMPDIR/frr-restarted"
+[[ "\$*" != 'restart haproxy' || ! -f "$BATS_TEST_TMPDIR/proxy-restart-fails" ]] || exit 1
+EOF
+  cat > "$bin/haproxy" << EOF
+#!/usr/bin/env bash
+printf '%s\n' "haproxy \$*" >> "$RECORD/argv"
+[[ \$* == "-c -q -f $root/etc/edge/haproxy.cfg" ]] || { echo "fake haproxy: unexpected \$*" >&2; exit 1; }
+if grep -qx '    no-such-keyword' "$root/etc/edge/haproxy.cfg"; then
+  echo "[ALERT] (1) : config : parsing [$root/etc/edge/haproxy.cfg:3] : unknown keyword 'no-such-keyword' in 'defaults' section"
+  exit 1
+fi
 EOF
   cat > "$bin/ip" << EOF
 #!/usr/bin/env bash
@@ -1382,6 +1595,8 @@ edge_files() {
   for file in daemons nftables.conf sysctl.conf; do
     echo "fixture $file" > "$root/etc/edge/$file"
   done
+  printf 'global\n    maxconn 4000\n' > "$root/etc/edge/haproxy.cfg"
+  printf '[Service]\nUser=haproxy\n' > "$root/etc/edge/haproxy-unit.conf"
   cp "$ROOT/infra/openstack/stacks/sto2/edge/sshd.conf" "$root/etc/edge/sshd.conf"
   printf 'router bgp 64497\nexit\nip route 203.0.113.16/28 reject\n' > "$root/etc/edge/frr.conf"
 }
@@ -1391,13 +1606,14 @@ first_line() {
   grep -nE "$1" "$RECORD/argv" | head -1 | cut -d: -f1 | grep . || echo 0
 }
 
-# disarmed: what a failed first boot leaves: forwarding off now and at the next boot, and FRR stopped
-# and kept from starting at the next boot.
+# disarmed: what a failed first boot leaves: forwarding off now and at the next boot, and FRR and the
+# proxy stopped and kept from starting at the next boot.
 disarmed() {
   local root="$BATS_TEST_TMPDIR/edge-root"
   [ ! -e "$root/etc/sysctl.d/90-edge.conf" ]
   grep -qx 'sysctl -q -w net.ipv4.ip_forward=0' "$RECORD/argv"
   grep -qx 'systemctl disable --now frr' "$RECORD/argv"
+  grep -qx 'systemctl disable --now haproxy' "$RECORD/argv"
 }
 
 @test "the first boot starts FRR only once FRR's dry run accepts its file, and fails saying why otherwise" {
@@ -1444,13 +1660,64 @@ disarmed() {
   [ "$forwarding" -gt "$(first_line '^systemctl restart nftables$')" ]
   [ "$forwarding" -gt "$(first_line "^vtysh -c show bgp summary\$")" ]
   [ "$forwarding" -gt "$(first_line '^ip -4 route show exact 203.0.113.16/28 type unreachable$')" ]
-  [ "$forwarding" -gt "$(first_line '^nft list table ip edge-nat$')" ]
+  [ "$forwarding" -gt "$(first_line '^nft list table inet edge$')" ]
+  absent 'edge-nat' "$RECORD/argv"
+  [ "$forwarding" -gt "$(first_line '^systemctl restart haproxy$')" ]
   # The forwarding setting is installed with it, and not before.
   [ "$(first_line "^install -m 0644 $root/etc/edge/sysctl.conf ")" -gt "$(first_line '^systemctl restart frr$')" ]
 
   # FRR fails to restart: the trap leaves forwarding off, its setting gone, and FRR stopped.
   touch "$BATS_TEST_TMPDIR/restart-fails"
   rm -f "$root/etc/sysctl.d/90-edge.conf"
+  first_boot
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"edge-first-boot: FAILED at line"* ]]
+  absent '^sysctl --system$' "$RECORD/argv"
+  disarmed
+}
+
+@test "the first boot starts the proxy as its own unit only once its configuration passes the proxy's own check, and fails saying why otherwise" {
+  local root="$BATS_TEST_TMPDIR/edge-root"
+  edge_files
+  first_boot
+  echo "$output"
+  [ "$status" -eq 0 ]
+  # The package comes from the image's repositories with FRR's and nftables', and stops running with
+  # its own defaults at once, as FRR does; the file is checked as cloud-init wrote it, then installed
+  # with the unit's settings, which systemd reads before the proxy starts, and it is enabled.
+  grep -Eq '^apt-get .* install .*\bhaproxy\b' "$RECORD/argv"
+  [ "$(first_line '^systemctl stop haproxy$')" -gt "$(first_line '^apt-get .* install ')" ]
+  [ "$(first_line "^haproxy -c -q -f $root/etc/edge/haproxy.cfg\$")" -gt 0 ]
+  [ "$(first_line "^haproxy -c")" -lt "$(first_line '^install ')" ]
+  cmp "$root/etc/edge/haproxy.cfg" "$root/etc/haproxy/haproxy.cfg"
+  cmp "$root/etc/edge/haproxy-unit.conf" "$root/etc/systemd/system/haproxy.service.d/10-edge.conf"
+  [ "$(first_line '^systemctl daemon-reload$')" -lt "$(first_line '^systemctl restart haproxy$')" ]
+  [ "$(first_line '^systemctl enable haproxy$')" -gt 0 ]
+  # It starts once the rules are loaded and FRR answers: a proxy with no route to the Gateway fails
+  # connections at once, and the rules are what keep that from leaving by the default route.
+  [ "$(first_line '^systemctl restart haproxy$')" -gt "$(first_line '^systemctl restart nftables$')" ]
+  [ "$(first_line '^systemctl restart haproxy$')" -gt "$(first_line "^vtysh -c show bgp summary\$")" ]
+  [ "$(first_line '^systemctl is-active --quiet haproxy$')" -gt "$(first_line '^systemctl restart haproxy$')" ]
+
+  # A file the proxy refuses: the first boot fails, says why on the console and in the log, installs
+  # nothing of the proxy's, and leaves it stopped.
+  rm -rf "$root/etc/haproxy/haproxy.cfg" "$root/etc/systemd" "$root/etc/sysctl.d/90-edge.conf"
+  printf 'global\n    maxconn 4000\n    no-such-keyword\n' > "$root/etc/edge/haproxy.cfg"
+  first_boot
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"edge-first-boot: the proxy refuses /etc/edge/haproxy.cfg"* ]]
+  [[ $output == *"unknown keyword 'no-such-keyword'"* ]]
+  grep -q "the proxy refuses /etc/edge/haproxy.cfg" "$root/dev/console"
+  grep -q "the proxy refuses /etc/edge/haproxy.cfg" "$root/var/log/edge-first-boot.log"
+  [ ! -e "$root/etc/haproxy/haproxy.cfg" ]
+  absent -E '^systemctl (enable|restart) haproxy' "$RECORD/argv"
+  disarmed
+
+  # A proxy that does not start leaves the edge disarmed as well.
+  edge_files
+  touch "$BATS_TEST_TMPDIR/proxy-restart-fails"
   first_boot
   echo "$output"
   [ "$status" -ne 0 ]

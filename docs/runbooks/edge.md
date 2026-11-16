@@ -1,12 +1,13 @@
 # The edge routers
 
 The edge routers are two small Linux VMs on the node network, outside the cluster, made by the
-`sto2/edge` stack ([infrastructure.md](../infrastructure.md#the-edge-routers)). They run FRR: the
-workers open BGP sessions to them and announce the address of every labelled `LoadBalancer` Service
-as a /32, and each edge forwards traffic that arrives at its own public address to the public
-Gateway's address and back
-([ADR 0018](../adr/0018-own-edge-routers-translate-public-traffic-to-the-gateway.md)). Either can be
-lost or rebuilt while the other serves.
+`sto2/edge` stack ([infrastructure.md](../infrastructure.md#the-edge-routers)). They run FRR and a
+TCP proxy: the workers open BGP sessions to them and announce the address of every labelled
+`LoadBalancer` Service as a /32, and each edge's proxy accepts connections to its own public address
+on the public ports and opens its own to the public Gateway's address, sending the client's address
+in a PROXY protocol header
+([ADR 0018](../adr/0018-own-edge-routers-translate-public-traffic-to-the-gateway.md), amended by
+ADR 0020). Either can be lost or rebuilt while the other serves.
 
 ## First build
 
@@ -21,13 +22,14 @@ In this order, after the plumbing stack is applied ([rebuild.md](rebuild.md)):
    floating IPs, a server group, a security group with its rules, a key pair and a rule per public
    port and network. Type the stack's name to apply it. The public ports admit the operator
    allowlist only, until `TF_VAR_public_allowed_cidrs` says otherwise.
-4. Wait for the first boot, a minute or two: it turns unattended upgrades off, installs FRR and
-   nftables, checks both files, gives the SSH daemon its settings, starts FRR and nftables and turns
-   forwarding on last; a first boot that fails says why on the console and leaves forwarding off and
-   FRR stopped. `just edge-check` then reads both edges over SSH. The first time for each edge it
-   records the edge's host keys itself when every key the address offers is one the instance
-   printed on its console ([a new host key](#a-new-hosts-ssh-key)); until the cluster's workers
-   peer, the sessions line says how many of the workers have none.
+4. Wait for the first boot, a minute or two: it turns unattended upgrades off, installs FRR, HAProxy
+   and nftables, checks the three files, gives the SSH daemon its settings, starts nftables, FRR and
+   the proxy and turns forwarding on last; a first boot that fails says why on the console and
+   leaves forwarding off and FRR and the proxy stopped. `just edge-check` then reads both edges
+   over SSH. The first time for each edge it records the edge's host keys itself when every key the
+   address offers is one the instance printed on its console
+   ([a new host key](#a-new-hosts-ssh-key)); until the cluster's workers peer, the sessions line
+   says how many of the workers have none.
 5. Compare the hosts the two instances run on: the server group's policy keeps them apart only
    where the cloud can.
 
@@ -53,11 +55,26 @@ In this order, after the plumbing stack is applied ([rebuild.md](rebuild.md)):
   with its reject route for the range, for the range `talman.yaml` names, and the kernel has it. A
   FAIL that no reject route is configured means FRR runs without the edge's configuration, as after
   a first boot that failed: rebuild the edge.
-- **The nftables rules are loaded**; **the forward chain sends a translated connection, new or
-  established, toward the Gateway only through a worker**, read from the rules as loaded; and **the
-  kernel forwards**, which is a FAIL when it forwards without the rules. While FRR is stopped, a new
-  connection through this edge is refused and an established one's packets are dropped here, so
-  its clients' connections end, and a client that retries can reach the other edge.
+- **The nftables rules are loaded, and none translates an address**; **the forward chain forwards
+  nothing**; **the output chain keeps the proxy's connections to the Gateway on a worker's route**,
+  read from the rules as loaded; and **the kernel forwards**, which is a FAIL when it forwards
+  without the rules. While FRR is stopped, the proxy's new connections to the Gateway are refused
+  here at once. The refusal does not end one it already holds: the kernel reports it to an
+  established socket as a soft error only, so that connection and its client's stall until the
+  proxy's 5-minute idle timeout closes them, and a client that opens another connection or retries
+  can reach the other edge.
+- **The proxy is running**, **runs as its own user, not root**, **its configuration binds the
+  stack's public ports, and no other port**, **listens on the addresses and ports its configuration
+  binds, and on no others**, and **sends each connection to the cluster's Gateway address, with the
+  PROXY protocol version 2 header**: read from `systemctl is-active haproxy`,
+  `ps -C haproxy -o user=`, `/etc/haproxy/haproxy.cfg` and `sudo -n ss -H -ltnp`, and the public
+  ports from `TF_VAR_public_ports` when it is set, or else the stack's `variables.tf`. A FAIL that
+  it is not running means `systemctl status haproxy` and `journalctl -u haproxy` on the edge: a line
+  there per connection names the client's address and port and how the connection ended, and a
+  connection that found no route to the Gateway ends at once. A listener on every address, an
+  unlisted port or a backend that is not the Gateway's is not what the first boot installed, or the
+  stack's ports changed and were not rolled out: rebuild the edge. Without a Gateway address in
+  `talman.yaml`, the backends' line is a skip that says their address was not compared.
 - **Unattended upgrades are off**: the first boot turns them off, as they would upgrade FRR in
   place.
 - **The SSH daemon runs with the settings the first boot wrote**: `sudo -n sshd -T -C user=...` on
@@ -73,7 +90,7 @@ In this order, after the plumbing stack is applied ([rebuild.md](rebuild.md)):
 - **cannot read X on the edge**: a line that says the edge did not answer for one state, as its
   command was not found or failed, with what the edge said, any address left out. It is a FAIL of
   its own and says nothing about the state itself: run the command on the edge, as its ordinary
-  user as the check does (`sudo -n` for `vtysh`, `nft` and `sshd`; `nft` and `sshd` are in
+  user as the check does (`sudo -n` for `vtysh`, `nft`, `ss` and `sshd`; `nft` and `sshd` are in
   `/usr/sbin`, which that user's `PATH` does not reach), and read why it fails; a stopped FRR is one
   cause for the BGP lines.
 
@@ -136,7 +153,40 @@ edges' keys.
 
 While an edge is replaced the workers' sessions to it are down and come back when it is up. The
 other edge carries the traffic, and half of the clients' attempts to the published addresses fail
-until the replacement answers, as they do while an edge is lost.
+until the replacement answers, as they do while an edge is lost. A connection through the edge that
+is replaced ends when it goes, a long-lived one included, and the client opens another.
+
+### Rolling out the proxy
+
+The edges' proxy sends a PROXY protocol header at the start of every connection it opens to the
+Gateway. A Gateway whose listeners do not accept the header cannot read it as TLS or HTTP and closes
+the connection, so **every connection through such an edge fails**: no page, no TLS handshake. That
+is why the order matters, and why it is this one:
+
+1. **The Gateway accepts the header first.** The change that makes the public Gateway's listeners
+   accept a PROXY header, ADR 0020, is merged and live, and the `ClientTrafficPolicy` `public` in
+   `envoy-gateway-system` carries the setting and is Accepted
+   (`kubectl get clienttrafficpolicy public -n envoy-gateway-system -o yaml` reads it, and changes
+   nothing). Its listeners still serve connections that come without a header, so the edges that
+   are not replaced yet, which translate and send none, keep working. `just gateway-check` passes.
+   `just edge-rollout` does not read the cluster, so nothing refuses a rollout started before this
+   is so: it is this step's, not the script's.
+2. **Edge 2 serves, confirmed by hand.** `just edge-check` fails an edge that still translates, by
+   design: with no proxy, a translation table loaded and rules in the forward chain, edge 2 fails
+   it until it is replaced. `just edge-rollout --replace --edge 1` checks the other edge with it
+   and so stops at "edge 2 does not pass its check". Run `just gateway-check` and read its lines
+   for edge 2: they pass when the edge answers the demo, as the edge still translates. Then run
+   `just edge-rollout --replace --edge 1 --other-down` and type back the sentence it asks for, as
+   edge 2 cannot be checked. It replaces edge 1, waits for it to pass `just edge-check`, which
+   reads the proxy and the rules, and stops there.
+3. **`just gateway-check` after it.** It requests the demo through each edge's address, so it fails
+   the edge that sends a header the Gateway does not accept. Once it passes,
+   `just edge-rollout --replace --edge 2`, which checks the new edge 1 first, and
+   `just gateway-check` again.
+
+During a replacement clients see what they see while an edge is lost: half of their attempts to the
+published addresses fail until the replacement answers, and a connection through the edge that goes
+ends. After it, the Gateway's access logs carry the client's address.
 
 ## A new host's SSH key
 

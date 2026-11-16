@@ -247,7 +247,7 @@ edge-policy-render dir:
 edge-policy-assert file:
     scripts/edge-policy-assert {{ quote(file) }}
 
-# Prove what an edge forwards: its rendered rules loaded with nft into network namespaces of a user namespace, beside a client, a worker and the cloud's router, where a translated connection, new or established, leaves only through a worker's route; needs unprivileged user namespaces, nft and socat, which the CI containers do not allow, so it runs on a developer's machine and skips, saying why, where they are missing
+# Prove what an edge does with a client's connection: its rendered rules and proxy configuration run in network namespaces of a user namespace, beside a client, a worker and the cloud's router, where the proxy answers the client and sends the Gateway's address a PROXY protocol header naming the client, nothing is forwarded, and with no worker's route a connection fails at once and recovers with the route; needs unprivileged user namespaces, nft, ss, socat and haproxy, which the CI containers do not allow, so it runs on a developer's machine and skips, saying why, where they are missing
 edge-forward-check:
     bats --filter-tags namespace tests/edge-forward.bats
 

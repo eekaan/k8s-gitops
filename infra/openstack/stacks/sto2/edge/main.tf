@@ -1,9 +1,10 @@
 # The edge routers (ADR 0013, and the record of their data path): two small Linux VMs on the plumbing
-# stack's node network, at the two addresses it reserves, running FRR. The workers open BGP sessions
-# to them and announce every LoadBalancer Service's address as a /32; each edge forwards traffic that
-# reaches its own public address to the public Gateway's address, through the workers, and back. The
-# stack reads the plumbing stack's state and nothing of the cluster stack's, so destroying and
-# rebuilding the cluster leaves the edges.
+# stack's node network, at the two addresses it reserves, running FRR and a TCP proxy. The workers
+# open BGP sessions to them and announce every LoadBalancer Service's address as a /32; each edge's
+# proxy accepts connections to its own public address on the public ports and opens its own
+# connection to the public Gateway's address, through the workers, sending the client's address in a
+# PROXY protocol header (ADR 0020). The stack reads the plumbing stack's state and nothing of the
+# cluster stack's, so destroying and rebuilding the cluster leaves the edges.
 
 # The cloud and its credentials come from the environment: OS_CLOUD names the clouds.yaml entry.
 provider "openstack" {}
@@ -88,19 +89,33 @@ locals {
     })
   }
 
+  # In numeric order, as the rules and the proxy's configuration list them.
+  public_ports = [for port in sort(formatlist("%05d", var.public_ports)) : tonumber(port)]
+
   nftables_conf = {
     for key, edge in local.edges : key => templatefile("${path.module}/nftables.conf.tftpl", {
       workers = join(", ", local.worker_blocks)
+      gateway = local.bgp.gateway_address
+      ports   = local.public_ports
+      own     = edge.address
+    })
+  }
+
+  # The template ends each port's stanza with a blank line; the file ends with its last line.
+  haproxy_conf = {
+    for key, edge in local.edges : key => "${trimspace(templatefile("${path.module}/haproxy.cfg.tftpl", {
       own     = edge.address
       gateway = local.bgp.gateway_address
-      ports   = join(", ", [for port in sort(formatlist("%05d", var.public_ports)) : tostring(tonumber(port))])
-    })
+      ports   = local.public_ports
+    }))}\n"
   }
 
   config = {
     for key in keys(local.edges) : key => {
       frr_conf      = local.frr_conf[key]
       nftables_conf = local.nftables_conf[key]
+      haproxy_conf  = local.haproxy_conf[key]
+      haproxy_unit  = file("${path.module}/haproxy-unit.conf")
       sysctl        = file("${path.module}/sysctl.conf")
       sshd_conf     = file("${path.module}/sshd.conf")
     }
@@ -108,13 +123,15 @@ locals {
 
   # Everything an edge is, delivered once at its first boot. It holds no secret: user data is kept
   # in tofu state and served to the instance by the metadata service, so it holds the routing
-  # configuration and the firewall rules, which name the workers' block and the service range, and
-  # neither the operator allowlist (the security group holds that) nor a key. Changing it replaces
-  # the instance: an edge is rebuilt, not patched.
+  # configuration, the firewall rules and the proxy's configuration, which name the workers' block,
+  # the service range and the edge's own address, and neither the operator allowlist (the security
+  # group holds that) nor a key. Changing it replaces the instance: an edge is rebuilt, not patched.
   user_data = {
     for key in keys(local.edges) : key => templatefile("${path.module}/user-data.yaml.tftpl", {
       frr_conf      = local.config[key].frr_conf
       nftables_conf = local.config[key].nftables_conf
+      haproxy_conf  = local.config[key].haproxy_conf
+      haproxy_unit  = local.config[key].haproxy_unit
       sysctl        = local.config[key].sysctl
       sshd_conf     = local.config[key].sshd_conf
       daemons       = file("${path.module}/frr-daemons")
@@ -198,7 +215,7 @@ resource "openstack_networking_secgroup_rule_v2" "path_mtu" {
   remote_ip_prefix  = "0.0.0.0/0"
 }
 
-# The edges fetch packages from the distribution's repositories and forward to the workers.
+# The edges fetch packages from the distribution's repositories and connect to the workers.
 resource "openstack_networking_secgroup_rule_v2" "egress" {
   for_each = { IPv4 = "0.0.0.0/0", IPv6 = "::/0" }
 
@@ -213,12 +230,12 @@ resource "openstack_compute_keypair_v2" "edge" {
   public_key = var.edge_ssh_public_key
 }
 
-# No allowed address pair: an edge forwards packets whose source is its own address, after its own
-# translation, and receives packets whose destination is its own address, so port security, which
-# lets a port send only from its own address and its pairs, needs nothing added. Without the source
-# translation an edge would send packets from every client's address, and receive replies for them,
-# which no list of pairs covers short of every address; port security would have to be off on the
-# port, and the record of the data path says why that is not done.
+# No allowed address pair: an edge's proxy sends only from the edge's own address, in its own
+# connections to the Gateway, and receives only packets whose destination is its own address, so port
+# security, which lets a port send only from its own address and its pairs, needs nothing added.
+# Forwarding clients' packets as they are would send from every client's address and receive replies
+# for them, which no list of pairs covers short of every address; port security would have to be off
+# on the port, and the record of the data path says why that is not done.
 module "edge" {
   source   = "../../../modules/vm"
   for_each = local.edges
