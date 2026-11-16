@@ -16,9 +16,11 @@ resources:
   - ../../base/etcd-snapshots
   - ../../base/external-dns
   - ../../base/external-secrets
+  - ../../base/gatekeeper-system
   - ../../base/keda
   - ../../base/kromgo
   - ../../base/kube-system
+  - ../../base/kyverno
   - ../../base/monitoring
   - ../../base/openbao
   - ../../base/piraeus-datastore
@@ -44,6 +46,8 @@ resources:
   - ../../base/external-dns/external-dns/ks.yaml
   - ../../base/external-secrets/external-secrets/ks.yaml
   - ../../base/external-secrets/openbao-store/ks.yaml
+  - ../../base/gatekeeper-system/gatekeeper-policies/ks.yaml
+  - ../../base/gatekeeper-system/gatekeeper/ks.yaml
   - ../../base/keda/keda/ks.yaml
   - ../../base/kromgo/kromgo/ks.yaml
   - ../../base/kube-system/cilium/ks.yaml
@@ -60,6 +64,8 @@ resources:
   - ../../base/kube-system/snapshot-controller/ks.yaml
   - ../../base/kube-system/spegel/ks.yaml
   - ../../base/kube-system/vpa/ks.yaml
+  - ../../base/kyverno/kyverno-policies/ks.yaml
+  - ../../base/kyverno/kyverno/ks.yaml
   - ../../base/monitoring/flux-monitoring/ks.yaml
   - ../../base/monitoring/grafana-operator/ks.yaml
   - ../../base/monitoring/grafana/ks.yaml

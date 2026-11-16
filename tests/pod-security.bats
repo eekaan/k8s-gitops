@@ -312,6 +312,16 @@ real_render() {
   done
 }
 
+@test "a pod template label whose value YAML 1.1 reads as a boolean is judged as the string it is" {
+  # Gatekeeper's chart labels its pods gatekeeper.sh/system: "yes", which Kyverno's parser reads as
+  # a boolean when the pod is handed to it unquoted and then refuses the pod.
+  tree boolean
+  yq -i '.spec.template.metadata.labels["gatekeeper.sh/system"] = "yes"' "$(object boolean ReplicaSet.apps_web_worker.yaml)"
+  check boolean
+  echo "$output"
+  [ "$status" -eq 0 ]
+}
+
 @test "a pod without a verdict from the evaluator fails the check" {
   # A run of the evaluator that reports on fewer pods than it was given leaves some pod unjudged,
   # which must not read as a pass.

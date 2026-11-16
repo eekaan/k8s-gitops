@@ -1,0 +1,47 @@
+---
+# Values for the Gatekeeper chart, read by the HelmRelease through a ConfigMap generated without
+# substitution. Keys not set here keep the chart's defaults, among them the requests and the memory
+# limit of each pod. Gatekeeper only reports here: its constraints (gatekeeper-policies) are in
+# dry-run, and nothing it registers may refuse or hold up an object.
+
+# Two controller managers, of which both answer the webhook, on different nodes where the
+# scheduler can, and the chart's budget that keeps one running while a node is drained. The audit
+# is one more pod, which the chart runs once.
+replicas: 2
+controllerManager:
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          gatekeeper.sh/operation: webhook
+          app.kubernetes.io/instance: gatekeeper
+
+# No mutation: the chart's mutating webhook, and the pods that would run mutators, are left out.
+disableMutation: true
+
+# The webhook that evaluates every object fails open: while no controller manager answers, or one
+# answers too slowly, the API server admits the object. These are the chart's defaults, kept on
+# purpose. The namespaces it skips are the control plane's and Flux's, and the chart adds its own.
+validatingWebhookFailurePolicy: Ignore
+validatingWebhookTimeoutSeconds: 3
+validatingWebhookExemptNamespacesLabels:
+  kubernetes.io/metadata.name:
+    - kube-system
+    - flux-system
+# The webhook on namespaces that guards the label which exempts a namespace from Gatekeeper fails
+# closed by default; the HelmRelease's post-renderer skips the same three namespaces in it.
+validatingWebhookCheckIgnoreFailurePolicy: Ignore
+
+# The chart's hooks that would change the cluster beside the release are off: the namespace's
+# Pod Security labels are declared in its namespace.yaml, the definitions are applied with the
+# release by Flux, whose defaults create and replace them on every upgrade, and Flux waits for the
+# release's pods before it applies the rules, so no job has to probe the webhook.
+postInstall:
+  labelNamespace:
+    enabled: false
+  probeWebhook:
+    enabled: false
+upgradeCRDs:
+  enabled: false

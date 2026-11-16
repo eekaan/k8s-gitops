@@ -1,0 +1,28 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/prometheusrule-monitoring-v1.json
+# An alert on the controller manager, the Gatekeeper pods that evaluate each admitted object. The
+# webhooks fail open, so while none runs nothing is evaluated at admission: the alert is the only
+# sign. The audit still runs and reports in the constraints' status, from its own pod, so it is
+# not what this alert watches. It reads kube-state-metrics' count of the Deployment's available
+# replicas, which the stack's monitor scrapes, so it holds while Gatekeeper's own metrics are gone
+# with its pods.
+# Tests: tests/rules/gatekeeper.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: gatekeeper-alerts
+spec:
+  groups:
+    - name: gatekeeper
+      rules:
+        # Two replicas run, so a drained node leaves one available; none for ten minutes is more
+        # than a rollout or a node's drain takes.
+        - alert: GatekeeperControllerManagerDown
+          expr: kube_deployment_status_replicas_available{namespace="gatekeeper-system", deployment="gatekeeper-controller-manager"} < 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Gatekeeper's controller manager has no available replica
+            description: The Deployment {{ $labels.deployment }} in {{ $labels.namespace }} has had no available replica for 10 minutes, so no object is evaluated at admission; the webhooks fail open, so nothing is refused.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#gatekeepercontrollermanagerdown

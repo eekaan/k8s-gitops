@@ -179,7 +179,9 @@ spec:
           level: $level
           version: latest
 EOF
-  jq -c '.pod' "$tmp/workloads.jsonl" | yq -p json -o yaml '.' >"$tmp/pods.yaml"
+  # One JSON document each, not converted to YAML: Kyverno reads YAML 1.1, where an unquoted yes or
+  # on is a boolean, so a label value such as "yes" must keep its quotes.
+  jq -c '.pod' "$tmp/workloads.jsonl" | sed 's/^/---\n/' >"$tmp/pods.yaml"
   # Kyverno exits 1 when a pod fails the level, which is a verdict; any other failure leaves no
   # verdict on some pod, which the count below catches. It prints a deprecation warning for the
   # policy type on standard output before the report, the one line that starts with a brace.

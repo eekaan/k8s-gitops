@@ -124,3 +124,16 @@ exceptions:
       admits no name outside the cluster's domain but the zone's own; the ClusterRole, which reads
       Gateways, HTTPRoutes and Namespaces and nothing else and writes nothing; the namespace's Pod
       Security level and the node firewall (ADR 0017)
+  - namespace: kyverno
+    reason: the API server calls the admission controllers' webhooks from the control planes' host
+      network; the admission and reports controllers and the chart's hook jobs reach the API server
+      and the cluster's resolver; and Prometheus scrapes the admission and reports controllers. The
+      flows are not yet enumerated, and the webhooks' callers are observed in audit mode before a
+      policy names them
+    covered-by: the namespace's Pod Security level and the node firewall (ADR 0017)
+  - namespace: gatekeeper-system
+    reason: the API server calls the controller managers' webhooks from the control planes' host
+      network; the controller managers and the audit pod reach the API server and the cluster's
+      resolver; and Prometheus scrapes all three. The flows are not yet enumerated, and the
+      webhooks' callers are observed in audit mode before a policy names them
+    covered-by: the namespace's Pod Security level and the node firewall (ADR 0017)

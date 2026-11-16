@@ -1,0 +1,7 @@
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: pass-digest, namespace: apps}
+spec:
+  containers:
+    - {name: app, image: "registry.example/team/app@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}

@@ -1,0 +1,7 @@
+---
+# A level that is only audited and warned about is not a level that is enforced.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fail-audit-only
+  labels: {pod-security.kubernetes.io/audit: restricted, pod-security.kubernetes.io/warn: restricted}

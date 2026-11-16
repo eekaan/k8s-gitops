@@ -1,0 +1,690 @@
+#!/usr/bin/env bats
+# Proves features/admission-policy.feature; each test carries its scenario's title.
+# Needs helm, kustomize, flux, yq, jq, kyverno and gator on PATH (the versions pinned for the
+# repository). Each chart is pulled once per run from its public registry or repository, and the
+# tree is rendered once by the test that runs both engines over it; building, rendering and the
+# engines' own tools are offline.
+
+# The tests run one at a time even where bats runs a file's tests side by side: a test that starts
+# while another pulls a chart finds the chart's directory before the chart is in it.
+export BATS_NO_PARALLELIZE_WITHIN_FILE=true
+
+setup_file() {
+  # Helm's cache and registry settings stay in the run's own directory, and so does the Docker
+  # configuration helm falls back to for credentials, so no login is read.
+  export HELM_CACHE_HOME="$BATS_FILE_TMPDIR/helm/cache"
+  export HELM_CONFIG_HOME="$BATS_FILE_TMPDIR/helm/config"
+  export HELM_DATA_HOME="$BATS_FILE_TMPDIR/helm/data"
+  export DOCKER_CONFIG="$BATS_FILE_TMPDIR/docker"
+  mkdir -p "$DOCKER_CONFIG"
+  # flux build rewrites the kustomization.yaml of what it builds and puts it back afterwards, so it
+  # builds a copy of the applications, never this checkout. The cluster directories stay behind.
+  export TREE="$BATS_FILE_TMPDIR/tree"
+  mkdir -p "$TREE/kubernetes"
+  cp -R "$BATS_TEST_DIRNAME/../kubernetes/apps" "$BATS_TEST_DIRNAME/../kubernetes/components" "$TREE/kubernetes/"
+}
+
+setup() {
+  REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+  CLUSTER="$REPO/kubernetes/clusters/lab-sto2"
+  KUBE="$(yq -e '.kubernetes' "$REPO/versions.yaml")"
+  # The rules of the three of them, in the order the docs give them.
+  RULES=(image-pinned restricted-security-context namespace-pod-security-level)
+  # Nothing to connect to: a step that needed a cluster fails instead of finding one.
+  export KUBECONFIG="$BATS_TEST_TMPDIR/no-kubeconfig"
+  unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
+}
+
+# app_dir APP: sets APP_DIR to the directory of the application APP, in whichever namespace
+# directory it is, relative to the tree.
+app_dir() {
+  local -a dirs=("$TREE"/kubernetes/apps/base/*/"$1")
+  [ -f "${dirs[0]}/ks.yaml" ] || { echo "$1: no application directory with a ks.yaml"; return 1; }
+  APP_DIR="${dirs[0]#"$TREE"/}"
+}
+
+# built APP: the application as Flux applies it: its app/ built with its ks.yaml, substituting
+# strictly the variables of the cluster's example key lists. Writes $BATS_TEST_TMPDIR/APP-built.yaml
+# and sets BUILT and APP_DIR.
+built() {
+  local app=$1 vars="$BATS_TEST_TMPDIR/example-vars.yaml" ks="$BATS_TEST_TMPDIR/$1-ks.yaml"
+  app_dir "$app"
+  # shellcheck disable=SC2016 # $list is a yq variable.
+  yq ea '. as $list ireduce ({}; . * ($list // {}))' \
+    "$CLUSTER/cluster-config.example.yaml" "$CLUSTER/cluster-secrets.example.yaml" >"$vars"
+  # shellcheck disable=SC2016 # $vars is a yq variable.
+  yq ea 'select(fileIndex == 0) as $vars | select(fileIndex == 1 and . != null)
+    | .spec.postBuild.substitute = $vars' "$vars" "$TREE/$APP_DIR/ks.yaml" >"$ks"
+  BUILT="$BATS_TEST_TMPDIR/$app-built.yaml"
+  # Built from the tree's parent, with paths from there, as scripts/kubernetes-check builds.
+  (cd "$TREE" && flux build kustomization "$app" --path "./$APP_DIR/app" \
+    --kustomization-file "$ks" --dry-run --strict-substitute) >"$BUILT"
+}
+
+# render APP: the chart that APP's HelmRelease installs, built as built() builds it, from the
+# OCIRepository or HelmRepository it names at its pinned version, with the values helm-controller
+# gives the chart (those of the ConfigMap the HelmRelease reads, then the HelmRelease's own over
+# them), the chart's definitions included and the HelmRelease's post-renderer patches applied by
+# kustomize. The ServiceMonitor and PodMonitor APIs count as present, as group versions and as kinds.
+# Writes $BATS_TEST_TMPDIR/APP.yaml and sets RENDERED, CHART, VALUES and INLINE.
+render() {
+  local app=$1 url tag name release namespace pulled chart repo dir="$BATS_TEST_TMPDIR/post-render-$1"
+  built "$app"
+  name="$(yq -N 'select(.kind == "HelmRelease") | .spec.valuesFrom[0].name' "$BUILT")"
+  release="$(yq -N 'select(.kind == "HelmRelease") | .spec.releaseName // .metadata.name' "$BUILT")"
+  namespace="$(yq -N 'select(.kind == "HelmRelease") | .spec.targetNamespace // .metadata.namespace' "$BUILT")"
+  VALUES="$BATS_TEST_TMPDIR/$app-values.yaml"
+  yq -N "select(.kind == \"ConfigMap\" and .metadata.name == \"$name\") | .data[\"values.yaml\"]" "$BUILT" >"$VALUES"
+  [ -s "$VALUES" ] || { echo "$app: no values in the ConfigMap $name its HelmRelease reads"; return 1; }
+  INLINE="$BATS_TEST_TMPDIR/$app-inline.yaml"
+  yq -N 'select(.kind == "HelmRelease") | .spec.values // {}' "$BUILT" >"$INLINE"
+  url="$(yq -N 'select(.kind == "OCIRepository") | .spec.url' "$BUILT")"
+  if [ -n "$url" ]; then
+    tag="$(yq -N 'select(.kind == "OCIRepository") | .spec.ref.tag' "$BUILT")"
+    pulled="$BATS_FILE_TMPDIR/charts/$app/$tag"
+    if [ ! -d "$pulled" ]; then
+      mkdir -p "$pulled"
+      helm pull "$url" --version "$tag" --destination "$pulled"
+    fi
+  else
+    chart="$(yq -N 'select(.kind == "HelmRelease") | .spec.chart.spec.chart' "$BUILT")"
+    tag="$(yq -N 'select(.kind == "HelmRelease") | .spec.chart.spec.version' "$BUILT")"
+    repo="$(yq -N 'select(.kind == "HelmRepository") | .spec.url' "$BUILT")"
+    [ -n "$chart" ] && [ -n "$tag" ] && [ -n "$repo" ] || { echo "$app: no chart source"; return 1; }
+    pulled="$BATS_FILE_TMPDIR/charts/$app/$tag"
+    if [ ! -d "$pulled" ]; then
+      mkdir -p "$pulled"
+      helm pull "$chart" --repo "$repo" --version "$tag" --destination "$pulled"
+    fi
+  fi
+  CHART="$(echo "$pulled"/*.tgz)"
+  mkdir -p "$dir"
+  helm template "$release" "$CHART" --namespace "$namespace" --kube-version "$KUBE" --include-crds \
+    --api-versions monitoring.coreos.com/v1 --api-versions monitoring.coreos.com/v1/ServiceMonitor \
+    --api-versions monitoring.coreos.com/v1/PodMonitor \
+    --values "$VALUES" --values "$INLINE" >"$dir/rendered.yaml"
+  yq ea -N '[select(.kind == "HelmRelease")] | .[0] | {"apiVersion": "kustomize.config.k8s.io/v1beta1",
+    "kind": "Kustomization", "resources": ["rendered.yaml"],
+    "patches": [(.spec.postRenderers // [])[] | (.kustomize.patches // [])[]]}' "$BUILT" >"$dir/kustomization.yaml"
+  RENDERED="$BATS_TEST_TMPDIR/$app.yaml"
+  kustomize build "$dir" >"$RENDERED"
+}
+
+# pod_templates FILE: every pod template in FILE, one JSON object per line, with the workload's
+# kind and name and its template's pod spec. Hook pods that Helm runs only for `helm test` are not
+# part of what the release runs and are left out.
+pod_templates() {
+  yq -N -o json -I0 'select(. != null)' "$1" | jq -c '
+    select(.metadata.annotations["helm.sh/hook"] // "" | test("test") | not)
+    | select(.kind == "Deployment" or .kind == "DaemonSet" or .kind == "StatefulSet" or .kind == "Job"
+        or .kind == "CronJob" or .kind == "Pod")
+    | {workload: (.kind + "/" + .metadata.name),
+       replicas: (.spec.replicas // 1),
+       labels: (.spec.template.metadata.labels // {}),
+       pod: (if .kind == "Pod" then .spec elif .kind == "CronJob" then .spec.jobTemplate.spec.template.spec
+             else .spec.template.spec end)}'
+}
+
+# overlay_without NS-DIR...: copies kubernetes/ to $TREE_OUT and takes the namespace directory NS-DIR
+# of each argument, and every application in it, out of the lab-sto2 overlay. Sets OVERLAY_OUT to
+# the overlay as Flux reads it.
+overlay_without() {
+  local dir
+  TREE_OUT="$BATS_TEST_TMPDIR/tree-without"
+  rm -rf "$TREE_OUT"
+  mkdir -p "$TREE_OUT"
+  cp -R "$REPO/kubernetes" "$TREE_OUT/kubernetes"
+  for dir in "$@"; do
+    DIR="$dir" yq -i '.resources |= map(select(test("^../../base/" + strenv(DIR) + "(/|$)") | not))' \
+      "$TREE_OUT/kubernetes/apps/overlays/lab-sto2/kustomization.yaml"
+  done
+  OVERLAY_OUT="$BATS_TEST_TMPDIR/overlay-without.yaml"
+  kustomize build --load-restrictor LoadRestrictionsNone "$TREE_OUT/kubernetes/apps/overlays/lab-sto2" >"$OVERLAY_OUT"
+}
+
+@test "Each policy engine is selected on its own and builds nothing when it is not" {
+  local engine other app names dependents
+  # Each engine's namespace directory and the applications in it: the engine and its rules.
+  local -A ns_dir=([kyverno]=kyverno [gatekeeper]=gatekeeper-system)
+  local -A apps=([kyverno]="kyverno kyverno-policies" [gatekeeper]="gatekeeper gatekeeper-policies")
+  overlay_without
+  for engine in kyverno gatekeeper; do
+    for app in ${apps[$engine]}; do
+      [ "$(APP="$app" yq -N 'select(.kind == "Kustomization" and .metadata.name == strenv(APP)) | .metadata.name' "$OVERLAY_OUT")" = "$app" ] \
+        || { echo "the lab-sto2 overlay does not enable $app"; return 1; }
+    done
+    [ "$(DIR="${ns_dir[$engine]}" yq -N 'select(.kind == "Namespace" and .metadata.name == strenv(DIR)) | .metadata.name' "$OVERLAY_OUT")" = "${ns_dir[$engine]}" ]
+  done
+  for engine in kyverno gatekeeper; do
+    other=kyverno
+    [ "$engine" = kyverno ] && other=gatekeeper
+    # The engine taken out leaves nothing in the build, and the other engine is whole: the build
+    # holds each of its applications and its namespace.
+    overlay_without "${ns_dir[$engine]}"
+    echo "$engine out: $(grep -ci "$engine" "$OVERLAY_OUT" || true) lines name it"
+    [ "$(grep -ci "$engine" "$OVERLAY_OUT" || true)" -eq 0 ]
+    for app in ${apps[$other]}; do
+      [ "$(APP="$app" yq -N 'select(.kind == "Kustomization" and .metadata.name == strenv(APP)) | .metadata.name' "$OVERLAY_OUT")" = "$app" ]
+    done
+    # The tree without the engine passes the check that builds every application and its
+    # dependencies, so nothing left in it needs what was taken out.
+    run "$REPO/scripts/kubernetes-check" "$TREE_OUT"
+    echo "$output"
+    [ "$status" -eq 0 ]
+  done
+  # The dependencies the overlay holds: an engine's rules wait for that engine and nothing else
+  # names an engine, and each engine waits for the monitoring definitions alone, never for the
+  # other engine.
+  overlay_without
+  # shellcheck disable=SC2016 # $name is a yq variable.
+  dependents="$(yq -N 'select(.kind == "Kustomization" and .apiVersion == "kustomize.toolkit.fluxcd.io/*")
+    | .metadata.name as $name | (.spec.dependsOn // [])[]
+    | select(.name == "kyverno" or .name == "kyverno-policies" or .name == "gatekeeper" or .name == "gatekeeper-policies")
+    | $name + " -> " + .name' "$OVERLAY_OUT" | sort)"
+  echo "dependencies on an engine: $dependents"
+  [ "$dependents" = "$(printf '%s\n' 'gatekeeper-policies -> gatekeeper' 'kyverno-policies -> kyverno')" ]
+  for app in kyverno gatekeeper; do
+    names="$(APP="$app" yq -N 'select(.kind == "Kustomization" and .metadata.name == strenv(APP)) | .spec.dependsOn[].name' "$OVERLAY_OUT" | paste -sd' ')"
+    echo "$app depends on: $names"
+    [ "$names" = prometheus-operator-crds ]
+  done
+}
+
+@test "Neither engine's webhooks can refuse or delay a workload: the ones that match workloads fail open and skip the system namespaces" {
+  local webhooks skipped args kinds policies actions timeouts
+  # Gatekeeper registers its webhooks itself, so they are in the render, with the chart's post-
+  # renderer applied: every one fails open and skips the three namespaces.
+  render gatekeeper
+  webhooks="$(yq -N 'select(.kind == "ValidatingWebhookConfiguration" or .kind == "MutatingWebhookConfiguration")
+    | .kind + "/" + .metadata.name + " " + .webhooks[].name' "$RENDERED")"
+  echo "Gatekeeper's webhooks: ${webhooks:-none}"
+  [ -n "$webhooks" ]
+  # No mutation: no mutating webhook at all.
+  [ -z "$(grep '^MutatingWebhookConfiguration' <<<"$webhooks" || true)" ]
+  [ "$(grep -c '^ValidatingWebhookConfiguration' <<<"$webhooks")" -eq 2 ]
+  policies="$(yq -N 'select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] | .name + " " + .failurePolicy' "$RENDERED")"
+  echo "failure policies: $policies"
+  [ -z "$(grep -v ' Ignore$' <<<"$policies" || true)" ]
+  # A slow answer delays the API server as a refusal would hold it up: each webhook waits the
+  # chart's three seconds at most, and the failure policy then admits the object.
+  timeouts="$(yq -N 'select(.kind == "ValidatingWebhookConfiguration") | .webhooks[] | .name + " " + (.timeoutSeconds | tostring)' "$RENDERED")"
+  echo "timeouts: $timeouts"
+  [ "$(grep -c . <<<"$timeouts")" -eq 2 ]
+  [ -z "$(grep -v ' 3$' <<<"$timeouts" || true)" ]
+  # Each webhook's namespaceSelector skips kube-system, flux-system and the engine's namespace: a
+  # NotIn expression on the namespace's own name lists each, and nothing opts a namespace back in.
+  skipped="$(yq -N -o json -I0 'select(.kind == "ValidatingWebhookConfiguration") | .webhooks[]' "$RENDERED" | jq -r '
+    .name + " " + ([.namespaceSelector.matchExpressions[]
+      | select(.key == "kubernetes.io/metadata.name" and .operator == "NotIn") | .values[]] | sort | join(","))')"
+  echo "skipped namespaces: $skipped"
+  [ "$(grep -c . <<<"$skipped")" -eq 2 ]
+  [ -z "$(grep -v ' flux-system,gatekeeper-system,kube-system$' <<<"$skipped" || true)" ]
+  # The audit leaves out only the namespaces a Config object excludes from it, and neither the
+  # application nor its release has one, so it sees every namespace (the docs' scope of each engine).
+  [ -z "$(yq -N 'select(.apiVersion == "config.gatekeeper.sh/*") | .metadata.name' "$BUILT" "$RENDERED")" ]
+  # No mutation and no generation: the chart's mutation is off, and nothing of the rules mutates.
+  [ "$(yq -N 'select(.kind == "Deployment" and .metadata.name == "gatekeeper-controller-manager")
+    | .spec.template.spec.containers[0].args[]' "$RENDERED" | grep -cx -- '--disable-opa-builtin={http.send}')" -eq 1 ]
+  yq -N 'select(.kind == "Deployment" and .metadata.name == "gatekeeper-controller-manager")
+    | .spec.template.spec.containers[0].args[]' "$RENDERED" | grep -qx -- '--operation=webhook'
+  [ -z "$(yq -N 'select(.kind == "Deployment") | .spec.template.spec.containers[0].args[]' "$RENDERED" | grep -x -- '--operation=mutation-webhook' || true)" ]
+  # Kyverno's chart registers none: its controller makes them at run time, from what these values
+  # and the policies decide. The values force the failure policy Ignore on every webhook that
+  # matches resources, skip the three namespaces in the selector of each, and leave out the
+  # webhook that protects generation labels, the generation of Kubernetes' own policies and the
+  # background and cleanup controllers that mutate and clean up.
+  render kyverno
+  [ -z "$(yq -N 'select(.kind == "ValidatingWebhookConfiguration" or .kind == "MutatingWebhookConfiguration")
+    | .metadata.name' "$RENDERED")" ]
+  args="$(yq -N 'select(.kind == "Deployment" and .metadata.name == "kyverno-admission-controller")
+    | .spec.template.spec.containers[] | select(.name == "kyverno") | .args[]' "$RENDERED")"
+  echo "admission controller's flags: $(paste -sd' ' <<<"$args")"
+  grep -qx -- '--forceFailurePolicyIgnore=true' <<<"$args"
+  grep -qx -- '--protectGenerationLabels=false' <<<"$args"
+  grep -qx -- '--generateValidatingAdmissionPolicy=false' <<<"$args"
+  # A slow answer holds the API server up as a refusal would. Kyverno 1.20.0 sets no wait on the
+  # webhooks that match resources unless a policy sets webhookConfiguration.timeoutSeconds, which
+  # none does (below), so the API server's default of 10 seconds applies there. --webhookTimeout sets
+  # the wait of the webhooks on Kyverno's own kinds, which fail closed; it stays at its default of
+  # 10 seconds or below.
+  timeouts="$(grep -E -- '^--?webhookTimeout(=|$)' <<<"$args" || true)"
+  echo "admission controller's webhook timeout: ${timeouts:-the default, 10 seconds}"
+  if [ -n "$timeouts" ]; then
+    [[ $timeouts =~ ^--?webhookTimeout=([0-9]+)$ ]]
+    [ "${BASH_REMATCH[1]}" -ge 1 ]
+    [ "${BASH_REMATCH[1]}" -le 10 ]
+  fi
+  skipped="$(yq -N 'select(.kind == "ConfigMap" and .metadata.name == "kyverno") | .data.webhooks' "$RENDERED" |
+    jq -r '[.namespaceSelector.matchExpressions[] | select(.key == "kubernetes.io/metadata.name" and .operator == "NotIn") | .values[]]
+      | sort | join(",")')"
+  echo "namespaces the resource webhooks skip: $skipped"
+  [ "$skipped" = flux-system,kube-system,kyverno ]
+  # Beyond the webhooks, Kyverno leaves out of admission and of its scans everything in the
+  # namespaces its resourceFilters name, the chart's defaults, from which the docs say what each
+  # engine's first report holds.
+  skipped="$(yq -N 'select(.kind == "ConfigMap" and .metadata.name == "kyverno") | .data.resourceFilters' "$RENDERED" |
+    grep -oE '\[\*/\*,[^],]+,\*\]' | sed -E 's/^\[\*\/\*,([^,]+),\*\]$/\1/' | sort | paste -sd, -)"
+  echo "namespaces the resource filters leave out: $skipped"
+  [ "$skipped" = kube-node-lease,kube-public,kube-system,kyverno ]
+  [ -z "$(yq -N 'select(.kind == "Deployment" and (.metadata.name == "kyverno-background-controller" or .metadata.name == "kyverno-cleanup-controller")) | .metadata.name' "$RENDERED")" ]
+  # What the rules do: Kyverno's are ValidatingPolicies alone, each in audit and failing open.
+  rules_built kyverno-policies
+  kinds="$(yq -N '.kind' "$BUILT" | sort | uniq -c | paste -sd' ')"
+  echo "Kyverno's rule objects: $kinds"
+  [ "$(yq -N '.kind' "$BUILT" | sort -u)" = ValidatingPolicy ]
+  [ "$(yq -N '.kind' "$BUILT" | grep -c .)" -eq 3 ]
+  # No policy sets a timeout of its own for the webhook its rule is served by.
+  [ -z "$(yq -N 'select(.spec.webhookConfiguration != null) | .metadata.name' "$BUILT")" ]
+  actions="$(yq -N '.metadata.name + " " + (.spec.validationActions | join(",")) + " " + .spec.failurePolicy' "$BUILT")"
+  echo "$actions"
+  [ -z "$(grep -v ' Audit Ignore$' <<<"$actions" || true)" ]
+  # Gatekeeper's are ConstraintTemplates and constraints in dry-run, and no mutator, expansion or
+  # config object that would change an object or what is watched.
+  rules_built gatekeeper-policies
+  kinds="$(yq -N '.kind' "$BUILT" | sort -u | grep -v '^ConstraintTemplate$' || true)"
+  echo "Gatekeeper's constraint kinds: $(paste -sd' ' <<<"$kinds")"
+  [ "$(yq -N 'select(.kind == "ConstraintTemplate") | .metadata.name' "$BUILT" | grep -c .)" -eq 3 ]
+  [ "$(yq -N 'select(.apiVersion == "constraints.gatekeeper.sh/*") | .metadata.name' "$BUILT" | grep -c .)" -eq 3 ]
+  [ -z "$(yq -N '.apiVersion' "$BUILT" | sort -u | grep -v -e '^templates.gatekeeper.sh/' -e '^constraints.gatekeeper.sh/' || true)" ]
+  # Rego alone: the chart's default of making a ValidatingAdmissionPolicy for a template acts only on
+  # a template with CEL source.
+  [ "$(yq -N 'select(.kind == "ConstraintTemplate") | .spec.targets[] | keys | join(",")' "$BUILT" | sort -u)" = rego,target ]
+  actions="$(yq -N 'select(.apiVersion == "constraints.gatekeeper.sh/*") | .metadata.name + " " + .spec.enforcementAction' "$BUILT")"
+  echo "$actions"
+  [ -z "$(grep -v ' dryrun$' <<<"$actions" || true)" ]
+  # What only a live cluster shows is stated beside the settings that decide it.
+  # Kyverno's six run-time webhook configurations are listed with each one's failure policy.
+  for name in kyverno-exception-validating-webhook-cfg kyverno-cel-exception-validating-webhook-cfg \
+    kyverno-global-context-validating-webhook-cfg kyverno-policy-mutating-webhook-cfg \
+    kyverno-policy-validating-webhook-cfg kyverno-verify-mutating-webhook-cfg; do
+    grep -qF "\`$name\`" "$REPO/docs/kubernetes.md"
+  done
+  tr -s "\n " "  " <"$REPO/docs/kubernetes.md" | grep -qF "Kyverno registers six more webhook configurations at run time, five of which fail closed"
+  tr -s "\n " "  " <"$REPO/docs/kubernetes.md" | grep -qF "while no Kyverno pod answers, a write of a Kyverno policy, PolicyException or GlobalContextEntry is refused"
+  tr -s "\n " "  " <"$REPO/docs/runbooks/alerts.md" | grep -qF "a write of a Kyverno policy, PolicyException or GlobalContextEntry is refused"
+}
+
+# rules_built APP: built APP, with the empty documents flux build leaves out of $BUILT, so that
+# every document of it is an object.
+rules_built() {
+  built "$1"
+  yq 'select(. != null)' "$BUILT" >"$BUILT.objects"
+  mv "$BUILT.objects" "$BUILT"
+}
+
+# engine_inputs OUT: from a render in OUT, the pods and namespaces the engines evaluate, in
+# $BATS_TEST_TMPDIR: pods.yaml, one Pod for each pod template of each workload with the workload's
+# namespace, namespaces.yaml, the Namespace objects, and values.yaml, the namespaces' labels as
+# Kyverno's CLI takes them.
+engine_inputs() {
+  local all="$BATS_TEST_TMPDIR/render-objects.ndjson" missing
+  find "$1" -name '*.yaml' -print0 | xargs -0 yq -N -o json -I0 'select(. != null)' >"$all"
+  # A Helm test hook that the release does not run (the root's defaults turn the tests on, and a
+  # release excludes one by name in test.filters) is never a pod of the cluster, and the image check
+  # of just kubernetes-validate leaves it out in the same way.
+  jq -cs 'def hooks: ((.metadata.annotations["helm.sh/hook"] // "") | split(",") | map(gsub("^ +| +$"; "")) | map(select(. != "")));
+      def testonly: (hooks | length > 0) and (hooks | all(. == "test" or . == "test-success" or . == "test-failure"));
+      . as $all
+      # A chart object without a namespace is installed into the namespace of its release, which
+      # the labels of helm-controller name through the HelmRelease.
+      | ([$all[] | select(.kind == "HelmRelease") | {key: ((.metadata.namespace // "") + "/" + .metadata.name),
+          value: (.spec.targetNamespace // .metadata.namespace // "")}] | from_entries) as $releases
+      | def namespace_of: .metadata.namespace // $releases[(.metadata.labels["helm.toolkit.fluxcd.io/namespace"] // "") + "/"
+          + (.metadata.labels["helm.toolkit.fluxcd.io/name"] // "")] // "default";
+      def runs($n; $release):
+          ($all | map(select(.kind == "HelmRelease" and .metadata.name == $release.name
+              and (.metadata.namespace // "default") == $release.namespace)) | first) as $hr
+          | if $hr == null then true
+            else ($hr.spec.test.enable // false) == true
+              and (($hr.spec.test.filters // []) as $f
+                | (($f | map(select(.exclude != true) | .name)) as $in
+                  | ($in | length) == 0 or ($in | index($n) != null))
+                  and (($f | map(select(.exclude == true) | .name) | index($n)) == null))
+            end;
+      $all[]
+      | select(.kind == "Deployment" or .kind == "StatefulSet" or .kind == "DaemonSet" or .kind == "ReplicaSet"
+          or .kind == "ReplicationController" or .kind == "Job" or .kind == "CronJob" or .kind == "Pod")
+      | . as $o
+      | select(($o | testonly | not) or runs($o.metadata.name;
+          {"name": ($o.metadata.labels["helm.toolkit.fluxcd.io/name"] // ""),
+           "namespace": ($o.metadata.labels["helm.toolkit.fluxcd.io/namespace"] // "default")}))
+      | {apiVersion: "v1", kind: "Pod",
+         metadata: {name: ((.kind | ascii_downcase) + "-" + .metadata.name), namespace: namespace_of},
+         spec: (if .kind == "Pod" then .spec elif .kind == "CronJob" then .spec.jobTemplate.spec.template.spec
+                else .spec.template.spec end)}' "$all" | jq -c '.' | sed 's/^/---\n/' >"$BATS_TEST_TMPDIR/pods.yaml"
+  # flux-system is the one namespace of a pod that the render holds no Namespace of: the Flux
+  # Operator makes it, and the FluxInstance's patches give it its level (Pod Security, above). Any
+  # other namespace without an object is a pod in a namespace nothing declares, which the check of
+  # the render refuses, so it fails here too.
+  missing="$(jq -rs --slurpfile pods <(grep '^{' "$BATS_TEST_TMPDIR/pods.yaml" | jq -c '.metadata.namespace') \
+    '([.[] | select(.kind == "Namespace") | .metadata.name]) as $declared | ($pods | unique)
+    | map(select(. as $n | $declared | index($n) | not)) | join(" ")' "$all")"
+  echo "namespaces of pods that no Namespace of the render declares: ${missing:-none}"
+  [ -z "$missing" ] || [ "$missing" = flux-system ]
+  if [ "$missing" = flux-system ]; then
+    printf '%s\n' '{"apiVersion":"v1","kind":"Namespace","metadata":{"name":"flux-system","labels":{"pod-security.kubernetes.io/enforce":"restricted"}}}' >>"$all"
+  fi
+  jq -c 'select(.kind == "Namespace") | {apiVersion: "v1", kind: "Namespace",
+    metadata: {name: .metadata.name, labels: (.metadata.labels // {})}}' "$all" | sed 's/^/---\n/' >"$BATS_TEST_TMPDIR/namespaces.yaml"
+  jq -cs '{apiVersion: "cli.kyverno.io/v1alpha1", kind: "Values",
+    namespaceSelector: [.[] | select(.kind == "Namespace") | {name: .metadata.name, labels: (.metadata.labels // {})}]}' "$all" \
+    >"$BATS_TEST_TMPDIR/values.yaml"
+}
+
+# broken_inputs: pods.yaml, namespaces.yaml and values.yaml gain, in a namespace that enforces the
+# restricted level, a pod that breaks the first two rules, and a namespace that breaks the third.
+broken_inputs() {
+  local ns="$1"
+  cat >>"$BATS_TEST_TMPDIR/pods.yaml" <<EOF
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: broken, namespace: $ns}
+spec:
+  containers:
+    - {name: broken, image: "registry.example/broken:latest"}
+EOF
+  cat >>"$BATS_TEST_TMPDIR/namespaces.yaml" <<EOF
+---
+apiVersion: v1
+kind: Namespace
+metadata: {name: unlabelled}
+EOF
+}
+
+# engines_over DIR: runs both engines over the inputs of engine_inputs, with each engine's rules
+# from the tree. Sets KYVERNO_STATUS, KYVERNO_OUTPUT, and GATEKEEPER_FINDINGS, the number of
+# findings of the constraints, and GATEKEEPER_OUTPUT.
+engines_over() {
+  local dir="$BATS_TEST_TMPDIR/engine-rules" policy
+  rm -rf "$dir"
+  mkdir -p "$dir/kyverno" "$dir/gatekeeper"
+  rules_built kyverno-policies
+  yq '.' "$BUILT" >"$dir/kyverno/policies.yaml"
+  rules_built gatekeeper-policies
+  yq '.' "$BUILT" >"$dir/gatekeeper/rules.yaml"
+  policy="$dir/kyverno/policies.yaml"
+  set +e
+  KYVERNO_OUTPUT="$(kyverno apply "$policy" --resource "$BATS_TEST_TMPDIR/pods.yaml" --resource "$BATS_TEST_TMPDIR/namespaces.yaml" \
+    --values-file "$BATS_TEST_TMPDIR/values.yaml" 2>&1)"
+  KYVERNO_STATUS=$?
+  GATEKEEPER_OUTPUT="$(gator test --filename "$dir/gatekeeper/rules.yaml" --filename "$BATS_TEST_TMPDIR/pods.yaml" \
+    --filename "$BATS_TEST_TMPDIR/namespaces.yaml" --output json 2>&1)"
+  set -e
+  GATEKEEPER_FINDINGS="$(jq 'length' <<<"$GATEKEEPER_OUTPUT" 2>/dev/null || echo "not JSON")"
+}
+
+# scope_kyverno, scope_gatekeeper: one line for each rule of $BUILT, "NAME kinds namespaceSelector",
+# the objects it matches in a form both engines share. A match key beyond the kinds and the
+# namespace selector (an excluded namespace, a label selector, a match condition) is printed as
+# "unsupported" so it differs from the engine without it.
+scope_kyverno() {
+  yq -N -o json -I0 '.' "$BUILT" | jq -r '
+    def kind: {pods: "Pod", namespaces: "Namespace"}[.] // .;
+    .metadata.name + " " + ([.spec.matchConstraints.resourceRules[].resources[] | kind] | sort | join(","))
+      + " " + (.spec.matchConstraints.namespaceSelector // {} | tojson)
+      + (if ((.spec.matchConstraints | keys) - ["resourceRules", "namespaceSelector"]) != []
+          or (.spec.matchConditions // []) != []
+          or ([.spec.matchConstraints.resourceRules[] | keys] | flatten | unique) != ["apiGroups", "apiVersions", "operations", "resources"]
+          or ([.spec.matchConstraints.resourceRules[].operations] | flatten | unique) != ["CREATE", "UPDATE"]
+         then " unsupported" else "" end)' | sort
+}
+scope_gatekeeper() {
+  yq -N -o json -I0 'select(.apiVersion == "constraints.gatekeeper.sh/*")' "$BUILT" | jq -r '
+    .metadata.name + " " + ([.spec.match.kinds[].kinds[]] | sort | join(","))
+      + " " + (.spec.match.namespaceSelector // {} | tojson)
+      + (if ((.spec.match | keys) - ["kinds", "namespaceSelector"]) != [] then " unsupported" else "" end)' | sort
+}
+
+@test "Both engines hold the same three rules, in audit, and the tree's own render passes them" {
+  local rule out="$BATS_TEST_TMPDIR/render" kyverno_names gatekeeper_names offline file ns
+  # The same three names in both, each naming the offline check of the tree it mirrors.
+  rules_built kyverno-policies
+  kyverno_names="$(yq -N '.metadata.name' "$BUILT" | sort | paste -sd' ')"
+  yq -N '.metadata.name + " " + .metadata.annotations["k8s-gitops/offline-check"]' "$BUILT" | sort >"$BATS_TEST_TMPDIR/kyverno-checks"
+  # What each rule matches: the kind and the namespace selector, and nothing else that would narrow
+  # it, so a rule cannot be held back in one engine and not the other.
+  scope_kyverno >"$BATS_TEST_TMPDIR/kyverno-scope"
+  rules_built gatekeeper-policies
+  gatekeeper_names="$(yq -N 'select(.apiVersion == "constraints.gatekeeper.sh/*") | .metadata.name' "$BUILT" | sort | paste -sd' ')"
+  yq -N 'select(.apiVersion == "constraints.gatekeeper.sh/*") | .metadata.name + " " + .metadata.annotations["k8s-gitops/offline-check"]' "$BUILT" \
+    | sort >"$BATS_TEST_TMPDIR/gatekeeper-checks"
+  scope_gatekeeper >"$BATS_TEST_TMPDIR/gatekeeper-scope"
+  echo "Kyverno: $kyverno_names; Gatekeeper: $gatekeeper_names"
+  [ "$kyverno_names" = "$(printf '%s\n' "${RULES[@]}" | sort | paste -sd' ')" ]
+  [ "$gatekeeper_names" = "$kyverno_names" ]
+  diff "$BATS_TEST_TMPDIR/kyverno-checks" "$BATS_TEST_TMPDIR/gatekeeper-checks"
+  cat "$BATS_TEST_TMPDIR/kyverno-scope"
+  diff "$BATS_TEST_TMPDIR/kyverno-scope" "$BATS_TEST_TMPDIR/gatekeeper-scope"
+  while read -r rule offline; do
+    echo "$rule mirrors $offline"
+    file="${offline%% *}"
+    [ -x "$REPO/$file" ]
+  done <"$BATS_TEST_TMPDIR/kyverno-checks"
+  # The tree's own render: every pod template and every namespace in it passes every rule in both.
+  "$REPO/scripts/render" "$out" "$REPO"
+  engine_inputs "$out"
+  [ "$(grep -c '^kind: Pod\|"kind":"Pod"' "$BATS_TEST_TMPDIR/pods.yaml")" -gt 20 ]
+  [ "$(grep -c '"kind":"Namespace"' "$BATS_TEST_TMPDIR/namespaces.yaml")" -gt 10 ]
+  engines_over
+  echo "Kyverno: $KYVERNO_OUTPUT"
+  echo "Gatekeeper: $GATEKEEPER_OUTPUT"
+  [ "$KYVERNO_STATUS" -eq 0 ]
+  [ "$GATEKEEPER_FINDINGS" = 0 ]
+  # A pod and a namespace that break the rules fail them, in both: the passes above are not the
+  # engines finding nothing to look at.
+  ns="$(jq -r 'select(.kind == "Namespace" and .metadata.labels["pod-security.kubernetes.io/enforce"] == "restricted") | .metadata.name' \
+    <(yq -N -o json -I0 '.' "$BATS_TEST_TMPDIR/namespaces.yaml") | head -n 1)"
+  [ -n "$ns" ]
+  broken_inputs "$ns"
+  engines_over
+  echo "Kyverno: $KYVERNO_OUTPUT"
+  echo "Gatekeeper: $GATEKEEPER_OUTPUT"
+  [ "$KYVERNO_STATUS" -ne 0 ]
+  for rule in "${RULES[@]}"; do
+    grep -q "policy $rule -> resource .*broken\|policy $rule -> resource .*unlabelled" <<<"$KYVERNO_OUTPUT"
+    jq -e --arg rule "$rule" 'any(.[]; .constraint.metadata.name == $rule)' <<<"$GATEKEEPER_OUTPUT"
+  done
+}
+
+@test "Each rule fails the object it is written to catch, in each engine's own test" {
+  local rows row name message passed=0 failed=0 skipped=0 cases
+  # Kyverno's: every resource of a test is named for what its policy must do with it, pass-,
+  # fail- or skip-, and its result is read from the engine's own report, so that an object the
+  # engine excluded cannot stand for one it refused.
+  run kyverno test "$REPO/tests/admission-policy/kyverno" --require-tests
+  echo "$output"
+  [ "$status" -eq 0 ]
+  rows="$(kyverno test "$REPO/tests/admission-policy/kyverno" --output-format json --detailed-results 2>/dev/null |
+    sed -n '/^\[/,/^\]/p' | jq -c '.[]')"
+  [ -n "$rows" ]
+  while read -r row; do
+    name="$(jq -r '.RESOURCE | split("/") | last' <<<"$row")"
+    message="$(jq -r '.Message' <<<"$row")"
+    echo "$name: $message"
+    [ "$(jq -r '.RESULT' <<<"$row")" = Pass ]
+    case $name in
+      pass-*) [ "$message" = success ]; passed=$((passed + 1)) ;;
+      fail-*) [ "$message" != success ] && [ "$message" != Excluded ]; failed=$((failed + 1)) ;;
+      skip-*) [ "$message" = Excluded ]; skipped=$((skipped + 1)) ;;
+    esac
+  done <<<"$rows"
+  echo "Kyverno: $passed pass, $failed fail, $skipped skip"
+  [ "$passed" -ge 3 ] && [ "$failed" -ge 5 ] && [ "$skipped" -ge 1 ]
+  # Gatekeeper's: gator verify runs each case against the template and constraint of the tree and
+  # fails when a case's assertion does not hold; a case that must be refused asserts the rule's
+  # message, one that must not asserts no violation.
+  run gator verify "$REPO/tests/admission-policy/gatekeeper/suite.yaml" --verbose
+  echo "$output"
+  [ "$status" -eq 0 ]
+  cases="$(yq -N '[.tests[].cases[]] | length' "$REPO/tests/admission-policy/gatekeeper/suite.yaml")"
+  [ "$(grep -c -- '--- PASS: ' <<<"$output")" -eq $((cases + $(yq -N '.tests | length' "$REPO/tests/admission-policy/gatekeeper/suite.yaml"))) ]
+  [ -z "$(grep -- '--- FAIL' <<<"$output" || true)" ]
+  # Each rule has a case that is refused and one that is not, with the rule's own message.
+  for name in "${RULES[@]}"; do
+    [ "$(NAME="$name" yq -N '[.tests[] | select(.name == strenv(NAME)) | .cases[].assertions[] | select(.violations != "no")] | length' \
+      "$REPO/tests/admission-policy/gatekeeper/suite.yaml")" -ge 1 ]
+    [ "$(NAME="$name" yq -N '[.tests[] | select(.name == strenv(NAME)) | .cases[].assertions[] | select(.violations == "no")] | length' \
+      "$REPO/tests/admission-policy/gatekeeper/suite.yaml")" -ge 1 ]
+  done
+}
+
+@test "Each engine is pinned to an exact chart version that Renovate can update" {
+  local overlay app path version spec refkeys url
+  overlay="$(kustomize build --load-restrictor LoadRestrictionsNone "$TREE/kubernetes/apps/overlays/lab-sto2")"
+  for app in kyverno kyverno-policies gatekeeper gatekeeper-policies; do
+    path="$(APP=$app yq -N 'select(.kind == "Kustomization" and .metadata.name == strenv(APP)) | .spec.path' <<<"$overlay")"
+    echo "$app in the overlay: ${path:-none}"
+    [ -n "$path" ]
+  done
+  for app in kyverno gatekeeper; do
+    built "$app"
+    # An exact release, never a range or a moving tag. Flux gives a ref's semver and digest
+    # precedence over its tag, so an OCIRepository's ref holds the tag alone.
+    refkeys="$(yq -N 'select(.kind == "OCIRepository") | .spec.ref // {} | keys | sort | join(",")' "$BUILT")"
+    echo "$app ref keys: ${refkeys:-none}"
+    [[ -z $refkeys || $refkeys == tag || $refkeys == digest,tag ]]
+    version="$(yq -N 'select(.kind == "OCIRepository") | .spec.ref.tag // ""' "$BUILT")"
+    [ -n "$version" ] || version="$(yq -N 'select(.kind == "HelmRelease") | .spec.chart.spec.version // ""' "$BUILT")"
+    echo "$app chart version: ${version:-none}"
+    [[ $version =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]
+    # Renovate finds it: an OCIRepository tag carries its comment, a HelmRelease's chart version
+    # is read by Renovate's Flux manager, which needs the HelmRepository beside it.
+    spec="$(cat "$TREE/$APP_DIR/app/"*.yaml)"
+    if grep -q '^kind: OCIRepository' <<<"$spec"; then
+      url="$(yq -N 'select(.kind == "OCIRepository") | .spec.url' "$BUILT")"
+      grep -qxF "    # renovate: datasource=docker depName=${url#oci://}" <<<"$spec"
+    else
+      grep -q '^kind: HelmRepository' <<<"$spec"
+    fi
+  done
+  # Gatekeeper's test CLI is the release of the chart's application, so the two move together.
+  [ "$(yq -N 'select(.kind == "HelmRelease") | .spec.chart.spec.version' "$BUILT")" = \
+    "$(sed -n 's/^"http:gator" = { version = "\([^"]*\)".*/\1/p' "$REPO/mise.toml")" ]
+}
+
+@test "Each engine's pods keep running while a node is drained, request their memory and pass the restricted level" {
+  local app deployment replicas spread budget unrequested violations level overlay failed=""
+  local -A deployments=([kyverno]=kyverno-admission-controller [gatekeeper]=gatekeeper-controller-manager)
+  local -A namespaces=([kyverno]=kyverno [gatekeeper]=gatekeeper-system)
+  overlay="$(kustomize build --load-restrictor LoadRestrictionsNone "$TREE/kubernetes/apps/overlays/lab-sto2")"
+  for app in kyverno gatekeeper; do
+    deployment="${deployments[$app]}"
+    render "$app"
+    # The controller that answers the webhooks runs two replicas, spread over nodes where the
+    # scheduler can, under a budget that keeps one. The spread and the budget are compared with
+    # the labels of the rendered pod template, so a selector that matches none of its pods does
+    # not count.
+    read -r replicas spread budget < <(yq -N -o json -I0 'select(. != null)' "$RENDERED" | jq -rs --arg c "$deployment" '
+      (.[] | select(.kind == "Deployment" and .metadata.name == $c)) as $d
+      | ($d.spec.template.metadata.labels // {}) as $labels
+      | def selects: (.matchLabels // {}) as $m | ($m | length) > 0 and ($m | to_entries | all($labels[.key] == .value));
+      [($d.spec.replicas // 1 | tostring),
+       ([$d.spec.template.spec.topologySpreadConstraints // [] | .[]
+         | select(.topologyKey == "kubernetes.io/hostname" and .maxSkew == 1 and (.labelSelector | selects))
+         | .whenUnsatisfiable][0] // "none"),
+       ([.[] | select(.kind == "PodDisruptionBudget" and (.spec.selector | selects))
+         | (.spec.minAvailable // "none" | tostring) + "/" + (.spec.maxUnavailable // "none" | tostring)][0] // "none")]
+      | join(" ")')
+    echo "$deployment: replicas ${replicas:-none}, spread: ${spread:-none}, budget: ${budget:-none}"
+    [ "${replicas:-0}" = 2 ] || failed+=" $deployment:replicas"
+    [ "${spread:-none}" != none ] || failed+=" $deployment:spread"
+    [ "$budget" = "1/none" ] || failed+=" $deployment:budget"
+    # Every container of every pod template the release runs requests CPU and memory, and has a
+    # memory limit, so an engine cannot starve the node it runs on.
+    unrequested="$(pod_templates "$RENDERED" | jq -r '.workload as $w | .pod
+      | ((.containers // []) + (.initContainers // []))[]
+      | select((.resources.requests.cpu // "") == "" or (.resources.requests.memory // "") == ""
+          or (.resources.limits.memory // "") == "")
+      | "\($w) container \(.name)"')"
+    echo "$app containers without requests or a memory limit: ${unrequested:-none}"
+    [ -z "$unrequested" ] || failed+=" $app:requests"
+    # The namespace is the level the cluster gets, from the overlay: restricted, which every pod
+    # template here meets, by the restricted level's rules read for each container.
+    level="$(NS="${namespaces[$app]}" yq -N 'select(.kind == "Namespace" and .metadata.name == strenv(NS))
+      | .metadata.labels["pod-security.kubernetes.io/enforce"] // "none"' <<<"$overlay")"
+    echo "$app namespace enforces: $level"
+    [ "$level" = restricted ] || failed+=" $app:level"
+    violations="$(pod_templates "$RENDERED" | jq -r '
+      .workload as $workload | .pod as $pod
+      | ([
+          {bad: (($pod.hostNetwork) == true or ($pod.hostPID) == true or ($pod.hostIPC) == true),
+           why: "\($workload) shares a host namespace"},
+          {bad: (($pod.volumes // []) | any(has("hostPath"))), why: "\($workload) mounts a host path"}
+        ] + [
+          (($pod.containers // []) + ($pod.initContainers // []))[]
+          | (.securityContext // {}) as $c | "\($workload) container \(.name)" as $where
+          | ($c.seccompProfile.type // $pod.securityContext.seccompProfile.type // "none") as $profile
+          | {bad: ($c.privileged == true), why: "\($where) is privileged"},
+            {bad: ($c.allowPrivilegeEscalation != false), why: "\($where) allows privilege escalation"},
+            {bad: (($c.capabilities.drop // []) | any(. == "ALL") | not), why: "\($where) keeps its capabilities"},
+            {bad: ((($c.capabilities.add // []) - ["NET_BIND_SERVICE"]) | length > 0), why: "\($where) adds capabilities"},
+            {bad: ($c.runAsNonRoot == false or ($c.runAsNonRoot // $pod.securityContext.runAsNonRoot) != true),
+             why: "\($where) may run as root"},
+            {bad: (($c.runAsUser // $pod.securityContext.runAsUser) == 0), why: "\($where) runs as user 0"},
+            {bad: ($profile != "RuntimeDefault" and $profile != "Localhost"), why: "\($where) has no seccomp profile"},
+            {bad: ((.ports // []) | any(.hostPort != null)), why: "\($where) uses a host port"}
+        ])[] | select(.bad) | .why')"
+    echo "$app violations of the restricted level: ${violations:-none}"
+    [ -z "$violations" ] || failed+=" $app:restricted"
+  done
+  echo "failed:${failed:- none}"
+  [ -z "$failed" ]
+}
+
+# monitor_targets: one line per ServiceMonitor or PodMonitor in $RENDERED, "Kind/name -> Kind/name"
+# naming each rendered object it scrapes: for a ServiceMonitor, a Service whose labels its selector
+# matches and that names every port it scrapes; for a PodMonitor, a workload whose pod template
+# does so. A monitor that scrapes none of them ends in "-> none".
+monitor_targets() {
+  yq -N -o json -I0 'select(. != null)' "$RENDERED" | jq -rs '. as $all | .[]
+    | select(.kind == "ServiceMonitor" or .kind == "PodMonitor") | . as $monitor
+    | ($monitor.spec.selector.matchLabels // {}) as $selector
+    | [($monitor.spec.endpoints // $monitor.spec.podMetricsEndpoints // [])[].port] as $ports
+    | [$all[] | if $monitor.kind == "ServiceMonitor" then
+          select(.kind == "Service")
+          | {name: ("Service/" + .metadata.name), labels: (.metadata.labels // {}), ports: [.spec.ports[]?.name]}
+        else
+          select(.kind == "Deployment" or .kind == "DaemonSet" or .kind == "StatefulSet")
+          | {name: (.kind + "/" + .metadata.name), labels: (.spec.template.metadata.labels // {}),
+             ports: [.spec.template.spec.containers[].ports[]?.name]}
+        end
+      | select(.labels as $labels | ($selector | length > 0)
+          and ($selector | to_entries | all($labels[.key] == .value)))
+      | select(.ports as $named | ($ports | length > 0) and ($ports | all(. as $port | any($named[]; . == $port))))
+      | .name] as $targets
+    | "\($monitor.kind)/\($monitor.metadata.name) -> \(if ($targets | length) > 0 then $targets | join(" ") else "none" end)"'
+}
+
+@test "Each engine's metrics are scraped and each engine's findings can be read" {
+  local app targets depends
+  for app in kyverno gatekeeper; do
+    render "$app"
+    # Gatekeeper's chart makes no monitor, so the application's own PodMonitor joins its render.
+    if [ "$app" = gatekeeper ]; then
+      { echo ---; yq -N 'select(.kind == "PodMonitor")' "$BUILT"; } >>"$RENDERED"
+    fi
+    targets="$(monitor_targets)"
+    echo "$app: ${targets:-no monitor}"
+    [ -n "$targets" ]
+    [[ $targets != *' -> none'* ]]
+    depends="$(yq '.spec.dependsOn // [] | .[].name' "$TREE/$APP_DIR/ks.yaml")"
+    echo "$app depends on: ${depends:-nothing}"
+    grep -qx prometheus-operator-crds <<<"$depends"
+  done
+  # Kyverno's admission and reports controllers; Gatekeeper's controller manager and audit pods,
+  # one monitor for both, which share the label it selects.
+  render kyverno
+  [ "$(monitor_targets | grep -cxF 'ServiceMonitor/kyverno-admission-controller -> Service/kyverno-svc-metrics')" -eq 1 ]
+  [ "$(monitor_targets | grep -cxF 'ServiceMonitor/kyverno-reports-controller -> Service/kyverno-reports-controller-metrics')" -eq 1 ]
+  render gatekeeper
+  { echo ---; yq -N 'select(.kind == "PodMonitor")' "$BUILT"; } >>"$RENDERED"
+  [ "$(monitor_targets | grep -c 'PodMonitor/gatekeeper -> Deployment/gatekeeper-audit Deployment/gatekeeper-controller-manager')" -eq 1 ]
+  # How to read the findings is in the docs: each engine's reports, where the audit puts them and
+  # the metrics that count them.
+  grep -qF 'kubectl get policyreport --all-namespaces' "$REPO/docs/kubernetes.md"
+  grep -qF 'kubectl get clusterpolicyreport' "$REPO/docs/kubernetes.md"
+  grep -qF 'kubectl get constraints' "$REPO/docs/kubernetes.md"
+  grep -qF 'gatekeeper_violations' "$REPO/docs/kubernetes.md"
+  grep -qF 'kyverno_validating_policy_results_total' "$REPO/docs/kubernetes.md"
+}

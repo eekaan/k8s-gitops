@@ -1,0 +1,62 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/templates.gatekeeper.sh/constrainttemplate_v1.json
+# The Rego of the restricted-security-context rule: a pod sets what the restricted Pod Security
+# level requires of a container: no privilege escalation, every capability dropped, a non-root user
+# and a seccomp profile of the runtime or a local one, the container's own or the pod's. Which
+# namespaces it applies to is the constraint's. Kyverno holds the same rule under the same name
+# (kyverno-policies). Gatekeeper makes the kind K8sRestrictedSecurityContext from this template, and
+# no schema of it is in the tree.
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8srestrictedsecuritycontext
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sRestrictedSecurityContext
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8srestrictedsecuritycontext
+
+        import future.keywords.contains
+        import future.keywords.if
+        import future.keywords.in
+
+        spec := input.review.object.spec
+
+        # The pod's containers, init containers and ephemeral containers alike.
+        containers contains c if some c in spec.containers
+        containers contains c if some c in object.get(spec, "initContainers", [])
+        containers contains c if some c in object.get(spec, "ephemeralContainers", [])
+
+        context(c) := object.get(c, "securityContext", {})
+
+        pod_context := object.get(spec, "securityContext", {})
+
+        violation contains {"msg": msg} if {
+          some c in containers
+          object.get(context(c), "allowPrivilegeEscalation", true) != false
+          msg := sprintf("container %v does not set allowPrivilegeEscalation to false", [c.name])
+        }
+
+        violation contains {"msg": msg} if {
+          some c in containers
+          not "ALL" in object.get(object.get(context(c), "capabilities", {}), "drop", [])
+          msg := sprintf("container %v does not drop ALL capabilities", [c.name])
+        }
+
+        # A container's own setting wins over the pod's, as it does for the kubelet.
+        violation contains {"msg": msg} if {
+          some c in containers
+          object.get(context(c), "runAsNonRoot", object.get(pod_context, "runAsNonRoot", false)) != true
+          msg := sprintf("container %v does not set runAsNonRoot to true, its own or the pod's", [c.name])
+        }
+
+        violation contains {"msg": msg} if {
+          some c in containers
+          profile := object.get(object.get(context(c), "seccompProfile", object.get(pod_context, "seccompProfile", {})), "type", "")
+          not profile in {"RuntimeDefault", "Localhost"}
+          msg := sprintf("container %v does not have the RuntimeDefault or a Localhost seccomp profile, its own or the pod's", [c.name])
+        }

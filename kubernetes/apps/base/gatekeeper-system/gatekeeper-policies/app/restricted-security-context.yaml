@@ -1,0 +1,24 @@
+---
+# The restricted-security-context rule, as a constraint of the template, for the pods of the
+# namespaces that enforce the restricted Pod Security level: the same rule as just
+# pod-security-check, which holds every workload of the render to its namespace's level. The fields
+# that must be absent (host namespaces, host paths, added capabilities) are Pod Security admission's,
+# which already refuses them in such a namespace. A namespace's level is the label the tree
+# declares; Talos exempts kube-system from admission and the tree labels it privileged, so it is not
+# matched. In dry-run: a violation is recorded in the constraint's status and counted by the audit,
+# and nothing is refused.
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRestrictedSecurityContext
+metadata:
+  name: restricted-security-context
+  annotations:
+    k8s-gitops/offline-check: scripts/pod-security-check
+spec:
+  enforcementAction: dryrun
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: [Pod]
+    namespaceSelector:
+      matchLabels:
+        pod-security.kubernetes.io/enforce: restricted

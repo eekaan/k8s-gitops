@@ -1,0 +1,44 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/helmrelease-helm-v2.json
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: gatekeeper
+spec:
+  interval: 30m
+  chart:
+    spec:
+      chart: gatekeeper
+      # The version is pinned: a new chart arrives by a change to this file, which Flux applies at once.
+      version: 3.23.1
+      interval: 12h
+      sourceRef:
+        kind: HelmRepository
+        name: gatekeeper
+  valuesFrom:
+    - kind: ConfigMap
+      name: gatekeeper-values
+  # The webhook that checks the label which exempts a namespace from Gatekeeper is on namespaces
+  # alone, and its chart skips only the release's namespace; no value adds the other two. This
+  # gives it the same three as the webhook on every other resource, which the chart's values do.
+  postRenderers:
+    - kustomize:
+        patches:
+          - target:
+              kind: ValidatingWebhookConfiguration
+              name: gatekeeper-validating-webhook-configuration
+            patch: |
+              apiVersion: admissionregistration.k8s.io/v1
+              kind: ValidatingWebhookConfiguration
+              metadata:
+                name: gatekeeper-validating-webhook-configuration
+              webhooks:
+                - name: check-ignore-label.gatekeeper.sh
+                  namespaceSelector:
+                    matchExpressions:
+                      - key: kubernetes.io/metadata.name
+                        operator: NotIn
+                        values:
+                          - gatekeeper-system
+                          - kube-system
+                          - flux-system

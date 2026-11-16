@@ -1,0 +1,21 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: gatekeeper
+  description: Gatekeeper, an admission policy engine that reports in dry-run, and never refuses, what is applied against the three rules of gatekeeper-policies.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#admission-policy
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#gatekeepercontrollermanagerdown
+      title: Runbook
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/gatekeeper-system/gatekeeper
+      title: Manifests
+spec:
+  type: service
+  lifecycle: production
+  owner: group:default/operators
+  system: admission-policy
+  dependsOn:
+    - resource:default/prometheus-operator-crds

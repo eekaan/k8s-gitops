@@ -282,15 +282,17 @@ validated() {
   [ "$status" -eq 0 ]
 
   # Every rule had something to look at: objects validated against a schema and the images of the
-  # rendered releases. Every object of the tree has a schema: the kinds whose definitions a
-  # definitions application's source brings, and those Cilium's operator installs, are validated,
-  # and no kind is listed as having none.
+  # rendered releases. The only kinds listed as having no schema are the three constraint kinds
+  # Gatekeeper makes from its templates at run time, which gator checks instead
+  # (schema-exceptions.yaml). Every other object of the tree has one: the kinds whose definitions a
+  # definitions application's source brings, and those Cilium's operator installs, are validated.
   [[ $output =~ ([1-9][0-9]*)\ flux\ builds ]]
   [[ $output =~ ([1-9][0-9]*)\ objects\ validated ]]
   [[ $output =~ ,\ ([0-9]+)\ of\ listed\ kinds ]]
-  [ "${BASH_REMATCH[1]}" -eq 0 ]
+  [ "${BASH_REMATCH[1]}" -eq 3 ]
   [[ $output =~ ([1-9][0-9]*)\ images ]]
-  [[ $output != *"listed without a schema"* ]]
+  [ "$(grep -c 'listed without a schema' <<<"$output")" -eq 3 ]
+  [ "$(grep 'listed without a schema' <<<"$output" | grep -vc 'constraints.gatekeeper.sh/v1beta1')" -eq 0 ]
   [[ $output != *"GatewayClass"* && $output != *"VolumeSnapshotClass"* && $output != *"CiliumBGPPeerConfig"* ]]
 }
 
@@ -1667,7 +1669,10 @@ EOF
   fails_naming "CiliumLoadBalancerIPPool wrongtype" disabled
   fails_naming "CiliumLoadBalancerIPPool required" spec
   [ "$(grep -c "$file" <<<"$output")" -eq 6 ]
-  [[ $output != *"kube-system/cilium-bgp/"* && $output != *"no schema"* && $output != *"listed without a schema"* ]]
+  [[ $output != *"kube-system/cilium-bgp/"* && $output != *"no schema"* ]]
+  # Nothing is listed without a schema but Gatekeeper's three constraint kinds (schema-exceptions.yaml).
+  [ "$(grep -c 'listed without a schema' <<<"$output")" -eq 3 ]
+  [ "$(grep 'listed without a schema' <<<"$output" | grep -vc 'constraints.gatekeeper.sh/v1beta1')" -eq 0 ]
 
   # The definitions are read at the tag prefix followed by the tag of the Cilium chart the tree pins,
   # and the operator that chart runs, with the tree's values, is that release: Cilium tags a chart
@@ -1722,7 +1727,10 @@ EOF
   fails_naming "ServiceAccount misspelt" role
   fails_naming "ServiceAccount wrongtype" roles
   [ "$(grep -c "$file" <<<"$output")" -eq 2 ]
-  [[ $output != *"etcd-snapshots"* && $output != *"no schema"* && $output != *"listed without a schema"* ]]
+  [[ $output != *"etcd-snapshots"* && $output != *"no schema"* ]]
+  # Nothing is listed without a schema but Gatekeeper's three constraint kinds (schema-exceptions.yaml).
+  [ "$(grep -c 'listed without a schema' <<<"$output")" -eq 3 ]
+  [ "$(grep 'listed without a schema' <<<"$output" | grep -vc 'constraints.gatekeeper.sh/v1beta1')" -eq 0 ]
 }
 
 @test "A definition of one of Kubernetes' own groups or Flux's is refused, whatever brings it" {

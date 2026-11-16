@@ -67,6 +67,7 @@ kubernetes/apps/base/external-dns/external-dns/app/ocirepository.yaml	flux	ghcr.
 kubernetes/apps/base/external-dns/external-dns/app/ocirepository.yaml	regex	ghcr.io/home-operations/charts-mirror/external-dns	tag
 kubernetes/apps/base/external-secrets/external-secrets/app/ocirepository.yaml	flux	ghcr.io/external-secrets/charts/external-secrets	tag
 kubernetes/apps/base/external-secrets/external-secrets/app/ocirepository.yaml	regex	ghcr.io/external-secrets/charts/external-secrets	tag
+kubernetes/apps/base/gatekeeper-system/gatekeeper/app/helmrelease.yaml	flux	gatekeeper	-
 kubernetes/apps/base/keda/keda/app/ocirepository.yaml	flux	ghcr.io/home-operations/charts-mirror/keda	tag
 kubernetes/apps/base/keda/keda/app/ocirepository.yaml	regex	ghcr.io/home-operations/charts-mirror/keda	tag
 kubernetes/apps/base/kromgo/kromgo/app/ocirepository.yaml	flux	ghcr.io/bjw-s-labs/helm/app-template	tag
@@ -94,6 +95,8 @@ kubernetes/apps/base/kube-system/snapshot-controller/app/gitrepository.yaml	rege
 kubernetes/apps/base/kube-system/spegel/app/ocirepository.yaml	flux	ghcr.io/spegel-org/helm-charts/spegel	tag
 kubernetes/apps/base/kube-system/spegel/app/ocirepository.yaml	regex	ghcr.io/spegel-org/helm-charts/spegel	tag
 kubernetes/apps/base/kube-system/vpa/app/helmrelease.yaml	flux	vpa	-
+kubernetes/apps/base/kyverno/kyverno/app/ocirepository.yaml	flux	ghcr.io/kyverno/charts/kyverno	tag
+kubernetes/apps/base/kyverno/kyverno/app/ocirepository.yaml	regex	ghcr.io/kyverno/charts/kyverno	tag
 kubernetes/apps/base/monitoring/grafana-operator/app/ocirepository.yaml	flux	ghcr.io/grafana/helm-charts/grafana-operator	tag
 kubernetes/apps/base/monitoring/grafana-operator/app/ocirepository.yaml	regex	ghcr.io/grafana/helm-charts/grafana-operator	tag
 kubernetes/apps/base/monitoring/grafana/app/grafana.yaml	regex	docker.io/grafana/grafana	version

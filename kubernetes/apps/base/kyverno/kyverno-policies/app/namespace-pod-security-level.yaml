@@ -1,0 +1,31 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/policies.kyverno.io/validatingpolicy_v1.json
+# A namespace carries a Pod Security level: the label pod-security.kubernetes.io/enforce, set to
+# privileged, baseline or restricted. The same rule as just pod-security-check, which fails a
+# namespace an object of the render is in that has none, because a level is declared in the tree
+# and never left to the API server's default. Gatekeeper holds the same rule under the same name
+# (gatekeeper-policies).
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: namespace-pod-security-level
+  annotations:
+    k8s-gitops/offline-check: scripts/pod-security-check
+spec:
+  validationActions:
+    - Audit
+  failurePolicy: Ignore
+  autogen:
+    podControllers:
+      controllers: []
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE, UPDATE]
+        resources: [namespaces]
+  validations:
+    - expression: >-
+        has(object.metadata.labels) && 'pod-security.kubernetes.io/enforce' in object.metadata.labels &&
+        object.metadata.labels['pod-security.kubernetes.io/enforce'] in ['privileged', 'baseline', 'restricted']
+      message: the namespace has a pod-security.kubernetes.io/enforce label of privileged, baseline or restricted

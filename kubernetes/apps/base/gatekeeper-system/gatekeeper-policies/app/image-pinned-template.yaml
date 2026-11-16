@@ -1,0 +1,43 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/templates.gatekeeper.sh/constrainttemplate_v1.json
+# The Rego of the image-pinned rule: every image of a pod is pinned by a sha256 digest, or by a tag
+# other than latest. Kyverno holds the same rule under the same name (kyverno-policies). Gatekeeper
+# makes the kind K8sImagePinned from this template, and no schema of it is in the tree.
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8simagepinned
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sImagePinned
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8simagepinned
+
+        import future.keywords.contains
+        import future.keywords.if
+        import future.keywords.in
+
+        # The pod's containers, init containers and ephemeral containers alike.
+        containers contains c if some c in input.review.object.spec.containers
+        containers contains c if some c in object.get(input.review.object.spec, "initContainers", [])
+        containers contains c if some c in object.get(input.review.object.spec, "ephemeralContainers", [])
+
+        # A digest of 64 hexadecimal digits pins whatever tag goes with it.
+        pinned(image) if regex.match(`@sha256:[0-9a-f]{64}$`, image)
+
+        # Otherwise a tag: an image name with no digest that ends in a colon and a tag, where the
+        # tag has no slash, which a registry's port has, and is not latest.
+        pinned(image) if {
+          regex.match(`^([^@]*/)?[^/@:]+:[^/@:]+$`, image)
+          not endswith(image, ":latest")
+        }
+
+        violation contains {"msg": msg} if {
+          some c in containers
+          not pinned(c.image)
+          msg := sprintf("container %v image %v is not pinned by a sha256 digest or by a tag other than latest", [c.name, c.image])
+        }

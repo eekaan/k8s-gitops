@@ -344,8 +344,10 @@ On what Flux builds:
   listed kind with the number of its objects
   (`listed without a schema: <kind> (<group>/<version>): <n> objects`) and ends with how many
   objects it validated and how many are of listed kinds, so a pass never silently means a skip. The
-  list is empty, as every kind of the tree has a schema: the check prints no listed kind, and
-  `0 of listed kinds`.
+  list holds three kinds, the constraint kinds of `constraints.gatekeeper.sh` that Gatekeeper makes
+  from its templates at run time, which `gator` checks instead
+  ([Admission policy](#admission-policy)): the check prints each of them with its one object, and
+  `3 of listed kinds`. Every other kind of the tree has a schema.
 
   What the check does not evaluate: the rules a definition states in CEL
   (`x-kubernetes-validations`), which are the API server's; admission webhooks and policies;
@@ -598,6 +600,7 @@ once it is not, and the agents' rendered configuration agrees.
 | `openbao`, `external-secrets`, `cert-manager`, `cnpg-system`, `keda`, `volsync-system` | listed | flows not yet enumerated: webhooks and APIs the API server calls, the store's clients, scrapes. Each entry says which, and what covers it. |
 | `piraeus-datastore` | listed | the CSI node plugin runs in the host's network namespace; the satellites replicate over the pod network, and their flows are not yet enumerated. |
 | `cilium-secrets` | listed | holds no pod. |
+| `kyverno`, `gatekeeper-system` | listed | flows not yet enumerated: the API server calls each policy engine's webhooks from the control planes' host network, the controllers reach the API server, Prometheus scrapes them ([Admission policy](#admission-policy)). Pod Security, node firewall. |
 
 `network-policy-exceptions.yaml` is the list; its header says what an entry holds.
 
@@ -1472,6 +1475,8 @@ The own alerts, each with its runbook section in [docs/runbooks/alerts.md](runbo
 | `OpenBaoSnapshotStale` | No run of the OpenBao snapshot CronJob has succeeded for 13 hours. | critical | [OpenBaoSnapshotStale](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#openbaosnapshotstale) |
 | `OpenBaoSnapshotJobFailing` | The OpenBao snapshot CronJob's latest scheduled run has not succeeded after 30 minutes. | warning | [OpenBaoSnapshotJobFailing](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#openbaosnapshotjobfailing) |
 | `FalcoCriticalRuleMatched` | A Falco rule of priority Critical, Alert or Emergency has matched on a node within the last 15 minutes. | critical | [FalcoCriticalRuleMatched](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#falcocriticalrulematched) |
+| `KyvernoAdmissionControllerDown` | Kyverno's admission controller has had no available replica for 10 minutes. | warning | [KyvernoAdmissionControllerDown](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#kyvernoadmissioncontrollerdown) |
+| `GatekeeperControllerManagerDown` | Gatekeeper's controller manager has had no available replica for 10 minutes. | warning | [GatekeeperControllerManagerDown](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#gatekeepercontrollermanagerdown) |
 
 The alerts read only what Prometheus scrapes: kube-state-metrics' pod readiness for OpenBao's
 members, its Deployment availability for the Flux Operator, its nodes' roles, which tell the
@@ -1487,6 +1492,9 @@ kube-state-metrics exposes no CronJob label unless its chart is told to, so a la
 set would not reach the metrics. `tests/rules-check.bats` fails when an alert reads a metric that
 no monitor of the render scrapes, or whose monitor selects nothing of the Service or pod that
 serves it.
+
+The two policy engines' alerts read kube-state-metrics' Deployment availability for each engine's
+admission controller ([Admission policy](#admission-policy)).
 
 What no alert covers, and why:
 
@@ -4671,6 +4679,248 @@ then, in a pull request:
 The Falco documentation says what else an override can do
 ([overriding](https://falco.org/docs/concepts/rules/overriding/),
 [exceptions](https://falco.org/docs/concepts/rules/exceptions/)).
+
+## Admission policy
+
+The tree's checks stop a bad object before it is merged. They do not see one applied by hand, by an
+operator or by a chart at run time, and they report nothing about what already runs. An admission
+policy engine does both, against rules written once. Two engines dominate, so the lab runs both, in
+audit, holding the same three rules, to compare them on a real cluster. Neither refuses, mutates or
+generates a workload, and neither can hold up the cluster: the webhooks that match workloads fail
+open and skip the control plane's and Flux's namespaces. Kyverno also keeps webhooks of its own, on
+its own policy kinds, that fail closed ([Audit, and what a webhook may do](#audit-and-what-a-webhook-may-do)).
+
+Each engine is two applications an overlay selects on its own, in a namespace of its own that
+enforces the restricted level:
+
+| Engine | Namespace | Applications | Chart | Rules written as |
+| --- | --- | --- | --- | --- |
+| Kyverno | `kyverno` | `kyverno`, `kyverno-policies` | `kyverno` 3.10.0, Kyverno 1.20.0, an OCI chart | `ValidatingPolicy` (`policies.kyverno.io/v1`), in CEL |
+| Gatekeeper | `gatekeeper-system` | `gatekeeper`, `gatekeeper-policies` | `gatekeeper` 3.23.1, from the project's Helm repository | `ConstraintTemplate` in Rego, and a constraint of each template's kind |
+
+The engine's application is the chart and what scrapes and alerts on it; the rules are the other
+application, which waits for the engine (`dependsOn`) because the kinds it applies are the
+release's. Gatekeeper makes the kind of each constraint from its template within seconds of the
+template's creation, so the first reconcile of `gatekeeper-policies` can fail on the constraints and
+the next, a minute later, applies them. Nothing else in the tree depends on either application, and
+`tests/admission-policy.bats` builds the overlay without each engine in turn: the other builds whole
+and nothing of the one taken out is left. Neither engine's pods are a dependency of anything, as
+the webhooks of both that match workloads fail open.
+
+Neither namespace holds a default deny yet: each is in `network-policy-exceptions.yaml` with its
+reason and what covers it instead ([Network policy](#network-policy)), because the API server's calls
+to the webhooks come from the control planes' host network and the flows are observed before a
+policy names them.
+
+### The three rules
+
+Each rule has the same name, the same meaning and the same offline twin in both engines, named in an
+annotation, `k8s-gitops/offline-check`, on each engine's object. Each is a rule the tree already
+keeps before a change is merged, so the render of the tree passes all three in both engines
+(`tests/admission-policy.bats` evaluates every pod template and namespace of the render in both, and
+fails when either finds anything, with a pod and a namespace that break the rules added to show the
+engines see them):
+
+| Rule | What it asks | The offline check it mirrors |
+| --- | --- | --- |
+| `image-pinned` | Every container, init container and ephemeral container of a pod has an image pinned by a sha256 digest, or by a tag other than `latest`. | The image check of `just kubernetes-validate` ([What the checks refuse](#what-the-checks-refuse)). |
+| `restricted-security-context` | A pod in a namespace that enforces the `restricted` Pod Security level sets `allowPrivilegeEscalation: false`, drops `ALL` capabilities, runs as non-root and has the `RuntimeDefault` or a `Localhost` seccomp profile, on each container or on the pod. | `just pod-security-check` ([Pod Security](#pod-security)), which holds every workload of the render to its namespace's level. What must be absent at that level (host namespaces, host paths, added capabilities) is Pod Security admission's, which refuses it in such a namespace, so this rule asks for what a manifest has to set. |
+| `namespace-pod-security-level` | A namespace has a `pod-security.kubernetes.io/enforce` label of `privileged`, `baseline` or `restricted`. | `just pod-security-check`, which fails a namespace an object of the render is in that has none. |
+
+A pod is the one object matched, for the first two: a Deployment, a Job or a DaemonSet ends in pods,
+and evaluating the pod finds what an operator or a controller made as well. Kyverno's automatic
+rules for pod controllers are off, so a finding is one object in both engines. The restricted rule
+is for the namespaces that carry the `restricted` enforce label, which both engines read from the
+namespace (`namespaceSelector`), and `kube-system`, which Talos exempts from Pod Security admission
+and the tree labels `privileged`, is not one of them.
+
+Beyond the rules' own match, the engines do not look at the same namespaces at run time. Kyverno
+leaves out, at admission and in its background scans, every object its configuration's
+`resourceFilters` name. The chart's defaults, which the rendered `kyverno` ConfigMap keeps, name
+everything in `kyverno`, `kube-system`, `kube-public` and `kube-node-lease`, and Kyverno matches a
+filter's namespace against a Namespace object's own name too (`ToFilter` in `pkg/config/config.go`
+at the pinned version). Gatekeeper's audit leaves out only the namespaces a `Config` object excludes
+from it, and the tree has none, so it evaluates every namespace, `kube-system`, `flux-system` and
+both engines' own among them; its `--exempt-namespace` only lets its own namespace carry the label
+that exempts a namespace from the webhook. At admission, both webhooks skip `kube-system`,
+`flux-system` and their own namespace.
+
+So the first reports of a live cluster are expected to differ on the namespaces Kubernetes makes,
+which the tree declares no level for, against `namespace-pod-security-level`: `default` in both
+engines, `kube-node-lease` and `kube-public` in Gatekeeper's alone. `kube-system` carries the
+`privileged` level the tree gives it and `flux-system` the `restricted` level the FluxInstance gives
+it, so neither is a finding. A pod in `kube-system` or `flux-system` that breaks a rule is seen by
+neither webhook; Gatekeeper's audit reports it in both namespaces, Kyverno's scan in `flux-system`
+alone. Only the live cluster shows the reports themselves.
+
+How each engine says it:
+
+- **Kyverno**: one `ValidatingPolicy` per rule in `kyverno-policies/app/`, `validationActions:
+  [Audit]` and `failurePolicy: Ignore`. `variables` collect the containers or images, and each
+  `validations` expression is CEL, with the message the report carries; the restricted rule has one
+  expression for each setting, so a report names which of the four a pod misses. The legacy kind,
+  `ClusterPolicy` of `kyverno.io/v1`, is no longer executed as of Kyverno 1.20, and the chart refuses
+  to install or upgrade over one found on the cluster.
+- **Gatekeeper**: one `ConstraintTemplate` per rule in `gatekeeper-policies/app/`, holding the Rego
+  and the name of the kind, and one constraint of that kind, `enforcementAction: dryrun`. Gatekeeper
+  creates the kinds `K8sImagePinned`, `K8sRestrictedSecurityContext` and
+  `K8sNamespacePodSecurityLevel` at run time, from the templates, and no definition of them is in the
+  tree. `just kubernetes-validate` fails for an object
+  of a kind that has no schema unless `schema-exceptions.yaml` lists it, so the three constraint
+  kinds are listed there, each with its reason: Gatekeeper makes them from the templates at run
+  time, and `gator verify` and `gator test` check the constraints, each against its template's
+  schema, which `tests/admission-policy.bats` runs. The templates
+  and the Kyverno policies are validated by `just kubernetes-validate` against the definitions the
+  render holds.
+
+### Tests
+
+Each rule is tested in its engine's own tool, with objects it accepts and objects it refuses:
+Kyverno's `kyverno test`, one directory for each rule in `tests/admission-policy/kyverno/`, whose
+resources are named `pass-`, `fail-` or `skip-` for what the policy must do, and `gator verify`,
+`tests/admission-policy/gatekeeper/suite.yaml`. The bats test reads Kyverno's report and requires
+every `fail-` object to be refused with its rule's message, not excluded, and every `skip-` object
+to be excluded. `kyverno` is the CLI pinned in `mise.toml` for the Pod Security check, which is on
+the 1.19 line, and the engine runs 1.20.0; the CEL of both is the Kubernetes library, and a live
+cluster is what shows a difference. `gator` is pinned beside it, at the release of the Gatekeeper
+chart, and runs the same Rego engine as the webhook; Renovate does not move either
+(`.renovate/by-hand.tsv`).
+
+### Audit, and what a webhook may do
+
+- **Gatekeeper's** webhooks are in the render, and the test reads them there. `validation.gatekeeper.sh`
+  and `check-ignore-label.gatekeeper.sh` fail open (`Ignore`) and skip `kube-system`, `flux-system`
+  and `gatekeeper-system` in their namespace selectors, and wait three seconds at most, the chart's
+  value, before the failure policy admits the object: the chart's values give the first its list and
+  the chart adds its own namespace, and a post-renderer of the HelmRelease gives the second the same
+  list, as the chart skips only the release's namespace there. The mutating webhook is not
+  rendered (`disableMutation`), and the chart's three hook jobs that would change the cluster beside
+  the release are off. Every constraint is `dryrun`.
+- **Kyverno's** are made at run time by its admission controller, so the render holds none and the test
+  reads the settings that decide them: `--forceFailurePolicyIgnore=true`, which gives every webhook
+  that matches resources the failure policy `Ignore` whatever a policy says (each policy also sets
+  it), and the namespace selector of the `kyverno` ConfigMap, which skips `kube-system` and
+  `flux-system`, with the release's own namespace added by the chart. The webhook that protects
+  generation labels, the generation of Kubernetes' own ValidatingAdmissionPolicies, and the background
+  and cleanup controllers are off, and every rule is `Audit`. A webhook that matches resources waits
+  10 seconds at most before `Ignore` admits the object: at the pinned version Kyverno sets no
+  `timeoutSeconds` on it unless a policy's `webhookConfiguration` does, which none does and the test
+  asserts, so the API server's default of 10 seconds applies. That is longer than Gatekeeper's
+  three: a Kyverno pod that hangs rather than fails delays each write it matches by up to 10
+  seconds. The admission controller's `--webhookTimeout`, whose default is also 10 seconds
+  (`DefaultWebhookTimeout`), sets the wait of the webhooks on Kyverno's own kinds; the values leave
+  it out, and the test fails if it is set above 10.
+- **What only the live cluster shows.** Kyverno registers six more webhook configurations at run
+  time, five of which fail closed and skip no namespace: read from its source at the pinned version,
+  neither the values nor a policy changes them, and `--enablePolicyException=false` does not stop the
+  first three. All match only Kyverno's own kinds (`kyverno.io` and `policies.kyverno.io`), so no
+  workload is held up.
+  - `kyverno-exception-validating-webhook-cfg` and `kyverno-cel-exception-validating-webhook-cfg`:
+    `Fail`, on PolicyExceptions.
+  - `kyverno-global-context-validating-webhook-cfg`: `Fail`, on GlobalContextEntries.
+  - `kyverno-policy-mutating-webhook-cfg` and `kyverno-policy-validating-webhook-cfg`: `Fail`, on
+    Kyverno's policy kinds.
+  - `kyverno-verify-mutating-webhook-cfg`: `Ignore`, on Kyverno's own Leases in its namespace, which
+    is how the controller checks that its webhooks are reached.
+
+  So while no Kyverno pod answers, a write of a Kyverno policy, PolicyException or GlobalContextEntry
+  is refused: Flux cannot apply or change a rule, which is `kyverno-policies` failing and retrying,
+  and every other object is admitted. These are the only webhooks of either engine that fail closed,
+  and they match Kyverno's own kinds alone.
+  `kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations` on a cluster shows the
+  full set. What the chart's webhook certificates and a first start do in practice, and whether the
+  CEL of the rules evaluates on Kyverno 1.20 as on the CLI, are also visible there only.
+
+### Reading the findings
+
+- **Kyverno** writes a `PolicyReport` for each namespace and a `ClusterPolicyReport` for what is
+  not in one, such as a namespace: `kubectl get policyreport --all-namespaces`,
+  `kubectl get clusterpolicyreport`, and `-o yaml` on one for each failed result's policy, rule
+  message and resource. The reports controller scans what already runs every hour, and each admitted
+  object is reported as it is admitted. The counts are the metric `kyverno_validating_policy_results_total`
+  (`kyverno_validating_policy_results` in Kyverno's source, which the Prometheus exporter gives the
+  counter suffix; a scrape of the live cluster confirms the name), scraped from the admission and
+  reports controllers' ServiceMonitors. `kubectl get validatingpolicies` lists the rules and whether
+  each is ready.
+- **Gatekeeper** keeps the findings in each constraint's status: `kubectl get constraints` lists them
+  with their violation counts, and `kubectl get k8simagepinned image-pinned -o yaml` has
+  `status.violations`, up to 20 of them (`constraintViolationsLimit`) with the resource and the
+  message, and `status.totalViolations`. The audit runs every 60 seconds. The count of violations
+  for each constraint and enforcement action is the metric `gatekeeper_violations`, which a
+  PodMonitor scrapes from the audit pod, and the controller managers' webhook metrics from theirs.
+- Each engine has one own alert, `KyvernoAdmissionControllerDown` and
+  `GatekeeperControllerManagerDown`, for its admission controller not running
+  ([Alerts](#alerts)); a violation is a finding to read, not an alert.
+
+### Moving a rule to enforce
+
+A rule changes from a report to a refusal one engine at a time, and one rule at a time: `Deny` in
+`validationActions` for Kyverno, `deny` as the `enforcementAction` for Gatekeeper. Never both
+engines for one rule, as the object would be refused twice with two messages. What must be true
+first:
+
+- The rule's report has been empty for a stretch that covers the charts' upgrades and the
+  operators' pods, in the engine that will refuse: a finding is an object that would be refused the
+  next time it is made, and an operator that makes it cannot be told why.
+- What the rule would refuse is what the offline check already refuses, or the tree is changed
+  first, so a pull request fails before the cluster does.
+- The engine's pods run on more than one node with a budget, which they do, and the failure policy
+  stays `Ignore`: a refusal applies only while the webhook answers, and an engine that is down admits.
+- The namespaces that keep the cluster reconciled stay skipped, as they are.
+- A way to except an object is chosen first: Kyverno's `PolicyException` is off
+  (`features.policyExceptions`), and a Gatekeeper constraint's `match.excludedNamespaces` is
+  the narrow tool for a namespace.
+- The rule's test has a refused case in the engine's tool, which it has, and the change moves its
+  assertion with the action.
+
+### What each engine costs
+
+From the rendered releases, with the values of the tree:
+
+| | Kyverno | Gatekeeper |
+| --- | --- | --- |
+| Objects the release renders | 66, among them 4 hook Jobs and 2 test Pods | 29 |
+| Definitions | 22 | 17, and 3 more at run time, one for each constraint kind |
+| Rules | 3 objects | 6 objects |
+| Long-running pods | 3: two admission controllers and one reports controller | 3: two controller managers and one audit |
+| Memory requested | 320 MiB (2 x 128, 64) | 1536 MiB (3 x 512) |
+| CPU requested | 300m | 300m |
+| Memory limit | 384 MiB, 128 MiB | 512 MiB each |
+| Disruption budget | one, on the admission controllers | one, on the controller managers |
+| Priority | the default | `system-cluster-critical` on both Deployments, with a ResourceQuota `gatekeeper-critical-pods` of 100 pods in its namespace |
+
+### A short comparison
+
+What this port showed:
+
+- **Rules.** A Kyverno rule is one object of CEL, whose expressions each carry a message, and
+  Rego needs a template and a constraint, with the kind in two places. The three rules are 3 and 6
+  objects. Rego's rule per violation gives the same messages.
+- **Tests.** Both tools run offline from files. Kyverno's report names the result of every resource
+  and says `Excluded` for one the namespace selector leaves out, which a test can mistake for a pass
+  unless it reads the message; `gator verify` asserts the number of violations and their message
+  for each case. Gatekeeper needs the namespaces in a case's inventory for a `namespaceSelector`,
+  Kyverno's CLI a values file.
+- **Webhook control.** Gatekeeper's webhooks are chart objects whose failure policy and skipped
+  namespaces are values, but one of two needed a post-renderer. Kyverno's are made at run time from
+  a flag and a ConfigMap, so the render cannot show them, and six of them are beyond the settings.
+  Gatekeeper's waits three seconds for an answer, Kyverno's ten.
+- **Scope.** Kyverno's `resourceFilters` leave four namespaces out of admission and scans alike,
+  `kube-public` and `kube-node-lease` among them; Gatekeeper's audit sees every namespace, the
+  system ones its webhook skips included. So Gatekeeper reports more of what Kubernetes and Talos
+  make, and of the namespaces Kyverno's webhook skips, its scan covers `flux-system` alone.
+- **Findings.** Kyverno's are objects a person lists for each namespace and a scan keeps current;
+  Gatekeeper's are in the constraint's status, cut at 20 for each constraint.
+- **Cost.** Gatekeeper requests almost five times the memory, for the same number of pods; Kyverno has more
+  definitions and objects, and its release runs hook Jobs that Gatekeeper's, with its hooks switched
+  off here, does not.
+- **Priority.** The Gatekeeper chart runs both its Deployments at `system-cluster-critical`, a
+  priority that can preempt workloads, and renders the quota its namespace needs for it; Kyverno's
+  pods keep the default. Gatekeeper's `--default-create-vap-for-templates` is on, and acts only on a
+  template with CEL source: all three here are Rego, which the test asserts, so it makes no
+  ValidatingAdmissionPolicy, as Kyverno's generation is off.
+- **Install order.** Kyverno's kinds are the release's. Gatekeeper's constraint kinds exist after
+  the templates reconcile, which costs one retry of the rules' Kustomization.
 
 ## Flux itself
 

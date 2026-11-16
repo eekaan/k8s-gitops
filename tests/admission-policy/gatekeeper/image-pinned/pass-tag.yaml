@@ -1,0 +1,7 @@
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: pass-tag, namespace: apps}
+spec:
+  containers:
+    - {name: app, image: "registry.example/team/app:1.2.3"}
