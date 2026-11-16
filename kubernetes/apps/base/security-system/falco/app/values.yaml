@@ -1,0 +1,112 @@
+---
+# Values for the Falco chart, read by the HelmRelease through a ConfigMap generated without
+# substitution. Falco watches the system calls of every process on every node and writes an event,
+# a JSON line on standard output, for each that a rule names (docs/kubernetes.md, Runtime
+# detection). Keys not set here keep the chart's defaults.
+
+image:
+  # The image of the chart's appVersion, by digest; Renovate moves the chart and this image in one
+  # pull request, and tests/falco.bats holds the two versions together. The image carries the rules
+  # and the container plugin the pod runs, so nothing is fetched when it starts.
+  # renovate: datasource=docker depName=docker.io/falcosecurity/falco
+  tag: 0.45.2@sha256:1562a643953f938e02f47319b5214d93a235f11f646d60e9b8a516fd5a64698e
+
+# Every node, control planes included: a toleration without a key tolerates every taint. At the
+# priority Kubernetes gives node agents, the scheduler makes room for it on a full node.
+tolerations:
+  - operator: Exists
+podPriorityClassName: system-node-critical
+
+# The chart's guidance for a node, which nothing here has measured: the load is the system calls of
+# the node's workloads, which a busier node raises.
+resources:
+  requests:
+    cpu: 100m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 1024Mi
+
+driver:
+  # The modern eBPF probe, which the kernel Talos ships runs (BTF, the BPF ring buffer and
+  # tracepoints are on in its kernel configuration): nothing is built, downloaded or loaded as a
+  # kernel module, and the pod has no init container for a driver. The chart's
+  # driver.modernEbpf.leastPrivileged is not set: the security context below is the container's
+  # whole one, so the key's one effect would be an annotation that turns AppArmor off for the pod.
+  kind: modern_ebpf
+
+# The container's whole security context; the chart uses it in place of the one it generates. BPF
+# loads the probe's programs and maps, PERFMON attaches them to tracepoints and opens the perf
+# events, SYS_RESOURCE lifts the memory lock limit the maps count against, and SYS_PTRACE reads the
+# other processes' state under /proc. Root stays, as reading other processes' files needs it.
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+    add:
+      - BPF
+      - PERFMON
+      - SYS_PTRACE
+      - SYS_RESOURCE
+  seccompProfile:
+    type: RuntimeDefault
+
+# The rules are those of the image: falcoctl, which downloads rules and plugins when the pod starts
+# and again on a schedule, runs neither as an init container nor as a sidecar.
+falcoctl:
+  artifact:
+    install:
+      enabled: false
+    follow:
+      enabled: false
+
+collectors:
+  containerEngine:
+    # The runtime Talos runs for the cluster's pods is containerd, on its CRI socket; the engines of
+    # other runtimes would mount their sockets' directories for nothing.
+    engines:
+      docker:
+        enabled: false
+      podman:
+        enabled: false
+      containerd:
+        enabled: false
+      cri:
+        sockets:
+          - /run/containerd/containerd.sock
+      lxc:
+        enabled: false
+      libvirt_lxc:
+        enabled: false
+      bpm:
+        enabled: false
+
+# Falco's own Prometheus endpoint, on the pod's address, which the chart's Service and
+# ServiceMonitor expose. The kernel's BPF statistics need a sysctl that is off.
+metrics:
+  enabled: true
+  libbpfStatsEnabled: false
+serviceMonitor:
+  create: true
+  interval: 30s
+  # The series carry the pod; the node it runs on is what an operator acts on.
+  relabelings:
+    - sourceLabels:
+        - __meta_kubernetes_pod_node_name
+      targetLabel: node
+
+# Local rule files by name, which the chart makes a ConfigMap of and mounts in the directory Falco
+# reads after the image's rules: overrides of the image's rules, macros and lists, and rules of its
+# own. Empty: nothing here has been found noisy, and no rule is local. docs/kubernetes.md, Runtime
+# detection, says how an exception goes in.
+customRules: {}
+
+falco:
+  # One JSON line for each event on standard output, which the log collector ships with the rest of
+  # the pod's lines, and no other output: the chart's syslog output has no syslog to reach in a
+  # container, and no output sends an event anywhere.
+  json_output: true
+  buffered_outputs: false
+  syslog_output:
+    enabled: false

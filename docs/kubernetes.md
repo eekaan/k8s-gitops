@@ -588,6 +588,7 @@ once it is not, and the agents' rendered configuration agrees.
 | `kromgo` | default deny | kromgo takes the proxies and the kubelet's probes on 8080 and Prometheus' scrape on 8081, and reaches the resolver and Prometheus on 9090. |
 | `sso-system` | default deny | dex takes the proxies and oauth2-proxy on 5556 and reaches the API server and GitHub on 443; oauth2-proxy takes the proxies on 4180 and reaches dex; below. |
 | `backstage` | default deny | Backstage takes the proxies and the kubelet's probes on 7007 and reaches the resolver and its database on 5432; the database takes the operator, its own pods, Backstage, the dump job, Prometheus and the kubelet's probes, and reaches its own pods, the resolver and the API server; the dump job reaches the resolver, the database and the world on 443. |
+| `security-system` | default deny | Falco takes Prometheus' scrape and the kubelet's probes on 8765, and reaches the resolver alone. |
 | `ai-system` | listed | applications whose allows are not written, not a namespace that cannot have the posture. n8n takes the proxies on 5678 and reaches its database, the resolver and whatever its workflows call outside; the PostgreSQL instances take n8n, each other and the operator, and reach the API server; Open WebUI takes the proxies on 8080 and reaches nothing until an administrator turns on a connection that calls out; the backup movers reach the object storage on 443. The proxies reach n8n's 5678 and Open WebUI's 8080 alone there and forward only to their Services, PostgreSQL authenticates every client, Pod Security, node firewall. |
 | `etcd-snapshots` | listed | an application whose allows are not written, not a namespace that cannot have the posture. The snapshot job takes nothing and reaches the Talos API through `talos.default`, the object storage, the hosts age's release is downloaded from (its URL redirects to a second host, which serves the file) and the resolver. Talos' own authorisation of its one role, Pod Security, node firewall. |
 | `external-dns` | listed | an application whose allows are not written, not a namespace that cannot have the posture. external-dns takes Prometheus' scrape and the kubelet's probes on 7979 and nothing else, and reaches the API server, the DNS provider's API on 443 and the resolver. Its token, scoped to zone read and DNS edit on the cluster's one zone, its name filter, a ClusterRole that only reads, Pod Security, node firewall ([DNS records](#dns-records)). |
@@ -677,6 +678,13 @@ once it is not, and the agents' rendered configuration agrees.
   redirects to a second host, and the object storage, whose endpoint is a URL, as for the movers
   below ([Dumps](#dumps)). The pods the operator makes carry the labels of its source, which no
   render holds; the job pods it makes to create and join an instance carry `cnpg.io/cluster` too.
+- **`security-system`.** Falco's pods, by the labels of the DaemonSet's selector, take Prometheus
+  (`app.kubernetes.io/name: prometheus` in `monitoring`) on 8765, the metrics port the chart's
+  monitor scrapes, and the kubelet's probes on the same port. They reach the resolver alone, for
+  the API server's name, which the image's rule `Contact K8S API Server From Container` compares a
+  container's connections with: Falco reads the container runtime's socket and the node's files
+  through host paths, which no pod policy sees, writes its events to standard output, and calls no
+  API ([Runtime detection](#runtime-detection)).
 - **The object storage's port.** cluster-config holds the object storage's endpoint as a URL, which
   a DNS name rule cannot take, so the movers' rule is the world on 443: the port https uses for an
   endpoint that names none, as cluster-config's example does and `tests/network-policy.bats` holds
@@ -771,37 +779,37 @@ namespace and the policy, when
   the nodes. A reason excuses none of these.
 
 The check reads only what the render holds. Besides the policies of `backstage`, `demo`,
-`envoy-gateway-system`, `kromgo` and `sso-system`, that is one policy of a listed namespace:
-`flux-operator-web`, the `NetworkPolicy` the Flux Operator's chart renders in `flux-system`, which
-lets every pod of every namespace (an empty `namespaceSelector`) reach the operator's web interface
-on 9080. It passes
-because `flux-system` is listed; the day `flux-system` takes the default deny, the check refuses it,
-as a `NetworkPolicy` other than the default deny and as an allow of every pod of every namespace.
-The `NetworkPolicy` objects the operator makes for the Flux instance, which its
-`spec.cluster.networkPolicy` turns on, are made at run time, so no render holds them and the check
-never sees them.
+`envoy-gateway-system`, `kromgo`, `security-system` and `sso-system`, that is one policy of a listed
+namespace: `flux-operator-web`, the `NetworkPolicy` the Flux Operator's chart renders in
+`flux-system`, which lets every pod of every namespace (an empty `namespaceSelector`) reach the
+operator's web interface on 9080. It passes because `flux-system` is listed; the day `flux-system`
+takes the default deny, the check refuses it, as a `NetworkPolicy` other than the default deny and
+as an allow of every pod of every namespace. The `NetworkPolicy` objects the operator makes for the
+Flux instance, which its `spec.cluster.networkPolicy` turns on, are made at run time, so no render
+holds them and the check never sees them.
 
 `scripts/network-policy-check --reach RENDER FROM TO PORT/PROTOCOL` evaluates the policies of a
 render for one flow and answers `allowed` or `denied`; the egress of the source and the ingress of
 the destination both have to allow it, and a pod is in default deny for a direction only when a
 policy that selects it asks for it, as Cilium decides. Over a render that holds what the check
 refuses wherever it is, it gives no answer and exits 2. The tests use it to follow the public path
-hop by hop (the world to the proxies' listener ports, the proxies to `hello`'s port, to kromgo's,
-to n8n's, to Open WebUI's, to dex's and oauth2-proxy's and to Backstage's but not to kromgo's
-metrics port, n8n's or Open WebUI's other ports or either database, the kubelet to every probe port,
+hop by hop (the world to the proxies' listener ports, the proxies to `hello`'s port, to kromgo's, to
+n8n's, to Open WebUI's, to dex's and oauth2-proxy's and to Backstage's but not to kromgo's metrics
+port, n8n's or Open WebUI's other ports or either database, the kubelet to every probe port,
 Prometheus to kromgo's metrics port alone), to show that no pod of `demo`, `kromgo` or `backstage`
 reaches the secret store, the storage controller, another pod of `demo` or another application, n8n
 and Open WebUI among them, that Backstage reaches the resolver and its database's port and nothing
-outside the cluster, that the database takes the operator, its own pods, Backstage, the dump job
-and Prometheus on their ports and no other application, that kromgo reaches the resolver and the
-port of the Prometheus its configuration names, read from the render, and nothing else, and no
-other application reaches it, and that with their default deny `backstage`, `demo`,
-`envoy-gateway-system`, `kromgo` and `sso-system` let exactly their flows through and without it
-take and send everything. What it cannot show: the entity the pinned datapath gives a connection an
-edge translated and a worker forwarded again, read from its source above and confirmed in audit
-mode; the labels of the pods the operators create at run time, taken from the operators' source and
-observed in audit mode; that an address a name resolves to is the one a rule meant; and anything
-about pods in the host's network namespace.
+outside the cluster, that the database takes the operator, its own pods, Backstage, the dump job and
+Prometheus on their ports and no other application, that kromgo reaches the resolver and the port of
+the Prometheus its configuration names, read from the render, and nothing else, and no other
+application reaches it, that Falco's pods take Prometheus and the kubelet on its metrics port alone
+and reach the resolver alone, and that with their default deny `backstage`, `demo`,
+`envoy-gateway-system`, `kromgo`, `security-system` and `sso-system` let exactly their flows through
+and without it take and send everything. What it cannot show: the entity the pinned datapath gives a
+connection an edge translated and a worker forwarded again, read from its source above and confirmed
+in audit mode; the labels of the pods the operators create at run time, taken from the operators'
+source and observed in audit mode; that an address a name resolves to is the one a rule meant; and
+anything about pods in the host's network namespace.
 
 ### What policy does not cover
 
@@ -841,35 +849,35 @@ does not matter.
    `cilium` is Ready at a revision that holds the value, which it is only once its release has
    rolled every agent onto that configuration (`rollOutCiliumPods`, at most two agents at a time by
    the chart's update strategy).
-2. **The policies merge.** The root applies the default denies, the applications apply their
-   allows, and the agents evaluate both and drop nothing they deny; what a policy would drop is
-   reported as `AUDIT`. As the allows land after the denies, `AUDIT` flows of `backstage`, `demo`,
-   `envoy-gateway-system`, `kromgo` and `sso-system` from before they landed are expected, such as
-   the proxies to `hello` on 8080 and to the controller on 18000, and the controller to the API
-   server, and an agent's recent flows can hold them for a while.
+2. **The policies merge.** The root applies the default denies, the applications apply their allows,
+   and the agents evaluate both and drop nothing they deny; what a policy would drop is reported as
+   `AUDIT`. As the allows land after the denies, `AUDIT` flows of `backstage`, `demo`,
+   `envoy-gateway-system`, `kromgo`, `security-system` and `sso-system` from before they landed are
+   expected, such as the proxies to `hello` on 8080 and to the controller on 18000, and the
+   controller to the API server, and an agent's recent flows can hold them for a while.
 3. **Watch**, from the moment the Kustomizations that hold the allows, `hello`,
-   `demo-volsync-movers`, `envoy-gateway`, `kromgo`, `dex`, `oauth2-proxy` and `backstage`, are
-   Ready at the merge's revision (`flux get kustomizations`). `just network-drops` lists what the
-   agents' Hubble holds: the `AUDIT` flows a policy would drop, by namespace, pod and port, never an
-   address. It runs each agent's own `hubble` through `kubectl exec`, so the kubeconfig needs exec
-   on the Cilium agents' pods in `kube-system`, more than the reading recipes need;
+   `demo-volsync-movers`, `envoy-gateway`, `kromgo`, `dex`, `oauth2-proxy`, `backstage` and `falco`,
+   are Ready at the merge's revision (`flux get kustomizations`). `just network-drops` lists what
+   the agents' Hubble holds: the `AUDIT` flows a policy would drop, by namespace, pod and port,
+   never an address. It runs each agent's own `hubble` through `kubectl exec`, so the kubeconfig
+   needs exec on the Cilium agents' pods in `kube-system`, more than the reading recipes need;
    `NETWORK_DROPS_LAST` (500) bounds the flows asked of each agent and `NETWORK_DROPS_TIMEOUT` (60)
    the seconds each call may take. Hubble keeps only each agent's recent flows (4095 by the chart's
    default), so run it after each of: `just gateway-check`; `just cluster-check`; the secret demo
    (`just bao-put demo/hello greeting`, then the Secret in `demo`); a badge asked of kromgo by its
    name, which has kromgo query Prometheus ([Status badges](#status-badges)); a sign-in through the
    route that opts in to it ([Sign-in](#sign-in)); Backstage's catalogue opened by its name, which
-   has Backstage read its database; the nightly dump of `backstage-db` from 02:00, which waits up
-   to 20 minutes before it starts ([Dumps](#dumps)); the nightly backup of `volsync-demo` at 03:17,
-   and a restore of it ([Restoring](#restoring)). Watch a day at least, through one nightly backup
-   and one dump. An `AUDIT` flow of `backstage`, `demo`, `envoy-gateway-system`, `kromgo` or
-   `sso-system` that a check made once the allows were Ready is a missing allow, added beside its
-   application in a pull request while the cluster still audits, or a pod doing what it should not.
-   Confirm also that no `@remote-node` flow reaches the proxies' listener ports and none to the
-   webhook's 9443 is `AUDIT`. `AUDIT` flows of `flux-system` show too: Flux's own policies and the
-   Flux Operator's `flux-operator-web`, which the agents enforced before the value, are only
-   audited while it is set, and what they would drop is what they dropped before; they are not the
-   namespaces' allows.
+   has Backstage read its database; the nightly dump of `backstage-db` from 02:00, which waits up to
+   20 minutes before it starts ([Dumps](#dumps)); the nightly backup of `volsync-demo` at 03:17, and
+   a restore of it ([Restoring](#restoring)). Watch a day at least, through one nightly backup and
+   one dump. An `AUDIT` flow of `backstage`, `demo`, `envoy-gateway-system`, `kromgo`,
+   `security-system` or `sso-system` that a check made once the allows were Ready is a missing
+   allow, added beside its application in a pull request while the cluster still audits, or a pod
+   doing what it should not. Confirm also that no `@remote-node` flow reaches the proxies' listener
+   ports and none to the webhook's 9443 is `AUDIT`. `AUDIT` flows of `flux-system` show too: Flux's
+   own policies and the Flux Operator's `flux-operator-web`, which the agents enforced before the
+   value, are only audited while it is set, and what they would drop is what they dropped before;
+   they are not the namespaces' allows.
 4. **Enforce, a change of its own.** One pull request makes these edits, together and no others:
    - `kubernetes/apps/base/kube-system/cilium/app/values.yaml`: the line `policyAuditMode: true`
      goes, with the three comment lines above it, from `# The agents evaluate every policy`; the
@@ -897,10 +905,11 @@ does not matter.
      former becoming "Enforcement stays in its default mode, so the agents enforce the policies:
      never would enforce none."
    - `docs/roadmap.md`, M8's row: "the namespaces' default deny with their allows in `backstage`,
-     `demo`, `envoy-gateway-system`, `kromgo` and `sso-system`" gains ", which Cilium enforces", and
-     the clause "; and network policy that drops anything, as Cilium audits every policy,
-     cluster-wide, and drops nothing ([Service addresses](kubernetes.md#service-addresses))" goes,
-     the row ending at "`infra-apply`.".
+     `demo`, `envoy-gateway-system`, `kromgo`, `security-system` and `sso-system`" gains ", which
+     Cilium enforces", and the clause "; and network policy that drops anything, as Cilium audits
+     every policy, cluster-wide, and drops nothing
+     ([Service addresses](kubernetes.md#service-addresses))" goes, the row ending at
+     "`infra-apply`.".
 
    `tests/network-policy.bats` requires the enforcing sentence exactly when the value is gone, and
    fails, saying which sentence the value needs, on a change that does one without the other.
@@ -1229,7 +1238,8 @@ every namespace, and evaluates the chart's default alerting and recording rules.
   application ([Cilium's metrics](#ciliums-metrics));
 - the storage layer, through the `linstor-monitoring` application: the LINSTOR controller's metrics
   and the satellites' DRBD reactor ([Storage monitoring](#storage-monitoring));
-- the silence operator, through its chart's PodMonitor ([Silences](#silences)).
+- the silence operator, through its chart's PodMonitor ([Silences](#silences));
+- Falco on every node, through its chart's ServiceMonitor ([Runtime detection](#runtime-detection)).
 
 It does not scrape:
 
@@ -1461,6 +1471,7 @@ The own alerts, each with its runbook section in [docs/runbooks/alerts.md](runbo
 | `LinstorStoragePoolFull` | A storage pool has been above 95 percent full for 5 minutes. | critical | [LinstorStoragePoolFull](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#linstorstoragepoolfull) |
 | `OpenBaoSnapshotStale` | No run of the OpenBao snapshot CronJob has succeeded for 13 hours. | critical | [OpenBaoSnapshotStale](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#openbaosnapshotstale) |
 | `OpenBaoSnapshotJobFailing` | The OpenBao snapshot CronJob's latest scheduled run has not succeeded after 30 minutes. | warning | [OpenBaoSnapshotJobFailing](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#openbaosnapshotjobfailing) |
+| `FalcoCriticalRuleMatched` | A Falco rule of priority Critical, Alert or Emergency has matched on a node within the last 15 minutes. | critical | [FalcoCriticalRuleMatched](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#falcocriticalrulematched) |
 
 The alerts read only what Prometheus scrapes: kube-state-metrics' pod readiness for OpenBao's
 members, its Deployment availability for the Flux Operator, its nodes' roles, which tell the
@@ -1469,8 +1480,8 @@ control planes' Cilium agents from the workers', and its CronJob metrics for the
 ([Raft snapshots](#raft-snapshots)) and for the dump job of every PostgreSQL cluster ([Dumps](#dumps)), Prometheus' own `up` for OpenBao's active Service and the Cilium agents, VolSync's
 controller metrics, Vector's internal metrics, cert-manager's certificate metrics, the Flux
 Operator's state of Flux's resources, the Cilium agents' BGP session state, LINSTOR's own metrics,
-the DRBD reactor's, and external-dns' gauge of its last successful sync and its absence. The dump
-alerts are written once, in the `cloudnative-pg` application's `app/`, whose tests are
+the DRBD reactor's, Falco's counter of the matches of each rule, and external-dns' gauge of its
+last successful sync and its absence. The dump alerts are written once, in the `cloudnative-pg` application's `app/`, whose tests are
 `tests/rules/cloudnative-pg.yaml`, and select the CronJobs by their names' suffix, `-pgdump`:
 kube-state-metrics exposes no CronJob label unless its chart is told to, so a label the component
 set would not reach the metrics. `tests/rules-check.bats` fails when an alert reads a metric that
@@ -1494,6 +1505,13 @@ What no alert covers, and why:
   not. A volume none of whose replicas is UpToDate raises `DrbdReplicaNotUpToDate`, a warning, for
   each replica, and no critical alert of its own.
 - The Cilium operator, Envoy and Hubble, which nothing scrapes.
+- Falco's kernel buffers dropping events, and one Falco target down on a cluster of ten nodes or
+  more, either of which leaves `FalcoCriticalRuleMatched` quiet for that node
+  ([Runtime detection](#runtime-detection)). Falco has no alert of its own for its pods: one
+  missing from a node raises the stock `KubeDaemonSetRolloutStuck` or `KubeDaemonSetNotScheduled`,
+  for any DaemonSet short of its nodes, and a target Prometheus has that does not answer raises the
+  stock `TargetDown`, a warning, once more than a tenth of the job's targets have been down for 10
+  minutes, which is one target on a cluster of fewer than ten nodes.
 
 The alerts have no destination yet: Alertmanager sends them nowhere, so they show in Prometheus and
 Alertmanager only.
@@ -4412,6 +4430,247 @@ The steps n8n took, in order; the next port does the same and says where it diff
     made or why it has none, its hostname, the table of what it can call and what a person loses
     to that, any first-visit step and what it means that nobody has claimed the instance, how it
     is backed up and restored.
+
+## Runtime detection
+
+`apps/base/security-system/falco/` runs Falco, from the Falco project's chart
+(`oci://ghcr.io/falcosecurity/charts/falco`), in the namespace `security-system`: one pod on every
+node, control planes included. Falco watches the system calls of every process on the node and
+writes an event for each one that a rule names, such as a shell opened in a container with a
+terminal, a read of a sensitive file by a process that should not, or a binary dropped into a
+container and run. It detects and does not respond: no pod is stopped or changed, an event leaves
+no pod but through the log pipeline, and the chart installs nothing but the DaemonSet, its
+ServiceAccount, the ConfigMap of Falco's configuration file, the Service of its metrics and their
+ServiceMonitor (no Falcosidekick, no Falco Talon, no metadata collector). A cluster selects it with
+two entries of its overlay, the namespace directory `security-system` and
+`security-system/falco/ks.yaml`; without them nothing of it builds. The application names
+`prometheus-operator-crds` in `dependsOn`, as the chart's ServiceMonitor and the application's
+`PrometheusRule` are kinds that definition provides, and `cilium`, as its `CiliumNetworkPolicy` is
+a kind Cilium's operator defines.
+
+The namespace denies traffic by default ([Network policy](#network-policy)), and Falco's
+`CiliumNetworkPolicy`, in `app/`, lets in Prometheus' scrape and the kubelet's probes on 8765 and
+lets out queries to the cluster's resolver on port 53, UDP and TCP, and nothing else. Falco looks
+up a name only to compare a socket's address with it in a rule's condition, through the fields
+`fd.cip.name`, `fd.sip.name`, `fd.lip.name` and `fd.rip.name` (libsinsp's `sinsp_dns_manager` in
+libs 0.26.1, which the pinned Falco is built with), and the image's rules use one of them once: the
+macro `k8s_api_server`, `fd.sip.name="kubernetes.default.svc.cluster.local"`, of the rule
+`Contact K8S API Server From Container`, at priority Notice. Falco resolves that name at the first
+connection a container opens once it runs, inside its reading of events, and again from a thread
+of its own every 10 seconds, doubling to every 320 while the answer stays the same. Without the
+resolver that rule never matches, and the first lookup holds up the reading of events until it
+times out. A local rule that compares one of these fields makes Falco look up its name the same
+way. Falco opens no other connection: its one output is standard output and falcoctl is off; its
+one plugin, `container`, asks only the CRI engine, on the runtime's Unix socket; and neither the
+Falco binary nor that plugin in the pinned image holds the in-cluster API server's variable
+`KUBERNETES_SERVICE_HOST` or the service account token's path, and the chart makes no Role for it.
+The pod still mounts its service account's token, which nothing in it reads.
+
+### The driver, and the privileges it needs
+
+Falco reads the system calls with the modern eBPF probe, which is in the Falco binary: the probe's
+programs are loaded into the kernel when Falco starts, and nothing is built, downloaded or loaded
+as a kernel module. The probe needs a kernel that exposes BTF and has the BPF ring buffer
+([Falco](https://falco.org/docs/concepts/event-sources/kernel/)). The kernel of the pinned Talos
+release, 6.18.63 (the `kernel/build/config-amd64` of the `siderolabs/pkgs` tag that
+`siderolabs/talos`' Makefile pins as `PKGS` at `versions.yaml`'s `talos`), has `CONFIG_BPF_SYSCALL`,
+`CONFIG_DEBUG_INFO_BTF`, `CONFIG_BPF_EVENTS`, `CONFIG_TRACEPOINTS` and the perf events on. That is
+read from the configuration, not from a node: the first start on one is where a kernel setting
+that stops the probe shows, in the pod's log, which names the requirement that failed. Kernel
+lockdown, which restricts what BPF programs may do, is off: Talos adds `lockdown=confidentiality`
+to the kernel's command line only for secure boot (`SecureBootArgs` in
+`pkg/machinery/kernel/kernel.go` at the pinned release), `talos/schematic.yaml` asks for none, and
+the kernel's configuration defaults to no lockdown (`CONFIG_LOCK_DOWN_KERNEL_FORCE_NONE`). Its
+`CONFIG_LOCK_DOWN_IN_EFI_SECURE_BOOT` would turn lockdown on in a node whose firmware has UEFI
+secure boot enabled, which the configuration cannot say. The chart's
+init container that loads a driver is for the kernel module and is not rendered for this driver, so
+the pod has no init container.
+
+What the chart offers for this driver: a privileged container, which it generates by default, or
+the four capabilities of `driver.modernEbpf.leastPrivileged`. The application sets the container's
+whole security context itself, since the chart then uses it in place of the one it generates, and
+the container is not privileged:
+
+- `BPF` loads the probe's programs and maps, and `PERFMON` attaches them to the kernel's
+  tracepoints and opens their perf events; the kernel gives these their own capabilities from
+  version 5.8;
+- `SYS_RESOURCE` lifts the memory lock limit the probe's maps and ring buffers are counted against;
+- `SYS_PTRACE` lets Falco read the state of other processes under `/proc`;
+- every other capability is dropped, `allowPrivilegeEscalation` is false, the seccomp profile is
+  the runtime's default, which containerd's profile admits `bpf` to a container with `CAP_BPF`
+  and `perf_event_open` to one with `CAP_PERFMON`
+  ([containerd](https://github.com/containerd/containerd/blob/v2.3.7/contrib/seccomp/seccomp_default.go),
+  the version Talos 1.14.6 runs), and the user stays root, as reading other processes' files
+  needs it. The pod uses the pod network, not the node's, and no host PID or IPC namespace.
+
+`leastPrivileged` is left unset: with the security context given, its one effect is an annotation
+that turns AppArmor off for the pod, which would be one more thing the exception covers. The pod's
+own security context is empty and `tests/falco.bats` asserts it so.
+
+The host paths it mounts, and why:
+
+- `/proc` at `/host/proc`, read-only: the processes and their state, which Falco reads for what the
+  probe cannot, such as the processes that already ran when it started;
+- `/etc` at `/host/etc`, read-only, from which Falco's userspace reads the host's `passwd` and
+  `group` for the user and group names of events (libsinsp's `usergroup_manager`, which reads them
+  under the host root); without it a rule's output shows no names. The chart mounts it for every
+  driver and the driver itself does not need it;
+- `/sys/kernel` at `/sys/kernel`, read-only, which holds the kernel's BTF and its tracing files;
+- `/run/containerd` at `/host/run/containerd`, the directory of the container runtime's socket,
+  which the container plugin asks for the name, namespace and image of the pod behind each event,
+  so a rule can say which workload did it. The chart mounts it read-write, and a read-only mount
+  would not stop a client from connecting to a socket in it. The runtime's socket is as strong as
+  root on the node: whoever can run a command in this container, which is whoever may `exec` in
+  `security-system`, can use it. Only the CRI engine of the container plugin is on, with this one
+  socket; the others, which would mount the directories of Docker, Podman and the like, are off.
+
+The chart also declares host path volumes for `/boot`, `/lib/modules` and `/usr` whatever the
+driver, and mounts them only in Falco's container when `driver.loader.enabled` is false, which it is
+not here, and in the driver loader's init container, which it renders for every driver but the
+modern eBPF probe. No value removes them, so the HelmRelease's post-renderer, a kustomize patch as
+the Cilium and Piraeus Operator releases use, deletes them from the DaemonSet: the pod declares only
+the four paths above, `tests/falco.bats` compares them with the container's mounts, and it fails
+on a mount that names a volume the pod does not have, as each of those three would once the
+loader is turned off.
+
+The namespace enforces `privileged`, which host paths and added capabilities need, and audits and
+warns at `restricted` ([Pod Security](#pod-security)); the one entry of
+`pod-security-exceptions.yaml` for it is `DaemonSet/falco`, whose reason names what the baseline
+level refuses in the pod: the four capabilities and the four host paths, with the runtime's
+socket directory mounted read-write; `tests/falco.bats` runs the baseline check on the rendered
+pod and fails when the reason leaves out a failed control, a capability or a path. Its tolerations
+admit every taint, and it runs at `system-node-critical`, as the log collector does, so a node
+that is full or tainted still has it.
+
+### The rules, and nothing that updates them
+
+Falco starts from the rules and the container plugin that its image holds, which the image's tag
+and digest pin. The pod has no falcoctl: the chart runs falcoctl as an init container that
+installs the rules and plugins when the pod starts and as a sidecar that follows newer ones, by
+default every week, and both are off, so nothing is fetched at start or later, and the pod has no
+volume a downloaded rule or plugin could arrive in. `falco.rules_files` lists the image's
+`falco_rules.yaml` and `falco_rules.local.yaml`, and the directory `rules.d`, where local rules
+go ([Tuning](#tuning)).
+
+The rules are those of the image at its version, 25 at `0.45.2`, each tagged `maturity_stable`;
+the rules of the project's incubating and sandbox maturity levels are not in the image and are not
+installed. The rules of priority Critical are `Detect release_agent File Container Escapes`,
+`Drop and execute new binary in container` and `Fileless execution via memfd_create`. A newer
+rule set arrives with a newer image: the chart and the image it runs, `appVersion` of the chart,
+are moved by Renovate in one pull request (`.renovate/groups.json5`), and `tests/falco.bats` fails
+unless the image's version is the chart's.
+
+### Events
+
+Falco writes each event as one JSON line on standard output, with `rule`, `priority`, `output`,
+`output_fields`, `tags`, `source`, `hostname`, which is the node's name, and `time`, and writes
+no other output: not to syslog, a file, an address or a program. The pod's own messages, its start
+and its warnings, are plain lines on standard error. The log collector reads every pod's lines
+([Logs](#logs)), so the events are in the store with the namespace, pod, container and node of
+the Falco pod that wrote them, each line whole in `_msg`:
+
+- `just logs 'kubernetes.pod_namespace:security-system kubernetes.container_name:falco | unpack_json | filter rule:*'`
+  prints the events and none of Falco's own messages;
+- `just logs 'kubernetes.pod_namespace:security-system kubernetes.container_name:falco | unpack_json | filter priority:in("Critical", "Alert", "Emergency")'`
+  prints those of priority Critical or above;
+- the same with `| filter rule:"Terminal shell in container"` for one rule, or `node:<name>` for
+  one node.
+
+A shell opened with a terminal in any pod, `kubectl exec --stdin --tty <pod> -- sh`, raises
+`Terminal shell in container`, at priority Notice, and is the harmless way to see an event arrive.
+
+### Metrics, and the alert
+
+Falco serves its own Prometheus metrics, on its web server's port 8765 at `/metrics`, with the
+chart's Service `falco-metrics` and a ServiceMonitor that scrapes it every 30 seconds over plain
+HTTP on the pod network and labels each series with the node, `node`. The same port serves the
+health check the pod's probes use. The metrics include, for each rule that has matched since the
+pod started, `falcosecurity_falco_rules_matches_total`, with the labels `rule_name`, `source`,
+`priority` as the number of the rule's priority, 0 Emergency, 1 Alert, 2 Critical, 3 Error, 4
+Warning, 5 Notice, 6 Informational and 7 Debug, and a `tag_` label for each of the rule's tags
+(`userspace/falco/falco_metrics.cpp` at the pinned version). A rule that has not matched has no
+series.
+
+The separate exporter, `falco-exporter`, is not installed. The project deprecated it when Falco
+0.38 began to serve Prometheus metrics itself, and it reads Falco's gRPC output, which would need
+that output turned on, with its own certificates. What it would add is a counter of events with
+the pod and namespace of the workload each concerns as labels, a series for each such pair, which
+the alert does not need: the node is enough to find the pod in the event's log line.
+
+`FalcoCriticalRuleMatched` is critical, and each rule and node is one alert. It compares the
+counter of each rule of priority Critical, Alert or Emergency with the last value the series had 15
+minutes ago or before, within a day, and fires while they differ: from the first evaluation that
+reads a new count until that count is 15 minutes old, so it has no time of its own and clears 15
+minutes after the last match, but for a restart whose count climbs back, below. A rise is a match;
+so is a series with no sample in that day, a new pod's first match of a rule; and so is a count
+lower than before, Falco restarted in the same pod and matched since. A staleness marker from a
+failed scrape and a gap in the scrape, such as a restart of Prometheus, change nothing while the
+count is unchanged and the series is back within a day of its last sample. Its blind spot is a
+restart of Falco's container inside the same pod, which keeps every label, after which the rule's
+count comes back to exactly the count the series had before the window, such as a rule that
+matched once before the restart and once after: that match raises no alert, and is in the logs
+only. A count that climbs back to the old one after such a restart, such as 1, 2 and then 3 where
+it was 3, can clear the alert while it equals it though Falco went on matching, and fire it again
+once the lower counts are 15 minutes old. The other way, a series back unchanged more than a day
+after its last sample reads as new and fires once with nothing behind it: from a day and 15
+minutes after that sample, or from its return if that is later, until the return is 15 minutes
+old, so for at most 15 minutes; every series does the same after Prometheus lost its data.
+`tests/rules/falco.yaml` pins each case. The alert goes nowhere yet, like the others
+([Alerts](#alerts)).
+
+### What Falco costs and what it sees
+
+Falco's requests and limits are the chart's guidance for a node, 100m and 512Mi requested, 1 CPU
+and 1Gi at most, and are unmeasured here: the cost is the system calls of the node's workloads,
+which the pod cannot be told in advance. The probe's buffers are 8 MiB for every two CPUs of the
+node, and its auxiliary maps a few tens of KiB for each ([Falco](https://falco.org/docs/concepts/event-sources/kernel/)),
+so a node with more CPUs holds more. A pod throttled at its CPU limit reads fewer calls than the
+node makes; the kernel then drops events, which Falco counts in `falcosecurity_scap_n_drops_*`
+and no alert reads.
+
+Falco sees every process's system calls on the node, the node's own and those of every container,
+with their arguments, and an event's `output` and `output_fields` carry the arguments of the
+process that matched: command lines, file names, environment values a rule prints. Arguments can
+hold secrets, a password given on a command line or a token in an address, and such an event then
+holds it. An event is a line in the pod's log file on the node, until the kubelet rotates it, and a
+document in the log store, with the other logs, for 14 days or until the store's 15 GiB are used
+([Logs](#logs)); whoever can read the store, with `just logs` or Grafana's VictoriaLogs datasource,
+or `exec` into the pods of `monitoring` and `security-system`, can read it.
+
+### Tuning
+
+Local rules have one place, the `customRules` key of
+`apps/base/security-system/falco/app/values.yaml`: a map of rule file names to their contents,
+which the chart makes a ConfigMap of and mounts in `rules.d`, which Falco reads after the image's
+rules. It is empty, and nothing has been found noisy. To silence a known-benign event, find it
+(`just logs` above) and read its rule and the pod, namespace and process in its `output_fields`;
+then, in a pull request:
+
+1. add a file to `customRules` that overrides the placeholder the rule leaves for the case (the
+   image's rules name them `user_*` and `known_*`, such as
+   `user_expected_terminal_shell_in_container_conditions` for `Terminal shell in container`) or the
+   rule's own condition, with the reason for the exception in a comment above it:
+
+   ```yaml
+   customRules:
+     exceptions.yaml: |-
+       # Reason: the debug pods of the platform namespace open a shell with a terminal on purpose.
+       - macro: user_expected_terminal_shell_in_container_conditions
+         condition: (k8s.ns.name = "platform" and k8s.pod.name startswith "debug-")
+         override:
+           condition: replace
+   ```
+
+2. keep the exception as narrow as the event is: a namespace and a pod name, or a process and a
+   file, never a whole rule off, which `- rule: <name>` with `enabled: false` and
+   `override: {enabled: replace}` does when nothing narrower will;
+3. merge it. The chart rolls the pods when the rules change, one node at a time. Falco refuses a
+   file whose rules do not load, so a new pod that crash-loops on one is that, and
+   `KubeDaemonSetRolloutStuck` raises it after 15 minutes.
+
+The Falco documentation says what else an override can do
+([overriding](https://falco.org/docs/concepts/rules/overriding/),
+[exceptions](https://falco.org/docs/concepts/rules/exceptions/)).
 
 ## Flux itself
 

@@ -443,11 +443,12 @@ scrapes=(
   '^cilium_|cilium-monitoring|PodMonitor.monitoring.coreos.com_kube-system_cilium-agent|cilium/DaemonSet.apps_kube-system_cilium|kube-system'
   '^linstor_|linstor-monitoring|ServiceMonitor.monitoring.coreos.com_piraeus-datastore_linstor-controller|recorded:Service/linstor-controller|piraeus-datastore'
   '^drbd_|linstor-monitoring|PodMonitor.monitoring.coreos.com_piraeus-datastore_linstor-satellite|recorded:Pod/linstor-satellite|piraeus-datastore'
+  '^falcosecurity_falco_|falco|ServiceMonitor.monitoring.coreos.com_security-system_falco|Service_security-system_falco-metrics|security-system'
 )
 
 # own_metrics RENDER: the metrics each own alert of the render reads, as APPLICATION ALERT METRIC per
-# line: the names left in its expression once strings, label matchers, ranges, the label lists of
-# by, on and the like, and PromQL's own words are taken out.
+# line: the names left in its expression once strings, label matchers, ranges, offsets, the label
+# lists of by, on and the like, and PromQL's own words are taken out.
 own_metrics() {
   local file app
   while IFS= read -r file; do
@@ -456,6 +457,7 @@ own_metrics() {
       jq -r --arg app "$app" --argjson words '["sum","count","avg","min","max","quantile","rate","increase","delta","absent","last_over_time","label_replace","vector","scalar","time","and","or","unless","bool","by","without","on","ignoring","group_left","group_right"]' '
         .alert as $alert | .expr
         | gsub("\"[^\"]*\""; "") | gsub("\\{[^}]*\\}"; "") | gsub("\\[[^\\]]*\\]"; "")
+        | gsub("offset[ \t\n]+[0-9a-z]+"; "")
         | gsub("(by|without|on|ignoring|group_left|group_right)[ \t\n]*\\([^)]*\\)"; "")
         | [scan("[a-zA-Z_:][a-zA-Z0-9_:]*")] | map(select(. as $word | $words | index($word) | not)) | unique[]
         | $app + " " + $alert + " " + .'
@@ -541,6 +543,14 @@ scrape_gaps() {
   # An alert on a metric nothing scrapes is refused, naming the alert and the metric.
   fixture
   yq -i '.spec.groups[0].rules += [{"alert": "NothingScrapesThis", "expr": "unscraped_thing_total > 0", "for": "5m"}]' \
+    "$(own_file vector)"
+  gaps="$(scrape_gaps "$FX/render")"
+  echo "$gaps"
+  [ "$gaps" = "vector: alert NothingScrapesThis reads unscraped_thing_total, which no monitor scrapes" ]
+  # An offset modifier, with its duration, is not read as a metric: the alert is named for its one
+  # metric and nothing else.
+  fixture
+  yq -i '.spec.groups[0].rules += [{"alert": "NothingScrapesThis", "expr": "unscraped_thing_total unless last_over_time(unscraped_thing_total[1d] offset 15m)", "for": "5m"}]' \
     "$(own_file vector)"
   gaps="$(scrape_gaps "$FX/render")"
   echo "$gaps"

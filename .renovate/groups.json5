@@ -65,6 +65,16 @@
       groupName: "n8n",
     },
     {
+      // tests/falco.bats fails unless the image's version is the chart's appVersion, as the image
+      // carries the rules and plugin the chart's version expects.
+      description: "Falco: its chart and the image the chart runs",
+      matchPackageNames: ["ghcr.io/falcosecurity/charts/falco", "docker.io/falcosecurity/falco"],
+      groupName: "Falco",
+      // The chart and the image number their releases apart, so both move in one pull request
+      // whatever the step of each.
+      separateMajorMinor: false,
+    },
+    {
       description: "The Flux Operator: its image and its operator and instance charts",
       matchPackageNames: ["controlplaneio-fluxcd/**", "ghcr.io/controlplaneio-fluxcd/**"],
       groupName: "Flux Operator",

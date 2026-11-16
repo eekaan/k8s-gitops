@@ -116,6 +116,9 @@ kubernetes/apps/base/openbao/openbao/app/values.yaml	helm-values	ghcr.io/fluxcd/
 kubernetes/apps/base/openbao/openbao/app/values.yaml	regex	ghcr.io/fluxcd/flux-cli	image
 kubernetes/apps/base/piraeus-datastore/piraeus-operator/app/ocirepository.yaml	flux	ghcr.io/piraeusdatastore/piraeus-operator/piraeus	tag
 kubernetes/apps/base/piraeus-datastore/piraeus-operator/app/ocirepository.yaml	regex	ghcr.io/piraeusdatastore/piraeus-operator/piraeus	tag
+kubernetes/apps/base/security-system/falco/app/ocirepository.yaml	flux	ghcr.io/falcosecurity/charts/falco	tag
+kubernetes/apps/base/security-system/falco/app/ocirepository.yaml	regex	ghcr.io/falcosecurity/charts/falco	tag
+kubernetes/apps/base/security-system/falco/app/values.yaml	regex	docker.io/falcosecurity/falco	tag
 kubernetes/apps/base/sso-system/dex/app/ocirepository.yaml	flux	ghcr.io/dexidp/helm-charts/dex	tag
 kubernetes/apps/base/sso-system/dex/app/ocirepository.yaml	regex	ghcr.io/dexidp/helm-charts/dex	tag
 kubernetes/apps/base/sso-system/oauth2-proxy/app/ocirepository.yaml	flux	ghcr.io/oauth2-proxy/charts/oauth2-proxy	tag

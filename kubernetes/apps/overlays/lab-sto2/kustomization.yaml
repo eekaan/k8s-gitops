@@ -22,6 +22,7 @@ resources:
   - ../../base/monitoring
   - ../../base/openbao
   - ../../base/piraeus-datastore
+  - ../../base/security-system
   - ../../base/volsync-system
   - ../../base/sso-system
   - ../../base/ai-system/n8n/ks.yaml
@@ -72,6 +73,7 @@ resources:
   - ../../base/piraeus-datastore/linstor-cluster/ks.yaml
   - ../../base/piraeus-datastore/linstor-monitoring/ks.yaml
   - ../../base/piraeus-datastore/piraeus-operator/ks.yaml
+  - ../../base/security-system/falco/ks.yaml
   - ../../base/volsync-system/volsync/ks.yaml
   - ../../base/sso-system/dex/ks.yaml
   - ../../base/sso-system/oauth2-proxy/ks.yaml

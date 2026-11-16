@@ -1,0 +1,493 @@
+---
+# Unit tests of the falco application's own alert, run by just rules-check with promtool. The series
+# are shaped as Falco writes its rule counters, falcosecurity_falco_rules_matches_total, which it
+# emits only for a rule that has matched: the labels rule_name and priority, the number of the
+# rule's priority, 0 Emergency to 7 Debug (userspace/falco/falco_metrics.cpp at the pinned
+# version), and the source and a tag_ label for each of the rule's tags, with the pod, Service,
+# namespace and node of the ServiceMonitor's scrape of the Service falco-metrics. Each group's name
+# is the title of its scenario in features/alerts.feature, and each case is a series of its own pod
+# and node, so an alert names the case it is for.
+rule_files:
+  - falco.rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: The alert FalcoCriticalRuleMatched fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # A rule of priority Critical on node-1 that matched once before the window and again at
+      # minute 40: the counter goes from 1 to 2.
+      - series: >-
+          falcosecurity_falco_rules_matches_total{rule_name="Drop and execute new binary in container",
+          priority="2", source="syscall", tag_container="true", pod="falco-a", node="node-1",
+          instance="a:8765", job="falco-metrics", namespace="security-system",
+          service="falco-metrics", endpoint="metrics"}
+        values: '1x39 2x60'
+      # A rule of priority Critical that matched once, long ago, and a failed scrape wrote a
+      # staleness marker at minute 21: the same pod and the same counter, 1, before and after. The
+      # series is not new, and nothing matched.
+      - series: >-
+          falcosecurity_falco_rules_matches_total{rule_name="Detect release_agent File Container Escapes",
+          priority="2", source="syscall", tag_container="true", pod="falco-d", node="node-3",
+          instance="d:8765", job="falco-metrics", namespace="security-system",
+          service="falco-metrics", endpoint="metrics"}
+        values: '1x20 stale 1x80'
+      # The same with Prometheus down, or the pod unscraped, for 19 minutes, from 21 to 39: no
+      # sample, longer than the lookback, then the same pod with the same counter. Not new either.
+      - series: >-
+          falcosecurity_falco_rules_matches_total{rule_name="Drop and execute new binary in container",
+          priority="2", source="syscall", tag_container="true", pod="falco-e", node="node-4",
+          instance="e:8765", job="falco-metrics", namespace="security-system",
+          service="falco-metrics", endpoint="metrics"}
+        values: '1x20 _x19 1x60'
+      # And for 45 minutes, from 21 to 65, longer than the window and its offset together: the
+      # counter it comes back with at minute 66 is still the last one seen within the day.
+      - series: >-
+          falcosecurity_falco_rules_matches_total{rule_name="Drop and execute new binary in container",
+          priority="2", source="syscall", tag_container="true", pod="falco-f", node="node-5",
+          instance="f:8765", job="falco-metrics", namespace="security-system",
+          service="falco-metrics", endpoint="metrics"}
+        values: '1x20 _x45 1x60'
+      # A rule of priority Critical that matched yesterday, before the first sample, and not since:
+      # its counter, scraped throughout, is unchanged a day and more later, when the window no
+      # longer holds the sample of that day's start.
+      - series: >-
+          falcosecurity_falco_rules_matches_total{rule_name="Fileless execution via memfd_create",
+          priority="2", source="syscall", tag_container="true", pod="falco-j", node="node-6",
+          instance="j:8765", job="falco-metrics", namespace="security-system",
+          service="falco-metrics", endpoint="metrics"}
+        values: '1x1500'
+      # A series that comes back unchanged a day and a quarter of an hour after its last sample, at
+      # minute 20, with none from 21 to 1474: nothing within the day says what it was, so it is
+      # taken for a new one, and the alert fires from its return until that is 15 minutes old, the
+      # most such a series fires for.
+      - series: >-
+          falcosecurity_falco_rules_matches_total{rule_name="Detect release_agent File Container Escapes",
+          priority="2", source="syscall", tag_container="true", pod="falco-k", node="node-11",
+          instance="k:8765", job="falco-metrics", namespace="security-system",
+          service="falco-metrics", endpoint="metrics"}
+        values: '1x20 _x1454 1x30'
+      # Back unchanged a day and 5 minutes after its last sample, at minute 40, with none from 41 to
+      # 1484: quiet at its return, while the window still holds that sample, then taken for a new
+      # series from a day and 15 minutes after it, minute 1495, until the return is 15 minutes old,
+      # minute 1500: the 5 minutes the gap ran past a day.
+      - series: >-
+          falcosecurity_falco_rules_matches_total{rule_name="Fileless execution via memfd_create",
+          priority="2", source="syscall", tag_container="true", pod="falco-m", node="node-12",
+          instance="m:8765", job="falco-metrics", namespace="security-system",
+          service="falco-metrics", endpoint="metrics"}
+        values: '1x40 _x1444 1x30'
+      # Back unchanged 23 hours and 50 minutes after its last sample, at minute 60, with none from 61
+      # to 1489: the window of a day holds that sample until the return is older than 15 minutes, so
+      # the series is never taken for a new one.
+      - series: >-
+          falcosecurity_falco_rules_matches_total{rule_name="Drop and execute new binary in container",
+          priority="2", source="syscall", tag_container="true", pod="falco-n", node="node-13",
+          instance="n:8765", job="falco-metrics", namespace="security-system",
+          service="falco-metrics", endpoint="metrics"}
+        values: '1x60 _x1429 1x30'
+      # A rule of priority Alert and one of priority Emergency, each from a local rule file, that
+      # matched at minute 40 as the first did.
+      - series: >-
+          falcosecurity_falco_rules_matches_total{rule_name="Local rule at alert level",
+          priority="1", source="syscall", pod="falco-a", node="node-1",
+          instance="a:8765", job="falco-metrics", namespace="security-system",
+          service="falco-metrics", endpoint="metrics"}
+        values: '1x39 2x60'
+      - series: >-
+          falcosecurity_falco_rules_matches_total{rule_name="Local rule at emergency level",
+          priority="0", source="syscall", pod="falco-a", node="node-1",
+          instance="a:8765", job="falco-metrics", namespace="security-system",
+          service="falco-metrics", endpoint="metrics"}
+        values: '1x39 2x60'
+      # A rule of priority Error, the next below Critical, and one of priority Notice, matched at
+      # minute 40 too: neither is an alert.
+      - series: >-
+          falcosecurity_falco_rules_matches_total{rule_name="Local rule at error level",
+          priority="3", source="syscall", pod="falco-a", node="node-1",
+          instance="a:8765", job="falco-metrics", namespace="security-system",
+          service="falco-metrics", endpoint="metrics"}
+        values: '1x39 2x60'
+      - series: >-
+          falcosecurity_falco_rules_matches_total{rule_name="Terminal shell in container",
+          priority="5", source="syscall", tag_shell="true", pod="falco-a", node="node-1",
+          instance="a:8765", job="falco-metrics", namespace="security-system",
+          service="falco-metrics", endpoint="metrics"}
+        values: '1x39 2x60'
+    alert_rule_test:
+      # Healthy: every counter is where it was a quarter of an hour ago.
+      - eval_time: 20m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts: []
+      # A quarter of an hour after the staleness marker of minute 21, where a comparison with the
+      # sample of a quarter of an hour ago finds none.
+      - eval_time: 36m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts: []
+      - eval_time: 39m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts: []
+      # The counters rise at minute 40, and the alert fires at once for the rules of priority
+      # Emergency, Alert and Critical, once each, and not for Error or Notice.
+      - eval_time: 40m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts:
+          - exp_labels: &emergency
+              severity: critical
+              rule_name: Local rule at emergency level
+              priority: "0"
+              node: node-1
+            exp_annotations: &emergency_annotations
+              summary: A Falco rule of priority Critical or above matched
+              description: Falco matched the rule Local rule at emergency level, of priority 0, on node node-1 within the last 15 minutes; priority 2 is Critical, 1 Alert and 0 Emergency.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#falcocriticalrulematched
+          - exp_labels: &alert
+              severity: critical
+              rule_name: Local rule at alert level
+              priority: "1"
+              node: node-1
+            exp_annotations: &alert_annotations
+              summary: A Falco rule of priority Critical or above matched
+              description: Falco matched the rule Local rule at alert level, of priority 1, on node node-1 within the last 15 minutes; priority 2 is Critical, 1 Alert and 0 Emergency.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#falcocriticalrulematched
+          - exp_labels: &critical
+              severity: critical
+              rule_name: Drop and execute new binary in container
+              priority: "2"
+              node: node-1
+            exp_annotations: &critical_annotations
+              summary: A Falco rule of priority Critical or above matched
+              description: Falco matched the rule Drop and execute new binary in container, of priority 2, on node node-1 within the last 15 minutes; priority 2 is Critical, 1 Alert and 0 Emergency.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#falcocriticalrulematched
+      # The counters of node-1 are in their window, and the series of node-3 and node-4, which come
+      # back after a staleness marker and after a gap of 19 minutes with the counter they had, are
+      # not matches: the alert stays quiet for both, as it does for the rest of their time.
+      - eval_time: 45m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts:
+          - exp_labels: *emergency
+            exp_annotations: *emergency_annotations
+          - exp_labels: *alert
+            exp_annotations: *alert_annotations
+          - exp_labels: *critical
+            exp_annotations: *critical_annotations
+      # The last minute of node-1's quarter of an hour, which holds from the sample of minute 40
+      # until that sample is 15 minutes old: at 54 it is not yet, at 55 it is.
+      - eval_time: 54m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts:
+          - exp_labels: *emergency
+            exp_annotations: *emergency_annotations
+          - exp_labels: *alert
+            exp_annotations: *alert_annotations
+          - exp_labels: *critical
+            exp_annotations: *critical_annotations
+      - eval_time: 55m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts: []
+      # node-5 is back after its gap of 45 minutes with the counter it had: quiet from its first
+      # sample to the end of the quarter of an hour after it.
+      - eval_time: 66m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts: []
+      - eval_time: 80m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts: []
+      # A day and more after node-6's match, its unchanged counter is quiet; node-11, back a day and
+      # a quarter of an hour after its last sample, fires from its first sample until that is 15
+      # minutes old.
+      - eval_time: 1474m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts: []
+      - eval_time: 1475m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts:
+          - exp_labels: &day
+              severity: critical
+              rule_name: Detect release_agent File Container Escapes
+              priority: "2"
+              node: node-11
+            exp_annotations: &day_annotations
+              summary: A Falco rule of priority Critical or above matched
+              description: Falco matched the rule Detect release_agent File Container Escapes, of priority 2, on node node-11 within the last 15 minutes; priority 2 is Critical, 1 Alert and 0 Emergency.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#falcocriticalrulematched
+      - eval_time: 1489m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts:
+          - exp_labels: *day
+            exp_annotations: *day_annotations
+      # node-13 is back at minute 1490 after 23 hours and 50 minutes, and stays quiet to the end of
+      # its quarter of an hour; node-12, back at 1485 after a day and 5 minutes, is quiet until a day
+      # and 15 minutes after its last sample, fires at 1495 and last at 1499.
+      - eval_time: 1490m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts: []
+      - eval_time: 1494m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts: []
+      - eval_time: 1495m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts:
+          - exp_labels: &past_day
+              severity: critical
+              rule_name: Fileless execution via memfd_create
+              priority: "2"
+              node: node-12
+            exp_annotations: &past_day_annotations
+              summary: A Falco rule of priority Critical or above matched
+              description: Falco matched the rule Fileless execution via memfd_create, of priority 2, on node node-12 within the last 15 minutes; priority 2 is Critical, 1 Alert and 0 Emergency.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#falcocriticalrulematched
+      - eval_time: 1499m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts:
+          - exp_labels: *past_day
+            exp_annotations: *past_day_annotations
+      - eval_time: 1500m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts: []
+      - eval_time: 1504m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts: []
+  - name: The alert FalcoCriticalRuleMatched fires for the first match of a new pod and stays quiet for it once the series is a quarter of an hour old
+    interval: 1m
+    input_series:
+      # A rule of priority Critical on node-2 whose pod is new: a pod's counters start from nothing,
+      # so the series of the pod falco-c begins at minute 48 with its first match, 1, which a rise
+      # within a window never shows. The series of the pod falco-b, which ran before, is steady.
+      - series: >-
+          falcosecurity_falco_rules_matches_total{rule_name="Fileless execution via memfd_create",
+          priority="2", source="syscall", tag_container="true", pod="falco-c", node="node-2",
+          instance="c:8765", job="falco-metrics", namespace="security-system",
+          service="falco-metrics", endpoint="metrics"}
+        values: '_x48 1x60'
+      - series: >-
+          falcosecurity_falco_rules_matches_total{rule_name="Drop and execute new binary in container",
+          priority="2", source="syscall", tag_container="true", pod="falco-b", node="node-2",
+          instance="b:8765", job="falco-metrics", namespace="security-system",
+          service="falco-metrics", endpoint="metrics"}
+        values: '1x107'
+      # A rule of priority Error and one of priority Notice whose first match in the same new pod is
+      # at the same minute: new series too, and neither is an alert.
+      - series: >-
+          falcosecurity_falco_rules_matches_total{rule_name="Local rule at error level",
+          priority="3", source="syscall", pod="falco-c", node="node-2",
+          instance="c:8765", job="falco-metrics", namespace="security-system",
+          service="falco-metrics", endpoint="metrics"}
+        values: '_x48 1x60'
+      - series: >-
+          falcosecurity_falco_rules_matches_total{rule_name="Terminal shell in container",
+          priority="5", source="syscall", tag_shell="true", pod="falco-c", node="node-2",
+          instance="c:8765", job="falco-metrics", namespace="security-system",
+          service="falco-metrics", endpoint="metrics"}
+        values: '_x48 1x60'
+    alert_rule_test:
+      - eval_time: 47m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts: []
+      # The first match is in the window from minute 48 until the series is 15 minutes old: minute
+      # 62 is, 63 is not.
+      - eval_time: 48m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              rule_name: Fileless execution via memfd_create
+              priority: "2"
+              node: node-2
+            exp_annotations:
+              summary: A Falco rule of priority Critical or above matched
+              description: Falco matched the rule Fileless execution via memfd_create, of priority 2, on node node-2 within the last 15 minutes; priority 2 is Critical, 1 Alert and 0 Emergency.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#falcocriticalrulematched
+      - eval_time: 55m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              rule_name: Fileless execution via memfd_create
+              priority: "2"
+              node: node-2
+            exp_annotations:
+              summary: A Falco rule of priority Critical or above matched
+              description: Falco matched the rule Fileless execution via memfd_create, of priority 2, on node node-2 within the last 15 minutes; priority 2 is Critical, 1 Alert and 0 Emergency.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#falcocriticalrulematched
+      - eval_time: 62m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              rule_name: Fileless execution via memfd_create
+              priority: "2"
+              node: node-2
+            exp_annotations:
+              summary: A Falco rule of priority Critical or above matched
+              description: Falco matched the rule Fileless execution via memfd_create, of priority 2, on node node-2 within the last 15 minutes; priority 2 is Critical, 1 Alert and 0 Emergency.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#falcocriticalrulematched
+      - eval_time: 63m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts: []
+      - eval_time: 65m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts: []
+  - name: The alert FalcoCriticalRuleMatched fires for a match after Falco restarted in the same pod unless the count comes back to what it was
+    interval: 1m
+    input_series:
+      # Falco's container restarts in its pod, as after an out-of-memory kill: the pod, its address
+      # and so every label stay, the scrape fails once, which writes a staleness marker at minute 30,
+      # and the restarted Falco emits no counter for the rule until it matches again, from 1. On
+      # node-7 that is at minute 50, 20 minutes after the marker; on node-8 at minute 35, within 15
+      # minutes of it. Each was 3 before.
+      - series: >-
+          falcosecurity_falco_rules_matches_total{rule_name="Drop and execute new binary in container",
+          priority="2", source="syscall", tag_container="true", pod="falco-g", node="node-7",
+          instance="g:8765", job="falco-metrics", namespace="security-system",
+          service="falco-metrics", endpoint="metrics"}
+        values: '3x29 stale _x19 1x30'
+      - series: >-
+          falcosecurity_falco_rules_matches_total{rule_name="Drop and execute new binary in container",
+          priority="2", source="syscall", tag_container="true", pod="falco-h", node="node-8",
+          instance="h:8765", job="falco-metrics", namespace="security-system",
+          service="falco-metrics", endpoint="metrics"}
+        values: '3x29 stale _x4 1x30'
+      # The known blind spot: the same on node-9, whose rule had matched once before the restart, so
+      # the restarted counter comes back at 1, the count last seen before the window. The alert
+      # cannot tell it from the old series back after a gap, and stays quiet; the event is in the
+      # logs.
+      - series: >-
+          falcosecurity_falco_rules_matches_total{rule_name="Drop and execute new binary in container",
+          priority="2", source="syscall", tag_container="true", pod="falco-i", node="node-9",
+          instance="i:8765", job="falco-metrics", namespace="security-system",
+          service="falco-metrics", endpoint="metrics"}
+        values: '1x29 stale _x19 1x30'
+      # Falco restarts and matches between two scrapes on node-10: no marker, and the counter is 1
+      # at minute 70 where it was 3.
+      - series: >-
+          falcosecurity_falco_rules_matches_total{rule_name="Drop and execute new binary in container",
+          priority="2", source="syscall", tag_container="true", pod="falco-l", node="node-10",
+          instance="l:8765", job="falco-metrics", namespace="security-system",
+          service="falco-metrics", endpoint="metrics"}
+        values: '3x69 1x30'
+      # Falco restarts on node-14 with a marker at minute 100, as on node-7, and its counter climbs
+      # back to the 3 it had: 1 at 120, 2 at 121 and 3 from 122.
+      - series: >-
+          falcosecurity_falco_rules_matches_total{rule_name="Drop and execute new binary in container",
+          priority="2", source="syscall", tag_container="true", pod="falco-o", node="node-14",
+          instance="o:8765", job="falco-metrics", namespace="security-system",
+          service="falco-metrics", endpoint="metrics"}
+        values: '3x99 stale _x19 1 2 3x40'
+    alert_rule_test:
+      # Before the restarts every counter is steady.
+      - eval_time: 29m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts: []
+      - eval_time: 34m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts: []
+      # node-8 from its new sample at 35 until that is 15 minutes old: 49 is the last minute.
+      - eval_time: 35m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts:
+          - exp_labels: &node8
+              severity: critical
+              rule_name: Drop and execute new binary in container
+              priority: "2"
+              node: node-8
+            exp_annotations: &node8_annotations
+              summary: A Falco rule of priority Critical or above matched
+              description: Falco matched the rule Drop and execute new binary in container, of priority 2, on node node-8 within the last 15 minutes; priority 2 is Critical, 1 Alert and 0 Emergency.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#falcocriticalrulematched
+      - eval_time: 49m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts:
+          - exp_labels: *node8
+            exp_annotations: *node8_annotations
+      # node-7 from 50 to 64; node-9 never.
+      - eval_time: 50m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts:
+          - exp_labels: &node7
+              severity: critical
+              rule_name: Drop and execute new binary in container
+              priority: "2"
+              node: node-7
+            exp_annotations: &node7_annotations
+              summary: A Falco rule of priority Critical or above matched
+              description: Falco matched the rule Drop and execute new binary in container, of priority 2, on node node-7 within the last 15 minutes; priority 2 is Critical, 1 Alert and 0 Emergency.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#falcocriticalrulematched
+      - eval_time: 55m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts:
+          - exp_labels: *node7
+            exp_annotations: *node7_annotations
+      - eval_time: 64m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts:
+          - exp_labels: *node7
+            exp_annotations: *node7_annotations
+      - eval_time: 65m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts: []
+      # node-10 from 70 to 84.
+      - eval_time: 69m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts:
+          - exp_labels: &node10
+              severity: critical
+              rule_name: Drop and execute new binary in container
+              priority: "2"
+              node: node-10
+            exp_annotations: &node10_annotations
+              summary: A Falco rule of priority Critical or above matched
+              description: Falco matched the rule Drop and execute new binary in container, of priority 2, on node node-10 within the last 15 minutes; priority 2 is Critical, 1 Alert and 0 Emergency.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#falcocriticalrulematched
+      - eval_time: 84m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts:
+          - exp_labels: *node10
+            exp_annotations: *node10_annotations
+      - eval_time: 85m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts: []
+      # node-14 while its counts are 1 and 2, at 120 and 121; quiet from 122, where it is 3 again
+      # though Falco matched, to 134; and again at 135 and 136, when the counts of 15 minutes before
+      # are 1 and 2.
+      - eval_time: 120m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts:
+          - exp_labels: &node14
+              severity: critical
+              rule_name: Drop and execute new binary in container
+              priority: "2"
+              node: node-14
+            exp_annotations: &node14_annotations
+              summary: A Falco rule of priority Critical or above matched
+              description: Falco matched the rule Drop and execute new binary in container, of priority 2, on node node-14 within the last 15 minutes; priority 2 is Critical, 1 Alert and 0 Emergency.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#falcocriticalrulematched
+      - eval_time: 121m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts:
+          - exp_labels: *node14
+            exp_annotations: *node14_annotations
+      - eval_time: 122m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts: []
+      - eval_time: 134m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts: []
+      - eval_time: 135m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts:
+          - exp_labels: *node14
+            exp_annotations: *node14_annotations
+      - eval_time: 136m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts:
+          - exp_labels: *node14
+            exp_annotations: *node14_annotations
+      - eval_time: 137m
+        alertname: FalcoCriticalRuleMatched
+        exp_alerts: []

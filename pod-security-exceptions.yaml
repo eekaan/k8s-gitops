@@ -71,3 +71,11 @@ exceptions:
     created-by: LinstorCluster/linstorcluster
     level: privileged
     reason: the high-availability controller listens for the kernel's DRBD events on each node, and the operator's template runs it privileged for that
+  - namespace: security-system
+    workload: DaemonSet/falco
+    level: privileged
+    reason: >-
+      the probe watches the node's system calls as root with the added capabilities BPF, PERFMON,
+      SYS_PTRACE and SYS_RESOURCE, which baseline refuses, and mounts the host paths /proc, /etc and
+      /sys/kernel read-only and /run/containerd, the container runtime's socket directory,
+      read-write, which baseline refuses too

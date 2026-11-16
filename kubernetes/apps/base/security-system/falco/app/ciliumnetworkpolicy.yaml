@@ -1,0 +1,55 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What Falco lets through, on top of the namespace's default deny: Prometheus' scrape of its metrics
+# and the kubelet's probes, both on its web server's port; it resolves one name, the API server's,
+# which the image's rule "Contact K8S API Server From Container" compares a container's connections
+# with. It opens no other connection: it reads the container runtime's socket and the node's files
+# through host paths, which no policy sees, writes its events to standard output alone, and calls no
+# API (docs/kubernetes.md, Runtime detection).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: falco
+spec:
+  # The pods of the DaemonSet, by the labels of its selector, which the Service falco-metrics
+  # selects too.
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: falco
+      app.kubernetes.io/instance: falco
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    # The stack's Prometheus, scraping Falco's metrics through the chart's ServiceMonitor, which names
+    # the Service's port metrics, the container's 8765.
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": monitoring
+            app.kubernetes.io/name: prometheus
+      toPorts:
+        - ports:
+            - port: "8765"
+              protocol: TCP
+    # The kubelet's startup, liveness and readiness probes, /healthz on the same port, which arrive
+    # from the node the pod runs on.
+    - fromEntities:
+        - host
+      toPorts:
+        - ports:
+            - port: "8765"
+              protocol: TCP
+  egress:
+    # The cluster's resolver, for the API server's name in the rule's macro k8s_api_server, which
+    # Falco resolves at a container's first connection and again every 10 to 320 seconds after.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
