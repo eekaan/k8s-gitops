@@ -1,0 +1,28 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: oauth2-proxy
+  namespace: flux-system
+spec:
+  path: ./apps/base/sso-system/oauth2-proxy/app
+  targetNamespace: sso-system
+  # It reads the client secret dex's application makes and signs people in through dex; the
+  # ExternalSecrets and the Password generator are External Secrets', and the list of identities
+  # reads the store, which openbao-store makes and is Ready once the store is; the route names the
+  # public Gateway; its CiliumNetworkPolicy is a kind Cilium's operator defines.
+  dependsOn:
+    - name: dex
+    - name: external-secrets
+    - name: openbao-store
+    - name: gateway-public
+    - name: cilium
+  # Ready once oauth2-proxy answers its readiness endpoint, which needs the list of identities:
+  # until the owner has written it to the store (just bao-put sso-system/oauth2-proxy
+  # allowed-emails), the pods wait for their Secret and the application reports that it is not
+  # Ready.
+  wait: true
+  sourceRef:
+    kind: ExternalArtifact
+    name: oauth2-proxy

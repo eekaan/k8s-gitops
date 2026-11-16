@@ -112,6 +112,10 @@ kubernetes/apps/base/openbao/openbao/app/values.yaml	helm-values	ghcr.io/fluxcd/
 kubernetes/apps/base/openbao/openbao/app/values.yaml	regex	ghcr.io/fluxcd/flux-cli	image
 kubernetes/apps/base/piraeus-datastore/piraeus-operator/app/ocirepository.yaml	flux	ghcr.io/piraeusdatastore/piraeus-operator/piraeus	tag
 kubernetes/apps/base/piraeus-datastore/piraeus-operator/app/ocirepository.yaml	regex	ghcr.io/piraeusdatastore/piraeus-operator/piraeus	tag
+kubernetes/apps/base/sso-system/dex/app/ocirepository.yaml	flux	ghcr.io/dexidp/helm-charts/dex	tag
+kubernetes/apps/base/sso-system/dex/app/ocirepository.yaml	regex	ghcr.io/dexidp/helm-charts/dex	tag
+kubernetes/apps/base/sso-system/oauth2-proxy/app/ocirepository.yaml	flux	ghcr.io/oauth2-proxy/charts/oauth2-proxy	tag
+kubernetes/apps/base/sso-system/oauth2-proxy/app/ocirepository.yaml	regex	ghcr.io/oauth2-proxy/charts/oauth2-proxy	tag
 kubernetes/apps/base/volsync-system/volsync/app/ocirepository.yaml	flux	ghcr.io/home-operations/charts-mirror/volsync	tag
 kubernetes/apps/base/volsync-system/volsync/app/ocirepository.yaml	regex	ghcr.io/home-operations/charts-mirror/volsync	tag
 kubernetes/clusters/lab-sto2/flux-system/flux-instance/app/ocirepository.yaml	flux	ghcr.io/controlplaneio-fluxcd/charts/flux-instance	tag

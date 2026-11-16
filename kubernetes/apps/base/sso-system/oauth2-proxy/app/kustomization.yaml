@@ -1,0 +1,23 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - allowed-emails.yaml
+  - ciliumnetworkpolicy.yaml
+  - cookie-secret.yaml
+  - helmrelease.yaml
+  - httproute.yaml
+  - ocirepository.yaml
+  - referencegrant.yaml
+
+configMapGenerator:
+  - name: oauth2-proxy-values
+    files:
+      - values.yaml
+generatorOptions:
+  annotations:
+    kustomize.toolkit.fluxcd.io/substitute: disabled
+
+configurations:
+  - kustomizeconfig.yaml

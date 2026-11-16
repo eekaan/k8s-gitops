@@ -1,0 +1,24 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/gateway.networking.k8s.io/referencegrant_v1beta1.json
+# Lets the namespaces that opt a route in refer to oauth2-proxy's Service: their SecurityPolicy for
+# external authorisation and their HTTPRoute for the sign-in paths (components/sso). A grant is read
+# from the namespace of what is referred to, so it is here and not in the opting application, whose
+# target namespace Flux sets on every object it applies. Each namespace that opts in is two entries
+# of from, and the grant names no namespace that has not; the Service is the only one granted.
+# tests/sso.bats fails unless the namespaces here are exactly those with such a policy.
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: oauth2-proxy
+spec:
+  from:
+    - group: gateway.envoyproxy.io
+      kind: SecurityPolicy
+      namespace: demo
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: demo
+  to:
+    - group: ""
+      kind: Service
+      name: oauth2-proxy

@@ -1,0 +1,45 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/helmrelease-helm-v2.json
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: oauth2-proxy
+spec:
+  interval: 30m
+  chartRef:
+    kind: OCIRepository
+    name: oauth2-proxy
+  # The values, which Flux does not substitute: the configuration file, which names the cluster's
+  # domain, is in spec.values, which it does.
+  valuesFrom:
+    - kind: ConfigMap
+      name: oauth2-proxy-values
+  values:
+    config:
+      # One file in place of the chart's own: the secrets and the list of identities are not in it.
+      # The client's secret and the cookie secret are the pods' variables (values.yaml), and the
+      # list is a file the --authenticated-emails-file argument names. The upstream is a static 200:
+      # Envoy asks every request of a route that opts in at oauth2-proxy's root and lets it through
+      # on a 200 alone, and without a session the root answers with the redirect to dex, as the
+      # sign-in button is skipped (components/sso).
+      configFile: |
+        provider = "oidc"
+        provider_display_name = "GitHub"
+        client_id = "oauth2-proxy"
+        code_challenge_method = "S256"
+        oidc_issuer_url = "https://dex.${CLUSTER_DOMAIN}"
+        skip_oidc_discovery = true
+        login_url = "https://dex.${CLUSTER_DOMAIN}/auth"
+        redeem_url = "http://dex.sso-system.svc.cluster.local:5556/token"
+        oidc_jwks_url = "http://dex.sso-system.svc.cluster.local:5556/keys"
+        redirect_url = "https://auth.${CLUSTER_DOMAIN}/oauth2/callback"
+        cookie_domains = [ ".${CLUSTER_DOMAIN}" ]
+        cookie_secure = true
+        cookie_httponly = true
+        cookie_samesite = "lax"
+        session_store_type = "cookie"
+        whitelist_domains = [ ".${CLUSTER_DOMAIN}" ]
+        set_xauthrequest = true
+        skip_provider_button = true
+        upstreams = [ "static://200" ]
+        silence_ping_logging = true
