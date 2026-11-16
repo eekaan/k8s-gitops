@@ -81,5 +81,11 @@
       matchPackageNames: ["ghcr.io/open-webui/open-webui"],
       allowedVersions: "/^[0-9]/",
     },
+    {
+      // Backstage's registry lists a -next.N pre-release of each coming minor beside its releases.
+      description: "Backstage: releases, not the pre-releases of the next minor",
+      matchPackageNames: ["ghcr.io/backstage/backstage"],
+      allowedVersions: "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
+    },
   ],
 }

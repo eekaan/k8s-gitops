@@ -1,0 +1,20 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: acme-issuers
+  description: The Let's Encrypt staging and production ClusterIssuers, with the DNS provider's token read from the secret store.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#the-acme-issuers
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/cert-manager/acme-issuers
+      title: Manifests
+spec:
+  type: issuer
+  lifecycle: production
+  owner: group:default/operators
+  system: certificates
+  dependsOn:
+    - component:default/cert-manager
+    - resource:default/openbao-store

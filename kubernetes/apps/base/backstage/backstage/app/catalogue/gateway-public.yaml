@@ -1,0 +1,24 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: gateway-public
+  description: The public Gateway, its certificate and its proxy settings, which routes of labelled namespaces attach to.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#the-public-gateway
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/edge.md
+      title: Runbook
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/envoy-gateway-system/gateway-public
+      title: Manifests
+spec:
+  type: gateway
+  lifecycle: production
+  owner: group:default/operators
+  system: networking
+  dependsOn:
+    - resource:default/acme-issuers
+    - resource:default/cilium-bgp
+    - resource:default/cluster-ca
+    - component:default/envoy-gateway

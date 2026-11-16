@@ -1,0 +1,21 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: envoy-gateway
+  description: The Envoy Gateway controller, which runs the proxies of the public Gateway.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#envoy-gateway
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/envoy-gateway-system/envoy-gateway
+      title: Manifests
+spec:
+  type: service
+  lifecycle: production
+  owner: group:default/operators
+  system: networking
+  dependsOn:
+    - component:default/cilium
+    - resource:default/envoy-gateway-crds
+    - resource:default/gateway-api-crds

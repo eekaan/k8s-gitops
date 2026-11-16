@@ -1,0 +1,143 @@
+---
+# Values for the app-template chart, read by the HelmRelease through a ConfigMap generated without
+# substitution. The settings that name the cluster's domain, and the names of the generated
+# ConfigMaps, are in the HelmRelease's own values. Keys not set here keep the chart's defaults.
+
+# The user the image runs as, 1000, node, with the group and the seccomp profile the restricted Pod
+# Security level requires. Backstage needs nothing of the Kubernetes API, so the pod gets no service
+# account token. The values of the namespace's app-template-defaults ConfigMap (components/common),
+# written out.
+defaultPodOptions:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+
+controllers:
+  backstage:
+    # One replica, replaced by deleting the old pod first. Nothing of Backstage's state is in the
+    # pod, but each plugin creates its schema and migrates its tables in the database at start, and
+    # two pods that start together on an empty database both fail on the schemas and tables they
+    # create at once. There is no PodDisruptionBudget: one that keeps the
+    # only pod available would make every drain wait for ever, and one that lets it be evicted does
+    # nothing. A drain evicts the pod, which starts again on another node.
+    replicas: 1
+    strategy: Recreate
+    containers:
+      main:
+        image:
+          repository: ghcr.io/backstage/backstage
+          # renovate: datasource=docker depName=ghcr.io/backstage/backstage
+          tag: 1.55.2@sha256:68f2025a3f2774e04d58a65a948ccd04a93ddab7b7977be850e9df6d3beae6e3
+        # The image's own command with one configuration file in place of its two.
+        command:
+          - node
+          - packages/backend
+          - --config
+          - /config/app-config.yaml
+        env:
+          # PostgreSQL, through the keys of the Secret the operator makes for the cluster
+          # backstage-db; no credential is written here.
+          DB_HOST:
+            valueFrom:
+              secretKeyRef:
+                name: backstage-db-app
+                key: host
+          DB_PORT:
+            valueFrom:
+              secretKeyRef:
+                name: backstage-db-app
+                key: port
+          DB_NAME:
+            valueFrom:
+              secretKeyRef:
+                name: backstage-db-app
+                key: dbname
+          DB_USER:
+            valueFrom:
+              secretKeyRef:
+                name: backstage-db-app
+                key: username
+          DB_PASSWORD:
+            valueFrom:
+              secretKeyRef:
+                name: backstage-db-app
+                key: password
+        # Backstage's own endpoints: the process is up, and its plugins have started. The first
+        # start migrates the database, which the startup probe gives time before the other two count.
+        probes:
+          liveness:
+            enabled: true
+            custom: true
+            spec:
+              httpGet:
+                path: /.backstage/health/v1/liveness
+                port: 7007
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 3
+          readiness:
+            enabled: true
+            custom: true
+            spec:
+              httpGet:
+                path: /.backstage/health/v1/readiness
+                port: 7007
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 3
+          startup:
+            enabled: true
+            custom: true
+            spec:
+              httpGet:
+                path: /.backstage/health/v1/liveness
+                port: 7007
+              periodSeconds: 5
+              timeoutSeconds: 5
+              failureThreshold: 60
+        # From a local run of the pinned image against PostgreSQL with this configuration and the
+        # catalogue: its resident memory peaks near 530Mi at start and stays near 500Mi.
+        resources:
+          requests:
+            cpu: 100m
+            memory: 512Mi
+          limits:
+            memory: 1Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
+
+service:
+  backstage:
+    controller: backstage
+    ports:
+      http:
+        port: 7007
+
+# The image, run with a read-only root filesystem and these two mounts alone, starts, serves and
+# answers every request the guest can make: it writes nowhere, and its scaffolder, which would
+# need a temporary directory to run anything, cannot. The ConfigMaps' names are the HelmRelease's.
+persistence:
+  config:
+    type: configMap
+    advancedMounts:
+      backstage:
+        main:
+          - path: /config
+            readOnly: true
+  catalogue:
+    type: configMap
+    advancedMounts:
+      backstage:
+        main:
+          - path: /catalogue
+            readOnly: true

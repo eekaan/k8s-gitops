@@ -1,0 +1,23 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: etcd-snapshots
+  description: A CronJob that takes an etcd snapshot every six hours, encrypts it and uploads it to the backup bucket.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/cluster.md#scheduled-etcd-snapshots
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/etcd-restore.md
+      title: Runbook
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/etcd-snapshots/etcd-snapshots
+      title: Manifests
+spec:
+  type: job
+  lifecycle: production
+  owner: group:default/operators
+  system: storage
+  dependsOn:
+    - component:default/external-secrets
+    - resource:default/openbao-store
+    - resource:default/prometheus-operator-crds

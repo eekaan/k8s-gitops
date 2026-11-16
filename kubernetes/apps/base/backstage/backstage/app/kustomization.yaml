@@ -1,0 +1,97 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# The database comes from components/cnpg-cluster, which ks.yaml adds.
+resources:
+  - ciliumnetworkpolicy.yaml
+  - helmrelease.yaml
+  - httproute.yaml
+  - ocirepository.yaml
+
+# The component's dump job gets labels for its pods, which its policies in ciliumnetworkpolicy.yaml
+# select it by. The patch targets the CronJob by kind, as Flux substitutes its name after the build
+# (docs/kubernetes.md, PostgreSQL).
+patches:
+  - target:
+      kind: CronJob
+    patch: |-
+      - op: add
+        path: /spec/jobTemplate/spec/template/metadata
+        value:
+          labels:
+            app.kubernetes.io/name: pgdump
+            app.kubernetes.io/instance: backstage-db
+
+configMapGenerator:
+  - name: backstage-values
+    files:
+      - values.yaml
+  - name: backstage-config
+    files:
+      - app-config.yaml
+  # One file for each thing the catalogue describes: the entities of the applications the cluster
+  # runs and the domain, systems and group that place them (docs/kubernetes.md, Backstage).
+  - name: backstage-catalogue
+    files:
+      - catalogue/acme-issuers.yaml
+      - catalogue/backstage.yaml
+      - catalogue/cert-manager.yaml
+      - catalogue/cilium-bgp.yaml
+      - catalogue/cilium-monitoring.yaml
+      - catalogue/cilium.yaml
+      - catalogue/cloudnative-pg.yaml
+      - catalogue/cluster-ca.yaml
+      - catalogue/demo-volsync-movers.yaml
+      - catalogue/descheduler.yaml
+      - catalogue/dex.yaml
+      - catalogue/domain.yaml
+      - catalogue/envoy-gateway-crds.yaml
+      - catalogue/envoy-gateway.yaml
+      - catalogue/etcd-snapshots.yaml
+      - catalogue/external-dns.yaml
+      - catalogue/external-secrets.yaml
+      - catalogue/flux-monitoring.yaml
+      - catalogue/gateway-api-crds.yaml
+      - catalogue/gateway-public.yaml
+      - catalogue/grafana-operator.yaml
+      - catalogue/grafana.yaml
+      - catalogue/hello-route.yaml
+      - catalogue/hello-secret.yaml
+      - catalogue/hello-sso.yaml
+      - catalogue/hello.yaml
+      - catalogue/keda.yaml
+      - catalogue/kromgo.yaml
+      - catalogue/kube-prometheus-stack.yaml
+      - catalogue/kubelet-csr-approver.yaml
+      - catalogue/linstor-cluster.yaml
+      - catalogue/linstor-monitoring.yaml
+      - catalogue/metrics-server.yaml
+      - catalogue/n8n.yaml
+      - catalogue/oauth2-proxy.yaml
+      - catalogue/open-webui.yaml
+      - catalogue/openbao-dashboard.yaml
+      - catalogue/openbao-snapshots.yaml
+      - catalogue/openbao-store.yaml
+      - catalogue/openbao.yaml
+      - catalogue/operators.yaml
+      - catalogue/piraeus-operator.yaml
+      - catalogue/prometheus-operator-crds.yaml
+      - catalogue/reflector.yaml
+      - catalogue/reloader.yaml
+      - catalogue/runtime-classes.yaml
+      - catalogue/silence-operator.yaml
+      - catalogue/snapshot-controller.yaml
+      - catalogue/spegel.yaml
+      - catalogue/systems.yaml
+      - catalogue/vector.yaml
+      - catalogue/victoria-logs.yaml
+      - catalogue/volsync-demo.yaml
+      - catalogue/volsync.yaml
+      - catalogue/vpa.yaml
+generatorOptions:
+  annotations:
+    kustomize.toolkit.fluxcd.io/substitute: disabled
+
+configurations:
+  - kustomizeconfig.yaml

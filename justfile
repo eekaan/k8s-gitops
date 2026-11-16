@@ -71,6 +71,10 @@ lock-check:
 scenarios-check:
     scripts/scenarios-check
 
+# Write each catalogue entity's dependencies from the dependsOn of the Kustomization it describes, so the entities and the overlay agree (docs/kubernetes.md, Backstage)
+catalogue-dependencies:
+    scripts/catalogue-dependencies
+
 # Run the bats tests, except those tagged hermetic, which run just ci and need a container runtime, and those tagged namespace, which need unprivileged user namespaces (just edge-forward-check). A shard such as 2/3 runs the second of three parts of the test files, split by their number of tests
 [script]
 test shard='1/1':

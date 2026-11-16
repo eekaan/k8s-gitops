@@ -1,0 +1,21 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/ocirepository-source-v1.json
+# The app-template chart from its publisher's public OCI registry, which runs the published
+# Backstage image as a container and its Service. Backstage's own chart adds nothing this
+# application uses: it is a Deployment around the same image, with a PostgreSQL subchart that is
+# off here, and it leaves less of the pod's hardening to values this tree reads in full.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: app-template
+spec:
+  # The tag is pinned: a new chart arrives by a change to this file, which Flux applies at once.
+  interval: 12h
+  # The chart's packaged layer, which helm-controller reads as it is.
+  layerSelector:
+    mediaType: application/vnd.cncf.helm.chart.content.v1.tar+gzip
+    operation: copy
+  url: oci://ghcr.io/bjw-s-labs/helm/app-template
+  ref:
+    # renovate: datasource=docker depName=ghcr.io/bjw-s-labs/helm/app-template
+    tag: 5.3.0

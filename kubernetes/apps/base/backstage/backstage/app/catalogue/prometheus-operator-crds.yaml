@@ -1,0 +1,17 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: prometheus-operator-crds
+  description: The Prometheus Operator's monitoring.coreos.com resource definitions and nothing else.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#resource-definitions
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/kube-system/prometheus-operator-crds
+      title: Manifests
+spec:
+  type: definitions
+  lifecycle: production
+  owner: group:default/operators
+  system: observability

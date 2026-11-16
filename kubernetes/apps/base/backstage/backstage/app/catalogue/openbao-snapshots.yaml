@@ -1,0 +1,24 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: openbao-snapshots
+  description: A CronJob that takes a snapshot of OpenBao's raft storage every six hours, encrypts it and uploads it to the OpenBao bucket.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#raft-snapshots
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/openbao.md#restoring-a-snapshot
+      title: Runbook
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/openbao/openbao-snapshots
+      title: Manifests
+spec:
+  type: job
+  lifecycle: production
+  owner: group:default/operators
+  system: storage
+  dependsOn:
+    - component:default/external-secrets
+    - component:default/openbao
+    - resource:default/openbao-store
+    - resource:default/prometheus-operator-crds

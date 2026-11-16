@@ -99,6 +99,18 @@
       automerge: false,
     },
     {
+      // The image's frontend and backend change with its release (docs/kubernetes.md, Backstage).
+      description: "Backstage",
+      matchPackageNames: ["ghcr.io/backstage/backstage"],
+      automerge: false,
+    },
+    {
+      // The chart that runs it is held the same way, whatever the switch above says.
+      description: "Everything of Backstage's application, its chart included",
+      matchFileNames: ["kubernetes/apps/base/backstage/**"],
+      automerge: false,
+    },
+    {
       description: "Anything pinned in mise.toml or versions.yaml",
       matchFileNames: ["mise.toml", "versions.yaml"],
       automerge: false,
