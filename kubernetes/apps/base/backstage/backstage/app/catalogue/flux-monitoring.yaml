@@ -1,0 +1,21 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: flux-monitoring
+  description: The monitors and alert rules for Flux's controllers and its operator.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#flux-monitoring
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxrootsyncnotready
+      title: Runbook
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/monitoring/flux-monitoring
+      title: Manifests
+spec:
+  type: monitoring-rules
+  lifecycle: production
+  owner: group:default/operators
+  system: observability
+  dependsOn:
+    - resource:default/prometheus-operator-crds

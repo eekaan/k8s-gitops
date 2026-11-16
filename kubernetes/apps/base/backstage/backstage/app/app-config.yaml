@@ -1,0 +1,58 @@
+---
+# Backstage's whole configuration: the pod passes this one file with --config, so none of the image's
+# own app-config files, which hold its demo catalogue and a GitHub integration, is read. Backstage
+# fills ${...} from the pod's environment, and the environment variables APP_CONFIG_app_baseUrl and
+# APP_CONFIG_backend_baseUrl, set by the HelmRelease from the cluster's domain, replace the base URLs.
+# Nothing here is secret.
+
+app:
+  title: Cluster catalogue
+  # The frontend the image was built with, which every plugin the image holds adds its pages to.
+  packages: all
+  extensions:
+    # The catalogue is the front page.
+    - page:catalog:
+        config:
+          path: /
+
+organization:
+  name: Cluster
+
+backend:
+  listen:
+    port: 7007
+  database:
+    client: pg
+    # The user the PostgreSQL operator makes cannot create databases, which Backstage's default of a
+    # database for each plugin needs, so each plugin gets a schema of the one database instead.
+    pluginDivisionMode: schema
+    connection:
+      host: ${DB_HOST}
+      port: ${DB_PORT}
+      database: ${DB_NAME}
+      user: ${DB_USER}
+      password: ${DB_PASSWORD}
+
+auth:
+  providers:
+    # The only sign-in the image's frontend offers. The backend refuses it outside development
+    # unless this is set, and with it anyone who reaches the route signs in as the guest user: what
+    # that allows is what the rest of this file leaves, reading the catalogue (docs/kubernetes.md,
+    # Backstage).
+    guest:
+      dangerouslyAllowOutsideDevelopment: true
+
+catalog:
+  # The catalogue is the files below. With this on the backend refuses to register, unregister or
+  # change a location, whoever asks.
+  readonly: true
+  rules:
+    - allow: [Domain, System, Component, Resource, Group]
+  locations:
+    # Every file of the directory the pod mounts from the ConfigMap generated from catalogue/.
+    - type: file
+      target: /catalogue/*.yaml
+
+techdocs:
+  # Nothing builds documentation in the pod, and nothing is published for it to read.
+  builder: external

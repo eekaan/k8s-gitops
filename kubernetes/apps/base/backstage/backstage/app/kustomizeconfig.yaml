@@ -1,0 +1,14 @@
+---
+# Lets kustomize write the generated ConfigMaps' hashed names into the HelmRelease, in valuesFrom and
+# in the values that mount the configuration and the catalogue, so a change to a file produces a new
+# ConfigMap and a new release, and the pods restart on it.
+nameReference:
+  - kind: ConfigMap
+    version: v1
+    fieldSpecs:
+      - path: spec/valuesFrom/name
+        kind: HelmRelease
+      - path: spec/values/persistence/config/name
+        kind: HelmRelease
+      - path: spec/values/persistence/catalogue/name
+        kind: HelmRelease

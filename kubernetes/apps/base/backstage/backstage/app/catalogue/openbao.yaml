@@ -1,0 +1,24 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: openbao
+  description: OpenBao, the cluster's secret store, which unseals itself and keeps its data on its members' volumes.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#openbao
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/openbao.md
+      title: Runbook
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/openbao/openbao
+      title: Manifests
+spec:
+  type: service
+  lifecycle: production
+  owner: group:default/operators
+  system: secrets
+  dependsOn:
+    - component:default/cert-manager
+    - component:default/external-secrets
+    - resource:default/linstor-cluster
+    - resource:default/prometheus-operator-crds

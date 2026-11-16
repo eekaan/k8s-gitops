@@ -1,0 +1,23 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: oauth2-proxy
+  description: oauth2-proxy, which holds the sign-in's session and answers for each request of a route that opts in whether it is admitted.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#sign-in
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/sso-system/oauth2-proxy
+      title: Manifests
+spec:
+  type: service
+  lifecycle: production
+  owner: group:default/operators
+  system: sign-in
+  dependsOn:
+    - component:default/cilium
+    - component:default/dex
+    - component:default/external-secrets
+    - resource:default/gateway-public
+    - resource:default/openbao-store

@@ -8,6 +8,7 @@ kind: Kustomization
 resources:
   - ../../base/flux-system/artifact-generator
   - ../../base/ai-system
+  - ../../base/backstage
   - ../../base/cert-manager
   - ../../base/cnpg-system
   - ../../base/demo
@@ -25,6 +26,7 @@ resources:
   - ../../base/sso-system
   - ../../base/ai-system/n8n/ks.yaml
   - ../../base/ai-system/open-webui/ks.yaml
+  - ../../base/backstage/backstage/ks.yaml
   - ../../base/cert-manager/acme-issuers/ks.yaml
   - ../../base/cert-manager/cert-manager/ks.yaml
   - ../../base/cert-manager/cluster-ca/ks.yaml

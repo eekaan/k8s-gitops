@@ -1,0 +1,37 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/helmrelease-helm-v2.json
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: backstage
+spec:
+  interval: 30m
+  chartRef:
+    kind: OCIRepository
+    name: app-template
+  # The values, which Flux does not substitute: the settings that depend on the cluster's domain
+  # and the names of the generated ConfigMaps are in spec.values, which it does. The pod's user and
+  # security context are in the values in full, not taken from the namespace's app-template-defaults
+  # ConfigMap, as the render that validates the tree reads only the ConfigMaps an application builds
+  # itself.
+  valuesFrom:
+    - kind: ConfigMap
+      name: backstage-values
+  values:
+    controllers:
+      backstage:
+        containers:
+          main:
+            env:
+              # The name the route gives Backstage, which it builds its links, its cookies and the
+              # address its frontend calls the backend at from. The Gateway terminates TLS, so
+              # Backstage serves plain HTTP behind it while it names itself as https.
+              APP_CONFIG_app_baseUrl: https://backstage.${CLUSTER_DOMAIN}
+              APP_CONFIG_backend_baseUrl: https://backstage.${CLUSTER_DOMAIN}
+    persistence:
+      # The ConfigMaps generated from app-config.yaml and from catalogue/, whose hashed names
+      # kustomize writes here (kustomizeconfig.yaml).
+      config:
+        name: backstage-config
+      catalogue:
+        name: backstage-catalogue

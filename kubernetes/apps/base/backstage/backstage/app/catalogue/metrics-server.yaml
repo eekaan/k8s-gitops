@@ -1,0 +1,20 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: metrics-server
+  description: Serves resource metrics, verifying each kubelet's serving certificate against the cluster CA.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#the-kube-system-baseline
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/kube-system/metrics-server
+      title: Manifests
+spec:
+  type: service
+  lifecycle: production
+  owner: group:default/operators
+  system: cluster-services
+  dependsOn:
+    - component:default/kubelet-csr-approver
+    - resource:default/prometheus-operator-crds

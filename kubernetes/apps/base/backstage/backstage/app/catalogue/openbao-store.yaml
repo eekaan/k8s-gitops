@@ -1,0 +1,22 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: openbao-store
+  description: The ClusterSecretStore through which External Secrets reads OpenBao.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#external-secrets
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/openbao.md
+      title: Runbook
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/external-secrets/openbao-store
+      title: Manifests
+spec:
+  type: secret-store
+  lifecycle: production
+  owner: group:default/operators
+  system: secrets
+  dependsOn:
+    - component:default/external-secrets
+    - component:default/openbao

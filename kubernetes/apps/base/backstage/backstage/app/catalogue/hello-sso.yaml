@@ -1,0 +1,21 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: hello-sso
+  description: The HTTPRoute that gives the demo workload a second name on the public Gateway, behind the cluster's sign-in.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#sign-in
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/demo/hello-sso
+      title: Manifests
+spec:
+  type: route
+  lifecycle: experimental
+  owner: group:default/operators
+  system: demo
+  dependsOn:
+    - resource:default/gateway-public
+    - component:default/hello
+    - component:default/oauth2-proxy

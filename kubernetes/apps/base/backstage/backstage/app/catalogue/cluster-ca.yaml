@@ -1,0 +1,19 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: cluster-ca
+  description: The cluster's own certificate authority and the ClusterIssuer that signs with it.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#the-clusters-own-ca
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/cert-manager/cluster-ca
+      title: Manifests
+spec:
+  type: issuer
+  lifecycle: production
+  owner: group:default/operators
+  system: certificates
+  dependsOn:
+    - component:default/cert-manager

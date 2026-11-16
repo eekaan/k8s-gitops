@@ -1,0 +1,21 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: linstor-monitoring
+  description: The monitors and alert rules for LINSTOR's controller and satellites.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#storage-monitoring
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#drbdreplicanotuptodate
+      title: Runbook
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/piraeus-datastore/linstor-monitoring
+      title: Manifests
+spec:
+  type: monitoring-rules
+  lifecycle: production
+  owner: group:default/operators
+  system: storage
+  dependsOn:
+    - resource:default/prometheus-operator-crds

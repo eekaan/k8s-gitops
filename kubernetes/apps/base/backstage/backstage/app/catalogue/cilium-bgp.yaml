@@ -1,0 +1,21 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: cilium-bgp
+  description: The BGP peering and address pool through which the workers announce LoadBalancer addresses to the edge routers.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#service-addresses
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#ciliumbgpsessionsdown
+      title: Runbook
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/kube-system/cilium-bgp
+      title: Manifests
+spec:
+  type: bgp-configuration
+  lifecycle: production
+  owner: group:default/operators
+  system: networking
+  dependsOn:
+    - component:default/cilium

@@ -1,0 +1,251 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What Backstage lets through, on top of the namespace's default deny: the public Gateway's proxies
+# and the kubelet's probes on the port it serves on; it resolves its database's name and reaches the
+# database. It opens no other connection: its plugins call each other on the pod's loopback, which
+# policy does not see, it mounts no service account token, and nothing outside the cluster is
+# reachable from it.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: backstage
+spec:
+  # The pods the chart's Service selects.
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/controller: backstage
+      app.kubernetes.io/instance: backstage
+      app.kubernetes.io/name: backstage
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    # The routed backend: only the pods Envoy Gateway runs for the public Gateway, selected by their
+    # labels and not by their namespace, whose controller and certificate job are no proxies. The
+    # route sends to the Service's port 7007, which targets the container's 7007.
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": envoy-gateway-system
+            app.kubernetes.io/name: envoy
+            app.kubernetes.io/component: proxy
+            app.kubernetes.io/managed-by: envoy-gateway
+            gateway.envoyproxy.io/owning-gateway-name: public
+            gateway.envoyproxy.io/owning-gateway-namespace: envoy-gateway-system
+      toPorts:
+        - ports:
+            - port: "7007"
+              protocol: TCP
+    # The kubelet's startup, liveness and readiness probes, which arrive from the node the pod runs
+    # on.
+    - fromEntities:
+        - host
+      toPorts:
+        - ports:
+            - port: "7007"
+              protocol: TCP
+  egress:
+    # The cluster's resolver, for the name of the database's Service, the key host of the Secret
+    # backstage-db-app.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    # The database: the pods the Service backstage-db-rw selects are the cluster's primary, which a
+    # failover moves to another instance, so the rule names every instance of the cluster, on
+    # PostgreSQL's port. A Service's address is translated to a pod's before policy applies, so the
+    # rule names the pods.
+    - toEndpoints:
+        - matchLabels:
+            cnpg.io/cluster: backstage-db
+            cnpg.io/podRole: instance
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What the pods of the database let through among themselves and with the operator, on top of the
+# namespace's default deny: every pod the operator makes for the cluster backstage-db, its instances
+# and the jobs that create and join them, which all carry the label cnpg.io/cluster. The pinned
+# operator's documentation asks that the operator reach every pod of a cluster on 8000, the instance
+# manager's status port, and 5432, PostgreSQL's, and that the cluster's pods connect to each other
+# (docs/src/security.md, Exposed Ports; docs/src/networking.md); a replica streams from the primary
+# through the Service backstage-db-rw. The instance manager reads and writes the Cluster and its
+# Secrets through the API server.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: backstage-db
+spec:
+  endpointSelector:
+    matchLabels:
+      cnpg.io/cluster: backstage-db
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    # The operator, the pods of its Deployment in cnpg-system.
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": cnpg-system
+            app.kubernetes.io/name: cloudnative-pg
+      toPorts:
+        - ports:
+            - port: "8000"
+              protocol: TCP
+            - port: "5432"
+              protocol: TCP
+    # The cluster's own pods: replication, and a joining instance's copy of the primary. They listen
+    # on 5432, 8000 and 9187 alone.
+    - fromEndpoints:
+        - matchLabels:
+            cnpg.io/cluster: backstage-db
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    - toEndpoints:
+        - matchLabels:
+            cnpg.io/cluster: backstage-db
+    # The API server. A Service's address is translated to the control plane's before policy
+    # applies, so 6443 is the port that counts.
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "6443"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# Who reaches the database's instances besides the operator and each other: Backstage and the dump
+# job on PostgreSQL's port, Prometheus on the exporter's port the PodMonitor names, metrics, and the
+# kubelet's probes on the status port, where the operator puts them (pkg/specs/pods.go).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: backstage-db-instances
+spec:
+  endpointSelector:
+    matchLabels:
+      cnpg.io/cluster: backstage-db
+      cnpg.io/podRole: instance
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/controller: backstage
+            app.kubernetes.io/instance: backstage
+            app.kubernetes.io/name: backstage
+        - matchLabels:
+            app.kubernetes.io/name: pgdump
+            app.kubernetes.io/instance: backstage-db
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": monitoring
+            app.kubernetes.io/name: prometheus
+      toPorts:
+        - ports:
+            - port: "9187"
+              protocol: TCP
+    - fromEntities:
+        - host
+      toPorts:
+        - ports:
+            - port: "8000"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What the database's daily dump job lets through, on top of the namespace's default deny: it
+# resolves the names of the replicas' and the primary's Services and reaches the instances on
+# PostgreSQL's port, the replicas first and the primary when none answers; it takes no connection.
+# The job's pods carry the labels app.kubernetes.io/name pgdump and app.kubernetes.io/instance
+# backstage-db, which kustomization.yaml gives the component's CronJob. Two policies: the object
+# storage's rule carries a reason of its own.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: backstage-db-pgdump
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: pgdump
+      app.kubernetes.io/instance: backstage-db
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    - toEndpoints:
+        - matchLabels:
+            cnpg.io/cluster: backstage-db
+            cnpg.io/podRole: instance
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# The dump job's two calls outside the cluster: its first step downloads the pinned age release from
+# GitHub, whose URL redirects to a second host that serves the file, and its last uploads the
+# encrypted dump to the object storage, whose endpoint cluster-config holds as a URL. Neither can be
+# named by a DNS name here, so the policy allows the world on 443, the port https reaches both on
+# (docs/kubernetes.md, Network policy).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: backstage-db-pgdump-world
+  annotations:
+    k8s-gitops/network-policy-reason: >-
+      the dump job downloads the pinned age release from GitHub, whose URL redirects to another
+      host, and uploads the encrypted dump to the object storage outside the cluster, whose endpoint
+      cluster-config holds as a URL and so cannot name a DNS name here; it reaches them on 443 only
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: pgdump
+      app.kubernetes.io/instance: backstage-db
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP

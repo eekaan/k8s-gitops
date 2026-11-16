@@ -47,6 +47,10 @@ kubernetes/apps/base/ai-system/open-webui/app/ocirepository.yaml	flux	ghcr.io/bj
 kubernetes/apps/base/ai-system/open-webui/app/ocirepository.yaml	regex	ghcr.io/bjw-s-labs/helm/app-template	tag
 kubernetes/apps/base/ai-system/open-webui/app/values.yaml	helm-values	ghcr.io/open-webui/open-webui	-
 kubernetes/apps/base/ai-system/open-webui/app/values.yaml	regex	ghcr.io/open-webui/open-webui	tag
+kubernetes/apps/base/backstage/backstage/app/ocirepository.yaml	flux	ghcr.io/bjw-s-labs/helm/app-template	tag
+kubernetes/apps/base/backstage/backstage/app/ocirepository.yaml	regex	ghcr.io/bjw-s-labs/helm/app-template	tag
+kubernetes/apps/base/backstage/backstage/app/values.yaml	helm-values	ghcr.io/backstage/backstage	-
+kubernetes/apps/base/backstage/backstage/app/values.yaml	regex	ghcr.io/backstage/backstage	tag
 kubernetes/apps/base/cert-manager/cert-manager/app/ocirepository.yaml	flux	quay.io/jetstack/charts/cert-manager	tag
 kubernetes/apps/base/cert-manager/cert-manager/app/ocirepository.yaml	regex	quay.io/jetstack/charts/cert-manager	tag
 kubernetes/apps/base/cnpg-system/cloudnative-pg/app/ocirepository.yaml	flux	ghcr.io/cloudnative-pg/charts/cloudnative-pg	tag

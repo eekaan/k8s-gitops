@@ -74,6 +74,9 @@ spec:
   `network-policy-exceptions.yaml` with its reason, and `just network-policy-check` fails until
   one of them holds.
 
+An application the overlay selects also has an entity in Backstage's catalogue, in the same change
+([Backstage](#backstage)); `tests/backstage.bats` fails without it.
+
 Enable the application by listing its namespace directory, once, and its `ks.yaml` in
 `apps/overlays/<cluster>/kustomization.yaml`. A disabled application stays in the list,
 commented out with the reason:
@@ -584,6 +587,7 @@ once it is not, and the agents' rendered configuration agrees.
 | `envoy-gateway-system` | default deny | the controller, its webhook, its certificate job and the proxies, below. |
 | `kromgo` | default deny | kromgo takes the proxies and the kubelet's probes on 8080 and Prometheus' scrape on 8081, and reaches the resolver and Prometheus on 9090. |
 | `sso-system` | default deny | dex takes the proxies and oauth2-proxy on 5556 and reaches the API server and GitHub on 443; oauth2-proxy takes the proxies on 4180 and reaches dex; below. |
+| `backstage` | default deny | Backstage takes the proxies and the kubelet's probes on 7007 and reaches the resolver and its database on 5432; the database takes the operator, its own pods, Backstage, the dump job, Prometheus and the kubelet's probes, and reaches its own pods, the resolver and the API server; the dump job reaches the resolver, the database and the world on 443. |
 | `ai-system` | listed | applications whose allows are not written, not a namespace that cannot have the posture. n8n takes the proxies on 5678 and reaches its database, the resolver and whatever its workflows call outside; the PostgreSQL instances take n8n, each other and the operator, and reach the API server; Open WebUI takes the proxies on 8080 and reaches nothing until an administrator turns on a connection that calls out; the backup movers reach the object storage on 443. The proxies reach n8n's 5678 and Open WebUI's 8080 alone there and forward only to their Services, PostgreSQL authenticates every client, Pod Security, node firewall. |
 | `etcd-snapshots` | listed | an application whose allows are not written, not a namespace that cannot have the posture. The snapshot job takes nothing and reaches the Talos API through `talos.default`, the object storage, the hosts age's release is downloaded from (its URL redirects to a second host, which serves the file) and the resolver. Talos' own authorisation of its one role, Pod Security, node firewall. |
 | `external-dns` | listed | an application whose allows are not written, not a namespace that cannot have the posture. external-dns takes Prometheus' scrape and the kubelet's probes on 7979 and nothing else, and reaches the API server, the DNS provider's API on 443 and the resolver. Its token, scoped to zone read and DNS edit on the cluster's one zone, its name filter, a ClusterRole that only reads, Pod Security, node firewall ([DNS records](#dns-records)). |
@@ -610,19 +614,20 @@ once it is not, and the agents' rendered configuration agrees.
   attached to the Gateway send to, by one rule each: the pods its Service selects, in its namespace
   while that carries `k8s-gitops/gateway: public`, on the container port the route sends to and no
   other: `hello` in `demo` on 8080, kromgo in `kromgo` on 8080, n8n on 5678 and Open WebUI on 8080
-  in `ai-system`, and dex on 5556 and oauth2-proxy on 4180 in `sso-system`. oauth2-proxy's rule also
-  carries the question the proxies ask it about each request of a route that opts in to sign-in
-  ([Sign-in](#sign-in)), which is no route's backend but reaches the same pods and port.
-  `tests/network-policy.bats` reads those ports from the render, from each route's backend through
-  its Service's target port to the container port, and fails unless the rules name, in each labelled
-  namespace, exactly them; it reads the proxies' egress in every form the evaluation reads, and
-  fails on a port entry or a peer it cannot compare, a backend in a namespace without the label and
-  a Service without a selector. What a pod of such a namespace takes is its own namespace's to say:
-  in `demo`, `hello` on 8080; in `kromgo`, kromgo on 8080; in `sso-system`, dex on 5556 and
-  oauth2-proxy on 4180. In `ai-system`, which is listed and so has no pod in default deny, every pod
-  takes them on every port, so the proxies' rules are what keep them from n8n's other ports, from
-  every port of its database and from Open WebUI's other ports; PostgreSQL also authenticates every
-  client. The controller takes the proxies on 18000
+  in `ai-system`, dex on 5556 and oauth2-proxy on 4180 in `sso-system`, and Backstage in `backstage`
+  on 7007. oauth2-proxy's rule also carries the question the proxies ask it about each request of a
+  route that opts in to sign-in ([Sign-in](#sign-in)), which is no route's backend but reaches the
+  same pods and port. `tests/network-policy.bats` reads those ports from the render, from each
+  route's backend through its Service's target port to the container port, and fails unless the
+  rules name, in each labelled namespace, exactly them; it reads the proxies' egress in every form
+  the evaluation reads, and fails on a port entry or a peer it cannot compare, a backend in a
+  namespace without the label and a Service without a selector. What a pod of such a namespace
+  takes is its own namespace's to say: in `demo`, `hello` on 8080; in `kromgo`, kromgo on 8080; in
+  `sso-system`, dex on 5556 and oauth2-proxy on 4180; in `backstage`, Backstage on 7007. In
+  `ai-system`, which is listed and so has no pod in default deny, every pod takes them on every
+  port, so the proxies' rules are what keep them from n8n's other ports, from every port of its
+  database and from Open WebUI's other ports; PostgreSQL also authenticates every client. The
+  controller takes the proxies on 18000
   and the kubelet on 8081, and reaches the resolver and the API server on 443 and 6443 (a Service's
   address is translated to the control plane's before policy applies). Its admission webhook takes
   the API server, the local host and other nodes' hosts on 9443, in a policy of its own with its
@@ -655,6 +660,23 @@ once it is not, and the agents' rendered configuration agrees.
   and for the external authorisation of each route that opts in, and the kubelet's probes there; it
   reaches the resolver and dex on 5556, and nothing outside the cluster. Neither takes the
   controller, another namespace's pods or the world, and no monitor scrapes them.
+- **`backstage`.** Backstage's pod, by the labels its Service selects, takes the proxies by their
+  labels on 7007, the port the route sends to, and the kubelet's probes on the same port; it reaches
+  the resolver and the database's instances (`cnpg.io/cluster: backstage-db`,
+  `cnpg.io/podRole: instance`) on 5432, every instance, as a failover moves the primary that
+  `backstage-db-rw` selects. The database's pods, every pod the operator makes for the cluster, by
+  `cnpg.io/cluster: backstage-db`, take the operator (`app.kubernetes.io/name: cloudnative-pg` in
+  `cnpg-system`) on 8000 and 5432 and each other on every port, as the pinned operator's
+  documentation asks (`docs/src/security.md`, Exposed Ports; `docs/src/networking.md`), and reach
+  each other, the resolver and the API server on 443 and 6443; its instances take Backstage and the
+  dump job on 5432, Prometheus on 9187, the port the PodMonitor names, and the kubelet's probes on
+  8000, where the operator puts them (`pkg/specs/pods.go`). The dump job's pods, by the labels
+  `app.kubernetes.io/name: pgdump` and `app.kubernetes.io/instance: backstage-db` that
+  `app/kustomization.yaml` gives the component's CronJob, reach the resolver, the instances on
+  5432, and the world on 443 in a policy of its own with its reason: the age release, whose URL
+  redirects to a second host, and the object storage, whose endpoint is a URL, as for the movers
+  below ([Dumps](#dumps)). The pods the operator makes carry the labels of its source, which no
+  render holds; the job pods it makes to create and join an instance carry `cnpg.io/cluster` too.
 - **The object storage's port.** cluster-config holds the object storage's endpoint as a URL, which
   a DNS name rule cannot take, so the movers' rule is the world on 443: the port https uses for an
   endpoint that names none, as cluster-config's example does and `tests/network-policy.bats` holds
@@ -748,10 +770,11 @@ namespace and the policy, when
   own (`pkg/k8s/apis/cilium.io/utils/utils.go`), so that it also selects the world, the hosts and
   the nodes. A reason excuses none of these.
 
-The check reads only what the render holds. Besides the policies of `demo`, `envoy-gateway-system`,
-`kromgo` and `sso-system`, that is one policy of a listed namespace: `flux-operator-web`, the
-`NetworkPolicy` the Flux Operator's chart renders in `flux-system`, which lets every pod of every
-namespace (an empty `namespaceSelector`) reach the operator's web interface on 9080. It passes
+The check reads only what the render holds. Besides the policies of `backstage`, `demo`,
+`envoy-gateway-system`, `kromgo` and `sso-system`, that is one policy of a listed namespace:
+`flux-operator-web`, the `NetworkPolicy` the Flux Operator's chart renders in `flux-system`, which
+lets every pod of every namespace (an empty `namespaceSelector`) reach the operator's web interface
+on 9080. It passes
 because `flux-system` is listed; the day `flux-system` takes the default deny, the check refuses it,
 as a `NetworkPolicy` other than the default deny and as an allow of every pod of every namespace.
 The `NetworkPolicy` objects the operator makes for the Flux instance, which its
@@ -764,19 +787,21 @@ the destination both have to allow it, and a pod is in default deny for a direct
 policy that selects it asks for it, as Cilium decides. Over a render that holds what the check
 refuses wherever it is, it gives no answer and exits 2. The tests use it to follow the public path
 hop by hop (the world to the proxies' listener ports, the proxies to `hello`'s port, to kromgo's,
-to n8n's, to Open WebUI's and to dex's and oauth2-proxy's but not to kromgo's metrics port, n8n's or
-Open WebUI's other ports or n8n's database, the kubelet to every probe port, Prometheus to kromgo's
-metrics port alone), to show that no pod of `demo` or `kromgo` reaches the secret store, the storage
-controller, another pod of `demo` or another application, n8n and Open WebUI among them, that kromgo
-reaches the resolver and the port of the Prometheus its configuration names, read from the render,
-and nothing else, and no other application reaches it, and that with their default deny `demo`,
+to n8n's, to Open WebUI's, to dex's and oauth2-proxy's and to Backstage's but not to kromgo's
+metrics port, n8n's or Open WebUI's other ports or either database, the kubelet to every probe port,
+Prometheus to kromgo's metrics port alone), to show that no pod of `demo`, `kromgo` or `backstage`
+reaches the secret store, the storage controller, another pod of `demo` or another application, n8n
+and Open WebUI among them, that Backstage reaches the resolver and its database's port and nothing
+outside the cluster, that the database takes the operator, its own pods, Backstage, the dump job
+and Prometheus on their ports and no other application, that kromgo reaches the resolver and the
+port of the Prometheus its configuration names, read from the render, and nothing else, and no
+other application reaches it, and that with their default deny `backstage`, `demo`,
 `envoy-gateway-system`, `kromgo` and `sso-system` let exactly their flows through and without it
-take and send everything. What it
-cannot show: the entity the pinned datapath gives a connection an edge translated and a worker
-forwarded again, read from its source above and confirmed in audit mode; the labels of the pods the
-operators create at run time, taken from the operators' source and observed in audit mode; that an
-address a name resolves to is the one a rule meant; and anything about pods in the host's network
-namespace.
+take and send everything. What it cannot show: the entity the pinned datapath gives a connection an
+edge translated and a worker forwarded again, read from its source above and confirmed in audit
+mode; the labels of the pods the operators create at run time, taken from the operators' source and
+observed in audit mode; that an address a name resolves to is the one a rule meant; and anything
+about pods in the host's network namespace.
 
 ### What policy does not cover
 
@@ -818,31 +843,33 @@ does not matter.
    the chart's update strategy).
 2. **The policies merge.** The root applies the default denies, the applications apply their
    allows, and the agents evaluate both and drop nothing they deny; what a policy would drop is
-   reported as `AUDIT`. As the allows land after the denies, `AUDIT` flows of `demo`,
+   reported as `AUDIT`. As the allows land after the denies, `AUDIT` flows of `backstage`, `demo`,
    `envoy-gateway-system`, `kromgo` and `sso-system` from before they landed are expected, such as
    the proxies to `hello` on 8080 and to the controller on 18000, and the controller to the API
    server, and an agent's recent flows can hold them for a while.
 3. **Watch**, from the moment the Kustomizations that hold the allows, `hello`,
-   `demo-volsync-movers`, `envoy-gateway`, `kromgo`, `dex` and `oauth2-proxy`, are Ready at the
-   merge's revision (`flux get kustomizations`). `just network-drops` lists what the agents' Hubble
-   holds: the `AUDIT` flows a policy would drop, by namespace, pod and port, never an address. It
-   runs each agent's own `hubble` through `kubectl exec`, so the kubeconfig needs exec on the Cilium
-   agents' pods in `kube-system`, more than the reading recipes need; `NETWORK_DROPS_LAST` (500)
-   bounds the flows asked of each agent and `NETWORK_DROPS_TIMEOUT` (60) the seconds each call may
-   take. Hubble keeps only each agent's recent flows (4095 by the chart's default), so run it after
-   each of: `just gateway-check`; `just cluster-check`; the secret demo
+   `demo-volsync-movers`, `envoy-gateway`, `kromgo`, `dex`, `oauth2-proxy` and `backstage`, are
+   Ready at the merge's revision (`flux get kustomizations`). `just network-drops` lists what the
+   agents' Hubble holds: the `AUDIT` flows a policy would drop, by namespace, pod and port, never an
+   address. It runs each agent's own `hubble` through `kubectl exec`, so the kubeconfig needs exec
+   on the Cilium agents' pods in `kube-system`, more than the reading recipes need;
+   `NETWORK_DROPS_LAST` (500) bounds the flows asked of each agent and `NETWORK_DROPS_TIMEOUT` (60)
+   the seconds each call may take. Hubble keeps only each agent's recent flows (4095 by the chart's
+   default), so run it after each of: `just gateway-check`; `just cluster-check`; the secret demo
    (`just bao-put demo/hello greeting`, then the Secret in `demo`); a badge asked of kromgo by its
    name, which has kromgo query Prometheus ([Status badges](#status-badges)); a sign-in through the
-   route that opts in to it ([Sign-in](#sign-in)); the nightly backup of `volsync-demo` at 03:17,
-   and a restore of it ([Restoring](#restoring)). Watch a day at least, through one nightly backup.
-   An `AUDIT` flow of `demo`, `envoy-gateway-system`, `kromgo` or `sso-system` that a check made
-   once the allows were Ready is a missing allow, added beside its application in a pull request
-   while the cluster still audits, or a pod doing what it should not. Confirm also that no
-   `@remote-node` flow reaches the proxies' listener ports and none to the webhook's 9443 is
-   `AUDIT`. `AUDIT` flows of `flux-system` show too: Flux's own
-   policies and the Flux Operator's `flux-operator-web`, which the agents enforced before the value,
-   are only audited while it is set, and what they would drop is what they dropped before; they are
-   not the namespaces' allows.
+   route that opts in to it ([Sign-in](#sign-in)); Backstage's catalogue opened by its name, which
+   has Backstage read its database; the nightly dump of `backstage-db` from 02:00, which waits up
+   to 20 minutes before it starts ([Dumps](#dumps)); the nightly backup of `volsync-demo` at 03:17,
+   and a restore of it ([Restoring](#restoring)). Watch a day at least, through one nightly backup
+   and one dump. An `AUDIT` flow of `backstage`, `demo`, `envoy-gateway-system`, `kromgo` or
+   `sso-system` that a check made once the allows were Ready is a missing allow, added beside its
+   application in a pull request while the cluster still audits, or a pod doing what it should not.
+   Confirm also that no `@remote-node` flow reaches the proxies' listener ports and none to the
+   webhook's 9443 is `AUDIT`. `AUDIT` flows of `flux-system` show too: Flux's own policies and the
+   Flux Operator's `flux-operator-web`, which the agents enforced before the value, are only
+   audited while it is set, and what they would drop is what they dropped before; they are not the
+   namespaces' allows.
 4. **Enforce, a change of its own.** One pull request makes these edits, together and no others:
    - `kubernetes/apps/base/kube-system/cilium/app/values.yaml`: the line `policyAuditMode: true`
      goes, with the three comment lines above it, from `# The agents evaluate every policy`; the
@@ -869,11 +896,11 @@ does not matter.
      and its checks of `enable-policy` and the checksum stay as they are, the comment above the
      former becoming "Enforcement stays in its default mode, so the agents enforce the policies:
      never would enforce none."
-   - `docs/roadmap.md`, M8's row: "the namespaces' default deny with their allows in `demo`,
-     `envoy-gateway-system`, `kromgo` and `sso-system`" gains ", which Cilium enforces", and the
-     clause "; and network policy that drops anything, as Cilium audits every policy, cluster-wide,
-     and drops nothing ([Service addresses](kubernetes.md#service-addresses))" goes, the row ending
-     at "`infra-apply`.".
+   - `docs/roadmap.md`, M8's row: "the namespaces' default deny with their allows in `backstage`,
+     `demo`, `envoy-gateway-system`, `kromgo` and `sso-system`" gains ", which Cilium enforces", and
+     the clause "; and network policy that drops anything, as Cilium audits every policy,
+     cluster-wide, and drops nothing ([Service addresses](kubernetes.md#service-addresses))" goes,
+     the row ending at "`infra-apply`.".
 
    `tests/network-policy.bats` requires the enforcing sentence exactly when the value is gone, and
    fails, saying which sentence the value needs, on a change that does one without the other.
@@ -2740,7 +2767,7 @@ cannot be listed without it: `just kubernetes-check` refuses the dependency.
   label and name the one kind. A route in a namespace without it is not accepted, which is the
   Gateway API's rule and the controller's to apply; it shows in the route's status, which
   `just gateway-check` reads, and `tests/gateway.bats` proves the selector on the objects. `demo`,
-  `ai-system`, `kromgo` and `sso-system` are the namespaces that carry the label, and
+  `ai-system`, `kromgo`, `sso-system` and `backstage` are the namespaces that carry the label, and
   `tests/gateway.bats` pins that set.
 - **The certificate.** The `Certificate` `public-wildcard` asks the `ClusterIssuer` the cluster
   chose, `cluster-ca` by default, for an ECDSA P-256 certificate for `*.${CLUSTER_DOMAIN}` and
@@ -4141,6 +4168,176 @@ accounts, chats, connections and session key; there is no application secret to 
 cluster with no backup starts Open WebUI empty, with an administrator to create and a connection to
 enter again.
 
+### Backstage
+
+Backstage, the catalogue of what the cluster runs, runs in the namespace `backstage`
+(`apps/base/backstage/backstage/`), which enforces the restricted Pod Security level and carries the
+Gateway label. Its `ks.yaml` names the PostgreSQL operator, the Prometheus Operator definitions,
+External Secrets, the store's application, the public Gateway and Cilium, whose operator defines the
+kind of its network policies, in `dependsOn` and sets `wait` with the long timeout, so the
+application is Ready once Backstage answers its readiness endpoint with its database.
+
+- **The image** is Backstage's published one, `ghcr.io/backstage/backstage`, pinned by tag and
+  digest in `values.yaml` and tracked by Renovate, which never merges it
+  (`.renovate/automerge.json5`). This repository builds no image. The image is what
+  `npx @backstage/create-app` makes, built by Backstage's project, and it cannot take another
+  plugin: what it holds is what runs. The plugins its backend loads include the app, which serves
+  the frontend, the auth plugin with the guest sign-in provider, the catalogue, search with
+  PostgreSQL, the scaffolder, TechDocs, the Kubernetes plugin, notifications, signals, user
+  settings, the proxy, the MCP actions endpoint and the permission framework, which allows
+  everything; its frontend was built with the guest provider as its one sign-in. That is enough for
+  a catalogue from files with PostgreSQL behind the Gateway, and nothing more is asked of it. A
+  catalogue that needs another sign-in, a plugin or a different theme needs an image built from
+  Backstage's own application, which is a change of its own: a build and a publish in CI, and the
+  pin moving to that image.
+- **The chart** is app-template, as for [n8n](#n8n). Backstage's own chart is a Deployment around
+  the same image with a PostgreSQL subchart that is off here, and gives less of the pod's hardening
+  to values.
+- **The configuration** is one file, `app-config.yaml`, generated into a ConfigMap and mounted at
+  `/config`; the pod runs the image's command with `--config /config/app-config.yaml` alone, so
+  neither of the image's own files, with its demo entities and a GitHub integration, is read. The
+  base URLs are the only values from the cluster's domain, and the HelmRelease sets them through the
+  environment variables `APP_CONFIG_app_baseUrl` and `APP_CONFIG_backend_baseUrl`.
+- **The catalogue** is the files of `apps/base/backstage/backstage/app/catalogue/`, which kustomize
+  generates into the ConfigMap `backstage-catalogue`, mounted read-only at `/catalogue`; the one
+  location is `file: /catalogue/*.yaml`. A change to a file gives a new ConfigMap name and a new
+  release. There is one entity for every application the lab-sto2 overlay selects, that is, for
+  every Kustomization its `ks.yaml` entries build, named as the application is (`n8n` is the
+  Component `n8n`), in a file of that name. An application that only applies configuration or
+  definitions (a Gateway, issuers, monitors, a route) is a `Resource`, and one that runs workloads a
+  `Component`. Each entity has a description that is true of the tree, an owner (the group
+  `operators`, which stands for whoever operates the cluster), its system, links to its section of
+  `docs/kubernetes.md` or `docs/cluster.md`, to its runbook where one exists and to its manifests,
+  all addresses of this repository's public files, and `dependsOn` for the applications its
+  Kustomization names in `dependsOn`, as the overlay builds it, patches included.
+  `domain.yaml`, `systems.yaml` and `operators.yaml` hold the Domain, the ten Systems that group
+  the applications and the Group. Flux's own two applications, which the cluster directory builds,
+  and the artifact generator, which the overlay lists as a directory, are not applications of the
+  overlay's `ks.yaml` entries and have no entity.
+
+  `tests/backstage.bats` holds the files to the overlay: every application has exactly one entity of
+  its own name and every Component and Resource names an application, every owner, system and domain
+  exists, every `dependsOn` is the entities of what the Kustomization names and nothing else, every
+  link is an address of this repository's public files to a file or directory that exists and, for a
+  Markdown file, to a heading it has, and no other address is in the catalogue. It fails, naming
+  the application, for one added to the overlay without an entity and for an entity of an
+  application the overlay lacks. `just catalogue-dependencies` writes `dependsOn` of every entity
+  from the Kustomizations, and fails naming both when one names an application with no entity;
+  descriptions, systems and links stay as written.
+- **The database** is a PostgreSQL cluster named `backstage-db` from `components/cnpg-cluster`, with
+  the component's three instances, which it offers no variable to lower, and 2Gi each: the catalogue
+  is the files, so the database holds only what Backstage derives from them (entities, relations
+  and the search index), its plugins' signing keys and the guest user's sign-in record, and a lost
+  database is made again by a start. Backstage reads its host, port, database, user and password
+  from the keys of the Secret `backstage-db-app`, which the operator makes. The user may not create
+  databases, so `backend.database.pluginDivisionMode` is `schema`: each plugin gets a schema of
+  the one database. Nothing is seeded by a person. The component dumps the database once a day,
+  encrypted, to the object storage ([Dumps](#dumps)), with the S3 key that `external-secrets` and
+  `openbao-store` in `dependsOn` serve. Backstage needs no other secret: its plugins sign the tokens
+  they exchange with keys they keep in the database, so External Secrets makes none for it, and
+  `backend.auth.keys`, which would admit callers from outside, is not set.
+- **The hostname** is `backstage.${CLUSTER_DOMAIN}`, an `HTTPRoute` on the public Gateway's `https`
+  listener to the Service `backstage` on 7007, published and reached as
+  [Giving an application a public hostname](#giving-an-application-a-public-hostname) and
+  [DNS records](#dns-records) say. The route sends on only the requests a reader's pages make
+  (Sign-in, below).
+- **Network.** The namespace denies traffic both ways by default and declares its flows beside the
+  application (`ciliumnetworkpolicy.yaml`, [Network policy](#network-policy)). Backstage's pod takes
+  the public Gateway's proxies and the kubelet's probes on 7007, and sends only to the cluster's
+  resolver and to its database's instances on 5432: not to the API server, not to another
+  application, nothing outside the cluster. The database's pods take the operator on 8000 and 5432
+  and each other, Backstage and the dump job on 5432, Prometheus on 9187 and the kubelet's probes on
+  8000, and send to each other, the resolver and the API server; the dump job sends to the resolver,
+  the instances on 5432 and the world on 443, for the age release and the object storage, in a
+  policy of its own with its reason. The dump job's pods carry the labels
+  `app.kubernetes.io/name: pgdump` and `app.kubernetes.io/instance: backstage-db`, which a patch in
+  `app/kustomization.yaml` gives the component's CronJob, so that a policy can select them. This
+  layer holds once the cluster enforces the policies; while it audits them, a flow they would drop
+  is reported and passes.
+- **Hardening.** The pod runs as user and group 1000 (`node`) with the runtime's seccomp profile and
+  no service account token, as Backstage reads nothing from the Kubernetes API. The container has a
+  read-only root filesystem, no capability and no privilege escalation, and **mounts nothing
+  writable**: only the two ConfigMaps, read-only. The image, run so against PostgreSQL with the
+  rendered configuration and catalogue, starts, serves the catalogue and answers a guest's requests,
+  and its scaffolder, which needs a temporary directory to run anything, cannot run. Backstage
+  requests 100m of CPU and 512Mi of memory and is limited to 1Gi, from that run (resident memory
+  peaked near 530Mi at start and stayed near 500Mi). The probes ask Backstage's health endpoints
+  `/.backstage/health/v1/liveness` and `/readiness`, the latter once the plugins have started.
+- **One replica**, with the strategy `Recreate`. Nothing of Backstage's state is in the pod, but
+  each plugin creates its schema and tables in the database as it starts, and two pods that start
+  together on an empty database both stop on it (run side by side, both did). So the old pod goes
+  before the new one starts, and there is no PodDisruptionBudget, as for n8n. A drain evicts the
+  pod, which starts again on another node.
+- **What the pod calls outside the cluster.** Nothing at run time:
+
+  | What | State |
+  | --- | --- |
+  | Catalogue locations of type `url`, entity providers | none configured; the one location is a file glob |
+  | Reading a file at an address a caller names | the backend holds readers for GitHub and GitLab whatever its configuration; a dry run of a location's registration, the validation of an entity and the catalogue's actions read through them, and registering a location is refused before any read, as the catalogue is read-only; the route sends none of those requests to the pod (Sign-in, below) |
+  | GitHub integration and its token | none; the image's own configuration that has them is not read |
+  | TechDocs | `techdocs.builder: external`: nothing is built or fetched, and no entity names documentation |
+  | Scaffolder and its templates | no template is in the catalogue, the pod has no writable directory to run one in, and the route sends none of its tasks, dry runs or autocompletions |
+  | Kubernetes plugin | no cluster configured: it does not start |
+  | Proxy | no endpoint |
+  | Analytics, update checks | the image has none |
+  | The network | the pod sends only to the cluster's resolver and its database (Network, above) |
+
+  The pinned image started and served on a network with no route out and logged no failed
+  connection. A link in an entity is one a person follows in a browser, to this repository's files.
+  A headless browser that opened every page of the navigation as the guest, through a stand-in for
+  the route that applies its matches, asked no host but Backstage's; the home page shows no widget
+  until a visitor adds one.
+- **Sign-in.** The image's frontend offers the guest provider and no other, and the backend refuses
+  it outside development unless `auth.providers.guest.dangerouslyAllowOutsideDevelopment` is set,
+  which it is. So anyone who can reach the route signs in as the guest user: **access is the
+  route's, not Backstage's**. Without signing in, a request to the backend is refused (401) unless
+  it is for the health endpoints, the frontend's files, the guest sign-in's refresh or the documents
+  that publish the keys its tokens are verified with: the default authentication policy stays on.
+  Every visitor is the same user, `user:development/guest`.
+
+  **The route admits by allowlist**, from the requests the pinned frontend makes as a reader opens
+  its pages: `GET` and `HEAD` of any path, which serve the pages, sign the guest in
+  (`GET /api/auth/guest/refresh`) and carry the pages' reads, and `POST` of
+  `/api/catalog/entities/by-refs`, matched exactly, the read of entities by their references that
+  the catalogue's table, the entity pages and the graph send, the one read the pages need as a
+  `POST`. No other request matches, and the Gateway answers it itself, 404, without reaching the
+  pod; a path that differs from the exact one in letter case or by a trailing slash matches nothing.
+  So a guest changes nothing: no location is registered, validated, analysed or dry-run, no entity
+  is refreshed or deleted, no scaffolder task, dry run or autocompletion starts, no action is
+  invoked through the catalogue or the MCP endpoint, no notification is marked, and no setting of
+  the guest user is kept. Starring an entity says "Request failed with 404 Not Found", and the
+  guest's stars and settings read as unset, as the frontend takes the 404 of its settings read for
+  "absent"; the pages render. Every `GET` route of the plugins the image loads reads the database or
+  the pod's files, and none fetches from an address or changes the catalogue: the catalogue, search,
+  TechDocs with its external builder, the scaffolder's lists, notifications, user settings and the
+  auth plugin's discovery documents; the Kubernetes and proxy plugins have nothing mounted, and the
+  MCP endpoint answers `GET` with 405. Signing in records the guest user's claims in the auth
+  plugin's table, and the plugins keep their signing keys there, as they do whoever calls.
+  `catalog.readonly: true` makes the backend refuse to register or unregister a location as well
+  (403), whoever asks. `tests/backstage.bats` pins the matches and checks, as Gateway API matches a
+  route, that the writes, the deletes, the validation and dry-run endpoints and the variants of the
+  listed path in letter case and with a trailing slash match none of them. It pins the rule's one
+  backend, the Service `backstage` on 7007, with no filter on the rule or on the backend, and fails
+  on any object of Envoy Gateway's API group, `gateway.envoyproxy.io`, and on any object that names
+  the route as its target, in what the application builds and its chart renders.
+
+  The entities are the files'. Putting the cluster's sign-in in front of the route later needs no
+  change to the application: a policy of an application of its own, attached to the `HTTPRoute`
+  `backstage`, decides who reaches Backstage at all, and the guest provider behind it signs in
+  whoever got through. Until then the edge routers' allowlist
+  ([The edge routers](infrastructure.md#the-edge-routers)) is what stands between the catalogue and
+  everyone else, and its content, which is what the cluster runs and where its documentation is, is
+  readable by whoever is let through.
+- **Updates.** Renovate proposes the image's tags and the chart's, as for every application, and
+  never merges either: a rule holds every file of the application back, whatever the auto-merge
+  switch says. Backstage's pre-release tags (`-next.N`) are not proposed. The image's frontend and
+  backend change with its release, so a new one is looked at, not merged blind.
+- **Adding an application to the catalogue.** An application added to the overlay needs its entity
+  in the same change: copy the entity of a similar one to `catalogue/<application>.yaml`, name it as
+  the application, write its description, system and links, list the file in
+  `app/kustomization.yaml` and run `just catalogue-dependencies`. `tests/backstage.bats` fails
+  until it holds.
+
 ### Porting an application from the reference catalogue
 
 The steps n8n took, in order; the next port does the same and says where it differs.
@@ -4208,10 +4405,13 @@ The steps n8n took, in order; the next port does the same and says where it diff
    reach in `tests/network-policy.bats`, where a port with a route adds its namespace and port to
    the pairs the routes must send to, and a row that the proxies reach its port and not another;
    and the applications that take the volsync component in `tests/volume-backups.bats`.
-9. **Docs.** The application's section here: what runs, where its state lives, how its secret is
-   made or why it has none, its hostname, the table of what it can call and what a person loses to
-   that, any first-visit step and what it means that nobody has claimed the instance, how it is
-   backed up and restored.
+9. **Catalogue.** The application's entity in `apps/base/backstage/backstage/app/catalogue/`, named
+   as the application and listed in that directory's generator in `app/kustomization.yaml`, with
+   its dependencies from `just catalogue-dependencies` ([Backstage](#backstage)).
+10. **Docs.** The application's section here: what runs, where its state lives, how its secret is
+    made or why it has none, its hostname, the table of what it can call and what a person loses
+    to that, any first-visit step and what it means that nobody has claimed the instance, how it
+    is backed up and restored.
 
 ## Flux itself
 
