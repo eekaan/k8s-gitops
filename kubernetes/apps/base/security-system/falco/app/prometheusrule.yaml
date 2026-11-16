@@ -1,0 +1,44 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/prometheusrule-monitoring-v1.json
+# One alert on Falco's own metrics, which the chart's ServiceMonitor scrapes: the counter
+# falcosecurity_falco_rules_matches_total, which Falco emits for a rule only once it has matched,
+# labelled rule_name and source, priority as the number of the rule's priority, 0 Emergency, 1 Alert
+# and 2 Critical down to 7 Debug, and a tag_ label for each tag of the rule
+# (userspace/falco/falco_metrics.cpp at the pinned version), and node from the ServiceMonitor.
+# A pod that is down, or not ready, is the stock KubeDaemonSetRolloutStuck of the monitoring stack's
+# rules, for a DaemonSet short of its nodes' pods, and a target that does not answer its stock
+# TargetDown, once more than a tenth of the job's targets are down. Tests: tests/rules/falco.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: falco-alerts
+  namespace: security-system
+spec:
+  groups:
+    - name: falco
+      rules:
+        # A rule's counter now, against the last value it had 15 minutes ago or before, within a day:
+        # any difference is a match in the last quarter of an hour. A rise is one; so is a series
+        # with no sample in that day, as a pod's counters start from nothing and a rule's appears at
+        # its first match; and so is a counter lower than before, as Falco restarted in the same pod
+        # and matched since. last_over_time reads past a staleness marker and a gap in the scrape, as
+        # a failed scrape, a restart of Prometheus or one of the pod's readiness leaves, so a series
+        # that is merely back with its count is not a match; nor, the blind spot, is a counter that
+        # comes back after a restart in the same pod at the very count it had before
+        # (docs/kubernetes.md, Metrics, and the alert). The alert holds while a series differs,
+        # until its new sample is 15 minutes old, so it needs no time of its own: Falco has already
+        # written the event.
+        - alert: FalcoCriticalRuleMatched
+          expr: |-
+            max by (rule_name, priority, node) (
+              falcosecurity_falco_rules_matches_total{priority=~"[0-2]"}
+              !=
+              (last_over_time(falcosecurity_falco_rules_matches_total{priority=~"[0-2]"}[1d] offset 15m) or falcosecurity_falco_rules_matches_total{priority=~"[0-2]"} * 0)
+            )
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: A Falco rule of priority Critical or above matched
+            description: Falco matched the rule {{ $labels.rule_name }}, of priority {{ $labels.priority }}, on node {{ $labels.node }} within the last 15 minutes; priority 2 is Critical, 1 Alert and 0 Emergency.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#falcocriticalrulematched

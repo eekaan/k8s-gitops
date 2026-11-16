@@ -1,0 +1,40 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/helmrelease-helm-v2.json
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: falco
+spec:
+  interval: 30m
+  chartRef:
+    kind: OCIRepository
+    name: falco
+  valuesFrom:
+    - kind: ConfigMap
+      name: falco-values
+  # The chart declares host path volumes for /boot, /lib/modules and /usr whatever the driver, and
+  # mounts them only in Falco's container when driver.loader.enabled is false, which it is not
+  # here, and in the driver loader's init container, which it renders for every driver but
+  # modern_ebpf. Nothing mounts them here, and each is a host path the pod would be excepted for, so
+  # they are removed; tests/falco.bats fails on a mount whose volume is gone.
+  postRenderers:
+    - kustomize:
+        patches:
+          - target:
+              kind: DaemonSet
+              name: falco
+            patch: |
+              apiVersion: apps/v1
+              kind: DaemonSet
+              metadata:
+                name: falco
+              spec:
+                template:
+                  spec:
+                    volumes:
+                      - name: boot-fs
+                        $patch: delete
+                      - name: lib-modules
+                        $patch: delete
+                      - name: usr-fs
+                        $patch: delete

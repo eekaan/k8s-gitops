@@ -34,6 +34,7 @@ setup() {
   PROMETHEUS='monitoring:app.kubernetes.io/name=prometheus'
   OTHER_APP='other:app.kubernetes.io/name=app'
   KROMGO=kromgo/Deployment/kromgo
+  FALCO=security-system/DaemonSet/falco
   # Backstage's pod and its database's: the instances and the jobs the PostgreSQL operator makes for
   # the cluster backstage-db at run time, by the labels it gives them (pkg/specs/pods.go and jobs.go
   # of the pinned operator), its own pods in cnpg-system, and the daily dump job.
@@ -268,7 +269,7 @@ proxies_egress() {
   real_render
   run "$REPO/scripts/network-policy-check" "$REAL" "$REPO/network-policy-exceptions.yaml"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [ "$(grep ' denies ingress and egress' <<<"$output" | cut -d' ' -f1 | paste -sd' ')" = "backstage demo envoy-gateway-system kromgo sso-system" ]
+  [ "$(grep ' denies ingress and egress' <<<"$output" | cut -d' ' -f1 | paste -sd' ')" = "backstage demo envoy-gateway-system kromgo security-system sso-system" ]
   [ "$(grep -c ' listed' <<<"$output")" -eq "$(yq '.exceptions | length' "$REPO/network-policy-exceptions.yaml")" ]
 }
 
@@ -640,7 +641,7 @@ E
   local probes pod port
   probes=$(yq -N -o json -I0 'select(. != null)' "$VIEW"/*/*/*.yaml | jq -r '
     select(.kind | IN("Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"))
-    | select(.metadata.namespace | IN("backstage", "demo", "envoy-gateway-system", "kromgo", "sso-system"))
+    | select(.metadata.namespace | IN("backstage", "demo", "envoy-gateway-system", "kromgo", "security-system", "sso-system"))
     | . as $w
     | (if .kind == "CronJob" then .spec.jobTemplate.spec.template else .spec.template end).spec.containers[]
     | . as $c
@@ -660,6 +661,7 @@ E
   [[ $probes == *"sso-system/Deployment/dex 5558"* ]]
   [[ $probes == *"sso-system/Deployment/oauth2-proxy 4180"* ]]
   [[ $probes == *"backstage/Deployment/backstage 7007"* ]]
+  [[ $probes == *"security-system/DaemonSet/falco 8765"* ]]
   # The database's instances, which no render holds, are probed on the status port, where the pinned
   # operator puts its startup, liveness and readiness probes (pkg/specs/pods.go), and on no other.
   allowed "$VIEW" @host "$BACKSTAGE_DB" 8000/tcp
@@ -733,7 +735,7 @@ E
 
 @test "A pod of an application cannot reach the secret store, the storage controller or another application" {
   real_render
-  local pods=(demo/Deployment/hello demo/Deployment/volsync-demo "$MOVER" "$KROMGO" "$BACKSTAGE" "$PGDUMP")
+  local pods=(demo/Deployment/hello demo/Deployment/volsync-demo "$MOVER" "$KROMGO" "$BACKSTAGE" "$PGDUMP" "$FALCO")
   local pod
   for pod in "${pods[@]}"; do
     denied "$VIEW" "$pod" openbao/StatefulSet/openbao 8200/tcp
@@ -794,6 +796,36 @@ E
   denied "$VIEW" "$MOVER" "$KROMGO" 8080/tcp
   denied "$VIEW" ai-system/Deployment/n8n "$KROMGO" 8080/tcp
   denied "$VIEW" "$KROMGO" demo/Deployment/hello 8080/tcp
+  # Falco's pods take Prometheus' scrape of the port of its Service that its monitor names, read from
+  # the render, and the kubelet's probes on it, and nothing else; they reach the cluster's resolver
+  # on 53, for the name the image's rule "Contact K8S API Server From Container" compares, and
+  # nothing else, not the API server, the nodes or anything outside the cluster: Falco reads the
+  # runtime's socket and the node's files through host paths, and writes its events to standard
+  # output.
+  local falco_metrics
+  falco_metrics=$(P="$(yq -N '.spec.endpoints[].port' "$REAL"/*/falco/ServiceMonitor.monitoring.coreos.com_security-system_falco.yaml)" \
+    yq '.spec.ports[] | select(.name == strenv(P)) | .targetPort' "$REAL"/*/falco/Service_security-system_falco-metrics.yaml)
+  [[ $falco_metrics =~ ^[0-9]+$ ]] || { echo "Falco's monitor scrapes no one numbered port: $falco_metrics"; return 1; }
+  allowed "$VIEW" "$PROMETHEUS" "$FALCO" "$falco_metrics/tcp"
+  allowed "$VIEW" @host "$FALCO" "$falco_metrics/tcp"
+  denied "$VIEW" "$PROMETHEUS" "$FALCO" 22/tcp
+  denied "$VIEW" monitoring/Deployment/kube-prometheus-stack-kube-state-metrics "$FALCO" "$falco_metrics/tcp"
+  denied "$VIEW" "$OTHER_APP" "$FALCO" "$falco_metrics/tcp"
+  denied "$VIEW" demo/Deployment/hello "$FALCO" "$falco_metrics/tcp"
+  denied "$VIEW" "$KROMGO" "$FALCO" "$falco_metrics/tcp"
+  denied "$VIEW" "$PROXY" "$FALCO" "$falco_metrics/tcp"
+  denied "$VIEW" @world "$FALCO" "$falco_metrics/tcp"
+  denied "$VIEW" @remote-node "$FALCO" "$falco_metrics/tcp"
+  denied "$VIEW" @kube-apiserver "$FALCO" "$falco_metrics/tcp"
+  allowed "$VIEW" "$FALCO" "$DNS" 53/udp
+  allowed "$VIEW" "$FALCO" "$DNS" 53/tcp
+  denied "$VIEW" "$FALCO" "$DNS" 9153/tcp
+  denied "$VIEW" "$FALCO" @kube-apiserver 443/tcp
+  denied "$VIEW" "$FALCO" @world 443/tcp
+  denied "$VIEW" "$FALCO" @world 80/tcp
+  denied "$VIEW" "$FALCO" @remote-node 10250/tcp
+  denied "$VIEW" "$FALCO" "$PROMETHEUS" 9090/tcp
+  denied "$VIEW" "$FALCO" monitoring/StatefulSet/victoria-logs 9428/tcp
   # The backup movers reach the object storage on 443 and no other port of the world; the other
   # pods reach none of it.
   allowed "$VIEW" "$MOVER" @world 443/tcp
@@ -1051,8 +1083,8 @@ E
   [[ $output == *"cluster-wide CiliumClusterwideNetworkPolicy/nodes selects nodes"* ]]
 
   # The tree: the agents honour the field, and the allows of backstage, demo, envoy-gateway-system,
-  # kromgo and sso-system let exactly their flows through with the namespaces' default deny, and every
-  # flow without it.
+  # kromgo, security-system and sso-system let exactly their flows through with the namespaces'
+  # default deny, and every flow without it.
   real_render
   [ "$(yq '.data["enable-non-default-deny-policies"]' "$REAL"/*/cilium/ConfigMap_kube-system_cilium-config.yaml)" = true ]
   local open="$BATS_TEST_TMPDIR/open" removed
@@ -1060,8 +1092,9 @@ E
   removed=("$open"/*/*/NetworkPolicy.networking.k8s.io_demo_default-deny.yaml "$open"/*/*/NetworkPolicy.networking.k8s.io_envoy-gateway-system_default-deny.yaml
     "$open"/*/*/NetworkPolicy.networking.k8s.io_kromgo_default-deny.yaml
     "$open"/*/*/NetworkPolicy.networking.k8s.io_sso-system_default-deny.yaml
-    "$open"/*/*/NetworkPolicy.networking.k8s.io_backstage_default-deny.yaml)
-  [ "${#removed[@]}" -eq 5 ]
+    "$open"/*/*/NetworkPolicy.networking.k8s.io_backstage_default-deny.yaml
+    "$open"/*/*/NetworkPolicy.networking.k8s.io_security-system_default-deny.yaml)
+  [ "${#removed[@]}" -eq 6 ]
   rm -- "${removed[@]}"
   local flow want from to port
   local flows=(
@@ -1114,6 +1147,11 @@ E
     "denied $OTHER_APP $BACKSTAGE_DB 5432/tcp"
     "allowed $PGDUMP @world 443/tcp"
     "denied $PGDUMP @world 80/tcp"
+    "allowed $PROMETHEUS $FALCO 8765/tcp"
+    "denied $OTHER_APP $FALCO 8765/tcp"
+    "allowed $FALCO $DNS 53/udp"
+    "denied $FALCO @kube-apiserver 6443/tcp"
+    "denied $FALCO @world 443/tcp"
   )
   for flow in "${flows[@]}"; do
     read -r want from to port <<<"$flow"

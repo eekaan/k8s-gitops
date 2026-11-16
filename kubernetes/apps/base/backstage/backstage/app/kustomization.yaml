@@ -51,6 +51,7 @@ configMapGenerator:
       - catalogue/etcd-snapshots.yaml
       - catalogue/external-dns.yaml
       - catalogue/external-secrets.yaml
+      - catalogue/falco.yaml
       - catalogue/flux-monitoring.yaml
       - catalogue/gateway-api-crds.yaml
       - catalogue/gateway-public.yaml

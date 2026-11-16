@@ -531,3 +531,39 @@ nothing is lost yet; [OpenBaoSnapshotStale](#openbaosnapshotstale) fires when it
 Look at first, and usually: as for [OpenBaoSnapshotStale](#openbaosnapshotstale). A snapshot that
 has outgrown the memory-backed volume it is written to (256 MiB) fails the `snapshot` step with a
 write error: the volume's `sizeLimit` and the step's memory limit in the CronJob then grow together.
+
+## FalcoCriticalRuleMatched
+
+Falco matched a rule of priority Critical, Alert or Emergency on a node within the last 15 minutes
+([Runtime detection](../kubernetes.md#runtime-detection)): a process did something that rule calls
+dangerous, such as running a binary that was dropped into a container, running one from memory, or
+escaping a container through the cgroup's release agent. The alert names the rule and the node: the
+rule's count differs from the last one Prometheus had for it 15 minutes earlier, which also holds for
+a rule's first match in a new pod and for a match after Falco restarted in its pod. It clears 15
+minutes after the last match, but after such a restart a count that climbs back to the old one can
+clear it while Falco goes on matching and fire it again once the lower counts are 15 minutes old.
+Falco only detects: nothing has been stopped. Its blind spot: after a restart of Falco's container
+inside the same pod, a rule whose count comes back to exactly the count it had before the window,
+such as once before the restart and once after, raises nothing for that match, so the logs below
+are the record; and a series back unchanged more than a day after its last sample fires once with
+nothing new behind it, from a day and 15 minutes after that sample, or from its return if that is
+later, for at most 15 minutes.
+
+Look at first: the event, which has the process, its arguments and the container, and the pod's
+namespace and name in `output_fields`:
+`just logs 'kubernetes.pod_namespace:security-system kubernetes.container_name:falco | unpack_json | filter priority:in("Critical", "Alert", "Emergency")' --since 1h`.
+Then the pod it names: `kubectl --namespace <namespace> get pod <pod> --output wide` for its
+image and node, and its own log.
+
+Usually: either a workload doing what its rule treats as an attack, which is an incident, where the
+pod and the node are the evidence and what to do next is a decision; or a workload that does this
+on purpose, a debugging session or an image that unpacks a binary at start, which is an exception
+to write down with its reason ([Tuning](../kubernetes.md#tuning)). Both are told apart by the
+event's process and image, never by the rule alone. A quiet alert is only as good as Falco's scrape
+target on each node: a target that does not answer raises the stock `TargetDown`, a warning, once
+more than a tenth of the job's targets have been down for 10 minutes, which is one target on a
+cluster of fewer than ten nodes and not one alone on a larger one, and a pod missing from a node
+raises `KubeDaemonSetRolloutStuck` or `KubeDaemonSetNotScheduled`. No recipe checks the target:
+`just cluster-check` covers the control plane, the kubelets and node-exporter, not `falco-metrics`.
+Grafana's Explore, behind `just grafana`, shows it with the Prometheus query
+`up{job="falco-metrics"}`: one series per node, each 1.
