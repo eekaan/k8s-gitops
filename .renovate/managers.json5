@@ -73,5 +73,13 @@
       matchPackageNames: ["docker.io/n8nio/n8n", "docker.io/n8nio/runners"],
       allowedVersions: "/^{{major}}\\.{{minor}}\\.[0-9]+$/",
     },
+    {
+      // Open WebUI's registry holds each release under two tags, 0.13.3-slim and v0.13.3-slim, and
+      // Renovate's docker versioning reads a leading v as part of the version, so it may propose the
+      // form with the v, which .renovate/tag-forms.tsv does not accept for the pin.
+      description: "Open WebUI: the tags written without a v",
+      matchPackageNames: ["ghcr.io/open-webui/open-webui"],
+      allowedVersions: "/^[0-9]/",
+    },
   ],
 }

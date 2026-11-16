@@ -23,6 +23,7 @@ resources:
   - ../../base/piraeus-datastore
   - ../../base/volsync-system
   - ../../base/ai-system/n8n/ks.yaml
+  - ../../base/ai-system/open-webui/ks.yaml
   - ../../base/cert-manager/acme-issuers/ks.yaml
   - ../../base/cert-manager/cert-manager/ks.yaml
   - ../../base/cert-manager/cluster-ca/ks.yaml

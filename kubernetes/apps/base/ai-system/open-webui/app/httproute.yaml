@@ -1,0 +1,20 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/gateway.networking.k8s.io/httproute_v1.json
+# Open WebUI's public name: open-webui under the cluster's domain, on the public Gateway's https
+# listener, which this namespace reaches through its k8s-gitops/gateway label. The Service is the
+# chart's, named after the release, and the port is the one Open WebUI listens on.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: open-webui
+spec:
+  parentRefs:
+    - name: public
+      namespace: envoy-gateway-system
+      sectionName: https
+  hostnames:
+    - open-webui.${CLUSTER_DOMAIN}
+  rules:
+    - backendRefs:
+        - name: open-webui
+          port: 8080

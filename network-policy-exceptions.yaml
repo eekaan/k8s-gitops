@@ -84,19 +84,23 @@ exceptions:
       interception, and no pod
     covered-by: no pod runs in it; the namespace enforces the restricted Pod Security level
   - namespace: ai-system
-    reason: n8n is an application whose allows are not written, not a namespace that cannot hold the
-      default deny. n8n's pod takes the public Gateway's proxies on 5678 and the kubelet's probes on
-      5678 and 5680, reaches its database through n8n-db-rw on 5432, the cluster's resolver and
-      whatever hosts and ports its workflows call outside the cluster, and talks to its task runners
-      on the pod's loopback, which policy does not see; the three PostgreSQL instances take n8n and
-      each other's replication on 5432, the operator in cnpg-system and the kubelet on the status
-      port 8000 and Prometheus on 9187, and reach the API server; the backup movers reach the
-      resolver and the object storage on 443
-    covered-by: the public Gateway's proxies, whose egress here names n8n's pods alone, on 5678,
-      the container port its route sends to, and which forward only to n8n's Service; PostgreSQL's
-      authentication of every client, whose credentials only the operator's Secrets hold; n8n's pod,
-      which mounts no service account token; the namespace's Pod Security level and the node
-      firewall (ADR 0017)
+    reason: n8n and Open WebUI are applications whose allows are not written, not a namespace that
+      cannot hold the default deny. n8n's pod takes the public Gateway's proxies on 5678 and the
+      kubelet's probes on 5678 and 5680, reaches its database through n8n-db-rw on 5432, the
+      cluster's resolver and whatever hosts and ports its workflows call outside the cluster, and
+      talks to its task runners on the pod's loopback, which policy does not see; the three
+      PostgreSQL instances take n8n and each other's replication on 5432, the operator in
+      cnpg-system and the kubelet on the status port 8000 and Prometheus on 9187, and reach the API
+      server; Open WebUI's pod takes the proxies and the kubelet's probes on 8080, keeps its
+      database on its volume, and reaches nothing until an administrator turns on a model
+      connection or another feature that calls out, then the cluster's resolver and the hosts and
+      ports those name, outside the cluster; the backup movers reach the resolver and the object
+      storage on 443
+    covered-by: the public Gateway's proxies, whose egress here names n8n's pods on 5678 and Open
+      WebUI's on 8080, the container ports their routes send to, and which forward only to their
+      Services; PostgreSQL's authentication of every client, whose credentials only the operator's
+      Secrets hold; n8n's pod and Open WebUI's, which mount no service account token; the
+      namespace's Pod Security level and the node firewall (ADR 0017)
   - namespace: etcd-snapshots
     reason: the etcd snapshot job is an application whose allows are not written, not a namespace
       that cannot hold the default deny. Its pod takes no connection and reaches the control planes'

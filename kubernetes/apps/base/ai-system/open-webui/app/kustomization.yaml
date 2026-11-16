@@ -1,0 +1,21 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# The volume and its backup come from components/volsync, which ks.yaml adds. Open WebUI has no
+# database cluster and no secret of its own.
+resources:
+  - helmrelease.yaml
+  - httproute.yaml
+  - ocirepository.yaml
+
+configMapGenerator:
+  - name: open-webui-values
+    files:
+      - values.yaml
+generatorOptions:
+  annotations:
+    kustomize.toolkit.fluxcd.io/substitute: disabled
+
+configurations:
+  - kustomizeconfig.yaml

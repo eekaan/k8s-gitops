@@ -583,7 +583,7 @@ once it is not, and the agents' rendered configuration agrees.
 | `demo` | default deny | `hello` takes the proxies on 8080; the backup movers resolve names and reach the object storage on 443; `volsync-demo` and the rest open nothing. |
 | `envoy-gateway-system` | default deny | the controller, its webhook, its certificate job and the proxies, below. |
 | `kromgo` | default deny | kromgo takes the proxies and the kubelet's probes on 8080 and Prometheus' scrape on 8081, and reaches the resolver and Prometheus on 9090. |
-| `ai-system` | listed | an application whose allows are not written, not a namespace that cannot have the posture. n8n takes the proxies on 5678 and reaches its database, the resolver and whatever its workflows call outside; the PostgreSQL instances take n8n, each other and the operator, and reach the API server; the backup movers reach the object storage on 443. The proxies reach n8n's 5678 alone there and forward only to n8n's Service, PostgreSQL authenticates every client, Pod Security, node firewall. |
+| `ai-system` | listed | applications whose allows are not written, not a namespace that cannot have the posture. n8n takes the proxies on 5678 and reaches its database, the resolver and whatever its workflows call outside; the PostgreSQL instances take n8n, each other and the operator, and reach the API server; Open WebUI takes the proxies on 8080 and reaches nothing until an administrator turns on a connection that calls out; the backup movers reach the object storage on 443. The proxies reach n8n's 5678 and Open WebUI's 8080 alone there and forward only to their Services, PostgreSQL authenticates every client, Pod Security, node firewall. |
 | `etcd-snapshots` | listed | an application whose allows are not written, not a namespace that cannot have the posture. The snapshot job takes nothing and reaches the Talos API through `talos.default`, the object storage, the hosts age's release is downloaded from (its URL redirects to a second host, which serves the file) and the resolver. Talos' own authorisation of its one role, Pod Security, node firewall. |
 | `external-dns` | listed | an application whose allows are not written, not a namespace that cannot have the posture. external-dns takes Prometheus' scrape and the kubelet's probes on 7979 and nothing else, and reaches the API server, the DNS provider's API on 443 and the resolver. Its token, scoped to zone read and DNS edit on the cluster's one zone, its name filter, a ClusterRole that only reads, Pod Security, node firewall ([DNS records](#dns-records)). |
 | `kube-system` | listed | Cilium's agent, its Envoy and its operator run in the host's network namespace; the resolver takes queries from every namespace; the pod-network workloads' flows are not yet enumerated. Node firewall, Pod Security. |
@@ -608,16 +608,17 @@ once it is not, and the agents' rendered configuration agrees.
   the loopback. They reach the resolver, the controller on 18000 (xDS) and each backend the routes
   attached to the Gateway send to, by one rule each: the pods its Service selects, in its namespace
   while that carries `k8s-gitops/gateway: public`, on the container port the route sends to and no
-  other: `hello` in `demo` on 8080, kromgo in `kromgo` on 8080 and n8n in `ai-system` on 5678.
-  `tests/network-policy.bats` reads those ports from the render, from each route's backend through
-  its Service's target port to the container port, and fails unless the rules name, in each
-  labelled namespace, exactly them; it reads the proxies' egress in every form the evaluation
-  reads, and fails on a port entry or a peer it cannot compare, a backend in a namespace without
-  the label and a Service without a selector. What a pod of such a namespace takes is its own
-  namespace's to say: in `demo`, `hello` on 8080, and in `kromgo`, kromgo on 8080. In
-  `ai-system`, which is listed and so has no pod in default deny, every pod takes them on every
-  port, so the proxies' rule is what keeps them from n8n's other ports and from every port of its
-  database; PostgreSQL also authenticates every client. The controller takes the proxies on 18000
+  other: `hello` in `demo` on 8080, kromgo in `kromgo` on 8080, and n8n on 5678 and Open WebUI on
+  8080 in `ai-system`. `tests/network-policy.bats` reads those ports from the render, from each
+  route's backend through its Service's target port to the container port, and fails unless the
+  rules name, in each labelled namespace, exactly them; it reads the proxies' egress in every form
+  the evaluation reads, and fails on a port entry or a peer it cannot compare, a backend in a
+  namespace without the label and a Service without a selector. What a pod of such a namespace
+  takes is its own namespace's to say: in `demo`, `hello` on 8080, and in `kromgo`, kromgo on 8080.
+  In `ai-system`, which is listed and so has no pod in default deny, every pod takes them on every
+  port, so the proxies' rules are what keep them from n8n's other ports, from every port of its
+  database and from Open WebUI's other ports; PostgreSQL also authenticates every client. The
+  controller takes the proxies on 18000
   and the kubelet on 8081, and reaches the resolver and the API server on 443 and 6443 (a Service's
   address is translated to the control plane's before policy applies). Its admission webhook takes
   the API server, the local host and other nodes' hosts on 9443, in a policy of its own with its
@@ -749,14 +750,14 @@ render for one flow and answers `allowed` or `denied`; the egress of the source 
 the destination both have to allow it, and a pod is in default deny for a direction only when a
 policy that selects it asks for it, as Cilium decides. Over a render that holds what the check
 refuses wherever it is, it gives no answer and exits 2. The tests use it to follow the public path
-hop by hop (the world to the proxies' listener ports, the proxies to `hello`'s port, to kromgo's
-and to n8n's but not to kromgo's metrics port, n8n's other ports or its database, the kubelet to
-every probe port, Prometheus to kromgo's metrics port alone), to show that no pod of `demo` or
-`kromgo` reaches the secret store, the storage controller, another pod of `demo` or another
-application, n8n among them, that kromgo reaches the resolver and the port of the Prometheus its
-configuration names, read from the render, and nothing else, and no other application reaches it,
-and that without their default deny `demo`, `envoy-gateway-system` and `kromgo` take and send
-everything. What it
+hop by hop (the world to the proxies' listener ports, the proxies to `hello`'s port, to kromgo's,
+to n8n's and to Open WebUI's but not to kromgo's metrics port, n8n's or Open WebUI's other ports or
+n8n's database, the kubelet to every probe port, Prometheus to kromgo's metrics port alone), to
+show that no pod of `demo` or `kromgo` reaches the secret store, the storage controller, another
+pod of `demo` or another application, n8n and Open WebUI among them, that kromgo reaches the
+resolver and the port of the Prometheus its configuration names, read from the render, and nothing
+else, and no other application reaches it, and that without their default deny `demo`,
+`envoy-gateway-system` and `kromgo` take and send everything. What it
 cannot show: the entity the pinned datapath gives a connection an edge translated and a worker
 forwarded again, read from its source above and confirmed in audit mode; the labels of the pods the
 operators create at run time, taken from the operators' source and observed in audit mode; that an
@@ -3609,8 +3610,8 @@ name from [the public Gateway](#giving-an-application-a-public-hostname). A clus
 entries in its overlay, the namespace directory and the application's `ks.yaml`. With only the
 namespace directory's, it gets the namespace and the `app-template-defaults` ConfigMap of
 `components/common` and nothing of the application; with neither, nothing of the namespace.
-`tests/applications.bats` proves each of these for n8n on the objects the overlay builds and the
-chart renders (`features/applications.feature`).
+`tests/applications.bats` proves each of these for n8n and for Open WebUI on the objects the overlay
+builds and the chart renders (`features/applications.feature`).
 
 ### n8n
 
@@ -3766,6 +3767,145 @@ When the certificate comes from Let's Encrypt's production issuer, as lab-sto2's
 does not warn about it; with the cluster's own authority or the staging issuer it would, unless it
 were given the root of that chain ([What a client outside sees](#the-public-gateway)).
 
+### Open WebUI
+
+Open WebUI, a chat interface for language-model APIs, runs in `ai-system`
+(`apps/base/ai-system/open-webui/`), selected by one entry of the overlay, its `ks.yaml`: the
+namespace directory is n8n's entry. The namespace holds no default deny, and
+`network-policy-exceptions.yaml` lists Open WebUI's flows beside n8n's; the public Gateway's
+proxies reach its pods on 8080 alone ([Network policy](#network-policy)). Its `ks.yaml` names
+External Secrets, the store's application, VolSync, LINSTOR and the public Gateway in `dependsOn`,
+and sets `wait` with the long timeout, so a cluster that lacks one of them is refused by
+`just kubernetes-check` and the application is Ready once Open WebUI answers its readiness endpoint
+on the restored volume. It has no database cluster
+and no secret of its own, so it names neither the operator nor the Prometheus Operator definitions.
+
+- **The chart** is app-template at the tag n8n's is, its `OCIRepository` named after the
+  application, with the image `ghcr.io/open-webui/open-webui` pinned by tag and digest in
+  `values.yaml`. The image is the slim build, `0.11.4-slim`. The standard image bakes an embedding
+  model, a speech model and a tokenizer into `/app/backend/data/cache`, the directory the volume is
+  mounted over, so they would be hidden and fetched again at first use; the slim image has none.
+- **The state** is the volume alone. The claim `open-webui` of `components/volsync` is 5Gi on the
+  default StorageClass, mounted at `/app/backend/data` (`DATA_DIR`), backed up every night at 03:37
+  with the component's retention (the newest of each of the last 7 days, 4 weeks and 3 months) and
+  filled from the latest backup when it is created ([Restoring](#restoring)). It holds Open WebUI's
+  database, `webui.db`, a SQLite file, so the application has no PostgreSQL: its accounts, chats,
+  settings and connections are rows of that file. It holds the files people attach in `uploads`, the
+  caches Open WebUI makes in `cache`, and the file `.webui_secret_key`. Restoring the volume brings
+  all of it back at once.
+- **The secrets.** Nothing is seeded: no ExternalSecret of the application's own exists, so the pod
+  never waits for a store entry. The only ExternalSecret in the application is the volume's backup
+  credentials, which every volume of the component has ([Volume backups](#volume-backups)).
+  - The key that signs sessions, `WEBUI_SECRET_KEY`, is not given. When it is unset, Open WebUI
+    generates one at its first start into the file named by `WEBUI_SECRET_KEY_FILE`, which is
+    `/app/backend/data/.webui_secret_key` on the claim (the file's default is in the image, which is
+    read-only), and reads it from there at every start. It is on the volume and in every backup of it,
+    encrypted with the repository's password, and nowhere in the store, etcd or Git. A volume restored
+    from a backup brings the key with it, so sessions survive; a volume made empty gets a new key, and
+    everyone signs in again.
+  - The model backend, an OpenAI-compatible URL and key, is entered by an administrator in the
+    interface (Admin Settings, Connections) and kept in `webui.db`. The key is therefore in the
+    volume's backups, in the repository the backups go to, encrypted as the rest of the volume is, and
+    is read by whoever can read the volume or restore it; give the connection a key that can be
+    revoked, scoped to what Open WebUI needs.
+- **The hostname** is `open-webui.${CLUSTER_DOMAIN}`, an `HTTPRoute` on the public Gateway's `https`
+  listener to the Service `open-webui` on 8080. `CORS_ALLOW_ORIGIN`, the one origin Open WebUI
+  allows, and `WEBUI_URL` are that name over https, and `WEBUI_AUTH_COOKIE_SECURE` makes the session
+  cookie for https alone. `WEBUI_URL` is kept in Open WebUI's database after the first start, so a
+  volume restored under another domain keeps the old one until an administrator changes it in the
+  settings; `CORS_ALLOW_ORIGIN` is read at every start. Open WebUI's
+  server trusts `X-Forwarded-For` from any peer, as the image starts it (`FORWARDED_ALLOW_IPS`
+  defaults to `*`), and the variable is left alone: the sign-in rate limit is keyed by the account's
+  email and not by the address, and the client's address reaches only the audit log and the
+  token-exchange limit, so a forged one gains little.
+- **Hardening.** The pod runs as user and group 1000, though the image runs as root unless told
+  otherwise, with the runtime's seccomp profile; the one container has a read-only root filesystem,
+  no capability and no privilege escalation. It writes to the claim at `/app/backend/data`, to an
+  `emptyDir` at `/app/backend/open_webui/static`, where Open WebUI copies the logos and style sheet
+  from its build at every start and serves them, logging an error for each file where it cannot, and
+  to an `emptyDir` at `/tmp`, which `HOME` names. That is every path the pinned image writes with
+  this configuration: it was run read-only with those mounts alone, with no capability and no
+  network, signed in to, sent a file and asked for the page, its configuration, its models and its
+  settings, and logged no error and no failed write, only one warning, from a database migration the
+  first start applies. It requests 100m of CPU and 384Mi of memory and is limited to 1Gi: the
+  highest a run reached was about 320Mi, after the first account, a sign-in and a file upload, and
+  it was idle at 0.3% of a CPU. The startup, liveness and readiness probes ask `/health`, `/health`
+  and `/health/db`, which answers once the database does.
+- **Nothing calls Open WebUI's publisher or a model provider.** Nothing needs to: the image was run
+  with no network and served its page, and a probe in the process that logs every name lookup and
+  connection to an address outside the pod's own saw none through the start, the first account, a
+  sign-in, those requests and a file attachment. The probe was first shown to catch a call: with the
+  OpenAI connection turned on, it logged the lookup of OpenAI's API. In this image that needs
+  `uvloop` and `aiodns` kept from loading, as they look names up and connect in C, where a probe of
+  Python's own calls does not see them. Each call Open WebUI can make unasked, and its state:
+
+  | Call | Variable | State |
+  | --- | --- | --- |
+  | Ollama's API, whose default address Open WebUI looks up at every start | `ENABLE_OLLAMA_API`, `OLLAMA_BASE_URL` | off; the address is the pod's own loopback, where nothing listens |
+  | The OpenAI API, at OpenAI's own public address, which Open WebUI gives the connection when no variable names one and asks for models, with an empty key, as soon as the connection is on | `ENABLE_OPENAI_API`, `OPENAI_API_BASE_URL` | off; the address is left at that default, which nothing contacts while the connection is off, and no variable gives a key: an administrator replaces the address and adds the key before turning it on |
+  | The latest release, from GitHub's API | `ENABLE_VERSION_UPDATE_CHECK` | off |
+  | Hugging Face, for the embedding, reranking and speech models, and the installs a function or tool asks for | `OFFLINE_MODE` | on, which also stops the update check |
+  | The vector store's anonymous usage statistics, which the slim image cannot send: it does not install the store's package | `ANONYMIZED_TELEMETRY` | off, in case a later image installs it |
+  | The package analytics a dependency reports, which the slim image cannot send: it does not install the packages that report | `SCARF_NO_ANALYTICS`, `DO_NOT_TRACK` | `true`, which turns them off, as the image's own environment already does |
+  | Sharing chats to the community site | `ENABLE_COMMUNITY_SHARING` | off |
+  | The browser fetching Python packages from a content delivery network to run code | `ENABLE_CODE_EXECUTION`, `ENABLE_CODE_INTERPRETER` | off |
+  | Embedding and retrieval, which would need an embedding model and a vector store | `BYPASS_EMBEDDING_AND_RETRIEVAL` | `true`; see below |
+
+  What a person loses: running code in the chat, and knowledge bases. The slim image has no embedding
+  model and its only vector store is PostgreSQL with pgvector, which this application does not have,
+  so a file attached to a chat is read and handed to the model whole, and a long one can exceed the
+  model's context. What still can call out needs a person to act first: an administrator who turns
+  the OpenAI connection on, and then every chat goes to the address it holds; one who turns on web
+  search, image generation or speech with an external provider, or a login provider; a person who
+  picks the in-browser speech synthesis, whose runtime the browser fetches from a content delivery
+  network; and a document splitter by tokens, which fetches its encoding from a
+  public file store when first used. Which variables take effect when:
+
+  - Fixed by the volume's first start, kept in its database from then on, so that changing the
+    variable later changes nothing on a volume that has started and the setting is changed in the
+    interface instead: the two connections (`ENABLE_OLLAMA_API`, `ENABLE_OPENAI_API`), the Ollama
+    address (`OLLAMA_BASE_URL`), code execution and the code interpreter, community sharing,
+    retrieval bypass, sign-up (`ENABLE_SIGNUP`), the default role (`DEFAULT_USER_ROLE`) and the
+    site's URL (`WEBUI_URL`).
+  - Read at every start: `OFFLINE_MODE`, `ENABLE_VERSION_UPDATE_CHECK`, `ANONYMIZED_TELEMETRY`,
+    `SCARF_NO_ANALYTICS`, `DO_NOT_TRACK`, `CORS_ALLOW_ORIGIN` and `WEBUI_AUTH_COOKIE_SECURE`. A change
+    to one takes effect on a volume that has already started.
+- **Updates.** The pin is the version the local run and the reading of the source above were made on;
+  a newer release is Renovate's to propose, and the notes and the variables of this section are read
+  again for it. Renovate proposes the image's tag and digest, and never merges it by itself
+  (`.renovate/automerge.json5`). It is not held to patches of the running minor, as n8n's is: the
+  version tags of the image are releases alone, and its builds of the development branch are under
+  `dev`, `main` and `git-<commit>`, so a newer minor is a release. Open WebUI is before 1.0 and its
+  minors change the database, which it migrates at start and does not migrate back, so a person reads
+  the release notes before merging one, and the way back from a version that has started on the volume
+  is the restore of a backup taken before it.
+- **One replica**, with the strategy `Recreate`: the database is a file on a ReadWriteOnce volume
+  that a second process would not share, and the sessions of the websocket are kept in memory, as no
+  Redis is deployed. There is no PodDisruptionBudget, for the reason n8n's section gives. A drain
+  evicts the pod, which starts again on another node once the volume follows.
+
+**The first visit.** Open WebUI makes the first account created the administrator, and no
+administrator credential is in the tree. Sign-up is off from the start (`ENABLE_SIGNUP`), which does
+not stop the first account, and creating it closes sign-up in the settings, so a later person cannot
+register themselves: the administrator opens sign-up again when they want it, and an account made then
+waits for approval (`DEFAULT_USER_ROLE`). The control is the edge, as for n8n: the edge routers admit
+only the operator allowlist on the public ports until `public_allowed_cidrs` widens it
+([The edge routers](infrastructure.md#the-edge-routers)). So the step right after the first rollout is
+to open `https://open-webui.<domain>` from an allowed network and create the administrator, before the
+allowlist is widened; a cluster whose allowlist is open must not enable the application until someone
+is ready to do it. Then, in Admin Settings, Connections, the administrator replaces the OpenAI
+connection's address, OpenAI's own API until then, with the model API's URL, adds its key, and only
+then turns the OpenAI API on: turned on first, Open WebUI asks OpenAI's API for models straight away,
+with an empty key. The names, the certificate and the way to reach the application before DNS follow
+n8n's paragraph.
+
+**A rebuild.** The volume comes back from its latest backup once the store's recovery keys and the
+backups' key are in place, as for every application
+([the runbook](runbooks/volume-backups.md#the-stores-key-is-lost-and-the-file-is-kept)), with the
+accounts, chats, connections and session key; there is no application secret to put back first. A
+cluster with no backup starts Open WebUI empty, with an administrator to create and a connection to
+enter again.
+
 ### Porting an application from the reference catalogue
 
 The steps n8n took, in order; the next port does the same and says where it differs.
@@ -3773,41 +3913,70 @@ The steps n8n took, in order; the next port does the same and says where it diff
 1. **Layout.** A namespace directory with `namespace.yaml` (the strictest Pod Security level the
    workload passes, the prune annotation, and `k8s-gitops/gateway: public` if it has a route) and a
    `kustomization.yaml` that includes `components/common`; the application's `ks.yaml` and `app/`
-   beside it. List both in the overlay. The namespace's default deny with the application's flows
+   beside it. List both in the overlay; an application in a namespace that is already listed adds
+   its `ks.yaml` alone, and goes into the list of overlay entries that n8n's test of the overlay
+   expects. The namespace's default deny with the application's flows
    ([Declaring an application's flows](#declaring-an-applications-flows)), or its entry in
    `network-policy-exceptions.yaml` with the flows it would declare, as `ai-system`'s is.
-2. **Pins.** The chart as an `OCIRepository` with its tag under a `# renovate:` comment, each image
-   by tag and digest under one. `just renovate-record`, then the form of the tags in
-   `.renovate/tag-forms.tsv`, read from the registry's own listing; `just renovate-pins` passes.
+2. **Pins.** The chart as an `OCIRepository` named after the application, as the namespace holds
+   one per application and two applications applying one name would take turns owning it, with its
+   tag under a `# renovate:` comment, each image by tag and digest under one. Read the registry's
+   listing for the image's variants (slim, with CUDA, with its own model server) and take the one
+   that fetches least and fits the volume, and for whether its version tags are releases alone.
+   `just renovate-record`, then the form of the tags in `.renovate/tag-forms.tsv`, read from the
+   registry's own listing; `just renovate-pins` passes.
    Where the registry tags betas as plain versions, as n8n's does, a rule in
-   `.renovate/managers.json5` keeps Renovate to the line the tree runs.
+   `.renovate/managers.json5` keeps Renovate to the line the tree runs; where it does not, say so,
+   and add the image to the packages `.renovate/automerge.json5` never merges.
 3. **Database.** `components/cnpg-cluster` in `ks.yaml` with `CNPG_CLUSTER_NAME`, and the connection
-   from the keys of `<name>-app`; `prometheus-operator-crds` and `cloudnative-pg` in `dependsOn`.
+   from the keys of `<name>-app`; `prometheus-operator-crds` and `cloudnative-pg` in `dependsOn`. An
+   application whose default is an embedded database on its volume, such as Open WebUI's SQLite,
+   takes none of these, and its section says so and what that makes the volume.
 4. **Secrets.** A secret the application keeps a copy of, or that must outlive the cluster, such as
    n8n's encryption key, in the store: an ExternalSecret that reads `<namespace>/<application>`,
    `openbao-store` in `dependsOn`, and the one `just bao-put` command in the docs, with every place
    the secret lives and the order on a rebuild. A generator and a `CreatedOnce` ExternalSecret only
-   for a secret nothing keeps, such as the runners' token. Nothing secret in a values file, and no
-   SOPS file for an application.
+   for a secret nothing keeps, such as the runners' token. A secret the application makes itself
+   and keeps on its volume, such as Open WebUI's session key, needs no entry when a variable puts
+   the file on the volume; find where it is kept when unset in the application's source, and say
+   that the volume's backups hold it. The credentials an administrator enters in the interface, a
+   model API's key among them, are in the backups too: say that as well. Nothing secret in a values
+   file, and no SOPS file for an application.
 5. **Volume.** `components/volsync` with `APP`, a capacity and a minute of its own for the schedule;
-   the claim named in `existingClaim`; say what is in the volume and what is in the database.
+   the claim named in `existingClaim`; say what is in the volume and what is in the database, or
+   that the volume is both.
 6. **Route.** An `HTTPRoute` on `https` of `public`, the application's own settings for its
-   host, protocol and proxies agreeing with it, `gateway-public` in `dependsOn`, and a rule for the
-   backend's pods and container port in the proxies' egress ([Giving an application a public hostname](#giving-an-application-a-public-hostname)).
+   host, protocol, origin and proxies agreeing with it, `gateway-public` in `dependsOn`, and a rule
+   for the backend's pods and container port in the proxies' egress ([Giving an application a public hostname](#giving-an-application-a-public-hostname)).
 7. **Hardening.** Restricted: a user the image runs as, a read-only root filesystem with every path
    the application writes as a volume, found by running the pinned image read-only with those
-   mounts alone, no capability, requests and a memory limit, probes on the application's health
-   endpoints, everything that calls its publisher's services turned off by its documented variable
-   or named as still on, replicas and an update strategy that fit the volume.
+   mounts alone, no capability, requests and a memory limit measured from that run, probes on the
+   application's health endpoints, everything that calls its publisher's services turned off by its
+   documented variable or named as still on, replicas and an update strategy that fit the volume.
+   Run the image with no network and a probe that logs each name lookup and connection, through the
+   start and a first use, and put what it tried in the docs as a table of call, variable and state:
+   an application can look up a default address at start whatever its switch says. Show the probe
+   catching a call the application is known to make, such as a connection turned on at its default
+   address, before taking its silence as proof: a runtime that resolves and connects outside the
+   calls the probe watches, as Open WebUI's event loop and resolver do, logs nothing at all. A volume
+   mounted over a directory hides what the image holds there, so a variant that bakes models into
+   the data directory fetches them again.
 8. **Tests.** Scenarios in `features/applications.feature`, each proved by a test of
    `tests/applications.bats` under its title, written and seen failing before the manifests, and
-   mutated afterwards: remove the line each assertion guards and see the test fail. Two tests pin
-   sets a port extends: the namespaces that carry the Gateway label in `tests/gateway.bats`, where a
+   mutated afterwards: remove the line each assertion guards and see the test fail. `render_app`
+   renders any application's release for them. These tests pin sets a port extends: what the
+   overlay builds of the namespace, in n8n's test of the overlay, where a second application in
+   `ai-system` adds its Kustomization to the set and is left out of the two builds that keep the
+   namespace alone; the namespaces that carry the Gateway label in `tests/gateway.bats`, where a
    port with a route also adds its application to the `tree_without` list of the test that leaves
-   the Gateway out, and the applications that take the volsync component in
-   `tests/volume-backups.bats`.
-9. **Docs.** The application's paragraph here: what it is, where its state lives, how its secret
-   is made, its hostname, any first-visit step, how it is backed up and restored.
+   the Gateway out, and to the same list in `tests/external-dns.bats`; the backends the proxies
+   reach in `tests/network-policy.bats`, where a port with a route adds its namespace and port to
+   the pairs the routes must send to, and a row that the proxies reach its port and not another;
+   and the applications that take the volsync component in `tests/volume-backups.bats`.
+9. **Docs.** The application's section here: what runs, where its state lives, how its secret is
+   made or why it has none, its hostname, the table of what it can call and what a person loses to
+   that, any first-visit step and what it means that nobody has claimed the instance, how it is
+   backed up and restored.
 
 ## Flux itself
 

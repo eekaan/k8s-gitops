@@ -1,0 +1,38 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: open-webui
+  namespace: flux-system
+  labels:
+    # The volume is made from a restore of its repository before the pod starts, which the default
+    # timeout does not allow for on a first rollout.
+    k8s-gitops/timeout: long
+spec:
+  path: ./apps/base/ai-system/open-webui/app
+  targetNamespace: ai-system
+  # The volume and its backup, from the volsync component: Open WebUI's state is that volume alone,
+  # its database being a file on it (docs/kubernetes.md, Applications).
+  components:
+    - ../../../../../components/volsync
+  postBuild:
+    substitute:
+      APP: open-webui
+      VOLSYNC_CAPACITY: 5Gi
+      VOLSYNC_SCHEDULE: "37 3 * * *"
+  # The volume's ExternalSecret reads the store, which openbao-store makes and is Ready once the
+  # store is; the volume and its snapshots come from LINSTOR's default classes and the backups from
+  # VolSync; the route names the public Gateway. Open WebUI has no secret of its own to read.
+  dependsOn:
+    - name: external-secrets
+    - name: openbao-store
+    - name: volsync
+    - name: linstor-cluster
+    - name: gateway-public
+  # Ready once the release is, which is once Open WebUI answers its readiness endpoint with its
+  # database on the restored volume.
+  wait: true
+  sourceRef:
+    kind: ExternalArtifact
+    name: open-webui

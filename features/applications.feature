@@ -35,3 +35,33 @@ Feature: Applications
     Given the n8n application as the lab-sto2 overlay applies it
     When what it builds and what its pinned chart renders are read
     Then n8n runs its task broker in external mode on the pod's loopback, the container runners runs n8n's runners image of the same version as n8n's, pinned by digest, and reaches the broker there, both read the same token from a Secret that External Secrets generates once, and the Service exposes n8n's port and not the broker's
+
+  Scenario: Open WebUI is selected by one overlay entry and builds nothing when it is not
+    Given the lab-sto2 overlay, which lists the namespace directory ai-system and selects Open WebUI with the application's ks.yaml alone
+    When it is built with that entry and without it, and then with the entry and each application Open WebUI depends on left out in turn
+    Then with the entry it applies the Kustomization open-webui beside the namespace ai-system and its app-template-defaults ConfigMap; without it, nothing of Open WebUI and the same namespace; and with one of external-secrets, gateway-public, linstor-cluster, openbao-store and volsync left out, it is refused, naming open-webui and the missing application
+
+  Scenario: Open WebUI starts with no secret seeded and no model backend
+    Given the open-webui application as the lab-sto2 overlay applies it
+    When what it builds and what its pinned chart renders are read
+    Then the only ExternalSecret it builds is the volume's backup credentials of the volsync component, it builds and renders no Secret and no PostgreSQL cluster, no variable is read from a Secret or holds a key, password or token of its own, the key that signs sessions is the file Open WebUI generates on its volume when none is given, and the Ollama and OpenAI-compatible connections are both off, the Ollama one at the pod's own loopback and the OpenAI one left at the application's default public address, which nothing contacts while the connection is off, and no variable gives either a key
+
+  Scenario: Open WebUI calls nothing outside the cluster until a person configures a connection
+    Given the open-webui application as the lab-sto2 overlay applies it
+    When the container's image and environment are read
+    Then the image is the slim build, which holds no model weights, and the update check, anonymous telemetry, product analytics, community sharing, the default Ollama address, in-browser code execution, downloads from Hugging Face and embedding and retrieval are off, each by its variable, and the container sets no command or arguments of its own, so the image's start script runs with that environment and nothing else sets a variable
+
+  Scenario: Open WebUI's pod meets the restricted level with a read-only root and only the writable mounts it needs
+    Given the open-webui application as the lab-sto2 overlay applies it and its namespace
+    When the namespace's labels and the rendered pod are read
+    Then the namespace enforces the restricted level, the pod runs as a non-root user with the runtime's seccomp profile and one container with a read-only root filesystem, no capability and no privilege escalation, requests of 100m of CPU and 384Mi of memory and a memory limit of 1Gi, and health checks, and it writes only to the claim at /app/backend/data and to volumes of their own at /app/backend/open_webui/static and /tmp
+
+  Scenario: Open WebUI lets nobody but the first account register and makes later accounts wait for approval
+    Given the open-webui application as the lab-sto2 overlay applies it
+    When what its pinned chart renders is read
+    Then sign-up is off and the role of an account made after the first is pending, and no variable gives an account, an administrator or a login provider
+
+  Scenario: Open WebUI's data is on a backed-up volume and it is reached by its hostname on the public Gateway
+    Given the open-webui application as the lab-sto2 overlay applies it, with two different cluster domains
+    When what it builds and what its pinned chart renders are read
+    Then its data directory is the claim open-webui made by the volsync component, filled from the latest backup when it is created and backed up every night, the one replica replaces its pod by deleting the old one first, the route names open-webui under the domain on the https listener of the public Gateway and the Service's port, and the origin and URL Open WebUI is given are that name over https, whichever domain the cluster has

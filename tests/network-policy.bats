@@ -543,6 +543,10 @@ E
   denied "$VIEW" "$PROXY" ai-system/Deployment/n8n 8080/tcp
   denied "$VIEW" "$PROXY" "$N8N_DB" 5432/tcp
   denied "$VIEW" "$PROXY" "$N8N_DB" 5678/tcp
+  # Open WebUI's route sends the proxies to its 8080 in ai-system, and they reach no other port of
+  # its pod, n8n's among them.
+  allowed "$VIEW" "$PROXY" ai-system/Deployment/open-webui 8080/tcp
+  denied "$VIEW" "$PROXY" ai-system/Deployment/open-webui 5678/tcp
   allowed "$VIEW" "$PROXY" envoy-gateway-system/Deployment/envoy-gateway 18000/tcp
   allowed "$VIEW" "$PROXY" "$DNS" 53/udp
   # Nothing but the listener ports reaches the proxies from outside.
@@ -624,7 +628,8 @@ E
   routed=$(routed_ports "$REAL")
   named=$(proxies_egress "$VIEW")
   echo "the routes' backends' container ports: $routed; the proxies' egress to the labelled namespaces: ${named:-every port}"
-  [[ " $routed " == *" demo:8080 "* && " $routed " == *" ai-system:5678 "* && " $routed " == *" kromgo:8080 "* ]]
+  [[ " $routed " == *" demo:8080 "* && " $routed " == *" ai-system:5678 "* && " $routed " == *" ai-system:8080 "* \
+    && " $routed " == *" kromgo:8080 "* ]]
   [ "$named" = "$routed" ]
   # A route to a backend in a namespace without the Gateway label, or behind a Service without a
   # selector, has no port the comparison could name, and fails it saying why.
@@ -693,6 +698,7 @@ E
     denied "$VIEW" "$pod" "$STORAGE" 3371/tcp
     denied "$VIEW" "$pod" "$OTHER_APP" 8080/tcp
     denied "$VIEW" "$pod" ai-system/Deployment/n8n 5678/tcp
+    denied "$VIEW" "$pod" ai-system/Deployment/open-webui 8080/tcp
     denied "$VIEW" "$pod" envoy-gateway-system/Deployment/envoy-gateway 18000/tcp
     denied "$VIEW" "$pod" "$PROXY" 10443/tcp
     denied "$VIEW" "$pod" external-secrets/Deployment/external-secrets 8080/tcp

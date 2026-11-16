@@ -237,3 +237,15 @@ spec:
         - ports:
             - port: "8080"
               protocol: TCP
+    # Open WebUI's 8080 in ai-system.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": ai-system
+            "k8s:io.cilium.k8s.namespace.labels.k8s-gitops/gateway": public
+            app.kubernetes.io/controller: open-webui
+            app.kubernetes.io/instance: open-webui
+            app.kubernetes.io/name: open-webui
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP

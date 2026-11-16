@@ -1,0 +1,172 @@
+---
+# Values for the app-template chart, read by the HelmRelease through a ConfigMap generated without
+# substitution. The settings that name the cluster's domain are in the HelmRelease's own values. Keys
+# not set here keep the chart's defaults.
+
+# The user the image is run as: it runs as root unless told otherwise, and its files are readable by
+# any user. The group and the seccomp profile are what the restricted Pod Security level requires. A
+# volume is re-owned only when its root directory does not already match, so a large volume does not
+# slow every start. The values of the namespace's app-template-defaults ConfigMap (components/common),
+# written out.
+defaultPodOptions:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile:
+      type: RuntimeDefault
+
+controllers:
+  open-webui:
+    # One replica: the database is a SQLite file on a ReadWriteOnce volume, which a second process
+    # would not share, and the websocket sessions are kept in memory, as no Redis is deployed. No
+    # PodDisruptionBudget: a budget of one available out of one pod would make a drain wait for ever,
+    # and a budget that allowed the eviction is the absence of one. A drain evicts the pod, and it
+    # starts again on another node once the volume follows.
+    replicas: 1
+    # The old pod lets go of the volume before the new one starts, where a rolling update would wait
+    # for a second pod to mount it.
+    strategy: Recreate
+    containers:
+      main:
+        image:
+          repository: ghcr.io/open-webui/open-webui
+          # The slim build: the full image bakes an embedding model, a speech model and a tokenizer
+          # into the data directory, which the volume mounted there hides, so they would be fetched
+          # again at first use; the slim one has none to fetch or to hide.
+          # renovate: datasource=docker depName=ghcr.io/open-webui/open-webui
+          tag: 0.11.4-slim@sha256:0487ad4a5a4b986062dedace806c3ef1e88fec38c10d1e64d6a5501c66671e5e
+        env:
+          PORT: "8080"
+          # The home directory the image gives root is not the pod's user's to write.
+          HOME: /tmp
+
+          # The data directory is the claim: the database (webui.db), uploads and caches. The key
+          # that signs sessions is generated at the first start into a file on it when no key is
+          # given, and read from there at every start after: it is in the volume's backups, and no
+          # copy of it is in the secret store.
+          DATA_DIR: /app/backend/data
+          WEBUI_SECRET_KEY_FILE: /app/backend/data/.webui_secret_key
+
+          # The session cookie is for https, which is the only way the Gateway serves it.
+          WEBUI_AUTH_COOKIE_SECURE: "true"
+
+          # Accounts. The first one created becomes the administrator and closes sign-up in the
+          # settings, which are kept in the database; sign-up is also off here, so it is closed
+          # before the first account is made, which the first start allows regardless. An account
+          # made after an administrator opens sign-up again waits for approval.
+          ENABLE_SIGNUP: "false"
+          DEFAULT_USER_ROLE: pending
+
+          # No model backend is configured: an administrator adds an OpenAI-compatible connection in
+          # the interface, which keeps it, key included, in the database on the volume. Both
+          # connection kinds start off, and the default Ollama address, a name Open WebUI looks up at
+          # start whatever the switch says, is the pod's own loopback, where nothing listens. The
+          # OpenAI connection keeps Open WebUI's default address, OpenAI's own API, which nothing
+          # contacts while it is off; the administrator replaces it before turning it on.
+          ENABLE_OLLAMA_API: "false"
+          ENABLE_OPENAI_API: "false"
+          OLLAMA_BASE_URL: http://127.0.0.1:11434
+
+          # Nothing calls anyone else: no check for a new version, no telemetry or analytics, no
+          # sharing to the community site, no download of models from Hugging Face, and no code run in
+          # the browser, which fetches its packages from a content delivery network.
+          ENABLE_VERSION_UPDATE_CHECK: "false"
+          ANONYMIZED_TELEMETRY: "false"
+          SCARF_NO_ANALYTICS: "true"
+          DO_NOT_TRACK: "true"
+          ENABLE_COMMUNITY_SHARING: "false"
+          OFFLINE_MODE: "true"
+          ENABLE_CODE_EXECUTION: "false"
+          ENABLE_CODE_INTERPRETER: "false"
+
+          # The slim image has neither an embedding model nor a vector store that needs no server
+          # (its default is PostgreSQL with pgvector), so a file a person attaches is read and handed
+          # to the model whole, and knowledge bases are not available.
+          BYPASS_EMBEDDING_AND_RETRIEVAL: "true"
+        # Open WebUI's own endpoints: the process answers, and its database does. The first start on
+        # an empty volume applies the database's migrations, which the startup probe gives time
+        # before the other two count.
+        probes:
+          liveness:
+            enabled: true
+            custom: true
+            spec:
+              httpGet:
+                path: /health
+                port: 8080
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 3
+          readiness:
+            enabled: true
+            custom: true
+            spec:
+              httpGet:
+                path: /health/db
+                port: 8080
+              periodSeconds: 10
+              timeoutSeconds: 5
+              failureThreshold: 3
+          startup:
+            enabled: true
+            custom: true
+            spec:
+              httpGet:
+                path: /health
+                port: 8080
+              periodSeconds: 5
+              timeoutSeconds: 5
+              failureThreshold: 60
+        # From local runs of the pinned image with these mounts and settings: about 320Mi at the
+        # highest, after the first start's migrations, the first account, a sign-in and a file
+        # upload, and idle at 0.3% of a CPU. The request leaves room above that, and the limit for
+        # the chats and files of people using it.
+        resources:
+          requests:
+            cpu: 100m
+            memory: 384Mi
+          limits:
+            memory: 1Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
+
+service:
+  open-webui:
+    controller: open-webui
+    ports:
+      http:
+        port: 8080
+
+persistence:
+  # The claim, the volsync component's, which ks.yaml adds and names after the application: the whole
+  # data directory, backed up and restored with it.
+  data:
+    type: persistentVolumeClaim
+    existingClaim: open-webui
+    advancedMounts:
+      open-webui:
+        main:
+          - path: /app/backend/data
+  # The root filesystem is read-only. Open WebUI copies its static files, the logos and the style
+  # sheet, from its build into this directory at every start and serves them from it; where it
+  # cannot write, it logs an error for each file.
+  static:
+    type: emptyDir
+    advancedMounts:
+      open-webui:
+        main:
+          - path: /app/backend/open_webui/static
+  # Temporary files.
+  tmp:
+    type: emptyDir
+    advancedMounts:
+      open-webui:
+        main:
+          - path: /tmp

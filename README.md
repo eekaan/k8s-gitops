@@ -14,8 +14,9 @@ public and describes a real deployment: [`CLAUDE.md`](CLAUDE.md) lists what it n
 - **Talos** (`talos/`): talman renders each node's machine configuration from patches and applies
   it over the Talos API; each node also firewalls itself ([docs/cluster.md](docs/cluster.md)).
 - **Cluster state** (`kubernetes/`): the applications Flux reconciles, one directory each: the
-  platform's, the `demo` ones that prove it, and n8n, the workflow automation tool
-  ([docs/kubernetes.md](docs/kubernetes.md), [Applications](docs/kubernetes.md#applications)).
+  platform's, the `demo` ones that prove it, n8n, the workflow automation tool, and Open WebUI, a
+  chat interface ([docs/kubernetes.md](docs/kubernetes.md),
+  [Applications](docs/kubernetes.md#applications)).
 
 ## How a request gets in
 
@@ -38,9 +39,9 @@ Encrypt's production issuer, whose certificates a client with the usual public r
   volume, except a PostgreSQL instance's, which is one copy on the instance's own worker
   ([Storage](docs/kubernetes.md#storage)). VolSync backs up the volume of each application that
   opts in from its `ks.yaml`, with restic to object storage, encrypted before upload; in the
-  cluster's overlay, n8n and `volsync-demo`, one of the applications in the `demo` namespace, do
-  ([Volume backups](docs/kubernetes.md#volume-backups)). Prometheus's, Alertmanager's and
-  VictoriaLogs's volumes are not backed up.
+  cluster's overlay, n8n, Open WebUI and `volsync-demo`, one of the applications in the `demo`
+  namespace, do ([Volume backups](docs/kubernetes.md#volume-backups)). Prometheus's,
+  Alertmanager's and VictoriaLogs's volumes are not backed up.
 - **The secret store** (OpenBao) is snapshotted to object storage every six hours by a CronJob in
   the cluster, encrypted with age before upload, whose two alerts fire when its runs stop
   succeeding; a snapshot is restored into a store that unseals with the same seal key

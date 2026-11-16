@@ -377,9 +377,10 @@ of_ai_system() {
   local dependency dependencies=(cloudnative-pg prometheus-operator-crds external-secrets openbao-store volsync linstor-cluster gateway-public)
   # The overlay selects it with two entries, its namespace directory and its ks.yaml, and builds
   # the namespace, the defaults every namespace directory holds, and the Kustomization.
-  [ "$(yq '.resources[] | select(test("/ai-system(/|$)"))' "$OVERLAY_DIR/kustomization.yaml" | paste -sd, -)" = ../../base/ai-system,../../base/ai-system/n8n/ks.yaml ]
+  # Open WebUI's ks.yaml is a third entry, selected by it alone.
+  [ "$(yq '.resources[] | select(test("/ai-system(/|$)"))' "$OVERLAY_DIR/kustomization.yaml" | paste -sd, -)" = ../../base/ai-system,../../base/ai-system/n8n/ks.yaml,../../base/ai-system/open-webui/ks.yaml ]
   overlay
-  [ "$(of_ai_system "$OVERLAY")" = ConfigMap/ai-system/app-template-defaults,Kustomization/flux-system/n8n,Namespace/-/ai-system ]
+  [ "$(of_ai_system "$OVERLAY")" = ConfigMap/ai-system/app-template-defaults,Kustomization/flux-system/n8n,Kustomization/flux-system/open-webui,Namespace/-/ai-system ]
   # Its Kustomization names what it needs, no more and no less.
   [ "$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "n8n") | .spec.dependsOn | map(.name) | sort | join(" ")' "$OVERLAY")" \
     = "$(printf '%s\n' "${dependencies[@]}" | sort | paste -sd' ' -)" ]
@@ -389,14 +390,14 @@ of_ai_system() {
   [ "$status" -eq 0 ]
   # With only the namespace directory's entry, the cluster builds the namespace and its defaults,
   # and nothing else of ai-system.
-  tree_without n8n
+  tree_without n8n open-webui
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]
   kustomize build --load-restrictor LoadRestrictionsNone "$TREE/kubernetes/apps/overlays/lab-sto2" >"$BATS_TEST_TMPDIR/namespace-only.yaml"
   [ "$(of_ai_system "$BATS_TEST_TMPDIR/namespace-only.yaml")" = ConfigMap/ai-system/app-template-defaults,Namespace/-/ai-system ]
   # With neither, nothing of ai-system.
-  tree_without n8n ai-system
+  tree_without n8n open-webui ai-system
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]
@@ -448,4 +449,253 @@ of_ai_system() {
   # The broker is reached only inside the pod: the Service has n8n's port alone.
   [ "$(only "$RENDERED" Service)" = n8n ]
   [ "$(object "$RENDERED" Service n8n | yq '[.spec.ports[].port] | join(",")')" = 5678 ]
+}
+
+# render_app APP: renders the chart that APP's HelmRelease installs, as render does for n8n: from the
+# URL and tag of its OCIRepository, with the values of each ConfigMap the HelmRelease reads and its
+# own over them. Builds APP, writes $BATS_TEST_TMPDIR/APP.yaml and sets BUILT, KS, RENDERED and
+# INLINE.
+render_app() {
+  local app=$1 url tag release namespace pulled name i values=() count
+  built "$app"
+  url="$(yq -N 'select(.kind == "OCIRepository") | .spec.url' "$BUILT")"
+  tag="$(yq -N 'select(.kind == "OCIRepository") | .spec.ref.tag' "$BUILT")"
+  release="$(yq -N 'select(.kind == "HelmRelease") | .spec.releaseName // .metadata.name' "$BUILT")"
+  namespace="$(yq -N 'select(.kind == "HelmRelease") | .spec.targetNamespace // .metadata.namespace' "$BUILT")"
+  count="$(yq -N 'select(.kind == "HelmRelease") | .spec.valuesFrom | length' "$BUILT")"
+  for ((i = 0; i < count; i++)); do
+    name="$(I=$i yq -N 'select(.kind == "HelmRelease") | .spec.valuesFrom[env(I)].name' "$BUILT")"
+    [ "$(I=$i yq -N 'select(.kind == "HelmRelease") | .spec.valuesFrom[env(I)].kind' "$BUILT")" = ConfigMap ] ||
+      { echo "valuesFrom $name is not a ConfigMap"; return 1; }
+    values[i]="$BATS_TEST_TMPDIR/values-$i.yaml"
+    NAME="$name" yq -N 'select(.kind == "ConfigMap" and .metadata.name == strenv(NAME)) | .data["values.yaml"]' \
+      "$BUILT" >"${values[i]}"
+    [ -s "${values[i]}" ] || { echo "no values in the ConfigMap $name the HelmRelease reads"; return 1; }
+  done
+  INLINE="$BATS_TEST_TMPDIR/inline.yaml"
+  yq -N 'select(.kind == "HelmRelease") | .spec.values // {}' "$BUILT" >"$INLINE"
+  pulled="$BATS_FILE_TMPDIR/charts/$tag"
+  if [ ! -d "$pulled" ]; then
+    mkdir -p "$pulled"
+    helm pull "$url" --version "$tag" --destination "$pulled"
+  fi
+  RENDERED="$BATS_TEST_TMPDIR/$app.yaml"
+  helm template "$release" "$pulled"/*.tgz --namespace "$namespace" --kube-version "$KUBE" \
+    "${values[@]/#/--values=}" --values "$INLINE" >"$RENDERED"
+}
+
+# The variables that keep Open WebUI from calling anyone before a person configures a connection,
+# with the state each has; docs/kubernetes.md has a row for each.
+OPEN_WEBUI_OFF="ENABLE_OLLAMA_API=false ENABLE_OPENAI_API=false ENABLE_VERSION_UPDATE_CHECK=false
+  ENABLE_COMMUNITY_SHARING=false ANONYMIZED_TELEMETRY=false SCARF_NO_ANALYTICS=true
+  OFFLINE_MODE=true DO_NOT_TRACK=true ENABLE_CODE_EXECUTION=false ENABLE_CODE_INTERPRETER=false
+  BYPASS_EMBEDDING_AND_RETRIEVAL=true"
+
+# The other variables the container sets, none of which makes Open WebUI call anyone: where it
+# listens, where it writes, how it is reached, and who may register.
+OPEN_WEBUI_REVIEWED="PORT HOME DATA_DIR WEBUI_SECRET_KEY_FILE WEBUI_AUTH_COOKIE_SECURE WEBUI_URL
+  CORS_ALLOW_ORIGIN ENABLE_SIGNUP DEFAULT_USER_ROLE OLLAMA_BASE_URL"
+
+@test "Open WebUI is selected by one overlay entry and builds nothing when it is not" {
+  local dependency dependencies=(external-secrets gateway-public linstor-cluster openbao-store volsync)
+  # The namespace directory is the one n8n's entry selects; Open WebUI adds its ks.yaml alone.
+  [ "$(yq '.resources[] | select(test("/ai-system/open-webui/ks.yaml$"))' "$OVERLAY_DIR/kustomization.yaml" | paste -sd, -)" = ../../base/ai-system/open-webui/ks.yaml ]
+  overlay
+  of_ai_system "$OVERLAY" | tr , '\n' | grep -qx 'Kustomization/flux-system/open-webui'
+  # Its Kustomization names what it needs, no more and no less, and waits for its release.
+  [ "$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "open-webui") | .spec.dependsOn | map(.name) | sort | join(" ")' "$OVERLAY")" \
+    = "$(printf '%s\n' "${dependencies[@]}" | sort | paste -sd' ' -)" ]
+  [ "$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "open-webui") | .spec.wait' "$OVERLAY")" = true ]
+  run "$REPO/scripts/kubernetes-check" "$REPO"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  # Without the entry, nothing of Open WebUI: n8n's, the namespace and its defaults remain.
+  tree_without open-webui
+  run "$REPO/scripts/kubernetes-check" "$TREE"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  kustomize build --load-restrictor LoadRestrictionsNone "$TREE/kubernetes/apps/overlays/lab-sto2" >"$BATS_TEST_TMPDIR/without.yaml"
+  [ "$(of_ai_system "$BATS_TEST_TMPDIR/without.yaml")" = ConfigMap/ai-system/app-template-defaults,Kustomization/flux-system/n8n,Namespace/-/ai-system ]
+  [ "$(grep -c open-webui "$BATS_TEST_TMPDIR/without.yaml")" -eq 0 ]
+  # Selecting it without one of the applications it needs is refused, naming both.
+  for dependency in "${dependencies[@]}"; do
+    tree_without "$dependency"
+    run "$REPO/scripts/kubernetes-check" "$TREE"
+    echo "without $dependency: $output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"kubernetes/apps/base/ai-system/open-webui/ks.yaml: Kustomization open-webui names $dependency"* ]]
+    [[ $output == *"does not enable"* ]]
+  done
+}
+
+@test "Open WebUI starts with no secret seeded and no model backend" {
+  local name data
+  render_app open-webui
+  container
+  # No PostgreSQL: the database is SQLite's file on the volume, which Open WebUI makes itself.
+  [ "$(yq '.spec.components | map(select(test("/components/cnpg-cluster$"))) | length' "$KS")" -eq 0 ]
+  [ -z "$(yq -N 'select(.kind == "Cluster") | .metadata.name' "$BUILT")" ]
+  [ -z "$(env_of DATABASE_URL)" ]
+  # The one ExternalSecret is the volume's backup credentials, which every volume of the component has;
+  # no Secret is built or rendered, and no generator makes one.
+  [ "$(yq -N 'select(.kind == "ExternalSecret") | .metadata.name' "$BUILT")" = open-webui-volsync ]
+  [ -z "$(yq -N 'select(.kind == "Secret") | .metadata.name' "$BUILT" "$RENDERED")" ]
+  [ -z "$(yq -N 'select(.apiVersion | test("^generators\.external-secrets\.io/")) | .metadata.name' "$BUILT")" ]
+  # Nothing the pod reads comes from a Secret, and no variable that holds a credential has a value.
+  [ "$(yq '[.env[] | select(has("valueFrom"))] | length' "$CONTAINER")" -eq 0 ]
+  [ "$(yq '.envFrom // [] | length' "$CONTAINER")" -eq 0 ]
+  [ "$(yq '[.spec.template.spec.volumes[] | select(has("secret"))] | length' "$DEPLOYMENT")" -eq 0 ]
+  [ -z "$(yq -N '.spec.template.spec.containers[].env[]? | select(.name | test("PASSWORD|KEY|SECRET|TOKEN|CREDENTIAL|^WEBUI_ADMIN_")) | select(.name != "WEBUI_SECRET_KEY_FILE") | .name' "$RENDERED")" ]
+  # The key that signs sessions is the file Open WebUI generates when it has none, kept on the volume.
+  data="$(env_value DATA_DIR)"
+  [ "$(mounts "$CONTAINER" | grep ' claim ' | cut -d' ' -f1)" = "$data" ]
+  [[ $(env_value WEBUI_SECRET_KEY_FILE) == "$data"/* ]]
+  # No model backend: both connections are off and neither is given a key. The Ollama one is at the
+  # pod's own loopback, where nothing listens; the OpenAI one is given no address, so it keeps Open
+  # WebUI's default, OpenAI's own API, which nothing contacts while the connection is off.
+  [ "$(env_value ENABLE_OLLAMA_API)" = false ]
+  [ "$(env_value ENABLE_OPENAI_API)" = false ]
+  [[ $(env_value OLLAMA_BASE_URL) =~ ^http://127\.0\.0\.1:[0-9]+$ ]] || { echo "OLLAMA_BASE_URL is $(env_value OLLAMA_BASE_URL)"; return 1; }
+  for name in OPENAI_API_BASE_URL OPENAI_API_BASE_URLS OPENAI_API_KEY OPENAI_API_KEYS OLLAMA_BASE_URLS OLLAMA_API_BASE_URL; do
+    [ -z "$(env_of "$name")" ] || { echo "$name is set"; return 1; }
+  done
+}
+
+@test "Open WebUI calls nothing outside the cluster until a person configures a connection" {
+  local pair name want
+  render_app open-webui
+  container
+  # The slim image, which holds no embedding, speech or tokenizer weights to fetch or to be hidden
+  # under the volume.
+  [[ $(yq '.image' "$CONTAINER") =~ ^ghcr\.io/open-webui/open-webui:[0-9]+\.[0-9]+\.[0-9]+-slim@sha256:[0-9a-f]{64}$ ]]
+  for pair in $OPEN_WEBUI_OFF; do
+    name="${pair%%=*}"
+    want="${pair#*=}"
+    [ "$(env_value "$name")" = "$want" ] || { echo "$name is not $want"; return 1; }
+    grep -q "\`$name\`" "$REPO/docs/kubernetes.md" || { echo "docs/kubernetes.md has no row for $name"; return 1; }
+  done
+  # The default Ollama address is a name Open WebUI looks up at start; here it is the pod's own.
+  [[ $(env_value OLLAMA_BASE_URL) =~ ^http://127\.0\.0\.1:[0-9]+$ ]]
+  grep -q "\`OLLAMA_BASE_URL\`" "$REPO/docs/kubernetes.md"
+  # A variable outside the ones reviewed for what it makes Open WebUI call is refused, whatever it
+  # does: a name that turns a fetch or an export on (CUSTOM_NAME, ENABLE_OTEL with an endpoint) is
+  # not among them, so adding one is a decision this list records.
+  want="$OPEN_WEBUI_REVIEWED"
+  for pair in $OPEN_WEBUI_OFF; do want="$want ${pair%%=*}"; done
+  name="$(yq -N '.env[].name' "$CONTAINER" | LC_ALL=C sort | paste -sd' ' -)"
+  want="$(xargs -n1 <<<"$want" | LC_ALL=C sort | paste -sd' ' -)"
+  [ "$name" = "$want" ] || { echo "variables: $name; reviewed: $want"; return 1; }
+  # The image's own start script runs with that environment: a command or arguments of the
+  # container's own could set any variable before it.
+  [ "$(yq '.command // [] | length' "$CONTAINER")" -eq 0 ] || { echo "command: $(yq -o json -I0 '.command' "$CONTAINER")"; return 1; }
+  [ "$(yq '.args // [] | length' "$CONTAINER")" -eq 0 ] || { echo "args: $(yq -o json -I0 '.args' "$CONTAINER")"; return 1; }
+}
+
+@test "Open WebUI lets nobody but the first account register and makes later accounts wait for approval" {
+  render_app open-webui
+  container
+  # The first account becomes the administrator whatever these say; they decide the ones after it.
+  [ "$(env_value ENABLE_SIGNUP)" = false ]
+  [ "$(env_value DEFAULT_USER_ROLE)" = pending ]
+  # No account, administrator or login provider is given by a variable.
+  [ -z "$(yq -N '.spec.template.spec.containers[].env[]? | select(.name | test("^WEBUI_ADMIN_|^ENABLE_OAUTH|^OAUTH_|^ENABLE_LDAP|^ENABLE_LOGIN_FORM|^ENABLE_PASSWORD_AUTH|^WEBUI_AUTH$|^ENABLE_API_KEY")) | .name' "$RENDERED")" ]
+}
+
+@test "Open WebUI's pod meets the restricted level with a read-only root and only the writable mounts it needs" {
+  local name
+  render_app open-webui
+  container
+  overlay
+  [ "$(yq -N 'select(.kind == "Namespace" and .metadata.name == "ai-system") | .metadata.labels["pod-security.kubernetes.io/enforce"]' "$OVERLAY")" = restricted ]
+  [ "$(yq '.spec.template.spec.securityContext.runAsNonRoot' "$DEPLOYMENT")" = true ]
+  [ "$(yq '.spec.template.spec.securityContext.runAsUser' "$DEPLOYMENT")" -gt 0 ]
+  [ "$(yq '.spec.template.spec.securityContext.seccompProfile.type' "$DEPLOYMENT")" = RuntimeDefault ]
+  [ "$(yq '[.spec.template.spec.hostNetwork, .spec.template.spec.hostPID, .spec.template.spec.hostIPC] | map(. // false) | join(",")' "$DEPLOYMENT")" = false,false,false ]
+  [ "$(yq '[.spec.template.spec.containers[].name] | join(",")' "$DEPLOYMENT")" = main ]
+  [ "$(yq '.spec.template.spec.initContainers // [] | length' "$DEPLOYMENT")" -eq 0 ]
+  [ "$(yq '.securityContext.allowPrivilegeEscalation' "$CONTAINER")" = false ]
+  [ "$(yq '.securityContext.readOnlyRootFilesystem' "$CONTAINER")" = true ]
+  [ "$(yq '.securityContext.capabilities.drop | join(",")' "$CONTAINER")" = ALL ]
+  [ "$(yq '.securityContext.capabilities.add // [] | length' "$CONTAINER")" -eq 0 ]
+  [ "$(yq '.securityContext.privileged // false' "$CONTAINER")" = false ]
+  [[ $(yq '.image' "$CONTAINER") =~ ^[a-z0-9./-]+:[0-9]+\.[0-9]+\.[0-9]+(-[a-z]+)?@sha256:[0-9a-f]{64}$ ]]
+  # The values docs/kubernetes.md gives from the measured run: requests above its peak, a memory
+  # limit, and no CPU limit.
+  echo "resources: $(yq -o json -I0 '.resources' "$CONTAINER")"
+  [ "$(yq -o json -I0 '.resources' "$CONTAINER" | jq -cS .)" = '{"limits":{"memory":"1Gi"},"requests":{"cpu":"100m","memory":"384Mi"}}' ]
+  # Where it writes, and nowhere else: the claim, the static files it copies from its build at every
+  # start and then serves, and /tmp.
+  echo "mounts: $(mounts "$CONTAINER" | paste -sd, -)"
+  [ "$(mounts "$CONTAINER" | paste -sd, -)" = "/app/backend/data claim open-webui,/app/backend/open_webui/static emptyDir,/tmp emptyDir" ]
+  [ "$(volume_at "$CONTAINER" /tmp)" != "$(volume_at "$CONTAINER" /app/backend/open_webui/static)" ]
+  # Health, on Open WebUI's own endpoints: the process answers, and its database does.
+  [ "$(yq '.livenessProbe.httpGet.path' "$CONTAINER")" = /health ]
+  [ "$(yq '.readinessProbe.httpGet.path' "$CONTAINER")" = /health/db ]
+  [ "$(yq '.startupProbe.httpGet.path' "$CONTAINER")" = /health ]
+  for name in livenessProbe readinessProbe startupProbe; do
+    [ "$(NAME="$name" yq '.[strenv(NAME)].httpGet.port' "$CONTAINER")" = "$(env_value PORT)" ]
+  done
+}
+
+@test "Open WebUI's data is on a backed-up volume and it is reached by its hostname on the public Gateway" {
+  local claim source destination route service domain schedule other
+  domain="$(yq -e '.CLUSTER_DOMAIN' "$EXAMPLE")"
+  render_app open-webui
+  container
+  # The volume: the volsync component's claim for the application, filled from the restore on create
+  # and backed up every night with the component's retention.
+  [ "$(yq '.spec.components | map(select(test("/components/volsync$"))) | length' "$KS")" -eq 1 ]
+  [ "$(yq '.spec.postBuild.substitute.APP' "$KS")" = open-webui ]
+  # The restore on a first rollout takes longer than the default timeout, which the label lengthens;
+  # the schedule is a minute of its own, so the mover pods of two volumes do not start together.
+  [ "$(yq '.metadata.labels["k8s-gitops/timeout"]' "$KS")" = long ]
+  schedule="$(yq '.spec.postBuild.substitute.VOLSYNC_SCHEDULE' "$KS")"
+  for other in "$REPO"/kubernetes/apps/base/*/*/ks.yaml; do
+    [ "$(yq '.metadata.name' "$other")" = open-webui ] && continue
+    [ "$(yq '.spec.postBuild.substitute.VOLSYNC_SCHEDULE // ""' "$other")" != "$schedule" ] || { echo "$other has the schedule $schedule"; return 1; }
+  done
+  claim="$(only "$BUILT" PersistentVolumeClaim)"
+  [ "$claim" = open-webui ]
+  [ "$(object "$BUILT" PersistentVolumeClaim "$claim" | yq '.spec.dataSourceRef.kind')" = ReplicationDestination ]
+  destination="$(object "$BUILT" PersistentVolumeClaim "$claim" | yq '.spec.dataSourceRef.name')"
+  [ "$(only "$BUILT" ReplicationDestination)" = "$destination" ]
+  [ "$(object "$BUILT" ReplicationDestination "$destination" | yq '.spec.trigger.manual')" = restore-once ]
+  source="$(only "$BUILT" ReplicationSource)"
+  [ "$(object "$BUILT" ReplicationSource "$source" | yq '.spec.sourcePVC')" = "$claim" ]
+  [[ $(object "$BUILT" ReplicationSource "$source" | yq '.spec.trigger.schedule') =~ ^[0-9]+\ [0-9]+\ \*\ \*\ \*$ ]]
+  [ "$(object "$BUILT" ReplicationSource "$source" | yq -o json -I0 '.spec.restic.retain' | jq -cS .)" = '{"daily":7,"monthly":3,"weekly":4}' ]
+  # The data directory is the claim, and the one replica lets go of it before its successor starts.
+  [ "$(yq '.spec.template.spec.volumes[] | select(.persistentVolumeClaim.claimName == "'"$claim"'") | .name' "$DEPLOYMENT")" = data ]
+  [ "$(mounts "$CONTAINER" | grep " claim $claim" | paste -sd, -)" = "$(env_value DATA_DIR) claim $claim" ]
+  [ "$(yq '.spec.replicas' "$DEPLOYMENT")" -eq 1 ]
+  [ "$(yq '.spec.strategy.type' "$DEPLOYMENT")" = Recreate ]
+  # The route: the public Gateway's https listener, and no other, to the Service at the port the
+  # application listens on.
+  route="$(only "$BUILT" HTTPRoute)"
+  [ "$route" = open-webui ]
+  object "$BUILT" HTTPRoute "$route" >"$BATS_TEST_TMPDIR/route.yaml"
+  [ "$(yq '.metadata.namespace' "$BATS_TEST_TMPDIR/route.yaml")" = ai-system ]
+  [ "$(yq '.spec.hostnames | join(",")' "$BATS_TEST_TMPDIR/route.yaml")" = "open-webui.$domain" ]
+  [ "$(yq '.spec.parentRefs | length' "$BATS_TEST_TMPDIR/route.yaml")" -eq 1 ]
+  [ "$(yq '.spec.parentRefs[0] | .name + "/" + .namespace + "/" + .sectionName' "$BATS_TEST_TMPDIR/route.yaml")" = public/envoy-gateway-system/https ]
+  [ "$(yq '.spec.rules | length' "$BATS_TEST_TMPDIR/route.yaml")" -eq 1 ]
+  service="$(yq '.spec.rules[0].backendRefs[0].name' "$BATS_TEST_TMPDIR/route.yaml")"
+  [ "$(only "$RENDERED" Service)" = "$service" ]
+  [ "$(object "$RENDERED" Service "$service" | yq '.spec.ports[0].port')" = "$(yq '.spec.rules[0].backendRefs[0].port' "$BATS_TEST_TMPDIR/route.yaml")" ]
+  [ "$(env_value PORT)" = "$(yq '.spec.rules[0].backendRefs[0].port' "$BATS_TEST_TMPDIR/route.yaml")" ]
+  # The origin it allows and the URL it names itself by are that name over https, and the session
+  # cookie is for https alone; they follow the variable.
+  [ "$(env_value CORS_ALLOW_ORIGIN)" = "https://open-webui.$domain" ]
+  [ "$(env_value WEBUI_URL)" = "https://open-webui.$domain" ]
+  [ "$(env_value WEBUI_AUTH_COOKIE_SECURE)" = true ]
+  other_vars
+  VARS="$OTHER" render_app open-webui
+  container
+  domain="$(yq -e '.CLUSTER_DOMAIN' "$OTHER")"
+  [ "$(object "$BUILT" HTTPRoute open-webui | yq '.spec.hostnames | join(",")')" = "open-webui.$domain" ]
+  [ "$(env_value CORS_ALLOW_ORIGIN)" = "https://open-webui.$domain" ]
+  [ "$(env_value WEBUI_URL)" = "https://open-webui.$domain" ]
+  # The namespace lets its routes attach to that listener.
+  overlay
+  [ "$(yq -N 'select(.kind == "Namespace" and .metadata.name == "ai-system") | .metadata.labels["k8s-gitops/gateway"]' "$OVERLAY")" = public ]
 }
