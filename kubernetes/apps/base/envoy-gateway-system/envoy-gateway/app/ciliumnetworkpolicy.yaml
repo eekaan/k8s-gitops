@@ -249,3 +249,27 @@ spec:
         - ports:
             - port: "8080"
               protocol: TCP
+    # dex's 5556 in sso-system, the sign-in's issuer.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": sso-system
+            "k8s:io.cilium.k8s.namespace.labels.k8s-gitops/gateway": public
+            app.kubernetes.io/name: dex
+            app.kubernetes.io/instance: dex
+      toPorts:
+        - ports:
+            - port: "5556"
+              protocol: TCP
+    # oauth2-proxy's 4180 in sso-system: the routes of the sign-in host and of each opting route's
+    # /oauth2/, and the external authorisation the proxies ask of it for each request of a route that
+    # opts in (components/sso), which is no route but reaches the same port.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": sso-system
+            "k8s:io.cilium.k8s.namespace.labels.k8s-gitops/gateway": public
+            app.kubernetes.io/name: oauth2-proxy
+            app.kubernetes.io/instance: oauth2-proxy
+      toPorts:
+        - ports:
+            - port: "4180"
+              protocol: TCP

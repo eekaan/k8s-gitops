@@ -1,0 +1,24 @@
+---
+# Who may sign in: the owner's list of e-mail addresses, one per line, which the owner writes to the
+# secret store as one value (docs/kubernetes.md, Sign-in): the list piped into
+# `just bao-put sso-system/oauth2-proxy allowed-emails`. It becomes the key allowed-emails of the
+# Secret oauth2-proxy-allowed-emails, which oauth2-proxy's pods mount as a file. The list is in no
+# file of this repository. Until the store holds it, the ExternalSecret reports the missing key and
+# the pods wait for the Secret, so oauth2-proxy never starts without a list.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: oauth2-proxy-allowed-emails
+spec:
+  refreshInterval: 15m
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: openbao
+  target:
+    name: oauth2-proxy-allowed-emails
+    creationPolicy: Owner
+  data:
+    - secretKey: allowed-emails
+      remoteRef:
+        key: sso-system/oauth2-proxy
+        property: allowed-emails

@@ -583,6 +583,7 @@ once it is not, and the agents' rendered configuration agrees.
 | `demo` | default deny | `hello` takes the proxies on 8080; the backup movers resolve names and reach the object storage on 443; `volsync-demo` and the rest open nothing. |
 | `envoy-gateway-system` | default deny | the controller, its webhook, its certificate job and the proxies, below. |
 | `kromgo` | default deny | kromgo takes the proxies and the kubelet's probes on 8080 and Prometheus' scrape on 8081, and reaches the resolver and Prometheus on 9090. |
+| `sso-system` | default deny | dex takes the proxies and oauth2-proxy on 5556 and reaches the API server and GitHub on 443; oauth2-proxy takes the proxies on 4180 and reaches dex; below. |
 | `ai-system` | listed | applications whose allows are not written, not a namespace that cannot have the posture. n8n takes the proxies on 5678 and reaches its database, the resolver and whatever its workflows call outside; the PostgreSQL instances take n8n, each other and the operator, and reach the API server; Open WebUI takes the proxies on 8080 and reaches nothing until an administrator turns on a connection that calls out; the backup movers reach the object storage on 443. The proxies reach n8n's 5678 and Open WebUI's 8080 alone there and forward only to their Services, PostgreSQL authenticates every client, Pod Security, node firewall. |
 | `etcd-snapshots` | listed | an application whose allows are not written, not a namespace that cannot have the posture. The snapshot job takes nothing and reaches the Talos API through `talos.default`, the object storage, the hosts age's release is downloaded from (its URL redirects to a second host, which serves the file) and the resolver. Talos' own authorisation of its one role, Pod Security, node firewall. |
 | `external-dns` | listed | an application whose allows are not written, not a namespace that cannot have the posture. external-dns takes Prometheus' scrape and the kubelet's probes on 7979 and nothing else, and reaches the API server, the DNS provider's API on 443 and the resolver. Its token, scoped to zone read and DNS edit on the cluster's one zone, its name filter, a ClusterRole that only reads, Pod Security, node firewall ([DNS records](#dns-records)). |
@@ -608,17 +609,20 @@ once it is not, and the agents' rendered configuration agrees.
   the loopback. They reach the resolver, the controller on 18000 (xDS) and each backend the routes
   attached to the Gateway send to, by one rule each: the pods its Service selects, in its namespace
   while that carries `k8s-gitops/gateway: public`, on the container port the route sends to and no
-  other: `hello` in `demo` on 8080, kromgo in `kromgo` on 8080, and n8n on 5678 and Open WebUI on
-  8080 in `ai-system`. `tests/network-policy.bats` reads those ports from the render, from each
-  route's backend through its Service's target port to the container port, and fails unless the
-  rules name, in each labelled namespace, exactly them; it reads the proxies' egress in every form
-  the evaluation reads, and fails on a port entry or a peer it cannot compare, a backend in a
-  namespace without the label and a Service without a selector. What a pod of such a namespace
-  takes is its own namespace's to say: in `demo`, `hello` on 8080, and in `kromgo`, kromgo on 8080.
-  In `ai-system`, which is listed and so has no pod in default deny, every pod takes them on every
-  port, so the proxies' rules are what keep them from n8n's other ports, from every port of its
-  database and from Open WebUI's other ports; PostgreSQL also authenticates every client. The
-  controller takes the proxies on 18000
+  other: `hello` in `demo` on 8080, kromgo in `kromgo` on 8080, n8n on 5678 and Open WebUI on 8080
+  in `ai-system`, and dex on 5556 and oauth2-proxy on 4180 in `sso-system`. oauth2-proxy's rule also
+  carries the question the proxies ask it about each request of a route that opts in to sign-in
+  ([Sign-in](#sign-in)), which is no route's backend but reaches the same pods and port.
+  `tests/network-policy.bats` reads those ports from the render, from each route's backend through
+  its Service's target port to the container port, and fails unless the rules name, in each labelled
+  namespace, exactly them; it reads the proxies' egress in every form the evaluation reads, and
+  fails on a port entry or a peer it cannot compare, a backend in a namespace without the label and
+  a Service without a selector. What a pod of such a namespace takes is its own namespace's to say:
+  in `demo`, `hello` on 8080; in `kromgo`, kromgo on 8080; in `sso-system`, dex on 5556 and
+  oauth2-proxy on 4180. In `ai-system`, which is listed and so has no pod in default deny, every pod
+  takes them on every port, so the proxies' rules are what keep them from n8n's other ports, from
+  every port of its database and from Open WebUI's other ports; PostgreSQL also authenticates every
+  client. The controller takes the proxies on 18000
   and the kubelet on 8081, and reaches the resolver and the API server on 443 and 6443 (a Service's
   address is translated to the control plane's before policy applies). Its admission webhook takes
   the API server, the local host and other nodes' hosts on 9443, in a policy of its own with its
@@ -642,6 +646,15 @@ once it is not, and the agents' rendered configuration agrees.
   the container port that Service's port 9090 targets: `monitoring` is listed and takes them on
   every port, so kromgo's egress is what keeps them from Prometheus' other ports and the
   namespace's other pods. kromgo opens no other connection; it mounts no service account token.
+- **`sso-system`.** dex takes the proxies by their labels on 5556, its issuer's port, oauth2-proxy
+  on the same port, where it redeems a sign-in code and reads dex's keys, and the kubelet's probes
+  on 5558; it reaches the resolver and the API server on 443 and 6443, where its storage keeps its
+  objects, and, in a policy of its own with its reason (`dex-github`), the world on 443: GitHub's
+  `github.com` and `api.github.com`, which a DNS name rule could name only with the layer-7 DNS
+  rule this tree keeps out. oauth2-proxy takes the proxies by their labels on 4180, for its routes
+  and for the external authorisation of each route that opts in, and the kubelet's probes there; it
+  reaches the resolver and dex on 5556, and nothing outside the cluster. Neither takes the
+  controller, another namespace's pods or the world, and no monitor scrapes them.
 - **The object storage's port.** cluster-config holds the object storage's endpoint as a URL, which
   a DNS name rule cannot take, so the movers' rule is the world on 443: the port https uses for an
   endpoint that names none, as cluster-config's example does and `tests/network-policy.bats` holds
@@ -735,8 +748,8 @@ namespace and the policy, when
   own (`pkg/k8s/apis/cilium.io/utils/utils.go`), so that it also selects the world, the hosts and
   the nodes. A reason excuses none of these.
 
-The check reads only what the render holds. Besides the policies of `demo`, `envoy-gateway-system`
-and `kromgo`, that is one policy of a listed namespace: `flux-operator-web`, the
+The check reads only what the render holds. Besides the policies of `demo`, `envoy-gateway-system`,
+`kromgo` and `sso-system`, that is one policy of a listed namespace: `flux-operator-web`, the
 `NetworkPolicy` the Flux Operator's chart renders in `flux-system`, which lets every pod of every
 namespace (an empty `namespaceSelector`) reach the operator's web interface on 9080. It passes
 because `flux-system` is listed; the day `flux-system` takes the default deny, the check refuses it,
@@ -751,13 +764,14 @@ the destination both have to allow it, and a pod is in default deny for a direct
 policy that selects it asks for it, as Cilium decides. Over a render that holds what the check
 refuses wherever it is, it gives no answer and exits 2. The tests use it to follow the public path
 hop by hop (the world to the proxies' listener ports, the proxies to `hello`'s port, to kromgo's,
-to n8n's and to Open WebUI's but not to kromgo's metrics port, n8n's or Open WebUI's other ports or
-n8n's database, the kubelet to every probe port, Prometheus to kromgo's metrics port alone), to
-show that no pod of `demo` or `kromgo` reaches the secret store, the storage controller, another
-pod of `demo` or another application, n8n and Open WebUI among them, that kromgo reaches the
-resolver and the port of the Prometheus its configuration names, read from the render, and nothing
-else, and no other application reaches it, and that without their default deny `demo`,
-`envoy-gateway-system` and `kromgo` take and send everything. What it
+to n8n's, to Open WebUI's and to dex's and oauth2-proxy's but not to kromgo's metrics port, n8n's or
+Open WebUI's other ports or n8n's database, the kubelet to every probe port, Prometheus to kromgo's
+metrics port alone), to show that no pod of `demo` or `kromgo` reaches the secret store, the storage
+controller, another pod of `demo` or another application, n8n and Open WebUI among them, that kromgo
+reaches the resolver and the port of the Prometheus its configuration names, read from the render,
+and nothing else, and no other application reaches it, and that with their default deny `demo`,
+`envoy-gateway-system`, `kromgo` and `sso-system` let exactly their flows through and without it
+take and send everything. What it
 cannot show: the entity the pinned datapath gives a connection an edge translated and a worker
 forwarded again, read from its source above and confirmed in audit mode; the labels of the pods the
 operators create at run time, taken from the operators' source and observed in audit mode; that an
@@ -805,25 +819,27 @@ does not matter.
 2. **The policies merge.** The root applies the default denies, the applications apply their
    allows, and the agents evaluate both and drop nothing they deny; what a policy would drop is
    reported as `AUDIT`. As the allows land after the denies, `AUDIT` flows of `demo`,
-   `envoy-gateway-system` and `kromgo` from before they landed are expected, such as the proxies to
-   `hello` on 8080 and to the controller on 18000, and the controller to the API server, and an
-   agent's recent flows can hold them for a while.
+   `envoy-gateway-system`, `kromgo` and `sso-system` from before they landed are expected, such as
+   the proxies to `hello` on 8080 and to the controller on 18000, and the controller to the API
+   server, and an agent's recent flows can hold them for a while.
 3. **Watch**, from the moment the Kustomizations that hold the allows, `hello`,
-   `demo-volsync-movers`, `envoy-gateway` and `kromgo`, are Ready at the merge's revision
-   (`flux get kustomizations`). `just network-drops` lists what the agents' Hubble holds: the
-   `AUDIT` flows a policy would drop, by namespace, pod and port, never an address. It runs each
-   agent's own `hubble` through `kubectl exec`, so the kubeconfig needs exec on the Cilium agents'
-   pods in `kube-system`, more than the reading recipes need; `NETWORK_DROPS_LAST` (500) bounds the
-   flows asked of each agent and `NETWORK_DROPS_TIMEOUT` (60) the seconds each call may take. Hubble
-   keeps only each agent's recent flows (4095 by the chart's default), so run it after each of:
-   `just gateway-check`; `just cluster-check`; the secret demo (`just bao-put demo/hello greeting`,
-   then the Secret in `demo`); a badge asked of kromgo by its name, which has kromgo query
-   Prometheus ([Status badges](#status-badges)); the nightly backup of `volsync-demo` at 03:17, and
-   a restore of it ([Restoring](#restoring)). Watch a day at least, through one nightly backup. An
-   `AUDIT` flow of `demo`, `envoy-gateway-system` or `kromgo` that a check made once the allows were
-   Ready is a missing allow, added beside its application in a pull request while the cluster still
-   audits, or a pod doing what it should not. Confirm also that no `@remote-node` flow reaches the proxies' listener ports
-   and none to the webhook's 9443 is `AUDIT`. `AUDIT` flows of `flux-system` show too: Flux's own
+   `demo-volsync-movers`, `envoy-gateway`, `kromgo`, `dex` and `oauth2-proxy`, are Ready at the
+   merge's revision (`flux get kustomizations`). `just network-drops` lists what the agents' Hubble
+   holds: the `AUDIT` flows a policy would drop, by namespace, pod and port, never an address. It
+   runs each agent's own `hubble` through `kubectl exec`, so the kubeconfig needs exec on the Cilium
+   agents' pods in `kube-system`, more than the reading recipes need; `NETWORK_DROPS_LAST` (500)
+   bounds the flows asked of each agent and `NETWORK_DROPS_TIMEOUT` (60) the seconds each call may
+   take. Hubble keeps only each agent's recent flows (4095 by the chart's default), so run it after
+   each of: `just gateway-check`; `just cluster-check`; the secret demo
+   (`just bao-put demo/hello greeting`, then the Secret in `demo`); a badge asked of kromgo by its
+   name, which has kromgo query Prometheus ([Status badges](#status-badges)); a sign-in through the
+   route that opts in to it ([Sign-in](#sign-in)); the nightly backup of `volsync-demo` at 03:17,
+   and a restore of it ([Restoring](#restoring)). Watch a day at least, through one nightly backup.
+   An `AUDIT` flow of `demo`, `envoy-gateway-system`, `kromgo` or `sso-system` that a check made
+   once the allows were Ready is a missing allow, added beside its application in a pull request
+   while the cluster still audits, or a pod doing what it should not. Confirm also that no
+   `@remote-node` flow reaches the proxies' listener ports and none to the webhook's 9443 is
+   `AUDIT`. `AUDIT` flows of `flux-system` show too: Flux's own
    policies and the Flux Operator's `flux-operator-web`, which the agents enforced before the value,
    are only audited while it is set, and what they would drop is what they dropped before; they are
    not the namespaces' allows.
@@ -854,10 +870,10 @@ does not matter.
      former becoming "Enforcement stays in its default mode, so the agents enforce the policies:
      never would enforce none."
    - `docs/roadmap.md`, M8's row: "the namespaces' default deny with their allows in `demo`,
-     `envoy-gateway-system` and `kromgo`" gains ", which Cilium enforces", and the clause "; and
-     network policy that drops anything, as Cilium audits every policy, cluster-wide, and drops nothing
-     ([Service addresses](kubernetes.md#service-addresses))" goes, the row ending at
-     "`infra-apply`.".
+     `envoy-gateway-system`, `kromgo` and `sso-system`" gains ", which Cilium enforces", and the
+     clause "; and network policy that drops anything, as Cilium audits every policy, cluster-wide,
+     and drops nothing ([Service addresses](kubernetes.md#service-addresses))" goes, the row ending
+     at "`infra-apply`.".
 
    `tests/network-policy.bats` requires the enforcing sentence exactly when the value is gone, and
    fails, saying which sentence the value needs, on a change that does one without the other.
@@ -2724,8 +2740,8 @@ cannot be listed without it: `just kubernetes-check` refuses the dependency.
   label and name the one kind. A route in a namespace without it is not accepted, which is the
   Gateway API's rule and the controller's to apply; it shows in the route's status, which
   `just gateway-check` reads, and `tests/gateway.bats` proves the selector on the objects. `demo`,
-  `ai-system` and `kromgo` are the namespaces that carry the label, and `tests/gateway.bats` pins
-  that set.
+  `ai-system`, `kromgo` and `sso-system` are the namespaces that carry the label, and
+  `tests/gateway.bats` pins that set.
 - **The certificate.** The `Certificate` `public-wildcard` asks the `ClusterIssuer` the cluster
   chose, `cluster-ca` by default, for an ECDSA P-256 certificate for `*.${CLUSTER_DOMAIN}` and
   `${CLUSTER_DOMAIN}`, with a new private key at each renewal and the same Secret, so the listener
@@ -3046,6 +3062,216 @@ removing the application leaves them, as Helm never deletes what `crds/` install
 `tests/external-dns.bats` builds the application as Flux applies it, renders the chart with its
 values, and checks the arguments, the permissions, the targets, the owner, the token's path and the
 dependencies; `tests/gateway-check.bats` the check's lines.
+
+## Sign-in
+
+A cloud cluster has no home network to hide behind, so an interface not meant for everyone gets a
+login in front of it, and no application brings its own. Two applications in the namespace
+`sso-system` (`apps/base/sso-system/`) provide it, and a route opts in with one component.
+
+- `dex` signs a person in with GitHub. It is an OpenID Connect provider whose issuer is
+  `https://dex.${CLUSTER_DOMAIN}` on the public Gateway, from dex's own chart. GitHub is its only
+  connector, its state is Kubernetes objects of its own API group, there is no password database and
+  no static password, and it has one client, oauth2-proxy's. It runs two replicas on different
+  nodes under a disruption budget that keeps one running: dex's Kubernetes storage is written for
+  several instances, which tolerate each other creating and rotating its signing keys. The chart's
+  ClusterRole lets dex list and create custom resource definitions, any of the cluster's and not
+  only its own: dex's Kubernetes storage creates the definitions of its group, `dex.coreos.com`, at
+  start when they are missing (its `crdHandling`, `ensure` by default). Created ahead of time, with
+  `crdHandling: check`, with which dex refuses to start without them, they would let that grant go;
+  they are not, so an Internet-facing service holds it. Its root filesystem is read-only, with an
+  empty `/tmp` mounted: the image's entrypoint expands dex's configuration into a file there before
+  dex starts.
+- `oauth2-proxy` holds the session and decides who is admitted, from its own chart at
+  `auth.${CLUSTER_DOMAIN}`. Two stateless replicas on different nodes, under a disruption budget;
+  the session is an encrypted, secure, HTTP-only cookie for `.${CLUSTER_DOMAIN}`, so a sign-in on
+  one host serves every host under the domain. It reads dex's keys and redeems the sign-in code
+  through dex's Service inside the cluster (`skip_oidc_discovery`), and sends the browser to dex's
+  public name, so it needs neither a route out and back through the edge nor trust in the Gateway's
+  certificate. Its one callback is `https://auth.${CLUSTER_DOMAIN}/oauth2/callback`, whichever host a
+  person starts from, so dex has one redirect URI and an opting application adds none.
+- `demo/hello-sso` is the one route that opts in: `hello-sso.${CLUSTER_DOMAIN}`, a second hostname on
+  the `hello` backend. No other application is behind it.
+
+Each is its own Kustomization, with `wait`, that nothing but the demo route names in `dependsOn`
+(oauth2-proxy names dex). A cluster that lists neither application builds none of it, and a cluster
+whose overlay lists the demo route without them is refused. The namespace enforces the restricted
+Pod Security level, and `just pod-security-check` evaluates their pods. It denies traffic by
+default, and each application's `ciliumnetworkpolicy.yaml` lets its flows through
+([What the namespaces let through](#what-the-namespaces-let-through)).
+
+### Who is admitted
+
+dex's GitHub connector can restrict sign-in to the members of organisations or teams, and
+oauth2-proxy can admit by groups, by e-mail domain or by a file of e-mail addresses. A personal
+account has no organisation, so the restriction is the file: oauth2-proxy's
+`authenticated_emails_file`, one address per line, compared without regard to case, with `#` lines
+ignored. It is the only way in: no e-mail domain or group is set. dex asks GitHub for the account's
+public e-mail address, or else its primary one that GitHub lists as verified (dex's GitHub connector,
+`userEmail`), and marks it verified, which is what oauth2-proxy's check of the claim needs; the
+file is the check that decides. The list holds the address a person's GitHub account has as its
+public or primary one.
+
+dex does not restrict: anyone with a GitHub account can sign in at dex and get as far as
+oauth2-proxy's callback. oauth2-proxy refuses an address that is not on the list there, with status
+403 and its "Forbidden" page ("You do not have permission to access this resource."), and saves no
+session, so every request the person makes to a route sends them through sign-in again and ends on
+that page (below). oauth2-proxy logs the refusal as an authentication line, with the address, ending
+`[AuthFailure] Invalid authentication via OAuth2: unauthorized`; the page gives no reason, as
+oauth2-proxy shows one only in debug mode, which is not set.
+
+oauth2-proxy watches the file, so a change to the list reaches it once External Secrets has
+refreshed the Secret, every 15 minutes at most, and the kubelet has updated the mounted file; an
+empty file admits nobody.
+
+Envoy Gateway's own `SecurityPolicy` `oidc`, at the pinned release, was weighed as a replacement
+for oauth2-proxy and not taken. It signs a person in without a second component, and its
+`cookieDomain` and `redirectURL` could give one session for the domain, and its client secret could
+stay in `sso-system` behind a `ReferenceGrant`. But it can admit an identity only through
+`authorization` rules on the token's claims, whose values are written in the policy, which would put
+the list of who is allowed into the tree. oauth2-proxy reads the list from a file the secret store
+fills.
+
+### The secrets
+
+| What | Who makes it | Where it lives |
+|------|--------------|----------------|
+| The GitHub OAuth App's client ID and secret | the owner, on GitHub | the secret store, at `secrets/sso-system/dex`, keys `github-client-id` and `github-client-secret`; read by the ExternalSecret `dex-github` into the Secret of that name, and from it into dex's environment |
+| The secret dex and oauth2-proxy share, and oauth2-proxy's cookie secret | External Secrets' `Password` generator, once, in the cluster; no person | the Secrets `dex-oauth2-proxy-client` and `oauth2-proxy-cookie`, with nothing behind them in the store, and so in etcd and its snapshots, encrypted to the Talos age key |
+| The identities allowed to sign in | the owner | the secret store, at `secrets/sso-system/oauth2-proxy`, key `allowed-emails`, one value of one address per line; read by the ExternalSecret `oauth2-proxy-allowed-emails` into the Secret of that name, mounted as a file |
+
+None is in a ConfigMap, a values file, a Flux variable or the tree: dex expands `${NAME}` in its
+connector settings from its environment and takes its client's secret from the variable `secretEnv`
+names, and oauth2-proxy reads both secrets from its environment, and the list from its file.
+`tests/sso.bats` renders both charts and fails when a client or cookie secret has a value of its own
+anywhere, or an e-mail address is in anything the applications build or render. A generated secret
+is made once and never refreshed: a deleted Secret is made again with a new value, which needs both
+applications restarted for `dex-oauth2-proxy-client` and ends every session for
+`oauth2-proxy-cookie`. Neither reaches a running pod: both are read when a pod starts, nothing
+restarts the pods, and after a new `oauth2-proxy-cookie` the two replicas disagree on the key, and
+refuse each other's sessions, until both have been restarted.
+
+### What the owner does, in order
+
+1. On GitHub, under the account's developer settings, create an OAuth App. Its homepage is
+   `https://auth.<the cluster's domain>` and its authorisation callback URL is
+   `https://dex.<the cluster's domain>/callback`. Note its client ID and generate a client secret.
+2. Write both to the store, the secret typed without echo:
+
+   ```sh
+   just bao-put sso-system/dex github-client-id
+   just bao-put sso-system/dex github-client-secret
+   ```
+
+3. Write the list, one address per line:
+
+   ```sh
+   printf '%s\n' <address> <address> | just bao-put sso-system/oauth2-proxy allowed-emails
+   ```
+
+Until the first two exist the ExternalSecret `dex-github` reports the missing key, dex's pods stay
+in `CreateContainerConfigError`, and the Kustomization `dex` is not Ready, with the pods' state as its
+reason. Until the third exists the Secret `oauth2-proxy-allowed-emails` does not exist, the pods
+of oauth2-proxy stay in `ContainerCreating`, and the Kustomization `oauth2-proxy` is not Ready, and
+so is `hello-sso`, which waits for it. Nothing else of the cluster waits on any of them, and the
+generated secrets are made as soon as External Secrets runs.
+
+The wait is not open-ended. Each release's install times out after 10 minutes and is retried three
+times (the root's release defaults, [What the root sets](#what-the-root-sets)); after that
+helm-controller marks the `HelmRelease` Stalled, with the reason `RetriesExceeded`, and stops
+trying. A store entry written more than about 40 minutes after the release was first installed
+therefore needs the failure count reset, for each release that has stalled, `dex` first:
+
+```sh
+flux reconcile helmrelease dex -n sso-system --reset
+flux reconcile helmrelease oauth2-proxy -n sso-system --reset
+```
+
+oauth2-proxy's release exists only once dex's Kustomization is Ready, so it stalls only when the
+list is written late; `flux get helmreleases -n sso-system` says which have.
+
+### Putting a route behind it
+
+The application's `ks.yaml` adds `components/sso` and two variables, beside the `HTTPRoute` its own
+manifests define, which names the public Gateway and whose namespace carries the Gateway label
+([Giving an application a public hostname](#giving-an-application-a-public-hostname)):
+
+```yaml
+components:
+  - ../../../../../components/sso
+postBuild:
+  substitute:
+    SSO_ROUTE: <the HTTPRoute's name>
+    SSO_HOSTNAME: <its host name, without the domain>
+dependsOn:
+  - name: oauth2-proxy
+```
+
+The component makes the `SecurityPolicy` named after the route, which targets that `HTTPRoute` and
+nothing else, and the `HTTPRoute` `<name>-oauth2` that sends `/oauth2/` on the same host to
+oauth2-proxy. The namespace is added to the `ReferenceGrant` `oauth2-proxy` in `sso-system`
+(`apps/base/sso-system/oauth2-proxy/app/referencegrant.yaml`) as two entries, one for
+`SecurityPolicy` and one for `HTTPRoute`. The grant sits there because a grant is read from the
+namespace of what is referred to, and Flux's target namespace would put one made by the component
+into the application's own. A namespace not in the grant cannot refer to oauth2-proxy's Service;
+the Gateway API says so and the controller applies it. The grant names the one Service, never a
+namespace that has not opted in. No network policy changes for sign-in: the proxies already reach
+oauth2-proxy, and the route's own backend needs the rules every public hostname needs.
+
+For each request to the route, Envoy first asks oauth2-proxy over HTTP, sending the request's host,
+method and cookie (Envoy always adds `Authorization`, which oauth2-proxy does not read here), and
+acts on the answer. A 200 lets the request through to the backend, with the answer's
+`X-Auth-Request-User` and `X-Auth-Request-Email` headers added to it. Any other answer below 500 goes
+back to the client as it is, status, `Location` and `Set-Cookie` included, and the backend gets
+nothing. An answer of 500 or more, or none, is refused with 403: the policy does not fail open.
+
+The policy asks at one fixed path, `/?rd=https://<host>/` (`pathOverride`), whatever the request's
+own path. oauth2-proxy serves `/` with its catch-all handler, which answers a session of a listed
+identity with a 200 from its static upstream (`upstreams = [ "static://200" ]`) and a request
+without one with the redirect to dex that starts a sign-in (`skip_provider_button`, so no page with
+a button comes first). Passing the request's own path would let `/ping`, `/ready` and `/robots.txt`
+through to the backend, as oauth2-proxy answers them with 200 before it looks for a session; the
+policy's `path` option appends that path. The query says where the person returns after signing in,
+the route's own host: Envoy passes oauth2-proxy no `X-Forwarded-Host` or `X-Forwarded-Uri` to work
+it out from, and without it a person would end on the sign-in host instead.
+
+What a person sees, at `https://hello-sso.<domain>/some/page`:
+
+1. Without a session, oauth2-proxy answers 302 to `https://dex.<domain>/auth` and sets a short-lived
+   cookie of its own for the domain, which the callback checks. Envoy passes both to the browser;
+   `hello` receives nothing.
+2. dex has one connector, so it sends the browser on to GitHub, which asks the person to sign in,
+   and the first time to authorise the OAuth App. GitHub returns them to dex's callback, and dex,
+   which shows no approval screen, to `https://auth.<domain>/oauth2/callback`.
+3. oauth2-proxy redeems the code at dex and reads the address. On the list, it sets the session
+   cookie for the domain and redirects to `https://hello-sso.<domain>/`, which now passes and shows
+   hello's page. The page first asked for, `/some/page`, is not returned to: oauth2-proxy was never
+   told it. Not on the list, the person gets the 403 "Forbidden" page and no session, and every
+   later request to the route goes through steps 1 to 3 and ends there again; oauth2-proxy's log
+   has the line `[AuthFailure] Invalid authentication via OAuth2: unauthorized`
+   ([Who is admitted](#who-is-admitted)).
+4. With the session, every route that opts in passes, on any host under the domain.
+
+`https://auth.<domain>/` signs a person in the same way and ends on oauth2-proxy's own answer,
+"Authenticated".
+
+`tests/sso.bats` proves each of these on the rendered objects: the policy's target, its backend,
+the fixed path with the route's host in its query and the headers, oauth2-proxy's static upstream,
+its skipped sign-in button and the absence of anything that would answer without a session, the
+grant that names exactly the namespaces that have a policy, the secrets, the files and the
+configuration. It cannot show what only a running Gateway, dex and GitHub can: the answers of Envoy
+and oauth2-proxy to a real request, the redirects, the return to the route's host, and the Gateway
+refusing a namespace that is not in the grant. The first sign-in is the proof on the cluster.
+
+### What it does not cover
+
+The Kubernetes API's own authentication: nothing here makes `kubectl` sign in, and dex has no client
+for it. An application with a login of its own keeps that login: a route behind this sign-in asks
+nothing of the backend, which gets the client's headers, its cookies and `Authorization` among
+them, with the identity headers added. The session cookie is set for the
+cluster's domain, so the browser sends it to every application under the domain, whether its route
+opts in or not, and whoever holds it passes every route that opts in for as long as it lasts. A
+route that is not given the component is as open as it was.
 
 ## PostgreSQL
 

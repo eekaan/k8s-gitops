@@ -259,7 +259,7 @@ proxies_egress() {
   real_render
   run "$REPO/scripts/network-policy-check" "$REAL" "$REPO/network-policy-exceptions.yaml"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [ "$(grep ' denies ingress and egress' <<<"$output" | cut -d' ' -f1 | paste -sd' ')" = "demo envoy-gateway-system kromgo" ]
+  [ "$(grep ' denies ingress and egress' <<<"$output" | cut -d' ' -f1 | paste -sd' ')" = "demo envoy-gateway-system kromgo sso-system" ]
   [ "$(grep -c ' listed' <<<"$output")" -eq "$(yq '.exceptions | length' "$REPO/network-policy-exceptions.yaml")" ]
 }
 
@@ -547,6 +547,21 @@ E
   # its pod, n8n's among them.
   allowed "$VIEW" "$PROXY" ai-system/Deployment/open-webui 8080/tcp
   denied "$VIEW" "$PROXY" ai-system/Deployment/open-webui 5678/tcp
+  # The sign-in's routes send the proxies to dex's 5556 and oauth2-proxy's 4180 in sso-system, which
+  # carries the Gateway label and denies by default; oauth2-proxy's 4180 is also where the proxies ask
+  # about each request of a route that opts in (components/sso). Each takes them on that port alone,
+  # by their labels, and nothing from outside the cluster.
+  allowed "$VIEW" "$PROXY" sso-system/Deployment/dex 5556/tcp
+  allowed "$VIEW" "$PROXY" sso-system/Deployment/oauth2-proxy 4180/tcp
+  denied "$VIEW" "$PROXY" sso-system/Deployment/dex 5558/tcp
+  denied "$VIEW" "$PROXY" sso-system/Deployment/dex 5557/tcp
+  denied "$VIEW" "$PROXY" sso-system/Deployment/oauth2-proxy 44180/tcp
+  denied "$VIEW" "$PROXY" sso-system/Deployment/oauth2-proxy 5556/tcp
+  denied "$VIEW" @world sso-system/Deployment/dex 5556/tcp
+  denied "$VIEW" @world sso-system/Deployment/oauth2-proxy 4180/tcp
+  denied "$VIEW" @remote-node sso-system/Deployment/oauth2-proxy 4180/tcp
+  denied_in "$VIEW" envoy-gateway-system/Deployment/envoy-gateway sso-system/Deployment/dex 5556/tcp
+  denied_in "$VIEW" envoy-gateway-system/Deployment/envoy-gateway sso-system/Deployment/oauth2-proxy 4180/tcp
   allowed "$VIEW" "$PROXY" envoy-gateway-system/Deployment/envoy-gateway 18000/tcp
   allowed "$VIEW" "$PROXY" "$DNS" 53/udp
   # Nothing but the listener ports reaches the proxies from outside.
@@ -604,7 +619,7 @@ E
   local probes pod port
   probes=$(yq -N -o json -I0 'select(. != null)' "$VIEW"/*/*/*.yaml | jq -r '
     select(.kind | IN("Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"))
-    | select(.metadata.namespace | IN("demo", "envoy-gateway-system", "kromgo"))
+    | select(.metadata.namespace | IN("demo", "envoy-gateway-system", "kromgo", "sso-system"))
     | . as $w
     | (if .kind == "CronJob" then .spec.jobTemplate.spec.template else .spec.template end).spec.containers[]
     | . as $c
@@ -621,6 +636,8 @@ E
   [[ $probes == *"demo/Deployment/hello 8080"* ]]
   [[ $probes == *"envoy-gateway-system/Deployment/envoy-gateway 8081"* ]]
   [[ $probes == *"kromgo/Deployment/kromgo 8080"* ]]
+  [[ $probes == *"sso-system/Deployment/dex 5558"* ]]
+  [[ $probes == *"sso-system/Deployment/oauth2-proxy 4180"* ]]
   # The ports the proxies' egress names in each labelled namespace are exactly the container ports
   # the Gateway's routes send to in that namespace, read from the render. A route to a backend on
   # another port, or in another labelled namespace, fails here until the rules name it.
@@ -630,6 +647,7 @@ E
   echo "the routes' backends' container ports: $routed; the proxies' egress to the labelled namespaces: ${named:-every port}"
   [[ " $routed " == *" demo:8080 "* && " $routed " == *" ai-system:5678 "* && " $routed " == *" ai-system:8080 "* \
     && " $routed " == *" kromgo:8080 "* ]]
+  [[ " $routed " == *" sso-system:4180 "* && " $routed " == *" sso-system:5556 "* ]]
   [ "$named" = "$routed" ]
   # A route to a backend in a namespace without the Gateway label, or behind a Service without a
   # selector, has no port the comparison could name, and fails it saying why.
@@ -945,15 +963,17 @@ E
   [ "$status" -eq 1 ]
   [[ $output == *"cluster-wide CiliumClusterwideNetworkPolicy/nodes selects nodes"* ]]
 
-  # The tree: the agents honour the field, and the allows of demo, envoy-gateway-system and kromgo
-  # let exactly their flows through with the namespaces' default deny, and every flow without it.
+  # The tree: the agents honour the field, and the allows of demo, envoy-gateway-system, kromgo and
+  # sso-system let exactly their flows through with the namespaces' default deny, and every flow
+  # without it.
   real_render
   [ "$(yq '.data["enable-non-default-deny-policies"]' "$REAL"/*/cilium/ConfigMap_kube-system_cilium-config.yaml)" = true ]
   local open="$BATS_TEST_TMPDIR/open" removed
   cp -R "$VIEW" "$open"
   removed=("$open"/*/*/NetworkPolicy.networking.k8s.io_demo_default-deny.yaml "$open"/*/*/NetworkPolicy.networking.k8s.io_envoy-gateway-system_default-deny.yaml
-    "$open"/*/*/NetworkPolicy.networking.k8s.io_kromgo_default-deny.yaml)
-  [ "${#removed[@]}" -eq 3 ]
+    "$open"/*/*/NetworkPolicy.networking.k8s.io_kromgo_default-deny.yaml
+    "$open"/*/*/NetworkPolicy.networking.k8s.io_sso-system_default-deny.yaml)
+  [ "${#removed[@]}" -eq 4 ]
   rm -- "${removed[@]}"
   local flow want from to port
   local flows=(
@@ -981,6 +1001,24 @@ E
     "allowed $KROMGO $DNS 53/udp"
     "denied $KROMGO openbao/StatefulSet/openbao 8200/tcp"
     "denied $KROMGO @world 443/tcp"
+    "allowed $PROXY sso-system/Deployment/dex 5556/tcp"
+    "allowed $PROXY sso-system/Deployment/oauth2-proxy 4180/tcp"
+    "denied @world sso-system/Deployment/dex 5556/tcp"
+    "allowed sso-system/Deployment/oauth2-proxy sso-system/Deployment/dex 5556/tcp"
+    "denied sso-system/Deployment/oauth2-proxy sso-system/Deployment/dex 5558/tcp"
+    "denied sso-system/Deployment/dex sso-system/Deployment/oauth2-proxy 4180/tcp"
+    "allowed sso-system/Deployment/dex @kube-apiserver 6443/tcp"
+    "denied sso-system/Deployment/oauth2-proxy @kube-apiserver 6443/tcp"
+    "allowed sso-system/Deployment/dex @world 443/tcp"
+    "denied sso-system/Deployment/dex @world 80/tcp"
+    "denied sso-system/Deployment/oauth2-proxy @world 443/tcp"
+    "allowed sso-system/Deployment/dex $DNS 53/udp"
+    "allowed sso-system/Deployment/oauth2-proxy $DNS 53/udp"
+    "denied sso-system/Deployment/dex openbao/StatefulSet/openbao 8200/tcp"
+    "denied sso-system/Deployment/oauth2-proxy openbao/StatefulSet/openbao 8200/tcp"
+    "denied sso-system/Deployment/oauth2-proxy demo/Deployment/hello 8080/tcp"
+    "denied demo/Deployment/hello sso-system/Deployment/oauth2-proxy 4180/tcp"
+    "denied $OTHER_APP sso-system/Deployment/dex 5556/tcp"
   )
   for flow in "${flows[@]}"; do
     read -r want from to port <<<"$flow"

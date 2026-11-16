@@ -1,0 +1,60 @@
+---
+# oauth2-proxy's chart values that do not depend on the cluster; the HelmRelease adds the
+# configuration file, which does. The chart's image is oauth2-proxy's own, at the chart's app
+# version.
+
+# Two stateless replicas: the session is a cookie, so either serves any request.
+replicaCount: 2
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+  maxUnavailable: null
+
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: oauth2-proxy
+        app.kubernetes.io/instance: oauth2-proxy
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 64Mi
+  limits:
+    memory: 128Mi
+
+# oauth2-proxy calls no part of the Kubernetes API.
+serviceAccount:
+  automountServiceAccountToken: false
+
+# No scraping is set up for the cluster's own metrics.
+metrics:
+  enabled: false
+
+config:
+  # The cookie secret, from the Secret External Secrets makes once (cookie-secret.yaml); the chart
+  # makes no Secret of its own and reads the one key it is told to require. The client's ID is in
+  # the configuration file and its secret is read below.
+  existingSecret: oauth2-proxy-cookie
+  requiredSecretKeys:
+    - cookie-secret
+
+# oauth2-proxy's client secret at dex: the one dex's application makes once, shared by reference.
+extraEnv:
+  - name: OAUTH2_PROXY_CLIENT_SECRET
+    valueFrom:
+      secretKeyRef:
+        name: dex-oauth2-proxy-client
+        key: client-secret
+
+# The identities allowed to sign in, a file made from the Secret allowed-emails.yaml makes from the
+# secret store: one address per line. The chart makes no Secret of it, as it is told which exists.
+authenticatedEmailsFile:
+  enabled: true
+  persistence: secret
+  template: oauth2-proxy-allowed-emails
+  restrictedUserAccessKey: allowed-emails
