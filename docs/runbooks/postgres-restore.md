@@ -38,32 +38,47 @@ name.
 
 ## Listing the dumps
 
-The bucket's objects under the database's path, newest last:
+The bucket's objects under the database's path, newest first, by name and size:
 
 ```sh
-rclone lsf --files-only store:"${BACKUP_BUCKET_PREFIX}-postgres/CLUSTER/NS/OLD/" | sort
+just postgres-dumps NS OLD CLUSTER
 ```
 
-The names are the UTC times the dumps were taken. Choose the dump by its time, not by its place in
+`just postgres-dumps CLUSTER` lists the databases that have a dump, as `<namespace>/<name>`. The
+names are the UTC times the dumps were taken. Choose the dump by its time, not by its place in
 the listing: when a lost cluster is rebuilt under its old name, Flux creates `OLD` empty with its
 own dump job, which from its first night uploads dumps of the empty database to this same path.
-Those dumps end the listing, and after 14 nights every real dump has been rotated out. Restore
+Those dumps start the listing, and after 14 nights every real dump has been rotated out. Restore
 before then, or stop the rotation until the restore is done by suspending the application's
 Flux Kustomization (`flux suspend kustomization <app>`) and then the CronJob
 (`kubectl --namespace NS patch cronjob OLD-pgdump --patch '{"spec":{"suspend":true}}'`).
 
 ## Fetching and decrypting one
 
+Check the dump before anything is built for it:
+
+```sh
+just postgres-dump-check NS OLD <a name from the listing, or latest> CLUSTER
+```
+
+It downloads the dump into a private directory in memory where the machine has a memory-backed
+filesystem, checks that it is an age file, decrypts it with the Talos age key and has `pg_restore
+--list` read it, without a database, from the cluster's PostgreSQL image. It prints the dump's name,
+its sizes, the PostgreSQL version that made it, when, and the number of tables, never a table's name
+or a row, and removes everything, on failure too. A dump that is not an age file, that the key does
+not decrypt, that `pg_restore` cannot read or that holds no table fails with that reason. The count
+includes empty tables, as `pg_dump` keeps a data entry for each, so it does not tell a dump of the
+rebuilt, empty database from a real one; the dump's time does.
+
+The restore needs the plain file, which the check does not keep:
+
 ```sh
 name=<a name from the listing>
 rclone copyto --s3-no-check-bucket store:"${BACKUP_BUCKET_PREFIX}-postgres/CLUSTER/NS/OLD/$name" "$name"
 age --decrypt --identity "$SOPS_AGE_KEY_FILE" --output restore.dump "$name"
-pg_restore --list restore.dump | head
 ```
 
-`pg_restore --list` reads the table of contents without a database: a file that is not a dump, or
-that a `pg_restore` of an older major than the dump's cannot read, fails here. The plain `restore.dump`
-is the database's whole content; delete it when done.
+The plain `restore.dump` is the database's whole content; delete it when done.
 
 ## Restoring into a new cluster
 

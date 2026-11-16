@@ -318,6 +318,16 @@ require_age_key() {
   fi
 }
 
+# age_decrypt ENCRYPTED PLAINTEXT: decrypts with the Talos age key: the file SOPS_AGE_KEY_FILE names,
+# or without one, as in CI, SOPS_AGE_KEY on age's standard input, so never as an argument.
+age_decrypt() {
+  if [[ -n ${SOPS_AGE_KEY_FILE:-} && -f $SOPS_AGE_KEY_FILE ]]; then
+    age --decrypt --identity "$SOPS_AGE_KEY_FILE" --output "$2" "$1"
+  else
+    printf '%s\n' "$SOPS_AGE_KEY" | age --decrypt --identity - --output "$2" "$1"
+  fi
+}
+
 # sops_recipient: the age recipient talos/.sops.yaml encrypts secrets bundles to.
 sops_recipient() {
   yq '.creation_rules[0].age // ""' "$sops_config"

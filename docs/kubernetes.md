@@ -3190,6 +3190,15 @@ cannot read a file outside its directory; `tests/postgres-dumps.bats` holds `fet
 etcd job's byte for byte, and the encrypting and uploading scripts to it line by line apart from the
 words that say dump for snapshot and the path.
 
+`just postgres-dumps <namespace> <name> [cluster]` lists a database's dumps, newest first, and
+`just postgres-dump-check <namespace> <name> [dump|latest] [cluster]` decrypts one and has
+`pg_restore --list` read it, printing counts and nothing of its contents and keeping nothing on disk
+([postgres-restore.md](runbooks/postgres-restore.md)). `pg_restore` runs from the `dump` step's image
+in `cronjob.yaml`, with no network and no log, so the check needs `docker` or `podman`
+(`CONTAINER_RUNTIME` names one). The container runs as the caller's uid, which rootful Docker and
+podman keep; rootless Docker and a host that enforces SELinux refuse the mount, and the check then
+says the archive cannot be read.
+
 **What a dump is not.** It is a copy of one day, not a point in time: a restore loses everything
 written since the dump, and a dump holds one database's objects, not the cluster's roles' passwords
 or its settings. The operator's own backups, WAL archiving and base backups through its Barman Cloud
