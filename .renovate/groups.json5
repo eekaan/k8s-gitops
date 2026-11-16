@@ -41,6 +41,16 @@
       groupName: "Flux",
     },
     {
+      // tests/openbao-snapshots.bats holds the snapshot job's client image to the tag the chart gives
+      // the servers.
+      description: "OpenBao: its chart and the image of the client the snapshot job runs",
+      matchPackageNames: ["ghcr.io/openbao/charts/openbao", "quay.io/openbao/openbao"],
+      groupName: "OpenBao",
+      // The chart's version and the servers' differ, so each takes its own step: one pull request
+      // whatever the step of either.
+      separateMajorMinor: false,
+    },
+    {
       description: "The log collector: Vector's chart and the image vector-check checks its configuration in",
       matchPackageNames: ["ghcr.io/vectordotdev/helm-charts/vector", "docker.io/timberio/vector"],
       groupName: "Vector",

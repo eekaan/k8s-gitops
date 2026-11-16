@@ -492,3 +492,42 @@ read from; the step says so and dumps the primary. A long dump from a replica ca
 a conflict with the replica's recovery (`canceling statement due to conflict with recovery`). Each
 retry waits the database's stagger again within the same 45 minute deadline, so a retry has less
 time than the first attempt and a long dump can fail until the next night's run.
+
+## OpenBaoSnapshotStale
+
+The CronJob `openbao-snapshots` has had no successful run for 13 hours, two runs and an hour of
+grace, or it has never succeeded and was created more than 13 hours ago. The newest snapshot of the
+secret store in the bucket is then older than that, and what the store held after it is lost if its
+volumes are ([the restore runbook](openbao.md#restoring-a-snapshot)). The alert reads
+kube-state-metrics' record of the CronJob, so it cannot fire for a CronJob that does not exist.
+
+Look at first: `kubectl --namespace openbao get cronjob,job,pod` for what the runs did. A failed run
+says which step failed: `kubectl --namespace openbao logs job/<job> --all-containers` (`fetch-age`,
+`snapshot`, `encrypt` or `upload`). A pod that does not start says why in
+`kubectl --namespace openbao describe pod <pod>`: without the Secret `openbao-snapshots-s3`, the
+`upload` container waits in `CreateContainerConfigError` once the steps before it have run; without
+`openbao-tls`, the pod's volumes do not mount and no step starts, which its events name. The runbook
+lists the bucket's snapshots ([listing](openbao.md#listing-and-checking-snapshots)).
+
+Usually: the Secret `openbao-snapshots-s3` is missing, because the secret store lacks the key
+`volsync` or the External Secrets operator cannot read it (`just bao-seed-volsync`); the S3 key was
+replaced and the store's copy was not (`just bao-seed-volsync --rotate-s3`); the OpenBao bucket does
+not exist (`just infra-backup-buckets`); the pod cannot download age, which needs the pod network to
+reach its release host, or the archive no longer matches the checksum the manifest pins; or the
+`snapshot` step cannot log in or is refused, which its log says: a login refused as a permission
+error is the role `snapshot` or its account's binding changed, and a certificate error is the
+listener's CA or its names, which `openbao-tls` renews. A `snapshot` step that ends because the store
+has no active member is the store being down, which [OpenBaoNoActiveMember](#openbaonoactivemember)
+reports. Once a run succeeds, take a snapshot by hand to clear the alert at once:
+`kubectl --namespace openbao create job --from=cronjob/openbao-snapshots <name>`.
+
+## OpenBaoSnapshotJobFailing
+
+The latest scheduled run of the CronJob `openbao-snapshots` has not succeeded, half an hour after it
+was scheduled, which is longer than the run's 20 minute deadline: it failed, or its pod never
+started. The alert clears once a run succeeds. The previous snapshot is still in the bucket, so
+nothing is lost yet; [OpenBaoSnapshotStale](#openbaosnapshotstale) fires when it is 13 hours old.
+
+Look at first, and usually: as for [OpenBaoSnapshotStale](#openbaosnapshotstale). A snapshot that
+has outgrown the memory-backed volume it is written to (256 MiB) fails the `snapshot` step with a
+write error: the volume's `sizeLimit` and the step's memory limit in the CronJob then grow together.

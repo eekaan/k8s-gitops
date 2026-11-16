@@ -39,8 +39,13 @@ Encrypt's production issuer, whose certificates a client with the usual public r
   ([Storage](docs/kubernetes.md#storage)). VolSync backs up the volume of each application that
   opts in from its `ks.yaml`, with restic to object storage, encrypted before upload; in the
   cluster's overlay, n8n and `volsync-demo`, one of the applications in the `demo` namespace, do
-  ([Volume backups](docs/kubernetes.md#volume-backups)). The secret store's, Prometheus's,
-  Alertmanager's and VictoriaLogs's volumes are not backed up.
+  ([Volume backups](docs/kubernetes.md#volume-backups)). Prometheus's, Alertmanager's and
+  VictoriaLogs's volumes are not backed up.
+- **The secret store** (OpenBao) is snapshotted to object storage every six hours by a CronJob in
+  the cluster, encrypted with age before upload, whose two alerts fire when its runs stop
+  succeeding; a snapshot is restored into a store that unseals with the same seal key
+  ([Raft snapshots](docs/kubernetes.md#raft-snapshots),
+  [restore](docs/runbooks/openbao.md#restoring-a-snapshot)).
 - **etcd** is snapshotted to object storage, encrypted with age before upload, every six hours by
   a CronJob in the cluster, whose two alerts fire when its runs stop succeeding, and whenever the
   operator runs `just cluster-snapshot`; `just cluster-restore` puts one back

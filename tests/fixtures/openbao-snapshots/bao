@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# A stand-in for OpenBao's CLI as the snapshot job's script calls it, installed by the tests as
+# <tmp>/bin/bao. It answers the two calls the job makes and refuses every other, as the store's
+# `snapshot` role would refuse any other request:
+#   bao write -field=token auth/kubernetes/login role=ROLE jwt=@FILE
+#       prints a token when FILE holds the pod's token and ROLE is the one in <tmp>/record/role, and
+#       fails as the store does otherwise;
+#   bao operator raft snapshot save PATH
+#       writes a snapshot to PATH while BAO_TOKEN is the token it handed out, and is denied otherwise.
+# It records "bao ARGS" in <tmp>/record/argv and each call's environment in <tmp>/record/env.bao.<n>.
+# It refuses an address that is not https, and a CA that is not a file, and while
+# <tmp>/store-fails/tls exists it fails as a listener whose certificate the CA did not sign would.
+# The token it hands out is marker-bao-token, and the pod's is marker-pod-token.
+set -uo pipefail
+
+root=${0%/bin/*}
+record=$root/record
+printf '%s\n' "bao $*" >> "$record/argv"
+call=1
+while [[ -e $record/env.bao.$call ]]; do
+  call=$((call + 1))
+done
+while IFS= read -r -d '' entry; do
+  printf '%s\0' "$entry"
+done < "/proc/$$/environ" > "$record/env.bao.$call"
+
+if [[ ${BAO_ADDR-} != https://* || ! -s ${BAO_CACERT-/nonexistent} ]]; then
+  echo "Error: no https address, or no CA to verify it with" >&2
+  exit 2
+fi
+if [[ -e $root/store-fails/tls ]]; then
+  echo "Error: tls: failed to verify certificate: x509: certificate signed by unknown authority" >&2
+  exit 2
+fi
+
+args="$*"
+case $args in
+  "write -field=token auth/kubernetes/login role="*)
+    role=${args##*role=}
+    role=${role%% *}
+    jwt=${args##* jwt=@}
+    if [[ $role != "$(cat "$record/role")" ]]; then
+      echo "Error: writing to auth/kubernetes/login: Code: 403. Errors: * invalid role name \"$role\"" >&2
+      exit 2
+    fi
+    if [[ $(cat "$jwt" 2> /dev/null) != marker-pod-token ]]; then
+      echo "Error: writing to auth/kubernetes/login: Code: 403. Errors: * permission denied" >&2
+      exit 2
+    fi
+    echo marker-bao-token
+    ;;
+  "operator raft snapshot save "*)
+    if [[ ${BAO_TOKEN-} != marker-bao-token ]]; then
+      echo "Error: permission denied" >&2
+      exit 2
+    fi
+    printf 'marker-snapshot-content %s\n\001\002binary tail\n' "$$" > "${args##* }"
+    ;;
+  *)
+    echo "Error: permission denied: bao $*" >&2
+    exit 2
+    ;;
+esac

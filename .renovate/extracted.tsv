@@ -100,6 +100,8 @@ kubernetes/apps/base/monitoring/vector/app/ocirepository.yaml	flux	ghcr.io/vecto
 kubernetes/apps/base/monitoring/vector/app/ocirepository.yaml	regex	ghcr.io/vectordotdev/helm-charts/vector	tag
 kubernetes/apps/base/monitoring/victoria-logs/app/ocirepository.yaml	flux	ghcr.io/victoriametrics/helm-charts/victoria-logs-single	tag
 kubernetes/apps/base/monitoring/victoria-logs/app/ocirepository.yaml	regex	ghcr.io/victoriametrics/helm-charts/victoria-logs-single	tag
+kubernetes/apps/base/openbao/openbao-snapshots/app/cronjob.yaml	kubernetes	docker.io/rclone/rclone	-
+kubernetes/apps/base/openbao/openbao-snapshots/app/cronjob.yaml	kubernetes	quay.io/openbao/openbao	-
 kubernetes/apps/base/openbao/openbao/app/ocirepository.yaml	flux	ghcr.io/openbao/charts/openbao	tag
 kubernetes/apps/base/openbao/openbao/app/ocirepository.yaml	regex	ghcr.io/openbao/charts/openbao	tag
 kubernetes/apps/base/openbao/openbao/app/values.yaml	helm-values	ghcr.io/fluxcd/flux-cli	-
