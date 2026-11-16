@@ -53,11 +53,18 @@ Then the operator, right away, before anything else logs in as the role `operato
    did, as after a rebuild. It seeds the key `volsync` the volume backups read
    ([volume-backups.md](volume-backups.md)); the demo's ExternalSecret syncs at its next refresh,
    its first restore runs and its claim is Bound.
+10. `just bao-seed-postgres <file>`, with `<file>` a new file beside the other custody files on a
+    store that never held the key, and the existing custody file of the PostgreSQL backups' key on
+    a store that did, as after a rebuild. It seeds the key `postgres-backups`, the customer key the
+    PostgreSQL clusters' archives are encrypted with
+    ([postgres-restore.md](postgres-restore.md#the-customer-key)); until it runs, the databases'
+    backup Secrets do not exist, so the instances start but their archiving fails and
+    `PostgresWALArchivingFailing` fires.
 
 The recipes read a custody file only where no one but the operator can have written it: the file
 owned by the operator and writable by no one else, in directories only the operator or root can
-write to, or whose sticky bit keeps others from replacing what they do not own; and `bao-recovery`
-and `bao-seed-volsync` write a new one only in such a place. age does not say who wrote a file, and
+write to, or whose sticky bit keeps others from replacing what they do not own; `bao-recovery`,
+`bao-seed-volsync` and `bao-seed-postgres` write a new one only in such a place. age does not say who wrote a file, and
 the Talos age key's recipient is public, so the file's place is what vouches for it: keep the
 custody files in a directory only the operator can write, beside the Talos age key.
 

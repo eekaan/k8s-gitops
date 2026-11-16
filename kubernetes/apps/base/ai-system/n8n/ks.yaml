@@ -20,17 +20,20 @@ spec:
   postBuild:
     substitute:
       CNPG_CLUSTER_NAME: n8n-db
+      CNPG_NAMESPACE: ai-system
       CNPG_STORAGE_SIZE: 5Gi
       APP: n8n
       VOLSYNC_CAPACITY: 5Gi
       VOLSYNC_SCHEDULE: "23 3 * * *"
-  # The Cluster and its PodMonitor are of the operator's and Prometheus Operator's kinds; the
-  # ExternalSecrets and the Password generator are External Secrets', and the encryption key's and
-  # the backups' read the store, which openbao-store makes and is Ready once the store is; the
-  # volume and its snapshots come from LINSTOR's default classes and the backups from VolSync; the
-  # route names the public Gateway.
+  # The Cluster and its PodMonitor are of the operator's and Prometheus Operator's kinds, and its
+  # ObjectStore the Barman Cloud plugin's, which archives its WAL; the ExternalSecrets and the
+  # Password generator are External Secrets', and the encryption key's and the backups' read the
+  # store, which openbao-store makes and is Ready once the store is; the volume and its snapshots
+  # come from LINSTOR's default classes and the backups from VolSync; the route names the public
+  # Gateway.
   dependsOn:
     - name: cloudnative-pg
+    - name: plugin-barman-cloud
     - name: prometheus-operator-crds
     - name: external-secrets
     - name: openbao-store

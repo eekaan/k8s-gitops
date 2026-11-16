@@ -374,7 +374,7 @@ of_ai_system() {
 }
 
 @test "A cluster that does not select n8n builds none of it, and one that selects it without what it depends on is refused" {
-  local dependency dependencies=(cloudnative-pg prometheus-operator-crds external-secrets openbao-store volsync linstor-cluster gateway-public)
+  local dependency dependencies=(cloudnative-pg plugin-barman-cloud prometheus-operator-crds external-secrets openbao-store volsync linstor-cluster gateway-public)
   # The overlay selects it with two entries, its namespace directory and its ks.yaml, and builds
   # the namespace, the defaults every namespace directory holds, and the Kustomization.
   # Open WebUI's ks.yaml is a third entry, selected by it alone.

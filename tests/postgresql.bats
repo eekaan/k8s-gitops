@@ -33,19 +33,25 @@ setup() {
   # Nothing to connect to: a step that needed a cluster fails instead of finding one.
   export KUBECONFIG="$BATS_TEST_TMPDIR/no-kubeconfig"
   unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
+  # KEY=VALUE pairs that built() puts over the example's cluster-config.
+  SET=()
 }
 
 # built NAMESPACE APP: the application as Flux applies it: its app/ built from the copy with its
 # ks.yaml, substituting strictly the variables of the cluster's example key lists and the
 # application's own postBuild.substitute over them, as scripts/kubernetes-check does. Writes
 # $BATS_TEST_TMPDIR/APP-built.yaml and sets BUILT; a build that fails prints Flux's error and
-# returns non-zero.
+# returns non-zero. The pairs of SET go over the cluster-config values first.
 built() {
-  local ns=$1 app=$2 vars="$BATS_TEST_TMPDIR/example-vars.yaml" ks="$BATS_TEST_TMPDIR/$2-ks.yaml"
+  local ns=$1 app=$2 vars="$BATS_TEST_TMPDIR/example-vars.yaml" ks="$BATS_TEST_TMPDIR/$2-ks.yaml" pair
   local error="$BATS_TEST_TMPDIR/$2-error.txt"
   # shellcheck disable=SC2016 # $list is a yq variable.
   yq ea '. as $list ireduce ({}; . * ($list // {}))' \
     "$CLUSTER/cluster-config.example.yaml" "$CLUSTER/cluster-secrets.example.yaml" >"$vars"
+  for pair in "${SET[@]}"; do
+    # shellcheck disable=SC2016 # $key is a yq variable.
+    KEY="${pair%%=*}" VALUE="${pair#*=}" yq -i '.[strenv(KEY)] = strenv(VALUE)' "$vars"
+  done
   # shellcheck disable=SC2016 # $vars is a yq variable.
   yq ea 'select(fileIndex == 0) as $vars | select(fileIndex == 1 and . != null)
     | .spec.postBuild.substitute = ($vars * (.spec.postBuild.substitute // {}))' \
@@ -76,7 +82,7 @@ render() {
   [ -s "$VALUES" ] || { echo "no values in the ConfigMap $name the HelmRelease reads"; return 1; }
   INLINE="$BATS_TEST_TMPDIR/inline.yaml"
   yq -N 'select(.kind == "HelmRelease") | .spec.values // {}' "$BUILT" >"$INLINE"
-  pulled="$BATS_FILE_TMPDIR/charts/$tag"
+  pulled="$BATS_FILE_TMPDIR/charts/${url##*/}-$tag"
   if [ ! -d "$pulled" ]; then
     mkdir -p "$pulled"
     helm pull "$url" --version "$tag" --destination "$pulled"
@@ -90,27 +96,32 @@ render() {
     --values "$VALUES" --values "$INLINE" >"$RENDERED"
 }
 
-# database APP [NAME]: writes the application APP as database_app() does, then builds it as built()
-# does, setting BUILT, and returns the build's status, printing Flux's error when it fails.
+# database APP [NAME [NAMESPACE]]: writes the application APP as database_app() does, then builds it
+# as built() does, setting BUILT, and returns the build's status, printing Flux's error when it fails.
 database() {
   database_app "$@"
   built demo "$1"
 }
 
-# database_app APP [NAME]: writes into the copy an application APP in the demo namespace that has no
-# manifests of its own and takes a cluster from the component, with the ks.yaml docs/kubernetes.md
-# gives for it, its cluster named NAME, or without a name when NAME is not given.
+# database_app APP [NAME [NAMESPACE]]: writes into the copy an application APP that has no manifests
+# of its own and takes a cluster from the component, with the ks.yaml docs/kubernetes.md gives for
+# it, its cluster named NAME, or without a name when NAME is not given, in the namespace NAMESPACE,
+# demo when it is not given. The application's files are always under demo/, which is only where
+# the copy keeps them.
 database_app() {
-  local app=$1 name=${2:-} dir="$TREE/kubernetes/apps/base/demo/$1"
+  local app=$1 name=${2:-} namespace=${3:-demo} dir="$TREE/kubernetes/apps/base/demo/$1"
   mkdir -p "$dir/app"
   printf '%s\n' '---' 'apiVersion: kustomize.config.k8s.io/v1beta1' 'kind: Kustomization' 'resources: []' \
     >"$dir/app/kustomization.yaml"
-  # shellcheck disable=SC2016 # $app is a yq variable.
-  APP_NAME="$app" yq -n 'strenv(APP_NAME) as $app | {"apiVersion": "kustomize.toolkit.fluxcd.io/v1",
+  # shellcheck disable=SC2016 # $app and $namespace are yq variables.
+  APP_NAME="$app" NAMESPACE_NAME="$namespace" yq -n 'strenv(APP_NAME) as $app | strenv(NAMESPACE_NAME) as $namespace
+    | {"apiVersion": "kustomize.toolkit.fluxcd.io/v1",
     "kind": "Kustomization", "metadata": {"name": $app, "namespace": "flux-system"},
-    "spec": {"path": "./apps/base/demo/" + $app + "/app", "targetNamespace": "demo",
-      "dependsOn": [{"name": "cloudnative-pg"}, {"name": "prometheus-operator-crds"}],
+    "spec": {"path": "./apps/base/demo/" + $app + "/app", "targetNamespace": $namespace,
+      "dependsOn": [{"name": "cloudnative-pg"}, {"name": "plugin-barman-cloud"}, {"name": "prometheus-operator-crds"},
+        {"name": "external-secrets"}, {"name": "openbao-store"}],
       "components": ["../../../../../components/cnpg-cluster"],
+      "postBuild": {"substitute": {"CNPG_NAMESPACE": $namespace}},
       "sourceRef": {"kind": "ExternalArtifact", "name": $app}}}' >"$dir/ks.yaml"
   if [ -n "$name" ]; then
     NAME="$name" yq -i '.spec.postBuild.substitute.CNPG_CLUSTER_NAME = strenv(NAME)' "$dir/ks.yaml"
@@ -133,6 +144,95 @@ resize() {
 # value, each on a line of its own.
 pin() {
   awk -v key="$2:" '$1 == key { print prev; print $2; exit } { prev = $0 }' "$1"
+}
+
+# schema_problems SCHEMA DOCUMENT: what is wrong with the JSON DOCUMENT against the JSON schema file
+# SCHEMA, one line each: a field the schema does not define, a value of another type than its field's
+# or outside its enum. Each value's place in the schema: a property, an array's items, a map's
+# additionalProperties, or anything at all below a field that keeps unknown fields. Metadata is the
+# API server's. Every path counts, those of maps and lists and of false and null values included:
+# paths(scalars) would drop the last two, and an empty map or list has no path below it.
+schema_problems() {
+  jq -r --slurpfile schema "$1" '
+    def node($s; $p): reduce $p[] as $k ($s;
+      if . == null or .["x-any"] then .
+      elif ($k | type) == "number" then .items
+      elif ((.properties // {}) | has($k)) then .properties[$k]
+      elif (.additionalProperties | type) == "object" then .additionalProperties
+      elif .["x-kubernetes-preserve-unknown-fields"] then {"x-any": true}
+      else null end);
+    def types($n): if $n["x-kubernetes-int-or-string"] then ["integer", "string"]
+      elif $n.type then [$n.type] else [($n.anyOf // [])[].type | select(. != null)] end;
+    def kind: if type == "number" then (if . == floor then "integer" else "number" end) else type end;
+    def shown: if type == "object" then "a map" elif type == "array" then "a list" else tojson end;
+    . as $doc | $schema[0] as $s
+    | paths as $p | select($p[0] != "apiVersion" and $p[0] != "kind" and $p[0] != "metadata")
+    | ($doc | getpath($p)) as $v | node($s; $p) as $n | ($p | map(tostring) | join(".")) as $at
+    | if $n == null then "\($at): not in the definition"
+      elif $n["x-any"] then empty
+      elif (types($n) | length) > 0 and (any(types($n)[]; . == ($v | kind) or (. == "number" and ($v | kind) == "integer")) | not)
+        then "\($at): \($v | shown) is not of type \(types($n) | join(" or "))"
+      elif ($v | type) != "object" and ($v | type) != "array" and $n.enum != null and (any($n.enum[]; . == $v) | not)
+        then "\($at): \($v | tojson) is not one of \($n.enum | tojson)"
+      else empty end' "$2"
+}
+
+# assert_restricted: every Deployment of $RENDERED meets the checks of the restricted Pod Security
+# level that a pod template can show, and fails with the line of the first that does not.
+assert_restricted() {
+  local pods containers line
+  # The checks of the restricted level that a pod template can show. A pod template that sets no
+  # user leaves the image's, which must not be root; runAsNonRoot makes the kubelet refuse root.
+  # shellcheck disable=SC2016 # $p is a yq variable.
+  pods="$(yq -N 'select(.kind == "Deployment") | .spec.template.spec as $p
+    | .metadata.name + " hostNamespaces=" + ([$p.hostNetwork, $p.hostPID, $p.hostIPC] | map(select(. == true)) | length | tostring)
+      + " volumes=" + ([$p.volumes // [] | .[] | keys | .[] | select(. != "name")] | unique | join(","))' "$RENDERED")"
+  echo "$pods"
+  [ -n "$pods" ]
+  while read -r line; do
+    [[ $line =~ \ hostNamespaces=0\ volumes=((configMap|csi|downwardAPI|emptyDir|ephemeral|persistentVolumeClaim|projected|secret)(,|$))*$ ]] ||
+      { echo "not restricted: $line"; return 1; }
+  done <<<"$pods"
+  # shellcheck disable=SC2016 # $d, $p and $c are yq variables.
+  containers="$(yq -N 'select(.kind == "Deployment") | .metadata.name as $d | .spec.template.spec as $p
+    | (($p.initContainers // []) + $p.containers)[] as $c
+    | $d + "/" + $c.name
+      + " privileged=" + ($c.securityContext.privileged // false | tostring)
+      + " allowPrivilegeEscalation=" + ($c.securityContext.allowPrivilegeEscalation | tostring)
+      + " runAsNonRoot=" + ($c.securityContext.runAsNonRoot // $p.securityContext.runAsNonRoot // false | tostring)
+      + " runAsUser=" + ($c.securityContext.runAsUser // $p.securityContext.runAsUser // "unset" | tostring)
+      + " seccomp=" + ($c.securityContext.seccompProfile.type // $p.securityContext.seccompProfile.type // "unset")
+      + " drop=" + ($c.securityContext.capabilities.drop // [] | join(","))
+      + " add=" + ($c.securityContext.capabilities.add // [] | map(select(. != "NET_BIND_SERVICE")) | join(","))
+      + " hostPorts=" + ([$c.ports // [] | .[] | select((.hostPort // 0) != 0)] | length | tostring)' "$RENDERED")"
+  echo "$containers"
+  [ -n "$containers" ]
+  while read -r line; do
+    [[ $line =~ \ privileged=false\ allowPrivilegeEscalation=false\ runAsNonRoot=true\ runAsUser=([1-9][0-9]*|unset)\ seccomp=(RuntimeDefault|Localhost)\ drop=([^ ]*,)?ALL(,[^ ]*)?\ add=\ hostPorts=0$ ]] ||
+      { echo "not restricted: $line"; return 1; }
+  done <<<"$containers"
+}
+
+# assert_values_keys: every key the repository's values for the chart of $APP set is one that chart
+# defines, so a key the chart renamed or dropped fails here and is not ignored by Helm.
+assert_values_keys() {
+  local keys="$BATS_TEST_TMPDIR/keys" unknown="" key map open
+  local paths='[.. | select(path | length > 0) | path | select(all_c(tag == "!!str")) | join(".")] | .[]'
+  render
+  mkdir -p "$keys"
+  yq -N "$paths" "$VALUES" "$INLINE" | sort -u >"$keys/ours"
+  helm show values "$CHART" >"$keys/defaults"
+  yq -N "$paths" "$keys/defaults" | sort -u >"$keys/chart"
+  # A map the chart leaves empty, such as an annotations map, takes keys of the user's choosing.
+  open="$(yq -N '[.. | select(tag == "!!map" and length == 0) | path | join(".")] | .[]' "$keys/defaults")"
+  while read -r key; do
+    for map in $open; do
+      if [[ $key == "$map".* ]]; then continue 2; fi
+    done
+    unknown+=" $key"
+  done < <(comm -23 "$keys/ours" "$keys/chart")
+  echo "keys the chart does not define:${unknown:- none}"
+  [ -z "$unknown" ]
 }
 
 @test "The PostgreSQL operator is installed with its resource definitions" {
@@ -245,42 +345,13 @@ pin() {
 }
 
 @test "The PostgreSQL operator meets the restricted Pod Security level its namespace enforces" {
-  local level pods containers line
+  local level
   level="$(yq -N 'select(.kind == "Namespace") | .metadata.labels["pod-security.kubernetes.io/enforce"] // "none"' \
     "$TREE/kubernetes/apps/base/$NAMESPACE/namespace.yaml")"
   echo "the namespace enforces: $level"
   [ "$level" = restricted ]
   render
-  # The checks of the restricted level that a pod template can show. A pod template that sets no
-  # user leaves the image's, which must not be root; runAsNonRoot makes the kubelet refuse root.
-  # shellcheck disable=SC2016 # $p is a yq variable.
-  pods="$(yq -N 'select(.kind == "Deployment") | .spec.template.spec as $p
-    | .metadata.name + " hostNamespaces=" + ([$p.hostNetwork, $p.hostPID, $p.hostIPC] | map(select(. == true)) | length | tostring)
-      + " volumes=" + ([$p.volumes // [] | .[] | keys | .[] | select(. != "name")] | unique | join(","))' "$RENDERED")"
-  echo "$pods"
-  [ -n "$pods" ]
-  while read -r line; do
-    [[ $line =~ \ hostNamespaces=0\ volumes=((configMap|csi|downwardAPI|emptyDir|ephemeral|persistentVolumeClaim|projected|secret)(,|$))*$ ]] ||
-      { echo "not restricted: $line"; return 1; }
-  done <<<"$pods"
-  # shellcheck disable=SC2016 # $d, $p and $c are yq variables.
-  containers="$(yq -N 'select(.kind == "Deployment") | .metadata.name as $d | .spec.template.spec as $p
-    | (($p.initContainers // []) + $p.containers)[] as $c
-    | $d + "/" + $c.name
-      + " privileged=" + ($c.securityContext.privileged // false | tostring)
-      + " allowPrivilegeEscalation=" + ($c.securityContext.allowPrivilegeEscalation | tostring)
-      + " runAsNonRoot=" + ($c.securityContext.runAsNonRoot // $p.securityContext.runAsNonRoot // false | tostring)
-      + " runAsUser=" + ($c.securityContext.runAsUser // $p.securityContext.runAsUser // "unset" | tostring)
-      + " seccomp=" + ($c.securityContext.seccompProfile.type // $p.securityContext.seccompProfile.type // "unset")
-      + " drop=" + ($c.securityContext.capabilities.drop // [] | join(","))
-      + " add=" + ($c.securityContext.capabilities.add // [] | map(select(. != "NET_BIND_SERVICE")) | join(","))
-      + " hostPorts=" + ([$c.ports // [] | .[] | select((.hostPort // 0) != 0)] | length | tostring)' "$RENDERED")"
-  echo "$containers"
-  [ -n "$containers" ]
-  while read -r line; do
-    [[ $line =~ \ privileged=false\ allowPrivilegeEscalation=false\ runAsNonRoot=true\ runAsUser=([1-9][0-9]*|unset)\ seccomp=(RuntimeDefault|Localhost)\ drop=([^ ]*,)?ALL(,[^ ]*)?\ add=\ hostPorts=0$ ]] ||
-      { echo "not restricted: $line"; return 1; }
-  done <<<"$containers"
+  assert_restricted
 }
 
 @test "The operator chart and the PostgreSQL image are pinned where Renovate updates them" {
@@ -305,7 +376,7 @@ pin() {
 }
 
 @test "An application gets a three-instance PostgreSQL cluster from the component" {
-  local clusters spec monitors selector ports backups
+  local clusters spec monitors selector ports labels
   database orders orders-db
   echo "builds: $(yq -N 'select(. != null) | .kind + "/" + .metadata.name' "$BUILT" | paste -sd' ' -)"
   clusters="$(yq -N 'select(.kind == "Cluster" and .apiVersion == "postgresql.cnpg.io/v1")
@@ -323,19 +394,15 @@ pin() {
     + " image=" + (.imageName // "none")' "$BUILT")"
   echo "$spec"
   [[ $spec =~ ^instances=3\ antiAffinity=true\ type=required\ topologyKey=kubernetes\.io/hostname\ pdb=true\ catalog=false\ image=[^:]+:[0-9]+\.[0-9]+(-[a-z0-9]+)*$ ]]
-  # None of the operator's own backup objects: the component's dump job copies the database out instead
-  # (tests/postgres-dumps.bats), as the operator's plugin offers server-side encryption only.
-  backups="$(yq -N 'select(. != null) | select(.kind == "Backup" or .kind == "ScheduledBackup" or .kind == "ObjectStore"
-      or (.kind == "Cluster" and (.spec.backup != null or (.spec.plugins // [] | length) > 0)))
-    | .kind + "/" + .metadata.name' "$BUILT")"
-  echo "backup configuration: ${backups:-none}"
-  [ -z "$backups" ]
   # The operator labels an instance's pods with its Cluster's name and their role, and names the
   # port its exporter serves on metrics.
   monitors="$(yq -N 'select(.kind == "PodMonitor") | .metadata.namespace + "/" + .metadata.name' "$BUILT")"
   selector="$(yq -N -o json -I0 'select(.kind == "PodMonitor") | .spec.selector.matchLabels // {}' "$BUILT")"
   ports="$(yq -N 'select(.kind == "PodMonitor") | .spec.podMetricsEndpoints // [] | map(.port) | join(",")' "$BUILT")"
-  echo "monitors: ${monitors:-none}; selector: $selector; ports: $ports"
+  # Its series carry the Cluster's name as the label cnpg_io_cluster, which the alerts group by.
+  labels="$(yq -N 'select(.kind == "PodMonitor") | .spec.podTargetLabels // [] | join(",")' "$BUILT")"
+  echo "monitors: ${monitors:-none}; selector: $selector; ports: $ports; labels: $labels"
+  [ "$labels" = cnpg.io/cluster ]
   [ "$(grep -c . <<<"$monitors")" -eq 1 ]
   [[ $monitors == demo/* ]]
   [[ $selector == '{"cnpg.io/cluster":"orders-db"}' || $selector == '{"cnpg.io/cluster":"orders-db","cnpg.io/podRole":"instance"}' ]]
@@ -370,32 +437,7 @@ pin() {
   cluster="$BATS_TEST_TMPDIR/cluster.json"
   yq -N -o json 'select(.kind == "Cluster")' "$BUILT" >"$cluster"
   [ -s "$cluster" ]
-  # Each value's place in the schema: a property, an array's items, a map's additionalProperties,
-  # or anything at all below a field that keeps unknown fields. Metadata is the API server's. Every
-  # path counts, those of maps and lists and of false and null values included: paths(scalars)
-  # would drop the last two, and an empty map or list has no path below it.
-  problems="$(jq -r --slurpfile schema "$schema" '
-    def node($s; $p): reduce $p[] as $k ($s;
-      if . == null or .["x-any"] then .
-      elif ($k | type) == "number" then .items
-      elif ((.properties // {}) | has($k)) then .properties[$k]
-      elif (.additionalProperties | type) == "object" then .additionalProperties
-      elif .["x-kubernetes-preserve-unknown-fields"] then {"x-any": true}
-      else null end);
-    def types($n): if $n["x-kubernetes-int-or-string"] then ["integer", "string"]
-      elif $n.type then [$n.type] else [($n.anyOf // [])[].type | select(. != null)] end;
-    def kind: if type == "number" then (if . == floor then "integer" else "number" end) else type end;
-    def shown: if type == "object" then "a map" elif type == "array" then "a list" else tojson end;
-    . as $doc | $schema[0] as $s
-    | paths as $p | select($p[0] != "apiVersion" and $p[0] != "kind" and $p[0] != "metadata")
-    | ($doc | getpath($p)) as $v | node($s; $p) as $n | ($p | map(tostring) | join(".")) as $at
-    | if $n == null then "\($at): not in the definition"
-      elif $n["x-any"] then empty
-      elif (types($n) | length) > 0 and (any(types($n)[]; . == ($v | kind) or (. == "number" and ($v | kind) == "integer")) | not)
-        then "\($at): \($v | shown) is not of type \(types($n) | join(" or "))"
-      elif ($v | type) != "object" and ($v | type) != "array" and $n.enum != null and (any($n.enum[]; . == $v) | not)
-        then "\($at): \($v | tojson) is not one of \($n.enum | tojson)"
-      else empty end' "$cluster")"
+  problems="$(schema_problems "$schema" "$cluster")"
   echo "fields: $(jq -r '[paths | select(.[0] == "spec") | map(tostring) | join(".")] | join(" ")' "$cluster")"
   echo "problems: ${problems:-none}"
   [ -z "$problems" ]
@@ -432,21 +474,401 @@ pin() {
 }
 
 @test "every values key of cloudnative-pg is one its pinned chart defines" {
-  local keys="$BATS_TEST_TMPDIR/keys" unknown="" key map open
-  local paths='[.. | select(path | length > 0) | path | select(all_c(tag == "!!str")) | join(".")] | .[]'
+  assert_values_keys
+}
+
+@test "every values key of plugin-barman-cloud is one its pinned chart defines" {
+  APP="plugin-barman-cloud"
+  assert_values_keys
+}
+
+# archive_path FILE: where the Cluster in the built objects FILE archives to: the destinationPath of
+# the ObjectStore its archiver plugin entry names, and under it the server name that entry gives,
+# which is the directory the plugin keeps the archive in.
+archive_path() {
+  local store server
+  store="$(yq -N 'select(.kind == "Cluster") | .spec.plugins[] | select(.isWALArchiver == true) | .parameters.barmanObjectName' "$1")"
+  server="$(yq -N 'select(.kind == "Cluster") | .spec.plugins[] | select(.isWALArchiver == true) | .parameters.serverName' "$1")"
+  echo "$(STORE="$store" yq -N 'select(.kind == "ObjectStore" and .metadata.name == strenv(STORE)) | .spec.configuration.destinationPath' "$1")/$server"
+}
+
+@test "A PostgreSQL cluster from the component archives its WAL and takes a daily base backup to a path of its own in the object store" {
+  local plugins stores backups schedule minute hour taken retention compression endpoint vars dump_schedule dump_start
+  local dump_end deadline
+  vars="$BATS_TEST_TMPDIR/example-vars.yaml"
+  database orders orders-db
+  # The Cluster archives its WAL through the plugin, to the ObjectStore of its own name, in a
+  # directory of its own name, and the operator's deprecated in-tree object store is not used.
+  plugins="$(yq -N 'select(.kind == "Cluster") | .spec.plugins // [] | map(.name + " archiver=" + (.isWALArchiver | tostring)
+    + " store=" + .parameters.barmanObjectName + " server=" + .parameters.serverName) | join(",")' "$BUILT")"
+  echo "plugins: ${plugins:-none}"
+  [ "$plugins" = "barman-cloud.cloudnative-pg.io archiver=true store=orders-db server=orders-db" ]
+  [ "$(yq -N 'select(.kind == "Cluster") | .spec.backup.barmanObjectStore // "none"' "$BUILT")" = none ]
+  stores="$(yq -N 'select(.kind == "ObjectStore") | .apiVersion + " " + .metadata.namespace + "/" + .metadata.name' "$BUILT")"
+  echo "object stores: ${stores:-none}"
+  [ "$stores" = "barmancloud.cnpg.io/v1 demo/orders-db" ]
+  # One base backup a day, taken through the plugin, the first as soon as the schedule exists.
+  backups="$(yq -N 'select(.kind == "ScheduledBackup") | .metadata.namespace + "/" + .metadata.name + " cluster=" + .spec.cluster.name
+    + " method=" + .spec.method + " plugin=" + .spec.pluginConfiguration.name + " immediate=" + (.spec.immediate | tostring)
+    + " owner=" + .spec.backupOwnerReference' "$BUILT")"
+  echo "scheduled backups: ${backups:-none}"
+  [ "$backups" = "demo/orders-db cluster=orders-db method=plugin plugin=barman-cloud.cloudnative-pg.io immediate=true owner=self" ]
+  [ "$(yq -N 'select(.kind == "ScheduledBackup") | .spec.suspend // false' "$BUILT")" = false ]
+  schedule="$(yq -N 'select(.kind == "ScheduledBackup") | .spec.schedule' "$BUILT")"
+  echo "schedule: $schedule"
+  # Six fields, seconds first: second 0 of one minute of one hour, every day.
+  [[ $schedule =~ ^0\ ([0-9]|[1-5][0-9])\ ([0-9]|1[0-9]|2[0-3])\ \*\ \*\ \*$ ]]
+  minute=${BASH_REMATCH[1]}
+  hour=${BASH_REMATCH[2]}
+  # Not on a minute that people and cron jobs favour, nor one that another backup of the cluster's
+  # applications or of the component starts at, so the copies do not all read the same disks and
+  # write to the same bucket together.
+  taken="$(grep -rhE '^[[:space:]]*(VOLSYNC_SCHEDULE: |schedule: )"?[0-9*/,]+ [0-9*/,]+' "$REPO/kubernetes/apps" "$REPO/kubernetes/components" \
+    --exclude=scheduledbackup.yaml | sed -E 's/^[^"0-9*]*"?([0-9*/,]+) ([0-9*/,]+).*/\1:\2/' | sort -u | paste -sd' ' -)"
+  echo "other schedules (minute:hour): $taken; this one's minute: $minute"
+  [[ $minute != 0 && $minute != 15 && $minute != 30 && $minute != 45 ]]
+  [[ " $taken " != *" $minute:"* ]]
+  # Nor inside the window of the database's own dump job, from its schedule to the end of its run's
+  # deadline, which holds the wait of its stagger, so the dump's reads and the base backup's do not
+  # meet on the instances.
+  dump_schedule="$(yq -N 'select(.kind == "CronJob" and .metadata.name == "orders-db-pgdump") | .spec.schedule' "$BUILT")"
+  deadline="$(yq -N 'select(.kind == "CronJob" and .metadata.name == "orders-db-pgdump") | .spec.jobTemplate.spec.activeDeadlineSeconds' "$BUILT")"
+  [[ $dump_schedule =~ ^([0-9]|[1-5][0-9])\ ([0-9]|1[0-9]|2[0-3])\ \*\ \*\ \*$ ]]
+  dump_start=$((BASH_REMATCH[2] * 60 + BASH_REMATCH[1]))
+  [[ $deadline =~ ^[1-9][0-9]*$ ]]
+  dump_end=$((dump_start + (deadline + 59) / 60))
+  echo "dump window: minute $dump_start to $dump_end of the day; base backup at minute $((hour * 60 + minute))"
+  ((hour * 60 + minute < dump_start || hour * 60 + minute > dump_end))
+  # What the ObjectStore keeps and how: a recovery window for base backups and WAL, both compressed.
+  retention="$(yq -N 'select(.kind == "ObjectStore") | .spec.retentionPolicy // "none"' "$BUILT")"
+  compression="$(yq -N 'select(.kind == "ObjectStore") | (.spec.configuration.data.compression // "none") + " " + (.spec.configuration.wal.compression // "none")' "$BUILT")"
+  echo "retention: $retention; compression of base backups and WAL: $compression"
+  [[ $retention =~ ^[1-9][0-9]*[dwm]$ ]]
+  [[ $compression =~ ^(bzip2|gzip|lz4|snappy|zstd)\ (bzip2|gzip|lz4|snappy|xz|zstd)$ ]]
+  # The cluster's object storage: its endpoint from cluster-config, the postgres bucket, and under
+  # it the Kubernetes cluster, the namespace and the database.
+  endpoint="$(yq -N 'select(.kind == "ObjectStore") | .spec.configuration.endpointURL' "$BUILT")"
+  [ "$endpoint" = "$(yq '.S3_ENDPOINT' "$vars")" ]
+  echo "archive: $(archive_path "$BUILT")"
+  [ "$(archive_path "$BUILT")" = "s3://$(yq '.BACKUP_BUCKET_PREFIX' "$vars")-postgres/$(yq '.CLUSTER_NAME' "$vars")/demo/orders-db" ]
+  # The endpoint is cluster-config's and no other: moved there, it moves here.
+  SET=(S3_ENDPOINT=https://s3.marker.invalid)
+  database orders orders-db
+  endpoint="$(yq -N 'select(.kind == "ObjectStore") | .spec.configuration.endpointURL' "$BUILT")"
+  echo "endpoint for another cluster-config: $endpoint"
+  [ "$endpoint" = https://s3.marker.invalid ]
+}
+
+@test "Every object a database archives is encrypted at the provider with a customer key the provider does not keep" {
+  local app name selectors
+  for app in orders billing; do
+    database "$app" "$app-db"
+    # The customer key is a key of a Secret, named in s3Credentials, beside the other credentials,
+    # and the plugin refuses an ObjectStore that sets it and the bucket-managed encryption too.
+    selectors="$(yq -N 'select(.kind == "ObjectStore") | .spec.configuration.s3Credentials.sseCustomerKey | .name + "/" + .key' "$BUILT")"
+    name="$(yq -N 'select(.kind == "ObjectStore") | .spec.configuration.s3Credentials.accessKeyId.name' "$BUILT")"
+    echo "$app: customer key from $selectors; the other credentials from $name"
+    [[ $selectors == "$name/"?* ]]
+    [ "$(yq -N 'select(.kind == "ObjectStore") | .spec.configuration.data.encryption // "unset"' "$BUILT")" = unset ]
+    [ "$(yq -N 'select(.kind == "ObjectStore") | .spec.configuration.wal.encryption // "unset"' "$BUILT")" = unset ]
+    [ "$(yq -N 'select(.kind == "ObjectStore") | .spec.configuration.serverName // "unset"' "$BUILT")" = unset ]
+  done
+}
+
+@test "The object store's key reaches the database's namespace from the secret store and is nowhere in the tree" {
+  local secret keys refs credential literal source template read_from es
+  database orders orders-db
+  # Two ExternalSecrets in the application's namespace: the one that writes the Secret the
+  # ObjectStore names, read here, and the dump job's (tests/postgres-dumps.bats). The ObjectStore's
+  # is made from the cluster's S3 key in the key volsync, its two key fields and not the restic
+  # master beside them, and from the customer key's own key.
+  [ "$(yq -N 'select(.kind == "ExternalSecret") | .metadata.namespace + "/" + .metadata.name' "$BUILT" | sort | paste -sd,)" = demo/orders-db-backup,demo/orders-db-dump-s3 ]
+  secret="$(yq -N 'select(.kind == "ObjectStore") | .spec.configuration.s3Credentials.accessKeyId.name' "$BUILT")"
+  es="select(.kind == \"ExternalSecret\" and .spec.target.name == \"$secret\")"
+  [ "$(yq -N "$es | .metadata.namespace + \"/\" + .metadata.name" "$BUILT")" = demo/orders-db-backup ]
+  [ "$(yq -N "$es | .spec.secretStoreRef.kind + \"/\" + .spec.secretStoreRef.name" "$BUILT")" = ClusterSecretStore/openbao ]
+  refs="$(yq -N "$es | .spec.data | map(.remoteRef.key + \"/\" + .remoteRef.property) | sort | join(\",\")" "$BUILT")"
+  echo "reads: $refs"
+  [ "$refs" = "postgres-backups/SSE_C_KEY,volsync/AWS_ACCESS_KEY_ID,volsync/AWS_SECRET_ACCESS_KEY" ]
+  [ "$(yq -N "$es | .spec.dataFrom // \"none\"" "$BUILT")" = none ]
+  # The Secret it makes is the one every credential of the ObjectStore names, by keys it holds.
+  keys="$(yq -N "$es | .spec.target.template.data | keys | .[]" "$BUILT")"
+  for credential in accessKeyId secretAccessKey region sseCustomerKey; do
+    echo "$credential: $(CRED="$credential" yq -N 'select(.kind == "ObjectStore") | .spec.configuration.s3Credentials[strenv(CRED)] | .name + "/" + .key' "$BUILT")"
+    [ "$(CRED="$credential" yq -N 'select(.kind == "ObjectStore") | .spec.configuration.s3Credentials[strenv(CRED)].name' "$BUILT")" = "$secret" ]
+    grep -qxF "$(CRED="$credential" yq -N 'select(.kind == "ObjectStore") | .spec.configuration.s3Credentials[strenv(CRED)].key' "$BUILT")" <<<"$keys"
+  done
+  # Which value of the store ends up under which key: each credential's key holds a template of one
+  # store value, and the value is read from the entry and property the credential is made from. A
+  # key that held the other credential's value, or a literal, would still be a key the Secret has.
+  for credential in accessKeyId:volsync/AWS_ACCESS_KEY_ID secretAccessKey:volsync/AWS_SECRET_ACCESS_KEY \
+    sseCustomerKey:postgres-backups/SSE_C_KEY; do
+    source="$(CRED="${credential%%:*}" yq -N 'select(.kind == "ObjectStore") | .spec.configuration.s3Credentials[strenv(CRED)].key' "$BUILT")"
+    template="$(KEY="$source" yq -N "$es | .spec.target.template.data[strenv(KEY)]" "$BUILT")"
+    [[ $template =~ ^\{\{\ \.([A-Za-z]+)\ \}\}$ ]]
+    read_from="$(NAME="${BASH_REMATCH[1]}" yq -N "$es | .spec.data[] | select(.secretKey == strenv(NAME))
+      | .remoteRef.key + \"/\" + .remoteRef.property" "$BUILT")"
+    echo "${credential%%:*}: $source = $template, read from $read_from"
+    [ "$read_from" = "${credential#*:}" ]
+  done
+  # The region is not secret and is the cluster's own, from cluster-config, written as a value.
+  [ "$(yq -N "$es | .spec.target.template.data.REGION" "$BUILT")" = "$(yq '.S3_REGION' "$BATS_TEST_TMPDIR/example-vars.yaml")" ]
+  # And no other: moved there, it moves here.
+  SET=(S3_REGION=marker-region)
+  database orders orders-db
+  echo "region for another cluster-config: $(yq -N "$es | .spec.target.template.data.REGION" "$BUILT")"
+  [ "$(yq -N "$es | .spec.target.template.data.REGION" "$BUILT")" = marker-region ]
+  # Nothing built is a Secret, and the credentials of the ObjectStore are references only.
+  [ -z "$(yq -N 'select(.kind == "Secret") | .metadata.name' "$BUILT")" ]
+  [ "$(yq -N 'select(.kind == "ObjectStore") | .spec.configuration.s3Credentials | to_entries | map(.value | keys | join("+")) | unique | join(",")' "$BUILT")" = key+name ]
+  # No key in the tree: no encrypted file stands in for one, and no base64 of 32 bytes, the form of
+  # the customer key, is written in a manifest of the component or of an application.
+  [ -z "$(find "$REPO/kubernetes" \( -name '*.enc.*' -o -name '*.sops.*' -o -name '*.age*' \))" ]
+  literal="$(grep -rnE '(^|[^A-Za-z0-9+/])[A-Za-z0-9+/]{43}=([^A-Za-z0-9+/=]|$)' "$REPO/kubernetes/components/cnpg-cluster" "$REPO/kubernetes/apps/base/cnpg-system" \
+    "$REPO/kubernetes/apps/base/ai-system" || true)"
+  echo "a base64 key in a manifest: ${literal:-none}"
+  [ -z "$literal" ]
+}
+
+@test "Two databases never share a backup path" {
+  local -a paths=()
+  database orders orders-db
+  paths+=("$(archive_path "$BUILT")")
+  database billing billing-db
+  paths+=("$(archive_path "$BUILT")")
+  # The same database name in another namespace.
+  database_app orders-other orders-db other
+  built demo orders-other
+  paths+=("$(archive_path "$BUILT")")
+  database_app billing-other billing-db other
+  built demo billing-other
+  paths+=("$(archive_path "$BUILT")")
+  printf 'path: %s\n' "${paths[@]}"
+  [ "$(printf '%s\n' "${paths[@]}" | sort -u | wc -l)" -eq 4 ]
+  # Each part moves the path alone: the Kubernetes cluster's name, which keeps two clusters that
+  # share a bucket apart, and the bucket's prefix.
+  SET=(CLUSTER_NAME=other-cluster)
+  database orders orders-db
+  echo "another cluster: $(archive_path "$BUILT")"
+  [ "$(archive_path "$BUILT")" = "${paths[0]/\/example-cluster\//\/other-cluster\/}" ]
+  SET=(BACKUP_BUCKET_PREFIX=marker-prefix)
+  database orders orders-db
+  echo "another prefix: $(archive_path "$BUILT")"
+  [ "$(archive_path "$BUILT")" = "${paths[0]/\/\/example-backups-postgres\//\/\/marker-prefix-postgres\/}" ]
+  # A path never ends where another's begins: the database's name is its own last element.
+  [[ ${paths[0]} == */demo/orders-db ]]
+}
+
+@test "Two databases never share a backup path, whatever namespace an application names" {
+  local dir="$BATS_TEST_TMPDIR/wrong-namespace"
+  # The path takes its namespace from CNPG_NAMESPACE, which the component cannot read from the
+  # Kustomization's targetNamespace, so scripts/kubernetes-check holds the two equal for every
+  # Kustomization that takes the component: one that names another namespace shares the path of
+  # the database of that namespace.
+  run "$REPO/scripts/kubernetes-check" "$REPO"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  mkdir -p "$dir"
+  cp -R "$REPO/kubernetes" "$dir/kubernetes"
+  yq -i '.spec.postBuild.substitute.CNPG_NAMESPACE = "other"' "$dir/kubernetes/apps/base/ai-system/n8n/ks.yaml"
+  run "$REPO/scripts/kubernetes-check" "$dir"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"kubernetes/apps/base/ai-system/n8n/ks.yaml: Kustomization n8n sets CNPG_NAMESPACE to other"* ]]
+  [[ $output == *"targetNamespace is ai-system"* ]]
+  # Left out, the build fails strictly, so no database is archived under an empty namespace, and the
+  # check names the variable.
+  yq -i 'del(.spec.postBuild.substitute.CNPG_NAMESPACE)' "$dir/kubernetes/apps/base/ai-system/n8n/ks.yaml"
+  run "$REPO/scripts/kubernetes-check" "$dir"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *CNPG_NAMESPACE* ]]
+}
+
+@test "A cluster that does not select the backup plugin builds no database that needs it, and one that selects a database without it is refused" {
+  local overlay plugin=plugin-barman-cloud dir
+  # n8n takes a cluster from the component, which names the plugin's application in dependsOn of
+  # every user, as it names the operator's.
+  overlay="$(kustomize build --load-restrictor LoadRestrictionsNone "$REPO/kubernetes/apps/overlays/lab-sto2")"
+  [ "$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "n8n") | .spec.dependsOn | map(.name) | map(select(. == "'$plugin'")) | join(",")' <<<"$overlay")" = "$plugin" ]
+  [ "$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "'$plugin'") | .spec.path + " wait=" + (.spec.wait | tostring)' <<<"$overlay")" \
+    = "./apps/base/cnpg-system/$plugin/app wait=true" ]
+  run "$REPO/scripts/kubernetes-check" "$REPO"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  # An overlay that lists n8n without the plugin's application is refused, naming both.
+  dir="$BATS_TEST_TMPDIR/without-plugin"
+  mkdir -p "$dir"
+  cp -R "$REPO/kubernetes" "$dir/kubernetes"
+  PLUGIN="$plugin" yq -i '.resources |= map(select(test("/" + strenv(PLUGIN) + "/ks.yaml$") | not))' \
+    "$dir/kubernetes/apps/overlays/lab-sto2/kustomization.yaml"
+  run "$REPO/scripts/kubernetes-check" "$dir"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"kubernetes/apps/base/ai-system/n8n/ks.yaml: Kustomization n8n names $plugin"* ]]
+  [[ $output == *"does not enable"* ]]
+  # A Kustomization that takes the component and does not name the plugin's application is refused
+  # although the overlay enables it, so a database cannot start before the plugin's webhooks exist.
+  dir="$BATS_TEST_TMPDIR/without-dependency"
+  mkdir -p "$dir"
+  cp -R "$REPO/kubernetes" "$dir/kubernetes"
+  PLUGIN="$plugin" yq -i '.spec.dependsOn |= map(select(.name != strenv(PLUGIN)))' \
+    "$dir/kubernetes/apps/base/ai-system/n8n/ks.yaml"
+  run "$REPO/scripts/kubernetes-check" "$dir"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"kubernetes/apps/base/ai-system/n8n/ks.yaml: Kustomization n8n takes the cnpg-cluster component but does not name $plugin in dependsOn"* ]]
+  # One that lists neither builds neither.
+  dir="$BATS_TEST_TMPDIR/without-plugin"
+  PLUGIN=n8n yq -i '.resources |= map(select(test("/" + strenv(PLUGIN) + "/ks.yaml$") | not))' \
+    "$dir/kubernetes/apps/overlays/lab-sto2/kustomization.yaml"
+  run "$REPO/scripts/kubernetes-check" "$dir"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  overlay="$(kustomize build --load-restrictor LoadRestrictionsNone "$dir/kubernetes/apps/overlays/lab-sto2")"
+  [ -z "$(yq -N 'select(.kind == "Kustomization" and (.metadata.name == "n8n" or .metadata.name == "'$plugin'")) | .metadata.name' <<<"$overlay")" ]
+}
+
+@test "The Barman Cloud plugin runs beside the operator it is made for, signed by the cluster's own CA, and meets the restricted Pod Security level" {
+  local required=1.30 operator overlay image sidecar version deployment labels replicas spread budgets issuers secrets served
+  # The plugin's release requires CloudNativePG 1.30 or newer, which is the operator's version the
+  # chart the repository pins installs, read from the chart. The floor is this constant, from the
+  # installation documentation of the plugin's release, and nothing reads it from a release: a plugin
+  # release whose documentation raises it needs it raised here by hand, in the same pull request.
   render
-  mkdir -p "$keys"
-  yq -N "$paths" "$VALUES" "$INLINE" | sort -u >"$keys/ours"
-  helm show values "$CHART" >"$keys/defaults"
-  yq -N "$paths" "$keys/defaults" | sort -u >"$keys/chart"
-  # A map the chart leaves empty, such as an annotations map, takes keys of the user's choosing.
-  open="$(yq -N '[.. | select(tag == "!!map" and length == 0) | path | join(".")] | .[]' "$keys/defaults")"
-  while read -r key; do
-    for map in $open; do
-      if [[ $key == "$map".* ]]; then continue 2; fi
-    done
-    unknown+=" $key"
-  done < <(comm -23 "$keys/ours" "$keys/chart")
-  echo "keys the chart does not define:${unknown:- none}"
-  [ -z "$unknown" ]
+  operator="$(tar -xzOf "$CHART" cloudnative-pg/Chart.yaml | yq '.appVersion')"
+  echo "operator $operator; the plugin requires $required or newer"
+  [ "$(printf '%s\n' "$required" "$operator" | sort -V | head -n 1)" = "$required" ]
+  APP="plugin-barman-cloud"
+  # Enabled in the cluster's overlay, after the operator and the CA that signs its certificates.
+  overlay="$(kustomize build --load-restrictor LoadRestrictionsNone "$TREE/kubernetes/apps/overlays/lab-sto2")"
+  [ "$(yq -N "select(.kind == \"Kustomization\" and .metadata.name == \"$APP\") | .spec.path + \" wait=\" + (.spec.wait | tostring)" <<<"$overlay")" \
+    = "./apps/base/$NAMESPACE/$APP/app wait=true" ]
+  [ "$(yq -N "select(.kind == \"Kustomization\" and .metadata.name == \"$APP\") | .spec.dependsOn | map(.name) | sort | join(\" \")" <<<"$overlay")" \
+    = "cloudnative-pg cluster-ca" ]
+  render
+  version="$(tar -xzOf "$CHART" plugin-barman-cloud/Chart.yaml | yq '.appVersion')"
+  echo "plugin $version"
+  # Everything it renders is in the operator's namespace, which the plugin must share.
+  [ -z "$(yq -N "select(. != null and .metadata.namespace != null and .metadata.namespace != \"$NAMESPACE\") | .kind" "$RENDERED")" ]
+  # Its images are the release its chart is made for, pinned by digest, the operator's and the
+  # sidecar the operator injects into every database pod.
+  image="$(yq -N 'select(.kind == "Deployment") | .spec.template.spec.containers[0].image' "$RENDERED")"
+  sidecar="$(yq -N 'select(.kind == "ConfigMap") | .data.SIDECAR_IMAGE' "$RENDERED")"
+  echo "images: $image $sidecar"
+  [[ $image == "ghcr.io/cloudnative-pg/plugin-barman-cloud:$version@sha256:"* ]]
+  [[ $sidecar == "ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar:$version@sha256:"* ]]
+  [[ ${image#*@} =~ ^sha256:[0-9a-f]{64}$ && ${sidecar#*@} =~ ^sha256:[0-9a-f]{64}$ ]]
+  # More than one replica, on different nodes, with a budget that keeps one running while a node is
+  # drained: while no replica answers, the operator cannot make a database's pod.
+  deployment="$BATS_TEST_TMPDIR/deployment.yaml"
+  yq -N 'select(.kind == "Deployment")' "$RENDERED" >"$deployment"
+  labels="$(yq -o json -I0 '.spec.template.metadata.labels // {}' "$deployment")"
+  replicas="$(yq '.spec.replicas // 1' "$deployment")"
+  # shellcheck disable=SC2016 # $labels is a yq variable.
+  spread="$(LABELS="$labels" yq -N '(strenv(LABELS) | from_yaml) as $labels
+    | [.spec.template.spec.topologySpreadConstraints // [] | .[]
+      | select(.topologyKey == "kubernetes.io/hostname" and .whenUnsatisfiable == "DoNotSchedule" and .maxSkew == 1
+        and (.labelSelector.matchLabels // {} | length) > 0
+        and (.labelSelector.matchLabels | to_entries | all_c(.value == $labels[.key])))] | length' "$deployment")"
+  # shellcheck disable=SC2016 # $labels is a yq variable.
+  budgets="$(LABELS="$labels" yq -N '(strenv(LABELS) | from_yaml) as $labels | select(.kind == "PodDisruptionBudget"
+    and (.spec.selector.matchLabels // {} | length) > 0
+    and (.spec.selector.matchLabels | to_entries | all_c(.value == $labels[.key])))
+    | (.spec.minAvailable // "unset" | tostring)' "$BUILT")"
+  echo "replicas $replicas; spread constraints $spread; budgets (minAvailable): ${budgets:-none}"
+  [ "$replicas" -ge 2 ]
+  [ "$spread" -ge 1 ]
+  [[ $budgets =~ ^[0-9]+$ ]]
+  ((budgets >= 1 && budgets < replicas))
+  # Its two certificates come from the cluster's own CA, the ClusterIssuer cluster-ca, and from no
+  # other issuer, ACME issuers included; the chart makes neither certificates nor an issuer of its
+  # own, which would be self-signed. They make the Secrets the Service says the operator reads.
+  [ -z "$(yq -N 'select(.kind == "Certificate" or .kind == "Issuer" or .kind == "ClusterIssuer") | .kind' "$RENDERED")" ]
+  issuers="$(yq -N 'select(.kind == "Certificate") | .metadata.name + " " + .spec.issuerRef.kind + "/" + .spec.issuerRef.name' "$BUILT" | sort | paste -sd, -)"
+  echo "certificates: $issuers"
+  [ "$issuers" = "barman-cloud-client ClusterIssuer/cluster-ca,barman-cloud-server ClusterIssuer/cluster-ca" ]
+  [ -z "$(yq -N 'select(.kind == "Issuer" or .kind == "ClusterIssuer") | .kind' "$BUILT")" ]
+  secrets="$(yq -N 'select(.kind == "Certificate") | .spec.secretName' "$BUILT" | sort | paste -sd, -)"
+  served="$(yq -N 'select(.kind == "Service") | .metadata.annotations["cnpg.io/pluginClientSecret"] + "," + .metadata.annotations["cnpg.io/pluginServerSecret"]' "$RENDERED")"
+  echo "secrets: $secrets; the Service names: $served"
+  [ "$secrets" = "$(tr ',' '\n' <<<"$served" | sort | paste -sd, -)" ]
+  # The server's certificate is valid for the Service's name, which the operator dials.
+  [ "$(yq -N 'select(.kind == "Certificate" and .metadata.name == "barman-cloud-server") | .spec.dnsNames | join(",")' "$BUILT")" \
+    = "$(yq -N 'select(.kind == "Service") | .metadata.name' "$RENDERED")" ]
+  # The namespace it shares with the operator enforces the restricted level, and the pods meet it.
+  [ "$(yq -N 'select(.kind == "Namespace") | .metadata.labels["pod-security.kubernetes.io/enforce"]' "$TREE/kubernetes/apps/base/$NAMESPACE/namespace.yaml")" = restricted ]
+  assert_restricted
+}
+
+@test "The plugin's chart and images are pinned where Renovate updates them" {
+  local -a chart
+  local dir=kubernetes/apps/base/cnpg-system/plugin-barman-cloud/app url image repository line
+  mapfile -t chart < <(pin "$TREE/$dir/ocirepository.yaml" tag)
+  url="$(yq '.spec.url' "$TREE/$dir/ocirepository.yaml")"
+  echo "chart: $url, ${chart[1]:-no tag} under '${chart[0]:-nothing}'"
+  [[ ${chart[0]:-} =~ ^\ *#\ renovate:\ datasource=docker\ depName=([^ ]+)$ ]]
+  [ "${BASH_REMATCH[1]}" = "${url#oci://}" ]
+  [[ ${chart[1]:-} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+  # Each image under the chart's values: the operator's and the sidecar's, by tag and digest, which
+  # Renovate moves together.
+  for image in plugin-barman-cloud plugin-barman-cloud-sidecar; do
+    repository="ghcr.io/cloudnative-pg/$image"
+    line="$(awk -v want="# renovate: datasource=docker depName=$repository" '
+      { sub(/^[ \t]+/, "") } prev == want { print $0; exit } { prev = $0 }' "$TREE/$dir/values.yaml")"
+    echo "$image: ${line:-nothing}"
+    [[ $line =~ ^tag:\ \"?v[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}\"?$ ]]
+  done
+}
+
+@test "Every field of the component's ObjectStore and ScheduledBackup is one the pinned plugin and operator define" {
+  local operator_schema plugin_schema problems
+  operator_schema="$BATS_TEST_TMPDIR/scheduledbackup-schema.json"
+  plugin_schema="$BATS_TEST_TMPDIR/objectstore-schema.json"
+  render
+  yq -N -o json 'select(.kind == "CustomResourceDefinition" and .metadata.name == "scheduledbackups.postgresql.cnpg.io")
+    | .spec.versions[] | select(.name == "v1") | .schema.openAPIV3Schema' "$RENDERED" >"$operator_schema"
+  [ -s "$operator_schema" ]
+  APP="plugin-barman-cloud"
+  render
+  yq -N -o json 'select(.kind == "CustomResourceDefinition" and .metadata.name == "objectstores.barmancloud.cnpg.io")
+    | .spec.versions[] | select(.name == "v1") | .schema.openAPIV3Schema' "$RENDERED" >"$plugin_schema"
+  [ -s "$plugin_schema" ]
+  database orders orders-db
+  yq -N -o json 'select(.kind == "ObjectStore")' "$BUILT" >"$BATS_TEST_TMPDIR/objectstore.json"
+  yq -N -o json 'select(.kind == "ScheduledBackup")' "$BUILT" >"$BATS_TEST_TMPDIR/scheduledbackup.json"
+  [ -s "$BATS_TEST_TMPDIR/objectstore.json" ]
+  [ -s "$BATS_TEST_TMPDIR/scheduledbackup.json" ]
+  problems="$(schema_problems "$plugin_schema" "$BATS_TEST_TMPDIR/objectstore.json"; schema_problems "$operator_schema" "$BATS_TEST_TMPDIR/scheduledbackup.json")"
+  echo "problems: ${problems:-none}"
+  [ -z "$problems" ]
+}
+
+@test "The restore runbook's manifest is one the pinned operator defines and reads the archive of the cluster it replaces" {
+  local schema runbook="$REPO/docs/runbooks/postgres-restore.md" manifest="$BATS_TEST_TMPDIR/restore.yaml" problems source old new
+  render
+  schema="$BATS_TEST_TMPDIR/cluster-schema.json"
+  yq -N -o json 'select(.kind == "CustomResourceDefinition" and .metadata.name == "clusters.postgresql.cnpg.io")
+    | .spec.versions[] | select(.name == "v1") | .schema.openAPIV3Schema' "$RENDERED" >"$schema"
+  [ -s "$schema" ]
+  [ -f "$runbook" ]
+  # The one fenced YAML block of the runbook that is a Cluster, whatever list item it is indented in.
+  awk -v dir="$BATS_TEST_TMPDIR" '/^ *```yaml$/ { inside = 1; block++; match($0, /^ */); indent = RLENGTH; next }
+    /^ *```$/ { inside = 0; next } inside { print substr($0, indent + 1) > (dir "/block-" block ".yaml") }' "$runbook"
+  grep -lx 'kind: Cluster' "$BATS_TEST_TMPDIR"/block-*.yaml >"$BATS_TEST_TMPDIR/cluster-blocks"
+  [ "$(grep -c . "$BATS_TEST_TMPDIR/cluster-blocks")" -eq 1 ]
+  cp "$(cat "$BATS_TEST_TMPDIR/cluster-blocks")" "$manifest"
+  yq -o json '.' "$manifest" >"$BATS_TEST_TMPDIR/restore.json"
+  problems="$(schema_problems "$schema" "$BATS_TEST_TMPDIR/restore.json")"
+  echo "problems: ${problems:-none}"
+  [ -z "$problems" ]
+  # It recovers from the plugin's archive of the old cluster, by the old cluster's name, and writes
+  # its own archive under its own name, so that the two never write to one path.
+  source="$(yq '.spec.bootstrap.recovery.source' "$manifest")"
+  old="$(SOURCE="$source" yq '.spec.externalClusters[] | select(.name == strenv(SOURCE)) | .plugin.parameters.serverName' "$manifest")"
+  new="$(yq '.spec.plugins[] | select(.isWALArchiver == true) | .parameters.serverName // ""' "$manifest")"
+  echo "reads the archive of $old, writes its own under ${new:-no name}; named $(yq '.metadata.name' "$manifest")"
+  [ "$(SOURCE="$source" yq '.spec.externalClusters[] | select(.name == strenv(SOURCE)) | .plugin.name' "$manifest")" = barman-cloud.cloudnative-pg.io ]
+  [ -n "$old" ] && [ -n "$new" ] && [ "$old" != "$new" ]
+  [ "$new" = "$(yq '.metadata.name' "$manifest")" ]
 }

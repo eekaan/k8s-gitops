@@ -13,6 +13,7 @@ docker	docker.io/envoyproxy/gateway-helm	^v[0-9]+\.[0-9]+\.[0-9]+$	registry tag 
 docker	ghcr.io/controlplaneio-fluxcd/flux-operator-manifests	^v[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
 docker	ghcr.io/fluxcd/flux-cli	^v[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
 docker	ghcr.io/cloudnative-pg/charts/cloudnative-pg	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/cloudnative-pg/charts/plugin-barman-cloud	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
 docker	ghcr.io/external-secrets/charts/external-secrets	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
 docker	ghcr.io/home-operations/charts-mirror/keda	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
 docker	quay.io/cilium/charts/cilium	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
@@ -38,6 +39,8 @@ docker	ghcr.io/renovatebot/renovate	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
 docker	docker.io/n8nio/n8n	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list, which holds n8n's betas and its next major as plain versions too (.renovate/managers.json5)
 docker	docker.io/n8nio/runners	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list, which holds n8n's betas and its next major as plain versions too (.renovate/managers.json5)
 docker	ghcr.io/cloudnative-pg/postgresql	^[0-9]+\.[0-9]+-standard-trixie$	registry tag list
+docker	ghcr.io/cloudnative-pg/plugin-barman-cloud	^v[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar	^v[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
 docker	docker.io/timberio/vector	^[0-9]+\.[0-9]+\.[0-9]+-distroless-libc$	registry tag list
 docker	jdxcode/mise	^[0-9]+\.[0-9]+\.[0-9]+-debian$	registry tag list
 github-releases	kubernetes-sigs/gateway-api	^v[0-9]+\.[0-9]+\.[0-9]+$	release list

@@ -51,6 +51,10 @@ kubernetes/apps/base/cert-manager/cert-manager/app/ocirepository.yaml	flux	quay.
 kubernetes/apps/base/cert-manager/cert-manager/app/ocirepository.yaml	regex	quay.io/jetstack/charts/cert-manager	tag
 kubernetes/apps/base/cnpg-system/cloudnative-pg/app/ocirepository.yaml	flux	ghcr.io/cloudnative-pg/charts/cloudnative-pg	tag
 kubernetes/apps/base/cnpg-system/cloudnative-pg/app/ocirepository.yaml	regex	ghcr.io/cloudnative-pg/charts/cloudnative-pg	tag
+kubernetes/apps/base/cnpg-system/plugin-barman-cloud/app/ocirepository.yaml	flux	ghcr.io/cloudnative-pg/charts/plugin-barman-cloud	tag
+kubernetes/apps/base/cnpg-system/plugin-barman-cloud/app/ocirepository.yaml	regex	ghcr.io/cloudnative-pg/charts/plugin-barman-cloud	tag
+kubernetes/apps/base/cnpg-system/plugin-barman-cloud/app/values.yaml	regex	ghcr.io/cloudnative-pg/plugin-barman-cloud	tag
+kubernetes/apps/base/cnpg-system/plugin-barman-cloud/app/values.yaml	regex	ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar	tag
 kubernetes/apps/base/demo/hello/app/deployment.yaml	kubernetes	docker.io/library/busybox	-
 kubernetes/apps/base/demo/volsync-demo/app/deployment.yaml	kubernetes	docker.io/library/busybox	-
 kubernetes/apps/base/envoy-gateway-system/envoy-gateway-crds/app/ocirepository.yaml	flux	docker.io/envoyproxy/gateway-helm	tag

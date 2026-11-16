@@ -1,0 +1,23 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: plugin-barman-cloud
+  namespace: flux-system
+spec:
+  path: ./apps/base/cnpg-system/plugin-barman-cloud/app
+  targetNamespace: cnpg-system
+  # The plugin serves the operator, which must run for the plugin's Service to be found, and its
+  # two certificates are signed by the cluster's own CA, whose ClusterIssuer exists once cluster-ca
+  # is Ready.
+  dependsOn:
+    - name: cloudnative-pg
+    - name: cluster-ca
+  # Ready only once the release is installed, the plugin's pods are ready and its certificates are
+  # issued, so an application that names this one in dependsOn finds the ObjectStore definition in
+  # place and a plugin the operator can reach, which every database pod that archives needs.
+  wait: true
+  sourceRef:
+    kind: ExternalArtifact
+    name: plugin-barman-cloud

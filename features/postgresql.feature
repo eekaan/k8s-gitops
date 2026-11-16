@@ -1,5 +1,5 @@
 Feature: PostgreSQL
-  The CloudNativePG operator, run by Flux in its own namespace, and the component that gives an application a PostgreSQL cluster of three instances on three workers. Each cluster's application database is dumped once a day, encrypted before it leaves the cluster, and the dump is uploaded to the object storage; the operator's own backup objects are not used.
+  The CloudNativePG operator, run by Flux in its own namespace, the Barman Cloud plugin beside it, and the component that gives an application a PostgreSQL cluster of three instances on three workers. Each cluster's WAL is archived and its base backups are taken to the object storage, encrypted at the provider with a customer key (ADR 0008), so it can be restored to a point in time; its application database is also dumped once a day, encrypted before it leaves the cluster, and the dump is uploaded to the object storage.
 
   Scenario: The PostgreSQL operator is installed with its resource definitions
     Given the cloudnative-pg application and its namespace, enabled in the cluster's overlay
@@ -29,7 +29,7 @@ Feature: PostgreSQL
   Scenario: An application gets a three-instance PostgreSQL cluster from the component
     Given an application whose Kustomization names the cnpg-cluster component and sets its cluster's name
     When it is built as Flux applies it
-    Then it yields one Cluster of that name in the application's namespace, with three instances that must run on three different nodes, the operator's disruption budgets on, an image whose tag names a PostgreSQL minor version and none of the operator's own backup objects, and one PodMonitor that selects that Cluster's instances and their metrics port
+    Then it yields one Cluster of that name in the application's namespace, with three instances that must run on three different nodes, the operator's disruption budgets on, an image whose tag names a PostgreSQL minor version, and one PodMonitor that selects that Cluster's instances and their metrics port and labels their series with the Cluster's name
 
   Scenario: Each PostgreSQL instance keeps its data once, on its own node
     Given the component's Cluster built for an application, and the StorageClasses the cluster's applications apply
@@ -50,6 +50,56 @@ Feature: PostgreSQL
     Given an application whose Kustomization names the cnpg-cluster component without setting its cluster's name
     When it is built with Flux's strict substitution
     Then the build fails, naming the variable CNPG_CLUSTER_NAME
+
+  Scenario: The Barman Cloud plugin runs beside the operator it is made for, signed by the cluster's own CA, and meets the restricted Pod Security level
+    Given the plugin's application and its chart rendered offline with the repository's values, and the operator's chart
+    When the operator's version, the plugin's objects, its certificates and its pod templates are read
+    Then the operator is of the release the plugin requires or a newer one, the plugin runs in cnpg-system on more than one node with a budget that keeps one running, its image and its sidecar image are the release its chart is made for, each pinned by digest, its two certificates are issued by the cluster's own CA and by no other issuer and the chart makes no issuer, and no pod template uses a host namespace, runs as root, allows privilege escalation or keeps a capability
+
+  Scenario: The plugin's chart and images are pinned where Renovate updates them
+    Given the plugin's OCIRepository and the values that name its images
+    When their versions and the comment line above each are read
+    Then the chart's tag is an exact version under a renovate comment that names its registry path, and each image is pinned by a tag and a digest under a renovate comment that names its repository
+
+  Scenario: A PostgreSQL cluster from the component archives its WAL and takes a daily base backup to a path of its own in the object store
+    Given an application whose Kustomization names the cnpg-cluster component and sets its cluster's name and namespace
+    When it is built as Flux applies it
+    Then the Cluster archives through the plugin's entry that names the application's ObjectStore, a ScheduledBackup of method plugin for that Cluster runs once a day at a minute no other backup of the cluster uses and takes its first backup when it is made, the ObjectStore keeps base backups and WAL for a recovery window, compresses both, and reaches the cluster's object storage at the endpoint of cluster-config, in the postgres bucket, under the cluster's name, the namespace and the database's name
+
+  Scenario: Every object a database archives is encrypted at the provider with a customer key the provider does not keep
+    Given every ObjectStore the component makes for two applications
+    When the encryption fields of each are read
+    Then each names a Secret key for the customer key, in s3Credentials.sseCustomerKey, and none sets the encryption of its data or its WAL, which the plugin refuses together with it
+
+  Scenario: The object store's key reaches the database's namespace from the secret store and is nowhere in the tree
+    Given an application that takes the component, and the tree
+    When its ExternalSecret and every file of the tree that is a Secret, a literal credential or an encrypted file are read
+    Then the Secret the ObjectStore reads is made by an ExternalSecret of the application's namespace, each credential's key holding the one value of the store it is named for: the cluster's S3 key in the key volsync, its two fields only, and the key postgres-backups of the secret store for the customer key, no Secret holds a value in the tree, and no key is written in any file
+
+  Scenario: Two databases never share a backup path
+    Given four applications that take the component, two with different names and two more with the same names in another namespace
+    When each is built as Flux applies it
+    Then the four archives are in four different places, and the place changes with the name of the Kubernetes cluster that cluster-config holds and with the bucket's prefix, each alone, and ends in the namespace and the database's name
+
+  Scenario: Two databases never share a backup path, whatever namespace an application names
+    Given the tree, and a copy in which n8n's Kustomization sets CNPG_NAMESPACE to a namespace other than its targetNamespace, and one that leaves it out
+    When scripts/kubernetes-check runs on each
+    Then the tree passes, the first is refused naming the Kustomization, the value and the targetNamespace, and the second is refused
+
+  Scenario: Every field of the component's ObjectStore and ScheduledBackup is one the pinned plugin and operator define
+    Given the component's ObjectStore and ScheduledBackup built for an application, and the definitions of the pinned plugin chart and operator chart
+    When each field and value is looked up in its definition's schema
+    Then each field is defined there, and each value has the type the schema gives and, where it lists them, one of the values it allows
+
+  Scenario: A cluster that does not select the backup plugin builds no database that needs it, and one that selects a database without it is refused
+    Given the cluster's overlay, with the application that takes the component and with the plugin's application left out
+    When it is built as Flux applies it and checked with scripts/kubernetes-check
+    Then n8n names the plugin's application in dependsOn, a Kustomization that takes the component without naming it is refused, and an overlay that lists n8n without the plugin's application is refused, naming the dependency, while one that lists neither builds neither
+
+  Scenario: The restore runbook's manifest is one the pinned operator defines and reads the archive of the cluster it replaces
+    Given the Cluster manifest in docs/runbooks/postgres-restore.md and the Cluster definition of the pinned chart
+    When each field and value is looked up in the definition's schema
+    Then each field is defined there, and the recovery reads the ObjectStore of the old cluster by the old cluster's name and writes the new cluster's archive under its own name
 
   Scenario: A PostgreSQL cluster from the component is dumped daily and only the encrypted dump is uploaded, to a path of its own
     Given an application whose Kustomization names the cnpg-cluster component, built as Flux applies it, and the job's scripts run with a stand-in for pg_dump and a recording stand-in for the S3 client

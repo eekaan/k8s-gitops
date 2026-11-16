@@ -512,6 +512,34 @@ for dir in kubernetes/clusters/*/; do
         ;;
     esac
   done <"$tmp/issuer-choices"
+
+  # A Kustomization that takes the cnpg-cluster component builds a database that archives through the
+  # Barman Cloud plugin, so it names plugin-barman-cloud in dependsOn, and the check above then
+  # requires the cluster to enable it: otherwise its Cluster is admitted before the plugin's webhooks
+  # exist, or never. The component builds the archive's path from CNPG_NAMESPACE, which it cannot read
+  # from targetNamespace, so the two are held equal here: a Kustomization that names another
+  # namespace archives to the path of the database of that namespace.
+  if ! jq -r 'def clean: tostring | gsub("[^A-Za-z0-9._-]"; "?");
+    select(((.spec.components // []) | map(select(test("(^|/)components/cnpg-cluster/?$"))) | length) > 0) as $k
+    | (if (($k.spec.dependsOn // []) | map(.name) | index("plugin-barman-cloud")) == null then "plugin|" + ($k.metadata.name | clean) else empty end,
+       if ($k.spec.postBuild.substitute.CNPG_NAMESPACE // "") != ($k.spec.targetNamespace // "") then
+         "namespace|" + ($k.metadata.name | clean) + "|" + (($k.spec.postBuild.substitute.CNPG_NAMESPACE // "nothing") | clean)
+           + "|" + (($k.spec.targetNamespace // "nothing") | clean) else empty end)' \
+    "$tmp/dependents.jsonl" >"$tmp/database-users"; then
+    fail "$dir/ks.yaml: cannot read the Kustomizations built for $overlay, so those that take the cnpg-cluster component were not checked"
+    continue
+  fi
+  while IFS='|' read -r verdict dependent namespace target; do
+    file="${ks_name_file[$dependent]:-$dir/ks.yaml}"
+    case $verdict in
+      plugin)
+        fail "$file: Kustomization $dependent takes the cnpg-cluster component but does not name plugin-barman-cloud in dependsOn, so its database can be made before the plugin's webhooks exist; name plugin-barman-cloud in dependsOn"
+        ;;
+      namespace)
+        fail "$file: Kustomization $dependent sets CNPG_NAMESPACE to $namespace, but its targetNamespace is $target, so its backups would go to the path of a database of the namespace $namespace; set CNPG_NAMESPACE to the targetNamespace"
+        ;;
+    esac
+  done <"$tmp/database-users"
 done
 
 if ((failures > 0)); then

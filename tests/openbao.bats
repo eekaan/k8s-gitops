@@ -631,7 +631,7 @@ covers() {
 @test "The operator role allows every request its recipes and runbook make, and nothing more" {
   local wanted granted others
   local scripts=(scripts/bao-put scripts/bao-recovery scripts/bao-root scripts/bao-seal-restore scripts/bao-seed-volsync
-    scripts/bao-volsync-password scripts/lib/openbao.sh)
+    scripts/bao-seed-postgres scripts/bao-volsync-password scripts/lib/openbao.sh)
   render
   statefulset
   initialize
@@ -650,7 +650,7 @@ covers() {
   # shellcheck disable=SC2016
   wanted="$( (cd "$REPO" && grep -hE 'bao_request (GET|POST|PUT|PATCH|DELETE) ' "${scripts[@]}") |
     grep -vE '[a-z_]+=[^ ]+ bao_request ' | grep -oE 'bao_request (GET|POST|PUT|PATCH|DELETE) "?[^ ]+' |
-    sed -E 's/^bao_request //; s/["]//g; s/[)]+$//; s#\$bao_mount#secrets#; s#\$path#demo/hello#; s#\$volsync_key#volsync#' |
+    sed -E 's/^bao_request //; s/["]//g; s/[)]+$//; s#\$bao_mount#secrets#; s#\$path#demo/hello#; s#\$volsync_key#volsync#; s#\$postgres_key#postgres-backups#' |
     grep -vE ' (auth/kubernetes/login|sys/seal-status|sys/decode-token)$')"
   # And those the runbook's CLI steps send, as OpenBao v2.7.2's api/sys_rotate.go and
   # api/sys_generate_root.go make them: rotating the recovery keys with verification, and making a
@@ -674,7 +674,7 @@ covers() {
   # The policy allows each, and grants nothing none of them needs.
   # shellcheck disable=SC2016 # $grant is a jq variable.
   [ "$(policy operator | jq -r '.path | to_entries[] | .key as $path | .value.capabilities[] | $path + " " + .' | sort)" = \
-    "$(sed -E 's#^secrets/data/(demo/hello|volsync) #secrets/data/* #' <<<"$granted" | sort -u)" ]
+    "$(sed -E 's#^secrets/data/(demo/hello|volsync|postgres-backups) #secrets/data/* #' <<<"$granted" | sort -u)" ]
 }
 
 @test "External Secrets mints tokens for the store's account and no other" {

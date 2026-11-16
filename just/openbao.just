@@ -23,6 +23,11 @@ bao-seal-restore *args:
 bao-seed-volsync *args:
     scripts/bao-seed-volsync "$@"
 
+# Seed the key the PostgreSQL backups read, once for each store: make the SSE-C customer key, keep it in a new file outside the repository encrypted to the Talos age key's recipient and opened again before the store holds anything, then create the key, as just bao-seed-postgres <file> [cluster]; refuses a store that holds the key, writes the key an existing file holds to a store that holds none, as after an interruption or on a rebuilt cluster, where <file> must be the existing custody file and never a new one; prints nothing of the key
+[positional-arguments]
+bao-seed-postgres *args:
+    scripts/bao-seed-postgres "$@"
+
 # Run one command, such as restic, with one application's volume repository, its derived password and the cluster's S3 key in its environment, from the custody file bao-seed-volsync wrote, as just bao-volsync-password <file> <app> <command> [argument...]; prints no password
 [positional-arguments]
 bao-volsync-password *args:

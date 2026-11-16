@@ -48,3 +48,18 @@ linstor_targets() {
     {"name": "Pod/linstor-controller", "ns": "piraeus-datastore",
      "labels": {"app.kubernetes.io/component": "linstor-controller"}, "ports": ["api"]}]'
 }
+
+# cnpg_targets: what the CloudNativePG operator makes at run time that the PodMonitor of
+# components/cnpg-cluster selects, as candidates for selected: the pod of an instance of n8n-db, the
+# one cluster the render makes from the component, with the labels and the container ports the
+# operator gives it at the version the cloudnative-pg chart runs, 1.30 (pkg/specs/pods.go,
+# pkg/utils/labels_annotations.go). The exporter on the port metrics serves the operator's metrics
+# and the Barman Cloud plugin's.
+cnpg_targets() {
+  echo '[
+    {"name": "Pod/n8n-db-1", "ns": "ai-system",
+     "labels": {"cnpg.io/cluster": "n8n-db", "cnpg.io/instanceName": "n8n-db-1", "cnpg.io/podRole": "instance",
+       "app.kubernetes.io/name": "postgresql", "app.kubernetes.io/instance": "n8n-db",
+       "app.kubernetes.io/component": "database", "app.kubernetes.io/managed-by": "cloudnative-pg"},
+     "ports": ["postgresql", "metrics", "status"]}]'
+}

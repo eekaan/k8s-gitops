@@ -1,0 +1,16 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/helmrelease-helm-v2.json
+# Named as the chart is, so the Deployment the chart names after the release is plugin-barman-cloud,
+# as the plugin's documentation calls it.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: plugin-barman-cloud
+spec:
+  interval: 30m
+  chartRef:
+    kind: OCIRepository
+    name: plugin-barman-cloud
+  valuesFrom:
+    - kind: ConfigMap
+      name: plugin-barman-cloud-values

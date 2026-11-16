@@ -52,13 +52,15 @@ Encrypt's production issuer, whose certificates a client with the usual public r
   operator runs `just cluster-snapshot`; `just cluster-restore` puts one back
   ([Scheduled etcd snapshots](docs/cluster.md#scheduled-etcd-snapshots),
   [restore](docs/runbooks/etcd-restore.md)).
-- **PostgreSQL**: the CloudNativePG operator runs, and an application gets a database of three
-  instances by including the cluster template `components/cnpg-cluster` from its `ks.yaml`, as n8n
-  does, the one application in the cluster's overlay that includes it. The template also dumps the
-  database to object storage once a day by a CronJob in the cluster, encrypted with age before
-  upload, whose two alerts fire when its runs stop succeeding: a daily copy, not a point in time, as
-  no WAL is archived and no base backup taken ([Dumps](docs/kubernetes.md#dumps),
-  [restore](docs/runbooks/postgres-restore.md)).
+- **PostgreSQL**: the CloudNativePG operator and its Barman Cloud plugin run, and an application gets
+  a database of three instances by including the cluster template `components/cnpg-cluster` from its
+  `ks.yaml`, as n8n does, the one application in the cluster's overlay that includes it. The template
+  archives the database's WAL and takes a base backup every day to the `postgres` bucket, encrypted at
+  the provider with a customer key, from which the runbook restores it to a point in time of the last
+  30 days; it also dumps the database once a day by a CronJob in the cluster, encrypted with age
+  before upload. Four alerts fire when archiving fails, the newest base backup is too old, or the
+  dumps stop succeeding ([Backups and restores](docs/kubernetes.md#backups-and-restores),
+  [Dumps](docs/kubernetes.md#dumps), [restore](docs/runbooks/postgres-restore.md)).
 - **OpenTofu state** is in object storage, encrypted by OpenTofu
   ([State](docs/infrastructure.md#state)).
 

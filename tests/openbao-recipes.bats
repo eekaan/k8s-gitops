@@ -1845,7 +1845,7 @@ EOF
   cd "$REPO"
   for recipe in "bao-put demo/hello greeting" "bao-recovery $BATS_TEST_TMPDIR/custody/recovery.age" \
     "bao-root $CUSTODY report-env" "bao-seal-restore $CUSTODY" "bao-seed-volsync $VOLSYNC_CUSTODY" \
-    "bao-volsync-password $VOLSYNC_CUSTODY volsync-demo report-env"; do
+    "bao-volsync-password $VOLSYNC_CUSTODY volsync-demo report-env" "bao-seed-postgres $BATS_TEST_TMPDIR/custody/postgres.age"; do
     for how in shellopts named bash-env bash-x; do
       : >"$RECORD/argv"
       # shellcheck disable=SC2086 # each recipe is its arguments, split.
@@ -1895,4 +1895,385 @@ EOF
   [[ $output == *"Unable to connect to the server"* && $output != *192.0.2.10* ]]
   no_controls "$output"
   forwards_closed
+}
+
+# pg_seed_env: seed_env, with the custody file of the PostgreSQL backup key as PG_CUSTODY, which the
+# fake OpenBao looks for when it says the key was written after the file stood.
+pg_seed_env() {
+  seed_env
+  PG_CUSTODY="$BATS_TEST_TMPDIR/custody/postgres.age"
+  echo "$PG_CUSTODY" >"$STATE/outfile"
+}
+
+# pg_custody_key FILE: the customer key the custody file FILE holds, opened with the Talos age key.
+pg_custody_key() {
+  age -d -i "$BATS_TEST_TMPDIR/keys/talos.agekey" "$1" | "$JQ" -r '.postgres.sse_c_key'
+}
+
+# pg_stored: the property SSE_C_KEY of the key postgres-backups in the fake store.
+pg_stored() {
+  "$JQ" -r '.SSE_C_KEY' "$STATE/kv/postgres-backups.json"
+}
+
+@test "Seeding the PostgreSQL backup key writes it to the custody file, checks it opens, and only then writes the store's key" {
+  local key
+  pg_seed_env
+  recipe bao-seed-postgres "$PG_CUSTODY"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *"$PG_CUSTODY"* ]]
+  # The file opens with the Talos age key and holds 32 random bytes as base64, which is the form the
+  # plugin takes for an SSE-C key, and nothing else of the key.
+  key=$(pg_custody_key "$PG_CUSTODY")
+  [[ $key =~ ^[A-Za-z0-9+/]{43}=$ ]]
+  [ "$(base64 -d <<<"$key" | wc -c)" -eq 32 ]
+  # Those bytes are the ones the kernel's generator gave: head read 32 bytes of /dev/urandom, once,
+  # and the key is exactly what it returned, in base64.
+  [ "$(grep -c '^head ' "$RECORD/argv")" -eq 1 ]
+  grep -qx 'head -c 32 /dev/urandom' "$RECORD/argv"
+  [ "$(base64 -w0 "$RECORD/head-output")" = "$key" ]
+  [ "$(age -d -i "$BATS_TEST_TMPDIR/keys/talos.agekey" "$PG_CUSTODY" | "$JQ" -r '.cluster')" = lab-sto2 ]
+  [ "$(stat -c %a "$PG_CUSTODY")" = 600 ]
+  # The store's key holds that key and nothing else, written only once the file stood, and only if
+  # the key did not exist.
+  [ "$(pg_stored)" = "$key" ]
+  [ "$("$JQ" -r 'keys | join(" ")' "$STATE/kv/postgres-backups.json")" = SSE_C_KEY ]
+  [ -e "$STATE/stored-after-file" ]
+  [ "$(requests_of PATCH secrets/data/postgres-backups | "$JQ" -c '.')" = '{"data":{},"options":{"cas":0}}' ]
+  [ "$(requests_of POST secrets/data/postgres-backups | "$JQ" -r '.options.cas')" = 0 ]
+  # Over TLS verified against OpenBao's CA, with the operator's token, which is revoked; the
+  # port-forward is closed and nothing but the custody file is left behind.
+  [ "$("$JQ" -r 'select(.tls != "verified") | .path' "$RECORD/requests")" = "" ]
+  [ "$("$JQ" -r 'select(.path != "auth/kubernetes/login") | .token' "$RECORD/requests" | sort -u)" = marker-bao-token ]
+  [ -e "$STATE/revoked" ]
+  forwards_closed
+  [ "$(ls -A "$BATS_TEST_TMPDIR/custody")" = postgres.age ]
+
+  # Another seeding makes another key: it depends on nothing the recipe is given, the cluster's
+  # name included.
+  rm -r "$STATE/kv" "$STATE/stored-after-file" "$PG_CUSTODY"
+  mkdir "$STATE/kv"
+  recipe bao-seed-postgres "$PG_CUSTODY"
+  [ "$status" -eq 0 ]
+  [ "$(pg_custody_key "$PG_CUSTODY")" != "$key" ]
+
+  # A file that opens, but to something else than was written, is not trusted either: nothing is
+  # written to the store, and nothing stays in the custody directory.
+  rm -r "$STATE/kv" "$STATE/stored-after-file" "$PG_CUSTODY"
+  mkdir "$STATE/kv"
+  fake age <<AGE
+printf '%s\n' "age \$*" >> "$RECORD/argv"
+if [[ " \$* " == *" --encrypt "* ]]; then
+  cat > /dev/null
+  printf '{"cluster":"lab-sto2"}' | exec "$(command -v age)" "\$@"
+fi
+exec "$(command -v age)" "\$@"
+AGE
+  : >"$RECORD/requests"
+  recipe bao-seed-postgres "$PG_CUSTODY"
+  echo "a file that opens to another content: $output"
+  [ "$status" -ne 0 ]
+  [ -z "$(requests_of POST secrets/data/postgres-backups)" ]
+  [ ! -e "$STATE/kv/postgres-backups.json" ]
+  [ -z "$(ls -A "$BATS_TEST_TMPDIR/custody")" ]
+  forwards_closed
+  record age
+
+  # A recipient the operator's age key does not open: the file is not trusted, the store is never
+  # written, and nothing stays in the custody directory.
+  age-keygen -o "$BATS_TEST_TMPDIR/keys/other.agekey" 2>/dev/null
+  OTHER="$(age-keygen -y "$BATS_TEST_TMPDIR/keys/other.agekey")" yq -i '.creation_rules[].age = strenv(OTHER)' "$REPO/talos/.sops.yaml"
+  : >"$RECORD/requests"
+  recipe bao-seed-postgres "$PG_CUSTODY"
+  echo "another recipient: $output"
+  [ "$status" -ne 0 ]
+  [ -z "$(requests_of POST secrets/data/postgres-backups)" ]
+  # The one patch it sent asks whether the key exists and carries no data.
+  [ "$(requests_of PATCH secrets/data/postgres-backups | "$JQ" -c '.')" = '{"data":{},"options":{"cas":0}}' ]
+  [ ! -e "$STATE/kv/postgres-backups.json" ]
+  [ ! -e "$PG_CUSTODY" ]
+  [ -z "$(ls -A "$BATS_TEST_TMPDIR/custody")" ]
+  forwards_closed
+
+  # Where no hard link can be made, as on a filesystem without them, the file is put in place no
+  # other way: ln's own error is shown and the file is not said to exist; nothing stays in the
+  # custody directory, and the store is never written.
+  RECIPIENT=$RECIPIENT yq -i '.creation_rules[].age = strenv(RECIPIENT)' "$REPO/talos/.sops.yaml"
+  fake_tool ln <<'LN'
+printf '%s\n' "ln $*" >> "$RECORD/argv"
+printf "ln: failed to create hard link '%s' => '%s': Operation not permitted\n" "${@: -1}" "${@: -2:1}" >&2
+exit 1
+LN
+  : >"$RECORD/requests"
+  recipe bao-seed-postgres "$PG_CUSTODY"
+  echo "no hard links: $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"Operation not permitted"* ]]
+  [[ $output != *exists* ]]
+  [ -z "$(requests_of POST secrets/data/postgres-backups)" ]
+  [ ! -e "$STATE/kv/postgres-backups.json" ]
+  [ -z "$(ls -A "$BATS_TEST_TMPDIR/custody")" ]
+  forwards_closed
+}
+
+@test "A store that already holds the PostgreSQL backup key is not seeded again, and a rebuilt store takes the key from the custody file" {
+  local key before
+  pg_seed_env
+  recipe bao-seed-postgres "$PG_CUSTODY"
+  [ "$status" -eq 0 ]
+  key=$(pg_custody_key "$PG_CUSTODY")
+  before=$(cat "$STATE/kv/postgres-backups.json")
+  cp "$PG_CUSTODY" "$BATS_TEST_TMPDIR/custody-before.age"
+
+  # The same file again, and a new one: the store holds the key, so nothing is written, no key is
+  # made for it, and the file stays.
+  : >"$RECORD/requests"
+  recipe bao-seed-postgres "$PG_CUSTODY"
+  echo "same file: $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"already holds"* ]]
+  recipe bao-seed-postgres "$BATS_TEST_TMPDIR/custody/another.age"
+  echo "another file: $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"already holds"* ]]
+  [ "$(cat "$STATE/kv/postgres-backups.json")" = "$before" ]
+  [ -z "$(requests_of POST secrets/data/postgres-backups)" ]
+  cmp "$PG_CUSTODY" "$BATS_TEST_TMPDIR/custody-before.age"
+  [ ! -e "$BATS_TEST_TMPDIR/custody/another.age" ]
+  forwards_closed
+
+  # An existing file is never replaced, and one that is not a custody file of this recipe for this
+  # cluster is refused and kept: an unrelated file, the recovery keys' file, and another cluster's
+  # file, though it holds a key.
+  echo keep-me >"$BATS_TEST_TMPDIR/custody/existing.age"
+  : >"$RECORD/argv"
+  recipe bao-seed-postgres "$BATS_TEST_TMPDIR/custody/existing.age"
+  echo "an unrelated file: $output"
+  [ "$status" -ne 0 ]
+  [ "$(cat "$BATS_TEST_TMPDIR/custody/existing.age")" = keep-me ]
+  CUSTODY="$BATS_TEST_TMPDIR/custody/recovery.age"
+  custody_file marker-seal-key
+  cp "$CUSTODY" "$BATS_TEST_TMPDIR/recovery-before.age"
+  recipe bao-seed-postgres "$CUSTODY"
+  echo "the recovery keys' file: $output"
+  [ "$status" -ne 0 ]
+  cmp "$CUSTODY" "$BATS_TEST_TMPDIR/recovery-before.age"
+  # shellcheck disable=SC2016 # $key is a jq variable.
+  "$JQ" -n --arg key "$(printf 'a%.0s' {1..43})=" '{cluster: "lab-other", postgres: {sse_c_key: $key}}' |
+    age --encrypt --recipient "$RECIPIENT" --output "$BATS_TEST_TMPDIR/custody/foreign.age"
+  cp "$BATS_TEST_TMPDIR/custody/foreign.age" "$BATS_TEST_TMPDIR/foreign-before.age"
+  recipe bao-seed-postgres "$BATS_TEST_TMPDIR/custody/foreign.age"
+  echo "another cluster's file: $output"
+  [ "$status" -ne 0 ]
+  cmp "$BATS_TEST_TMPDIR/custody/foreign.age" "$BATS_TEST_TMPDIR/foreign-before.age"
+  [ "$(cat "$STATE/kv/postgres-backups.json")" = "$before" ]
+  [ -z "$(requests_of POST secrets/data/postgres-backups)" ]
+  # Where the store holds no key the refusal is the file's alone: a foreign file with a key in it
+  # is not the one a rebuilt store takes, so nothing is written.
+  mv "$STATE/kv" "$BATS_TEST_TMPDIR/kv-held"
+  mkdir "$STATE/kv"
+  recipe bao-seed-postgres "$BATS_TEST_TMPDIR/custody/foreign.age"
+  echo "another cluster's file, an empty store: $output"
+  [ "$status" -ne 0 ]
+  [ -z "$(requests_of POST secrets/data/postgres-backups)" ]
+  [ ! -e "$STATE/kv/postgres-backups.json" ]
+  cmp "$BATS_TEST_TMPDIR/custody/foreign.age" "$BATS_TEST_TMPDIR/foreign-before.age"
+  rm -r "$STATE/kv"
+  mv "$BATS_TEST_TMPDIR/kv-held" "$STATE/kv"
+
+  # A path inside the repository is refused before OpenBao is reached.
+  : >"$RECORD/argv"
+  recipe bao-seed-postgres "$REPO/postgres.age"
+  echo "inside the repository: $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"inside the repository"* ]]
+  [ ! -e "$REPO/postgres.age" ]
+  [ "$(grep -c -E '^(kubectl|curl) ' "$RECORD/argv")" -eq 0 ]
+
+  # The cluster is rebuilt: the store is a new one that holds no key. It is given the key the
+  # existing file holds, no other is made, and the file is as it was.
+  rm -r "$STATE/kv"
+  rm -f "$STATE/stored-after-file" "$STATE/revoked"
+  mkdir "$STATE/kv"
+  : >"$RECORD/argv"
+  : >"$RECORD/requests"
+  recipe bao-seed-postgres "$PG_CUSTODY"
+  echo "rebuilt: $output"
+  [ "$status" -eq 0 ]
+  [ "$(pg_stored)" = "$key" ]
+  [ "$(grep -c '^head ' "$RECORD/argv")" -eq 0 ]
+  cmp "$PG_CUSTODY" "$BATS_TEST_TMPDIR/custody-before.age"
+  [[ $output == *"customer key in $PG_CUSTODY"* ]]
+  [[ $output != *"new customer key"* ]]
+  [ -e "$STATE/revoked" ]
+  forwards_closed
+}
+
+@test "A run that cannot ask the PostgreSQL backup key's store, or loses a race for the file, makes nothing" {
+  local refusal reason
+  pg_seed_env
+  # Asking whether the key exists refused for another reason than its check-and-set, by a denied
+  # permission, a server error or a request that never reached OpenBao: the recipe says that reason,
+  # not that the store holds the key, and makes nothing.
+  for refusal in 'write-refused permission denied' 'kv-fails internal error' 'unreachable Failed to connect'; do
+    reason=${refusal#* }
+    : >"$STATE/${refusal%% *}"
+    : >"$RECORD/requests"
+    recipe bao-seed-postgres "$BATS_TEST_TMPDIR/custody/refused.age"
+    echo "${refusal%% *}: $output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"$reason"* ]]
+    [[ $output != *"already holds"* ]]
+    [ -z "$(requests_of POST secrets/data/postgres-backups)" ]
+    [ ! -e "$STATE/kv/postgres-backups.json" ]
+    [ "$(find "$BATS_TEST_TMPDIR/custody" -mindepth 1 -name '*refused.age*' | wc -l)" -eq 0 ]
+    forwards_closed
+    rm "$STATE/${refusal%% *}"
+  done
+
+  # A file someone makes at the path after the recipe checked it is never replaced, and the store is
+  # not written: the recipe stops before it, and leaves no partial file.
+  echo "$BATS_TEST_TMPDIR/custody/late.age" >"$STATE/clobber"
+  : >"$RECORD/requests"
+  recipe bao-seed-postgres "$BATS_TEST_TMPDIR/custody/late.age"
+  echo "made by someone else: $output"
+  [ "$status" -ne 0 ]
+  [ "$(cat "$BATS_TEST_TMPDIR/custody/late.age")" = someone-else ]
+  [ -z "$(requests_of POST secrets/data/postgres-backups)" ]
+  [ ! -e "$STATE/kv/postgres-backups.json" ]
+  [ "$(find "$BATS_TEST_TMPDIR/custody" -mindepth 1 -name '.late.age.*' | wc -l)" -eq 0 ]
+  forwards_closed
+}
+
+@test "A run interrupted between the PostgreSQL backup key's file and its store goes on from the file" {
+  local key
+  pg_seed_env
+  # Interrupted as the store is written, the write lost: the file holds the key, the store does not
+  # hold it. The second request to the key: the first asks whether it exists.
+  echo secrets/data/postgres-backups >"$STATE/interrupt"
+  echo 2 >"$STATE/interrupt-at"
+  : >"$STATE/interrupt-drops"
+  recipe bao-seed-postgres "$PG_CUSTODY"
+  echo "interrupted: $output"
+  [ "$status" -ne 0 ]
+  [ ! -e "$STATE/kv/postgres-backups.json" ]
+  key=$(pg_custody_key "$PG_CUSTODY")
+  [[ $key =~ ^[A-Za-z0-9+/]{43}=$ ]]
+  # It says which state it left and how the next run goes on, without the key.
+  [[ $output == *"$PG_CUSTODY"* ]]
+  [[ $output == *"from the file"* ]]
+  leaked "$output" "$key"
+  forwards_closed
+  rm "$STATE/interrupt" "$STATE/interrupt-count"
+  cp "$PG_CUSTODY" "$BATS_TEST_TMPDIR/custody-before.age"
+  # The next run reads the key back from the file: no other is made, and the store holds the one
+  # that was kept.
+  : >"$RECORD/argv"
+  recipe bao-seed-postgres "$PG_CUSTODY"
+  echo "continued: $output"
+  [ "$status" -eq 0 ]
+  [ "$(pg_stored)" = "$key" ]
+  [ "$(grep -c '^head ' "$RECORD/argv")" -eq 0 ]
+  cmp "$PG_CUSTODY" "$BATS_TEST_TMPDIR/custody-before.age"
+  [ -e "$STATE/stored-after-file" ]
+  forwards_closed
+
+  # Interrupted after OpenBao took the write, so the run never heard: the next run finds the key
+  # there, changes nothing, and keeps the file, whose key the store holds.
+  rm -r "$STATE/kv" "$STATE/stored-after-file" "$PG_CUSTODY" "$STATE/interrupt-drops"
+  mkdir "$STATE/kv"
+  echo secrets/data/postgres-backups >"$STATE/interrupt"
+  echo 2 >"$STATE/interrupt-at"
+  recipe bao-seed-postgres "$PG_CUSTODY"
+  echo "interrupted after the write: $output"
+  [ "$status" -ne 0 ]
+  key=$(pg_custody_key "$PG_CUSTODY")
+  [ "$(pg_stored)" = "$key" ]
+  rm "$STATE/interrupt" "$STATE/interrupt-count"
+  cp "$PG_CUSTODY" "$BATS_TEST_TMPDIR/custody-before.age"
+  recipe bao-seed-postgres "$PG_CUSTODY"
+  echo "found the key: $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"already holds"* ]]
+  [ "$(pg_stored)" = "$key" ]
+  cmp "$PG_CUSTODY" "$BATS_TEST_TMPDIR/custody-before.age"
+  forwards_closed
+
+  # The same when OpenBao refuses the write.
+  rm -r "$STATE/kv" "$PG_CUSTODY"
+  mkdir "$STATE/kv"
+  : >"$STATE/create-refused"
+  recipe bao-seed-postgres "$PG_CUSTODY"
+  echo "write refused: $output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"from the file"* ]]
+  key=$(pg_custody_key "$PG_CUSTODY")
+  rm "$STATE/create-refused"
+  recipe bao-seed-postgres "$PG_CUSTODY"
+  echo "continued: $output"
+  [ "$status" -eq 0 ]
+  [ "$(pg_stored)" = "$key" ]
+  forwards_closed
+
+  # The same when it is interrupted as the file is put in place, right after the link is made.
+  rm -r "$STATE/kv" "$PG_CUSTODY"
+  mkdir "$STATE/kv"
+  fake_tool ln <<LN
+printf '%s\n' "ln \$*" >> "\$RECORD/argv"
+"$(command -v ln)" "\$@" || exit
+kill -INT "\$PPID"
+LN
+  recipe bao-seed-postgres "$PG_CUSTODY"
+  echo "interrupted as the file is put in place: $output"
+  [ "$status" -ne 0 ]
+  [ ! -e "$STATE/kv/postgres-backups.json" ]
+  key=$(pg_custody_key "$PG_CUSTODY")
+  [[ $output == *"$PG_CUSTODY"* ]]
+  [[ $output == *"from the file"* ]]
+  [ "$(ls -A "$BATS_TEST_TMPDIR/custody")" = postgres.age ]
+  forwards_closed
+  record ln
+  recipe bao-seed-postgres "$PG_CUSTODY"
+  echo "continued: $output"
+  [ "$status" -eq 0 ]
+  [ "$(pg_stored)" = "$key" ]
+  forwards_closed
+}
+
+# shellcheck disable=SC2016 # $key is a jq variable.
+@test "Nothing of the PostgreSQL backup key is printed, passed as an argument or written unencrypted" {
+  local key targets
+  pg_seed_env
+  recipe bao-seed-postgres "$PG_CUSTODY"
+  echo "seeded: $output"
+  [ "$status" -eq 0 ]
+  key=$(pg_custody_key "$PG_CUSTODY")
+  leaked "$output" "$key" marker-service-account-jwt marker-bao-token
+  # Every output redirection of the script and of scripts/lib/openbao.sh goes to /dev/null, a file
+  # descriptor, the port-forward's log, OpenBao's CA or the probe's refusal, none of which holds a
+  # secret, and the one file they have a tool write, age's --output, is the partial custody file,
+  # which age writes encrypted.
+  targets=$(cd "$ROOT" && for file in scripts/bao-seed-postgres scripts/lib/openbao.sh; do
+    grep -vE '^[[:space:]]*#' "$file" | sed -E 's/<[A-Za-z]+>//g; s/[<>]=//g' |
+      grep -oE '(^|[^<>&0-9-])[0-9]*(&>>|&>|>>|>\||>)[[:space:]]*("[^"]*"|&[0-9-]+|[^[:space:];|&)]+)' |
+      sed -E 's/^.*(&>>|&>|>>|>\||>)[[:space:]]*//'
+  done | grep -vxE '/dev/null|&[0-9]+|&-|"\$log"|"\$work_dir/ca\.crt"|"\$work_dir/refusal"' | sort -u) || true
+  echo "written elsewhere: ${targets:-nothing}"
+  [ -z "$targets" ]
+  [ "$(cd "$ROOT" && grep -ohE -- '--output [^ ]+' scripts/bao-seed-postgres | sort -u)" = '--output "$partial"' ]
+  # The key travels in the body of the write that creates the key, and in no other request.
+  [ "$("$JQ" -r --arg key "$key" 'select(.body | contains($key)) | .method + " " + .path' "$RECORD/requests")" = \
+    'POST secrets/data/postgres-backups' ]
+  # The runs that fail say as little.
+  recipe bao-seed-postgres "$PG_CUSTODY"
+  echo "again: $output"
+  [ "$status" -ne 0 ]
+  leaked "$output" "$key"
+  rm -r "$STATE/kv"
+  mkdir "$STATE/kv"
+  : >"$STATE/create-refused"
+  recipe bao-seed-postgres "$PG_CUSTODY"
+  echo "write refused: $output"
+  [ "$status" -ne 0 ]
+  leaked "$output" "$key"
 }

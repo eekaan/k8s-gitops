@@ -1,0 +1,49 @@
+---
+# Values for the Barman Cloud plugin's chart, read by the HelmRelease through a ConfigMap generated
+# without substitution. Keys not set here keep the chart's defaults: the chart's own Service,
+# ServiceAccount and RBAC, and its Deployment's restricted security contexts.
+
+# Two replicas, which the plugin supports for pod and node loss (not for an upgrade, which the
+# chart's Recreate strategy replaces them all for). While none answers, the operator cannot make
+# the pod of a database that archives. The two must run on different nodes, and a disruption budget
+# beside the release (poddisruptionbudget.yaml) keeps one running while a node is drained.
+replicaCount: 2
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+    nodeTaintsPolicy: Honor
+    # The chart adds no selector of its own; these are its selector labels for this release.
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: plugin-barman-cloud
+        app.kubernetes.io/instance: plugin-barman-cloud
+    matchLabelKeys:
+      - pod-template-hash
+
+# The plugin's image and the sidecar it injects into every database pod that archives, each of the
+# release the chart is made for (the chart's appVersion, which tests/postgresql.bats holds them to),
+# by tag and digest, which Renovate moves together.
+image:
+  # renovate: datasource=docker depName=ghcr.io/cloudnative-pg/plugin-barman-cloud
+  tag: "v0.16.0@sha256:6404a416718bd7aad943c67a25a7bb20d0558b43edfeab0bf167f013ca435882"
+sidecarImage:
+  # renovate: datasource=docker depName=ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar
+  tag: "v0.16.0@sha256:c669259e20ed1e11fad821f735c396c19d929985aa05b9544b13ecc8b5a386d0"
+
+# The two certificates and the issuer are the application's own (certificates.yaml): the chart's
+# certificates name an Issuer of the namespace, and its own issuer is self-signed, where the cluster
+# signs what it needs inside itself with its CA.
+certificate:
+  createClientCertificate: false
+  createServerCertificate: false
+  createIssuer: false
+
+# No CPU limit, so the gRPC calls the operator makes while it makes a pod are never throttled. The
+# plugin watches Secrets and ObjectStores and holds little else.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi

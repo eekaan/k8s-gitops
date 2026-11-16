@@ -61,9 +61,10 @@ database() {
   APP_NAME=$app APP_NS=$ns CLUSTER_NAME=$name yq -n '{"apiVersion": "kustomize.toolkit.fluxcd.io/v1",
     "kind": "Kustomization", "metadata": {"name": strenv(APP_NAME), "namespace": "flux-system"},
     "spec": {"path": "./apps/base/" + strenv(APP_NS) + "/" + strenv(APP_NAME) + "/app", "targetNamespace": strenv(APP_NS),
-      "dependsOn": [{"name": "cloudnative-pg"}, {"name": "prometheus-operator-crds"}, {"name": "external-secrets"}, {"name": "openbao-store"}],
+      "dependsOn": [{"name": "cloudnative-pg"}, {"name": "plugin-barman-cloud"}, {"name": "prometheus-operator-crds"},
+        {"name": "external-secrets"}, {"name": "openbao-store"}],
       "components": ["../../../../../components/cnpg-cluster"],
-      "postBuild": {"substitute": {"CNPG_CLUSTER_NAME": strenv(CLUSTER_NAME)}},
+      "postBuild": {"substitute": {"CNPG_CLUSTER_NAME": strenv(CLUSTER_NAME), "CNPG_NAMESPACE": strenv(APP_NS)}},
       "sourceRef": {"kind": "ExternalArtifact", "name": strenv(APP_NAME)}}}' > "$dir/ks.yaml"
   # shellcheck disable=SC2016 # $list is a yq variable.
   yq ea '. as $list ireduce ({}; . * ($list // {}))' \
@@ -234,7 +235,7 @@ dump_and_upload() {
 }
 
 @test "The dump is taken as the application's own role and the S3 key reaches only the upload" {
-  local secret
+  local secret es
   database demo orders orders-db
 
   # The application's role, with the Secret the operator makes for it: three keys, read by the dump
@@ -274,14 +275,20 @@ dump_and_upload() {
   [ "$status" -ne 0 ]
 
   # The S3 key: the two properties of the key the volume backups use and nothing else, in a Secret of
-  # this database's, which only the upload container takes.
-  [ "$(yq -N 'select(.kind == "ExternalSecret") | .spec.secretStoreRef.name' "$BUILT")" = openbao ]
-  [ "$(yq -N 'select(.kind == "ExternalSecret") | .spec.data[].remoteRef | .key + ":" + .property' "$BUILT" | sort | paste -sd,)" = "volsync:AWS_ACCESS_KEY_ID,volsync:AWS_SECRET_ACCESS_KEY" ]
-  [ "$(yq -N 'select(.kind == "ExternalSecret") | (.spec.dataFrom // []) | length' "$BUILT")" -eq 0 ]
-  [ "$(yq -N 'select(.kind == "ExternalSecret") | .metadata.namespace' "$BUILT")" = demo ]
-  secret=$(yq -N 'select(.kind == "ExternalSecret") | .spec.target.name' "$BUILT")
+  # this database's, which only the upload container takes. The build's other ExternalSecret is the
+  # ObjectStore's (tests/postgresql.bats), whose Secret holds the customer key as well: no step of
+  # the job takes it.
+  [ "$(yq -N 'select(.kind == "ExternalSecret") | .spec.target.name' "$BUILT" | sort | paste -sd,)" = "orders-db-backup,orders-db-dump-s3" ]
+  es='select(.kind == "ExternalSecret" and .spec.target.name == "orders-db-dump-s3")'
+  [ "$(yq -N "$es | .spec.secretStoreRef.name" "$BUILT")" = openbao ]
+  [ "$(yq -N "$es | .spec.data[].remoteRef | .key + \":\" + .property" "$BUILT" | sort | paste -sd,)" = "volsync:AWS_ACCESS_KEY_ID,volsync:AWS_SECRET_ACCESS_KEY" ]
+  [ "$(yq -N "$es | (.spec.dataFrom // []) | length" "$BUILT")" -eq 0 ]
+  [ "$(yq -N "$es | .metadata.namespace" "$BUILT")" = demo ]
+  secret=$(yq -N "$es | .spec.target.name" "$BUILT")
   [ -n "$secret" ]
   [ "$(job_pod_field '[(.initContainers + .containers)[] | select(.env[]?.valueFrom.secretKeyRef.name == "'"$secret"'") | .name] | join(",")')" = upload ]
+  [ "$(job_pod_field '[(.initContainers + .containers)[] | select(.env[]?.valueFrom.secretKeyRef.name == "orders-db-backup") | .name] | length')" -eq 0 ]
+  [ "$(job_pod_field '[.volumes[]? | select(.secret.secretName == "orders-db-backup")] | length')" -eq 0 ]
   [ "$(job_pod_field '[(.initContainers + .containers)[] | select(.envFrom != null) | .name] | length')" -eq 0 ]
   [ "$(job_pod_field '[.volumes[]? | select(.secret.secretName == "'"$secret"'")] | length')" -eq 0 ]
   [ -z "$(job_pod_field '(.initContainers + .containers)[] | .env[]? | select(.name | test("SECRET|ACCESS_KEY|TOKEN|PASSWORD")) | select(.value != null) | .name')" ]

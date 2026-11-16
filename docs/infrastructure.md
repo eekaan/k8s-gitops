@@ -143,11 +143,16 @@ storage container or an S3 bucket.
 
 The cluster's key exists so that it can be revoked on its own, without touching the state. The
 cluster's etcd snapshot job uses it to upload to the etcd bucket and to delete the oldest snapshots
-([cluster.md](cluster.md#scheduled-etcd-snapshots)), and the OpenBao snapshot job the same in the
-OpenBao bucket ([kubernetes.md](kubernetes.md#raft-snapshots)). Both keys belong to the same project and reach
-every bucket in it, the state bucket included, which is why state and snapshots are encrypted
-before they are uploaded
-([ADR 0008](adr/0008-state-and-backups-are-encrypted-before-they-leave.md)).
+([cluster.md](cluster.md#scheduled-etcd-snapshots)), the OpenBao snapshot job the same in the
+OpenBao bucket ([kubernetes.md](kubernetes.md#raft-snapshots)), the volume backups to write their
+repositories, and each PostgreSQL cluster's sidecar to write its WAL archive and base backups to the
+postgres bucket and to delete what falls outside the 30-day window
+([kubernetes.md](kubernetes.md#backups-and-restores)). Both keys belong to the same project and
+reach every bucket in it, the state bucket included, which is why state, snapshots and volume
+backups are encrypted before they are uploaded
+([ADR 0008](adr/0008-state-and-backups-are-encrypted-before-they-leave.md)). PostgreSQL's archive is
+encrypted at the provider with a customer key instead, so the cluster's key alone can list and
+delete the postgres bucket's objects but not read them.
 
 These recipes, `just infra-state-bucket` and the etcd snapshot recipes `just cluster-snapshot`,
 `cluster-snapshots` and `cluster-restore` ([cluster.md](cluster.md#recipes)) reach the object
