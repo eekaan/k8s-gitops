@@ -143,7 +143,8 @@ storage container or an S3 bucket.
 
 The cluster's key exists so that it can be revoked on its own, without touching the state. The
 cluster's etcd snapshot job uses it to upload to the etcd bucket and to delete the oldest snapshots
-([cluster.md](cluster.md#scheduled-etcd-snapshots)). Both keys belong to the same project and reach
+([cluster.md](cluster.md#scheduled-etcd-snapshots)), and the OpenBao snapshot job the same in the
+OpenBao bucket ([kubernetes.md](kubernetes.md#raft-snapshots)). Both keys belong to the same project and reach
 every bucket in it, the state bucket included, which is why state and snapshots are encrypted
 before they are uploaded
 ([ADR 0008](adr/0008-state-and-backups-are-encrypted-before-they-leave.md)).

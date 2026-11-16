@@ -35,10 +35,15 @@ exceptions:
     covered-by: the namespace's Pod Security level and the node firewall (ADR 0017)
   - namespace: openbao
     reason: the secret store takes connections from External Secrets, from Prometheus and from its
-      own replicas, and reaches the API server to review the tokens its clients present; those flows
-      are not yet enumerated
-    covered-by: the store's own authentication of every client (ADR 0005), the namespace's Pod
-      Security level and the node firewall (ADR 0017)
+      own replicas, and reaches the API server to review the tokens its clients present; the
+      snapshot job's pod takes no connection and reaches the store's active member through the
+      Service openbao-active on 8200, the object storage on 443, the hosts it downloads age's
+      release from on 443 (the release's URL redirects to a second host, which serves the file), and
+      the cluster's resolver; it mounts no token for the API server and does not reach it. Those
+      flows are not yet enumerated
+    covered-by: the store's own authentication of every client (ADR 0005), which gives the snapshot
+      job the role snapshot alone, whose one capability takes a snapshot; the age archive's pinned
+      SHA-256; the namespace's Pod Security level and the node firewall (ADR 0017)
   - namespace: external-secrets
     reason: the API server calls its webhook from the control planes' host network and its
       controller reaches the secret store and the API server; the flows are not yet enumerated, and

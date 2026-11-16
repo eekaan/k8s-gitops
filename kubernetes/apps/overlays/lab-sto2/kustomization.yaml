@@ -65,6 +65,7 @@ resources:
   - ../../base/monitoring/vector/ks.yaml
   - ../../base/monitoring/victoria-logs/ks.yaml
   - ../../base/openbao/openbao/ks.yaml
+  - ../../base/openbao/openbao-snapshots/ks.yaml
   - ../../base/piraeus-datastore/linstor-cluster/ks.yaml
   - ../../base/piraeus-datastore/linstor-monitoring/ks.yaml
   - ../../base/piraeus-datastore/piraeus-operator/ks.yaml

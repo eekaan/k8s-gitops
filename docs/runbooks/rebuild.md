@@ -9,7 +9,7 @@ step it failed in ([cluster.md](../cluster.md#recipes)).
 
 - The state bucket and each stack's state in it: a destroy empties a stack's state and leaves the
   object in the bucket ([infrastructure.md](../infrastructure.md#recipes)).
-- The backup buckets and what they hold, the etcd snapshots among them: no stack owns them
+- The backup buckets and what they hold, the etcd and OpenBao snapshots among them: no stack owns them
   ([infrastructure.md](../infrastructure.md#s3-keys-and-backup-buckets)).
 - The cluster's secrets bundle, `talos/<cluster>/secrets.sops.yaml`, which is committed, and the
   Talos and Flux age keys, which the operator holds. The rebuilt cluster is made from the same
@@ -33,7 +33,9 @@ step it failed in ([cluster.md](../cluster.md#recipes)).
   cluster stack ([cluster.md](../cluster.md#the-workers-data-device)).
 - OpenBao's store and every key in it, as its data is on LINSTOR's volumes: the rebuilt cluster's
   OpenBao initialises anew, with a new seal key, and the recovery keys in the old store's custody
-  file open nothing in it.
+  file open nothing in it, unless the old store's newest snapshot is restored into it with the old
+  seal key in place before its first member starts
+  ([openbao.md](openbao.md#restoring-a-snapshot)).
 - Everything in etcd: every object of the Kubernetes API, the Secrets made in the cluster among
   them. Flux applies again what Git holds. A snapshot restores into the same nodes only
   ([etcd-restore.md](etcd-restore.md#when-to-restore)), so the steps there do not bring it into
@@ -77,6 +79,12 @@ step it failed in ([cluster.md](../cluster.md#recipes)).
 
 ## Building it again
 
+Restoring the old store's snapshot, rather than starting OpenBao anew and writing every key again,
+is chosen before `just cluster-flux` in step 1: the old seal key has to be in the cluster before
+OpenBao's first member starts, and Flux, once installed, applies OpenBao as soon as its
+dependencies are Ready. [openbao.md](openbao.md#restoring-a-snapshot) says when to step in; its
+steps take the place of step 4's.
+
 1. The build order in [cluster.md](../cluster.md#from-nothing-to-a-ready-cluster), from the start,
    leaving out the steps that make the age keys and the secrets bundle: they survived, and
    `just cluster-secrets` refuses to replace a bundle. The edge stack is applied before
@@ -98,7 +106,7 @@ step it failed in ([cluster.md](../cluster.md#recipes)).
    accepts a gap up to that long, when the operator judges one acceptable. Run `just cluster-check`
    again afterwards: every check passes.
 
-4. Once Flux has applied OpenBao, the operator's steps of its
+4. Once Flux has applied OpenBao, unless its snapshot is restored (above), the operator's steps of its
    [first initialisation](openbao.md#first-initialisation): `just bao-recovery <file>` with a new
    file, and every key the store held written again. For the volume backups that is
    `just bao-seed-volsync <file>` with the existing custody file of their master, never a new one:

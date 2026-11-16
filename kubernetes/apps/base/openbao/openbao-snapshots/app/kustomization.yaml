@@ -1,0 +1,21 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - externalsecret.yaml
+  - cronjob.yaml
+  - prometheusrule.yaml
+
+# The steps' scripts, which tests/openbao-snapshots.bats runs as the containers run them. They hold
+# shell variables, so Flux leaves their `${...}` alone.
+configMapGenerator:
+  - name: openbao-snapshots-scripts
+    files:
+      - scripts/fetch-age.sh
+      - scripts/snapshot.sh
+      - scripts/encrypt.sh
+      - scripts/upload.sh
+generatorOptions:
+  annotations:
+    kustomize.toolkit.fluxcd.io/substitute: disabled

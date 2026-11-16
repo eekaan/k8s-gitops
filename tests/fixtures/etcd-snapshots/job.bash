@@ -1,11 +1,15 @@
 # shellcheck shell=bash
-# Helpers, loaded by tests/etcd-snapshots.bats and tests/cluster-snapshot.bats, that build the etcd
-# snapshot application as Flux applies it and run its scripts as its containers run them, against the
-# recording fakes of the tests. Needs flux, kustomize, yq and jq on PATH.
+# Helpers, loaded by tests/etcd-snapshots.bats, tests/cluster-snapshot.bats and
+# tests/openbao-snapshots.bats, that build a snapshot application as Flux applies it and run its
+# scripts as its containers run them, against the recording fakes of the tests. Needs flux, kustomize,
+# yq and jq on PATH.
 
 JOB_REPO=$(cd "$BATS_TEST_DIRNAME/.." && pwd)
 JOB_CLUSTER=$JOB_REPO/kubernetes/clusters/lab-sto2
-JOB_APP=kubernetes/apps/base/etcd-snapshots/etcd-snapshots
+# The application and Kustomization it builds; tests/openbao-snapshots.bats, whose job has the same
+# shape, sets both before it loads this file.
+JOB_APP=${JOB_APP:-kubernetes/apps/base/etcd-snapshots/etcd-snapshots}
+JOB_NAME=${JOB_NAME:-etcd-snapshots}
 
 # job_setup_file: a copy of the applications and components in the file's temporary directory, as
 # flux build rewrites the kustomization.yaml of what it builds and puts it back afterwards.
@@ -33,7 +37,7 @@ job_build() {
   yq ea 'select(fileIndex == 0) as $vars | select(fileIndex == 1 and . != null)
     | .spec.postBuild.substitute = $vars' "$vars" "$JOB_TREE/$JOB_APP/ks.yaml" > "$ks"
   JOB_BUILT=$BATS_TEST_TMPDIR/job-built.yaml
-  (cd "$JOB_TREE" && flux build kustomization etcd-snapshots --path "./$JOB_APP/app" \
+  (cd "$JOB_TREE" && flux build kustomization "$JOB_NAME" --path "./$JOB_APP/app" \
     --kustomization-file "$ks" --dry-run --strict-substitute) > "$JOB_BUILT"
 }
 
@@ -52,8 +56,8 @@ job_scripts() {
   local name
   mkdir -p "$1"
   while IFS= read -r name; do
-    yq -N "select(.kind == \"ConfigMap\" and (.metadata.name | test(\"^etcd-snapshots-scripts\"))) | .data[\"$name\"]" "$JOB_BUILT" > "$1/$name"
-  done < <(yq -N 'select(.kind == "ConfigMap" and (.metadata.name | test("^etcd-snapshots-scripts"))) | .data | keys | .[]' "$JOB_BUILT")
+    yq -N "select(.kind == \"ConfigMap\" and (.metadata.name | test(\"^${JOB_NAME}-scripts\"))) | .data[\"$name\"]" "$JOB_BUILT" > "$1/$name"
+  done < <(yq -N "select(.kind == \"ConfigMap\" and (.metadata.name | test(\"^${JOB_NAME}-scripts\"))) | .data | keys | .[]" "$JOB_BUILT")
 }
 
 # job_env CONTAINER: the container's environment as NAME=VALUE lines: each literal value as built,

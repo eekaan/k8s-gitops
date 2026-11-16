@@ -107,7 +107,7 @@ own_file() {
   done < <(own_alerts "$RENDER")
 
   # ... and an application the overlay leaves out brings none: openbao is taken out of a copy of the
-  # tree, and its unit tests with it.
+  # tree, and its unit tests with it, those of the snapshot job in the namespace among them.
   tree="$BATS_TEST_TMPDIR/tree"
   mkdir -p "$tree"
   cp -R "$REPO/kubernetes" "$REPO/versions.yaml" "$tree/"
@@ -115,7 +115,7 @@ own_file() {
   left="$BATS_TEST_TMPDIR/left"
   "$REPO/scripts/render" "$left" "$tree" > "$BATS_TEST_TMPDIR/left.log" 2>&1 || { cat "$BATS_TEST_TMPDIR/left.log"; return 1; }
   [ ! -e "$left/$CLUSTER/openbao" ]
-  rm -f "$FX/repo/tests/rules/openbao.yaml"
+  rm -f "$FX/repo/tests/rules/openbao.yaml" "$FX/repo/tests/rules/openbao-snapshots.yaml"
   run env RULES_RENDER="$left" "$REPO/scripts/rules-config" "$BATS_TEST_TMPDIR/left-out" "$FX/repo"
   echo "$output"
   [ "$status" -eq 0 ]

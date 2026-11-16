@@ -5,8 +5,8 @@ itself with the key in the Secret `openbao-seal-1`, and the operator keeps its r
 copy of that key in a file encrypted to the Talos age key
 ([ADR 0016](../adr/0016-openbao-unseals-itself-and-the-operator-keeps-the-recovery-keys.md)). This
 runbook covers the first initialisation, checking it, a first initialisation that failed, a member
-that does not rejoin, bringing the seal key back, restoring access with the recovery keys, and
-rotating.
+that does not rejoin, bringing the seal key back, restoring access with the recovery keys, listing
+and checking the snapshots of the raft storage, restoring one, and rotating.
 
 Commands run through the cluster's kubeconfig, `talos/<cluster>/clusterconfig/kubeconfig`, which
 `just cluster-kubeconfig` fetches. The recipes read the Talos age key from `SOPS_AGE_KEY_FILE`, or
@@ -191,6 +191,124 @@ request, makes that endpoint answer without a token, and reverting the pull requ
 again ([listener](https://openbao.org/docs/configuration/listener/tcp/)). This step has no recipe:
 its requests, the shares among them, go to OpenBao through a port-forward with the shares read from
 the file into the request bodies on standard input, never typed or printed.
+
+## Listing and checking snapshots
+
+A CronJob takes a snapshot of the raft storage every six hours and uploads it encrypted to the
+OpenBao bucket, `BACKUP_BUCKET_PREFIX` followed by `-openbao`, as `<cluster>/<UTC time>.snapshot.age`
+([kubernetes.md](../kubernetes.md#raft-snapshots)). Listing and fetching reach the bucket with rclone,
+configured through its environment as the recipes configure it, so no rclone configuration file of the
+operator's is read; the endpoint, the region and whether addressing is by path are in
+`infra/openstack/backend.hcl`, and the key is the cluster's, `CLUSTER_S3_ACCESS_KEY_ID` and
+`CLUSTER_S3_SECRET_ACCESS_KEY` of `.env`. Set the variables from those files without printing a
+value, in a shell that is closed afterwards:
+
+```sh
+export RCLONE_CONFIG=/dev/null RCLONE_CONFIG_STORE_TYPE=s3 RCLONE_CONFIG_STORE_PROVIDER=Other \
+  RCLONE_CONFIG_STORE_ENV_AUTH=false RCLONE_CONFIG_STORE_FORCE_PATH_STYLE=<use_path_style> \
+  RCLONE_CONFIG_STORE_ENDPOINT=<endpoint> RCLONE_CONFIG_STORE_REGION=<region> \
+  RCLONE_CONFIG_STORE_ACCESS_KEY_ID=<access key ID> RCLONE_CONFIG_STORE_SECRET_ACCESS_KEY=<secret key>
+```
+
+The newest snapshots, newest first, with their sizes in bytes:
+
+```sh
+rclone lsf --files-only --format ps --separator ' ' store:<BACKUP_BUCKET_PREFIX>-openbao/<cluster>/ |
+  grep -E '^[0-9]{8}T[0-9]{6}Z\.snapshot\.age ' | sort -r | head
+```
+
+The newest is under 6 hours old, and under 13 while the job is healthy
+([OpenBaoSnapshotStale](alerts.md#openbaosnapshotstale)). The same bucket's other objects are none of
+the job's.
+
+To check that a snapshot decrypts and is a snapshot, without restoring it, fetch it into a directory
+only you can read and open it with the Talos age key, which never leaves the operator's machine; the
+archive's listing is all that is printed:
+
+```sh
+umask 077
+dir=$(mktemp -d)
+rclone copyto store:<BACKUP_BUCKET_PREFIX>-openbao/<cluster>/<name> "$dir/snapshot.age"
+head -n 1 "$dir/snapshot.age"
+age --decrypt --identity "$SOPS_AGE_KEY_FILE" --output "$dir/snapshot" "$dir/snapshot.age"
+tar -tzf "$dir/snapshot"
+```
+
+The first line is `age-encryption.org/v1`, and the listing is `meta.json`, `state.bin`, `SHA256SUMS` and
+`SHA256SUMS.sealed`: OpenBao's raft snapshot archive. A file that does not decrypt was encrypted to
+another key than the Talos age key's. Remove the directory when done, as the decrypted file is the
+store's whole storage, ciphertext under the seal key. It is not a copy to keep.
+
+## Restoring a snapshot
+
+The snapshots cover the loss of the three volumes, or of the cluster, while the operator's custody
+file is kept. Everything written after the snapshot restored is lost, up to six hours of it. They do
+not cover the loss of the seal key, which the file holds and the Secret `openbao-seal-1` did: a snapshot is
+ciphertext that opens only under the seal key its store had, and OpenBao refuses to restore it into a
+store whose seal differs; forcing it with `sys/storage/raft/snapshot-force` installs data no key opens.
+Nor do they cover the loss of the Talos age key, which decrypts them. With the custody file lost
+and the Secret gone, the store is started again empty and every secret is written again
+([kubernetes.md](../kubernetes.md#when-something-is-lost)).
+
+A restore goes into a store that unseals with the same seal key and has recovery keys of the
+operator's, so that `just bao-root` can run the restore:
+
+1. **Choose the snapshot** as [listing](#listing-and-checking-snapshots) says, and check that it
+   decrypts. The newest is the usual choice; take an earlier one when the newest was taken after the
+   damage.
+   **Stop the job** until the restore is checked: the CronJob keeps running, and a rebuilt cluster
+   runs it from the moment `openbao` is Ready, so it uploads snapshots of the empty store under the
+   same prefix, and once 56 of them exist (14 days) retention deletes the old store's, the one being
+   restored among them. `flux suspend kustomization openbao-snapshots`; if the CronJob already
+   exists, also `kubectl --namespace openbao patch cronjob openbao-snapshots --patch
+   '{"spec":{"suspend":true}}'`. Step 7 undoes both.
+2. **Put the seal key in place.** The Secret `openbao-seal-1` must hold the key the snapshot's store had,
+   which `just bao-seal-restore <file>` writes from the custody file (it leaves a Secret that holds the same
+   key alone, and replaces another only with `--replace`,
+   [above](#bringing-the-seal-key-back)).
+   - With the cluster running and only the volumes lost, the Secret is there; check it with
+     `just bao-seal-restore <file>`, which changes nothing when it matches.
+   - In a rebuilt cluster the Secret has to exist before the first member starts, or External Secrets makes a new
+     key. Once Flux has made the namespace `openbao`, and before it applies the application
+     (`flux get kustomization openbao` shows it waiting for its dependencies),
+     `flux suspend kustomization openbao`, then `just bao-seal-restore <file>`, then
+     `flux resume kustomization openbao`. The ExternalSecret `openbao-seal-1` finds the Secret and keeps its key.
+3. **Start the store empty.** With the cluster running, delete the three pods and the three claims, as
+   [a first initialisation that failed](#a-first-initialisation-that-failed) says: the members start from nothing,
+   `openbao-0` initialises with the seal key in the Secret, and the others join it. In a rebuilt cluster the
+   members start empty by themselves. Wait until all three are Ready, as
+   [first initialisation](#first-initialisation) steps 3 and 4 say.
+4. **Make recovery keys for the new store**: `just bao-recovery <new file>`, a new file beside the custody
+   file, never over it. The new store has none, and `just bao-root` needs three shares to make the root token that
+   restores.
+5. **Fetch and decrypt the snapshot** into a private directory, as [above](#listing-and-checking-snapshots).
+6. **Restore it** with OpenBao's CLI on the operator's machine, which takes the file by its path:
+   `just bao-root <new file> bao operator raft snapshot restore "$dir/snapshot"`. The restore replaces the
+   store's data with the snapshot's, so the store's own tokens, the command's among them, are replaced
+   too: the recipe's last step, revoking its token, can fail with the token unknown, and its report
+   names the token's accessor. Remove `$dir` once the restore has run.
+7. **Check it.**
+   - `kubectl --namespace openbao get pods`: three members Ready, which means unsealed, and
+     `kubectl --namespace openbao exec openbao-0 --container openbao -- bao status` says `Sealed false`.
+   - The original custody file opens the restored store, and the new file no longer does. OpenBao
+     keeps the recovery key in its storage, at `core/recovery-key`, and checks the shares of a root
+     token generation against what is there when it runs (the pinned release's
+     `internal/vault/seal_autoseal.go` and `internal/vault/seal_manager.go`); the snapshot carries
+     that storage, so the restored store's
+     recovery key is the one `just bao-recovery <file>` made for the store the snapshot was taken of.
+     `just bao-root <file> bao token lookup -accessor <accessor>`, with the accessor step 6's report
+     named, opens it and says that token is gone; without an accessor, `just bao-root <file> bao status`.
+     Remove the new file only once the custody file has opened the store. A snapshot taken before
+     the original store's recovery keys were made carries none: neither file opens a store restored
+     from it, and `just bao-recovery <another new file>` makes them, as after a first initialisation.
+   - `just bao-root <file> bao kv list secrets/`, which prints key names and never values, shows the keys the store held, such as `volsync`.
+   - `kubectl get externalsecret --all-namespaces`: every ExternalSecret of the store reports
+     `SecretSynced` within its refresh interval, as the role `external-secrets` came back with the snapshot.
+   - Start the job again: `flux resume kustomization openbao-snapshots`, and, if step 1 suspended the
+     CronJob, `kubectl --namespace openbao patch cronjob openbao-snapshots --patch
+     '{"spec":{"suspend":false}}'`. Then
+     `kubectl --namespace openbao create job --from=cronjob/openbao-snapshots <name>` takes a snapshot of the
+     restored store, so the bucket's newest is of it.
 
 ## Rotating
 

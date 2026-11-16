@@ -1,0 +1,34 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: openbao-snapshots
+  namespace: flux-system
+spec:
+  path: ./apps/base/openbao/openbao-snapshots/app
+  # The namespace the role snapshot binds its account in (openbao/app/initialize/initialize.json):
+  # the job runs as that account, so it runs beside the store.
+  targetNamespace: openbao
+  # The store, which the job logs in to, and its ClusterSecretStore, which the ExternalSecret that
+  # reads the S3 key names; External Secrets' definitions, for that ExternalSecret; the monitoring
+  # definitions, for the PrometheusRule.
+  dependsOn:
+    - name: external-secrets
+    - name: openbao
+    - name: openbao-store
+    - name: prometheus-operator-crds
+  postBuild:
+    substitute:
+      # The cluster the snapshots are of, the directory name of kubernetes/clusters/<cluster> and
+      # talos/<cluster>, under which the snapshots are listed. A second cluster that runs this
+      # application sets both values from its overlay.
+      OPENBAO_SNAPSHOT_CLUSTER: lab-sto2
+      # The public half of the Talos age key, talos/.sops.yaml's recipient, which the operator's
+      # recipes encrypt to and the etcd snapshot job encrypts to. tests/openbao-snapshots.bats fails
+      # when the three differ, so the recipient that just cluster-age-key writes there is written
+      # here too.
+      OPENBAO_SNAPSHOT_AGE_RECIPIENT: age1pklkf3zmxckt2xv2anwljpylrlkzkzv2tuwn2eurcht8jhu36ququnulxj
+  sourceRef:
+    kind: ExternalArtifact
+    name: openbao-snapshots

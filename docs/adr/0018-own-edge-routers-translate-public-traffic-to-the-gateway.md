@@ -1,7 +1,11 @@
 # 0018 — Edge routers the deployment runs, translating public traffic to the Gateway
 
-- Status: accepted
+- Status: accepted, amended by 0020
 - Date: 2026-11-14
+- Amended: 2026-11-15, the client's address reaches the Gateway in a PROXY protocol header that a
+  layer 4 proxy on each edge sends, so what this record "does not build" as a proxy on the edges is
+  decided there; the source translation, the routing and the rest stand as written
+  ([ADR 0020](0020-the-client-address-reaches-the-gateway-in-a-proxy-protocol-header.md))
 
 ## Context
 
