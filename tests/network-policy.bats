@@ -581,6 +581,38 @@ E
   denied "$VIEW" @remote-node sso-system/Deployment/oauth2-proxy 4180/tcp
   denied_in "$VIEW" envoy-gateway-system/Deployment/envoy-gateway sso-system/Deployment/dex 5556/tcp
   denied_in "$VIEW" envoy-gateway-system/Deployment/envoy-gateway sso-system/Deployment/oauth2-proxy 4180/tcp
+  # The log store's route sends the proxies to VictoriaLogs' 9428 in monitoring, which carries the
+  # Gateway label and is listed, so it takes them on every port: the proxies' egress names the
+  # store's pod on that port alone, so they reach no other port of it and no pod of Prometheus,
+  # Grafana, Alertmanager or the collector. Those pods and ports are read from the render: the
+  # Services of Prometheus and Alertmanager, which select the pods their operator makes; the Grafana
+  # its operator runs, whose pods it labels app with the Grafana's name and serves on 3000 unless the
+  # Grafana's configuration sets another port (grafana-operator v5.25.0, controllers/reconcilers/grafana/
+  # and controllers/config/operator_constants.go); and the collector's DaemonSet. The controller's
+  # pods do not reach the store.
+  local store=monitoring/StatefulSet/victoria-logs selector port grafana
+  allowed "$VIEW" "$PROXY" "$store" 9428/tcp
+  denied "$VIEW" "$PROXY" "$store" 9429/tcp
+  denied "$VIEW" "$PROXY" "$store" 8080/tcp
+  denied "$VIEW" envoy-gateway-system/Deployment/envoy-gateway "$store" 9428/tcp
+  selector=$(yq '.spec.selector | to_entries | map(.key + "=" + .value) | join(",")' "$REAL"/*/kube-prometheus-stack/Service_monitoring_kube-prometheus-stack-prometheus.yaml)
+  port=$(yq '.spec.ports[] | select(.name == "http-web") | .targetPort' "$REAL"/*/kube-prometheus-stack/Service_monitoring_kube-prometheus-stack-prometheus.yaml)
+  [ "$port" = 9090 ] || { echo "Prometheus' web port in the render: $port"; return 1; }
+  denied "$VIEW" "$PROXY" "monitoring:$selector" "$port/tcp"
+  selector=$(yq '.spec.selector | to_entries | map(.key + "=" + .value) | join(",")' "$REAL"/*/kube-prometheus-stack/Service_monitoring_kube-prometheus-stack-alertmanager.yaml)
+  port=$(yq '.spec.ports[] | select(.name == "http-web") | .targetPort' "$REAL"/*/kube-prometheus-stack/Service_monitoring_kube-prometheus-stack-alertmanager.yaml)
+  [ "$port" = 9093 ] || { echo "Alertmanager's web port in the render: $port"; return 1; }
+  denied "$VIEW" "$PROXY" "monitoring:$selector" "$port/tcp"
+  grafana=$(yq '.metadata.name + " " + ((.spec.config.server.http_port // 3000) | tostring)' "$REAL"/*/grafana/Grafana.grafana.integreatly.org_monitoring_*.yaml)
+  [ "$grafana" = "grafana 3000" ] || { echo "the Grafana of the render and its port: $grafana"; return 1; }
+  denied "$VIEW" "$PROXY" "monitoring:app=${grafana% *}" "${grafana#* }/tcp"
+  port=$(yq '.spec.template.spec.containers[].ports[] | select(.name == "prom-exporter") | .containerPort' "$REAL"/*/vector/DaemonSet.apps_monitoring_vector.yaml)
+  [ "$port" = 9598 ] || { echo "the collector's metrics port in the render: $port"; return 1; }
+  denied "$VIEW" "$PROXY" monitoring/DaemonSet/vector "$port/tcp"
+  # The rule names the store's pod, not the namespace: another pod of monitoring is no backend on the
+  # store's port either.
+  denied "$VIEW" "$PROXY" monitoring/DaemonSet/vector 9428/tcp
+  denied "$VIEW" "$PROXY" "monitoring:app=${grafana% *}" 9428/tcp
   allowed "$VIEW" "$PROXY" envoy-gateway-system/Deployment/envoy-gateway 18000/tcp
   allowed "$VIEW" "$PROXY" "$DNS" 53/udp
   # Nothing but the listener ports reaches the proxies from outside.
@@ -676,6 +708,7 @@ E
   [[ " $routed " == *" demo:8080 "* && " $routed " == *" ai-system:5678 "* && " $routed " == *" ai-system:8080 "* \
     && " $routed " == *" kromgo:8080 "* && " $routed " == *" backstage:7007 "* ]]
   [[ " $routed " == *" sso-system:4180 "* && " $routed " == *" sso-system:5556 "* ]]
+  [[ " $routed " == *" monitoring:9428 "* ]]
   [ "$named" = "$routed" ]
   # A route to a backend in a namespace without the Gateway label, or behind a Service without a
   # selector, has no port the comparison could name, and fails it saying why.

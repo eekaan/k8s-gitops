@@ -1,5 +1,5 @@
 Feature: Logs
-  VictoriaLogs keeps the cluster's logs for two weeks, and Vector on every node ships them: every pod's, and the node's own Talos service and kernel logs but its audit log, read from the files Talos writes.
+  VictoriaLogs keeps the cluster's logs for two weeks, and Vector on every node ships them: every pod's, and the node's own Talos service and kernel logs but its audit log, read from the files Talos writes. A person on the cluster's sign-in list reads them in VictoriaLogs' own interface at logs under the cluster's domain, and nothing else of the store is reachable through the public Gateway.
 
   Scenario: The log store builds with Flux and runs once in the monitoring namespace
     Given the victoria-logs application and its namespace directory, enabled in the cluster's overlay
@@ -105,3 +105,28 @@ Feature: Logs
     Given the collector's rendered configuration
     When every path from a source to a sink is read
     Then the only path from the Talos source to the store runs through the filter that drops the audit log's records, after the filter that drops the kernel's audit lines, and no other transform or sink takes Talos's lines before it
+
+  Scenario: The log store's interface is reached at logs under the cluster's domain on the public Gateway, behind the cluster's sign-in
+    Given the victoria-logs-route application as the lab-sto2 overlay applies it, the store's application, the monitoring namespace and oauth2-proxy's grant, built with two different cluster domains
+    When its Kustomization, its route, its SecurityPolicy, its sign-in route, the namespace's labels and the grant are read
+    Then the application sits beside the store in monitoring, takes the sso component with the route and the host logs, waits, and names gateway-public, victoria-logs and oauth2-proxy in dependsOn, and the store's application waits too; monitoring carries the Gateway label; the route logs is on the public Gateway's https listener for logs under the cluster's domain; its one SecurityPolicy targets it alone and asks oauth2-proxy's Service of sso-system at "/?rd=https://logs.<domain>/", sending it only the cookie, passing the backend the identity it answers with and never letting a request through when the answer cannot be had, and sets nothing else; the route logs-oauth2 sends /oauth2/ on the same host to oauth2-proxy; the grant names monitoring for SecurityPolicy and HTTPRoute; and the route's host, the return address and the sign-in route's host follow the domain
+
+  Scenario: Only the interface and its queries are routed to the log store, and the root is redirected to the interface
+    Given the route logs as Flux applies it and the store's rendered Service
+    When its rules are read whole and requests are matched against them as Gateway API matches a route
+    Then it has two rules: one for exactly / that redirects with status 302 to /select/vmui/ and has no backend, and one with no filter to the store's Service on its port that matches, by path alone and in this order, the prefixes /select/vmui and /select/logsql and exactly /select/buildinfo and /select/tenant_ids; the interface's files, every query handler, the build information and the tenants are sent on, and the root, /select itself, the vmalert proxy, every writer, the delete, internal, metrics, flags, profiling and health paths, and the routed paths changed in letter case, by a suffix or by a trailing slash are sent nowhere
+
+  Scenario: No route of the tree reaches the log store without the cluster's sign-in
+    Given every application the overlay enables, built as Flux applies them, and the render of the tree with every chart expanded
+    When every route, every object that targets a route, every SecurityPolicy, every ReferenceGrant and the Grafana are read, as they are and with a second route to the store, a route in monitoring without a policy, a second Service in front of the store's pods that another namespace's route names through a grant in monitoring, the policy failing open, another route on the host, a second object on the route or a Grafana that asks its operator for a route added
+    Then logs of monitoring is the only route that sends to the store's Service, whatever namespace a reference names or leaves out, every route in monitoring on the public Gateway is one that a policy asking oauth2-proxy of sso-system without failing open targets, or that route's sign-in route to oauth2-proxy alone, no Grafana there asks for a route, logs is targeted by that policy and by nothing else, no other route lists its host, no grant of monitoring lets another namespace refer to its Services, and each addition is named as what breaks this
+
+  Scenario: The log store's route is selected by an overlay entry, builds nothing when it is not, and is refused without the store, the Gateway or the sign-in
+    Given the lab-sto2 overlay, which lists victoria-logs-route in one entry of its own
+    When it is built with the entry and without it, and the tree is checked without the entry and with victoria-logs, gateway-public or oauth2-proxy left out in turn
+    Then with the entry it applies the Kustomization victoria-logs-route and without it nothing of the route and nothing else changes, the tree without it passes the kubernetes check, and each of the three left out is refused, naming victoria-logs-route and the missing application
+
+  Scenario: The routed paths were read from the VictoriaLogs release the pinned chart deploys
+    Given the route logs, whose header records the VictoriaLogs release its paths were read from, and the store's pinned chart
+    When the record, its Source line and the chart's appVersion are compared
+    Then the record is the chart's appVersion, the Source line names app/vlselect/main.go at that release's tag, .renovate/by-hand.tsv holds the record as moved by hand, and a record that differs from the chart's fails, saying what to read again and what to set
