@@ -1,0 +1,11 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/helmrepository-source-v1.json
+# CrowdSec's chart is published to a classic Helm repository only, which its project's documentation
+# names; no OCI registry carries it, so Flux reads the repository's index.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: crowdsec
+spec:
+  interval: 12h
+  url: https://crowdsecurity.github.io/helm-charts

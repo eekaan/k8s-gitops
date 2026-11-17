@@ -1,0 +1,18 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: crowdsec-gateway-logs
+  namespace: flux-system
+spec:
+  path: ./apps/base/envoy-gateway-system/crowdsec-gateway-logs/app
+  targetNamespace: envoy-gateway-system
+  # The proxies' pods exist once the Gateway is programmed, and the grant is to read them. The
+  # Role and its binding are plain objects, so the Kustomization is Ready once they are applied.
+  dependsOn:
+    - name: gateway-public
+  wait: true
+  sourceRef:
+    kind: ExternalArtifact
+    name: crowdsec-gateway-logs

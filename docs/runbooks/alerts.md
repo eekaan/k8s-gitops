@@ -657,6 +657,45 @@ by hand to clear the alert at once, once the cause is gone: `kubectl --namespace
 -f` a `Backup` of method `plugin` for the cluster, as
 [postgres-restore.md](postgres-restore.md#taking-a-base-backup-by-hand) shows.
 
+## CrowdSecLocalAPIDown
+
+CrowdSec's local API has not answered its scrape for 10 minutes, or no target of it exists. The
+local API stores the alerts the agent sends and lists the decisions, so while it is down no decision
+can be listed and the agent's alerts are lost. Nothing is blocked by it either way: nothing enforces
+a decision ([CrowdSec](../kubernetes.md#crowdsec)). The alert clears once the local API answers.
+
+What fires it:
+
+- **A target that fails its scrape**: the pod runs and does not serve, as while its database claim
+  is being attached or the process is stuck.
+- **No target**: the pod is gone or never started, as when its claims cannot be made, its image
+  cannot be pulled or its Secret `crowdsec-lapi-secrets` is missing, or the release is not
+  installed.
+
+Look at first: `kubectl --namespace crowdsec get pods,pvc`, which shows a pod that does not start
+or a claim that is not bound, and the pod's log, `kubectl --namespace crowdsec logs
+deployment/crowdsec-lapi` (add `--previous` for a crash loop). `kubectl --namespace crowdsec get
+externalsecret` says whether the Secret exists, and `kubectl --namespace flux-system get
+kustomization crowdsec` and `kubectl --namespace crowdsec get helmrelease crowdsec` whether the
+release is installed.
+
+Usually: the claims' storage is not ready, which `just cluster-check` and the storage alerts show
+([Storage](../kubernetes.md#storage)), or the Secret `crowdsec-lapi-secrets` is missing, in which
+case the ExternalSecret that made it makes it again with new values, and the local API and the agent
+are restarted together so that both read them. The agent registers with the local API at every
+start, so after the local API's database was lost, restart the agent too; the decisions the
+database held are lost with it, and only requests the proxies log after the agent starts decide
+again.
+
+The agent's own failure to start does not fire this alert. It registers under its pod's name, and
+the local API refuses a name it already holds, so a pod of the agent that runs its init container a
+second time, as when the pod's sandbox is made again, stays in `Init:CrashLoopBackOff`, and
+`kubectl --namespace crowdsec logs deployment/crowdsec-agent --container wait-for-lapi-and-register`
+ends with `user already exist`. Delete the pod, `kubectl --namespace crowdsec delete pod <pod
+name>`, and its Deployment makes one under a new name, which registers; or delete the old machine,
+`kubectl --namespace crowdsec exec deployment/crowdsec-lapi -- cscli machines delete <pod name>`,
+and the same pod registers at its next try.
+
 ## PublicEndpointDown
 
 The probe of a public hostname has had no answer for 5 minutes. The blackbox exporter asks the

@@ -1,0 +1,25 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: crowdsec
+  description: CrowdSec, which reads the public Gateway's access logs and records a decision on each client that scans, probes or fails to sign in, with an alert on its local API being down; nothing enforces a decision.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#crowdsec
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#crowdseclocalapidown
+      title: Runbook
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/crowdsec/crowdsec
+      title: Manifests
+spec:
+  type: service
+  lifecycle: production
+  owner: group:default/operators
+  system: observability
+  dependsOn:
+    - component:default/cilium
+    - resource:default/crowdsec-gateway-logs
+    - component:default/external-secrets
+    - resource:default/linstor-cluster
+    - resource:default/prometheus-operator-crds

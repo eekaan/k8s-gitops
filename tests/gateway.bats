@@ -538,9 +538,9 @@ tree_without() {
     [ "$(yq '.resources[] | select(test("/'"$app"'/ks.yaml$"))' "$REPO/kubernetes/apps/overlays/lab-sto2/kustomization.yaml")" ] \
       || { echo "the lab-sto2 overlay does not list $app"; return 1; }
   done
-  # Leaving the Gateway, the applications that have a route on it and the DNS records of their
-  # routes out builds: nothing else names them.
-  tree_without gateway-public hello-route n8n kromgo external-dns open-webui hello-sso dex oauth2-proxy backstage
+  # Leaving the Gateway, the applications that have a route on it, the DNS records of their routes
+  # and CrowdSec, whose agent reads the Gateway's proxies, out builds: nothing else names them.
+  tree_without gateway-public hello-route n8n kromgo external-dns open-webui hello-sso dex oauth2-proxy backstage crowdsec crowdsec-gateway-logs
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]

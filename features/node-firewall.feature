@@ -58,6 +58,36 @@ Feature: Nodes firewall themselves
     When every node's configuration is rendered
     Then that network reaches the Talos and Kubernetes API rules from talman.yaml's values, no file of talos/ that git would commit holds an address but the wildcard and loopback ones, and git ignores the cluster's talman.yaml and operator-cidrs.json
 
+  Scenario: Every port a host-network pod declares is admitted by a rule for every node or listed with its reason
+    Given the render of the kubernetes/ tree, the inventory in talos/firewall.yaml and node-firewall-exceptions.yaml
+    When the ports are read that the containers and init containers declare in every pod template of the render that is on the host's network
+    Then each port is admitted by exactly one rule of the inventory, of its protocol and for every node, or is one entry under no-rule with its reason, never both, the account of them is the one the test holds, and docs/cluster.md names every port without a rule where it says what gets none; a port with neither, with both, with two rules, with a rule only control planes have, or whose host port is another than itself, fails, named with its workload
+
+  Scenario: Every rule of the node firewall has a listener, a port a host-network pod declares or a listed node service
+    Given the render of the kubernetes/ tree, the inventory in talos/firewall.yaml and node-firewall-exceptions.yaml
+    When each rule of the inventory is matched with the ports the host-network pods of the render declare
+    Then each rule admits such a port or is named once under no-pod with what listens there, never both, and the account of them is the one the test holds; a rule with neither fails as stale, and an entry under no-pod for a rule a pod uses or that the inventory lacks, and an entry under no-rule that no such port matches, fail as entries without use
+
+  Scenario: No pod on the pod network declares a host port
+    Given the render of the kubernetes/ tree
+    When every pod template that is not on the host's network is read
+    Then no container or init container of it declares a host port, which Cilium would serve before the node's firewall sees the packet; one that does fails, named with its workload, and the host ports the render does declare, all in templates on the host's network, are the ones the test holds
+
+  Scenario: No monitor scrapes a port that has no rule
+    Given the render's PodMonitors, ServiceMonitors and Services, and the ports node-firewall-exceptions.yaml lists under no-rule
+    When each monitor is matched with the pods and the Services it selects
+    Then no PodMonitor scrapes such a port of a pod it selects, by its name or its number, and no ServiceMonitor scrapes a port of a Service that leads to it; what the test cannot decide counts against the monitor: a selector of an operator it does not know selects, an endpoint that names no port or rewrites the address it scrapes reaches every port, and a Service without a selector leads to every pod; and a Probe, a ScrapeConfig or a Prometheus with scrape configurations of its own fails until the test reads it
+
+  Scenario: No rule admits a pod's own address to a node's Talos API, and each node holds its floating address itself
+    Given fixture node data with each node's floating address and the pod range
+    When every node's configuration is rendered
+    Then each node holds exactly its own floating address, as one address on a dummy link, and its one rule for the Talos API's port accepts no network that shares an address with the pod range, from which a pod arrives at its own node's address on the node network and at its floating address
+
+  Scenario: The account of what a rollout proves names every port the firewall admits
+    Given the inventory in talos/firewall.yaml and the section of docs/cluster.md on what the rollout's checks prove and what to watch afterwards
+    When the section is read
+    Then every port and every port range of the inventory's thirteen rules is in it as a whole word
+
   Scenario: The first rollout applies to one node in a self-reverting mode and stops unless the checks pass
     Given a cluster whose configuration changes a worker and a control plane
     When cluster-talos runs with --first naming the worker, again with each check failing in turn, with the cluster unhealthy before it starts, and with the worker's configuration reverted before the checks end

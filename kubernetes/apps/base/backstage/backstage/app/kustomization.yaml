@@ -44,6 +44,8 @@ configMapGenerator:
       - catalogue/cilium.yaml
       - catalogue/cloudnative-pg.yaml
       - catalogue/cluster-ca.yaml
+      - catalogue/crowdsec-gateway-logs.yaml
+      - catalogue/crowdsec.yaml
       - catalogue/demo-volsync-movers.yaml
       - catalogue/descheduler.yaml
       - catalogue/dex.yaml

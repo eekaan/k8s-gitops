@@ -330,6 +330,12 @@ Feature: Alerts
     Then the alert fires after its time for the first two and never for the others
 
   @by:rules-check
+  Scenario: The alert CrowdSecLocalAPIDown fires after its time in the failing case and stays quiet in the healthy one
+    Given CrowdSec's local API whose target answers its scrape for ten minutes, then fails it for twenty, then answers again for ten, and then has no series for twenty
+    When the rule is evaluated over time
+    Then the alert is quiet while the target answers, fires once the scrape has failed for its time, is quiet again once it answers, and fires once the series has been gone for its time
+
+  @by:rules-check
   Scenario: The alert PublicEndpointDown fires after its time in the failing case and stays quiet in the healthy one
     Given a probe of a public hostname that gets no answer, and one that is answered as expected
     When the rule is evaluated over time

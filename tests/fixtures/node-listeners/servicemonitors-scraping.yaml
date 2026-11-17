@@ -1,0 +1,225 @@
+---
+# Services and ServiceMonitors that each scrape a port the tree lists as having no rule: the
+# operator's API (health, 9234) and metrics (prometheus, 9963) and Envoy's metrics (9964). A
+# monitor selects its Service by the label fixture.
+# A Service port whose target is the name the pod gives the port.
+apiVersion: v1
+kind: Service
+metadata:
+  name: operator-by-target-name
+  namespace: kube-system
+  labels:
+    fixture: operator-by-target-name
+spec:
+  selector:
+    io.cilium/app: operator
+    name: cilium-operator
+  ports:
+    - name: health
+      port: 80
+      targetPort: health
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: by-target-name
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      fixture: operator-by-target-name
+  endpoints:
+    - port: health
+---
+# A Service port whose target is the port's number.
+apiVersion: v1
+kind: Service
+metadata:
+  name: operator-by-target-number
+  namespace: kube-system
+  labels:
+    fixture: operator-by-target-number
+spec:
+  selector:
+    name: cilium-operator
+  ports:
+    - name: web
+      port: 80
+      targetPort: 9963
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: through-target-number
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      fixture: operator-by-target-number
+  endpoints:
+    - port: web
+---
+# A Service port that names no target, which is then its own number.
+apiVersion: v1
+kind: Service
+metadata:
+  name: operator-by-port-number
+  namespace: kube-system
+  labels:
+    fixture: operator-by-port-number
+spec:
+  selector:
+    name: cilium-operator
+  ports:
+    - name: metrics
+      port: 9963
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: by-port-number
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      fixture: operator-by-port-number
+  endpoints:
+    - port: metrics
+---
+# A Service port whose target is the empty string, which names none: its own number again.
+apiVersion: v1
+kind: Service
+metadata:
+  name: operator-by-empty-target
+  namespace: kube-system
+  labels:
+    fixture: operator-by-empty-target
+spec:
+  selector:
+    name: cilium-operator
+  ports:
+    - name: metrics
+      port: 9963
+      targetPort: ""
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: by-empty-target
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      fixture: operator-by-empty-target
+  endpoints:
+    - port: metrics
+---
+# A Service whose one port leads elsewhere, and monitors that reach the pods' other ports behind it:
+# by the deprecated target port as a name and as a number, with no port at all or a target port
+# that names none, which is every port of the pods, and by rewriting the address.
+apiVersion: v1
+kind: Service
+metadata:
+  name: operator-other-port
+  namespace: kube-system
+  labels:
+    fixture: operator-other-port
+spec:
+  selector:
+    name: cilium-operator
+  ports:
+    - name: web
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: by-target-port
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      fixture: operator-other-port
+  endpoints:
+    - targetPort: prometheus
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: by-target-number
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      fixture: operator-other-port
+  endpoints:
+    - targetPort: 9234
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: every-port
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      fixture: operator-other-port
+  endpoints:
+    - path: /metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: target-zero
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      fixture: operator-other-port
+  endpoints:
+    - targetPort: 0
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: readdressed
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      fixture: operator-other-port
+  endpoints:
+    - port: web
+      relabelings:
+        - action: replace
+          sourceLabels:
+            - __meta_kubernetes_pod_host_ip
+          targetLabel: __address__
+          replacement: $1:9963
+---
+# A Service without a selector leads where its endpoints say, which the check does not read: it
+# counts for every pod that has the port's number.
+apiVersion: v1
+kind: Service
+metadata:
+  name: without-selector
+  namespace: monitoring
+  labels:
+    fixture: without-selector
+spec:
+  ports:
+    - name: metrics
+      port: 9964
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: without-selector
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      fixture: without-selector
+  endpoints:
+    - port: metrics
