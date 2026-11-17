@@ -1,0 +1,13 @@
+---
+# What the agent reads: the logs of the public Gateway's proxies, through the Kubernetes API. The
+# Kubernetes datasource lists and watches the pods of one namespace that a label selector names and
+# follows the logs of each of their containers from the moment it finds them, so no path of the node
+# is read and no other pod's lines reach CrowdSec: the namespace is the one the Role of
+# crowdsec-gateway-logs grants, and the selector is the labels the controller gives the proxies of
+# the public Gateway (the EnvoyProxy's topologySpreadConstraints selects the same). The type is the
+# label the parser of the release selects.
+source: kubernetes
+namespace: envoy-gateway-system
+selector: app.kubernetes.io/name=envoy,app.kubernetes.io/component=proxy,app.kubernetes.io/managed-by=envoy-gateway,gateway.envoyproxy.io/owning-gateway-name=public
+labels:
+  type: envoy-gateway-json

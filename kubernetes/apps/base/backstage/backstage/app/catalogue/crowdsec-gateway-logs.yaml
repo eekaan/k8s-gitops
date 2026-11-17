@@ -1,0 +1,19 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: crowdsec-gateway-logs
+  description: The Role and its binding in the proxies' namespace that let CrowdSec's agent list the public Gateway's proxies and read their logs.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#crowdsec
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/envoy-gateway-system/crowdsec-gateway-logs
+      title: Manifests
+spec:
+  type: role
+  lifecycle: production
+  owner: group:default/operators
+  system: observability
+  dependsOn:
+    - resource:default/gateway-public

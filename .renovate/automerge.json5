@@ -111,6 +111,14 @@
       automerge: false,
     },
     {
+      // The test that runs CrowdSec's image needs docker, which the required check has none of: a
+      // person runs `bats tests/crowdsec.bats` on a machine with docker before merging an update
+      // of the image or of the chart (docs/kubernetes.md, CrowdSec).
+      description: "Everything of CrowdSec's application: its image and its chart",
+      matchFileNames: ["kubernetes/apps/base/crowdsec/**"],
+      automerge: false,
+    },
+    {
       description: "Anything pinned in mise.toml or versions.yaml",
       matchFileNames: ["mise.toml", "versions.yaml"],
       automerge: false,
