@@ -60,6 +60,7 @@ docker	ghcr.io/backstage/backstage	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list, w
 docker	ghcr.io/falcosecurity/charts/falco	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list, which holds release candidates as 9.2.0-rc1
 docker	docker.io/falcosecurity/falco	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list, which holds release candidates and variants such as 0.45.2-slim as separate tags
 docker	ghcr.io/kyverno/charts/kyverno	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	docker.io/crowdsecurity/crowdsec	^v[0-9]+\.[0-9]+\.[0-9]+$	registry tag list, which holds each release's slim and debian variants, its release candidates, and the moving tags latest, slim and dev-debian
 docker	ghcr.io/open-feature/charts/open-feature-operator	^v[0-9]+\.[0-9]+\.[0-9]+$	registry tag list, which holds a signature tag, sha256-<digest>.sig, beside each release
 docker	ghcr.io/open-feature/open-feature-operator	^v[0-9]+\.[0-9]+\.[0-9]+$	registry tag list, which holds latest, main, a branch build and signature tags beside the releases
 docker	ghcr.io/open-feature/flagd	^v[0-9]+\.[0-9]+\.[0-9]+$	registry tag list, which holds a -fips build of the newer releases, latest, latest-fips, main, pull request and branch builds and signature tags beside the releases

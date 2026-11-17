@@ -101,6 +101,85 @@ EOF
   absent -E 'create|delete|set|unset|save|add|remove' "$RECORD/argv"
 }
 
+# policy_copy: a copy in $COPY of what the render of the proof's input reads, each file where the
+# repository has it: the scripts, the fixture's three files and the two files its main.tf names.
+policy_copy() {
+  local path
+  COPY="$BATS_TEST_TMPDIR/copy"
+  mkdir -p "$COPY"
+  cp -R "$ROOT/scripts" "$COPY/scripts"
+  for path in tests/fixtures/edge-policy/main.tf tests/fixtures/edge-policy/proof.sh \
+    tests/fixtures/edge-policy/speaker.conf.in infra/openstack/stacks/sto2/edge/frr.conf.tftpl \
+    kubernetes/apps/base/kube-system/cilium-bgp/app/bgp-peer.yaml; do
+    mkdir -p "$COPY/$(dirname "$path")"
+    cp "$ROOT/$path" "$COPY/$path"
+  done
+}
+
+teardown() {
+  [[ -n ${HOLDER-} ]] || return 0
+  # The console that holds the state lock ends when its standard input does, here or when the test's
+  # process goes; one that never got its input is ended by hand.
+  if [[ -n ${HOLD-} ]]; then
+    exec {HOLD}>&-
+  else
+    kill "$HOLDER" 2> /dev/null || true
+  fi
+  wait "$HOLDER" 2> /dev/null || true
+}
+
+@test "The routing policy's proof renders its input while another run holds the fixture's state lock" {
+  local fixture lock waited
+  policy_copy
+  fixture="$COPY/tests/fixtures/edge-policy"
+  lock="$fixture/.terraform.tfstate.lock.info"
+  # The render with no lock held, which the renders under the lock are compared with.
+  "$COPY/scripts/edge-policy-render" "$BATS_TEST_TMPDIR/free"
+  grep -qx 'hostname proof-edge' "$BATS_TEST_TMPDIR/free/edge.conf"
+  [ ! -e "$lock" ]
+
+  # Another tofu console in the copy's fixture holds the directory's state lock while its standard
+  # input is open, and this test's process keeps it open. Its descriptor 3 is closed, as bats waits
+  # for whatever holds that one, and the bound ends it whatever becomes of the test.
+  mkfifo "$BATS_TEST_TMPDIR/hold"
+  timeout -k 5 300 tofu -chdir="$fixture" console -no-color \
+    < "$BATS_TEST_TMPDIR/hold" > "$BATS_TEST_TMPDIR/holder.out" 2>&1 3>&- &
+  HOLDER=$!
+  exec {HOLD}> "$BATS_TEST_TMPDIR/hold"
+  waited=0
+  until [ -e "$lock" ] || ((waited >= 300)); do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  [ -e "$lock" ] || { echo "the other console took no state lock within 30 s; it printed:"; cat "$BATS_TEST_TMPDIR/holder.out"; return 1; }
+
+  run "$COPY/scripts/edge-policy-render" "$BATS_TEST_TMPDIR/held"
+  echo "the render under the lock: status $status"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  cmp "$BATS_TEST_TMPDIR/free/edge.conf" "$BATS_TEST_TMPDIR/held/edge.conf"
+
+  # The proof's own render, and what it hands docker: the fake keeps the file the proof would read
+  # from the directory mounted at /work.
+  fake docker << EOF
+printf '%s\n' "\$@" > "$RECORD/docker.args"
+for arg in "\$@"; do
+  [[ \$arg != *:/work:ro ]] || cp "\${arg%:/work:ro}/edge.conf" "$RECORD/edge.conf"
+done
+printf '%s\n' '== proof' 'ran to its end'
+EOF
+  run env PATH="$BIN:$PATH" "$COPY/scripts/edge-policy-check" fixture-image
+  echo "the proof under the lock: status $status"
+  echo "$output"
+  [ -f "$RECORD/docker.args" ] || { echo "docker was not run: the proof ended before it"; return 1; }
+  [ "$(head -n 1 "$RECORD/docker.args")" = run ]
+  grep -qx fixture-image "$RECORD/docker.args"
+  cmp "$BATS_TEST_TMPDIR/free/edge.conf" "$RECORD/edge.conf"
+  # The lock was the other console's from the first render under it to the last.
+  [ -e "$lock" ]
+  kill -0 "$HOLDER"
+}
+
 @test "a proof of the routing policy that fails says why" {
   # A container that prints part of the proof's report, a wait that ran out among it, and fails.
   fake docker << EOF
@@ -132,6 +211,11 @@ printf '%s\n' "\$@" > "$RECORD/docker.args"
 printf '%s\n' '== proof' 'ran to its end'
 EOF
   run env PATH="$BIN:$PATH" "$ROOT/scripts/edge-policy-check" fixture-image
+  # The fake's proof is no passing one, so the status proves nothing; it is shown with what the
+  # script printed, which says why when the script ended before it reached docker.
+  echo "status $status"
+  echo "$output"
+  [ -f "$RECORD/docker.args" ] || { echo "docker was not run: the script ended before it"; return 1; }
   for flag in --cap-drop=ALL --security-opt=no-new-privileges --read-only --tmpfs=/tmp:exec --network=none; do
     echo "$flag"
     grep -qx -- "${flag%%=*}" "$RECORD/docker.args"

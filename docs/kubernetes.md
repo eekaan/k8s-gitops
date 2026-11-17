@@ -593,6 +593,7 @@ once it is not, and the agents' rendered configuration agrees.
 | `sso-system` | default deny | dex takes the proxies and oauth2-proxy on 5556 and reaches the API server and GitHub on 443; oauth2-proxy takes the proxies on 4180 and reaches dex; below. |
 | `backstage` | default deny | Backstage takes the proxies and the kubelet's probes on 7007 and reaches the resolver and its database on 5432; the database takes the operator, its own pods, Backstage, the dump job, Prometheus and the kubelet's probes, and reaches its own pods, the resolver and the API server, and its instances, for their Barman Cloud sidecars, the object storage on 443; the dump job reaches the resolver, the database and the world on 443. |
 | `security-system` | default deny | Falco takes Prometheus' scrape and the kubelet's probes on 8765, and reaches the resolver alone. |
+| `crowdsec` | default deny | the local API takes the agent on 8080, Prometheus on 6060 and the kubelet's probes, and sends nothing; the agent takes Prometheus and the kubelet on 6060 and reaches the resolver, the local API and the API server on 443 and 6443; below. |
 | `open-feature-operator` | default deny | the OpenFeature Operator takes the kubelet's probes on 8081, Prometheus' scrape on 8080 and the API server's calls to its webhooks on 9443, and reaches the API server alone. |
 | `ai-system` | listed | applications whose allows are not written, not a namespace that cannot have the posture. n8n takes the proxies on 5678 and reaches its database, the resolver and whatever its workflows call outside; the PostgreSQL instances take n8n, each other and the operator, and reach the API server, and their Barman Cloud sidecars reach the object storage on 443 and the API server; the dump job reaches the database, the hosts age's release is downloaded from and the object storage; Open WebUI takes the proxies on 8080 and reaches nothing until an administrator turns on a connection that calls out; the backup movers reach the object storage on 443. The proxies reach n8n's 5678 and Open WebUI's 8080 alone there and forward only to their Services, PostgreSQL authenticates every client, Pod Security, node firewall. |
 | `etcd-snapshots` | listed | an application whose allows are not written, not a namespace that cannot have the posture. The snapshot job takes nothing and reaches the Talos API through `talos.default`, the object storage, the hosts age's release is downloaded from (its URL redirects to a second host, which serves the file) and the resolver. Talos' own authorisation of its one role, Pod Security, node firewall. |
@@ -699,6 +700,15 @@ once it is not, and the agents' rendered configuration agrees.
   container's connections with: Falco reads the container runtime's socket and the node's files
   through host paths, which no pod policy sees, writes its events to standard output, and calls no
   API ([Runtime detection](#runtime-detection)).
+- **`crowdsec`.** The local API's pods, by the labels its Service selects, take the agent's pod on
+  8080, Prometheus (`app.kubernetes.io/name: prometheus` in `monitoring`) on the metrics port 6060
+  and the kubelet's probes on 8080, and send nothing. The agent's pod takes Prometheus and the
+  kubelet on 6060 and reaches the resolver, the local API's pods on 8080 and the API server on 443
+  and 6443, and nothing else: the one name it looks up is the local API's Service, and it calls no
+  name outside the cluster, so it has no DNS name rule and no rule that reads its queries. It
+  reaches the proxies' logs through the API server, so no flow to the proxies' namespace exists.
+  `tests/crowdsec.bats` reads every rule of the two policies and evaluates the flows on the ports
+  the chart renders. [CrowdSec](#crowdsec) says what each is for.
 - **`open-feature-operator`.** The operator's pod, by the labels of its Deployment's selector,
   takes the kubelet's probes on 8081, the manager's health port, and Prometheus
   (`app.kubernetes.io/name: prometheus` in `monitoring`) on 8080, the container port its PodMonitor
@@ -802,16 +812,15 @@ namespace and the policy, when
   own (`pkg/k8s/apis/cilium.io/utils/utils.go`), so that it also selects the world, the hosts and
   the nodes. A reason excuses none of these.
 
-The check reads only what the render holds. Besides the policies of `backstage`, `demo`,
+The check reads only what the render holds. Besides the policies of `backstage`, `crowdsec`, `demo`,
 `envoy-gateway-system`, `kromgo`, `open-feature-operator`, `security-system` and `sso-system`, that
-is one policy of a listed
-namespace: `flux-operator-web`, the `NetworkPolicy` the Flux Operator's chart renders in
-`flux-system`, which lets every pod of every namespace (an empty `namespaceSelector`) reach the
-operator's web interface on 9080. It passes because `flux-system` is listed; the day `flux-system`
-takes the default deny, the check refuses it, as a `NetworkPolicy` other than the default deny and
-as an allow of every pod of every namespace. The `NetworkPolicy` objects the operator makes for the
-Flux instance, which its `spec.cluster.networkPolicy` turns on, are made at run time, so no render
-holds them and the check never sees them.
+is one policy of a listed namespace: `flux-operator-web`, the `NetworkPolicy` the Flux Operator's
+chart renders in `flux-system`, which lets every pod of every namespace (an empty
+`namespaceSelector`) reach the operator's web interface on 9080. It passes because `flux-system` is
+listed; the day `flux-system` takes the default deny, the check refuses it, as a `NetworkPolicy`
+other than the default deny and as an allow of every pod of every namespace. The `NetworkPolicy`
+objects the operator makes for the Flux instance, which its `spec.cluster.networkPolicy` turns on,
+are made at run time, so no render holds them and the check never sees them.
 
 `scripts/network-policy-check --reach RENDER FROM TO PORT/PROTOCOL` evaluates the policies of a
 render for one flow and answers `allowed` or `denied`; the egress of the source and the ingress of
@@ -881,39 +890,39 @@ does not matter.
    the chart's update strategy).
 2. **The policies merge.** The root applies the default denies, the applications apply their allows,
    and the agents evaluate both and drop nothing they deny; what a policy would drop is reported as
-   `AUDIT`. As the allows land after the denies, `AUDIT` flows of `backstage`, `demo`,
+   `AUDIT`. As the allows land after the denies, `AUDIT` flows of `backstage`, `crowdsec`, `demo`,
    `envoy-gateway-system`, `kromgo`, `open-feature-operator`, `security-system` and `sso-system`
    from before they landed are expected, such as the proxies to `hello` on 8080 and to the
    controller on 18000, and the controller to the API server, and an agent's recent flows can hold
    them for a while.
 3. **Watch**, from the moment the Kustomizations that hold the allows, `hello`,
-   `demo-volsync-movers`, `envoy-gateway`, `kromgo`, `dex`, `oauth2-proxy`, `backstage`, `falco` and
-   `open-feature-operator`, are Ready at the merge's revision (`flux get kustomizations`).
-   `just network-drops` lists what
-   the agents' Hubble holds: the `AUDIT` flows a policy would drop, by namespace, pod and port,
-   never an address. It runs each agent's own `hubble` through `kubectl exec`, so the kubeconfig
-   needs exec on the Cilium agents' pods in `kube-system`, more than the reading recipes need;
-   `NETWORK_DROPS_LAST` (500) bounds the flows asked of each agent and `NETWORK_DROPS_TIMEOUT` (60)
-   the seconds each call may take. Hubble keeps only each agent's recent flows (4095 by the chart's
-   default), so run it after each of: `just gateway-check`; `just cluster-check`; the secret demo
-   (`just bao-put demo/hello greeting`, then the Secret in `demo`); a badge asked of kromgo by its
-   name, which has kromgo query Prometheus ([Status badges](#status-badges)); a sign-in through the
-   route that opts in to it ([Sign-in](#sign-in)); Backstage's catalogue opened by its name, which
-   has Backstage read its database; the nightly dump of `backstage-db` from 02:00, which waits up to
-   20 minutes before it starts ([Dumps](#dumps)); the base backup of `backstage-db` at 02:47 UTC,
-   and a WAL segment its primary archives, which `select pg_switch_wal()` there forces
-   ([Backups and restores](#backups-and-restores)); the nightly backup of `volsync-demo` at 03:17, and
-   a restore of it ([Restoring](#restoring)); the two dry runs that call the OpenFeature Operator's
-   webhooks ([OpenFeature Operator](#openfeature-operator)). Watch a day at least, through one
-   nightly backup, one dump and one base backup. An `AUDIT` flow of `backstage`, `demo`,
-   `envoy-gateway-system`, `kromgo`, `open-feature-operator`, `security-system` or `sso-system` that
-   a check made once the allows were Ready is a missing allow, added beside its application in a
-   pull request while the cluster still audits, or a pod doing what it should not. Confirm also that
-   no `@remote-node` flow reaches the proxies' listener ports and none to a webhook's 9443, Envoy
-   Gateway's or the OpenFeature Operator's, is `AUDIT`. `AUDIT` flows of `flux-system` show too: Flux's
-   own policies and the Flux Operator's `flux-operator-web`, which the agents enforced before the
-   value, are only audited while it is set, and what they would drop is what they dropped before;
-   they are not the namespaces' allows.
+   `demo-volsync-movers`, `envoy-gateway`, `kromgo`, `dex`, `oauth2-proxy`, `backstage`, `falco`,
+   `crowdsec` and `open-feature-operator`, are Ready at the merge's revision
+   (`flux get kustomizations`). `just network-drops` lists what the agents' Hubble holds: the
+   `AUDIT` flows a policy would drop, by namespace, pod and port, never an address. It runs each
+   agent's own `hubble` through `kubectl exec`, so the kubeconfig needs exec on the Cilium agents'
+   pods in `kube-system`, more than the reading recipes need; `NETWORK_DROPS_LAST` (500) bounds the
+   flows asked of each agent and `NETWORK_DROPS_TIMEOUT` (60) the seconds each call may take. Hubble
+   keeps only each agent's recent flows (4095 by the chart's default), so run it after each of:
+   `just gateway-check`; `just cluster-check`; the secret demo (`just bao-put demo/hello greeting`,
+   then the Secret in `demo`); a badge asked of kromgo by its name, which has kromgo query
+   Prometheus ([Status badges](#status-badges)); a sign-in through the route that opts in to it
+   ([Sign-in](#sign-in)); Backstage's catalogue opened by its name, which has Backstage read its
+   database; the nightly dump of `backstage-db` from 02:00, which waits up to 20 minutes before it
+   starts ([Dumps](#dumps)); the base backup of `backstage-db` at 02:47 UTC, and a WAL segment its
+   primary archives, which `select pg_switch_wal()` there forces
+   ([Backups and restores](#backups-and-restores)); the nightly backup of `volsync-demo` at 03:17,
+   and a restore of it ([Restoring](#restoring)); the two dry runs that call the OpenFeature
+   Operator's webhooks ([OpenFeature Operator](#openfeature-operator)). Watch a day at least,
+   through one nightly backup, one dump and one base backup. An `AUDIT` flow of `backstage`,
+   `crowdsec`, `demo`, `envoy-gateway-system`, `kromgo`, `open-feature-operator`, `security-system`
+   or `sso-system` that a check made once the allows were Ready is a missing allow, added beside its
+   application in a pull request while the cluster still audits, or a pod doing what it should not.
+   Confirm also that no `@remote-node` flow reaches the proxies' listener ports and none to a
+   webhook's 9443, Envoy Gateway's or the OpenFeature Operator's, is `AUDIT`. `AUDIT` flows of
+   `flux-system` show too: Flux's own policies and the Flux Operator's `flux-operator-web`, which
+   the agents enforced before the value, are only audited while it is set, and what they would drop
+   is what they dropped before; they are not the namespaces' allows.
 4. **Enforce, a change of its own.** One pull request makes these edits, together and no others:
    - `kubernetes/apps/base/kube-system/cilium/app/values.yaml`: the line `policyAuditMode: true`
      goes, with the three comment lines above it, from `# The agents evaluate every policy`; the
@@ -941,7 +950,7 @@ does not matter.
      former becoming "Enforcement stays in its default mode, so the agents enforce the policies:
      never would enforce none."
    - `docs/roadmap.md`, M8's row: "the namespaces' default deny with their allows in `backstage`,
-     `demo`, `envoy-gateway-system`, `kromgo`, `security-system` and `sso-system`" gains ", which
+     `crowdsec`, `demo`, `envoy-gateway-system`, `kromgo`, `security-system` and `sso-system`" gains ", which
      Cilium enforces", and the clause "; and network policy that drops anything, as Cilium audits
      every policy, cluster-wide, and drops nothing
      ([Service addresses](kubernetes.md#service-addresses))" goes, the row ending at
@@ -1350,9 +1359,10 @@ The agents serve their metrics on port 9962 of the node they run on, as they run
 network, once `prometheus.enabled` is set in the Cilium application's values. That key creates no
 monitor and needs no resource definition, so `scripts/install-cilium`, which installs Cilium from the
 same values file before any definition exists, is unchanged, and the chart's ServiceMonitors stay off
-([Monitoring](#monitoring)). It adds the port 9962 to the agents' container ports, beside the host
-ports 9879 and 4244 they already declare; the DaemonSet's exception in `pod-security-exceptions.yaml`
-already allows host ports, and no new workload and no new Pod Security level comes with it.
+([Monitoring](#monitoring)). It adds the host port 9962 to the agents' container ports, beside the
+host ports 9879 and 4244 they already declare; the DaemonSet's exception in
+`pod-security-exceptions.yaml` already allows host ports, and no new workload and no new Pod
+Security level comes with it.
 
 `apps/base/kube-system/cilium-monitoring/` holds a PodMonitor, `cilium-agent`, which selects the pods
 labelled `k8s-app: cilium` and scrapes the port `prometheus` every 30 seconds, naming the job
@@ -1514,6 +1524,7 @@ The own alerts, each with its runbook section in [docs/runbooks/alerts.md](runbo
 | `FalcoCriticalRuleMatched` | A Falco rule of priority Critical, Alert or Emergency has matched on a node within the last 15 minutes. | critical | [FalcoCriticalRuleMatched](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#falcocriticalrulematched) |
 | `KyvernoAdmissionControllerDown` | Kyverno's admission controller has had no available replica for 10 minutes. | warning | [KyvernoAdmissionControllerDown](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#kyvernoadmissioncontrollerdown) |
 | `GatekeeperControllerManagerDown` | Gatekeeper's controller manager has had no available replica for 10 minutes. | warning | [GatekeeperControllerManagerDown](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#gatekeepercontrollermanagerdown) |
+| `CrowdSecLocalAPIDown` | CrowdSec's local API's target has not answered its scrape for 10 minutes, or has no series. | warning | [CrowdSecLocalAPIDown](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#crowdseclocalapidown) |
 
 The alerts read only what Prometheus scrapes: kube-state-metrics' pod readiness for OpenBao's
 members, its Deployment availability for the Flux Operator, its nodes' roles, which tell the
@@ -1523,9 +1534,9 @@ control planes' Cilium agents from the workers', and its CronJob metrics for the
 controller metrics, Vector's internal metrics, cert-manager's certificate metrics, the Flux
 Operator's state of Flux's resources, the Cilium agents' BGP session state, LINSTOR's own metrics,
 the DRBD reactor's, Falco's counter of the matches of each rule, external-dns' gauge of its last
-successful sync and its absence, and the metrics of the PostgreSQL instances and the Barman Cloud
+successful sync and its absence, the metrics of the PostgreSQL instances and the Barman Cloud
 plugin, which the component's PodMonitor scrapes, with kube-state-metrics' creation times of their
-pods ([PostgreSQL](#postgresql)). The
+pods ([PostgreSQL](#postgresql)), and Prometheus' own `up` of CrowdSec's local API. The
 PostgreSQL alerts, on the archive and the base backups and on the dumps, are written once, in the
 `cloudnative-pg` application's `app/`, whose tests are `tests/rules/cloudnative-pg.yaml`. The dump
 alerts select the CronJobs by their names' suffix, `-pgdump`: kube-state-metrics exposes no CronJob
@@ -3159,6 +3170,220 @@ removing the application leaves them, as Helm never deletes what `crds/` install
 `tests/external-dns.bats` builds the application as Flux applies it, renders the chart with its
 values, and checks the arguments, the permissions, the targets, the owner, the token's path and the
 dependencies; `tests/gateway-check.bats` the check's lines.
+
+### CrowdSec
+
+CrowdSec reads the public Gateway's access logs, recognises the clients that scan the Gateway, probe
+it for files and fail to sign in again and again, and records a decision for each. Nothing enforces a
+decision: they are listed and counted, and block nothing; the one alert is on the local API being
+down. It is selected by three entries
+of a cluster's overlay, the namespace directory `crowdsec` and the Kustomizations `crowdsec` and
+`crowdsec-gateway-logs`, and a cluster that lists none builds none of it. `crowdsec`'s `dependsOn`
+names Cilium, `crowdsec-gateway-logs`, External Secrets, LINSTOR and the Prometheus Operator
+definitions, and sets `wait`, so `just kubernetes-check` refuses a cluster that lacks one of them;
+`crowdsec-gateway-logs` names the public Gateway.
+
+- **What it reads.** The Gateway's proxies write one JSON line per request to standard output
+  ([The public Gateway](#the-public-gateway), Access log), in a format of this tree's own that no
+  parser of CrowdSec's hub reads. The agent reads those lines through the Kubernetes API, not from
+  the nodes' log files: CrowdSec's Kubernetes datasource lists and watches the pods one label selector
+  names in one namespace and follows their containers' logs, so no path of the node is mounted and
+  the agent is one pod. The selector is the labels the controller gives the proxies of the public
+  Gateway, `envoy-gateway-system` is the namespace, and nothing else's lines reach CrowdSec; the
+  acquisition is `acquisition.yaml` of the application, mounted into the agent's `acquis.d`. The
+  chart's schema lists no such datasource and its template refuses to render without one, so the
+  chart's own acquisition is a placeholder: a file source on a path that is not in the pod, which
+  reads nothing. Those two files are the only acquisitions the agent's container mounts, and its
+  configuration does not move the two places the image reads acquisitions from, that file and that
+  directory. The agent's service account `crowdsec-agent` is bound by the Role
+  `crowdsec-agent-gateway-logs` of `crowdsec-gateway-logs`, in the proxies' namespace, to get, list
+  and watch pods and to get their logs, and to nothing else; a Role names no pod, so the grant is the
+  namespace's pods, and the selector is what narrows the reading. No other role, of a namespace or
+  of the cluster, is bound to it by the application or its chart, and no other binding that an
+  application of the overlay builds names the account. The proxies' pods hold the shutdown
+  manager's container as well, whose lines are not access logs and fall through the parser
+  unparsed.
+- **What it decides.** The parser `k8s-gitops/envoy-gateway-json-logs`, this tree's own and in the
+  release's values, turns each line into an event with the client address, the host, the method, the
+  path and the status, and a time, which the access log does not carry: the time the agent read the
+  line. Three scenarios, each this tree's own and in the same values, pour the events into leaky
+  buckets, one per client or per client and host, so one client's requests never fill another's:
+
+  | Scenario | Counts | In a bucket per | Overflows above | Leaks one every |
+  | --- | --- | --- | --- | --- |
+  | `k8s-gitops/http-probing` | distinct paths answered with 400, 403 or 404, static files left out | client and host | 10 | 10s |
+  | `k8s-gitops/http-sensitive-paths` | distinct paths of the kind scanners ask for first, `.env`, `.git`, `wp-login.php`, `xmlrpc.php` and the like | client | 3 | 30s |
+  | `k8s-gitops/http-auth-failures` | answers with 401 | client and host | 10 | 30s |
+
+  A bucket that overflows raises an alert for its client's address: no scenario names a scope of
+  its own, so the address is the one the parser took from `client_address`. The image's profile
+  turns an alert into a ban decision of four hours for the address. The
+  access log has no user agent and no query string, so the hub's scenarios that need either (a bad
+  user agent, SQL injection and cross-site scripting probes, and the crawlers' allow lists) cannot
+  run on it and are left out; so are the ones that read the body of a request, which no log holds.
+  The image's own allow lists apply: private ranges and the public resolvers' addresses are never
+  decided on, and nor, by its post-overflow items, are Cloudflare's address ranges and Google's
+  special crawlers'. Its other two, which whitelist search engine crawlers by address and by the
+  name a reverse lookup of the address gives, are removed, because that lookup leaves the cluster
+  (the table below).
+- **The address a decision names.** Envoy takes the client's address from the PROXY protocol header
+  an edge router writes ([ADR
+  0020](adr/0020-the-client-address-reaches-the-gateway-in-a-proxy-protocol-header.md)), and the log
+  names it beside the socket's own peer. The header is a claim of whoever writes the first bytes of a
+  connection: a client cannot make it through an edge router, and a sender inside the cluster that can
+  open a connection to a proxy can, which the policy of the proxies' namespace refuses only once the
+  agents enforce it rather than audit it ([Service addresses](#service-addresses)). A decision on an
+  address is therefore as good as who can reach a listener: a forged claim names an address that
+  never made the requests and gets it a decision. That is one reason nothing enforces them. The parser
+  makes the other case safe: a connection that carried no header has the connection's own address as
+  its client address, an edge router's or a node's, and a ban on it would block every client of that
+  edge, so such a line is whitelisted by the parser and no scenario sees it.
+- **What it is loaded from.** The chart is CrowdSec's own, from its classic Helm repository, pinned by
+  version, and the image is pinned by tag and digest. Renovate proposes both and merges neither by
+  itself, whatever the auto-merge switch says: a rule of `.renovate/automerge.json5` holds every
+  file of the application back, because the required check does not run the image (below), so a
+  person runs `bats tests/crowdsec.bats` on a machine with docker before merging an update of
+  either. Nothing is installed from
+  the hub by a collection, because `cscli` installs the version a hub branch holds, which moves, and takes
+  none from the command line, and the image's entrypoint names none; the parser and
+  the scenarios are the release's values, and `tests/crowdsec.bats` fails when a variable of either
+  pod installs a collection, a parser, a scenario or a post-overflow from the hub. The agent loads the
+  image's `linux` collection with them, which reads syslog and sshd and nothing the proxies write, and
+  its `whitelist-good-actors` collection, whose items are the allow lists named above. The image's
+  entrypoint installs two container-log parsers at every start, which no value turns off; with
+  `cscli.hub_branch` set they are written from the content the image's own hub index embeds, so
+  nothing is fetched, and they select labels this tree's acquisition never sets, so they read nothing.
+  The agent's one variable, `DISABLE_POSTOVERFLOWS`, makes the entrypoint remove two of the image's
+  post-overflow items before the agent starts, the one that looks up an address's name and the one that
+  reads its result; the test runs the image with the variable and fails when an overflow makes the
+  lookup.
+- **Where it runs.** In `crowdsec`, a namespace of its own that enforces the baseline Pod Security
+  level, not `security-system`, where Falco runs at the privileged level
+  ([Runtime detection](#runtime-detection)): CrowdSec needs no host path and no capability, and a
+  namespace that admitted them would only widen what its pods may do. The image runs as root, which
+  no value of the chart changes, so the local API and the agent are entries of
+  `pod-security-exceptions.yaml` at baseline, with no capability, no privilege escalation, the
+  runtime's seccomp profile and no host path. The namespace holds the default deny
+  ([Network policy](#network-policy)): the local API takes the agent on 8080, Prometheus on 6060 and
+  the kubelet's probes, and sends nothing; the agent takes Prometheus and the kubelet on 6060 and
+  sends to the resolver, the local API and the Kubernetes API, and to nothing else. The policies are
+  audited, not enforced, while the agents audit ([Service addresses](#service-addresses)), so until
+  they enforce, the table below is what the configuration says and the policies are what would
+  refuse the rest. The local API's database and configuration directory are two small claims of the
+  default StorageClass, not backed up. Decisions in a lost database are lost: the agent reads only
+  the lines the proxies write after it starts, so only new requests decide again, and it registers
+  again at its next start. The secrets the local API and its agents share, a session key and a
+  registration token, are made once in the cluster by External Secrets' Password generators into
+  the Secret `crowdsec-lapi-secrets`, which the release reads by name, never by a person and never
+  in the tree; an agent registers with the token at every start, and the local API accepts that
+  only from the private ranges and the loopback, which the pod range is in, as the chart's default
+  configuration has it. It registers under its pod's name, and the local API keeps every machine
+  that registered, so each new pod of the agent, after a rollout or a drain, leaves one more row
+  in `cscli machines list`; `cscli machines prune --force`, run in the local API's pod, removes
+  the machines that have sent no heartbeat for ten minutes, which a running agent sends every
+  minute, and every machine that was never validated; registration with the token validates one at
+  once. The name is also why a pod of the agent that runs its init container a second time, as
+  Kubernetes does when the pod's sandbox is made again, cannot start: the init container registers
+  that name again, the local API refuses a machine it already holds, and the pod stays in
+  `Init:CrashLoopBackOff` with `user already exist` in the log of `wait-for-lapi-and-register`.
+  `kubectl --namespace crowdsec get pods` shows it, and the local API's alert does not, as the local
+  API runs. Deleting the pod makes one under a new name, which registers; `cscli machines delete
+  <pod name>` in the local API's pod lets the same pod register again.
+- **What leaves.** Nothing about the cluster's traffic. The local API runs with the Central API off,
+  by the variable the image reads, which turns off its registration, its signals, its metrics and its
+  pull of the community blocklist, and no console enrolment is configured. An acquisition can call
+  out too, to a log store or a cloud's API, and the agent's two, above, read the Kubernetes API and a
+  path that is not there. The table lists the other calls: the ones the image makes outside a
+  cluster as it ships, and the ones its variables, a notification and a threat intelligence key turn
+  on, each with what decides it and its state:
+
+  | Call | What leaves | Variable | State |
+  | --- | --- | --- | --- |
+  | Central API registration | a request to register the instance with its generated machine identity | `DISABLE_ONLINE_API` of the local API | off |
+  | Signals to the Central API | the scenario, the time and the address of each alert | `DISABLE_ONLINE_API` of the local API | off |
+  | Metrics to the Central API | the names, versions and last contacts of the local API's machines and bouncers, and the usage metrics its agents and bouncers report to it | `DISABLE_ONLINE_API` of the local API, which removes the online client both pushes go through | off |
+  | Community blocklist | a pull of decisions; nothing of the cluster | `DISABLE_ONLINE_API` of the local API | off |
+  | Console enrolment | the instance's identity and its tags | `ENROLL_KEY` of the local API, unset | off |
+  | Version check | a request for the latest release, which `cscli` makes to learn which hub branch to use | `cscli.hub_branch` of the agent's configuration, set to `master`, which skips it | off |
+  | Reverse DNS lookups | the address of each overflow, as a query to the cluster's resolver, which forwards it out of the cluster to the nameservers of the address's reverse zone | `DISABLE_POSTOVERFLOWS` of the agent, which removes `crowdsecurity/rdns` and `crowdsecurity/seo-bots-whitelist`; the local API's pod keeps both and reads no line (below) | off |
+  | Hub index and items | requests for the files of two parsers | `cscli.hub_branch`, which makes the image's entrypoint write them from the index it embeds | not made |
+  | Notifications | each alert, to where one of the image's notification plugins sends it: an HTTP endpoint, Slack, Splunk, Sentinel or a mail server; the sixth writes a file in the pod | a profile's `notifications`, in `config.profiles.yaml`, and the plugins' settings, in `config.notifications`, both unset, so the image's profile is the one in use and names no plugin | off |
+  | Threat intelligence lookups | an address a parser or a scenario asks CrowdSec's threat intelligence service about | `api.cti` of a pod's configuration, unset in both, and no parser or scenario of the release calls `CrowdsecCTI` | off |
+
+  With the branch named the entrypoint fetches nothing, so the agent's policy has no rule for the
+  hub's host and none for a name, and `tests/crowdsec.bats` holds both out; it also starts the agent
+  as its pod does, with no network, and fails when any name but the local API's is looked up. The
+  agent's enrichment works from the databases the image carries: at start the entrypoint links its
+  GeoLite2 city and ASN databases into the data directory, so addresses carry a country and an
+  autonomous system and the lookups are local. The local API's pod runs the image's log processor
+  beside the API: the chart starts that pod with a script of its own, which starts CrowdSec whole.
+  That log processor reads the image's own acquisition, a file source whose path is not in the pod,
+  so it reads no line and raises no overflow, and the post-overflow items it keeps, the one that
+  looks up names among them, have nothing to look up; the same test starts that container as its pod
+  does, with no network, and fails unless it answers its health endpoint, looks up no name but the
+  loopback's, where its log processor logs in, and loads that one acquisition, which matches no
+  file. A change that turns a row on is a decision recorded first; `tests/crowdsec.bats` fails when
+  a variable, a file of the release, a values key, an init container or a policy that would turn one
+  on appears, refuses a post-renderer on the release, which it does not apply, and asserts the
+  state of every row.
+- **What enforces decisions: nothing.** Decisions are not enforced. A bouncer is what enforces one,
+  and none is built here, for three reasons. The address is a claim until the agents enforce policy,
+  so enforcing a decision would let any sender inside the cluster that reaches a proxy cause the ban
+  of an address it names. The public Gateway's routes that opt in to [sign-in](#sign-in) already carry
+  an external authorisation `SecurityPolicy` that does not fail open, and Envoy Gateway applies one
+  `extAuth` to a route: of two `SecurityPolicy` objects that target the same route the oldest takes
+  precedence and the other's settings are not applied, and a policy that targets the Gateway
+  gives way, for a route that has one of its own, to the route's (only the most specific
+  configuration takes effect unless the route's policy sets `mergeType`). An authorisation `SecurityPolicy` for a bouncer
+  therefore does not combine with the sign-in's on a route, and could cover only routes without
+  one, or only the Gateway until a route opts in; a processor through an `EnvoyExtensionPolicy`
+  is a different extension that the sign-in's policy does not compete with, and would be weighed
+  first. And the edge routers see every client's address first and an nftables bouncer there would
+  drop it before it reaches the cluster, but the edges are rebuilt from their own stack, which a
+  change to CrowdSec does not touch. Either route is its own change, built to fail open (a bouncer
+  that cannot reach the local API allows), tested in a mode that only logs what it would block, and
+  given its own decision first. `tests/crowdsec.bats` fails when a `SecurityPolicy`,
+  `BackendTrafficPolicy`, `EnvoyExtensionPolicy` or `EnvoyPatchPolicy` of the tree names CrowdSec or
+  a bouncer, or when any object of the Gateway API's groups that an application of the overlay
+  builds does: a route, a policy, a filter or a grant across namespaces. Until then the decisions
+  are what an operator reads, below, and the one alert says whether the local API runs.
+- **Listing decisions and deleting one.** With the cluster's kubeconfig:
+  `kubectl --namespace crowdsec exec deployment/crowdsec-lapi -- cscli decisions list` lists the
+  decisions, `cscli alerts list` the alerts behind them and `cscli alerts inspect <id> -d` one alert
+  with the events that made it;
+  `kubectl --namespace crowdsec exec deployment/crowdsec-lapi -- cscli decisions delete --ip 203.0.113.7`
+  deletes the decision on an address, which stays deleted until the same address overflows a bucket
+  again, and `cscli decisions delete --all` deletes every decision. To read what the agent does,
+  `kubectl --namespace crowdsec exec deployment/crowdsec-agent -- cscli metrics` lists the lines it
+  read, the parser's hits and misses and the buckets that overflowed, and
+  `just logs 'kubernetes.pod_namespace:crowdsec'` its log.
+- **Metrics and the alert.** The chart's two ServiceMonitors scrape both pods' metrics on 6060
+  (`cs_active_decisions` and `cs_alerts` of the local API; `cs_kubernetessource_hits_total`,
+  `cs_node_hits_ok_total` and `cs_bucket_overflowed_total` of the agent). One own alert,
+  `CrowdSecLocalAPIDown`, fires when the local API's target has not answered its scrape for 10
+  minutes or has no series, with its runbook section ([Alerts](#alerts)); an agent that reads nothing
+  raises none, as a quiet Gateway is also nothing read.
+
+`tests/crowdsec.bats` builds the applications as Flux applies them, renders the chart with the values
+helm-controller gives it, each from the key the HelmRelease names, and reads what each pod mounts
+from the render: the selection, the acquisitions and the grant, the loaded items, the parser's
+fields and its whitelist, each scenario's filter, bucket, capacity and leak against the table above,
+the environment, the init containers, where the shared secrets come from, every rule of the two
+policies and the docs' table of calls. It evaluates the policies' flows with
+`scripts/network-policy-check --reach` ([What the check refuses](#what-the-check-refuses)), over
+every policy the overlay and its applications build that can select a pod of the namespace, which
+are the namespace's default deny, those two and any of the whole cluster, on the ports the chart
+renders: the agent to the local API, the resolver and the API server, Prometheus and the kubelet
+to each pod's own port, and a refusal for the world, other nodes, the proxies, other pods and
+other ports.
+Its test of the parser and the scenarios runs CrowdSec's own image with no network: over sample
+lines in the format of the proxies' log, among them a client whose few failed requests lie between
+the offenders' and gets no decision, and then each pod's start as the chart runs it, the agent's
+and the local API's, with Go's resolver naming every lookup. It needs docker: where there is none,
+as in the tools container of `just ci`, it checks the sample lines against the EnvoyProxy's format
+and skips the rest, saying so, so CI does not run the image; it runs whole on a machine with
+docker, through `just test` or `bats tests/crowdsec.bats`, which is why an update of the image or
+the chart waits for a person who has run it.
 
 ## Sign-in
 
@@ -4981,9 +5206,12 @@ The steps n8n took, in order; the next port does the same and says where it diff
    address, before taking its silence as proof: a runtime that resolves and connects outside the
    calls the probe watches, as Open WebUI's event loop and resolver do, logs nothing at all. A volume
    mounted over a directory hides what the image holds there, so a variant that bakes models into
-   the data directory fetches them again. An application that cannot start offline, as an operator
-   that exits without an API server cannot, has no such run to measure: run its image with no
-   network and a read-only root to see which user it runs as and that it stops naming the missing
+   the data directory fetches them again. A workload on the host network accounts for every port it
+   declares, by a rule in `talos/firewall.yaml` or an entry in `node-firewall-exceptions.yaml`, and
+   a host port on the pod network fails `tests/node-listeners.bats`
+   ([cluster.md](cluster.md#the-node-firewall)). An application that cannot start offline, as an
+   operator that exits without an API server cannot, has no such run to measure: run its image with
+   no network and a read-only root to see which user it runs as and that it stops naming the missing
    cluster, read in its source what it writes and what it calls, keep the chart's requests and say
    in the docs that they are not measured, and where a claim rests on what the API server does,
    run a kube-apiserver of the cluster's version offline, with etcd alone, and the image beside it.
@@ -5042,13 +5270,13 @@ writes an event for each one that a rule names, such as a shell opened in a cont
 terminal, a read of a sensitive file by a process that should not, or a binary dropped into a
 container and run. It detects and does not respond: no pod is stopped or changed, an event leaves
 no pod but through the log pipeline, and the chart installs nothing but the DaemonSet, its
-ServiceAccount, the ConfigMap of Falco's configuration file, the Service of its metrics and their
-ServiceMonitor (no Falcosidekick, no Falco Talon, no metadata collector). A cluster selects it with
-two entries of its overlay, the namespace directory `security-system` and
-`security-system/falco/ks.yaml`; without them nothing of it builds. The application names
-`prometheus-operator-crds` in `dependsOn`, as the chart's ServiceMonitor and the application's
-`PrometheusRule` are kinds that definition provides, and `cilium`, as its `CiliumNetworkPolicy` is
-a kind Cilium's operator defines.
+ServiceAccount, the ConfigMap of Falco's configuration file, the ConfigMap of the tree's local
+rules ([Tuning](#tuning)), the Service of its metrics and their ServiceMonitor (no Falcosidekick,
+no Falco Talon, no metadata collector). A cluster selects it with two entries of its overlay, the
+namespace directory `security-system` and `security-system/falco/ks.yaml`; without them nothing of
+it builds. The application names `prometheus-operator-crds` in `dependsOn`, as the chart's
+ServiceMonitor and the application's `PrometheusRule` are kinds that definition provides, and
+`cilium`, as its `CiliumNetworkPolicy` is a kind Cilium's operator defines.
 
 The namespace denies traffic by default ([Network policy](#network-policy)), and Falco's
 `CiliumNetworkPolicy`, in `app/`, lets in Prometheus' scrape and the kubelet's probes on 8765 and
@@ -5066,7 +5294,15 @@ way. Falco opens no other connection: its one output is standard output and falc
 one plugin, `container`, asks only the CRI engine, on the runtime's Unix socket; and neither the
 Falco binary nor that plugin in the pinned image holds the in-cluster API server's variable
 `KUBERNETES_SERVICE_HOST` or the service account token's path, and the chart makes no Role for it.
-The pod still mounts its service account's token, which nothing in it reads.
+
+So the pod mounts no service account token. The chart has no value for that, on the pod or on the
+ServiceAccount, and the HelmRelease's post-renderer sets `automountServiceAccountToken: false` on
+the pod template
+([Kubernetes](https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/#opt-out-of-api-credential-automounting)).
+`tests/falco.bats` reads the field in the render, with no volume that projects a token, no mount of
+one and no Role or binding, and fails once the chart has a value for it, which then takes the
+patch's place; where a docker daemon answers, it also searches the image's two files for the
+variable and the path.
 
 ### The driver, and the privileges it needs
 
@@ -5160,7 +5396,11 @@ installed. The rules of priority Critical are `Detect release_agent File Contain
 `Drop and execute new binary in container` and `Fileless execution via memfd_create`. A newer
 rule set arrives with a newer image: the chart and the image it runs, `appVersion` of the chart,
 are moved by Renovate in one pull request (`.renovate/groups.json5`), and `tests/falco.bats` fails
-unless the image's version is the chart's.
+unless the image's version is the chart's. Its proofs that run Falco itself skip in CI, so CI does
+not show that a newer image still loads the local rules without a warning, compiles the exception
+and enables the same rules; `bats tests/falco.bats` where a docker daemon answers does. A macro the
+newer rules no longer define would load with the warning `LOAD_UNUSED_MACRO` and except nothing
+([Tuning](#tuning)).
 
 ### Events
 
@@ -5179,7 +5419,21 @@ the Falco pod that wrote them, each line whole in `_msg`:
   one node.
 
 A shell opened with a terminal in any pod, `kubectl exec --stdin --tty <pod> -- sh`, raises
-`Terminal shell in container`, at priority Notice, and is the harmless way to see an event arrive.
+`Terminal shell in container`, at priority Notice, and is the harmless way to see an event arrive
+for whoever has a terminal. A script or an agent has none, and needs none:
+
+- `kubectl --namespace demo exec deployment/hello --container httpd -- find /www -name id_rsa`
+  raises `Search Private Keys or Passwords`, at priority Warning. The rule matches the start of any
+  process named `find` whose arguments hold the name of a private key file, whether it has a
+  terminal or not and whether it runs in a container or on the node; the search itself finds
+  nothing and exits 0. Any pod whose image has `find` serves.
+- `just logs 'kubernetes.pod_namespace:security-system kubernetes.container_name:falco | unpack_json | filter rule:"Search Private Keys or Passwords"'`
+  finds the event, which shows the command in `proc.cmdline`, the pod and namespace in
+  `k8s.pod.name` and `k8s.ns.name`, under `output_fields`.
+
+`tests/falco.bats` holds the command to hello's namespace, Deployment, container and directory and,
+where a docker daemon answers, asks Falco itself for the rule, its priority, its compiled condition
+and the fields of its output.
 
 ### Metrics, and the alert
 
@@ -5222,13 +5476,86 @@ old, so for at most 15 minutes; every series does the same after Prometheus lost
 
 ### What Falco costs and what it sees
 
-Falco's requests and limits are the chart's guidance for a node, 100m and 512Mi requested, 1 CPU
-and 1Gi at most, and are unmeasured here: the cost is the system calls of the node's workloads,
-which the pod cannot be told in advance. The probe's buffers are 8 MiB for every two CPUs of the
-node, and its auxiliary maps a few tens of KiB for each ([Falco](https://falco.org/docs/concepts/event-sources/kernel/)),
-so a node with more CPUs holds more. A pod throttled at its CPU limit reads fewer calls than the
-node makes; the kernel then drops events, which Falco counts in `falcosecurity_scap_n_drops_*`
-and no alert reads.
+Falco requests 100m of CPU and may use one, the chart's figures: the cost is the system calls of
+the node's workloads, which the pod cannot be told in advance. A pod throttled at its CPU limit
+reads fewer calls than the node makes; the kernel then drops events, which Falco counts in
+`falcosecurity_scap_n_drops_*` and no alert reads.
+
+It requests `192Mi` of memory and is limited to `512Mi`. Part of its memory is fixed once the probe
+is loaded, and part grows with the node:
+
+- The probe's ring buffers, through which the kernel hands Falco its events: one of 8 MiB for every
+  two CPUs that are online, and one more for an odd CPU. The values write the chart's defaults for
+  both, `driver.modernEbpf.bufSizePreset: 4` and `cpusForEachBuffer: 2`, which the rendered
+  `engine.modern_ebpf` carries; the image's `falco.yaml` gives the size of each preset, and libs
+  0.26.1 counts the buffers (`pman_init_state` in `userspace/libpman/src/configuration.c`).
+- The probe's auxiliary maps, in which it builds an event before the event goes to a ring buffer:
+  256 KiB for each CPU the kernel counts as possible, online or not, two segments of 128 KiB
+  ([Falco](https://falco.org/docs/concepts/event-sources/kernel/#auxiliary-map-memory);
+  `AUXMAP_POOL_DEPTH` and `AUXILIARY_MAP_SIZE` in libs'
+  `driver/modern_bpf/shared_definitions/struct_definitions.h`).
+- Falco itself, with the image's rules and the container plugin loaded and no event read: about 53
+  MiB resident, 18 MiB of it Falco's own data and 34 MiB pages of the image's files it maps, its
+  binary and the plugin. That is measured off a node: the pinned image run on a workstation of 16
+  CPUs with the rendered configuration and `engine.kind: nodriver`, which loads no probe, and with
+  the image's `HOST_ROOT` emptied, as Falco does not start where `/host/proc` is missing.
+  Transparent huge pages were off for Falco's process in that run, as the Talos kernel gives them
+  only to memory a process asks them for (`CONFIG_TRANSPARENT_HUGEPAGE_MADVISE` in its
+  configuration) and no mapping of Falco's asks; with them on for every process, as that
+  workstation has them, the same run holds about 92 to 97 MiB.
+- The state Falco keeps of the node's processes and threads, which builds up over time and then
+  levels off
+  ([Falco's FAQ](https://falco.org/about/faq/#what-is-the-performance-overhead-or-resource-utilization-of-falco)).
+  It is unmeasured here.
+
+The kernel charges the buffers and the maps to the container. At the kernel Talos runs, 6.18.63,
+`bpf_ringbuf_area_alloc` in `kernel/bpf/ringbuf.c` allocates every page of a ring buffer with
+`GFP_KERNEL_ACCOUNT`, and `__bpf_map_area_alloc` in `kernel/bpf/syscall.c` adds `__GFP_ACCOUNT` to
+an array map's allocation (`bpf_memcg_flags` in `include/linux/bpf.h`); either flag charges the
+memory cgroup of the process that creates the map, which is Falco's. Only the kernel's command line
+turns the charge off, `cgroup.memory=nokmem` for both and `nobpf` for the maps (`cgroup_memory` in
+`mm/memcontrol.c`), and neither Talos' default arguments (`DefaultArgs` in
+`pkg/machinery/kernel/kernel.go` at the pinned release) nor `talos/schematic.yaml` adds either.
+Both are allocated whole when the probe loads, so they count against the limit from Falco's start,
+whatever the node does. The probe's programs and its other maps are left out of this arithmetic.
+
+For a node of 8 CPUs the fixed part is 32 MiB of ring buffers, 2 MiB of auxiliary maps and Falco's
+53 MiB, about 87 MiB. The request is that and as much again for the state, about 174 MiB, taken up
+to `192Mi`. Each further pair of CPUs adds 8.5 MiB to the fixed part, a ring buffer and the pair's
+auxiliary maps, and so 17 MiB to the request: `192Mi` holds up to a node of 10 CPUs, and on a node
+of 32 the fixed part alone is about 189 MiB, nearly the whole request. The limit is the chart's
+request, its figure for a node of any size, as the ceiling. These figures are arithmetic from the
+sources and a measurement off a node; none is a measurement on a node. There, Grafana's Explore,
+behind `just grafana`, shows each container's working set with the Prometheus query
+`container_memory_working_set_bytes{namespace="security-system", container="falco"}`, which the
+kubelets report ([Monitoring](#monitoring)), to hold against the request and the limit. Falco's own
+figure, `falcosecurity_falco_memory_rss_bytes`, the resident memory of its process, is not one to
+hold against them. The kernel maps each ring buffer's data pages twice in a row, so that an event
+that wraps past the buffer's end reads as one (`bpf_ringbuf_area_alloc` in `kernel/bpf/ringbuf.c`),
+and Falco maps that whole range (`ring_buffer__add` in libbpf 1.3.0, which libs 0.26.1 builds
+with), each page of it counted as the process's resident memory (`remap_vmalloc_range` in
+`mm/vmalloc.c`, which inserts every page when the range is mapped). So on a node of 8 CPUs it counts
+about 64 MiB for the buffers, which the container is charged 32 MiB for. Its
+`falcosecurity_falco_container_memory_used_bytes` reads the cgroup v1 file
+`/sys/fs/cgroup/memory/memory.usage_in_bytes` unless the variable `FALCO_CGROUP_MEM_PATH` names
+another (libs' `userspace/libsinsp/linux/resource_utilization.cpp`, under the name Falco's
+`cmake/modules/falcosecurity-libs.cmake` gives the variable), so it is 0 on Talos, which mounts
+cgroup v2 alone (`MountCgroups` in `internal/app/machined/pkg/startup/tasks.go` at the pinned
+release), as it is in the run off a node above.
+
+A container that goes on using more memory than its limit is killed by the kernel and started
+again by the kubelet
+([Kubernetes](https://kubernetes.io/docs/tasks/configure-pod-container/assign-memory-resource/#exceed-a-container-s-memory-limit)),
+and Falco's is started again in the same pod, as a DaemonSet's pods restart their containers always
+([Kubernetes](https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/#pod-template)).
+The pod keeps its name and address, so every label of its series stays, and Falco's counters start
+from nothing: the precondition of the blind spot of `FalcoCriticalRuleMatched`
+([Metrics, and the alert](#metrics-and-the-alert)), in which a rule that had matched once before
+the kill and matches once after it raises nothing. What the node did between the kill and the
+restart, nothing read. Such a kill shows as `OOMKilled`, the reason of the container's last state,
+beside its restart count: `kubectl --namespace security-system get pods` gives the restarts, and
+`kubectl --namespace security-system get pod <pod> --output jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}'`
+the reason.
 
 Falco sees every process's system calls on the node, the node's own and those of every container,
 with their arguments, and an event's `output` and `output_fields` carry the arguments of the
@@ -5243,32 +5570,104 @@ or `exec` into the pods of `monitoring` and `security-system`, can read it.
 
 Local rules have one place, the `customRules` key of
 `apps/base/security-system/falco/app/values.yaml`: a map of rule file names to their contents,
-which the chart makes a ConfigMap of and mounts in `rules.d`, which Falco reads after the image's
-rules. It is empty, and nothing has been found noisy. To silence a known-benign event, find it
-(`just logs` above) and read its rule and the pod, namespace and process in its `output_fields`;
-then, in a pull request:
+which the chart makes the ConfigMap `falco-rules` of and mounts at `/etc/falco/rules.d`, which
+Falco reads after the image's rules. It holds one file, `exceptions.yaml`, of one item, with its
+reason in a comment above it, and no rule of the tree's own:
 
-1. add a file to `customRules` that overrides the placeholder the rule leaves for the case (the
-   image's rules name them `user_*` and `known_*`, such as
-   `user_expected_terminal_shell_in_container_conditions` for `Terminal shell in container`) or the
-   rule's own condition, with the reason for the exception in a comment above it:
+```yaml
+- macro: user_known_stand_streams_redirect_activities
+  condition: (k8s.ns.name = "demo" and container.name = "httpd" and container.image.repository = "docker.io/library/busybox" and proc.name = "httpd")
+  override:
+    condition: replace
+```
 
-   ```yaml
-   customRules:
-     exceptions.yaml: |-
-       # Reason: the debug pods of the platform namespace open a shell with a terminal on purpose.
-       - macro: user_expected_terminal_shell_in_container_conditions
-         condition: (k8s.ns.name = "platform" and k8s.pod.name startswith "debug-")
-         override:
-           condition: replace
-   ```
+It quiets the image's rule `Redirect STDOUT/STDIN to Network Connection in Container`, of priority
+Notice, for the demo's web server, `hello`, and for nothing else. The rule's condition is
+`dup and container and evt.rawres in (0, 1, 2) and fd.type in ("ipv4", "ipv6") and not user_known_stand_streams_redirect_activities`:
+a `dup`, `dup2` or `dup3` in a container that returns 0, 1 or 2, a standard stream, for an IPv4 or
+IPv6 socket, which is how a reverse shell begins; the macro it negates is the placeholder the image
+leaves for known cases, `(never_true)`. busybox's `httpd` answers a request the same way:
+`mini_httpd` in `networking/httpd.c` of busybox 1.38.0, the version `hello` runs, forks for each
+connection it accepts, and the child calls `xmove_fd(n, 0)` and `xdup2(0, 1)`, two `dup2` calls
+that return 0 and 1 for the connection's socket (`libbb/xfuncs_printf.c`). So every request matches
+the rule twice, the kubelet's readiness probe included, and the server matches it once more when it
+starts, as `mini_httpd` first moves its listening socket to standard input with `xmove_fd`; those
+events would bury any other the rule raises.
 
-2. keep the exception as narrow as the event is: a namespace and a pod name, or a process and a
-   file, never a whole rule off, which `- rule: <name>` with `enabled: false` and
-   `override: {enabled: replace}` does when nothing narrower will;
-3. merge it. The chart rolls the pods when the rules change, one node at a time. Falco refuses a
-   file whose rules do not load, so a new pod that crash-loops on one is that, and
-   `KubeDaemonSetRolloutStuck` raises it after 15 minutes.
+The exception replaces the placeholder with four equalities, each of which leaves something out
+of it: the namespace, the workloads of every other namespace; the container's name, `volsync-demo`,
+which runs the same image in the same namespace; the image's repository, any other image run under
+that name there; and the process, a shell, or any process but `httpd`, that puts its streams on a
+socket in that very container. All of those still match, as every other workload does. Falco
+compiles the rule to the image's condition with one negation, of that conjunction:
+`(evt.type in (dup, dup2, dup3) and container.id != host and evt.rawres in (0, 1, 2) and fd.type in (ipv4, ipv6) and not (k8s.ns.name = demo and container.name = httpd and container.image.repository = docker.io/library/busybox and proc.name = httpd))`.
+
+`tests/falco.bats` holds the exception to that:
+
+- The place holds that one file of that one item, an override that replaces one macro's condition,
+  and the chart's ConfigMap and the pod's mount carry it. There is no second place: under
+  `/etc/falco` the pod mounts only its configuration file, an empty `config.d` and `rules.d`, and
+  the configuration names `config.d` alone as where Falco reads further configuration, which could
+  turn a rule off.
+- The condition is, to the letter, the conjunction of four values read from `hello` as Flux applies
+  it: the namespace its Kustomization targets, its container's name, its image without tag or
+  digest and the first word of its command. A `hello` whose container is renamed, whose image moves
+  or whose command changes fails the proof, as the exception then names nothing that runs. Of every
+  container and init container of the workloads the overlay builds into `demo`, only `hello`'s has
+  that name and image, with the image's short forms written out as the runtime reports them, so no
+  other `httpd` is excepted. The reason above is read from the source of the busybox version `hello`
+  runs, which the proof finds named here, so a `hello` on another version fails it until that
+  version's `httpd` is read, and the failure says which version to read.
+- Where a docker daemon answers, Falco itself says so, run from the pinned image without network,
+  capability or root, on the rendered configuration and rules. Its dry run exits 0: a condition
+  with a field Falco does not know makes it exit 1, which on a node is a pod in a crash loop. It
+  validates the image's rules and then the local file without an error or a warning: an override of
+  a macro the image does not define loads with the warning `LOAD_UNUSED_MACRO` and excepts nothing.
+  It prints the rule enabled, at priority Notice, compiled to the condition above. And it lists the
+  same rules enabled with the local file as without it, no other rule, macro or list changed.
+
+What no proof shows: an event evaluated against the rule. Of the image's engines, replay is the one
+that gives Falco system calls without a probe, and it reads a capture file, which only a probe on a
+running kernel records and which would hold that machine's processes, users and addresses. So that
+the rule still matches every other workload rests on the condition Falco compiles. The values Falco
+reports for the four fields follow from the pinned sources, and an event on a node is what shows
+them: `container.name` is the name in the container's CRI metadata and `k8s.ns.name` the namespace
+of its pod's sandbox (`go-worker/pkg/container/cri.go` of the container plugin at 0.7.6, the
+version the image loads), and `container.image.repository` is the image reference containerd 2.3.7
+reports, the image's first repository digest (`internal/cri/server/container_status.go`), up to its
+`@`, which for `hello`'s image is `docker.io/library/busybox`. An event that comes before the
+container plugin has the container's details from the runtime may not have the three fields the
+plugin gives, all but `proc.name`, as the plugin's descriptions of them say; the conjunction is then
+false, and the event still matches. The CI containers have no docker daemon, so the proofs that run
+Falco run where a developer or an agent has one, and skip in CI, saying why.
+
+To silence another known-benign event, find it (`just logs` above) and read its rule and the
+namespace, pod, container, image and process in its `output_fields`; then, in a pull request:
+
+1. add an item to `exceptions.yaml` that overrides the placeholder the rule leaves for the case
+   (the image's rules name them `user_*` and `known_*`, such as
+   `user_expected_terminal_shell_in_container_conditions` for `Terminal shell in container`), with
+   the reason for the exception in a comment above it, as the item above has;
+2. keep it as narrow as the event is, a conjunction of what the event shows of the workload, and
+   never a whole rule off: the proof of the place fails on a second item, file or place, and, where
+   a docker daemon answers, the proofs fail when Falco lists one rule fewer enabled;
+3. prove it as the item above is proved: the proof of the place states what the place holds, so an
+   item it does not expect fails it, and the item's own proof takes its values from the workload it
+   excepts;
+4. merge it. The pod template carries a checksum of the rules' ConfigMap, `checksum/rules`, so the
+   DaemonSet rolls when the rules change, one node at a time, and the Kustomization waits for the
+   release. A pod that still runs gets the new file as well: the kubelet brings a changed ConfigMap
+   to the mount
+   ([Kubernetes](https://kubernetes.io/docs/concepts/configuration/configmap/#mounted-configmaps-are-updated-automatically)),
+   and Falco watches the rules files it loaded (`watch_config_files`, on in the rendered
+   configuration), tries the new ones in a dry run of its own and, when they load, restarts itself
+   in place, which keeps the pod and starts its counters from nothing as a kill at the memory limit
+   does ([What Falco costs and what it sees](#what-falco-costs-and-what-it-sees)). A file Falco
+   refuses stops both: a pod that runs keeps the rules it has and writes
+   `Falco internal: hot restart failure`, at priority Critical, among its events, and a new pod
+   exits when it starts, so the roll stops at its first node, the release's upgrade does not
+   become ready and its remediation rolls it back ([What the root sets](#what-the-root-sets)).
+   `FluxApplierNotReady` raises the release after 15 minutes.
 
 The Falco documentation says what else an override can do
 ([overriding](https://falco.org/docs/concepts/rules/overriding/),

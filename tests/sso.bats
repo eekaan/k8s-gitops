@@ -10,6 +10,9 @@
 # charts are pulled once: so the tests run one at a time.
 export BATS_NO_PARALLELIZE_WITHIN_FILE=true
 
+# tree_without, a copy of the tree whose overlay leaves applications out.
+load fixtures/tree-without
+
 setup_file() {
   # Helm's cache and registry settings stay in the run's own directory, and so does the Docker
   # configuration helm falls back to for credentials, so no login is read.
@@ -166,19 +169,6 @@ cfg_line() {
   grep -qxF -- "$2" "$1" || { echo "$1 has no line: $2"; return 1; }
 }
 
-# tree_without APP...: copies kubernetes/ to $TREE and takes the ks.yaml of each APP out of the
-# overlay's resources.
-tree_without() {
-  local app
-  TREE="$BATS_TEST_TMPDIR/tree"
-  mkdir -p "$TREE"
-  cp -r "$REPO/kubernetes" "$TREE/kubernetes"
-  cp "$REPO/versions.yaml" "$TREE/versions.yaml"
-  for app in "$@"; do
-    yq -i '.resources |= map(select(test("/'"$app"'/ks.yaml$") | not))' "$TREE/kubernetes/apps/overlays/lab-sto2/kustomization.yaml"
-  done
-}
-
 # secret_targets FILE...: the name of each Secret an ExternalSecret of the files makes, one per line.
 secret_targets() {
   yq -N 'select(.kind == "ExternalSecret") | .spec.target.name // .metadata.name' "$@"
@@ -284,7 +274,7 @@ secret_targets() {
     [ "$(yq '.spec.refreshPolicy' "$BATS_TEST_TMPDIR/es.yaml")" = CreatedOnce ]
     [ "$(yq '.spec.target.creationPolicy' "$BATS_TEST_TMPDIR/es.yaml")" = Owner ]
     [ "$(yq '.spec.dataFrom[0].sourceRef.generatorRef | [.kind, .name] | join("/")' "$BATS_TEST_TMPDIR/es.yaml")" = "Password/$secret" ]
-    [ "$(yq '.spec | has("data") or has("secretStoreRef")' "$BATS_TEST_TMPDIR/es.yaml")" = false ]
+    [ "$(yq '.spec | (has("data") or has("secretStoreRef"))' "$BATS_TEST_TMPDIR/es.yaml")" = false ]
   done
   # Every secret a container reads is a Secret one of those ExternalSecrets makes, by reference, and
   # none has a value of its own: three variables of dex's, two of oauth2-proxy's.

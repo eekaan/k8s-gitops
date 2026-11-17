@@ -270,7 +270,7 @@ proxies_egress() {
   real_render
   run "$REPO/scripts/network-policy-check" "$REAL" "$REPO/network-policy-exceptions.yaml"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [ "$(grep ' denies ingress and egress' <<<"$output" | cut -d' ' -f1 | paste -sd' ')" = "backstage demo envoy-gateway-system kromgo open-feature-operator security-system sso-system" ]
+  [ "$(grep ' denies ingress and egress' <<<"$output" | cut -d' ' -f1 | paste -sd' ')" = "backstage crowdsec demo envoy-gateway-system kromgo open-feature-operator security-system sso-system" ]
   [ "$(grep -c ' listed' <<<"$output")" -eq "$(yq '.exceptions | length' "$REPO/network-policy-exceptions.yaml")" ]
 }
 

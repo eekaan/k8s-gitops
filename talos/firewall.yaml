@@ -4,7 +4,10 @@
 # firewall for the nodes it names, which talos/patches/all/firewall.yaml writes into their machine
 # configuration; everything else that reaches a node is dropped. docs/cluster.md lists the same
 # listeners, with who connects to each and why, and tests/node-firewall.bats fails when the two, or a
-# node's rules, disagree. A new listener is one entry here and one row in that table.
+# node's rules, disagree. A new listener is one entry here, one row in that table and its port in
+# that page's account of what a rollout proves. tests/node-listeners.bats holds every entry to a
+# listener: a port that a pod of kubernetes/ on the host network declares, or an entry of
+# node-firewall-exceptions.yaml that says what listens there instead.
 #
 #   name      the rule's name, unique
 #   protocol  tcp or udp

@@ -21,6 +21,11 @@ Feature: Kubernetes tree layout
     When the kubernetes check runs
     Then it exits non-zero and names both Kustomizations and the overlay
 
+  Scenario: An issuer choice is checked without reading standard input when the tree holds no issuers application
+    Given a tree with no issuers application in which one Kustomization chooses an issuer with PUBLIC_ISSUER, and the same tree with no choice
+    When the kubernetes check runs on each with its standard input closed, at /dev/null, a pipe that stays open and silent, and a pipe that carries a ClusterIssuer of the chosen name
+    Then every run ends within its bound, the choice is refused each time, in the same lines, as an issuer the issuers application does not make, and the tree without a choice passes each time
+
   Scenario: An object with a field its schema does not have is refused, and objects of listed kinds without a schema are counted by kind
     Given an application whose Deployment has a field the Deployment schema lacks, a Flux Kustomization with one its schema lacks, a custom resource with one its rendered definition lacks, and custom resources of kinds that have no definition and are listed with their reasons
     When the kubernetes validation runs
@@ -125,6 +130,11 @@ Feature: Kubernetes tree layout
     Given a release whose chart renders a test hook, an upgrade hook, a Deployment and a custom resource naming its own image, whose images have no tag, the tag latest or only a registry's port
     When the kubernetes validation runs
     Then it exits non-zero and names the application, the object and the image, unless the release does not run that test or the image is listed with its reason in the image allowlist
+
+  Scenario: An application that renders no object passes the image rule without reading standard input
+    Given a tree with an application whose kustomization lists nothing, for which the render keeps a directory that holds no file, and an application read after it that runs one pinned image
+    When the kubernetes validation runs with its standard input closed, at /dev/null, a pipe that stays open and silent, and a pipe that carries a pod whose image has no tag
+    Then every run ends within its bound and passes, having counted the one pinned image and not the pod's
 
   Scenario: A Kustomization outside flux-system fails the check
     Given an application whose ks.yaml sets another namespace

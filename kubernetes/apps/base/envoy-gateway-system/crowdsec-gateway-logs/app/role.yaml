@@ -1,0 +1,19 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/role-rbac-v1.json
+# What CrowdSec's agent reads of this namespace, which holds the public Gateway's proxies: the list
+# and watch of its pods, with which the Kubernetes datasource finds the proxies by their labels,
+# and their logs, which it follows. A Role is of one namespace and cannot name which pods' logs a
+# subject reads, so the read is the namespace's pods and no other namespace's; which of them the
+# agent follows is its acquisition's selector (crowdsec's values). It lives here, as a Kustomization
+# deploys into one namespace, and is bound only when CrowdSec is selected.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: crowdsec-agent-gateway-logs
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]

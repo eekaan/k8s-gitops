@@ -522,16 +522,17 @@ seconds() {
   loaded="$(yq -N 'select(.kind == "GrafanaDashboard") | .metadata.name' "$BUILT" "$RENDERED")"
   echo "GrafanaDashboards: $(grep -c . <<<"$loaded")"
   [ -n "$loaded" ]
+  # yq binds or looser than a pipe: .spec | has(a) or has(b) would ask the whole object for b.
   fetched="$(yq -N 'select(.kind == "GrafanaDashboard" or .kind == "GrafanaDatasource")
-    | select((.spec | has("url") or has("urlAuthorization") or has("grafanaCom") or has("oci") or has("jsonnet")
-        or has("jsonnetLib")) or (.spec.plugins // [] | length) > 0)
+    | select((.spec | (has("url") or has("urlAuthorization") or has("grafanaCom") or has("oci") or has("jsonnet")
+        or has("jsonnetLib"))) or (.spec.plugins // [] | length) > 0)
     # The one exception, documented in docs/kubernetes.md: the datasource for VictoriaLogs asks for
     # its own plugin, once; tests/logs.bats checks that it is pinned to an exact version.
     | select((.kind == "GrafanaDatasource" and .metadata.name == "victoria-logs"
         and .spec.datasource.type == "victoriametrics-logs-datasource"
         and (.spec.plugins // [] | length) == 1 and .spec.plugins[0].name == "victoriametrics-logs-datasource"
-        and (.spec | has("url") or has("urlAuthorization") or has("grafanaCom") or has("oci") or has("jsonnet")
-          or has("jsonnetLib") | not)) | not)
+        and (.spec | (has("url") or has("urlAuthorization") or has("grafanaCom") or has("oci") or has("jsonnet")
+          or has("jsonnetLib")) | not)) | not)
     | .kind + "/" + .metadata.name' "$BUILT" "$RENDERED")"
   echo "fetched at run time: ${fetched:-none}"
   [ -z "$fetched" ]

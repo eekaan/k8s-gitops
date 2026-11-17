@@ -136,11 +136,33 @@ refuse_http2_debug() {
   fi
 }
 
-# confirm STACK VERB PARTICIPLE: whether STACK's name is typed back, before it is VERBed.
+# reserve_answers: keeps the script's standard input, where the operator's typed answers come from, a
+# terminal, or a pipe or a file written before the script started, for the prompts alone. It
+# duplicates standard input onto a descriptor of the script's own, answers_fd, and makes /dev/null
+# the script's standard input, so every program the script starts from here on has /dev/null as its
+# standard input unless it is given another on purpose: one that reads its standard input when it
+# is given no other, as ssh does for the command it runs, finds nothing of an answer that waits for
+# a later prompt. The prompts (confirm below, and those of scripts/lib/host-keys.sh and
+# scripts/edge-rollout) read from answers_fd, one line each, in the order they are asked. A
+# standard input that is closed leaves answers_fd on /dev/null: every answer is then the empty one,
+# as at the end of the input. A script calls it once, as soon as the libraries are sourced: until
+# then only dirname has run, for the script to find the libraries and for them to find each other,
+# and it reads nothing. answers_fd is not exported: a script that is to ask is handed the answers
+# as its own standard input (edge_check_passes in scripts/lib/edge.sh).
+reserve_answers() {
+  if ! { exec {answers_fd}<&0; } 2> /dev/null; then
+    exec {answers_fd}< /dev/null
+  fi
+  exec < /dev/null
+}
+
+# confirm STACK VERB PARTICIPLE: whether STACK's name is typed back, before it is VERBed. The answer
+# is one line of the operator's input: of answers_fd when the script reserved it (reserve_answers),
+# of standard input otherwise.
 confirm() {
   local answer=
   printf 'Type %s to %s it: ' "$1" "$2" >&2
-  read -r answer || true
+  read -r -u "${answers_fd:-0}" answer || true
   if [[ $answer != "$1" ]]; then
     infra_error "$1 was not confirmed and is not $3"
     return 1

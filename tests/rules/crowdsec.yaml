@@ -1,0 +1,60 @@
+---
+# Unit tests of the crowdsec application's own alert, run by just rules-check with promtool. The
+# series is Prometheus' own `up` of the local API's target, as the chart's ServiceMonitor makes it:
+# the job is the Service's name, with the namespace, pod, instance, service and endpoint of the
+# scrape. Each group's name is the title of its scenario in features/alerts.feature.
+rule_files:
+  - crowdsec.rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: The alert CrowdSecLocalAPIDown fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # The local API answers its scrape for the first 10 minutes. From minute 10 the scrape fails,
+      # as for a pod that is running and not serving: up is 0, for 20 minutes. From minute 30 it
+      # answers again for 10 minutes. At minute 40 the pod is gone, so the series ends with a stale
+      # marker and is absent for 20 minutes, as it is for a release that is not installed.
+      - series: >-
+          up{namespace="crowdsec", pod="crowdsec-lapi-7d9f-abcde", instance="198.51.100.41:6060",
+          job="crowdsec-service", service="crowdsec-service", endpoint="metrics"}
+        values: '1x9 0x19 1x9 stale _x20'
+    alert_rule_test:
+      # Answering: quiet.
+      - eval_time: 5m
+        alertname: CrowdSecLocalAPIDown
+        exp_alerts: []
+      # The scrape fails from minute 10, so the alert is pending from minute 10 and fires after
+      # 10 minutes, at minute 20.
+      - eval_time: 19m
+        alertname: CrowdSecLocalAPIDown
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CrowdSecLocalAPIDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: crowdsec
+            exp_annotations:
+              summary: CrowdSec's local API is not running
+              description: The local API of CrowdSec in crowdsec has not answered its scrape for 10 minutes, so the agent's alerts are not stored and no decision can be listed.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#crowdseclocalapidown
+      # Answering again from minute 30: quiet.
+      - eval_time: 35m
+        alertname: CrowdSecLocalAPIDown
+        exp_alerts: []
+      # No series from minute 40, so the alert is pending from minute 40 and fires after 10
+      # minutes, at minute 50.
+      - eval_time: 49m
+        alertname: CrowdSecLocalAPIDown
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: CrowdSecLocalAPIDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: crowdsec
+              service: crowdsec-service
+            exp_annotations:
+              summary: CrowdSec's local API is not running
+              description: The local API of CrowdSec in crowdsec has not answered its scrape for 10 minutes, so the agent's alerts are not stored and no decision can be listed.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#crowdseclocalapidown

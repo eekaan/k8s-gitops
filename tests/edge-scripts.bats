@@ -26,6 +26,9 @@ setup() {
   ADDRESS_2=203.0.113.52
   INSTANCE_1=3f6a0c1e-0b5a-4c3e-9d7a-1a2b3c4d5e61
   INSTANCE_2=8e1d2c3b-4a59-4687-b0c1-d2e3f4a5b672
+  # What a test hands a recipe its typed answers through, once answers_pipe has made it a named pipe
+  # or answers_file a file.
+  ANSWERS="$BATS_TEST_TMPDIR/answers"
   KEY="$BATS_TEST_TMPDIR/keys/edge"
   echo 'fixture private key, never read' > "$KEY"
   echo 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureEdgePublicKeyFixtureFixtureFix fixture' > "$KEY.pub"
@@ -128,9 +131,14 @@ EOF
   # An ssh that refuses unless host key checking is strict against the recorded keys and the edges'
   # key is the one named, and otherwise runs the command here, as the edge's login shell would, with
   # only what the ordinary user's PATH reaches on a Debian edge: its commands in /usr/bin, and none of
-  # /usr/sbin's, which sudo's secure_path reaches (the fake sudo).
+  # /usr/sbin's, which sudo's secure_path reaches (the fake sudo). The client sends its own standard
+  # input to the command it runs, whether that reads it or not (ssh(1), -n), so the answers, when
+  # the fake has them as its standard input, are read to their end.
   fake ssh << EOF
 printf '%s\n' "ssh \$*" >> "$RECORD/argv"
+if [[ /dev/stdin -ef "$ANSWERS" ]]; then
+  while IFS= read -r _; do :; done
+fi
 strict= known= identity= only=
 while ((\$#)); do
   case \$1 in
@@ -287,18 +295,23 @@ if [[ -f $EDGE_FIXTURE/broken-$section ]]; then
 fi
 cat "$EDGE_FIXTURE/$file"
 EOF
-  host_sbin_fake nft << 'EOF'
-case $* in
-  'list tables') section=rules ;;
+  # The loaded ruleset is the fixture's file rules, as nft lists it as JSON (ruleset); the tables'
+  # names, which nft list tables prints, are those of that listing.
+  host_sbin_fake nft << EOF
+case \$* in
+  '-j list ruleset' | 'list tables') section=rules ;;
   'list chain inet edge forward') section=forward ;;
   'list chain inet edge output') section=output ;;
-  *) echo "fake nft: unexpected $*" >&2; exit 1 ;;
+  *) echo "fake nft: unexpected \$*" >&2; exit 1 ;;
 esac
-if [[ -f $EDGE_FIXTURE/broken-$section ]]; then
-  cat "$EDGE_FIXTURE/broken-$section" >&2
+if [[ -f \$EDGE_FIXTURE/broken-\$section ]]; then
+  cat "\$EDGE_FIXTURE/broken-\$section" >&2
   exit 1
 fi
-cat "$EDGE_FIXTURE/$section"
+if [[ \$* == 'list tables' ]]; then
+  exec "$(type -P jq)" -r '.nftables[] | .table? | objects | "table \(.family) \(.name)"' "\$EDGE_FIXTURE/rules"
+fi
+cat "\$EDGE_FIXTURE/\$section"
 EOF
   host_sbin_fake sysctl << 'EOF'
 cat "$EDGE_FIXTURE/forwarding"
@@ -377,9 +390,16 @@ EOF
   WORKERS='192.0.2.20 192.0.2.30 192.0.2.22'
 }
 
-# fake NAME: a binary first on the scripts' PATH, its body read from stdin.
+# fake NAME: a binary first on the scripts' PATH, its body read from stdin. Before anything else it
+# notes its name in the record's file had-answers when its own standard input is the answers, the
+# pipe or the file a test made of ANSWERS; that note reads nothing of them, and of the bodies only
+# the fake ssh's does.
 fake() {
-  { echo '#!/usr/bin/env bash'; cat; } > "$BIN/$1"
+  {
+    echo '#!/usr/bin/env bash'
+    printf '[[ ! /dev/stdin -ef %q ]] || echo %q >> %q\n' "$ANSWERS" "$1" "$RECORD/had-answers"
+    cat
+  } > "$BIN/$1"
   chmod +x "$BIN/$1"
 }
 
@@ -406,6 +426,140 @@ exec "$real" "\$@"
 EOF
 }
 
+# ruleset [OBJECTS...]: a loaded ruleset as nft -j list ruleset prints it: on one line, the object
+# nftables, whose list starts with nft's own metainfo and holds each object of OBJECTS, one a line: a
+# table, a chain or a rule (libnftables-json(5)). Each object below is as nft 1.1.7 lists it for a
+# ruleset loaded in a network namespace, and those of own_table are the whole listing of the rules
+# the stack renders; the handles of the others, and where an object added to a table stands among
+# that table's, are the fixtures' own, which the check does not read. What it reads, a table's
+# family and name, a chain's type and the statements of a rule, Debian 13's nft, 1.1.3, lists alike.
+ruleset() {
+  local object objects=''
+  while IFS= read -r object; do
+    [[ -z $object ]] || objects+=", $object"
+  done < <(printf '%s\n' "$@")
+  printf '{"nftables": [{"metainfo": {"version": "1.1.7", "release_name": "Commodore Bullmoose #8", "json_schema_version": 1}}%s]}\n' "$objects"
+}
+
+# own_table: the edge's own table as listed once the rules the stack renders are loaded, for an
+# edge at host number 7, the workers' block for host numbers 20 to 99 and the public ports 80 and
+# 443: three base chains that filter, and no rule in the forward chain.
+own_table() {
+  cat << 'JSON'
+{"table": {"family": "inet", "name": "edge", "handle": 1}}
+{"chain": {"family": "inet", "table": "edge", "name": "input", "handle": 1, "type": "filter", "hook": "input", "prio": 0, "policy": "drop"}}
+{"chain": {"family": "inet", "table": "edge", "name": "forward", "handle": 2, "type": "filter", "hook": "forward", "prio": 0, "policy": "drop"}}
+{"chain": {"family": "inet", "table": "edge", "name": "output", "handle": 3, "type": "filter", "hook": "output", "prio": 0, "policy": "accept"}}
+{"rule": {"family": "inet", "table": "edge", "chain": "input", "handle": 4, "expr": [{"match": {"op": "in", "left": {"ct": {"key": "state"}}, "right": ["established", "related"]}}, {"accept": null}]}}
+{"rule": {"family": "inet", "table": "edge", "chain": "input", "handle": 5, "expr": [{"match": {"op": "in", "left": {"ct": {"key": "state"}}, "right": "invalid"}}, {"drop": null}]}}
+{"rule": {"family": "inet", "table": "edge", "chain": "input", "handle": 6, "expr": [{"match": {"op": "==", "left": {"meta": {"key": "iif"}}, "right": "lo"}}, {"accept": null}]}}
+{"rule": {"family": "inet", "table": "edge", "chain": "input", "handle": 7, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 22}}, {"accept": null}]}}
+{"rule": {"family": "inet", "table": "edge", "chain": "input", "handle": 9, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "daddr"}}, "right": "192.0.2.7"}}, {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": {"set": [80, 443]}}}, {"accept": null}]}}
+{"rule": {"family": "inet", "table": "edge", "chain": "input", "handle": 11, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "saddr"}}, "right": {"set": [{"range": ["192.0.2.20", "192.0.2.99"]}]}}}, {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 179}}, {"accept": null}]}}
+{"rule": {"family": "inet", "table": "edge", "chain": "input", "handle": 12, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "icmp", "field": "type"}}, "right": "destination-unreachable"}}, {"match": {"op": "==", "left": {"payload": {"protocol": "icmp", "field": "code"}}, "right": 4}}, {"accept": null}]}}
+{"rule": {"family": "inet", "table": "edge", "chain": "input", "handle": 14, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "icmpv6", "field": "type"}}, "right": {"set": ["packet-too-big", "nd-router-advert", "nd-neighbor-solicit", "nd-neighbor-advert"]}}}, {"accept": null}]}}
+{"rule": {"family": "inet", "table": "edge", "chain": "output", "handle": 16, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "daddr"}}, "right": "203.0.113.21"}}, {"match": {"op": "!=", "left": {"rt": {"key": "nexthop", "family": "ip"}}, "right": {"set": [{"range": ["192.0.2.20", "192.0.2.99"]}]}}}, {"reject": {"type": "icmp", "expr": "port-unreachable"}}]}}
+JSON
+}
+
+# translation_table: the table an edge that translates has loaded beside its own, edge-nat: a chain
+# hooked at nat before routing that moves a public port's destination to the Gateway, and one after
+# it that sets the source of what was moved.
+translation_table() {
+  cat << 'JSON'
+{"table": {"family": "ip", "name": "edge-nat", "handle": 2}}
+{"chain": {"family": "ip", "table": "edge-nat", "name": "prerouting", "handle": 1, "type": "nat", "hook": "prerouting", "prio": -100, "policy": "accept"}}
+{"chain": {"family": "ip", "table": "edge-nat", "name": "postrouting", "handle": 2, "type": "nat", "hook": "postrouting", "prio": 100, "policy": "accept"}}
+{"rule": {"family": "ip", "table": "edge-nat", "chain": "prerouting", "handle": 4, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "daddr"}}, "right": "192.0.2.7"}}, {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": {"set": [80, 443]}}}, {"dnat": {"addr": "203.0.113.21"}}]}}
+{"rule": {"family": "ip", "table": "edge-nat", "chain": "postrouting", "handle": 6, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "daddr"}}, "right": "203.0.113.21"}}, {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": {"set": [80, 443]}}}, {"match": {"op": "in", "left": {"ct": {"key": "status"}}, "right": "dnat"}}, {"snat": {"addr": "192.0.2.7"}}]}}
+JSON
+}
+
+# nat_chain [HOOK]: a table of another name whose one chain is hooked at nat, before routing or at
+# HOOK, output or postrouting, and holds no rule.
+nat_chain() {
+  local hook=${1:-prerouting} prio=-100
+  [[ $hook != postrouting ]] || prio=100
+  printf '{"table": {"family": "ip", "name": "other", "handle": 3}}\n'
+  printf '{"chain": {"family": "ip", "table": "other", "name": "%s", "handle": 1, "type": "nat", "hook": "%s", "prio": %s, "policy": "accept"}}\n' "$hook" "$hook" "$prio"
+}
+
+# prerouting_filter: a table of another name whose base chain filters before routing, at the hook a
+# nat chain that moves a destination takes, and its one rule.
+prerouting_filter() {
+  cat << 'JSON'
+{"table": {"family": "inet", "name": "raw", "handle": 15}}
+{"chain": {"family": "inet", "table": "raw", "name": "prerouting", "handle": 1, "type": "filter", "hook": "prerouting", "prio": -300, "policy": "accept"}}
+{"rule": {"family": "inet", "table": "raw", "chain": "prerouting", "handle": 2, "expr": [{"match": {"op": "in", "left": {"ct": {"key": "state"}}, "right": "invalid"}}, {"drop": null}]}}
+JSON
+}
+
+# iptables_nat_table: the nat table iptables-nft 1.8 makes for a rule in each of two of its chains,
+# -j MASQUERADE and -j DNAT: the chains hooked at nat, and each rule's target as nft lists one of
+# iptables' own targets, an xt statement named after it.
+iptables_nat_table() {
+  cat << 'JSON'
+{"table": {"family": "ip", "name": "nat", "handle": 12}}
+{"chain": {"family": "ip", "table": "nat", "name": "POSTROUTING", "handle": 1, "type": "nat", "hook": "postrouting", "prio": 100, "policy": "accept"}}
+{"chain": {"family": "ip", "table": "nat", "name": "PREROUTING", "handle": 3, "type": "nat", "hook": "prerouting", "prio": -100, "policy": "accept"}}
+{"rule": {"family": "ip", "table": "nat", "chain": "POSTROUTING", "handle": 2, "expr": [{"match": {"op": "==", "left": {"meta": {"key": "oifname"}}, "right": "ens3"}}, {"counter": {"packets": 0, "bytes": 0}}, {"xt": {"type": "target", "name": "MASQUERADE"}}]}}
+{"rule": {"family": "ip", "table": "nat", "chain": "PREROUTING", "handle": 4, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 80}}, {"counter": {"packets": 0, "bytes": 0}}, {"xt": {"type": "target", "name": "DNAT"}}]}}
+JSON
+}
+
+# filter_table: a second table that only filters: a base chain of the type filter, and its rules.
+filter_table() {
+  cat << 'JSON'
+{"table": {"family": "inet", "name": "filter", "handle": 14}}
+{"chain": {"family": "inet", "table": "filter", "name": "input", "handle": 1, "type": "filter", "hook": "input", "prio": 0, "policy": "accept"}}
+{"rule": {"family": "inet", "table": "filter", "chain": "input", "handle": 2, "expr": [{"match": {"op": "in", "left": {"ct": {"key": "state"}}, "right": ["established", "related"]}}, {"accept": null}]}}
+{"rule": {"family": "inet", "table": "filter", "chain": "input", "handle": 3, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "ip", "field": "saddr"}}, "right": {"prefix": {"addr": "198.51.100.0", "len": 24}}}}, {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 22}}, {"accept": null}]}}
+JSON
+}
+
+# named_not_stated: two rules of the edge's own input chain that name a translation and state none:
+# one that matches a connection whose destination was translated (ct status dnat), and one whose
+# comment is the word masquerade.
+named_not_stated() {
+  cat << 'JSON'
+{"rule": {"family": "inet", "table": "edge", "chain": "input", "handle": 17, "expr": [{"match": {"op": "in", "left": {"ct": {"key": "status"}}, "right": "dnat"}}, {"accept": null}]}}
+{"rule": {"family": "inet", "table": "edge", "chain": "input", "handle": 18, "comment": "masquerade", "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 22}}, {"accept": null}]}}
+JSON
+}
+
+# unhooked STATEMENT [inet]: a chain that is hooked nowhere, so it carries no type, and its one
+# rule, which holds STATEMENT, dnat, snat, masquerade or redirect, as nft lists the statement: in a
+# table of a name of its own, aside, which comes with them, or with inet in the edge's own table.
+unhooked() {
+  local family=ip table=aside stated
+  if [[ ${2-} == inet ]]; then
+    family=inet table=edge
+  else
+    printf '{"table": {"family": "ip", "name": "aside", "handle": 5}}\n'
+  fi
+  case $1:$family in
+    dnat:ip) stated='{"dnat": {"addr": "203.0.113.21"}}' ;;
+    dnat:inet) stated='{"dnat": {"family": "ip", "addr": "203.0.113.21"}}' ;;
+    snat:ip) stated='{"snat": {"addr": "192.0.2.7"}}' ;;
+    snat:inet) stated='{"snat": {"family": "ip", "addr": "192.0.2.7"}}' ;;
+    masquerade:*) stated='{"masquerade": null}' ;;
+    redirect:*) stated='{"redirect": {"port": 8080}}' ;;
+  esac
+  printf '{"chain": {"family": "%s", "table": "%s", "name": "helper", "handle": 20}}\n' "$family" "$table"
+  printf '{"rule": {"family": "%s", "table": "%s", "chain": "helper", "handle": 21, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 80}}, %s]}}\n' "$family" "$table" "$stated"
+}
+
+# inline_chain: a table of a name of its own whose chain, hooked nowhere, holds one rule, which jumps
+# to an inline chain that holds a masquerade statement. nft has no JSON for an inline chain and
+# lists it as its text, in a string, where a statement's object would stand.
+inline_chain() {
+  cat << 'JSON'
+{"table": {"family": "ip", "name": "aside", "handle": 2}}
+{"chain": {"family": "ip", "table": "aside", "name": "plain", "handle": 1}}
+{"rule": {"family": "ip", "table": "aside", "chain": "plain", "handle": 4, "expr": [{"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 80}}, "jump {\n\t\t\tmasquerade\n\t\t}"]}}
+JSON
+}
+
 # edge_state NUMBER FRR_STATE SESSIONS PREFIXES [FORWARDING]: what edge NUMBER answers. SESSIONS is
 # the addresses of the established sessions and PREFIXES the routes in the table, each with a path
 # per session.
@@ -418,7 +572,7 @@ edge_state() {
   jq -n --arg prefixes "$4" --arg addresses "$3" '{routes: ($prefixes | split(" ") | map(select(. != ""))
     | map({key: ., value: ($addresses | split(" ") | map(select(. != "")) | map({valid: true, bestpath: true, multipath: true}))})
     | from_entries)}' > "$dir/table.json"
-  printf 'table inet edge\n' > "$dir/rules"
+  ruleset "$(own_table)" > "$dir/rules"
   echo "${5:-1}" > "$dir/forwarding"
   # FRR's configuration with its reject route for the service range, the kernel's route from it, the
   # forward chain that holds no rule, the output chain that refuses the proxy's packets toward the
@@ -500,6 +654,64 @@ no_address() {
   ! grep -qE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' <<< "$1"
 }
 
+# check_ruleset OBJECTS...: the check of edge 1, healthy but for the ruleset it has loaded: OBJECTS.
+check_ruleset() {
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  ruleset "$@" > "$HOST/edge-1/rules"
+  edge_check --edge 1
+  echo "$output"
+}
+
+# translates OBJECTS KINDS: the check of edge 1 with OBJECTS loaded beside its own table fails on
+# one line of its own, which names KINDS and nothing else of the ruleset; its own table is there, so
+# the lines that read its chains and the kernel's forwarding say what they say of a loaded table.
+translates() {
+  check_ruleset "$(own_table)" "$1"
+  [ "$status" -ne 0 ]
+  [[ $output$'\n' == *"FAIL  lab-edge-1: the ruleset on the edge holds what translates an address: $2"$'\n'* ]]
+  [ "$(grep -c FAIL <<< "$output")" -eq 1 ]
+  [[ $output != *"none translates an address"* ]]
+  [[ $output == *"pass  lab-edge-1: the forward chain forwards nothing"* ]]
+  [[ $output == *"pass  lab-edge-1: the output chain keeps the proxy's connections to the Gateway on a worker's route"* ]]
+  [[ $output == *"pass  lab-edge-1: the kernel forwards"* ]]
+  no_address "$output"
+}
+
+# other_edge_down_answered: the rollout other_edge_down sets up, which just ran with the four
+# answers as its standard input, read each at its prompt, in the order they are asked: the stack's
+# name; the yes the check of edge 2 asks before it connects to it, as its key is not recorded; the
+# sentence, as edge 2 does not pass; and the yes for the key of the instance edge 1 becomes. Edge 1
+# is replaced, by the instance whose console was read, and passes its check. Both edges were
+# connected to, no answer is left for the end of the input to follow, and no fake or recorded program
+# the rollout or its checks started had the answers as its standard input. The checks have them, as
+# the rollout hands them to ask with, and real_edge_check's wrapper notes nothing; the dirname each
+# script runs before it keeps its input has them as well, and other_edge_down does not record it.
+other_edge_down_answered() {
+  [ "$status" -eq 0 ]
+  [[ $output == *"Type sto2/edge to roll out it: "* ]]
+  [[ $output == *"The console of the edge router lab-edge-2's instance held no fingerprints, so the comparison is yours."* ]]
+  [ "$(recorded 2)" = "$(cat "$HOST/key-$ADDRESS_2")" ]
+  [[ $output == *"FAIL  lab-edge-2: FRR is not running"* ]]
+  [[ $output == *'Type "replace edge 1 with edge 2 down" to replace it anyway: '* ]]
+  [[ $output == *"The console of the edge router lab-edge-1's instance held no fingerprints, so the comparison is yours."* ]]
+  [ "$(grep -o 'Type yes to record them and connect: ' <<< "$output" | wc -l)" -eq 2 ]
+  [ "$(recorded 1)" = "$(replacement_key 1)" ]
+  [ "$(current_instance 1)" = "$new" ]
+  [ "$(sequence)" = "$(printf '%s\n' \
+    'plan' \
+    'check 2' 'scan 2' \
+    'plan -target=module.edge["1"] -target=openstack_networking_floatingip_associate_v2.edge["1"] -replace=module.edge["1"].openstack_compute_instance_v2.this' \
+    'forget 1' 'apply' 'scan 1' 'check 1' \
+    'plan')" ]
+  [[ $output == *"pass  lab-edge-1: 3 of 3 worker sessions are established"* ]]
+  [[ $output == *"sto2/edge: edge 1 replaced, and edge 1 passes; what is left of the plan:"* ]]
+  grep -q "^ssh .*@$ADDRESS_2 " "$RECORD/argv"
+  grep -q "^ssh .*@$ADDRESS_1 " "$RECORD/argv"
+  [ -z "$(answers_left)" ]
+  [ ! -s "$RECORD/had-answers" ]
+  no_address "$output"
+}
+
 @test "edge-check passes with every worker's session established and fails, saying which, when one is missing or a route outside the range is present, and no address is printed" {
   # Both edges complete: three sessions each, and a next hop per session for every Service address.
   edge_state 1 active "$WORKERS" 203.0.113.17/32
@@ -533,7 +745,7 @@ no_address() {
 
   # FRR down, the rules not loaded and forwarding off each fail on their own.
   edge_state 1 inactive "$WORKERS" 203.0.113.17/32 0
-  printf 'table inet filter\n' > "$HOST/edge-1/rules"
+  ruleset "$(filter_table)" > "$HOST/edge-1/rules"
   edge_check --edge 1
   [ "$status" -ne 0 ]
   [[ $output == *"FAIL  lab-edge-1: FRR is not running"* ]]
@@ -618,16 +830,16 @@ no_address() {
   [ "$status" -ne 0 ]
   [[ $output == *"FAIL  lab-edge-1: the forward chain does not drop by default"* ]]
 
-  # The old translation table still loaded.
+  # The translation table still loaded beside the edge's own.
   edge_state 1 active "$WORKERS" 203.0.113.17/32
-  printf 'table inet edge\ntable ip edge-nat\n' > "$HOST/edge-1/rules"
+  ruleset "$(own_table)" "$(translation_table)" > "$HOST/edge-1/rules"
   edge_check --edge 1
   [ "$status" -ne 0 ]
-  [[ $output == *"FAIL  lab-edge-1: a translation table is loaded, so a connection to a public port may be translated instead of proxied"* ]]
+  [[ $output$'\n' == *"FAIL  lab-edge-1: the ruleset on the edge holds what translates an address: a chain hooked at nat, a dnat statement, a snat statement"$'\n'* ]]
 
   # Forwarding on with no rules loaded.
   edge_state 1 active "$WORKERS" 203.0.113.17/32
-  : > "$HOST/edge-1/rules"
+  ruleset > "$HOST/edge-1/rules"
   : > "$HOST/edge-1/forward"
   : > "$HOST/edge-1/output"
   edge_check --edge 1
@@ -840,7 +1052,7 @@ on_edge() {
     "table|the BGP table|the table holds" \
     "config|FRR's running configuration|FRR's configuration holds no reject route" \
     "unreachable|the kernel's unreachable routes|is not in the kernel" \
-    "rules|the nftables tables|the nftables rules are not loaded" \
+    "rules|the nftables ruleset|the nftables rules are not loaded" \
     "forward|the forward chain|the forward chain holds a rule" \
     "output|the output chain|the output chain does not refuse" \
     "default|the default route|the output chain keeps" \
@@ -878,7 +1090,7 @@ on_edge() {
   edge_check --edge 1
   echo "$output"
   [ "$status" -ne 0 ]
-  [[ $output == *"FAIL  lab-edge-1: cannot read the nftables tables on the edge: "*"not found"* ]]
+  [[ $output == *"FAIL  lab-edge-1: cannot read the nftables ruleset on the edge: "*"not found"* ]]
   [[ $output == *"pass  lab-edge-1: FRR is running"* ]]
   [[ $output == *"pass  lab-edge-1: unattended upgrades are off"* ]]
   [[ $output != *"the kernel does not forward"* ]]
@@ -896,6 +1108,171 @@ EOF
   [[ $output == *"FAIL  lab-edge-1: cannot read FRR's state on the edge: not asked, as mktemp failed: "*"No space left on device"* ]]
   [[ $output == *"FAIL  lab-edge-1: cannot read the SSH daemon's settings on the edge: not asked, as mktemp failed: "*"No space left on device"* ]]
   [[ $output != *"pass "* && $output != *"the kernel does not forward"* ]]
+}
+
+@test "The check fails an edge whose loaded ruleset has a chain hooked at nat or a statement that translates, in any table" {
+  local statement answer objects hook
+  local passes='pass  lab-edge-1: the nftables rules are loaded, and none translates an address'
+
+  # The edge's own table as nft lists it, alone, beside a second table that only filters, beside one
+  # whose chain filters before routing, and with rules that name a translation without stating one:
+  # every line passes.
+  for objects in '' "$(filter_table)" "$(prerouting_filter)" "$(named_not_stated)"; do
+    check_ruleset "$(own_table)" "$objects"
+    [ "$status" -eq 0 ]
+    [[ $output$'\n' == *"$passes"$'\n'* ]]
+    [[ $output != *FAIL* && $output != *skip* ]]
+    no_address "$output"
+  done
+
+  # Each alone beside the edge's own table: a chain hooked at nat that holds no rule, in a table of
+  # another name, before routing, at output and after routing; the nat table iptables-nft makes;
+  # each statement that translates, in a chain that is hooked nowhere, in the edge's own table and in
+  # another; and the table of an edge that translates, by its name.
+  for hook in prerouting output postrouting; do
+    translates "$(nat_chain "$hook")" "a chain hooked at nat"
+  done
+  translates "$(iptables_nat_table)" "a chain hooked at nat"
+  for statement in dnat snat masquerade redirect; do
+    translates "$(unhooked "$statement" inet)" "a $statement statement"
+    translates "$(unhooked "$statement")" "a $statement statement"
+  done
+  translates "$(translation_table)" "a chain hooked at nat, a dnat statement, a snat statement"
+
+  # Without the edge's own table its rules are not loaded: with nothing loaded, with a table of the
+  # edge's name in another family, and with a table of its family under another name.
+  for objects in '' '{"table": {"family": "ip", "name": "edge", "handle": 1}}' "$(filter_table)"; do
+    edge_state 1 active "$WORKERS" 203.0.113.17/32
+    ruleset "$objects" > "$HOST/edge-1/rules"
+    : > "$HOST/edge-1/forward"
+    : > "$HOST/edge-1/output"
+    edge_check --edge 1
+    echo "$output"
+    [ "$status" -ne 0 ]
+    [[ $output$'\n' == *"FAIL  lab-edge-1: the nftables rules are not loaded"$'\n'* ]]
+    [[ $output == *"FAIL  lab-edge-1: the kernel forwards without the nftables rules"* ]]
+    [[ $output != *translate* ]]
+  done
+
+  # What is loaded in their place is named all the same, on a line of its own.
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  ruleset "$(nat_chain)" "$(unhooked masquerade)" > "$HOST/edge-1/rules"
+  : > "$HOST/edge-1/forward"
+  : > "$HOST/edge-1/output"
+  edge_check --edge 1
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output$'\n' == *"FAIL  lab-edge-1: the nftables rules are not loaded"$'\n'* ]]
+  [[ $output$'\n' == *"FAIL  lab-edge-1: the ruleset on the edge holds what translates an address: a chain hooked at nat, a masquerade statement"$'\n'* ]]
+  [[ $output == *"FAIL  lab-edge-1: the kernel forwards without the nftables rules"* ]]
+  [[ $output != *"none translates an address"* ]]
+  no_address "$output"
+
+  # A rule that jumps to an inline chain, beside the edge's own table: what the chain's rules state,
+  # a masquerade here, is in a text the check does not read, so the ruleset is not read as one that
+  # translates nothing. It is neither a pass nor rules that are not loaded.
+  check_ruleset "$(own_table)" "$(inline_chain)"
+  [ "$status" -ne 0 ]
+  [[ $output$'\n' == *"FAIL  lab-edge-1: cannot read the nftables ruleset on the edge: a rule holds a statement that nft lists as text, not as JSON, as it lists an inline chain"$'\n'* ]]
+  [[ $output != *"none translates an address"* && $output != *"the nftables rules are not loaded"* ]]
+  [[ $output == *"FAIL  lab-edge-1: the kernel forwards, and whether the nftables rules are loaded could not be read"* ]]
+  no_address "$output"
+
+  # An answer that is not nft's listing is not read as one: the tables' names alone, as nft list
+  # tables prints them, JSON that is not a listing, a listing of another schema version, two
+  # listings, and nothing at all. It is neither a pass nor rules that are not loaded.
+  for answer in 'table inet edge' '{}' '[]' '{"nftables": []}' '{"nftables": [{"table": {"family": "inet", "name": "edge", "handle": 1}}]}' \
+    '{"nftables": [{"metainfo": {"version": "9.9.9", "release_name": "a later one", "json_schema_version": 2}}, {"table": {"family": "inet", "name": "edge", "handle": 1}}]}' \
+    "$(ruleset "$(own_table)")"$'\n'"$(ruleset "$(own_table)")" ''; do
+    edge_state 1 active "$WORKERS" 203.0.113.17/32
+    printf '%s\n' "$answer" > "$HOST/edge-1/rules"
+    edge_check --edge 1
+    echo "${answer:0:60}: $output"
+    [ "$status" -ne 0 ]
+    [[ $output$'\n' == *"FAIL  lab-edge-1: cannot read the nftables ruleset on the edge: its answer is not nft's JSON listing of schema version 1"$'\n'* ]]
+    [[ $output != *"none translates an address"* && $output != *"the nftables rules are not loaded"* ]]
+    [[ $output == *"FAIL  lab-edge-1: the kernel forwards, and whether the nftables rules are loaded could not be read"* ]]
+    no_address "$output"
+  done
+}
+
+@test "Without a Gateway address the output chain's guard is a skip that says what was not compared" {
+  local entry chain wrong
+  local kept="the output chain keeps the proxy's connections to the Gateway on a worker's route"
+  local skipped="skip  lab-edge-1: the output chain's guard: not compared with the Gateway's address, which talos/lab-sto2/talman.yaml does not give"
+
+  # With the address in talman.yaml the guard is compared with it, and passes.
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_check --edge 1
+  [ "$status" -eq 0 ]
+  [[ $output == *"pass  lab-edge-1: $kept"* ]]
+
+  # A talman.yaml that lists the workers and gives no Gateway address: the line is a skip, which
+  # says what was not compared and what was still checked, and it fails nothing.
+  yq -i 'del(.values.bgp)' "$REPO/talos/lab-sto2/talman.yaml"
+  edge_check --edge 1
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output$'\n' == *"$skipped; it holds every worker's address and not the default route's next hop"$'\n'* ]]
+  [[ $output != *"$kept"* && $output != *FAIL* ]]
+  no_address "$output"
+  # A guard for another address cannot be told from one for the Gateway's: the same skip.
+  output_chain '192.0.2.20-192.0.2.99' 203.0.113.22 > "$HOST/edge-1/output"
+  edge_check --edge 1
+  [ "$status" -eq 0 ]
+  [[ $output$'\n' == *"$skipped; it holds every worker's address and not the default route's next hop"$'\n'* ]]
+
+  # What needs no Gateway address still fails: no guard rule, a worker's address left out, and the
+  # default route's next hop admitted, as a network or by itself.
+  for entry in \
+    "none|the output chain does not refuse a packet toward the Gateway that does not go through a worker" \
+    "192.0.2.20-192.0.2.29|the output chain's guard leaves out a worker's address" \
+    "192.0.2.0/24|the output chain's guard admits the default route's next hop" \
+    "192.0.2.1, 192.0.2.20-192.0.2.99|the output chain's guard admits the default route's next hop"; do
+    IFS='|' read -r chain wrong <<< "$entry"
+    edge_state 1 active "$WORKERS" 203.0.113.17/32
+    output_chain "$chain" > "$HOST/edge-1/output"
+    edge_check --edge 1
+    echo "$chain: $output"
+    [ "$status" -ne 0 ]
+    [[ $output$'\n' == *"FAIL  lab-edge-1: $wrong"$'\n'* ]]
+    [[ $output != *"the output chain's guard: not compared"* && $output != *"$kept"* ]]
+  done
+  # And a worker without an address in the file.
+  yq -i 'del(.nodes[] | select(.hostname == "lab-w-2") | .values.privateAddress)' "$REPO/talos/lab-sto2/talman.yaml"
+  edge_state 1 active "192.0.2.20 192.0.2.22" 203.0.113.17/32
+  edge_check --edge 1
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL  lab-edge-1: the output chain's guard cannot be checked against every worker: talman.yaml has no privateAddress for lab-w-2; run just infra-talman"* ]]
+  [[ $output != *"the output chain's guard: not compared"* && $output != *"$kept"* ]]
+
+  # A talman.yaml that gives no Gateway address and lists no worker, and no talman.yaml at all: no
+  # worker's address was looked for in the guard either, which the skip says; a guard that is
+  # missing or admits the default route's next hop still fails.
+  for entry in listed absent; do
+    if [[ $entry == listed ]]; then
+      yq -i 'del(.nodes[] | select(.role == "worker"))' "$REPO/talos/lab-sto2/talman.yaml"
+    else
+      rm "$REPO/talos/lab-sto2/talman.yaml"
+    fi
+    edge_state 1 active "$WORKERS" 203.0.113.17/32
+    edge_check --edge 1
+    echo "$entry: $output"
+    [ "$status" -eq 0 ]
+    [[ $output$'\n' == *"$skipped, and no worker's address was looked for in it, as the file gives none either; it does not hold the default route's next hop"$'\n'* ]]
+    [[ $output != *"$kept"* && $output != *FAIL* ]]
+    no_address "$output"
+    output_chain none > "$HOST/edge-1/output"
+    edge_check --edge 1
+    [ "$status" -ne 0 ]
+    [[ $output == *"FAIL  lab-edge-1: the output chain does not refuse a packet toward the Gateway that does not go through a worker"* ]]
+    output_chain '192.0.2.0/24' > "$HOST/edge-1/output"
+    edge_check --edge 1
+    [ "$status" -ne 0 ]
+    [[ $output == *"FAIL  lab-edge-1: the output chain's guard admits the default route's next hop"* ]]
+    [[ $output != *"the output chain's guard: not compared"* ]]
+  done
 }
 
 @test "The check fails an edge whose SSH daemon accepts another key exchange or a password" {
@@ -1423,6 +1800,155 @@ instance_plan() {
   # --other-down replaces one named edge only.
   run env "${ENVIRONMENT[@]}" "$REPO/scripts/edge-rollout" --replace --other-down --yes < /dev/null
   [ "$status" -eq 2 ]
+}
+
+# answers_pipe LINE...: makes ANSWERS, a named pipe in the test's directory, with each LINE in it,
+# written once by a writer that has ended, and opens it for reading on the descriptor answers. A
+# recipe started with that descriptor as its standard input finds every answer waiting from its
+# first prompt on, and the end of the input after the last.
+answers_pipe() {
+  mkfifo "$ANSWERS"
+  printf '%s\n' "$@" > "$ANSWERS" &
+  exec {answers}< "$ANSWERS"
+  wait "$!"
+}
+
+# answers_file LINE...: the same with ANSWERS a file that holds each LINE.
+answers_file() {
+  printf '%s\n' "$@" > "$ANSWERS"
+  exec {answers}< "$ANSWERS"
+}
+
+# answers_left: the lines of the answers that nothing read.
+answers_left() {
+  cat <&"$answers"
+}
+
+# other_edge_down: what a rollout that replaces edge 1 with --other-down meets when it asks four
+# things. Edge 1 serves, and only a forced replacement replaces its instance. Edge 2 answers on SSH
+# and serves nothing, and its host key is not recorded. Neither console holds fingerprints: that of
+# edge 2's instance, and that of the instance edge 1 becomes, whose identifier it sets new to. The
+# checks are the real edge-check, and every program the rollout and its checks start is a fake or
+# recorded, so that each notes its name when the answers are its standard input; dirname is left
+# out, as it runs before the scripts can keep their input, which they say where they run it.
+other_edge_down() {
+  local tool
+  with_instances
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_state 2 inactive "" "" 0
+  grep -v "^$ADDRESS_2 " "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts" > "$BATS_TEST_TMPDIR/known"
+  cp "$BATS_TEST_TMPDIR/known" "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts"
+  echo '{"resource_changes": []}' > "$BATS_TEST_TMPDIR/plan.json"
+  new=$(next_instance 1)
+  early_console | set_console "$(current_instance 2)"
+  early_console | set_console "$new"
+  real_edge_check
+  for tool in awk sort date sleep rm mkdir chmod head; do
+    record "$tool"
+  done
+  : > "$RECORD/argv"
+}
+
+@test "A rollout answered through a pipe written before it started reads the stack's name, the sentence that names both edges and the yes for each host key" {
+  local new
+  other_edge_down
+  answers_pipe 'sto2/edge' 'yes' 'replace edge 1 with edge 2 down' 'yes'
+
+  run env "${ENVIRONMENT[@]}" "$REPO/scripts/edge-rollout" --replace --edge 1 --other-down <&"$answers"
+  echo "$output"
+  other_edge_down_answered
+}
+
+@test "a rollout answered from a file written before it started reads each answer at its prompt, as through a pipe" {
+  local new
+  other_edge_down
+  answers_file 'sto2/edge' 'yes' 'replace edge 1 with edge 2 down' 'yes'
+
+  run env "${ENVIRONMENT[@]}" "$REPO/scripts/edge-rollout" --replace --edge 1 --other-down <&"$answers"
+  echo "$output"
+  other_edge_down_answered
+}
+
+@test "A plan that takes one edge down is applied on the stack's name read from a pipe, after the other edge's check" {
+  real_edge_check
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_state 2 active "$WORKERS" 203.0.113.17/32
+  instance_plan 2 '["delete", "create"]'
+  : > "$RECORD/argv"
+  answers_pipe 'sto2/edge'
+
+  run env "${ENVIRONMENT[@]}" "$REPO/scripts/infra-apply" sto2/edge <&"$answers"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  # Edge 1 is checked over its connection first, and the plan is applied once the name is read.
+  [[ $output == *"checking that edge 1 serves before edge 2 is taken down"* ]]
+  [[ $output == *"pass  lab-edge-1: 3 of 3 worker sessions are established"* ]]
+  [[ $output == *"Type sto2/edge to apply it: sto2/edge applied"$'\n'* ]]
+  [ "$(sequence | grep -v '^plan$')" = "$(printf '%s\n' 'check 1' 'forget 2' 'apply')" ]
+  [ "$(recorded 2)" = "" ]
+  # The check's ssh ran without the pipe as its standard input. infra-apply's own tofu had it, as
+  # infra-apply keeps its standard input, and read nothing of it: the name was there for the prompt,
+  # and nothing is left.
+  grep -q "^ssh .*@$ADDRESS_1 " "$RECORD/argv"
+  grep -qx tofu "$RECORD/had-answers"
+  absent -x ssh "$RECORD/had-answers"
+  [ -z "$(answers_left)" ]
+  no_address "$output"
+}
+
+# closed_input SCRIPT [ARG...]: runs SCRIPT of the copy, in the environment above, with its standard
+# input closed as it starts, by the shell that starts it: a descriptor closed earlier would be the
+# next one that shell opens. A run that waited for an answer would be ended after a minute.
+closed_input() {
+  # shellcheck disable=SC2016 # "$@" is the inner shell's.
+  run timeout 60 bash -c 'exec "$@" <&-' _ env "${ENVIRONMENT[@]}" "$REPO/scripts/$1" "${@:2}"
+}
+
+@test "a check, a rollout or an apply started with its standard input closed runs, and takes the end of the input for an answer" {
+  with_instances
+  edge_state 1 active "$WORKERS" 203.0.113.17/32
+  edge_state 2 active "$WORKERS" 203.0.113.17/32
+  # Nothing to ask: the check of both edges runs as it does with an input.
+  closed_input edge-check
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ $output == *"pass  lab-edge-2: the SSH daemon runs with the settings the first boot wrote"* ]]
+  [[ $output != *FAIL* && $output != *"Bad file descriptor"* ]]
+
+  # A host key the console does not vouch for is asked about, and the empty answer declines it.
+  grep -v "^$ADDRESS_1 " "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts" > "$BATS_TEST_TMPDIR/known"
+  cp "$BATS_TEST_TMPDIR/known" "$HOME_DIR/.local/state/k8s-gitops/edge.known_hosts"
+  early_console | set_console "$(current_instance 1)"
+  : > "$RECORD/argv"
+  closed_input edge-check --edge 1
+  echo "$output"
+  [ "$status" -eq 1 ]
+  [[ $output == *"Type yes to record them and connect: edge-check: the host key was not accepted; nothing was done on the host"* ]]
+  [[ $output != *"Bad file descriptor"* ]]
+  [ "$(recorded 1)" = "" ]
+  absent "^ssh .*@$ADDRESS_1 " "$RECORD/argv"
+
+  # The rollout's first question, the stack's name, the same.
+  original_keys
+  plan_replacing 1
+  : > "$RECORD/argv"
+  closed_input edge-rollout
+  echo "$output"
+  [ "$status" -eq 1 ]
+  [[ $output == *"Type sto2/edge to roll out it: edge-rollout: sto2/edge was not confirmed and is not rolled out"* ]]
+  [[ $output != *"Bad file descriptor"* ]]
+  absent -E '^(ssh|tofu .* apply) ' "$RECORD/argv"
+
+  # infra-apply keeps its standard input as it is, closed here, and the check it runs first takes
+  # it so: a plan that takes edge 2 down is applied once edge 1 passes.
+  instance_plan 2 '["delete", "create"]'
+  : > "$RECORD/argv"
+  closed_input infra-apply sto2/edge --yes
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ "$(trail)" = "$(printf '%s\n' 'ssh 1' 'forget 2' 'apply')" ]
+  [[ $output == *"pass  lab-edge-1: 3 of 3 worker sessions are established"* ]]
+  [[ $output != *"Bad file descriptor"* ]]
 }
 
 @test "applying a plan that replaces one edge drops its recorded host keys and no other edge's" {

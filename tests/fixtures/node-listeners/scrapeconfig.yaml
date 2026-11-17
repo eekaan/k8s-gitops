@@ -1,0 +1,11 @@
+---
+# A ScrapeConfig, which the check does not read: its targets are no pod's or Service's.
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: ScrapeConfig
+metadata:
+  name: node-ports
+  namespace: monitoring
+spec:
+  staticConfigs:
+    - targets:
+        - node.example:9963

@@ -130,7 +130,8 @@ host_clock() {
 #     is offered, and nothing overrides that;
 #   the console holds none or cannot be read: the fingerprints the host offers are shown, and the
 #     keys are recorded only once yes is typed, as the comparison with the console is the
-#     operator's.
+#     operator's. The answer is one line of the operator's input: of answers_fd when the script
+#     reserved it (reserve_answers in scripts/lib/infra.sh), of standard input otherwise.
 # Returns 2 when the keys were not accepted, 3 when the host offers a key its instance did not
 # print, 1 when the host does not answer. Never prints an address. Shared with scripts/lib/edge.sh.
 ssh_host_trust() {
@@ -206,7 +207,7 @@ ssh_host_trust() {
   ssh-keygen -l -f /dev/stdin <<< "$scanned" | awk '{ print "  " $2 " " $NF }'
   echo "Compare them with the fingerprints the host printed on its console when it first booted."
   printf 'Type yes to record them and connect: ' >&2
-  read -r answer || true
+  read -r -u "${answers_fd:-0}" answer || true
   if [[ $answer != yes ]]; then
     infra_error "the host key was not accepted; nothing was done on the host"
     return 2

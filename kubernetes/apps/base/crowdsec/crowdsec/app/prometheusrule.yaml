@@ -1,0 +1,30 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/prometheusrule-monitoring-v1.json
+# An alert on the local API's target, which the chart's ServiceMonitor scrapes: Prometheus' own `up`
+# of the Service crowdsec-service. The local API stores the agent's alerts and lists the decisions,
+# so without it nothing is decided that anyone can read. A running pod that does not serve has
+# `up` at 0; a pod that is gone, a release that is not installed or a Service that selects nothing
+# has no series, which absent() catches. Tests: tests/rules/crowdsec.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: crowdsec-alerts
+  namespace: crowdsec
+spec:
+  groups:
+    - name: crowdsec
+      rules:
+        # The 10 minutes of `for` keep a restart, a drain or a rollout of the single replica, which
+        # takes the pod's claim with it, from alerting. absent() gives the alert the namespace of its
+        # selector as its label, as the first branch keeps it.
+        - alert: CrowdSecLocalAPIDown
+          expr: >-
+            max by (namespace) (up{namespace="crowdsec", service="crowdsec-service"}) < 1
+            or absent(up{namespace="crowdsec", service="crowdsec-service"})
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: CrowdSec's local API is not running
+            description: The local API of CrowdSec in {{ $labels.namespace }} has not answered its scrape for 10 minutes, so the agent's alerts are not stored and no decision can be listed.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#crowdseclocalapidown

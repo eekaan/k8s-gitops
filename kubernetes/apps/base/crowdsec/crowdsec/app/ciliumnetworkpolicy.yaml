@@ -1,0 +1,122 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What the local API lets through, on top of the namespace's default deny: the agent's calls on its
+# port, Prometheus' scrape and the kubelet's probes. It sends nothing: it makes no call to the
+# Central API (DISABLE_ONLINE_API), pulls nothing from the hub and resolves no name, so it has no
+# egress rule.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: crowdsec-lapi
+spec:
+  # The pods the chart's Service crowdsec-service selects.
+  endpointSelector:
+    matchLabels:
+      k8s-app: crowdsec
+      type: lapi
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    # The agent: it registers with the local API, logs in and sends its alerts, on the port the
+    # Service's lapi port targets.
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": crowdsec
+            k8s-app: crowdsec
+            type: agent
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+    # The stack's Prometheus, scraping the local API's metrics through the chart's monitor, which
+    # names the Service's port metrics, the container's 6060.
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": monitoring
+            app.kubernetes.io/name: prometheus
+      toPorts:
+        - ports:
+            - port: "6060"
+              protocol: TCP
+    # The kubelet's liveness, readiness and startup probes of the health endpoint, which arrive from
+    # the node the pod runs on.
+    - fromEntities:
+        - host
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What the agent lets through, on top of the namespace's default deny: Prometheus' scrape and the
+# kubelet's probes of its metrics port, and its calls to the resolver, the local API and the
+# Kubernetes API. Nothing else leaves: it sends nothing about the traffic it reads outside the
+# cluster, and it takes no connection from any other pod.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: crowdsec-agent
+spec:
+  # The pods of the agent's Deployment.
+  endpointSelector:
+    matchLabels:
+      k8s-app: crowdsec
+      type: agent
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    # The stack's Prometheus, scraping the agent's metrics through the chart's monitor.
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": monitoring
+            app.kubernetes.io/name: prometheus
+      toPorts:
+        - ports:
+            - port: "6060"
+              protocol: TCP
+    # The kubelet's probes, which the chart points at the metrics endpoint.
+    - fromEntities:
+        - host
+      toPorts:
+        - ports:
+            - port: "6060"
+              protocol: TCP
+  egress:
+    # The cluster's resolver, for the local API's Service.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    # The local API: the agent registers with it at its start and sends its alerts. A Service's
+    # address is translated to a pod's before policy applies, so the rule names the pods.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": crowdsec
+            k8s-app: crowdsec
+            type: lapi
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+    # The Kubernetes API: the Kubernetes datasource lists and watches the proxies' pods and follows
+    # their logs through it, in the one namespace the Role of crowdsec-gateway-logs grants. A
+    # Service's address is translated to the control plane's before policy applies, so 6443 is the
+    # port that counts.
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "6443"
+              protocol: TCP

@@ -59,6 +59,9 @@ kubernetes/apps/base/cnpg-system/plugin-barman-cloud/app/ocirepository.yaml	flux
 kubernetes/apps/base/cnpg-system/plugin-barman-cloud/app/ocirepository.yaml	regex	ghcr.io/cloudnative-pg/charts/plugin-barman-cloud	tag
 kubernetes/apps/base/cnpg-system/plugin-barman-cloud/app/values.yaml	regex	ghcr.io/cloudnative-pg/plugin-barman-cloud	tag
 kubernetes/apps/base/cnpg-system/plugin-barman-cloud/app/values.yaml	regex	ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar	tag
+kubernetes/apps/base/crowdsec/crowdsec/app/helmrelease.yaml	flux	crowdsec	-
+kubernetes/apps/base/crowdsec/crowdsec/app/values.yaml	helm-values	docker.io/crowdsecurity/crowdsec	-
+kubernetes/apps/base/crowdsec/crowdsec/app/values.yaml	regex	docker.io/crowdsecurity/crowdsec	tag
 kubernetes/apps/base/demo/hello-flags/app/deployment.yaml	kubernetes	docker.io/library/busybox	-
 kubernetes/apps/base/demo/hello/app/deployment.yaml	kubernetes	docker.io/library/busybox	-
 kubernetes/apps/base/demo/volsync-demo/app/deployment.yaml	kubernetes	docker.io/library/busybox	-

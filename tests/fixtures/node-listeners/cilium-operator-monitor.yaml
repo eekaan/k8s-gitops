@@ -1,0 +1,53 @@
+---
+# The Service and the ServiceMonitor the Cilium chart renders for the operator's metrics once its
+# values set operator.prometheus.serviceMonitor.enabled, as scripts/render writes them, without the
+# label that names the chart's version. The cilium application's values keep the monitor off.
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/name: cilium-operator
+    app.kubernetes.io/part-of: cilium
+    helm.toolkit.fluxcd.io/name: cilium
+    helm.toolkit.fluxcd.io/namespace: kube-system
+    io.cilium/app: operator
+    name: cilium-operator
+  name: cilium-operator
+  namespace: kube-system
+spec:
+  clusterIP: None
+  ports:
+    - name: metrics
+      port: 9963
+      protocol: TCP
+      targetPort: prometheus
+  selector:
+    io.cilium/app: operator
+    name: cilium-operator
+  type: ClusterIP
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    app.kubernetes.io/name: cilium-operator
+    app.kubernetes.io/part-of: cilium
+    helm.toolkit.fluxcd.io/name: cilium
+    helm.toolkit.fluxcd.io/namespace: kube-system
+  name: cilium-operator
+  namespace: kube-system
+spec:
+  endpoints:
+    - honorLabels: true
+      interval: 10s
+      path: /metrics
+      port: metrics
+  namespaceSelector:
+    matchNames:
+      - kube-system
+  selector:
+    matchLabels:
+      io.cilium/app: operator
+      name: cilium-operator
+  targetLabels:
+    - io.cilium/app

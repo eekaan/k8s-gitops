@@ -337,10 +337,48 @@ whose sources are networks, and the patch writes each into the node's machine co
 `NetworkRuleConfig`. The operator allowlist reaches the rules that way only: from the same
 `api_allowed_cidrs` the security group takes, through the generated `talman.yaml`, which git
 ignores; no committed file holds it. A new listener, or a listener that moves, needs its entry in
-`talos/firewall.yaml` and its row in the table below, and nothing else, or the firewall drops what
-reaches it. `tests/node-firewall.bats` renders every node's configuration offline and fails when a
-node has a rule `talos/firewall.yaml` does not list or lacks one it lists, when a rule accepts other
-networks than its sources stand for, and when the table below and the file disagree.
+`talos/firewall.yaml`, or the firewall drops what reaches it. The tests then fail until the entry
+has its row in the table below, its port in the account of
+[what a rollout proves](#what-the-checks-prove-and-what-to-watch-afterwards), and its listener: a
+port that a pod of the render of `kubernetes/` on the host network declares, in the account
+`tests/node-listeners.bats` holds, or an entry under `no-pod` in `node-firewall-exceptions.yaml`,
+at the repository's root, that says what listens there. The counts of rules that the tests hold
+change with it. A port that such a pod declares and that needs no rule is an entry under
+`no-rule` in the same file, with where it listens and who calls it, and is named under
+[What gets no rule](#what-gets-no-rule).
+
+`tests/node-firewall.bats` renders every node's configuration offline and fails when a node has a
+rule `talos/firewall.yaml` does not list or lacks one it lists, when a rule accepts other networks
+than its sources stand for, and when the table below and the file disagree.
+`tests/node-listeners.bats` renders the `kubernetes/` tree and ties the rules to the ports its pods
+hold on a node. A pod on the host network holds the ports it listens on as the node's own, so the
+test reads every pod template of the render that sets `hostNetwork` for the ports its containers
+and init containers declare, and fails when such a port is neither admitted by exactly one rule
+that every node has nor listed under `no-rule`, or is both; when a rule admits no such port and is
+not named under `no-pod`, or is both; when an entry of either list matches nothing; when a pod
+template that is not on the host network declares a host port; and when a monitor of the render
+scrapes a port listed under `no-rule`, or the render holds a scraper the test does not read: a
+`Probe`, a `ScrapeConfig` or a Prometheus with scrape configurations of its own. It holds the
+account of the ports, of the rules and of the host ports as literals, so a chart that adds a port
+or a host port, and a rule that changes its nodes or its sources, change the test. Three things
+are outside what it reads:
+
+- A port that a process on the host network opens without declaring it in its pod: Cilium's health
+  checks on TCP 4240, which the agent serves on its node's address
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/health/server/server.go#L436-L465)),
+  Envoy's health listener on TCP 9878 and the kernel's VXLAN port, UDP 8472. No rule admits such a
+  port unless the inventory names it, so one that a client off the node needs and that has no rule
+  shows as a path that does not work, as the health checks and the overlay would without theirs.
+  Their rules are entries under `no-pod`, which say in prose what listens there.
+- A pod that an operator creates at run time, which no render holds. LINSTOR's CSI node plugin is
+  such a pod on the host network, and its ports are accounted for in prose, under
+  [What gets no rule](#what-gets-no-rule), from the operator's template. Pod Security refuses the
+  host network and host ports below the privileged level
+  ([kubernetes.md](kubernetes.md#pod-security)), so only a namespace that enforces that level,
+  `kube-system`, `monitoring`, `piraeus-datastore` or `security-system`, can hold another.
+- Whether a process binds the address its reason names. The reasons rest on the sources cited under
+  [What gets no rule](#what-gets-no-rule), read at the versions the tree pins, and a chart update
+  can change what a process binds without changing what its pod declares.
 
 ### Sources
 
@@ -409,15 +447,35 @@ BGP sessions to it, and ICMP at up to five packets a second.
 - KubePrism and Talos' own DNS listen for the node itself; the loopback interface is always
   admitted, and Talos admits the cluster's DNS traffic to its host DNS from the pod and service
   ranges itself, as the machine configuration forwards the cluster's DNS to it.
-- The Cilium agent's health API, TCP 9879, listens on the loopback address only
-  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/operations/system_requirements.rst#firewall-rules)).
+- The Cilium agent's health API, TCP 9879, and the Cilium operator's API, TCP 9234, which serves
+  its health check, listen on the loopback address only, although both pods declare the port: the
+  agent's by its source
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/daemon/healthz/agenthealth.go#L58-L84),
+  [its ports](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/operations/system_requirements.rst#firewall-rules)),
+  the operator's at the address the chart gives it, `operator-api-serve-addr` in the rendered
+  `cilium-config`
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/install/kubernetes/cilium/templates/cilium-configmap.yaml#L27-L31),
+  [the server](https://github.com/cilium/cilium/blob/v1.20.4/operator/api/server.go#L119-L134)).
+  The node's own kubelet probes each there, as the chart's probes name the loopback address.
+- The Cilium operator and Cilium's Envoy serve their metrics, TCP 9963 and 9964, on every address
+  of the node, and both pods declare the port: the operator at `operator-prometheus-serve-addr`
+  in the rendered `cilium-config`, which the chart sets by default
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/install/kubernetes/cilium/templates/cilium-configmap.yaml#L248-L255),
+  [the address](https://github.com/cilium/cilium/blob/v1.20.4/operator/metrics/cell.go#L13-L16)),
+  Envoy on the metrics listener of its bootstrap configuration, whose health listener, TCP 9878,
+  is on the loopback address
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/install/kubernetes/cilium/files/cilium-envoy/configmap/bootstrap-config.yaml#L13-L18),
+  [the health listener](https://github.com/cilium/cilium/blob/v1.20.4/install/kubernetes/cilium/files/cilium-envoy/configmap/bootstrap-config.yaml#L119-L123)).
+  Nothing calls them: their monitors are off ([kubernetes.md](kubernetes.md#monitoring)), no
+  monitor of the render scrapes them, which `tests/node-listeners.bats` holds, and the kubelet
+  probes the operator's API and Envoy's health listener instead. The agent's metrics are the
+  exception, with a rule of their own above.
 - LINSTOR's CSI node plugin runs on the host network with health ports, TCP 9808 and 9809, that
   only its own kubelet probes; a connection to the node's own address goes over the loopback
   interface
   ([Piraeus](https://github.com/piraeusdatastore/piraeus-operator/blob/v2.12.1/pkg/resources/cluster/csi-node/csi-node-daemon-set.yaml)).
-- The Cilium operator and Cilium's Envoy can serve metrics on the host network. Nothing scrapes
-  them, as their monitors are off ([kubernetes.md](kubernetes.md#monitoring)), so nothing off the
-  node reaches them. The agent's metrics are the exception, with a rule of their own above.
+  The operator creates the pod at run time, so the render does not hold it and no test reads its
+  ports.
 - Spegel runs on the pod network: its peers reach each other, and Prometheus its metrics, at pod
   addresses, and its registry is a NodePort that each node's own containerd reaches at the node's
   own address
@@ -449,11 +507,25 @@ reaches them, and neither does a node without machine configuration. Each, with 
 - NodePorts, which Cilium serves from its eBPF datapath at the node's network device as it replaces
   kube-proxy. The security group keeps Kubernetes' NodePort range, 30000-32767, closed to everything
   outside the nodes in both of its sets ([infrastructure.md](infrastructure.md#the-nodes-security-group)).
-- Host ports of pods, which Cilium serves the same way, outside the NodePort range. Pod Security
-  refuses them at the baseline level, which Talos enforces wherever a namespace sets no other; only
-  `kube-system`, `monitoring` and `piraeus-datastore` allow them, and the one pod there that
-  declares one, node-exporter, runs on the host network, where its port is the node's own and the
-  firewall filters it. The full security group also admits no host port from outside the nodes.
+- Host ports of pods on the pod network, which Cilium serves the same way, outside the NodePort
+  range
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/network/kubernetes/kubeproxy-free.rst#container-hostport-support)).
+  No pod template of the render that is on the pod network declares one, which
+  `tests/node-listeners.bats` holds, and Pod Security refuses them at the baseline level, which
+  Talos enforces wherever a namespace sets no other; only `kube-system`, `monitoring`,
+  `piraeus-datastore` and `security-system` enforce the privileged level, which allows them. The
+  pods of the render that declare a host port are Cilium's agent, its Envoy and its operator, six
+  ports between them, as the test holds, and all three are on the host network, where Cilium maps
+  no host port
+  ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/loadbalancer/reflectors/k8s.go#L148-L153))
+  and the port is the node's own, which the firewall filters: each has its rule
+  [above](#what-each-node-admits) or its reason under [What gets no rule](#what-gets-no-rule).
+  node-exporter, on the host network as well, declares its port without a host port, which comes
+  to the same: Kubernetes gives every port that a pod on the host network declares the host port
+  of its own number when the pod is made, and refuses a container's port that names another
+  ([Kubernetes](https://github.com/kubernetes/kubernetes/blob/v1.37.1/pkg/apis/core/v1/defaults.go#L214-L217),
+  [validation](https://github.com/kubernetes/kubernetes/blob/v1.37.1/pkg/apis/core/validation/validation.go#L4341-L4349)).
+  The full security group also admits no host port from outside the nodes.
 - Services' external addresses, which Cilium serves the same way, and which any Service could name.
   The API server refuses a new one: every control plane enables Kubernetes' `DenyServiceExternalIPs`
   admission plugin (`talos/patches/controlplane/deny-service-external-ips.yaml`), which refuses a
@@ -567,15 +639,21 @@ keeps (checks 3 and 8); Cilium's health port, TCP 4240, which Cilium probes on c
 (check 4). And these are not reached in the window at all: etcd's peer and client ports, TCP
 2379-2380, whose members hold their streams open; etcd's metrics, the controller manager's and the
 scheduler's ports, TCP 2381, 10257 and 10259, and node-exporter's and the kubelet's from Prometheus,
-which keeps its scrape connections; Hubble, TCP 4244, which Hubble Relay keeps; any path from a pod
-on the node itself, from the pod range; trustd, TCP 50001, which a worker reaches when it joins; the
-CI host; and the nodes' floating addresses. `tests/node-firewall.bats` pins their rules offline.
+which keeps its scrape connections; the Cilium agents' metrics, TCP 9962, which Prometheus scrapes
+on a connection it keeps as well, and which no check asks for: their job, `cilium-agent`, is none of
+those `cluster-check` reads ([kubernetes.md](kubernetes.md#ciliums-metrics)); Hubble, TCP 4244,
+which Hubble Relay keeps; any path from a pod on the node itself, from the pod range; trustd, TCP
+50001, which a worker reaches when it joins; the CI host; and the nodes' floating addresses.
+`tests/node-firewall.bats` pins their rules offline.
 
 After the rollout, each of these is proved once its client opens a new connection, which a restart
 makes it do. Until each has been, watch:
 
 1. Prometheus, restarted once: two scrape intervals later, `up` is 1 for every target of the
-   kubelet, node-exporter, etcd, controller manager and scheduler jobs, a target on every node.
+   kubelet, node-exporter and `cilium-agent` jobs, a target on every node, and of the etcd,
+   controller manager and scheduler jobs, a target on every control plane. `just cluster-check`
+   reads the targets of each of those jobs but `cilium-agent`, whose targets, the proof of the rule
+   for TCP 9962, are read in Prometheus itself.
 2. metrics-server, restarted once: `kubectl top nodes` answers for every node.
 3. Hubble Relay, restarted once: it reports every node connected.
 4. Cilium's agents, restarted one node at a time: `cilium-health status` reports every node
@@ -617,8 +695,23 @@ When the old address is gone already, the way back runs through the cluster itse
    them, one node at a time, through each node's Talos API at the node's own address on the node
    network: the pod's connections come from its node's own address, which every node accepts as
    `members`, and reach its own node over the loopback interface. A pod on the pod network reaches
-   the other nodes the same way, masqueraded, but its own node only through the node's floating
-   address, as `floating`.
+   the other nodes the same way, masqueraded, as `members` ([Sources](#sources)), but its own
+   node's Talos API at neither the node's address on the node network nor its floating address.
+   The node holds both itself, the floating one on a dummy link
+   (`talos/patches/all/floating-ip.yaml`), so the connection never leaves the node and nothing
+   masquerades it: Cilium's masquerading is a rule of netfilter's postrouting hook, for what leaves
+   through a device that is not Cilium's own
+   ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/pkg/datapath/iptables/iptables.go#L2206-L2241),
+   [the hook](https://github.com/cilium/cilium/blob/v1.20.4/pkg/datapath/iptables/custom_chain.go#L43-L48)),
+   and Cilium hands a packet for the node itself to the node's network stack as the pod sent it
+   ([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/bpf/bpf_lxc.c#L1228-L1247),
+   [L1366-L1385](https://github.com/cilium/cilium/blob/v1.20.4/bpf/bpf_lxc.c#L1366-L1385)). It
+   arrives on the pod's interface, not on the loopback interface, which Talos admits whatever the
+   rules say, in both of the firewall's chains
+   ([Talos](https://github.com/siderolabs/talos/blob/v1.14.6/internal/app/machined/pkg/controllers/network/nftables_chain_config.go#L129-L143),
+   [L331-L346](https://github.com/siderolabs/talos/blob/v1.14.6/internal/app/machined/pkg/controllers/network/nftables_chain_config.go#L331-L346)),
+   and from the pod's own address, of the pod range, which the rule for the port does not accept
+   (`tests/node-firewall.bats`). That is why the recovery pod is on the host network.
 4. Once the nodes hold the new allowlist, `just cluster-talos` runs from the new network again.
 
 The talosconfig and the rendered configurations hold the cluster's keys. They reach the pod as a

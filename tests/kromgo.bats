@@ -21,6 +21,9 @@ BADGES="cluster_age_days cluster_cpu_usage cluster_memory_usage cluster_node_cou
 KEPT_LABELS="version_id git_version"
 MATCHED_LABELS="job service phase condition name alertname alertstate"
 
+# tree_without, a copy of the tree whose overlay leaves applications and namespaces out.
+load fixtures/tree-without
+
 setup_file() {
   # Helm's cache and registry settings stay in the run's own directory, and so does the Docker
   # configuration helm falls back to for credentials, so no login is read.
@@ -285,25 +288,6 @@ hostnames() {
         else $v end)
     | select(test("[A-Za-z0-9_-]\\.[A-Za-z]"))
     | "\($p | map(tostring) | join(".")): \(.)"'
-}
-
-# tree_without ENTRY...: copies kubernetes/ to $TREE and takes each ENTRY out of the overlay's
-# resources: ks:NAME for an application's ks.yaml, ns:NAME for a namespace directory under
-# apps/base/, and a bare NAME for an application's ks.yaml.
-tree_without() {
-  local entry
-  TREE="$BATS_TEST_TMPDIR/tree"
-  rm -rf "$TREE"
-  mkdir -p "$TREE"
-  cp -r "$REPO/kubernetes" "$TREE/kubernetes"
-  for entry in "$@"; do
-    case $entry in
-      ns:*) ENTRY="${entry#ns:}" yq -i '.resources |= map(select(. != "../../base/" + strenv(ENTRY)))' \
-        "$TREE/kubernetes/apps/overlays/lab-sto2/kustomization.yaml" ;;
-      *) ENTRY="${entry#ks:}" yq -i '.resources |= map(select(test("/" + strenv(ENTRY) + "/ks.yaml$") | not))' \
-        "$TREE/kubernetes/apps/overlays/lab-sto2/kustomization.yaml" ;;
-    esac
-  done
 }
 
 # of_kromgo FILE: what an overlay built into FILE holds of kromgo, sorted, as kind, namespace and
