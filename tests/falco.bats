@@ -155,7 +155,9 @@ falco_config() {
 }
 
 # tree_without PATTERN...: a copy of the tree in $TREE whose overlay lists no resource that matches
-# any PATTERN, an extended regular expression.
+# any PATTERN, an extended regular expression. Unlike the shared tree_without of
+# tests/fixtures/tree-without.bash, which takes names, it matches a pattern against whole entries,
+# so one pattern takes out a namespace directory and every ks.yaml under it.
 tree_without() {
   local pattern
   TREE="$BATS_TEST_TMPDIR/tree"
@@ -235,7 +237,7 @@ of_security_system() {
   # and open the perf events, SYS_RESOURCE to raise the memory lock limit the maps are counted
   # against, and SYS_PTRACE to read the processes' state under /proc.
   [ "$(yq '[.spec.template.spec.containers[].securityContext.privileged // false] | any' "$DAEMONSET")" = false ]
-  [ "$(yq '.spec.template.spec | (.hostNetwork // false) or (.hostPID // false) or (.hostIPC // false)' "$DAEMONSET")" = false ]
+  [ "$(yq '.spec.template.spec | ((.hostNetwork // false) or (.hostPID // false) or (.hostIPC // false))' "$DAEMONSET")" = false ]
   [ "$(yq '.securityContext | keys | join(" ")' "$CONTAINER")" = "allowPrivilegeEscalation capabilities seccompProfile" ]
   [ "$(yq '.securityContext.allowPrivilegeEscalation' "$CONTAINER")" = false ]
   [ "$(yq '.securityContext.capabilities.drop | join(" ")' "$CONTAINER")" = ALL ]

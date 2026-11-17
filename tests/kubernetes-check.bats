@@ -181,6 +181,29 @@ fails_naming() {
     { echo "no failure message naming '$1' that says '$2'"; return 1; }
 }
 
+# with_stdin STATE COMMAND...: runs COMMAND as run does, with its standard input in STATE: closed;
+# null, at /dev/null; silent, a pipe that stays open and carries nothing; or carried, a pipe that
+# carries $CARRIED and ends. A command still running after two minutes is ended, with status 124.
+with_stdin() {
+  local state=$1 fd
+  shift
+  case $state in
+    # The shell that becomes the command closes it: closed for run instead, the command would find
+    # a pipe of run's at descriptor 0.
+    closed) run bash -c 'exec "$@" <&-' bash timeout 120 "$@" ;;
+    null) run timeout 120 "$@" </dev/null ;;
+    silent)
+      [ -p "$BATS_TEST_TMPDIR/silent" ] || mkfifo "$BATS_TEST_TMPDIR/silent"
+      # Open here for reading and writing: the pipe has a writer for as long as the command runs.
+      exec {fd}<>"$BATS_TEST_TMPDIR/silent"
+      run timeout 120 "$@" <&"$fd"
+      exec {fd}>&-
+      ;;
+    carried) run timeout 120 "$@" < <(printf '%s\n' "$CARRIED") ;;
+    *) echo "with_stdin: no state $state"; return 1 ;;
+  esac
+}
+
 # refused_line FILE WORDS...: a failure message that names FILE and every one of WORDS.
 refused_line() {
   local file=$1 line word
@@ -1491,6 +1514,63 @@ world_app() {
   yq -i '.spec.dependsOn += [{"name": "flux-operator"}]' "$TREE/kubernetes/apps/base/demo/world/ks.yaml"
   check
   [ "$status" -eq 0 ]
+}
+
+@test "An issuer choice is checked without reading standard input when the tree holds no issuers application" {
+  local form state usage key
+  local -A statuses=() printed=()
+  # valid_tree runs the check once, without a bound, on the tree it makes: with standard input at
+  # /dev/null, so that run does not depend on what the test was started with, and only the bounded
+  # runs below try the four states.
+  valid_tree </dev/null
+  # The rule reads the ClusterIssuers of kubernetes/apps/base/*/acme-issuers/app/, and the fixture
+  # tree has no such application.
+  [ -z "$(find "$TREE/kubernetes" -path '*/acme-issuers/*' -print -quit)" ]
+  # What yq prints, with status 0, when it is handed the rule's expression, no file and nothing to
+  # read: its usage. The issuer chosen below is the first line of that, so a run that took what yq
+  # printed then for the names of the issuers would know the issuer and pass the choice.
+  usage="$(yq -N 'select(.kind == "ClusterIssuer") | .metadata.name' </dev/null | head -n 1)"
+  [ "$usage" = "Usage:" ] ||
+    { echo "yq no longer prints its usage when it is handed no file, so the issuer this test chooses has to be chosen anew"; return 1; }
+  CARRIED="$(printf '%s\n' '---' 'apiVersion: cert-manager.io/v1' 'kind: ClusterIssuer' 'metadata:' "  name: \"$usage\"")"
+
+  # The tree as it is, in which no Kustomization chooses an issuer, and then with one choice: each in
+  # every state of standard input, and every run made before one is judged, so that a failure shows
+  # them all.
+  for form in none one; do
+    if [ "$form" = one ]; then
+      hello_ks <<EOF
+  postBuild:
+    substitute:
+      PUBLIC_ISSUER: "$usage"
+EOF
+    fi
+    for state in closed null silent carried; do
+      with_stdin "$state" "$CHECK" "$TREE"
+      statuses[$form/$state]=$status
+      printed[$form/$state]="$(grep -v '^built ' <<<"$output" || true)"
+      echo "choice: $form; standard input: $state; status $status"
+      echo "${printed[$form/$state]}"
+    done
+  done
+
+  for state in closed null silent carried; do
+    key=none/$state
+    [ "${statuses[$key]}" -eq 0 ] || { echo "with no choice and standard input $state the check ended with status ${statuses[$key]}"; return 1; }
+    [ "${printed[$key]}" = "kubernetes-check: passed (6 kustomize builds, 5 flux builds, 4 ks.yaml, 3 applications, 0 dependencies)" ]
+  done
+  for state in closed null silent carried; do
+    key=one/$state
+    [ "${statuses[$key]}" -eq 1 ] || { echo "with the choice and standard input $state the check ended with status ${statuses[$key]}"; return 1; }
+    # Refused twice over: the choice names no dependency on the issuers application, and its issuer
+    # is one no application makes. The same lines whatever standard input is, and none that says the
+    # issuers could not be read.
+    grep -F 'kubernetes/apps/base/demo/hello/ks.yaml: Kustomization hello chooses the issuer Usage?,' <<<"${printed[$key]}" |
+      grep -qF 'makes no issuer of that name' || { echo "with standard input $state the choice is not refused as an issuer no application makes"; return 1; }
+    [ "$(tail -n 1 <<<"${printed[$key]}")" = "kubernetes-check: 2 failure(s)" ]
+    [[ ${printed[$key]} != *"cannot read the ClusterIssuers"* ]]
+    [ "${printed[$key]}" = "${printed[one/closed]}" ] || { echo "the lines with standard input $state are not those with it closed"; return 1; }
+  done
 }
 
 @test "A manifest an application keeps where the artifact does not carry it is refused" {

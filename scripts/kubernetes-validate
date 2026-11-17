@@ -1000,11 +1000,16 @@ fi
 images=0
 image_rule() {
   local app cluster_app objects verdict kind name image hooks file
+  local -a written
   for cluster_app in "$out"/*/*/; do
     cluster_app="${cluster_app%/}"
     app="${cluster_app##*/}"
     objects="$tmp/objects.jsonl"
-    yq -N -o json -I0 '.' "$cluster_app"/*.yaml >"$objects" 2>/dev/null || { fail "$cluster_app: cannot read what scripts/render wrote"; continue; }
+    # The render keeps a directory for an application that renders no object. It holds no image, and
+    # yq is not run on it, as with no file to read it reads standard input, or prints its usage.
+    written=("$cluster_app"/*.yaml)
+    ((${#written[@]} > 0)) || continue
+    yq -N -o json -I0 '.' "${written[@]}" >"$objects" 2>/dev/null || { fail "$cluster_app: cannot read what scripts/render wrote"; continue; }
     # \z is the end of the string; $ would also match before a final line break.
     if ! jq -rs "$jq_clean"'def pinned:
         if test("[[:cntrl:]]") then false

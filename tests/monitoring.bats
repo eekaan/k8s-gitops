@@ -174,7 +174,7 @@ bytes() {
         and (.spec.template.spec.containers[].image | test("grafana")))
       or (.kind | test("^Grafana"))
       or ((.kind == "ConfigMap" or .kind == "Secret")
-        and (.metadata.labels // {} | has("grafana_dashboard") or has("grafana_datasource"))))
+        and (.metadata.labels // {} | (has("grafana_dashboard") or has("grafana_datasource")))))
     | .kind + "/" + .metadata.name' "$RENDERED")"
   echo "Grafana objects: ${grafana:-none}"
   [ -z "$grafana" ]

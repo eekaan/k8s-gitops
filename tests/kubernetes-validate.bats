@@ -47,6 +47,29 @@ validate() {
   echo "$output"
 }
 
+# with_stdin STATE COMMAND...: runs COMMAND as run does, with its standard input in STATE: closed;
+# null, at /dev/null; silent, a pipe that stays open and carries nothing; or carried, a pipe that
+# carries $CARRIED and ends. A command still running after two minutes is ended, with status 124.
+with_stdin() {
+  local state=$1 fd
+  shift
+  case $state in
+    # The shell that becomes the command closes it: closed for run instead, the command would find
+    # a pipe of run's at descriptor 0.
+    closed) run bash -c 'exec "$@" <&-' bash timeout 120 "$@" ;;
+    null) run timeout 120 "$@" </dev/null ;;
+    silent)
+      [ -p "$BATS_TEST_TMPDIR/silent" ] || mkfifo "$BATS_TEST_TMPDIR/silent"
+      # Open here for reading and writing: the pipe has a writer for as long as the command runs.
+      exec {fd}<>"$BATS_TEST_TMPDIR/silent"
+      run timeout 120 "$@" <&"$fd"
+      exec {fd}>&-
+      ;;
+    carried) run timeout 120 "$@" < <(printf '%s\n' "$CARRIED") ;;
+    *) echo "with_stdin: no state $state"; return 1 ;;
+  esac
+}
+
 # fails_naming WHAT TEXT: the check failed, and one of its messages names WHAT and says TEXT.
 fails_naming() {
   [ "$status" -ne 0 ] || { echo "expected the check to fail"; return 1; }
@@ -529,6 +552,45 @@ EOF
   validate
   [ "$status" -ne 0 ]
   fails_naming .image-allowlist "reason"
+}
+
+@test "An application that renders no object passes the image rule without reading standard input" {
+  local state app=kubernetes/apps/base/demo/hello/app
+  local -A statuses=() printed=()
+  # The application's kustomization lists nothing, so Flux builds no object of it, and the render
+  # keeps a directory for it that holds no file: the image rule has nothing of it to read.
+  rm "$TREE/$app/configmap.yaml"
+  put "$app/kustomization.yaml" <<'EOF'
+---
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: []
+EOF
+  # hooked, which the rule reads after hello, runs one image, pinned: the rule goes on past the
+  # empty directory and counts it.
+  hooked_app '{}'
+  "$REPO/scripts/render" "$BATS_TEST_TMPDIR/render" "$TREE" </dev/null
+  [ -d "$BATS_TEST_TMPDIR/render/test/hello" ]
+  [ -z "$(find "$BATS_TEST_TMPDIR/render/test/hello" -mindepth 1 -print -quit)" ]
+  [ -n "$(find "$BATS_TEST_TMPDIR/render/test/hooked" -name '*.yaml' -print -quit)" ]
+  # A pod the image rule refuses when it reads it: its image has no tag.
+  CARRIED="$(printf '%s\n' '---' 'apiVersion: v1' 'kind: Pod' 'metadata:' '  name: carried' '  namespace: demo' \
+    'spec:' '  containers:' '    - name: main' '      image: registry.example.invalid/carried')"
+
+  # Every state of standard input, and every run made before one is judged, so that a failure shows
+  # them all.
+  for state in closed null silent carried; do
+    with_stdin "$state" "$VALIDATE" "$TREE"
+    statuses[$state]=$status
+    printed[$state]=$output
+    echo "standard input: $state; status $status"
+    echo "$output"
+  done
+  for state in closed null silent carried; do
+    [ "${statuses[$state]}" -eq 0 ] || { echo "with standard input $state the validation ended with status ${statuses[$state]}"; return 1; }
+    # Nothing but the verdict, which counts hooked's one image and not the pod's, tagged or not.
+    [ "${printed[$state]}" = "kubernetes-validate: passed (6 flux builds, 10 objects validated, 0 of listed kinds, 1 images)" ]
+  done
 }
 
 @test "the check validates nothing on a tree that fails kubernetes-check, and says so" {

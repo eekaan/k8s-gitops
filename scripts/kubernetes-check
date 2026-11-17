@@ -489,8 +489,14 @@ for dir in kubernetes/clusters/*/; do
   # requires the cluster to enable it: otherwise its certificate is requested from an issuer that
   # does not exist, or before it does. The name is one of the ClusterIssuers that application
   # defines, so a mistyped name is refused here and not left to a Certificate that is never Ready.
-  acme_issuers=$(yq -N 'select(.kind == "ClusterIssuer") | .metadata.name' kubernetes/apps/base/*/acme-issuers/app/*.yaml | jq -R . | jq -sc .) ||
-    fail "$dir/ks.yaml: cannot read the ClusterIssuers of acme-issuers, so the issuer choices were not checked"
+  # The application's files are listed first: a tree without it makes no issuer, and yq is not run,
+  # as with no file to read it reads standard input, or prints its usage where the names are read.
+  issuer_files=(kubernetes/apps/base/*/acme-issuers/app/*.yaml)
+  acme_issuers='[]'
+  if ((${#issuer_files[@]} > 0)); then
+    acme_issuers=$(yq -N 'select(.kind == "ClusterIssuer") | .metadata.name' "${issuer_files[@]}" | jq -R . | jq -sc .) ||
+      fail "$dir/ks.yaml: cannot read the ClusterIssuers of acme-issuers, so the issuer choices were not checked"
+  fi
   if ! jq -r --argjson known "${acme_issuers:-[]}" 'def clean: tostring | gsub("[^A-Za-z0-9._-]"; "?");
     select((.spec.postBuild.substitute.PUBLIC_ISSUER // "cluster-ca") != "cluster-ca") as $k
     | ($k.spec.postBuild.substitute.PUBLIC_ISSUER) as $issuer

@@ -40,6 +40,11 @@ Feature: Edge routers
     When an edge's FRR configuration is rendered
     Then its keepalive, hold, connect retry and graceful restart settings are those of the manifests, and its multipath covers at least as many paths as there can be workers
 
+  Scenario: The routing policy's proof renders its input while another run holds the fixture's state lock
+    Given a copy of what the render of the proof's input reads, and another tofu holding the state lock of the fixture's directory there
+    When the proof's input is rendered in the copy and the proof is run with a recording docker
+    Then the render is byte for byte the one made with no lock held, and docker is run on it
+
   Scenario: An edge answers a client's connection to a public port through its proxy and names the client's address to the Gateway in a PROXY protocol header
     Given the edge's rendered rules and proxy configuration, a client, a worker that holds the Gateway's address with a server there that records what each connection starts with, and the cloud's router as the default route
     When the client connects to the edge's own address on the public port from a port of its choosing, and to a port that is not listed with a server listening on it, to the edge's other address on the public port, and to the Gateway's address through the edge

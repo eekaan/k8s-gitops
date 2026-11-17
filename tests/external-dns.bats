@@ -12,6 +12,8 @@
 export BATS_NO_PARALLELIZE_WITHIN_FILE=true
 
 load fixtures/edge-stack
+# tree_without, a copy of the tree whose overlay leaves applications out.
+load fixtures/tree-without
 
 setup_file() {
   # Helm's cache and registry settings stay in the run's own directory, and so does the Docker
@@ -468,19 +470,6 @@ edge_copy() {
   edge_stack_fixture "$COPY" "$BIN" "$STATE"
   EDGE_ENVIRONMENT=("${EDGE_STACK_ENVIRONMENT[@]}" CLUSTER_DOMAIN=example.com BACKUP_BUCKET_PREFIX=marker-backups
     TMPDIR="$BATS_TEST_TMPDIR")
-}
-
-# tree_without APP...: copies kubernetes/ to $TREE and takes the ks.yaml of each APP out of the
-# overlay's resources.
-tree_without() {
-  local app
-  TREE="$BATS_TEST_TMPDIR/tree"
-  rm -rf "$TREE"
-  mkdir -p "$TREE"
-  cp -r "$REPO/kubernetes" "$TREE/kubernetes"
-  for app in "$@"; do
-    yq -i '.resources |= map(select(test("/'"$app"'/ks.yaml$") | not))' "$TREE/kubernetes/apps/overlays/lab-sto2/kustomization.yaml"
-  done
 }
 
 @test "A cluster that selects DNS records without the Gateway or the edges' addresses is refused" {

@@ -12,6 +12,8 @@ if (($# != 1)); then
 fi
 dir=$1
 mkdir -p "$dir"
-encoded=$(tofu -chdir="$root/tests/fixtures/edge-policy" console -no-color <<< 'base64encode(local.frr_conf)')
+# Without the state lock: tofu console takes the lock of the directory it runs in, the fixture has no
+# state for it to protect, and holding it only makes a second render at the same time fail.
+encoded=$(tofu -chdir="$root/tests/fixtures/edge-policy" console -no-color -lock=false <<< 'base64encode(local.frr_conf)')
 base64 -d <<< "${encoded//\"/}" > "$dir/edge.conf"
 cp "$root/tests/fixtures/edge-policy/proof.sh" "$root/tests/fixtures/edge-policy/speaker.conf.in" "$dir/"
