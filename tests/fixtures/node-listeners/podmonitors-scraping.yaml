@@ -1,0 +1,197 @@
+---
+# PodMonitors that each scrape a port the tree lists as having no rule: the agents' health API
+# (health, 9879), the operator's API (health, 9234) and metrics (prometheus, 9963) and Envoy's
+# metrics (envoy-metrics, 9964). Each is named after the way it reaches the port.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: by-name
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      io.cilium/app: operator
+      name: cilium-operator
+  podMetricsEndpoints:
+    - port: prometheus
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: by-number
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      k8s-app: cilium-envoy
+  podMetricsEndpoints:
+    - portNumber: 9964
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: by-target-name
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      k8s-app: cilium
+  podMetricsEndpoints:
+    - targetPort: health
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: by-target-number
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      name: cilium-operator
+  podMetricsEndpoints:
+    - targetPort: 9234
+---
+# No port: Prometheus keeps every port the pod declares.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: every-port
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      name: cilium-operator
+  podMetricsEndpoints:
+    - path: /metrics
+---
+# A target port that names none, 0 or the empty string: every port again.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: target-zero
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      k8s-app: cilium-envoy
+  podMetricsEndpoints:
+    - targetPort: 0
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: target-empty
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      k8s-app: cilium
+  podMetricsEndpoints:
+    - targetPort: ""
+---
+# The port it names has a rule, and it scrapes another address than the one it found.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: readdressed
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      k8s-app: cilium
+  podMetricsEndpoints:
+    - port: prometheus
+      relabelings:
+        - action: replace
+          sourceLabels:
+            - __meta_kubernetes_pod_host_ip
+          targetLabel: __address__
+          replacement: $1:9879
+---
+# An operator no selector has, which the check takes to select every pod.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: unknown-operator
+  namespace: kube-system
+spec:
+  selector:
+    matchExpressions:
+      - key: k8s-app
+        operator: Matches
+        values:
+          - cilium-envoy
+  podMetricsEndpoints:
+    - portNumber: 9964
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: by-expressions
+  namespace: monitoring
+spec:
+  namespaceSelector:
+    matchNames:
+      - kube-system
+  selector:
+    matchExpressions:
+      - key: k8s-app
+        operator: In
+        values:
+          - another
+          - cilium-envoy
+      - key: name
+        operator: Exists
+      - key: io.cilium/app
+        operator: DoesNotExist
+      - key: app.kubernetes.io/name
+        operator: NotIn
+        values:
+          - cilium-agent
+  podMetricsEndpoints:
+    - portNumber: 9964
+---
+# A list of namespaces that names none leaves the monitor its own.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: from-its-own-namespace
+  namespace: kube-system
+spec:
+  namespaceSelector:
+    matchNames: []
+  selector:
+    matchLabels:
+      k8s-app: cilium-envoy
+  podMetricsEndpoints:
+    - port: envoy-metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: from-any-namespace
+  namespace: monitoring
+spec:
+  namespaceSelector:
+    any: true
+  selector:
+    matchLabels:
+      k8s-app: cilium-envoy
+  podMetricsEndpoints:
+    - port: envoy-metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: from-a-named-namespace
+  namespace: monitoring
+spec:
+  namespaceSelector:
+    matchNames:
+      - default
+      - kube-system
+  selector:
+    matchLabels:
+      k8s-app: cilium-envoy
+  podMetricsEndpoints:
+    - port: envoy-metrics

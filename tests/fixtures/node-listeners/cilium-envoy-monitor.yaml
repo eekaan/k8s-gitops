@@ -1,0 +1,35 @@
+---
+# The ServiceMonitor the Cilium chart renders for Envoy's metrics once its values set
+# envoy.prometheus.serviceMonitor.enabled, as scripts/render writes it, without the label that names
+# the chart's version. It selects the Service cilium-envoy, which the chart renders with or without
+# the monitor. The cilium application's values keep the monitor off.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  labels:
+    app.kubernetes.io/name: cilium-envoy
+    app.kubernetes.io/part-of: cilium
+    helm.toolkit.fluxcd.io/name: cilium
+    helm.toolkit.fluxcd.io/namespace: kube-system
+  name: cilium-envoy
+  namespace: kube-system
+spec:
+  endpoints:
+    - honorLabels: true
+      interval: 10s
+      path: /metrics
+      port: envoy-metrics
+      relabelings:
+        - action: replace
+          replacement: ${1}
+          sourceLabels:
+            - __meta_kubernetes_pod_node_name
+          targetLabel: node
+  namespaceSelector:
+    matchNames:
+      - kube-system
+  selector:
+    matchLabels:
+      k8s-app: cilium-envoy
+  targetLabels:
+    - k8s-app

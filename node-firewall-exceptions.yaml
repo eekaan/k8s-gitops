@@ -1,0 +1,73 @@
+---
+# The ports that pods of the render of kubernetes/ declare on the host's network and that the node
+# firewall has no rule for, and the rules of the firewall that no such pod declares a port for, each
+# with its reason. tests/node-listeners.bats reads this file together with the render of
+# kubernetes/ and the firewall's inventory, talos/firewall.yaml; docs/cluster.md, The node
+# firewall, says what it requires and holds the sources of each reason.
+#
+# A pod on the host's network holds the ports its containers declare as the node's own. Each such
+# port that a pod template of the render declares is admitted by exactly one rule of the inventory
+# that every node has, or is an entry under no-rule here, never both. Each rule of the inventory
+# admits such a port, or is an entry under no-pod here, never both. A pod that an operator creates
+# at run time is not in the render: its ports are no entry here, and docs/cluster.md, The node
+# firewall, accounts for them in prose. An entry that no port of the render matches, or that names
+# no rule of the inventory, fails the test: remove it. So does a monitor of the render that scrapes
+# a port listed under no-rule: a port that Prometheus scrapes needs a rule.
+# An entry under no-rule has:
+#   namespace  the workload's namespace
+#   workload   Kind/name of the workload as the render holds it
+#   protocol   tcp or udp
+#   port       the port its container declares
+#   reason     a sentence: where the port listens and who calls it
+# An entry under no-pod has:
+#   rule       the rule's name in the inventory
+#   reason     a sentence: what listens on the rule's ports, which no pod template of the render
+#              declares
+no-rule:
+  - namespace: kube-system
+    workload: DaemonSet/cilium
+    protocol: tcp
+    port: 9879
+    reason: the agent's health API, which listens on the node's loopback address only; the node's
+      own kubelet probes it there for the pod's startup, readiness and liveness
+  - namespace: kube-system
+    workload: DaemonSet/cilium-envoy
+    protocol: tcp
+    port: 9964
+    reason: Envoy's metrics, which listen on every address of the node; nothing calls them, as no
+      monitor selects them and the kubelet probes Envoy's health listener, on the loopback address
+  - namespace: kube-system
+    workload: Deployment/cilium-operator
+    protocol: tcp
+    port: 9234
+    reason: the operator's API with its health check, which listens on the node's loopback address
+      only; the node's own kubelet probes it there for the pod's readiness and liveness
+  - namespace: kube-system
+    workload: Deployment/cilium-operator
+    protocol: tcp
+    port: 9963
+    reason: the operator's metrics, which listen on every address of the node; nothing calls them,
+      as no monitor selects them and the kubelet probes the operator's API
+no-pod:
+  - rule: apid
+    reason: the Talos API, a service of Talos itself
+  - rule: trustd
+    reason: Talos' trust daemon, a service of Talos itself on the control planes
+  - rule: kube-apiserver
+    reason: the API server, a static pod Talos runs on the control planes
+  - rule: etcd
+    reason: etcd's client and peer ports; Talos runs etcd on the control planes as a service of its
+      own, outside Kubernetes
+  - rule: etcd-metrics
+    reason: the metrics listener talos/patches/controlplane/metrics.yaml gives that etcd
+  - rule: kube-controller-manager
+    reason: the controller manager, a static pod Talos runs on the control planes
+  - rule: kube-scheduler
+    reason: the scheduler, a static pod Talos runs on the control planes
+  - rule: kubelet
+    reason: the kubelet, a service of Talos itself
+  - rule: cilium-vxlan
+    reason: the kernel's VXLAN device, which Cilium makes for its overlay
+  - rule: cilium-health
+    reason: Cilium's health checks between nodes, on a port the agent opens on its node without
+      declaring it in its pod

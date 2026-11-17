@@ -1,0 +1,155 @@
+---
+# PodMonitors that scrape no port the tree lists as having no rule, each named after what keeps it
+# from one.
+# Its own namespace is the only one it looks in, and the pods are in kube-system.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: another-namespace
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      k8s-app: cilium-envoy
+  podMetricsEndpoints:
+    - portNumber: 9964
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: a-named-namespace-without-the-pods
+  namespace: kube-system
+spec:
+  namespaceSelector:
+    matchNames:
+      - monitoring
+  selector:
+    matchLabels:
+      k8s-app: cilium-envoy
+  podMetricsEndpoints:
+    - portNumber: 9964
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: a-label-the-pods-lack
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      name: cilium-operator
+      tier: none
+  podMetricsEndpoints:
+    - port: prometheus
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: another-value-of-a-label
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      name: cilium-operators
+  podMetricsEndpoints:
+    - port: prometheus
+---
+# Every pod but the operator's, whose port of that name is the only one without a rule.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: excluded-by-not-in
+  namespace: kube-system
+spec:
+  selector:
+    matchExpressions:
+      - key: name
+        operator: NotIn
+        values:
+          - cilium-operator
+  podMetricsEndpoints:
+    - port: prometheus
+---
+# The pods without the label k8s-app, the operator's among them, which have no port 9964.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: excluded-by-does-not-exist
+  namespace: kube-system
+spec:
+  selector:
+    matchExpressions:
+      - key: k8s-app
+        operator: DoesNotExist
+  podMetricsEndpoints:
+    - portNumber: 9964
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: excluded-by-in
+  namespace: kube-system
+spec:
+  selector:
+    matchExpressions:
+      - key: k8s-app
+        operator: In
+        values:
+          - cilium
+  podMetricsEndpoints:
+    - portNumber: 9964
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: excluded-by-exists
+  namespace: kube-system
+spec:
+  selector:
+    matchExpressions:
+      - key: tier
+        operator: Exists
+  podMetricsEndpoints:
+    - portNumber: 9964
+---
+# The agents' metrics and Hubble ports, which have rules.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: ports-with-a-rule
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      k8s-app: cilium
+  podMetricsEndpoints:
+    - port: prometheus
+    - port: peer-service
+    - portNumber: 9962
+    - targetPort: 4244
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: ports-the-pods-lack
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      name: cilium-operator
+  podMetricsEndpoints:
+    - port: metrics
+    - portNumber: 9962
+    - targetPort: envoy-metrics
+    - targetPort: 9964
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: no-endpoint
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      name: cilium-operator
+  podMetricsEndpoints: []

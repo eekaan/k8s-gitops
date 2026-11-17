@@ -2,6 +2,19 @@
 
 - Status: accepted
 - Date: 2026-11-14
+- Amended: 2026-11-17, the pods that declare a host port are Cilium's agent and its Envoy, on
+  every node, control planes included, and its operator, not node-exporter, which declares none;
+  all of them are on the host network, where Cilium maps no host port and the port is the node's
+  own, which the firewall filters, and what Cilium serves before the firewall is the host port of
+  a pod on the pod network, so the reduced set suits a cluster where no pod on the pod network
+  declares one, which Pod Security allows in `security-system` as well as in the three namespaces
+  named here; the Cilium agents' metrics are a listener of every node as well; and a new listener
+  is also its port in the documentation's account of what a rollout proves and its place in
+  `tests/node-listeners.bats`, which holds every port that a pod of the render of `kubernetes/`
+  declares on the host network to a rule or a listed reason, every rule to a listener and the
+  render's pods on the pod network to no host port, and does not read a pod that an operator
+  creates at run time, such as LINSTOR's CSI node plugin on the host network
+  ([The node firewall](../cluster.md#the-node-firewall))
 
 ## Context
 
