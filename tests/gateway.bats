@@ -185,10 +185,11 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   VARS="$OTHER" built gateway-public
   [ "$(object "$BUILT" EnvoyProxy "$proxy" | yq '.spec.provider.kubernetes.envoyService.annotations["lbipam.cilium.io/ips"]')" \
     = "$(VARS="$OTHER" var GATEWAY_ADDRESS)" ]
-  # It is applied after what it needs: the controller, the issuer and the BGP objects, and, where
-  # the cluster chooses an ACME issuer for its certificate, the application that makes the issuers.
-  [ "$(yq '.spec.dependsOn | map(.name) | sort | join(" ")' "$REPO/$APP_DIR/ks.yaml")" = "cilium-bgp cluster-ca envoy-gateway" ]
-  [ "$(depends_on gateway-public | sort | paste -sd' ' -)" = "acme-issuers cilium-bgp cluster-ca envoy-gateway" ]
+  # It is applied after what it needs: the controller, the issuer, the BGP objects and the exporter
+  # that answers its Probe, and, where the cluster chooses an ACME issuer for its certificate, the
+  # application that makes the issuers.
+  [ "$(yq '.spec.dependsOn | map(.name) | sort | join(" ")' "$REPO/$APP_DIR/ks.yaml")" = "blackbox-exporter cilium-bgp cluster-ca envoy-gateway" ]
+  [ "$(depends_on gateway-public | sort | paste -sd' ' -)" = "acme-issuers blackbox-exporter cilium-bgp cluster-ca envoy-gateway" ]
   # Nothing else can take the address first: of everything the cluster applies, built with an
   # address of its own, only this EnvoyProxy carries the label outside a selector, sets an LB-IPAM
   # annotation or names the Gateway's address anywhere, and no text, such as the values a chart
@@ -513,7 +514,7 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   [ "$(yq -N 'select(.kind == "Namespace" and .metadata.name == "demo") | .metadata.labels["k8s-gitops/gateway"]' "$OVERLAY")" = public ]
   [ "$(yq -N 'select(.kind == "Namespace" and .metadata.name == "demo") | .metadata.labels["pod-security.kubernetes.io/enforce"]' "$OVERLAY")" = restricted ]
   # The route is applied after the Gateway, which it names.
-  [ "$(depends_on hello-route | sort | paste -sd' ' -)" = "gateway-public hello" ]
+  [ "$(depends_on hello-route | sort | paste -sd' ' -)" = "blackbox-exporter gateway-public hello" ]
 }
 
 # tree_without APP...: copies kubernetes/ to $TREE and takes the ks.yaml of each APP out of the

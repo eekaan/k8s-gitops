@@ -9,10 +9,11 @@ spec:
   path: ./apps/base/demo/hello-route/app
   targetNamespace: demo
   # The route names the public Gateway and the hello Service. A cluster without the Gateway cannot
-  # enable it.
+  # enable it. Its Probe is answered by the blackbox exporter.
   dependsOn:
     - name: gateway-public
     - name: hello
+    - name: blackbox-exporter
   wait: true
   sourceRef:
     kind: ExternalArtifact

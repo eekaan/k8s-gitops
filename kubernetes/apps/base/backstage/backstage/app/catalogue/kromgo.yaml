@@ -16,6 +16,7 @@ spec:
   owner: group:default/operators
   system: observability
   dependsOn:
+    - component:default/blackbox-exporter
     - component:default/cilium
     - resource:default/gateway-public
     - resource:default/prometheus-operator-crds

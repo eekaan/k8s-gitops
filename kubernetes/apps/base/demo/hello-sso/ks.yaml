@@ -17,11 +17,12 @@ spec:
       SSO_HOSTNAME: hello-sso
   # The route names the public Gateway and the hello Service, and the policy names oauth2-proxy's
   # Service, which the grant in its namespace lets this one reach. A cluster without any of them
-  # cannot enable it.
+  # cannot enable it. Its Probe is answered by the blackbox exporter.
   dependsOn:
     - name: gateway-public
     - name: hello
     - name: oauth2-proxy
+    - name: blackbox-exporter
   wait: true
   sourceRef:
     kind: ExternalArtifact

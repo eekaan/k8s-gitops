@@ -27,6 +27,11 @@ Feature: The render diff of a pull request
     When just render runs on each
     Then the optional one is skipped as helm-controller skips it and the chart renders with the values it has left, the required one and the chart sources are refused, naming the release, and only the exact name selects its ConfigMap
 
+  Scenario: A values key the ConfigMap does not hold fails the render unless its entry is optional
+    Given a HelmRelease whose valuesFrom names a key its ConfigMap holds, a key the ConfigMap does not hold, and that key in an optional entry
+    When just render runs on each
+    Then the key it holds gives its values, the missing key fails the render naming the release, the ConfigMap and the key, as helm-controller refuses the release, and the optional entry is skipped as helm-controller skips it, the chart rendering with the values it has left
+
   Scenario: An object that only claims to be a definition does not change what a chart renders
     Given a tree with no definition of the monitoring API, and objects called CustomResourceDefinition of another API group, of another API version, with a version that is not served and with a group the API server would refuse, each naming that API, and a real definition of it
     When just render runs on each

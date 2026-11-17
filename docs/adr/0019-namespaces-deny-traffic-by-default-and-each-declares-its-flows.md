@@ -2,6 +2,12 @@
 
 - Status: accepted
 - Date: 2026-11-15
+- Amended: 2026-11-16, on the listener ports, 10080 and 10443, the proxies take the blackbox
+  exporter's pods beside the world, for the probes of the public hostnames, and no other pod of the
+  cluster; those probes write no PROXY protocol header, which therefore stays `optional` until they
+  reach the listeners through the edges
+  ([ADR 0020](0020-the-client-address-reaches-the-gateway-in-a-proxy-protocol-header.md),
+  [Probes](../kubernetes.md#probes))
 
 ## Context
 

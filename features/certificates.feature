@@ -19,7 +19,7 @@ Feature: Public certificates
   Scenario: A cluster chooses its public certificate's issuer in one place, and the cluster's own CA is the default
     Given the public Gateway built with no choice, and built as the cluster's overlay applies it
     When its Certificate's issuer is read in each
-    Then with no choice it names the cluster's own CA issuer, the lab-sto2 overlay chooses the ACME production issuer by one patch of the Gateway's Kustomization and nothing else in the tree names an issuer by variable, and its Certificate follows that choice
+    Then with no choice it names the cluster's own CA issuer, the lab-sto2 overlay chooses the ACME production issuer by one patch of the Gateway's Kustomization, which one patch of the blackbox exporter's repeats for its probes, and nothing else in the tree names an issuer by variable, and its Certificate follows that choice
 
   Scenario: A cluster that chooses an ACME issuer without the issuers application is refused
     Given a copy of the tree whose overlay chooses an ACME issuer for the public Gateway

@@ -316,7 +316,7 @@ of_kromgo() {
 }
 
 @test "A cluster that does not select kromgo builds none of it, and one that selects it without what it depends on is refused" {
-  local dependency dependencies=(prometheus-operator-crds gateway-public cilium)
+  local dependency dependencies=(prometheus-operator-crds gateway-public cilium blackbox-exporter)
   # The overlay selects it with two entries, its namespace directory and its ks.yaml, and builds
   # the namespace with its default deny, the defaults every namespace directory holds, and the
   # Kustomization.

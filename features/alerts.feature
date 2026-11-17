@@ -328,3 +328,39 @@ Feature: Alerts
     Given a PostgreSQL cluster whose newest base backup is older than 36 hours, one older than 36 hours with none, one with a recent backup, and one under a day old with none
     When the rule is evaluated over time
     Then the alert fires after its time for the first two and never for the others
+
+  @by:rules-check
+  Scenario: The alert PublicEndpointDown fires after its time in the failing case and stays quiet in the healthy one
+    Given a probe of a public hostname that gets no answer, and one that is answered as expected
+    When the rule is evaluated over time
+    Then the alert fires after its time for the hostname that gets no answer and never for the one answered as expected, nor for one answered with a status it does not accept, nor for a probe of another job that gets no answer
+
+  @by:rules-check
+  Scenario: The alert PublicEndpointWrongStatus fires after its time in the failing case and stays quiet in the healthy one
+    Given a probe of a public hostname that is answered with a status the probe does not accept, and one that is answered as expected
+    When the rule is evaluated over time
+    Then the alert fires after its time for the hostname answered with the wrong status and never for the one answered as expected, nor for one that gets no answer, nor for a probe of another job answered with such a status
+
+  @by:rules-check
+  Scenario: The alert PublicCertificateExpiring fires after its time in the failing case and stays quiet in the healthy one
+    Given a public hostname whose certificate expires within 14 days but not within 3, and one whose certificate has longer to run
+    When the rule is evaluated over time
+    Then the alert fires after its time for the hostname whose certificate is within 14 days of its end and never for the other, nor for one within 3 days, nor for such a certificate that a probe of another job reads
+
+  @by:rules-check
+  Scenario: The alert PublicCertificateExpiryImminent fires after its time in the failing case and stays quiet in the healthy one
+    Given a public hostname whose certificate expires within 3 days, and one whose certificate has longer to run
+    When the rule is evaluated over time
+    Then the alert fires after its time for the hostname whose certificate is within 3 days of its end and never for the other, nor for such a certificate that a probe of another job reads
+
+  @by:rules-check
+  Scenario: The alert ProbeNotRunning fires after its time in the failing case and stays quiet in the healthy one
+    Given a declared probe whose scrape through the exporter starts to fail, as when the exporter is gone, and one that is scraped throughout while its target is down
+    When the rule is evaluated over time
+    Then the alert fires after its time for the probe that is not scraped, naming its hostname, and never for the one that is, nor for a probe of another job that is not scraped
+
+  @by:rules-check
+  Scenario: The alert ProbeNotRunning stays quiet on a cluster that declares no Probe
+    Given the exporter running, its own metrics scraped, no Probe of the public hostnames declared, and a target of another job down
+    When the rule is evaluated over time
+    Then the alert never fires

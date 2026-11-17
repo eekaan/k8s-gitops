@@ -1,0 +1,30 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cert-manager.io/certificate_v1.json
+# The way the cluster's authority's public certificate reaches the exporter while the public
+# Gateway's certificate comes from that authority (docs/kubernetes.md, Probes). cert-manager puts the
+# certificate of the authority that signed a Certificate in the key ca.crt of its Secret, beside the
+# certificate and the private key of the Certificate itself; the exporter's values for that issuer,
+# trust/cluster-ca.yaml, mount that one key and nothing else, so it trusts the authority and holds
+# neither the authority's key, which stays in cert-manager's namespace, nor this certificate's. The
+# certificate itself is for nothing: no one serves or presents it. It is applied whatever issuer the
+# cluster chooses, as the application is the same on every cluster; with another issuer nothing
+# mounts its Secret.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: blackbox-exporter-trust
+spec:
+  secretName: blackbox-exporter-trust
+  commonName: blackbox-exporter-trust
+  usages:
+    - client auth
+  duration: 2160h
+  renewBefore: 720h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  issuerRef:
+    group: cert-manager.io
+    kind: ClusterIssuer
+    name: cluster-ca

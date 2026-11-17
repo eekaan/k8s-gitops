@@ -1,0 +1,27 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/monitoring.coreos.com/probe_v1.json
+# n8n's route, probed from inside the cluster by the blackbox exporter as hello's is
+# (docs/kubernetes.md, Probes): the public Gateway's proxies' Service by its cluster name, over https,
+# with the hostname as the parameter that sets the Host header and the name the TLS handshake
+# verifies. The path is n8n's health endpoint, which answers 200 while n8n serves, so the probe needs
+# no page of the editor. The module takes a 200 only.
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: n8n
+spec:
+  jobName: public-endpoints
+  module: public_https
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+  targets:
+    staticConfig:
+      static:
+        - https://envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local/healthz
+      labels:
+        hostname: n8n.${CLUSTER_DOMAIN}
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname

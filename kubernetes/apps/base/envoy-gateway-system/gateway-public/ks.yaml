@@ -13,11 +13,12 @@ spec:
   targetNamespace: envoy-gateway-system
   # The controller serves the Gateway and starts the proxies, cluster-ca signs the listener's
   # certificate, and cilium-bgp holds the pool and the advertisement that give the proxies' Service
-  # its address and announce it.
+  # its address and announce it. The redirect's Probe is answered by the blackbox exporter.
   dependsOn:
     - name: envoy-gateway
     - name: cluster-ca
     - name: cilium-bgp
+    - name: blackbox-exporter
   # Ready only once the certificate is issued and the Gateway is programmed, which the controller
   # reports once the proxies' Service has the address it asked for. Without a Ready condition of
   # its own a Gateway counts as ready, so its condition is read.

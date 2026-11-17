@@ -744,6 +744,28 @@ replicas() {
   refused helmrelease.yaml '.spec.chart.spec.sourceRef.namespace = "w*"' "its HelmRepository is not one object of the application"
 }
 
+@test "A values key the ConfigMap does not hold fails the render unless its entry is optional" {
+  # The key the ConfigMap holds gives its values.
+  values_from key '{"kind": "ConfigMap", "name": "x-extra", "valuesKey": "values.yaml"}'
+  render key
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(replicas key)" = 7 ]
+  # A key it does not hold: helm-controller refuses the release, the reference's key not found
+  # (fluxcd/pkg chartutil, ChartValuesFromReferences), and the render fails, naming the release, the
+  # ConfigMap and the key, rather than render the release as if the values were there.
+  values_from missing '{"kind": "ConfigMap", "name": "x-extra", "valuesKey": "other.yaml"}'
+  render missing
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"demo/greeter: HelmRelease web/greeter: values from ConfigMap x-extra name the key other.yaml, which the ConfigMap does not hold"* ]]
+  # Optional, it is skipped as helm-controller skips it: the chart renders with the values it has
+  # left.
+  values_from optional '{"kind": "ConfigMap", "name": "x-extra", "valuesKey": "other.yaml", "optional": true}'
+  render optional
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(replicas optional)" = 1 ]
+}
+
 # decoy: the tree decoy, which has no definition of the monitoring API, whose servicemonitors the
 # greeter's chart renders a monitor for only where it is served, and the object on stdin added to
 # the greeter's application; renders it into $BATS_TEST_TMPDIR/decoy.out.

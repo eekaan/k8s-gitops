@@ -586,7 +586,7 @@ once it is not, and the agents' rendered configuration agrees.
 | Namespace | Posture | Why, and what covers it instead |
 | --- | --- | --- |
 | `demo` | default deny | `hello` takes the proxies on 8080; the backup movers resolve names and reach the object storage on 443; `volsync-demo` and the rest open nothing. |
-| `envoy-gateway-system` | default deny | the controller, its webhook, its certificate job and the proxies, below. |
+| `envoy-gateway-system` | default deny | the controller, its webhook, its certificate job and the proxies, below; the proxies take the blackbox exporter's probes. |
 | `kromgo` | default deny | kromgo takes the proxies and the kubelet's probes on 8080 and Prometheus' scrape on 8081, and reaches the resolver and Prometheus on 9090. |
 | `sso-system` | default deny | dex takes the proxies and oauth2-proxy on 5556 and reaches the API server and GitHub on 443; oauth2-proxy takes the proxies on 4180 and reaches dex; below. |
 | `backstage` | default deny | Backstage takes the proxies and the kubelet's probes on 7007 and reaches the resolver and its database on 5432; the database takes the operator, its own pods, Backstage, the dump job, Prometheus and the kubelet's probes, and reaches its own pods, the resolver and the API server, and its instances, for their Barman Cloud sidecars, the object storage on 443; the dump job reaches the resolver, the database and the world on 443. |
@@ -596,7 +596,7 @@ once it is not, and the agents' rendered configuration agrees.
 | `external-dns` | listed | an application whose allows are not written, not a namespace that cannot have the posture. external-dns takes Prometheus' scrape and the kubelet's probes on 7979 and nothing else, and reaches the API server, the DNS provider's API on 443 and the resolver. Its token, scoped to zone read and DNS edit on the cluster's one zone, its name filter, a ClusterRole that only reads, Pod Security, node firewall ([DNS records](#dns-records)). |
 | `kube-system` | listed | Cilium's agent, its Envoy and its operator run in the host's network namespace; the resolver takes queries from every namespace; the pod-network workloads' flows are not yet enumerated. Node firewall, Pod Security. |
 | `flux-system` | listed | the controllers' flows are not yet enumerated as allows; Flux's own network policies, which the operator makes at run time, and the operator's for its web interface, `flux-operator-web`, which the check reads and passes because the namespace is listed ([What the check refuses](#what-the-check-refuses)); Pod Security, node firewall. |
-| `monitoring` | listed | Prometheus scrapes every namespace and the nodes, the node exporter runs in the host's network namespace, the API server calls the operator's webhook, the other flows are not yet enumerated. |
+| `monitoring` | listed | Prometheus scrapes every namespace and the nodes, the node exporter runs in the host's network namespace, the API server calls the operator's webhook, the blackbox exporter takes Prometheus on 9115 and reaches the resolver and the public Gateway's proxies on 10080 and 10443, the other flows are not yet enumerated. |
 | `openbao`, `external-secrets`, `cert-manager`, `cnpg-system`, `keda`, `volsync-system` | listed | flows not yet enumerated: webhooks and APIs the API server calls, the store's clients, scrapes, the PostgreSQL operator's calls to the Barman Cloud plugin. Each entry says which, and what covers it. |
 | `piraeus-datastore` | listed | the CSI node plugin runs in the host's network namespace; the satellites replicate over the pod network, and their flows are not yet enumerated. |
 | `cilium-secrets` | listed | holds no pod. |
@@ -609,9 +609,10 @@ once it is not, and the agents' rendered configuration agrees.
 - **`envoy-gateway-system`.** The proxies (labels `app.kubernetes.io/name: envoy`,
   `app.kubernetes.io/component: proxy`, `app.kubernetes.io/managed-by: envoy-gateway`,
   `gateway.envoyproxy.io/owning-gateway-name: public`) take the world on 10080 and 10443, the
-  container ports the controller derives from the listeners 80 and 443 by adding 10000, and the
-  kubelet on 19003 and 19002: Envoy Gateway v1.10.0 probes the envoy container on its readiness
-  port, 19003 (`internal/xds/bootstrap/bootstrap.go`,
+  container ports the controller derives from the listeners 80 and 443 by adding 10000, the blackbox
+  exporter's pods on the same two ports, which are the only pods of the cluster they take there
+  ([Probes](#probes)), and the kubelet on 19003 and 19002: Envoy Gateway v1.10.0 probes the envoy
+  container on its readiness port, 19003 (`internal/xds/bootstrap/bootstrap.go`,
   `internal/infrastructure/kubernetes/proxy/resource.go`), and the shutdown manager on 19002
   (`internal/cmd/envoy/shutdown_manager.go`); 19001 is the stats port and 19000 the admin port on
   the loopback. They reach the resolver, the controller on 18000 (xDS) and each backend the routes
@@ -711,8 +712,13 @@ once it is not, and the agents' rendered configuration agrees.
   gets it through the tunnel with the world's identity, which the pinned datapath sets for a
   load-balanced connection from outside so that the receiving node does not take it for a node's
   (`bpf/lib/nodeport.h`, `nodeport_lb4` and the NAT that follows it). The listeners therefore take
-  `world` alone, and the watch in audit mode confirms it: a flow from `@remote-node` to the
-  listeners would show as `AUDIT`.
+  `world` alone from outside, and the watch in audit mode confirms it: a flow from `@remote-node` to
+  the listeners would show as `AUDIT`. A pod that asks the proxies' Service by its cluster name, as
+  the blackbox exporter's probes do, is no `world`: the agents translate the Service's cluster
+  address to a proxy's before policy applies, as for every Service, and the source stays the pod, so
+  the proxies take the exporter's pods by their labels in a rule of their own. Nothing else in the
+  cluster reaches the listeners; a pod that resolved a public hostname to the edges' addresses would
+  leave the cluster and come back translated, as `world`.
 - **The local host and the API server.** In Kubernetes mode the pinned agent lets the local host
   reach the pods on its node whatever the policies say (`allow-localhost` `auto` becomes `always`,
   `daemon/cmd/daemon.go`; `pkg/policy/repository.go` adds the rule), so the kubelet's probes do not
@@ -808,22 +814,24 @@ refuses wherever it is, it gives no answer and exits 2. The tests use it to foll
 hop by hop (the world to the proxies' listener ports, the proxies to `hello`'s port, to kromgo's, to
 n8n's, to Open WebUI's, to dex's and oauth2-proxy's and to Backstage's but not to kromgo's metrics
 port, n8n's or Open WebUI's other ports or either database, the kubelet to every probe port,
-Prometheus to kromgo's metrics port alone), to show that no pod of `demo`, `kromgo` or `backstage`
-reaches the secret store, the storage controller, another pod of `demo` or another application, n8n
-and Open WebUI among them, that Backstage reaches the resolver and its database's port and nothing
-outside the cluster, that the database takes the operator, its own pods, Backstage, the dump job and
-Prometheus on their ports and no other application, that its instances reach the world on the
-object storage's port and on no other, and a job that joins an instance on none, that kromgo reaches
-the resolver and the port of
-the Prometheus its configuration names, read from the render, and nothing else, and no other
-application reaches it, that Falco's pods take Prometheus and the kubelet on its metrics port alone
-and reach the resolver alone, and that with their default deny `backstage`, `demo`,
-`envoy-gateway-system`, `kromgo`, `security-system` and `sso-system` let exactly their flows through
-and without it take and send everything. What it cannot show: the entity the pinned datapath gives a
-connection an edge translated and a worker forwarded again, read from its source above and confirmed
-in audit mode; the labels of the pods the operators create at run time, taken from the operators'
-source and observed in audit mode; that an address a name resolves to is the one a rule meant; and
-anything about pods in the host's network namespace.
+Prometheus to kromgo's metrics port alone), to show that the blackbox exporter, the prober the
+Probes name, reaches the proxies on the listener port each Probe's target asks for, read from the
+render, and that no other pod of the render or of the operators is taken there, to show that no pod
+of `demo`, `kromgo` or `backstage` reaches the secret store, the storage controller, another pod of
+`demo` or another application, n8n and Open WebUI among them, that Backstage reaches the resolver
+and its database's port and nothing outside the cluster, that the database takes the operator, its
+own pods, Backstage, the dump job and Prometheus on their ports and no other application, that its
+instances reach the world on the object storage's port and on no other, and a job that joins an
+instance on none, that kromgo reaches the resolver and the port of the Prometheus its configuration
+names, read from the render, and nothing else, and no other application reaches it, that Falco's
+pods take Prometheus and the kubelet on its metrics port alone and reach the resolver alone, and
+that with their default deny `backstage`, `demo`, `envoy-gateway-system`, `kromgo`,
+`security-system` and `sso-system` let exactly their flows through and without it take and send
+everything. What it cannot show: the entity the pinned datapath gives a connection an edge
+translated and a worker forwarded again, read from its source above and confirmed in audit mode; the
+labels of the pods the operators create at run time, taken from the operators' source and observed
+in audit mode; that an address a name resolves to is the one a rule meant; and anything about pods
+in the host's network namespace.
 
 ### What policy does not cover
 
@@ -884,9 +892,11 @@ does not matter.
    has Backstage read its database; the nightly dump of `backstage-db` from 02:00, which waits up to
    20 minutes before it starts ([Dumps](#dumps)); the base backup of `backstage-db` at 02:47 UTC,
    and a WAL segment its primary archives, which `select pg_switch_wal()` there forces
-   ([Backups and restores](#backups-and-restores)); the nightly backup of `volsync-demo` at 03:17, and
-   a restore of it ([Restoring](#restoring)). Watch a day at least, through one nightly backup, one
-   dump and one base backup. An `AUDIT` flow of `backstage`, `demo`, `envoy-gateway-system`, `kromgo`,
+   ([Backups and restores](#backups-and-restores)); the nightly backup of `volsync-demo` at 03:17,
+   and a restore of it ([Restoring](#restoring)). The blackbox exporter's probes need nothing to
+   start them: its pods reach the proxies on 10080 and 10443 at every scrape of a `Probe`
+   ([Probes](#probes)). Watch a day at least, through one nightly backup, one dump and one base
+   backup. An `AUDIT` flow of `backstage`, `demo`, `envoy-gateway-system`, `kromgo`,
    `security-system` or `sso-system` that a check made once the allows were Ready is a missing
    allow, added beside its application in a pull request while the cluster still audits, or a pod
    doing what it should not. Confirm also that no `@remote-node` flow reaches the proxies' listener
@@ -1255,7 +1265,9 @@ every namespace, and evaluates the chart's default alerting and recording rules.
 - the storage layer, through the `linstor-monitoring` application: the LINSTOR controller's metrics
   and the satellites' DRBD reactor ([Storage monitoring](#storage-monitoring));
 - the silence operator, through its chart's PodMonitor ([Silences](#silences));
-- Falco on every node, through its chart's ServiceMonitor ([Runtime detection](#runtime-detection)).
+- Falco on every node, through its chart's ServiceMonitor ([Runtime detection](#runtime-detection));
+- the public hostnames, through the blackbox exporter and the Probes that applications declare
+  beside their routes ([Probes](#probes)).
 
 It does not scrape:
 
@@ -1492,6 +1504,11 @@ The own alerts, each with its runbook section in [docs/runbooks/alerts.md](runbo
 | `FalcoCriticalRuleMatched` | A Falco rule of priority Critical, Alert or Emergency has matched on a node within the last 15 minutes. | critical | [FalcoCriticalRuleMatched](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#falcocriticalrulematched) |
 | `KyvernoAdmissionControllerDown` | Kyverno's admission controller has had no available replica for 10 minutes. | warning | [KyvernoAdmissionControllerDown](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#kyvernoadmissioncontrollerdown) |
 | `GatekeeperControllerManagerDown` | Gatekeeper's controller manager has had no available replica for 10 minutes. | warning | [GatekeeperControllerManagerDown](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#gatekeepercontrollermanagerdown) |
+| `PublicEndpointDown` | The probe of a public hostname through the Gateway gets no answer for 5 minutes. | critical | [PublicEndpointDown](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#publicendpointdown) |
+| `PublicEndpointWrongStatus` | The probe of a public hostname is answered with a status it does not accept for 5 minutes. | critical | [PublicEndpointWrongStatus](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#publicendpointwrongstatus) |
+| `PublicCertificateExpiring` | The certificate the Gateway serves for a public hostname expires within 14 days, and not within 3, for 10 minutes. | warning | [PublicCertificateExpiring](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#publiccertificateexpiring) |
+| `PublicCertificateExpiryImminent` | The certificate the Gateway serves for a public hostname expires within 3 days, for 5 minutes. | critical | [PublicCertificateExpiryImminent](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#publiccertificateexpiryimminent) |
+| `ProbeNotRunning` | A declared probe of a public hostname has not been scraped through the exporter for 10 minutes. | warning | [ProbeNotRunning](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#probenotrunning) |
 
 The alerts read only what Prometheus scrapes: kube-state-metrics' pod readiness for OpenBao's
 members, its Deployment availability for the Flux Operator, its nodes' roles, which tell the
@@ -1501,15 +1518,15 @@ control planes' Cilium agents from the workers', and its CronJob metrics for the
 controller metrics, Vector's internal metrics, cert-manager's certificate metrics, the Flux
 Operator's state of Flux's resources, the Cilium agents' BGP session state, LINSTOR's own metrics,
 the DRBD reactor's, Falco's counter of the matches of each rule, external-dns' gauge of its last
-successful sync and its absence, and the metrics of the PostgreSQL instances and the Barman Cloud
+successful sync and its absence, the metrics of the PostgreSQL instances and the Barman Cloud
 plugin, which the component's PodMonitor scrapes, with kube-state-metrics' creation times of their
-pods ([PostgreSQL](#postgresql)). The
+pods ([PostgreSQL](#postgresql)), and the blackbox exporter's probe metrics ([Probes](#probes)). The
 PostgreSQL alerts, on the archive and the base backups and on the dumps, are written once, in the
 `cloudnative-pg` application's `app/`, whose tests are `tests/rules/cloudnative-pg.yaml`. The dump
 alerts select the CronJobs by their names' suffix, `-pgdump`: kube-state-metrics exposes no CronJob
-label unless its chart is told to, so a label the component set would not reach the metrics. `tests/rules-check.bats` fails when an alert reads a metric that
-no monitor of the render scrapes, or whose monitor selects nothing of the Service or pod that
-serves it.
+label unless its chart is told to, so a label the component set would not reach the metrics.
+`tests/rules-check.bats` fails when an alert reads a metric that no monitor of the render scrapes,
+or whose monitor selects nothing of the Service or pod that serves it.
 
 The two policy engines' alerts read kube-state-metrics' Deployment availability for each engine's
 admission controller ([Admission policy](#admission-policy)).
@@ -1704,8 +1721,9 @@ in a ConfigMap, with its record.
 The `Grafana`'s `spec.preferences.homeDashboardUid` names the home dashboard's `uid`, which is how
 the operator sets an instance's home. VolSync exposes whether a volume is out of sync and how many
 scheduled syncs were missed, and no time of the last sync, so those are what the home shows of a
-backup's age. It has no panel of the public Gateway, which no monitor scrapes, or of Flux, which the
-monitors of `flux-monitoring` scrape: Flux's alerts are among the firing alerts it counts.
+backup's age. It has no panel of the public Gateway, whose proxies no monitor scrapes and whose
+hostnames the probes' alerts read ([Probes](#probes)), or of Flux, which the monitors of
+`flux-monitoring` scrape: Flux's alerts are among the firing alerts it counts.
 
 **Scraped, without a dashboard.** The tree holds no dashboard of these; what their monitors scrape
 is in Prometheus, where the alerts ([Alerts](#alerts)) and a query read it:
@@ -1730,9 +1748,9 @@ data" or no upstream file exists:
 | Vector | An upstream dashboard: its repository ships none |
 | VolSync | An upstream dashboard: its repository ships none, and the one shared on grafana.com states no licence |
 
-The other applications the render holds a monitor for, the descheduler, external-dns, KEDA, the
-kubelet CSR approver, metrics-server, the reloader, Spegel, the Vertical Pod Autoscaler and the
-Grafana operator, have no dashboard.
+The other applications the render holds a monitor for, the blackbox exporter, the descheduler,
+external-dns, KEDA, the kubelet CSR approver, metrics-server, the reloader, Spegel, the Vertical Pod
+Autoscaler and the Grafana operator, have no dashboard.
 
 An upstream dashboard declares the datasource it reads as an input in its `__inputs`, and its
 `GrafanaDashboard`'s `spec.datasources` maps that input to the name of the tree's Prometheus. Before
@@ -1788,11 +1806,11 @@ is privileged too, for node-exporter and the log collector. The own namespace is
 `restricted`, and is one more entry in the set of namespaces that carry the label, which
 `tests/gateway.bats` pins. A cluster selects kromgo with two entries of its overlay, the namespace
 directory and the application's `ks.yaml`; the application waits for the Prometheus Operator's
-definitions, the Gateway and Cilium, whose kind its network policy is, and is Ready once both pods
-are (`wait: true`), which is once kromgo has read its configuration and listens: a configuration it
-refuses keeps the application from Ready. It queries the stack's Prometheus at each request, not at
-start, so a badge answers with an error until Prometheus does, and the stack's application is not
-waited for.
+definitions, the Gateway, Cilium, whose kind its network policy is, and the blackbox exporter, which
+answers its route's `Probe`, and is Ready once both pods are (`wait: true`), which is once kromgo
+has read its configuration and listens: a configuration it refuses keeps the application from Ready.
+It queries the stack's Prometheus at each request, not at start, so a badge answers with an error
+until Prometheus does, and the stack's application is not waited for.
 
 **What it may reach.** The namespace denies ingress and egress by default, and the policy beside
 the application, `app/ciliumnetworkpolicy.yaml`, lets kromgo's flows through and no other
@@ -1874,6 +1892,264 @@ only the networks the edge stack allows
 ([The edge routers](infrastructure.md#the-edge-routers)), which bounds who can ask. A rate limit on
 the route would be a `BackendTrafficPolicy`, which `tests/gateway.bats` would have to admit: it holds
 the Gateway's `ClientTrafficPolicy` to be the one policy on the Gateway or on a route attached to it.
+
+### Probes
+
+`apps/base/monitoring/blackbox-exporter/` runs the Prometheus community's blackbox exporter in
+`monitoring`, from its chart on the community's OCI registry, for the checks of what the cluster
+serves to the outside. It names `prometheus-operator-crds`, for its `ServiceMonitor` and
+`PrometheusRule` and the `Probe` kind of the applications that declare one, and `cluster-ca`, for
+the certificate below, in `dependsOn`, and sets `wait`, so what declares a `Probe` and names it
+starts once the exporter runs. Two replicas, never on one worker, under a budget of one; small
+requests and no limits; the restricted Pod Security level, from the chart's defaults and the
+runtime's seccomp profile; its own metrics through the chart's `ServiceMonitor`. Its chart's tag is
+a pin Renovate moves.
+
+**What waits for the exporter.** `gateway-public` and every application that declares a `Probe` name
+`blackbox-exporter` in `dependsOn`, and `external-dns` waits for the Gateway. Flux reads a
+dependency's readiness when the dependent reconciles, at its interval or on a change, and applies
+the dependent only while what it names is Ready. While the exporter's Kustomization is not, as when
+its release has failed or its chart cannot be fetched, no change to the Gateway or to an
+application with a route is applied from its next reconcile, and none to `external-dns` once
+`gateway-public` has reconciled since: each reports `DependencyNotReady` and keeps what it has
+applied, so nothing that runs is stopped, and a cluster built from nothing has no Gateway until the
+exporter runs. A release that fails is retried three times
+([What the root sets](#what-the-root-sets)) and is then Stalled until its failure count is reset,
+which helm-controller does when the release's chart or values change, and
+`flux reconcile helmrelease blackbox-exporter -n monitoring --reset` does by hand.
+
+The exporter has three modules, and the chart's own `http_2xx` is switched off:
+
+- `public_https`: a GET over TLS that must be answered 200, is not redirected, and fails when the
+  answer is not over TLS or its certificate does not verify against the trust of the cluster's
+  issuer, which under staging verifies nothing (**Trust**, below).
+- `public_https_signin`: the same, for a route behind the cluster's sign-in, but the answer must be
+  302, the redirect that starts a sign-in, which it does not follow (**Behind sign-in**, below).
+- `public_http_redirect`: a GET over plain HTTP that must be answered 301, which it does not follow.
+
+**What is probed, and from where.** An application declares a `Probe` beside its route ([Giving an
+application a public hostname](#giving-an-application-a-public-hostname)): `hello-route` has one for
+`hello.${CLUSTER_DOMAIN}`, `n8n` one for `n8n.${CLUSTER_DOMAIN}` at n8n's health endpoint
+`/healthz`, kromgo one for `kromgo.${CLUSTER_DOMAIN}` at the badge `/badges/cluster_node_count`,
+`open-webui` one for `open-webui.${CLUSTER_DOMAIN}` at Open WebUI's readiness endpoint `/health/db`,
+which answers 200 without a session once its database does, `dex` one for `dex.${CLUSTER_DOMAIN}`
+at its discovery document `/.well-known/openid-configuration`, which dex serves on its http port
+without a session once it runs with its configuration, `oauth2-proxy` one for
+`auth.${CLUSTER_DOMAIN}` at its readiness endpoint `/ready`, which it answers before it looks for a
+session and which, with the cookie session store, checks no connection, `backstage` one for
+`backstage.${CLUSTER_DOMAIN}` at Backstage's readiness endpoint `/.backstage/health/v1/readiness`,
+a `GET` its route admits, which answers 200 without a session once every plugin has started, each
+having migrated its schema in the database, `hello-sso` one for `hello-sso.${CLUSTER_DOMAIN}` at
+`/` with the module that expects the sign-in redirect (**Behind sign-in**, below), and
+`gateway-public` one for the redirect, which is probed for the apex of the domain, as the redirect
+takes any host. Backstage's endpoint does not ask the database again once Backstage has started, so
+its probe proves the database at Backstage's start, not since. kromgo's
+route sends only the badge paths, and kromgo answers a badge in its SVG form with a 200 whether its
+query succeeds or not, an id it does not serve included ([Status badges](#status-badges)), so its
+probe proves the route and kromgo, not Prometheus, and
+`tests/probes.bats` holds the badge to one the configuration serves; each probe runs that badge's
+query once. Every `Probe` sets the job name `public-endpoints`, which the alerts
+select, names the exporter's Service as its prober, and has one target, the Gateway's proxies'
+Service by its cluster name, with the hostname as a label, which a relabeling turns into the URL
+parameter `hostname`. For that parameter the exporter sets the `Host` header and, as no module has
+a `server_name`, the name the TLS handshake asks for and verifies. So the request is the one a
+client of the hostname makes, and it reaches the proxies by the cluster's DNS and the Service's
+address, without the hostname being resolved at all: nothing leaves the cluster, nothing depends on
+public DNS, the edge routers or the floating addresses, and no address is written anywhere. The
+proxies' Service is the one Envoy Gateway makes, named
+`envoy-<namespace>-<name>-<the first 8 characters of the SHA-256 of "<namespace>/<name>">` after the
+Gateway's namespace and name, in the controller's own namespace whichever namespace the Gateway is
+in, here `envoy-envoy-gateway-system-public-5ea56ca9` in `envoy-gateway-system`; the controller
+derives the name, `tests/probes.bats` derives it again, the namespace from the controller's
+Deployment in the render, and fails when a `Probe` names another, and the `EnvoyProxy` could not set
+a name of its own without changing what `tests/gateway.bats` pins of its Service. The controller
+makes the Service at run time, so no render holds its name: the test's rule for it was read in the
+controller's source at the version the test records, and for a controller of another version, or one
+configured to deploy the proxies in each Gateway's namespace, where they take another name, the test
+fails until the rule is read again there, as one that named the Service otherwise would pass every
+other check and fail every probe at the name's resolution. The two other ways were weighed
+and left: a cluster-internal resolution of the public hostnames to the Gateway would be a rule in
+the cluster's DNS for every hostname, which no application of the tree owns, or the Service's
+address written into the exporter's pods, which the tree does not write; and the hostname as the
+target alone goes out through public DNS.
+
+**What it proves, and what it does not.** A passing probe of a route proves the Gateway's proxies
+are up and take connections on 443, the listener serves a certificate that verifies for the
+hostname, the route is accepted and its backend answers 200. It proves the redirect on 80 the same
+way. It does not prove the way in from outside: the edge routers, their translation to the Gateway's
+address, BGP, the Service's external address and public DNS, which stay `just gateway-check`'s
+([Checking the public Gateway](#checking-the-public-gateway)). The probe goes to the Service's
+cluster address, not the announced one. Each probe is a connection of its own, which the Service
+gives to one of the proxies, so a probe proves one proxy at a time: with one of the two failing
+while it is still Ready, about every other probe fails and the others pass. An alert that needs
+every probe to fail for 5 minutes then fires only on a run of failures that long, which comes by
+chance and rarely, and resolves at the next probe that passes.
+
+**Behind sign-in.** A route that a `SecurityPolicy` with external authorisation targets
+([Sign-in](#sign-in)) is probed with `public_https_signin`. The probe has no session, so the
+proxies ask oauth2-proxy, which answers with the 302 to dex that starts a sign-in, as
+`skip_provider_button` is set and the probe's request is no AJAX one (`Proxy` and `doOAuthStart` in
+`oauthproxy.go` of the pinned v7.15.6), and the proxies send that answer back. A passing probe
+proves the proxies, the certificate, the route, the policy in its path and oauth2-proxy answering;
+not the backend behind it, which `hello-route`'s probe of the same backend covers, nor dex, which
+dex's own probe covers. The day the policy is lost and the backend answers anyone, the answer is a
+200 and `PublicEndpointWrongStatus` fires. The sign-in paths on the same host, the route
+`hello-sso-oauth2` that `components/sso` adds and no policy covers, are covered by the host's one
+`Probe`: the probes are of hostnames, and the probe of `/` meets the route the policy covers.
+
+**While an application is not running**, the probe of its route fails, and it is
+`PublicEndpointWrongStatus` that fires, not `PublicEndpointDown`: the proxies answer the probe
+themselves, 503 for a backend with no pod ready, and 403 for a route behind sign-in while
+oauth2-proxy cannot answer, as the policy does not fail open. A `Probe` is applied with its route,
+by its application's Kustomization, which Flux applies once those it names in `dependsOn` are Ready.
+So on a new cluster the alert fires for an application whose pods wait for a secret the owner writes
+to the store, from 5 minutes after it is applied until the secret is there: n8n, for its encryption
+key ([n8n](#n8n)); dex, for the GitHub client; and after dex oauth2-proxy, for the list of
+identities, as its route and its `Probe` are applied only once dex is Ready. `hello-sso` waits for
+oauth2-proxy in the same way, so its probe meets the redirect from its first run
+([What the owner does, in order](#what-the-owner-does-in-order)). A route whose application takes
+longer than the alert's 5 minutes to start, as Backstage on its database's first start, raises it
+until it answers.
+
+**Its way through network policy.** The exporter's pod resolves the Service's cluster name with the
+cluster's resolver and connects to its cluster address; the Cilium agents translate that address to
+a proxy's before policy applies and keep the pod as the source, so the proxies see the exporter's
+pod in `monitoring`, not `world`, on the container port of the listener: 10443 for https, 10080 for
+the redirect. `envoy-gateway-system` denies by default, and the proxies' policy `public-proxy` takes
+the exporter's pods on those two ports, by the labels the exporter's chart gives them, in a rule of
+their own beside the world's; from there the proxies reach the backend by the rule of its route, as
+for any client ([What the namespaces let through](#what-the-namespaces-let-through)). `monitoring`
+is listed, so the exporter's own egress is open and Prometheus' requests to it pass.
+`tests/network-policy.bats` reads the ports from the target of every `Probe` of the render and the
+exporter from their prober's Service, and fails unless the exporter's pods reach the proxies on each
+and no other pod of the render or of the operators is taken there. While the cluster audits, a line
+of `just network-drops` from a `monitoring/blackbox-exporter-…` pod to an
+`envoy-gateway-system/envoy-envoy-gateway-system-public-…` pod on `10443/tcp` or `10080/tcp` means
+that rule does not match the exporter's pods, as after its chart changed their labels; once the
+cluster enforces, such a flow is dropped and every probe raises `PublicEndpointDown`.
+
+**The PROXY protocol.** The listeners accept a PROXY protocol header as `optional` ([The public
+Gateway](#the-public-gateway)), and the exporter writes none: its connection begins with the TLS
+handshake or the HTTP request, which the listeners serve with the exporter's pod as the client. The
+probes are a sender the rule above admits that writes no header, which is one reason the header
+stays optional: a policy that required it would reset every probe, and `tests/probes.bats` fails,
+saying the probes would be cut, when the Gateway's `ClientTrafficPolicy` requires the header while a
+`Probe` reaches the listeners from inside the cluster. Before the header is required, the probes
+must reach the listeners another way, through the edges, which write it.
+
+**Trust.** The probe verifies the certificate against the trust of the issuer the cluster chooses
+for the Gateway's certificate ([Choosing the public Gateway's
+issuer](#choosing-the-public-gateways-issuer)), the cluster's own CA or production, and does not
+verify it under staging, whose chain no client trusts. The `HelmRelease` adds to the exporter's
+shared values those of that issuer, the key `<issuer>.yaml` of a ConfigMap made from `app/trust/`,
+which the variable `PROBE_ISSUER` names, `cluster-ca` when it is not set. A cluster that chooses an
+issuer sets `PROBE_ISSUER` to the same name in a patch of the Kustomization `blackbox-exporter` in
+its overlay, beside the patch of `gateway-public` that sets `PUBLIC_ISSUER`. The name is written
+twice, as a patch reaches one Kustomization and a replacement from the Gateway's would break the
+overlays that leave the Gateway out; `tests/probes.bats` fails for every cluster of the tree whose
+render has the Gateway's certificate from one issuer and the probes trusting another.
+
+- `cluster-ca`, the default: the `ca_file` of both modules over https is the authority's public
+  certificate, which reaches the exporter through a `Certificate` of its own application, issued by
+  the same issuer: cert-manager puts the issuing authority's certificate in the `ca.crt` of the
+  Secret it makes for it, and the exporter mounts that one key, never the Secret's private key, and
+  never `cert-manager`'s Secret of the authority, whose key does not leave that namespace. The
+  `Certificate` itself is for nothing. Reflector, which would copy a whole Secret, key included, and
+  a trust bundle controller, which the tree does not have, are the other ways, and neither is
+  simpler.
+- `letsencrypt-production`, which `lab-sto2` chooses: the system's roots of the exporter's image, as
+  a client outside has them. The modules name no CA of their own and nothing is mounted; the
+  exporter's `Certificate` is applied all the same, as the application is the same on every cluster,
+  and nothing reads its Secret.
+- `letsencrypt-staging`, which a new cluster starts on: none. No client trusts its chain, so its
+  values make both modules over https skip verification, `insecure_skip_verify: true`, their one
+  setting, and nothing is mounted. The probe still needs a TLS answer from the proxies with the
+  status the module takes, and the exporter still reads the expiry of the certificate served:
+  `probe_ssl_earliest_cert_expiry` is the earliest end among the certificates the proxies send,
+  whether verified or not (`prober/http.go` and `getEarliestCertExpiry` in `prober/tls.go` of the
+  pinned v0.29.1), so `PublicEndpointDown`, `PublicEndpointWrongStatus` and both certificate
+  alerts hold. What the probe does not catch under staging is a wrong certificate: Go skips the
+  check of the name with that of the chain, so a certificate of any issuer, a self-signed one or
+  one for another name is accepted. Under the cluster's own CA or production, a certificate for
+  another name, or one the probe's trust does not verify, fails the handshake and raises
+  `PublicEndpointDown`; that trust is the one authority under the cluster's own CA and every public
+  one under production, where a certificate another public authority issued for the name passes, as
+  for any client. So a wrong name or an untrusted chain is caught once the cluster moves to
+  production.
+
+No module skips verification under the cluster's own CA or production; under staging the values of
+the two modules over https hold that one setting and no other module skips it. `public_https_signin`
+verifies as `public_https` does under every issuer, and `tests/probes.bats` fails when their
+`tls_config` differs. `just kubernetes-check` refuses a cluster that enables the exporter while the
+Gateway's issuer or the probes' is one with no values in `app/trust/`, and names the file to add;
+the release, which would find no values for it, fails rather than probe without them.
+`tests/probes.bats` reads the issuer, the modules and the pod from what `scripts/render` makes of
+the tree, `lab-sto2` as it is and copies that choose the cluster's own CA and staging.
+
+**Every route has its probe.** `tests/probes.bats` reads the routes, the `Probe`s and the policies
+from what `scripts/render` makes of the tree: every application the overlay enables as Flux builds
+it, components and substitutions included, and every release as its chart renders it. A route or a
+`Probe` that a chart makes from a release's values is therefore read as one a manifest declares, in
+its release's namespace where the chart names none, and an object with a list of items, as a `List`
+a chart renders, as those items, each an object, as Helm installs them; a route that a controller
+makes at run time is in no render, and is not seen. The test fails, naming the route, when an
+`HTTPRoute` of the public Gateway's https listener has a hostname that no `Probe` names, has no
+hostname at all (it would serve every name under the listener), or the redirect has none. A `Probe`
+counts when its job is `public-endpoints`, it goes to the exporter at the address of the Service its
+release renders, it uses the module of its listener and hostname, its one target is the proxies'
+Service and it sends its `hostname` label on as the parameter as it is: the last relabeling that
+writes `__param_hostname` copies the label with the default regex and replacement, and no relabeling
+writes another label, maps or drops labels, or keeps or drops the target. It counts only in the
+shape `hello`'s has, those fields and no other, as each thing more is a way for a `Probe` that is
+there not to probe: a path or a scheme of the prober asks the exporter for something else than a
+probe, or over TLS it does not serve; an interval, a scrape timeout or metric relabelings of its own
+can stretch the probe to once a day, cut every scrape short or drop its series; a second target can
+leave the cluster; a label beside `hostname` can be one Prometheus reads as a setting of the scrape;
+and a relabeling to another label, which runs after the operator's own, can send the scrape or the
+probe elsewhere or take it out of the job the alerts read. The module of a hostname on the https
+listener is `public_https_signin` when a route of that hostname is the target, by `targetRefs` or
+`targetRef`, of a `SecurityPolicy` with external authorisation, and `public_https` otherwise;
+`tests/gateway.bats` refuses a policy that selects routes by label and any policy on the Gateway but
+its `ClientTrafficPolicy`. The rule keys on hostnames: one `Probe` covers every route of its
+hostname, so without the `Probe` of a host behind sign-in both its routes are named. A `Probe` of
+such a host for 200 is refused, naming it, even beside the right one, as it would pass only once the
+policy were lost; and so is a `Probe` of the redirect for a host no such policy covers, which could
+never pass. A fixture for each of these proves the rule, a release whose chart renders a route from
+its values among them. The test also fails when an application of the render that holds an object of
+kind `Probe`, one of its manifests, however the file spells the kind, or one its chart renders, does
+not name `blackbox-exporter` in the `dependsOn` of its Kustomization, and `just kubernetes-check`,
+which refuses a `dependsOn` on an application the overlay does not enable, then refuses a cluster
+that lists the application without the exporter, as it does `hello-route` without the Gateway.
+
+**Alerts.** Five, in the exporter's `prometheusrule.yaml`, with their runbooks ([Alerts](#alerts)).
+Each reads the series of the job `public-endpoints` alone, the one the `Probe`s set, so a probe of
+another job raises none of them: `tests/probes.bats` holds every selector of the rules the render
+applies to that job, and each alert's unit test holds a probe of another job in the failing state.
+`PublicEndpointDown` is a failing probe with no response at all, `probe_http_status_code` being 0
+when none came; `PublicEndpointWrongStatus` a failing probe that was answered, with a status the
+module does not accept, so the two never fire together. `PublicCertificateExpiring` is the served
+certificate's expiry within 14 days and not within 3, and `PublicCertificateExpiryImminent` within
+3, one alert for each severity, as the rules check names alerts once. The expiry is
+`probe_ssl_earliest_cert_expiry`, the earliest end among the certificates the proxies send: the
+listener's certificate while the intermediates of its chain outlive it, and an intermediate that
+ends sooner raises the alerts as well. The series of the verified chain,
+`probe_ssl_last_chain_expiry_timestamp_seconds`, is not read: under staging no chain is verified,
+and it then holds Go's zero time (`getLastChainExpiry` in `prober/tls.go`), which
+`PublicCertificateExpiryImminent` would take for an expired certificate. They read the certificate
+the proxies serve, where cert-manager's `CertManagerCertificateExpiringSoon` reads the one
+cert-manager stored ([cert-manager](#cert-manager)): a renewal that fails raises both warnings for
+the Gateway's certificate, and only the probes' see a stored certificate the proxies do not serve,
+or an expiry while cert-manager is not scraped, and only they turn critical. `ProbeNotRunning` is a
+declared `Probe` whose scrape through the exporter has failed for 10 minutes, Prometheus' own `up`
+of the job being 0: the exporter is gone, the `Probe` names another prober or a module the exporter
+does not have, or the probe outlasts the scrape. A cluster that declares no `Probe` has no such
+scrape, so it cannot fire there; nor does it see a `Probe` Prometheus does not select, which
+`tests/monitoring.bats` holds against the stack's selectors. Alertmanager's configuration is
+unchanged: the alerts have no destination yet.
+
+`tests/probes.bats` reads the render of the tree and of copies of it, checks the modules, the trust,
+the routes and the `Probe`s as above, and renders the exporter's pinned chart with the values of
+each issuer to check the pods.
 
 ## Grafana
 
@@ -2261,7 +2537,9 @@ A `ClusterIssuer` reads its Secrets from the controller's cluster resource names
   broken spends staging's. Production's are trusted by a client with the usual public roots, and its
   limits are the ones a broken setup can exhaust. The procedure for a new cluster is to choose staging first, move to production
   once staging has issued the certificate and `just gateway-check` passes, and go back to staging
-  to test anything again. Both issuers register their account with the CA as soon as they exist.
+  to test anything again. While on staging, the probes of the public hostnames do not verify the
+  certificate, as no client trusts that chain ([Probes](#probes)). Both issuers register their
+  account with the CA as soon as they exist.
 - **Production's rate limits.** Let's Encrypt's [rate limits](https://letsencrypt.org/docs/rate-limits/)
   as Let's Encrypt publishes them: 50 certificates per registered domain every 7 days; 5
   certificates for the exact same set of names every 7 days, which no override raises; and 5
@@ -2286,8 +2564,10 @@ A `ClusterIssuer` reads its Secrets from the controller's cluster resource names
 The `Certificate` `public-wildcard` of `gateway-public` names the `ClusterIssuer` the variable
 `PUBLIC_ISSUER` gives, `cluster-ca` when it is not set, so a cluster that says nothing keeps the
 cluster's own authority. A cluster sets it in one place, a patch in its overlay
-(`apps/overlays/<cluster>/kustomization.yaml`) on the Kustomization `gateway-public`, which in
-`lab-sto2` reads:
+(`apps/overlays/<cluster>/kustomization.yaml`) on the Kustomization `gateway-public`, and repeats
+the name for the probes of its public hostnames, which verify the certificate against the trust of
+its issuer, in a patch on the Kustomization `blackbox-exporter` ([Probes](#probes)). In `lab-sto2`
+they read:
 
 ```yaml
 patches:
@@ -2299,6 +2579,12 @@ patches:
       - op: add
         path: /spec/postBuild
         value: {substitute: {PUBLIC_ISSUER: letsencrypt-production}}
+  - target: {group: kustomize.toolkit.fluxcd.io, kind: Kustomization, name: blackbox-exporter}
+    patch: |-
+      apiVersion: kustomize.toolkit.fluxcd.io/v1
+      kind: Kustomization
+      metadata: {name: blackbox-exporter}
+      spec: {postBuild: {substitute: {PROBE_ISSUER: letsencrypt-production}}}
 ```
 
 It is a patch and not a `cluster-config` key because the choice is part of the tree and reviewed in
@@ -2309,12 +2595,19 @@ a cluster that chooses an issuer other than `cluster-ca` without that dependency
 overlay names the dependency without listing the application.
 
 `lab-sto2` chooses production. A new cluster starts with `PUBLIC_ISSUER: letsencrypt-staging`, and
-once the staging certificate is Ready and `just gateway-check` passes, changes that one line to
-`PUBLIC_ISSUER: letsencrypt-production` in a pull request of its own. cert-manager then issues the
-certificate again from production, with a new private key, into the same Secret, and the listener
-serves the new certificate when it is Ready; the old one is served until then. Going back to
-staging for testing is the same one-line change the other way (the rate limits in [The ACME
-issuers](#the-acme-issuers)).
+`PROBE_ISSUER: letsencrypt-staging` for its probes, and once the staging certificate is Ready and
+`just gateway-check` passes, changes both to `letsencrypt-production` in a pull request of its own.
+cert-manager then issues the certificate again from production, with a new private key, into the
+same Secret, and the listener serves the new certificate when it is Ready; the old one is served
+until then. Going back to staging for testing is the same change the other way (the rate limits in
+[The ACME issuers](#the-acme-issuers)). On staging the probes do not verify the certificate, as no
+client trusts that chain; on production they verify it against the public roots again
+([Probes](#probes)). The two do not change together: the Gateway waits for the exporter, so the
+exporter takes the new issuer's trust first, and the proxies serve the old certificate until the new
+one is issued. A change to production, or to the cluster's own CA, therefore fails the probe of
+every hostname over https in between, as the old certificate does not verify against the new trust,
+and `PublicEndpointDown` fires for each when the issuance takes more than 5 minutes; it clears with
+the new certificate. A change to staging fails none, as the probes then verify nothing.
 
 - **What a client sees.** `lab-sto2` serves the production certificate, which a client with the usual
   public roots trusts with nothing to hand it. With the cluster's own CA or staging, a client outside refuses the
@@ -2763,9 +3056,11 @@ and build both applications offline to check the rest of this section.
 
 `gateway-public`, an application of the same namespace, runs the one Gateway, `public`, of the
 GatewayClass `envoy-gateway`. It names `envoy-gateway`, `cluster-ca` (the issuer,
-[cert-manager](#cert-manager)) and `cilium-bgp` in `dependsOn`, so it starts once the controller
-runs, an issuer signs and the pool and the BGP objects exist; a cluster that chooses an ACME issuer
-for its certificate adds `acme-issuers` ([Choosing the public Gateway's
+[cert-manager](#cert-manager)), `cilium-bgp` and `blackbox-exporter` (which probes the redirect,
+[Probes](#probes)) in `dependsOn`, so it starts once the controller runs, an issuer signs, the pool
+and the BGP objects exist and the exporter answers, and takes no change while the exporter's
+Kustomization is not Ready ([Probes](#probes)); a cluster that chooses an ACME issuer for its
+certificate adds `acme-issuers` ([Choosing the public Gateway's
 issuer](#choosing-the-public-gateways-issuer)). It is Ready, with the 10 minute
 timeout, once its certificate is issued and the controller reports the Gateway programmed, which it
 does once the proxies' Service holds an address and the proxies are available. A cluster whose
@@ -2805,7 +3100,9 @@ cannot be listed without it: `just kubernetes-check` refuses the dependency.
   and no backend: plain HTTP is never forwarded. `tests/gateway.bats` builds every application the
   overlay enables and fails when a route of any kind other than the redirect names `http`, by its
   section or its port, when a route in the Gateway's namespace names the Gateway without a section,
-  which would attach it to `http` as well, or when the redirect is anything but that rule.
+  which would attach it to `http` as well, or when the redirect is anything but that rule. The
+  application's `Probe` `https-redirect` asks the proxies for the 301 from inside the cluster, and
+  `hello-route`'s `Probe` for the demo's 200 ([Probes](#probes)).
 - **Who may attach.** To `https`, `HTTPRoute`s of the namespaces that carry the label
   `k8s-gitops/gateway: public`, and of no other: the listener's `allowedRoutes` select them by that
   label and name the one kind. A route in a namespace without it is not accepted, which is the
@@ -2841,11 +3138,13 @@ cannot be listed without it: `just kubernetes-check` refuses the dependency.
   whoever writes the first bytes of a connection to a proxy can name any address, which a client
   cannot through an edge router that writes its own header and can through a sender that forwards
   plain TCP. Of senders inside the cluster, `public-proxy`
-  ([What the namespaces let through](#what-the-namespaces-let-through)) admits none to the
-  listeners, but only once the agents enforce it rather than audit it
-  ([Service addresses](#service-addresses)), and the local host of a proxy's node reaches that
-  proxy whatever the policies say; the access log's `peer_address` is the socket's own, so a claim
-  shows beside its sender. The trust model is in
+  ([What the namespaces let through](#what-the-namespaces-let-through)) admits the blackbox
+  exporter's pods alone to the listeners, for the probes of the public hostnames, but only once the
+  agents enforce it rather than audit it ([Service addresses](#service-addresses)), and the local
+  host of a proxy's node reaches that proxy whatever the policies say; the access log's
+  `peer_address` is the socket's own, so a claim shows beside its sender. The probes write no
+  header, which `optional` serves, so they are one reason it stays: if the header is ever required,
+  the probes go another way, through the edges, first ([Probes](#probes)). The trust model is in
   [ADR 0020](adr/0020-the-client-address-reaches-the-gateway-in-a-proxy-protocol-header.md).
 - **Access log.** The `EnvoyProxy` sets one JSON line per request to standard output, which the
   collector reads with the container's other lines ([Logs](#logs)): `client_address`, the address
@@ -3011,6 +3310,18 @@ answer holding addresses.
    in each labelled namespace, exactly the ports the routes send to there.
    In a namespace with the default deny, the backend also takes the proxies on that port
    ([Declaring an application's flows](#declaring-an-applications-flows)).
+5. Declare the route's `Probe` in that application, beside the route: copy `hello-route`'s
+   `probe.yaml`, change its name and its `hostname` label to the route's hostname, and the path of
+   its target to one the application answers 200 without a session where `/` does not, and nothing
+   else, as a `Probe` with a field, a target, a label or a relabeling more does not count; list it
+   in the application's `kustomization.yaml`, and add `blackbox-exporter` to its `dependsOn`, so a
+   cluster without the exporter cannot enable it ([Probes](#probes)). A route behind the cluster's
+   sign-in copies `demo/hello-sso`'s instead, whose module `public_https_signin` expects the
+   redirect to sign-in. Add the route's name to the routes, and the `Probe`'s path to the paths,
+   that `tests/probes.bats` pins for the tree: it fails on those pins first, and then, naming the
+   route and the hostname, when a route has no `Probe` for a hostname with the module it needs. A
+   route the application's chart renders from its release's values is held to the same, as the test
+   reads the render.
 
 The record for the name is made by external-dns within a minute or two of the route being accepted,
 and removed when the route is; there is no DNS step to do by hand ([DNS records](#dns-records)).
@@ -3245,7 +3556,12 @@ in `CreateContainerConfigError`, and the Kustomization `dex` is not Ready, with 
 reason. Until the third exists the Secret `oauth2-proxy-allowed-emails` does not exist, the pods
 of oauth2-proxy stay in `ContainerCreating`, and the Kustomization `oauth2-proxy` is not Ready, and
 so is `hello-sso`, which waits for it. Nothing else of the cluster waits on any of them, and the
-generated secrets are made as soon as External Secrets runs.
+generated secrets are made as soon as External Secrets runs. Until the first two exist the probe of
+`dex` under the domain fails, and `PublicEndpointWrongStatus` fires for it; then, until the third
+exists, the probe of `auth` does. The routes and `Probe`s of oauth2-proxy and of `hello-sso` are
+applied with their applications, each once the one before it is Ready, so the probe of `auth` is not
+there while dex waits, and the probe of `hello-sso` meets the redirect from its first run
+([Probes](#probes)).
 
 The wait is not open-ended. Each release's install times out after 10 minutes and is retried three
 times (the root's release defaults, [What the root sets](#what-the-root-sets)); after that
@@ -3287,7 +3603,10 @@ namespace of what is referred to, and Flux's target namespace would put one made
 into the application's own. A namespace not in the grant cannot refer to oauth2-proxy's Service;
 the Gateway API says so and the controller applies it. The grant names the one Service, never a
 namespace that has not opted in. No network policy changes for sign-in: the proxies already reach
-oauth2-proxy, and the route's own backend needs the rules every public hostname needs.
+oauth2-proxy, and the route's own backend needs the rules every public hostname needs. The route's
+`Probe`, which every public hostname needs, uses the module `public_https_signin`, which expects
+the redirect to sign-in that a request without a session gets, and `tests/probes.bats` refuses one
+that expects a 200 there ([Probes](#probes)).
 
 For each request to the route, Envoy first asks oauth2-proxy over HTTP, sending the request's host,
 method and cookie (Envoy always adds `Authorization`, which oauth2-proxy does not read here), and
@@ -4062,10 +4381,10 @@ n8n, the workflow automation tool, runs in `ai-system` (`apps/base/ai-system/n8n
 enforces the restricted Pod Security level and carries the Gateway label; it holds no default deny,
 and `network-policy-exceptions.yaml` lists it with n8n's flows ([Network policy](#network-policy)).
 n8n's `ks.yaml` names the operator, the Barman Cloud plugin, the Prometheus Operator definitions,
-External Secrets, the store's application, VolSync, LINSTOR and the public Gateway in `dependsOn`,
-and sets `wait` with the long timeout, so a cluster that lacks one of them is refused by
-`just kubernetes-check`, the encryption key's ExternalSecret is applied once the store is Ready, and
-the application is Ready once n8n answers its readiness endpoint.
+External Secrets, the store's application, VolSync, LINSTOR, the public Gateway and the blackbox
+exporter in `dependsOn`, and sets `wait` with the long timeout, so a cluster that lacks one of them
+is refused by `just kubernetes-check`, the encryption key's ExternalSecret is applied once the store
+is Ready, and the application is Ready once n8n answers its readiness endpoint.
 
 - **The chart** is app-template, from its publisher's OCI registry, pinned by tag and tracked by
   Renovate, with the images `docker.io/n8nio/n8n` and `docker.io/n8nio/runners` pinned by tag and
@@ -4148,7 +4467,8 @@ the application is Ready once n8n answers its readiness endpoint.
   Gateway's proxy adds the forwarding headers, and the edge routers in front of it translate the
   source address and add none ([ADR 0018](adr/0018-own-edge-routers-translate-public-traffic-to-the-gateway.md)),
   so n8n trusts one proxy. n8n sees as the client's the address the Gateway's proxy took as the
-  client's ([The public Gateway](#the-public-gateway)).
+  client's ([The public Gateway](#the-public-gateway)). The route's `Probe` asks for `/healthz`
+  through the Gateway from inside the cluster ([Probes](#probes)).
 - **The task runners.** Code nodes run in n8n's external mode, as n8n's documentation recommends:
   the container `runners`, from n8n's runners image of n8n's own version, which
   `tests/applications.bats` holds, runs the launcher that starts a JavaScript or Python runner when
@@ -4220,11 +4540,12 @@ Open WebUI, a chat interface for language-model APIs, runs in `ai-system`
 namespace directory is n8n's entry. The namespace holds no default deny, and
 `network-policy-exceptions.yaml` lists Open WebUI's flows beside n8n's; the public Gateway's
 proxies reach its pods on 8080 alone ([Network policy](#network-policy)). Its `ks.yaml` names
-External Secrets, the store's application, VolSync, LINSTOR and the public Gateway in `dependsOn`,
-and sets `wait` with the long timeout, so a cluster that lacks one of them is refused by
-`just kubernetes-check` and the application is Ready once Open WebUI answers its readiness endpoint
-on the restored volume. It has no database cluster
-and no secret of its own, so it names neither the operator nor the Prometheus Operator definitions.
+External Secrets, the store's application, VolSync, LINSTOR, the public Gateway and the blackbox
+exporter, which answers its route's `Probe`, in `dependsOn`, and sets `wait` with the long timeout,
+so a cluster that lacks one of them is refused by `just kubernetes-check` and the application is
+Ready once Open WebUI answers its readiness endpoint on the restored volume. It has no database
+cluster and no secret of its own, so it names neither the operator nor the Prometheus Operator
+definitions, whose `Probe` kind the exporter waits for.
 
 - **The chart** is app-template at the tag n8n's is, its `OCIRepository` named after the
   application, with the image `ghcr.io/open-webui/open-webui` pinned by tag and digest in
@@ -4263,7 +4584,9 @@ and no secret of its own, so it names neither the operator nor the Prometheus Op
   server trusts `X-Forwarded-For` from any peer, as the image starts it (`FORWARDED_ALLOW_IPS`
   defaults to `*`), and the variable is left alone: the sign-in rate limit is keyed by the account's
   email and not by the address, and the client's address reaches only the audit log and the
-  token-exchange limit, so a forged one gains little.
+  token-exchange limit, so a forged one gains little. The route's `Probe` asks for `/health/db`
+  through the Gateway from inside the cluster, which Open WebUI answers 200 without a session once
+  its database does ([Probes](#probes)).
 - **Hardening.** The pod runs as user and group 1000, though the image runs as root unless told
   otherwise, with the runtime's seccomp profile; the one container has a read-only root filesystem,
   no capability and no privilege escalation. It writes to the claim at `/app/backend/data`, to an
@@ -4357,10 +4680,10 @@ enter again.
 Backstage, the catalogue of what the cluster runs, runs in the namespace `backstage`
 (`apps/base/backstage/backstage/`), which enforces the restricted Pod Security level and carries the
 Gateway label. Its `ks.yaml` names the PostgreSQL operator, the Barman Cloud plugin, the Prometheus
-Operator definitions, External Secrets, the store's application, the public Gateway and Cilium,
-whose operator defines the
-kind of its network policies, in `dependsOn` and sets `wait` with the long timeout, so the
-application is Ready once Backstage answers its readiness endpoint with its database.
+Operator definitions, External Secrets, the store's application, the public Gateway, Cilium, whose
+operator defines the kind of its network policies, and the blackbox exporter, which answers its
+route's `Probe`, in `dependsOn` and sets `wait` with the long timeout, so the application is Ready
+once Backstage answers its readiness endpoint with its database.
 
 - **The image** is Backstage's published one, `ghcr.io/backstage/backstage`, pinned by tag and
   digest in `values.yaml` and tracked by Renovate, which never merges it
@@ -4428,7 +4751,8 @@ application is Ready once Backstage answers its readiness endpoint with its data
   listener to the Service `backstage` on 7007, published and reached as
   [Giving an application a public hostname](#giving-an-application-a-public-hostname) and
   [DNS records](#dns-records) say. The route sends on only the requests a reader's pages make
-  (Sign-in, below).
+  (Sign-in, below). Its `Probe` asks for the readiness endpoint, a `GET` the route admits, through
+  the Gateway from inside the cluster ([Probes](#probes)).
 - **Network.** The namespace denies traffic both ways by default and declares its flows beside the
   application (`ciliumnetworkpolicy.yaml`, [Network policy](#network-policy)). Backstage's pod takes
   the public Gateway's proxies and the kubelet's probes on 7007, and sends only to the cluster's
@@ -4571,8 +4895,10 @@ The steps n8n took, in order; the next port does the same and says where it diff
    the claim named in `existingClaim`; say what is in the volume and what is in the database, or
    that the volume is both.
 6. **Route.** An `HTTPRoute` on `https` of `public`, the application's own settings for its
-   host, protocol, origin and proxies agreeing with it, `gateway-public` in `dependsOn`, and a rule
-   for the backend's pods and container port in the proxies' egress ([Giving an application a public hostname](#giving-an-application-a-public-hostname)).
+   host, protocol, origin and proxies agreeing with it, `gateway-public` in `dependsOn`, a rule
+   for the backend's pods and container port in the proxies' egress, and the route's `Probe` at a
+   path the application answers 200 without a session, with `blackbox-exporter` in `dependsOn`
+   ([Giving an application a public hostname](#giving-an-application-a-public-hostname)).
 7. **Hardening.** Restricted: a user the image runs as, a read-only root filesystem with every path
    the application writes as a volume, found by running the pinned image read-only with those
    mounts alone, no capability, requests and a memory limit measured from that run, probes on the
@@ -4597,7 +4923,10 @@ The steps n8n took, in order; the next port does the same and says where it diff
    the Gateway out, and to the same list in `tests/external-dns.bats`; the backends the proxies
    reach in `tests/network-policy.bats`, where a port with a route adds its namespace and port to
    the pairs the routes must send to, and a row that the proxies reach its port and not another;
-   and the applications that take the volsync component in `tests/volume-backups.bats`.
+   the routes, the `Probe`s' paths and the applications that declare a `Probe` in
+   `tests/probes.bats`, where a port with a route also adds its application to the `tree_without`
+   list of the test that leaves the Gateway out; and the applications that take the volsync
+   component in `tests/volume-backups.bats`.
 9. **Catalogue.** The application's entity in `apps/base/backstage/backstage/app/catalogue/`, named
    as the application and listed in that directory's generator in `app/kustomization.yaml`, with
    its dependencies from `just catalogue-dependencies` ([Backstage](#backstage)).
@@ -5278,7 +5607,10 @@ the API server requires, and only its served versions count; an object that is o
 names no API. A well-shaped definition in the tree, or in a chart, does name its versions, which is
 what the cluster would serve once it is applied. Objects are selected by their exact name and
 namespace, as the controllers look them up: a `valuesFrom` or chart source named `x-*` selects
-nothing that is not called `x-*`. A HelmRelease whose name is not a DNS subdomain or whose
+nothing that is not called `x-*`. A `valuesFrom` entry whose ConfigMap is not in the application, or
+whose `valuesKey` the ConfigMap does not hold, fails the render naming the release, the ConfigMap
+and the key, as helm-controller fails the release, unless the entry is `optional`, which both skip.
+A HelmRelease whose name is not a DNS subdomain or whose
 namespace is not a DNS label is refused, naming its file (or its application's directory), before
 anything is read from it. The render reads the tree's `kubernetes/` and `versions.yaml` alone, and
 refuses a tree from which a build would read outside it, or a document a tool would read otherwise

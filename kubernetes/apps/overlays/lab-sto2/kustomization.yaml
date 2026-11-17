@@ -67,6 +67,7 @@ resources:
   - ../../base/kube-system/vpa/ks.yaml
   - ../../base/kyverno/kyverno-policies/ks.yaml
   - ../../base/kyverno/kyverno/ks.yaml
+  - ../../base/monitoring/blackbox-exporter/ks.yaml
   - ../../base/monitoring/flux-monitoring/ks.yaml
   - ../../base/monitoring/grafana-operator/ks.yaml
   - ../../base/monitoring/grafana/ks.yaml
@@ -87,7 +88,8 @@ resources:
   - ../../base/demo/hello-sso/ks.yaml
 
 patches:
-  # The issuer of the public Gateway's certificate, the one place this cluster chooses it:
+  # The issuer of the public Gateway's certificate, the place this cluster chooses it, which the next
+  # patch repeats for the probes:
   # letsencrypt-production, whose certificates a client with the usual public roots trusts. Without this patch the
   # certificate comes from the cluster's own CA. Choosing an issuer of acme-issuers names that
   # application in dependsOn, which scripts/kubernetes-check requires.
@@ -106,6 +108,24 @@ patches:
         value:
           substitute:
             PUBLIC_ISSUER: letsencrypt-production
+  # The issuer whose certificates the probes of the public hostnames verify, the one the patch above
+  # chooses for the Gateway: tests/probes.bats fails for a cluster whose two differ, and
+  # scripts/kubernetes-check refuses one that probes with an issuer the probes hold no values for
+  # (docs/kubernetes.md, Probes). Selected by target, so an overlay that leaves the exporter out
+  # still builds.
+  - target:
+      group: kustomize.toolkit.fluxcd.io
+      kind: Kustomization
+      name: blackbox-exporter
+    patch: |-
+      apiVersion: kustomize.toolkit.fluxcd.io/v1
+      kind: Kustomization
+      metadata:
+        name: blackbox-exporter
+      spec:
+        postBuild:
+          substitute:
+            PROBE_ISSUER: letsencrypt-production
   # The cluster's name, which owns the DNS records external-dns makes: two clusters that share a
   # zone never touch each other's records. Selected by target, so an overlay that leaves the
   # application out still builds.

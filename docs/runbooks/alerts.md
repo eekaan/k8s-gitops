@@ -656,3 +656,142 @@ object storage refused it, in which case the alert fires 36 hours after its pods
 by hand to clear the alert at once, once the cause is gone: `kubectl --namespace <namespace> create
 -f` a `Backup` of method `plugin` for the cluster, as
 [postgres-restore.md](postgres-restore.md#taking-a-base-backup-by-hand) shows.
+
+## PublicEndpointDown
+
+The probe of a public hostname has had no answer for 5 minutes. The blackbox exporter asks the
+Gateway's proxies for the hostname from inside the cluster, and no response came back: the
+connection was refused or timed out, or the TLS handshake failed, which a certificate for another
+name does, or one that the trust of the cluster's issuer does not verify: the cluster's authority
+for `cluster-ca`, the system's roots for `letsencrypt-production`; under `letsencrypt-staging` the
+probe verifies no certificate ([Probes](../kubernetes.md#probes)). The alert names the hostname; the
+apex of the domain is the redirect's probe, over plain HTTP.
+
+Look at first: `just gateway-check`, which reads the Gateway, its Service, the proxies and the
+certificate and says which fails; then `kubectl --namespace envoy-gateway-system get pods,svc` for
+the proxies and their Service. To see the probe's own reason, ask the exporter for it, the same
+request Prometheus makes, from a port-forward to its Service:
+`kubectl --namespace monitoring port-forward svc/blackbox-exporter 9115` and, in another terminal,
+`curl 'http://127.0.0.1:9115/probe?module=public_https&hostname=<hostname>&target=https://<Service>/&debug=true'`
+with the module, the Service's name and the path from the Probe (`public_https_signin` for a route
+behind sign-in), which prints the exporter's log of that probe.
+
+Usually: both proxies are gone or not Ready, which `kubectl --namespace envoy-gateway-system get
+pods` shows; the Gateway's certificate is not issued or is for another name
+(`kubectl --namespace envoy-gateway-system get certificate`); the exporter's trust does not match
+the issuer, so the handshake fails verification: the Gateway serves a certificate of another issuer
+than the overlay's `PROBE_ISSUER` names, as while a new issuer's certificate is not Ready yet and
+the proxies still serve the old one, or, with the cluster's own CA, after the authority was replaced
+and the exporter's Secret `blackbox-exporter-trust` was not renewed yet
+(`kubectl --namespace monitoring get certificate blackbox-exporter-trust`). A probe that fails
+while `just gateway-check` passes through the edges points at the exporter or the cluster's
+network, not at the Gateway: the pods of `kubectl --namespace monitoring get pods` and Cilium, and
+`just network-drops`, which lists the exporter's flows to the proxies on 10443 or 10080 when the
+proxies' policy does not take them ([Probes](../kubernetes.md#probes)). Every hostname at once,
+with a name the exporter cannot resolve in its log of the probe, means the proxies' Service is not
+named as the Probes' targets name it, as after an update of Envoy Gateway that names it otherwise:
+`kubectl --namespace envoy-gateway-system get svc` shows the name the controller gave it.
+
+## PublicEndpointWrongStatus
+
+The Gateway answers the probe of a public hostname, but with a status the probe does not accept,
+for 5 minutes: a 200 is what a route's probe wants, a 302, the redirect to sign-in, what the probe
+of a route behind sign-in wants, and a 301 the redirect's. The Gateway and the certificate are fine,
+since the handshake succeeded and verified, and the route or its backend is not: Envoy answers 503
+for a route whose backend has no ready endpoint, 403 for a route behind sign-in while oauth2-proxy
+cannot answer, and 404 for a hostname it holds no route for ([Probes](../kubernetes.md#probes)).
+
+Look at first: the status the probe got: the exporter's `probe_http_status_code` for that hostname
+in Prometheus' web interface, or the debug request in [PublicEndpointDown](#publicendpointdown).
+Then the route: `kubectl get httproute --all-namespaces` shows the routes of the Gateway and
+`kubectl --namespace <namespace> describe httproute <name>` its conditions, `Accepted` and
+`ResolvedRefs`.
+
+Usually: a 503 means the backend Service has no ready pods
+(`kubectl --namespace <namespace> get endpointslices`), as for an application whose pods wait for a
+secret the owner writes to the store, until it is there: n8n for its encryption key, and dex and
+after it oauth2-proxy for the sign-in's
+([What the owner does, in order](../kubernetes.md#what-the-owner-does-in-order)); a 404 means the
+route is not accepted, as its namespace lost the label `k8s-gitops/gateway: public`, or the hostname
+changed under the route. For a route behind sign-in, a 403 means oauth2-proxy did not answer
+(`kubectl --namespace sso-system get pods`), and a 200 means the backend answers without a session:
+the route's `SecurityPolicy` is gone or not accepted
+(`kubectl --namespace <namespace> describe securitypolicy <route>`), which leaves the page open to
+anyone until it is back. For the redirect, any status but 301 means another route took the http
+listener, which `just gateway-check` reports.
+
+## PublicCertificateExpiring
+
+The certificate the Gateway serves for a public hostname expires within 14 days and the probe still
+sees it: cert-manager renews it with two fifths of its lifetime left. The probe reads the earliest
+end among the certificates the proxies send (`probe_ssl_earliest_cert_expiry`), which are the
+listener's certificate and the intermediates of its chain, so it is the listener's certificate while
+its intermediates outlive it, and an intermediate that ends sooner raises the alert although the
+certificate is renewed ([Probes](../kubernetes.md#probes)). A renewal that fails also raises
+[CertManagerCertificateExpiringSoon](#certmanagercertificateexpiringsoon) for `public-wildcard`,
+which reads the certificate cert-manager stored; this alert alone means the proxies serve an older
+certificate than the one stored, cert-manager is not scraped, or it is an intermediate that ends.
+
+Look at first: `kubectl --namespace envoy-gateway-system get certificate public-wildcard` and
+`kubectl --namespace envoy-gateway-system describe certificate public-wildcard`: its `Ready`
+condition, its `Not After` and `Renewal Time`, and the events of the issuance;
+`kubectl --namespace cert-manager logs deployment/cert-manager` says why cert-manager does not
+issue. A stored `Not After` later than the alert's days has one of two causes: the proxies serve an
+older certificate than the one stored, or the certificate that ends is an intermediate of the chain,
+not the listener's. The certificate served tells them apart. The debug request in
+[PublicEndpointDown](#publicendpointdown) prints the probe's series, among them
+`probe_ssl_last_chain_info`, whose `serialnumber` and `issuer` are those of the listener's
+certificate as the proxies serve it; the stored one's are printed by
+`kubectl --namespace envoy-gateway-system get secret public-wildcard-tls --output jsonpath='{.data.tls\.crt}' | base64 --decode | openssl x509 -noout -serial -issuer -enddate`,
+which reads the first certificate of the Secret's chain, the listener's, and prints no key. Another
+serial number (the two write the same hex digits in different case) means the proxies hold an older
+certificate. The same one means an intermediate ends first: the issuer gives its chain with each
+certificate, and the next issuance, which cert-manager starts once two fifths of the listener's
+lifetime are left, can be weeks away. To issue sooner, mark the `Certificate` for issuance with
+cert-manager's command-line tool, which is not one of this repository's pinned tools:
+`cmctl renew --namespace envoy-gateway-system public-wildcard`. An issuance from Let's Encrypt
+counts against its rate limits ([The ACME issuers](../kubernetes.md#the-acme-issuers)).
+
+Usually: the issuer cannot sign, as the cluster's authority's Secret is gone, an ACME order fails
+([Choosing the public Gateway's issuer](../kubernetes.md#choosing-the-public-gateways-issuer)) or
+the `ClusterIssuer` is not Ready (`kubectl get clusterissuer`); or cert-manager is not running. A
+renewed certificate reaches the proxies within seconds, and the alert clears after the next probe.
+The proxies serve the certificate the controller last sent them, so one older than the stored
+certificate means the controller has not sent the new one: it is not running, or the proxies cannot
+reach it on 18000 (`kubectl --namespace envoy-gateway-system get pods` and the controller's log).
+
+## PublicCertificateExpiryImminent
+
+The same as [PublicCertificateExpiring](#publiccertificateexpiring), within 3 days: the certificate
+was not renewed in the 11 days since the warning, and the hostname's clients will refuse it soon.
+Treat it as an outage in progress.
+
+Look at first, and usually: as for [PublicCertificateExpiring](#publiccertificateexpiring). The
+renewal is cert-manager's and follows by itself once the issuer signs again; nothing in this
+repository renews a certificate by hand.
+
+## ProbeNotRunning
+
+A declared probe of a public hostname has not been scraped through the exporter for 10 minutes:
+Prometheus' `up` of its target in the job `public-endpoints` is 0, so the probe writes nothing and
+the other alerts on that hostname say nothing. The exporter is gone, the `Probe` names another
+prober or a module the exporter does not have, or the probe takes longer than the scrape allows. A
+cluster that declares no `Probe` never raises it ([Probes](../kubernetes.md#probes)).
+
+Look at first: `kubectl --namespace monitoring get pods,svc` for the exporter's two pods and its
+Service `blackbox-exporter`, and `kubectl get probes --all-namespaces` for the Probes, which are in
+the namespaces of their routes. In Prometheus' web interface, Status, Targets shows each Probe's
+scrape and its error: a refused connection when the Service has no ready pod, an HTTP 400 for a
+module the exporter does not have.
+`kubectl --namespace monitoring get helmrelease blackbox-exporter` says whether the release, which
+reads the values of the cluster's `PROBE_ISSUER`, failed.
+
+Usually: both exporter pods are Pending or not Ready, as after a drain of the workers they ran on;
+the exporter's Kustomization is not applied, which
+`kubectl --namespace flux-system get kustomization blackbox-exporter` shows; or a Probe was given a
+prober or a module by hand that the tree does not have. A release that failed three times is Stalled
+until its failure count is reset, which helm-controller does when the release's chart or values
+change, and `flux reconcile helmrelease blackbox-exporter -n monitoring --reset` does by hand.
+Until the exporter's Kustomization is Ready again, Flux applies no change to the Gateway or to an
+application with a route, which wait for it, from each one's next reconcile
+([Probes](../kubernetes.md#probes)).

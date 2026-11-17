@@ -23,13 +23,15 @@ spec:
       VOLSYNC_SCHEDULE: "37 3 * * *"
   # The volume's ExternalSecret reads the store, which openbao-store makes and is Ready once the
   # store is; the volume and its snapshots come from LINSTOR's default classes and the backups from
-  # VolSync; the route names the public Gateway. Open WebUI has no secret of its own to read.
+  # VolSync; the route names the public Gateway, and its Probe is answered by the blackbox exporter.
+  # Open WebUI has no secret of its own to read.
   dependsOn:
     - name: external-secrets
     - name: openbao-store
     - name: volsync
     - name: linstor-cluster
     - name: gateway-public
+    - name: blackbox-exporter
   # Ready once the release is, which is once Open WebUI answers its readiness endpoint with its
   # database on the restored volume.
   wait: true
