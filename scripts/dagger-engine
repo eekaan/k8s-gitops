@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Starts, in Docker, the engine container the pinned dagger CLI would otherwise start itself, with
+# an empty file system over the cache entries its image ships.
+# The pinned engine merges those entries at every start and refuses to start unless all of them
+# merge, and one of them expires a week after the image was built: a container made from the image
+# as it is never comes up, and the CLI waits ten minutes for it before it gives up
+# (https://github.com/dagger/dagger/pull/15199). Without the entries the engine starts and builds
+# what they held the first time a Go module needs it. The CLI starts the container of this name
+# when one exists and creates one only when none does, so the container made here is the one it
+# uses.
+# An engine the caller names (DAGGER_ENGINE, _EXPERIMENTAL_DAGGER_RUNNER_HOST) is not this
+# script's, and without docker the CLI says what it lacks itself: both leave nothing to do here.
+# Usage: scripts/dagger-engine
+set -euo pipefail
+
+if [[ -n ${DAGGER_ENGINE-}${_EXPERIMENTAL_DAGGER_RUNNER_HOST-} ]] || ! command -v docker > /dev/null; then
+  exit 0
+fi
+
+here=$(cd "$(dirname "$0")/.." && pwd)
+entries=/usr/local/share/dagger/entries
+image=$(sed -n 's/^dagger_engine:[[:space:]]*//p' "$here/versions.yaml")
+if [[ $image != *:*@sha256:* ]]; then
+  echo "dagger-engine: versions.yaml names no engine image by tag and digest" >&2
+  exit 1
+fi
+tag=${image%@*}
+name=dagger-engine-${tag##*:}
+
+state=$(docker inspect --format '{{.State.Running}} {{.State.Restarting}} {{json .HostConfig.Tmpfs}}' "$name" 2> /dev/null) || state=
+case $state in
+  '')
+    docker run --detach --name "$name" --restart always --privileged --volume /var/lib/dagger \
+      --tmpfs "$entries" "$image" > /dev/null
+    echo "dagger-engine: started $name without its image's cache entries" >&2
+    ;;
+  'true false '*)
+    # It runs: with the entries hidden, or started before they expired. Either way it serves.
+    ;;
+  *"\"$entries\""*)
+    docker start "$name" > /dev/null
+    ;;
+  *)
+    echo "dagger-engine: $name exists, does not run, and was made with its image's cache entries, so it cannot start; remove it with 'docker rm $name' and run again" >&2
+    exit 1
+    ;;
+esac

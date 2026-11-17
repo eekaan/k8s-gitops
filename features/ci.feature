@@ -126,3 +126,13 @@ Feature: Continuous integration
     Given every workflow file under .github/workflows/ and the recipes its jobs run
     When a job runs a recipe that, itself or in the script it runs, calls the Dagger module
     Then that job checks out the whole history, as the module reads the workspace's Git history, which a shallow clone of a commit with parents cannot give
+
+  Scenario: The engine starts without the cache entries its image ships
+    Given the engine image versions.yaml pins and a docker that records what it is asked
+    When scripts/dagger-engine runs with no engine container, with one that runs, with a stopped one that hides the entries, with one made from the image as it is that does not run or keeps restarting, and with an engine the caller names
+    Then it makes one container, named as the pinned dagger CLI names its engine, privileged, from the pinned image by digest, with an empty file system over /usr/local/share/dagger/entries; leaves the running one alone; starts the stopped one; stops the run for the one that cannot start, saying how to replace it and removing nothing; and calls docker for nothing when the caller names an engine
+
+  Scenario: Every recipe and script that calls Dagger starts the engine first
+    Given the justfile and scripts/tools-image
+    When the lines that call the Dagger module are read
+    Then each follows a line that runs scripts/dagger-engine

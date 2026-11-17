@@ -87,18 +87,6 @@ jobs:
       - run: just ci "$GROUP"
         env:
           GROUP: ${{ matrix.group }}
-      # Diagnostic: the engine's own log is the only record of why it did not start.
-      - if: failure()
-        run: |
-          docker ps -a --filter name=dagger-engine --format '{{.Names}} {{.Status}}' || true
-          for name in $(docker ps -a --filter name=dagger-engine --format '{{.Names}}'); do
-            docker inspect --format '{{.Name}} restarts={{.RestartCount}} oom={{.State.OOMKilled}} exit={{.State.ExitCode}} error={{.State.Error}}' "$name" || true
-            docker logs --tail 150 "$name" 2>&1 | cut -c1-400 || true
-          done
-          free -m || true
-          nproc || true
-          uname -r || true
-          sudo dmesg 2>/dev/null | tail -40 || true
 
   render:
     # Always a hosted runner: the CI host's cache would gain it nothing.
