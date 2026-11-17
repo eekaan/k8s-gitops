@@ -18,5 +18,5 @@ spec:
   owner: group:default/operators
   system: databases
   dependsOn:
+    - component:default/cert-manager
     - component:default/cloudnative-pg
-    - resource:default/cluster-ca
