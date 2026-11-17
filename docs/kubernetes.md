@@ -2154,9 +2154,13 @@ to set, while it is not the image the chart runs.
 ## cert-manager
 
 `apps/base/cert-manager/cert-manager/` installs cert-manager, which issues and renews the TLS
-certificates applications and gateways ask for, from the issuers they name (ADR 0006). OpenBao's own
-issuers are namespaced and sign OpenBao's listener certificate alone ([OpenBao](#openbao)); the one
-issuer any namespace may name is the `ClusterIssuer` `cluster-ca`, below.
+certificates applications and gateways ask for, from the issuers they name (ADR 0006). The
+namespaced issuers serve their own application alone: `cluster-ca-bootstrap` signs the cluster's
+own CA, below; OpenBao's own issuers sign OpenBao's listener certificate ([OpenBao](#openbao)); and
+the Barman Cloud plugin's self-signed `Issuer` signs the plugin's two certificates
+([PostgreSQL](#postgresql)). The issuers any namespace may name are the cluster's three
+`ClusterIssuer`s: `cluster-ca` and the ACME issuers `letsencrypt-staging` and
+`letsencrypt-production`, below.
 
 It runs in its own namespace, `cert-manager`, at the restricted Pod Security level, from the
 publisher's chart in `oci://quay.io/jetstack/charts`; its leader election leases are there too, so
@@ -3376,12 +3380,33 @@ Renovate group with the chart; the test fails unless both images are the release
 pod or a node, and a disruption budget keeps one through a drain: while none answers, the operator
 cannot make or change the pod of a database that archives. The plugin's two certificates, which
 authenticate the operator to the plugin and the plugin to the operator, are the application's own,
-signed by the cluster's own CA, `ClusterIssuer` `cluster-ca`, and by no ACME issuer; the chart's
-own, which name an `Issuer` of the namespace and a self-signed one it makes, are off. The
-application names `cloudnative-pg` and `cluster-ca` in `dependsOn` and sets `wait`. Its pods meet
-the restricted level the namespace enforces, and so does the sidecar the plugin injects, which runs
-as a non-root user with a read-only root file system, every capability dropped and the runtime's
-seccomp profile.
+`barman-cloud-client` and `barman-cloud-server` in the Secrets `barman-cloud-client-tls` and
+`barman-cloud-server-tls` that the plugin's Service names for the operator, each signed by its own
+key through the `Issuer` `barman-cloud-selfsigned` of the namespace, as in the plugin's own
+manifest; the chart's certificates and issuer are off. The application names `cert-manager` and
+`cloudnative-pg` in `dependsOn` and sets `wait`. Its pods meet the restricted level the namespace
+enforces, and so does the sidecar the plugin injects, which runs as a non-root user with a read-only
+root file system, every capability dropped and the runtime's seccomp profile.
+
+Each side trusts exactly the other's certificate, which is why the two are self-signed and not
+issued by the cluster's CA. The plugin's server takes the client certificate, `tls.crt` of
+`barman-cloud-client-tls`, as its only client authority and names that certificate's subject when
+it asks the operator for one; the operator trusts the server's certificate, `tls.crt` of
+`barman-cloud-server-tls`, and presents its own only if it is issued by an authority the server
+names. A self-signed certificate is; one the cluster's CA issued is not, so the operator would
+present none and the plugin would end the handshake with `tls: certificate required`. Naming the
+CA to the plugin instead would admit every certificate the cluster's CA issues for client
+authentication. The server's certificate would pass either way, as the operator trusts that
+certificate itself; it is self-signed as well, as in the plugin's manifest, so the application needs
+no issuer but its own.
+
+While the operator cannot reach the plugin, every `Cluster` that names it stays in
+the phase `Cluster cannot proceed to reconciliation due to an error while interacting with
+plugins`, its `phaseReason` naming the error, and the operator makes, changes and fails over none of
+its pods. A primary that does not have the plugin's sidecar yet, such as one made before its
+`Cluster` named the plugin, then fails to archive every WAL segment, `PostgresWALArchivingFailing`
+fires ([alerts.md](runbooks/alerts.md#postgreswalarchivingfailing)), and the segments stay on its
+volume until it is full; a `Cluster` made meanwhile gets no instance at all.
 
 An application takes a cluster from the component `components/cnpg-cluster`, in its `ks.yaml`:
 
@@ -3531,12 +3556,18 @@ A cluster's data lives on the workers' data volumes, in the archive and in the d
 lives](#where-the-data-lives)).
 
 `tests/postgresql.bats` renders the operator's and the plugin's charts and checks their namespace,
-definitions, replicas, budgets, monitors, images, certificates and pods; builds applications that
+definitions, replicas, budgets, monitors, images, certificates and pods; runs a TLS 1.3 handshake
+between OpenSSL stand-ins for the plugin's server and the operator, each given the files the real
+one reads, with certificates made as the plugin's issuer makes them, and checks that certificates
+the cluster's CA would issue end it with `certificate required`; builds applications that
 take a cluster from the component, one that does not name it and two that patch it, by kind and by
 name, as Flux applies them, and checks their archive paths, schedule, retention, encryption and
 credentials; checks each field of the `Cluster`, the `ObjectStore` and the `ScheduledBackup`
 against the pinned charts' definitions and the restore runbook's manifest against the `Cluster`'s;
-and checks the `StorageClass` against LINSTOR's. `tests/postgres-dumps.bats` builds applications that
+and checks the `StorageClass` against LINSTOR's. Its handshake runs the system's `openssl`, which
+`mise.toml` does not pin: the CI tools image has the one its base image comes with, which
+`versions.yaml` pins by digest, and an `openssl` that is missing or behaves otherwise fails the test
+rather than passing it. `tests/postgres-dumps.bats` builds applications that
 take a cluster from the component and runs the dump job's scripts as its containers run them, with
 stand-ins for `pg_dump`, `pg_isready` and the S3 client. `tests/rules/cloudnative-pg.yaml` tests the
 alerts.

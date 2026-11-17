@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 # Proves features/postgresql.feature; each test carries its scenario's title.
-# Needs helm, kustomize, flux, yq and jq on PATH (the versions pinned for the repository). The
+# Needs helm, kustomize, flux, yq and jq on PATH (the versions pinned for the repository), and the
+# system's openssl, which makes the certificates of the plugin's handshake and runs it. The
 # operator's chart is pulled once per run from its public registry; building and rendering are
 # offline. flux build rewrites the kustomization.yaml of what it builds while it runs, so every
 # build reads a copy of kubernetes/, never this checkout, and the applications that take a cluster
@@ -775,8 +776,8 @@ archive_path() {
   done
 }
 
-@test "The Barman Cloud plugin runs beside the operator it is made for, signed by the cluster's own CA, and meets the restricted Pod Security level" {
-  local required=1.30 operator overlay image sidecar version deployment labels replicas spread budgets issuers secrets served
+@test "The Barman Cloud plugin runs beside the operator it is made for and meets the restricted Pod Security level" {
+  local required=1.30 operator overlay image sidecar version deployment labels replicas spread budgets
   # The plugin's release requires CloudNativePG 1.30 or newer, which is the operator's version the
   # chart the repository pins installs, read from the chart. The floor is this constant, from the
   # installation documentation of the plugin's release, and nothing reads it from a release: a plugin
@@ -786,12 +787,13 @@ archive_path() {
   echo "operator $operator; the plugin requires $required or newer"
   [ "$(printf '%s\n' "$required" "$operator" | sort -V | head -n 1)" = "$required" ]
   APP="plugin-barman-cloud"
-  # Enabled in the cluster's overlay, after the operator and the CA that signs its certificates.
+  # Enabled in the cluster's overlay, after the operator and cert-manager, whose kinds its issuer and
+  # certificates are.
   overlay="$(kustomize build --load-restrictor LoadRestrictionsNone "$TREE/kubernetes/apps/overlays/lab-sto2")"
   [ "$(yq -N "select(.kind == \"Kustomization\" and .metadata.name == \"$APP\") | .spec.path + \" wait=\" + (.spec.wait | tostring)" <<<"$overlay")" \
     = "./apps/base/$NAMESPACE/$APP/app wait=true" ]
   [ "$(yq -N "select(.kind == \"Kustomization\" and .metadata.name == \"$APP\") | .spec.dependsOn | map(.name) | sort | join(\" \")" <<<"$overlay")" \
-    = "cloudnative-pg cluster-ca" ]
+    = "cert-manager cloudnative-pg" ]
   render
   version="$(tar -xzOf "$CHART" plugin-barman-cloud/Chart.yaml | yq '.appVersion')"
   echo "plugin $version"
@@ -827,24 +829,240 @@ archive_path() {
   [ "$spread" -ge 1 ]
   [[ $budgets =~ ^[0-9]+$ ]]
   ((budgets >= 1 && budgets < replicas))
-  # Its two certificates come from the cluster's own CA, the ClusterIssuer cluster-ca, and from no
-  # other issuer, ACME issuers included; the chart makes neither certificates nor an issuer of its
-  # own, which would be self-signed. They make the Secrets the Service says the operator reads.
+  # The chart makes neither certificates nor an issuer: the two certificates and their issuer are the
+  # application's own, which the next test reads.
   [ -z "$(yq -N 'select(.kind == "Certificate" or .kind == "Issuer" or .kind == "ClusterIssuer") | .kind' "$RENDERED")" ]
-  issuers="$(yq -N 'select(.kind == "Certificate") | .metadata.name + " " + .spec.issuerRef.kind + "/" + .spec.issuerRef.name' "$BUILT" | sort | paste -sd, -)"
-  echo "certificates: $issuers"
-  [ "$issuers" = "barman-cloud-client ClusterIssuer/cluster-ca,barman-cloud-server ClusterIssuer/cluster-ca" ]
-  [ -z "$(yq -N 'select(.kind == "Issuer" or .kind == "ClusterIssuer") | .kind' "$BUILT")" ]
-  secrets="$(yq -N 'select(.kind == "Certificate") | .spec.secretName' "$BUILT" | sort | paste -sd, -)"
-  served="$(yq -N 'select(.kind == "Service") | .metadata.annotations["cnpg.io/pluginClientSecret"] + "," + .metadata.annotations["cnpg.io/pluginServerSecret"]' "$RENDERED")"
-  echo "secrets: $secrets; the Service names: $served"
-  [ "$secrets" = "$(tr ',' '\n' <<<"$served" | sort | paste -sd, -)" ]
-  # The server's certificate is valid for the Service's name, which the operator dials.
-  [ "$(yq -N 'select(.kind == "Certificate" and .metadata.name == "barman-cloud-server") | .spec.dnsNames | join(",")' "$BUILT")" \
-    = "$(yq -N 'select(.kind == "Service") | .metadata.name' "$RENDERED")" ]
   # The namespace it shares with the operator enforces the restricted level, and the pods meet it.
   [ "$(yq -N 'select(.kind == "Namespace") | .metadata.labels["pod-security.kubernetes.io/enforce"]' "$TREE/kubernetes/apps/base/$NAMESPACE/namespace.yaml")" = restricted ]
   assert_restricted
+}
+
+# The plugin's server and the operator, as the pinned releases make them, each trust exactly the
+# other's certificate. The server (cnpg-i-machinery v0.4.2, pkg/pluginhelper/http/server.go,
+# getConfigForClient) requires a client certificate and verifies it against a pool read from the file
+# --client-cert names, and Go's server names that pool's subjects to the client as the authorities it
+# accepts (crypto/tls, handshake_server_tls13.go, at go1.26.6, the version the plugin's go.mod
+# names). The operator (CloudNativePG v1.30.1, internal/controller/plugin_controller.go) presents
+# tls.crt and tls.key of the Secret the Service names in cnpg.io/pluginClientSecret, and trusts tls.crt
+# of the one in cnpg.io/pluginServerSecret for the server's certificate. Go's client sends a
+# certificate only if one in its chain is issued by an authority the server names, and none otherwise
+# (crypto/tls, handshake_client.go, getClientCertificate, and common.go, SupportsCertificate, at
+# go1.27.1, the toolchain the operator's go.mod names), and the server then ends the handshake with
+# the alert certificate required (handshake_server.go, processCertsFromClient, at go1.26.6); Go's
+# x509 accepts a certificate that is itself among the roots (crypto/x509, verify.go, Verify).
+#
+# handshake() runs those rules with OpenSSL. Its client picks a certificate by the authorities the
+# server names only in strict mode, which in TLS 1.3 also refuses an RSA or ECDSA key for want of
+# certificate types that TLS 1.3 no longer sends (ssl/t1_lib.c, tls1_check_chain, at openssl-3.5.7,
+# the tools image's), so the certificates made here have Ed25519 keys; a key's type changes neither
+# its certificate's issuer nor the names the server sends.
+
+# plugin_arg NAME: the value of the argument --NAME of the plugin's container in $RENDERED.
+plugin_arg() {
+  NAME="$1" yq -N 'select(.kind == "Deployment") | .spec.template.spec.containers[] | select(.name == "barman-cloud")
+    | .args[] | select(test("^--" + strenv(NAME) + "=")) | sub("^--" + strenv(NAME) + "="; "")' "$RENDERED"
+}
+
+# mounted FILE: the Secret and key, as SECRET/KEY, that the plugin's container reads the file FILE
+# from: the Secret volume mounted at FILE's directory in $RENDERED.
+mounted() {
+  # shellcheck disable=SC2016 # $p and $volume are yq variables.
+  FILE="$1" yq -N 'select(.kind == "Deployment") | .spec.template.spec as $p | $p.containers[] | select(.name == "barman-cloud")
+    | .volumeMounts[] | select((strenv(FILE) | sub("/[^/]*$"; "")) == .mountPath) | .name as $volume
+    | $p.volumes[] | select(.name == $volume) | .secret.secretName + "/" + (strenv(FILE) | sub("^.*/"; ""))' "$RENDERED"
+}
+
+# authority DIR NAME: DIR/NAME.crt and DIR/NAME.key, a CA whose common name is NAME, made as the
+# cluster's own CA is: an ECDSA P-384 key and a certificate it signs itself, which may sign others.
+authority() {
+  [ ! -f "$1/$2.crt" ] || return 0
+  printf '%s\n' '[req]' 'distinguished_name = dn' 'prompt = no' '[dn]' "CN = $2" '[ca]' \
+    'basicConstraints = critical, CA:TRUE' 'keyUsage = critical, keyCertSign, digitalSignature, keyEncipherment' >"$1/$2.cnf"
+  openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -out "$1/$2.key"
+  openssl req -new -x509 -config "$1/$2.cnf" -extensions ca -key "$1/$2.key" -days 3650 -out "$1/$2.crt"
+}
+
+# issue DIR NAME [CA]: DIR/NAME.crt and DIR/NAME.key for the Certificate NAME of $BUILT, with its common
+# name, DNS names and usages, made as the issuer it names would make it: signed by its own key, so
+# that its issuer is its own subject, when the build holds that issuer and it is selfSigned, as
+# cert-manager's selfSigned issuer signs (pkg/controller/certificaterequests/selfsigned/selfsigned.go
+# at v1.21.3); otherwise signed by a CA named after the issuer, or CA when it is given, and tls.crt
+# holds the certificate alone, as cert-manager's CA issuer writes it when its CA signed itself
+# (pkg/util/pki/parse_certificate_chain.go, toBundleAndCA).
+issue() {
+  local dir=$1 name=$2 ca=${3:-} certificate kind issuer usage dns
+  local -a usages=()
+  certificate="select(.kind == \"Certificate\" and .metadata.name == \"$name\")"
+  kind="$(yq -N "$certificate | .spec.issuerRef.kind" "$BUILT")"
+  issuer="$(yq -N "$certificate | .spec.issuerRef.name" "$BUILT")"
+  if [ -z "$ca" ] &&
+    [ "$(yq -N "select(.kind == \"$kind\" and .metadata.name == \"$issuer\") | .spec | has(\"selfSigned\")" "$BUILT")" != true ]; then
+    ca=$issuer
+  fi
+  while read -r usage; do
+    case $usage in
+      "client auth") usages+=(clientAuth) ;;
+      "server auth") usages+=(serverAuth) ;;
+      *) echo "issue: no extended key usage for '$usage'"; return 1 ;;
+    esac
+  done < <(yq -N "$certificate | .spec.usages // [] | .[]" "$BUILT")
+  dns="$(yq -N "$certificate | .spec.dnsNames // [] | map(\"DNS:\" + .) | join(\",\")" "$BUILT")"
+  {
+    printf '%s\n' '[req]' 'distinguished_name = dn' 'prompt = no' '[dn]' "CN = $(yq -N "$certificate | .spec.commonName" "$BUILT")" \
+      '[leaf]' 'basicConstraints = critical, CA:FALSE' 'subjectKeyIdentifier = none' 'authorityKeyIdentifier = none'
+    if [ "${#usages[@]}" -gt 0 ]; then echo "extendedKeyUsage = $(IFS=,; echo "${usages[*]}")"; fi
+    if [ -n "$dns" ]; then echo "subjectAltName = $dns"; fi
+  } >"$dir/$name.cnf"
+  openssl genpkey -algorithm ED25519 -out "$dir/$name.key"
+  if [ -z "$ca" ]; then
+    openssl req -new -x509 -config "$dir/$name.cnf" -extensions leaf -key "$dir/$name.key" -days 90 -out "$dir/$name.crt"
+  else
+    authority "$dir" "$ca"
+    openssl req -new -config "$dir/$name.cnf" -key "$dir/$name.key" -out "$dir/$name.csr"
+    openssl x509 -req -in "$dir/$name.csr" -CA "$dir/$ca.crt" -CAkey "$dir/$ca.key" -extfile "$dir/$name.cnf" \
+      -extensions leaf -days 90 -out "$dir/$name.crt"
+  fi
+}
+
+# made DIR SECRET/KEY: the file issue() made in DIR for the key KEY, tls.crt or tls.key, of the Secret
+# SECRET: that of the Certificate of $BUILT that writes SECRET.
+made() {
+  local name
+  name="$(SECRET="${2%/*}" yq -N 'select(.kind == "Certificate" and .spec.secretName == strenv(SECRET)) | .metadata.name' "$BUILT")"
+  case ${2##*/} in
+    tls.crt) [ -n "$name" ] && echo "$1/$name.crt" ;;
+    tls.key) [ -n "$name" ] && echo "$1/$name.key" ;;
+    *) return 1 ;;
+  esac
+}
+
+# handshake DIR SERVER_CERT SERVER_KEY CLIENT_CAS CLIENT_CERT CLIENT_KEY TRUST NAME: one TLS 1.3
+# handshake on the loopback interface between a server that serves SERVER_CERT, requires a client
+# certificate and accepts one that is, or is issued by, a certificate of CLIENT_CAS, whose subjects it
+# names, and a client that offers CLIENT_CERT only if it is issued by an authority the server names,
+# and accepts the server's certificate for NAME if it is, or is issued by, a certificate of TRUST. The
+# server answers with a page that describes the client certificate it verified. Writes DIR/server.out
+# and DIR/client.out and returns the client's status.
+handshake() {
+  local dir=$1 pid port="" status=0 _
+  printf 'GET / HTTP/1.0\r\n\r\n' >"$dir/request"
+  openssl s_server -accept 127.0.0.1:0 -naccept 1 -www -tls1_3 -cert "$2" -key "$3" -CAfile "$4" \
+    -Verify 1 -verify_return_error -partial_chain </dev/null >"$dir/server.out" 2>&1 3>&- &
+  pid=$!
+  for _ in $(seq 100); do
+    port="$(sed -n 's/^ACCEPT 127\.0\.0\.1:\([0-9][0-9]*\)$/\1/p' "$dir/server.out")"
+    [ -z "$port" ] || break
+    sleep 0.1
+  done
+  if [ -n "$port" ]; then
+    openssl s_client -connect "127.0.0.1:$port" -tls1_3 -strict -cert "$5" -key "$6" -CAfile "$7" -partial_chain \
+      -verify_return_error -verify_hostname "$8" -servername "$8" -ign_eof <"$dir/request" >"$dir/client.out" 2>&1 || status=$?
+  else
+    echo "the server did not start" >"$dir/client.out"
+    status=1
+  fi
+  for _ in $(seq 50); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" || true
+  return "$status"
+}
+
+# accepted DIR: the client's view of the last handshake in DIR: the authorities the server named, one
+# per line, then the line client= and the subject of the client certificate the server verified, or
+# none.
+accepted() {
+  awk '/^Acceptable client certificate CA names$/ { names = 1; next } names && /^[A-Za-z]+=/ { print; next } { names = 0 }
+    /^Client certificate$/ { page = 1 } page && /^ *Subject: / { sub(/^ *Subject: /, ""); client = $0; page = 0 }
+    END { print "client=" (client == "" ? "none" : client) }' "$1/client.out"
+}
+
+@test "The backup plugin and the operator each trust exactly the other's certificate" {
+  local dir="$BATS_TEST_TMPDIR/tls" certificates server_cert server_key client_cas client_secret server_secret name
+  local subject each certificate issuer
+  APP="plugin-barman-cloud"
+  render
+  # render() reads the chart as helm template writes it, and helm-controller passes the release through
+  # its post-renderers before it applies it, so the files the pods read are those read below only
+  # while the release has none.
+  [ "$(yq -N 'select(.kind == "HelmRelease") | .spec.postRenderers // [] | length' "$BUILT")" -eq 0 ] ||
+    { echo "the HelmRelease has post-renderers, which change the pods after the render read here"; return 1; }
+  mkdir -p "$dir/built" "$dir/cluster-ca"
+  # No configuration of the machine's OpenSSL applies.
+  : >"$dir/openssl.cnf"
+  export OPENSSL_CONF="$dir/openssl.cnf"
+  # The two Certificates have the names, Secrets, usages and DNS names of the plugin's own manifest,
+  # and neither is a CA, as there.
+  certificates="$(yq -N 'select(.kind == "Certificate") | .metadata.namespace + "/" + .metadata.name + " cn=" + .spec.commonName
+    + " secret=" + .spec.secretName + " usages=" + (.spec.usages // [] | join(",")) + " dns=" + (.spec.dnsNames // [] | join(","))
+    + " ca=" + (.spec.isCA // false | tostring)' "$BUILT" | sort)"
+  echo "$certificates"
+  [ "$certificates" = "$(printf '%s\n' \
+    "$NAMESPACE/barman-cloud-client cn=barman-cloud-client secret=barman-cloud-client-tls usages=client auth dns= ca=false" \
+    "$NAMESPACE/barman-cloud-server cn=barman-cloud secret=barman-cloud-server-tls usages=server auth dns=barman-cloud ca=false")" ]
+  # What each side reads: the plugin's server its certificate, its key and its client authorities from
+  # the Secrets mounted in its pod, the operator the Secrets the Service names.
+  server_cert="$(mounted "$(plugin_arg server-cert)")"
+  server_key="$(mounted "$(plugin_arg server-key)")"
+  client_cas="$(mounted "$(plugin_arg client-cert)")"
+  client_secret="$(yq -N 'select(.kind == "Service") | .metadata.annotations["cnpg.io/pluginClientSecret"]' "$RENDERED")"
+  server_secret="$(yq -N 'select(.kind == "Service") | .metadata.annotations["cnpg.io/pluginServerSecret"]' "$RENDERED")"
+  name="$(yq -N 'select(.kind == "Service") | .metadata.annotations["cnpg.io/pluginServerName"] // .metadata.name' "$RENDERED")"
+  echo "the plugin serves $server_cert and $server_key and takes $client_cas as its client authorities;" \
+    "the operator presents $client_secret and trusts $server_secret/tls.crt for $name"
+  [ "$client_cas" = "$(yq -N 'select(.kind == "Certificate" and .metadata.name == "barman-cloud-client") | .spec.secretName' "$BUILT")/tls.crt" ]
+  [ "$client_secret" = "${client_cas%/tls.crt}" ]
+  [ "$server_cert" = "$(yq -N 'select(.kind == "Certificate" and .metadata.name == "barman-cloud-server") | .spec.secretName' "$BUILT")/tls.crt" ]
+  [ "$server_key" = "${server_cert%/tls.crt}/tls.key" ]
+  [ "$server_secret" = "${server_cert%/tls.crt}" ]
+  # The server's certificate is valid for the name the operator checks it for, the Service's.
+  [ "$(yq -N 'select(.kind == "Certificate" and .metadata.name == "barman-cloud-server") | .spec.dnsNames | join(",")' "$BUILT")" = "$name" ]
+  # The handshake tells the two kinds of issuer apart: certificates the cluster's CA issues end it with
+  # certificate required, as the server names the client certificate's own subject and the CA issued
+  # that certificate, and it completes once the server names the CA instead.
+  issue "$dir/cluster-ca" barman-cloud-client cluster-ca
+  issue "$dir/cluster-ca" barman-cloud-server cluster-ca
+  run handshake "$dir/cluster-ca" "$(made "$dir/cluster-ca" "$server_cert")" "$(made "$dir/cluster-ca" "$server_key")" \
+    "$(made "$dir/cluster-ca" "$client_cas")" "$(made "$dir/cluster-ca" "$client_secret/tls.crt")" \
+    "$(made "$dir/cluster-ca" "$client_secret/tls.key")" "$(made "$dir/cluster-ca" "$server_secret/tls.crt")" "$name"
+  echo "issued by the cluster's CA: status $status; $(accepted "$dir/cluster-ca" | paste -sd' ' -)"
+  [ "$status" -ne 0 ]
+  [ "$(accepted "$dir/cluster-ca")" = "$(printf '%s\n' CN=barman-cloud-client client=none)" ]
+  grep -q 'alert certificate required' "$dir/cluster-ca/client.out"
+  run handshake "$dir/cluster-ca" "$dir/cluster-ca/barman-cloud-server.crt" "$dir/cluster-ca/barman-cloud-server.key" \
+    "$dir/cluster-ca/cluster-ca.crt" "$dir/cluster-ca/barman-cloud-client.crt" "$dir/cluster-ca/barman-cloud-client.key" \
+    "$dir/cluster-ca/barman-cloud-server.crt" "$name"
+  echo "the same, with the server naming the CA: status $status; $(accepted "$dir/cluster-ca" | paste -sd' ' -)"
+  [ "$status" -eq 0 ]
+  [ "$(accepted "$dir/cluster-ca")" = "$(printf '%s\n' CN=cluster-ca client=CN=barman-cloud-client)" ]
+  # With the certificates the tree's issuers make, each side presents its own and trusts the other's:
+  # the server names the client certificate's subject alone, and verifies the certificate the client
+  # presents, and the client verifies the server's.
+  issue "$dir/built" barman-cloud-client
+  issue "$dir/built" barman-cloud-server
+  run handshake "$dir/built" "$(made "$dir/built" "$server_cert")" "$(made "$dir/built" "$server_key")" \
+    "$(made "$dir/built" "$client_cas")" "$(made "$dir/built" "$client_secret/tls.crt")" \
+    "$(made "$dir/built" "$client_secret/tls.key")" "$(made "$dir/built" "$server_secret/tls.crt")" "$name"
+  echo "issued as the tree's issuers issue: status $status; $(accepted "$dir/built" | paste -sd' ' -)"
+  cat "$dir/built/server.out"
+  subject="$(openssl x509 -in "$(made "$dir/built" "$client_secret/tls.crt")" -noout -subject)"
+  [ "$status" -eq 0 ]
+  [ "$(accepted "$dir/built")" = "$(printf '%s\n' "${subject#subject=}" "client=${subject#subject=}")" ]
+  grep -qx 'Verify return code: 0 (ok)' "$dir/built/client.out"
+  # Both are self-signed: each Certificate names an Issuer, of cert-manager's group, that the build
+  # holds in the plugin's namespace, of kind selfSigned and nothing else; the build holds no
+  # ClusterIssuer.
+  for each in barman-cloud-client barman-cloud-server; do
+    certificate="select(.kind == \"Certificate\" and .metadata.name == \"$each\")"
+    echo "$each: issuer $(yq -N "$certificate | .spec.issuerRef | (.group // \"\") + \"/\" + .kind + \"/\" + .name" "$BUILT")"
+    [ "$(yq -N "$certificate | (.spec.issuerRef.group // \"\") + \" \" + .spec.issuerRef.kind" "$BUILT")" = "cert-manager.io Issuer" ]
+    issuer="$(yq -N "$certificate | .spec.issuerRef.name" "$BUILT")"
+    [ "$(yq -N "select(.kind == \"Issuer\" and .metadata.name == \"$issuer\") | .metadata.namespace + \" \" + (.spec | keys | join(\",\"))" "$BUILT")" \
+      = "$NAMESPACE selfSigned" ]
+  done
+  [ -z "$(yq -N 'select(.kind == "ClusterIssuer") | .metadata.name' "$BUILT")" ]
 }
 
 @test "The plugin's chart and images are pinned where Renovate updates them" {
