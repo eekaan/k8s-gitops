@@ -55,6 +55,11 @@ Feature: Edge routers
     When a connection is established through the proxy, and the worker's route then goes, as when FRR stops, and new connections are opened with the default route only and with no route at all
     Then what the established connection sends and the new connections' attempts reach neither the router nor anything else, each new connection is closed unanswered within a second and a half, and with the worker's route back a new connection is answered by the proxy that ran throughout
 
+  Scenario: A template that does not render fails the forward check where it is rendered, with what tofu said
+    Given the forward check's fixture as it is; a copy of it beside a stack whose proxy template is absent, where tofu console exits 0, prints "(known after apply)" and says why on standard error; a tofu that exits 0 and prints "(known after apply)"; and a tofu that exits non-zero
+    When the helper the forward check renders with is asked for the fixture's files
+    Then the fixture as it is renders both files, and every other render fails, non-zero, naming the local it asked for and showing what tofu printed on standard error, and leaves no file
+
   @pending @INF-15
   Scenario: The edges are replaced one at a time only once the Gateway accepts the header
     Given a Gateway whose public listeners accept a PROXY protocol header and edges that send one
@@ -91,6 +96,16 @@ Feature: Edge routers
     When just edge-rollout --replace runs, and again with the first edge missing a worker's session once replaced
     Then it replaces the first edge's instance alone, records its new host keys, waits until its check passes with every worker's session established, and only then replaces the second edge's instance; with the check failing, the second edge is never planned, applied or touched
 
+  Scenario: A rollout answered through a pipe written before it started reads the stack's name, the sentence that names both edges and the yes for each host key
+    Given edge 2 down with its host key not recorded, edge 1 to be replaced, consoles that hold no fingerprints, an SSH client that reads its standard input to the end, as OpenSSH's does, and the four answers written once to a pipe, in the order they are asked, by a writer that has ended
+    When just edge-rollout --replace --edge 1 --other-down runs without --yes, the pipe its standard input, and checks the edges with the real edge-check
+    Then each answer reaches its prompt, the yes the check of edge 2 asks for its host key among them, edge 1 is replaced and passes, no answer is left, and no program the rollout or its checks started had the pipe as its standard input but the checks themselves, which the rollout hands it to ask with, and the dirname each script runs to find its libraries before it keeps its input
+
+  Scenario: A plan that takes one edge down is applied on the stack's name read from a pipe, after the other edge's check
+    Given a plan that replaces edge 2 while edge 1 serves, an SSH client that reads its standard input to the end, and the stack's name written once to a pipe by a writer that has ended
+    When just infra-apply sto2/edge runs without --yes, the pipe its standard input
+    Then edge 1 is checked over SSH by a client that did not have the pipe, the name is read from the pipe, and the plan is applied
+
   Scenario: EDGE_ROLLOUT_WAIT and EDGE_ROLLOUT_INTERVAL are read from .env, as HOST_CONSOLE_WAIT is
     Given a .env that holds EDGE_ROLLOUT_WAIT, EDGE_ROLLOUT_INTERVAL and HOST_CONSOLE_WAIT, none of them in the environment, and a plan that replaces the first edge whose console holds no fingerprints yet
     When just edge-rollout runs with 08 and 04, and with 010 and 02 in the file, and with a value in the file that is no whole number of at most 9 digits
@@ -115,6 +130,16 @@ Feature: Edge routers
     Given an edge whose command for one section of the report is missing or fails, in turn for every section, with a message that holds an address
     When just edge-check runs
     Then it fails with a line that says it cannot read that state on the edge and what the edge said with the address left out, and it does not draw the unhealthy conclusion from the missing answer
+
+  Scenario: The check fails an edge whose loaded ruleset has a chain hooked at nat or a statement that translates, in any table
+    Given an edge, healthy otherwise, whose loaded ruleset as nft lists it as JSON is, in turn: its own table alone, beside a table that only filters, beside one whose chain filters before routing, and with rules that match a translated connection or carry a translation's name in a comment; its own table beside the translation table by its name, beside a chain hooked at nat that holds no rule in a table of another name, before routing, at output and after routing, beside the nat table iptables-nft makes, and with each of dnat, snat, masquerade and redirect in a chain hooked nowhere, in its own table and in another; in place of its own table nothing, a table of its name in another family, a table of its family under another name, and a chain hooked at nat with a masquerade statement in a chain hooked nowhere; its own table beside a rule that jumps to an inline chain with a masquerade statement, which nft lists as text; and an answer that is not nft's listing
+    When just edge-check runs
+    Then the first four pass, saying that none translates an address; each of the next fails on a line of its own that names what was found, a chain hooked at nat or which statements, and no rule, element or address; without its own table the rules are not loaded, and what translates in their place is named on its line all the same; and the inline chain and an answer that is not the listing each fail as a state that cannot be read, neither a pass nor rules that are not loaded
+
+  Scenario: Without a Gateway address the output chain's guard is a skip that says what was not compared
+    Given an edge whose output chain holds its guard, and a talman.yaml that gives no Gateway address: with its workers, with none, and not there at all
+    When just edge-check runs, and again with no guard rule, a worker's address left out of the guard, a worker without an address in the file, and the default route's next hop admitted
+    Then the guard's line is a skip, which fails nothing and says that the guard was not compared with the Gateway's address, that no worker's address was looked for in it when the file gives none, and what was still checked; and each of the others fails as it does with the address
 
   Scenario: The first boot gives the SSH daemon the settings the tree holds, and they win over the image's
     Given the image's SSH daemon configuration, which includes its drop-in directory ahead of its own key exchange, ciphers and MACs, and drop-ins that say password login, root login and forwarding are on

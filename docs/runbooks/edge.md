@@ -55,11 +55,19 @@ In this order, after the plumbing stack is applied ([rebuild.md](rebuild.md)):
   with its reject route for the range, for the range `talman.yaml` names, and the kernel has it. A
   FAIL that no reject route is configured means FRR runs without the edge's configuration, as after
   a first boot that failed: rebuild the edge.
-- **The nftables rules are loaded, and none translates an address**; **the forward chain forwards
-  nothing**; **the output chain keeps the proxy's connections to the Gateway on a worker's route**,
-  read from the rules as loaded; and **the kernel forwards**, which is a FAIL when it forwards
-  without the rules. While FRR is stopped, the proxy's new connections to the Gateway are refused
-  here at once. The refusal does not end one it already holds: the kernel reports it to an
+- **The nftables rules are loaded, and none translates an address**: read from the whole ruleset
+  the edge has loaded, every table of it, as `sudo -n nft -j list ruleset` lists it. A FAIL that
+  the rules are not loaded means the table `inet edge` is not there, as after a first boot that
+  failed. A FAIL that the ruleset on the edge holds what translates an address names what was
+  found, in whichever table: a chain hooked at nat, or a `dnat`, `snat`, `masquerade` or `redirect`
+  statement. The first boot loads none, so an edge that has one was built from another
+  configuration or changed by hand: rebuild it.
+- **The forward chain forwards nothing**; **the output chain keeps the proxy's connections to the
+  Gateway on a worker's route**, read from the rules as loaded; and **the kernel forwards**, which
+  is a FAIL when it forwards without the rules. Without a Gateway address in `talman.yaml` the
+  output chain's line is a skip, which says that its guard was not compared with that address and
+  what was still checked. While FRR is stopped, the proxy's new connections to the Gateway are
+  refused here at once. The refusal does not end one it already holds: the kernel reports it to an
   established socket as a soft error only, so that connection and its client's stall until the
   proxy's 5-minute idle timeout closes them, and a client that opens another connection or retries
   can reach the other edge.
@@ -92,7 +100,11 @@ In this order, after the plumbing stack is applied ([rebuild.md](rebuild.md)):
   its own and says nothing about the state itself: run the command on the edge, as its ordinary
   user as the check does (`sudo -n` for `vtysh`, `nft`, `ss` and `sshd`; `nft` and `sshd` are in
   `/usr/sbin`, which that user's `PATH` does not reach), and read why it fails; a stopped FRR is one
-  cause for the BGP lines.
+  cause for the BGP lines. The ruleset's command is `sudo -n nft -j list ruleset`, and its line is
+  a `cannot read` as well when the edge's answer is not nft's JSON listing of schema version 1, the
+  one the check reads, as from an nft of another schema version, and when a rule holds a statement
+  that nft lists as text, not as JSON, as it lists the inline chain of a `jump { ... }`. The first
+  boot loads no inline chain, so an edge that has one was changed by hand: rebuild it.
 
 To learn what the edge sees, `just edge-routes` (or `just edge-routes 2`) prints the sessions and
 the table, with addresses, in a terminal only: it refuses in CI and when its output is piped. In the
@@ -135,6 +147,12 @@ An edge is rebuilt, not patched.
 The rollout plans and applies each edge's own resources alone, so a change it does not touch, such
 as a rule of the security group, is left; the last plan it prints says what is left, and
 `just infra-apply sto2/edge` applies it.
+
+What a rollout asks for is typed, or supplied on its standard input, one line each, in the order it
+is asked: the stack's name, the sentence of `--other-down`, and `yes` for each host key the console
+does not vouch for, the one a check of the other edge asks about among them. Only the prompts read
+that input, so answers written to a pipe before the rollout starts each reach theirs
+([Rolling out a change](../infrastructure.md#rolling-out-a-change)).
 
 A replacement has SSH host keys of its own at the same floating address, and the connection holds
 to the recorded keys, so the replaced edge's recorded keys are dropped before it is replaced and
