@@ -25,3 +25,23 @@ Feature: OpenBao snapshots
     Given the cluster's overlay with the snapshot application listed, and with it left out
     When the overlay is built
     Then the application's Kustomization is built only while it is listed, and waits for the store and its ClusterSecretStore
+
+  Scenario: The secret store's snapshots are listed newest first by name and size
+    Given the OpenBao bucket holding snapshots of the cluster, objects of other names and in deeper paths, and another cluster's snapshots, and the etcd bucket holding snapshots of the same cluster
+    When just openbao-snapshots runs for the cluster, for the other cluster and for a cluster without snapshots
+    Then it prints the objects directly under the cluster's own path of the OpenBao bucket that are named as a snapshot is, newest first, each by its name and size and nothing else, from one listing request made with the state key; a cluster without snapshots lists nothing, says so on standard error and exits 0; and the output names no bucket, endpoint or key
+
+  Scenario: A snapshot of the secret store is checked by decrypting it and verifying its archive, and nothing of the state is printed
+    Given snapshots encrypted to the Talos age key's recipient, each an archive as the pinned OpenBao writes one, whose members' IDs and addresses, storage and sealed checksums are markers, and a stand-in for the object storage
+    When just openbao-snapshot-check runs for the newest snapshot, for a named one and for another cluster's newest
+    Then the one object is downloaded, begins with the age header and is decrypted with the Talos age key into a memory-backed directory, where tar lists the archive and writes members to standard output and nothing to a file, and the recipe prints exactly the snapshot's name, where it was kept, its encrypted and plain sizes, the time on its metadata's member in UTC, the index, term and version of the metadata and the number of its servers, the size of the state, that both checksums match and that the sealed checksums were not opened, and no member's ID or address, storage key or value, checksum or byte of the sealed file
+
+  Scenario: A snapshot that is not encrypted, does not decrypt, is no raft snapshot archive or fails a checksum fails the check with its reason
+    Given a snapshot that is a plain archive, one encrypted to another key, one that holds no archive, one whose state differs from its checksum and one whose metadata does
+    When just openbao-snapshot-check runs for each
+    Then each exits non-zero with one line that names the snapshot and says which of them it is, in words of the recipe's own, followed only by the step it failed in; the plain archive and the one another key encrypted are never handed to gzip or tar; and nothing of an archive is printed
+
+  Scenario: The snapshot check leaves nothing behind, whether it passes, fails or is interrupted
+    Given a snapshot that checks, snapshots that fail the check, a failing download, and runs interrupted by Ctrl-C and by SIGTERM while the plain archive is in the private directory, whether the program then running dies of the signal or handles it and exits 0
+    When just openbao-snapshot-check runs for each, with a memory-backed directory and without one
+    Then no run leaves a file or directory in the memory-backed directory or in TMPDIR, the encrypted and the plain archive included, and an interrupted run exits non-zero without a line of its result

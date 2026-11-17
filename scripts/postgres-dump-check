@@ -32,6 +32,8 @@ umask 077
 here=$(dirname "$0")
 # shellcheck source=scripts/lib/postgres-dumps.sh
 . "$here/lib/postgres-dumps.sh"
+# shellcheck source=scripts/lib/backup-check.sh
+. "$here/lib/backup-check.sh"
 
 usage() {
   infra_error "usage: postgres-dump-check <namespace> <name> [<dump>|latest] [cluster]; <dump> is a name just postgres-dumps prints"
@@ -80,23 +82,6 @@ find_image() {
   fi
 }
 
-# memory_backed_dir: prints the first of the runtime directory and /dev/shm that this user can write
-# and that is on a memory-backed filesystem, and fails when there is none.
-memory_backed_dir() {
-  local dir
-  for dir in "${XDG_RUNTIME_DIR-}" /dev/shm; do
-    if [[ -n $dir && -d $dir && -w $dir ]]; then
-      case $(stat -f -c %T "$dir" 2> /dev/null) in
-        tmpfs | ramfs)
-          printf '%s\n' "$dir"
-          return 0
-          ;;
-      esac
-    fi
-  done
-  return 1
-}
-
 # run_runtime ARG...: the container runtime, with none of the secrets and the caller's TMPDIR.
 run_runtime() {
   TMPDIR=$runtime_tmpdir run_tool "$runtime" "$@"
@@ -118,64 +103,23 @@ step="making a private directory for the dump"
 # The runtime keeps its own temporary files, such as a pulled image's layers, where the caller's
 # TMPDIR says, not in the private directory, which is on memory and small.
 runtime_tmpdir=${TMPDIR:-/var/tmp}
-if base=$(memory_backed_dir); then
-  scratch="memory-backed"
-else
-  base=${TMPDIR:-/tmp}
-  scratch="disk, as no memory-backed filesystem was found; removed afterwards"
-  infra_error "no memory-backed filesystem was found; the dump is kept on the disk, under TMPDIR, until the check removes it"
-fi
-TMPDIR=$base make_private_dir
-# What rclone and the runtime report is kept in the directory too, so it goes with it.
-export TMPDIR=$work_dir
+backup_private_dir dump
 
 step="finding the dump in the postgres bucket"
 if ! listing=$(s3_postgres_dumps "$cluster" "$namespace" "$name"); then
   infra_error "rclone cannot list the postgres bucket with the state key, or it does not exist; just infra-backup-buckets creates it"
   exit 1
 fi
-found=
-while read -r listed _; do
-  if [[ -n $listed && ($dump == latest || $listed == "$dump") ]]; then
-    found=$listed
-    break
-  fi
-done <<< "$listing"
-if [[ -z $found && $dump == latest ]]; then
-  infra_error "the postgres bucket holds no dump of $database; just postgres-dumps lists them"
-  exit 1
-elif [[ -z $found ]]; then
-  infra_error "the postgres bucket holds no dump $dump of $database; just postgres-dumps lists them"
-  exit 1
-fi
-dump=$found
+backup_find "$listing" "$dump" postgres dump "$database" postgres-dumps
+dump=$backup_name
 encrypted=$work_dir/$dump
 plain=$work_dir/plain.dump
 
 step="downloading $dump"
-# rclone copies nothing, and succeeds, when the object is not there.
-if ! run_keeping_errors s3_rclone state copyto "store:$BACKUP_BUCKET_PREFIX-postgres/$cluster/$namespace/$name/$dump" "$encrypted" ||
-  [[ ! -s $encrypted ]]; then
-  report_errors rclone
-  infra_error "rclone cannot download $dump with the state key"
-  exit 1
-fi
+backup_download postgres "$cluster/$namespace/$name" "$dump" "$encrypted"
 
 step="decrypting $dump with the Talos age key"
-# tr drops the NUL of a binary file's header, which bash would warn about.
-if [[ $(head -c 21 "$encrypted" | tr -d '\0') != age-encryption.org/v1 ]]; then
-  infra_error "$dump is not an age file"
-  exit 1
-fi
-if ! run_keeping_errors age_decrypt "$encrypted" "$plain"; then
-  # age's other errors, such as a full directory, name the scratch directory, so only this one is told.
-  if [[ $last_errors == *"no identity matched"* ]]; then
-    infra_error "the Talos age key cannot decrypt $dump"
-  else
-    infra_error "age cannot read $dump, for a reason other than the key: it may be damaged, or the scratch directory full"
-  fi
-  exit 1
-fi
+backup_decrypt "$dump" "$encrypted" "$plain"
 
 step="reading the archive of $dump with pg_restore --list"
 # The log driver keeps the table of contents, which pg_restore prints, out of the runtime's log on disk

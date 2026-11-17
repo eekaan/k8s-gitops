@@ -1,8 +1,8 @@
 # shellcheck shell=bash
 # Shared by the scripts that reach the object storage through its S3 API: the key sets, the backup
-# buckets' roles, the one way rclone is run against the store, and the etcd snapshots in the etcd
-# bucket. Builds on scripts/lib/infra.sh, and on scripts/lib/errors.sh for what is shown of rclone's
-# errors.
+# buckets' roles, the one way rclone is run against the store, the listing of the backups under a
+# path of a backup bucket, and the snapshots in the etcd bucket and in the OpenBao bucket. Builds on
+# scripts/lib/infra.sh, and on scripts/lib/errors.sh for what is shown of rclone's errors.
 
 # shellcheck source=scripts/lib/infra.sh
 . "$(dirname "${BASH_SOURCE[0]}")/infra.sh"
@@ -12,8 +12,9 @@
 # The backup buckets are named <BACKUP_BUCKET_PREFIX>-<role>, one per role.
 s3_backup_roles=(etcd openbao volsync postgres)
 
-# An etcd snapshot's object in the etcd bucket is <cluster>/<name>, its name the UTC time it was
-# taken, so that names sort as the snapshots were taken.
+# A snapshot's object, an etcd snapshot's in the etcd bucket and an OpenBao snapshot's in the OpenBao
+# bucket, is <cluster>/<name>, its name the UTC time it was taken, so that names sort as the
+# snapshots were taken.
 s3_snapshot_name_re='^[0-9]{8}T[0-9]{6}Z\.snapshot\.age$'
 
 # What rclone keeps from the caller's environment: where programs and its home are, and how this
@@ -137,24 +138,39 @@ s3_owned_buckets() {
   done <<< "$listing"
 }
 
-# s3_etcd_snapshots CLUSTER [missing-bucket-ok]: CLUSTER's etcd snapshots in the etcd bucket,
-# <BACKUP_BUCKET_PREFIX>-etcd, as the state key lists them: the objects directly under CLUSTER/ named
-# as a snapshot is, each as its name and size in bytes, one per line, newest first; nothing when
-# there is none. When the bucket cannot be listed, returns rclone's status, 3 when the bucket does
-# not exist, while a prefix without objects lists as empty. Prints nothing of rclone's output but
-# its reason, on standard error, as scripts/lib/errors.sh shows errors: not for the missing bucket
-# when the caller says it may be missing.
-s3_etcd_snapshots() {
+# s3_backup_objects ROLE PATH NAME_RE [missing-bucket-ok]: the objects directly under PATH/ in the
+# backup bucket of ROLE, <BACKUP_BUCKET_PREFIX>-<ROLE>, whose names match the regular expression
+# NAME_RE, as the state key lists them: each as its name and size in bytes, one per line, last name
+# first, which is newest first for names that are the time a backup was taken; nothing when there is
+# none. When the bucket cannot be listed, returns rclone's status, 3 when the bucket does not exist,
+# while a path without objects lists as empty. Prints nothing of rclone's output but its reason, on
+# standard error, as scripts/lib/errors.sh shows errors: not for the missing bucket when the caller
+# says it may be missing.
+s3_backup_objects() {
   local status=0
-  run_keeping_errors s3_rclone state lsjson --files-only "store:$BACKUP_BUCKET_PREFIX-etcd/$1/" || status=$?
+  run_keeping_errors s3_rclone state lsjson --files-only "store:$BACKUP_BUCKET_PREFIX-$1/$2/" || status=$?
   if ((status != 0)); then
-    if ((status != 3)) || [[ ${2-} != missing-bucket-ok ]]; then
+    if ((status != 3)) || [[ ${4-} != missing-bucket-ok ]]; then
       report_errors rclone
     fi
     return "$status"
   fi
-  jq -r --arg name "$s3_snapshot_name_re" \
+  jq -r --arg name "$3" \
     '[.[] | select(.Name | test($name))] | sort_by(.Name) | reverse[] | "\(.Name) \(.Size)"' <<< "$last_output"
+}
+
+# s3_etcd_snapshots CLUSTER [missing-bucket-ok]: CLUSTER's etcd snapshots in the etcd bucket: the
+# objects directly under CLUSTER/ named as a snapshot is, listed as s3_backup_objects lists them,
+# with its statuses and the missing bucket it may be told to expect.
+s3_etcd_snapshots() {
+  s3_backup_objects etcd "$1" "$s3_snapshot_name_re" "${2-}"
+}
+
+# s3_openbao_snapshots CLUSTER: the snapshots of CLUSTER's OpenBao in the OpenBao bucket, which the
+# snapshot job of kubernetes/apps/base/openbao/openbao-snapshots uploads: the objects directly under
+# CLUSTER/ named as a snapshot is, listed as s3_backup_objects lists them, with its statuses.
+s3_openbao_snapshots() {
+  s3_backup_objects openbao "$1" "$s3_snapshot_name_re"
 }
 
 # s3_create_buckets KEYSET NAME...: creates each bucket NAME that KEYSET's project does not own

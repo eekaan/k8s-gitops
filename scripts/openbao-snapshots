@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Lists the snapshots of a cluster's OpenBao in the OpenBao backup bucket,
+# <BACKUP_BUCKET_PREFIX>-openbao, which the snapshot job uploads as <cluster>/<UTC time>.snapshot.age,
+# with the state key, reading only: one per line, newest first, by the name openbao-snapshot-check
+# takes and the size in bytes, and nothing else, neither the bucket's name nor what rclone reports. A
+# cluster without snapshots lists nothing and says so on standard error. Of rclone's errors only the
+# reason is shown, with places and keys replaced, and with CI set none of it, but the name of the
+# file that keeps it (scripts/lib/errors.sh). It reaches the object storage only, never the cluster
+# or the store.
+# Usage: scripts/openbao-snapshots [cluster]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/s3.sh
+. "$here/lib/s3.sh"
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "${1-}"
+require_env BACKUP_BUCKET_PREFIX AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+s3_bucket_name_ok BACKUP_BUCKET_PREFIX prefix
+s3_require_client
+start_errors_log "$cluster_dir/clusterconfig/${0##*/}.errors.log"
+
+step="listing the openbao bucket"
+if ! listing=$(s3_openbao_snapshots "$cluster"); then
+  infra_error "rclone cannot list the openbao bucket with the state key, or it does not exist; just infra-backup-buckets creates it"
+  exit 1
+fi
+if [[ -z $listing ]]; then
+  printf '%s: the openbao bucket holds no snapshot of %s\n' "${0##*/}" "$cluster" >&2
+  exit 0
+fi
+printf '%s\n' "$listing"

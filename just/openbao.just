@@ -32,3 +32,11 @@ bao-seed-postgres *args:
 [positional-arguments]
 bao-volsync-password *args:
     scripts/bao-volsync-password "$@"
+
+# List a cluster's OpenBao snapshots in the OpenBao backup bucket, newest first, by name and size, reading only, with the state key
+openbao-snapshots cluster='lab-sto2':
+    scripts/openbao-snapshots {{ quote(cluster) }}
+
+# Prove that an OpenBao snapshot is a whole raft snapshot archive, as far as that shows without the store's seal key, printing its metadata and nothing of the store: download the snapshot (latest: the newest) into a private directory on a memory-backed filesystem where there is one, check it begins with the age header, decrypt it with the Talos age key, have gzip test it and tar list it, and compare the metadata's size and both SHA-256 checksums with its members, which tar writes to standard output and never to a file; print its name, sizes, time, index, term, metadata version and number of members; the sealed checksums are not opened; everything is removed on every exit; see docs/runbooks/openbao.md
+openbao-snapshot-check snapshot='latest' cluster='lab-sto2':
+    scripts/openbao-snapshot-check {{ quote(snapshot) }} {{ quote(cluster) }}

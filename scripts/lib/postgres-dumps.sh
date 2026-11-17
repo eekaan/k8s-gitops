@@ -14,18 +14,12 @@ pg_dump_name_re='^[0-9]{8}T[0-9]{6}Z\.dump\.age$'
 pg_label_re='^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
 
 # s3_postgres_dumps CLUSTER NAMESPACE NAME: the dumps of the database, as the state key lists the
-# objects directly under its path: each as its name and size in bytes, one per line, newest first;
-# nothing when there is none. When the bucket cannot be listed, returns rclone's status and shows
-# its reason as scripts/lib/errors.sh shows errors; a prefix without objects lists as empty.
+# objects directly under its path that are named as a dump is: each as its name and size in bytes,
+# one per line, newest first; nothing when there is none. When the bucket cannot be listed, returns
+# rclone's status and shows its reason as scripts/lib/errors.sh shows errors; a prefix without
+# objects lists as empty (s3_backup_objects in scripts/lib/s3.sh).
 s3_postgres_dumps() {
-  local status=0
-  run_keeping_errors s3_rclone state lsjson --files-only "store:$BACKUP_BUCKET_PREFIX-postgres/$1/$2/$3/" || status=$?
-  if ((status != 0)); then
-    report_errors rclone
-    return "$status"
-  fi
-  jq -r --arg name "$pg_dump_name_re" \
-    '[.[] | select(.Name | test($name))] | sort_by(.Name) | reverse[] | "\(.Name) \(.Size)"' <<< "$last_output"
+  s3_backup_objects postgres "$1/$2/$3" "$pg_dump_name_re"
 }
 
 # s3_postgres_databases CLUSTER: the databases that have a dump under CLUSTER, as <namespace>/<name>,
