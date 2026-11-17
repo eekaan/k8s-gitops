@@ -303,13 +303,16 @@ environment, selects what the outer ring holds:
 
   Neither set changes the nodes' group or the workers' group, so a switch either way adds or
   removes the control planes' group, its six rules and its place on their ports, and no apply
-  leaves the Talos API open. Cilium serves a pod's host port the same way as a NodePort, outside
-  that range, so `reduced` suits a cluster where no pod on a control plane declares a host port: Pod
-  Security forbids them at the baseline level, which Talos enforces wherever a namespace sets no
-  other, and only `kube-system`, `monitoring` and `piraeus-datastore` allow them, where the one pod
-  with a host port, node-exporter, runs on the host network, where its port is the node's own and
-  the firewall filters it. What else Cilium serves before the firewall, and what controls each, is
-  in [cluster.md](cluster.md#what-the-firewall-does-not-see).
+  leaves the Talos API open. Cilium serves the host port of a pod on the pod network the same way
+  as a NodePort, outside that range, so `reduced` suits a cluster where no pod on the pod network
+  declares a host port. None in the render of `kubernetes/` does, which `tests/node-listeners.bats`
+  holds, and Pod Security forbids them at the baseline level, which Talos enforces wherever a
+  namespace sets no other; only `kube-system`, `monitoring`, `piraeus-datastore` and
+  `security-system` enforce the privileged level, which allows them. The pods that declare a host
+  port, Cilium's agent, its Envoy and its operator, are all on the host network, where Cilium maps
+  no host port and the port is the node's own, which the firewall filters; node-exporter, on the
+  host network as well, declares none. What else Cilium serves before the firewall, and what
+  controls each, is in [cluster.md](cluster.md#what-the-firewall-does-not-see).
 
   With `reduced`, the control planes' group admits an edge router too, on every port it opens to
   all; the control planes' own firewall admits no listener from it, and a control plane carries no

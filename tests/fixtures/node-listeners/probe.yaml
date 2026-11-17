@@ -1,0 +1,14 @@
+---
+# A Probe, which the check does not read: its targets are no pod's or Service's.
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: node-ports
+  namespace: monitoring
+spec:
+  prober:
+    url: prober.monitoring.svc:9115
+  targets:
+    staticConfig:
+      static:
+        - node.example:9963

@@ -1328,9 +1328,10 @@ The agents serve their metrics on port 9962 of the node they run on, as they run
 network, once `prometheus.enabled` is set in the Cilium application's values. That key creates no
 monitor and needs no resource definition, so `scripts/install-cilium`, which installs Cilium from the
 same values file before any definition exists, is unchanged, and the chart's ServiceMonitors stay off
-([Monitoring](#monitoring)). It adds the port 9962 to the agents' container ports, beside the host
-ports 9879 and 4244 they already declare; the DaemonSet's exception in `pod-security-exceptions.yaml`
-already allows host ports, and no new workload and no new Pod Security level comes with it.
+([Monitoring](#monitoring)). It adds the host port 9962 to the agents' container ports, beside the
+host ports 9879 and 4244 they already declare; the DaemonSet's exception in
+`pod-security-exceptions.yaml` already allows host ports, and no new workload and no new Pod
+Security level comes with it.
 
 `apps/base/kube-system/cilium-monitoring/` holds a PodMonitor, `cilium-agent`, which selects the pods
 labelled `k8s-app: cilium` and scrapes the port `prometheus` every 30 seconds, naming the job
@@ -4585,7 +4586,10 @@ The steps n8n took, in order; the next port does the same and says where it diff
    address, before taking its silence as proof: a runtime that resolves and connects outside the
    calls the probe watches, as Open WebUI's event loop and resolver do, logs nothing at all. A volume
    mounted over a directory hides what the image holds there, so a variant that bakes models into
-   the data directory fetches them again.
+   the data directory fetches them again. A workload on the host network accounts for every port it
+   declares, by a rule in `talos/firewall.yaml` or an entry in `node-firewall-exceptions.yaml`, and
+   a host port on the pod network fails `tests/node-listeners.bats`
+   ([cluster.md](cluster.md#the-node-firewall)).
 8. **Tests.** Scenarios in `features/applications.feature`, each proved by a test of
    `tests/applications.bats` under its title, written and seen failing before the manifests, and
    mutated afterwards: remove the line each assertion guards and see the test fail. `render_app`

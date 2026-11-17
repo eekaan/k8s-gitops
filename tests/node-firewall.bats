@@ -110,6 +110,16 @@ in_subnet() {
   (((($(ipv4 "$1") ^ $(ipv4 "${2%/*}")) & mask) == 0))
 }
 
+# overlap A B: whether the IPv4 networks A and B share an address.
+overlap() {
+  in_subnet "${1%/*}" "$2" || in_subnet "${2%/*}" "$1"
+}
+
+# section FILE HEADING: the lines of FILE under the heading HEADING, up to the next heading.
+section() {
+  awk -v heading="$2" '$0 == heading { inside = 1; next } /^#/ { inside = 0 } inside' "$1"
+}
+
 # overlapping A B: whether the port lists A and B, comma-separated ports and lo-hi ranges, share a
 # port.
 overlapping() {
@@ -291,6 +301,152 @@ overlapping() {
     for rule in cilium-vxlan cilium-health; do
       diff <(echo "$members") <(subnets "$hostname" "$rule")
     done
+  done
+}
+
+# pods_at_talos_api DIRECTORY: for each fixture node's configuration in DIRECTORY, a line when the
+# node holds anything but its own floating address, as one address, on dummy links, a line when it
+# has no one rule for the Talos API's port, TCP 50000, and a line for each network such a rule
+# accepts that shares an address with the node's pod range; then how many networks it read. Fails
+# when it printed a line about a node.
+pods_at_talos_api() {
+  # rules and subnets read the configurations of RENDERED.
+  local RENDERED=$1 hostname floating held pods rule protocol ports network found networks=0 problems=0
+  for hostname in $(nodes); do
+    floating=$(yq ".nodes[] | select(.hostname == \"$hostname\") | .floating_ip" "$FIXTURE")
+    held=$(yq -N -o json -I0 'select(.kind == "DummyLinkConfig") | .addresses' "$RENDERED/$hostname.yaml")
+    if [[ $held != "[{\"address\":\"$floating/32\"}]" ]]; then
+      echo "$hostname: holds ${held:-nothing} on dummy links, not its floating address alone"
+      problems=$((problems + 1))
+    fi
+    pods=$(yq -N 'select(.kind == "KubeNetworkConfig") | .podSubnets[]' "$RENDERED/$hostname.yaml")
+    found=0
+    while read -r rule protocol ports; do
+      if [[ $protocol != tcp ]] || ! overlapping "$ports" 50000; then
+        continue
+      fi
+      found=$((found + 1))
+      for network in $(subnets "$hostname" "$rule"); do
+        networks=$((networks + 1))
+        if overlap "$network" "$pods"; then
+          echo "$hostname: $rule accepts $network, which shares addresses with the pod range $pods"
+          problems=$((problems + 1))
+        fi
+      done
+    done < <(rules "$hostname")
+    if ((found != 1)); then
+      echo "$hostname: $found rules for the Talos API's port, not one"
+      problems=$((problems + 1))
+    fi
+  done
+  echo "$networks networks read"
+  ((problems == 0))
+}
+
+@test "No rule admits a pod's own address to a node's Talos API, and each node holds its floating address itself" {
+  # A connection to an address the node holds itself never leaves the node, so nothing masquerades
+  # it: a pod on the node arrives there from its own address, of the pod range. The node holds its
+  # address on the node network and its floating address, the latter as the one address of a dummy
+  # link, so a rule for the Talos API's port that accepted the pod range would admit every pod on
+  # the node at both.
+  pods=$(yq '.pod_subnet' "$FIXTURE")
+  for hostname in $(nodes); do
+    [ "$(yq -N 'select(.kind == "KubeNetworkConfig") | .podSubnets[]' "$RENDERED/$hostname.yaml")" = "$pods" ]
+  done
+  run pods_at_talos_api "$RENDERED"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  # Fifteen networks in the one rule for the Talos API's port, on each of six nodes.
+  [ "$output" = "90 networks read" ]
+
+  # The same on copies of the configurations with one change each: the pod range, a network inside
+  # it and one around it in a node's rule, a second rule for the port, and a dummy link that is
+  # gone, holds a second address or holds another node's.
+  changed() {
+    rm -rf "$BATS_TEST_TMPDIR/changed"
+    cp -R "$RENDERED" "$BATS_TEST_TMPDIR/changed"
+  }
+  [[ $pods == *.*.0.0/16 ]]
+  for network in "$pods" "${pods%/*}/24" "${pods%%.*}.0.0.0/8"; do
+    changed
+    NETWORK=$network yq -i '(select(.kind == "NetworkRuleConfig" and .name == "apid") | .ingress) += [{"subnet": strenv(NETWORK)}]' \
+      "$BATS_TEST_TMPDIR/changed/worker-1.yaml"
+    run pods_at_talos_api "$BATS_TEST_TMPDIR/changed"
+    echo "$output"
+    [ "$status" -eq 1 ]
+    [ "$output" = "worker-1: apid accepts $network, which shares addresses with the pod range $pods"$'\n'"91 networks read" ]
+  done
+  changed
+  yq -i '(select(.kind == "NetworkRuleConfig" and .name == "kubelet") | .portSelector.ports) = ["49000-51000"]' \
+    "$BATS_TEST_TMPDIR/changed/cp-3.yaml"
+  run pods_at_talos_api "$BATS_TEST_TMPDIR/changed"
+  echo "$output"
+  [ "$status" -eq 1 ]
+  [[ $output == *"cp-3: kubelet accepts $pods, which shares addresses with the pod range $pods"* ]]
+  [[ $output == *"cp-3: 2 rules for the Talos API's port, not one"* ]]
+  changed
+  yq -i 'select(.kind != "DummyLinkConfig")' "$BATS_TEST_TMPDIR/changed/cp-2.yaml"
+  run pods_at_talos_api "$BATS_TEST_TMPDIR/changed"
+  echo "$output"
+  [ "$status" -eq 1 ]
+  [ "$output" = "cp-2: holds nothing on dummy links, not its floating address alone"$'\n'"90 networks read" ]
+  changed
+  yq -i '(select(.kind == "DummyLinkConfig") | .addresses) += [{"address": "198.51.100.200/32"}]' "$BATS_TEST_TMPDIR/changed/cp-1.yaml"
+  run pods_at_talos_api "$BATS_TEST_TMPDIR/changed"
+  echo "$output"
+  [ "$status" -eq 1 ]
+  [[ $output == "cp-1: holds [{"*"198.51.100.200/32"*"}] on dummy links, not its floating address alone"* ]]
+  changed
+  other=$(yq '.nodes[] | select(.hostname == "worker-3") | .floating_ip' "$FIXTURE")
+  OTHER=$other yq -i '(select(.kind == "DummyLinkConfig") | .addresses) = [{"address": strenv(OTHER) + "/32"}]' "$BATS_TEST_TMPDIR/changed/worker-2.yaml"
+  run pods_at_talos_api "$BATS_TEST_TMPDIR/changed"
+  echo "$output"
+  [ "$status" -eq 1 ]
+  [ "$output" = "worker-2: holds [{\"address\":\"$other/32\"}] on dummy links, not its floating address alone"$'\n'"90 networks read" ]
+}
+
+# unnamed_ports FILE: the ports and port ranges of the inventory's rules that the section "What the
+# checks prove, and what to watch afterwards" of FILE does not hold as a whole word, each with its
+# rule, one per line; then how many it looked for.
+unnamed_ports() {
+  local account name ports port looked=0
+  account=$(section "$1" '### What the checks prove, and what to watch afterwards')
+  while read -r name ports; do
+    for port in ${ports//,/ }; do
+      looked=$((looked + 1))
+      grep -qwF -- "$port" <<< "$account" || echo "$port of $name"
+    done
+  done < <(yq -N '.listeners[] | .name + " " + (.ports | map(tostring) | join(","))' "$INVENTORY")
+  echo "$looked ports looked for"
+}
+
+@test "The account of what a rollout proves names every port the firewall admits" {
+  [ -n "$(section "$ROOT/docs/cluster.md" '### What the checks prove, and what to watch afterwards')" ]
+  run unnamed_ports "$ROOT/docs/cluster.md"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  # Thirteen rules, each of one port or one range.
+  [ "$output" = "13 ports looked for" ]
+
+  # The same on copies of the page with one change each to the section: a port gone, a port there
+  # only inside a longer number, and a range with one end gone. The table under "What each node
+  # admits" still names each of them, so the section alone is what counts.
+  page() {
+    awk '/^### What the checks prove/ { inside = 1; print; next } /^#/ { inside = 0 }
+      inside { '"$2"' } { print }' "$ROOT/docs/cluster.md" > "$BATS_TEST_TMPDIR/$1.md"
+    ! cmp -s "$ROOT/docs/cluster.md" "$BATS_TEST_TMPDIR/$1.md"
+  }
+  page gone 'gsub(/8472/, "")'
+  run unnamed_ports "$BATS_TEST_TMPDIR/gone.md"
+  [ "$output" = "8472 of cilium-vxlan"$'\n'"13 ports looked for" ]
+  page longer 'gsub(/50001/, "150001")'
+  run unnamed_ports "$BATS_TEST_TMPDIR/longer.md"
+  [ "$output" = "50001 of trustd"$'\n'"13 ports looked for" ]
+  page range 'gsub(/2379-2380/, "2379")'
+  run unnamed_ports "$BATS_TEST_TMPDIR/range.md"
+  [ "$output" = "2379-2380 of etcd"$'\n'"13 ports looked for" ]
+  for port in 8472 50001 2379-2380; do
+    section "$BATS_TEST_TMPDIR/gone.md" '### What each node admits' | grep -qwF -- "$port"
   done
 }
 

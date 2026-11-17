@@ -1,0 +1,219 @@
+---
+# Services and ServiceMonitors that scrape no port the tree lists as having no rule, each named
+# after what keeps it from one. A monitor selects its Service by the label fixture.
+# The Service selects other pods, which are on the pod network.
+apiVersion: v1
+kind: Service
+metadata:
+  name: other-pods
+  namespace: kube-system
+  labels:
+    fixture: other-pods
+spec:
+  selector:
+    k8s-app: hubble-relay
+  ports:
+    - name: metrics
+      port: 9963
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: other-pods
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      fixture: other-pods
+  endpoints:
+    - port: metrics
+---
+# The Service names the operator's labels from another namespace than the operator's, where it
+# selects nothing.
+apiVersion: v1
+kind: Service
+metadata:
+  name: another-namespace
+  namespace: monitoring
+  labels:
+    fixture: another-namespace
+spec:
+  selector:
+    name: cilium-operator
+  ports:
+    - name: metrics
+      port: 9963
+      targetPort: prometheus
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: another-namespace
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      fixture: another-namespace
+  endpoints:
+    - port: metrics
+---
+# The Service asks for a label the operator's pods lack.
+apiVersion: v1
+kind: Service
+metadata:
+  name: a-label-the-pods-lack
+  namespace: kube-system
+  labels:
+    fixture: a-label-the-pods-lack
+spec:
+  selector:
+    name: cilium-operator
+    tier: none
+  ports:
+    - name: metrics
+      port: 9963
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: a-label-the-pods-lack
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      fixture: a-label-the-pods-lack
+  endpoints:
+    - port: metrics
+---
+# The agents' metrics, by name and by number, and the operator's ports that are not there: ports
+# with a rule, or that the pods lack.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ports-with-a-rule
+  namespace: kube-system
+  labels:
+    fixture: ports-with-a-rule
+spec:
+  selector:
+    k8s-app: cilium
+  ports:
+    - name: metrics
+      port: 9962
+      targetPort: prometheus
+    - name: hubble
+      port: 443
+      targetPort: 4244
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ports-with-a-rule
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      fixture: ports-with-a-rule
+  endpoints:
+    - port: metrics
+    - port: hubble
+    - targetPort: prometheus
+    - targetPort: 4244
+---
+# The Service has a port that leads to a port without a rule, and the monitor scrapes its other
+# port, or names a port it lacks.
+apiVersion: v1
+kind: Service
+metadata:
+  name: another-port-of-the-service
+  namespace: kube-system
+  labels:
+    fixture: another-port-of-the-service
+spec:
+  selector:
+    name: cilium-operator
+  ports:
+    - name: metrics
+      port: 9963
+      targetPort: prometheus
+    - name: web
+      port: 8080
+      targetPort: web
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: another-port-of-the-service
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      fixture: another-port-of-the-service
+  endpoints:
+    - port: web
+    - port: absent
+    - targetPort: 8080
+---
+# No monitor selects this Service: one asks for another label, one looks in its own namespace alone.
+apiVersion: v1
+kind: Service
+metadata:
+  name: unselected
+  namespace: kube-system
+  labels:
+    fixture: unselected
+spec:
+  selector:
+    name: cilium-operator
+  ports:
+    - name: metrics
+      port: 9963
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: another-label
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      fixture: selected
+  endpoints:
+    - port: metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: its-own-namespace-alone
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      fixture: unselected
+  endpoints:
+    - port: metrics
+---
+# A Service without a selector whose port is none that has no rule.
+apiVersion: v1
+kind: Service
+metadata:
+  name: without-selector
+  namespace: kube-system
+  labels:
+    fixture: without-selector
+spec:
+  ports:
+    - name: metrics
+      port: 9962
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: without-selector
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      fixture: without-selector
+  endpoints:
+    - port: metrics
