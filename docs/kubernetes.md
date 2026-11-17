@@ -4844,13 +4844,13 @@ writes an event for each one that a rule names, such as a shell opened in a cont
 terminal, a read of a sensitive file by a process that should not, or a binary dropped into a
 container and run. It detects and does not respond: no pod is stopped or changed, an event leaves
 no pod but through the log pipeline, and the chart installs nothing but the DaemonSet, its
-ServiceAccount, the ConfigMap of Falco's configuration file, the Service of its metrics and their
-ServiceMonitor (no Falcosidekick, no Falco Talon, no metadata collector). A cluster selects it with
-two entries of its overlay, the namespace directory `security-system` and
-`security-system/falco/ks.yaml`; without them nothing of it builds. The application names
-`prometheus-operator-crds` in `dependsOn`, as the chart's ServiceMonitor and the application's
-`PrometheusRule` are kinds that definition provides, and `cilium`, as its `CiliumNetworkPolicy` is
-a kind Cilium's operator defines.
+ServiceAccount, the ConfigMap of Falco's configuration file, the ConfigMap of the tree's local
+rules ([Tuning](#tuning)), the Service of its metrics and their ServiceMonitor (no Falcosidekick,
+no Falco Talon, no metadata collector). A cluster selects it with two entries of its overlay, the
+namespace directory `security-system` and `security-system/falco/ks.yaml`; without them nothing of
+it builds. The application names `prometheus-operator-crds` in `dependsOn`, as the chart's
+ServiceMonitor and the application's `PrometheusRule` are kinds that definition provides, and
+`cilium`, as its `CiliumNetworkPolicy` is a kind Cilium's operator defines.
 
 The namespace denies traffic by default ([Network policy](#network-policy)), and Falco's
 `CiliumNetworkPolicy`, in `app/`, lets in Prometheus' scrape and the kubelet's probes on 8765 and
@@ -4868,7 +4868,15 @@ way. Falco opens no other connection: its one output is standard output and falc
 one plugin, `container`, asks only the CRI engine, on the runtime's Unix socket; and neither the
 Falco binary nor that plugin in the pinned image holds the in-cluster API server's variable
 `KUBERNETES_SERVICE_HOST` or the service account token's path, and the chart makes no Role for it.
-The pod still mounts its service account's token, which nothing in it reads.
+
+So the pod mounts no service account token. The chart has no value for that, on the pod or on the
+ServiceAccount, and the HelmRelease's post-renderer sets `automountServiceAccountToken: false` on
+the pod template
+([Kubernetes](https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/#opt-out-of-api-credential-automounting)).
+`tests/falco.bats` reads the field in the render, with no volume that projects a token, no mount of
+one and no Role or binding, and fails once the chart has a value for it, which then takes the
+patch's place; where a docker daemon answers, it also searches the image's two files for the
+variable and the path.
 
 ### The driver, and the privileges it needs
 
@@ -4962,7 +4970,11 @@ installed. The rules of priority Critical are `Detect release_agent File Contain
 `Drop and execute new binary in container` and `Fileless execution via memfd_create`. A newer
 rule set arrives with a newer image: the chart and the image it runs, `appVersion` of the chart,
 are moved by Renovate in one pull request (`.renovate/groups.json5`), and `tests/falco.bats` fails
-unless the image's version is the chart's.
+unless the image's version is the chart's. Its proofs that run Falco itself skip in CI, so CI does
+not show that a newer image still loads the local rules without a warning, compiles the exception
+and enables the same rules; `bats tests/falco.bats` where a docker daemon answers does. A macro the
+newer rules no longer define would load with the warning `LOAD_UNUSED_MACRO` and except nothing
+([Tuning](#tuning)).
 
 ### Events
 
@@ -4981,7 +4993,21 @@ the Falco pod that wrote them, each line whole in `_msg`:
   one node.
 
 A shell opened with a terminal in any pod, `kubectl exec --stdin --tty <pod> -- sh`, raises
-`Terminal shell in container`, at priority Notice, and is the harmless way to see an event arrive.
+`Terminal shell in container`, at priority Notice, and is the harmless way to see an event arrive
+for whoever has a terminal. A script or an agent has none, and needs none:
+
+- `kubectl --namespace demo exec deployment/hello --container httpd -- find /www -name id_rsa`
+  raises `Search Private Keys or Passwords`, at priority Warning. The rule matches the start of any
+  process named `find` whose arguments hold the name of a private key file, whether it has a
+  terminal or not and whether it runs in a container or on the node; the search itself finds
+  nothing and exits 0. Any pod whose image has `find` serves.
+- `just logs 'kubernetes.pod_namespace:security-system kubernetes.container_name:falco | unpack_json | filter rule:"Search Private Keys or Passwords"'`
+  finds the event, which shows the command in `proc.cmdline`, the pod and namespace in
+  `k8s.pod.name` and `k8s.ns.name`, under `output_fields`.
+
+`tests/falco.bats` holds the command to hello's namespace, Deployment, container and directory and,
+where a docker daemon answers, asks Falco itself for the rule, its priority, its compiled condition
+and the fields of its output.
 
 ### Metrics, and the alert
 
@@ -5024,13 +5050,86 @@ old, so for at most 15 minutes; every series does the same after Prometheus lost
 
 ### What Falco costs and what it sees
 
-Falco's requests and limits are the chart's guidance for a node, 100m and 512Mi requested, 1 CPU
-and 1Gi at most, and are unmeasured here: the cost is the system calls of the node's workloads,
-which the pod cannot be told in advance. The probe's buffers are 8 MiB for every two CPUs of the
-node, and its auxiliary maps a few tens of KiB for each ([Falco](https://falco.org/docs/concepts/event-sources/kernel/)),
-so a node with more CPUs holds more. A pod throttled at its CPU limit reads fewer calls than the
-node makes; the kernel then drops events, which Falco counts in `falcosecurity_scap_n_drops_*`
-and no alert reads.
+Falco requests 100m of CPU and may use one, the chart's figures: the cost is the system calls of
+the node's workloads, which the pod cannot be told in advance. A pod throttled at its CPU limit
+reads fewer calls than the node makes; the kernel then drops events, which Falco counts in
+`falcosecurity_scap_n_drops_*` and no alert reads.
+
+It requests `192Mi` of memory and is limited to `512Mi`. Part of its memory is fixed once the probe
+is loaded, and part grows with the node:
+
+- The probe's ring buffers, through which the kernel hands Falco its events: one of 8 MiB for every
+  two CPUs that are online, and one more for an odd CPU. The values write the chart's defaults for
+  both, `driver.modernEbpf.bufSizePreset: 4` and `cpusForEachBuffer: 2`, which the rendered
+  `engine.modern_ebpf` carries; the image's `falco.yaml` gives the size of each preset, and libs
+  0.26.1 counts the buffers (`pman_init_state` in `userspace/libpman/src/configuration.c`).
+- The probe's auxiliary maps, in which it builds an event before the event goes to a ring buffer:
+  256 KiB for each CPU the kernel counts as possible, online or not, two segments of 128 KiB
+  ([Falco](https://falco.org/docs/concepts/event-sources/kernel/#auxiliary-map-memory);
+  `AUXMAP_POOL_DEPTH` and `AUXILIARY_MAP_SIZE` in libs'
+  `driver/modern_bpf/shared_definitions/struct_definitions.h`).
+- Falco itself, with the image's rules and the container plugin loaded and no event read: about 53
+  MiB resident, 18 MiB of it Falco's own data and 34 MiB pages of the image's files it maps, its
+  binary and the plugin. That is measured off a node: the pinned image run on a workstation of 16
+  CPUs with the rendered configuration and `engine.kind: nodriver`, which loads no probe, and with
+  the image's `HOST_ROOT` emptied, as Falco does not start where `/host/proc` is missing.
+  Transparent huge pages were off for Falco's process in that run, as the Talos kernel gives them
+  only to memory a process asks them for (`CONFIG_TRANSPARENT_HUGEPAGE_MADVISE` in its
+  configuration) and no mapping of Falco's asks; with them on for every process, as that
+  workstation has them, the same run holds about 92 to 97 MiB.
+- The state Falco keeps of the node's processes and threads, which builds up over time and then
+  levels off
+  ([Falco's FAQ](https://falco.org/about/faq/#what-is-the-performance-overhead-or-resource-utilization-of-falco)).
+  It is unmeasured here.
+
+The kernel charges the buffers and the maps to the container. At the kernel Talos runs, 6.18.63,
+`bpf_ringbuf_area_alloc` in `kernel/bpf/ringbuf.c` allocates every page of a ring buffer with
+`GFP_KERNEL_ACCOUNT`, and `__bpf_map_area_alloc` in `kernel/bpf/syscall.c` adds `__GFP_ACCOUNT` to
+an array map's allocation (`bpf_memcg_flags` in `include/linux/bpf.h`); either flag charges the
+memory cgroup of the process that creates the map, which is Falco's. Only the kernel's command line
+turns the charge off, `cgroup.memory=nokmem` for both and `nobpf` for the maps (`cgroup_memory` in
+`mm/memcontrol.c`), and neither Talos' default arguments (`DefaultArgs` in
+`pkg/machinery/kernel/kernel.go` at the pinned release) nor `talos/schematic.yaml` adds either.
+Both are allocated whole when the probe loads, so they count against the limit from Falco's start,
+whatever the node does. The probe's programs and its other maps are left out of this arithmetic.
+
+For a node of 8 CPUs the fixed part is 32 MiB of ring buffers, 2 MiB of auxiliary maps and Falco's
+53 MiB, about 87 MiB. The request is that and as much again for the state, about 174 MiB, taken up
+to `192Mi`. Each further pair of CPUs adds 8.5 MiB to the fixed part, a ring buffer and the pair's
+auxiliary maps, and so 17 MiB to the request: `192Mi` holds up to a node of 10 CPUs, and on a node
+of 32 the fixed part alone is about 189 MiB, nearly the whole request. The limit is the chart's
+request, its figure for a node of any size, as the ceiling. These figures are arithmetic from the
+sources and a measurement off a node; none is a measurement on a node. There, Grafana's Explore,
+behind `just grafana`, shows each container's working set with the Prometheus query
+`container_memory_working_set_bytes{namespace="security-system", container="falco"}`, which the
+kubelets report ([Monitoring](#monitoring)), to hold against the request and the limit. Falco's own
+figure, `falcosecurity_falco_memory_rss_bytes`, the resident memory of its process, is not one to
+hold against them. The kernel maps each ring buffer's data pages twice in a row, so that an event
+that wraps past the buffer's end reads as one (`bpf_ringbuf_area_alloc` in `kernel/bpf/ringbuf.c`),
+and Falco maps that whole range (`ring_buffer__add` in libbpf 1.3.0, which libs 0.26.1 builds
+with), each page of it counted as the process's resident memory (`remap_vmalloc_range` in
+`mm/vmalloc.c`, which inserts every page when the range is mapped). So on a node of 8 CPUs it counts
+about 64 MiB for the buffers, which the container is charged 32 MiB for. Its
+`falcosecurity_falco_container_memory_used_bytes` reads the cgroup v1 file
+`/sys/fs/cgroup/memory/memory.usage_in_bytes` unless the variable `FALCO_CGROUP_MEM_PATH` names
+another (libs' `userspace/libsinsp/linux/resource_utilization.cpp`, under the name Falco's
+`cmake/modules/falcosecurity-libs.cmake` gives the variable), so it is 0 on Talos, which mounts
+cgroup v2 alone (`MountCgroups` in `internal/app/machined/pkg/startup/tasks.go` at the pinned
+release), as it is in the run off a node above.
+
+A container that goes on using more memory than its limit is killed by the kernel and started
+again by the kubelet
+([Kubernetes](https://kubernetes.io/docs/tasks/configure-pod-container/assign-memory-resource/#exceed-a-container-s-memory-limit)),
+and Falco's is started again in the same pod, as a DaemonSet's pods restart their containers always
+([Kubernetes](https://kubernetes.io/docs/concepts/workloads/controllers/daemonset/#pod-template)).
+The pod keeps its name and address, so every label of its series stays, and Falco's counters start
+from nothing: the precondition of the blind spot of `FalcoCriticalRuleMatched`
+([Metrics, and the alert](#metrics-and-the-alert)), in which a rule that had matched once before
+the kill and matches once after it raises nothing. What the node did between the kill and the
+restart, nothing read. Such a kill shows as `OOMKilled`, the reason of the container's last state,
+beside its restart count: `kubectl --namespace security-system get pods` gives the restarts, and
+`kubectl --namespace security-system get pod <pod> --output jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}'`
+the reason.
 
 Falco sees every process's system calls on the node, the node's own and those of every container,
 with their arguments, and an event's `output` and `output_fields` carry the arguments of the
@@ -5045,32 +5144,104 @@ or `exec` into the pods of `monitoring` and `security-system`, can read it.
 
 Local rules have one place, the `customRules` key of
 `apps/base/security-system/falco/app/values.yaml`: a map of rule file names to their contents,
-which the chart makes a ConfigMap of and mounts in `rules.d`, which Falco reads after the image's
-rules. It is empty, and nothing has been found noisy. To silence a known-benign event, find it
-(`just logs` above) and read its rule and the pod, namespace and process in its `output_fields`;
-then, in a pull request:
+which the chart makes the ConfigMap `falco-rules` of and mounts at `/etc/falco/rules.d`, which
+Falco reads after the image's rules. It holds one file, `exceptions.yaml`, of one item, with its
+reason in a comment above it, and no rule of the tree's own:
 
-1. add a file to `customRules` that overrides the placeholder the rule leaves for the case (the
-   image's rules name them `user_*` and `known_*`, such as
-   `user_expected_terminal_shell_in_container_conditions` for `Terminal shell in container`) or the
-   rule's own condition, with the reason for the exception in a comment above it:
+```yaml
+- macro: user_known_stand_streams_redirect_activities
+  condition: (k8s.ns.name = "demo" and container.name = "httpd" and container.image.repository = "docker.io/library/busybox" and proc.name = "httpd")
+  override:
+    condition: replace
+```
 
-   ```yaml
-   customRules:
-     exceptions.yaml: |-
-       # Reason: the debug pods of the platform namespace open a shell with a terminal on purpose.
-       - macro: user_expected_terminal_shell_in_container_conditions
-         condition: (k8s.ns.name = "platform" and k8s.pod.name startswith "debug-")
-         override:
-           condition: replace
-   ```
+It quiets the image's rule `Redirect STDOUT/STDIN to Network Connection in Container`, of priority
+Notice, for the demo's web server, `hello`, and for nothing else. The rule's condition is
+`dup and container and evt.rawres in (0, 1, 2) and fd.type in ("ipv4", "ipv6") and not user_known_stand_streams_redirect_activities`:
+a `dup`, `dup2` or `dup3` in a container that returns 0, 1 or 2, a standard stream, for an IPv4 or
+IPv6 socket, which is how a reverse shell begins; the macro it negates is the placeholder the image
+leaves for known cases, `(never_true)`. busybox's `httpd` answers a request the same way:
+`mini_httpd` in `networking/httpd.c` of busybox 1.38.0, the version `hello` runs, forks for each
+connection it accepts, and the child calls `xmove_fd(n, 0)` and `xdup2(0, 1)`, two `dup2` calls
+that return 0 and 1 for the connection's socket (`libbb/xfuncs_printf.c`). So every request matches
+the rule twice, the kubelet's readiness probe included, and the server matches it once more when it
+starts, as `mini_httpd` first moves its listening socket to standard input with `xmove_fd`; those
+events would bury any other the rule raises.
 
-2. keep the exception as narrow as the event is: a namespace and a pod name, or a process and a
-   file, never a whole rule off, which `- rule: <name>` with `enabled: false` and
-   `override: {enabled: replace}` does when nothing narrower will;
-3. merge it. The chart rolls the pods when the rules change, one node at a time. Falco refuses a
-   file whose rules do not load, so a new pod that crash-loops on one is that, and
-   `KubeDaemonSetRolloutStuck` raises it after 15 minutes.
+The exception replaces the placeholder with four equalities, each of which leaves something out
+of it: the namespace, the workloads of every other namespace; the container's name, `volsync-demo`,
+which runs the same image in the same namespace; the image's repository, any other image run under
+that name there; and the process, a shell, or any process but `httpd`, that puts its streams on a
+socket in that very container. All of those still match, as every other workload does. Falco
+compiles the rule to the image's condition with one negation, of that conjunction:
+`(evt.type in (dup, dup2, dup3) and container.id != host and evt.rawres in (0, 1, 2) and fd.type in (ipv4, ipv6) and not (k8s.ns.name = demo and container.name = httpd and container.image.repository = docker.io/library/busybox and proc.name = httpd))`.
+
+`tests/falco.bats` holds the exception to that:
+
+- The place holds that one file of that one item, an override that replaces one macro's condition,
+  and the chart's ConfigMap and the pod's mount carry it. There is no second place: under
+  `/etc/falco` the pod mounts only its configuration file, an empty `config.d` and `rules.d`, and
+  the configuration names `config.d` alone as where Falco reads further configuration, which could
+  turn a rule off.
+- The condition is, to the letter, the conjunction of four values read from `hello` as Flux applies
+  it: the namespace its Kustomization targets, its container's name, its image without tag or
+  digest and the first word of its command. A `hello` whose container is renamed, whose image moves
+  or whose command changes fails the proof, as the exception then names nothing that runs. Of every
+  container and init container of the workloads the overlay builds into `demo`, only `hello`'s has
+  that name and image, with the image's short forms written out as the runtime reports them, so no
+  other `httpd` is excepted. The reason above is read from the source of the busybox version `hello`
+  runs, which the proof finds named here, so a `hello` on another version fails it until that
+  version's `httpd` is read, and the failure says which version to read.
+- Where a docker daemon answers, Falco itself says so, run from the pinned image without network,
+  capability or root, on the rendered configuration and rules. Its dry run exits 0: a condition
+  with a field Falco does not know makes it exit 1, which on a node is a pod in a crash loop. It
+  validates the image's rules and then the local file without an error or a warning: an override of
+  a macro the image does not define loads with the warning `LOAD_UNUSED_MACRO` and excepts nothing.
+  It prints the rule enabled, at priority Notice, compiled to the condition above. And it lists the
+  same rules enabled with the local file as without it, no other rule, macro or list changed.
+
+What no proof shows: an event evaluated against the rule. Of the image's engines, replay is the one
+that gives Falco system calls without a probe, and it reads a capture file, which only a probe on a
+running kernel records and which would hold that machine's processes, users and addresses. So that
+the rule still matches every other workload rests on the condition Falco compiles. The values Falco
+reports for the four fields follow from the pinned sources, and an event on a node is what shows
+them: `container.name` is the name in the container's CRI metadata and `k8s.ns.name` the namespace
+of its pod's sandbox (`go-worker/pkg/container/cri.go` of the container plugin at 0.7.6, the
+version the image loads), and `container.image.repository` is the image reference containerd 2.3.7
+reports, the image's first repository digest (`internal/cri/server/container_status.go`), up to its
+`@`, which for `hello`'s image is `docker.io/library/busybox`. An event that comes before the
+container plugin has the container's details from the runtime may not have the three fields the
+plugin gives, all but `proc.name`, as the plugin's descriptions of them say; the conjunction is then
+false, and the event still matches. The CI containers have no docker daemon, so the proofs that run
+Falco run where a developer or an agent has one, and skip in CI, saying why.
+
+To silence another known-benign event, find it (`just logs` above) and read its rule and the
+namespace, pod, container, image and process in its `output_fields`; then, in a pull request:
+
+1. add an item to `exceptions.yaml` that overrides the placeholder the rule leaves for the case
+   (the image's rules name them `user_*` and `known_*`, such as
+   `user_expected_terminal_shell_in_container_conditions` for `Terminal shell in container`), with
+   the reason for the exception in a comment above it, as the item above has;
+2. keep it as narrow as the event is, a conjunction of what the event shows of the workload, and
+   never a whole rule off: the proof of the place fails on a second item, file or place, and, where
+   a docker daemon answers, the proofs fail when Falco lists one rule fewer enabled;
+3. prove it as the item above is proved: the proof of the place states what the place holds, so an
+   item it does not expect fails it, and the item's own proof takes its values from the workload it
+   excepts;
+4. merge it. The pod template carries a checksum of the rules' ConfigMap, `checksum/rules`, so the
+   DaemonSet rolls when the rules change, one node at a time, and the Kustomization waits for the
+   release. A pod that still runs gets the new file as well: the kubelet brings a changed ConfigMap
+   to the mount
+   ([Kubernetes](https://kubernetes.io/docs/concepts/configuration/configmap/#mounted-configmaps-are-updated-automatically)),
+   and Falco watches the rules files it loaded (`watch_config_files`, on in the rendered
+   configuration), tries the new ones in a dry run of its own and, when they load, restarts itself
+   in place, which keeps the pod and starts its counters from nothing as a kill at the memory limit
+   does ([What Falco costs and what it sees](#what-falco-costs-and-what-it-sees)). A file Falco
+   refuses stops both: a pod that runs keeps the rules it has and writes
+   `Falco internal: hot restart failure`, at priority Critical, among its events, and a new pod
+   exits when it starts, so the roll stops at its first node, the release's upgrade does not
+   become ready and its remediation rolls it back ([What the root sets](#what-the-root-sets)).
+   `FluxApplierNotReady` raises the release after 15 minutes.
 
 The Falco documentation says what else an override can do
 ([overriding](https://falco.org/docs/concepts/rules/overriding/),

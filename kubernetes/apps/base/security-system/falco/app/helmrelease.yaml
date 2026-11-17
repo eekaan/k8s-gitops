@@ -17,6 +17,11 @@ spec:
   # here, and in the driver loader's init container, which it renders for every driver but
   # modern_ebpf. Nothing mounts them here, and each is a host path the pod would be excepted for, so
   # they are removed; tests/falco.bats fails on a mount whose volume is gone.
+  #
+  # The pod mounts no service account token, as nothing in it reads one: neither the Falco binary
+  # nor the container plugin of the image holds the API server's variable or the token's path, and
+  # the chart binds no Role to the service account. The chart has no value for the field, on the pod
+  # or on the ServiceAccount, so the patch sets it; tests/falco.bats fails once the chart has one.
   postRenderers:
     - kustomize:
         patches:
@@ -31,6 +36,7 @@ spec:
               spec:
                 template:
                   spec:
+                    automountServiceAccountToken: false
                     volumes:
                       - name: boot-fs
                         $patch: delete
