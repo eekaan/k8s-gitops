@@ -597,7 +597,7 @@ once it is not, and the agents' rendered configuration agrees.
 | `external-dns` | listed | an application whose allows are not written, not a namespace that cannot have the posture. external-dns takes Prometheus' scrape and the kubelet's probes on 7979 and nothing else, and reaches the API server, the DNS provider's API on 443 and the resolver. Its token, scoped to zone read and DNS edit on the cluster's one zone, its name filter, a ClusterRole that only reads, Pod Security, node firewall ([DNS records](#dns-records)). |
 | `kube-system` | listed | Cilium's agent, its Envoy and its operator run in the host's network namespace; the resolver takes queries from every namespace; the pod-network workloads' flows are not yet enumerated. Node firewall, Pod Security. |
 | `flux-system` | listed | the controllers' flows are not yet enumerated as allows; Flux's own network policies, which the operator makes at run time, and the operator's for its web interface, `flux-operator-web`, which the check reads and passes because the namespace is listed ([What the check refuses](#what-the-check-refuses)); Pod Security, node firewall. |
-| `monitoring` | listed | Prometheus scrapes every namespace and the nodes, the node exporter runs in the host's network namespace, the API server calls the operator's webhook, the other flows are not yet enumerated. |
+| `monitoring` | listed | Prometheus scrapes every namespace and the nodes, the node exporter runs in the host's network namespace, the API server calls the operator's webhook, Alertmanager reaches the resolver and, outside the cluster, each of its two destinations on the port of its URL, hosts that are deployment values and so are named by no policy ([Where alerts go](#where-alerts-go)), the other flows are not yet enumerated. |
 | `openbao`, `external-secrets`, `cert-manager`, `cnpg-system`, `keda`, `volsync-system` | listed | flows not yet enumerated: webhooks and APIs the API server calls, the store's clients, scrapes, the PostgreSQL operator's calls to the Barman Cloud plugin. Each entry says which, and what covers it. |
 | `piraeus-datastore` | listed | the CSI node plugin runs in the host's network namespace; the satellites replicate over the pod network, and their flows are not yet enumerated. |
 | `cilium-secrets` | listed | holds no pod. |
@@ -1327,16 +1327,17 @@ It does not scrape:
   metrics endpoint needs no definition, so it is on and a PodMonitor of its own application scrapes
   it.
 
-Alertmanager routes every alert to its one receiver, `null`, which sends nothing: alerts show in
-Prometheus and Alertmanager and go nowhere else.
+Alertmanager sends a critical or warning alert to a notification webhook and the Watchdog to a
+heartbeat URL, once the two addresses are in the secret store; until then it runs without them and
+nothing leaves the cluster ([Where alerts go](#where-alerts-go)).
 
 Prometheus keeps 14 days of data, and at most 16 GiB, on a 20 GiB volume; Alertmanager keeps its
 silences and notification log on a 1 GiB volume. Both volumes are claims on the cluster's default
 storage class, which neither names; without one, the claims and the two pods stay Pending.
 
 `tests/monitoring.bats` builds the application as Flux applies it, renders the pinned chart with
-its values, and checks the namespace, the targets, the rules, the receivers, the claims and that
-each values key is one the chart or a subchart reads.
+its values, and checks the namespace, the targets, the rules, the claims and that each values key
+is one the chart or a subchart reads; `tests/alert-routes.bats` holds Alertmanager's configuration.
 
 ### Flux monitoring
 
@@ -1501,7 +1502,9 @@ alert, unless:
 
 - its `severity` label is `critical`, `warning` or `info`: `critical` is a loss of service or of
   data in progress that an operator acts on at once, `warning` is a failure that needs action
-  within the working day, and `info` points at something to look at when convenient;
+  within the working day, and `info` points at something to look at when convenient. A `critical`
+  or a `warning` alert goes to the receiver `notify`; an `info` alert goes to no receiver and shows
+  in Prometheus' and Alertmanager's interfaces only ([Where alerts go](#where-alerts-go));
 - it has a `summary`, a `description` that names what is affected with `{{ $labels.<name> }}`, and
   a `for`;
 - its `runbook_url` is `https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/<file>.md#<heading>`
@@ -1601,8 +1604,161 @@ What no alert covers, and why:
   stock `TargetDown`, a warning, once more than a tenth of the job's targets have been down for 10
   minutes, which is one target on a cluster of fewer than ten nodes.
 
-The alerts have no destination yet: Alertmanager sends them nowhere, so they show in Prometheus and
-Alertmanager only.
+#### Where alerts go
+
+Alertmanager sends a critical or warning alert to a notification webhook, and the Watchdog, the
+stock alert that always fires, to a heartbeat URL, so that whoever watches the heartbeat learns
+that Prometheus or Alertmanager has stopped from its silence. Which services stand behind the two
+addresses is the deployment's choice: each address is a value an operator writes to the secret
+store, the tree holds neither, and until both are there nothing leaves the cluster.
+
+**The routes.** Alertmanager's configuration is `alertmanager.config` in the values of
+`kube-prometheus-stack`, written out whole, so that what the chart renders into its Secret is
+those values and nothing of the chart's own configuration is merged in. An alert takes the first
+route that matches it, and every route groups by `alertname` and `namespace`:
+
+| Alert | Receiver | First sent after | Flushed every | Repeated after |
+| --- | --- | --- | --- | --- |
+| the Watchdog (`alertname = "Watchdog"`) | `heartbeat` | at once | 1m | 5m, so a beat every 6m (below) |
+| a `severity` of `critical` or `warning` | `notify` | 30s | 5m | 12h |
+| any other: an `info` alert, the info inhibitor | `null`, which sends nothing | | | |
+
+The Watchdog's route comes first and does not continue, so the Watchdog reaches `heartbeat` alone
+whatever severity it carries; the wait, the interval and the repeat of `notify` are the chart's
+own. The inhibit rules are the chart's four, as it ships them: a critical alert mutes the warning
+and info alerts of its name and namespace, a warning the info alerts, the info inhibitor the info
+alerts of its namespace, and any other alert the info inhibitor. An `info` alert reaches no
+receiver: it shows in Prometheus' and Alertmanager's interfaces and nowhere else. No
+`AlertmanagerConfig` object is in the tree: the chart's Alertmanager selects them in every
+namespace and the operator puts their routes before these, so one would change the route tree the
+checks below read, and `tests/alert-routes.bats` refuses one in the render or in an application's
+`app/`.
+
+**The receivers.** `notify` and `heartbeat` are each one generic webhook and nothing else: the
+configuration holds no address, no credential and no client setting. Each reads its address from a
+file, at every notification: `/etc/alertmanager/destinations/notify-url` and
+`/etc/alertmanager/destinations/heartbeat-url`. `notify` is told when an alert resolves;
+`heartbeat` is not, as the notification that would follow the Watchdog's end is no beat.
+Alertmanager trims the file's content and reads it as one of its notification templates, so `{{`
+in an address starts a template.
+
+**The Secret.** The two files are the keys of the Secret `alert-destinations` in `monitoring`,
+which the Alertmanager mounts whole and read-only at `/etc/alertmanager/destinations`, as an
+optional volume: the pod starts while the Secret does not exist, with an empty directory, and the
+kubelet puts the files in once it does, without a restart. The operator's own list of Secrets to
+mount, `secrets`, is not used, as it makes the volume required: no Alertmanager would run until the
+store held both addresses. `apps/base/monitoring/alert-destinations/` is the one ExternalSecret
+that writes the Secret, from the properties `notify-url` and `heartbeat-url` of
+`monitoring/alert-destinations` in the store, by two `data` entries, so the Secret holds those two
+keys and nothing else the entry may hold. Its Kustomization names `openbao-store` in `dependsOn`,
+which names `external-secrets`, whose chart brings the `ExternalSecret` kind; it does not wait, and
+nothing names it in `dependsOn`, so a store without the addresses stalls no Kustomization and no
+release. An operator writes the two, each typed or piped in ([The recipes](#the-recipes)):
+`just bao-put monitoring/alert-destinations notify-url` and
+`just bao-put monitoring/alert-destinations heartbeat-url`. Each is written exactly as its service
+gives it, with `https://`: Alertmanager follows redirects, and Go's HTTP client turns a POST that
+is answered with a 301, 302 or 303 into a GET without a body, so an `http://` address of a service
+that redirects to `https://` reaches it with no alerts.
+
+Both must be there before either works: External Secrets fails the whole ExternalSecret while a
+property it names is missing (`SecretSyncedError`), and writes no Secret. It reads a failing
+ExternalSecret again after a delay that doubles from a second up to seven minutes; the kubelet
+puts a Secret that appears into a pod's volume within its sync period, a minute by default, which
+the tree leaves as it is, and the moment its watch takes; and Alertmanager reads the file at the
+group's next flush, a minute for the heartbeat and five for a notification that is waiting. So the
+first beat can leave up to about nine minutes after the second `bao-put`, and the first
+notification up to about thirteen. An address changed in the store reaches the pod the same way,
+within the ExternalSecret's refresh interval of 15 minutes and the kubelet's minute, and the next
+notification is sent to it.
+
+**What a notification carries.** Alertmanager POSTs the JSON its documentation gives for a
+webhook (`version` 4): the receiver, the status, the group's key and labels, why it is sent
+(`notification_reason`, such as `first notification`), the labels and annotations its alerts
+share, its own address in the cluster (`externalURL`,
+`http://kube-prometheus-stack-alertmanager.monitoring:9093`) and, for each alert, its status, every
+label, every annotation, when it started and ended, its fingerprint and the address of its
+expression at Prometheus in the cluster (`generatorURL`, under
+`http://kube-prometheus-stack-prometheus.monitoring:9090/graph`). So whoever runs the destination
+reads the names of namespaces, pods, nodes, containers and jobs, the addresses in `instance`
+labels, the `prometheus` label that names the Prometheus the alert came from, and each rule's
+summary, description and runbook link. The heartbeat's body has the same form and holds the
+Watchdog alone.
+
+**The heartbeat's time.** The Watchdog's group is flushed at once and then every minute. A flush
+sends a beat when the last one is more than five minutes old, by the time Alertmanager wrote it to
+its notification log, which it does once the destination has answered. The fifth flush after a
+beat comes five minutes after the flush that sent it, which is a moment before the beat was
+written, so it sends nothing and the sixth sends the next: a beat leaves every six minutes. The
+longest gap between two beats while everything works is six minutes, so a heartbeat monitor expects
+a beat every six minutes and allows twelve, twice the longest gap, before it reports. A beat that
+cannot be sent is tried again within its flush and then at every flush, a minute apart.
+
+**Until the addresses are there.** Alertmanager runs, and each notification fails at once on the
+file it cannot read: its log says `read url_file: open
+/etc/alertmanager/destinations/notify-url: no such file or directory` for the receiver, and the
+failure counts in `alertmanager_notifications_failed_total` for the integration `webhook`. Two
+stock alerts read that counter against `alertmanager_notifications_total` over fifteen minutes:
+`AlertmanagerFailedToSendAlerts`, a warning, and `AlertmanagerClusterFailedToSendAlerts`, critical
+(the chart's other rule of that name, a warning, selects no integration and never fires). Both
+fire once failures have held for their five minutes, so about five minutes after the first
+notification fails, the Watchdog's, and stay firing until the addresses are there; they show in
+the interfaces alone, as they cannot be sent either. They are left to fire, being true. They clear
+about fifteen minutes after the last notification failed, so the destination gets both as firing
+among its first notifications and their resolution after. When they fire later, a notification
+fails again. Look at the ExternalSecret's status
+(`kubectl --namespace monitoring get externalsecret alert-destinations`), at the keys the Secret
+holds, without their values (`kubectl --namespace monitoring describe secret alert-destinations`),
+and at Alertmanager's log (`kubectl --namespace monitoring logs
+alertmanager-kube-prometheus-stack-alertmanager-0 --container alertmanager`), whose lines `Notify
+failed` and `Notify attempt failed, will retry later` name the receiver and say why: `read
+url_file` for a file that is missing, `dial tcp` for a destination that refuses the connection or
+whose name does not resolve, `unexpected status code` for one that answers with an error. A
+destination that refuses the connection or answers with a server error is tried again until the
+group's next flush and counts as a failed notification then; one that answers with a client error
+fails at once.
+
+**Where an address is.** In the secret store, in the Secret `alert-destinations` and in the file in
+the pod. It is in no file of this repository, and neither in Alertmanager's configuration nor on
+its status page, which hold the file's path. Where a request fails, the URL in the error is
+replaced by `<redacted>`: the log never holds an address whole, and of its path and its query only
+what stands between `{{` and `}}`. What the log can hold is the host and that: a destination that
+refuses the connection is named by the address and port dialled, one whose name does not resolve
+by that name, an address that is no URL by the piece the parser rejects, and an address whose
+template fails by what is between the braces, which the error names before any request is made.
+A destination that answers with an error is logged with the status and the body it answered. So a
+token belongs in the path or the query of an address, never in its host name or between `{{` and
+`}}`.
+
+**The checks.** `just alerts-route-check`, in the `static` group of `just ci`, renders the
+application as Flux and helm-controller build it, takes the configuration from the Secret the one
+rendered Alertmanager reads, and runs amtool and Alertmanager on it, from the image the chart
+deploys: `alertmanager_image` in the justfile, by tag and the digest of its image index, which
+Renovate moves in the pull request that moves the chart, and which the check and
+`tests/alert-routes.bats` hold to the image the render names. `just alerts-route-check` runs them
+in a container of that image with no network, a read-only filesystem and no capability; `just ci`
+copies the two binaries into the tools container, where they bind and dial the loopback alone.
+`amtool check-config` must accept the configuration. Then each case of
+`tests/alert-routes/cases.yaml`, one for each scenario of `features/alert-routes.feature` that the
+check proves, runs and is printed with its verdict. amtool resolves the receivers of an alert
+(`amtool config routes test`); one Alertmanager on the loopback serves the cases amtool cannot:
+that a critical alert inhibits the warning of its name and namespace and no other; that
+Alertmanager, started with no file at either path, becomes ready, fails each notification on its
+file and counts every notification it attempted as failed, so that an Alertmanager that one day
+refuses to start without the files fails a pull request and not the cluster; and that a silence
+made through the API the silence operator uses suppresses an alert on its way to `notify` and
+leaves the Watchdog active. A case of a kind the check does not know fails it. Each run then
+proves its own refusals: a configuration amtool refuses, a route case whose expectation is wrong
+and an inhibition case whose expectation is wrong must each fail it.
+
+`tests/alert-routes.bats` holds the rest, without Docker: that the rendered configuration is the
+values', with the keys at every position the set that was read against the operator's own types at
+the operator version the chart runs, as the operator parses the configuration strictly and writes
+its own serialisation for Alertmanager, so a key that is no field of those types stops it; that
+the keys the ExternalSecret writes, the volume the Alertmanager mounts and the files the receivers
+read agree; the application, its overlay entry and what waits for what; and that every alert rule
+of the tree's render, the charts' and the tree's own, has a severity of `critical`, `warning` or
+`info`, or is the Watchdog or the info inhibitor, as an alert with any other would end at `null`
+unseen.
 
 #### Silences
 
@@ -1638,7 +1794,8 @@ the application's `dependsOn`. It is reviewed with that application and leaves w
 silence for an alert of a chart sits beside the application that installs the chart, as a file of
 its own, not in the chart's values. A cluster-level application under `clusters/<cluster>/` holds
 none. The tree ships none: none is true today, and the Watchdog, which is meant to fire, is never
-silenced.
+silenced, as a silenced Watchdog sends no beat and so stops the heartbeat
+([Where alerts go](#where-alerts-go)).
 
 ```yaml
 apiVersion: observability.giantswarm.io/v1alpha2
@@ -5126,8 +5283,8 @@ once the lower counts are 15 minutes old. The other way, a series back unchanged
 after its last sample reads as new and fires once with nothing behind it: from a day and 15
 minutes after that sample, or from its return if that is later, until the return is 15 minutes
 old, so for at most 15 minutes; every series does the same after Prometheus lost its data.
-`tests/rules/falco.yaml` pins each case. The alert goes nowhere yet, like the others
-([Alerts](#alerts)).
+`tests/rules/falco.yaml` pins each case. The alert is critical, so it goes to the receiver `notify`
+like the others of its severity ([Where alerts go](#where-alerts-go)).
 
 ### What Falco costs and what it sees
 

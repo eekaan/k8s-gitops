@@ -35,6 +35,7 @@ configMapGenerator:
   - name: backstage-catalogue
     files:
       - catalogue/acme-issuers.yaml
+      - catalogue/alert-destinations.yaml
       - catalogue/backstage.yaml
       - catalogue/cert-manager.yaml
       - catalogue/cilium-bgp.yaml

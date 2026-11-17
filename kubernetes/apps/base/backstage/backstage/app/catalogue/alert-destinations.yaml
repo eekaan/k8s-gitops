@@ -1,0 +1,19 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: alert-destinations
+  description: The ExternalSecret that reads the two addresses Alertmanager sends to, the notification webhook's and the heartbeat's, from the secret store.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#where-alerts-go
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/monitoring/alert-destinations
+      title: Manifests
+spec:
+  type: secret
+  lifecycle: production
+  owner: group:default/operators
+  system: observability
+  dependsOn:
+    - resource:default/openbao-store

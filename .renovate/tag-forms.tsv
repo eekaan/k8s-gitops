@@ -61,3 +61,4 @@ docker	ghcr.io/falcosecurity/charts/falco	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag 
 docker	docker.io/falcosecurity/falco	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list, which holds release candidates and variants such as 0.45.2-slim as separate tags
 docker	ghcr.io/kyverno/charts/kyverno	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
 docker	docker.io/crowdsecurity/crowdsec	^v[0-9]+\.[0-9]+\.[0-9]+$	registry tag list, which holds each release's slim and debian variants, its release candidates, and the moving tags latest, slim and dev-debian
+docker	quay.io/prometheus/alertmanager	^v[0-9]+\.[0-9]+\.[0-9]+$	registry tag list, which holds release candidates as v0.32.1-rc.0 and a distroless build of a release as v0.35.0-distroless, each a tag of its own

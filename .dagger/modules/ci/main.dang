@@ -19,7 +19,7 @@ type Ci {
   }
 
   """
-  Run the justfile's groups of checks side by side and return what they printed, after a line that says where the tools came from: the groups are the dependencies of the checks recipe, and a group's checks are its own dependencies. A group's renovate-check runs Renovate's validator and extraction in its own image, its vector-check runs Vector in the image the log collector runs, on the configuration the pinned tools render, and its edge-policy-check runs FRR's speakers in FRR's image, on the configuration the pinned tools render; its rules-check runs promtool, taken from the Prometheus image the monitoring chart deploys, on the alert rules the pinned tools render; its other checks run in one just run, in the tools container (tools). Every group runs to its end; when a check fails, the call fails with every group's output and names the groups that failed.
+  Run the justfile's groups of checks side by side and return what they printed, after a line that says where the tools came from: the groups are the dependencies of the checks recipe, and a group's checks are its own dependencies. A group's renovate-check runs Renovate's validator and extraction in its own image, its vector-check runs Vector in the image the log collector runs, on the configuration the pinned tools render, and its edge-policy-check runs FRR's speakers in FRR's image, on the configuration the pinned tools render; its rules-check runs promtool, taken from the Prometheus image the monitoring chart deploys, on the alert rules the pinned tools render; its alerts-route-check runs amtool and Alertmanager, taken from the Alertmanager image the monitoring chart deploys, on the configuration the pinned tools render for it; its other checks run in one just run, in the tools container (tools). Every group runs to its end; when a check fails, the call fails with every group's output and names the groups that failed.
   """
   pub checks(
     """
@@ -36,6 +36,11 @@ type Ci {
     The image edge-policy-check runs FRR from.
     """
     frrImage: String!,
+
+    """
+    The image alerts-route-check takes amtool and Alertmanager from, the one the monitoring chart deploys.
+    """
+    alertmanagerImage: String!,
 
     """
     The image the tools container is built from.
@@ -97,7 +102,7 @@ type Ci {
     """, "bash", group]).stdout
     let groups = listing.trimSpace.split("\n").reject { _.isEmpty }.map { line =>
       let words = line.split(" ")
-      Group(name: words.takeFirst.join(""), checks: words.dropFirst, checkout: checkout, validator: validator, collector: collector, frr: container.from(frrImage))
+      Group(name: words.takeFirst.join(""), checks: words.dropFirst, checkout: checkout, validator: validator, collector: collector, frr: container.from(frrImage), alertmanagerImage: alertmanagerImage)
     }
     if (groups.isEmpty) {
       raise "the checks recipe has no groups"
@@ -240,10 +245,15 @@ type Group {
   let frr: Container!
 
   """
-  Whether every check of the group passed, and what they printed: renovate-check's Renovate, vector-check's Vector, edge-policy-check's FRR, rules-check's promtool and the just run of the others side by side.
+  The image of the Alertmanager the monitoring chart deploys, which alerts-route-check takes amtool and Alertmanager from.
+  """
+  let alertmanagerImage: String!
+
+  """
+  Whether every check of the group passed, and what they printed: renovate-check's Renovate, vector-check's Vector, edge-policy-check's FRR, rules-check's promtool, alerts-route-check's amtool and Alertmanager, and the just run of the others side by side.
   """
   outcome: Outcome! {
-    let others = checks.reject { _ == "renovate-check" }.reject { _ == "vector-check" }.reject { _ == "edge-policy-check" }.reject { _ == "rules-check" }
+    let others = checks.reject { _ == "renovate-check" }.reject { _ == "vector-check" }.reject { _ == "edge-policy-check" }.reject { _ == "rules-check" }.reject { _ == "alerts-route-check" }
     # The edge routers' routing policy against real BGP speakers: the checkout renders the edge's
     # configuration, FRR's container runs the speakers, which bind and dial loopback addresses only,
     # and the checkout checks what they printed. No docker, no privileges. What the proof printed is
@@ -295,6 +305,22 @@ type Group {
     } else {
       []
     }
+    # The configuration the monitoring chart gives Alertmanager, and amtool's and Alertmanager's own
+    # word on it. Both come from the image of the Alertmanager the chart deploys, which the recipe
+    # hands in by its digest, so dagger.lock holds no entry for it. The tools container runs them, as
+    # it has the network the render needs, with the pinned installs first on PATH as the justfile
+    # puts them; amtool and Alertmanager bind and dial that container's loopback alone. The check
+    # fails when the render names another image than the one they came from.
+    let routes: [Run!]! = if (checks.contains("alerts-route-check")) {
+      let image = container.from(alertmanagerImage)
+      [Run(label: "alerts-route-check", ctr: checkout
+        .withFile("/usr/local/bin/amtool", image.file("/bin/amtool"))
+        .withFile("/usr/local/bin/alertmanager", image.file("/bin/alertmanager"))
+        .withExec(["chmod", "+x", "/usr/local/bin/amtool", "/usr/local/bin/alertmanager"])
+        .withExec(["bash", "-c", `PATH="$(mise bin-paths | paste -sd: -):$PATH"; export PATH; exec 2>&1; pinned="$(printf '%s' "$1" | cut -d@ -f1)"; scripts/alerts-route-config /tmp/alerts-route-check && { [ "$(cat /tmp/alerts-route-check/image)" = "$pinned" ] || { echo "the render deploys $(cat /tmp/alerts-route-check/image), not $pinned, which amtool and Alertmanager came from"; exit 1; }; } && scripts/alerts-route-run /tmp/alerts-route-check sh && scripts/alerts-route-run --refusals /tmp/alerts-route-check sh`, "bash", alertmanagerImage]))]
+    } else {
+      []
+    }
     # One just run, so a recipe that several checks depend on runs once. Without a recipe, just
     # would run its default and pass having checked nothing.
     let justRun: [Run!]! = if (others.isEmpty) {
@@ -302,7 +328,7 @@ type Group {
     } else {
       [Run(label: "", ctr: checkout.withExec(["bash", "-c", `exec 2>&1; just "$@"`, "bash"] + others))]
     }
-    let done = (renovate + vector + edgePolicy + rules + justRun).{{ label, outcome }}
+    let done = (renovate + vector + edgePolicy + rules + routes + justRun).{{ label, outcome }}
     Outcome(
       passed: done.all { _.outcome.passed },
       output: done.map { r => if (r.label == "") { r.outcome.output } else { r.label + ":\n" + r.outcome.output } }.join("\n"),

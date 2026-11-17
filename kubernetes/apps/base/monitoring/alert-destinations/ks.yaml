@@ -1,0 +1,22 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: alert-destinations
+  namespace: flux-system
+spec:
+  path: ./apps/base/monitoring/alert-destinations/app
+  targetNamespace: monitoring
+  # The ExternalSecret names the store, which its application makes Ready, after the operator
+  # whose chart brings the ExternalSecret kind.
+  dependsOn:
+    - name: openbao-store
+  # Not waited for: the two addresses it reads exist once an operator writes them with just
+  # bao-put, and until then the ExternalSecret reports the missing key and tries again. Nothing
+  # names this application in dependsOn, the monitoring stack least of all: Alertmanager runs
+  # without the Secret.
+  wait: false
+  sourceRef:
+    kind: ExternalArtifact
+    name: alert-destinations

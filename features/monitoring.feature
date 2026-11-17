@@ -32,11 +32,6 @@ Feature: Monitoring
     When the chart is rendered offline
     Then Prometheus and Alertmanager each claim a volume of a stated size that names no storage class, and Prometheus keeps its data for a stated time and below a stated size that fits its volume
 
-  Scenario: Alerts go nowhere yet
-    Given the kube-prometheus-stack application's pinned chart and values
-    When Alertmanager's rendered configuration is read
-    Then its only receiver is the null receiver, which every route ends in
-
   Scenario: Prometheus picks up every monitor and rule in the cluster
     Given the kube-prometheus-stack application's pinned chart and values
     When the rendered Prometheus is read

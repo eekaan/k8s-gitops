@@ -147,7 +147,10 @@ current. A new version alone leaves the record as it is. With [mise](https://mis
   collector runs, pinned by digest, so it needs Docker too), the alert rules the tree renders
   (`just rules-check`: promtool, in the image of the Prometheus the rendered chart deploys, checks
   every rule and runs the unit tests in `tests/rules`, and each alert of the tree's own has its
-  severity, runbook and a test that fires and one that stays quiet; Docker as well), and gitleaks
+  severity, runbook and a test that fires and one that stays quiet; Docker as well), where
+  Alertmanager sends each alert (`just alerts-route-check`: amtool and Alertmanager, in the image of
+  the Alertmanager the rendered chart deploys, pinned by digest, check its rendered configuration
+  and run the cases in `tests/alert-routes/cases.yaml`; Docker as well), and gitleaks
   over the committable files and the git history reachable from `HEAD`, so a clone and a CI
   checkout are judged on the same commits. The groups `tests-1` to `tests-3` each run a third of
   the bats tests.

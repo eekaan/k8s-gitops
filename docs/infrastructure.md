@@ -1092,7 +1092,10 @@ The tools below get only the secrets they use. `scripts/lib/tools.sh` runs `tofu
 `age-keygen`, `gh`, `ssh`, `ssh-keyscan` and `ssh-keygen` with the secrets they may not see
 unexported, and `s3_rclone` hands rclone the one key pair it is called with. `scripts/render`,
 `scripts/vector-config`, `scripts/rules-config`, `scripts/rules-image`, `scripts/rules-promtool`,
-`scripts/ci-comment`, `vector-check` and `rules-check` run their tools the same way.
+`scripts/alerts-route-config`, `scripts/alerts-route-run`, `scripts/ci-comment`, `vector-check` and
+`rules-check` run their tools the same way; `scripts/alerts-route-run` runs the command it is
+given, docker or a shell, with every secret unexported, so that amtool, Alertmanager and whatever
+else that command starts get none.
 Every other tool, `jq`, `yq`, `git` and `flock` among them, gets the environment as it is: `jq`
 reads `OPERATOR_CIDRS` from it by design, and none of them sends it anywhere. A wrapped tool a
 script starts in the background, such as a port-forward, is started as `( exec_tool kubectl … ) &`,
@@ -1115,8 +1118,10 @@ tests that record a tool's environment catch those: `tests/tool-secrets.bats` fo
 client, and for each of these recipes, the one that runs it: `tests/infra-recipes.bats` (tofu),
 `tests/cluster-recipes.bats` (the upgrade recipes' talman, kubectl and age), `tests/ci-host.bats`
 (gh, ssh), `tests/grafana.bats` (kubectl), `tests/render.bats` (flux, helm, kustomize),
-`tests/logs.bats` (`vector-config`'s flux and helm) and `tests/ci.bats` (gh in `ci-comment`). The
-docker of `vector-check` and `rules-check` has only the scan.
+`tests/logs.bats` (`vector-config`'s flux and helm), `tests/alert-routes.bats`
+(`alerts-route-config`'s flux and helm, and the command `alerts-route-run` is given) and
+`tests/ci.bats` (gh in `ci-comment`). The docker of `vector-check` and `rules-check` has only the
+scan.
 
 | Secret | Seen by |
 | --- | --- |
