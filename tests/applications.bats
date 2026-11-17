@@ -351,7 +351,9 @@ image_version() {
 
 # tree_without ENTRY...: copies kubernetes/ to $TREE and takes each ENTRY out of the overlay's
 # resources: an application's name, for its ks.yaml, or a namespace directory's path under
-# apps/base/, such as ai-system, for the directory.
+# apps/base/, such as ai-system, for the directory. Unlike the shared tree_without of
+# tests/fixtures/tree-without.bash, it takes a bare name both ways at once, so external-secrets, an
+# application and a namespace directory, loses both entries.
 tree_without() {
   local entry
   TREE="$BATS_TEST_TMPDIR/tree"

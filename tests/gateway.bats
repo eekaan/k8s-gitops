@@ -7,6 +7,9 @@
 # it back afterwards, so two builds at once could leave the rewritten file behind.
 export BATS_NO_PARALLELIZE_WITHIN_FILE=true
 
+# tree_without, a copy of the tree whose overlay leaves applications out.
+load fixtures/tree-without
+
 setup() {
   REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   CLUSTER="$REPO/kubernetes/clusters/lab-sto2"
@@ -516,18 +519,6 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   [ "$(depends_on hello-route | sort | paste -sd' ' -)" = "gateway-public hello" ]
 }
 
-# tree_without APP...: copies kubernetes/ to $TREE and takes the ks.yaml of each APP out of the
-# overlay's resources.
-tree_without() {
-  local app
-  TREE="$BATS_TEST_TMPDIR/tree"
-  mkdir -p "$TREE"
-  cp -r "$REPO/kubernetes" "$TREE/kubernetes"
-  for app in "$@"; do
-    yq -i '.resources |= map(select(test("/'"$app"'/ks.yaml$") | not))' "$TREE/kubernetes/apps/overlays/lab-sto2/kustomization.yaml"
-  done
-}
-
 @test "A cluster that leaves the Gateway out still builds, and a route without its Gateway is refused" {
   # The tree as it is passes, with the issuer, the Gateway and the route listed.
   run "$REPO/scripts/kubernetes-check" "$REPO"
@@ -639,7 +630,7 @@ tree_without() {
   # One setting that matches everything: no type, which logs every route's requests and, through
   # the listener, those no route took; no CEL match.
   [ "$(yq '.settings | length' "$log")" -eq 1 ]
-  [ "$(yq '.settings[0] | has("type") or has("matches")' "$log")" = false ]
+  [ "$(yq '.settings[0] | (has("type") or has("matches"))' "$log")" = false ]
   # JSON, to standard output, where the log collector reads the container's lines.
   [ "$(yq '.settings[0].format.type' "$log")" = JSON ]
   [ "$(yq '.settings[0].sinks | length' "$log")" -eq 1 ]

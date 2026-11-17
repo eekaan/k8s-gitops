@@ -597,7 +597,9 @@ routes reaching the kernel, equal-cost paths across several workers, graceful re
 restart or the nftables rules, which the stack's tests compare as text and `nft --check` reads for
 syntax at first boot: `nft` is in neither of the proof's containers, and `unshare` is not permitted
 in either, so no network namespace of its own could hold the rules. The container's FRR takes 64
-equal-cost paths where Debian's takes 256, so the proof renders with 64.
+equal-cost paths where Debian's takes 256, so the proof renders with 64. The render, `tofu console`
+in `tests/fixtures/edge-policy`, takes no state lock there, as the fixture has no state, so two
+proofs can run in one checkout at once.
 
 ### The data path
 
