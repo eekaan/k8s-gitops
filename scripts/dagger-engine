@@ -13,11 +13,13 @@
 # Usage: scripts/dagger-engine
 set -euo pipefail
 
-if [[ -n ${DAGGER_ENGINE-}${_EXPERIMENTAL_DAGGER_RUNNER_HOST-} ]] || ! command -v docker > /dev/null; then
+if [[ -n ${DAGGER_ENGINE-}${_EXPERIMENTAL_DAGGER_RUNNER_HOST-} ]] || ! type -P docker > /dev/null; then
   exit 0
 fi
 
 here=$(cd "$(dirname "$0")/.." && pwd)
+# shellcheck source=scripts/lib/tools.sh
+. "$here/scripts/lib/tools.sh"
 entries=/usr/local/share/dagger/entries
 image=$(sed -n 's/^dagger_engine:[[:space:]]*//p' "$here/versions.yaml")
 if [[ $image != *:*@sha256:* ]]; then

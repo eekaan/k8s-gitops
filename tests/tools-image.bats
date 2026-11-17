@@ -133,6 +133,8 @@ case ${1-} in
     printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' "$(printf '%s:%s' "$user" "$password" | base64 -w0)" > "$dir/config.json"
     echo "Login Succeeded"
     ;;
+  # scripts/dagger-engine asks for the engine's state before every call of the module; this one runs.
+  inspect) echo 'true false null' ;;
   *) echo "fake docker: unexpected call" >&2; exit 1 ;;
 esac
 EOF
@@ -365,7 +367,9 @@ handed() {
 # steps: the recorded calls to docker, dagger and cosign, in order, as the tool and its subcommand.
 steps() {
   [[ -e $RECORD/calls ]] || return 0
-  awk '$1 == "docker" || $1 == "dagger" || $1 == "cosign" { print $1, $2 }' "$RECORD/calls"
+  # Without the question scripts/dagger-engine puts to docker before each call of the module
+  # (tests/dagger-engine.bats holds what it does with the answer).
+  awk '($1 == "docker" && $2 != "inspect") || $1 == "dagger" || $1 == "cosign" { print $1, $2 }' "$RECORD/calls"
 }
 
 # step_list STEP...: STEPs one per line, as steps prints them.
