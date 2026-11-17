@@ -26,12 +26,22 @@
 # --edge N replaces edge N alone, after the same check of the other edge. With --other-down it goes
 # on when the other edge does not pass either, once a sentence that names both edges is typed back,
 # --yes or not: with both edges down nothing serves anyway, and replacing one is the way back.
+#
+# What is typed, the stack's name, that sentence and yes for a host key, is read one line at a
+# time, in the order it is asked, from the script's standard input: a terminal, or a pipe or a file
+# written before it started. No program the script starts has that input as its standard input
+# (reserve_answers in scripts/lib/infra.sh), so the ssh of a check reads nothing of an answer that
+# waits for a later prompt. The two exceptions are stated where they are made: dirname, below, and
+# the edge-check of edge_check_passes in scripts/lib/edge.sh, which asks for yes itself.
 # Usage: scripts/edge-rollout [--replace] [--edge 1|2 [--other-down]] [--yes]
 set -euo pipefail
 
+# reserve_answers comes with the libraries, so until they are sourced dirname, here and where the
+# libraries find each other, runs with the script's own standard input, of which it reads nothing.
 here=$(dirname "$0")
 # shellcheck source=scripts/lib/edge.sh
 . "$here/lib/edge.sh"
+reserve_answers
 
 usage() {
   infra_error "usage: edge-rollout [--replace] [--edge 1|2 [--other-down]] [--yes]"
@@ -98,11 +108,12 @@ check() {
 
 # other_down_typed NUMBER OTHER: whether the operator, told that OTHER does not serve either, types
 # the sentence that names both edges, --yes or not: replacing NUMBER then leaves no edge serving
-# until it passes its check.
+# until it passes its check. The sentence is one line of the operator's input, as confirm's answer
+# is (scripts/lib/infra.sh).
 other_down_typed() {
   local expected="replace edge $1 with edge $2 down" answer=
   printf 'Edge %s does not serve either, so no edge serves until edge %s passes its check. Type "%s" to replace it anyway: ' "$2" "$1" "$expected" >&2
-  read -r answer || true
+  read -r -u "${answers_fd:-0}" answer || true
   [[ $answer == "$expected" ]]
 }
 

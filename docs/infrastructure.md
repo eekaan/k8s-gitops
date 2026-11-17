@@ -688,11 +688,21 @@ Gateway's address through the edge get no answer, and nothing of them reaches th
 or the router. With the worker's route gone, the established connection and every new one, with the
 default route or with none, send nothing to the router, a new one is closed within a second and a
 half, and with the route back it is answered by the proxy that ran throughout. It needs `unshare`,
-`nft`, `ip`, `ss`, `socat`, `haproxy` (3.0, the edge's version) and `tofu` on `PATH`, and a host
-that allows unprivileged user namespaces with networks and mounts of their own; where one of them is
-missing, each of its tests skips, saying which. CI does not run it: the CI containers refuse those
-namespaces, so `just test` leaves its tests out, and the stack's tests compare the rules and the
-configuration as text.
+`nft`, `ip`, `ss`, `socat`, `haproxy` and `tofu` on `PATH`, and a host that allows unprivileged user
+namespaces with networks and mounts of their own; where one of them is missing, each of the two
+tests in the namespaces skips, saying which. The check needs `haproxy` on `PATH`. The edges run
+HAProxy 3.0, Debian 13's; the check takes whichever `haproxy` is there and does not compare its
+version, so a pass is a pass with that one, and one that refuses the rendered configuration fails
+the test with what it printed. Each file is rendered from the stack's own template by
+`tests/fixtures/edge-forward/render.sh`, where a template that does not render fails the check with
+what tofu said: `tofu console` exits 0 for a value it cannot evaluate, printing on standard output a
+warning that some expressions may produce unexpected results and then `(known after apply)`, so a
+render is one quoted base64 string and nothing else. CI does not run the two tests in the
+namespaces, which its containers refuse, so `just test` leaves them out; it runs
+the file's other tests, which need no more than `tofu`: that a template that does not render fails
+where it is rendered, that the recipe's comment and this paragraph name the programs the tests look
+for, and that this paragraph says of `haproxy` what the tests' own header says. The stack's tests
+compare the rules and the configuration as text.
 
 - zebra runs without `-r` (FRR's [zebra](https://docs.frrouting.org/en/stable-10.3/zebra.html):
   "When program terminates, do not flush routes installed by zebra from the kernel"). With it, an
@@ -807,6 +817,15 @@ edge does not pass either, once `replace edge N with edge M down` is typed back,
 with both down nothing serves anyway and replacing one is the way back
 ([runbooks/edge.md](runbooks/edge.md#replacing-one-edge)).
 
+What the rollout asks for may be typed at a terminal or supplied on its standard input, one line
+each, in the order it is asked: the stack's name, the sentence of `--other-down`, and `yes` for each
+host key the console does not vouch for, the one a check of the other edge asks about among them;
+`just infra-apply sto2/edge` reads the stack's name the same way, after the check of the other edge
+it runs first. Only the prompts read that input, the rollout's and those of the checks it runs:
+whatever else they start that would read its standard input, as the SSH client of a check does to
+the end, is given `/dev/null`, so answers written to a pipe before the rollout starts each reach
+their prompt, and the end of the input is an empty answer, which declines.
+
 A new instance, a replacement or one created again for an instance gone from the cloud, has SSH host
 keys of its own at the floating address the old one had, and the connection checks them strictly
 against the recorded ones. The recorded keys of an edge whose instance a plan creates are therefore
@@ -841,11 +860,26 @@ host's are, it prints pass, FAIL or skip for each edge:
   local-only is announced by some workers only.
 - FRR is configured with its reject route for the service range, for the range of the same file
   when there is one, and the kernel has it.
-- The nftables tables are loaded and none translates an address, which is a FAIL when the old
-  translation table is there; the forward chain drops by default and holds no rule; and the output
-  chain refuses a packet toward the Gateway, which is the proxy's connection, unless its route goes
-  through a worker: its one guarded rule is for the cluster's Gateway, holds every worker's address
-  of `talman.yaml` and not the edge's default route's next hop.
+- The nftables rules are loaded and none translates an address. The check reads the whole ruleset
+  the edge has loaded, every table of it, as `sudo -n nft -j list ruleset` lists it
+  ([`libnftables-json(5)`](https://manpages.debian.org/trixie/libnftables1/libnftables-json.5.en.html)),
+  and the line passes only when the table `inet edge` is in it, no chain of any table is hooked at
+  nat, and no rule of any table, in a base chain or not, holds a `dnat`, `snat`, `masquerade` or
+  `redirect` statement. Without the table it is a FAIL that the rules are not loaded. A chain hooked
+  at nat or one of those statements is a FAIL of its own, with the table or without it, that names
+  which was found and never a rule, an element of a set or an address. A rule that names a
+  translation without stating one, as a match on `ct status dnat` or a comment, is none. nft has
+  no JSON for the inline chain of a `jump { ... }` or a `goto { ... }` and lists it as text, where
+  what its rules state is not read, so a rule that holds one is a FAIL that the ruleset cannot be
+  read, not a pass.
+- The forward chain drops by default and holds no rule.
+- The output chain refuses a packet toward the Gateway, which is the proxy's connection, unless its
+  route goes through a worker: its one guarded rule is for the cluster's Gateway, holds every
+  worker's address of `talman.yaml` and not the edge's default route's next hop. Without a Gateway
+  address in `talman.yaml`, or without the file, the line is a skip that says the guard was not
+  compared with that address, that no worker's address was looked for in it when the file lists no
+  worker either, and what was still checked; a guard that is missing, that leaves out a worker's
+  address or that admits the default route's next hop is a FAIL all the same.
 - The proxy is running, as its own user and not root (`systemctl is-active haproxy` and
   `ps -C haproxy -o user=`). Its configuration, read from `/etc/haproxy/haproxy.cfg`, binds the
   stack's public ports and no other port: `TF_VAR_public_ports` when it is set, as tofu takes it,
@@ -877,12 +911,18 @@ host's are, it prints pass, FAIL or skip for each edge:
 The commands run on an edge are those of the ordinary user, whose `PATH` on Debian has no `sbin`
 directory (`ENV_PATH` in `login.defs`, and the `PATH` OpenSSH's server gives a command run over
 SSH), so a program that lives in `/usr/sbin` is run through `sudo -n`, whose `secure_path` has
-them: `nft` and `sshd`. `vtysh`, `ss`, `ip`, `systemctl` and `apt-config` are in `/usr/bin`; `vtysh`
+them: `nft` and `sshd`. `nft` is asked for the ruleset as JSON, `sudo -n nft -j list ruleset`, which
+Debian's package is built to print (`--with-json` in its
+[`debian/rules`](https://sources.debian.org/src/nftables/1.1.3-1/debian/rules/)), and for the
+forward and output chains as text, `sudo -n nft list chain inet edge forward` and the same for
+`output`. `vtysh`, `ss`, `ip`, `systemctl` and `apt-config` are in `/usr/bin`; `vtysh`
 and `ss` run through `sudo -n` as well, for what only root may read: FRR's daemons, and which
 process holds each listening socket. An answer the edge could not give, as its command was not
 found or failed, is a FAIL of its own line, `cannot read <what> on the edge: <what the edge said>`,
 with any address in the edge's words left out, and not the unhealthy conclusion drawn from an empty
-answer; the other lines are still checked.
+answer; so is an answer to the ruleset's listing that is not nft's JSON listing of schema version
+1, the one the check reads, or in which a rule holds a statement that nft lists as text, and of the
+listing nothing is printed. The other lines are still checked.
 
 A worker that is down fails the sessions line on both edges, so no rollout gets past its first
 check until the worker is back or the cluster stack no longer has it; the line counts every worker
@@ -971,9 +1011,13 @@ this defends against. With F the fingerprints the scan offers and C the console'
   recipe reads the console again every `EDGE_ROLLOUT_INTERVAL` seconds within what is left of
   `EDGE_ROLLOUT_WAIT` in `just edge-rollout`, and every 5 seconds for `HOST_CONSOLE_WAIT` seconds,
   30 by default, elsewhere, then says why and asks: the fingerprints are shown, and the keys are
-  recorded only once `yes` is typed. A client that cannot be run (no `OS_CLOUD` or `OS_AUTH_URL`,
-  a client older than 7.0.0) is not tried again, and the operator is asked at once. The waits are
-  timed with `date +%s`.
+  recorded only once `yes` is typed. The `yes` is one line of the recipe's standard input, typed at
+  a terminal or supplied on a pipe, one for each host that is asked about, in the order they are
+  asked. A `yes` supplied ahead records the keys shown without anyone comparing their fingerprints;
+  a key the console contradicts is still refused. `just edge-check` and `just edge-rollout` keep
+  that input for their prompts alone ([Rolling out a change](#rolling-out-a-change)). A client that cannot be run (no `OS_CLOUD` or
+  `OS_AUTH_URL`, a client older than 7.0.0) is not tried again, and the operator is asked at once.
+  The waits are timed with `date +%s`.
 
 What is compared is what is recorded: there is no second scan between. The CI host is covered the
 same way, by the `instance` output of the ci stack.
