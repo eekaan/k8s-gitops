@@ -179,6 +179,11 @@ current. A new version alone leaves the record as it is. With [mise](https://mis
   it found it: Dagger records in `dagger.lock` each image it resolves without an entry there, and
   the run puts the file back, whatever its bytes were, whether it passes, fails or is stopped by
   `INT`, `TERM` or `HUP`; `just lock-check` fails on such an entry in the committed file.
+- Before a recipe calls the module it runs `scripts/dagger-engine`, which starts the engine container
+  the pinned Dagger would start itself, with an empty file system over the cache entries the
+  engine's image ships. The pinned engine refuses to start once one of those entries has expired,
+  a week after the image was built; without them it starts and builds what they held when a Go
+  module first needs it. An engine named by `DAGGER_ENGINE` is left alone.
 - In CI, a first job lists the groups (`just ci-groups`), one job per group runs `just ci <group>`,
   each showing its own result on the pull request, the render job renders the change for its
   comment (`just ci-render`), and the job named `ci`, the required check on `main`, passes only when
