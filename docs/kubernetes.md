@@ -1092,6 +1092,56 @@ whatever image the nodes run, and a pod that selects one on a node whose image l
 does not start. `tests/baseline.bats` builds the application as Flux applies it and checks the two
 classes and their handlers.
 
+**Pods under a sandbox runtime reach Services.** Serving Services in place of kube-proxy, Cilium by
+default translates a Service's address to a backend's where a socket connects or sends, in hooks on
+the node's kernel, its socket load balancer, so that the socket is connected to the backend itself
+and no packet needs rewriting
+([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/network/kubernetes/kubeproxy-free.rst#socket-loadbalancer-bypass-in-pod-namespace)).
+A pod under `gvisor` or `kata` runs on a kernel of its own, gVisor's or the one in Kata's virtual
+machine, so its sockets never pass those hooks, and that documentation names Kata Containers and
+gVisor among the pods the translation at the socket has no effect on. With these values, an agent
+looks a Service up at a pod's interface only where the translation at the socket does not cover the
+pods (`bpf/bpf_lxc.c`, `ENABLE_PER_PACKET_LB`), so with the translation at the socket alone such a
+pod would reach other pods and no Service, the cluster's resolver included. Cilium's values
+therefore set `socketLB.hostNamespaceOnly: true`, which Cilium's guide to Kata Containers asks for
+([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/network/kubernetes/kata.rst#deploy-cilium))
+and the chart renders into the key `bpf-lb-sock-hostns-only` of the ConfigMap `cilium-config`: the
+agents translate at the socket only for processes in the node's own network namespace, pods on the
+host network among them, and at its interface for every other pod (`bpf/bpf_sock.c`,
+`ENABLE_SOCKET_LB_HOST_ONLY`). Kube-proxy replacement turns the translation at the socket on
+whatever `socketLB.enabled` says (`pkg/kpr/kpr.go`), so this value is the one switch. It holds for
+every pod off the host network, sandboxed or not. Such a pod's connection to a Service is
+translated packet by packet, on the way out and back, from an entry in Cilium's connection tracking
+that holds its backend (`bpf/lib/lb.h`, `lb4_local`), where a socket connected to the backend
+needed neither. The socket stays connected to the Service's address, and that is the address Falco
+records of a connection, as its probe reads the socket's own destination, so its rule
+`Contact K8S API Server From Container` matches a connection to the `kubernetes` Service from a
+container off the host network that the rule does not except
+([Runtime detection](#runtime-detection)). One known issue in Cilium's documentation comes with
+translation at the interface
+([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/network/kubernetes/kubeproxy-free.rst#connection-collisions-when-a-service-endpoint-is-accessed-via-multiple-vips)):
+two connections that one pod opens to one backend through two Service addresses, from the same
+source port, are one connection once translated, and the second can be dropped, so it advises
+against exposing a backend through more than one address. A pod under `kata` has a limitation of
+Kata's networking besides
+([Cilium](https://github.com/cilium/cilium/blob/v1.20.4/Documentation/network/kubernetes/kata.rst#limitations)):
+Kata copies the MTU of the pod's interface into its virtual machine and not the lower MTU that
+Cilium sets on the pod's default route for the tunnel's overhead, so its connections with other
+pods can see fragmentation or dropped packets until the pod lowers that route's MTU itself. The
+value is one of the settings in `cilium-config`, so a change of it restarts every agent, at most
+two at a time, and the operator ([Service addresses](#service-addresses)).
+
+An agent that restarts attaches its socket programs before it rebuilds the programs at the
+interfaces of the pods on its node (`pkg/datapath/loader/base.go`,
+`pkg/datapath/orchestrator/orchestrator.go`), so when the value is turned on a packet that a pod
+there sends to a Service's address in between goes out untranslated, and when it is turned off the
+connections that pods opened to Services under it, which still carry the Services' addresses,
+stall once their programs are rebuilt without the lookup. `tests/install-cilium.bats` fails unless
+the runtime classes Flux builds, in the applications and besides them, are exactly these two (it
+renders no chart but Cilium's, so a class another chart would render goes unseen), the value is
+set, the agents' rendered configuration holds it beside kube-proxy replacement, and one paragraph,
+in this section, opens with the first sentence of the paragraph above.
+
 ## Service addresses
 
 A Service of type `LoadBalancer` gets its address from Cilium and is announced over BGP by the
@@ -1100,7 +1150,7 @@ what that takes, beside the Cilium application, whose values turn on Cilium's Lo
 management and its BGP control plane and keep Layer 2 announcements off. These settings live in
 the ConfigMap `cilium-config`, and `rollOutCiliumPods` and `operator.rollOutPods` restart the agents
 and the operator whenever it changes: a change to any of them, as the one that turned them on,
-restarts every agent, node by node, and the operator.
+restarts every agent, at most two at a time by the chart's update strategy, and the operator.
 
 - **Opting in.** A Service gets an address, and has it advertised, only with the label
   `k8s-gitops/announce: bgp`. Any other `LoadBalancer` Service stays pending, so no address is handed
