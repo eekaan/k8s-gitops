@@ -139,6 +139,7 @@ ci group='':
     tools=$(scripts/tools-image ci-args)
     mapfile -t tools <<< "$tools"
     if [[ -t 2 ]]; then progress=auto; else progress=plain; fi
+    scripts/dagger-engine
     scripts/restore-after dagger.lock dagger api call --progress="$progress" ci checks --base="$base" --renovate-image='{{ renovate_image }}' --vector-image='{{ vector_image }}' --frr-image='{{ frr_image }}' "${tools[@]}" --group={{ quote(group) }}
 
 # Print the groups of checks as a JSON list, the CI workflow's matrix of jobs; in a GitHub Actions step, also set it as the step's output groups
@@ -181,6 +182,7 @@ ci-render out base='':
     tools=$(scripts/tools-image ci-args)
     mapfile -t tools <<< "$tools"
     if [[ -t 2 ]]; then progress=auto; else progress=plain; fi
+    scripts/dagger-engine
     dagger api call --progress="$progress" -o {{ quote(out) }} ci render-diff "${tools[@]}" --base={{ quote(base) }}
 
 # The comment workflow's job: put the comment the render job of the CI run RUN_ID left on its pull request, as text only; needs GH_TOKEN, GITHUB_REPOSITORY, RUN_ID, HEAD_SHA, HEAD_REPOSITORY and HEAD_BRANCH

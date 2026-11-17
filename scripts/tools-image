@@ -199,6 +199,7 @@ publish() {
   say "found none to reuse: ${reason:-cosign said nothing}"
 
   begin "building the tools and pushing them as $image:$key"
+  "$root/scripts/dagger-engine"
   pushed=$(dagger api call --progress=plain ci tools-layer --base="$base" --packages="$packages" \
     publish --address="$image:$key")
   digest=${pushed##*@}
