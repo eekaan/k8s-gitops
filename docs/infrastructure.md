@@ -155,8 +155,10 @@ encrypted at the provider with a customer key instead, so the cluster's key alon
 delete the postgres bucket's objects but not read them.
 
 These recipes, `just infra-state-bucket`, the etcd snapshot recipes `just cluster-snapshot`,
-`cluster-snapshots` and `cluster-restore` ([cluster.md](cluster.md#recipes)) and the PostgreSQL
+`cluster-snapshots` and `cluster-restore` ([cluster.md](cluster.md#recipes)), the PostgreSQL
 dump recipes `just postgres-dumps` and `postgres-dump-check` ([kubernetes.md](kubernetes.md#dumps))
+and the OpenBao snapshot recipes `just openbao-snapshots` and `openbao-snapshot-check`, which read
+the OpenBao bucket with the state key ([kubernetes.md](kubernetes.md#raft-snapshots)),
 reach the object storage with rclone, pinned in `mise.toml`, at the endpoint, region and addressing that
 `infra/openstack/backend.hcl` gives OpenTofu's state. rclone is configured through its environment
 only and reads no config file; the operator's own rclone configuration, its `RCLONE_` and `AWS_`

@@ -3870,6 +3870,9 @@ with the Talos age key from `SOPS_AGE_KEY_FILE`, or `SOPS_AGE_KEY`, into memory 
   [Volume backups](#what-an-operator-does-once-and-what-then-happens-by-itself). The first creates
   the key and never reads one, as the `operator` role may only create and patch keys.
 
+The snapshot recipes, `just openbao-snapshots` and `just openbao-snapshot-check`, are under
+[Raft snapshots](#raft-snapshots): they reach the object storage only, never the store.
+
 ### How an application gets a secret out
 
 An application reads a key with an ExternalSecret that names the ClusterSecretStore `openbao`, the
@@ -3936,8 +3939,8 @@ shared by both jobs would need a component of their own and both jobs' tests poi
 costs more than the copies do. `tests/openbao-snapshots.bats` runs each of them as its container
 does, with the same checks as the etcd snapshot job's.
 
-**What a snapshot is worth.** A snapshot is the raft state of the store: a gzip-compressed tar
-archive of `meta.json`, `state.bin`, `SHA256SUMS` and `SHA256SUMS.sealed` (OpenBao's source, in the
+**What a snapshot is worth.** A snapshot is the raft state of the store: a tar archive, in a gzip
+stream, of `meta.json`, `state.bin`, `SHA256SUMS` and `SHA256SUMS.sealed` (OpenBao's source, in the
 pinned release's `internal/physical/raft/snapshot`). It holds everything the store holds: every key
 of `secrets/`, every version, the policies, the roles and the auth methods' configuration. OpenBao
 keeps that data encrypted with a keyring that a root key protects, which the seal protects
@@ -3947,6 +3950,23 @@ store's seal, which is how a restore checks that the snapshot was sealed with th
 unseals with; a new store with the same seal key passes. A restore that skips that check, `snapshot-force`, installs data that still opens only with the seal key
 ([API](https://openbao.org/docs/api/system/storage/raft/)). The age layer keeps a copy that leaves
 the cluster unreadable to anyone who holds the S3 key without the operator's age key.
+
+`meta.json` is raft's record of the snapshot, as `getMetaFromFSM` and `openFromFSM` in the pinned
+release's `internal/physical/raft/snapshot.go` fill it: the version of that record, 1; a fixed ID;
+the index and term of the last entry the store had applied; the raft configuration, each member by
+its ID and address, and the index it was made at; and the length of `state.bin`. It holds no time
+and no OpenBao version: the one time the archive carries is on its members, which `write` in
+`internal/physical/raft/snapshot/archive.go` sets when the server writes it, and the stream is not
+compressed (`Write` in `snapshot.go` beside it). `state.bin` is every storage entry as the store
+keeps it, its path in the clear (`writeTo` in `internal/physical/raft/fsm.go`), and `SHA256SUMS`
+the SHA-256 of those two. Without the seal key that much can be verified, and
+`just openbao-snapshot-check` verifies it: the stream is whole, the members are the four, the
+metadata is of the version OpenBao restores and gives the state's size, and both checksums match.
+What cannot be verified without it is that `SHA256SUMS.sealed` opens under the seal key and gives
+the same checksums, which a restore checks (`handleStorageRaftSnapshotWrite` in
+`internal/vault/logical_system_raft.go`) and which alone ties an archive to the store that wrote
+it, as the plain checksums are not signed and the age recipient is public; and that the store's
+keyring opens the data. Of the entries of `state.bin` the check knows the checksum alone.
 
 This backup covers the loss of the three volumes, or of the cluster, while the seal key is kept in
 the operator's file, which `just bao-recovery` writes with the recovery keys: the store is started
@@ -3986,9 +4006,12 @@ and for the monitoring definitions.
 **Seeing and taking a snapshot.** `kubectl --namespace openbao get cronjob,job` shows the runs and
 `kubectl --namespace openbao logs job/<job> --all-containers` says which step failed (`fetch-age`,
 `snapshot`, `encrypt` or `upload`). To take one now,
-`kubectl --namespace openbao create job --from=cronjob/openbao-snapshots <name>`. The runbook lists
-what the bucket holds and checks that a snapshot opens
-([runbook](runbooks/openbao.md#listing-and-checking-snapshots)). The alerts are
+`kubectl --namespace openbao create job --from=cronjob/openbao-snapshots <name>`.
+`just openbao-snapshots [cluster]` lists what the bucket holds of a cluster's store, newest first,
+and `just openbao-snapshot-check [snapshot|latest] [cluster]` downloads one, decrypts it with the
+Talos age key and verifies its archive, printing its metadata and nothing of the store and keeping
+nothing ([runbook](runbooks/openbao.md#listing-and-checking-snapshots)). Both read the bucket with
+the state key and reach nothing but the object storage. The alerts are
 [`OpenBaoSnapshotStale`](runbooks/alerts.md#openbaosnapshotstale) and
 [`OpenBaoSnapshotJobFailing`](runbooks/alerts.md#openbaosnapshotjobfailing)
 ([Alerts](#alerts)).

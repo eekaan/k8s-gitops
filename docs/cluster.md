@@ -1223,7 +1223,8 @@ to hand it to kubectl and age-keygen on standard input.
 - `BACKUP_BUCKET_PREFIX`, `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`: the start of the backup
   buckets' names and the state key ([infrastructure.md](infrastructure.md#environment)), with which
   `cluster-snapshot`, both upgrade recipes, `cluster-snapshots` and `cluster-restore` reach the
-  etcd bucket, and `postgres-dumps` and `postgres-dump-check` the postgres bucket, through rclone,
+  etcd bucket, `postgres-dumps` and `postgres-dump-check` the postgres bucket, and
+  `openbao-snapshots` and `openbao-snapshot-check` the OpenBao bucket, through rclone,
   configured as the infrastructure recipes configure it
   ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)). `cluster-bootstrap`,
   `cluster-config` and `cluster-flux` need the prefix as well, which becomes `BACKUP_BUCKET_PREFIX`

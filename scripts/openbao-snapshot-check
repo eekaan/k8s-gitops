@@ -1,0 +1,329 @@
+#!/usr/bin/env bash
+# Proves, as far as anyone without the store's seal key can, that a snapshot of a cluster's OpenBao
+# in the OpenBao bucket is a whole raft snapshot archive of the shape the pinned OpenBao restores,
+# without showing or keeping any of it. It finds the snapshot, by a name openbao-snapshots prints or
+# as latest, the newest by name; downloads it with the state key into a private temporary directory,
+# on a memory-backed filesystem where there is one (the user's runtime directory, then /dev/shm) and
+# otherwise under TMPDIR, which it says; checks that the file begins with the age header; decrypts it
+# there with the Talos age key, as cluster-restore does; and verifies the plain archive where it is:
+#   - gzip tests it without an error or a warning: it is gzip to its end, with its checksum and
+#     length right, and nothing after it but zero bytes, which gzip ignores;
+#   - tar lists it to its end, and its members are exactly meta.json, state.bin, SHA256SUMS and
+#     SHA256SUMS.sealed, each once and a regular file, in any order, each right after the one before
+#     it by its size, from the archive's first block on, so that no header tar does not list as a
+#     member, as a PAX header is, lies among them, and after the last the two empty blocks that end
+#     an archive;
+#   - meta.json, SHA256SUMS and SHA256SUMS.sealed each hold at least one byte and fewer than 8192;
+#   - meta.json is one JSON object whose Version is 1, whose Index is a whole number above 0, whose
+#     Term is a whole number, and whose Size is the length of state.bin;
+#   - SHA256SUMS is two lines, one for meta.json and one for state.bin in either order, each 64
+#     hexadecimal digits, two spaces and the name, and each digest is the SHA-256 of that member;
+#   - SHA256SUMS.sealed is there. It is not opened.
+# Then it prints the snapshot's name, where it was kept, its encrypted and plain sizes, the time on
+# the archive's metadata member in UTC, the metadata's index, term and version and the number of
+# servers in its configuration, the size of the state, that the checksums match and that the sealed
+# ones were not opened; and nothing of the store: no storage key or value, which state.bin holds, no
+# server's ID or address, which meta.json holds, no line of SHA256SUMS and no byte of the sealed
+# file. What tar, gzip and jq report is not shown either, as it can quote the archive. tar is asked
+# only to list the archive and to write a member to its standard output, which jq and sha256sum read,
+# so no member is ever a file and the state exists nowhere but inside the plain archive. The
+# directory is removed on every exit, a failed run and one interrupted by Ctrl-C or SIGTERM included
+# (make_private_dir's EXIT trap in scripts/lib/cluster.sh).
+#
+# What the check cannot know: whether the sealed checksums open under the seal key the operator
+# keeps, and match, which is the check a restore makes and all that ties an archive to the store that
+# wrote it, as age's recipient is public and the plain checksums are not signed, so the check proves
+# the archive whole and not who made it; whether the store's keyring opens the data; and whether the
+# entries of state.bin are well formed beyond their checksum.
+#
+# Each fact is read in the source of the OpenBao release recorded below, github.com/openbao/openbao,
+# of the raft library its go.mod names, github.com/hashicorp/raft v1.7.3, and of the Go it is built
+# with:
+#   internal/physical/raft/snapshot/archive.go: write makes the four members, in the order above,
+#     with the time of writing and mode 0600, the sealed list only when it is given the store's seal;
+#     hashList.Encode writes the lines of SHA256SUMS from a Go map, so in an order that differs from
+#     one snapshot to the next; read takes the members in any order, refuses any other name, and
+#     reads the three small ones to at most 8192 bytes (copyEOFOrN), taking that many for a file cut
+#     short; DecodeAndVerify wants a matching line for each of the two members and none for another.
+#   internal/physical/raft/snapshot/snapshot.go: Write puts the archive in a gzip stream, without
+#     compressing; Verify concludes that stream (concludeGzipRead), and WriteToTempFileWithSealer,
+#     which a restore reads the archive with, does not: that the stream is whole is this check's to
+#     see, with gzip.
+#   internal/physical/raft/raft.go: Snapshot and WriteSnapshotToTemp pass the store's seal on as a
+#     sealer, which makes SHA256SUMS.sealed the same list of checksums, encrypted by the seal.
+#   internal/physical/raft/snapshot.go: getMetaFromFSM makes the metadata, Version 1, its index and
+#     term the store's latest, and with them no time and no OpenBao version; openFromFSM takes no
+#     snapshot at index 0 and sets Size to the state's length; BoltSnapshotStore.Create, which a
+#     restore reaches, refuses every version but 1.
+#   internal/physical/raft/fsm.go: writeTo makes state.bin, every storage entry with its key in the
+#     clear beside its value.
+#   internal/vault/logical_system_raft.go: handleStorageRaftSnapshotRead always takes a snapshot with
+#     the store's seal; handleStorageRaftSnapshotWrite opens the sealed checksums with it and refuses
+#     the snapshot when they do not open, which the snapshot-force path alone skips.
+#   api/sys_raft.go: RaftSnapshotWithContext, the client the job saves a snapshot with, fails unless
+#     the archive it received holds a SHA256SUMS.sealed that is not empty.
+#   github.com/hashicorp/raft, snapshot.go: SnapshotMeta, the fields of meta.json, under the names
+#     Go's encoder gives them; raft.go: restoreUserSnapshot refuses a version outside
+#     SnapshotVersionMin to SnapshotVersionMax (config.go: 0 to 1) and a state whose length is not
+#     the metadata's Size, and restores with the store's own configuration, not the snapshot's.
+#   Go's archive/tar: a Writer that is given no format rounds a Header's time to the second and
+#     writes the first format that holds the header, USTAR here, a header of one block before each
+#     member, and Close two empty blocks at the end, which GNU tar lists as below; Reader.Next stops
+#     at two empty blocks, whatever follows them, and hands a PAX global header to its caller as a
+#     member, whose name OpenBao's read then refuses.
+# tests/openbao-snapshot-recipes.bats fails when the release recorded here is not the one the
+# snapshot job's client image is of, until the files are read again at that release
+# (.renovate/by-hand.tsv).
+# openbao-snapshot-archive: v2.7.2
+#
+# tar, gzip and sha256sum are the machine's own, GNU tar and coreutils, and take no option from the
+# environment. Of rclone's errors only the reason is shown, with places and keys replaced, and with
+# CI set none of it, but the name of the file that keeps it (scripts/lib/errors.sh). The check
+# reaches the object storage only, never the cluster or the store.
+# Usage: scripts/openbao-snapshot-check [<snapshot>|latest] [cluster]
+set -euo pipefail
+umask 077
+# The listing tar prints is read byte for byte, whatever the operator's locale.
+export LC_ALL=C
+# GNU tar takes options from the first, and a gzip that still reads the second takes them from it:
+# its --verbose makes a warning of the zero bytes it otherwise ignores after a stream.
+unset TAR_OPTIONS GZIP
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/backup-check.sh
+. "$here/lib/backup-check.sh"
+
+usage() {
+  infra_error "usage: openbao-snapshot-check [<snapshot>|latest] [cluster]; <snapshot> is a name just openbao-snapshots prints"
+  exit 2
+}
+
+(($# <= 2)) || usage
+snapshot=${1:-latest} cluster=${2-}
+if [[ $snapshot != latest && ! $snapshot =~ $s3_snapshot_name_re ]]; then
+  usage
+fi
+# A cluster is named as scripts/cluster-env takes one, which would refuse another name with status 1.
+if [[ -n $cluster && ! $cluster =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
+  usage
+fi
+
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "$cluster"
+
+# The most OpenBao reads of meta.json, SHA256SUMS and SHA256SUMS.sealed: a member of that many bytes
+# or more it takes for a file cut short.
+read_bound=8192
+
+# What jq makes of meta.json, all of it as one input: ok and the version, index, term and number of
+# servers, or the name of the first field that is not what OpenBao restores. A number counts as
+# whole when jq writes it back as digits alone, and an index or a term only up to the largest raft
+# can hold. The configuration never fails the check: a restore uses the store's own.
+# shellcheck disable=SC2016 # a jq program
+metadata_program='
+  def whole: type == "number" and (tojson | test("^(0|[1-9][0-9]*)\\z"));
+  def counter: whole and (tojson | length < 20 or (length == 20 and . <= "18446744073709551615"));
+  if length != 1 or (.[0] | type) != "object" then "object"
+  else .[0]
+    | if (.Version | tojson) != "1" then "version"
+      elif (.Index | counter | not) or .Index == 0 then "index"
+      elif .Term | counter | not then "term"
+      elif (.Size | tojson) != $state then "size"
+      else "ok \(.Version | tojson) \(.Index | tojson) \(.Term | tojson) \((.Configuration | objects | .Servers | arrays | length) // 0)"
+      end
+  end'
+
+# What jq makes of SHA256SUMS, all of it as one string: ok, form when it is not exactly the two
+# lines OpenBao writes, in either order, or the member whose digest is not the one given. OpenBao
+# writes a digest in small letters and reads it in either.
+# shellcheck disable=SC2016 # a jq program
+sums_program='
+  split("\n") as $lines
+  | [$lines[:2][] | capture("^(?<digest>[0-9a-fA-F]{64})  (?<name>meta\\.json|state\\.bin)\\z")] as $sums
+  | if ($lines | length) != 3 or $lines[2] != "" or ($sums | map(.name) | sort) != ["meta.json", "state.bin"] then "form"
+    elif ($sums[] | select(.name == "meta.json") | .digest | ascii_downcase) != $meta then "meta.json"
+    elif ($sums[] | select(.name == "state.bin") | .digest | ascii_downcase) != $state then "state.bin"
+    else "ok"
+    end'
+
+# not_an_archive WHY: ends the check: the snapshot is not a raft snapshot archive, for WHY, which is
+# one of the check's own sentences and never text of the archive.
+not_an_archive() {
+  infra_error "$snapshot is not a raft snapshot archive: $1"
+  exit 1
+}
+
+# archive_listing: GNU tar's listing of the plain archive, a line for each member: the block of
+# the archive its header is in, its type and mode, its owner and group by number, its size, its
+# time in UTC and its name; and a line for the block the archive ends at. In the C locale tar writes
+# a newline in a name, and every byte that is not printable ASCII, as an escape, so no name ends a
+# line or begins another. What tar and the gzip it runs report is dropped.
+archive_listing() {
+  tar --list --verbose --block-number --utc --full-time --numeric-owner --quoting-style=escape --gzip --file - \
+    < "$plain" 2> /dev/null
+}
+
+# archive_ending BLOCKS: the two blocks that follow the archive's first BLOCKS blocks, as
+# hexadecimal digits, fewer where the archive holds fewer. The rest of the archive is read to its
+# end, so that gzip is not left writing to a reader that has gone.
+archive_ending() {
+  gzip --decompress --stdout < "$plain" 2> /dev/null | tail --bytes=+$(($1 * 512 + 1)) | {
+    head --bytes=1024 | od -An -v -tx1 | tr -d ' \n'
+    cat > /dev/null
+  }
+}
+
+# archive_member NAME: the bytes of the member NAME on standard output, and nothing in the
+# filesystem: tar writes there only what it is told to, and with --to-stdout nothing but a regular
+# file's bytes leave it at all.
+archive_member() {
+  tar --extract --to-stdout --gzip --file - "$1" < "$plain" 2> /dev/null
+}
+
+# member_digest NAME: the SHA-256 of the member NAME, as sha256sum computes it of the bytes tar
+# writes to it.
+member_digest() {
+  local sum
+  sum=$(archive_member "$1" | sha256sum) || return 1
+  [[ $sum =~ ^([0-9a-f]{64})[[:space:]] ]] || return 1
+  printf '%s' "${BASH_REMATCH[1]}"
+}
+
+complete=1
+require_env BACKUP_BUCKET_PREFIX AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY || complete=0
+require_age_key || complete=0
+require_commands age jq yq rclone || complete=0
+for program in tar gzip sha256sum; do
+  if ! type -P "$program" > /dev/null; then
+    infra_error "$program is not on PATH; the check reads the archive with the machine's GNU tar, gzip and sha256sum"
+    complete=0
+  fi
+done
+((complete))
+s3_bucket_name_ok BACKUP_BUCKET_PREFIX prefix
+s3_require_client
+start_errors_log "$cluster_dir/clusterconfig/${0##*/}.errors.log"
+
+step="making a private directory for the snapshot"
+backup_private_dir snapshot
+
+step="finding the snapshot in the openbao bucket"
+if ! listing=$(s3_openbao_snapshots "$cluster"); then
+  infra_error "rclone cannot list the openbao bucket with the state key, or it does not exist; just infra-backup-buckets creates it"
+  exit 1
+fi
+backup_find "$listing" "$snapshot" openbao snapshot "$cluster" openbao-snapshots
+snapshot=$backup_name
+encrypted=$work_dir/$snapshot
+plain=$work_dir/plain.snapshot
+
+step="downloading $snapshot"
+backup_download openbao "$cluster" "$snapshot" "$encrypted"
+
+step="decrypting $snapshot with the Talos age key"
+backup_decrypt "$snapshot" "$encrypted" "$plain"
+
+step="verifying the archive of $snapshot"
+gzip --test < "$plain" 2> /dev/null || not_an_archive "it is not gzip to its end, with nothing after it but zero bytes"
+members=$(archive_listing) || not_an_archive "tar cannot list it to its end"
+
+# A regular file's line and the end's, as tar lists a genuine archive's metadata and its end:
+#   block 0: -rw------- 0/0             195 2026-11-16 19:32:31 meta.json
+#   block 37: ** Block of NULs **
+# The name is the rest of the line after the time and one space, whatever it holds. tar pads the
+# time of every later member once one is longer, with a fraction of a second or a year beyond 9999,
+# which OpenBao writes neither of; the check stops at that member, so no padding is ever taken for
+# the start of a name. The end tar lists is the first empty block, where it stops, or the end of the
+# stream.
+member_re='^block ([0-9]+): [^ ]{10} +[0-9]+/[0-9]+ +([0-9]+) ([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}) (.*)$'
+end_re='^block [0-9]+: \*\* (Block of NULs|End of File) \*\*$'
+# A member's header is one block of 512 bytes and its bytes fill whole blocks after it, so its
+# size says which block the next header is in. A header tar lists no line for, as a PAX header's or
+# a long name's, takes blocks of its own: OpenBao writes none, and its reader takes a PAX global
+# header for a member of another name.
+declare -A size=()
+taken='' next_block=0
+while IFS= read -r line; do
+  if [[ -z $line || $line =~ $end_re ]]; then
+    continue
+  elif [[ ! $line =~ ^block\ [0-9]+:\ - ]]; then
+    not_an_archive "it holds a member that is no regular file"
+  elif [[ ! $line =~ $member_re ]]; then
+    not_an_archive "it holds a member whose time tar does not list as a date and a time to the second"
+  fi
+  block=${BASH_REMATCH[1]} bytes=${BASH_REMATCH[2]} stamp=${BASH_REMATCH[3]} member=${BASH_REMATCH[4]}
+  case $member in
+    meta.json | state.bin | SHA256SUMS | SHA256SUMS.sealed) ;;
+    *) not_an_archive "it holds a member that is none of meta.json, state.bin, SHA256SUMS and SHA256SUMS.sealed" ;;
+  esac
+  if [[ -n ${size[$member]+set} ]]; then
+    not_an_archive "it holds $member more than once"
+  fi
+  # Numbers of more digits than arithmetic holds are of no archive that was just read to its end.
+  if ((${#block} > 18 || ${#bytes} > 18 || 10#$block != next_block)); then
+    not_an_archive "its members do not follow one another, by their sizes, from its first block"
+  fi
+  next_block=$((10#$block + 1 + (10#$bytes + 511) / 512))
+  size[$member]=$bytes
+  if [[ $member == meta.json ]]; then
+    taken=$stamp
+  fi
+done <<< "$members"
+for member in meta.json state.bin SHA256SUMS SHA256SUMS.sealed; do
+  [[ -n ${size[$member]+set} ]] || not_an_archive "it holds no $member"
+done
+# OpenBao's reader stops at two empty blocks, so nothing after them is read in a restore. Without
+# them it reads on into what follows the last member, which tar does not list.
+printf -v empty_blocks '%02048d' 0
+if [[ $(archive_ending "$next_block") != "$empty_blocks" ]]; then
+  not_an_archive "its members are not followed by the two empty blocks that end an archive"
+fi
+
+# From the listing, before a member is read: a size of more digits than the bound has is beyond it.
+for member in meta.json SHA256SUMS SHA256SUMS.sealed; do
+  if [[ ${size[$member]} =~ ^0+$ ]]; then
+    not_an_archive "its $member is empty"
+  elif ((${#size[$member]} > ${#read_bound} || 10#${size[$member]} >= read_bound)); then
+    not_an_archive "its $member is of $read_bound bytes or more, which OpenBao does not read"
+  fi
+done
+
+metadata=$(archive_member meta.json | jq -rs --arg state "${size[state.bin]}" "$metadata_program" 2> /dev/null) ||
+  not_an_archive "its meta.json cannot be read as one JSON object"
+read -r verdict version index term servers <<< "$metadata"
+case $verdict in
+  ok) ;;
+  version) not_an_archive "the Version in its meta.json is not 1, the only one OpenBao restores" ;;
+  index) not_an_archive "the Index in its meta.json is not a whole number above 0" ;;
+  term) not_an_archive "the Term in its meta.json is not a whole number" ;;
+  size) not_an_archive "the Size in its meta.json is not the length of its state.bin" ;;
+  *) not_an_archive "its meta.json cannot be read as one JSON object" ;;
+esac
+
+meta_digest=$(member_digest meta.json) || not_an_archive "tar cannot read its meta.json to its end"
+state_digest=$(member_digest state.bin) || not_an_archive "tar cannot read its state.bin to its end"
+sums=$(archive_member SHA256SUMS | jq -Rrs --arg meta "$meta_digest" --arg state "$state_digest" "$sums_program" 2> /dev/null) ||
+  not_an_archive "tar cannot read its SHA256SUMS to its end"
+case $sums in
+  ok) ;;
+  meta.json | state.bin)
+    infra_error "$snapshot fails its integrity check: the SHA-256 of $sums is not the one SHA256SUMS gives"
+    exit 1
+    ;;
+  *) not_an_archive "its SHA256SUMS is not two lines, a SHA-256 and the name for each of meta.json and state.bin" ;;
+esac
+encrypted_size=$(wc -c < "$encrypted")
+plain_size=$(wc -c < "$plain")
+
+echo "snapshot: $snapshot"
+echo "scratch: $scratch"
+echo "encrypted: $encrypted_size bytes"
+echo "plain: $plain_size bytes"
+echo "taken: $taken UTC"
+echo "index: $index"
+echo "term: $term"
+echo "metadata version: $version"
+echo "members: $servers"
+echo "state: ${size[state.bin]} bytes"
+echo "checksums: meta.json and state.bin match SHA256SUMS"
+echo "sealed checksums: ${size[SHA256SUMS.sealed]} bytes, not opened: only the store's seal key opens them"

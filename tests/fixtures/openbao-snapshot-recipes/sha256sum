@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# A stand-in for sha256sum, installed by tests/openbao-snapshot-recipes.bats as <tmp>/bin/sha256sum,
+# that hashes what it is given with the real sha256sum, whose path is in <tmp>/state/real-sha256sum.
+# It finds its files from its own path:
+#   <tmp>/state/interrupt   the run is interrupted while the check hashes a member of the archive;
+#                           this stand-in dies of it when the file says dies, and when it says
+#                           handles, handles it itself, hashes and exits 0
+#   <tmp>/state/signal      the signal that interrupts: INT, as Ctrl-C sends, when there is no such
+#                           file, or TERM
+# It records its arguments in <tmp>/record/argv and, before it interrupts, what the check holds at
+# that moment in <tmp>/record/interrupted: the path of the directory TMPDIR names, the check's
+# private directory, with its mode, and then each file in it as its name, its size in bytes and its
+# mode.
+set -uo pipefail
+
+root=${0%/bin/*}
+printf '%s\n' "sha256sum $*" >> "$root/record/argv"
+case $(cat "$root/state/interrupt" 2> /dev/null) in
+  dies | handles)
+    signal=$(cat "$root/state/signal" 2> /dev/null) || signal=INT
+    {
+      printf '%s %s\n' "${TMPDIR-}" "$(stat -c %a "${TMPDIR:-/nonexistent}" 2> /dev/null)"
+      find "${TMPDIR:-/nonexistent}" -mindepth 1 -maxdepth 1 -printf '%f %s %m\n' 2> /dev/null
+    } > "$root/record/interrupted"
+    # The signal reaches the recipe's script, the topmost process that runs it, and this program
+    # alike. The walk ends at the just that runs the recipe, or the timeout the tests run that under,
+    # so nothing above the recipe is signalled, though its arguments name the script.
+    pid=$$ script=
+    while [[ $pid -gt 1 ]]; do
+      pid=$(awk '{print $4}' "/proc/$pid/stat")
+      case $(cat "/proc/$pid/comm") in
+        just | timeout) break ;;
+      esac
+      mapfile -d '' words < "/proc/$pid/cmdline"
+      for word in "${words[@]}"; do
+        # just's own command line names the recipe, without a directory.
+        if [[ $word == */openbao-snapshot-check ]]; then
+          script=$pid
+        fi
+      done
+    done
+    [[ -z $script ]] || kill "-$signal" "$script"
+    if [[ $(cat "$root/state/interrupt") != handles ]]; then
+      [[ $signal == TERM ]] && exit 143
+      exit 130
+    fi
+    ;;
+esac
+exec "$(cat "$root/state/real-sha256sum")" "$@"

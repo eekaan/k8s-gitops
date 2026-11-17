@@ -1,13 +1,14 @@
 # shellcheck shell=bash
-# Helpers, loaded by tests/etcd-snapshots.bats, tests/cluster-snapshot.bats and
-# tests/openbao-snapshots.bats, that build a snapshot application as Flux applies it and run its
-# scripts as its containers run them, against the recording fakes of the tests. Needs flux, kustomize,
-# yq and jq on PATH.
+# Helpers, loaded by tests/etcd-snapshots.bats, tests/cluster-snapshot.bats,
+# tests/openbao-snapshots.bats and tests/openbao-snapshot-recipes.bats, that build a snapshot
+# application as Flux applies it and run its scripts as its containers run them, against the recording
+# fakes of the tests. Needs flux, kustomize, yq and jq on PATH.
 
 JOB_REPO=$(cd "$BATS_TEST_DIRNAME/.." && pwd)
 JOB_CLUSTER=$JOB_REPO/kubernetes/clusters/lab-sto2
-# The application and Kustomization it builds; tests/openbao-snapshots.bats, whose job has the same
-# shape, sets both before it loads this file.
+# The application and Kustomization it builds; tests/openbao-snapshots.bats and
+# tests/openbao-snapshot-recipes.bats, whose job has the same shape, set both before they load this
+# file.
 JOB_APP=${JOB_APP:-kubernetes/apps/base/etcd-snapshots/etcd-snapshots}
 JOB_NAME=${JOB_NAME:-etcd-snapshots}
 

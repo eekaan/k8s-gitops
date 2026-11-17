@@ -203,48 +203,124 @@ the file into the request bodies on standard input, never typed or printed.
 
 A CronJob takes a snapshot of the raft storage every six hours and uploads it encrypted to the
 OpenBao bucket, `BACKUP_BUCKET_PREFIX` followed by `-openbao`, as `<cluster>/<UTC time>.snapshot.age`
-([kubernetes.md](../kubernetes.md#raft-snapshots)). Listing and fetching reach the bucket with rclone,
-configured through its environment as the recipes configure it, so no rclone configuration file of the
-operator's is read; the endpoint, the region and whether addressing is by path are in
-`infra/openstack/backend.hcl`, and the key is the cluster's, `CLUSTER_S3_ACCESS_KEY_ID` and
-`CLUSTER_S3_SECRET_ACCESS_KEY` of `.env`. Set the variables from those files without printing a
-value, in a shell that is closed afterwards:
+([kubernetes.md](../kubernetes.md#raft-snapshots)). Two recipes read that bucket, with the state key,
+`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` of `.env`, as the etcd snapshot recipes and the
+PostgreSQL dump recipes read theirs
+([infrastructure.md](../infrastructure.md#s3-keys-and-backup-buckets)). They reach the object storage
+and nothing else: neither uses the cluster's kubeconfig, and neither asks the store anything.
+
+The snapshots of a cluster, newest first, each by its name and its size in bytes:
 
 ```sh
-export RCLONE_CONFIG=/dev/null RCLONE_CONFIG_STORE_TYPE=s3 RCLONE_CONFIG_STORE_PROVIDER=Other \
-  RCLONE_CONFIG_STORE_ENV_AUTH=false RCLONE_CONFIG_STORE_FORCE_PATH_STYLE=<use_path_style> \
-  RCLONE_CONFIG_STORE_ENDPOINT=<endpoint> RCLONE_CONFIG_STORE_REGION=<region> \
-  RCLONE_CONFIG_STORE_ACCESS_KEY_ID=<access key ID> RCLONE_CONFIG_STORE_SECRET_ACCESS_KEY=<secret key>
-```
-
-The newest snapshots, newest first, with their sizes in bytes:
-
-```sh
-rclone lsf --files-only --format ps --separator ' ' store:<BACKUP_BUCKET_PREFIX>-openbao/<cluster>/ |
-  grep -E '^[0-9]{8}T[0-9]{6}Z\.snapshot\.age ' | sort -r | head
+just openbao-snapshots [cluster]
 ```
 
 The newest is under 6 hours old, and under 13 while the job is healthy
 ([OpenBaoSnapshotStale](alerts.md#openbaosnapshotstale)). The same bucket's other objects are none of
-the job's.
+the job's. The recipe lists none of them, only the objects directly under the cluster's path that
+are named as a snapshot is, and a cluster without snapshots lists nothing and says so.
 
-To check that a snapshot decrypts and is a snapshot, without restoring it, fetch it into a directory
-only you can read and open it with the Talos age key, which never leaves the operator's machine; the
-archive's listing is all that is printed:
+To check that a snapshot decrypts and is a whole snapshot, without restoring it:
 
 ```sh
-umask 077
-dir=$(mktemp -d)
-rclone copyto store:<BACKUP_BUCKET_PREFIX>-openbao/<cluster>/<name> "$dir/snapshot.age"
-head -n 1 "$dir/snapshot.age"
-age --decrypt --identity "$SOPS_AGE_KEY_FILE" --output "$dir/snapshot" "$dir/snapshot.age"
-tar -tzf "$dir/snapshot"
+just openbao-snapshot-check [<a name from the listing>|latest] [cluster]
 ```
 
-The first line is `age-encryption.org/v1`, and the listing is `meta.json`, `state.bin`, `SHA256SUMS` and
-`SHA256SUMS.sealed`: OpenBao's raft snapshot archive. A file that does not decrypt was encrypted to
-another key than the Talos age key's. Remove the directory when done, as the decrypted file is the
-store's whole storage, ciphertext under the seal key. It is not a copy to keep.
+Without a name it takes the newest. It downloads the snapshot into a private directory, in memory
+where the machine has a memory-backed filesystem; checks that it begins with age's header; decrypts
+it there with the Talos age key, which never leaves the operator's machine; and verifies the
+decrypted archive without unpacking it: it is gzip to its end, with nothing after it but zero
+bytes, which gzip ignores; it holds `meta.json`, `state.bin`, `SHA256SUMS` and `SHA256SUMS.sealed`,
+each once, and nothing else, and ends as OpenBao ends an archive; its metadata is of the version
+OpenBao restores, with an index, a term and the size the state has; and the SHA-256 of the metadata
+and of the state are the two `SHA256SUMS` gives. It removes everything it wrote, when it fails or is
+stopped with Ctrl-C too. A snapshot that passes prints:
+
+```
+snapshot: <name>
+scratch: memory-backed
+encrypted: <bytes> bytes
+plain: <bytes> bytes
+taken: <YYYY-MM-DD HH:MM:SS> UTC
+index: <number>
+term: <number>
+metadata version: 1
+members: <number>
+state: <bytes> bytes
+checksums: meta.json and state.bin match SHA256SUMS
+sealed checksums: <bytes> bytes, not opened: only the store's seal key opens them
+```
+
+- `scratch` is where the snapshot was kept while it was checked. On a machine whose runtime
+  directory and `/dev/shm` are not in memory, or not writable, it reads
+  `disk, as no memory-backed filesystem was found; removed afterwards`, and the check says so before
+  it downloads anything: the files were under `TMPDIR` until it removed them.
+- `encrypted` and `plain` are the sizes of the object and of the archive it decrypts to. OpenBao
+  does not compress the archive, so `plain` is a little more than `state`.
+- `taken` is when the store wrote the archive, by its own clock. The archive holds no other time.
+  It is normally a little earlier than the time in the snapshot's name, which is when the job
+  encrypted it.
+- `index` and `term` are raft's: the last entry the snapshot holds, and the term it was written in.
+  The index only grows within one store's life, and starts low again in a store that was started
+  empty.
+- `metadata version` is the version of raft's metadata, 1, the only one OpenBao restores. It is not
+  OpenBao's version, which the archive does not name.
+- `members` is the number of servers in the raft configuration the snapshot recorded, 3 while the
+  store has its three members.
+- `state` is the size of the store's storage in the archive.
+
+Nothing of the store is printed: not a storage path or value, not a member's name or address, not a
+checksum. The archive is the store's whole storage, ciphertext under the seal key, with every
+storage path in the clear, which is why the check keeps it in memory and removes it.
+
+A check that fails exits non-zero with one line that says why, by the snapshot's name where it has
+found one, and then the step it failed in:
+
+- `the openbao bucket holds no snapshot of <cluster>`, or `no snapshot <name> of <cluster>`: there is
+  nothing to check; `just openbao-snapshots` lists what there is.
+- `rclone cannot list the openbao bucket …` and `rclone cannot download <name> …`: the object storage
+  refused the request or did not answer, the bucket is not there, or, for a download, the object
+  was removed meanwhile or the directory had no room left. What rclone said is on the lines above,
+  without the endpoint, the bucket's name or a key; with `CI` set it is in
+  `talos/<cluster>/clusterconfig/openbao-snapshot-check.errors.log` instead.
+- `<name> is not an age file`: the object is not what the job uploads, which is always age's output.
+- `the Talos age key cannot decrypt <name>`: it was encrypted to another recipient than the Talos
+  age key the recipe was given, as a snapshot taken before that key was replaced is.
+- `age cannot read <name>, for a reason other than the key: it may be damaged, or the scratch
+  directory full`: the object is cut short or damaged, or the directory ran out of room. It holds
+  the encrypted object and the plain archive at once, about twice the size the listing shows; the
+  job's volume bounds a plain snapshot at 256 MiB. Where the runtime directory is too small,
+  `XDG_RUNTIME_DIR= just openbao-snapshot-check` has the check try `/dev/shm` instead.
+- `<name> is not a raft snapshot archive: …`: it decrypts, and is not the archive OpenBao writes.
+  What follows the colon says how: it is not gzip to its end, or bytes other than zeros follow the
+  stream; tar cannot list it, or cannot read a member to its end; a member is missing, extra, there
+  twice, no regular file, or carries a time OpenBao does not write; the members do not follow one
+  another, or are not followed by the two empty blocks that end an archive; `meta.json`,
+  `SHA256SUMS` or `SHA256SUMS.sealed` is empty, or too large for OpenBao to read; the metadata is no
+  JSON object, is of another version, gives no index above 0 or no term, or gives another size than
+  the state has; or `SHA256SUMS` is not its two lines. Without `SHA256SUMS.sealed` OpenBao restores
+  an archive only when forced. The check reads the archive with the machine's GNU tar, gzip and
+  `sha256sum`: where `tar` is of another kind, which lacks the options the check lists with, every
+  snapshot fails with `tar cannot list it to its end`.
+- `<name> fails its integrity check: the SHA-256 of meta.json is not the one SHA256SUMS gives`, or
+  `of state.bin`: the archive's content is not what OpenBao wrote. A restore refuses it.
+
+A snapshot that is no age file, no raft snapshot archive or fails its integrity check is not one to
+restore from: check the one before it, and have the job take a new one
+([kubernetes.md](../kubernetes.md#raft-snapshots)).
+
+What the check cannot know, as it holds no seal key:
+
+- Whether the sealed checksums open under the seal key in the custody file, and are the same as the
+  plain ones. That is the check a restore makes, and it is all that ties an archive to the store
+  that wrote it: anyone who can write to the bucket can encrypt a file to the Talos age key's
+  recipient, which is public, and the plain checksums are not signed, so whoever changes an archive
+  can write new ones. The check proves that the archive is whole, not who made it.
+- Whether the store's keyring opens the data.
+- Whether the entries of `state.bin` are well formed, beyond their checksum.
+
+So a pass says that the snapshot arrived whole, opens with the operator's age key and has the shape
+a restore reads. Only a restore into a store that unseals with the seal key says the rest.
 
 ## Restoring a snapshot
 
@@ -260,9 +336,12 @@ and the Secret gone, the store is started again empty and every secret is writte
 A restore goes into a store that unseals with the same seal key and has recovery keys of the
 operator's, so that `just bao-root` can run the restore:
 
-1. **Choose the snapshot** as [listing](#listing-and-checking-snapshots) says, and check that it
-   decrypts. The newest is the usual choice; take an earlier one when the newest was taken after the
-   damage.
+1. **Choose the snapshot** with `just openbao-snapshots`, and check it with
+   `just openbao-snapshot-check <name>` ([above](#listing-and-checking-snapshots)). The newest is the
+   usual choice; take an earlier one when the newest was taken after the damage. A snapshot of a
+   store that was started empty after the loss is told from the old store's by its time, in its name
+   and in the check's `taken`, which is after the loss, and by its `index`, which only grows within
+   one store's life and starts low again in a new one.
    **Stop the job** until the restore is checked: the CronJob keeps running, and a rebuilt cluster
    runs it from the moment `openbao` is Ready, so it uploads snapshots of the empty store under the
    same prefix, and once 56 of them exist (14 days) retention deletes the old store's, the one being
@@ -288,7 +367,36 @@ operator's, so that `just bao-root` can run the restore:
 4. **Make recovery keys for the new store**: `just bao-recovery <new file>`, a new file beside the custody
    file, never over it. The new store has none, and `just bao-root` needs three shares to make the root token that
    restores.
-5. **Fetch and decrypt the snapshot** into a private directory, as [above](#listing-and-checking-snapshots).
+5. **Fetch and decrypt the snapshot** into a private directory, by hand: the restore needs the plain
+   file, and the check keeps none. Fetching reaches the bucket with rclone, configured through its
+   environment as the recipes configure it, so no rclone configuration file of the operator's is
+   read; the endpoint, the region and whether addressing is by path are in
+   `infra/openstack/backend.hcl`, and the key is the cluster's, `CLUSTER_S3_ACCESS_KEY_ID` and
+   `CLUSTER_S3_SECRET_ACCESS_KEY` of `.env`. Set the variables from those files without printing a
+   value, in a shell that is closed afterwards:
+
+   ```sh
+   export RCLONE_CONFIG=/dev/null RCLONE_CONFIG_STORE_TYPE=s3 RCLONE_CONFIG_STORE_PROVIDER=Other \
+     RCLONE_CONFIG_STORE_ENV_AUTH=false RCLONE_CONFIG_STORE_FORCE_PATH_STYLE=<use_path_style> \
+     RCLONE_CONFIG_STORE_ENDPOINT=<endpoint> RCLONE_CONFIG_STORE_REGION=<region> \
+     RCLONE_CONFIG_STORE_ACCESS_KEY_ID=<access key ID> RCLONE_CONFIG_STORE_SECRET_ACCESS_KEY=<secret key>
+   ```
+
+   Fetch the snapshot into a directory only you can read and open it with the Talos age key, which
+   never leaves the operator's machine; the archive's listing is all that is printed:
+
+   ```sh
+   umask 077
+   dir=$(mktemp -d)
+   rclone copyto store:<BACKUP_BUCKET_PREFIX>-openbao/<cluster>/<name> "$dir/snapshot.age"
+   head -n 1 "$dir/snapshot.age"
+   age --decrypt --identity "$SOPS_AGE_KEY_FILE" --output "$dir/snapshot" "$dir/snapshot.age"
+   tar -tzf "$dir/snapshot"
+   ```
+
+   The first line is `age-encryption.org/v1`, and the listing is `meta.json`, `state.bin`,
+   `SHA256SUMS` and `SHA256SUMS.sealed`: OpenBao's raft snapshot archive. The decrypted file is the
+   store's whole storage, ciphertext under the seal key. It is not a copy to keep.
 6. **Restore it** with OpenBao's CLI on the operator's machine, which takes the file by its path:
    `just bao-root <new file> bao operator raft snapshot restore "$dir/snapshot"`. The restore replaces the
    store's data with the snapshot's, so the store's own tokens, the command's among them, are replaced
