@@ -115,5 +115,12 @@
       matchFileNames: ["mise.toml", "versions.yaml"],
       automerge: false,
     },
+    {
+      // What the application pins runs at admission and inside other workloads' pods: the operator,
+      // its chart and the flagd images it injects (docs/kubernetes.md, OpenFeature Operator).
+      description: "Everything of the OpenFeature Operator's application, the images it injects included",
+      matchFileNames: ["kubernetes/apps/base/open-feature-operator/**"],
+      automerge: false,
+    },
   ],
 }

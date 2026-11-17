@@ -27,6 +27,7 @@ resources:
   - ../../base/security-system
   - ../../base/volsync-system
   - ../../base/sso-system
+  - ../../base/open-feature-operator
   - ../../base/ai-system/n8n/ks.yaml
   - ../../base/ai-system/open-webui/ks.yaml
   - ../../base/backstage/backstage/ks.yaml
@@ -85,6 +86,8 @@ resources:
   - ../../base/sso-system/dex/ks.yaml
   - ../../base/sso-system/oauth2-proxy/ks.yaml
   - ../../base/demo/hello-sso/ks.yaml
+  - ../../base/open-feature-operator/open-feature-operator/ks.yaml
+  # - ../../base/demo/hello-flags/ks.yaml  # Disabled: the worked example of a workload that opts in to the OpenFeature Operator; no workload of this cluster asks for a flag sidecar
 
 patches:
   # The issuer of the public Gateway's certificate, the one place this cluster chooses it:

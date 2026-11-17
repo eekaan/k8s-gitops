@@ -1,0 +1,18 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/podmonitor-monitoring-v1.json
+# Scrapes the operator's metrics, the manager's controller and webhook counters, from the pod. The
+# pinned operator serves them in plain HTTP with no authentication on the container port named
+# metrics-server: it is started with the bind address alone, and the metrics certificate the chart
+# mounts is not read. The chart's own metrics Service names a port no container has and reaches no
+# pod, so the monitor selects the pod by the labels of the Deployment's selector instead.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: open-feature-operator
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: open-feature-operator
+      control-plane: controller-manager
+  podMetricsEndpoints:
+    - port: metrics-server

@@ -1,0 +1,66 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/deployment-apps-v1.json
+# A workload that asks the OpenFeature Operator for a flagd sidecar, and a container that asks that
+# sidecar for a flag once a minute and prints the answer. The pod template below is what the tree
+# holds; the operator's webhook adds the sidecar, a container named flagd, when the pod is created.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-flags
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hello-flags
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hello-flags
+        # What lets the API server send the pod to the operator's webhook at all: the webhook
+        # selects pods by this label, and no pod without it is ever held up or changed.
+        openfeature.dev/enabled: "true"
+      annotations:
+        # What the operator itself reads: without this annotation it admits the pod unchanged.
+        openfeature.dev/enabled: "true"
+        # The FeatureFlagSource that configures the sidecar, in the pod's own namespace. A pod
+        # that names a source or a flag set that does not exist is refused, not admitted without
+        # its sidecar.
+        openfeature.dev/featureflagsource: hello-flags
+    spec:
+      # An account of its own, which the operator binds to the read of every flag set; the sidecar
+      # reads the API server with its token, so the token stays mounted.
+      serviceAccountName: hello-flags
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ask
+          image: docker.io/library/busybox:1.38.0
+          # Asks the sidecar's OFREP endpoint, on the pod's loopback, what the flag greeting is, and
+          # prints the answer, a line of JSON with the value and the variant. Without a sidecar,
+          # which is what a pod gets while the operator's webhook does not answer, it says so.
+          command:
+            - sh
+            - -c
+            - |
+              trap 'exit 0' TERM INT
+              while true; do
+                wget -q -T 5 -O - --header 'Content-Type: application/json' --post-data '{}' \
+                  http://127.0.0.1:8016/ofrep/v1/evaluate/flags/greeting || echo 'no answer from the sidecar'
+                echo
+                sleep 60 &
+                wait $!
+              done
+          resources:
+            requests:
+              cpu: 1m
+              memory: 8Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL

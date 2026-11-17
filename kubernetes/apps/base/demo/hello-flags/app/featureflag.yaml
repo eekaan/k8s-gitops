@@ -1,0 +1,17 @@
+---
+# A flag set: one flag, greeting, whose value is its default variant until a targeting rule or a
+# change of this object says otherwise. Whoever can read flag sets in any namespace can read this
+# one, and every opted-in workload's service account can, so a flag holds nothing secret.
+apiVersion: core.openfeature.dev/v1beta1
+kind: FeatureFlag
+metadata:
+  name: hello-flags
+spec:
+  flagSpec:
+    flags:
+      greeting:
+        state: ENABLED
+        variants:
+          hello: hello
+          hej: hej
+        defaultVariant: hello
