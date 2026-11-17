@@ -1,0 +1,44 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/helmrelease-helm-v2.json
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: crowdsec
+spec:
+  interval: 30m
+  chart:
+    spec:
+      chart: crowdsec
+      # The version is pinned: a new chart arrives by a change to this file, which Flux applies at once.
+      version: 0.24.3
+      interval: 12h
+      sourceRef:
+        kind: HelmRepository
+        name: crowdsec
+  # The root's defaults run each release's Helm tests. The chart's two tests are pods that run
+  # curlimages/curl with no tag, which moves, and a failed pull fails the upgrade and rolls the
+  # release back; they also reach the services from a pod no policy of the namespace allows. They
+  # are excluded by name: spec.test.enable is overwritten by those defaults.
+  test:
+    filters:
+      - name: crowdsec-test-agent
+        exclude: true
+      - name: crowdsec-test-lapi-up
+        exclude: true
+  valuesFrom:
+    - kind: ConfigMap
+      name: crowdsec-values
+  values:
+    agent:
+      # The acquisition of the proxies' logs, a generated ConfigMap whose name kustomize writes here
+      # (kustomizeconfig.yaml), in the directory the agent reads acquisitions from besides its
+      # acquis.yaml.
+      extraVolumes:
+        - name: acquisition
+          configMap:
+            name: crowdsec-acquisition
+      extraVolumeMounts:
+        - name: acquisition
+          mountPath: /etc/crowdsec/acquis.d/envoy-gateway.yaml
+          subPath: envoy-gateway.yaml
+          readOnly: true

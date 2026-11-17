@@ -79,3 +79,19 @@ exceptions:
       SYS_PTRACE and SYS_RESOURCE, which baseline refuses, and mounts the host paths /proc, /etc and
       /sys/kernel read-only and /run/containerd, the container runtime's socket directory,
       read-write, which baseline refuses too
+  - namespace: crowdsec
+    workload: Deployment/crowdsec-lapi
+    level: baseline
+    reason: the image runs as root, as its entrypoint writes the configuration directory, so no value gives it the non-root user restricted requires
+  - namespace: crowdsec
+    workload: Deployment/crowdsec-agent
+    level: baseline
+    reason: the image runs as root, as its entrypoint and the init container that registers the agent write the configuration directory, so no value gives either the non-root user restricted requires
+  - namespace: crowdsec
+    workload: Pod/crowdsec-test-agent
+    level: baseline
+    reason: the chart's Helm test runs a curl image as root with no security context; the release excludes it by name, and the check evaluates the render's tests all the same
+  - namespace: crowdsec
+    workload: Pod/crowdsec-test-lapi-up
+    level: baseline
+    reason: the chart's Helm test runs a curl image as root with no security context; the release excludes it by name, and the check evaluates the render's tests all the same

@@ -27,6 +27,7 @@ resources:
   - ../../base/security-system
   - ../../base/volsync-system
   - ../../base/sso-system
+  - ../../base/crowdsec
   - ../../base/ai-system/n8n/ks.yaml
   - ../../base/ai-system/open-webui/ks.yaml
   - ../../base/backstage/backstage/ks.yaml
@@ -85,6 +86,8 @@ resources:
   - ../../base/sso-system/dex/ks.yaml
   - ../../base/sso-system/oauth2-proxy/ks.yaml
   - ../../base/demo/hello-sso/ks.yaml
+  - ../../base/crowdsec/crowdsec/ks.yaml
+  - ../../base/envoy-gateway-system/crowdsec-gateway-logs/ks.yaml
 
 patches:
   # The issuer of the public Gateway's certificate, the one place this cluster chooses it:

@@ -490,9 +490,9 @@ tree_without() {
   run "$REPO/scripts/kubernetes-check" "$REPO"
   echo "$output"
   [ "$status" -eq 0 ]
-  # Without the Gateway and the applications whose routes name it, nothing but external-dns needs
-  # the Gateway, so it is the one refused, naming it.
-  tree_without gateway-public hello-route n8n kromgo open-webui hello-sso dex oauth2-proxy backstage
+  # Without the Gateway, the applications whose routes name it and CrowdSec, whose agent reads its
+  # proxies, nothing but external-dns needs the Gateway, so it is the one refused, naming it.
+  tree_without gateway-public hello-route n8n kromgo open-webui hello-sso dex oauth2-proxy backstage crowdsec crowdsec-gateway-logs
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -ne 0 ]

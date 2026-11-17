@@ -1,0 +1,241 @@
+---
+# The values of the crowdsec release, a ConfigMap of the Kustomization (kustomization.yaml). They are
+# not passed through Flux's substitution. Keys not set here keep the chart's defaults.
+
+container_runtime: containerd
+
+image:
+  repository: docker.io/crowdsecurity/crowdsec
+  # The chart reads the tag as the image's version, which it defaults to its own appVersion; the
+  # digest pins the image index. Everything the agent loads is in this image or in this file: the
+  # two parsers its entrypoint installs (below) are written from the image's own hub index.
+  # renovate: datasource=docker depName=docker.io/crowdsecurity/crowdsec
+  tag: v1.8.2@sha256:65b74942f7e7ed5c60fde4ac15fc4ba715904c398c8b16dd451f4907d90347d4
+
+config:
+  # What the agent loads besides what its image holds. The image holds the parsers and scenarios of
+  # its `linux` collection, which read syslog and sshd and nothing the proxies write. Nothing is
+  # installed from the hub by a collection: a hub item arrives from a branch that moves, whichever
+  # version cscli is asked for, so the parser and the scenarios that read the public Gateway's access
+  # log are this tree's own, in the pinned values, and tests/crowdsec.bats runs them in the pinned
+  # image against sample lines.
+  parsers:
+    s01-parse:
+      envoy-gateway-json.yaml: |
+        # One JSON line per request, as the public Gateway's EnvoyProxy writes it
+        # (kubernetes/apps/base/envoy-gateway-system/gateway-public/app/envoyproxy.yaml): the client
+        # address Envoy took, the connection's own peer, the host, the method, the path without its
+        # query string, the status and the rest. It has no user agent and no query string, so the
+        # scenarios that need either cannot run on it.
+        name: k8s-gitops/envoy-gateway-json-logs
+        description: Parse the public Gateway's JSON access log lines
+        # The proxies' pods log other lines besides these, the controller's shutdown manager and Envoy's
+        # own messages among them, which are not JSON access logs and are left alone.
+        filter: "evt.Line.Labels.type == 'envoy-gateway-json' && evt.Line.Raw startsWith '{' && JsonExtract(evt.Line.Raw, 'client_address') != ''"
+        onsuccess: next_stage
+        statics:
+          # The access log has no time: a line is read as it is written, so its time is the one the
+          # agent read it at, which CrowdSec needs on an event to pour it into a scenario.
+          - target: evt.StrTime
+            expression: evt.Line.Time.Format("2006-01-02T15:04:05Z07:00")
+          - meta: log_type
+            value: http_access-log
+          - meta: service
+            value: http
+          - meta: source_ip
+            expression: JsonExtract(evt.Line.Raw, 'client_address')
+          - meta: peer_address
+            expression: JsonExtract(evt.Line.Raw, 'peer_address')
+          - meta: target_fqdn
+            expression: JsonExtract(evt.Line.Raw, 'host')
+          - meta: http_verb
+            expression: JsonExtract(evt.Line.Raw, 'method')
+          - meta: http_path
+            expression: JsonExtract(evt.Line.Raw, 'path')
+          - meta: http_status
+            expression: JsonExtract(evt.Line.Raw, 'status')
+          - parsed: static_ressource
+            expression: "JsonExtract(evt.Line.Raw, 'path') matches '(?i)\\\\.(css|js|map|png|jpe?g|gif|svg|ico|webp|woff2?|ttf)$' ? 'true' : 'false'"
+        nodes:
+          # A connection that carried no PROXY protocol header has the connection's own address as
+          # its client address, an edge router's or a node's: it names no client, and a decision on
+          # it would ban every client of that edge. A whitelist in a node of its own, as the
+          # statics of a node that holds one run only for what it whitelists.
+          - whitelist:
+              reason: the connection carried no PROXY protocol header, so the client address is the connection's own, an edge router's or a node's
+              expression:
+                - JsonExtract(evt.Line.Raw, 'client_address') == JsonExtract(evt.Line.Raw, 'peer_address')
+  scenarios:
+    http-probing.yaml: |
+      # A client that asks for many routes and files that are not there: the status of a request for
+      # something the Gateway has no route for, or an application does not have. Static files are
+      # left out, as a page that links to a file that is gone asks for it often.
+      type: leaky
+      name: k8s-gitops/http-probing
+      description: Detect a client scanning the public Gateway for routes and files that are not there
+      filter: "evt.Meta.service == 'http' && evt.Meta.http_status in ['400', '403', '404'] && evt.Parsed.static_ressource == 'false'"
+      groupby: "evt.Meta.source_ip + '/' + evt.Meta.target_fqdn"
+      distinct: "evt.Meta.http_path"
+      capacity: 10
+      leakspeed: 10s
+      blackhole: 5m
+      labels:
+        remediation: true
+        behavior: "http:scan"
+        label: "HTTP probing"
+        spoofable: 0
+        service: http
+        confidence: 1
+    http-sensitive-paths.yaml: |
+      # A client that asks for the files and folders scanners look for first. The paths are written
+      # here: the hub's scenario of this kind reads its list from a file it downloads.
+      type: leaky
+      name: k8s-gitops/http-sensitive-paths
+      description: Detect a client asking for sensitive files and folders on the public Gateway
+      # In a folded scalar a backslash is itself, so the expression's own escape is the double one.
+      filter: >-
+        evt.Meta.service == 'http' && evt.Meta.http_path matches
+        '(?i)(^|/)(\\.env|\\.git(/|$)|\\.svn|\\.hg|\\.aws|\\.ssh|\\.ds_store|wp-login\\.php|wp-admin|xmlrpc\\.php|phpmyadmin|phpinfo\\.php|id_rsa|etc/passwd|cgi-bin)'
+      groupby: "evt.Meta.source_ip"
+      distinct: "evt.Meta.http_path"
+      capacity: 3
+      leakspeed: 30s
+      blackhole: 5m
+      labels:
+        remediation: true
+        behavior: "http:scan"
+        label: "Access to sensitive files and folders over HTTP"
+        spoofable: 0
+        service: http
+        confidence: 3
+    http-auth-failures.yaml: |
+      # A client that fails to sign in again and again: a request the application answers with 401.
+      # The access log has no body and no query string, so what is guessed cannot be told from what
+      # is not, and the count is of failures to the same host from the same client.
+      type: leaky
+      name: k8s-gitops/http-auth-failures
+      description: Detect a client failing to authenticate to the public Gateway's applications again and again
+      filter: "evt.Meta.service == 'http' && evt.Meta.http_status == '401'"
+      groupby: "evt.Meta.source_ip + '/' + evt.Meta.target_fqdn"
+      capacity: 10
+      leakspeed: 30s
+      blackhole: 5m
+      labels:
+        remediation: true
+        behavior: "http:bruteforce"
+        label: "HTTP authentication failures"
+        spoofable: 0
+        service: http
+        confidence: 2
+  # The agent's configuration, merged over the image's: the hub's branch is named, so that cscli
+  # does not ask CrowdSec's version service which branch to use, and it makes no call to that
+  # service. The two container-log parsers the image's entrypoint installs at every start are then
+  # written from the content its hub index embeds, which cscli downloads nothing for
+  # (pkg/cwhub/fetch.go, FetchContentTo); this agent's acquisition (labelled with a type neither
+  # selects) never feeds them.
+  agent_config.yaml.local: |
+    cscli:
+      hub_branch: master
+
+secrets:
+  # The Secret the ExternalSecret of this application makes (lapi-secrets.yaml), holding the local
+  # API's session key and the agents' registration token; the chart makes none.
+  externalSecret:
+    name: crowdsec-lapi-secrets
+
+lapi:
+  # The Central API is off, so the local API registers nowhere, shares no signal, pulls no community
+  # blocklist and enrols in no console (docs/kubernetes.md, CrowdSec).
+  env:
+    - name: DISABLE_ONLINE_API
+      value: "true"
+  # The image runs as root, which the namespace's baseline level admits (pod-security-exceptions.yaml);
+  # the runtime's default seccomp profile, no privilege escalation and no capability are what is left
+  # to take away.
+  podSecurityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    privileged: false
+    capabilities:
+      drop:
+        - ALL
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: null
+      memory: 512Mi
+  # The database holds the decisions and the agents that registered, and the configuration directory
+  # the local API's own credentials. They are not backed up: a lost database loses its decisions,
+  # as the agent reads only the lines the proxies write after it starts, so only new requests
+  # decide again; the agent registers again at its next start.
+  persistentVolume:
+    data:
+      enabled: true
+      size: 1Gi
+    config:
+      enabled: true
+      size: 100Mi
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+
+agent:
+  # One agent for the one acquisition: the Kubernetes datasource follows the logs of the pods its
+  # selector names through the API server, so one pod per node would each follow every proxy and
+  # decide on the same lines.
+  isDeployment: true
+  replicas: 1
+  serviceAccountName: crowdsec-agent
+  # The entrypoint removes these post-overflow items of the image before it starts the agent.
+  # crowdsecurity/rdns looks up the name of the address of every overflow, a query to the cluster's
+  # resolver that leaves the cluster, and crowdsecurity/seo-bots-whitelist reads its result; the
+  # image's other two, which whitelist by address ranges, stay.
+  env:
+    - name: DISABLE_POSTOVERFLOWS
+      value: crowdsecurity/rdns crowdsecurity/seo-bots-whitelist
+  # The chart mounts the node's /var/log, which the acquisition does not read.
+  hostVarLog: false
+  # The acquisition that reads the proxies is in acquisition.yaml, mounted into the agent's
+  # acquis.d by the HelmRelease's own values: the chart's schema lists no `kubernetes` datasource
+  # for additionalAcquisition, and the chart refuses to render without one. This one is a
+  # placeholder: a file source on a path that is not in the pod, which reads nothing and costs a
+  # warning at start.
+  additionalAcquisition:
+    - source: file
+      filenames:
+        - /var/log/crowdsec-none/*.log
+      labels:
+        type: none
+  podSecurityContext:
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    privileged: false
+    capabilities:
+      drop:
+        - ALL
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: null
+      memory: 256Mi
+  metrics:
+    enabled: true
+    serviceMonitor:
+      enabled: true
+  # The init container that waits for the local API and registers the agent with it.
+  wait_for_lapi:
+    securityContext:
+      allowPrivilegeEscalation: false
+      privileged: false
+      capabilities:
+        drop:
+          - ALL

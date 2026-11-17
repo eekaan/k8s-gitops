@@ -1,0 +1,21 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/namespace-v1.json
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: crowdsec
+  annotations:
+    # Removing the namespace from the tree must not delete everything in it.
+    kustomize.toolkit.fluxcd.io/prune: disabled
+  labels:
+    # CrowdSec's image runs as root: its entrypoint writes the configuration directory, which no
+    # value of the chart turns into a non-root user, so the two workloads are entries of
+    # pod-security-exceptions.yaml at the baseline level. They read no path of the node and ask for
+    # no capability, so baseline is the level, not privileged, and the namespace has its own rather
+    # than sharing the level of a namespace that holds a workload that needs the host. Audit and
+    # warn at restricted record and report any pod that does not meet it.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: v1.37
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: v1.37

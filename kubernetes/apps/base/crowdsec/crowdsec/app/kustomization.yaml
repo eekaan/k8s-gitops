@@ -1,0 +1,28 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - helmrepository.yaml
+  - helmrelease.yaml
+  - serviceaccount.yaml
+  - lapi-secrets.yaml
+  - ciliumnetworkpolicy.yaml
+  - prometheusrule.yaml
+
+# The chart's values and the agent's acquisition, each in a file of its own and a ConfigMap whose
+# name carries a hash of it, so a change to either rolls the release. Neither goes through Flux's
+# substitution: the parser's and the scenarios' expressions hold `$` that a substitution would read.
+configMapGenerator:
+  - name: crowdsec-values
+    files:
+      - values.yaml
+  - name: crowdsec-acquisition
+    files:
+      - envoy-gateway.yaml=acquisition.yaml
+generatorOptions:
+  annotations:
+    kustomize.toolkit.fluxcd.io/substitute: disabled
+
+configurations:
+  - kustomizeconfig.yaml
