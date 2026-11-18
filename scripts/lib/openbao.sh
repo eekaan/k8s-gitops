@@ -6,13 +6,15 @@
 # private directory, a port-forward to OpenBao's active member, a short-lived token, and requests to
 # OpenBao's API through them. Nothing here prints a token, a value or a key, or passes one as an
 # argument: they reach kubectl, curl, jq and age on standard input or through a file descriptor, and
-# leave them on a pipe.
+# leave them on a pipe. scripts/secret-rotate sources it too, for the refusal to run traced, the
+# names and bao_kubectl: it opens no session, and its one write to OpenBao is bao-put's.
 
 # Traced, bash writes every command a recipe runs with the values it holds, the secrets among them,
 # so a recipe refuses to run while the shell traces, however that was turned on (bash -x,
 # SHELLOPTS=xtrace, a BASH_ENV that sets -x), before it reads anything. The one trace that goes on is
-# that of tests/openbao-recipes.bats: its BASH_ENV sets BAO_TESTS_XTRACE_DIR, which nothing else
-# sets, and sends the trace to a file in that directory, as nothing does by accident.
+# that of tests/openbao-recipes.bats and tests/secret-rotate.bats: their BASH_ENV sets
+# BAO_TESTS_XTRACE_DIR, which nothing else sets, and sends the trace to a file in that directory,
+# as nothing does by accident.
 if [[ $- == *x* ]] && ! [[ -n ${BAO_TESTS_XTRACE_DIR-} && -n ${BASH_XTRACEFD-} &&
   /proc/$$/fd/$BASH_XTRACEFD -ef $BAO_TESTS_XTRACE_DIR/$$ ]]; then
   set +x

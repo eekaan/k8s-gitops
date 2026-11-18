@@ -46,8 +46,16 @@ Then the operator, right away, before anything else logs in as the role `operato
    someone else made them and holds them: the store is not trusted. Rebuild it as
    [a first initialisation that failed](#a-first-initialisation-that-failed) says, while it holds no
    secret yet, and run this step again.
-8. `just bao-put demo/hello greeting`, and type a value at the prompt. Within the ExternalSecret's
-   refresh interval, 15 minutes, the Secret `hello` in `demo` holds it under `greeting`.
+8. Write the demo's key from 32 random bytes, which nobody types or sees:
+
+   ```sh
+   head -c 32 /dev/urandom | od -An -vtx1 | tr -d ' \n' | just bao-put demo/hello greeting
+   ```
+
+   The ExternalSecret has failed since step 6, and External Secrets tries it again after a delay
+   that doubles up to seven minutes, so within that the Secret `hello` in `demo` holds the value
+   under `greeting`, and within the kubelet's sync period after it the pods of `hello` hold it as
+   the file `/etc/hello/greeting`.
 9. `just bao-seed-volsync <file>`, with `<file>` a new file beside the Talos age key on a store that
    never held the key, and the existing custody file of the volume backups' master on a store that
    did, as after a rebuild. It seeds the key `volsync` the volume backups read
@@ -85,9 +93,9 @@ Each of these only reads:
 - `kubectl --namespace openbao get secret openbao-seal-1 --output jsonpath='{.immutable}'`: `true`.
 - `kubectl get clustersecretstore openbao`: Ready `True`.
 - `kubectl --namespace demo get externalsecret hello`: `SecretSynced` once step 8 is done. To compare
-  the value without printing it:
+  the value the pods hold with the Secret's, printing a digest of each and neither value:
   `kubectl --namespace demo get secret hello --output jsonpath='{.data.greeting}' | base64 -d | sha256sum`
-  against the same hash of what was typed.
+  against `kubectl --namespace demo exec deployment/hello --container httpd -- sha256sum /etc/hello/greeting`.
 
 A restart test: delete one member, `kubectl --namespace openbao delete pod openbao-1`, wait until it
 is Ready again, and check `bao status` in it says `Sealed false`; then each of the other two in turn.
@@ -453,3 +461,19 @@ operator's, so that `just bao-root` can run the restore:
   yet; until it has one, rotate them only when a share is known to be exposed, run the requests
   through `just bao-root <file> <command>`, give each share on standard input from the file, and
   send the new shares straight into a new file encrypted to the Talos age key, never to the screen.
+- **An application's secret**, where `secret-rotation.yaml` lists its key as `generated`:
+  `just secret-rotate <path> <key>`, such as `just secret-rotate demo/hello greeting`. It shows what
+  it will do and asks for the path to be typed back, then writes a value it makes itself, has the
+  Secret refreshed and waits for the restart. It is done when its last line says how many pods of
+  which workload are new and hold the new value; when it stops after the write it says what the
+  store and the Secret hold, and a second run rotates again and proves the value it writes
+  ([Rotating an application's secret](../kubernetes.md#rotating-an-applications-secret)). The
+  recipe rotates and never seeds: where the store does not hold the key yet, it refuses for an
+  ExternalSecret that is not Ready and pods that hold no file. The first value is written as step 8
+  of [the first initialisation](#first-initialisation) writes the demo's, from random bytes with
+  `just bao-put <path> <key>`, and never typed: Reloader keeps a digest of the Secret's data in the
+  workload ([What Git does not declare](../kubernetes.md#rotating-an-applications-secret)). The
+  ExternalSecret follows within seven minutes, the delay External Secrets retries a failed one
+  after, and the kubelet adds the file to the running pods within its sync period. A key the list
+  has as `issued` or `re-encryption` is rotated as its application's section says, and the recipe
+  refuses it.

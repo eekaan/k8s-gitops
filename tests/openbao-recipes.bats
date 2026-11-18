@@ -1845,7 +1845,8 @@ EOF
   cd "$REPO"
   for recipe in "bao-put demo/hello greeting" "bao-recovery $BATS_TEST_TMPDIR/custody/recovery.age" \
     "bao-root $CUSTODY report-env" "bao-seal-restore $CUSTODY" "bao-seed-volsync $VOLSYNC_CUSTODY" \
-    "bao-volsync-password $VOLSYNC_CUSTODY volsync-demo report-env" "bao-seed-postgres $BATS_TEST_TMPDIR/custody/postgres.age"; do
+    "bao-volsync-password $VOLSYNC_CUSTODY volsync-demo report-env" "bao-seed-postgres $BATS_TEST_TMPDIR/custody/postgres.age" \
+    "secret-rotate demo/hello greeting"; do
     for how in shellopts named bash-env bash-x; do
       : >"$RECORD/argv"
       # shellcheck disable=SC2086 # each recipe is its arguments, split.

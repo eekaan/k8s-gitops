@@ -73,6 +73,10 @@ spec:
   namespace gets a `default-deny` `NetworkPolicy` next to its `namespace.yaml`, or an entry of
   `network-policy-exceptions.yaml` with its reason, and `just network-policy-check` fails until
   one of them holds.
+- A key the application reads from the secret store, through an ExternalSecret, gets its entry in
+  `secret-rotation.yaml`, which says how the key is rotated
+  ([Rotating an application's secret](#rotating-an-applications-secret)); `tests/openbao.bats`
+  fails for a key that is read and has none.
 
 An application the overlay selects also has an entity in Backstage's catalogue, in the same change
 ([Backstage](#backstage)); `tests/backstage.bats` fails without it.
@@ -888,10 +892,10 @@ does not matter.
    need; `NETWORK_DROPS_LAST` (500) bounds the flows asked of each agent and `NETWORK_DROPS_TIMEOUT` (60)
    the seconds each call may take. Hubble keeps only each agent's recent flows (4095 by the chart's
    default), so run it after each of: `just gateway-check`; `just cluster-check`; the secret demo
-   (`just bao-put demo/hello greeting`, then the Secret in `demo`); a badge asked of kromgo by its
-   name, which has kromgo query Prometheus ([Status badges](#status-badges)); a sign-in through the
-   route that opts in to it ([Sign-in](#sign-in)); Backstage's catalogue opened by its name, which
-   has Backstage read its database; the nightly dump of `backstage-db` from 02:00, which waits up to
+   (`just secret-rotate demo/hello greeting`); a badge asked of kromgo by its name, which has
+   kromgo query Prometheus ([Status badges](#status-badges)); a sign-in through the route that opts
+   in to it ([Sign-in](#sign-in)); Backstage's catalogue opened by its name, which has Backstage
+   read its database; the nightly dump of `backstage-db` from 02:00, which waits up to
    20 minutes before it starts ([Dumps](#dumps)); the base backup of `backstage-db` at 02:47 UTC,
    and a WAL segment its primary archives, which `select pg_switch_wal()` there forces
    ([Backups and restores](#backups-and-restores)); the nightly backup of `volsync-demo` at 03:17, and
@@ -1077,7 +1081,11 @@ does not define itself.
   ([Spegel](https://github.com/spegel-org/spegel/blob/v0.8.1/main.go#L278-L305)); the values turn
   off the debug page beside it.
 - `reloader` restarts a workload annotated for it when a ConfigMap or Secret it uses changes, and
-  nothing else.
+  nothing else. `hello` in `demo` is annotated for its Secret, `secret.reloader.stakater.com/reload:
+  hello`, so a new value of the demo's secret reaches its pods by a restart
+  ([Rotating an application's secret](#rotating-an-applications-secret)). Reloader restarts when
+  the Secret's data changes, not when the Secret is created, and by writing a variable into the
+  container's environment, which starts a rollout as any change to the pod template does.
 - `descheduler` runs the chart's default policy every five minutes, with two changes: a pod is
   evicted only when another node can take it, and a cordoned node's taint is no reason to evict.
 
@@ -2317,6 +2325,10 @@ A `ClusterIssuer` reads its Secrets from the controller's cluster resource names
   other controller whose chart grants Secrets cluster-wide, as the reflector's and the reloader's
   do. The token's scope is what bounds the harm of a read. The `ExternalSecret` refreshes every 15
   minutes, so a token the operator replaces in the store reaches the cluster without a change here.
+  `secret-rotation.yaml` lists the key as `issued`: rotating it is making a new token at the
+  provider, with the same scope, and writing it with the same `just bao-put` command, and
+  `just secret-rotate` refuses it
+  ([Rotating an application's secret](#rotating-an-applications-secret)).
 - **The solver.** DNS-01 through the provider's API, the only solver, for names under
   `${CLUSTER_DOMAIN}` only: the `dnsZones` selector means a Certificate for any other name finds no
   solver and is refused. HTTP-01 is not used, which is also what lets one certificate cover a
@@ -2713,6 +2725,14 @@ environment, printing none of them: nobody computes a digest at a prompt. Every 
 takes the component holds the cluster's S3 key, which reaches every bucket of the project: whoever
 can read Secrets there can read, replace or delete any application's backups, though not decrypt
 them (ADR 0015).
+
+`secret-rotation.yaml` lists the master as `re-encryption` and the path's other keys, the S3 key,
+as `issued`, so `just secret-rotate` refuses both
+([Rotating an application's secret](#rotating-an-applications-secret)). The master is not rotated:
+a new one opens no repository made under the old one, and no recipe replaces it
+([below](#what-an-operator-does-once-and-what-then-happens-by-itself)). A new S3 key, once it is
+the one in `.env`, is written with `just bao-seed-volsync --rotate-s3`
+([runbook](runbooks/volume-backups.md#replacing-the-clusters-s3-key)).
 
 ### What an operator does once, and what then happens by itself
 
@@ -3174,7 +3194,10 @@ removing the application leaves them, as Helm never deletes what `crds/` install
   `tests/external-dns.bats` checks over everything the overlay applies. The pod takes it as
   `CF_API_TOKEN` by reference; no value is in the tree. The token is a requirement on the
   operator: one Cloudflare API token with Zone read and DNS edit on the cluster's one zone, which
-  `just bao-put cert-manager/cloudflare api-token` writes. Without the key the ExternalSecret
+  `just bao-put cert-manager/cloudflare api-token` writes. A new token is written the same way,
+  for both readers at once (`secret-rotation.yaml` lists the key as `issued`); the container takes
+  it from its environment when it starts and nothing restarts the pod, so an operator restarts it
+  once the Secret holds it, before the old one is revoked. Without the key the ExternalSecret
   reports it missing and the pod does not start; a token the provider refuses, revoked or without
   the scope, ends the process at its first sync, so the pod crash-loops. `ExternalDNSSyncStale`
   reports both, as no external-dns reports a sync. No zone identifier is set (`--zone-id-filter`),
@@ -3502,6 +3525,15 @@ applications restarted for `dex-oauth2-proxy-client` and ends every session for
 restarts the pods, and after a new `oauth2-proxy-cookie` the two replicas disagree on the key, and
 refuse each other's sessions, until both have been restarted.
 
+The store's keys here are `issued` in `secret-rotation.yaml`, so `just secret-rotate` refuses
+them ([Rotating an application's secret](#rotating-an-applications-secret)). A new client secret
+is generated in the OAuth App's settings on GitHub and written with
+`just bao-put sso-system/dex github-client-secret`; dex takes it from its environment when a pod
+starts and nothing restarts its pods, so an operator restarts them once the Secret holds it. The
+list is replaced whole with the `just bao-put` command below and reaches oauth2-proxy by itself
+([Who is admitted](#who-is-admitted)). The two generated secrets have no key in the store and no
+entry in the list.
+
 ### What the owner does, in order
 
 1. On GitHub, under the account's developer settings, create an OAuth App. Its homepage is
@@ -3794,7 +3826,10 @@ component adds an `ObjectStore`, a `ScheduledBackup` and an ExternalSecret.
   `postgres-backups`. The S3 key may list, read, write and delete every object of the project's
   buckets; it cannot read the archive's content without the customer key. The instance's sidecar
   holds both, as it must, so whoever can read the Secret `<name>-backup` or run a command in a
-  database pod can read the archive. No key is in the tree.
+  database pod can read the archive. No key is in the tree. The S3 key is rotated as the volume
+  backups' is, whose store entry it is (`just bao-seed-volsync --rotate-s3`,
+  [Volume backups](#the-repository-and-its-password)), and the ExternalSecret brings it into
+  `<name>-backup` at its next refresh.
 - **Encryption.** Every object is encrypted at the provider with a customer-provided key, SSE-C,
   not before it leaves the cluster ([ADR 0008](adr/0008-state-and-backups-are-encrypted-before-they-leave.md)):
   the `ObjectStore` names the Secret key in `s3Credentials.sseCustomerKey`, a base64 256-bit key,
@@ -3815,7 +3850,9 @@ component adds an `ObjectStore`, a `ScheduledBackup` and an ExternalSecret.
   [`just bao-seed-volsync`](#the-repository-and-its-password) does for the volume backups'
   master. **Losing the key loses every base backup and WAL segment.** It cannot be rotated in
   place: objects written under one key are unreadable under another, so a new key needs a new
-  destination path or server name. The custody file belongs beside the Talos age key, outside the
+  destination path or server name. `secret-rotation.yaml` lists it as `re-encryption`, so
+  `just secret-rotate` refuses it ([Rotating an application's secret](#rotating-an-applications-secret)).
+  The custody file belongs beside the Talos age key, outside the
   repository and the cluster ([postgres-restore.md](runbooks/postgres-restore.md#the-customer-key)).
 - **Restoring.** A restore needs the customer key, in the store or in the custody file, the
   cluster's S3 key, the plugin running and the `ObjectStore` of the old cluster, which the
@@ -3902,7 +3939,10 @@ takes the Secret, and only the `dump` container takes the database's: the key th
 objects never meets the database's password. The key reaches every bucket of the project
 ([Infrastructure](infrastructure.md#s3-keys-and-backup-buckets)), so the job's rights end where the
 code ends; the retention deletes only dumps of its own path. Nothing new is seeded, and no key is in
-the tree. The scripts are the component's own copies of the etcd snapshot job's, as a component
+the tree. The key is rotated as the volume backups' is, whose store entry it is
+(`just bao-seed-volsync --rotate-s3`, [Volume backups](#the-repository-and-its-password)): each
+run's pod takes it from the Secret as that then is.
+The scripts are the component's own copies of the etcd snapshot job's, as a component
 cannot read a file outside its directory; `tests/postgres-dumps.bats` holds `fetch-age.sh` to the
 etcd job's byte for byte, and the encrypting and uploading scripts to it line by line apart from the
 words that say dump for snapshot and the path.
@@ -3944,6 +3984,8 @@ the operator keeps its recovery keys (ADR 0016). Four applications hold it:
   expression reads, as kstatus does not.
 - `demo/hello-secret` holds one ExternalSecret that reads `demo/hello` through the store. It names
   `openbao-store` in `dependsOn` and does not wait, as the key exists once an operator writes it.
+  The Deployment `hello` mounts the Secret it writes as a file, so the demo's secret has pods to be
+  rotated in ([Rotating an application's secret](#rotating-an-applications-secret)).
 - `openbao/openbao-snapshots` holds the CronJob that snapshots the raft storage
   ([Raft snapshots](#raft-snapshots)). It names `external-secrets`, `openbao`, `openbao-store` and
   `prometheus-operator-crds` in `dependsOn`, and does not wait.
@@ -3951,7 +3993,7 @@ the operator keeps its recovery keys (ADR 0016). Four applications hold it:
 `tests/openbao.bats` builds the first three as Flux applies them and renders the chart with its
 values; `tests/openbao-snapshots.bats` builds the fourth and runs its scripts against fakes of
 OpenBao's client and of the object storage; `tests/openbao-recipes.bats` runs the recipes below
-against fakes of the cluster and of OpenBao.
+against fakes of the cluster and of OpenBao, and `tests/secret-rotate.bats` the rotation.
 
 ### What runs
 
@@ -4176,6 +4218,12 @@ with the Talos age key from `SOPS_AGE_KEY_FILE`, or `SOPS_AGE_KEY`, into memory 
   application's repository and password. Both are described under
   [Volume backups](#what-an-operator-does-once-and-what-then-happens-by-itself). The first creates
   the key and never reads one, as the `operator` role may only create and patch keys.
+- `just secret-rotate <path> <key> [--yes] [--wait <seconds>]` replaces a key that
+  `secret-rotation.yaml` lists as `generated` with a value it makes, and proves that every pod that
+  mounts it holds the new value
+  ([Rotating an application's secret](#rotating-an-applications-secret)). It opens no session of its
+  own: its one write is `bao-put`'s, which it runs with the value on standard input, and it logs in
+  to OpenBao no other way.
 
 The snapshot recipes, `just openbao-snapshots` and `just openbao-snapshot-check`, are under
 [Raft snapshots](#raft-snapshots): they reach the object storage only, never the store.
@@ -4184,12 +4232,179 @@ The snapshot recipes, `just openbao-snapshots` and `just openbao-snapshot-check`
 
 An application reads a key with an ExternalSecret that names the ClusterSecretStore `openbao`, the
 path as `remoteRef.key` and the key as `remoteRef.property`. The store logs in as `external-secrets`
-and reads the key-value mount and nothing else. `demo/hello-secret` is the example: after
-`just bao-put demo/hello greeting`, the Secret `hello` in `demo` holds the key `greeting`.
+and reads the key-value mount and nothing else. `demo/hello-secret` is the example: once
+`just bao-put demo/hello greeting` has written the key, a value of random bytes that nobody types
+([runbook](runbooks/openbao.md#first-initialisation), step 8), the Secret `hello` in `demo` holds
+the key `greeting`, and the pods of `hello` mount that key at `/etc/hello/greeting`, outside `/www`,
+the one directory their web server serves. The volume is optional: the pods run before anyone has
+written the key, and the kubelet adds the file, without a restart, once the Secret holds it. Until
+the key is written the ExternalSecret fails, and External Secrets tries it again after a delay that
+doubles from a second up to seven minutes (`BuildRateLimiter` in `pkg/controllers/common/common.go`
+at v2.15.0), so the Secret can follow a first value that long after it is written, and the file
+follows within the kubelet's sync period. The Deployment carries
+`secret.reloader.stakater.com/reload: hello`, so Reloader restarts its pods when the Secret's data
+changes ([The kube-system baseline](#the-kube-system-baseline)).
 
 The store serves every namespace. Creating an ExternalSecret is reserved to cluster administrators
 and Flux, which applies those in Git after review; no RoleBinding grants `edit` or `admin`. A
 namespace delegated to anyone else first gets its own store restricted with `conditions`.
+
+### Rotating an application's secret
+
+`secret-rotation.yaml`, at the repository's root, says how each key of the store that an
+ExternalSecret of the tree reads is rotated. An entry has the `path` and the `key` as `bao-put`
+takes them, a `rotation` and, unless that is `generated`, a `reason` of one sentence; an entry
+without a `key` is for every key at its path that no other entry names. `tests/openbao.bats` reads
+every ExternalSecret under `kubernetes/` and fails while a key one of them reads has no entry, or
+an entry names a key none reads. It reads them as their files hold them. A patch or a replacement
+could change what Flux applies of them, so the test fails as well on one, in a file under
+`kubernetes/` or in the text of a patch there, whose target or select names no kind or a kind that
+`ExternalSecret` matches as kustomize matches it, a regular expression of the whole name, and on a
+patch whose text names the kind.
+
+| Rotation | What it says of the key | How the key is rotated |
+| --- | --- | --- |
+| `generated` | Any new random value will do. | `just secret-rotate <path> <key>`, below. `greeting` at `demo/hello` is the only one. |
+| `re-encryption` | Data is encrypted under the value. | By no recipe: a new value loses that data unless it is encrypted again under it, and the application's section says what that would take. They are n8n's encryption key ([n8n](#n8n)), the volume backups' master password ([Volume backups](#the-repository-and-its-password)) and the PostgreSQL backups' customer key ([Backups and restores](#backups-and-restores)), and none is rotated. |
+| `issued` | The value is made elsewhere, by a provider that issues it or by the owner who writes it. | A new one is made there and written with `just bao-put <path> <key>`, or with `just bao-seed-volsync --rotate-s3` for the cluster's S3 key; the ExternalSecret brings it into the Secret at its next refresh, within its `refreshInterval`. The application's section says what then reads it. |
+
+`just secret-rotate <path> <key> [--yes] [--wait <seconds>]` (`scripts/secret-rotate`) rotates a
+`generated` key on `lab-sto2`. It takes the path and the key, never an ExternalSecret or a
+workload: those it finds in the cluster. In order:
+
+1. **Before it reaches the cluster** it refuses to run while the shell traces its commands, as the
+   other recipes do; anything but a path and a key `bao-put` would take, repeating none of what it
+   was given; a `--wait` that is no whole number of seconds of at most nine digits; a list it
+   cannot read as entries; a key the list has as `re-encryption` or `issued`, with the entry's
+   reason; and a key the list does not name, saying to add its entry.
+2. **It reads the cluster and changes nothing.** Every ExternalSecret, in any namespace, that
+   reads the key from the ClusterSecretStore `openbao`, by the path or by the path with `secrets/`
+   or `secrets/data/` in front, which External Secrets reads as the same path; for each, the
+   Deployments, StatefulSets and DaemonSets of its namespace whose pod template names its Secret;
+   their running pods; and from each pod the SHA-256 digest of the file, which `sha256sum` takes in
+   the container through `kubectl exec`. It refuses, naming what and why, when no ExternalSecret
+   reads the key; when one reads it otherwise than as one entry of `spec.data` with
+   `remoteRef.key` and `remoteRef.property` alone and no template, finds keys of the store by a
+   pattern, writes no Secret or an immutable one, or would not refresh again
+   (`refreshPolicy: CreatedOnce`, or a `refreshInterval` of zero under the periodic policy, the
+   default); when one is not Ready; when
+   no workload uses the Secret; when a workload takes it through its environment, `envFrom`, a
+   projected volume, a `subPath`, a volume without the key, or only in an init container; when a
+   workload carries no annotation by which Reloader restarts it for that Secret, could not replace
+   every pod (paused, `OnDelete`, a partition), selects its pods with `matchExpressions`, is in the
+   middle of a rollout or has no running pod; when a pod holds no file yet; when a container
+   cannot run `sha256sum`; and when a `kubectl exec` does not answer within 30 seconds, the time
+   each exec is given here and in the proof, as each other request to the API server is.
+   Reloader's annotations are read as the pinned Reloader reads them:
+   `secret.reloader.stakater.com/reload` naming the Secret, `secret.reloader.stakater.com/auto` or
+   `reloader.stakater.com/auto`, on the workload or, where it carries none of them and no
+   `reloader.stakater.com/search`, on its pod template; a workload whose own
+   `secrets.exclude.reloader.stakater.com/reload` names the Secret is refused. Reloader takes each
+   name of the first as a regular expression; the recipe counts only the Secret's own name.
+3. **It prints the plan**: the path and the key and that a new value is made here, each
+   ExternalSecret and its Secret, each workload with its number of pods and the annotation that
+   restarts it, and the file and container the proof reads. Then it asks for the path to be typed
+   back, which `--yes` answers. Anything else, or the end of the input, ends the run with nothing
+   changed. The answer is read the same from a terminal and from a pipe
+   (`printf 'demo/hello\n' | just secret-rotate demo/hello greeting`): every command the recipe
+   starts gets `/dev/null` for its standard input, or a pipe of its own.
+4. **It makes the value**, 32 random bytes of the kernel as 64 hexadecimal digits, as
+   `just bao-seed-volsync` makes its master, and stops if it is a value a pod already holds. It
+   writes it by running `scripts/bao-put` with the value on its standard input: that is the only
+   write, and the recipe sends OpenBao nothing itself.
+5. **It asks each ExternalSecret to refresh** by setting its annotation `force-sync` to the time
+   and eight random bytes, a value no other run sets, and reads it until its
+   `status.syncedResourceVersion` is another than before the annotation, for up to the wait, 300
+   seconds unless `--wait` says otherwise. External Secrets makes that field of the generation
+   and a hash of the labels and annotations each time it has synced, and syncs when it differs
+   from what the object has now. An ExternalSecret that is not Ready when it is read ends the
+   run. The wait has to cover a refresh, in which External Secrets logs in to the store, reads
+   the key and writes the Secret and its own status: with `--wait 0` each ExternalSecret is read
+   once, straight after its annotation, which on the cluster comes before it has refreshed, so
+   such a run stops after the write.
+6. **It waits for the restart**: for each workload's generation to pass the one read before, which
+   Reloader's change to the pod template moves, and then for `kubectl rollout status`, both within
+   the wait. `kubectl rollout status` alone would be satisfied by the rollout of before.
+7. **It proves**, for every running pod that is not being deleted, that it is none of the pods
+   read before, by UID, and that the digest of its file is the digest of the value written. With
+   step 4, none of them holds a value from before. A pod that fails either is named. A pod that
+   is being deleted is not counted: it is gone within its grace period.
+8. **It ends with one line**: the key, the path, how many pods of which workloads hold the new
+   value, and the seconds from the confirmation to the proof.
+
+**Why the proof is made of digests.** The role `operator` may create and patch a key and never
+read one, so the recipe can read neither the old value nor the new one back from the store, and it
+gets no wider right for the proof. Three digests stand in. The old one is taken in each pod
+before the write; the store's is the digest of the value the recipe made, which `bao-put`'s write
+answered for; the new one is taken in each new pod. The value reaches a pod only from the store,
+through the ExternalSecret, so a pod whose digest is the written one holds what the store served.
+The recipe never reads the Secret. Neither the value nor a digest is printed, passed as an
+argument, exported or written to a file: they stay in the shell's memory and on pipes, and the
+recipe makes no file.
+
+**What it needs.** On the operator's machine, the pinned `kubectl`, `jq` and `yq`, and `curl`,
+`base64`, `head`, `od`, `tr`, `sha256sum`, `sed`, `date` and `sleep`. Through the
+kubeconfig, what `bao-put` needs ([The recipes](#the-recipes)) and, beyond it, to read the
+ExternalSecrets of every namespace and to annotate those that read the key; to read the Deployments,
+StatefulSets, DaemonSets and pods of their namespaces; and to run a command in those pods
+(`pods/exec`). It reads no Secret but OpenBao's CA certificate, which `bao-put` reads. In the
+container, `sha256sum`, which prints the digest before the file's name: BusyBox, `hello`'s image,
+has it. `kubectl exec` reaches the container through the API server and the kubelet, not the pod
+network, so no network policy is involved; it runs `sha256sum` alone, with no shell and no terminal,
+a binary of the image reading a file that no rule of the ruleset Falco runs treats as sensitive, so
+no rule of [Runtime detection](#runtime-detection) matches it; and the admission policies look at
+pods and namespaces as they are created and updated, not at a command run in one.
+
+**What a run that stops leaves.** Before the write, nothing: it says so. If `bao-put` does not
+confirm the write, the store holds the value from before or the new one, and the recipe says that.
+After the write, the store holds the new value whatever fails, and a second run writes another
+value and proves that one, whatever the pods hold when it starts. What else is left depends on the
+refresh, and the recipe says which:
+
+- When an ExternalSecret turns not Ready or does not refresh within the wait, its Secret follows
+  at the ExternalSecret's next refresh by itself, and Reloader restarts the workloads when it does.
+  Where several ExternalSecrets read the key, this holds for those that had not refreshed yet; the
+  Secret of one that had holds the new value already, as below.
+- Once every ExternalSecret has refreshed, the Secrets hold the new value, and the files of the
+  running pods take it within the kubelet's sync period, as the recipe takes only a volume mounted
+  without `subPath`. That is what it says when a workload's rollout does not finish, when the proof
+  fails, and when a workload's generation does not move. A generation that does not move means
+  Reloader did not restart the workload, and once it has seen the change it will not restart it
+  for that change by itself: it restarts for an update of the Secret as it sees it, retries a
+  restart that fails five times, spaced 5 to 80 milliseconds apart by its work queue's default rate
+  limiter, and then drops it; and with `reloadOnCreate` off, as Reloader's rendered arguments in
+  `tests/openbao.bats` hold, it does nothing for the Secrets it finds when it starts, which it sees
+  as created, so a change made while it was down restarts nothing (`Update`, `Add` and `handleErr`
+  in `internal/pkg/controller/controller.go` at v1.4.24). A Reloader that has not seen the change
+  yet, as when the wait is shorter than it takes to, may still restart the workload, whose new pods
+  then hold the new value. A later refresh reads the same value and makes no change it would act
+  on.
+
+A new pod's file is the Secret as the kubelet's watch of it has it when the pod starts, which
+follows the API server within moments; a pod started before the watch had the change would hold
+the value from before until the kubelet's next sync of its volumes, within a minute or so, and fail
+the proof.
+
+**What Git does not declare.** A rotation leaves two fields on objects Flux applies. The
+annotation `force-sync` is written with kubectl, and Flux takes a field kubectl wrote on an
+object it applies for its own at its next apply and removes it, as Git does not declare it
+(kustomize-controller's cleanup of `kubectl` field managers); External Secrets answers that
+change with one more refresh, which reads the same value and changes nothing. Reloader restarts
+a workload by writing a variable, `STAKATER_<SECRET>_SECRET`, into the environment of the
+container that mounts the Secret, under its own field manager, which Flux leaves alone, so the
+variable stays, and no reconcile restarts the pods for it. Its value is a SHA-1 digest of the
+Secret's keys and values, readable by whoever can read the Deployment, and kept as well in the pod
+template of each ReplicaSet the Deployment keeps of its earlier rollouts, ten by default: nothing
+can be made of it for 32 random bytes, and it is a reason to keep a value a person chose out of a
+Secret that a workload is restarted for, and to write the first value of a `generated` key from
+random bytes too.
+
+`tests/secret-rotate.bats` runs the recipe against a fake cluster that holds the tree's own
+ExternalSecret and Deployment, and `tests/openbao.bats` holds the Deployment's mount and
+annotation, Reloader's rendered arguments and role, and the list. What only the cluster shows is
+the rotation itself: `just secret-rotate demo/hello greeting`. The fakes do not model External
+Secrets, Reloader or BusyBox's `sha256sum`, so the recipe is run that way again after a pull
+request that bumps any of them is merged.
 
 ### Raft snapshots
 
@@ -4295,7 +4510,9 @@ object (an upload fails on a name that exists). That the key reaches more than t
 residual risk of [ADR 0008](adr/0008-state-and-backups-are-encrypted-before-they-leave.md), stated in
 [the infrastructure document](infrastructure.md#s3-keys-and-backup-buckets); what the key cannot do
 is read a snapshot. Whoever can read Secrets in `openbao` reads this key too, and already holds the
-seal key.
+seal key. The key is rotated as the volume backups' is, whose store entry it is
+(`just bao-seed-volsync --rotate-s3`, [Volume backups](#the-repository-and-its-password)): each
+run's pod takes it from the Secret as that then is.
 
 **What it needs.** The pod reaches `openbao-active`, the object storage's endpoint and, for the age
 release, the release host of age's project over the pod network, and runs on a worker, as it
@@ -4434,7 +4651,11 @@ the application is Ready once n8n answers its readiness endpoint.
   `<file>` is the backups' custody file ([Volume backups](#volume-backups)); a backup holds the
   volume's files at its root. Should the store be given another key by mistake, n8n stops at its
   next start with that message, and nothing is lost: writing the right key and letting the
-  ExternalSecret refresh starts it again.
+  ExternalSecret refresh starts it again. `secret-rotation.yaml` therefore lists the key as
+  `re-encryption`, and `just secret-rotate` refuses it
+  ([Rotating an application's secret](#rotating-an-applications-secret)): rotating it would mean
+  encrypting the stored credentials again under the new key and putting that key into the settings
+  file on the volume, which no recipe here does, so the key is kept.
 - **The volume** is the claim `n8n` of `components/volsync`, 5Gi on the default StorageClass,
   mounted at `/home/node/.n8n`, backed up every night at 03:23 with the component's retention (the
   newest of each of the last 7 days, 4 weeks and 3 months) and filled from the latest backup when it
@@ -4867,7 +5088,11 @@ The steps n8n took, in order; the next port does the same and says where it diff
 4. **Secrets.** A secret the application keeps a copy of, or that must outlive the cluster, such as
    n8n's encryption key, in the store: an ExternalSecret that reads `<namespace>/<application>`,
    `openbao-store` in `dependsOn`, and the one `just bao-put` command in the docs, with every place
-   the secret lives and the order on a rebuild. A generator and a `CreatedOnce` ExternalSecret only
+   the secret lives and the order on a rebuild. Each key read from the store gets its entry in
+   `secret-rotation.yaml`: `generated` only where any new random value will do, and otherwise
+   `re-encryption` or `issued` with the reason, and the application's section says how the key is
+   rotated ([Rotating an application's secret](#rotating-an-applications-secret)). A generator and
+   a `CreatedOnce` ExternalSecret only
    for a secret nothing keeps, such as the runners' token. A secret the application makes itself
    and keeps on its volume, such as Open WebUI's session key, needs no entry when a variable puts
    the file on the volume; find where it is kept when unset in the application's source, and say

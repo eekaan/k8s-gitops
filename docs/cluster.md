@@ -820,7 +820,10 @@ the cluster's S3 key, which `just bao-seed-volsync` has already written for the 
 ([kubernetes.md](kubernetes.md#volume-backups)): nothing more is seeded. The key reaches every
 bucket of the project, the etcd bucket among them, so it lets the job delete and overwrite
 objects, as it lets every namespace that holds it; ADR 0008 states that residual risk. Only the
-uploading container takes it, as environment variables from the Secret.
+uploading container takes it, as environment variables from the Secret. The key is rotated as the
+volume backups' is, whose store entry it is (`just bao-seed-volsync --rotate-s3`,
+[kubernetes.md](kubernetes.md#the-repository-and-its-password)): each run's pod takes it from the
+Secret as that then is.
 
 **Retention.** The job keeps the newest 56 objects named as snapshots under the cluster's prefix,
 two weeks of runs, and deletes the older ones once the new snapshot is listed, never any other
