@@ -1,0 +1,16 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/persistentvolumeclaim-v1.json
+# The scratch claim the drill restores into, of the volume's size on the default StorageClass, which
+# any worker reaches, so neither the restore nor the check is tied to one node. It is made empty and
+# stays Pending until the first restore's mover is scheduled, as the class makes a volume for its
+# first pod. Nothing backs it up, snapshots or clones it.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ${APP}-drill
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: ${VOLSYNC_CAPACITY}

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# A stand-in for mv in the demo canary's loop, installed by the tests as <tmp>/bin/mv: it records each
+# call's operands, resolved against the working directory, in <tmp>/record/mv, one call a line, and
+# the call in <tmp>/record/order, where the fsync stand-in records its calls too, and then moves as
+# the system's mv does.
+set -uo pipefail
+root=${0%/bin/*}
+line=
+for operand in "$@"; do
+  [[ $operand == /* ]] || operand=$PWD/$operand
+  line+="$operand "
+done
+printf '%s\n' "${line% }" >> "$root/record/mv"
+printf 'mv %s\n' "${line% }" >> "$root/record/order"
+real=$(PATH=/usr/bin:/bin; command -v mv)
+exec "$real" "$@"
