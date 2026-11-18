@@ -1,10 +1,10 @@
 ---
 # yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
 # What the Envoy Gateway controller lets through, on top of the namespace's default deny: the proxies
-# fetch their configuration from it and the kubelet probes it; it reaches the API server and the
-# cluster's resolver. It opens no other connection: the proxies are configured over the connection
+# fetch their configuration and the firewall's Wasm modules from it and the kubelet probes it; it
+# reaches the API server and the cluster's resolver. The proxies are configured over the connection
 # they open to it. No monitor of the tree scrapes its metrics. The API server's calls to its webhook
-# are the next policy's.
+# and the controller's fetches from an image registry are the next policies'.
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
@@ -18,7 +18,8 @@ spec:
     ingress: false
     egress: false
   ingress:
-    # The proxies' configuration, served over xDS.
+    # The proxies' configuration, served over xDS, and the Wasm modules of the firewall's policies
+    # (components/waf), which each replica serves from its own cache over TLS on 18002.
     - fromEndpoints:
         - matchLabels:
             "k8s:io.kubernetes.pod.namespace": envoy-gateway-system
@@ -28,6 +29,8 @@ spec:
       toPorts:
         - ports:
             - port: "18000"
+              protocol: TCP
+            - port: "18002"
               protocol: TCP
     # The kubelet's probes.
     - fromEntities:
@@ -89,6 +92,36 @@ spec:
       toPorts:
         - ports:
             - port: "9443"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# The image registry each controller replica fetches a Wasm module from when it translates a policy
+# that names one (components/waf): ghcr.io, which answers a blob request with a redirect to another
+# host. A DNS name rule would need both names, and Cilium's DNS proxy to read them, which no policy
+# of the tree uses, so the rule is the world on 443, the port https reaches both on.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: envoy-gateway-registry
+  annotations:
+    k8s-gitops/network-policy-reason: >-
+      the controller fetches the firewall's Wasm module from its image's registry, which redirects a
+      blob request to another host, so a DNS name rule would need both names and the DNS proxy no
+      policy of the tree uses; port 443 only
+spec:
+  endpointSelector:
+    matchLabels:
+      control-plane: envoy-gateway
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
               protocol: TCP
 ---
 # yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
@@ -187,7 +220,9 @@ spec:
               protocol: UDP
             - port: "53"
               protocol: TCP
-    # The controller, which serves the proxies' configuration.
+    # The controller, which serves the proxies' configuration on 18000 and the Wasm modules of the
+    # firewall's policies on 18002 (components/waf): the proxies fetch a module from the controller,
+    # never from its registry.
     - toEndpoints:
         - matchLabels:
             "k8s:io.kubernetes.pod.namespace": envoy-gateway-system
@@ -195,6 +230,8 @@ spec:
       toPorts:
         - ports:
             - port: "18000"
+              protocol: TCP
+            - port: "18002"
               protocol: TCP
     # The routed backends, one rule for each: the pods its Service selects, in its namespace while
     # that carries the label the Gateway's https listener selects routes by, on the container port

@@ -1,0 +1,43 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# Puts a public route behind the web application firewall (docs/kubernetes.md, Web application
+# firewall): Coraza with the OWASP Core Rule Set at its defaults, which the public Gateway's proxies
+# run as a Wasm filter on that route and on no other. The component makes the EnvoyExtensionPolicy
+# named after the route, which targets that HTTPRoute and nothing else. An application adds it in
+# its ks.yaml, beside the HTTPRoute it defines in its own manifests, with the policy's acceptance as
+# the Kustomization's health:
+#
+#   components:
+#     - ../../../../../components/waf
+#   postBuild:
+#     substitute:
+#       WAF_ROUTE: <the HTTPRoute's name>
+#       WAF_MODE: <"On" or DetectionOnly>
+#   wait: true
+#   healthCheckExprs:
+#     - apiVersion: gateway.envoyproxy.io/v1alpha1
+#       kind: EnvoyExtensionPolicy
+#       current: >-
+#         has(status.ancestors) && size(status.ancestors) > 0 && status.ancestors.all(a,
+#         a.conditions.exists(c, c.type == 'Accepted' && c.status == 'True' && c.observedGeneration
+#         == metadata.generation))
+#       failed: >-
+#         has(status.ancestors) && status.ancestors.exists(a, a.conditions.exists(c, c.type ==
+#         'Accepted' && c.status == 'False' && c.observedGeneration == metadata.generation))
+#
+#   WAF_ROUTE  the name of the application's HTTPRoute, which the policy covers and is named after
+#   WAF_MODE   "On", quoted, as YAML 1.1 and yamllint's truthy rule read a bare On as true: a
+#              request whose anomaly score reaches the threshold is refused with 403; or
+#              DetectionOnly: it is let through, and the rules it matched are logged all the same
+#
+# Neither has a default: tests/waf.bats fails unless every ks.yaml that takes the component sets
+# both, and carries the health check above. The policy fails open, so the proxies serve the route
+# without the filter when its module cannot be had. The leading controller replica reports a fetch
+# it could not make as the policy not accepted, and the health check makes that the Kustomization's
+# failure, which the Flux alerts report. Another replica's failed fetch, and a proxy that could not
+# load the module, show only in their logs (docs/kubernetes.md, It fails open).
+resources:
+  - envoyextensionpolicy.yaml

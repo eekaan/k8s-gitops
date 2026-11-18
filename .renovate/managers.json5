@@ -87,5 +87,12 @@
       matchPackageNames: ["ghcr.io/backstage/backstage"],
       allowedVersions: "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
     },
+    {
+      // The web application firewall's filter: its registry lists a -busybox variant beside each
+      // release, and the moving tags latest, main and 0, the last two with -busybox variants too.
+      description: "coraza-proxy-wasm: releases, not their busybox variants or the moving tags",
+      matchPackageNames: ["ghcr.io/corazawaf/coraza-proxy-wasm"],
+      allowedVersions: "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
+    },
   ],
 }
