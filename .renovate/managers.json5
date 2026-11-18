@@ -94,5 +94,25 @@
       matchPackageNames: ["ghcr.io/corazawaf/coraza-proxy-wasm"],
       allowedVersions: "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
     },
+    {
+      // The operator runs valkey 9-alpine by default (roles/installer/defaults/main.yml of its tag),
+      // the major its configuration is written for, and the AWX pins its newest release by patch.
+      // The registry also lists 9.x tags without a patch, other bases and release candidates.
+      description: "valkey, the AWX's: releases of the alpine build on major 9",
+      matchPackageNames: ["ghcr.io/valkey-io/valkey"],
+      allowedVersions: "/^9\\.[0-9]+\\.[0-9]+-alpine$/",
+    },
+    {
+      // The ascender-operator chart names its kube-rbac-proxy by a tag of its own, which the
+      // HelmRelease's post-renderer pins by digest, and tests/ascender.bats fails unless the tag is
+      // the chart's: a newer tag on its own never passes. So Renovate proposes only new digests of
+      // that tag here, and the tag moves with the chart, in the chart's pull request
+      // (docs/kubernetes.md, Ascender).
+      description: "kube-rbac-proxy of the Ascender operator's chart: digests only, as its tag is the chart's",
+      matchFileNames: ["kubernetes/apps/base/ascender/ascender-operator/app/helmrelease.yaml"],
+      matchPackageNames: ["quay.io/brancz/kube-rbac-proxy"],
+      matchUpdateTypes: ["major", "minor", "patch"],
+      enabled: false,
+    },
   ],
 }

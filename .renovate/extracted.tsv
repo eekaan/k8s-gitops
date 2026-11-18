@@ -48,6 +48,15 @@ kubernetes/apps/base/ai-system/open-webui/app/ocirepository.yaml	flux	ghcr.io/bj
 kubernetes/apps/base/ai-system/open-webui/app/ocirepository.yaml	regex	ghcr.io/bjw-s-labs/helm/app-template	tag
 kubernetes/apps/base/ai-system/open-webui/app/values.yaml	helm-values	ghcr.io/open-webui/open-webui	-
 kubernetes/apps/base/ai-system/open-webui/app/values.yaml	regex	ghcr.io/open-webui/open-webui	tag
+kubernetes/apps/base/ascender/ascender-operator/app/helmrelease.yaml	flux	ascender-operator	-
+kubernetes/apps/base/ascender/ascender-operator/app/helmrelease.yaml	regex	ghcr.io/ctrliq/ascender-operator	newTag
+kubernetes/apps/base/ascender/ascender-operator/app/helmrelease.yaml	regex	quay.io/brancz/kube-rbac-proxy	newTag
+kubernetes/apps/base/ascender/ascender/app/awx.yaml	kubernetes	ghcr.io/ctrliq/ascender	-
+kubernetes/apps/base/ascender/ascender/app/awx.yaml	kubernetes	ghcr.io/ctrliq/ascender-ee	-
+kubernetes/apps/base/ascender/ascender/app/awx.yaml	regex	ghcr.io/ctrliq/ascender	image_version
+kubernetes/apps/base/ascender/ascender/app/awx.yaml	regex	ghcr.io/ctrliq/ascender-ee	control_plane_ee_image
+kubernetes/apps/base/ascender/ascender/app/awx.yaml	regex	ghcr.io/ctrliq/ascender-ee	init_container_image_version
+kubernetes/apps/base/ascender/ascender/app/awx.yaml	regex	ghcr.io/valkey-io/valkey	redis_image_version
 kubernetes/apps/base/backstage/backstage/app/ocirepository.yaml	flux	ghcr.io/bjw-s-labs/helm/app-template	tag
 kubernetes/apps/base/backstage/backstage/app/ocirepository.yaml	regex	ghcr.io/bjw-s-labs/helm/app-template	tag
 kubernetes/apps/base/backstage/backstage/app/values.yaml	helm-values	ghcr.io/backstage/backstage	-

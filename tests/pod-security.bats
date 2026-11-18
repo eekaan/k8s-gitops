@@ -409,7 +409,8 @@ real_render() {
   # containers the operator's templates create at the pinned version where the operator leaves a
   # field restricted requires unset: the LINSTOR controller's, the CSI controller's and the
   # affinity controller's. The Grafana and Prometheus operators and VolSync set those container
-  # fields themselves. Each field must lie under a path the resource's definition declares, or the
+  # fields themselves, and so does Ascender's operator, in the restricted mode its AWX asks for
+  # (tests/ascender.bats). Each field must lie under a path the resource's definition declares, or the
   # API server prunes it. An entry: the resource, the path of the pod's spec in it, the name of the
   # pod's security context there, and the init containers and containers it names.
   real_render
@@ -437,6 +438,7 @@ real_render() {
     "ReplicationSource volsync-demo .spec.restic moverSecurityContext - -"
     "ReplicationDestination volsync-demo-restore .spec.restic moverSecurityContext - -"
     "ReplicationDestination volsync-demo-drill .spec.restic moverSecurityContext - -"
+    "AWX ascender .spec security_context_settings - -"
   )
   yq -N -o json -I0 'select(.kind == "CustomResourceDefinition")
     | {"group": .spec.group, "kind": .spec.names.kind, "versions": [.spec.versions[] | {"name": .name, "schema": .schema.openAPIV3Schema}]}' \

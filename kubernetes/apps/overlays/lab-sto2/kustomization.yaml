@@ -104,6 +104,9 @@ resources:
   - ../../base/monitoring/linstor-monitoring-dashboard/ks.yaml
   - ../../base/monitoring/silence-operator-dashboard/ks.yaml
   - ../../base/security-system/network-audit/ks.yaml
+  - ../../base/ascender
+  - ../../base/ascender/ascender-operator/ks.yaml
+  - ../../base/ascender/ascender/ks.yaml
 
 patches:
   # The issuer of the public Gateway's certificate, the place this cluster chooses it, which the next

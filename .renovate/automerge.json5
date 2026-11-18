@@ -145,5 +145,13 @@
       matchPackageNames: ["docker.io/envoyproxy/gateway-helm"],
       automerge: false,
     },
+    {
+      // The operator runs what the application pins, and a new version of Ascender migrates its
+      // database when the operator next runs, so a person reads the release first
+      // (docs/kubernetes.md, Ascender).
+      description: "Everything of Ascender's two applications, the images the operator runs included",
+      matchFileNames: ["kubernetes/apps/base/ascender/**"],
+      automerge: false,
+    },
   ],
 }

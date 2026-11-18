@@ -435,7 +435,7 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
     echo "namespace $name: k8s-gitops/gateway=$labels"
     if [ "$labels" = "$label" ]; then attached+=("$name"); fi
   done < <(yq -N 'select(.kind == "Namespace") | .metadata.name + "\t" + (.metadata.labels["k8s-gitops/gateway"] // "none")' "$OVERLAY")
-  [ "${attached[*]}" = "ai-system backstage demo kromgo monitoring sso-system" ]
+  [ "${attached[*]}" = "ai-system ascender backstage demo kromgo monitoring sso-system" ]
   # Every route that names the Gateway from another namespace is in one that attached.
   built hello-route
   [ "$(yq -N 'select(.kind == "HTTPRoute") | .spec.parentRefs[].name' "$BUILT")" = "$gateway" ]
@@ -452,6 +452,9 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   built backstage
   [ "$(yq -N 'select(.kind == "HTTPRoute") | .spec.parentRefs[].name' "$BUILT")" = "$gateway" ]
   [ "$(yq -N 'select(.kind == "HTTPRoute") | .metadata.namespace' "$BUILT")" = backstage ]
+  built ascender
+  [ "$(yq -N 'select(.kind == "HTTPRoute") | .spec.parentRefs[].name' "$BUILT")" = "$gateway" ]
+  [ "$(yq -N 'select(.kind == "HTTPRoute") | .metadata.namespace' "$BUILT")" = ascender ]
   # The log store's route and its sign-in route.
   built victoria-logs-route
   [ "$(yq -N 'select(.kind == "HTTPRoute") | .spec.parentRefs[].name' "$BUILT" | sort -u)" = "$gateway" ]
@@ -538,7 +541,7 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   # Leaving the Gateway, the applications that have a route on it, the DNS records of their routes
   # and the dashboard of those records, and CrowdSec, whose agent reads the Gateway's proxies, out
   # builds: nothing else names them.
-  tree_without gateway-public hello-route n8n kromgo external-dns open-webui hello-sso dex oauth2-proxy backstage crowdsec crowdsec-gateway-logs victoria-logs-route external-dns-dashboard
+  tree_without gateway-public hello-route n8n kromgo external-dns open-webui hello-sso dex oauth2-proxy backstage crowdsec crowdsec-gateway-logs victoria-logs-route external-dns-dashboard ascender
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]

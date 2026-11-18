@@ -4,3 +4,4 @@
 # without a reason fails the check.
 #
 # hooked busybox  # example: the reason goes here
+ascender ghcr.io/ctrliq/ascender  # the AWX's spec.image is the repository alone: the operator joins it to spec.image_version with a colon, and tests/ascender.bats holds that version to the chart's with a sha256 digest

@@ -1,0 +1,24 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: ascender-operator
+  namespace: flux-system
+spec:
+  path: ./apps/base/ascender/ascender-operator/app
+  targetNamespace: ascender
+  # What its objects need to exist first: its CiliumNetworkPolicy is a kind Cilium's operator
+  # defines, and the Password generator and the ExternalSecret of the database's Secret are External
+  # Secrets' kinds.
+  dependsOn:
+    - name: cilium
+    - name: external-secrets
+  # Ready only once the release is installed with its pod ready, which defines the kind AWX and
+  # runs the operator, and once the database's Secret exists: the operator reads that Secret once,
+  # at the start of its run for the AWX, and makes a PostgreSQL of its own when it is missing, so
+  # ascender, which applies the AWX, waits for this.
+  wait: true
+  sourceRef:
+    kind: ExternalArtifact
+    name: ascender-operator

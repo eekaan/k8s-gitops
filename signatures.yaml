@@ -55,6 +55,10 @@ sources:
     signed: unsigned
     reason: a chart from a Helm repository, unsigned by its kind, as Flux verifies no signature of
       a chart an https Helm repository serves
+  - source: https://ctrliq.github.io/ascender-operator
+    signed: unsigned
+    reason: a chart from a Helm repository, unsigned by its kind, as Flux verifies no signature of
+      a chart an https Helm repository serves
   - source: https://open-policy-agent.github.io/gatekeeper/charts
     signed: unsigned
     reason: a chart from a Helm repository, unsigned by its kind, as Flux verifies no signature of

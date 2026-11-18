@@ -1,0 +1,20 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: ascender-operator
+  description: Ctrl IQ's operator for Ascender, which makes Ascender's web and task pods, its migration Job and their Secrets in the namespace ascender from the AWX resource there, and the database's Secret it reads.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#ascender
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/ascender/ascender-operator
+      title: Manifests
+spec:
+  type: service
+  lifecycle: production
+  owner: group:default/operators
+  system: applications
+  dependsOn:
+    - component:default/cilium
+    - component:default/external-secrets
