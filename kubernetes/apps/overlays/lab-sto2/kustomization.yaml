@@ -88,6 +88,14 @@ resources:
   - ../../base/demo/hello-sso/ks.yaml
   - ../../base/crowdsec/crowdsec/ks.yaml
   - ../../base/envoy-gateway-system/crowdsec-gateway-logs/ks.yaml
+  - ../../base/monitoring/cert-manager-dashboard/ks.yaml
+  - ../../base/monitoring/cilium-monitoring-dashboard/ks.yaml
+  - ../../base/monitoring/cloudnative-pg-dashboard/ks.yaml
+  - ../../base/monitoring/external-dns-dashboard/ks.yaml
+  - ../../base/monitoring/falco-dashboard/ks.yaml
+  - ../../base/monitoring/flux-monitoring-dashboard/ks.yaml
+  - ../../base/monitoring/linstor-monitoring-dashboard/ks.yaml
+  - ../../base/monitoring/silence-operator-dashboard/ks.yaml
 
 patches:
   # The issuer of the public Gateway's certificate, the one place this cluster chooses it:

@@ -1,0 +1,36 @@
+---
+# The Cilium agents' dashboard from the Cilium chart, unchanged: the agents' processes, their API,
+# BPF, the datapath, policy, endpoints, controllers and the Kubernetes client. It declares no input:
+# its panels name the variable DS_PROMETHEUS, which lists the datasources of type prometheus, so
+# nothing is mapped here. Its expressions select the agents by k8s_app="cilium", the label the
+# chart's own ServiceMonitor copies from the agents' Service; the PodMonitor of cilium-monitoring
+# copies it from the pods instead (podTargetLabels), and tests/dashboards.bats holds the two
+# together. The file carries an id, which the operator sets to null before it sends the dashboard
+# (getContentModel in controllers/content/resolver.go of grafana-operator v5.25.0), so Grafana
+# keys it by its uid alone. The panels that stay empty here are in docs/kubernetes.md (Dashboards).
+# The JSON is the ConfigMap kustomize generates from dashboards/cilium-agent.json; a new chart
+# means taking the file from it again, and tests/dashboards.bats fails until the committed file is
+# the pinned chart's, byte for byte, and the record is the chart's version.
+# Source: https://github.com/cilium/cilium/blob/v1.20.4/install/kubernetes/cilium/files/cilium-agent/dashboards/cilium-dashboard.json
+# Licence: Apache-2.0
+# SHA-256: 3db6e8e9addb6161d06422145921633f21ca31c789486f81561c69be57250939
+# Chart-path: files/cilium-agent/dashboards/cilium-dashboard.json
+# dashboard-cilium-agent: 1.20.4
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: cilium-agent
+spec:
+  instanceSelector:
+    matchLabels:
+      app.kubernetes.io/instance: grafana
+  # A restarted Grafana starts without it. The operator applies it again every minute, and after an
+  # attempt that fails, as while Grafana starts, tries again at once and then after a wait that
+  # doubles with each failure, up to about 17 minutes, until one succeeds.
+  resyncPeriod: 1m
+  # The folder the BGP dashboard is in too: the operator finds a folder by its title and makes it
+  # only when none has it.
+  folder: Cilium
+  configMapRef:
+    name: grafana-dashboard-cilium-agent
+    key: cilium-agent.json

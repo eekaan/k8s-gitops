@@ -1,0 +1,193 @@
+{
+  "uid": "cilium-bgp",
+  "title": "Cilium BGP sessions",
+  "tags": ["cilium", "bgp"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "1m",
+  "timezone": "browser",
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "hide": 2,
+        "current": {}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Agents scraped",
+      "description": "Cilium agents whose metrics Prometheus scraped at its last attempt. An agent that is not scraped reports no session, so the panels below say nothing of its node.",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "count(up{job=\"cilium-agent\"} == 1) or vector(0)",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Agents not answering",
+      "description": "Cilium agents Prometheus has as a target and could not scrape at its last attempt.",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "count(up{job=\"cilium-agent\"} == 0) or vector(0)",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Sessions established",
+      "description": "BGP sessions that are established, over every node. The alert CiliumBGPNoSessionEstablished fires when this stays 0 while a worker's agent is scraped.",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(cilium_bgp_control_plane_session_state{job=\"cilium-agent\"}) or vector(0)",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Sessions configured",
+      "description": "BGP sessions the nodes are configured for: one series for each peer of each node's BGP instance. A worker taken out of BGP and the control planes have no instance and report none.",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "count(cilium_bgp_control_plane_session_state{job=\"cilium-agent\"}) or vector(0)",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Sessions established against configured, by node",
+      "description": "For each node, the sessions that are established and the sessions it is configured for. The alert CiliumBGPSessionsDown fires for a node whose two lines stay apart for 5 minutes.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (node) (cilium_bgp_control_plane_session_state{job=\"cilium-agent\"})",
+          "legendFormat": "{{node}} established"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "count by (node) (cilium_bgp_control_plane_session_state{job=\"cilium-agent\"})",
+          "legendFormat": "{{node}} configured"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none", "min": 0, "decimals": 0 }, "overrides": [] }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Routes advertised, by session",
+      "description": "Routes a node advertises on each established session, by address family. The legend names the node and the peer as the agent labels it.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (node, neighbor, afi, safi) (cilium_bgp_control_plane_advertised_routes{job=\"cilium-agent\"})",
+          "legendFormat": "{{node}} {{neighbor}} {{afi}} {{safi}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none", "min": 0, "decimals": 0 }, "overrides": [] }
+    },
+    {
+      "id": 7,
+      "type": "state-timeline",
+      "title": "Each session's state",
+      "description": "One row for each session a node is configured for: established or down. The legend names the node and the peer as the agent labels it.",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "max by (node, neighbor) (cilium_bgp_control_plane_session_state{job=\"cilium-agent\"})",
+          "legendFormat": "{{node}} {{neighbor}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": { "text": "down", "color": "red", "index": 0 },
+                "1": { "text": "established", "color": "green", "index": 1 }
+              }
+            }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+        },
+        "overrides": []
+      },
+      "options": { "mergeValues": true, "showValue": "never", "legend": { "showLegend": true, "displayMode": "list", "placement": "bottom" } }
+    }
+  ]
+}

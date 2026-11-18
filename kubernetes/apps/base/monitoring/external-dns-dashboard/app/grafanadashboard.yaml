@@ -1,0 +1,24 @@
+---
+# external-dns, written for this tree, as external-dns publishes no dashboard at the pinned
+# version: the age of the last successful sync, computed as the alert computes it, the last attempt,
+# the endpoints of the sources and of the registry, their errors and the verified records by type,
+# selected by the namespace as the alert selects. The JSON is the ConfigMap kustomize generates
+# from dashboards/external-dns.json; its panels name the variable datasource, which lists the
+# datasources of type prometheus, and the dashboard declares no input, so nothing is mapped here.
+# tests/dashboards.bats holds every metric it queries to a monitor of the render.
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: external-dns
+spec:
+  instanceSelector:
+    matchLabels:
+      app.kubernetes.io/instance: grafana
+  # A restarted Grafana starts without it. The operator applies it again every minute, and after an
+  # attempt that fails, as while Grafana starts, tries again at once and then after a wait that
+  # doubles with each failure, up to about 17 minutes, until one succeeds.
+  resyncPeriod: 1m
+  folder: external-dns
+  configMapRef:
+    name: grafana-dashboard-external-dns
+    key: external-dns.json
