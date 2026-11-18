@@ -88,6 +88,7 @@ resources:
   - ../../base/demo/hello-sso/ks.yaml
   - ../../base/crowdsec/crowdsec/ks.yaml
   - ../../base/envoy-gateway-system/crowdsec-gateway-logs/ks.yaml
+  - ../../base/monitoring/victoria-logs-route/ks.yaml
   - ../../base/monitoring/cert-manager-dashboard/ks.yaml
   - ../../base/monitoring/cilium-monitoring-dashboard/ks.yaml
   - ../../base/monitoring/cloudnative-pg-dashboard/ks.yaml

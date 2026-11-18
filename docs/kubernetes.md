@@ -601,7 +601,7 @@ once it is not, and the agents' rendered configuration agrees.
 | `external-dns` | listed | an application whose allows are not written, not a namespace that cannot have the posture. external-dns takes Prometheus' scrape and the kubelet's probes on 7979 and nothing else, and reaches the API server, the DNS provider's API on 443 and the resolver. Its token, scoped to zone read and DNS edit on the cluster's one zone, its name filter, a ClusterRole that only reads, Pod Security, node firewall ([DNS records](#dns-records)). |
 | `kube-system` | listed | Cilium's agent, its Envoy and its operator run in the host's network namespace; the resolver takes queries from every namespace; the pod-network workloads' flows are not yet enumerated. Node firewall, Pod Security. |
 | `flux-system` | listed | the controllers' flows are not yet enumerated as allows; Flux's own network policies, which the operator makes at run time, and the operator's for its web interface, `flux-operator-web`, which the check reads and passes because the namespace is listed ([What the check refuses](#what-the-check-refuses)); Pod Security, node firewall. |
-| `monitoring` | listed | Prometheus scrapes every namespace and the nodes, the node exporter runs in the host's network namespace, the API server calls the operator's webhook, the other flows are not yet enumerated. |
+| `monitoring` | listed | Prometheus scrapes every namespace and the nodes, the node exporter runs in the host's network namespace, the API server calls the operator's webhook, VictoriaLogs takes the proxies on 9428 for the route `logs`, the other flows are not yet enumerated. The proxies reach VictoriaLogs' 9428 alone there and forward only the route's reads, behind the cluster's sign-in, Pod Security, node firewall. |
 | `openbao`, `external-secrets`, `cert-manager`, `cnpg-system`, `keda`, `volsync-system` | listed | flows not yet enumerated: webhooks and APIs the API server calls, the store's clients, scrapes, the PostgreSQL operator's calls to the Barman Cloud plugin. Each entry says which, and what covers it. |
 | `piraeus-datastore` | listed | the CSI node plugin runs in the host's network namespace; the satellites replicate over the pod network, and their flows are not yet enumerated. |
 | `cilium-secrets` | listed | holds no pod. |
@@ -623,26 +623,27 @@ once it is not, and the agents' rendered configuration agrees.
   attached to the Gateway send to, by one rule each: the pods its Service selects, in its namespace
   while that carries `k8s-gitops/gateway: public`, on the container port the route sends to and no
   other: `hello` in `demo` on 8080, kromgo in `kromgo` on 8080, n8n on 5678 and Open WebUI on 8080
-  in `ai-system`, dex on 5556 and oauth2-proxy on 4180 in `sso-system`, and Backstage in `backstage`
-  on 7007. oauth2-proxy's rule also carries the question the proxies ask it about each request of a
-  route that opts in to sign-in ([Sign-in](#sign-in)), which is no route's backend but reaches the
-  same pods and port. `tests/network-policy.bats` reads those ports from the render, from each
-  route's backend through its Service's target port to the container port, and fails unless the
-  rules name, in each labelled namespace, exactly them; it reads the proxies' egress in every form
-  the evaluation reads, and fails on a port entry or a peer it cannot compare, a backend in a
-  namespace without the label and a Service without a selector. What a pod of such a namespace
-  takes is its own namespace's to say: in `demo`, `hello` on 8080; in `kromgo`, kromgo on 8080; in
-  `sso-system`, dex on 5556 and oauth2-proxy on 4180; in `backstage`, Backstage on 7007. In
-  `ai-system`, which is listed and so has no pod in default deny, every pod takes them on every
-  port, so the proxies' rules are what keep them from n8n's other ports, from every port of its
-  database and from Open WebUI's other ports; PostgreSQL also authenticates every client. The
-  controller takes the proxies on 18000
-  and the kubelet on 8081, and reaches the resolver and the API server on 443 and 6443 (a Service's
-  address is translated to the control plane's before policy applies). Its admission webhook takes
-  the API server, the local host and other nodes' hosts on 9443, in a policy of its own with its
-  reason (below). The
-  certificate job reaches the resolver and the API server. No monitor of the tree scrapes the
-  Gateway, so no scrape is allowed; a monitor that does adds its rule.
+  in `ai-system`, dex on 5556 and oauth2-proxy on 4180 in `sso-system`, Backstage in `backstage` on
+  7007, and VictoriaLogs in `monitoring` on 9428. oauth2-proxy's rule also carries the question the
+  proxies ask it about each request of a route that opts in to sign-in ([Sign-in](#sign-in)), which
+  is no route's backend but reaches the same pods and port. `tests/network-policy.bats` reads those
+  ports from the render, from each route's backend through its Service's target port to the
+  container port, and fails unless the rules name, in each labelled namespace, exactly them; it
+  reads the proxies' egress in every form the evaluation reads, and fails on a port entry or a peer
+  it cannot compare, a backend in a namespace without the label and a Service without a selector.
+  What a pod of such a namespace takes is its own namespace's to say: in `demo`, `hello` on 8080; in
+  `kromgo`, kromgo on 8080; in `sso-system`, dex on 5556 and oauth2-proxy on 4180; in `backstage`,
+  Backstage on 7007. In `ai-system`, which is listed and so has no pod in default deny, every pod
+  takes them on every port, so the proxies' rules are what keep them from n8n's other ports, from
+  every port of its database and from Open WebUI's other ports; PostgreSQL also authenticates every
+  client. So it is in `monitoring`, listed as well: the proxies' rule for VictoriaLogs is what keeps
+  them off Prometheus, Grafana, Alertmanager, the collector and the store's other ports. The
+  controller takes the proxies on 18000 and the kubelet on 8081, and reaches the resolver and the
+  API server on 443 and 6443 (a Service's address is translated to the control plane's before policy
+  applies). Its admission webhook takes the API server, the local host and other nodes' hosts on
+  9443, in a policy of its own with its reason (below). The certificate job reaches the resolver and
+  the API server. No monitor of the tree scrapes the Gateway, so no scrape is allowed; a monitor
+  that does adds its rule.
 - **`demo`.** `hello` takes the proxies by their labels, not by their namespace, on 8080, so the
   controller is no path to it, and the kubelet's probe. The backup movers, the pods VolSync labels
   `app.kubernetes.io/created-by: volsync` for every application of the namespace that adds
@@ -889,25 +890,26 @@ does not matter.
    lists what the agents' Hubble holds: the `AUDIT` flows a policy would drop, by namespace, pod and
    port, never an address. It runs each agent's own `hubble` through `kubectl exec`, so the
    kubeconfig needs exec on the Cilium agents' pods in `kube-system`, more than the reading recipes
-   need; `NETWORK_DROPS_LAST` (500) bounds the flows asked of each agent and `NETWORK_DROPS_TIMEOUT` (60)
-   the seconds each call may take. Hubble keeps only each agent's recent flows (4095 by the chart's
-   default), so run it after each of: `just gateway-check`; `just cluster-check`; the secret demo
-   (`just secret-rotate demo/hello greeting`); a badge asked of kromgo by its name, which has
-   kromgo query Prometheus ([Status badges](#status-badges)); a sign-in through the route that opts
-   in to it ([Sign-in](#sign-in)); Backstage's catalogue opened by its name, which has Backstage
-   read its database; the nightly dump of `backstage-db` from 02:00, which waits up to
-   20 minutes before it starts ([Dumps](#dumps)); the base backup of `backstage-db` at 02:47 UTC,
-   and a WAL segment its primary archives, which `select pg_switch_wal()` there forces
-   ([Backups and restores](#backups-and-restores)); the nightly backup of `volsync-demo` at 03:17, and
-   a restore of it ([Restoring](#restoring)). Watch a day at least, through one nightly backup, one
-   dump and one base backup. An `AUDIT` flow of `backstage`, `crowdsec`, `demo`, `envoy-gateway-system`, `kromgo`,
-   `security-system` or `sso-system` that a check made once the allows were Ready is a missing
-   allow, added beside its application in a pull request while the cluster still audits, or a pod
-   doing what it should not. Confirm also that no `@remote-node` flow reaches the proxies' listener
-   ports and none to the webhook's 9443 is `AUDIT`. `AUDIT` flows of `flux-system` show too: Flux's
-   own policies and the Flux Operator's `flux-operator-web`, which the agents enforced before the
-   value, are only audited while it is set, and what they would drop is what they dropped before;
-   they are not the namespaces' allows.
+   need; `NETWORK_DROPS_LAST` (500) bounds the flows asked of each agent and `NETWORK_DROPS_TIMEOUT`
+   (60) the seconds each call may take. Hubble keeps only each agent's recent flows (4095 by the
+   chart's default), so run it after each of: `just gateway-check`; `just cluster-check`; the secret
+   demo (`just secret-rotate demo/hello greeting`); a badge asked of kromgo by
+   its name, which has kromgo query Prometheus ([Status badges](#status-badges)); a sign-in through
+   a route that opts in to it ([Sign-in](#sign-in)), and a query in the log store's interface ([The
+   log store's interface](#the-log-stores-interface)); Backstage's catalogue opened by its name,
+   which has Backstage read its database; the nightly dump of `backstage-db` from 02:00, which waits
+   up to 20 minutes before it starts ([Dumps](#dumps)); the base backup of `backstage-db` at 02:47
+   UTC, and a WAL segment its primary archives, which `select pg_switch_wal()` there forces
+   ([Backups and restores](#backups-and-restores)); the nightly backup of `volsync-demo` at 03:17,
+   and a restore of it ([Restoring](#restoring)). Watch a day at least, through one nightly backup,
+   one dump and one base backup. An `AUDIT` flow of `backstage`, `crowdsec`, `demo`,
+   `envoy-gateway-system`, `kromgo`, `security-system` or `sso-system` that a check made once the
+   allows were Ready is a missing allow, added beside its application in a pull request while the
+   cluster still audits, or a pod doing what it should not. Confirm also that no `@remote-node` flow
+   reaches the proxies' listener ports and none to the webhook's 9443 is `AUDIT`. `AUDIT` flows of
+   `flux-system` show too: Flux's own policies and the Flux Operator's `flux-operator-web`, which
+   the agents enforced before the value, are only audited while it is set, and what they would drop
+   is what they dropped before; they are not the namespaces' allows.
 4. **Enforce, a change of its own.** One pull request makes these edits, together and no others:
    - `kubernetes/apps/base/kube-system/cilium/app/values.yaml`: the line `policyAuditMode: true`
      goes, with the three comment lines above it, from `# The agents evaluate every policy`; the
@@ -2083,15 +2085,17 @@ credential and no volume: Prometheus is reached by the Service of the stack,
 token of its service account. Its own metrics are on a port of their own (`8081`), scraped by a
 `ServiceMonitor` the chart makes, and no route names that port.
 
-**Where it is.** `kromgo.${CLUSTER_DOMAIN}` on the public Gateway's `https` listener
-([Giving an application a public hostname](#giving-an-application-a-public-hostname)); the route
-sends only the paths under `/badges/` to kromgo, unchanged, as it has no filter, so its index page
-and its health endpoints answer the Gateway's 404. external-dns publishes the name, as it does for
-every route on the Gateway ([DNS records](#dns-records)). The namespace is `kromgo`, its own, labelled `k8s-gitops/gateway: public`. Labelling `monitoring`
-instead would let any route in it attach to the Gateway, and `monitoring` holds Prometheus,
-Alertmanager and Grafana, whose Services a route for the wrong name would publish; the namespace
-is privileged too, for node-exporter and the log collector. The own namespace is small, enforces
-`restricted`, and is one more entry in the set of namespaces that carry the label, which
+**Where it is.** `kromgo.${CLUSTER_DOMAIN}` on the public Gateway's `https` listener ([Giving an
+application a public hostname](#giving-an-application-a-public-hostname)); the route sends only the
+paths under `/badges/` to kromgo, unchanged, as it has no filter, so its index page and its health
+endpoints answer the Gateway's 404. external-dns publishes the name, as it does for every route on
+the Gateway ([DNS records](#dns-records)). The namespace is `kromgo`, its own, labelled
+`k8s-gitops/gateway: public`, as the badges are public and no sign-in covers their route.
+`monitoring` carries the label too, for the log store's route alone, and holds Prometheus,
+Alertmanager and Grafana, so `tests/logs.bats` fails for any route there on the Gateway that the
+cluster's sign-in does not cover ([The log store's interface](#the-log-stores-interface)); the
+namespace is privileged too, for node-exporter and the log collector. The own namespace is small,
+enforces `restricted`, and is one more entry in the set of namespaces that carry the label, which
 `tests/gateway.bats` pins. A cluster selects kromgo with two entries of its overlay, the namespace
 directory and the application's `ks.yaml`; the application waits for the Prometheus Operator's
 definitions, the Gateway and Cilium, whose kind its network policy is, and is Ready once both pods
@@ -2401,18 +2405,24 @@ lines in their buffers and retry.
 What listens, and where:
 
 - the store: port 9428 of its pod's address, plain HTTP, behind the headless Service
-  `victoria-logs`, for the collectors' inserts, queries and its web interface, and `/metrics`,
-  which Prometheus scrapes through the ServiceMonitor;
+  `victoria-logs`, for the collectors' inserts, its queries and its web interface, its deletion and
+  storage administration, and `/metrics`, which Prometheus scrapes through the ServiceMonitor, all on
+  that one port;
 - the collector: port 9598 of its pod's address, plain HTTP, its own metrics only, which Prometheus
   scrapes through the PodMonitor. It uses neither the node's network nor a host port, so it reserves
   no port on the nodes.
 
 Cilium carries pod addresses between the nodes in its VXLAN tunnel, so both ports answer the
-cluster's pods and nodes, and no host outside the cluster has a route to them. Neither application
-has an ingress, a route or a Service of type LoadBalancer or NodePort, and the nodes' security group
-admits from outside the cluster only the Talos and Kubernetes APIs.
+cluster's pods and nodes, and no host outside the cluster has a route to them. Neither chart renders
+an ingress, a route or a Service of type LoadBalancer or NodePort, and the nodes' security group
+admits from outside the cluster only the Talos and Kubernetes APIs. Through the public Gateway,
+behind the cluster's sign-in, the store's interface and its queries are reached and nothing else of
+it, by the route of an application of their own, `victoria-logs-route`
+([The log store's interface](#the-log-stores-interface)); the Kubernetes API's service proxy, which
+`just logs` uses, reaches all of it with the cluster's kubeconfig.
 
-Reading the logs, with the cluster's kubeconfig:
+Reading the logs, in a browser at `https://logs.<domain>/` once signed in
+([The log store's interface](#the-log-stores-interface)), or with the cluster's kubeconfig:
 
 - `just logs '<LogsQL query>' [--since 15m] [--limit 200] [cluster]` prints the records the query
   matches, from the last 15 minutes and at most 200 unless told otherwise (`--since` is a whole
@@ -2459,6 +2469,134 @@ is `vector_image` in the justfile, pinned by the digest of its image index under
 `# renovate: datasource=docker depName=…` comment: Renovate's custom manager for the justfile moves
 its tag and digest, in the same pull request as the chart, and `tests/logs.bats` fails, saying what
 to set, while it is not the image the chart runs.
+
+### The log store's interface
+
+VictoriaLogs' own query interface is at `https://logs.<domain>/`, on the public Gateway's `https`
+listener, behind the cluster's sign-in ([Sign-in](#sign-in)). The application `victoria-logs-route`
+(`apps/base/monitoring/victoria-logs-route/`) holds it, shaped as `demo/hello-sso`: its `app/` holds
+the one `HTTPRoute` `logs`, and its `ks.yaml` adds `components/sso` with `SSO_ROUTE` and
+`SSO_HOSTNAME` both `logs`, so the component makes the `SecurityPolicy` `logs`, which asks
+oauth2-proxy about each request of the route and does not fail open, and the route `logs-oauth2`,
+which sends `/oauth2/` on the same host to oauth2-proxy. Its `targetNamespace` is `monitoring`, the
+store's, which carries `k8s-gitops/gateway: public`, and the `ReferenceGrant` `oauth2-proxy` names
+`monitoring`. It names `gateway-public`, `victoria-logs` and `oauth2-proxy` in `dependsOn` and
+waits; `victoria-logs` waits for its release, so the route is applied once the store answers. Its
+own Ready says that its objects are applied, not that the Gateway took them: an HTTPRoute and a
+SecurityPolicy report their state per parent, where Flux's wait does not read it, so
+`just gateway-check`, which counts the routes the Gateway accepted and names the DNS record of each
+host, is what shows it. The proxies' egress allows the store's pod on 9428 and no other pod or port
+of `monitoring` ([What the namespaces let through](#what-the-namespaces-let-through)), which holds
+once the agents enforce the policies rather than audit them ([Service addresses](#service-addresses)
+says which they do); the route sends nothing else there either way. external-dns publishes the name
+as for every route on the Gateway ([DNS records](#dns-records)).
+
+- **Reaching it.** The first visit signs in through dex and GitHub, as for every route that opts in
+  ([Putting a route behind it](#putting-a-route-behind-it)). oauth2-proxy returns the person to
+  `/`, which the route redirects, 302, to `/select/vmui/`, the interface, where LogsQL queries run.
+  A session that another route which opts in started passes here too.
+- **What it shows.** Every record of the store: every pod's log lines and the log of every Talos
+  service and of the kernel, as [Logs](#logs) collects them, for as long as the store keeps them.
+  The node's audit log and the API server's audit log are not in the store, so not here either. It
+  shows all of it to whoever is on the sign-in list ([Who is admitted](#who-is-admitted)), the same
+  people who pass every other route that opts in; nothing narrows what a person may query.
+- **What is routed, and why each path reads.** The route has two rules, which `tests/logs.bats`
+  pins in full. `/`, exactly, is redirected with 302 to `/select/vmui/` and sent nowhere: it is the
+  store's help page, which links its metrics and its flags. The other rule sends to the Service
+  `victoria-logs` on 9428, with no filter and no method match, the paths that are, by whole
+  segments, under `/select/vmui` or `/select/logsql`, or exactly `/select/buildinfo` or
+  `/select/tenant_ids`. The store dispatches on the path, with each `//` made `/`, by the same
+  literal prefixes and exact paths, and each handler under them only reads, whatever the method,
+  the queries taking their arguments from the query string or the form body: `/select/vmui`
+  redirects to `/select/vmui/`, under which the store serves the interface's files embedded in it;
+  under `/select/logsql/` it runs the queries `query`, `hits`, `facets`, `field_names`,
+  `field_values`, `stats_query`, `stats_query_range`, `stream_field_names`, `stream_field_values`,
+  `stream_ids`, `streams`, `query_time_range` and `tail`, and answers any other name with an error;
+  `/select/buildinfo` gives its version and `/select/tenant_ids` the tenants that hold logs. A path
+  under these that ends in `/favicon.ico` gets the HTTP server's icon. The pinned release's
+  interface works out its server from its own address, `window.location.href` with `/select/vmui/…`
+  cut off, so it calls its own origin, and it asks only `/select/logsql/…`, with `POST`,
+  `/select/buildinfo` and `/select/tenant_ids`, besides its own files under `/select/vmui/`. The
+  sources are VictoriaLogs v1.54.0, the `appVersion` of the pinned chart `victoria-logs-single`
+  0.13.13: `app/victoria-logs/main.go`, `app/vlselect/main.go` and its built interface
+  `app/vlselect/vmui/`, which is what the image serves, `app/vlinsert/main.go` and
+  `app/vlstorage/main.go`; and VictoriaMetrics v1.156.0, the version its `go.mod` names,
+  `lib/httpserver/httpserver.go`, for the server's own paths.
+- **What is not routed.** A request whose path is none of those matches no rule, and the Gateway
+  answers it itself, 404, without reaching the store:
+  - the writers, `/insert/…` (JSON lines, native, Elasticsearch, Loki, OpenTelemetry, journald,
+    Datadog, Splunk and `/insert/ready`), `/internal/insert`, `/api/v2/logs`, `/api/v1/validate`
+    and `/services/collector/…`: what the collectors send to, which nothing outside the cluster may;
+  - deletion, `/delete/…`, which the store also refuses while `-delete.enable` is not set, as it is
+    not, and `/internal/delete/…`; the internal reads `/internal/select/…` of a cluster of stores;
+    and the storage's administration, `/internal/force_merge`, `/internal/force_flush`,
+    `/internal/log_new_streams` and `/internal/partition/…`, which detaches, attaches and snapshots
+    the data;
+  - the HTTP server's own paths, `/metrics`, `/flags`, `/debug/pprof/…`, `/health`, `/ping`,
+    `/-/healthy`, `/-/ready`, `/robots.txt` and `/favicon.ico`: the store's metrics, its command
+    line, its profiles and its health, which only the cluster needs;
+  - the store's help page at `/`, which the route redirects instead;
+  - `/select/vmalert/…`, which proxies to the vmalert `-vmalert.proxyURL` names, which the tree
+    does not run.
+
+  A path that differs from a routed one in letter case, by a suffix such as `/select/vmuix`, or by
+  a trailing slash or more after an exact one, such as `/select/buildinfo/`, matches nothing either.
+- **Why normalisation cannot turn a routed path into a writer.** The pinned Envoy Gateway, v1.10.0,
+  normalises the path before routing on every listener, as RFC 3986 says, removing dot segments
+  (`internal/xds/translator/listener.go`), and with the ClientTrafficPolicy's defaults, which the
+  tree's leaves as they are, merges adjacent slashes (`disableMergeSlashes` unset) and answers a path
+  with an escaped slash, `%2F` or `%5C`, with a redirect to the path unescaped, which comes back
+  through the Gateway and is normalised and matched again (`escapedSlashesAction:
+  UnescapeAndRedirect`, `internal/gatewayapi/listener.go`). The route matches the normalised path,
+  and that is the path the store receives: one that starts with the literal characters of a routed
+  prefix or is a routed exact path. The store resolves no dot segment and dispatches on the same
+  literal prefixes, the writers' first, so a path that starts `/select/` never reaches an insert,
+  delete or storage handler, whose prefixes it cannot have, and is read or refused.
+- **What a forged cross-site request can do.** oauth2-proxy's session cookie is `Secure`, `HttpOnly`
+  and `SameSite=Lax`, for `.${CLUSTER_DOMAIN}`. A browser sends it with a request that another site
+  starts only for a top-level navigation with `GET`, whose answer the person's own window shows and
+  the other site does not see, so another site's script or form asks the route without a session,
+  the sign-in answers with its redirect, and the store receives nothing. A host under the cluster's
+  domain is the same site, so the cookie goes with its requests: they reach only the routed reads,
+  and the store's CORS answer, `Access-Control-Allow-Origin: *` without
+  `Access-Control-Allow-Credentials`, lets no other origin read an answer to a request sent with
+  credentials. So no other site's page reads logs through a person's browser, and every routed path
+  only reads. The cookie itself goes to every host under the domain, those whose routes do not opt
+  in included, and whoever holds it reads the logs here for as long as it lasts, as it passes every
+  route that opts in ([What it does not cover](#what-it-does-not-cover)).
+- **The redirect is behind the sign-in too.** Envoy Gateway gives every rule of a route the
+  features of the policy that targets it (`internal/gatewayapi/securitypolicy.go`), and turns the
+  external authorisation on for each rule's route whatever its action, a redirect's included
+  (`internal/xds/translator/route.go`, `extauth.go`): a request for `/` without a session goes to
+  sign-in as well. Either way the redirect reaches no backend.
+- **The Gateway's timeout.** The route sets no timeout and no BackendTrafficPolicy applies, so Envoy
+  Gateway leaves the route's timeout unset (`internal/xds/translator/route.go`), and Envoy's default
+  for a route applies: 15 seconds from the end of the request to the end of the answer. A query that
+  runs longer, and a live tail, which the store keeps open for as long as the client stays, end at
+  the Gateway after 15 seconds, while the store allows a query 30 (`-search.maxQueryDuration`, its
+  default). `just logs` and Grafana do not pass the Gateway.
+- **The other ways in.** `just logs` and Grafana's Logs dashboard, behind `just grafana`, remain,
+  need no sign-in, only the cluster's kubeconfig, and read the store as above.
+- **Until the owner has seeded the sign-in** (dex's GitHub client and oauth2-proxy's list, [What the
+  owner does, in order](#what-the-owner-does-in-order)), `oauth2-proxy` is not Ready, so
+  `victoria-logs-route`, which waits for it, is not applied: there is no route and no DNS record,
+  and a request for the host through an edge is answered 404, as for any host no route serves. Once
+  the route is applied, an oauth2-proxy whose pods do not answer makes every request of the route
+  answer 403, and one whose Service has no ready endpoint 500 ([Putting a route behind
+  it](#putting-a-route-behind-it)): the policy does not fail open either way.
+
+`tests/logs.bats` builds the application as Flux applies it and checks the layout, the policy's
+whole spec, the sign-in route, the grant and the host following the domain; both rules in full, and,
+as Gateway API matches a route, that the interface's requests are sent on and the writers, the
+administration and the server's own paths are not; that no route the tree builds or its charts
+render, and no Grafana, reaches the store past the sign-in, and that no grant of `monitoring` lets
+another namespace's route refer to its Services, as one could through a second Service that selects
+the store's pod; the overlay entry and the refusals without the store, the Gateway or the sign-in;
+and that the route's header records, in `# victoria-logs-paths:` beside its `Source:` line, the
+release its paths were read from, which must be the `appVersion` of the store's pinned chart. A new
+chart therefore fails it, saying what to read again and what to set, and `.renovate/by-hand.tsv`
+lists the record. What only a running Gateway, oauth2-proxy and a browser can show, the redirects,
+the session and the answers, is not proved offline; the first sign-in is the proof on the cluster.
 
 ## cert-manager
 
@@ -3136,8 +3274,8 @@ cannot be listed without it: `just kubernetes-check` refuses the dependency.
   label and name the one kind. A route in a namespace without it is not accepted, which is the
   Gateway API's rule and the controller's to apply; it shows in the route's status, which
   `just gateway-check` reads, and `tests/gateway.bats` proves the selector on the objects. `demo`,
-  `ai-system`, `kromgo`, `sso-system` and `backstage` are the namespaces that carry the label, and
-  `tests/gateway.bats` pins that set.
+  `ai-system`, `kromgo`, `sso-system`, `backstage` and `monitoring` are the namespaces that carry
+  the label, and `tests/gateway.bats` pins that set.
 - **The certificate.** The `Certificate` `public-wildcard` asks the `ClusterIssuer` the cluster
   chose, `cluster-ca` by default, for an ECDSA P-256 certificate for `*.${CLUSTER_DOMAIN}` and
   `${CLUSTER_DOMAIN}`, with a new private key at each renewal and the same Secret, so the listener
@@ -3703,14 +3841,17 @@ login in front of it, and no application brings its own. Two applications in the
   public name, so it needs neither a route out and back through the edge nor trust in the Gateway's
   certificate. Its one callback is `https://auth.${CLUSTER_DOMAIN}/oauth2/callback`, whichever host a
   person starts from, so dex has one redirect URI and an opting application adds none.
-- `demo/hello-sso` is the one route that opts in: `hello-sso.${CLUSTER_DOMAIN}`, a second hostname on
-  the `hello` backend. No other application is behind it.
+- Two routes opt in: `demo/hello-sso`, `hello-sso.${CLUSTER_DOMAIN}`, a second hostname on the
+  `hello` backend, and `monitoring/victoria-logs-route`, `logs.${CLUSTER_DOMAIN}`, the log store's
+  interface ([The log store's interface](#the-log-stores-interface)). No other application is
+  behind it.
 
-Each is its own Kustomization, with `wait`, that nothing but the demo route names in `dependsOn`
-(oauth2-proxy names dex). A cluster that lists neither application builds none of it, and a cluster
-whose overlay lists the demo route without them is refused. The namespace enforces the restricted
-Pod Security level, and `just pod-security-check` evaluates their pods. It denies traffic by
-default, and each application's `ciliumnetworkpolicy.yaml` lets its flows through
+Each is its own Kustomization, with `wait`, that nothing but the routes that opt in names in
+`dependsOn` (oauth2-proxy names dex): `hello-sso` and `victoria-logs-route` wait on oauth2-proxy,
+and nothing waits on either route. A cluster that lists neither application builds none of it, and
+a cluster whose overlay lists a route that opts in without them is refused. The namespace enforces
+the restricted Pod Security level, and `just pod-security-check` evaluates their pods. It denies
+traffic by default, and each application's `ciliumnetworkpolicy.yaml` lets its flows through
 ([What the namespaces let through](#what-the-namespaces-let-through)).
 
 ### Who is admitted
@@ -3795,8 +3936,9 @@ Until the first two exist the ExternalSecret `dex-github` reports the missing ke
 in `CreateContainerConfigError`, and the Kustomization `dex` is not Ready, with the pods' state as its
 reason. Until the third exists the Secret `oauth2-proxy-allowed-emails` does not exist, the pods
 of oauth2-proxy stay in `ContainerCreating`, and the Kustomization `oauth2-proxy` is not Ready, and
-so is `hello-sso`, which waits for it. Nothing else of the cluster waits on any of them, and the
-generated secrets are made as soon as External Secrets runs.
+neither are `hello-sso` and `victoria-logs-route`, which wait for it and are not applied until it
+is. Nothing else of the cluster waits on any of them, and the generated secrets are made as soon as
+External Secrets runs.
 
 The wait is not open-ended. Each release's install times out after 10 minutes and is retried three
 times (the root's release defaults, [What the root sets](#what-the-root-sets)); after that
@@ -3845,7 +3987,11 @@ method and cookie (Envoy always adds `Authorization`, which oauth2-proxy does no
 acts on the answer. A 200 lets the request through to the backend, with the answer's
 `X-Auth-Request-User` and `X-Auth-Request-Email` headers added to it. Any other answer below 500 goes
 back to the client as it is, status, `Location` and `Set-Cookie` included, and the backend gets
-nothing. An answer of 500 or more, or none, is refused with 403: the policy does not fail open.
+nothing. An answer of 500 or more, or none, is refused with 403. While oauth2-proxy's Service has
+no ready endpoint, Envoy Gateway v1.10.0 cannot resolve the policy's backend
+(`internal/gatewayapi/route.go`, `processServiceDestinationSetting`) and gives every rule of the
+route a direct answer of 500 instead (`internal/gatewayapi/securitypolicy.go`). The policy does not
+fail open either way.
 
 The policy asks at one fixed path, `/?rd=https://<host>/` (`pathOverride`), whatever the request's
 own path. oauth2-proxy serves `/` with its catch-all handler, which answers a session of a listed
@@ -5344,6 +5490,9 @@ The steps n8n took, in order; the next port does the same and says where it diff
 6. **Route.** An `HTTPRoute` on `https` of `public`, the application's own settings for its
    host, protocol, origin and proxies agreeing with it, `gateway-public` in `dependsOn`, and a rule
    for the backend's pods and container port in the proxies' egress ([Giving an application a public hostname](#giving-an-application-a-public-hostname)).
+   A route behind the cluster's sign-in also takes `components/sso`, names `oauth2-proxy` in
+   `dependsOn` and adds its namespace to oauth2-proxy's grant
+   ([Putting a route behind it](#putting-a-route-behind-it)).
 7. **Hardening.** Restricted: a user the image runs as, a read-only root filesystem with every path
    the application writes as a volume, found by running the pinned image read-only with those
    mounts alone, no capability, requests and a memory limit measured from that run, probes on the
@@ -5371,7 +5520,10 @@ The steps n8n took, in order; the next port does the same and says where it diff
    the Gateway out, and to the same list in `tests/external-dns.bats`; the backends the proxies
    reach in `tests/network-policy.bats`, where a port with a route adds its namespace and port to
    the pairs the routes must send to, and a row that the proxies reach its port and not another;
-   and the applications that take the volsync component in `tests/volume-backups.bats`.
+   for a route behind the sign-in, the policies on the Gateway's routes in `tests/gateway.bats`, and
+   in `tests/sso.bats` the Kustomizations that name oauth2-proxy and the `tree_without` list of the
+   test that leaves the sign-in out; and the applications that take the volsync component in
+   `tests/volume-backups.bats`.
 9. **Catalogue.** The application's entity in `apps/base/backstage/backstage/app/catalogue/`, named
    as the application and listed in that directory's generator in `app/kustomization.yaml`, with
    its dependencies from `just catalogue-dependencies` ([Backstage](#backstage)).

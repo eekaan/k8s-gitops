@@ -18,6 +18,12 @@ spec:
     - group: gateway.networking.k8s.io
       kind: HTTPRoute
       namespace: demo
+    - group: gateway.envoyproxy.io
+      kind: SecurityPolicy
+      namespace: monitoring
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: monitoring
   to:
     - group: ""
       kind: Service

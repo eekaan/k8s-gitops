@@ -363,11 +363,12 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
         or any($p.spec.targetSelectors[]?; .kind == "Gateway" or (.kind | tostring | endswith("Route"))))
     | "\($p.kind)/\($own)/\($p.metadata.name)"')"
   echo "policies on the Gateway or its routes: $targeting"
-  # The one route that opts in to the cluster's sign-in (features/sso.feature) has the one
-  # SecurityPolicy that asks oauth2-proxy about its requests; it is named here, not found in the
+  # Each route that opts in to the cluster's sign-in (features/sso.feature) has the one
+  # SecurityPolicy that asks oauth2-proxy about its requests; they are named here, not found in the
   # tree, so a policy on the Gateway or on any other route is a failure. A route that opts in later
   # adds its policy to this list.
-  [ "$(sort <<<"$targeting")" = "$({ printf '%s\n' "ClientTrafficPolicy/$namespace/$(only "$BUILT" ClientTrafficPolicy)" SecurityPolicy/demo/hello-sso; } | sort)" ]
+  [ "$(sort <<<"$targeting")" = "$({ printf '%s\n' "ClientTrafficPolicy/$namespace/$(only "$BUILT" ClientTrafficPolicy)" SecurityPolicy/demo/hello-sso \
+    SecurityPolicy/monitoring/logs; } | sort)" ]
   # Nor does anything patch around it: no EnvoyPatchPolicy anywhere, which rewrites the translated
   # configuration of a Gateway, or of every Gateway of its class, whatever the policies say.
   local patches forwarded
@@ -432,7 +433,7 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
     echo "namespace $name: k8s-gitops/gateway=$labels"
     if [ "$labels" = "$label" ]; then attached+=("$name"); fi
   done < <(yq -N 'select(.kind == "Namespace") | .metadata.name + "\t" + (.metadata.labels["k8s-gitops/gateway"] // "none")' "$OVERLAY")
-  [ "${attached[*]}" = "ai-system backstage demo kromgo sso-system" ]
+  [ "${attached[*]}" = "ai-system backstage demo kromgo monitoring sso-system" ]
   # Every route that names the Gateway from another namespace is in one that attached.
   built hello-route
   [ "$(yq -N 'select(.kind == "HTTPRoute") | .spec.parentRefs[].name' "$BUILT")" = "$gateway" ]
@@ -449,6 +450,10 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   built backstage
   [ "$(yq -N 'select(.kind == "HTTPRoute") | .spec.parentRefs[].name' "$BUILT")" = "$gateway" ]
   [ "$(yq -N 'select(.kind == "HTTPRoute") | .metadata.namespace' "$BUILT")" = backstage ]
+  # The log store's route and its sign-in route.
+  built victoria-logs-route
+  [ "$(yq -N 'select(.kind == "HTTPRoute") | .spec.parentRefs[].name' "$BUILT" | sort -u)" = "$gateway" ]
+  [ "$(yq -N 'select(.kind == "HTTPRoute") | .metadata.namespace' "$BUILT" | sort -u)" = monitoring ]
 }
 
 @test "The Gateway listens on exactly the ports the edge routers translate" {
@@ -530,7 +535,7 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   done
   # Leaving the Gateway, the applications that have a route on it, the DNS records of their routes
   # and CrowdSec, whose agent reads the Gateway's proxies, out builds: nothing else names them.
-  tree_without gateway-public hello-route n8n kromgo external-dns open-webui hello-sso dex oauth2-proxy backstage crowdsec crowdsec-gateway-logs
+  tree_without gateway-public hello-route n8n kromgo external-dns open-webui hello-sso dex oauth2-proxy backstage crowdsec crowdsec-gateway-logs victoria-logs-route
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]
