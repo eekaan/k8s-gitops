@@ -614,13 +614,13 @@ once it is not, and the agents' rendered configuration agrees.
 | `kromgo` | default deny | kromgo takes the proxies and the kubelet's probes on 8080 and Prometheus' scrape on 8081, and reaches the resolver and Prometheus on 9090. |
 | `sso-system` | default deny | dex takes the proxies and oauth2-proxy on 5556 and reaches the API server and GitHub on 443; oauth2-proxy takes the proxies on 4180 and reaches dex; below. |
 | `backstage` | default deny | Backstage takes the proxies and the kubelet's probes on 7007 and reaches the resolver and its database on 5432; the database takes the operator, its own pods, Backstage, the dump job, Prometheus and the kubelet's probes, and reaches its own pods, the resolver and the API server, and its instances, for their Barman Cloud sidecars, the object storage on 443; the dump job reaches the resolver, the database and the world on 443. |
-| `security-system` | default deny | Falco takes Prometheus' scrape and the kubelet's probes on 8765, and reaches the resolver alone. |
+| `security-system` | default deny | Falco takes Prometheus' scrape and the kubelet's probes on 8765, and reaches the resolver alone; the flow recorder takes nothing and reaches the resolver and Hubble Relay on 4245. |
 | `crowdsec` | default deny | the local API takes the agent on 8080, Prometheus on 6060 and the kubelet's probes, and sends nothing; the agent takes Prometheus and the kubelet on 6060 and reaches the resolver, the local API and the API server on 443 and 6443; below. |
 | `open-feature-operator` | default deny | the OpenFeature Operator takes the kubelet's probes on 8081, Prometheus' scrape on 8080 and the API server's calls to its webhooks on 9443, and reaches the API server alone. |
 | `ai-system` | listed | applications whose allows are not written, not a namespace that cannot have the posture. n8n takes the proxies on 5678 and reaches its database, the resolver and whatever its workflows call outside; the PostgreSQL instances take n8n, each other and the operator, and reach the API server, and their Barman Cloud sidecars reach the object storage on 443 and the API server; the dump job reaches the database, the hosts age's release is downloaded from and the object storage; Open WebUI takes the proxies on 8080 and reaches nothing until an administrator turns on a connection that calls out; the backup movers reach the object storage on 443. The proxies reach n8n's 5678 and Open WebUI's 8080 alone there and forward only to their Services, PostgreSQL authenticates every client, Pod Security, node firewall. |
 | `etcd-snapshots` | listed | an application whose allows are not written, not a namespace that cannot have the posture. The snapshot job takes nothing and reaches the Talos API through `talos.default`, the object storage, the hosts age's release is downloaded from (its URL redirects to a second host, which serves the file) and the resolver. Talos' own authorisation of its one role, Pod Security, node firewall. |
 | `external-dns` | listed | an application whose allows are not written, not a namespace that cannot have the posture. external-dns takes Prometheus' scrape and the kubelet's probes on 7979 and nothing else, and reaches the API server, the DNS provider's API on 443 and the resolver. Its token, scoped to zone read and DNS edit on the cluster's one zone, its name filter, a ClusterRole that only reads, Pod Security, node firewall ([DNS records](#dns-records)). |
-| `kube-system` | listed | Cilium's agent, its Envoy and its operator run in the host's network namespace; the resolver takes queries from every namespace; the pod-network workloads' flows are not yet enumerated. Node firewall, Pod Security. |
+| `kube-system` | listed | Cilium's agent, its Envoy and its operator run in the host's network namespace; the resolver takes queries from every namespace; Hubble Relay takes the flow recorder of `security-system` on 4245; the pod-network workloads' other flows are not yet enumerated. Node firewall, the recorder's egress, which names Relay's pods on that port alone, Pod Security. |
 | `flux-system` | listed | the controllers' flows are not yet enumerated as allows; Flux's own network policies, which the operator makes at run time, and the operator's for its web interface, `flux-operator-web`, which the check reads and passes because the namespace is listed ([What the check refuses](#what-the-check-refuses)); Pod Security, node firewall. |
 | `monitoring` | listed | Prometheus scrapes every namespace and the nodes, the node exporter runs in the host's network namespace, the API server calls the operator's webhook, VictoriaLogs takes the proxies on 9428 for the route `logs`, Alertmanager reaches the resolver and, outside the cluster, each of its two destinations on the port of its URL, hosts that are deployment values and so are named by no policy ([Where alerts go](#where-alerts-go)), the other flows are not yet enumerated. The proxies reach VictoriaLogs' 9428 alone there and forward only the route's reads, behind the cluster's sign-in, Pod Security, node firewall. |
 | `openbao`, `external-secrets`, `cert-manager`, `cnpg-system`, `keda`, `volsync-system` | listed | flows not yet enumerated: webhooks and APIs the API server calls, the store's clients, scrapes, the PostgreSQL operator's calls to the Barman Cloud plugin. Each entry says which, and what covers it. |
@@ -727,7 +727,13 @@ once it is not, and the agents' rendered configuration agrees.
   the API server's name, which the image's rule `Contact K8S API Server From Container` compares a
   container's connections with: Falco reads the container runtime's socket and the node's files
   through host paths, which no pod policy sees, writes its events to standard output, and calls no
-  API ([Runtime detection](#runtime-detection)).
+  API ([Runtime detection](#runtime-detection)). The flow recorder's pods, by the label of its
+  Deployment's selector, take nothing, as the process listens on no port and nothing probes it.
+  They reach the resolver, for the name of Relay's Service, and the pods the Service `hubble-relay`
+  selects, by its selector's label in `kube-system`, on 4245, the container port that Service's
+  port 80 targets: `kube-system` is listed and takes them on every port, so the recorder's egress
+  is what keeps them from Relay's other ports and from the namespace's other pods
+  ([The record of what policy drops](#the-record-of-what-policy-drops)).
 - **`crowdsec`.** The local API's pods, by the labels its Service selects, take the agent's pod on
   8080, Prometheus (`app.kubernetes.io/name: prometheus` in `monitoring`) on the metrics port 6060
   and the kubelet's probes on 8080, and send nothing. The agent's pod takes Prometheus and the
@@ -872,10 +878,11 @@ port and the API server, the local host and other nodes' hosts on its webhooks' 
 them the world, another application or the other port's caller, and reaches the API server alone,
 that the proxies reach the controller on the port it serves the firewall's Wasm modules on and no
 other application's pod or anything outside the cluster does, that the controller reaches the world
-on 443 and on no other port and neither the certificate job nor the proxies reach it, and that with
-their default deny `backstage`, `demo`, `envoy-gateway-system`, `kromgo`, `open-feature-operator`,
-`security-system` and `sso-system` let exactly their flows through and without it take and send
-everything. What it cannot show: the entity the pinned datapath gives a
+on 443 and on no other port and neither the certificate job nor the proxies reach it, that the flow
+recorder takes nothing and reaches the resolver and Hubble Relay's pods on Relay's container port
+alone, and that with their default deny `backstage`, `demo`, `envoy-gateway-system`, `kromgo`,
+`open-feature-operator`, `security-system` and `sso-system` let exactly their flows through and
+without it take and send everything. What it cannot show: the entity the pinned datapath gives a
 connection an edge translated and a worker forwarded again, read from its source above and confirmed
 in audit mode; the labels of the pods the operators create at run time, taken from the operators'
 source and observed in audit mode; that an address a name resolves to is the one a rule meant; and
@@ -889,6 +896,245 @@ layer. The nodes' own listeners are the node firewall's
 ([ADR 0017](adr/0017-nodes-firewall-themselves-with-talos-ingress-firewall.md)). The listed
 namespaces take and send what they did before. Policy is connection-level: no layer 7 rule, no
 mutual authentication, no encryption.
+
+### The record of what policy drops
+
+What a policy dropped, or would have dropped while the cluster audits, stays in an agent's Hubble
+only while its buffer of recent flows holds it: 4095 flows of every verdict by the chart's default,
+gone within minutes to hours. The decision to enforce rests on a day of it, the night's jobs
+included, so the cluster keeps a record: `apps/base/security-system/network-audit/` runs a flow
+recorder, and the log store keeps what it writes for as long as it keeps logs. A cluster selects it
+with one entry of its overlay, `security-system/network-audit/ks.yaml`, beside the namespace
+directory `security-system`, which Falco's entries hold as well; without the entry nothing of it
+builds.
+
+- **What runs.** A Deployment `network-audit` of one pod with one container, `hubble`: the Hubble
+  CLI, `hubble observe --follow` for the verdicts `DROPPED` and `AUDIT`, against the Service
+  `hubble-relay.kube-system.svc:80` of Hubble Relay, which the Cilium release runs and whose server
+  takes no TLS. `DROPPED` is a packet an agent dropped, for a policy or for any other reason, and
+  `AUDIT` a connection a policy would have dropped while the agents audit. Relay passes the request
+  on to every node's agent as it is, each agent sends the flows of those two verdicts from the
+  moment it is asked, and Relay merges them by their time into the one stream the CLI prints
+  (`pkg/hubble/relay/observer/server.go` and `observer.go`, `pkg/hubble/observer/local_observer.go`
+  at the pinned release); Relay also asks the agents that join its peers while the stream runs. One
+  replica, which goes before the next starts (`Recreate`), as two would write every flow twice. The
+  application names `cilium` in `dependsOn`, as its network policy is of a kind Cilium's operator
+  defines and Relay is part of that release, and it waits: the Deployment counts its pod available
+  once it has been running for 30 seconds (`minReadySeconds`), so a recorder that cannot reach
+  Relay, whose process then ends, keeps the Kustomization from being Ready. Hubble's exporter and
+  its metrics are the other ways to the same flows, and neither is used: the exporter writes them to
+  a file of the agent's or to the agent's standard output, and the metrics are served on another
+  port of every node, which the node firewall does not admit. Both are settings of the agents, and
+  changing them restarts every agent; the agents' own drop counter carries a reason and a direction
+  and no workload (`Documentation/observability/hubble/configuration/export.rst`,
+  `Documentation/observability/metrics.rst`). The recorder is a client of what already runs: no
+  setting of a node, an agent or the collector changes for it.
+- **Its privileges.** A connection, and nothing else. The pod passes the `restricted` Pod Security
+  level, in a namespace that enforces `privileged` for Falco: a non-root user and group, the
+  runtime's seccomp profile, no privilege escalation, no capability and a read-only root
+  filesystem. It declares no volume and mounts no service account token, as Relay asks a client for
+  no credential, and it has no port, no Service and no probe, as the process listens on nothing.
+  `just pod-security-check` holds it to `restricted`, and `pod-security-exceptions.yaml` has no
+  entry for it. Its network policy lets it reach the resolver and Relay's pods on 4245, and lets
+  nothing reach it ([What the namespaces let through](#what-the-namespaces-let-through)).
+- **Its keepalive.** The pod sets three sysctls of its own network namespace, the TCP keepalive's
+  time, interval and probes, at 60 seconds, 10 seconds and 3: the kubelet counts them as safe, and
+  the `baseline` level, and so `restricted`, admits them from Kubernetes 1.29 on
+  (`pkg/kubelet/sysctl/safe_sysctls.go` and
+  `staging/src/k8s.io/pod-security-admission/policy/check_sysctls.go` at Kubernetes v1.37.1). The
+  CLI's one connection carries nothing while nothing is dropped, and the CLI sets no timer on it;
+  its gRPC library turns the kernel's keepalive on with the kernel's settings
+  (`vendor/google.golang.org/grpc/internal/tcp_keepalive_unix.go` at the pinned release), by
+  default two hours of silence and then nine probes 75 seconds apart. A Relay that went without
+  closing the connection, as when its node loses power, would leave the recorder waiting that long
+  and recording nothing. With the pod's settings the kernel ends a connection that has been silent
+  for a minute and then left three probes unanswered, 90 seconds after the silence began, and the
+  process ends with it.
+- **The image** is the one the Cilium agents run, `quay.io/cilium/cilium`, pinned by tag and digest
+  under a `# renovate:` comment. It carries, as `/usr/bin/hubble`, the Hubble CLI of the release the
+  agents and Relay are of (`images/cilium/Dockerfile`, and `SUBDIRS_CILIUM_CONTAINER` in the
+  `Makefile`), and every node holds the image already. The CLI's own image, `quay.io/cilium/hubble`,
+  has no tag of that release; the newest release tag its registry lists is v1.16.4.
+  `tests/network-audit.bats` fails, saying what to set, unless the pin is the image the rendered
+  chart gives the agents, tag and digest, and, saying to print its fixture's flow lines again with
+  the new CLI and replace the fixture, while the tag is not the release whose CLI printed them,
+  which the test's header records as `hubble-flow-lines`. Renovate moves the chart and the image in
+  one pull request, the group Cilium of `.renovate/groups.json5`, and never merges it by itself
+  (`.renovate/automerge.json5`). The image sets `HUBBLE_SERVER` to an agent's own socket, and the
+  `--server` flag overrides it.
+- **What a line holds.** One JSON object for each flow, on standard output, written as the flow
+  arrives: under `flow`, its `time`, `uuid`, `verdict`, `drop_reason_desc` when it was dropped,
+  `traffic_direction`, `l4`, the protocol with its ports, `node_name`, the node that reported it,
+  and for `source` and for `destination` the `namespace`, `pod_name`, `workloads` and `labels`;
+  beside `flow`, the record's own `node_name` and `time`, which the agent fills from the flow's,
+  and Relay orders the records by that time. A field without a value is left out. These are the
+  fields the CLI asks for with `--field-mask`, and an agent sends no other
+  (`pkg/hubble/observer/local_observer.go`): none of the fields of a flow's addresses, `IP`,
+  `ethernet` and `tunnel`, and none of the names an address resolves to, `source_names` and
+  `destination_names`. `tests/network-audit.bats` holds the mask to that set. What can still hold
+  an address is a label, where a policy of the cluster names a prefix (`cidr:`), which none of the
+  tree's does; the group address of an IGMP message, in `l4`; and the lines that are not flows,
+  below.
+- **How an end of a flow is named.** A pod's workload is what the pinned Cilium derives from the
+  pod's controlling owner (`pkg/k8s/utils/workload.go`): the Deployment, for a pod of a ReplicaSet
+  named after the pod's template hash; the CronJob, for a pod of a Job whose name ends in the eight
+  to ten digits of its scheduled time; otherwise the owner's own kind and name. A pod whose name was
+  not generated, or that has no controlling owner, has none. An agent knows the workload only of the
+  pods on its own node (`pkg/hubble/parser/common/endpoint.go`), so of a flow's two ends the one on
+  the node that reported it carries its workload, and the other, when it is a pod of another node,
+  only its pod's name. For a policy's verdict the reporting node is the one that decides: the
+  source's for egress, the destination's for ingress.
+- **The lines that are not flows.** The pod writes other lines too, and they say where the record
+  has gaps: a `lost_events` record, on standard output, when Hubble lost events before it could
+  send them, with how many, of every verdict and not only the two asked for, and where, the
+  kernel's event buffer, Hubble's queue or an agent's buffer of recent flows; a `node_status`
+  record, on standard error, for a node Relay could not read, with the error; and the CLI's own
+  messages, plain lines on standard error: a warning, such as the one it writes when its minor
+  version is lower than Relay's, as it can be during a minor upgrade of Cilium until the recorder
+  has moved too (a patch number is not compared), and the error it ends on
+  (`hubble/pkg/printer/printer.go`, `hubble/main.go`, `hubble/cmd/root.go`,
+  `hubble/cmd/common/conn/version.go`). An error can name an address, a node's or the resolver's.
+- **Where the lines go.** The log collector ships every pod's lines ([Logs](#logs)), so they are in
+  the store with the namespace, pod, container and node of the recorder, each line whole in `_msg`.
+  `{kubernetes.pod_namespace="security-system",kubernetes.container_name="hubble"}` selects them:
+  `just logs` with that and `| unpack_json | filter flow.verdict:AUDIT` prints the audited flows as
+  they were written, labels included. The store keeps them 14 days, as it keeps every log, and
+  drops the oldest days before that once they take 15 GiB, though never the last two
+  ([Logs](#logs)); `tests/network-audit.bats` holds both numbers to the store's values.
+- **What bounds the volume.** Only the two verdicts are sent, and a flow's line is some hundreds of
+  bytes, 670 on average in a local run of the image over hand-written flows. A line is an event an
+  agent reported, not a connection: an `AUDIT` line is written once for a connection, when its
+  first packet is judged, and none for the packets of an established one, while a packet a policy
+  denies once the cluster enforces is two `DROPPED` lines, the policy's verdict and the drop
+  itself, for each packet, a sender's retries included (`bpf/bpf_lxc.c`, "Emit verdict if drop or
+  if allow for CT_NEW", and the drop notification of `tail_handle_ipv4_cont`). Nothing limits the
+  rate beyond that: a flood of denied packets is a flood of lines, up to what Hubble passes on
+  before it reports lost events instead, and the lines share the store's 15 GiB with every other
+  log, so a flood shortens how far back all of them reach.
+- **What the record misses.** The time the recorder is not following: it asks for nothing older
+  than the moment it connects, and nothing is fetched afterwards. Its process ends when Relay or
+  the connection goes, and when Relay ends the stream, as it does once it reads no agent; the
+  kubelet starts it again after its back-off, and the recipe reports that start; a Cilium upgrade
+  replaces Relay's pod and the recorder's, whose image moves with it, and so makes such a start.
+  The two move in either order: `dependsOn` holds the recorder back only while `cilium` is not
+  Ready and compares no revision, as each application reads an artifact of its own
+  (kustomize-controller's `checkDependencies`). An eviction by the descheduler
+  ([The kube-system baseline](#the-kube-system-baseline)) makes such a start too: every five
+  minutes it moves pods off a node it finds above its target use, and it may take the recorder's
+  pod, as that claims no volume, or Relay's, which claims none either and whose end ends the
+  recorder's stream. Each leaves a gap until the new pod's container runs, and evictions that
+  recur keep a 24-hour window from passing. The loss of the recorder's node stops the record until
+  its pod has been replaced on another, some six minutes at the defaults, which the recipe shows
+  only once the old pod is deleted (below). Events Hubble lost and the nodes Relay could not read,
+  which the lines above name. An agent's restart, which every change of `cilium-config` and every
+  upgrade brings, at most two agents at a time, makes its node one of those: the agent's server
+  ends the node's stream with an error, which Relay writes as a `node_status` line and answers by
+  asking the node again at its next look at its peers, every 2 seconds, once its connection to the
+  node is back; the new agent sends its flows from then on, so the record lacks that node's from
+  the old agent's stop until shortly after the new one serves, and the recorder's pod need not be
+  deleted (`pkg/hubble/server/server.go`, `pkg/hubble/relay/observer/server.go`,
+  `pkg/hubble/relay/defaults/defaults.go`). Lines the collector could not ship before the kubelet
+  rotated the pod's log away, as for any pod ([Logs](#logs)). And what Relay itself does not see,
+  which no line names at once (`pkg/hubble/relay/observer/observer.go`, `retrieveFlowsFromPeer`,
+  and `pkg/hubble/relay/pool/manager.go`): Relay counts a node's stream that ends cancelled as
+  finished and does not ask that node again while the follow runs, and it cancels a node's stream
+  itself when the node leaves its peers or changes its address; and a node that went without
+  closing its connection, as on a power loss, is asked again only once Relay's connection to it
+  has failed, which without traffic on it takes the kernel's keepalive, a little over two hours at
+  the defaults Relay's pod runs with, and then a `node_status` line says so. A new follow asks
+  every node Relay reaches, so after a node rejoined under the same name, changed its address or
+  lost power, deleting the recorder's pod starts one, and the record is whole from then on.
+- **Reading it.** `just network-audit [since] [cluster]` prints the record of a window that ends
+  now, 24 hours unless told otherwise (`since` is a whole number with `s`, `m`, `h`, `d` or `w`,
+  as `just logs --since` takes it), through the same path as `just logs`, the Kubernetes API's
+  service proxy to the store. The store does the counting: one query unpacks each of the
+  recorder's lines and counts them by verdict, direction, drop reason, port and the namespace, pod
+  name, workloads and labels of each end, so the answer's limit, 10000, bounds groups and never
+  flows. The recipe prints one line a group, with no header, the most frequent first:
+  `COUNT VERDICT NAMESPACE DIRECTION SOURCE DESTINATION PORT/PROTOCOL REASON`. `COUNT` is the
+  number of the recorder's lines, events and not connections, as above; `DIRECTION` is `ingress`,
+  `egress` or `-`; `NAMESPACE` is the namespace whose policies decided the flow, the source's for
+  egress and the destination's for ingress, and `-` for a flow without a direction; `SOURCE` and
+  `DESTINATION` are `NAMESPACE/KIND/NAME` of the end's workload, so that a night's job pods and a
+  rollout's pods are one line, `NAMESPACE/POD` for a pod the line gives no workload, and `@world`,
+  `@host`, `@remote-node` and the like for an end that is no pod; `PORT/PROTOCOL` is the
+  destination port over `tcp`, `udp` or `sctp`, and `0/other` for anything else; `REASON` is the
+  drop reason of a `DROPPED` flow and `-` for `AUDIT`. Groups that differ only in a pod's name
+  under its workload, or in a label, are one line with their sum. It prints no label and no
+  address, and of a name only its printable ASCII, so nothing in a line can drive a terminal. With
+  no flow it says `no dropped or audited flow in the record of the last <since>`. It reads the
+  answer in the shape the store's version writes it, the version whose answers
+  `tests/network-audit.bats` holds; were a later version to flatten a line's JSON into other field
+  names, every flow would count among the lines that are not flows and the table would be empty:
+  an empty table beside a large count of those lines is that. So the test fails, saying to put the
+  recipe's query to the new version and replace its answers, while the store's image or its
+  chart's `appVersion` is of another release than the one the test's header records as
+  `victoria-logs-answers`; `.renovate/by-hand.tsv` lists this record and `hubble-flow-lines`.
+- **What the recipe says of the record.** After the table, on standard error: how many of the
+  recorder's lines in the window are not flows, with the `just logs` query that shows them, which
+  fails nothing; and, from one listing of the recorder's pod, whether it ran through the window. A
+  recorder that has run since before the window began is said so, and the run exits 0. One that is
+  not running, or whose container started inside the window, is named with its state or its start
+  time, and the run exits 1 after the table, as flows from the time it was not following are not
+  in the record; so does a run that cannot list the pod, or whose listing holds no state it reads,
+  and it shows nothing kubectl printed. The listing is what the API holds: when the recorder's node
+  is lost, its pod is listed as running from its old start until the node has been marked not
+  Ready, 50 seconds after its kubelet last renewed its lease by default, and the pod's toleration
+  of that, 300 seconds by the API server's `DefaultTolerationSeconds` admission plugin, has run
+  out, and the pod is deleted and replaced; a run in those six minutes exits 0 over a window the
+  recorder did not follow to its end, and a run after them names the new pod's state or start. An
+  answer of 10000 groups is cut: the run says so and exits 1. A `since` that is no duration exits 2
+  with the usage before anything is called, and a store or an API that refuses or does not answer
+  fails with `just logs`' own message and nothing else. The kubeconfig needs what `just logs` needs
+  and to list the pods of `security-system`.
+- **The answers the tests hold.** `tests/network-audit.bats` runs the recipe over the store's own
+  answer to its query, `tests/fixtures/network-audit/answer.jsonl`, and the inputs the answer was
+  made from are beside it: `tests/fixtures/network-audit/flows.jsonl`, 15 flows written as an
+  agent sends them under the recorder's mask, one of them `FORWARDED`;
+  `tests/fixtures/network-audit/records.jsonl`, two `lost_events` records and three `node_status`
+  records; `tests/fixtures/network-audit/bulk.ndjson`, the body of the bulk request the collector
+  would send for the lines, each whole in `message` beside the namespace, pod, container and node
+  of its pod; and `tests/fixtures/network-audit/bulk.args`, that request's query arguments, the
+  collector's sink's. The test's header records the releases of the store and of the CLI they came
+  from, and the test fails while the store or the recorder runs another, saying to do the proof
+  again, offline, in these steps. The recorder's image, with no network, a read-only root, user
+  65532 and no capability, runs the recorder's command with `--input-file -`: over `flows.jsonl`
+  it prints a line for each flow but the `FORWARDED` one; over `records.jsonl`, without the two
+  `--verdict` flags, which it applies to every record of a file, it prints the `lost_events`
+  records on standard output, the `node_status` records of a node's error and of a node Relay could
+  not reach on standard error, and nothing for the nodes that connected; and without
+  `--input-file` it ends on its error for a Relay it cannot look up, whose resolver address is put
+  in a documentation range. Those lines, in that order, are the messages of the recorder's documents
+  in `bulk.ndjson`, which also holds a line of Falco's and one of a container `hubble` in `demo`,
+  for the query to leave out. The store's image then runs by the digest the header records, on a
+  network made with `docker network create --internal`, with `-retentionPeriod=100y`: the
+  documents' times are fixed, and the store answers 201 for a line older than its retention and
+  keeps none of it. It takes `bulk.ndjson` at `/insert/elasticsearch/_bulk` with the arguments of
+  `bulk.args`, the body sent as `Content-Type: application/x-ndjson`, as the collector's
+  Elasticsearch sink sends it: a body sent as a form, as `curl --data-binary` sends one unless told
+  otherwise, is answered with no item and none of it is kept. Once it holds every line,
+  `/select/logsql/query` with the recipe's query, a `start` before the first line and the limit
+  10000, as `scripts/logs` asks it, answers what `answer.jsonl` is to hold. The container and the network are removed afterwards. The store
+  returns groups of the same count in no fixed order, so two runs over the same lines can differ in
+  that order alone; the recipe orders its table by count and then by the line's text, so it does
+  not depend on that order.
+- **No alert reads the record.** Nothing in the tree evaluates a rule over the log store: the
+  alerts are Prometheus rules over metrics ([Alerts](#alerts)), and no rules engine for the store
+  runs, so no alert reads the record and none is added for it. A recorder that is not available
+  raises the monitoring chart's own alerts, which watch every namespace, each a warning:
+  `KubeDeploymentReplicasMismatch`, once the Deployment has had fewer replicas available than it
+  asks for, with no rollout moving, for 15 minutes, whatever the cause; `KubePodCrashLooping`, once
+  its container has been in `CrashLoopBackOff` for 15 minutes, as when the process keeps ending;
+  `KubePodNotReady`, once the pod has been pending, or running and not ready, for 15 minutes; and
+  `KubeContainerWaiting`, once its container has waited for another reason, such as an image it
+  cannot pull, for an hour. `tests/network-audit.bats` reads them in the render. A recorder whose
+  stream Relay no longer feeds, as above, raises none of them.
+- **What it costs.** The recorder requests 10m of CPU and 32Mi of memory and is limited to 128Mi.
+  None of these is measured on the cluster: in a local run of the image that printed 42000 flows
+  read from standard input, the container's memory peaked at 25 MiB. Live, `kubectl top pod
+  --namespace security-system --selector app.kubernetes.io/name=network-audit` gives its use, and
+  `just logs` with the selector above and `| stats count() lines, sum_len(_msg) bytes`,
+  `--since 24h`, the lines and bytes a day it adds to the store's 15 GiB.
 
 ### Turning it on, and back
 
@@ -926,37 +1172,51 @@ does not matter.
    from before they landed are expected, such as the proxies to `hello` on 8080 and to the
    controller on 18000, and the controller to the API server, and an agent's recent flows can hold
    them for a while.
-3. **Watch**, from the moment the Kustomizations that hold the allows, `hello`,
+3. **Watch a day of the record**, from the moment the Kustomizations that hold the allows, `hello`,
    `demo-volsync-movers`, `envoy-gateway`, `kromgo`, `dex`, `oauth2-proxy`, `backstage`, `falco`,
-   `crowdsec` and `open-feature-operator`, are Ready at the merge's revision
-   (`flux get kustomizations`). `just network-drops` lists what the agents' Hubble holds: the
-   `AUDIT` flows a policy would drop, by namespace, pod and port, never an address. It runs each
-   agent's own `hubble` through `kubectl exec`, so the kubeconfig needs exec on the Cilium agents'
-   pods in `kube-system`, more than the reading recipes need; `NETWORK_DROPS_LAST` (500) bounds the
-   flows asked of each agent and `NETWORK_DROPS_TIMEOUT` (60) the seconds each call may take. Hubble
-   keeps only each agent's recent flows (4095 by the chart's default), so run it after each of:
-   `just gateway-check`; `just cluster-check`; the secret demo
+   `crowdsec`, `open-feature-operator` and `network-audit`, are Ready at the merge's revision
+   (`flux get kustomizations`). The flow recorder writes every flow a policy would drop to the log
+   store ([The record of what policy drops](#the-record-of-what-policy-drops)), so each path needs
+   to be taken only once: `just gateway-check`; `just cluster-check`; the secret demo
    (`just secret-rotate demo/hello greeting`); a badge asked of kromgo by its name, which has
-   kromgo query Prometheus ([Status badges](#status-badges)); a sign-in through a route that
-   opts in to it ([Sign-in](#sign-in)), and a query in the log store's interface
+   kromgo query Prometheus ([Status badges](#status-badges)); a sign-in through a route that opts
+   in to it ([Sign-in](#sign-in)), and a query in the log store's interface
    ([The log store's interface](#the-log-stores-interface)); Backstage's catalogue opened by its
-   name, which has
-   Backstage read its database; the nightly dump of `backstage-db` from 02:00, which waits up to
-   20 minutes before it starts ([Dumps](#dumps)); the base backup of `backstage-db` at 02:47 UTC,
-   and a WAL segment its primary archives, which `select pg_switch_wal()` there forces
-   ([Backups and restores](#backups-and-restores)); the nightly backup of `volsync-demo` at 03:17,
-   and a restore of it ([Restoring](#restoring)); its restore drill's restore at 04:17 and check at
-   05:17 ([The restore drill](#the-restore-drill)); the two dry runs that call the OpenFeature
-   Operator's webhooks ([OpenFeature Operator](#openfeature-operator)). Watch a day at least,
-   through one nightly backup, one dump and one base backup. An `AUDIT` flow of `backstage`,
+   name, which has Backstage read its database; a WAL segment the primary of `backstage-db`
+   archives, which `select pg_switch_wal()` there forces
+   ([Backups and restores](#backups-and-restores)); a restore of `volsync-demo`
+   ([Restoring](#restoring)); and the two dry runs that call the OpenFeature Operator's webhooks
+   ([OpenFeature Operator](#openfeature-operator)). Then let a night pass, for the paths nobody
+   takes by hand: the nightly dump of `backstage-db` from 02:00, which waits up to 20 minutes
+   before it starts ([Dumps](#dumps)), the base backup of `backstage-db` at 02:47 UTC, the nightly
+   backup of `volsync-demo` at 03:17, and its restore drill's restore at 04:17 and check at 05:17
+   ([The restore drill](#the-restore-drill)). Once the allows have been Ready for 24 hours, and
+   within 24 hours of taking the paths above, so that the window holds them and one nightly
+   backup, one dump, one base backup and one drill, `just network-audit 24h` must exit 0 and print
+   no `AUDIT` line whose `NAMESPACE` is a namespace that holds the default deny: `backstage`,
    `crowdsec`, `demo`, `envoy-gateway-system`, `kromgo`, `open-feature-operator`, `security-system`
-   or `sso-system` that a check made once the allows were Ready is a missing allow, added beside its
-   application in a pull request while the cluster still audits, or a pod doing what it should not.
-   Confirm also that no `@remote-node` flow reaches the proxies' listener ports and none to a
-   webhook's 9443, Envoy Gateway's or the OpenFeature Operator's, is `AUDIT`. `AUDIT` flows of
-   `flux-system` show too: Flux's own policies and the Flux Operator's `flux-operator-web`, which
-   the agents enforced before the value, are only audited while it is set, and what they would drop
-   is what they dropped before; they are not the namespaces' allows.
+   or `sso-system`. Exit 0 says that the recorder's container ran through those 24 hours and that the
+   table is not cut, and what the record can miss even then is in
+   [The record of what policy drops](#the-record-of-what-policy-drops); a run that exits 1 says what
+   the record lacks, and the day is watched again from there. The lines that are not flows, which
+   the run counts, are read with the query it prints: events Hubble lost, which its `lost_events`
+   records count whatever their verdict, and a node Relay could not read are where the record may
+   lack flows.
+   An `AUDIT` line of one of those namespaces is a missing allow, added beside its application in a
+   pull request while the cluster still audits, or a pod doing what it should not; a flow from
+   `@remote-node` to the proxies' listener ports or to a webhook's 9443, Envoy Gateway's or the
+   OpenFeature Operator's, would be such a line.
+   `AUDIT` lines whose `NAMESPACE` is `flux-system` are expected: Flux's own policies and the Flux
+   Operator's `flux-operator-web`, which the agents enforced before the value, are only audited
+   while it is set, and what they would drop is what they dropped before; they are not the
+   namespaces' allows. A `DROPPED` line, while the agents audit, is a packet dropped for the reason
+   its `REASON` gives, which is none of the policies' denials at layers 3 and 4.
+   `just network-drops` stays for what the agents hold at this moment: the `DROPPED` and `AUDIT`
+   flows among each agent's recent ones (4095 by the chart's default), by pod and port, never an
+   address. It needs neither the recorder nor the log store: it runs each agent's own `hubble`
+   through `kubectl exec`, so the kubeconfig needs exec on the Cilium agents' pods in
+   `kube-system`, more than the reading recipes need; `NETWORK_DROPS_LAST` (500) bounds the flows
+   asked of each agent and `NETWORK_DROPS_TIMEOUT` (60) the seconds each call may take.
 4. **Enforce, a change of its own.** One pull request makes these edits, together and no others:
    - `kubernetes/apps/base/kube-system/cilium/app/values.yaml`: the line `policyAuditMode: true`
      goes, with the three comment lines above it, from `# The agents evaluate every policy`; the
@@ -969,7 +1229,7 @@ does not matter.
      when that sentence, the values and the agents' rendered configuration disagree. In
      [What the namespaces let through](#what-the-namespaces-let-through), "the watch in audit mode
      confirms it: a flow from `@remote-node` to the listeners would show as `AUDIT`" becomes
-     "`just network-drops` confirms it: a flow from `@remote-node` to the listeners would show as
+     "`just network-audit` confirms it: a flow from `@remote-node` to the listeners would show as
      `DROPPED`".
    - `features/cilium.feature` and `tests/install-cilium.bats`: the scenario "Cilium audits network
      policy by a value in Git, and the docs say so" and its test are retitled together "Cilium
@@ -993,9 +1253,11 @@ does not matter.
    `tests/network-policy.bats` requires the enforcing sentence exactly when the value is gone, and
    fails, saying which sentence the value needs, on a change that does one without the other.
    Without the value every agent enforces every policy of the tree. The agents restart into
-   enforcing as they restarted into audit mode, and a node audits until its agent has. Run the
-   checks of step 3 again; `just network-drops` then shows `DROPPED` flows, and each of an
-   application namespace is an intended denial.
+   enforcing as they restarted into audit mode, and a node audits until its agent has. Take the
+   paths of step 3 again; `just network-audit` then prints, where a policy denied, `DROPPED` lines
+   with the reason `POLICY_DENIED`: each whose `NAMESPACE` is an application namespace is an
+   intended denial, and those of `flux-system` are what Flux's own policies dropped before the
+   cluster audited.
 5. **Back.** For the whole cluster: one pull request that reverses each edit of step 4, putting
    back the value and its comment, the audit paragraph, the scenario and its test under their audit
    title, and the roadmap's clause; the agents restart into audit mode and drop nothing a policy
@@ -1014,12 +1276,13 @@ listed: no policy of the namespace asks for the default deny, so they alter noth
 applications' Kustomizations are Ready at that revision (`flux get kustomizations`), the second adds
 `networkpolicy-default-deny.yaml` to the namespace directory's `kustomization.yaml` and removes the
 namespace's entry from `network-policy-exceptions.yaml`, so the default deny lands on allows already
-in place. Then run the namespace's own checks and `just network-drops`: a `DROPPED` flow of the
-namespace is an intended denial or a missing allow, which the way back for one namespace reopens in
-one pull request. A namespace with a flow whose peer only the live cluster shows, such as the
-callers of a webhook, is watched in audit mode as the first namespaces were: the cluster audits
-again (step 5) while its policies land, and enforces again by step 4. While the cluster audits, a
-namespace takes the posture in one change, its default deny and its allows together.
+in place. Then run the namespace's own checks and `just network-audit`: a `DROPPED` line whose
+`NAMESPACE` is the namespace, with the reason `POLICY_DENIED`, is an intended denial or a missing
+allow, which the way back for one namespace reopens in one pull request. A namespace with a flow
+whose peer only the live cluster shows, such as the callers of a webhook, is watched in audit mode
+as the first namespaces were: the cluster audits again (step 5) while its policies land, and
+enforces again by step 4. While the cluster audits, a namespace takes the posture in one change,
+its default deny and its allows together.
 
 ## Variables
 

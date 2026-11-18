@@ -5,8 +5,8 @@ Feature: Runtime detection with Falco
 
   Scenario: Falco is selected by overlay entries and builds nothing when it is not
     Given the lab-sto2 overlay, which selects Falco with the namespace directory security-system and Falco's ks.yaml
-    When it is built with both entries, with only the namespace directory's and with neither, and again with the monitoring definitions it needs left out
-    Then with both it applies the namespace security-system, its default deny and the Kustomization falco, which waits and names prometheus-operator-crds and cilium; with only the namespace directory's it applies the namespace and its default deny and nothing of Falco; with neither, nothing of security-system; and with the definitions left out it is refused, naming falco and the missing application
+    When it is built with both entries, without Falco's ks.yaml and with no entry of security-system, and again with the monitoring definitions it needs left out
+    Then with both it applies the namespace security-system, its default deny and the Kustomization falco, which waits and names prometheus-operator-crds and cilium; without Falco's ks.yaml it applies the namespace, its default deny and the namespace's other application, the flow recorder, and nothing of Falco; with no entry of security-system, nothing of security-system; and with the definitions left out it is refused, naming falco and the missing application
 
   Scenario: Falco runs on every node with the modern eBPF probe and only the privileges it names
     Given the falco application built as Flux applies it and its pinned chart rendered with the repository's values

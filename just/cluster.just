@@ -89,6 +89,10 @@ gateway-check cluster='lab-sto2':
 network-drops cluster='lab-sto2':
     scripts/network-drops {{ quote(cluster) }}
 
+# Print, changing nothing, the record of the flows the network policies dropped or, in audit mode, would have dropped over a window that ends now (24h when none is given; a whole number with s, m, h, d or w): the lines the flow recorder in security-system wrote, counted by the log store and read as just logs reads it, through the Kubernetes API's service proxy; one line per COUNT VERDICT NAMESPACE DIRECTION SOURCE DESTINATION PORT/PROTOCOL REASON, the most frequent first, a pod under its workload, names and ports only and no address; then, on standard error, how many of the recorder's lines are not flows and whether the recorder ran through the window; fails when it did not, when its pod cannot be listed, when the answer is cut at 10000 groups, and with just logs' own reason when the API does not answer or the store refuses the query; see docs/kubernetes.md, The record of what policy drops
+network-audit since='24h' cluster='lab-sto2':
+    scripts/network-audit {{ quote(since) }} {{ quote(cluster) }}
+
 # Forward a local port, GRAFANA_PORT or 3000, on 127.0.0.1 only, to Grafana on a cluster through its kubeconfig until Ctrl-C; prints the local URL and where the admin password is kept, never the password
 grafana cluster='lab-sto2':
     scripts/grafana {{ quote(cluster) }}

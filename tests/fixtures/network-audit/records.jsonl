@@ -1,0 +1,5 @@
+{"lost_events":{"source":"HUBBLE_RING_BUFFER","num_events_lost":"12","first":"2026-11-16T10:16:00Z","last":"2026-11-16T10:16:01Z"},"node_name":"worker-2","time":"2026-11-16T10:16:16.000000016Z"}
+{"lost_events":{"source":"PERF_EVENT_RING_BUFFER","num_events_lost":"3","cpu":1},"node_name":"worker-1","time":"2026-11-16T10:17:17.000000017Z"}
+{"node_status":{"state_change":"NODE_ERROR","node_names":["worker-3"],"message":"rpc error: code = Unavailable desc = connection error: desc = \"transport: Error while dialing: dial tcp 192.0.2.13:4244: connect: connection refused\""},"node_name":"worker-2","time":"2026-11-16T10:18:18.000000018Z"}
+{"node_status":{"state_change":"NODE_UNAVAILABLE","node_names":["worker-4"]},"node_name":"worker-2","time":"2026-11-16T10:19:19.000000019Z"}
+{"node_status":{"state_change":"NODE_CONNECTED","node_names":["worker-1","worker-2","worker-3"]},"node_name":"worker-2","time":"2026-11-16T10:00:00.000000000Z"}

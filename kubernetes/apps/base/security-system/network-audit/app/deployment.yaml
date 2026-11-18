@@ -1,0 +1,104 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/deployment-apps-v1.json
+# The flow recorder: the Hubble CLI, following through Hubble Relay every flow that was dropped, by
+# a network policy or for another reason (DROPPED), or that a policy would have dropped while the
+# agents audit (AUDIT), and writing each as one JSON line on standard output, which the log
+# collector ships with the pod's other lines (docs/kubernetes.md, The record of what policy drops).
+# It keeps nothing: it follows from the moment it starts, and what happened while it was not running
+# is not fetched.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: network-audit
+spec:
+  # One follower: a second would write every flow a second time. For the same reason the old pod
+  # goes before a new one starts.
+  replicas: 1
+  strategy:
+    type: Recreate
+  # The process ends when it cannot reach Relay, and nothing probes it, so a pod counts as available
+  # only once its container has run for half a minute: one that keeps ending never does, and the
+  # Deployment and its Kustomization say so.
+  minReadySeconds: 30
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: network-audit
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: network-audit
+    spec:
+      # It calls no API: Relay's server asks a client for no credential.
+      automountServiceAccountToken: false
+      # On TERM the process ends within a second: the CLI handles only INT itself, and as process 1
+      # it is ended by the Go runtime, with status 2.
+      terminationGracePeriodSeconds: 5
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+        # The CLI's one connection carries nothing while no flow is dropped, and the CLI sets no
+        # timer of its own on it: a Relay that went without closing it, as with a node that lost
+        # power, is noticed only by the kernel's TCP keepalive, which the CLI's gRPC library turns
+        # on with the kernel's settings, two hours of silence and then nine probes 75 seconds apart
+        # by default. With these, of the pod's own network namespace and on the kubelet's list of
+        # safe sysctls, a silent connection is probed after a minute and ends 30 seconds later, and
+        # the process with it.
+        sysctls:
+          - name: net.ipv4.tcp_keepalive_time
+            value: "60"
+          - name: net.ipv4.tcp_keepalive_intvl
+            value: "10"
+          - name: net.ipv4.tcp_keepalive_probes
+            value: "3"
+      containers:
+        - name: hubble
+          # The image the Cilium agents run, which carries the Hubble CLI of the release the agents
+          # and Relay are of and is on every node already; the CLI's own image has no tag of that
+          # release. tests/network-audit.bats holds it, tag and digest, to the image the Cilium
+          # chart gives the agents, and Renovate moves both in one pull request.
+          # renovate: datasource=docker depName=quay.io/cilium/cilium
+          image: quay.io/cilium/cilium:v1.20.4@sha256:20fe92e4c86641233a450098c158d2d29085f3419931ab6bf681d2485dedf16e
+          command:
+            - hubble
+            - observe
+            # Relay's Service, whose server takes no TLS. The flag wins over the HUBBLE_SERVER the
+            # image sets, an agent's own socket.
+            - --server
+            - hubble-relay.kube-system.svc:80
+            # From now on, without end: nothing older is asked for.
+            - --follow
+            - --verdict
+            - DROPPED
+            - --verdict
+            - AUDIT
+            # One JSON object a line, written as each flow arrives.
+            - --output
+            - jsonpb
+            # What a line holds, and nothing else of the flow: what the recipe prints, the flow's
+            # identifier, and its time and node name, which the agents fill each record's own from;
+            # Relay orders the records by that time. None of the fields of a flow's addresses, IP,
+            # ethernet and tunnel, nor of the names an address resolves to.
+            - --field-mask
+            - time,uuid,node_name,verdict,drop_reason_desc,traffic_direction,l4,source.namespace,source.pod_name,source.workloads,source.labels,destination.namespace,destination.pod_name,destination.workloads,destination.labels
+          # No port and no probe: the process listens on nothing, and it ends when its stream does,
+          # with status 1 when Relay or the connection goes and with 0 when Relay ends the stream
+          # itself, as it does once it has no agent left to read. The kubelet starts it again either
+          # way, which is what connects it again.
+          # In a local run of the image that printed 42000 flows read from standard input, the
+          # container's memory peaked at 25 MiB; the requests and the limit are not measured on the
+          # cluster.
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL

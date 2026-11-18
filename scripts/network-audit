@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+# Prints, reading only, the record of the flows the cluster's network policies dropped or, in audit
+# mode, would have dropped, over a window that ends now: the lines the flow recorder in
+# security-system wrote, which the log store keeps (docs/kubernetes.md, The record of what policy
+# drops), as one line per verdict, deciding namespace, direction, source, destination, port and drop
+# reason with the number of flows, the most frequent first:
+#   COUNT VERDICT NAMESPACE DIRECTION SOURCE DESTINATION PORT/PROTOCOL REASON
+# DIRECTION is ingress, egress or -, for a flow Hubble gives no direction. NAMESPACE is the
+# namespace whose policies decided the flow, the source's for egress and the destination's for
+# ingress, and - otherwise. SOURCE and DESTINATION are NAMESPACE/KIND/NAME of the endpoint's first
+# workload, so that a night's job pods and a rollout's pods are one line; NAMESPACE/POD for a pod
+# the record gives no workload; and @world, @host, @remote-node and the like, from its reserved:
+# label, for an endpoint that is no pod, as scripts/network-drops names them. REASON is the drop
+# reason of a DROPPED flow, and - for AUDIT.
+#
+# The store does the counting: scripts/logs is run once, with one LogsQL query that unpacks each of
+# the recorder's lines and counts them by the fields above, so the limit of the answer, 10000,
+# bounds groups and never flows. Groups that differ only in what a line leaves out, a pod's name
+# under its workload or a label, are summed here. An answer of as many groups as the limit is cut:
+# that is said, and the run fails.
+#
+# After the table, on standard error: how many of the recorder's lines in the window are not flows
+# (events Hubble lost, a node Hubble Relay could not read, the CLI's own errors), with the just logs
+# query that shows them, which fails nothing; and, from one listing of the recorder's pod, whether
+# the recorder ran through the window. A recorder that is not running, or whose container started
+# inside the window, did not record all of it: that is said, with the time, and the run fails after
+# the table, as it does when the listing fails or holds no state it can read.
+#
+# It never prints an address or a label: of each group only the fields above are read, a port only
+# when it is a number, each with every character that is not printable ASCII left out, a terminal's
+# escapes among them, which the store's answer carries as JSON escapes; kubectl's output for the
+# listing goes nowhere; and a store or an API that refuses or does not answer is reported by
+# scripts/logs in its own words, without an address, and by nothing else.
+# Usage: scripts/network-audit [since] [cluster]
+#   since  the window, a whole number with s, m, h, d or w as scripts/logs --since takes it; 24h
+#          when unset
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/cluster.sh
+. "$here/lib/cluster.sh"
+
+usage="usage: network-audit [since] [cluster]"
+if (($# > 2)) || [[ ${1-} == -* || ${2-} == -* ]]; then
+  infra_error "$usage"
+  exit 2
+fi
+since=${1:-24h}
+if [[ ! $since =~ ^([1-9][0-9]{0,8})([smhdw])$ ]]; then
+  infra_error "since is not a duration: a whole number with s, m, h, d or w, such as 90m or 24h"
+  infra_error "$usage"
+  exit 2
+fi
+case ${BASH_REMATCH[2]} in
+  s) factor=1 ;;
+  m) factor=60 ;;
+  h) factor=3600 ;;
+  d) factor=86400 ;;
+  w) factor=604800 ;;
+esac
+seconds=$((BASH_REMATCH[1] * factor))
+
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "${2-}"
+complete=1
+require_kubeconfig || complete=0
+require_commands kubectl jq date || complete=0
+((complete))
+
+work=$(mktemp -d -t network-audit.XXXXXXXXXX)
+# A failing script names the step it failed in, as in every cluster recipe, once the private
+# directory is gone. Not where the reason has been given already: by scripts/logs, or by this
+# script's own findings about the record, after which nothing has failed.
+explained=0
+# shellcheck disable=SC2329 # It runs from the EXIT trap.
+finish() {
+  local code=$1
+  rm -rf -- "$work"
+  ((explained)) || failed_step "$code"
+  exit "$code"
+}
+trap 'finish $?' EXIT
+
+# The recorder's lines, by the two fields of their stream that name them: the namespace and the
+# container. The pod's name is in the stream too and changes with every pod.
+recorder='{kubernetes.pod_namespace="security-system",kubernetes.container_name="hubble"}'
+# What a line of the table is made of. The store flattens a line's JSON, so a field's name is its
+# path, and keeps a list, an endpoint's workloads and labels, as JSON text.
+fields='flow.verdict, flow.traffic_direction, flow.drop_reason_desc'
+fields+=', flow.source.namespace, flow.source.pod_name, flow.source.workloads, flow.source.labels'
+fields+=', flow.destination.namespace, flow.destination.pod_name, flow.destination.workloads, flow.destination.labels'
+fields+=', flow.l4.TCP.destination_port, flow.l4.UDP.destination_port, flow.l4.SCTP.destination_port'
+query="$recorder | unpack_json fields ($fields) | stats by ($fields) count() flows | sort by (flows desc)"
+limit=10000
+
+# The window begins where scripts/logs, asked right after, has the store's begin.
+window=$(($(date -u +%s) - seconds))
+
+step="asking the log store for the record"
+code=0
+"$here/logs" "$query" --since "$since" --limit "$limit" "$cluster" > "$work/answer" || code=$?
+if ((code != 0)); then
+  explained=1
+  exit "$code"
+fi
+
+# shellcheck disable=SC2034 # failed_step in scripts/lib/cluster.sh names it
+step="reading the store's answer"
+# One JSON object a line, every value a string, a field without a value left out. The group whose
+# lines unpacked to no verdict is the recorder's lines that are no flows.
+# shellcheck disable=SC2016 # jq's own variables.
+jq -s '
+  def text($key): (.[$key] // "") | if type == "string" then . else tojson end;
+  def clean: gsub("[^\\x21-\\x7e]"; "");
+  def listed: try (fromjson | if type == "array" then . else [] end) catch [];
+  def endpoint($side):
+    (text("flow.\($side).workloads") | listed | map(select(type == "object")) | first) as $workload
+    | text("flow.\($side).namespace") as $namespace
+    | text("flow.\($side).pod_name") as $pod
+    | if (($workload.kind // "") | type) == "string" and (($workload.name // "") | type) == "string"
+        and ($workload.kind // "") != "" and ($workload.name // "") != ""
+      then "\($namespace)/\($workload.kind)/\($workload.name)"
+      elif $pod != "" then "\($namespace)/\($pod)"
+      else text("flow.\($side).labels") | listed
+        | map(select(type == "string" and test("^reserved:[a-z0-9-]+$"))) | (first // "reserved:unknown")
+        | sub("^reserved:"; "@") end;
+  def count: text("flows") | if test("^[0-9]{1,15}$") then tonumber else error("a group without a count") end;
+  def row:
+    text("flow.verdict") as $verdict
+    | (text("flow.traffic_direction") | if . == "INGRESS" then "ingress" elif . == "EGRESS" then "egress" else "-" end) as $direction
+    | (if $direction == "egress" then text("flow.source.namespace")
+       elif $direction == "ingress" then text("flow.destination.namespace") else "" end) as $namespace
+    | . as $group
+    | ([["TCP", "tcp"], ["UDP", "udp"], ["SCTP", "sctp"]]
+       | map(. as [$layer, $name] | $group | text("flow.l4.\($layer).destination_port")
+           | select(test("^[0-9]{1,5}$")) | "\(.)/\($name)")
+       | first // "0/other") as $port
+    | (if $verdict == "DROPPED" then text("flow.drop_reason_desc") else "" end) as $reason
+    | [$verdict, $namespace, $direction, endpoint("source"), endpoint("destination"), $port, $reason]
+    | map(clean | if . == "" then "-" else . end);
+  map(if type == "object" then . else error("a group that is no object") end)
+  | {groups: length,
+     other: (map(select(text("flow.verdict") == "") | count) | add // 0),
+     table: (map(select(text("flow.verdict") != "") | {row: row, count: count})
+       | group_by(.row) | map({row: .[0].row, count: (map(.count) | add)})
+       | sort_by([-.count] + .row) | map("\(.count) \(.row | join(" "))"))}' \
+  "$work/answer" > "$work/result" 2> /dev/null
+groups=$(jq -r '.groups' "$work/result")
+other=$(jq -r '.other' "$work/result")
+jq -r '.table[]' "$work/result" > "$work/table"
+
+if [[ -s $work/table ]]; then
+  # A reader that stops early, such as head, ends cat with SIGPIPE: that is not a failure.
+  cat "$work/table" || {
+    code=$?
+    ((code == 141)) || exit "$code"
+  }
+else
+  echo "no dropped or audited flow in the record of the last $since"
+fi
+
+status=0
+if ((other == 1)); then
+  infra_error "1 of the recorder's lines in the last $since is not a flow; just logs '$recorder | unpack_json | filter flow.verdict:\"\"' --since $since $cluster shows it"
+elif ((other > 1)); then
+  infra_error "$other of the recorder's lines in the last $since are not flows; just logs '$recorder | unpack_json | filter flow.verdict:\"\"' --since $since $cluster shows them"
+fi
+if ((groups >= limit)); then
+  infra_error "the store answered with $groups groups, as many as the recipe asks for at most: the table is cut, its least frequent groups left out"
+  status=1
+fi
+
+# shellcheck disable=SC2034 # failed_step in scripts/lib/cluster.sh names it
+step="listing the recorder's pod"
+# Whether the recorder ran through the window, from its container's state: a pod on its way out is
+# not counted. What kubectl prints, a warning or an error that can name the API server's address, is
+# never shown, and of its answer only a time and a state's one-word reason are, each by its shape.
+state=unknown
+if pods=$(kubectl get pods --namespace security-system --selector app.kubernetes.io/name=network-audit \
+  --output json --request-timeout=10s 2> /dev/null); then
+  # shellcheck disable=SC2016 # jq's own variables.
+  state=$(jq -r '
+    [.items[] | select(.metadata.deletionTimestamp == null)] as $pods
+    | [$pods[] | (.status.containerStatuses // [])[] | select(.name == "hubble")] as $containers
+    | [$containers[] | .state.running.startedAt // empty] as $running
+    | if ($pods | length) == 0 then "none"
+      elif ($running | length) > 0 then "running \($running | min)"
+      else ($containers[0] // {}) as $container
+        | "stopped \($container.state.waiting.reason // $container.state.terminated.reason // $pods[0].status.phase // "-") \($container.lastState.terminated.finishedAt // $container.state.terminated.finishedAt // "-")"
+      end' <<< "$pods" 2> /dev/null) || state=unreadable
+fi
+time_shape='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
+read -r kind first second <<< "$state"
+case $kind in
+  running)
+    if [[ $first =~ $time_shape ]] && started=$(date -u -d "$first" +%s 2> /dev/null); then
+      if ((started <= window)); then
+        infra_error "the recorder has run since $first, before the last $since began"
+      else
+        infra_error "the recorder's container started at $first, inside the last $since: what was dropped before that is not in the record"
+        status=1
+      fi
+    else
+      kind=unreadable
+    fi
+    ;;
+  stopped)
+    said=''
+    [[ ! $first =~ ^[A-Za-z]{1,40}$ ]] || said=$first
+    [[ ! $second =~ $time_shape ]] || said+="${said:+; }its container last ended at $second"
+    infra_error "the recorder is not running${said:+ ($said)}: what is dropped meanwhile is not in the record"
+    status=1
+    ;;
+  none)
+    infra_error "no pod of the recorder exists in security-system: nothing is recorded"
+    status=1
+    ;;
+  unknown) ;;
+  *) kind=unreadable ;;
+esac
+case $kind in
+  unknown)
+    infra_error "cannot tell whether the recorder ran through the last $since: listing its pod through the kubeconfig failed"
+    status=1
+    ;;
+  unreadable)
+    infra_error "cannot tell whether the recorder ran through the last $since: the listing of its pod holds no state the recipe reads"
+    status=1
+    ;;
+esac
+explained=1
+exit "$status"

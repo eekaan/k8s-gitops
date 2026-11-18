@@ -136,6 +136,8 @@ kubernetes/apps/base/piraeus-datastore/piraeus-operator/app/ocirepository.yaml	r
 kubernetes/apps/base/security-system/falco/app/ocirepository.yaml	flux	ghcr.io/falcosecurity/charts/falco	tag
 kubernetes/apps/base/security-system/falco/app/ocirepository.yaml	regex	ghcr.io/falcosecurity/charts/falco	tag
 kubernetes/apps/base/security-system/falco/app/values.yaml	regex	docker.io/falcosecurity/falco	tag
+kubernetes/apps/base/security-system/network-audit/app/deployment.yaml	kubernetes	quay.io/cilium/cilium	-
+kubernetes/apps/base/security-system/network-audit/app/deployment.yaml	regex	quay.io/cilium/cilium	image
 kubernetes/apps/base/sso-system/dex/app/ocirepository.yaml	flux	ghcr.io/dexidp/helm-charts/dex	tag
 kubernetes/apps/base/sso-system/dex/app/ocirepository.yaml	regex	ghcr.io/dexidp/helm-charts/dex	tag
 kubernetes/apps/base/sso-system/oauth2-proxy/app/ocirepository.yaml	flux	ghcr.io/oauth2-proxy/charts/oauth2-proxy	tag

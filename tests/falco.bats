@@ -458,7 +458,8 @@ of_security_system() {
   # The overlay selects it with two entries, the namespace directory and the ks.yaml of Falco.
   [ "$(yq '.resources[] | select(test("/security-system(/|$)"))' "$OVERLAY_DIR/kustomization.yaml" | grep -c -x -e '../../base/security-system' -e '../../base/security-system/falco/ks.yaml')" -eq 2 ]
   overlay
-  [ "$(of_security_system "$OVERLAY")" = ConfigMap/security-system/app-template-defaults,Kustomization/flux-system/falco,Namespace/-/security-system,NetworkPolicy/security-system/default-deny ]
+  # The namespace also holds the flow recorder, network-audit, an application of its own.
+  [ "$(of_security_system "$OVERLAY")" = ConfigMap/security-system/app-template-defaults,Kustomization/flux-system/falco,Kustomization/flux-system/network-audit,Namespace/-/security-system,NetworkPolicy/security-system/default-deny ]
   # It waits for the definitions of the monitors it makes and of its network policy, and is Ready
   # once its release is.
   [ "$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "falco") | .spec.dependsOn | map(.name) | join(" ")' "$OVERLAY")" = "prometheus-operator-crds cilium" ]
@@ -466,15 +467,16 @@ of_security_system() {
   run "$REPO/scripts/kubernetes-check" "$REPO"
   echo "$output"
   [ "$status" -eq 0 ]
-  # With only the namespace directory's entry, and without Falco's dashboard, which goes with Falco,
-  # the cluster builds the namespace, its defaults and its default deny, and nothing of Falco.
+  # Without the entry of Falco's ks.yaml, and without Falco's dashboard, which goes with Falco, the
+  # cluster builds the namespace, its defaults, its default deny and the flow recorder, which
+  # stays, and nothing of Falco.
   tree_without '/security-system/falco/ks.yaml$' '/monitoring/falco-dashboard/ks.yaml$'
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]
   overlay "$TREE/kubernetes/apps/overlays/lab-sto2"
-  [ "$(of_security_system "$OVERLAY")" = ConfigMap/security-system/app-template-defaults,Namespace/-/security-system,NetworkPolicy/security-system/default-deny ]
-  # With neither, nor the dashboard, nothing of security-system.
+  [ "$(of_security_system "$OVERLAY")" = ConfigMap/security-system/app-template-defaults,Kustomization/flux-system/network-audit,Namespace/-/security-system,NetworkPolicy/security-system/default-deny ]
+  # With no entry of security-system, nor the dashboard, nothing of security-system.
   tree_without '/security-system(/|$)' '/monitoring/falco-dashboard/ks.yaml$'
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
