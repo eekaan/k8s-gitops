@@ -101,6 +101,10 @@ network-audit since='24h' cluster='lab-sto2':
 grafana cluster='lab-sto2':
     scripts/grafana {{ quote(cluster) }}
 
+# Forward a local port, LOCUST_PORT or 8089, on 127.0.0.1 only, to Locust's master on a cluster through its kubeconfig until Ctrl-C; prints the local URL and that the interface has no sign-in, so that anything on this machine can start a test through it while the forward runs
+locust cluster='lab-sto2':
+    scripts/locust {{ quote(cluster) }}
+
 # Print the logs a LogsQL query matches, one line per record, the oldest first, through the Kubernetes API's service proxy to VictoriaLogs: just logs 'kubernetes.pod_namespace:monitoring error' [--since 15m] [--limit 200] [cluster]; --since is a number with s, m, h, d or w; fails with the reason when the API does not answer or the store refuses the query
 [positional-arguments]
 logs *args:

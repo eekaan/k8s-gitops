@@ -1,0 +1,82 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/deployment-apps-v1.json
+# Locust's master: it serves the web interface on 8089 and takes the workers on 5557, hands them the
+# users to run and the host to run them against when a test starts, and gathers their statistics.
+# It runs no users itself and sends nothing. One replica, replaced rather than rolled: two masters
+# would split the workers between them. Every option is an argument, none a LOCUST_* variable, and
+# none starts a test: only a request to the interface does (docs/kubernetes.md, Locust).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: locust-master
+  labels:
+    app.kubernetes.io/name: locust
+    app.kubernetes.io/component: master
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: locust
+      app.kubernetes.io/component: master
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: locust
+        app.kubernetes.io/component: master
+    spec:
+      # Locust calls no API.
+      automountServiceAccountToken: false
+      # Locust reads its options from LOCUST_* variables as well, and the variables a Service of the
+      # namespace would hand every pod are named after it: one named locust-web would give
+      # LOCUST_WEB_PORT=tcp://<address>:<port>, which Locust parses as its web port and refuses.
+      enableServiceLinks: false
+      securityContext:
+        # The image's user is the name locust, uid and gid 1000. The kubelet cannot hold a name to
+        # runAsNonRoot and refuses to start the container, so the numbers are given.
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: locust
+          image: docker.io/locustio/locust:2.47.0@sha256:90fdf5b9632e67bb556d17784095652871be68318c5074731d911d4caaa42cc3
+          args:
+            - --master
+            - --locustfile=/mnt/locust/locustfile.py
+            - --host=${LOCUST_TARGET}
+            - --web-port=8089
+            - --master-bind-port=5557
+          ports:
+            - name: web
+              containerPort: 8089
+            - name: master
+              containerPort: 5557
+          # The interface's page, which asks for no sign-in.
+          readinessProbe:
+            httpGet:
+              path: /
+              port: web
+          # Measured offline: about 61 MiB resident at its peak, and under a hundredth of a core.
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: locustfile
+              mountPath: /mnt/locust
+              readOnly: true
+      volumes:
+        - name: locustfile
+          configMap:
+            name: locust-locustfile
