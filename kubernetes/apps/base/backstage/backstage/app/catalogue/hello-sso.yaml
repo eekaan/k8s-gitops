@@ -16,6 +16,7 @@ spec:
   owner: group:default/operators
   system: demo
   dependsOn:
+    - component:default/blackbox-exporter
     - resource:default/gateway-public
     - component:default/hello
     - component:default/oauth2-proxy

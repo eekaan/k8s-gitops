@@ -16,6 +16,7 @@ spec:
   owner: group:default/operators
   system: sign-in
   dependsOn:
+    - component:default/blackbox-exporter
     - component:default/cilium
     - component:default/external-secrets
     - resource:default/gateway-public

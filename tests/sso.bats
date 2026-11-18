@@ -564,7 +564,7 @@ secret_targets() {
   [ "$status" -eq 0 ]
   rm -rf "$TREE"
   # Each application that is a dependency, left out in turn, is refused by name.
-  for dependency in external-secrets openbao-store gateway-public cilium; do
+  for dependency in external-secrets openbao-store gateway-public cilium blackbox-exporter; do
     for app in dex oauth2-proxy; do
       tree_without "$dependency"
       run "$REPO/scripts/kubernetes-check" "$TREE"

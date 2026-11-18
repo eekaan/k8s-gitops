@@ -1,0 +1,31 @@
+---
+# Endpoints written by hand for the two Services a Probe may name, which the cluster's Services then
+# lead to beside or instead of the pods their selectors select: an EndpointSlice of the blackbox
+# exporter's Service, and the Endpoints of the public Gateway's proxies' Service, whose name the
+# endpoints controller mirrors into an EndpointSlice.
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: blackbox-exporter-by-hand
+  namespace: monitoring
+  labels:
+    kubernetes.io/service-name: blackbox-exporter
+addressType: IPv4
+endpoints:
+  - addresses:
+      - 192.0.2.10
+ports:
+  - name: http
+    port: 9963
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: envoy-envoy-gateway-system-public-5ea56ca9
+  namespace: envoy-gateway-system
+subsets:
+  - addresses:
+      - ip: 192.0.2.10
+    ports:
+      - name: https-443
+        port: 9963

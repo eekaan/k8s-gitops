@@ -30,7 +30,7 @@ spec:
   # Password generator are External Secrets', and the encryption key's and the backups' read the
   # store, which openbao-store makes and is Ready once the store is; the volume and its snapshots
   # come from LINSTOR's default classes and the backups from VolSync; the route names the public
-  # Gateway.
+  # Gateway, and its Probe is answered by the blackbox exporter.
   dependsOn:
     - name: cloudnative-pg
     - name: plugin-barman-cloud
@@ -40,6 +40,7 @@ spec:
     - name: volsync
     - name: linstor-cluster
     - name: gateway-public
+    - name: blackbox-exporter
   # Ready once the release is, which is once n8n answers its readiness endpoint with the database,
   # the volume and the encryption key in place: until an operator has written the key to the store
   # (just bao-put ai-system/n8n encryption-key), the pod waits for its Secret.

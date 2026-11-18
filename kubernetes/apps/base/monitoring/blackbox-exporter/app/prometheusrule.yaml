@@ -1,0 +1,85 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/prometheusrule-monitoring-v1.json
+# Alerts on what the Probes of the public Gateway's hostnames find (docs/kubernetes.md, Probes). The
+# Probes all set the job name public-endpoints and a label hostname, and the series are the blackbox
+# exporter's HTTP prober's: probe_success, probe_http_status_code, which is 0 while no response came,
+# and probe_ssl_earliest_cert_expiry, the expiry of the served certificate as a Unix time
+# (https://github.com/prometheus/blackbox_exporter#metrics), and Prometheus' own up of each Probe's
+# scrape. Tests: tests/rules/blackbox-exporter.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: blackbox-exporter-alerts
+  namespace: monitoring
+spec:
+  groups:
+    - name: public-endpoints
+      rules:
+        # No response at all: nothing answered the connection, the TLS handshake failed, which a
+        # certificate the authority did not sign or for another name does, or the request timed out.
+        - alert: PublicEndpointDown
+          expr: |
+            (probe_success{job="public-endpoints"} == 0)
+              and on (job, instance, hostname)
+            (probe_http_status_code{job="public-endpoints"} == 0)
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: A public hostname gets no answer through the Gateway
+            description: The probe of {{ $labels.hostname }} through the Gateway has had no answer for 5 minutes, so the connection, the TLS handshake or the request fails.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#publicendpointdown
+        # An answer the module does not accept: a 503 for a route whose backend is gone, a 404 for
+        # one the Gateway does not hold, a redirect that is not the 301 the module wants.
+        - alert: PublicEndpointWrongStatus
+          expr: |
+            (probe_success{job="public-endpoints"} == 0)
+              and on (job, instance, hostname)
+            (probe_http_status_code{job="public-endpoints"} != 0)
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: A public hostname is answered with a status the probe does not accept
+            description: The probe of {{ $labels.hostname }} through the Gateway has been answered with a status it does not accept for 5 minutes, so the Gateway answers but not as the route should.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#publicendpointwrongstatus
+        # The two certificate alerts do not overlap: this one is for the last 14 days but not the
+        # last 3, which the next one is for, so one hostname raises one of them at a time. They read
+        # the certificate the proxies serve, where cert-manager's CertManagerCertificateExpiringSoon
+        # reads the one it stored: a renewal that fails raises both, and these alone see a stored
+        # certificate the proxies do not serve, or an expiry while cert-manager is not scraped.
+        - alert: PublicCertificateExpiring
+          expr: |
+            (probe_ssl_earliest_cert_expiry{job="public-endpoints"} - time() < 14 * 86400)
+              and
+            (probe_ssl_earliest_cert_expiry{job="public-endpoints"} - time() >= 3 * 86400)
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: A public certificate expires within 14 days
+            description: The certificate the Gateway serves for {{ $labels.hostname }} expires within 14 days and has not been renewed.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#publiccertificateexpiring
+        - alert: PublicCertificateExpiryImminent
+          expr: probe_ssl_earliest_cert_expiry{job="public-endpoints"} - time() < 3 * 86400
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: A public certificate expires within 3 days
+            description: The certificate the Gateway serves for {{ $labels.hostname }} expires within 3 days and has not been renewed.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#publiccertificateexpiryimminent
+        # A declared Probe whose scrape fails: Prometheus asks the exporter for the probe and gets no
+        # answer it can read, as when the exporter is gone, the Probe names another prober or a
+        # module the exporter does not have, or the probe outlasts the scrape. The alerts above say
+        # nothing then, as the probe writes no sample. A cluster that declares no Probe has no such
+        # scrape, so nothing fires there.
+        - alert: ProbeNotRunning
+          expr: up{job="public-endpoints"} == 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: A probe of a public hostname writes no samples
+            description: The probe of {{ $labels.hostname }} has not been scraped through the exporter for 10 minutes, so the hostname is not being checked.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#probenotrunning

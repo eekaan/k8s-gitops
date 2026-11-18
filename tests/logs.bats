@@ -1266,7 +1266,8 @@ paths_record() {
   domain="$(yq -e '.CLUSTER_DOMAIN' "$EXAMPLE")"
   # The application beside the store, in its namespace, as the overlay applies it: shaped as
   # demo/hello-sso, with the component, the route's and the host's names, waiting, after the Gateway,
-  # the store and the sign-in. No patch of the overlay changes it.
+  # the store, the sign-in and the exporter that answers its Probe. No patch of the overlay changes
+  # it.
   ks="$REPO/kubernetes/apps/base/$NAMESPACE/$ROUTE_APP/ks.yaml"
   overlay
   [ "$(yq -o json -I0 '.spec | sort_keys(..)' "$ks")" \
@@ -1277,23 +1278,23 @@ paths_record() {
   [ "$(yq '.spec.targetNamespace' "$ks")" = "$NAMESPACE" ]
   [ "$(yq -o json -I0 '.spec.components' "$ks")" = '["../../../../../components/sso"]' ]
   [ "$(yq -o json -I0 '.spec.postBuild.substitute | sort_keys(.)' "$ks")" = '{"SSO_HOSTNAME":"logs","SSO_ROUTE":"logs"}' ]
-  [ "$(yq '.spec.dependsOn | map(.name) | sort | join(" ")' "$ks")" = "gateway-public oauth2-proxy victoria-logs" ]
+  [ "$(yq '.spec.dependsOn | map(.name) | sort | join(" ")' "$ks")" = "blackbox-exporter gateway-public oauth2-proxy victoria-logs" ]
   [ "$(yq '.spec.wait' "$ks")" = true ]
   [ "$(yq -o json -I0 '.spec.sourceRef' "$ks")" = "{\"kind\":\"ExternalArtifact\",\"name\":\"$ROUTE_APP\"}" ]
   # The store's application waits, so the route is applied once the store's release is Ready.
   [ "$(NAME="$STORE" yq -N 'select(.kind == "Kustomization" and .metadata.name == strenv(NAME)) | .spec.wait' "$OVERLAY")" = true ]
   # The namespace's routes may attach to the public Gateway's https listener.
   [ "$(yq -N "select(.kind == \"Namespace\" and .metadata.name == \"$NAMESPACE\") | .metadata.labels[\"k8s-gitops/gateway\"]" "$OVERLAY")" = public ]
-  # app/ holds the one HTTPRoute; the component adds the policy and the sign-in route, all in
-  # monitoring.
+  # app/ holds the one HTTPRoute and its Probe (tests/probes.bats); the component adds the policy and
+  # the sign-in route, all in monitoring.
   # shellcheck disable=SC2016 # The file holds a ${NAME} reference, not for the shell to expand.
-  [ "$(yq -N 'select(.kind != "Kustomization") | .kind + "/" + .metadata.name' "$REPO/kubernetes/apps/base/$NAMESPACE/$ROUTE_APP"/app/*.yaml)" \
-    = 'HTTPRoute/${SSO_ROUTE}' ]
-  [ "$(yq -o json -I0 '.resources' "$REPO/kubernetes/apps/base/$NAMESPACE/$ROUTE_APP/app/kustomization.yaml")" = '["httproute.yaml"]' ]
+  [ "$(yq -N 'select(.kind != "Kustomization") | .kind + "/" + .metadata.name' "$REPO/kubernetes/apps/base/$NAMESPACE/$ROUTE_APP"/app/*.yaml | paste -sd' ' -)" \
+    = 'HTTPRoute/${SSO_ROUTE} Probe/${SSO_ROUTE}' ]
+  [ "$(yq -o json -I0 '.resources' "$REPO/kubernetes/apps/base/$NAMESPACE/$ROUTE_APP/app/kustomization.yaml")" = '["httproute.yaml","probe.yaml"]' ]
   built "$ROUTE_APP"
   objects="$(yq -N 'select(.kind != null) | .kind + "/" + .metadata.namespace + "/" + .metadata.name' "$BUILT" | sort | paste -sd' ' -)"
   echo "built: $objects"
-  [ "$objects" = "HTTPRoute/monitoring/logs HTTPRoute/monitoring/logs-oauth2 SecurityPolicy/monitoring/logs" ]
+  [ "$objects" = "HTTPRoute/monitoring/logs HTTPRoute/monitoring/logs-oauth2 Probe/monitoring/logs SecurityPolicy/monitoring/logs" ]
   # The route: on the public Gateway's https listener, for logs under the cluster's domain.
   route="$(yq -N -o json -I0 'select(.kind == "HTTPRoute" and .metadata.name == "logs")' "$BUILT")"
   [ "$(jq -cS '.spec.parentRefs' <<<"$route")" = '[{"name":"public","namespace":"envoy-gateway-system","sectionName":"https"}]' ]
@@ -1642,7 +1643,7 @@ YAML
   echo "$output"
   [ "$status" -eq 0 ]
   # Each application it names, left out, is refused, naming both.
-  for dependency in "$STORE" gateway-public oauth2-proxy; do
+  for dependency in "$STORE" gateway-public oauth2-proxy blackbox-exporter; do
     tree_without "$dependency"
     run "$REPO/scripts/kubernetes-check" "$TREE"
     echo "without $dependency: status $status"

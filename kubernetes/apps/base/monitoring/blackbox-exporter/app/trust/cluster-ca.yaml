@@ -1,0 +1,27 @@
+---
+# The exporter's trust while the public Gateway's certificate comes from the cluster's own CA, the
+# ClusterIssuer cluster-ca (docs/kubernetes.md, Probes): that authority's public certificate alone.
+# It is the one key ca.crt of the Secret cert-manager makes for trust-certificate.yaml, which the
+# same issuer signs, and not that Secret's private key. The volume follows the Secret, and the
+# exporter reads the file at each probe. Both modules over https verify against it.
+extraVolumes:
+  - name: probe-trust
+    secret:
+      secretName: blackbox-exporter-trust
+      items:
+        - key: ca.crt
+          path: ca.crt
+extraVolumeMounts:
+  - name: probe-trust
+    mountPath: /etc/probe-trust
+    readOnly: true
+config:
+  modules:
+    public_https:
+      http:
+        tls_config:
+          ca_file: /etc/probe-trust/ca.crt
+    public_https_signin:
+      http:
+        tls_config:
+          ca_file: /etc/probe-trust/ca.crt

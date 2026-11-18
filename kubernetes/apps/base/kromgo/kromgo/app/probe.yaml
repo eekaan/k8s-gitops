@@ -1,0 +1,29 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/monitoring.coreos.com/probe_v1.json
+# kromgo's route, probed from inside the cluster by the blackbox exporter as hello's is
+# (docs/kubernetes.md, Probes): the public Gateway's proxies' Service by its cluster name, over https,
+# with the hostname as the parameter that sets the Host header and the name the TLS handshake
+# verifies. The route sends only the badge paths to kromgo, so the path is one badge of config.yaml,
+# which kromgo answers 200 with its SVG; that form is 200 too when the badge's query fails
+# (errorResponse in kromgo's internal/kromgo/response.go), so the probe proves the route and kromgo,
+# not Prometheus. Each probe runs that badge's query once. The module takes a 200 only.
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: kromgo
+spec:
+  jobName: public-endpoints
+  module: public_https
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+  targets:
+    staticConfig:
+      static:
+        - https://envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local/badges/cluster_node_count
+      labels:
+        hostname: kromgo.${CLUSTER_DOMAIN}
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname

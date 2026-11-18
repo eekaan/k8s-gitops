@@ -1,0 +1,27 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ocirepository.yaml
+  - helmrelease.yaml
+  - trust-certificate.yaml
+  - prometheusrule.yaml
+
+configMapGenerator:
+  - name: blackbox-exporter-values
+    files:
+      - values.yaml
+  # The trust of each issuer the probes can verify, one key each, of which the HelmRelease reads the
+  # one the cluster chooses.
+  - name: blackbox-exporter-trust-values
+    files:
+      - trust/cluster-ca.yaml
+      - trust/letsencrypt-production.yaml
+      - trust/letsencrypt-staging.yaml
+generatorOptions:
+  annotations:
+    kustomize.toolkit.fluxcd.io/substitute: disabled
+
+configurations:
+  - kustomizeconfig.yaml

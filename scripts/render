@@ -13,7 +13,9 @@
 #     <registry>/<repository>/<chart>/<version>/<chart>.tgz for an OCI HelmRepository and
 #     https:/<host>/<path>/<chart>/<version>/<chart>.tgz for a classic one; a source that is
 #     anything else, names a credential or pins a range is refused;
-#   - the values of its valuesFrom ConfigMaps, then its own spec.values over them;
+#   - the values of its valuesFrom ConfigMaps, then its own spec.values over them; an entry whose
+#     ConfigMap or key is missing fails the render, as it fails the release, unless it is optional,
+#     which skips it;
 #   - helm-controller's release name and namespace, the Kubernetes version in versions.yaml, every
 #     API version a definition in the render serves, as on a cluster where all of them exist, and the
 #     chart's own definitions: an apiextensions.k8s.io/v1 CustomResourceDefinition whose group, kind
@@ -294,7 +296,7 @@ named_objects() {
 # chart, values and release, in $tmp/releases/CLUSTER/APP/INDEX/.
 release() {
   local cluster=$1 app=$2 index=$3 hr=$4 name namespace where repo url tag pulled release target
-  local work="$tmp/releases/$cluster/$app/$index" built="$tmp/built/$cluster/$app.yaml" i entry
+  local work="$tmp/releases/$cluster/$app/$index" built="$tmp/built/$cluster/$app.yaml" i entry optional
   local chart version type field refused
   local -a tgz pull
   # Every key the render reads, by its own name: one that folds to a field without being it is
@@ -393,11 +395,27 @@ release() {
     jq -e '.kind == "ConfigMap"' <<<"$entry" >/dev/null ||
       die "$where: values from a $(jq -r '(.kind // "(no kind)") | tostring | gsub("[[:cntrl:]]"; "?")' <<<"$entry") are not rendered, only from a ConfigMap of the application"
     jq -e '(.targetPath // "") == ""' <<<"$entry" >/dev/null || die "$where: values from a ConfigMap into a targetPath are not rendered, only whole values"
+    # A key the ConfigMap does not hold fails the release in helm-controller unless the entry is
+    # optional, which skips it (fluxcd/pkg chartutil, ChartValuesFromReferences): KEY marks its absence.
     named_objects "$built" ConfigMap "$(jq -c --arg ns "$namespace" '{"name": .name, "namespace": $ns}' <<<"$entry")" |
-      jq -r --argjson entry "$entry" '.data[$entry.valuesKey // "values.yaml"] // ""' >"$work/values-$i.yaml" ||
+      jq -r --argjson entry "$entry" '($entry.valuesKey // "values.yaml") as $key
+        | if (.data // {}) | has($key) then "VALUES", .data[$key] else "KEY" end' >"$work/values-$i.read" ||
       die "$where: the values of ConfigMap $(jq -r '.name | tostring | gsub("[[:cntrl:]]"; "?")' <<<"$entry") cannot be read"
-    [[ -s $work/values-$i.yaml || $(jq -r '.optional // false' <<<"$entry") == true ]] ||
-      die "$where: values from ConfigMap $(jq -r '.name | tostring | gsub("[[:cntrl:]]"; "?")' <<<"$entry") are not in the application"
+    optional=$(jq -r '.optional // false' <<<"$entry")
+    case $(head -n 1 "$work/values-$i.read") in
+      VALUES) tail -n +2 "$work/values-$i.read" >"$work/values-$i.yaml" ;;
+      KEY)
+        [[ $optional == true ]] ||
+          die "$where: values from ConfigMap $(jq -r '.name | tostring | gsub("[[:cntrl:]]"; "?")' <<<"$entry") name the key $(jq -r '.valuesKey // "values.yaml" | tostring | gsub("[[:cntrl:]]"; "?")' <<<"$entry"), which the ConfigMap does not hold, so helm-controller would refuse the release"
+        : >"$work/values-$i.yaml"
+        ;;
+      *)
+        [[ $optional == true ]] ||
+          die "$where: values from ConfigMap $(jq -r '.name | tostring | gsub("[[:cntrl:]]"; "?")' <<<"$entry") are not in the application"
+        : >"$work/values-$i.yaml"
+        ;;
+    esac
+    rm -f "$work/values-$i.read"
   done < <(jq -c '.spec.valuesFrom // [] | .[]' <<<"$hr")
   jq '.spec.values // {}' <<<"$hr" >"$work/values-inline.yaml"
   # helm-controller's release: spec.releaseName, or the HelmRelease's name after its targetNamespace.

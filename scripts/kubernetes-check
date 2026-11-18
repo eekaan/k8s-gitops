@@ -616,6 +616,41 @@ for dir in kubernetes/clusters/*/; do
         ;;
     esac
   done <"$tmp/database-users"
+
+  # The blackbox exporter verifies the certificate the public Gateway serves against the trust of
+  # the issuer it comes from, which it holds as values for each issuer, one file each in its
+  # app/trust/ (letsencrypt-staging's skips verification, as no client trusts that chain). A
+  # cluster that enables it with an issuer it holds no values for, for the Gateway's certificate
+  # (PUBLIC_ISSUER) or for its own probes (PROBE_ISSUER), would see its release fail, as the key
+  # the HelmRelease reads is not there, and no probe run. That the two name one issuer is
+  # tests/probes.bats', which reads it from the render of every cluster.
+  trusted=() trust_dir=""
+  for file in kubernetes/apps/base/*/blackbox-exporter/app/trust/*.yaml; do
+    trust_dir="${file%/*}"
+    file="${file##*/}"
+    trusted+=("${file%.yaml}")
+  done
+  if ! jq -rs 'def clean: tostring | gsub("[^A-Za-z0-9._-]"; "?");
+    ($ARGS.positional) as $trusted
+    | (map(select(.metadata.name == "blackbox-exporter")) | first) as $probe
+    | (map(select(.metadata.name == "gateway-public")) | first) as $gateway
+    | if $probe == null then empty else
+        ((if $gateway == null then empty else ["Gateway", ($gateway.spec.postBuild.substitute.PUBLIC_ISSUER // "cluster-ca")] end),
+          ["probes", ($probe.spec.postBuild.substitute.PROBE_ISSUER // "cluster-ca")])
+        | select(.[1] as $issuer | $trusted | index($issuer) | not)
+        | (.[0] + "|" + (.[1] | clean))
+      end' --args "${trusted[@]}" <"$tmp/dependents.jsonl" >"$tmp/probe-trust"; then
+    fail "$dir/ks.yaml: cannot read the Kustomizations built for $overlay, so the probes' trust was not checked"
+    continue
+  fi
+  while IFS='|' read -r whose issuer; do
+    file="${ks_name_file[blackbox-exporter]:-$dir/ks.yaml}"
+    case $whose in
+      Gateway) what="probes the public Gateway of $overlay, whose certificate comes from $issuer" ;;
+      *) what="is given the issuer $issuer to trust in $overlay" ;;
+    esac
+    fail "$file: Kustomization blackbox-exporter $what, and the probes hold no trust for $issuer, only for ${trusted[*]:-nothing}, so the exporter's release would fail and nothing be probed; add ${trust_dir:-its app/trust}/$issuer.yaml with the exporter's values for that issuer and list it in the application's kustomization.yaml (docs/kubernetes.md, Probes)"
+  done <"$tmp/probe-trust"
 done
 
 if ((failures > 0)); then

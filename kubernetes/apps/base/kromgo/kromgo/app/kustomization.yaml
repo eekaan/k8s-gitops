@@ -7,6 +7,7 @@ resources:
   - httproute.yaml
   - ocirepository.yaml
   - ciliumnetworkpolicy.yaml
+  - probe.yaml
 
 # The chart's values and kromgo's configuration, each in a file of its own and a ConfigMap whose
 # name carries a hash of it, so a change to either rolls the release. Neither goes through Flux's

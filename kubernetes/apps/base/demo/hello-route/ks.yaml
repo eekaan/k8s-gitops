@@ -18,10 +18,11 @@ spec:
       WAF_MODE: "On"
   # The route names the public Gateway and the hello Service; the firewall's policy is of a kind
   # envoy-gateway-crds defines, which gateway-public waits for through envoy-gateway. A cluster
-  # without the Gateway cannot enable it.
+  # without the Gateway cannot enable it. Its Probe is answered by the blackbox exporter.
   dependsOn:
     - name: gateway-public
     - name: hello
+    - name: blackbox-exporter
   wait: true
   # Ready only once the controller has accepted the firewall's policy at its generation: the policy
   # fails open, so a module the leading controller replica could not fetch shows here, and not only

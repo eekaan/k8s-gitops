@@ -769,6 +769,84 @@ E
   done
 }
 
+# probe_ports RENDER: the container port of the proxies each Probe of RENDER asks for, sorted and
+# unique: a Probe's target names the proxies' Service, which takes the port of the public Gateway's
+# listener of the target's scheme, https or http, where it names none, and Envoy Gateway serves a
+# listener under 1024 on its port plus 10000. A target that names a port, or a scheme no listener
+# has, fails it.
+probe_ports() {
+  (set -o pipefail; yq -N -o json -I0 'select(. != null)' "$1"/*/*/Probe.monitoring.coreos.com_*.yaml \
+    "$1"/*/*/Gateway.gateway.networking.k8s.io_*.yaml | jq -s -r '
+    ([ .[] | select(.kind == "Gateway" and .metadata.namespace == "envoy-gateway-system" and .metadata.name == "public") ][0]
+      // error("no Gateway public")) as $gw
+    | [ .[] | select(.kind == "Probe") | .spec.targets.staticConfig.static[]
+        | capture("^(?<scheme>https?)://(?<host>[^/:]+)(?<port>:[0-9]+)?(/|$)") // error("the target \(.) is not http or https")
+        | if .port != null then error("the target names the port \(.port), which this test does not map to a listener") else . end
+        | .scheme | ascii_upcase as $protocol
+        | ([ $gw.spec.listeners[] | select(.protocol == $protocol) | .port ] | unique
+           | if length == 1 then .[0] else error("the Gateway has not one listener of \($protocol)") end)
+        | if . < 1024 then . + 10000 else . end ]
+    | unique | map(tostring) | join(" ")')
+}
+
+@test "The probes of the public hostnames reach the Gateway's listeners from inside the cluster, and no other pod does" {
+  real_render
+  local exporter ports port pod pods taken=()
+  # The exporter is the workload whose pods the Service of the Probes' prober selects: the prober is
+  # that Service's cluster name and port, the same for every Probe.
+  exporter=$(yq -N -o json -I0 'select(. != null)' "$REAL"/*/*/Probe.monitoring.coreos.com_*.yaml "$REAL"/*/*/Service_*.yaml \
+    "$REAL"/*/*/Deployment.apps_*.yaml | jq -s -r '
+    ([ .[] | select(.kind == "Probe") | .spec.prober.url ] | unique
+      | if length == 1 then .[0] else error("the Probes name not one prober: \(.)") end
+      | capture("^(?<name>[a-z0-9-]+)\\.(?<ns>[a-z0-9-]+)\\.svc\\.cluster\\.local:(?<port>[0-9]+)$")
+      // error("the prober is no Service by its cluster name")) as $p
+    | ([ .[] | select(.kind == "Service" and .metadata.name == $p.name and .metadata.namespace == $p.ns) ][0]
+      // error("no Service \($p.ns)/\($p.name)")) as $svc
+    | [ .[] | select(.kind == "Deployment" and .metadata.namespace == $p.ns)
+        | select(.spec.template.metadata.labels as $l | $svc.spec.selector | to_entries | all(.[]; $l[.key] == .value))
+        | "\(.metadata.namespace)/Deployment/\(.metadata.name)" ]
+    | if length == 1 then .[0] else error("not one Deployment behind \($p.ns)/\($p.name)") end')
+  echo "the exporter: $exporter"
+  [ "$exporter" = monitoring/Deployment/blackbox-exporter ]
+  # A Probe's target is the proxies' Service by its cluster name (tests/probes.bats), whose address
+  # Cilium translates to a proxy's before policy applies: the proxies see the exporter's pods, not
+  # the world, on the container port of the listener the target's scheme names.
+  ports=$(probe_ports "$REAL")
+  echo "the listener ports the Probes ask for: $ports"
+  [ "$ports" = "10080 10443" ]
+  for port in $ports; do
+    allowed "$VIEW" "$exporter" "$PROXY" "$port/tcp"
+  done
+  # And no other port of the proxies: not their readiness, shutdown, stats or admin port.
+  for port in 19000 19001 19002 19003 22; do
+    denied "$VIEW" "$exporter" "$PROXY" "$port/tcp"
+  done
+  # A probe goes through the proxies: the exporter reaches no backend in a namespace that denies by
+  # default, nor the Gateway's controller.
+  denied "$VIEW" "$exporter" demo/Deployment/hello 8080/tcp
+  denied "$VIEW" "$exporter" "$KROMGO" 8080/tcp
+  denied "$VIEW" "$exporter" envoy-gateway-system/Deployment/envoy-gateway 18000/tcp
+  # The exporter's are the only pods the proxies take on those ports from inside the cluster: every
+  # workload of the render, in every namespace, and the pods the operators make at run time.
+  mapfile -t pods < <(yq -N -o json -I0 'select(. != null)' "$VIEW"/*/*/*.yaml | jq -r '
+    select(.kind | IN("Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob", "Pod"))
+    | select((.metadata.namespace // "") != "") | "\(.metadata.namespace)/\(.kind)/\(.metadata.name)"' | sort -u)
+  [ "${#pods[@]}" -gt 30 ]
+  pods+=("$PROMETHEUS" "$MOVER" "$N8N_DB" "$STORAGE" "$OTHER_APP")
+  for pod in "${pods[@]}"; do
+    for port in $ports; do
+      run "$REPO/scripts/network-policy-check" --reach-ingress "$VIEW" "$pod" "$PROXY" "$port/tcp"
+      case $status in
+        0) taken+=("$pod:$port") ;;
+        1) ;;
+        *) echo "no answer for $pod on $port: $output"; return 1 ;;
+      esac
+    done
+  done
+  echo "taken on the listener ports from inside the cluster, of ${#pods[@]} sources: ${taken[*]}"
+  [ "${taken[*]}" = "$exporter:10080 $exporter:10443" ]
+}
+
 @test "A pod of an application cannot reach the secret store, the storage controller or another application" {
   real_render
   local pods=(demo/Deployment/hello demo/Deployment/volsync-demo "$MOVER" "$KROMGO" "$BACKSTAGE" "$PGDUMP" "$FALCO")

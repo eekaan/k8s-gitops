@@ -10,12 +10,14 @@ spec:
   targetNamespace: sso-system
   # The ExternalSecrets and the Password generator are External Secrets', and the GitHub client's
   # read the store, which openbao-store makes and is Ready once the store is; the route names the
-  # public Gateway; its CiliumNetworkPolicies are a kind Cilium's operator defines.
+  # public Gateway, and its Probe is answered by the blackbox exporter; its CiliumNetworkPolicies are
+  # a kind Cilium's operator defines.
   dependsOn:
     - name: external-secrets
     - name: openbao-store
     - name: gateway-public
     - name: cilium
+    - name: blackbox-exporter
   # Ready once dex answers its readiness endpoint, which needs the GitHub client's ID and secret:
   # until the owner has written them to the store (just bao-put sso-system/dex), the pods wait for
   # their Secret and the application reports that it is not Ready.

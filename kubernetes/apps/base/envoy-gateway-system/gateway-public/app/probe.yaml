@@ -1,0 +1,28 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/monitoring.coreos.com/probe_v1.json
+# The redirect of the http listener, probed from inside the cluster by the blackbox exporter
+# (docs/kubernetes.md, Probes): plain HTTP to the proxies' Service, by its cluster name, which must
+# answer 301 and is not followed, for the apex of the cluster's domain, which the redirect takes like
+# any other host. The Service's name is Envoy Gateway's for this Gateway: envoy-<namespace>-<name>-
+# <the first 8 characters of the SHA-256 of "<namespace>/<name>">; tests/probes.bats derives it and
+# fails when it differs.
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: https-redirect
+spec:
+  jobName: public-endpoints
+  module: public_http_redirect
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+  targets:
+    staticConfig:
+      static:
+        - http://envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local/
+      labels:
+        hostname: ${CLUSTER_DOMAIN}
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname

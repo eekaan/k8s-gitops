@@ -18,11 +18,12 @@ spec:
   # The route names the public Gateway and the store's Service, and the policy names oauth2-proxy's
   # Service, which the grant in its namespace lets this one reach. A cluster without any of them
   # cannot enable it, and the route is applied only once oauth2-proxy is Ready, so no request reaches
-  # the store before the sign-in can answer for it.
+  # the store before the sign-in can answer for it. Its Probe is answered by the blackbox exporter.
   dependsOn:
     - name: gateway-public
     - name: victoria-logs
     - name: oauth2-proxy
+    - name: blackbox-exporter
   wait: true
   sourceRef:
     kind: ExternalArtifact
