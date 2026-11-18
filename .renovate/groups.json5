@@ -93,5 +93,12 @@
       matchPackageNames: ["controlplaneio-fluxcd/**", "ghcr.io/controlplaneio-fluxcd/**"],
       groupName: "Flux Operator",
     },
+    {
+      // tests/open-feature-operator.bats fails unless the operator's image is of the version the
+      // chart's own values default to.
+      description: "The OpenFeature Operator: its chart and the operator's image the chart runs",
+      matchPackageNames: ["ghcr.io/open-feature/charts/open-feature-operator", "ghcr.io/open-feature/open-feature-operator"],
+      groupName: "OpenFeature Operator",
+    },
   ],
 }

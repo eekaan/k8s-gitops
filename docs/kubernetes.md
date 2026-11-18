@@ -409,8 +409,10 @@ On what Flux builds:
   exception is one line of `.image-allowlist`: the application, the image as rendered, and the
   reason, which the check requires. Images an object names anywhere else are not read, and their
   pins are Renovate's or a change by hand to keep: the image list of the Piraeus operator's
-  ConfigMap, Envoy Gateway's configuration ConfigMap, the Grafana resource's `spec.version` and
-  the FluxInstance's `spec.distribution`.
+  ConfigMap, Envoy Gateway's configuration ConfigMap, the Grafana resource's `spec.version`,
+  the FluxInstance's `spec.distribution`, and the images the OpenFeature Operator puts into other
+  pods, which reach it as environment variables and which `tests/open-feature-operator.bats` holds
+  to a tag and a digest ([OpenFeature Operator](#openfeature-operator)).
 
 `kubernetes-validate` runs the render once, so it pulls the charts as `just render-check` does, and
 the `static` group runs both, each pulling them. Sharing them would take a directory that outlives
@@ -596,6 +598,7 @@ once it is not, and the agents' rendered configuration agrees.
 | `backstage` | default deny | Backstage takes the proxies and the kubelet's probes on 7007 and reaches the resolver and its database on 5432; the database takes the operator, its own pods, Backstage, the dump job, Prometheus and the kubelet's probes, and reaches its own pods, the resolver and the API server, and its instances, for their Barman Cloud sidecars, the object storage on 443; the dump job reaches the resolver, the database and the world on 443. |
 | `security-system` | default deny | Falco takes Prometheus' scrape and the kubelet's probes on 8765, and reaches the resolver alone. |
 | `crowdsec` | default deny | the local API takes the agent on 8080, Prometheus on 6060 and the kubelet's probes, and sends nothing; the agent takes Prometheus and the kubelet on 6060 and reaches the resolver, the local API and the API server on 443 and 6443; below. |
+| `open-feature-operator` | default deny | the OpenFeature Operator takes the kubelet's probes on 8081, Prometheus' scrape on 8080 and the API server's calls to its webhooks on 9443, and reaches the API server alone. |
 | `ai-system` | listed | applications whose allows are not written, not a namespace that cannot have the posture. n8n takes the proxies on 5678 and reaches its database, the resolver and whatever its workflows call outside; the PostgreSQL instances take n8n, each other and the operator, and reach the API server, and their Barman Cloud sidecars reach the object storage on 443 and the API server; the dump job reaches the database, the hosts age's release is downloaded from and the object storage; Open WebUI takes the proxies on 8080 and reaches nothing until an administrator turns on a connection that calls out; the backup movers reach the object storage on 443. The proxies reach n8n's 5678 and Open WebUI's 8080 alone there and forward only to their Services, PostgreSQL authenticates every client, Pod Security, node firewall. |
 | `etcd-snapshots` | listed | an application whose allows are not written, not a namespace that cannot have the posture. The snapshot job takes nothing and reaches the Talos API through `talos.default`, the object storage, the hosts age's release is downloaded from (its URL redirects to a second host, which serves the file) and the resolver. Talos' own authorisation of its one role, Pod Security, node firewall. |
 | `external-dns` | listed | an application whose allows are not written, not a namespace that cannot have the posture. external-dns takes Prometheus' scrape and the kubelet's probes on 7979 and nothing else, and reaches the API server, the DNS provider's API on 443 and the resolver. Its token, scoped to zone read and DNS edit on the cluster's one zone, its name filter, a ClusterRole that only reads, Pod Security, node firewall ([DNS records](#dns-records)). |
@@ -711,6 +714,15 @@ once it is not, and the agents' rendered configuration agrees.
   reaches the proxies' logs through the API server, so no flow to the proxies' namespace exists.
   `tests/crowdsec.bats` reads every rule of the two policies and evaluates the flows on the ports
   the chart renders. [CrowdSec](#crowdsec) says what each is for.
+- **`open-feature-operator`.** The operator's pod, by the labels of its Deployment's selector,
+  takes the kubelet's probes on 8081, the manager's health port, and Prometheus
+  (`app.kubernetes.io/name: prometheus` in `monitoring`) on 8080, the container port its PodMonitor
+  names. Its admission webhooks take the API server, the local host and other nodes' hosts on 9443,
+  the port its webhook Service targets, in a policy of its own with its reason (below). It reaches
+  the API server on 443 and 6443 and nothing else: it looks no name up, so not even the resolver,
+  and it calls nothing outside the cluster ([OpenFeature Operator](#openfeature-operator)). A
+  workload that opts in to it declares two flows of its own in its namespace, the kubelet's probes
+  of the sidecar on 8014 and the sidecar to the API server, as the example `hello-flags` does.
 - **The object storage's port.** cluster-config holds the object storage's endpoint as a URL, which
   a DNS name rule cannot take, so the movers' rule is the world on 443: the port https uses for an
   endpoint that names none, as cluster-config's example does and `tests/network-policy.bats` holds
@@ -805,15 +817,15 @@ namespace and the policy, when
   own (`pkg/k8s/apis/cilium.io/utils/utils.go`), so that it also selects the world, the hosts and
   the nodes. A reason excuses none of these.
 
-The check reads only what the render holds. Besides the policies of `backstage`, `crowdsec`,
-`demo`, `envoy-gateway-system`, `kromgo`, `security-system` and `sso-system`, that is one policy of
-a listed namespace: `flux-operator-web`, the `NetworkPolicy` the Flux Operator's chart renders in
-`flux-system`, which lets every pod of every namespace (an empty `namespaceSelector`) reach the
-operator's web interface on 9080. It passes because `flux-system` is listed; the day `flux-system`
-takes the default deny, the check refuses it, as a `NetworkPolicy` other than the default deny and
-as an allow of every pod of every namespace. The `NetworkPolicy` objects the operator makes for the
-Flux instance, which its `spec.cluster.networkPolicy` turns on, are made at run time, so no render
-holds them and the check never sees them.
+The check reads only what the render holds. Besides the policies of `backstage`, `crowdsec`, `demo`,
+`envoy-gateway-system`, `kromgo`, `open-feature-operator`, `security-system` and `sso-system`, that
+is one policy of a listed namespace: `flux-operator-web`, the `NetworkPolicy` the Flux Operator's
+chart renders in `flux-system`, which lets every pod of every namespace (an empty
+`namespaceSelector`) reach the operator's web interface on 9080. It passes because `flux-system` is
+listed; the day `flux-system` takes the default deny, the check refuses it, as a `NetworkPolicy`
+other than the default deny and as an allow of every pod of every namespace. The `NetworkPolicy`
+objects the operator makes for the Flux instance, which its `spec.cluster.networkPolicy` turns on,
+are made at run time, so no render holds them and the check never sees them.
 
 `scripts/network-policy-check --reach RENDER FROM TO PORT/PROTOCOL` evaluates the policies of a
 render for one flow and answers `allowed` or `denied`; the egress of the source and the ingress of
@@ -832,9 +844,12 @@ object storage's port and on no other, and a job that joins an instance on none,
 the resolver and the port of
 the Prometheus its configuration names, read from the render, and nothing else, and no other
 application reaches it, that Falco's pods take Prometheus and the kubelet on its metrics port alone
-and reach the resolver alone, and that with their default deny `backstage`, `demo`,
-`envoy-gateway-system`, `kromgo`, `security-system` and `sso-system` let exactly their flows through
-and without it take and send everything. What it cannot show: the entity the pinned datapath gives a
+and reach the resolver alone, that the OpenFeature Operator's pod takes Prometheus on its metrics
+port and the API server, the local host and other nodes' hosts on its webhooks' port, neither of
+them the world, another application or the other port's caller, and reaches the API server alone,
+and that with their default deny `backstage`, `demo`, `envoy-gateway-system`, `kromgo`,
+`open-feature-operator`, `security-system` and `sso-system` let exactly their flows through and
+without it take and send everything. What it cannot show: the entity the pinned datapath gives a
 connection an edge translated and a worker forwarded again, read from its source above and confirmed
 in audit mode; the labels of the pods the operators create at run time, taken from the operators'
 source and observed in audit mode; that an address a name resolves to is the one a rule meant; and
@@ -881,32 +896,37 @@ does not matter.
 2. **The policies merge.** The root applies the default denies, the applications apply their allows,
    and the agents evaluate both and drop nothing they deny; what a policy would drop is reported as
    `AUDIT`. As the allows land after the denies, `AUDIT` flows of `backstage`, `crowdsec`, `demo`,
-   `envoy-gateway-system`, `kromgo`, `security-system` and `sso-system` from before they landed are
-   expected, such as the proxies to `hello` on 8080 and to the controller on 18000, and the
-   controller to the API server, and an agent's recent flows can hold them for a while.
+   `envoy-gateway-system`, `kromgo`, `open-feature-operator`, `security-system` and `sso-system`
+   from before they landed are expected, such as the proxies to `hello` on 8080 and to the
+   controller on 18000, and the controller to the API server, and an agent's recent flows can hold
+   them for a while.
 3. **Watch**, from the moment the Kustomizations that hold the allows, `hello`,
-   `demo-volsync-movers`, `envoy-gateway`, `kromgo`, `dex`, `oauth2-proxy`, `backstage`, `falco` and
-   `crowdsec`, are Ready at the merge's revision (`flux get kustomizations`). `just network-drops`
-   lists what the agents' Hubble holds: the `AUDIT` flows a policy would drop, by namespace, pod and
-   port, never an address. It runs each agent's own `hubble` through `kubectl exec`, so the
-   kubeconfig needs exec on the Cilium agents' pods in `kube-system`, more than the reading recipes
-   need; `NETWORK_DROPS_LAST` (500) bounds the flows asked of each agent and `NETWORK_DROPS_TIMEOUT`
-   (60) the seconds each call may take. Hubble keeps only each agent's recent flows (4095 by the
-   chart's default), so run it after each of: `just gateway-check`; `just cluster-check`; the secret
-   demo (`just secret-rotate demo/hello greeting`); a badge asked of kromgo by
-   its name, which has kromgo query Prometheus ([Status badges](#status-badges)); a sign-in through
-   a route that opts in to it ([Sign-in](#sign-in)), and a query in the log store's interface ([The
-   log store's interface](#the-log-stores-interface)); Backstage's catalogue opened by its name,
-   which has Backstage read its database; the nightly dump of `backstage-db` from 02:00, which waits
-   up to 20 minutes before it starts ([Dumps](#dumps)); the base backup of `backstage-db` at 02:47
-   UTC, and a WAL segment its primary archives, which `select pg_switch_wal()` there forces
+   `demo-volsync-movers`, `envoy-gateway`, `kromgo`, `dex`, `oauth2-proxy`, `backstage`, `falco`,
+   `crowdsec` and `open-feature-operator`, are Ready at the merge's revision
+   (`flux get kustomizations`). `just network-drops` lists what the agents' Hubble holds: the
+   `AUDIT` flows a policy would drop, by namespace, pod and port, never an address. It runs each
+   agent's own `hubble` through `kubectl exec`, so the kubeconfig needs exec on the Cilium agents'
+   pods in `kube-system`, more than the reading recipes need; `NETWORK_DROPS_LAST` (500) bounds the
+   flows asked of each agent and `NETWORK_DROPS_TIMEOUT` (60) the seconds each call may take. Hubble
+   keeps only each agent's recent flows (4095 by the chart's default), so run it after each of:
+   `just gateway-check`; `just cluster-check`; the secret demo
+   (`just secret-rotate demo/hello greeting`); a badge asked of kromgo by its name, which has
+   kromgo query Prometheus ([Status badges](#status-badges)); a sign-in through a route that
+   opts in to it ([Sign-in](#sign-in)), and a query in the log store's interface
+   ([The log store's interface](#the-log-stores-interface)); Backstage's catalogue opened by its
+   name, which has
+   Backstage read its database; the nightly dump of `backstage-db` from 02:00, which waits up to
+   20 minutes before it starts ([Dumps](#dumps)); the base backup of `backstage-db` at 02:47 UTC,
+   and a WAL segment its primary archives, which `select pg_switch_wal()` there forces
    ([Backups and restores](#backups-and-restores)); the nightly backup of `volsync-demo` at 03:17,
-   and a restore of it ([Restoring](#restoring)). Watch a day at least, through one nightly backup,
-   one dump and one base backup. An `AUDIT` flow of `backstage`, `crowdsec`, `demo`,
-   `envoy-gateway-system`, `kromgo`, `security-system` or `sso-system` that a check made once the
-   allows were Ready is a missing allow, added beside its application in a pull request while the
-   cluster still audits, or a pod doing what it should not. Confirm also that no `@remote-node` flow
-   reaches the proxies' listener ports and none to the webhook's 9443 is `AUDIT`. `AUDIT` flows of
+   and a restore of it ([Restoring](#restoring)); the two dry runs that call the OpenFeature
+   Operator's webhooks ([OpenFeature Operator](#openfeature-operator)). Watch a day at least,
+   through one nightly backup, one dump and one base backup. An `AUDIT` flow of `backstage`,
+   `crowdsec`, `demo`, `envoy-gateway-system`, `kromgo`, `open-feature-operator`, `security-system`
+   or `sso-system` that a check made once the allows were Ready is a missing allow, added beside its
+   application in a pull request while the cluster still audits, or a pod doing what it should not.
+   Confirm also that no `@remote-node` flow reaches the proxies' listener ports and none to a
+   webhook's 9443, Envoy Gateway's or the OpenFeature Operator's, is `AUDIT`. `AUDIT` flows of
    `flux-system` show too: Flux's own policies and the Flux Operator's `flux-operator-web`, which
    the agents enforced before the value, are only audited while it is set, and what they would drop
    is what they dropped before; they are not the namespaces' allows.
@@ -1229,7 +1249,12 @@ the change that turns the BGP control plane on. The objects are cluster-scoped; 
 API server drops the namespace the application's `targetNamespace` gives them. Their numbers come
 from `cluster-config` ([Before Flux starts](#before-flux-starts)). `tests/install-cilium.bats`
 renders the chart and the nodes' machine configurations and builds every application as Flux
-applies it to check each of these. The chart ships none of the definitions; the operator installs
+applies it to check each of these, and requires of every application that holds an object of
+Cilium's kinds, a `CiliumNetworkPolicy` included, that it names `cilium` in `dependsOn` and that
+the cluster's overlay lists it, enabled or commented out with its reason
+([Adding an application](#adding-an-application)): a disabled application applies nothing, and the
+line that enables it brings the dependency along.
+The chart ships none of the definitions; the operator installs
 the ones it embeds, which Cilium publishes in its repository, so `operator-definitions.yaml` has
 `kubernetes-validate` read them there at the release the chart's tag pins, and validate the pool,
 the BGP objects and every `CiliumNetworkPolicy` ([Network policy](#network-policy)) against them,
@@ -1325,7 +1350,9 @@ every namespace, and evaluates the chart's default alerting and recording rules.
 - the storage layer, through the `linstor-monitoring` application: the LINSTOR controller's metrics
   and the satellites' DRBD reactor ([Storage monitoring](#storage-monitoring));
 - the silence operator, through its chart's PodMonitor ([Silences](#silences));
-- Falco on every node, through its chart's ServiceMonitor ([Runtime detection](#runtime-detection)).
+- Falco on every node, through its chart's ServiceMonitor ([Runtime detection](#runtime-detection));
+- the OpenFeature Operator's manager, through its application's PodMonitor
+  ([OpenFeature Operator](#openfeature-operator)).
 
 It does not scrape:
 
@@ -1610,6 +1637,10 @@ What no alert covers, and why:
   for any DaemonSet short of its nodes, and a target Prometheus has that does not answer raises the
   stock `TargetDown`, a warning, once more than a tenth of the job's targets have been down for 10
   minutes, which is one target on a cluster of fewer than ten nodes.
+- The OpenFeature Operator, which has no alert of its own: both of its webhooks fail open, no
+  workload asks for a sidecar and the tree applies no flag set, so nothing is missed while it is
+  down or slow ([OpenFeature Operator](#openfeature-operator)). A manager whose scrape fails raises
+  the stock `TargetDown`, as its job has one target.
 
 The alerts have no destination yet: Alertmanager sends them nowhere, so they show in Prometheus and
 Alertmanager only.
@@ -5202,6 +5233,370 @@ application is Ready once Backstage answers its readiness endpoint with its data
   `app/kustomization.yaml` and run `just catalogue-dependencies`. `tests/backstage.bats` fails
   until it holds.
 
+### OpenFeature Operator
+
+The OpenFeature Operator (`apps/base/open-feature-operator/open-feature-operator/`) serves feature
+flags as Kubernetes objects and adds a flagd sidecar, at admission, to a pod that asks for one. It
+runs in the namespace `open-feature-operator`, which enforces the restricted Pod Security level and
+denies traffic by default, from its publisher's chart
+(`oci://ghcr.io/open-feature/charts/open-feature-operator`). A cluster selects it with two entries
+of its overlay, the namespace directory and the application's `ks.yaml`. Its `ks.yaml` sets `wait`
+and names in `dependsOn` what its objects need to exist first: `cluster-ca`, the issuer of its two
+Certificates, which waits for cert-manager; `prometheus-operator-crds`, for its PodMonitor; and
+`cilium`, for its network policies. No workload opts in and the tree applies no flag set, so the
+operator changes no pod. `tests/open-feature-operator.bats` holds what follows on the built
+application and on the chart rendered as helm-controller renders it
+(`features/open-feature-operator.feature`).
+
+It is the one application of the tree that changes other workloads' pods at admission. What this
+section says of the pinned versions is read from their sources, in the files it names. What it says
+the API server does was also seen on one: a kube-apiserver of the cluster's Kubernetes version,
+started offline with etcd alone, to which the rendered release was applied as Helm applies it, and
+beside it the operator's and flagd's pinned images, run as the rendered Deployment and the injected
+container run them. That run had no kubelet, no other controller and no cert-manager: the two
+Secrets, the CA bundles and the endpoint of the webhook's Service were made by hand, so it shows
+what admission does and nothing of a pod's life on a node.
+
+- **What runs, and what it may do.** One Deployment with one pod, the manager, which holds a
+  leader election lease in its own namespace, runs the controllers of its kinds and answers the two
+  webhooks. Its ClusterRole, `open-feature-operator-manager-role`, lets it create, change and
+  delete pods, ConfigMaps, Services and Deployments in every namespace, and Ingresses, HTTPRoutes
+  and PodDisruptionBudgets too, more than it uses here: it makes such objects only for a `Flagd`
+  object, for flagd-proxy and for a source of the `file` provider, and it changes a workload's
+  Deployment only to restart it, when the source its pods name sets `rolloutOnChange`
+  (`internal/controller/core/featureflagsource/controller.go`), which the example's does not. The
+  role also lets it read every service account, and read and update one ClusterRoleBinding by its
+  name, whose role reads every flag set and source and which names the manager's own account among
+  its subjects: that is how the manager reads flag sets (Opting in, below). It may also ask the
+  API server to review a token or an access, the rights of an authenticated metrics endpoint the
+  pinned operator does not serve. Of the rights Kubernetes' documentation names as ways to
+  escalate privilege ("Role Based Access Control Good Practices"), the release grants one, the
+  creation of workloads: no rule names Secrets, service account tokens, persistent volumes, the
+  nodes' proxy, namespaces, certificate approval, any other role or binding, or webhook
+  configurations, and none grants a wildcard or binds, escalates or impersonates. Nor does any
+  rule let it exec or attach into a running pod or write to a node or its status, and no role of
+  the release has an aggregation rule, which would fill it at run time with rules the render does
+  not list. The test fails on a chart that grants any of these, gives a role of the release an
+  aggregation rule or binds a role the release does not render. That bounds what the operator's
+  own code does, so it cannot change what its webhooks match; it does not bound what its account
+  can reach. A right to create pods in a namespace is a right to run them as any service account
+  of that namespace and to mount any of its Secrets (the same documentation, "Workload
+  creation"), and the operator has it in every namespace, `flux-system` among them, whose
+  controllers hold cluster-admin: its webhook skips `flux-system`, its role does not. So the
+  operator's account is as strong as cluster-admin, and a compromised operator is a compromised
+  cluster. It is trusted as Flux is, which is why its images are pinned by digest
+  and nothing of it merges by itself (The images, below).
+- **The kinds**, all of `core.openfeature.dev/v1beta1`: a `FeatureFlag` is a set of flags; a
+  `FeatureFlagSource` says where a pod's sidecar gets its flags and how the sidecar is set up; a
+  `Flagd` makes the operator run flagd as a Deployment with a Service of its own; an
+  `InProcessConfiguration` gives a pod's containers the environment of a provider that evaluates
+  flags in the application's own process, with no sidecar. The last two are served and not covered
+  here: nothing in the tree is of either kind, and no test or flow is written for what they make.
+- **The two webhooks.** The release registers two webhook configurations with one webhook each,
+  both calling the operator's own Service in its namespace:
+
+  | Webhook | What the API server sends it | While the operator is down or slow |
+  | --- | --- | --- |
+  | `mutate.openfeature.dev`, mutating | the creation and update of a pod that carries the label `openfeature.dev/enabled: "true"`, in any namespace but `kube-system`, `flux-system` and `open-feature-operator` | the pod is admitted as it is: a pod that asked starts without its sidecar |
+  | `vfeatureflag.kb.io`, validating | the creation and update of a `FeatureFlag` | the flag set is admitted unvalidated |
+
+  The label is the webhook's `objectSelector`, which the API server matches against the pod, and
+  on an update against the pod as it was too, before it calls anything (Kubernetes' documentation
+  of admission webhooks, "Matching requests: objectSelector"): a pod that never carries the label
+  is never sent, so it cannot be refused, changed or delayed by its webhook. The chart's default
+  selector is empty and matches every pod of the cluster; the values set the label. The skipped
+  namespaces are a `namespaceSelector` on the name every namespace carries, which the chart has no
+  value for and a post-renderer of the HelmRelease adds, as Gatekeeper's has it; nothing opts a
+  namespace back in. Both webhooks fail open (`failurePolicy: Ignore`), the mutating one by the
+  chart's value and the validating one by the post-renderer, as the chart registers it failing
+  closed with no value to change that. Both wait 10 seconds at most (`timeoutSeconds`, the API
+  server's default, written out). A failure policy covers a call that fails: no answer in time, a
+  refused connection, a certificate the API server cannot verify. It does not cover an answer: a
+  refusal the operator returns is a refusal (the same documentation, "Failure policy"). On the
+  offline API server a pod without the label was admitted in under a tenth of a second whether
+  the operator answered or hung; a pod that asked was admitted as fast, sidecar included, with the
+  operator answering, and after ten seconds with the operator hung, then without a sidecar. A flag
+  set took the same ten seconds.
+- **When a pod that asked is refused.** The handler (`internal/webhook/pod_webhook.go` of the
+  pinned operator) admits unchanged a pod that carries the label and not the annotation
+  `openfeature.dev/enabled: "true"`. With the annotation it refuses a pod that has no owner, as a
+  pod made by hand has none (`static or orphaned pods cannot be mutated`); a pod that names neither
+  a `FeatureFlagSource` nor an `InProcessConfiguration`; a pod whose source does not exist; and a
+  pod whose source names, for the `kubernetes` provider, a flag set that does not exist. These are
+  answers, so the pod is refused, not started without its sidecar: the flag set and the source
+  have to exist when the pod is created, and a Deployment's ReplicaSet tries again until they do.
+  The handler also does not tell an update from a creation: on an update it builds the sidecar
+  again and appends its environment to the pod's containers again, which the API server then
+  refuses as a change of the pod's spec. So while the operator answers, the labels, annotations,
+  finalizers and owner references of an injected pod cannot be changed: `kubectl label pod` fails
+  with `pod updates may not change fields other than` the few a pod allows, and a finalizer cannot
+  be taken off, so a pod that carries one, as a Job's pods carry the Job controller's, should not
+  opt in. Deleting the pod is no update, and while the operator is down such an update passes. A
+  pod that carries the label alone is updated freely.
+- **Opting in.** `apps/base/demo/hello-flags/` is a workload that does, as an example no overlay
+  selects: the lab-sto2 overlay lists it commented out. It holds:
+  - a `FeatureFlag`, `hello-flags`, with one flag, `greeting`;
+  - a `FeatureFlagSource`, `hello-flags`, whose one source is that flag set by the `kubernetes`
+    provider: the sidecar reads and watches the flag set at the API server. Everything else is the
+    definition's default: the sidecar's evaluation port 8013, its management port 8014 and its
+    OFREP port 8016;
+  - a ServiceAccount of its own, which the pod names. When the pod is admitted the operator adds
+    its account to the subjects of the ClusterRoleBinding
+    `open-feature-operator-flagd-kubernetes-sync`, whose ClusterRole reads every `FeatureFlag` and
+    `FeatureFlagSource` of every namespace. That is how the sidecar may watch its flags, and it
+    means that every opted-in workload can read every flag set of the cluster: a flag holds nothing
+    secret. The namespace's default account would carry the grant to every pod of the namespace
+    that names no account of its own. The pod keeps its token mounted, as the sidecar reads the API
+    server with it;
+  - a Deployment whose pod template carries the label `openfeature.dev/enabled: "true"`, which
+    lets the API server send the pod to the webhook, the annotation of the same key, which is what
+    the operator reads, and the annotation `openfeature.dev/featureflagsource: hello-flags`, which
+    names the source in the pod's own namespace. Its container asks the sidecar's OFREP endpoint
+    over the pod's loopback, `http://127.0.0.1:8016/ofrep/v1/evaluate/flags/greeting`, once a
+    minute and prints the answer, `{"value":"hello","key":"greeting","reason":"STATIC","variant":"hello","metadata":{}}`,
+    or says that the sidecar did not answer, which is what a pod admitted while the operator was
+    down does for as long as it lives;
+  - a `CiliumNetworkPolicy` with the two flows an opted-in pod needs under a default deny: the
+    kubelet's probes of the sidecar on its management port, 8014, and the sidecar to the API
+    server on 443 and 6443. The pod's containers reach the sidecar over the loopback, which no
+    policy sees, and nothing else reaches the sidecar's ports.
+
+  Its `ks.yaml` names `open-feature-operator`, whose release defines its kinds and answers the
+  webhook, and `cilium` in `dependsOn`. `just kubernetes-validate` validates its flag set and
+  source against the chart's definitions, as it validates every application, selected or not. It
+  has no catalogue entity, as the overlay does not select it. To run it, a cluster's overlay lists
+  its `ks.yaml` and the change adds its entity.
+- **What the webhook adds to a pod** (`internal/common/flagdinjector/flagdinjector.go`, and the pod
+  the offline API server stored): an init container named `flagd` with `restartPolicy: Always`, a
+  sidecar that starts before the pod's containers and runs beside them. Its image is the pinned
+  flagd by tag and digest, pulled only when the node lacks it; its arguments are `start`, the
+  management port, the evaluation port, the sources as JSON and the OFREP port; it has HTTP
+  liveness and readiness probes, `/healthz` and `/readyz` on the management port, requests of 200m
+  of CPU and 32Mi and limits of 500m and 64Mi, the chart's `sidecarConfiguration.resources`, which
+  a source's `resources` replace; and it runs as user and group 65532, the image's own, as non-root
+  with the runtime's seccomp profile, a read-only root filesystem, no capability and no privilege
+  escalation. So the pod still passes the restricted level, which Pod Security admission evaluates
+  after the webhook: the API server admitted the example's pod, sidecar and all, into a namespace
+  that enforces it. The API server's own service account plugin runs again after the webhook and
+  mounts the pod's token into the sidecar. The webhook also adds five environment variables to
+  every container of the pod, `FLAGD_MANAGEMENT_PORT`, `FLAGD_PORT`, `FLAGD_EVALUATOR`,
+  `FLAGD_LOG_FORMAT` and `FLAGD_RESOLVER`, for a provider in the application, and the annotation
+  `openfeature.dev/allowkubernetessync: "true"`, by which the operator finds the pod again when it
+  starts. The pinned flagd, run as the injector runs it, with a read-only root and no network but
+  a loopback, and with a file made from the example's flag set as its source in place of the API
+  server, answered the example's request as above; beside the offline API server, with the
+  example's account, it read the flag set there and answered with the new variant within a second
+  of a change to the flag set.
+- **Which providers work here.** `kubernetes` is the one the example, its flows and the runs above
+  cover. `file` has the operator copy the flag set into a ConfigMap, which it mounts in the
+  sidecar, so the sidecar needs no flow but the probes; nothing here has run it. `http`, `grpc`
+  and the object storage providers have the sidecar fetch from a server, a flow the workload's
+  policy has to declare. `flagd-proxy` does not work: the Deployment the operator makes for it in
+  its own namespace sets no security context (`internal/common/flagdproxy/flagdproxy.go`), so the
+  restricted level refuses its pods, no flow is declared for it, and the handler refuses a pod
+  whose source names it for as long as the proxy is not ready.
+- **The images** are four pins of `values.yaml`, each a tag and a digest under a comment Renovate
+  reads. Three of them never appear in a pod spec of the render: they reach the operator as
+  environment variables, a repository and a tag that it joins with a colon, so the image check of
+  `just kubernetes-validate` does not read them, and the test reads the variables from the rendered
+  Deployment instead and fails on a tag without a digest, on a variant, on `latest` and on a
+  version the pinned chart does not default to.
+
+  | Image | Value | What runs it | What moves it |
+  | --- | --- | --- | --- |
+  | `ghcr.io/open-feature/open-feature-operator` | `controllerManager.manager.image.tag` | the manager's pod | Renovate, in one pull request with the chart (`.renovate/groups.json5`); the test holds it to the version the chart's own values default to, which is not the chart's `appVersion` |
+  | `ghcr.io/open-feature/flagd` | `sidecarConfiguration.image.tag` | every pod that opts in, as its sidecar | Renovate, with the next row, as both are one package; the test holds it to the chart's default |
+  | `ghcr.io/open-feature/flagd` | `flagdConfiguration.image.tag` | the Deployment of a `Flagd` object | Renovate; the test holds it to the sidecar's and to the chart's default |
+  | `ghcr.io/open-feature/flagd-proxy` | `flagdProxyConfiguration.image.tag` | the flagd-proxy Deployment, which the namespace refuses | Renovate; the test holds it to the chart's default |
+
+  Renovate merges nothing of the application by itself: a rule holds every file under
+  `apps/base/open-feature-operator/` back, whatever the auto-merge switch says
+  (`.renovate/automerge.json5`), because what it pins runs at admission and inside other workloads'
+  pods. The pins are at the versions the pinned chart defaults to, each the plain build and not
+  the `-fips` one. A newer flagd is a person's call: Renovate proposes it once the registry lists
+  it, whether or not a chart of the operator defaults to it yet, and the arguments, ports, probes
+  and environment the sidecar gets are the operator's code, written against the flagd its chart
+  names, not flagd's own defaults. So the test fails on a pull request that moves flagd or
+  flagd-proxy past the chart's default, and on one that moves the chart while the flagd it
+  defaults to moves too, until the pins follow it in the same pull request.
+- **Certificates.** The chart signs two Certificates with a self-signed `Issuer` of its own and has
+  no value for either. Post-renderers point both at the `ClusterIssuer` `cluster-ca`
+  ([The cluster's own CA](#the-clusters-own-ca)) and remove the chart's Issuer, so the release
+  holds no issuer and no Secret. `open-feature-operator-serving-cert` is the webhooks' serving
+  certificate, for the name the API server calls the Service by, in the Secret
+  `webhook-server-cert`, which the pod mounts where the webhook server reads it and reloads it
+  from when cert-manager renews it. Both webhook configurations carry
+  `cert-manager.io/inject-ca-from` naming that
+  Certificate, and the CA injector writes the authority that signed it, the cluster's own, into
+  each webhook's CA bundle. That bundle is the one trust between the two sides: the API server
+  verifies the operator's certificate against it, and the webhook server asks the API server for no
+  certificate (it is started with no client CA, `cmd/main.go`; controller-runtime's
+  `pkg/webhook/server.go`), so a certificate of `cluster-ca` serves the webhooks as the chart's
+  self-signed one would. `open-feature-operator-metrics-certs`, in the Secret
+  `metrics-server-cert`, is mounted and never read (Metrics, below), though the pod does not start
+  without it.
+- **The pod.** The chart's pod runs as non-root with no capability and no privilege escalation and
+  sets no seccomp profile, for which it has no value: a post-renderer adds the runtime's profile
+  and a read-only root filesystem. The pod's volumes are the two certificate Secrets, mounted
+  read-only, and nothing else: the manager writes nothing to its filesystem. It reads the mounted
+  serving certificate, holds its state in the API server, and logs to standard error
+  (`cmd/main.go`; controller-runtime's `pkg/webhook/server.go` at the version it builds against);
+  beside the offline API server it ran so, read-only and with no capability, through its start,
+  the validation of flag sets and the injection of pods, and changed no file. Without an API
+  server it cannot start at all: run alone with no network it exits at once, naming the missing
+  cluster configuration, as user 65532. The requests and limits (10m of CPU and 64Mi requested,
+  500m and 128Mi at most) are the chart's own and are not measured here: the manager keeps every
+  pod and every Deployment of the cluster in memory, as it indexes both (`cmd/main.go`), so what it
+  uses grows with the cluster, and the figure that counts is the pod's own, once it runs. One
+  replica, with no disruption budget: while its pod restarts or moves, a pod that asks is admitted
+  without its sidecar and a flag set unvalidated, and nothing asks. The chart writes the replica
+  count after a literal `0`, so its text is `replicas: 01`, which the release's kustomize
+  post-renderer reads and writes as the number 1. A text whose digits are all 0 to 7 is read as an
+  octal number, so a value of 10 would give 8 replicas and 16 give 14, while 8, 9, 18 or 19 keep
+  their value; the values file says so beside the key.
+- **Metrics.** The pinned operator prepares the options of an authenticated HTTPS metrics server
+  and then starts its manager with the bind address alone (`cmd/main.go`), so it serves its
+  metrics in plain HTTP with no authentication on the port the chart passes as
+  `--metrics-bind-address`, the container port `metrics-server`, 8080; its log says
+  `"secure": false`. The chart's Service `open-feature-operator-controller-manager-metrics-service`
+  targets a port named `https`, which no container has, so it selects the pod and reaches nothing,
+  and the metrics certificate is not read. Both stay as the chart renders them. The application's
+  `PodMonitor` scrapes the container port from the pod, by the labels of the Deployment's selector.
+  The test pins the flag, the absence of the flags that name a certificate or switch the secure
+  server, and the Service's target, so a chart that starts to serve HTTPS with authentication
+  fails it; an operator that did so behind the same flags would show as a failed scrape. There is
+  no alert and no dashboard of its own.
+- **Network.** The namespace holds the default deny, and the application's two policies let
+  through the kubelet's probes on 8081, Prometheus on 8080, the manager's calls to the API server
+  and, in a policy of its own with its reason, the API server's calls to the webhooks on 9443
+  ([What the namespaces let through](#what-the-namespaces-let-through)). The operator looks no name
+  up, so no rule reaches the resolver: its client takes the API server's address from the pod's
+  environment (client-go's in-cluster configuration), and the schema it validates a flag set
+  against is compiled into it (`internal/webhook/featureflag_webhook.go`).
+- **Definitions.** The four definitions are templates of the release, not files of the chart's
+  `crds` directory, so Helm would delete them with the release, and with them every flag set and
+  source of the cluster. A post-renderer gives each `helm.sh/resource-policy: keep`, as the tree's
+  other definitions have. The render holds them, so `just kubernetes-validate` has a schema for
+  every kind of the group, with no entry in `schema-exceptions.yaml` or `operator-definitions.yaml`.
+- **What is written at run time, and drift.** The root turns drift detection on for every release.
+  helm-controller asks, for each object of the release, what applying it again server-side with
+  conflicts forced would change, as a dry run, and then makes that change
+  (`internal/action/diff.go` and `internal/reconcile/correct_cluster_drift.go` of the
+  helm-controller the pinned Flux runs; `ssa/jsondiff` of `fluxcd/pkg`). Two things are written
+  into the release's objects at run time:
+  - the subjects of the ClusterRoleBinding, to which the operator adds a service account with an
+    update of the whole object. The dry run would write the release's own two subjects back, so
+    the HelmRelease lists that field under `driftDetection.ignore`. Without the entry every
+    reconcile of the release would take the opted-in accounts out again;
+  - each webhook's CA bundle, which the CA injector applies as a field of its own
+    (`pkg/controller/cainjector/injectables.go` of the pinned cert-manager). The release's objects
+    do not hold the field, so applying them again leaves it, and it needs no entry: the test fails
+    on a chart that renders one.
+
+  Both were seen on the offline API server. An upgrade of the release is not drift detection and
+  does write the binding's two subjects again, as helm-controller upgrades server-side with
+  conflicts forced (`internal/action/upgrade.go`), and leaves the CA bundles. The accounts come
+  back when the operator next starts, when it adds the account of every pod it marked at injection
+  (`BackfillPermissions`, `internal/webhook/pod_webhook.go`), or when a pod of the account is next
+  admitted. That pass tries five times, a second apart, while the manager's caches start; when it
+  gives up, the manager logs `podMutator backfill permissions error` (`cmd/main.go`) and turns
+  ready all the same, and the accounts come back only as pods of each are admitted, so after a
+  restart the manager's log says whether the pass ran. Until then a sidecar that starts is
+  forbidden to read its flag set: flagd logs that and exits, and the kubelet starts it again until
+  the account is back. An upgrade that changes the manager's Deployment restarts the operator by
+  itself; after one that does not,
+  `kubectl -n open-feature-operator rollout restart deployment open-feature-operator-controller-manager`
+  puts the accounts back.
+- **Removing it.** Taking the application's entry out of the overlay has Flux uninstall the
+  release. Its objects leave, the webhook configurations, the roles and the binding among them,
+  and the four definitions stay, with every flag set and source: the pinned Helm, run on the
+  offline API server, kept exactly those four and installed over them again without complaint.
+  What cert-manager and the operator made stays too: the two Secrets and the operator's lease, in
+  the namespace, which the tree never prunes. Pods that were injected keep their sidecar, which
+  no longer has the grant to read its flag set: at its next start it exits, as above, and new pods
+  get no sidecar.
+- **Checking the webhooks on a cluster.** Two server-side dry runs call both webhooks and apply
+  nothing, from the repository's root:
+
+  ```sh
+  yq '.spec.flagSpec.flags.greeting.targeting = {"nonsense": ["x"]}' \
+    kubernetes/apps/base/demo/hello-flags/app/featureflag.yaml |
+    kubectl apply --server-side --dry-run=server --namespace demo --filename -
+  yq '{"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "hello-flags-dry-run"}
+    * (.spec.template.metadata | pick(["labels", "annotations"])),
+    "spec": (.spec.template.spec | del(.serviceAccountName))}' \
+    kubernetes/apps/base/demo/hello-flags/app/deployment.yaml |
+    kubectl create --dry-run=server --namespace demo --filename -
+  ```
+
+  The first is the example's flag set with a targeting rule that is none, which the validating
+  webhook refuses: `admission webhook "vfeatureflag.kb.io" denied the request`. The second is a pod
+  of the example's template, under the namespace's default account, which the mutating webhook
+  refuses because a pod made by hand has no owner: `admission webhook "mutate.openfeature.dev"
+  denied the request: static or orphaned pods cannot be mutated`. Each refusal shows that the API
+  server reached the operator and trusted its certificate. A pod with an owner would not be a
+  harmless dry run: the mutating webhook is registered with `sideEffects: NoneOnDryRun`, but its
+  handler does not read whether a request is a dry run (`internal/webhook/pod_webhook.go`), so for
+  such a pod that asks it adds the pod's account to the binding, for a `kubernetes` source, or
+  makes the ConfigMap it copies the flag set into, for a `file` one
+  (`internal/common/flagdinjector/flagdinjector.go`), as for a pod it admits. The pod above has no
+  owner and is refused before either. An answer that ends in `(server dry run)`, after up to ten
+  seconds, means the call failed and the API server admitted the object, as the failure policy
+  says: the operator's pod, the two Certificates, the CA bundle in the webhook configurations and,
+  once the cluster enforces its policies, `just network-drops` for the namespace say which.
+
+**What only the live cluster shows.** None of the following is run by a check; each is read from
+the pinned sources, and the list is what to look at when the application first reconciles.
+
+- **The order kinds and their definitions arrive in.** The root applies the namespace and its
+  default deny at once. The application waits for `cluster-ca`, `prometheus-operator-crds` and
+  `cilium`, so cert-manager's, the Prometheus Operator's and Cilium's kinds exist before its
+  PodMonitor, its policies and its HelmRelease are applied. Helm builds every object of the
+  release against the API server's kinds before it creates the first (`pkg/action/install.go` of
+  the pinned Helm), which is why the Certificates' kind must exist, and then applies them in the
+  order of their kinds (`pkg/release/v1/util/kind_sorter.go`): the service accounts, the
+  ConfigMap, the four definitions, the roles and bindings, the Services, the Deployment, the two
+  webhook configurations, and last the Certificates, a kind that order does not know. Nothing in
+  the release is of a kind the release defines. The example waits for the operator's application,
+  so its flag set arrives after the definitions and once the webhook answers.
+- **What Helm's parser and helm-controller's post-renderer make of the chart's output.**
+  helm-controller gives Helm a post-renderer for every release, the release's own and then its
+  labels (`internal/postrender/build.go`), so Helm first merges the chart's output into one stream
+  with its own reader and reads the result again (`annotateAndMerge` and `splitAndDeannotate`,
+  `pkg/action/action.go`). The chart's namespace template renders two comment lines and no object
+  for this release: that reader drops it. The Deployment's `replicas: 01` passes it as written,
+  and its pull secrets, an empty list on a line of its own, as `[]`; the kustomize post-renderer
+  then writes the replicas as `1`. The test renders through that path of the pinned Helm with the
+  pinned kustomize, and the pinned Helm installed the result on the offline API server, to which
+  it applies server-side with strict field validation (`pkg/kube/client.go`). helm-controller
+  builds against the Helm the tree pins and against the library of kustomize 5.8.1 (its `go.mod`),
+  where the tree's checks run kustomize 5.8.3: the function that writes a build's output,
+  `Resource.AsYAML` in kustomize's `api/resource/resource.go`, which goes through JSON and so
+  writes `01` as `1`, is the same in both, and nothing here runs the older library.
+- **The CA bundle.** The Certificates are applied last, and cert-manager then issues them from
+  `cluster-ca`; a certificate from a CA issuer carries that authority as its `ca.crt`
+  (`pkg/controller/certificaterequests/ca/ca.go`), which is what the CA injector reads
+  (`pkg/controller/cainjector/sources.go`). Until a webhook has its bundle the API server cannot
+  verify the operator's certificate, the call fails and the failure policy admits: on the offline
+  API server it logged `failing open` with the certificate error, and the pod was created without
+  a sidecar.
+- **The pod waits for two Secrets**, the Certificates', which cert-manager makes: until both exist
+  its containers are not created.
+- **Who the API server's calls arrive as** is the paragraph on the local host and the API server
+  in [What the namespaces let through](#what-the-namespaces-let-through): the API server, the
+  local host or another node's host, which the webhook's policy names together.
+- **What the manager does at start, and when it is ready.** It reads its settings from the
+  environment and exits on a pull policy Kubernetes does not know, loads the cluster configuration,
+  and starts, in this order, the health and metrics servers, the webhook server, its caches, and
+  after winning the leader election its controllers (controller-runtime's
+  `pkg/manager/internal.go`). Beside that it lists the pods it marked at injection, which waits for
+  the caches, and adds their accounts to the binding. `/readyz` answers once that pass is over,
+  whether it succeeded or not (`BackfillPermissions`, `internal/webhook/pod_webhook.go`), and a
+  pass that failed logs `podMutator backfill permissions error`; the pod turns Ready at its next
+  readiness probe, and the release with it.
+- **That Pod Security admits the pod the webhook returns** is under what the webhook adds, above:
+  seen on the offline API server for the example's pod, in a namespace that enforces restricted.
+
 ### Porting an application from the reference catalogue
 
 The steps n8n took, in order; the next port does the same and says where it differs.
@@ -5223,7 +5618,13 @@ The steps n8n took, in order; the next port does the same and says where it diff
    registry's own listing; `just renovate-pins` passes.
    Where the registry tags betas as plain versions, as n8n's does, a rule in
    `.renovate/managers.json5` keeps Renovate to the line the tree runs; where it does not, say so,
-   and add the image to the packages `.renovate/automerge.json5` never merges.
+   and add the image to the packages `.renovate/automerge.json5` never merges. An image an operator
+   puts into other pods, or into the workloads it makes, is a value the operator is handed and no
+   pod spec of the render, so the image check of `just kubernetes-validate` does not read it: pin
+   it by tag and digest under a comment all the same, read how the operator joins the repository
+   and the tag in its source, hold the reference it would write in the application's test, from
+   the rendered variables, and hold every file of the application back from auto-merge, as the
+   [OpenFeature Operator](#openfeature-operator)'s are.
 3. **Database.** `components/cnpg-cluster` in `ks.yaml` with `CNPG_CLUSTER_NAME` and `CNPG_NAMESPACE`
    (the `targetNamespace`), and the connection from the keys of `<name>-app`; `cloudnative-pg`,
    `plugin-barman-cloud`, `prometheus-operator-crds`, `external-secrets` and `openbao-store` in
@@ -5269,7 +5670,12 @@ The steps n8n took, in order; the next port does the same and says where it diff
    the data directory fetches them again. A workload on the host network accounts for every port it
    declares, by a rule in `talos/firewall.yaml` or an entry in `node-firewall-exceptions.yaml`, and
    a host port on the pod network fails `tests/node-listeners.bats`
-   ([cluster.md](cluster.md#the-node-firewall)).
+   ([cluster.md](cluster.md#the-node-firewall)). An application that cannot start offline, as an
+   operator that exits without an API server cannot, has no such run to measure: run its image with
+   no network and a read-only root to see which user it runs as and that it stops naming the missing
+   cluster, read in its source what it writes and what it calls, keep the chart's requests and say
+   in the docs that they are not measured, and where a claim rests on what the API server does,
+   run a kube-apiserver of the cluster's version offline, with etcd alone, and the image beside it.
 8. **Tests.** Scenarios in `features/applications.feature`, each proved by a test of
    `tests/applications.bats` under its title, written and seen failing before the manifests, and
    mutated afterwards: remove the line each assertion guards and see the test fail. `render_app`
@@ -5292,6 +5698,32 @@ The steps n8n took, in order; the next port does the same and says where it diff
     made or why it has none, its hostname, the table of what it can call and what a person loses
     to that, any first-visit step and what it means that nobody has claimed the instance, how it
     is backed up and restored.
+11. **An operator with an admission webhook**, on top of the steps above. Read what each webhook
+    matches in the chart: its rules, its object selector and its namespace selector. A webhook
+    that matches other workloads' objects is narrowed until an object that did not ask is never
+    sent, by a label where the operator is opt-in; it skips `kube-system`, `flux-system` and the
+    operator's own namespace; it fails open; and its wait is written out. What the chart has no
+    value for is a post-renderer of the HelmRelease, and the test reads all of it from the chart
+    rendered with the post-renderers, with the rules pinned so that a chart that widens one fails.
+    Read in the operator's source what its handler refuses, as a failure policy does not cover an
+    answer, and what it does on an update. Its certificates come from `cluster-ca`, which goes
+    into `dependsOn`, once the source shows which certificate each side trusts: one of
+    `cluster-ca` serves where the API server trusts the bundle the CA injector writes and the
+    webhook server asks for no client certificate, and not where a side pins the other's own
+    certificate file. The API server's calls get a policy of their own with its reason, from
+    `kube-apiserver`, `host` and `remote-node` on the webhook's port. No role of the release may
+    grant a verb on webhook configurations, which keeps the operator's code from changing what
+    they match, and of the other rights Kubernetes' RBAC good practices name as ways to escalate
+    privilege the test refuses each the operator does not need, and any role of the release with
+    an aggregation rule, whose rules the render does not show. That bounds the code, not the
+    account: read what the roles let it create, as a right to create pods, or the workloads that
+    make them, in a namespace is as strong as every service account of that namespace, and say in
+    the docs what the operator's account can reach through it. Definitions the chart ships as
+    templates get `helm.sh/resource-policy: keep`. For each field something writes into the
+    release's objects at run time, a CA bundle or a list the operator extends, establish from
+    helm-controller's source whether drift detection would write it back, and list it under
+    `driftDetection.ignore` if so. Say in the docs what happens while the operator is down, when an
+    object that asked is refused, and what leaves and stays when the application is removed.
 
 ## Runtime detection
 

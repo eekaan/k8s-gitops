@@ -773,13 +773,22 @@ chart_config() {
   bgp_inputs
   tree_objects > "$BATS_TEST_TMPDIR/tree.jsonl"
   [ -z "$(jq -r 'select(.app == "kube-system/cilium" and (.object.apiVersion | startswith("cilium.io/"))) | .object.kind' "$BATS_TEST_TMPDIR/tree.jsonl")" ]
-  # Every application that does names cilium in dependsOn and is enabled.
+  # Every application that does names cilium in dependsOn and is listed in the cluster overlay:
+  # enabled, or commented out with its reason as a disabled application, which applies nothing
+  # until the line that enables it brings its dependency along.
   owners=$(jq -r 'select(.object.apiVersion | startswith("cilium.io/")) | .app' "$BATS_TEST_TMPDIR/tree.jsonl" | sort -u)
   echo "applications with Cilium objects: $owners"
   [ -n "$owners" ]
+  # The overlay's resources list alone, where an application is listed: a line under another key,
+  # as under patches, lists nothing.
+  listed=$(awk '/^[^[:space:]#-]/ { inside = ($0 == "resources:"); next } inside' "$COPY/kubernetes/apps/overlays/lab-sto2/kustomization.yaml")
+  [ -n "$listed" ]
   while IFS= read -r app; do
-    [ "$(yq '[.spec.dependsOn[].name] | contains(["cilium"])' "$COPY/kubernetes/apps/base/$app/ks.yaml")" = true ]
-    grep -qxF "  - ../../base/$app/ks.yaml" "$COPY/kubernetes/apps/overlays/lab-sto2/kustomization.yaml"
+    echo "checking $app"
+    # By the whole name: yq's contains matches a substring of a string, and cilium-bgp is not cilium.
+    [ "$(yq '[.spec.dependsOn[].name] | any_c(. == "cilium")' "$COPY/kubernetes/apps/base/$app/ks.yaml")" = true ]
+    entry="../../base/$app/ks.yaml"
+    grep -qxF "  - $entry" <<<"$listed" || grep -qE "^  # - ${entry//./\\.}  # Disabled: [^[:space:]]" <<<"$listed"
   done <<< "$owners"
   # The dependency orders them only if the Cilium application is Ready no sooner than its release:
   # it waits, for as long as the release may take, which is longer than the root's default.

@@ -1,0 +1,21 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: open-feature-operator
+  description: The OpenFeature Operator, which serves feature flags as Kubernetes objects and adds a flagd sidecar, at admission, to a pod that asks for one by a label and an annotation; no workload asks.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#openfeature-operator
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/open-feature-operator/open-feature-operator
+      title: Manifests
+spec:
+  type: service
+  lifecycle: production
+  owner: group:default/operators
+  system: cluster-services
+  dependsOn:
+    - component:default/cilium
+    - resource:default/cluster-ca
+    - resource:default/prometheus-operator-crds
