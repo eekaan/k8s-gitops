@@ -983,6 +983,78 @@ E
   denied "$VIEW" "$OPEN_FEATURE" @host 10250/tcp
 }
 
+@test "The restore drill's mover has the movers' flows and its check job has none" {
+  real_render
+  local destination job drill_mover check=demo/CronJob/volsync-demo-drill-check endpoint s3 port peer
+  # The ReplicationDestination of volsync-demo's drill, whose mover VolSync runs, and the check's
+  # CronJob, whose pod template the render holds.
+  destination=$(echo "$REAL"/*/volsync-demo/ReplicationDestination.volsync.backube_demo_volsync-demo-drill.yaml)
+  [ -f "$destination" ] || { echo "the render holds no ReplicationDestination volsync-demo-drill"; return 1; }
+  [ -f "$(echo "$VIEW"/*/volsync-demo/CronJob.batch_demo_volsync-demo-drill-check.yaml)" ] ||
+    { echo "the render holds no CronJob volsync-demo-drill-check"; return 1; }
+  # The labels of the mover's pod at the pinned VolSync, v0.17.0: the restic mover's ensureJob
+  # (internal/controller/mover/restic/mover.go) names the Job volsync-dst-<name> and labels its pod
+  # template app.kubernetes.io/created-by: volsync (utils.SetOwnedByVolSync, labels.go), which only
+  # spec.restic.moverPodLabels would add to; the Job controller adds the Job's name and uid.
+  [ "$(yq '.spec.restic.moverPodLabels // {} | length' "$destination")" -eq 0 ]
+  job="volsync-dst-$(yq '.metadata.name' "$destination")"
+  drill_mover="demo:app.kubernetes.io/created-by=volsync,batch.kubernetes.io/job-name=$job,job-name=$job,batch.kubernetes.io/controller-uid=marker-uid,controller-uid=marker-uid"
+  # The mover resolves the repository's name through the cluster's resolver and reaches the object
+  # storage on the port of its endpoint as cluster-config's example gives it, and nothing else.
+  endpoint=$(yq '.S3_ENDPOINT' "$REPO/kubernetes/clusters/lab-sto2/cluster-config.example.yaml")
+  [[ $endpoint =~ ^https://[^/:]+(:([0-9]+))?$ ]]
+  s3=${BASH_REMATCH[2]:-443}
+  allowed "$VIEW" "$drill_mover" "$DNS" 53/udp
+  allowed "$VIEW" "$drill_mover" "$DNS" 53/tcp
+  allowed "$VIEW" "$drill_mover" @world "$s3/tcp"
+  denied "$VIEW" "$drill_mover" "$DNS" 9153/tcp
+  for port in 80 22 53 5432 6443 8080; do
+    [ "$port" = "$s3" ] || denied "$VIEW" "$drill_mover" @world "$port/tcp"
+  done
+  for peer in @kube-apiserver @host @remote-node; do
+    for port in 443 6443 10250; do
+      denied "$VIEW" "$drill_mover" "$peer" "$port/tcp"
+    done
+  done
+  denied "$VIEW" "$drill_mover" demo/Deployment/hello 8080/tcp
+  denied "$VIEW" "$drill_mover" demo/Deployment/volsync-demo 8080/tcp
+  denied "$VIEW" "$drill_mover" "$check" 8080/tcp
+  denied "$VIEW" "$drill_mover" openbao/StatefulSet/openbao 8200/tcp
+  denied "$VIEW" "$drill_mover" "$STORAGE" 3370/tcp
+  # The check job, by the labels of its pod template in the render, reaches nothing on any port tried:
+  # not the resolver, the object storage's port, the API server, a node's kubelet, another pod of
+  # demo, the secret store or the world.
+  for port in 53/udp 53/tcp 9153/tcp; do
+    denied "$VIEW" "$check" "$DNS" "$port"
+  done
+  for port in "$s3/tcp" 443/tcp 80/tcp 53/udp 53/tcp 22/tcp; do
+    denied "$VIEW" "$check" @world "$port"
+  done
+  for peer in @kube-apiserver @host @remote-node; do
+    for port in 443 6443 10250; do
+      denied "$VIEW" "$check" "$peer" "$port/tcp"
+    done
+  done
+  denied "$VIEW" "$check" demo/Deployment/hello 8080/tcp
+  denied "$VIEW" "$check" demo/Deployment/volsync-demo 8080/tcp
+  denied "$VIEW" "$check" "$drill_mover" 8080/tcp
+  denied "$VIEW" "$check" "$MOVER" 443/tcp
+  denied "$VIEW" "$check" openbao/StatefulSet/openbao 8200/tcp
+  denied "$VIEW" "$check" openbao/StatefulSet/openbao 8201/tcp
+  denied "$VIEW" "$check" "$STORAGE" 3370/tcp
+  denied "$VIEW" "$check" "$OTHER_APP" 8080/tcp
+  # Nothing reaches either.
+  for peer in "$drill_mover" "$check"; do
+    denied "$VIEW" @world "$peer" 443/tcp
+    denied "$VIEW" @remote-node "$peer" 8080/tcp
+    denied "$VIEW" demo/Deployment/hello "$peer" 8080/tcp
+    denied "$VIEW" demo/Deployment/volsync-demo "$peer" 8080/tcp
+    denied "$VIEW" "$PROMETHEUS" "$peer" 8080/tcp
+    denied "$VIEW" "$PROXY" "$peer" 8080/tcp
+    denied "$VIEW" "$OTHER_APP" "$peer" 8080/tcp
+  done
+}
+
 @test "An allow that names an address fails the check" {
   local name rule
   local -A rules=(

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# A stand-in for date in the restore drill's check, installed by the tests as <tmp>/bin/date: the
+# clock a test sets. Asked for the Unix time in seconds, it prints what <tmp>/record/now holds; asked
+# for anything else, it fails, as the check must read no date but the seconds.
+set -uo pipefail
+root=${0%/bin/*}
+if [[ $# -ne 1 || $1 != +%s ]]; then
+  echo "unexpected arguments: date $*" >&2
+  exit 2
+fi
+cat "$root/record/now"

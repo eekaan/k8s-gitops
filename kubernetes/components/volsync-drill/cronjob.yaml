@@ -1,0 +1,80 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/cronjob-batch-v1.json
+# The drill's check, on its own schedule after the restore: scripts/check.sh reads the scratch claim
+# and exits non-zero unless the heartbeat in it is fresh, with one line in the job's log that names
+# the case. It holds no token, opens no connection and changes nothing on the volume: the claim is
+# read-only at the container's mount, and the pod sets no fsGroup, so the files are read as the user
+# the mover restored them as. The alerts on it select the CronJob by its name's suffix, -drill-check
+# (the volsync application). A CronJob's name is at most 52 characters, so APP is at most 40.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ${APP}-drill-check
+spec:
+  # A check's job is made within 600 seconds of its time and ends within 600 more, retry included,
+  # which the drill's largest age allows for (docs/kubernetes.md, The restore drill).
+  schedule: "${VOLSYNC_DRILL_CHECK_SCHEDULE}"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 600
+      template:
+        metadata:
+          # Labels of its own: none that the namespace's movers' policies select, so the pod has none
+          # of their flows.
+          labels:
+            app.kubernetes.io/name: volsync-drill-check
+            app.kubernetes.io/instance: ${APP}
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: ${VOLSYNC_UID:=1000}
+            runAsGroup: ${VOLSYNC_GID:=1000}
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: check
+              # The busybox of the demo's Deployments, by their tag and the digest of its image index.
+              image: docker.io/library/busybox:1.38.0@sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4
+              command: ["/bin/sh", "/scripts/check.sh"]
+              env:
+                - name: DRILL_DIR
+                  value: /drill
+                # The variable's value carries its own double quotes: Flux substitutes after
+                # kustomize has dropped the quotes of a manifest, and a bare number here would be
+                # one, which the API server refuses for a variable's value.
+                - name: DRILL_MAX_AGE_SECONDS
+                  value: ${VOLSYNC_DRILL_MAX_AGE}
+              resources:
+                requests:
+                  cpu: 1m
+                  memory: 8Mi
+                limits:
+                  memory: 32Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: drill
+                  mountPath: /drill
+                  readOnly: true
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+          volumes:
+            - name: drill
+              persistentVolumeClaim:
+                claimName: ${APP}-drill
+            - name: scripts
+              configMap:
+                name: ${APP}-drill-scripts

@@ -8,14 +8,22 @@ metadata:
 spec:
   path: ./apps/base/demo/volsync-demo/app
   targetNamespace: demo
-  # The volume, backed up every night and restored from the latest backup when it is created.
+  # The volume, backed up every night and restored from the latest backup when it is created, and the
+  # restore drill, which restores the newest backup into a scratch claim every night and checks the
+  # heartbeat the pod writes. The drill's three values follow the backup's schedule and the check's
+  # deadlines and move together, as docs/kubernetes.md, The restore drill, works out.
   components:
     - ../../../../../components/volsync
+    - ../../../../../components/volsync-drill
   postBuild:
     substitute:
       APP: volsync-demo
       VOLSYNC_CAPACITY: 1Gi
       VOLSYNC_SCHEDULE: "17 3 * * *"
+      VOLSYNC_DRILL_RESTORE_SCHEDULE: "17 4 * * *"
+      VOLSYNC_DRILL_CHECK_SCHEDULE: "17 5 * * *"
+      # Text with its double quotes, so the check's variable is text once substituted.
+      VOLSYNC_DRILL_MAX_AGE: '"95400"'
   # The component's objects are of VolSync's and External Secrets' kinds, its ExternalSecret reads
   # the store openbao-store makes, and the volume and its snapshots come from LINSTOR's default
   # classes.

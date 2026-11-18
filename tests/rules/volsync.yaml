@@ -3,8 +3,12 @@
 # series are shaped as VolSync's controller writes its metrics: labels obj_name, obj_namespace, role
 # and method (https://volsync.readthedocs.io/en/stable/usage/metrics/index.html), from two replicas
 # that differ in their pod and instance, with the job, namespace, service and endpoint of the
-# ServiceMonitor's scrape of the Service volsync-metrics. Each group's name is the title
-# of its scenario in features/alerts.feature.
+# ServiceMonitor's scrape of the Service volsync-metrics. The restore drill's alerts read
+# kube-state-metrics' CronJob metrics instead, shaped as tests/rules/cloudnative-pg.yaml shapes them
+# (kube_cronjob_created, kube_cronjob_status_last_schedule_time and
+# kube_cronjob_status_last_successful_time, labelled cronjob and namespace, Unix times in seconds),
+# for check CronJobs named <application>-drill-check. Each group's name is the title of its scenario
+# in features/alerts.feature.
 rule_files:
   - volsync.rules.yaml
 evaluation_interval: 1m
@@ -108,3 +112,179 @@ tests:
       - eval_time: 80m
         alertname: VolSyncSourceMissedIntervals
         exp_alerts: []
+  - name: The alert RestoreDrillStale fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # The drill of "old" last passed its check at 10 hours (36000 s) and never since: more than 36
+      # hours old once the clock passes 165600 s, minute 2760, so the alert is pending from minute 2761.
+      - series: >-
+          kube_cronjob_created{cronjob="old-drill-check", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x2800'
+      - series: >-
+          kube_cronjob_status_last_successful_time{cronjob="old-drill-check", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '36000x2800'
+      # The check of "never" was created at the start and has no last success: it is stale 36 hours
+      # after it was created, minute 2160, pending from minute 2161.
+      - series: >-
+          kube_cronjob_created{cronjob="never-drill-check", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x2800'
+      # The check of "healthy" passed a minute ago at every moment.
+      - series: >-
+          kube_cronjob_created{cronjob="healthy-drill-check", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x2800'
+      - series: >-
+          kube_cronjob_status_last_successful_time{cronjob="healthy-drill-check", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0+60x2800'
+      # The check of "young" was created at minute 1667 (100000 s), has had no success yet, and at the
+      # end of the test is not yet 36 hours old: it is quiet throughout.
+      - series: >-
+          kube_cronjob_created{cronjob="young-drill-check", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '100000x2800'
+      # CronJobs of other names, as old and never successful, are none of its concern: a dump's, and one
+      # whose name only starts with the suffix.
+      - series: >-
+          kube_cronjob_created{cronjob="orders-db-pgdump", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x2800'
+      - series: >-
+          kube_cronjob_created{cronjob="drill-check-notes", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x2800'
+    alert_rule_test:
+      # No check is more than 36 hours old yet.
+      - eval_time: 5m
+        alertname: RestoreDrillStale
+        exp_alerts: []
+      - eval_time: 2160m
+        alertname: RestoreDrillStale
+        exp_alerts: []
+      # "never" is pending from minute 2161 and fires 5 minutes later.
+      - eval_time: 2165m
+        alertname: RestoreDrillStale
+        exp_alerts: []
+      - eval_time: 2166m
+        alertname: RestoreDrillStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: demo
+              cronjob: never-drill-check
+              application: never
+            exp_annotations:
+              summary: No check of a volume's restore drill has passed for 36 hours
+              description: The restore drill of never in demo has had no check pass, by the CronJob never-drill-check, for 36 hours, so its newest backup is not shown to restore.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#restoredrillstale
+      # "old" is pending from minute 2761, 36 hours after its last success, so a minute before it
+      # fires only "never" does: no threshold shorter than 36 hours on the last-success comparison
+      # passes this.
+      - eval_time: 2765m
+        alertname: RestoreDrillStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: demo
+              cronjob: never-drill-check
+              application: never
+            exp_annotations:
+              summary: No check of a volume's restore drill has passed for 36 hours
+              description: The restore drill of never in demo has had no check pass, by the CronJob never-drill-check, for 36 hours, so its newest backup is not shown to restore.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#restoredrillstale
+      # "old" fires 5 minutes after it became pending, with "never" still firing.
+      - eval_time: 2766m
+        alertname: RestoreDrillStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: demo
+              cronjob: never-drill-check
+              application: never
+            exp_annotations:
+              summary: No check of a volume's restore drill has passed for 36 hours
+              description: The restore drill of never in demo has had no check pass, by the CronJob never-drill-check, for 36 hours, so its newest backup is not shown to restore.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#restoredrillstale
+          - exp_labels:
+              severity: warning
+              namespace: demo
+              cronjob: old-drill-check
+              application: old
+            exp_annotations:
+              summary: No check of a volume's restore drill has passed for 36 hours
+              description: The restore drill of old in demo has had no check pass, by the CronJob old-drill-check, for 36 hours, so its newest backup is not shown to restore.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#restoredrillstale
+  - name: The alert RestoreDrillJobFailing fires after its time in the failing case and stays quiet in the healthy one
+    interval: 1m
+    input_series:
+      # The check of "failing" last passed at the start, and its latest run was scheduled at minute 10
+      # (600 s) and has not succeeded since: pending from minute 10, firing half an hour later.
+      - series: >-
+          kube_cronjob_status_last_schedule_time{cronjob="failing-drill-check", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x9 600x200'
+      - series: >-
+          kube_cronjob_status_last_successful_time{cronjob="failing-drill-check", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x209'
+      # The check of "never" was first scheduled at minute 10 and has no last success at all: the same
+      # alert.
+      - series: >-
+          kube_cronjob_status_last_schedule_time{cronjob="never-drill-check", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '_x10 600x200'
+      # The check of "healthy" passed after it was scheduled.
+      - series: >-
+          kube_cronjob_status_last_schedule_time{cronjob="healthy-drill-check", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '600x209'
+      - series: >-
+          kube_cronjob_status_last_successful_time{cronjob="healthy-drill-check", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '660x209'
+      # A check that has not yet had its first schedule has neither series.
+      - series: >-
+          kube_cronjob_created{cronjob="young-drill-check", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x209'
+      # A failing run of a CronJob of another name is none of its concern.
+      - series: >-
+          kube_cronjob_status_last_schedule_time{cronjob="orders-db-pgdump", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '600x209'
+      - series: >-
+          kube_cronjob_status_last_successful_time{cronjob="orders-db-pgdump", namespace="demo", job="kube-state-metrics",
+          instance="192.0.2.1:8080", pod="ksm-a", service="kube-state-metrics", endpoint="http"}
+        values: '0x209'
+    alert_rule_test:
+      # Every check so far passed.
+      - eval_time: 5m
+        alertname: RestoreDrillJobFailing
+        exp_alerts: []
+      - eval_time: 39m
+        alertname: RestoreDrillJobFailing
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: RestoreDrillJobFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: demo
+              cronjob: failing-drill-check
+              application: failing
+            exp_annotations:
+              summary: The latest check of a volume's restore drill did not pass
+              description: The latest check of the restore drill of failing in demo, by the CronJob failing-drill-check, was scheduled over half an hour ago and has not passed.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#restoredrilljobfailing
+          - exp_labels:
+              severity: warning
+              namespace: demo
+              cronjob: never-drill-check
+              application: never
+            exp_annotations:
+              summary: The latest check of a volume's restore drill did not pass
+              description: The latest check of the restore drill of never in demo, by the CronJob never-drill-check, was scheduled over half an hour ago and has not passed.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#restoredrilljobfailing

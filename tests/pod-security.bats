@@ -436,6 +436,7 @@ real_render() {
     "LinstorCluster linstorcluster .spec.affinityController.podTemplate.spec securityContext - linstor-affinity-controller"
     "ReplicationSource volsync-demo .spec.restic moverSecurityContext - -"
     "ReplicationDestination volsync-demo-restore .spec.restic moverSecurityContext - -"
+    "ReplicationDestination volsync-demo-drill .spec.restic moverSecurityContext - -"
   )
   yq -N -o json -I0 'select(.kind == "CustomResourceDefinition")
     | {"group": .spec.group, "kind": .spec.names.kind, "versions": [.spec.versions[] | {"name": .name, "schema": .schema.openAPIV3Schema}]}' \

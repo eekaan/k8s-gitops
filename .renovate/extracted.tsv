@@ -151,6 +151,7 @@ kubernetes/components/cnpg-cluster/cluster.yaml	regex	ghcr.io/cloudnative-pg/pos
 kubernetes/components/cnpg-cluster/cronjob.yaml	kubernetes	docker.io/rclone/rclone	-
 kubernetes/components/cnpg-cluster/cronjob.yaml	kubernetes	ghcr.io/cloudnative-pg/postgresql	-
 kubernetes/components/cnpg-cluster/cronjob.yaml	regex	ghcr.io/cloudnative-pg/postgresql	image
+kubernetes/components/volsync-drill/cronjob.yaml	kubernetes	docker.io/library/busybox	-
 kubernetes/components/waf/envoyextensionpolicy.yaml	regex	ghcr.io/corazawaf/coraza-proxy-wasm	url
 mise.toml	mise	age	-
 mise.toml	mise	bats	-

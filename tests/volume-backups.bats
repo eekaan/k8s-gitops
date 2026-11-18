@@ -2,8 +2,12 @@
 # Proves features/volume-backups.feature; each test carries its scenario's title.
 # Needs helm, kustomize, flux, yq and jq on PATH (the versions pinned for the repository). The
 # VolSync, External Secrets and LINSTOR applications' charts are pulled once per run from their
-# public registries; building and rendering are offline.
+# public registries; building and rendering are offline. The restore drill's check script and the
+# demo canary's command run as their containers run them, under this machine's sh, with the
+# stand-ins of tests/fixtures/volsync-drill for the check's clock and the canary's sleep, mv and
+# date.
 
+bats_require_minimum_version 1.5.0
 # The tests run one at a time even where bats runs a file's tests side by side: a test that starts
 # while another pulls a chart finds the chart's directory before the chart is in it.
 export BATS_NO_PARALLELIZE_WITHIN_FILE=true
@@ -49,10 +53,12 @@ app_dir() {
   APP_DIR="${dirs[0]#"$TREE"/}"
 }
 
-# built APP [NAME=VALUE...]: the application APP as Flux applies it: its app/ built with its ks.yaml,
-# its components included, substituting strictly the variables of the cluster's example key lists
-# and the application's own postBuild.substitute over them, then each NAME=VALUE over both. Writes
-# $BATS_TEST_TMPDIR/APP-built.yaml and sets BUILT, APP_DIR and VARS, the file of the variables.
+# built APP [NAME=VALUE|-NAME...]: the application APP as Flux applies it: its app/ built with its
+# ks.yaml, its components included, substituting strictly the variables of the cluster's example key
+# lists and the application's own postBuild.substitute over them, then each NAME=VALUE over both,
+# and each -NAME taken out of them. With WITHOUT_COMPONENT set, that entry of the ks.yaml's
+# components is left out. Writes $BATS_TEST_TMPDIR/APP-built.yaml and sets BUILT, APP_DIR and VARS,
+# the file of the variables.
 built() {
   local app=$1 ks="$BATS_TEST_TMPDIR/$1-ks.yaml" pair
   shift
@@ -63,11 +69,18 @@ built() {
   yq ea 'select(fileIndex == 0) as $vars | select(fileIndex == 1 and . != null)
     | $vars * (.spec.postBuild.substitute // {})' "$BATS_TEST_TMPDIR/example-vars.yaml" "$TREE/$APP_DIR/ks.yaml" >"$VARS"
   for pair in "$@"; do
-    NAME="${pair%%=*}" VALUE="${pair#*=}" yq -i '.[strenv(NAME)] = strenv(VALUE)' "$VARS"
+    if [[ $pair == -* ]]; then
+      NAME="${pair#-}" yq -i 'del(.[strenv(NAME)])' "$VARS"
+    else
+      NAME="${pair%%=*}" VALUE="${pair#*=}" yq -i '.[strenv(NAME)] = strenv(VALUE)' "$VARS"
+    fi
   done
   # shellcheck disable=SC2016 # $vars is a yq variable.
   yq ea 'select(fileIndex == 0) as $vars | select(fileIndex == 1 and . != null)
     | .spec.postBuild.substitute = $vars' "$VARS" "$TREE/$APP_DIR/ks.yaml" >"$ks"
+  if [ -n "${WITHOUT_COMPONENT:-}" ]; then
+    yq -i '.spec.components -= [strenv(WITHOUT_COMPONENT)]' "$ks"
+  fi
   BUILT="$BATS_TEST_TMPDIR/$app-built.yaml"
   # Built from the tree's parent, with paths from there, as scripts/kubernetes-check builds.
   (cd "$TREE" && flux build kustomization "$app" --path "./$APP_DIR/app" \
@@ -139,6 +152,96 @@ object() {
   found="$(KIND="$1" yq -N -o json -I0 'select(.kind == strenv(KIND))' "$BUILT")"
   [ "$(grep -c . <<<"$found")" -eq 1 ] || { echo "$1: found $(grep -c . <<<"$found") objects, wanted one"; return 1; }
   echo "$found"
+}
+
+# named KIND NAME: the object of KIND named NAME that built yielded, as JSON on one line; fails
+# unless there is exactly one.
+named() {
+  local found
+  found="$(KIND="$1" NAME="$2" yq -N -o json -I0 'select(.kind == strenv(KIND) and .metadata.name == strenv(NAME))' "$BUILT")"
+  [ "$(grep -c . <<<"$found")" -eq 1 ] || { echo "$1/$2: found $(grep -c . <<<"$found") objects, wanted one"; return 1; }
+  echo "$found"
+}
+
+# stand_in NAME TOOL...: installs the stand-ins TOOL of tests/fixtures/volsync-drill, each a path in
+# that directory, as $BATS_TEST_TMPDIR/NAME/bin/<the path's last part>, with an empty
+# $BATS_TEST_TMPDIR/NAME/record beside it for what they read and record, and sets BIN to that bin
+# and RECORD to that record.
+stand_in() {
+  local name=$1 tool
+  shift
+  BIN="$BATS_TEST_TMPDIR/$name/bin"
+  RECORD="$BATS_TEST_TMPDIR/$name/record"
+  rm -rf "${BATS_TEST_TMPDIR:?}/${name:?}"
+  mkdir -p "$BIN" "$RECORD"
+  for tool in "$@"; do
+    cp "$REPO/tests/fixtures/volsync-drill/$tool" "$BIN/${tool##*/}"
+  done
+}
+
+# container_argv KIND NAME CONTAINER: sets ARGV to the command and arguments of the container
+# CONTAINER of the workload KIND/NAME that built yielded, and ENVIRONMENT to its environment as
+# NAME=VALUE, each as the manifest gives it; fails on a variable whose value is not written there,
+# and on a value or argument that is not text, which the API server refuses.
+container_argv() {
+  local object pod container
+  object="$(named "$1" "$2")"
+  pod="$(jq -c 'if .kind == "CronJob" then .spec.jobTemplate.spec.template.spec else .spec.template.spec end' <<<"$object")"
+  container="$(NAME="$3" jq -c '[.containers[] | select(.name == env.NAME)] | if length == 1 then .[0] else error("not one container of that name") end' <<<"$pod")"
+  [ "$(jq -r '[(.env // [])[] | select(.value == null)] | length' <<<"$container")" -eq 0 ] ||
+    { echo "$1/$2 container $3: a variable whose value the manifest does not hold"; return 1; }
+  [ "$(jq -r '[(.env // [])[].value, ((.command // []) + (.args // []))[] | select(type != "string")] | length' <<<"$container")" -eq 0 ] ||
+    { echo "$1/$2 container $3: a variable's value or an argument that is not text: $(jq -c '.env' <<<"$container")"; return 1; }
+  mapfile -d '' -t ARGV < <(jq -j '((.command // []) + (.args // []))[] | . + "\u0000"' <<<"$container")
+  mapfile -d '' -t ENVIRONMENT < <(jq -j '(.env // [])[] | .name + "=" + .value + "\u0000"' <<<"$container")
+  [ "${#ARGV[@]}" -gt 0 ] || { echo "$1/$2 container $3: no command"; return 1; }
+}
+
+# drill_check DIR [NAME=VALUE|-NAME...]: the restore drill's check on DIR, run as the container of
+# the CronJob that built yielded runs it: its command, with the script the built ConfigMap holds in
+# place of the one the pod mounts from it, and the environment the CronJob gives the container,
+# with DRILL_DIR naming DIR, each NAME=VALUE over it and each -NAME taken out, and the stand-ins of
+# BIN first on PATH. Sets status, output, which is its standard output, and stderr.
+drill_check() {
+  local dir=$1 app scripts mount pair name i
+  local -a environment=()
+  shift
+  app="$(var APP)"
+  container_argv CronJob "$app-drill-check" check
+  # The path the command names is the script of the ConfigMap, where the pod mounts it.
+  scripts="$BATS_TEST_TMPDIR/drill-scripts"
+  mkdir -p "$scripts"
+  named ConfigMap "$app-drill-scripts" | jq -j '.data["check.sh"]' >"$scripts/check.sh"
+  mount="$(named CronJob "$app-drill-check" | NAME="$app-drill-scripts" jq -r '.spec.jobTemplate.spec.template.spec
+    | (.volumes[] | select(.configMap.name == env.NAME) | .name) as $volume
+    | .containers[] | select(.name == "check") | .volumeMounts[] | select(.name == $volume) | .mountPath')"
+  [ -n "$mount" ] || { echo "the check container mounts no volume of the ConfigMap $app-drill-scripts"; return 1; }
+  [ "${ARGV[*]}" = "/bin/sh $mount/check.sh" ] || { echo "the check container runs [${ARGV[*]}], not /bin/sh on the script the ConfigMap is mounted with at $mount"; return 1; }
+  ARGV[1]="$scripts/check.sh"
+  for pair in "${ENVIRONMENT[@]}" "DRILL_DIR=$dir" "$@"; do
+    name="${pair%%=*}"
+    [[ $pair != -* ]] || name="${pair#-}"
+    for i in "${!environment[@]}"; do
+      [[ ${environment[$i]} != "$name="* ]] || unset "environment[$i]"
+    done
+    [[ $pair == -* ]] || environment+=("$pair")
+  done
+  run --separate-stderr env -i PATH="$BIN:$PATH" "${environment[@]}" "${ARGV[@]}"
+}
+
+# seconds_of_day SCHEDULE: the second of the day at which a schedule that runs once a day, at one
+# minute of one hour, starts; fails on any other schedule.
+seconds_of_day() {
+  [[ $1 =~ ^([0-9]|[1-5][0-9])\ ([0-9]|1[0-9]|2[0-3])\ \*\ \*\ \*$ ]] ||
+    { echo "not a schedule of once a day at one minute of one hour: [$1]" >&2; return 1; }
+  echo $((10#${BASH_REMATCH[2]} * 3600 + 10#${BASH_REMATCH[1]} * 60))
+}
+
+# duration_seconds DURATION: a Prometheus duration of hours, minutes and seconds, such as 1h or
+# 45m30s, in seconds; fails on any other form.
+duration_seconds() {
+  [[ -n $1 && $1 =~ ^(([0-9]+)h)?(([0-9]+)m)?(([0-9]+)s)?$ ]] || { echo "not a duration of h, m and s: $1" >&2; return 1; }
+  echo $((10#${BASH_REMATCH[2]:-0} * 3600 + 10#${BASH_REMATCH[4]:-0} * 60 + 10#${BASH_REMATCH[6]:-0}))
 }
 
 # selects SELECTOR LABELS: succeeds when the label map SELECTOR is not empty and every label in it
@@ -362,9 +465,11 @@ unknown_fields() {
     schedule="$(var VOLSYNC_SCHEDULE)"
     echo "built with ${vars:-the values of the application}: claim $name, capacity $capacity, schedule [$schedule]"
     [ -n "$capacity" ] && [ -n "$schedule" ]
-    claim="$(object PersistentVolumeClaim)"
+    # The application's claim and the ReplicationDestination that fills it, each by its name: the
+    # restore drill, which the test application also takes, builds a second of each.
+    claim="$(named PersistentVolumeClaim "$name")"
     source="$(object ReplicationSource)"
-    destination="$(object ReplicationDestination)"
+    destination="$(named ReplicationDestination "$(var APP)-restore")"
     secret="$(object ExternalSecret | jq -r '.spec.target.name')"
     echo "claim: $claim"
     echo "source: $source"
@@ -466,7 +571,7 @@ unknown_fields() {
 }
 
 @test "The movers meet the restricted Pod Security level of the application's namespace" {
-  local level privileged object context
+  local level privileged object name context movers
   app_dir "$DEMO"
   level="$(yq '.metadata.labels["pod-security.kubernetes.io/enforce"]' "$TREE/${APP_DIR%/*}/namespace.yaml")"
   privileged="$(yq '.metadata.annotations["volsync.backube/privileged-movers"] // "false"' "$TREE/${APP_DIR%/*}/namespace.yaml")"
@@ -474,15 +579,20 @@ unknown_fields() {
   [ "$level" = restricted ]
   [ "$privileged" = false ]
   built "$DEMO"
-  for object in ReplicationSource ReplicationDestination; do
-    context="$(object "$object" | jq -c '.spec.restic.moverSecurityContext // {}')"
-    echo "$object mover: $context"
+  # Every object that makes VolSync run a mover: the backup, the restore of the claim and the
+  # restore drill's.
+  movers="$(yq -N 'select(.kind == "ReplicationSource" or .kind == "ReplicationDestination") | .kind + " " + .metadata.name' "$BUILT" | sort)"
+  echo "movers of: ${movers//$'\n'/, }"
+  [ "$movers" = "$(printf '%s\n' "ReplicationDestination $DEMO-drill" "ReplicationDestination $DEMO-restore" "ReplicationSource $DEMO")" ]
+  while read -r object name; do
+    context="$(named "$object" "$name" | jq -c '.spec.restic.moverSecurityContext // {}')"
+    echo "$object $name mover: $context"
     [ "$(jq -r '.runAsNonRoot' <<<"$context")" = true ]
     [ "$(jq -r '.runAsUser // 0' <<<"$context")" -gt 0 ]
     [ "$(jq -r '.runAsGroup // 0' <<<"$context")" -gt 0 ]
     [ "$(jq -r '.fsGroup // 0' <<<"$context")" -gt 0 ]
     [ "$(jq -r '.seccompProfile.type' <<<"$context")" = RuntimeDefault ]
-  done
+  done <<<"$movers"
   # The user and group come from the application.
   built "$DEMO" VOLSYNC_UID=2345 VOLSYNC_GID=3456
   context="$(object ReplicationSource | jq -c '.spec.restic.moverSecurityContext')"
@@ -491,7 +601,7 @@ unknown_fields() {
 }
 
 @test "Every object the component makes is one the cluster's definitions accept" {
-  local definitions app objects unknown="" line
+  local definitions app objects unknown="" line drill refused
   # The definitions the cluster's charts install: VolSync's and External Secrets'.
   definitions="$BATS_TEST_TMPDIR/definitions.yaml"
   for app in volsync external-secrets; do
@@ -501,13 +611,30 @@ unknown_fields() {
   done
   built "$DEMO"
   objects="$(yq -N -o json -I0 'select(.apiVersion | test("^(volsync\.backube|external-secrets\.io)/"))' "$BUILT")"
-  echo "objects: $(jq -r '.kind' <<<"$objects" | paste -sd' ' -)"
-  [ "$(jq -r '.kind' <<<"$objects" | sort | paste -sd' ' -)" = "ExternalSecret ReplicationDestination ReplicationSource" ]
+  echo "objects: $(jq -r '.kind + "/" + .metadata.name' <<<"$objects" | paste -sd' ' -)"
+  # Both components' objects of these kinds, the restore drill's ReplicationDestination among them.
+  [ "$(jq -r '.kind + "/" + .metadata.name' <<<"$objects" | sort | paste -sd' ' -)" = "ExternalSecret/$DEMO-volsync ReplicationDestination/$DEMO-drill ReplicationDestination/$DEMO-restore ReplicationSource/$DEMO" ]
   while IFS= read -r line; do
     unknown+="$(unknown_fields "$line" "$definitions")"$'\n'
   done <<<"$objects"
   echo "not accepted:${unknown//$'\n'/ }"
   [ -z "${unknown//$'\n'/}" ]
+  # The comparison refuses what the definition does not allow, on the restore drill's own object:
+  # a field under another spelling, a copy method the definition does not list, a schedule its
+  # pattern does not match, and a text where it wants true or false.
+  drill="$(DEMO="$DEMO" jq -c 'select(.kind == "ReplicationDestination" and .metadata.name == env.DEMO + "-drill")' <<<"$objects")"
+  refused="$(unknown_fields "$(jq -c '.spec.restic.destinationPvc = .spec.restic.destinationPVC' <<<"$drill")" "$definitions")"
+  echo "another spelling: $refused"
+  [ "$refused" = "spec.restic.destinationPvc: not in the schema" ]
+  refused="$(unknown_fields "$(jq -c '.spec.restic.copyMethod = "Straight"' <<<"$drill")" "$definitions")"
+  echo "another copy method: $refused"
+  [[ $refused == 'spec.restic.copyMethod: "Straight" is not one of '* ]]
+  refused="$(unknown_fields "$(jq -c '.spec.trigger.schedule = "every night"' <<<"$drill")" "$definitions")"
+  echo "another schedule: $refused"
+  [[ $refused == 'spec.trigger.schedule: "every night" does not match '* ]]
+  refused="$(unknown_fields "$(jq -c '.spec.restic.enableFileDeletion = "true"' <<<"$drill")" "$definitions")"
+  echo "a text for a boolean: $refused"
+  [ "$refused" = "spec.restic.enableFileDeletion: not a boolean" ]
 }
 
 @test "Only the seeding recipe writes the repository's credentials into the secret store" {
@@ -572,7 +699,7 @@ unknown_fields() {
 }
 
 @test "The demo volume's backup and restore objects are in what Flux applies for the cluster" {
-  local overlay enabled namespace opted dependencies name kinds
+  local overlay enabled namespace opted drills dependencies name kinds found
   overlay="$BATS_TEST_TMPDIR/overlay.yaml"
   kustomize build --load-restrictor LoadRestrictionsNone "$TREE/kubernetes/apps/overlays/lab-sto2" >"$overlay"
   enabled="$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "volsync") | .spec.path' "$overlay")"
@@ -585,6 +712,22 @@ unknown_fields() {
   # The test application, n8n and Open WebUI, which keep their data on a volume of the component's,
   # are the applications that take it.
   [ "$(paste -sd' ' - <<<"$opted")" = "n8n open-webui $DEMO" ]
+  # The restore drill is the test application's alone, as it writes the canary the drill checks, and
+  # an application takes it only beside components/volsync, whose repository it restores.
+  drills="$(yq -N 'select(.kind == "Kustomization" and (.spec.components // [] | any_c(test("components/volsync-drill$"))))
+    | .metadata.name' "$overlay")"
+  echo "applications with the restore drill: ${drills:-none}"
+  [ "$(paste -sd' ' - <<<"$drills")" = "$DEMO" ]
+  for name in $drills; do
+    grep -qxF -- "$name" <<<"$opted" || { echo "$name takes the restore drill without components/volsync"; return 1; }
+  done
+  # n8n and Open WebUI build nothing of the drill.
+  for name in n8n open-webui; do
+    built "$name"
+    found="$(yq -N 'select(.metadata.name | test("-drill(-check|-scripts)?$")) | .kind + "/" + .metadata.name' "$BUILT")"
+    echo "$name builds of the drill: ${found:-nothing}"
+    [ -z "$found" ]
+  done
   # It waits for the operator, External Secrets, LINSTOR's classes and the store's application, each
   # of which the overlay applies.
   dependencies="$(DEMO="$DEMO" yq -N 'select(.kind == "Kustomization" and .metadata.name == strenv(DEMO)) | .spec.dependsOn[].name' "$overlay" | sort | paste -sd' ' -)"
@@ -598,6 +741,480 @@ unknown_fields() {
   kinds="$(yq -N '.kind' "$BUILT" | sort | paste -sd' ' -)"
   echo "built: $kinds"
   [[ $kinds == *PersistentVolumeClaim* && $kinds == *ReplicationDestination* && $kinds == *ReplicationSource* ]]
+}
+
+# env_value NAME: the value of NAME in ENVIRONMENT, which container_argv set; fails unless it is
+# there once.
+env_value() {
+  [ "$(printf '%s\n' "${ENVIRONMENT[@]}" | grep -c "^$1=")" -eq 1 ] ||
+    { echo "the container's environment holds $1 not once" >&2; return 1; }
+  printf '%s\n' "${ENVIRONMENT[@]}" | sed -n "s/^$1=//p"
+}
+
+@test "An application that takes the drill restores its newest backup into a scratch claim every night" {
+  local drill="$TREE/kubernetes/components/volsync-drill" ks app claim destination restore cronjob secret
+  local without with extra vars used var
+  # The application opts in by naming the component beside components/volsync in its Kustomization.
+  app_dir "$DEMO"
+  ks="$TREE/$APP_DIR/ks.yaml"
+  echo "components: $(yq '.spec.components // [] | join(" ")' "$ks")"
+  [ "$(yq '.spec.components // [] | map(select(. == "../../../../../components/volsync-drill")) | length' "$ks")" -eq 1 ]
+  [ "$(yq '.spec.components // [] | map(select(. == "../../../../../components/volsync")) | length' "$ks")" -eq 1 ]
+  [ "$(yq '.kind' "$drill/kustomization.yaml")" = Component ]
+  # The application's Kustomization waits for nothing it applies, so the scratch claim, which stays
+  # Pending until the first restore's mover is scheduled, holds nothing up.
+  echo "wait: $(yq '.spec.wait // false' "$ks"); health checks: $(yq '(.spec.healthChecks // []) + (.spec.healthCheckExprs // []) | length' "$ks")"
+  [ "$(yq '.spec.wait // false' "$ks")" = false ]
+  [ "$(yq '(.spec.healthChecks // []) + (.spec.healthCheckExprs // []) | length' "$ks")" -eq 0 ]
+
+  for vars in "" "APP=marker-app VOLSYNC_CLAIM=marker-claim VOLSYNC_CAPACITY=7Gi VOLSYNC_DRILL_RESTORE_SCHEDULE=41 */6 * * * VOLSYNC_DRILL_CHECK_SCHEDULE=43 */6 * * * VOLSYNC_DRILL_MAX_AGE=\"1234\""; do
+    local -a pairs=()
+    if [ -n "$vars" ]; then
+      pairs=(APP=marker-app VOLSYNC_CLAIM=marker-claim VOLSYNC_CAPACITY=7Gi "VOLSYNC_DRILL_RESTORE_SCHEDULE=41 */6 * * *"
+        "VOLSYNC_DRILL_CHECK_SCHEDULE=43 */6 * * *" 'VOLSYNC_DRILL_MAX_AGE="1234"')
+    fi
+    # What components/volsync alone makes, then both components: the drill adds its four objects and
+    # changes nothing of the rest.
+    WITHOUT_COMPONENT=../../../../../components/volsync-drill built "$DEMO" "${pairs[@]}"
+    without="$(yq -N -o json -I0 '.' "$BUILT" | sort)"
+    built "$DEMO" "${pairs[@]}"
+    with="$(yq -N -o json -I0 '.' "$BUILT" | sort)"
+    app="$(var APP)"
+    echo "built with ${vars:-the values of the application}: APP $app"
+    [ -n "$without" ]
+    [ -z "$(comm -23 <(echo "$without") <(echo "$with"))" ]
+    extra="$(comm -13 <(echo "$without") <(echo "$with") | jq -r '.kind + "/" + .metadata.name' | sort | paste -sd' ' -)"
+    echo "the drill adds: $extra"
+    [ "$extra" = "ConfigMap/$app-drill-scripts CronJob/$app-drill-check PersistentVolumeClaim/$app-drill ReplicationDestination/$app-drill" ]
+    claim="$(named PersistentVolumeClaim "$app-drill")"
+    destination="$(named ReplicationDestination "$app-drill")"
+    restore="$(named ReplicationDestination "$app-restore")"
+    cronjob="$(named CronJob "$app-drill-check")"
+    secret="$(object ExternalSecret | jq -r '.spec.target.name')"
+    echo "claim: $claim"
+    echo "destination: $destination"
+
+    # The scratch claim: the volume's size on the default StorageClass, made empty.
+    [ "$(jq -r '.spec.resources.requests.storage' <<<"$claim")" = "$(var VOLSYNC_CAPACITY)" ]
+    [ "$(jq -c '.spec.accessModes' <<<"$claim")" = '["ReadWriteOnce"]' ]
+    [ "$(jq -c '.spec | del(.accessModes, .resources) ' <<<"$claim")" = '{}' ]
+    [ "$(jq -c '.spec.resources | keys' <<<"$claim")" = '["requests"]' ]
+
+    # The ReplicationDestination: on the restore schedule alone, the newest backup (no previous, no
+    # restoreAsOf) of the application's repository straight into the scratch claim, no snapshot,
+    # the files the backup does not hold deleted, restic's cache, at VolSync's default size, deleted
+    # after each restore, and the movers' security context of components/volsync, field for field.
+    [ "$(jq -c '.spec | keys' <<<"$destination")" = '["restic","trigger"]' ]
+    [ "$(jq -c '.spec.trigger' <<<"$destination")" = "$(SCHEDULE="$(var VOLSYNC_DRILL_RESTORE_SCHEDULE)" jq -nc '{schedule: env.SCHEDULE}')" ]
+    [ "$(jq -c '.spec.restic | keys' <<<"$destination")" = '["cleanupCachePVC","copyMethod","destinationPVC","enableFileDeletion","moverSecurityContext","repository"]' ]
+    [ "$(jq -r '.spec.restic | [.repository, .destinationPVC, .copyMethod, .enableFileDeletion, .cleanupCachePVC] | map(tostring) | join(" ")' <<<"$destination")" = "$secret $app-drill Direct true true" ]
+    [ "$(jq -cS '.spec.restic.moverSecurityContext' <<<"$destination")" = "$(jq -cS '.spec.restic.moverSecurityContext' <<<"$restore")" ]
+
+    # The check: on the check schedule, given the largest age, its one script from the ConfigMap,
+    # byte for byte the component's, under a name without a hash.
+    [ "$(jq -r '.spec.schedule' <<<"$cronjob")" = "$(var VOLSYNC_DRILL_CHECK_SCHEDULE)" ]
+    container_argv CronJob "$app-drill-check" check
+    [[ $(var VOLSYNC_DRILL_MAX_AGE) =~ ^\"([0-9]+)\"$ ]]
+    [ "$(env_value DRILL_MAX_AGE_SECONDS)" = "${BASH_REMATCH[1]}" ]
+    [ "$(named ConfigMap "$app-drill-scripts" | jq -c '.data | keys')" = '["check.sh"]' ]
+    cmp <(named ConfigMap "$app-drill-scripts" | jq -j '.data["check.sh"]') "$REPO/kubernetes/components/volsync-drill/scripts/check.sh"
+  done
+
+  # The component reads four of components/volsync's variables and adds three, which nothing defaults.
+  used="$(grep -rhoE '\$\{[A-Za-z_][A-Za-z0-9_]*' "$drill" | sed 's/^\${//' | sort -u | paste -sd' ' -)"
+  echo "variables the component reads: $used"
+  [ "$used" = "APP VOLSYNC_CAPACITY VOLSYNC_DRILL_CHECK_SCHEDULE VOLSYNC_DRILL_MAX_AGE VOLSYNC_DRILL_RESTORE_SCHEDULE VOLSYNC_GID VOLSYNC_UID" ]
+  for var in VOLSYNC_DRILL_RESTORE_SCHEDULE VOLSYNC_DRILL_CHECK_SCHEDULE VOLSYNC_DRILL_MAX_AGE; do
+    run built "$DEMO" "-$var"
+    echo "built without $var: status $status: $output"
+    [ "$status" -ne 0 ]
+    [[ $output == *"$var"* ]]
+  done
+  # The largest age carries its quotes: Flux substitutes after kustomize has dropped the manifest's,
+  # so a bare number reaches the check's variable as a number, which the API server refuses.
+  built "$DEMO" VOLSYNC_DRILL_MAX_AGE=95400
+  echo "with a bare number: $(named CronJob "$DEMO-drill-check" | jq -c '.spec.jobTemplate.spec.template.spec.containers[0].env')"
+  [ "$(named CronJob "$DEMO-drill-check" | jq -r '.spec.jobTemplate.spec.template.spec.containers[0].env[]
+    | select(.name == "DRILL_MAX_AGE_SECONDS") | .value | type')" = number ]
+}
+
+@test "The scratch claim is never backed up and the drill gives no key a new holder" {
+  local scratch target repositories named_by pod
+  built "$DEMO"
+  scratch="$(var APP)-drill"
+  # One ExternalSecret and no Secret; the drill's component holds neither, nor anything that writes a
+  # secret.
+  echo "ExternalSecrets: $(yq -N 'select(.kind == "ExternalSecret") | .metadata.name' "$BUILT" | paste -sd' ' -)"
+  [ "$(yq -N 'select(.kind == "ExternalSecret") | .metadata.name' "$BUILT" | grep -c .)" -eq 1 ]
+  [ -z "$(yq -N 'select(.kind == "Secret") | .metadata.name' "$BUILT")" ]
+  [ -z "$(grep -rlE '^kind: (Secret|ExternalSecret|PushSecret|SecretStore|ClusterSecretStore)$' "$TREE/kubernetes/components/volsync-drill" || true)" ]
+  # Both ReplicationDestinations and the ReplicationSource read the one Secret the ExternalSecret
+  # writes.
+  target="$(object ExternalSecret | jq -r '.spec.target.name')"
+  repositories="$(yq -N 'select(.kind == "ReplicationSource" or .kind == "ReplicationDestination")
+    | .kind + "/" + .metadata.name + " " + .spec.restic.repository' "$BUILT" | sort)"
+  echo "repositories: ${repositories//$'\n'/, }"
+  [ "$repositories" = "$(printf '%s\n' "ReplicationDestination/$DEMO-drill $target" "ReplicationDestination/$DEMO-restore $target" "ReplicationSource/$DEMO $target")" ]
+  # The only ReplicationSource backs the application's own claim up.
+  [ "$(object ReplicationSource | jq -r '.spec.sourcePVC')" = "$DEMO" ]
+  # The scratch claim is named by its ReplicationDestination, which copies into it directly, and by
+  # the check job, and by nothing else: no ReplicationSource, snapshot or clone takes it.
+  named_by="$(yq -N -o json -I0 '.' "$BUILT" | SCRATCH="$scratch" jq -r '. as $o | paths(type == "string") as $p
+    | select(($o | getpath($p)) == env.SCRATCH)
+    | $o.kind + "/" + $o.metadata.name + " " + ($p | map(if type == "number" then "[]" else . end) | join("."))' | sort)"
+  echo "what names $scratch: ${named_by//$'\n'/, }"
+  [ "$named_by" = "$(printf '%s\n' "CronJob/$DEMO-drill-check spec.jobTemplate.spec.template.spec.volumes.[].persistentVolumeClaim.claimName" \
+    "PersistentVolumeClaim/$scratch metadata.name" "ReplicationDestination/$DEMO-drill metadata.name" \
+    "ReplicationDestination/$DEMO-drill spec.restic.destinationPVC")" ]
+  [ "$(named ReplicationDestination "$DEMO-drill" | jq -r '.spec.restic.copyMethod')" = Direct ]
+  # The check job reads no Secret and mounts no token.
+  pod="$(named CronJob "$DEMO-drill-check" | jq -c '.spec.jobTemplate.spec.template.spec')"
+  [ "$(jq -r '.automountServiceAccountToken' <<<"$pod")" = false ]
+  [ "$(jq '[.. | objects | select(has("secretKeyRef") or has("secretRef") or has("secret") or has("projected") or has("csi"))] | length' <<<"$pod")" -eq 0 ]
+}
+
+@test "The drill's check fails on an empty volume, a missing heartbeat and a stale one, and passes on a fresh one" {
+  local cases="$BATS_TEST_TMPDIR/cases" work="$BATS_TEST_TMPDIR/work" now=2000000000 max before after name value
+  built "$DEMO"
+  stand_in check date
+  echo "$now" >"$RECORD/now"
+  container_argv CronJob "$DEMO-drill-check" check
+  max="$(env_value DRILL_MAX_AGE_SECONDS)"
+  echo "the check runs [${ARGV[*]}] with the largest age $max"
+  [[ $max =~ ^[1-9][0-9]*$ ]]
+  # heartbeat CASE LINE: a directory CASE with the file created and a heartbeat holding LINE.
+  heartbeat() {
+    mkdir -p "$cases/$1"
+    printf 'marker\n' >"$cases/$1/created"
+    printf '%s\n' "$2" >"$cases/$1/heartbeat"
+  }
+  mkdir -p "$cases/empty" "$cases/lost-found/lost+found" "$cases/no-heartbeat" "$cases/hidden-only" "$cases/empty-heartbeat" "$work"
+  printf 'marker\n' >"$cases/no-heartbeat/created"
+  # Files the restore brought back, though a listing without hidden files shows none.
+  printf 'marker\n' >"$cases/hidden-only/.heartbeat.tmp"
+  : >"$cases/empty-heartbeat/heartbeat"
+  heartbeat fresh "$((now - 7200)) $(date -u -d "@$((now - 7200))" +%Y-%m-%dT%H:%M:%SZ)"
+  heartbeat at-bound "$((now - max)) $(date -u -d "@$((now - max))" +%Y-%m-%dT%H:%M:%SZ)"
+  heartbeat stale "$((now - max - 1)) $(date -u -d "@$((now - max - 1))" +%Y-%m-%dT%H:%M:%SZ)"
+  heartbeat future "$((now + 1)) $(date -u -d "@$((now + 1))" +%Y-%m-%dT%H:%M:%SZ)"
+  heartbeat date-only "$(date -u -d "@$((now - 60))" +%Y-%m-%dT%H:%M:%SZ)"
+  heartbeat fraction "$((now - 60)).5 marker"
+  heartbeat negative "-60 marker"
+  heartbeat leading-zero "0$((now - 60)) marker"
+  heartbeat blank-line ""
+  before="$(cd "$cases" && find . -printf '%p %y %s %m %T@\n' | sort)"
+  # Run from an empty directory, which stays empty, as do the cases.
+  cd "$work"
+
+  # Fresh, and exactly as old as the largest age: one line with the age and the bound.
+  drill_check "$cases/fresh"
+  echo "fresh: $status [$output] [$stderr]"
+  [ "$status" -eq 0 ]
+  [ -z "$stderr" ]
+  [ "${#lines[@]}" -eq 1 ]
+  [[ $output == *" 7200 seconds old"* && $output == *" $max seconds"* ]]
+  drill_check "$cases/at-bound"
+  echo "at the bound: $status [$output] [$stderr]"
+  [ "$status" -eq 0 ]
+  [ -z "$stderr" ]
+  [ "${#lines[@]}" -eq 1 ]
+  [[ $output == *" $max seconds old"* ]]
+
+  # Every other case fails with its reason on standard error and nothing on standard output.
+  for name in empty lost-found; do
+    drill_check "$cases/$name"
+    echo "$name: $status [$output] [$stderr]"
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    [[ $stderr == *"brought nothing back"* ]]
+    [[ $stderr == *"a repository path that holds no backup restores nothing without an error"* ]]
+  done
+  for name in no-heartbeat hidden-only; do
+    drill_check "$cases/$name"
+    echo "$name: $status [$output] [$stderr]"
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    [[ $stderr == *"holds no heartbeat"* ]]
+  done
+  for name in empty-heartbeat date-only fraction negative leading-zero blank-line; do
+    drill_check "$cases/$name"
+    echo "$name: $status [$output] [$stderr]"
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    [[ $stderr == *"not a whole number of seconds"* ]]
+  done
+  drill_check "$cases/future"
+  echo "future: $status [$output] [$stderr]"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+  [[ $stderr == *"lies in the future"* ]]
+  drill_check "$cases/stale"
+  echo "stale: $status [$output] [$stderr]"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+  [[ $stderr == *" $((max + 1)) seconds old"* && $stderr == *" $max seconds"* ]]
+
+  # The largest age unset, empty or not a positive whole number, and a directory that is none.
+  for value in -DRILL_MAX_AGE_SECONDS DRILL_MAX_AGE_SECONDS= DRILL_MAX_AGE_SECONDS=marker DRILL_MAX_AGE_SECONDS=0 \
+    DRILL_MAX_AGE_SECONDS=-5 DRILL_MAX_AGE_SECONDS=95400s DRILL_MAX_AGE_SECONDS=095400; do
+    drill_check "$cases/fresh" "$value"
+    echo "$value: $status [$output] [$stderr]"
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    [[ $stderr == *DRILL_MAX_AGE_SECONDS* ]]
+  done
+  for value in -DRILL_DIR DRILL_DIR= "DRILL_DIR=$cases/fresh/heartbeat" "DRILL_DIR=$cases/missing"; do
+    drill_check "$cases/fresh" "$value"
+    echo "$value: $status [$output] [$stderr]"
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    [[ $stderr == *DRILL_DIR* ]]
+  done
+
+  # It writes nothing.
+  after="$(cd "$cases" && find . -printf '%p %y %s %m %T@\n' | sort)"
+  [ "$after" = "$before" ]
+  [ -z "$(ls -A "$work")" ]
+  # It asks the clock for the seconds alone, which the stand-in refuses otherwise, and holds no
+  # ${...}, which Flux would substitute.
+  # shellcheck disable=SC2016 # the pattern is the characters themselves.
+  run ! grep -F '${' "$BATS_TEST_TMPDIR/drill-scripts/check.sh" "$REPO/kubernetes/components/volsync-drill/scripts/check.sh"
+}
+
+@test "The demo's canary writes a heartbeat the drill's check accepts" {
+  local dir="$BATS_TEST_TMPDIR/canary-volume" interval mount before after line stamp created pod container i
+  local -a canary environment inodes heartbeats renames synced order
+  built "$DEMO"
+  container_argv Deployment "$DEMO" canary
+  canary=("${ARGV[@]}")
+  interval="$(env_value HEARTBEAT_SECONDS)"
+  # The directory it writes is the volume's mount.
+  mount="$(named Deployment "$DEMO" | jq -r '.spec.template.spec | (.volumes[] | select(.persistentVolumeClaim.claimName == "'"$DEMO"'") | .name) as $volume
+    | .containers[] | select(.name == "canary") | .volumeMounts[] | select(.name == $volume) | .mountPath')"
+  echo "the canary runs [${canary[*]}], every $interval seconds, in $(env_value CANARY_DIR), the mount of the volume at $mount"
+  [ "$interval" = 300 ]
+  [ "$(env_value CANARY_DIR)" = "$mount" ]
+  mapfile -t environment < <(printf '%s\n' "${ENVIRONMENT[@]}" | grep -v '^CANARY_DIR=')
+  environment+=("CANARY_DIR=$dir")
+  mkdir -p "$dir"
+
+  # One round, then the kubelet's TERM: it ends with status 0.
+  stand_in canary sleep mv fsync canary/date
+  echo "$dir" >"$RECORD/dir"
+  before="$(date +%s)"
+  run env -i PATH="$BIN:$PATH" "${environment[@]}" "${canary[@]}"
+  after="$(date +%s)"
+  echo "status $status: $output"
+  [ "$status" -eq 0 ]
+  # It sleeps the interval between rounds; at each, the directory holds created and the heartbeat and
+  # nothing else, the heartbeat a new file renamed over the last, of one line: the Unix time in
+  # seconds and the same moment as a UTC date and time.
+  echo "slept: $(paste -sd' ' "$RECORD/sleep"); entries: $(paste -sd'|' "$RECORD/entries"); inodes: $(paste -sd' ' "$RECORD/inodes")"
+  [ "$(cat "$RECORD/sleep")" = "$(printf '%s\n' "$interval" "$interval")" ]
+  [ "$(cat "$RECORD/entries")" = "$(printf '%s\n' "created heartbeat" "created heartbeat")" ]
+  mapfile -t inodes <"$RECORD/inodes"
+  [ "${#inodes[@]}" -eq 2 ]
+  [ "${inodes[0]}" != "${inodes[1]}" ]
+  # Each round's file is renamed over the heartbeat from the same directory.
+  echo "renamed: $(paste -sd'|' "$RECORD/mv")"
+  [ "$(grep -c '' "$RECORD/mv")" -eq 2 ]
+  while read -r from to; do
+    [ "$(dirname "$from")" = "$dir" ]
+    [ "$from" != "$dir/heartbeat" ]
+    [ "$to" = "$dir/heartbeat" ]
+  done <"$RECORD/mv"
+  mapfile -t heartbeats <"$RECORD/heartbeats"
+  echo "heartbeats: ${heartbeats[*]}"
+  [ "${#heartbeats[@]}" -eq 2 ]
+  for line in "${heartbeats[@]}"; do
+    [[ $line =~ ^([0-9]+)\ ([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)$ ]]
+    stamp="${BASH_REMATCH[1]}"
+    [ "${BASH_REMATCH[2]}" = "$(date -u -d "@$stamp" +%Y-%m-%dT%H:%M:%SZ)" ]
+    [ "$stamp" -ge "$before" ]
+    [ "$stamp" -le "$after" ]
+  done
+  [ "$(grep -c '' "$dir/heartbeat")" -eq 1 ]
+  [ "$(cat "$dir/heartbeat")" = "${heartbeats[1]}" ]
+  # Each round's file is written, synced whole to disk and only then renamed. A snapshot holds what
+  # is on disk at its moment, and the kernel writes a file's data to disk later than its name, so a
+  # snapshot can hold a file renamed before it was synced as an empty one; synced first, the
+  # heartbeat in a snapshot is the last one or the new one, whole.
+  mapfile -t renames <"$RECORD/mv"
+  for i in "${!renames[@]}"; do
+    order+=("fsync ${renames[$i]%% *}" "mv ${renames[$i]}")
+  done
+  echo "in order: $(paste -sd'|' "$RECORD/order")"
+  [ "$(cat "$RECORD/order")" = "$(printf '%s\n' "${order[@]}")" ]
+  mapfile -t synced <"$RECORD/fsync"
+  echo "synced: $(paste -sd'|' "$RECORD/fsync")"
+  [ "${#synced[@]}" -eq 2 ]
+  for i in 0 1; do
+    [ "${synced[$i]}" = "${renames[$i]%% *} ${heartbeats[$i]}" ]
+  done
+  # Each line is one date call's, so its two fields are one moment even across a tick of the clock:
+  # three calls, for created and for the two rounds' heartbeats.
+  echo "dated: $(paste -sd'|' "$RECORD/date")"
+  [ "$(grep -c '' "$RECORD/date")" -eq 3 ]
+  # created is written once: a run on a volume that holds one, as a restored volume does, keeps it,
+  # content, inode and time alike.
+  [[ $(cat "$dir/created") =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+  printf '2001-02-03T04:05:06Z\n' >"$dir/created"
+  touch -d @981173106 "$dir/created"
+  created="$(stat -c '%i %Y' "$dir/created") $(cat "$dir/created")"
+  stand_in canary sleep fsync
+  echo "$dir" >"$RECORD/dir"
+  run env -i PATH="$BIN:$PATH" "${environment[@]}" "${canary[@]}"
+  [ "$status" -eq 0 ]
+  echo "created before the second run: $created; after: $(stat -c '%i %Y' "$dir/created") $(cat "$dir/created")"
+  [ "$(stat -c '%i %Y' "$dir/created") $(cat "$dir/created")" = "$created" ]
+
+  # The drill's check, run as its container runs it, passes on what it wrote.
+  stand_in check
+  drill_check "$dir"
+  echo "the check: $status [$output] [$stderr]"
+  [ "$status" -eq 0 ]
+  [ -z "$stderr" ]
+  [ "${#lines[@]}" -eq 1 ]
+
+  # The pod as before: the movers' user and group, the runtime's seccomp profile, no privilege
+  # escalation, no capability, a read-only root, replaced by Recreate, and its requests.
+  pod="$(named Deployment "$DEMO" | jq -c '.spec.template.spec')"
+  container="$(jq -c '.containers[] | select(.name == "canary")' <<<"$pod")"
+  [ "$(jq -r '.securityContext | [.runAsNonRoot, .runAsUser, .runAsGroup, .seccompProfile.type] | map(tostring) | join(" ")' <<<"$pod")" = \
+    "true $(object ReplicationSource | jq -r '.spec.restic.moverSecurityContext | [.runAsUser, .runAsGroup] | map(tostring) | join(" ")') RuntimeDefault" ]
+  [ "$(jq -c '.securityContext | [.allowPrivilegeEscalation, .readOnlyRootFilesystem, .capabilities]' <<<"$container")" = '[false,true,{"drop":["ALL"]}]' ]
+  [ "$(named Deployment "$DEMO" | jq -r '.spec.strategy.type')" = Recreate ]
+  [ "$(jq -c '.resources' <<<"$container")" = '{"requests":{"cpu":"1m","memory":"8Mi"}}' ]
+}
+
+@test "The drill's check job meets the restricted level, holds no token and only reads the scratch claim" {
+  local cronjob job pod container tag image claim mount scripts policies selector labels ks app takers
+  built "$DEMO"
+  cronjob="$(named CronJob "$DEMO-drill-check")"
+  job="$(jq -c '.spec.jobTemplate.spec' <<<"$cronjob")"
+  pod="$(jq -c '.template.spec' <<<"$job")"
+  echo "the CronJob: $cronjob"
+  # Never two checks at once; one starts within 600 seconds of its time and ends within 600 more, is
+  # tried once more after a failure, and its last success and last three failures are kept. No time
+  # zone, as the tree's other CronJobs, and not suspended.
+  [ "$(jq -r '.spec | [.concurrencyPolicy, .startingDeadlineSeconds, .successfulJobsHistoryLimit, .failedJobsHistoryLimit, (.timeZone // "none"), (.suspend // false)]
+    | map(tostring) | join(" ")' <<<"$cronjob")" = "Forbid 600 1 3 none false" ]
+  [ "$(jq -r '[.activeDeadlineSeconds, .backoffLimit, .template.spec.restartPolicy] | map(tostring) | join(" ")' <<<"$job")" = "600 1 Never" ]
+  # No token, no service links, no toleration.
+  [ "$(jq -r '[.automountServiceAccountToken, .enableServiceLinks, (.tolerations // [] | length)] | map(tostring) | join(" ")' <<<"$pod")" = "false false 0" ]
+  # One container: the busybox the demo's Deployments pin, by that tag and a digest.
+  [ "$(jq -r '(.initContainers // []) + .containers | length' <<<"$pod")" -eq 1 ]
+  container="$(jq -c '.containers[0]' <<<"$pod")"
+  tag="$(named Deployment "$DEMO" | jq -r '.spec.template.spec.containers[] | select(.name == "canary") | .image')"
+  image="$(jq -r '.image' <<<"$container")"
+  echo "the check's image: $image; the demo's: $tag and $(yq '.spec.template.spec.containers[0].image' "$TREE/kubernetes/apps/base/demo/hello/app/deployment.yaml")"
+  [ "$tag" = "$(yq '.spec.template.spec.containers[0].image' "$TREE/kubernetes/apps/base/demo/hello/app/deployment.yaml")" ]
+  [[ $tag == docker.io/library/busybox:* ]]
+  [[ $image =~ ^"$tag"@sha256:[0-9a-f]{64}$ ]]
+  # Non-root as the movers' user and group, with no fsGroup: the check changes nothing on the volume,
+  # ownership included.
+  [ "$(jq -cS '.securityContext' <<<"$pod")" = "$(object ReplicationSource | jq -cS '.spec.restic.moverSecurityContext
+    | {runAsNonRoot, runAsUser, runAsGroup, seccompProfile}')" ]
+  [ "$(jq -cS '.securityContext.seccompProfile' <<<"$pod")" = '{"type":"RuntimeDefault"}' ]
+  [ "$(jq -cS '.securityContext | [.allowPrivilegeEscalation, .readOnlyRootFilesystem, .runAsNonRoot, .capabilities, (.privileged // false)]' <<<"$container")" = '[false,true,true,{"drop":["ALL"]},false]' ]
+  [ -n "$(jq -r '.resources.requests.cpu // empty' <<<"$container")" ]
+  [ -n "$(jq -r '.resources.requests.memory // empty' <<<"$container")" ]
+  [ -n "$(jq -r '.resources.limits.memory // empty' <<<"$container")" ]
+  # Its only volumes: the scratch claim, read-only at the container's mount and not at the pod's
+  # volume, and the ConfigMap of its script, which its command names. It reads no Secret.
+  [ "$(jq -c '[.volumes[] | del(.name) | keys[0]] | sort' <<<"$pod")" = '["configMap","persistentVolumeClaim"]' ]
+  claim="$(jq -r '.volumes[] | select(.persistentVolumeClaim) | .name' <<<"$pod")"
+  scripts="$(jq -r '.volumes[] | select(.configMap) | .name' <<<"$pod")"
+  [ "$(jq -cS --arg v "$claim" '.volumes[] | select(.name == $v) | .persistentVolumeClaim' <<<"$pod")" = "{\"claimName\":\"$DEMO-drill\"}" ]
+  [ "$(jq -r --arg v "$scripts" '.volumes[] | select(.name == $v) | .configMap.name' <<<"$pod")" = "$DEMO-drill-scripts" ]
+  [ "$(jq -c '[.volumeMounts[].name] | sort' <<<"$container")" = "$(jq -nc --arg a "$claim" --arg b "$scripts" '[$a, $b] | sort')" ]
+  [ "$(jq -r --arg v "$claim" '.volumeMounts[] | select(.name == $v) | .readOnly' <<<"$container")" = true ]
+  [ "$(jq -r --arg v "$scripts" '.volumeMounts[] | select(.name == $v) | .readOnly' <<<"$container")" = true ]
+  mount="$(jq -r --arg v "$claim" '.volumeMounts[] | select(.name == $v) | .mountPath' <<<"$container")"
+  container_argv CronJob "$DEMO-drill-check" check
+  [ "$(env_value DRILL_DIR)" = "$mount" ]
+  [ "${ARGV[*]}" = "/bin/sh $(jq -r --arg v "$scripts" '.volumeMounts[] | select(.name == $v) | .mountPath' <<<"$container")/check.sh" ]
+  [ "$(jq '[.. | objects | select(has("secretKeyRef") or has("secretRef") or has("secret") or has("projected"))] | length' <<<"$pod")" -eq 0 ]
+  # Its pod template carries labels of its own, and none that a policy of the namespace's movers
+  # selects, so it has none of the movers' flows.
+  labels="$(jq -c '.template.metadata.labels // {}' <<<"$job")"
+  echo "the check's pod labels: $labels"
+  [ "$(jq 'length' <<<"$labels")" -gt 0 ]
+  built demo-volsync-movers
+  policies="$(yq -N -o json -I0 'select(.kind == "CiliumNetworkPolicy") | .spec.endpointSelector.matchLabels' "$BUILT")"
+  [ -n "$policies" ]
+  while IFS= read -r selector; do
+    echo "a movers' policy selects: $selector"
+    if selects "$selector" "$labels"; then
+      echo "a policy of the namespace's movers selects the check's pod"
+      return 1
+    fi
+  done <<<"$policies"
+  # The user and group follow the application's.
+  built "$DEMO" VOLSYNC_UID=2345 VOLSYNC_GID=3456
+  [ "$(named CronJob "$DEMO-drill-check" | jq -c '.spec.jobTemplate.spec.template.spec.securityContext | [.runAsUser, .runAsGroup, .fsGroup]')" = '[2345,3456,null]' ]
+  # A CronJob's name is at most 52 characters, so no application that takes the drill has an APP
+  # longer than 40.
+  takers=""
+  while IFS= read -r ks; do
+    if [ "$(yq '.spec.components // [] | map(select(test("/components/volsync-drill$"))) | length' "$ks")" -gt 0 ]; then
+      app="$(yq '.spec.postBuild.substitute.APP // ""' "$ks")"
+      takers+=" $app"
+      [ -n "$app" ]
+      [ "${#app}" -le 40 ]
+    fi
+  done < <(find "$TREE/kubernetes" -name ks.yaml)
+  echo "APP of the applications that take the drill:$takers"
+  [ -n "$takers" ]
+}
+
+@test "The drill's schedules follow the backup's and its largest age follows from them" {
+  local backup restore check max interval starting active margin b r c failing ks var value app taken=""
+  built "$DEMO"
+  backup="$(object ReplicationSource | jq -r '.spec.trigger.schedule')"
+  restore="$(named ReplicationDestination "$DEMO-drill" | jq -r '.spec.trigger.schedule')"
+  check="$(named CronJob "$DEMO-drill-check" | jq -r '.spec.schedule')"
+  starting="$(named CronJob "$DEMO-drill-check" | jq -r '.spec.startingDeadlineSeconds')"
+  active="$(named CronJob "$DEMO-drill-check" | jq -r '.spec.jobTemplate.spec.activeDeadlineSeconds')"
+  container_argv CronJob "$DEMO-drill-check" check
+  max="$(env_value DRILL_MAX_AGE_SECONDS)"
+  container_argv Deployment "$DEMO" canary
+  interval="$(env_value HEARTBEAT_SECONDS)"
+  echo "backup [$backup], restore [$restore], check [$check], largest age $max; heartbeat $interval, deadlines $starting and $active"
+  [ "$backup" = "17 3 * * *" ]
+  # Each runs once a day, the restore an hour after the backup and the check an hour after that.
+  b="$(seconds_of_day "$backup")"
+  r="$(seconds_of_day "$restore")"
+  c="$(seconds_of_day "$check")"
+  [ $(((r - b + 86400) % 86400)) -eq 3600 ]
+  [ $(((c - r + 86400) % 86400)) -eq 3600 ]
+  # Neither is at a minute of the day at which another application backs up or drills.
+  while IFS= read -r ks; do
+    app="$(yq '.metadata.name' "$ks")"
+    [ "$app" != "$DEMO" ] || continue
+    for var in VOLSYNC_SCHEDULE VOLSYNC_DRILL_RESTORE_SCHEDULE VOLSYNC_DRILL_CHECK_SCHEDULE; do
+      value="$(VAR="$var" yq '.spec.postBuild.substitute[strenv(VAR)] // ""' "$ks")"
+      [ -n "$value" ] || continue
+      taken+=" $(seconds_of_day "$value")"
+    done
+  done < <(find "$TREE/kubernetes" -name ks.yaml)
+  echo "other applications' backup and drill seconds of the day:$taken"
+  [ -n "$taken" ]
+  [[ " $taken " != *" $r "* && " $taken " != *" $c "* ]]
+  # The largest age is the day between two backups, the time from the backup's schedule to the
+  # check's, and a margin: the heartbeat's interval, as a snapshot's heartbeat is up to that much
+  # older than the snapshot, the check's two deadlines, as a check can read the volume that late, and
+  # 300 seconds for clocks, a slow write and a rename not yet on disk when the snapshot is taken.
+  margin=$((interval + starting + active + 300))
+  echo "margin $margin; 86400 + $(((c - b + 86400) % 86400)) + $margin = $((86400 + (c - b + 86400) % 86400 + margin))"
+  [ "$max" -eq $((86400 + (c - b + 86400) % 86400 + margin)) ]
+  # Which is the figure docs/kubernetes.md, The restore drill, works out.
+  [ "$max" -eq 95400 ]
+  # RestoreDrillJobFailing waits longer than a check can take from its schedule to its end.
+  failing="$(yq '.spec.groups[].rules[] | select(.alert == "RestoreDrillJobFailing") | .for' \
+    "$TREE/kubernetes/apps/base/volsync-system/volsync/app/prometheusrule.yaml")"
+  echo "RestoreDrillJobFailing waits ${failing:-nothing}"
+  [ "$(duration_seconds "$failing")" -gt $((starting + active)) ]
 }
 
 @test "every values key of volsync is one its pinned chart defines" {

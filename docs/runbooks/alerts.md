@@ -739,3 +739,79 @@ ends with `user already exist`. Delete the pod, `kubectl --namespace crowdsec de
 name>`, and its Deployment makes one under a new name, which registers; or delete the old machine,
 `kubectl --namespace crowdsec exec deployment/crowdsec-lapi -- cscli machines delete <pod name>`,
 and the same pod registers at its next try.
+
+## RestoreDrillStale
+
+The check of an application's restore drill, the CronJob `<app>-drill-check`, has not passed for
+36 hours, a night's check missed and half a day of grace, or it has never passed and was created
+more than 36 hours ago ([The restore drill](../kubernetes.md#the-restore-drill)). The backups may
+still be good: what is unproved, for that long, is that the newest one restores, with recent data.
+It is a warning for the working day. The alert reads kube-state-metrics' record of the CronJob, so it
+is quiet for an application younger than 36 hours. Its labels name the `namespace` and the
+`application`.
+
+Look at first:
+
+- the check's one line, which names the case: `kubectl --namespace <namespace> get cronjob,job,pod`
+  for what the checks did, then `kubectl --namespace <namespace> logs job/<job>`. A pod that never
+  started says why in `kubectl --namespace <namespace> describe pod <pod>`, a `Multi-Attach` event
+  when the scratch claim was still attached to another node;
+- the drill's ReplicationDestination:
+  `kubectl --namespace <namespace> get replicationdestination <app>-drill --output yaml`, whose
+  `status.lastSyncTime` and `status.lastSyncDuration` say when the last restore ended and how long
+  it took, and `status.latestMoverStatus` its result and the tail of the mover's log, which says
+  `No eligible snapshots found` when the repository holds no backup;
+- the backup's ReplicationSource, `kubectl --namespace <namespace> get replicationsource <app>
+  --output yaml`, the same fields, and the backup alerts,
+  [VolSyncSourceOutOfSync](#volsyncsourceoutofsync) and
+  [VolSyncSourceMissedIntervals](#volsyncsourcemissedintervals).
+
+Usually:
+
+- no backup newer than the bound: the backups failed two nights running, which the backup alerts
+  report, and the check's line gives the heartbeat's age;
+- the repository Secret `<app>-volsync` is missing, because the secret store lacks the key `volsync`
+  or the External Secrets operator cannot read it (`just bao-seed-volsync`): no mover runs, and the
+  scratch claim keeps the files of the last restore or none;
+- the canary's pod is not writing: it does not run, or its heartbeat is old on its own volume, so
+  every backup holds an old one (`kubectl --namespace <namespace> get pod`);
+- a restore still running when the check started, on another node, so the claim could not attach:
+  the check's pod waited for the volume until its deadline, and the restore's `lastSyncDuration`
+  shows how long it ran;
+- a changed `APP` or bucket prefix, so the repository's path holds nothing: the restore finds no
+  snapshot, and the claim keeps the previous files, which fail on their age, or holds none, which the
+  check reports as the restore having brought nothing back.
+
+Once the cause is fixed, a restore that was waiting for it runs soon after, as VolSync keeps retrying
+one whose repository Secret is missing or whose mover failed; otherwise the next restore runs at the
+schedule's time. To restore sooner, delete the drill's ReplicationDestination and have Flux make it
+again, as a new one restores at once; the scratch claim is not VolSync's and keeps its files
+meanwhile: `kubectl --namespace <namespace> delete replicationdestination <app>-drill`, then
+`flux reconcile kustomization <app>`. A manual trigger set with kubectl does not stay: Flux takes
+over the fields kubectl writes on an object it applies and removes the trigger at its next
+reconcile. Once a restore has run, run a check by hand, which clears the alert when it passes:
+`kubectl --namespace <namespace> create job --from=cronjob/<app>-drill-check <name>`.
+
+## RestoreDrillJobFailing
+
+The latest scheduled run of the CronJob `<app>-drill-check` has not passed, half an hour after it
+was scheduled, which is longer than the 600 seconds its job may take to be made and the 600 it may
+then run: the check failed, or its pod never started. The alert clears once a check passes. The
+backups are as they were; [RestoreDrillStale](#restoredrillstale) fires when no check has passed for
+36 hours. A check's job that failed, scheduled or by hand, also raises the stock `KubeJobFailed`, a
+warning, 15 minutes after it failed, and that one does not clear when a check passes: it fires for
+as long as the failed job exists, and the CronJob keeps its three newest failed jobs for their logs.
+Once the job's log is read, delete the job, which clears it:
+`kubectl --namespace <namespace> delete job <job>`.
+
+Look at first, and usually: as for [RestoreDrillStale](#restoredrillstale), the check's one line
+first: it says whether the restore brought nothing back, the claim holds no heartbeat, the heartbeat
+is not a number of seconds or lies in the future, or it is older than the bound, with its age. On the
+first night after an application takes the drill, a check fails once when the restore before it
+found a backup without a heartbeat, as every backup taken before the application wrote one is: when
+the canary comes with the drill, as `volsync-demo`'s does, the first check fails if both are applied
+from a few minutes before the backup's time, as the backup can be taken before the replaced pod has
+written its first heartbeat, until the check's. It fails too when no restore has used the scratch
+claim yet, as when the repository Secret came only after the check's time: the claim is made empty
+for the check, which reports that the restore brought nothing back. The next night's passes; delete
+the failed job as above. Run a check by hand as above.
