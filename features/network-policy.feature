@@ -50,3 +50,8 @@ Feature: Network policy
     Given the Cilium values, the render of the Cilium chart with them and docs/kubernetes.md
     When the mode the docs state is compared with the value policyAuditMode and the agents' rendered configuration
     Then the docs open one paragraph with "The cluster audits network policy." exactly when the value is set and the agents' configuration holds policy-audit-mode true, and with "The cluster enforces the policies." otherwise, a mismatch fails saying which sentence the value needs, and a change of that configuration rolls the agents
+
+  Scenario: The restore drill's mover has the movers' flows and its check job has none
+    Given the rendered policies of the tree, the ReplicationDestination and the CronJob of volsync-demo's restore drill in the render, and the labels VolSync and the Job controller give the pod of that ReplicationDestination's mover
+    When the flows from and to the drill's mover and from and to its check job are evaluated
+    Then the mover reaches the cluster resolver on 53 and the object storage on the port of its endpoint as cluster-config's example gives it, 443, and nothing else, not the resolver's other port, the API server, a node's kubelet, another pod of demo, the secret store, the storage controller or the world on another port, the check job reaches none of those, the resolver and the object storage's port included, and nothing reaches either

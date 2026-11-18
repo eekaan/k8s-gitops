@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# A stand-in for busybox's fsync in the demo canary's loop, installed by the tests as <tmp>/bin/fsync:
+# it records each call's operands, resolved against the working directory, in <tmp>/record/fsync, one
+# operand a line followed by what the file holds at that moment, and the call in <tmp>/record/order,
+# where the mv stand-in records its calls too, and then syncs them with the system's sync, which
+# fsyncs each file it names as busybox's fsync does.
+set -uo pipefail
+root=${0%/bin/*}
+line=
+for operand in "$@"; do
+  [[ $operand == /* ]] || operand=$PWD/$operand
+  printf '%s %s\n' "$operand" "$(cat "$operand")" >> "$root/record/fsync"
+  line+="$operand "
+done
+printf 'fsync %s\n' "${line% }" >> "$root/record/order"
+real=$(PATH=/usr/bin:/bin; command -v sync)
+exec "$real" "$@"

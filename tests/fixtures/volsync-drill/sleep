@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# A stand-in for sleep in the demo canary's loop, installed by the tests as <tmp>/bin/sleep. Each
+# call records the seconds it was asked for in <tmp>/record/sleep and what the directory named in
+# <tmp>/record/dir holds at that moment: its entries in <tmp>/record/entries, the heartbeat's inode in
+# <tmp>/record/inodes and its content in <tmp>/record/heartbeats. The first call returns at once, so
+# the loop goes round again; the second ends the loop as the kubelet ends the container, with TERM to
+# the shell that started it, whose trap runs before its next command.
+set -uo pipefail
+root=${0%/bin/*}
+record=$root/record
+dir=$(< "$record/dir")
+printf '%s\n' "$*" >> "$record/sleep"
+find "$dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort | paste -sd' ' - >> "$record/entries"
+stat -c %i "$dir/heartbeat" >> "$record/inodes"
+cat "$dir/heartbeat" >> "$record/heartbeats"
+if [[ $(grep -c '' "$record/sleep") -ge 2 ]]; then
+  kill -TERM "$PPID"
+fi

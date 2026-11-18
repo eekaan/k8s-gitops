@@ -1,0 +1,31 @@
+---
+# Restores the newest backup of the application's repository straight into the scratch claim, at
+# once when it is created and then on the drill's schedule, which VolSync reads in UTC. Direct takes
+# no snapshot of the claim; the files the backup does not hold are deleted, so the claim holds what
+# that backup holds; restic's cache, at VolSync's default size, is deleted after each restore, so
+# each restore starts cold, as a real one does. A repository path that holds no backup restores
+# nothing without an error, which the check finds (docs/kubernetes.md, The restore drill).
+apiVersion: volsync.backube/v1alpha1
+kind: ReplicationDestination
+metadata:
+  name: ${APP}-drill
+spec:
+  trigger:
+    schedule: "${VOLSYNC_DRILL_RESTORE_SCHEDULE}"
+  restic:
+    repository: ${APP}-volsync
+    destinationPVC: ${APP}-drill
+    copyMethod: Direct
+    enableFileDeletion: true
+    cleanupCachePVC: true
+    # components/volsync's, field for field: unprivileged, as the restricted Pod Security level
+    # requires; VolSync drops every capability of the mover's container and forbids privilege
+    # escalation itself.
+    moverSecurityContext:
+      runAsNonRoot: true
+      runAsUser: ${VOLSYNC_UID:=1000}
+      runAsGroup: ${VOLSYNC_GID:=1000}
+      fsGroup: ${VOLSYNC_GID:=1000}
+      fsGroupChangePolicy: OnRootMismatch
+      seccompProfile:
+        type: RuntimeDefault

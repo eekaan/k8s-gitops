@@ -336,6 +336,18 @@ Feature: Alerts
     Then the alert is quiet while the target answers, fires once the scrape has failed for its time, is quiet again once it answers, and fires once the series has been gone for its time
 
   @by:rules-check
+  Scenario: The alert RestoreDrillStale fires after its time in the failing case and stays quiet in the healthy one
+    Given the check CronJob of an application's restore drill whose last success is older than 36 hours, one that has never succeeded and is older than that, one that succeeded within 36 hours, one that has not yet had its first success and is younger than that, and CronJobs of other names that are as old
+    When the rule is evaluated over time
+    Then the alert fires after its time for the first two, naming the application and its namespace, and never for the others
+
+  @by:rules-check
+  Scenario: The alert RestoreDrillJobFailing fires after its time in the failing case and stays quiet in the healthy one
+    Given the check CronJob of an application's restore drill whose latest scheduled run ended without success, one that was scheduled and never succeeded, one whose latest run succeeded, one not yet scheduled, and CronJobs of other names whose latest run failed
+    When the rule is evaluated over time
+    Then the alert fires after its time for the first two, naming the application and its namespace, and never for the others
+
+  @by:rules-check
   Scenario: The alert PublicEndpointDown fires after its time in the failing case and stays quiet in the healthy one
     Given a probe of a public hostname that gets no answer, and one that is answered as expected
     When the rule is evaluated over time

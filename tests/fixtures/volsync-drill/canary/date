@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# A stand-in for date in the demo canary's loop, installed by the tests as <tmp>/bin/date: it records
+# each call's arguments in <tmp>/record/date, one call a line, and then prints as the system's date
+# does.
+set -uo pipefail
+root=${0%/bin/*}
+printf '%s\n' "$*" >> "$root/record/date"
+real=$(PATH=/usr/bin:/bin; command -v date)
+exec "$real" "$@"

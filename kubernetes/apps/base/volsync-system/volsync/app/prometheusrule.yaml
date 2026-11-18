@@ -1,10 +1,11 @@
 ---
 # yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/prometheusrule-monitoring-v1.json
-# Alerts on the controller's own metrics, which the chart's ServiceMonitor scrapes: the
-# volsync_volume_out_of_sync gauge and the volsync_missed_intervals_total counter, each labelled
+# The group volsync alerts on the controller's own metrics, which the chart's ServiceMonitor scrapes:
+# the volsync_volume_out_of_sync gauge and the volsync_missed_intervals_total counter, each labelled
 # obj_name, obj_namespace, role and method (https://volsync.readthedocs.io/en/stable/usage/metrics/index.html).
 # Every replica serves the metrics, so the expressions take the largest value over the replicas'
-# series. Both metrics need a schedule on the ReplicationSource. Tests: tests/rules/volsync.yaml.
+# series. Both metrics need a schedule on the ReplicationSource. The group volsync-drill, below,
+# alerts on the restore drill's check jobs. Tests: tests/rules/volsync.yaml.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -36,3 +37,66 @@ spec:
             summary: A volume's backup missed a scheduled interval
             description: The ReplicationSource {{ $labels.obj_name }} in {{ $labels.obj_namespace }} did not finish a backup before the next was due, within the last hour.
             runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#volsyncsourcemissedintervals
+    # Alerts on the restore drill of every application that takes components/volsync-drill, from
+    # kube-state-metrics' CronJob metrics, which Prometheus already scrapes, as the dump alerts of the
+    # cloudnative-pg application read them: kube_cronjob_status_last_successful_time,
+    # kube_cronjob_status_last_schedule_time and kube_cronjob_created, each labelled cronjob and
+    # namespace (kube-state-metrics v2.20, the version the pinned kube-prometheus-stack chart runs),
+    # in Unix seconds. The component names each check's CronJob <application>-drill-check, which
+    # the rules select by, as kube-state-metrics exposes no CronJob's labels unless its chart is told
+    # to, and the label the alerts carry, application, is the name without the suffix. The drill's
+    # ReplicationDestination is a destination, so neither alert above reads it.
+    - name: volsync-drill
+      rules:
+        # 36 hours is a night's check missed and half a day of grace. A CronJob that has never
+        # succeeded has no last-success series, so it is stale 36 hours after it was created: an
+        # application younger than that is quiet. Warning: the backups may still be good, and what
+        # is unproved is that they restore, a matter for the working day.
+        - alert: RestoreDrillStale
+          expr: |
+            label_replace(
+              (
+                time() - max by (namespace, cronjob) (kube_cronjob_status_last_successful_time{cronjob=~".+-drill-check"}) > 36 * 3600
+              )
+              or
+              (
+                time() - max by (namespace, cronjob) (kube_cronjob_created{cronjob=~".+-drill-check"}) > 36 * 3600
+                unless on (namespace, cronjob)
+                kube_cronjob_status_last_successful_time{cronjob=~".+-drill-check"}
+              ),
+              "application", "$1", "cronjob", "(.+)-drill-check"
+            )
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: No check of a volume's restore drill has passed for 36 hours
+            description: The restore drill of {{ $labels.application }} in {{ $labels.namespace }} has had no check pass, by the CronJob {{ $labels.cronjob }}, for 36 hours, so its newest backup is not shown to restore.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#restoredrillstale
+        # The latest check was scheduled after the last success and has had half an hour, longer than
+        # the 600 seconds a check may take to start and the 600 it may then run: it ended without
+        # passing, or its pod never started. It clears once a check passes. A CronJob not yet
+        # scheduled has no schedule series, so a new application is quiet.
+        - alert: RestoreDrillJobFailing
+          expr: |
+            label_replace(
+              (
+                max by (namespace, cronjob) (kube_cronjob_status_last_schedule_time{cronjob=~".+-drill-check"})
+                > on (namespace, cronjob)
+                max by (namespace, cronjob) (kube_cronjob_status_last_successful_time{cronjob=~".+-drill-check"})
+              )
+              or
+              (
+                max by (namespace, cronjob) (kube_cronjob_status_last_schedule_time{cronjob=~".+-drill-check"})
+                unless on (namespace, cronjob)
+                kube_cronjob_status_last_successful_time{cronjob=~".+-drill-check"}
+              ),
+              "application", "$1", "cronjob", "(.+)-drill-check"
+            )
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: The latest check of a volume's restore drill did not pass
+            description: The latest check of the restore drill of {{ $labels.application }} in {{ $labels.namespace }}, by the CronJob {{ $labels.cronjob }}, was scheduled over half an hour ago and has not passed.
+            runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#restoredrilljobfailing

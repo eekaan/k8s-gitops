@@ -547,6 +547,9 @@ level is declared in the tree, never left to the API server's default.
     gives the mover's container no privilege escalation and no capabilities itself, as its
     documentation's permission model describes for movers without the privileged-movers
     annotation, which no namespace here carries ([Volume backups](#volume-backups)).
+  - The ReplicationDestination `<app>-drill` of each application that takes the restore drill,
+    `volsync-demo` in `demo`: the same mover security context in `spec.restic.moverSecurityContext`,
+    from `components/volsync-drill` ([The restore drill](#the-restore-drill)).
 
   Admission evaluates each such pod when the operator creates it: a namespace that enforces
   `restricted` refuses one that fails it, and one that enforces less records and reports it
@@ -606,7 +609,7 @@ once it is not, and the agents' rendered configuration agrees.
 
 | Namespace | Posture | Why, and what covers it instead |
 | --- | --- | --- |
-| `demo` | default deny | `hello` takes the proxies on 8080; the backup movers resolve names and reach the object storage on 443; `volsync-demo` and the rest open nothing. |
+| `demo` | default deny | `hello` takes the proxies on 8080; the backup movers, the restore drill's among them, resolve names and reach the object storage on 443; `volsync-demo`, the drill's check and the rest open nothing. |
 | `envoy-gateway-system` | default deny | the controller, its webhook, its certificate job and the proxies, below; the proxies take the blackbox exporter's probes. |
 | `kromgo` | default deny | kromgo takes the proxies and the kubelet's probes on 8080 and Prometheus' scrape on 8081, and reaches the resolver and Prometheus on 9090. |
 | `sso-system` | default deny | dex takes the proxies and oauth2-proxy on 5556 and reaches the API server and GitHub on 443; oauth2-proxy takes the proxies on 4180 and reaches dex; below. |
@@ -674,7 +677,9 @@ once it is not, and the agents' rendered configuration agrees.
   policy of its own reaches nothing and is reached by nothing. The movers' policies select by that
   label, so any pod of `demo` that carries it gets the movers' flows, the world on 443 among them:
   the label is no proof of being a mover. What keeps it to the movers is who makes pods in the
-  namespace, Flux from the reviewed tree and VolSync's controller.
+  namespace, Flux from the reviewed tree and VolSync's controller. The restore drill's mover is one
+  of them; its check's pods carry labels of their own and reach nothing
+  ([The restore drill](#the-restore-drill)).
 - **`kromgo`.** kromgo's pods, by the labels its Service selects, take the proxies by their labels
   on 8080, the port the route sends to, the kubelet's probes on the same port, and Prometheus
   (`app.kubernetes.io/name: prometheus` in `monitoring`) on 8081, the metrics port the chart's
@@ -947,7 +952,8 @@ does not matter.
    20 minutes before it starts ([Dumps](#dumps)); the base backup of `backstage-db` at 02:47 UTC,
    and a WAL segment its primary archives, which `select pg_switch_wal()` there forces
    ([Backups and restores](#backups-and-restores)); the nightly backup of `volsync-demo` at 03:17,
-   and a restore of it ([Restoring](#restoring)); the two dry runs that call the OpenFeature
+   and a restore of it ([Restoring](#restoring)); its restore drill's restore at 04:17 and check at
+   05:17 ([The restore drill](#the-restore-drill)); the two dry runs that call the OpenFeature
    Operator's webhooks ([OpenFeature Operator](#openfeature-operator)). The blackbox exporter's
    probes need nothing to start them: its pods reach the proxies on 10080 and 10443 at every scrape
    of a `Probe` ([Probes](#probes)). Watch a day at least, through one nightly backup, one dump and
@@ -1628,6 +1634,8 @@ The own alerts, each with its runbook section in [docs/runbooks/alerts.md](runbo
 | `KyvernoAdmissionControllerDown` | Kyverno's admission controller has had no available replica for 10 minutes. | warning | [KyvernoAdmissionControllerDown](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#kyvernoadmissioncontrollerdown) |
 | `GatekeeperControllerManagerDown` | Gatekeeper's controller manager has had no available replica for 10 minutes. | warning | [GatekeeperControllerManagerDown](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#gatekeepercontrollermanagerdown) |
 | `CrowdSecLocalAPIDown` | CrowdSec's local API's target has not answered its scrape for 10 minutes, or has no series. | warning | [CrowdSecLocalAPIDown](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#crowdseclocalapidown) |
+| `RestoreDrillStale` | No check of an application's restore drill has passed for 36 hours. | warning | [RestoreDrillStale](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#restoredrillstale) |
+| `RestoreDrillJobFailing` | The latest scheduled check of an application's restore drill has not passed after 30 minutes. | warning | [RestoreDrillJobFailing](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#restoredrilljobfailing) |
 | `PublicEndpointDown` | The probe of a public hostname through the Gateway gets no answer for 5 minutes. | critical | [PublicEndpointDown](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#publicendpointdown) |
 | `PublicEndpointWrongStatus` | The probe of a public hostname is answered with a status it does not accept for 5 minutes. | critical | [PublicEndpointWrongStatus](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#publicendpointwrongstatus) |
 | `PublicCertificateExpiring` | The certificate the Gateway serves for a public hostname expires within 14 days, and not within 3, for 10 minutes. | warning | [PublicCertificateExpiring](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#publiccertificateexpiring) |
@@ -1655,6 +1663,11 @@ or whose monitor selects nothing of the Service or pod that serves it.
 
 The two policy engines' alerts read kube-state-metrics' Deployment availability for each engine's
 admission controller ([Admission policy](#admission-policy)).
+
+The restore drill's alerts read kube-state-metrics' CronJob metrics for the check job of every
+application that takes the drill ([The restore drill](#the-restore-drill)). They are written once,
+in the `volsync` application's `app/`, whose tests are `tests/rules/volsync.yaml`, and select the
+CronJobs by their names' suffix, `-drill-check`, as the dump alerts select theirs.
 
 What no alert covers, and why:
 
@@ -3507,7 +3520,8 @@ to check that its definitions are kept.
 VolSync backs an application's volume up to the VolSync bucket
 ([infrastructure.md](infrastructure.md#s3-keys-and-backup-buckets)) with its restic mover, and
 fills the volume from the latest backup when the volume and its restore are created together
-(ADR 0015).
+(ADR 0015). An application that writes a canary into its volume also has its newest backup restored
+and checked every night ([The restore drill](#the-restore-drill)).
 
 `apps/base/volsync-system/volsync/` installs the operator in its own namespace, `volsync-system`,
 at the restricted Pod Security level. Its publisher releases the chart only to a classic Helm
@@ -3685,7 +3699,8 @@ After that Flux does the rest, for as long as the store holds the key. `volsync-
 overlay, is applied once `volsync`, `external-secrets`, `openbao-store` and `linstor-cluster` are
 Ready. The test application
 `apps/base/demo/volsync-demo/` is a pod that holds a 1 GiB volume and writes the time it first found
-it empty. Its ExternalSecret writes the Secret the movers read as soon as the store holds the key,
+it empty, and the canary of its restore drill, a heartbeat every five minutes
+([The restore drill](#the-restore-drill)). Its ExternalSecret writes the Secret the movers read as soon as the store holds the key,
 the ReplicationDestination restores the repository's latest backup, which is empty on the first
 deployment, the claim is made from that snapshot and the pod starts, and the ReplicationSource
 backs the volume up at 03:17 each night. A claim and its restore therefore need no manual step once
@@ -3702,6 +3717,149 @@ repositories, where a new file would make a master that opens none of them
 `tests/volume-backups.bats` builds the applications as Flux applies them and renders the VolSync
 and External Secrets charts to check this section, and `tests/openbao-recipes.bats` runs the
 recipes against fakes of the cluster and of OpenBao.
+
+### The restore drill
+
+A backup that is never restored proves nothing, and a restore from a repository path that holds no
+backup succeeds with an empty volume and no error ([Restoring](#restoring)). The component
+`components/volsync-drill` restores an application's newest backup every night into a scratch claim
+of its own and checks what came back, as
+[ADR 0008](adr/0008-state-and-backups-are-encrypted-before-they-leave.md) asks of every backup. An
+application that writes the canary below takes it beside `components/volsync`, never without it,
+in its `ks.yaml`:
+
+```yaml
+spec:
+  components:
+    - ../../../../../components/volsync
+    - ../../../../../components/volsync-drill
+  postBuild:
+    substitute:
+      APP: <app>
+      VOLSYNC_CAPACITY: 1Gi
+      VOLSYNC_SCHEDULE: "17 3 * * *"
+      VOLSYNC_DRILL_RESTORE_SCHEDULE: "17 4 * * *"
+      VOLSYNC_DRILL_CHECK_SCHEDULE: "17 5 * * *"
+      VOLSYNC_DRILL_MAX_AGE: '"95400"'
+```
+
+The three variables are required: the build fails without any of them. `VOLSYNC_DRILL_MAX_AGE` is
+written with its double quotes, as Flux substitutes after kustomize has dropped a manifest's own
+quotes, and a bare number would reach the check's environment as a number, which the API server
+refuses for a variable's value. The component reads `APP`, `VOLSYNC_CAPACITY`, `VOLSYNC_UID` and
+`VOLSYNC_GID` as `components/volsync` does, and makes:
+
+- the scratch claim `<app>-drill`: `ReadWriteOnce`, of `VOLSYNC_CAPACITY`, on the default
+  StorageClass, made empty;
+- the ReplicationDestination `<app>-drill`, which restores the newest backup straight into the
+  scratch claim on `VOLSYNC_DRILL_RESTORE_SCHEDULE`, with the repository Secret `<app>-volsync`
+  the backups use, so no key gets a new holder. `copyMethod: Direct` takes no snapshot of the claim;
+  `enableFileDeletion` has restic delete the files the backup does not hold, so the claim holds what
+  that backup holds and not every file the volume ever had; `cleanupCachePVC` deletes restic's cache,
+  of VolSync's default 1 GiB, after each restore, so each night's restore starts cold, as a real one
+  does. Its mover runs with the security context `components/volsync` gives its movers;
+- the CronJob `<app>-drill-check`, on `VOLSYNC_DRILL_CHECK_SCHEDULE`, and the ConfigMap
+  `<app>-drill-scripts` of its one script, `scripts/check.sh`. The check runs the busybox the demo's
+  Deployments pin, by that tag and its digest, as `VOLSYNC_UID` and `VOLSYNC_GID` with no `fsGroup`,
+  so it reads the files as the user the mover restored them as and changes nothing on the volume,
+  ownership included. It mounts the scratch claim read-only, holds no token, and takes and opens no
+  connection. Its job is made within 600 seconds of its time and runs at most 600, a failed check is
+  tried once more within that, and two never run at once. A CronJob's name is at most 52
+  characters, so an application that takes the drill has an `APP` of at most 40.
+
+Nothing backs up, snapshots or clones the scratch claim. The mover is one of the namespace's movers,
+with their flows, the resolver and the object storage ([Network policy](#network-policy)).
+
+**The canary.** The application writes a file `heartbeat` at its volume's root: one line, the Unix
+time in seconds and the same moment as `%Y-%m-%dT%H:%M:%SZ`, both UTC, from one `date` call. The
+check reads the first field, so it parses no date, as busybox and coreutils read dates differently;
+a person reads the second. `volsync-demo`'s pod rewrites it every `HEARTBEAT_SECONDS`, 300: it
+writes a new file of the same directory, syncs it to disk and then renames it over the last. A
+backup's snapshot holds what is on disk at its moment, as after a crash, and the kernel writes a
+file's data to disk later than its name, so a snapshot can hold a file renamed before it was synced
+as an empty one; synced first, the heartbeat in a snapshot is the last one or the new one, whole.
+Only an application that writes the canary takes the drill: without one, every check fails on the
+missing heartbeat. n8n and Open WebUI write none, and their volumes have no drill.
+
+**The check.** It reads `DRILL_DIR`, the claim's mount, and `DRILL_MAX_AGE_SECONDS`, the largest
+age, and writes one line to the job's log that names the case. It passes, printing the heartbeat's
+age and the bound, when the heartbeat is at most as old as the bound. It fails, with its reason on
+standard error and status 1, when the claim holds nothing, or nothing but `lost+found`: the restore
+brought nothing back; when it holds files and no `heartbeat`; when the heartbeat's first field is
+not a whole number of seconds, or lies in the future; when the heartbeat is older than the bound;
+and when either variable is missing or wrong. It writes nothing.
+
+**The largest age**, worked out here and nowhere else. For `volsync-demo` the backup runs at 03:17,
+the restore at 04:17 and the check at 05:17, and
+
+    95400 = 86400 + 7200 + 1800
+
+86400 is the backup's interval; 7200 the time from the backup's schedule to the check's; 1800 the
+margin: 300, `HEARTBEAT_SECONDS`, as the heartbeat in a snapshot is up to that much older than the
+snapshot, 600 and 600, the check's `startingDeadlineSeconds` and `activeDeadlineSeconds`, as a check
+can read the volume that late after its time, and 300 for clocks, a slow write and a rename not yet
+on disk when the snapshot is taken, which leaves the heartbeat before it in the snapshot.
+`tests/volume-backups.bats` reads the three schedules, the bound, the canary's interval and the two
+deadlines from what is built and fails unless they hold to this sum, and holds the restore to an hour
+after the backup and the check to an hour after the restore, at minutes of the day no other
+application backs up or drills at. A healthy night's check finds a heartbeat from a little under
+7200 seconds old, as the snapshot is taken some seconds after the backup's minute, to about 8700.
+So a drill passes on the newest backup and on the one before it: one missed night is the backup
+alerts' to report ([Alerts](#alerts)), and the drill fails on the second. A night whose restore did
+not run, or found no snapshot, leaves the previous night's files in the scratch claim, which pass
+once more and then fail.
+
+**What a pass proves.** That the repository opens with the password derived for the application,
+that restic restores its newest backup, and that the data in it is recent. Not that the application
+starts on it. The empty case is the silent failure of a wrong repository path: under a path that
+holds no repository, restic creates an empty one and the restore succeeds with nothing, as after a
+change of `APP` or `BACKUP_BUCKET_PREFIX`, and the check names it. A path that changes once the
+claim holds files leaves those files there, which fail on their age the second night.
+
+**The first deployment.** VolSync synchronizes a new ReplicationDestination at once, then at each
+time of its schedule. The scratch claim stays Pending until the mover's pod is scheduled, as the
+default StorageClass makes a volume for its first pod, and the mover waits, as the backups' do, for
+the repository Secret ([What an operator does once](#what-an-operator-does-once-and-what-then-happens-by-itself)).
+Nothing in the application's Kustomization waits for the claim, so a Pending claim holds nothing up.
+A check after a restore of a backup that holds no heartbeat, as one taken before the application
+wrote it or before its first backup, fails, until a restore after a backup that holds one. A check
+before any restore has used the claim, as when the repository Secret comes only after the check's
+time, is the claim's first user: the claim is made empty for it, and the check fails on the empty
+volume until a restore has run.
+
+**The claim in turn.** The claim is `ReadWriteOnce`: the mover uses it while it restores, VolSync
+deletes the mover's Job once the restore ends, and the check uses it an hour later. Any worker
+reaches a volume of the default StorageClass, so the check need not run where the mover ran. A check
+that starts while a restore still runs reads, on the mover's node, a tree restic is still writing,
+which can hold the previous night's heartbeat or none; on any other node it waits for the volume,
+attached to the mover's node, until its deadline fails it. The restore's `status.lastSyncDuration`
+says how long a restore takes, against the hour before the check.
+
+**UTC.** Both schedulers count in UTC. The CronJob controller reads a schedule that names no
+`timeZone` in kube-controller-manager's zone, and VolSync's controller reads a cronspec in its own
+(`internal/controller/statemachine/machine.go` at the pinned version); neither image sets `TZ` or
+holds `/etc/localtime`, and Talos mounts no zone into the control plane's pods, so Go counts in UTC
+in both. The hours between the backup, the restore and the check therefore hold, and no CronJob of
+the tree sets `timeZone`.
+
+**What it costs.** Room: the scratch claim at its capacity, a replica on each of two workers, and,
+while a restore runs, restic's cache of 1 GiB, the same: at most `VOLSYNC_CAPACITY` and 1 GiB on one
+worker, 2 GiB for `volsync-demo` ([The storage pool](#the-storage-pool)). A nightly download from the
+object storage: the repository's index and the backup's tree, as the cache starts empty, and the
+parts of files that differ from what the scratch claim holds, as restic checks the files already
+there and fetches only what does not match; the whole backup the first time and whenever the claim
+is made again. A mover's pod and a check's pod a night.
+
+[`RestoreDrillJobFailing`](runbooks/alerts.md#restoredrilljobfailing) fires when the latest check has
+not passed half an hour after its time, longer than its two deadlines together, and
+[`RestoreDrillStale`](runbooks/alerts.md#restoredrillstale) when no check has passed for 36 hours
+([Alerts](#alerts)); [the runbook](runbooks/volume-backups.md#checking-the-first-drill) says what to
+read to check the first drill. A check's job that failed also raises the stock `KubeJobFailed` for
+as long as the job exists, past later passes, as the CronJob keeps its three newest failed jobs for
+their logs: it clears once the job is deleted, after its log is read.
+`tests/volume-backups.bats` builds the component as Flux applies it and runs the check's script and
+the canary's command as their containers run them, and `tests/network-policy.bats` evaluates the
+flows of the drill's mover and its check on the render.
 
 ## Envoy Gateway
 

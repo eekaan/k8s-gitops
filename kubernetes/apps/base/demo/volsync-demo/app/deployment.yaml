@@ -1,7 +1,12 @@
 ---
 # yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/deployment-apps-v1.json
 # A pod that holds the volume, so it is made and backed up, and writes the time it first found the
-# volume empty into created, once; a volume restored from a backup keeps that time.
+# volume empty into created, once; a volume restored from a backup keeps that time. It is also the
+# restore drill's canary: every HEARTBEAT_SECONDS it writes heartbeat, one line of the Unix time in
+# seconds and the same moment as a UTC date and time, from one date call, into a new file of the
+# same directory, which it syncs to disk and then renames over the last, so a snapshot holds the
+# last heartbeat or the new one, whole, and never an empty one (docs/kubernetes.md, The restore
+# drill).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -36,9 +41,23 @@ spec:
             - -c
             - |
               set -eu
-              [ -e /data/created ] || date -u +%Y-%m-%dT%H:%M:%SZ > /data/created
+              cd "$CANARY_DIR"
+              [ -e created ] || date -u +%Y-%m-%dT%H:%M:%SZ > created
               trap 'exit 0' TERM
-              while :; do sleep 3600 & wait $!; done
+              while :; do
+                date -u '+%s %Y-%m-%dT%H:%M:%SZ' > .heartbeat.tmp
+                fsync .heartbeat.tmp
+                mv .heartbeat.tmp heartbeat
+                sleep "$HEARTBEAT_SECONDS" & wait $!
+              done
+          env:
+            # The volume's mount, where both files are.
+            - name: CANARY_DIR
+              value: /data
+            # The drill's largest age counts it: a backup's heartbeat is up to this much older than
+            # the backup.
+            - name: HEARTBEAT_SECONDS
+              value: "300"
           resources:
             requests:
               cpu: 1m
