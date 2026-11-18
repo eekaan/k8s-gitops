@@ -655,6 +655,22 @@ jsonpath='{.spec.initContainers[*].name}'`). Once the operator reaches the plugi
 replicas and then the primary, in place, with the sidecar, and the primary archives what has piled
 up.
 
+While the primary still runs, growing `CNPG_STORAGE_SIZE` in the application's `ks.yaml`, in a pull
+request, can buy time while the cause is found ([PostgreSQL](../kubernetes.md#postgresql)). The new
+size reaches the `Cluster` only once the application's Kustomization reconciles, which Flux does
+only while every Kustomization it names in `dependsOn` is Ready, `plugin-barman-cloud` among them;
+`flux get kustomization <application>` names the one it waits for. The operator then grows every
+instance's volume to it only once its pass over the cluster reaches the volumes, which it does not
+while, among others, it cannot reach the plugin, an instance's pod is not active (pending, finished
+or being deleted, as one is while its worker is down), an instance is being made or a switchover or
+failover is under way. `get cluster` shows the phase the cluster is in; one other than `Cluster in
+healthy state`, such as `Waiting for the instances to become active`, is the sign to look for. When
+the claims' capacity does not grow (`kubectl --namespace <namespace> get pvc --selector
+cnpg.io/cluster=<name>`), grow the primary's claim by hand, as below for a primary whose volume
+filled. `kubectl --namespace <namespace> exec <name>-<n>
+--container postgres -- df -h /var/lib/postgresql/data/pgdata` shows the room left on the primary's
+volume, the file system of its data directory, which holds `pg_wal`.
+
 A primary whose volume filled meanwhile does not run: its `postgres` container restarts over and
 over, last terminated with exit code 4, its log holding `no free disk space for WALs`, and once the
 operator reconciles the cluster its phase is `Not enough disk space`. In that phase the operator
@@ -664,7 +680,8 @@ frees the volume. The way out the operator's documentation gives is to grow the 
 (`linstor-node-local` allows expansion). Once the volume has room the `postgres` container starts by
 itself and the operator goes on as above. Then set `CNPG_STORAGE_SIZE` in the application's
 `ks.yaml` to the same size, in a pull request, so the `Cluster` asks for what its volumes have; the
-operator grows the other instances' volumes to it, and never shrinks one.
+operator grows the other instances' volumes to it once its pass reaches the volumes, as above, and
+never shrinks one.
 
 The plugin's two certificates are renewed every 75 days, each with a new key. The operator takes a
 renewed Secret at once and the plugin's pods once the kubelet updates their Secret volumes, within

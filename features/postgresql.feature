@@ -69,7 +69,12 @@ Feature: PostgreSQL
   Scenario: A PostgreSQL cluster from the component archives its WAL and takes a daily base backup to a path of its own in the object store
     Given an application whose Kustomization names the cnpg-cluster component and sets its cluster's name and namespace, and the databases the cluster's overlay builds
     When each is built as Flux applies it
-    Then the Cluster archives through the plugin's entry that names the application's ObjectStore, a ScheduledBackup of method plugin for that Cluster runs once a day at a minute no other backup of the cluster uses, outside the run of the dump job of each database the overlay builds, and takes its first backup when it is made, the ObjectStore keeps base backups and WAL for a recovery window, compresses both, and reaches the cluster's object storage at the endpoint of cluster-config, in the postgres bucket, under the cluster's name, the namespace and the database's name
+    Then the Cluster archives through the plugin's entry that names the application's ObjectStore, a ScheduledBackup of method plugin for that Cluster runs once a day at a minute no backup of another kind uses, outside the run of the dump job of each database the overlay builds, and takes its first backup when it is made, the ObjectStore keeps base backups and WAL for a recovery window, compresses both, and reaches the cluster's object storage at the endpoint of cluster-config, in the postgres bucket, under the cluster's name, the namespace and the database's name
+
+  Scenario: Every database's volume has room for its data and the WAL its primary keeps while the archive is down, and grows in place
+    Given the databases the cluster's overlay builds from the cnpg-cluster component, every other Cluster their applications build beside them, and the StorageClass each Cluster names
+    When each application is built as Flux applies it, from its Kustomization as the overlay makes it, the component's defaults included
+    Then each instance's volume is at least 4Gi, sixteen hours of 16MiB WAL segments at one every five minutes besides 1Gi for the data, each Cluster sets no WAL volume, segment size, archive timeout or WAL kept for standbys of its own, which the floor takes at the operator's defaults, it resizes volumes in use, and its StorageClass allows expansion
 
   Scenario: Every object a database archives is encrypted at the provider with a customer key the provider does not keep
     Given every ObjectStore the component makes for two applications

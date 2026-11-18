@@ -5294,7 +5294,22 @@ level, with no storage host holding two instances of a cluster, which the placem
 The cost is that an instance cannot move: while its worker is down the cluster runs on two. When the
 worker or its data volume is lost for good, the instance's PersistentVolumeClaim and then its pod
 are deleted, which removes the instance, and the operator clones a new one from the primary. With
-three workers, the new one waits for a worker without an instance.
+three workers, the new one waits for a worker without an instance. A WAL segment that fails to
+archive stays on the primary's volume until it is archived, and PostgreSQL stops when the volume is
+full, so each volume holds the WAL of an archive outage as well as the data: at least 4Gi, sixteen
+hours of the 16MiB segment that the operator's default `archive_timeout` closes every five minutes
+while there is any activity (192 segments, 3Gi), besides 1Gi for the data and the WAL a running
+primary keeps, a floor `tests/postgresql.bats` holds every database of the overlay to. A larger
+`CNPG_STORAGE_SIZE` reaches the `Cluster` once the application's Kustomization reconciles, which
+Flux does only while every Kustomization it names in `dependsOn` is Ready. The operator then grows
+every instance's claim to it, but only once its pass over the cluster reaches the volumes, which it
+does not while, among others, it cannot reach the Barman Cloud plugin, an instance's pod is not
+active (pending, finished or being deleted, as one is while its worker is down), an instance is
+being made or a switchover or failover is under way; then no claim grows, and the primary's is
+grown by hand ([alerts.md](runbooks/alerts.md#postgreswalarchivingfailing)). As
+`linstor-node-local` allows expansion, the LINSTOR CSI driver grows a claim's volume and its XFS
+file system in place, while the pod runs; no volume can be shrunk, as the operator's webhook
+refuses a smaller size.
 
 ### Backups and restores
 
@@ -5314,10 +5329,15 @@ component adds an `ObjectStore`, a `ScheduledBackup` and an ExternalSecret.
   those ([Dumps](#dumps)). Two databases never share a path, and a restored cluster writes under its
   own name.
 - **How often.** A base backup is taken at 02:47 UTC every day, and one as soon as the
-  `ScheduledBackup` is made. The minute is one that no other backup uses: the etcd snapshots run at
-  minute 17, the volume backups at minutes of their own, and the dumps start at 02:00 and end by
-  their deadline at 02:45, and 02:47 is a quiet hour for the databases, so a base backup's reads and
-  its upload meet no other job's. WAL is archived as each segment fills.
+  `ScheduledBackup` is made. Every database's base backup starts at 02:47, the component's one
+  schedule, so the base backups of two databases run together. The minute is one that no backup of
+  another kind uses: the etcd snapshots run at minute 17, the OpenBao snapshots at minute 43, the
+  volume backups at minutes of their own, and the dumps start at 02:00 and end by their deadline at
+  02:45, and 02:47 is a quiet hour for the databases, so a base backup's reads and its upload meet no
+  dump that starts on schedule, and no backup of another kind starts with them. A dump the CronJob
+  starts late, as it may within the hour of its `startingDeadlineSeconds`, can still be running.
+  WAL is archived as each segment fills or, five minutes after the last switch with any activity
+  since, as the operator's default `archive_timeout` closes it.
 - **How long.** Base backups and WAL are kept for a recovery window of 30 days, so a database can
   be restored to any moment of the last 30 days. After each base backup the plugin deletes what
   falls outside the window, with the delete right of the key it holds, which is the cluster's S3
@@ -5380,9 +5400,14 @@ one reads, with certificates made as the plugin's issuer makes them, and checks 
 the cluster's CA would issue end it with `certificate required`; builds applications that
 take a cluster from the component, one that does not name it and two that patch it, by kind and by
 name, as Flux applies them, and checks their archive paths, schedule, retention, encryption and
-credentials; checks each field of the `Cluster`, the `ObjectStore` and the `ScheduledBackup`
-against the pinned charts' definitions and the restore runbook's manifest against the `Cluster`'s;
-and checks the `StorageClass` against LINSTOR's. Its handshake runs the system's `openssl`, which
+credentials; holds the volume of every `Cluster` an application of the overlay with a database
+builds, the component's and any beside it, built from its Kustomization as the overlay makes it, to
+the 4Gi floor above, computed in the test from its sources, and fails for one that sets a WAL
+volume, a segment size, an `archive_timeout` or a `wal_keep_size` of its own, turns
+`resizeInUseVolumes` off or names a class that does not allow expansion; checks each field of the
+`Cluster`, the `ObjectStore` and the `ScheduledBackup` against the pinned charts' definitions and
+the restore runbook's manifest against the `Cluster`'s; and checks the `StorageClass` against
+LINSTOR's. Its handshake runs the system's `openssl`, which
 `mise.toml` does not pin: the CI tools image has the one its base image comes with, which
 `versions.yaml` pins by digest, and an `openssl` that is missing or behaves otherwise fails the test
 rather than passing it. `tests/postgres-dumps.bats` builds applications that
@@ -6447,8 +6472,10 @@ once Backstage answers its readiness endpoint with its database.
   from the Kustomizations, and fails naming both when one names an application with no entity;
   descriptions, systems and links stay as written.
 - **The database** is a PostgreSQL cluster named `backstage-db` from `components/cnpg-cluster`, with
-  the component's three instances, which it offers no variable to lower, and 2Gi each: the catalogue
-  is the files, so the database holds only what Backstage derives from them (entities, relations
+  the component's three instances, which it offers no variable to lower, and 4Gi each, the least any
+  database's volume has, as it holds the WAL of an archive outage besides the data
+  ([PostgreSQL](#postgresql)). Its data is small: the catalogue is the files, so the database holds
+  only what Backstage derives from them (entities, relations
   and the search index), its plugins' signing keys and the guest user's sign-in record, and a lost
   database is made again by a start. Backstage reads its host, port, database, user and password
   from the keys of the Secret `backstage-db-app`, which the operator makes. The user may not create
