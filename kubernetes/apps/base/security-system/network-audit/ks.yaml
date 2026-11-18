@@ -1,0 +1,20 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: network-audit
+  namespace: flux-system
+spec:
+  path: ./apps/base/security-system/network-audit/app
+  targetNamespace: security-system
+  # Its CiliumNetworkPolicy is a kind Cilium's operator defines, and Hubble Relay, which it follows,
+  # is part of the Cilium release.
+  dependsOn:
+    - name: cilium
+  # Ready once the recorder has run for half a minute, so one that cannot reach Relay shows on this
+  # Kustomization.
+  wait: true
+  sourceRef:
+    kind: ExternalArtifact
+    name: network-audit

@@ -13,12 +13,13 @@
 exceptions:
   - namespace: kube-system
     reason: Cilium's agent, its Envoy and its operator run in the host's network namespace, which a
-      pod policy does not select; the cluster's resolver takes queries from every namespace; and the
-      flows of the pod-network workloads (Spegel, Hubble Relay, metrics-server, which the API server
-      calls as the metrics API, the descheduler, kubelet-csr-approver, Reflector, Reloader and the
-      VPA recommender) are not yet enumerated
-    covered-by: the node firewall (ADR 0017) for the host-network pods, and the namespace's Pod
-      Security level
+      pod policy does not select; the cluster's resolver takes queries from every namespace; Hubble
+      Relay takes the flow recorder of security-system on 4245, the container port its Service's
+      port 80 targets; and the other flows of the pod-network workloads (Spegel, Hubble Relay,
+      metrics-server, which the API server calls as the metrics API, the descheduler,
+      kubelet-csr-approver, Reflector, Reloader and the VPA recommender) are not yet enumerated
+    covered-by: the node firewall (ADR 0017) for the host-network pods; the flow recorder's egress,
+      which names Hubble Relay's pods on 4245 alone; and the namespace's Pod Security level
   - namespace: flux-system
     reason: the Flux operator and the controllers it installs reach the API server and the
       registries that hold the signed artifact and the charts; their flows are not yet enumerated as

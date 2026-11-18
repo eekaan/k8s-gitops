@@ -86,6 +86,7 @@ configMapGenerator:
       - catalogue/linstor-monitoring.yaml
       - catalogue/metrics-server.yaml
       - catalogue/n8n.yaml
+      - catalogue/network-audit.yaml
       - catalogue/oauth2-proxy.yaml
       - catalogue/open-feature-operator.yaml
       - catalogue/open-webui.yaml

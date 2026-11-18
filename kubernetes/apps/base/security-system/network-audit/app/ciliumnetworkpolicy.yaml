@@ -1,0 +1,42 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What the flow recorder lets through, on top of the namespace's default deny: it resolves the name
+# of Hubble Relay's Service and holds one connection to Relay. Nothing connects to it, as it listens
+# on no port and nothing probes it, so the policy has no ingress rule
+# (docs/kubernetes.md, The record of what policy drops).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: network-audit
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: network-audit
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    # The cluster's resolver, for the name of Relay's Service.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    # Hubble Relay: the pods the Service hubble-relay selects, on the container port its port 80
+    # targets. A Service's address is translated to a pod's before policy applies, so the rule names
+    # the pods and their port. kube-system is listed and takes every peer on every port, so this
+    # rule is what keeps the recorder from Relay's other ports and from the namespace's other pods.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": hubble-relay
+      toPorts:
+        - ports:
+            - port: "4245"
+              protocol: TCP
