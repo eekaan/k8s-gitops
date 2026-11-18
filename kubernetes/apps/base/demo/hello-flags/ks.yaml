@@ -1,0 +1,21 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: hello-flags
+  namespace: flux-system
+spec:
+  path: ./apps/base/demo/hello-flags/app
+  targetNamespace: demo
+  # The flag set and its source are kinds the operator's release defines, and the pod gets its
+  # sidecar only while the operator's webhook answers, which it does once that application is
+  # Ready. The CiliumNetworkPolicy is a kind Cilium's operator defines.
+  dependsOn:
+    - name: open-feature-operator
+    - name: cilium
+  # Ready once the Deployment's pod is.
+  wait: true
+  sourceRef:
+    kind: ExternalArtifact
+    name: hello-flags

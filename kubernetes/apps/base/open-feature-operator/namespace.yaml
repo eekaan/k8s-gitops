@@ -1,0 +1,15 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/namespace-v1.json
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: open-feature-operator
+  annotations:
+    # Removing the namespace from the tree must not delete everything in it.
+    kustomize.toolkit.fluxcd.io/prune: disabled
+  labels:
+    # The operator's pod runs as a non-root user with the runtime's default seccomp profile, no
+    # capabilities and no privilege escalation, which the restricted level requires. The level also
+    # refuses the pods of the flagd-proxy Deployment the operator would make here for a flag source
+    # of that provider, which sets no security context (docs/kubernetes.md, OpenFeature Operator).
+    pod-security.kubernetes.io/enforce: restricted
