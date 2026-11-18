@@ -730,6 +730,60 @@ defined_keys() {
   done
 }
 
+# store_retry_problem [FILE]: what is wrong with how long the collector's sink to the store waits
+# before it tries again an endpoint it has stopped sending to, nothing when it is right. Vector
+# stops sending to an endpoint once five requests in a row fail at the connection, refused or with
+# a name that does not resolve, or with a 5xx, and tries it again after a delay that doubles from a
+# second up to the sink's distribution.retry_max_duration_secs, an hour when unset
+# (src/sinks/util/service/health.rs at Vector's v0.61.0). LogCollectorSendFailing reads the
+# requests the sink sends, which must move in every 5 minutes of an outage, and must not stand
+# still for the 300 seconds after which Vector stops exporting a counter. Reads the configuration
+# as collector_config writes it, from FILE or else from $CONFIG.
+store_retry_problem() {
+  local sinks name wait
+  sinks="$(jq -r '.sinks | to_entries[] | select(.value.type == "elasticsearch")
+    | "\(.key) \(.value.distribution.retry_max_duration_secs // "unset")"' "${1:-$CONFIG}")"
+  if [ "$(grep -c . <<<"$sinks")" -ne 1 ]; then
+    echo "the collector has $(grep -c . <<<"$sinks") sinks to the store, not one"
+    return 0
+  fi
+  read -r name wait <<<"$sinks"
+  if [ "$wait" = unset ]; then
+    echo "the sink $name leaves the wait before it tries the store again to Vector's default, up to an hour:" \
+      "set distribution.retry_max_duration_secs to 30, as LogCollectorSendFailing depends on its requests moving at least every 30 seconds"
+  elif ! [[ $wait =~ ^[0-9]+$ ]] || ((wait < 1 || wait > 30)); then
+    echo "the sink $name waits up to $wait seconds before it tries the store again:" \
+      "set distribution.retry_max_duration_secs to 30, as LogCollectorSendFailing depends on its requests moving at least every 30 seconds"
+  fi
+  return 0
+}
+
+@test "The collector tries a store that has failed it again at least every 30 seconds" {
+  local broken problem filter expected case
+  render "$COLLECTOR"
+  collector_config
+  echo "the store's sink: $(jq -c '.sinks[] | select(.type == "elasticsearch") | {distribution}' "$CONFIG")"
+  problem="$(store_retry_problem)"
+  echo "${problem:-the tree waits at most 30 seconds}"
+  [ -z "$problem" ]
+  # Left to the default, set longer, or set to no wait at all, the check fails, naming the alert.
+  broken="$BATS_TEST_TMPDIR/broken.json"
+  for case in "del(.distribution)|leaves the wait before it tries the store again to Vector's default, up to an hour" \
+    ".distribution.retry_max_duration_secs = 31|waits up to 31 seconds before it tries the store again" \
+    ".distribution.retry_max_duration_secs = 3600|waits up to 3600 seconds before it tries the store again" \
+    ".distribution.retry_max_duration_secs = 0|waits up to 0 seconds before it tries the store again"; do
+    IFS='|' read -r filter expected <<<"$case"
+    jq "(.sinks[] | select(.type == \"elasticsearch\")) |= ($filter)" "$CONFIG" >"$broken"
+    problem="$(store_retry_problem "$broken")"
+    echo "$filter: ${problem:-nothing}"
+    [ "$problem" = "the sink victoria_logs $expected: set distribution.retry_max_duration_secs to 30, as LogCollectorSendFailing depends on its requests moving at least every 30 seconds" ]
+  done
+  jq '.sinks.second = (.sinks[] | select(.type == "elasticsearch"))' "$CONFIG" >"$broken"
+  problem="$(store_retry_problem "$broken")"
+  echo "a second sink to the store: $problem"
+  [ "$problem" = "the collector has 2 sinks to the store, not one" ]
+}
+
 # logs_copy: a copy of the repository's scripts, with a kubeconfig for the cluster lab-sto2, for just
 # logs to run in through the repository's justfile, against recording fakes: a mise with nothing
 # installed, which keeps the justfile from putting real tools in front of the fakes, and a kubectl

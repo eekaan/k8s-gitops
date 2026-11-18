@@ -1931,7 +1931,7 @@ The own alerts, each with its runbook section in [docs/runbooks/alerts.md](runbo
 | `PostgresBackupTooOld` | A PostgreSQL cluster's newest base backup is older than 36 hours, or it has none and its oldest instance is older than that, for 30 minutes. | warning | [PostgresBackupTooOld](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#postgresbackuptooold) |
 | `LogCollectorOutsizedShare` | One node's collector sends at least ten times the median node's rate of events, and at least 10 a second, for 30 minutes. | info | [LogCollectorOutsizedShare](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectoroutsizedshare) |
 | `LogCollectorDiscardingEvents` | A collector's component discards events it was not set to drop, for 15 minutes. | warning | [LogCollectorDiscardingEvents](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectordiscardingevents) |
-| `LogCollectorSendFailing` | A collector's sink to the store reports errors for 15 minutes. | warning | [LogCollectorSendFailing](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectorsendfailing) |
+| `LogCollectorSendFailing` | A collector's sink has sent requests to the store and had none accepted, for 15 minutes. | warning | [LogCollectorSendFailing](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectorsendfailing) |
 | `ExternalDNSSyncStale` | external-dns' last successful sync with the DNS provider is more than 10 minutes old, or no external-dns reports one, for 5 minutes. | warning | [ExternalDNSSyncStale](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#externaldnssyncstale) |
 | `FluxRootSyncNotReady` | One of the root sync's three objects, the Kustomizations `flux-system` and `cluster` and the OCIRepository `flux-system`, has not been Ready for 10 minutes. | critical | [FluxRootSyncNotReady](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxrootsyncnotready) |
 | `FluxApplierNotReady` | A Kustomization or HelmRelease other than the root sync has not been Ready for 15 minutes, for a reason other than waiting for a dependency. | warning | [FluxApplierNotReady](https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#fluxappliernotready) |
@@ -3231,7 +3231,11 @@ keeps the last two days, on a 20 GiB claim on the cluster's default storage clas
 replicates. Should the volume still fill, to less than 10 MB free, VictoriaLogs' default
 `-storage.minFreeDiskSpaceBytes`, the store turns read-only: it answers every insert with HTTP 429
 Too Many Requests, and its metric `vl_storage_is_read_only` is 1, while the collectors keep the
-lines in their buffers and retry.
+lines in their buffers and retry. `LogCollectorSendFailing` fires once none of a collector's requests
+of the previous 5 minutes has been accepted for 15 minutes in a row, about 20 minutes after its last
+accepted one, so a store away for less than about 20 minutes, the 5-minute rate window plus `for`,
+raises nothing. A collector tries a store that has failed it again within 30 seconds, its sink's
+`distribution.retry_max_duration_secs`, so it resumes within half a minute of the store's return.
 
 What listens, and where:
 

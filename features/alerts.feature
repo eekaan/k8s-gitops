@@ -89,9 +89,39 @@ Feature: Alerts
 
   @by:rules-check
   Scenario: The alert LogCollectorSendFailing fires after its time in the failing case and stays quiet in the healthy one
-    Given a collector whose sink reports errors, and one whose sink reports none
+    Given a collector whose requests to the store are accepted and then refused at the connection, and one whose requests are accepted throughout
     When the rule is evaluated over time
     Then the alert fires after its time for the first and never for the second
+
+  @by:rules-check
+  Scenario: The alert LogCollectorSendFailing fires while the store answers every insert with 429
+    Given a collector whose requests to the store are accepted and then answered with 429, retried and answered with 429 again, and one whose requests are accepted throughout
+    When the rule is evaluated over time
+    Then the alert fires after its time for the first and never for the second
+
+  @by:rules-check
+  Scenario: The alert LogCollectorSendFailing fires while the store answers every insert with a server error
+    Given a collector whose requests to the store are accepted and then answered with 503, retried and answered with 503 again, and one whose requests are accepted throughout
+    When the rule is evaluated over time
+    Then the alert fires after its time for the first and never for the second
+
+  @by:rules-check
+  Scenario: The alert LogCollectorSendFailing fires while every request to the store times out
+    Given a collector whose requests to the store are accepted and then get no answer until they time out, and are retried, and one whose requests are accepted throughout
+    When the rule is evaluated over time
+    Then the alert fires after its time for the first and never for the second
+
+  @by:rules-check
+  Scenario: The alert LogCollectorSendFailing stays quiet while the store accepts the collector's requests after retries
+    Given a collector some of whose requests the store answers with 429 or 503, at a steady share for an hour, each retried until it is accepted
+    When the rule is evaluated over time
+    Then the alert does not fire
+
+  @by:rules-check
+  Scenario: The alert LogCollectorSendFailing stays quiet on a collector with nothing to send
+    Given a collector whose sources stop producing lines, so that it sends no request and its counters stop moving and are no longer exported
+    When the rule is evaluated over time
+    Then the alert does not fire
 
   @by:rules-check
   Scenario: The alert CertManagerCertificateNotReady fires after its time in the failing case and stays quiet in the healthy one

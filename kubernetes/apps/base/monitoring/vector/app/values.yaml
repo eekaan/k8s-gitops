@@ -220,6 +220,13 @@ customConfig:
       compression: gzip
       healthcheck:
         enabled: false
+      # Once five requests in a row fail at the connection or with a 5xx, Vector stops sending to the
+      # store and tries it again after a wait that doubles from a second, up to an hour unless set.
+      # At 30 seconds the collector resumes within half a minute of the store's return, and the
+      # requests it counts move in every 5 minutes of an outage, which LogCollectorSendFailing
+      # reads. No line is dropped: they wait in the buffer.
+      distribution:
+        retry_max_duration_secs: 30
       query:
         _msg_field: message
         _time_field: timestamp

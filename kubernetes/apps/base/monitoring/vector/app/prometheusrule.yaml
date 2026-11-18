@@ -43,12 +43,23 @@ spec:
             summary: A log collector loses events
             description: The component {{ $labels.component_id }} of the collector {{ $labels.pod }} has been discarding events it did not mean to for 15 minutes.
             runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectordiscardingevents
+        # The sink retries a request that fails at the connection, times out or is answered with 429
+        # or a 5xx but 501 without end, so vector_component_errors_total moves only for a request
+        # Vector gives up on, which LogCollectorDiscardingEvents already sees. Every attempt counts a
+        # request sent, and only one the store accepts a 2xx response; the sink tries a store that
+        # has failed it again within 30 seconds (values.yaml), so its requests move in every 5
+        # minutes of an outage. The right-hand > 0 keeps a 2xx series that is still exported but
+        # flat from counting as accepted. No buffer gauge is read, as a full, blocked buffer stops
+        # updating it.
         - alert: LogCollectorSendFailing
-          expr: sum by (pod, component_id) (rate(vector_component_errors_total{component_kind="sink", component_id="victoria_logs"}[5m])) > 0
+          expr: |
+            sum by (pod, component_id) (rate(vector_http_client_requests_sent_total{component_kind="sink", component_id="victoria_logs"}[5m])) > 0
+            unless on (pod, component_id)
+            sum by (pod, component_id) (rate(vector_http_client_responses_total{component_kind="sink", component_id="victoria_logs", status=~"2.."}[5m])) > 0
           for: 15m
           labels:
             severity: warning
           annotations:
             summary: A log collector cannot send to the store
-            description: The sink {{ $labels.component_id }} of the collector {{ $labels.pod }} has reported errors for 15 minutes, so its lines wait on the node's disk.
+            description: The sink {{ $labels.component_id }} of the collector {{ $labels.pod }} has sent requests to the store and had none accepted for 15 minutes, so its lines wait on the node's disk.
             runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectorsendfailing
