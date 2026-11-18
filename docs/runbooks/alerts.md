@@ -104,19 +104,41 @@ change to the collector's configuration whose transform fails on lines it did no
 
 ## LogCollectorSendFailing
 
-A collector's sink to the store has reported errors for 15 minutes. The lines wait in the disk
-buffer on the node, 256 MiB, and once it is full the collector stops reading on that node until the
-store takes lines again, and the lines of files rotated away meanwhile are lost
-([Logs](../kubernetes.md#logs)).
+A collector's sink has sent requests to the store and had none accepted for 15 minutes: at each
+evaluation in that time, none of its requests of the 5 minutes before was accepted, each refused,
+answered with an error or left unanswered, and it tries a store that has failed it again within 30
+seconds. The lines wait in the disk buffer on the node, 256 MiB, and once it is full the
+collector stops reading on that node until the store takes lines again, and the lines of files
+rotated away meanwhile are lost ([Logs](../kubernetes.md#logs)). A store away for less than about 20
+minutes, the 5 minutes of the rate and the 15 of `for`, raises nothing. The alert is raised for each
+collector, one per node: on every node it points at the store, on one node at the path from that
+node to the store.
 
 Look at first: whether the store is up: `kubectl --namespace monitoring get pods`, and
 `just logs '*' --since 5m --limit 1`, which fails with the store's own message when it is away or
-read-only. The collector's log, `kubectl --namespace monitoring logs <pod>`, names the error.
+read-only. Then how the requests fail, by a query in Grafana's Explore behind `just grafana` and by
+the lines in the collector's log, which the collector does not ship, so they are read with
+`kubectl --namespace monitoring logs <pod> | grep -E 'Endpoint is unhealthy|Retrying after|Request timed out'`:
 
-Usually: the store moved to another worker and is starting, which clears by itself; the store's
-volume is full and it answers every insert with HTTP 429 (its metric `vl_storage_is_read_only` is 1);
-or Cilium's tunnel between the collector's node and the store's is down, which no recipe checks: the
-collector's log shows connection errors to `victoria-logs` while the store's pod is Running.
+- `sum by (pod, error_kind) (rate(vector_http_client_errors_total{component_id="victoria_logs"}[5m]))`
+  shows connections refused or a name that does not resolve, with `Retrying after error.` in the
+  log, and `Endpoint is unhealthy.` once, where the sink stopped sending until its next try: the
+  store is not running, or its Service has no ready endpoint.
+- `sum by (pod, status) (rate(vector_http_client_responses_total{component_id="victoria_logs"}[5m]))`
+  shows what the store answers: 429 while it is read-only, its `vl_storage_is_read_only` 1, with
+  `Retrying after response. reason=too many requests` in the log; a 5xx while it fails its inserts,
+  with `Retrying after response.` and, once, `Endpoint is unhealthy.`.
+- Neither, while requests are sent: they time out, with `Request timed out.` in the log, as when
+  Cilium's tunnel between the nodes is down or the store hangs.
+
+A store that refuses every insert with another 4xx raises this alert together with
+[LogCollectorDiscardingEvents](#logcollectordiscardingevents), as the sink drops each request it is
+refused. A 2xx whose body reports errors counts as accepted here: it is that alert's, not this one's.
+
+Usually: the store not running for longer than a move to another worker takes, as when its volume
+cannot be attached there; the store's volume full, so it answers every insert with 429; or, on one
+node only, Cilium's tunnel between the collector's node and the store's down, which no recipe
+checks: the requests time out while the store's pod is Running.
 
 ## CertManagerCertificateNotReady
 

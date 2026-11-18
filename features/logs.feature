@@ -57,6 +57,11 @@ Feature: Logs
     When they are rendered offline
     Then the store yields a ServiceMonitor that selects its Service on a port the Service serves, the collector a PodMonitor that selects its pods on the port its metrics exporter listens on, and both applications name prometheus-operator-crds in dependsOn
 
+  Scenario: The collector tries a store that has failed it again at least every 30 seconds
+    Given the vector application's pinned chart and values
+    When the collector's rendered configuration is read
+    Then its one sink to the store waits at most 30 seconds, and at least one, before it tries again an endpoint it has stopped sending to, and a configuration that waits longer, or leaves the wait to Vector's default of an hour, fails, saying that LogCollectorSendFailing depends on it
+
   Scenario: An operator's query prints the matching records, oldest first, without an address
     Given a cluster's kubeconfig and a kubectl that answers VictoriaLogs' query endpoint through the service proxy with records in neither time order, as for a query whose pipes reorder them, one with control characters in its message
     When just logs runs with a LogsQL query, and with --since, --limit and a cluster

@@ -2,10 +2,15 @@
 # Unit tests of the vector application's own alerts, run by just rules-check with promtool. The
 # series are shaped as Vector's internal_metrics source and the prometheus_exporter sink write them,
 # in the namespace vector, labelled with component_id, component_kind, component_type and, where the
-# metric has them, intentional, error_type and stage
-# (https://vector.dev/docs/reference/configuration/sources/internal_metrics/), and as the PodMonitor's
-# scrape adds job, namespace, pod and instance. One collector pod runs on each node. Each group's name
-# is the title of its scenario in features/alerts.feature.
+# metric has them, intentional, error_type and stage, or the HTTP client's method, status and
+# error_kind (https://vector.dev/docs/reference/configuration/sources/internal_metrics/), and as the
+# PodMonitor's scrape adds job, namespace, pod and instance. The series of LogCollectorSendFailing's
+# groups also carry host, the pod's name, which Vector sets on every series, and move as the pinned
+# Vector's do with the tree's sink in each case. Vector stops exporting a counter that has not
+# changed for 300 seconds, at the exporter's next sweep within a minute, and its series then ends
+# with no stale marker: the exporter writes a timestamp on each sample, which the PodMonitor
+# honours, and Prometheus marks no such series stale. One collector pod runs on each node. Each
+# group's name is the title of its scenario in features/alerts.feature.
 rule_files:
   - vector.rules.yaml
 evaluation_interval: 1m
@@ -149,37 +154,59 @@ tests:
   - name: The alert LogCollectorSendFailing fires after its time in the failing case and stays quiet in the healthy one
     interval: 1m
     input_series:
-      # vector-a's sink reports request errors after minute 10; vector-b's sink reports none, and a
-      # transform of vector-b reports errors throughout, which are not a failure to send, nor are
-      # those of the sink that only serves Prometheus.
+      # vector-a's requests are accepted, 33 a minute, until the store stops half a minute before
+      # minute 10: the connection the sink holds open is closed under its request, and every
+      # connection it opens after that is refused. After five failures in a row the sink stops
+      # sending and tries again at least every 30 seconds, so after a first 9 it sends 2 a minute.
+      # Its 2xx series takes its last increase at minute 10, and it and the series of the closed
+      # connection are exported until minute 16. vector-b's requests are accepted throughout.
       - series: >-
-          vector_component_errors_total{component_id="victoria_logs", component_kind="sink",
-          component_type="elasticsearch", error_type="request_failed", stage="sending", job="vector",
+          vector_http_client_requests_sent_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", host="vector-a", method="POST", job="vector",
           namespace="monitoring", pod="vector-a", instance="192.0.2.1:9598"}
-        values: '0x10 3+3x80'
+        values: '0+33x9 323+2x80'
       - series: >-
-          vector_component_errors_total{component_id="victoria_logs", component_kind="sink",
-          component_type="elasticsearch", error_type="request_failed", stage="sending", job="vector",
-          namespace="monitoring", pod="vector-b", instance="192.0.2.2:9598"}
-        values: '0x90'
+          vector_http_client_responses_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", host="vector-a", status="200", job="vector",
+          namespace="monitoring", pod="vector-a", instance="192.0.2.1:9598"}
+        values: '0+33x9 314x6'
       - series: >-
-          vector_component_errors_total{component_id="prometheus", component_kind="sink",
-          component_type="prometheus_exporter", error_type="request_failed", stage="sending", job="vector",
-          namespace="monitoring", pod="vector-b", instance="192.0.2.2:9598"}
-        values: '0+2x90'
+          vector_http_client_errors_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", host="vector-a",
+          error_kind="connection closed before message completed", job="vector",
+          namespace="monitoring", pod="vector-a", instance="192.0.2.1:9598"}
+        values: '_x10 1x6'
       - series: >-
-          vector_component_errors_total{component_id="talos_files", component_kind="transform",
-          component_type="remap", error_type="conversion_failed", stage="processing", job="vector",
+          vector_http_client_errors_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", host="vector-a",
+          error_kind="error trying to connect: tcp connect error: Connection refused (os error 111)",
+          job="vector", namespace="monitoring", pod="vector-a", instance="192.0.2.1:9598"}
+        values: '_x10 8+2x80'
+      - series: >-
+          vector_http_client_requests_sent_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", host="vector-b", method="POST", job="vector",
           namespace="monitoring", pod="vector-b", instance="192.0.2.2:9598"}
-        values: '0+7x90'
+        values: '0+33x90'
+      - series: >-
+          vector_http_client_responses_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", host="vector-b", status="200", job="vector",
+          namespace="monitoring", pod="vector-b", instance="192.0.2.2:9598"}
+        values: '0+33x90'
+    # vector-a's 5-minute window, open on the left, last holds an increase of its 2xx series at
+    # minute 13, the samples of minutes 9 and 10; from minute 14 its 2xx rate is 0 while it still
+    # sends requests, so the alert is pending from 14 and fires 15 minutes later, at 29, and still
+    # fires at 80. vector-b's is never pending.
     alert_rule_test:
-      - eval_time: 8m
+      - eval_time: 5m
         alertname: LogCollectorSendFailing
         exp_alerts: []
-      - eval_time: 25m
+      - eval_time: 12m
         alertname: LogCollectorSendFailing
         exp_alerts: []
-      - eval_time: 26m
+      - eval_time: 28m
+        alertname: LogCollectorSendFailing
+        exp_alerts: []
+      - eval_time: 29m
         alertname: LogCollectorSendFailing
         exp_alerts:
           - exp_labels:
@@ -188,5 +215,291 @@ tests:
               component_id: victoria_logs
             exp_annotations:
               summary: A log collector cannot send to the store
-              description: The sink victoria_logs of the collector vector-a has reported errors for 15 minutes, so its lines wait on the node's disk.
+              description: The sink victoria_logs of the collector vector-a has sent requests to the store and had none accepted for 15 minutes, so its lines wait on the node's disk.
               runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectorsendfailing
+      - eval_time: 80m
+        alertname: LogCollectorSendFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              pod: vector-a
+              component_id: victoria_logs
+            exp_annotations:
+              summary: A log collector cannot send to the store
+              description: The sink victoria_logs of the collector vector-a has sent requests to the store and had none accepted for 15 minutes, so its lines wait on the node's disk.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectorsendfailing
+  - name: The alert LogCollectorSendFailing fires while the store answers every insert with 429
+    interval: 1m
+    input_series:
+      # vector-a's requests are accepted, 33 a minute, until the store turns read-only half a minute
+      # before minute 10 and answers every insert with 429. A 429 does not count against the
+      # store's health, so the sink keeps sending and tries each batch again within 30 seconds; as
+      # batches pile up its requests grow to some 1450 a minute, every one answered with 429. Its
+      # 2xx series takes its last increase at minute 10 and is exported until minute 16. vector-b's
+      # requests are accepted throughout.
+      - series: >-
+          vector_http_client_requests_sent_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", host="vector-a", method="POST", job="vector",
+          namespace="monitoring", pod="vector-a", instance="192.0.2.1:9598"}
+        values: '0+33x9 426 772 1224 1810 2524 3361 4322 5429 6655 7985 9401 10846+1450x69'
+      - series: >-
+          vector_http_client_responses_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", host="vector-a", status="200", job="vector",
+          namespace="monitoring", pod="vector-a", instance="192.0.2.1:9598"}
+        values: '0+33x9 314x6'
+      - series: >-
+          vector_http_client_responses_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", host="vector-a", status="429", job="vector",
+          namespace="monitoring", pod="vector-a", instance="192.0.2.1:9598"}
+        values: '_x10 112 458 910 1496 2210 3047 4008 5115 6341 7671 9087 10532+1450x69'
+      - series: >-
+          vector_http_client_requests_sent_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", host="vector-b", method="POST", job="vector",
+          namespace="monitoring", pod="vector-b", instance="192.0.2.2:9598"}
+        values: '0+33x90'
+      - series: >-
+          vector_http_client_responses_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", host="vector-b", status="200", job="vector",
+          namespace="monitoring", pod="vector-b", instance="192.0.2.2:9598"}
+        values: '0+33x90'
+    # vector-a's 5-minute window, open on the left, last holds an increase of its 2xx series at
+    # minute 13, the samples of minutes 9 and 10; from minute 14 its 2xx rate is 0 while it still
+    # sends requests, so the alert is pending from 14 and fires 15 minutes later, at 29, and still
+    # fires at 80. vector-b's is never pending.
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: LogCollectorSendFailing
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: LogCollectorSendFailing
+        exp_alerts: []
+      - eval_time: 28m
+        alertname: LogCollectorSendFailing
+        exp_alerts: []
+      - eval_time: 29m
+        alertname: LogCollectorSendFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              pod: vector-a
+              component_id: victoria_logs
+            exp_annotations:
+              summary: A log collector cannot send to the store
+              description: The sink victoria_logs of the collector vector-a has sent requests to the store and had none accepted for 15 minutes, so its lines wait on the node's disk.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectorsendfailing
+      - eval_time: 80m
+        alertname: LogCollectorSendFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              pod: vector-a
+              component_id: victoria_logs
+            exp_annotations:
+              summary: A log collector cannot send to the store
+              description: The sink victoria_logs of the collector vector-a has sent requests to the store and had none accepted for 15 minutes, so its lines wait on the node's disk.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectorsendfailing
+  - name: The alert LogCollectorSendFailing fires while the store answers every insert with a server error
+    interval: 1m
+    input_series:
+      # vector-a's requests are accepted, 33 a minute, until the store fails its inserts half a
+      # minute before minute 10 and answers every one with 503. After five in a row the sink stops
+      # sending and tries again at least every 30 seconds, so after a first 9 it sends 2 a minute,
+      # each answered with 503. Its 2xx series takes its last increase at minute 10 and is exported
+      # until minute 16. vector-b's requests are accepted throughout.
+      - series: >-
+          vector_http_client_requests_sent_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", host="vector-a", method="POST", job="vector",
+          namespace="monitoring", pod="vector-a", instance="192.0.2.1:9598"}
+        values: '0+33x9 323+2x80'
+      - series: >-
+          vector_http_client_responses_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", host="vector-a", status="200", job="vector",
+          namespace="monitoring", pod="vector-a", instance="192.0.2.1:9598"}
+        values: '0+33x9 314x6'
+      - series: >-
+          vector_http_client_responses_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", host="vector-a", status="503", job="vector",
+          namespace="monitoring", pod="vector-a", instance="192.0.2.1:9598"}
+        values: '_x10 9+2x80'
+      - series: >-
+          vector_http_client_requests_sent_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", host="vector-b", method="POST", job="vector",
+          namespace="monitoring", pod="vector-b", instance="192.0.2.2:9598"}
+        values: '0+33x90'
+      - series: >-
+          vector_http_client_responses_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", host="vector-b", status="200", job="vector",
+          namespace="monitoring", pod="vector-b", instance="192.0.2.2:9598"}
+        values: '0+33x90'
+    # vector-a's 5-minute window, open on the left, last holds an increase of its 2xx series at
+    # minute 13, the samples of minutes 9 and 10; from minute 14 its 2xx rate is 0 while it still
+    # sends requests, so the alert is pending from 14 and fires 15 minutes later, at 29, and still
+    # fires at 80. vector-b's is never pending.
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: LogCollectorSendFailing
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: LogCollectorSendFailing
+        exp_alerts: []
+      - eval_time: 28m
+        alertname: LogCollectorSendFailing
+        exp_alerts: []
+      - eval_time: 29m
+        alertname: LogCollectorSendFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              pod: vector-a
+              component_id: victoria_logs
+            exp_annotations:
+              summary: A log collector cannot send to the store
+              description: The sink victoria_logs of the collector vector-a has sent requests to the store and had none accepted for 15 minutes, so its lines wait on the node's disk.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectorsendfailing
+      - eval_time: 80m
+        alertname: LogCollectorSendFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              pod: vector-a
+              component_id: victoria_logs
+            exp_annotations:
+              summary: A log collector cannot send to the store
+              description: The sink victoria_logs of the collector vector-a has sent requests to the store and had none accepted for 15 minutes, so its lines wait on the node's disk.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectorsendfailing
+  - name: The alert LogCollectorSendFailing fires while every request to the store times out
+    interval: 1m
+    input_series:
+      # vector-a's requests are accepted, 33 a minute, until the store takes connections and answers
+      # none half a minute before minute 10. Each request is dropped at the sink's timeout, 60
+      # seconds, with no response and no error counted, and a timeout does not count against the
+      # store's health, so the sink keeps sending, one request at a time, 1 a minute. Its 2xx
+      # series takes its last increase at minute 10 and is exported until minute 16. vector-b's
+      # requests are accepted throughout.
+      - series: >-
+          vector_http_client_requests_sent_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", host="vector-a", method="POST", job="vector",
+          namespace="monitoring", pod="vector-a", instance="192.0.2.1:9598"}
+        values: '0+33x9 315+1x80'
+      - series: >-
+          vector_http_client_responses_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", host="vector-a", status="200", job="vector",
+          namespace="monitoring", pod="vector-a", instance="192.0.2.1:9598"}
+        values: '0+33x9 314x6'
+      - series: >-
+          vector_http_client_requests_sent_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", host="vector-b", method="POST", job="vector",
+          namespace="monitoring", pod="vector-b", instance="192.0.2.2:9598"}
+        values: '0+33x90'
+      - series: >-
+          vector_http_client_responses_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", host="vector-b", status="200", job="vector",
+          namespace="monitoring", pod="vector-b", instance="192.0.2.2:9598"}
+        values: '0+33x90'
+    # vector-a's 5-minute window, open on the left, last holds an increase of its 2xx series at
+    # minute 13, the samples of minutes 9 and 10; from minute 14 its 2xx rate is 0 while it still
+    # sends requests, so the alert is pending from 14 and fires 15 minutes later, at 29, and still
+    # fires at 80. vector-b's is never pending.
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: LogCollectorSendFailing
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: LogCollectorSendFailing
+        exp_alerts: []
+      - eval_time: 28m
+        alertname: LogCollectorSendFailing
+        exp_alerts: []
+      - eval_time: 29m
+        alertname: LogCollectorSendFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              pod: vector-a
+              component_id: victoria_logs
+            exp_annotations:
+              summary: A log collector cannot send to the store
+              description: The sink victoria_logs of the collector vector-a has sent requests to the store and had none accepted for 15 minutes, so its lines wait on the node's disk.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectorsendfailing
+      - eval_time: 80m
+        alertname: LogCollectorSendFailing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              pod: vector-a
+              component_id: victoria_logs
+            exp_annotations:
+              summary: A log collector cannot send to the store
+              description: The sink victoria_logs of the collector vector-a has sent requests to the store and had none accepted for 15 minutes, so its lines wait on the node's disk.
+              runbook_url: https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/alerts.md#logcollectorsendfailing
+  - name: The alert LogCollectorSendFailing stays quiet while the store accepts the collector's requests after retries
+    interval: 1m
+    input_series:
+      # Of vector-a's 40 requests a minute, the store answers 4 with 429 and 3 with 503, and the
+      # sink tries each of those batches again until it is accepted, so 33 a minute are, for the
+      # whole hour and more.
+      - series: >-
+          vector_http_client_requests_sent_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", host="vector-a", method="POST", job="vector",
+          namespace="monitoring", pod="vector-a", instance="192.0.2.1:9598"}
+        values: '0+40x90'
+      - series: >-
+          vector_http_client_responses_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", host="vector-a", status="200", job="vector",
+          namespace="monitoring", pod="vector-a", instance="192.0.2.1:9598"}
+        values: '0+33x90'
+      - series: >-
+          vector_http_client_responses_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", host="vector-a", status="429", job="vector",
+          namespace="monitoring", pod="vector-a", instance="192.0.2.1:9598"}
+        values: '0+4x90'
+      - series: >-
+          vector_http_client_responses_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", host="vector-a", status="503", job="vector",
+          namespace="monitoring", pod="vector-a", instance="192.0.2.1:9598"}
+        values: '0+3x90'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: LogCollectorSendFailing
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: LogCollectorSendFailing
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: LogCollectorSendFailing
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: LogCollectorSendFailing
+        exp_alerts: []
+  - name: The alert LogCollectorSendFailing stays quiet on a collector with nothing to send
+    interval: 1m
+    input_series:
+      # vector-a's sources stop producing lines at minute 5, so it sends no request after that. Its
+      # requests and 2xx series take their last increase at minute 5 and are exported until minute
+      # 11, and there is nothing else.
+      - series: >-
+          vector_http_client_requests_sent_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", host="vector-a", method="POST", job="vector",
+          namespace="monitoring", pod="vector-a", instance="192.0.2.1:9598"}
+        values: '0+33x5 165x5'
+      - series: >-
+          vector_http_client_responses_total{component_id="victoria_logs", component_kind="sink",
+          component_type="elasticsearch", host="vector-a", status="200", job="vector",
+          namespace="monitoring", pod="vector-a", instance="192.0.2.1:9598"}
+        values: '0+33x5 165x5'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: LogCollectorSendFailing
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: LogCollectorSendFailing
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: LogCollectorSendFailing
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: LogCollectorSendFailing
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: LogCollectorSendFailing
+        exp_alerts: []
