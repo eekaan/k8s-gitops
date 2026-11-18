@@ -95,7 +95,10 @@ values. Once they are in place, `just renovate-record` writes what Renovate extr
 `.renovate/extracted.tsv`, which the change commits; a pin under such a comment also gets the form
 of its datasource's tags in `.renovate/tag-forms.tsv`, read from the registry's own listing, and a
 pin that no manager reads is listed in `.renovate/by-hand.tsv` with why and how it is moved.
-`just renovate-check` and `just renovate-pins` fail, naming the file to change, until they hold.
+`just renovate-check` and `just renovate-pins` fail, naming the file to change, until they hold. The
+chart's source is a row of `signatures.yaml`, and where its publisher signs keyless its
+`OCIRepository` carries the row's `verify` block ([Adding a source](#adding-a-source)); `just
+signatures-check` fails, naming the source, until it holds.
 
 ## What the root sets
 
@@ -132,6 +135,12 @@ by what a rule needs:
   images. It runs `kubernetes-check` first, keeping what Flux builds, and stops when that fails;
   then `scripts/render`, whose output it reads. It is a check of the `static` group, so it runs on
   every pull request and every push to `main`, and not in the publish run.
+
+The sources' signatures have two checks of their own, beside these ([Signatures](#signatures)):
+`just signatures-check`, offline, on what `kubernetes-check` builds, holds every chart source to its
+row of `signatures.yaml` and the rows to the verify blocks, and is a check of `static`; `just
+signatures-verify` asks the registries whether each pin is signed as its row says, and is the group
+`signatures` alone. Neither is in the publish run.
 
 That split is the design, and its cost is this: a tree with a misspelt field or an untagged image
 fails every pull request's `static` group, but the publish run does not refuse it again. Where the
@@ -7239,7 +7248,10 @@ The steps n8n took, in order; the next port does the same and says where it diff
    listing for the image's variants (slim, with CUDA, with its own model server) and take the one
    that fetches least and fits the volume, and for whether its version tags are releases alone.
    `just renovate-record`, then the form of the tags in `.renovate/tag-forms.tsv`, read from the
-   registry's own listing; `just renovate-pins` passes.
+   registry's own listing; `just renovate-pins` passes. The chart's source gets its row of
+   `signatures.yaml`, and, where the publisher signs keyless, the row's `verify` block in the
+   `OCIRepository`, after the pinned cosign verified the tag with the row's identity
+   ([Adding a source](#adding-a-source)); `just signatures-check` and `just signatures-verify` pass.
    Where the registry tags betas as plain versions, as n8n's does, a rule in
    `.renovate/managers.json5` keeps Renovate to the line the tree runs; where it does not, say so,
    and add the image to the packages `.renovate/automerge.json5` never merges. An image an operator
@@ -8126,7 +8138,8 @@ artifact generator publishes only `apps/base`, and `path` is
 - **Charts**: the operator's own `flux-operator` and `flux-instance` charts from
   `oci://ghcr.io/controlplaneio-fluxcd/charts`, at one version that Renovate moves together. Each
   `OCIRepository` refuses a chart without the keyless cosign signature of the publisher's release
-  workflow on a version tag.
+  workflow on a version tag, the identity of the chart's row of `signatures.yaml`
+  ([Signatures](#signatures)).
 - **Instance**: upstream Flux 2.x, with source-watcher beside the four default controllers for
   the per-application artifacts, and Flux's network policies on. A patch of the instance sets the
   namespace `flux-system` to enforce the restricted Pod Security level ([Pod
@@ -8141,8 +8154,9 @@ artifact generator publishes only `apps/base`, and `path` is
   `flux-system` after its namespace, that read `oci://ghcr.io/eekaan/k8s-gitops/manifests` at the
   tag `main` every minute and apply `./clusters/<cluster>`. Its patches make the source verify the
   artifact's keyless signature: issued by GitHub Actions to this repository's
-  `.github/workflows/publish.yaml` on `refs/heads/main`. An artifact signed by a run on another
-  branch or tag, or by another workflow, is refused (ADR 0003).
+  `.github/workflows/publish.yaml` on `refs/heads/main`, the identity of the artifact's row, the
+  first, of `signatures.yaml`. An artifact signed by a run on another branch or tag, or by another
+  workflow, is refused (ADR 0003).
 - **Metrics**: the operator's values set its report, and with it the metrics of the state of every
   Flux resource, to every 30 seconds. The monitors and the alerts are the `flux-monitoring`
   application's, not these two applications': Flux is installed before the monitoring definitions
@@ -8269,14 +8283,292 @@ The signing identity is this workflow file on that branch: the subject
 `https://github.com/eekaan/k8s-gitops/.github/workflows/publish.yaml@refs/heads/main` from the
 issuer `https://token.actions.githubusercontent.com`, which the instance requires
 ([Flux itself](#flux-itself)). Renaming the workflow file, or publishing from another branch,
-changes the identity, so the instance's patch changes in the same change. `tests/publish.bats` fails
-when the identity the script verifies and the one the instance's values accept differ.
+changes the identity, so the instance's patch changes in the same change, and the artifact's row of
+`signatures.yaml` with it. `tests/publish.bats` fails when the identity the script verifies and the
+one the instance's values accept differ, and `just signatures-check` when the patch and the row do.
 
 The package must be public for the cluster to pull it without credentials. GitHub makes a new
 package private, and a package linked to its repository takes the repository's access permissions
 but not its visibility, so the package's visibility is set to public in its settings once, after
 the first run; until then the cluster cannot pull it. A public package cannot be made private
 again.
+
+## Signatures
+
+`signatures.yaml` at the repository's root lists every source a chart comes from, the artifact the
+cluster syncs and the tools image the checks run in, one row each, and how it is signed: keyless,
+by one identity that the certificate of its signature holds; with a key, whose public key is a file
+under `signatures/`; or not where Flux looks, with the reason. Its header gives each kind's fields.
+A source signed keyless whose row has no `cluster: false` is verified before merge and, through the
+`verify` block of its `OCIRepository`, by Flux on the cluster; every other row is checked before
+merge alone, or is unsigned. Who signs each:
+
+| Source | Signed by | Verified | Why |
+|---|---|---|---|
+| `oci://ghcr.io/eekaan/k8s-gitops/manifests` | eekaan/k8s-gitops, `publish.yaml` on `main` | before merge and by the cluster | the artifact the cluster syncs, signed by the publish run |
+| `oci://ghcr.io/eekaan/k8s-gitops/ci-tools` | eekaan/k8s-gitops, `tools-image.yaml` on `main` | before merge alone | the checks run in it, and nothing on the cluster pulls it |
+| `https://charts.fairwinds.com/stable` | — | unsigned | a Helm repository: Flux verifies none of its charts |
+| `https://crowdsecurity.github.io/helm-charts` | — | unsigned | a Helm repository: Flux verifies none of its charts |
+| `https://open-policy-agent.github.io/gatekeeper/charts` | — | unsigned | a Helm repository: Flux verifies none of its charts |
+| `oci://docker.io/envoyproxy/gateway-helm` | — | unsigned | Envoy Gateway signs its image, not its chart |
+| `oci://ghcr.io/bjw-s-labs/helm/app-template` | bjw-s-labs/helm-charts, `chart-release-steps.yaml` on `main` | before merge and by the cluster | the publisher signs keyless; four applications read it |
+| `oci://ghcr.io/cloudnative-pg/charts/cloudnative-pg` | cloudnative-pg/charts, `release-publish.yml` on `main` | before merge and by the cluster | the publisher signs keyless |
+| `oci://ghcr.io/cloudnative-pg/charts/plugin-barman-cloud` | cloudnative-pg/charts, `release-publish.yml` on `main` | before merge and by the cluster | the publisher signs keyless |
+| `oci://ghcr.io/controlplaneio-fluxcd/charts/flux-instance` | controlplaneio-fluxcd/charts, `release.yml` at a version tag | before merge and by the cluster | the publisher signs keyless |
+| `oci://ghcr.io/controlplaneio-fluxcd/charts/flux-operator` | controlplaneio-fluxcd/charts, `release.yml` at a version tag | before merge and by the cluster | the publisher signs keyless |
+| `oci://ghcr.io/dexidp/helm-charts/dex` | — | unsigned | no signature; the publisher says nothing about signing |
+| `oci://ghcr.io/emberstack/helm-charts/reflector` | — | unsigned | no signature; the publisher says nothing about signing |
+| `oci://ghcr.io/external-secrets/charts/external-secrets` | external-secrets/external-secrets, `helm.yml` on `main` | before merge and by the cluster | the publisher signs keyless |
+| `oci://ghcr.io/falcosecurity/charts/falco` | falcosecurity/charts, `release.yml` on `master` | before merge and by the cluster | the publisher signs keyless |
+| `oci://ghcr.io/grafana/helm-charts/grafana-operator` | — | unsigned | no signature; the publisher says nothing about signing |
+| `oci://ghcr.io/home-operations/charts-mirror/descheduler` | home-operations/charts-mirror, `app-builder.yaml` on `main` | before merge and by the cluster | the mirror signs keyless |
+| `oci://ghcr.io/home-operations/charts-mirror/external-dns` | home-operations/charts-mirror, `app-builder.yaml` on `main` | before merge and by the cluster | the mirror signs keyless |
+| `oci://ghcr.io/home-operations/charts-mirror/keda` | home-operations/charts-mirror, `app-builder.yaml` on `main` | before merge and by the cluster | the mirror signs keyless |
+| `oci://ghcr.io/home-operations/charts-mirror/metrics-server` | home-operations/charts-mirror, `app-builder.yaml` on `main` | before merge and by the cluster | the mirror signs keyless |
+| `oci://ghcr.io/home-operations/charts-mirror/volsync` | home-operations/charts-mirror, `app-builder.yaml` on `main` | before merge and by the cluster | the mirror signs keyless |
+| `oci://ghcr.io/kyverno/charts/kyverno` | — | unsigned | signed into another repository, which Flux cannot read |
+| `oci://ghcr.io/oauth2-proxy/charts/oauth2-proxy` | oauth2-proxy/manifests, `release.yaml` on `main` | before merge and by the cluster | the publisher signs keyless |
+| `oci://ghcr.io/open-feature/charts/open-feature-operator` | a key, `signatures/open-feature-operator.pem` | before merge alone | a key the publisher does not publish; no key's block is built |
+| `oci://ghcr.io/openbao/charts/openbao` | openbao/openbao-helm, `release-chart.yml` on `main` | before merge and by the cluster | the publisher signs keyless |
+| `oci://ghcr.io/piraeusdatastore/piraeus-operator/piraeus` | — | unsigned | no signature; the publisher says nothing about signing |
+| `oci://ghcr.io/postfinance/charts/kubelet-csr-approver` | — | unsigned | no signature; the publisher says nothing about signing |
+| `oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack` | — | unsigned | Helm provenance with a PGP key, which Flux does not verify |
+| `oci://ghcr.io/prometheus-community/charts/prometheus-blackbox-exporter` | — | unsigned | Helm provenance with a PGP key, which Flux does not verify |
+| `oci://ghcr.io/prometheus-community/charts/prometheus-operator-crds` | — | unsigned | Helm provenance with a PGP key, which Flux does not verify |
+| `oci://ghcr.io/spegel-org/helm-charts/spegel` | spegel-org/spegel, `release.yaml` at a version tag | before merge and by the cluster | the publisher signs keyless |
+| `oci://ghcr.io/stakater/charts/reloader` | stakater/Reloader, `push-helm-chart.yaml` on `master` | before merge and by the cluster | the publisher signs keyless |
+| `oci://ghcr.io/vectordotdev/helm-charts/vector` | — | unsigned | no signature; the publisher says nothing about signing |
+| `oci://ghcr.io/victoriametrics/helm-charts/victoria-logs-single` | VictoriaMetrics/helm-charts, `release.yaml` on `master` | before merge and by the cluster | the publisher signs keyless |
+| `oci://gsoci.azurecr.io/charts/giantswarm/silence-operator` | a CircleCI pipeline of Giant Swarm's project | before merge and by the cluster | the publisher signs keyless, from CircleCI |
+| `oci://quay.io/cilium/charts/cilium` | cilium/cilium, `release.yaml` on `main` | before merge and by the cluster | the publisher signs keyless |
+| `oci://quay.io/jetstack/charts/cert-manager` | a key, `signatures/cert-manager.pem` | before merge alone | signed over SHA-512, which source-controller cannot verify with a key |
+
+### What the checks do
+
+- `just signatures-check`, a check of the `static` group, offline. It runs `just kubernetes-check`'s
+  builds first, and stops when they fail, and reads the sources from them: every application,
+  enabled or not, and each cluster directory, after kustomize and after Flux's substitution with
+  `--strict-substitute`. A source is the `url` of an `OCIRepository` or a `HelmRepository`, the
+  artifact the FluxInstance syncs, read from the values the `flux-instance` application builds into
+  its ConfigMap, or the tools image, by the name `scripts/tools-image` publishes; the objects of one
+  url share a row. The check fails, naming the source, and for an object its kind, namespace, name
+  and file: a source without a row, a row no source uses, a source listed twice, rows out of order,
+  a field missing, unknown or not one line of text; a `HelmRepository` whose row is not unsigned, as
+  a chart an https Helm repository serves is unsigned by its kind; a `HelmRepository` of type `oci`,
+  a `Bucket` or any other kind of `source.toolkit.fluxcd.io` it has no rule for; an `OCIRepository`
+  whose ref is neither a tag nor a digest; a key that is not a file directly under `signatures/`
+  holding one PEM public key, a file there no row names, and a key row without `cluster: false`; an
+  identity outside the grammar below; and a `verify` block that is not its row's. Every
+  `OCIRepository` whose row is keyless without `cluster: false` has `spec.verify` exactly
+  `provider: cosign` and one `matchOIDCIdentity` entry of the row's `issuer` and `subject`, byte for
+  byte, with no `secretRef` and nothing else, and so does the patch the FluxInstance's values put on
+  its sync source, the one patch whose target selects it as kustomize selects, by patterns of kind
+  and name; no other `OCIRepository` has a block. It needs what `kubernetes-check` needs.
+- `just signatures-verify`, the one check of the group `signatures`, which needs the network. It
+  runs the offline rules first and stops when they fail. Then, for each row, against the pins of the
+  tree, an `OCIRepository`'s tag or digest, the sync source's ref and the digest `versions.yaml`
+  records under `ci_tools_image` (with none recorded, the line says there is nothing to verify), it
+  probes the registry's `/v2/` with curl and runs the pinned cosign: `cosign verify` with a keyless
+  row's issuer and subject as its two regular-expression flags and nothing else, which is what Flux
+  matches, no claim Flux has no field for; with a key row's key, the transparency log not consulted
+  (`--insecure-ignore-tlog`), as source-controller does not consult it for a key, and the row's
+  digest algorithm; and for an unsigned OCI row, a lookup with an identity no certificate holds,
+  which passes only when cosign answers that there is no signature at all. A Helm repository's row
+  fetches nothing. It prints one line per row, `pass`, `FAIL` or `skip`, the source and how it was
+  verified or why it failed, and nothing else, then exits non-zero if any row failed.
+
+`signatures-verify` is a group of its own, outside `static`, so `just checks`, `just ci` and CI run
+both, CI as two jobs: a registry that cannot be reached fails `signatures` with its reason and
+leaves `static`'s result its own, and the required check `ci` stays red until a re-run verifies. The
+publish run runs neither: its gate is `just kubernetes-check` ([Publishing](#publishing)).
+
+The verification fails closed. Only cosign's exit 0 verifies, and only its own outcome "no
+signatures found", exit 10, counts as unsigned. The pinned cosign, 3.1.4, has exit codes of its own
+for no signature (10), a tag that is not there (11), a signature that does not match (12) and one
+without a certificate (13), for a signature at the signature tag (`cmd/cosign/errors/exit_codes.go`,
+`exit_code_lookup.go`, given in `cmd/cosign/cli/verify/verify.go` by `WrapError`); a signature in a
+Sigstore bundle that does not match, an unreachable registry, a refused request and a rate limit
+all exit 1. A registry's error does not end as "no signatures found": cosign resolves the pinned
+tag first, and any answer but the manifest is an error there, a missing tag's 404 exit 11; at the
+signature tag only a 404 reads as no signature, and any other answer is an error
+(`pkg/oci/remote/signatures.go`). The bundle lookup comes first, and when it fails for any reason
+cosign looks at the signature tag, as source-controller does, so a registry that refused the
+referrers call alone and then answered the rest would leave a bundle unseen, on the cluster as here.
+Before cosign runs, the check asks the registry's `/v2/` (Docker Hub's registry is
+`registry-1.docker.io`, not `docker.io`): one that does not answer within 20 seconds or cannot be
+resolved fails that source as "the registry <host> could not be reached", one that answers 429
+as "limits anonymous requests", and a 5xx as unreachable too. Every other failure of cosign fails
+with a reason of the check's own, chosen from its exit code and the time it took, never from what it
+printed: the signature does not match, a signature where the row says unsigned, no signature where
+the row names one, a tag that is not there, a cosign that did not finish within its `--timeout`
+(`SIGNATURES_VERIFY_TIMEOUT` seconds, 120 when unset), or a failure with no outcome of its own.
+Every row is checked; there is no retry beyond cosign's own.
+
+cosign runs with none of the caller's secrets (`scripts/lib/tools.sh`), in a home, a Docker
+configuration with no login in it and a TUF root of the run's own, without `REGISTRY_AUTH_FILE` and
+podman's places, and without any variable `cosign env` lists, among them `COSIGN_REPOSITORY`, which
+moves where a signature is read from, and the `SIGSTORE_*` files and `TUF_*` settings, which change
+what is trusted. It runs `verify` and no other subcommand. Nothing it prints reaches the output: its
+error for a host that does not resolve names the resolver's address.
+
+An issuer is `^`, a literal with every dot escaped, and `$`. A subject is `^`, a literal with every
+dot escaped up to and including the `@` that begins its ref (the whole subject, for an identity
+without a ref), the ref, which alone may hold a bracket expression, a quantifier or a group with an
+alternation inside it, and `$`, the subject's only `$`; no bare dot, backslash class, lazy
+quantifier or flag group. That is syntax Go's regular expressions and POSIX extended ones read
+alike, so what bash matches in the tests is what Flux and cosign match. Both compile the patterns
+with Go's `regexp.Compile` and match them with `MatchString`, unanchored (cosign's
+`pkg/cosign/verify.go` for a signature at the signature tag, sigstore-go's
+`pkg/verify/certificate_identity.go` for a bundle; source-controller hands its `matchOIDCIdentity`
+to them as `IssuerRegExp` and `SubjectRegExp`), so a pattern without its anchors also accepts a
+longer identity, such as another repository's workflow whose path ends the same way. And a block
+with an empty `matchOIDCIdentity` checks no identity of a signature at the signature tag: any
+certificate of Sigstore's public authority passes (`CheckCertificatePolicy` checks identities only
+when there are some), which is why every block names exactly one.
+
+### What Flux's verification needs
+
+The FluxInstance pins Flux's manifests to the operator's version, and at the version its values
+pin, `flux-operator-manifests:v0.62.1`, the distribution installs source-controller v1.10.1 and
+helm-controller v1.7.1 (`flux/v2.10.0/source-controller.yaml` and `helm-controller.yaml` of that
+artifact). That source-controller is built with cosign v3.1.4, the version `mise.toml` pins for the
+check (its `go.mod`). What this section says of the controllers is read at those versions and moves
+with those two pins; no test holds them together, so a bump of the operator's manifests artifact or
+of cosign is read against the same sources again.
+
+For a keyless block source-controller looks for a Sigstore bundle among the artifact's referrers,
+through the registry's referrers API or the referrers tag, and otherwise for a signature at the
+signature tag (`internal/oci/cosign/cosign.go`, `Verify`), as the pinned cosign's `verify` does
+(`cmd/cosign/cli/verify/verify.go`), so a row the check verifies is one the controller can verify; a
+source the check could verify only with something the controller does not do takes `cluster: false`
+instead of a block. For a key it builds a verifier over SHA-256 alone and does not consult the
+transparency log (`NewCosignVerifier`), so cert-manager's chart, signed over SHA-512, has no block.
+The controller needs the registry and Sigstore's TUF repository. The trusted root a bundle is
+verified with it loads once, and while that fails retries at most once a minute; what a signature
+at the signature tag is verified with, the transparency log's and certificate logs' keys and the
+authority's certificates, it reads for every verifier it builds, through cosign's older TUF client,
+which retries a failed update on every call, with no such limit (`NewCosignVerifier`:
+`GetRekorPubs`, `GetCTLogPubs`, `fulcio.GetRoots` and `GetIntermediates`); only a failed start of
+that client, which reads its local store and not the network, lasts until the controller restarts
+(`pkg/tuf/client.go` of `sigstore/sigstore` v1.11.1, which its `go.mod` takes). It asks the
+transparency log only about a signature that does not carry its entry. It reaches them through
+`flux-system`'s egress, which Flux's own `allow-egress` policy leaves open
+([What the namespaces let through](#what-the-namespaces-let-through)), the egress the sync source's
+and Flux's two charts' verification take, so no policy or exception changes for the other blocks. A
+rotation of Sigstore's public keys is not noticed, and a verified revision is not verified again
+until it, or the object's spec, changes (Flux's documentation of `OCIRepository` verification).
+
+Flux's substitution leaves the patterns as they are written: it substitutes `${var}` alone, and a
+`$` not followed by `{` stays (`fluxcd/pkg/envsubst`, `parse/scan.go`), so a pattern ending in `$`
+reaches the cluster as written, which `just signatures-check` proves on the builds. A `$$` would
+come out as `$`; the grammar allows one `$`. The FluxInstance's values, which hold the sync source's
+patch, are in a ConfigMap substitution leaves alone.
+
+No step of a rebuild applies a block before it can verify. Of the applications installed with helm
+before Flux, from the `url` and `ref` of their `ocirepository.yaml`
+([Applications installed before Flux](#applications-installed-before-flux)), Cilium, the Flux
+Operator and the Flux instance have blocks, which helm does not read; Flux applies them once it
+runs, over the pod network Cilium already gives. The kubelet serving certificate approver, installed
+the same way, is unsigned and has none.
+
+### When a verification fails
+
+source-controller verifies an `OCIRepository` with a block when its revision changes, when its spec
+changes, which adding or changing a block does, when the last verification failed, and when the
+verification policy changes (`internal/controller/ocirepository_controller.go`, `reconcileSource`).
+A verified revision reports `SourceVerified` `True`, reason `Succeeded`; a failed one
+`SourceVerified` `False` and `Ready` `False`, reason `VerificationError`, and the controller keeps
+the artifact it holds and pulls nothing new. A failure leaves the object's observed generation where
+it was. helm-controller then treats the source as not ready while its generation is newer than the
+one observed (`isSourceReady` and `isReady` in `internal/controller/helmrelease_controller.go`):
+
+- after a change of the spec, a block added or changed, every HelmRelease that reads the source
+  reports `SourceNotReady` and changes nothing, so the release that runs stays as it is and is
+  neither upgraded nor removed. An application whose Kustomization waits (`wait: true`) fails its
+  health check on the source, and every Kustomization that names it in `dependsOn`, directly or
+  through others, waits;
+- after a new revision of an unchanged spec, a tag moved to an artifact signed otherwise, the source
+  keeps its artifact, and helm-controller goes on reconciling the release from it, so the release
+  that runs stays as it is. The source also reports `Reconciling` `True`, reason
+  `ProgressingWithRetry` (`internal/reconcile/reconcile.go`), which the health check of a
+  Kustomization reads as still in progress: an application whose Kustomization waits fails its
+  health check at its next reconcile, and every Kustomization that names it in `dependsOn`,
+  directly or through others, waits, as after a change of the spec.
+
+The artifact is kept while source-controller's pod runs: its storage is an `emptyDir`
+(`flux/v2.10.0/source-controller.yaml`), so a new pod, after a Flux upgrade or a drained node,
+holds none, the object's artifact is cleared (`reconcileStorage`), and the source pulls it again
+only once it verifies. Until then every HelmRelease that reads it reports `SourceNotReady`, as the
+source has no artifact, and nothing reconciles the release, which goes on running as it is.
+
+A source fires `FluxSourceNotReady` after 15 minutes, the sync source `FluxRootSyncNotReady` after
+10, and a release or Kustomization that stops with it `FluxApplierNotReady` ([Alerts](#alerts)).
+`just cluster-signatures` reads the cluster's `OCIRepository` objects and says, for each, whether it
+is as its row says: one the cluster verifies has exactly its row's block, reports `SourceVerified`
+`True` for its current generation and is Ready for that generation, and any other has no block. It
+prints `pass` or `FAIL`, the namespace and name and one line of why, with the condition's reason,
+never a message or an address, and exits 0 only when none fails.
+
+A pin whose signature no longer matches its row, because its publisher's identity changed or another
+identity signed it, is handled as a possible compromise, and its block stays: the release keeps the
+artifact it runs. `just signatures-verify` fails such a pin as well, with `cluster: false` or
+without, so no pull request that only takes the block out passes `ci`; and without the block,
+source-controller would pull the artifact that failed and helm-controller would upgrade the release
+to it. Either the new identity is read from the publisher's page and from the certificate of the
+signature, and once it verifies the row and the block change to it in one pull request, as in
+[Adding a source](#adding-a-source), or the source is pinned to a digest whose signature still
+verifies with the row.
+
+### Taking a block out
+
+A block is taken out only for a signature the pinned controller cannot read though the check
+verifies it. A refused signature and a controller that cannot reach what verification needs both
+set `SourceVerified` and `Ready` `False` with reason `VerificationError` (`reconcileSource`, which
+wraps every error of `NewCosignVerifier` and `Verify` alike), so read the message first:
+`flux get sources oci --namespace <namespace>` shows `Ready`'s, which on a failed verification is
+`SourceVerified`'s, and `kubectl --namespace <namespace> describe ocirepository <name>` shows both.
+
+- A message that the verifier could not be built (`unable to initialize trusted root`,
+  `unable to get Rekor public keys`, `unable to get CTLog public keys`,
+  `unable to get Fulcio root certs` or `intermediate certs`, `unable to create Rekor client`), one
+  that names a network error, a timeout or a registry's error, and `no signatures found`, which a
+  failed referrers call can also end in, as the controller then looks at the signature tag alone,
+  are the cluster's reach. The block stays, the reach is fixed
+  ([What Flux's verification needs](#what-fluxs-verification-needs)), and the controller retries
+  by itself, the trusted root at most once a minute, and verifies the source once it reaches them.
+- A message that no signature matched, `no matching signatures` or `no matching attestations` and
+  why, with no network error in it, is a signature the controller refused. The block is taken out
+  only if `just signatures-verify` passes the row at that same digest: the revision the object
+  reports, its artifact's or the new one its `Reconciling` message names, with the source pinned
+  to that digest for the run if its tag has moved since.
+
+One pull request removes the block from every `OCIRepository` of the source's url, four files for
+app-template's row, and gives the row `cluster: false` with the reason, what the cluster showed
+when it refused the signature. `just signatures-check` accepts exactly that, and refuses a block
+removed alone or from only some of a url's objects. Once applied, the object's new generation has
+no block: source-controller removes its `SourceVerified` condition and reconciles as an unsigned
+source, Ready with the artifact of its tag, and `just cluster-signatures` passes it as verified
+before merge alone. `just signatures-verify` goes on verifying the row, so a mismatch still shows
+before merge. A pin that fails `just signatures-verify` as well is not taken out
+([When a verification fails](#when-a-verification-fails)).
+
+### Adding a source
+
+A new `OCIRepository` or `HelmRepository` url, a new sync source or another tools image name gets
+its row in the same change, in its place in the order. Read the publisher's page on signing, then
+run the pinned cosign anonymously, as the check does, against the pinned tag: a keyless signature's
+identity is the one the page states, or the one cosign names when an identity does not match; a key
+is the one the publisher's page gives, or, where the publisher gives none, as OpenFeature does, the
+one the transparency log entry of its signature records, which the row's `from` says; with no
+signature, the row is unsigned and says what the page says. A keyless row's pattern verifies the
+pinned tag and the release before or after it, and fails with one character of the subject's
+repository changed, before its block is added, with the comment the other blocks have.
+`just signatures-check` and `just signatures-verify` pass.
+
+What the checks do not cover: images, admission, the charts the bootstrap installs with helm before
+Flux runs, a source's own content beyond its signature, and commits of a `GitRepository`, which hold
+no chart and have no row; a signature in a repository other than the source's own, such as
+Kyverno's, is not read.
 
 ## The render diff
 

@@ -16,3 +16,9 @@ spec:
   ref:
     # renovate: datasource=docker depName=ghcr.io/spegel-org/helm-charts/spegel
     tag: 0.8.1
+  # Go regular expressions, kept to syntax POSIX extended expressions read the same way (no \d).
+  verify:
+    provider: cosign
+    matchOIDCIdentity:
+      - issuer: '^https://token\.actions\.githubusercontent\.com$'
+        subject: '^https://github\.com/spegel-org/spegel/\.github/workflows/release\.yaml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'

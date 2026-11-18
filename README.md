@@ -103,7 +103,7 @@ Recipes need the pinned tools (`just tools`) and the environment
 - `just cluster-bootstrap` builds the cluster from nodes waiting for configuration, and
   `just cluster-flux` installs Flux
   ([From nothing to a Ready cluster](docs/cluster.md#from-nothing-to-a-ready-cluster)).
-- `just cluster-check` and `just gateway-check` check it, reading only.
+- `just cluster-check`, `just gateway-check` and `just cluster-signatures` check it, reading only.
 - `just cluster-talos`, `just cluster-reboot` and `just cluster-upgrade` change it, and
   `just cluster-destroy` and [the rebuild runbook](docs/runbooks/rebuild.md) take it down.
 - `just grafana` and `just logs` look inside it.
@@ -135,7 +135,9 @@ current. A new version alone leaves the record as it is. With [mise](https://mis
   that the default service range overlaps no default node, pod or service subnet, validation
   without a state backend and the mocked `tofu test` runs), the Talos check
   (`just talos-check`: every node's machine configuration rendered from the template, the patches
-  and fixture node data, and validated, offline), the offline build of `kubernetes/`, its render
+  and fixture node data, and validated, offline), the offline build of `kubernetes/`, every chart
+  source's row of `signatures.yaml` and the verify blocks against the rows (`just signatures-check`,
+  offline), its render
   with every chart expanded (`just render-check`, which pulls the charts from their public
   registries), the network policy posture of its namespaces (`just network-policy-check`: each
   denies ingress and egress by default or is listed with its reason, every allow leaves the deny
@@ -152,8 +154,10 @@ current. A new version alone leaves the record as it is. With [mise](https://mis
   the Alertmanager the rendered chart deploys, pinned by digest, check its rendered configuration
   and run the cases in `tests/alert-routes/cases.yaml`; Docker as well), and gitleaks
   over the committable files and the git history reachable from `HEAD`, so a clone and a CI
-  checkout are judged on the same commits. The groups `tests-1` to `tests-3` each run a third of
-  the bats tests.
+  checkout are judged on the same commits. The group `signatures` runs `just signatures-verify`
+  alone, which asks the registries anonymously whether each source the tree pins is signed as its
+  row says, so a registry out of reach fails it and leaves `static` as it is. The groups `tests-1`
+  to `tests-3` each run a third of the bats tests.
 - The groups are the dependencies of the `checks` recipe, and a group's checks are its own
   dependencies; a new check goes into exactly one group, and then runs in `just checks`, in
   `just ci` and in CI.
@@ -243,6 +247,11 @@ The repository checks:
   apply definitions from, and the definitions of an operator or of Talos where
   `operator-definitions.yaml` says their files are, so the publish run does not run it
   (`docs/kubernetes.md`, What the checks refuse).
+- `just signatures-check` fails when a chart source Flux builds, the artifact the cluster syncs or
+  the tools image is not exactly one row of `signatures.yaml`, a row is no source's or not of the
+  form its kind takes, or an `OCIRepository`'s verify block, or the sync source's, is not its row's
+  identity; offline. `just signatures-verify` runs it, then cosign against each pin, anonymously,
+  and needs the network (`docs/kubernetes.md`, Signatures).
 - `just check-literals` fails when a file git would commit, tracked or untracked and not ignored,
   holds an IPv4 literal outside the documentation ranges, loopback, `0.0.0.0`, the metadata
   address and netmasks, unless `.address-allowlist` declares it with a reason. It skips the

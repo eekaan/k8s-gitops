@@ -1,0 +1,2 @@
+repository=example/tree
+image=charts.example.invalid/$repository/ci-tools

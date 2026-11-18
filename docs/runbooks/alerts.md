@@ -279,6 +279,24 @@ chart version that Renovate moved to is not published yet or was withdrawn; the 
 a chart's publisher no longer matches what the OCIRepository verifies; or, for the ArtifactGenerator,
 a path of the artifact of `main` that is not there.
 
+A refused signature and a source-controller that cannot reach what verification needs both read
+`VerificationError` in the OCIRepository's `SourceVerified` and Ready conditions, and only the
+message tells them apart, so read it first: `flux get sources oci --namespace <namespace>` or the
+describe above. A message that the verifier could not be built (the trusted root, the Rekor or CT
+log keys, Fulcio's certificates), that names a network error, a timeout or a registry's error, or
+that no signatures were found is the cluster's reach: the block stays, the reach is fixed, and
+source-controller retries and verifies the source by itself. `just cluster-signatures` names every
+OCIRepository that is not verified as its row of `signatures.yaml` says. The table of who signs, in
+[Signatures](../kubernetes.md#signatures), gives each source's identity, and the row's `from` in
+`signatures.yaml` says where it was read. `just signatures-verify` tells apart a registry that is
+out of reach, a pin whose signature no longer matches its row, which it fails, and a pin that
+verifies, which it passes. Only a message that no signature matched (`no matching signatures` or
+`no matching attestations`) with no network error in it, at a digest `just signatures-verify`
+passes, takes the pull request of [Taking a block out](../kubernetes.md#taking-a-block-out). A pin
+that no longer matches is a possible compromise: its block stays, and the new identity is read and
+verified, or a digest that still verifies is pinned
+([When a verification fails](../kubernetes.md#when-a-verification-fails)).
+
 ## FluxResourceSuspended
 
 A Flux resource, or the FluxInstance, has been suspended for a day. Flux neither applies nor fetches

@@ -20,3 +20,9 @@ spec:
   ref:
     # renovate: datasource=docker depName=ghcr.io/bjw-s-labs/helm/app-template
     tag: 5.3.0
+  # Go regular expressions, kept to syntax POSIX extended expressions read the same way (no \d).
+  verify:
+    provider: cosign
+    matchOIDCIdentity:
+      - issuer: '^https://token\.actions\.githubusercontent\.com$'
+        subject: '^https://github\.com/bjw-s-labs/helm-charts/\.github/workflows/chart-release-steps\.yaml@refs/heads/main$'

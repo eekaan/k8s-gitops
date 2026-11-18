@@ -1,0 +1,12 @@
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: mirrored
+  namespace: flux-system
+spec:
+  path: ./apps/base/demo/mirrored/app
+  targetNamespace: demo
+  sourceRef:
+    kind: ExternalArtifact
+    name: mirrored
