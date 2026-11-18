@@ -1,0 +1,39 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What a pod that opted in to the OpenFeature Operator needs, on top of the namespace's default
+# deny, for the sidecar the operator adds to it: the kubelet's probes of the sidecar, and the
+# sidecar's own reads at the API server. The pod's containers ask the sidecar over the loopback,
+# which no policy sees, and nothing else reaches the sidecar's ports.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: hello-flags
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: hello-flags
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    # The kubelet's liveness and readiness probes of the sidecar, /healthz and /readyz on its
+    # management port, which arrive from the node the pod runs on.
+    - fromEntities:
+        - host
+      toPorts:
+        - ports:
+            - port: "8014"
+              protocol: TCP
+  egress:
+    # The API server, where the sidecar reads and watches the flag set its source names. A
+    # Service's address is translated to the control plane's before policy applies, so 6443 is the
+    # port that counts.
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "6443"
+              protocol: TCP

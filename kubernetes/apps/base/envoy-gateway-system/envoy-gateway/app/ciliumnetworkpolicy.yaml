@@ -285,3 +285,17 @@ spec:
         - ports:
             - port: "7007"
               protocol: TCP
+    # VictoriaLogs' 9428 in monitoring, for the route logs to the store's interface and queries.
+    # monitoring is listed and takes the proxies on every port, so this rule is what keeps them off
+    # Prometheus, Grafana, Alertmanager and every other pod and port there.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": monitoring
+            "k8s:io.cilium.k8s.namespace.labels.k8s-gitops/gateway": public
+            app: server
+            app.kubernetes.io/instance: victoria-logs
+            app.kubernetes.io/name: victoria-logs-single
+      toPorts:
+        - ports:
+            - port: "9428"
+              protocol: TCP

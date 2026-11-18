@@ -1,0 +1,127 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/helmrelease-helm-v2.json
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: open-feature-operator
+spec:
+  interval: 30m
+  chartRef:
+    kind: OCIRepository
+    name: open-feature-operator
+  valuesFrom:
+    - kind: ConfigMap
+      name: open-feature-operator-values
+  # What the chart has no value for (docs/kubernetes.md, OpenFeature Operator).
+  postRenderers:
+    - kustomize:
+        patches:
+          # The webhook that changes pods. The chart's values give it its failure policy and the
+          # label a pod asks by; it has no value for the namespaces. It skips the control plane's
+          # and Flux's, so the webhook of an operator that is down, slow or wrong cannot hold or
+          # change what keeps the cluster reconciled, and its own. The wait before the failure
+          # policy admits the pod is the API server's default, written out.
+          - target:
+              kind: MutatingWebhookConfiguration
+              name: open-feature-operator-mutating-webhook-configuration
+            patch: |
+              apiVersion: admissionregistration.k8s.io/v1
+              kind: MutatingWebhookConfiguration
+              metadata:
+                name: open-feature-operator-mutating-webhook-configuration
+              webhooks:
+                - name: mutate.openfeature.dev
+                  namespaceSelector:
+                    matchExpressions:
+                      - key: kubernetes.io/metadata.name
+                        operator: NotIn
+                        values:
+                          - kube-system
+                          - flux-system
+                          - open-feature-operator
+                  timeoutSeconds: 10
+          # The chart registers the webhook that validates a FeatureFlag failing closed and has no
+          # value to change it: left so, no flag set could be created or changed while no operator
+          # answered, by Flux either. Here it fails open as the other does, and a flag set is then
+          # admitted unvalidated.
+          - target:
+              kind: ValidatingWebhookConfiguration
+              name: open-feature-operator-validating-webhook-configuration
+            patch: |
+              apiVersion: admissionregistration.k8s.io/v1
+              kind: ValidatingWebhookConfiguration
+              metadata:
+                name: open-feature-operator-validating-webhook-configuration
+              webhooks:
+                - name: vfeatureflag.kb.io
+                  failurePolicy: Ignore
+                  timeoutSeconds: 10
+          # The chart signs its two Certificates, the webhook's and the one its metrics server
+          # does not read, with a self-signed Issuer of its own and has no value for either. They
+          # come from the cluster's own authority instead, and the chart's Issuer goes.
+          - target:
+              group: cert-manager.io
+              kind: Certificate
+            patch: |
+              - op: replace
+                path: /spec/issuerRef
+                value:
+                  group: cert-manager.io
+                  kind: ClusterIssuer
+                  name: cluster-ca
+          - target:
+              group: cert-manager.io
+              kind: Issuer
+              name: open-feature-operator-selfsigned-issuer
+            patch: |
+              $patch: delete
+              apiVersion: cert-manager.io/v1
+              kind: Issuer
+              metadata:
+                name: open-feature-operator-selfsigned-issuer
+          # The chart's pod sets no seccomp profile, which the restricted level requires, and has
+          # no value for one. The manager writes nothing to its filesystem: it reads the mounted
+          # serving certificate and keeps its state in the API server.
+          - target:
+              kind: Deployment
+              name: open-feature-operator-controller-manager
+            patch: |
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: open-feature-operator-controller-manager
+              spec:
+                template:
+                  spec:
+                    securityContext:
+                      seccompProfile:
+                        type: RuntimeDefault
+                    containers:
+                      - name: manager
+                        securityContext:
+                          readOnlyRootFilesystem: true
+          # The definitions are templates of the release, so Helm would delete them with it, and
+          # with them every flag set and flag source of the cluster. Helm leaves what carries this
+          # annotation when the release is uninstalled, as it is when the application leaves the
+          # tree.
+          - target:
+              group: apiextensions.k8s.io
+              kind: CustomResourceDefinition
+            patch: |
+              apiVersion: apiextensions.k8s.io/v1
+              kind: CustomResourceDefinition
+              metadata:
+                name: _
+                annotations:
+                  helm.sh/resource-policy: keep
+  driftDetection:
+    # The operator adds the service account of every pod it injects with a kubernetes source to the
+    # subjects of this binding, which the release renders with its own two. Drift detection applies
+    # the release's object over the cluster's and would take those accounts out again at every
+    # reconcile, so it leaves the subjects alone. An upgrade of the release still writes the
+    # release's two: the operator puts the others back when it next starts.
+    ignore:
+      - paths: ["/subjects"]
+        target:
+          kind: ClusterRoleBinding
+          name: open-feature-operator-flagd-kubernetes-sync

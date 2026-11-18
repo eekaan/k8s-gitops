@@ -77,6 +77,7 @@ configMapGenerator:
       - catalogue/metrics-server.yaml
       - catalogue/n8n.yaml
       - catalogue/oauth2-proxy.yaml
+      - catalogue/open-feature-operator.yaml
       - catalogue/open-webui.yaml
       - catalogue/openbao-dashboard.yaml
       - catalogue/openbao-snapshots.yaml
@@ -94,6 +95,7 @@ configMapGenerator:
       - catalogue/spegel.yaml
       - catalogue/systems.yaml
       - catalogue/vector.yaml
+      - catalogue/victoria-logs-route.yaml
       - catalogue/victoria-logs.yaml
       - catalogue/volsync-demo.yaml
       - catalogue/volsync.yaml

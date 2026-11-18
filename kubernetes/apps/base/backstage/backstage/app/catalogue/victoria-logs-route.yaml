@@ -1,0 +1,21 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: victoria-logs-route
+  description: The HTTPRoute that serves VictoriaLogs' own interface and its queries at logs under the cluster's domain on the public Gateway, behind the cluster's sign-in, and nothing else of the store.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#the-log-stores-interface
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/monitoring/victoria-logs-route
+      title: Manifests
+spec:
+  type: route
+  lifecycle: production
+  owner: group:default/operators
+  system: observability
+  dependsOn:
+    - resource:default/gateway-public
+    - component:default/oauth2-proxy
+    - component:default/victoria-logs
