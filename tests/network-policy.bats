@@ -44,6 +44,7 @@ setup() {
   BACKSTAGE_DB_JOIN='backstage:cnpg.io/cluster=backstage-db,cnpg.io/instanceName=backstage-db-3,cnpg.io/jobRole=join,app.kubernetes.io/name=postgresql,app.kubernetes.io/instance=backstage-db,app.kubernetes.io/component=database,app.kubernetes.io/managed-by=cloudnative-pg'
   CNPG_OPERATOR=cnpg-system/Deployment/cloudnative-pg
   PGDUMP=backstage/CronJob/backstage-db-pgdump
+  OPEN_FEATURE="open-feature-operator/Deployment/open-feature-operator-controller-manager"
 }
 
 # tree NAME: a copy of the fixture in $BATS_TEST_TMPDIR/NAME, for the test to change.
@@ -269,7 +270,7 @@ proxies_egress() {
   real_render
   run "$REPO/scripts/network-policy-check" "$REAL" "$REPO/network-policy-exceptions.yaml"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [ "$(grep ' denies ingress and egress' <<<"$output" | cut -d' ' -f1 | paste -sd' ')" = "backstage crowdsec demo envoy-gateway-system kromgo security-system sso-system" ]
+  [ "$(grep ' denies ingress and egress' <<<"$output" | cut -d' ' -f1 | paste -sd' ')" = "backstage crowdsec demo envoy-gateway-system kromgo open-feature-operator security-system sso-system" ]
   [ "$(grep -c ' listed' <<<"$output")" -eq "$(yq '.exceptions | length' "$REPO/network-policy-exceptions.yaml")" ]
 }
 
@@ -581,6 +582,38 @@ E
   denied "$VIEW" @remote-node sso-system/Deployment/oauth2-proxy 4180/tcp
   denied_in "$VIEW" envoy-gateway-system/Deployment/envoy-gateway sso-system/Deployment/dex 5556/tcp
   denied_in "$VIEW" envoy-gateway-system/Deployment/envoy-gateway sso-system/Deployment/oauth2-proxy 4180/tcp
+  # The log store's route sends the proxies to VictoriaLogs' 9428 in monitoring, which carries the
+  # Gateway label and is listed, so it takes them on every port: the proxies' egress names the
+  # store's pod on that port alone, so they reach no other port of it and no pod of Prometheus,
+  # Grafana, Alertmanager or the collector. Those pods and ports are read from the render: the
+  # Services of Prometheus and Alertmanager, which select the pods their operator makes; the Grafana
+  # its operator runs, whose pods it labels app with the Grafana's name and serves on 3000 unless the
+  # Grafana's configuration sets another port (grafana-operator v5.25.0, controllers/reconcilers/grafana/
+  # and controllers/config/operator_constants.go); and the collector's DaemonSet. The controller's
+  # pods do not reach the store.
+  local store=monitoring/StatefulSet/victoria-logs selector port grafana
+  allowed "$VIEW" "$PROXY" "$store" 9428/tcp
+  denied "$VIEW" "$PROXY" "$store" 9429/tcp
+  denied "$VIEW" "$PROXY" "$store" 8080/tcp
+  denied "$VIEW" envoy-gateway-system/Deployment/envoy-gateway "$store" 9428/tcp
+  selector=$(yq '.spec.selector | to_entries | map(.key + "=" + .value) | join(",")' "$REAL"/*/kube-prometheus-stack/Service_monitoring_kube-prometheus-stack-prometheus.yaml)
+  port=$(yq '.spec.ports[] | select(.name == "http-web") | .targetPort' "$REAL"/*/kube-prometheus-stack/Service_monitoring_kube-prometheus-stack-prometheus.yaml)
+  [ "$port" = 9090 ] || { echo "Prometheus' web port in the render: $port"; return 1; }
+  denied "$VIEW" "$PROXY" "monitoring:$selector" "$port/tcp"
+  selector=$(yq '.spec.selector | to_entries | map(.key + "=" + .value) | join(",")' "$REAL"/*/kube-prometheus-stack/Service_monitoring_kube-prometheus-stack-alertmanager.yaml)
+  port=$(yq '.spec.ports[] | select(.name == "http-web") | .targetPort' "$REAL"/*/kube-prometheus-stack/Service_monitoring_kube-prometheus-stack-alertmanager.yaml)
+  [ "$port" = 9093 ] || { echo "Alertmanager's web port in the render: $port"; return 1; }
+  denied "$VIEW" "$PROXY" "monitoring:$selector" "$port/tcp"
+  grafana=$(yq '.metadata.name + " " + ((.spec.config.server.http_port // 3000) | tostring)' "$REAL"/*/grafana/Grafana.grafana.integreatly.org_monitoring_*.yaml)
+  [ "$grafana" = "grafana 3000" ] || { echo "the Grafana of the render and its port: $grafana"; return 1; }
+  denied "$VIEW" "$PROXY" "monitoring:app=${grafana% *}" "${grafana#* }/tcp"
+  port=$(yq '.spec.template.spec.containers[].ports[] | select(.name == "prom-exporter") | .containerPort' "$REAL"/*/vector/DaemonSet.apps_monitoring_vector.yaml)
+  [ "$port" = 9598 ] || { echo "the collector's metrics port in the render: $port"; return 1; }
+  denied "$VIEW" "$PROXY" monitoring/DaemonSet/vector "$port/tcp"
+  # The rule names the store's pod, not the namespace: another pod of monitoring is no backend on the
+  # store's port either.
+  denied "$VIEW" "$PROXY" monitoring/DaemonSet/vector 9428/tcp
+  denied "$VIEW" "$PROXY" "monitoring:app=${grafana% *}" 9428/tcp
   allowed "$VIEW" "$PROXY" envoy-gateway-system/Deployment/envoy-gateway 18000/tcp
   allowed "$VIEW" "$PROXY" "$DNS" 53/udp
   # Nothing but the listener ports reaches the proxies from outside.
@@ -641,7 +674,7 @@ E
   local probes pod port
   probes=$(yq -N -o json -I0 'select(. != null)' "$VIEW"/*/*/*.yaml | jq -r '
     select(.kind | IN("Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"))
-    | select(.metadata.namespace | IN("backstage", "demo", "envoy-gateway-system", "kromgo", "security-system", "sso-system"))
+    | select(.metadata.namespace | IN("backstage", "demo", "envoy-gateway-system", "kromgo", "open-feature-operator", "security-system", "sso-system"))
     | . as $w
     | (if .kind == "CronJob" then .spec.jobTemplate.spec.template else .spec.template end).spec.containers[]
     | . as $c
@@ -662,6 +695,7 @@ E
   [[ $probes == *"sso-system/Deployment/oauth2-proxy 4180"* ]]
   [[ $probes == *"backstage/Deployment/backstage 7007"* ]]
   [[ $probes == *"security-system/DaemonSet/falco 8765"* ]]
+  [[ $probes == *"open-feature-operator/Deployment/open-feature-operator-controller-manager 8081"* ]]
   # The database's instances, which no render holds, are probed on the status port, where the pinned
   # operator puts its startup, liveness and readiness probes (pkg/specs/pods.go), and on no other.
   allowed "$VIEW" @host "$BACKSTAGE_DB" 8000/tcp
@@ -676,6 +710,7 @@ E
   [[ " $routed " == *" demo:8080 "* && " $routed " == *" ai-system:5678 "* && " $routed " == *" ai-system:8080 "* \
     && " $routed " == *" kromgo:8080 "* && " $routed " == *" backstage:7007 "* ]]
   [[ " $routed " == *" sso-system:4180 "* && " $routed " == *" sso-system:5556 "* ]]
+  [[ " $routed " == *" monitoring:9428 "* ]]
   [ "$named" = "$routed" ]
   # A route to a backend in a namespace without the Gateway label, or behind a Service without a
   # selector, has no port the comparison could name, and fails it saying why.
@@ -909,6 +944,42 @@ E
   denied "$VIEW" ai-system/Deployment/n8n "$BACKSTAGE_DB" 5432/tcp
   denied "$VIEW" "$MOVER" "$BACKSTAGE_DB" 5432/tcp
   denied "$VIEW" "$KROMGO" "$BACKSTAGE_DB" 5432/tcp
+  # The OpenFeature Operator's pod takes Prometheus on the port its PodMonitor names and the API
+  # server's calls to its webhooks on the port its webhook Service targets, both read from the
+  # render: the calls arrive as the API server, as the local host or as another node's host. It
+  # reaches the API server and nothing else: it looks no name up and calls nothing outside the
+  # cluster, the secret store or another application. Nothing else reaches either port.
+  local open_feature_metrics open_feature_webhook
+  open_feature_metrics=$(P="$(yq -N '.spec.podMetricsEndpoints[].port' "$REAL"/*/open-feature-operator/PodMonitor.monitoring.coreos.com_open-feature-operator_open-feature-operator.yaml)" \
+    yq '.spec.template.spec.containers[].ports[] | select(.name == strenv(P)) | .containerPort' \
+    "$REAL"/*/open-feature-operator/Deployment.apps_open-feature-operator_open-feature-operator-controller-manager.yaml)
+  open_feature_webhook=$(yq '.spec.ports[].targetPort' "$REAL"/*/open-feature-operator/Service_open-feature-operator_open-feature-operator-webhook-service.yaml)
+  [[ $open_feature_metrics =~ ^[0-9]+$ && $open_feature_webhook =~ ^[0-9]+$ && $open_feature_metrics != "$open_feature_webhook" ]] ||
+    { echo "the operator's monitor and webhook Service name no two numbered ports: $open_feature_metrics, $open_feature_webhook"; return 1; }
+  allowed "$VIEW" "$PROMETHEUS" "$OPEN_FEATURE" "$open_feature_metrics/tcp"
+  allowed "$VIEW" @kube-apiserver "$OPEN_FEATURE" "$open_feature_webhook/tcp"
+  allowed "$VIEW" @host "$OPEN_FEATURE" "$open_feature_webhook/tcp"
+  allowed "$VIEW" @remote-node "$OPEN_FEATURE" "$open_feature_webhook/tcp"
+  allowed "$VIEW" "$OPEN_FEATURE" @kube-apiserver 443/tcp
+  allowed "$VIEW" "$OPEN_FEATURE" @kube-apiserver 6443/tcp
+  denied "$VIEW" @world "$OPEN_FEATURE" "$open_feature_webhook/tcp"
+  denied "$VIEW" "$OTHER_APP" "$OPEN_FEATURE" "$open_feature_webhook/tcp"
+  denied "$VIEW" demo/Deployment/hello "$OPEN_FEATURE" "$open_feature_webhook/tcp"
+  denied "$VIEW" "$PROMETHEUS" "$OPEN_FEATURE" "$open_feature_webhook/tcp"
+  denied "$VIEW" @kube-apiserver "$OPEN_FEATURE" "$open_feature_metrics/tcp"
+  denied "$VIEW" @remote-node "$OPEN_FEATURE" "$open_feature_metrics/tcp"
+  denied "$VIEW" @world "$OPEN_FEATURE" "$open_feature_metrics/tcp"
+  denied "$VIEW" "$OTHER_APP" "$OPEN_FEATURE" "$open_feature_metrics/tcp"
+  denied "$VIEW" monitoring/Deployment/kube-prometheus-stack-kube-state-metrics "$OPEN_FEATURE" "$open_feature_metrics/tcp"
+  denied "$VIEW" "$OPEN_FEATURE" @world 443/tcp
+  denied "$VIEW" "$OPEN_FEATURE" @world 80/tcp
+  denied "$VIEW" "$OPEN_FEATURE" "$DNS" 53/udp
+  denied "$VIEW" "$OPEN_FEATURE" openbao/StatefulSet/openbao 8200/tcp
+  denied "$VIEW" "$OPEN_FEATURE" "$STORAGE" 3370/tcp
+  denied "$VIEW" "$OPEN_FEATURE" "$OTHER_APP" 8080/tcp
+  denied "$VIEW" "$OPEN_FEATURE" ai-system/Deployment/n8n 5678/tcp
+  denied "$VIEW" "$OPEN_FEATURE" demo/Deployment/hello 8080/tcp
+  denied "$VIEW" "$OPEN_FEATURE" @host 10250/tcp
 }
 
 @test "An allow that names an address fails the check" {
@@ -1093,8 +1164,8 @@ E
   [[ $output == *"cluster-wide CiliumClusterwideNetworkPolicy/nodes selects nodes"* ]]
 
   # The tree: the agents honour the field, and the allows of backstage, demo, envoy-gateway-system,
-  # kromgo, security-system and sso-system let exactly their flows through with the namespaces'
-  # default deny, and every flow without it.
+  # kromgo, open-feature-operator, security-system and sso-system let exactly their flows through
+  # with the namespaces' default deny, and every flow without it.
   real_render
   [ "$(yq '.data["enable-non-default-deny-policies"]' "$REAL"/*/cilium/ConfigMap_kube-system_cilium-config.yaml)" = true ]
   local open="$BATS_TEST_TMPDIR/open" removed
@@ -1103,8 +1174,9 @@ E
     "$open"/*/*/NetworkPolicy.networking.k8s.io_kromgo_default-deny.yaml
     "$open"/*/*/NetworkPolicy.networking.k8s.io_sso-system_default-deny.yaml
     "$open"/*/*/NetworkPolicy.networking.k8s.io_backstage_default-deny.yaml
-    "$open"/*/*/NetworkPolicy.networking.k8s.io_security-system_default-deny.yaml)
-  [ "${#removed[@]}" -eq 6 ]
+    "$open"/*/*/NetworkPolicy.networking.k8s.io_security-system_default-deny.yaml
+    "$open"/*/*/NetworkPolicy.networking.k8s.io_open-feature-operator_default-deny.yaml)
+  [ "${#removed[@]}" -eq 7 ]
   rm -- "${removed[@]}"
   local flow want from to port
   local flows=(
@@ -1165,6 +1237,12 @@ E
     "allowed $FALCO $DNS 53/udp"
     "denied $FALCO @kube-apiserver 6443/tcp"
     "denied $FALCO @world 443/tcp"
+    "allowed @kube-apiserver $OPEN_FEATURE 9443/tcp"
+    "denied @world $OPEN_FEATURE 9443/tcp"
+    "allowed $PROMETHEUS $OPEN_FEATURE 8080/tcp"
+    "denied $OTHER_APP $OPEN_FEATURE 8080/tcp"
+    "allowed $OPEN_FEATURE @kube-apiserver 6443/tcp"
+    "denied $OPEN_FEATURE @world 443/tcp"
   )
   for flow in "${flows[@]}"; do
     read -r want from to port <<<"$flow"

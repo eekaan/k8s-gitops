@@ -63,6 +63,7 @@ kubernetes/apps/base/cnpg-system/plugin-barman-cloud/app/values.yaml	regex	ghcr.
 kubernetes/apps/base/crowdsec/crowdsec/app/helmrelease.yaml	flux	crowdsec	-
 kubernetes/apps/base/crowdsec/crowdsec/app/values.yaml	helm-values	docker.io/crowdsecurity/crowdsec	-
 kubernetes/apps/base/crowdsec/crowdsec/app/values.yaml	regex	docker.io/crowdsecurity/crowdsec	tag
+kubernetes/apps/base/demo/hello-flags/app/deployment.yaml	kubernetes	docker.io/library/busybox	-
 kubernetes/apps/base/demo/hello/app/deployment.yaml	kubernetes	docker.io/library/busybox	-
 kubernetes/apps/base/demo/volsync-demo/app/deployment.yaml	kubernetes	docker.io/library/busybox	-
 kubernetes/apps/base/envoy-gateway-system/envoy-gateway-crds/app/ocirepository.yaml	flux	docker.io/envoyproxy/gateway-helm	tag
@@ -119,6 +120,11 @@ kubernetes/apps/base/monitoring/vector/app/ocirepository.yaml	flux	ghcr.io/vecto
 kubernetes/apps/base/monitoring/vector/app/ocirepository.yaml	regex	ghcr.io/vectordotdev/helm-charts/vector	tag
 kubernetes/apps/base/monitoring/victoria-logs/app/ocirepository.yaml	flux	ghcr.io/victoriametrics/helm-charts/victoria-logs-single	tag
 kubernetes/apps/base/monitoring/victoria-logs/app/ocirepository.yaml	regex	ghcr.io/victoriametrics/helm-charts/victoria-logs-single	tag
+kubernetes/apps/base/open-feature-operator/open-feature-operator/app/ocirepository.yaml	flux	ghcr.io/open-feature/charts/open-feature-operator	tag
+kubernetes/apps/base/open-feature-operator/open-feature-operator/app/ocirepository.yaml	regex	ghcr.io/open-feature/charts/open-feature-operator	tag
+kubernetes/apps/base/open-feature-operator/open-feature-operator/app/values.yaml	regex	ghcr.io/open-feature/flagd	tag
+kubernetes/apps/base/open-feature-operator/open-feature-operator/app/values.yaml	regex	ghcr.io/open-feature/flagd-proxy	tag
+kubernetes/apps/base/open-feature-operator/open-feature-operator/app/values.yaml	regex	ghcr.io/open-feature/open-feature-operator	tag
 kubernetes/apps/base/openbao/openbao-snapshots/app/cronjob.yaml	kubernetes	docker.io/rclone/rclone	-
 kubernetes/apps/base/openbao/openbao-snapshots/app/cronjob.yaml	kubernetes	quay.io/openbao/openbao	-
 kubernetes/apps/base/openbao/openbao/app/ocirepository.yaml	flux	ghcr.io/openbao/charts/openbao	tag

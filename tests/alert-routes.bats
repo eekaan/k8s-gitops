@@ -313,6 +313,45 @@ severity_problems() {
       | "\($app): alert \(.alert): severity is \(.severity // "missing" | tostring), not critical, warning or info, so it reaches no receiver and no one sees it"'
 }
 
+# pin_problems ROOT REPOSITORY: one line for each place of the tree at ROOT that names the image
+# REPOSITORY, given without its registry, which just ci's module takes from the recipe and which has
+# a pin of its own: a file under .dagger, the module; scripts/lib/derived-images.sh, the images taken
+# by a tag derived at run time; and dagger.lock as committed at ROOT's HEAD and, where the tree has
+# one, as the working copy holds it. Prints nothing when none names it. The pinned Dagger leaves the
+# working copy's dagger.lock out of the workspace it hands the module (core/schema/host.go,
+# workspaceLockExcludePattern, at v1.0.0-beta.27), so the checks' containers have none and the
+# committed one is read from git; and Container.from consults and writes no lock entry for an image
+# given by its digest (core/schema/container.go, at v1.0.0-beta.27), so no run adds one for this
+# image. A place that is missing or that
+# cannot be read is a line too.
+pin_problems() {
+  local root=$1 repository=$2 path found file line status lock
+  for path in .dagger scripts/lib/derived-images.sh; do
+    if [ ! -e "$root/$path" ]; then
+      echo "$path is not in the tree"
+      continue
+    fi
+    status=0
+    found="$(grep -rlF -- "$repository" "$root/$path")" || status=$?
+    [ "$status" -le 1 ] || echo "$path cannot be read"
+    while IFS= read -r file; do
+      [ -z "$file" ] || echo "${file#"$root"/} names $repository"
+    done <<<"$found"
+  done
+  if [ -e "$root/dagger.lock" ]; then
+    status=0
+    found="$(grep -nF -- "$repository" "$root/dagger.lock")" || status=$?
+    [ "$status" -le 1 ] || echo "dagger.lock cannot be read"
+    while IFS= read -r line; do
+      [ -z "$line" ] || echo "dagger.lock:${line%%:*} names $repository"
+    done <<<"$found"
+  fi
+  lock="$(git -C "$root" show HEAD:dagger.lock)" || { echo "the commit at HEAD holds no dagger.lock"; return 0; }
+  while IFS= read -r line; do
+    [ -z "$line" ] || echo "dagger.lock at HEAD:${line%%:*} names $repository"
+  done < <(grep -nF -- "$repository" <<<"$lock" || true)
+}
+
 # stand_in NAME: writes a stand-in for the shell that has the image's binaries, or for the docker
 # that starts it, to $BATS_TEST_TMPDIR/bin/NAME and sets STAND_IN_LOG. It records each call as one
 # line of three fields separated by tabs: what came before the shell's -c, run for a command handed
@@ -673,7 +712,7 @@ MUTANTS
 }
 
 @test "The routes are checked with the Alertmanager image the chart deploys, in the static group of just ci" {
-  local runs checked pin group moved line name
+  local runs checked pin group moved line name repository problems copy kept
   stack
   runs="$(alertmanager_json | jq -r '.spec.image')"
   echo "the rendered Alertmanager runs: ${runs:-nothing}"
@@ -708,9 +747,57 @@ MUTANTS
   [ "$status" -eq 0 ]
   [[ $output == *"--alertmanager-image='$checked'"* ]]
   # The module checks with the image the recipe hands it, so it names none of its own; the image
-  # has a pin, so its repository is no derived image and the lock holds no entry for it.
-  run grep -rl 'prometheus/alertmanager' "$REPO/.dagger" "$REPO/scripts/lib/derived-images.sh" "$REPO/dagger.lock"
-  [ "$status" -eq 1 ]
+  # has a pin, so its repository is no derived image and the committed lock holds no entry for it.
+  repository="${runs%:*}"
+  repository="${repository#*/}"
+  problems="$(pin_problems "$REPO" "$repository")"
+  echo "the module, the derived images and the lock: ${problems:-none names $repository}"
+  [ -z "$problems" ]
+  # A copy of the three, the lock committed, as the checks' containers have them, with no working
+  # copy of the lock: none names the image, and the image in any of them is named where it is.
+  copy="$BATS_TEST_TMPDIR/pins"
+  mkdir -p "$copy/scripts/lib"
+  cp -R "$REPO/.dagger" "$copy/"
+  cp "$REPO/scripts/lib/derived-images.sh" "$copy/scripts/lib/"
+  git -C "$REPO" show HEAD:dagger.lock >"$copy/dagger.lock"
+  git -C "$copy" init -q -b main
+  git -C "$copy" add -A
+  git -C "$copy" -c user.name=test -c user.email=test@example.invalid -c commit.gpgsign=false commit -q -m 'the pins'
+  rm "$copy/dagger.lock"
+  problems="$(pin_problems "$copy" "$repository")"
+  echo "without a working copy of the lock: ${problems:-none names $repository}"
+  [ -z "$problems" ]
+  kept="$BATS_TEST_TMPDIR/pins-kept"
+  mkdir -p "$kept"
+  cp "$copy/.dagger/modules/ci/main.dang" "$copy/scripts/lib/derived-images.sh" "$kept/"
+  printf '# %s\n' "$runs" >>"$copy/.dagger/modules/ci/main.dang"
+  problems="$(pin_problems "$copy" "$repository")"
+  echo "the module naming the image: $problems"
+  [ "$problems" = ".dagger/modules/ci/main.dang names $repository" ]
+  cp "$kept/main.dang" "$copy/.dagger/modules/ci/main.dang"
+  printf 'derived_images+=(%s)\n' "${runs%:*}" >>"$copy/scripts/lib/derived-images.sh"
+  problems="$(pin_problems "$copy" "$repository")"
+  echo "the image listed as derived: $problems"
+  [ "$problems" = "scripts/lib/derived-images.sh names $repository" ]
+  cp "$kept/derived-images.sh" "$copy/scripts/lib/derived-images.sh"
+  # An entry as Dagger writes one, in the working copy alone and then committed.
+  git -C "$copy" show HEAD:dagger.lock >"$copy/dagger.lock"
+  printf '\n["","oci-sha",["%s"],"sha256:%064d"]' "$runs" 0 >>"$copy/dagger.lock"
+  line="$(grep -c '' "$copy/dagger.lock")"
+  problems="$(pin_problems "$copy" "$repository")"
+  echo "an entry in the working copy of the lock: $problems"
+  [ "$problems" = "dagger.lock:$line names $repository" ]
+  git -C "$copy" add dagger.lock
+  git -C "$copy" -c user.name=test -c user.email=test@example.invalid -c commit.gpgsign=false commit -q -m 'an entry for the image'
+  rm "$copy/dagger.lock"
+  problems="$(pin_problems "$copy" "$repository")"
+  echo "a committed entry, with no working copy: $problems"
+  [ "$problems" = "dagger.lock at HEAD:$line names $repository" ]
+  # A tree without the module does not pass for one whose module names no image.
+  rm -r "$copy/.dagger"
+  problems="$(pin_problems "$copy" "$repository")"
+  echo "no module: $problems"
+  grep -qxF '.dagger is not in the tree' <<<"$problems"
   # alerts-route-check is a check of the static group, which runs in just ci, and the module runs it
   # with the image's amtool and alertmanager.
   [ "$(just --justfile "$REPO/justfile" --dump --dump-format json | jq -r '.recipes.static.dependencies[].recipe | select(. == "alerts-route-check")')" = alerts-route-check ]

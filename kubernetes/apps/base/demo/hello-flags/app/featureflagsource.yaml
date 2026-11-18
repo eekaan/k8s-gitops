@@ -1,0 +1,13 @@
+---
+# Where the sidecar of a pod that names this source gets its flags: the flag set hello-flags of the
+# pod's own namespace, which the sidecar reads and watches at the API server (the kubernetes
+# provider). Every other setting is the definition's default: the sidecar's evaluation port 8013,
+# its management port 8014, where the kubelet probes it, and its OFREP port 8016.
+apiVersion: core.openfeature.dev/v1beta1
+kind: FeatureFlagSource
+metadata:
+  name: hello-flags
+spec:
+  sources:
+    - source: hello-flags
+      provider: kubernetes

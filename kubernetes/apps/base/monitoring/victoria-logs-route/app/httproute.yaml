@@ -1,0 +1,59 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/gateway.networking.k8s.io/httproute_v1.json
+# VictoriaLogs' own interface and its queries at logs under the cluster's domain, on the public
+# Gateway's https listener, which this namespace reaches through its k8s-gitops/gateway label. The
+# SecurityPolicy of components/sso covers both rules by the route's name, so a request without a
+# session goes to sign-in and the store receives nothing.
+#
+# The store serves its interface, its queries, its writers, its deletion and storage administration,
+# its metrics, its flags and its profiles on the one port, so the route sends on the reads alone, by
+# path, whatever the method. The store dispatches on the path, with each // made /, by the same
+# literal prefixes as these matches: /select/vmui redirects to /select/vmui/, under which it serves
+# the interface's files; under /select/logsql/ it runs queries; /select/buildinfo and
+# /select/tenant_ids give its version and its tenants; a path that ends in /favicon.ico gets its
+# icon; and it answers any other path under these with an error. The interface calls nothing else.
+# / is the store's help page, which links its metrics and its flags, so the root redirects to the
+# interface instead and sends nothing on. Any other path matches no rule, and the Gateway answers it
+# itself, 404 (docs/kubernetes.md, The log store's interface). The record below is the release these
+# paths were read from, which tests/logs.bats holds to the one the pinned chart deploys.
+# Source: https://github.com/VictoriaMetrics/VictoriaLogs/blob/v1.54.0/app/vlselect/main.go
+# victoria-logs-paths: v1.54.0
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: ${SSO_ROUTE}
+spec:
+  parentRefs:
+    - name: public
+      namespace: envoy-gateway-system
+      sectionName: https
+  hostnames:
+    - ${SSO_HOSTNAME}.${CLUSTER_DOMAIN}
+  rules:
+    - matches:
+        - path:
+            type: Exact
+            value: /
+      filters:
+        - type: RequestRedirect
+          requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /select/vmui/
+            statusCode: 302
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /select/vmui
+        - path:
+            type: PathPrefix
+            value: /select/logsql
+        - path:
+            type: Exact
+            value: /select/buildinfo
+        - path:
+            type: Exact
+            value: /select/tenant_ids
+      backendRefs:
+        - name: victoria-logs
+          port: 9428

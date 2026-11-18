@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
-# Proves the scenarios of features/openbao.feature that read manifests; each test carries its
-# scenario's title. tests/openbao-recipes.bats proves the recipes'.
+# Proves the scenarios of features/openbao.feature that read manifests, and the two of
+# features/secret-rotation.feature that read the tree; each test carries its scenario's title.
+# tests/openbao-recipes.bats and tests/secret-rotate.bats prove the recipes'.
 # Needs helm, kustomize, flux, yq and jq on PATH (the versions pinned for the repository). The chart
 # is pulled once per run from its public registry; building and rendering are offline. flux build
 # rewrites the kustomization.yaml of what it builds while it runs, so every build reads a copy of
@@ -107,6 +108,53 @@ render_external_secrets() {
   ESO_RENDERED="$BATS_TEST_TMPDIR/eso-rendered.yaml"
   helm template external-secrets "$(echo "$pulled"/*.tgz)" --namespace external-secrets --kube-version "$KUBE" \
     --values "$values" >"$ESO_RENDERED"
+}
+
+# render_reloader: Reloader's chart, rendered from its application as Flux applies it, with the
+# repository's values, under helm-controller's release name and namespace. Sets RELOADER_RENDERED.
+render_reloader() {
+  local built url tag name release namespace values pulled
+  built kube-system reloader
+  built=$BUILT
+  url="$(yq -N 'select(.kind == "OCIRepository") | .spec.url' "$built")"
+  tag="$(yq -N 'select(.kind == "OCIRepository") | .spec.ref.tag' "$built")"
+  name="$(yq -N 'select(.kind == "HelmRelease") | .spec.valuesFrom[0].name' "$built")"
+  release="$(yq -N 'select(.kind == "HelmRelease") | .spec.releaseName // .metadata.name' "$built")"
+  namespace="$(yq -N 'select(.kind == "HelmRelease") | .spec.targetNamespace // .metadata.namespace' "$built")"
+  values="$BATS_TEST_TMPDIR/reloader-values.yaml"
+  yq -N "select(.kind == \"ConfigMap\" and .metadata.name == \"$name\") | .data[\"values.yaml\"]" "$built" >"$values"
+  [ -s "$values" ] || { echo "no values in the ConfigMap $name the HelmRelease reads"; return 1; }
+  pulled="$BATS_FILE_TMPDIR/charts/reloader/$tag"
+  if [ ! -d "$pulled" ]; then
+    mkdir -p "$pulled"
+    helm pull "$url" --version "$tag" --destination "$pulled"
+  fi
+  RELOADER_RENDERED="$BATS_TEST_TMPDIR/reloader-rendered.yaml"
+  helm template "$release" "$(echo "$pulled"/*.tgz)" --namespace "$namespace" --kube-version "$KUBE" \
+    --api-versions monitoring.coreos.com/v1 --api-versions monitoring.coreos.com/v1/PodMonitor \
+    --values "$values" >"$RELOADER_RENDERED"
+}
+
+# store_reads: what every ExternalSecret under kubernetes/ reads from the ClusterSecretStore openbao,
+# one "PATH KEY" a line, sorted byte by byte: the path and property of each remoteRef, with * for
+# the key where it names no property; "PATH *" for a dataFrom extract, which takes every key at
+# its path, and "PATH KEY" for each key the template of that ExternalSecret names in an action;
+# and "? FIELD" for a dataFrom of any other form, which the list cannot follow. An entry that
+# reads a generator, or another store, reads nothing here.
+store_reads() {
+  local file
+  while IFS= read -r file; do
+    yq -N -o json -I0 'select(.kind == "ExternalSecret")' "$file"
+  done < <(grep -rlE '^kind: ExternalSecret$' "$REPO/kubernetes" | LC_ALL=C sort) | jq -r '
+    (.spec.secretStoreRef // {}) as $default
+    | def of_store: if .sourceRef.generatorRef then false
+        else (.sourceRef.storeRef // $default) | (.kind == "ClusterSecretStore" and .name == "openbao") end;
+      [.spec.target.template // {} | .. | strings | scan("\\{\\{.*?\\}\\}")
+        | scan("(?:^|[\\s(|{])\\.([A-Za-z_][A-Za-z0-9_]*)")[0]] as $named
+    | ((.spec.data // [])[] | select(of_store) | .remoteRef | .key + " " + (.property // "*")),
+      ((.spec.dataFrom // [])[] | select(of_store)
+        | if .extract then .extract.key + " *", .extract.key + " " + $named[]
+          else "? " + (keys - ["sourceRef"] | join(",")) end)' | LC_ALL=C sort -u
 }
 
 # statefulset: the rendered StatefulSet, as JSON in $BATS_TEST_TMPDIR/statefulset.json; sets STS.
@@ -629,9 +677,13 @@ covers() {
 }
 
 @test "The operator role allows every request its recipes and runbook make, and nothing more" {
-  local wanted granted others
+  local wanted granted others script
   local scripts=(scripts/bao-put scripts/bao-recovery scripts/bao-root scripts/bao-seal-restore scripts/bao-seed-volsync
-    scripts/bao-seed-postgres scripts/bao-volsync-password scripts/lib/openbao.sh)
+    scripts/bao-seed-postgres scripts/bao-volsync-password scripts/secret-rotate scripts/lib/openbao.sh)
+  # Each is a file of the tree: a script that is not there would be read as one that sends nothing.
+  for script in "${scripts[@]}"; do
+    [ -f "$REPO/$script" ] || { echo "$script is not in the tree"; return 1; }
+  done
   render
   statefulset
   initialize
@@ -743,6 +795,194 @@ covers() {
     echo "$key writable by bao-put: ${writable:-no}"
     [ -n "$writable" ]
   done
+}
+
+@test "The demo workload takes the store's value as a file it does not serve, and Reloader restarts it when the Secret changes" {
+  local external secret key deployment volumes volume mounts mount_path other served annotations args line flags flag
+  local account namespace role rules
+  built demo hello-secret
+  external="$(yq -N -o json -I0 'select(.kind == "ExternalSecret")' "$BUILT")"
+  secret="$(jq -r '.spec.target.name // .metadata.name' <<<"$external")"
+  key="$(jq -r '.spec.data[] | select(.remoteRef.key == "demo/hello" and .remoteRef.property == "greeting") | .secretKey' <<<"$external")"
+  echo "the ExternalSecret writes greeting of demo/hello into the Secret ${secret:-none}, key ${key:-none}"
+  [ "$secret" = hello ]
+  [ "$key" = greeting ]
+  built demo hello
+  deployment="$(yq -N -o json -I0 'select(.kind == "Deployment" and .metadata.name == "hello")' "$BUILT")"
+  [ "$(jq -r '.metadata.namespace' <<<"$deployment")" = "$(jq -r '.metadata.namespace' <<<"$external")" ]
+
+  # One volume holds the Secret: a secret volume with the one item, and optional, so the pods start
+  # before anyone has written the key.
+  volumes="$(jq -c --arg secret "$secret" '[.spec.template.spec.volumes[] | select(.secret.secretName == $secret)]' <<<"$deployment")"
+  echo "volumes of the Secret: $volumes"
+  [ "$(jq 'length' <<<"$volumes")" -eq 1 ]
+  [ "$(jq -cS '.[0].secret' <<<"$volumes")" = \
+    "$(jq -ncS --arg secret "$secret" --arg key "$key" '{secretName: $secret, optional: true, items: [{key: $key, path: $key}]}')" ]
+  volume="$(jq -r '.[0].name' <<<"$volumes")"
+  # The one container mounts it once, read-only and whole, with no subPath: the file is
+  # /etc/hello/greeting, which the kubelet keeps equal to the Secret.
+  mounts="$(jq -c --arg volume "$volume" '[.spec.template.spec | ((.initContainers // []) + .containers)[]
+    | .name as $container | .volumeMounts[]? | select(.name == $volume) | {container: $container} + .]' <<<"$deployment")"
+  echo "mounts of it: $mounts"
+  [ "$(jq -cS '.' <<<"$mounts")" = \
+    "$(jq -ncS --arg volume "$volume" '[{container: "httpd", name: $volume, mountPath: "/etc/hello", readOnly: true}]')" ]
+  mount_path="$(jq -r '.[0].mountPath' <<<"$mounts")"
+  # The Secret reaches the pod no other way.
+  other="$(jq -r --arg secret "$secret" '.spec.template.spec
+    | (((.initContainers // []) + .containers)[]
+        | (.env[]? | select(.valueFrom.secretKeyRef.name == $secret) | "env " + .name),
+          (.envFrom[]? | select(.secretRef.name == $secret) | "envFrom")),
+      (.volumes[] | select(any(.projected.sources[]?; .secret.name == $secret)) | "projected " + .name)' <<<"$deployment")"
+  echo "other ways the Secret reaches the pod: ${other:-none}"
+  [ -z "$other" ]
+  # The web server serves the directory its -h names and nothing outside it: BusyBox 1.38.0's httpd
+  # changes to that directory and answers 400 to a path that leaves it (networking/httpd.c). The
+  # mount is not in that directory, nor that directory in the mount.
+  served="$(jq -r '.spec.template.spec.containers[] | select(.name == "httpd") | .command as $c | $c[($c | index("-h")) + 1]' <<<"$deployment")"
+  echo "httpd serves: $served; the Secret is mounted at: $mount_path"
+  [ "$served" = /www ]
+  [[ $mount_path/ != "$served"/* && $served/ != "$mount_path"/* ]]
+
+  # Reloader restarts a workload whose own annotations name the Secret under the annotation it
+  # reads when no argument renames it (SecretUpdateOnChangeAnnotation in internal/pkg/options/flags.go
+  # and ShouldReload in pkg/common/common.go at v1.4.24), unless another excludes the Secret.
+  annotations="$(jq -c '.metadata.annotations // {}' <<<"$deployment")"
+  echo "the Deployment's annotations: $annotations"
+  [ "$(jq -r '.["secret.reloader.stakater.com/reload"] // ""' <<<"$annotations")" = "$secret" ]
+  [ "$(jq -r 'has("secrets.exclude.reloader.stakater.com/reload")' <<<"$annotations")" = false ]
+
+  # Reloader as the tree runs it: no argument renames an annotation the Deployment or the recipe
+  # reads, ignores Secrets, narrows the namespaces or the Secrets it watches, sends a webhook in
+  # place of the restart, restarts for a Secret that is created, or restarts otherwise than by a
+  # variable in the container's environment, which is what moves the Deployment's generation.
+  render_reloader
+  [ "$(yq -N 'select(.kind == "Deployment") | .metadata.name' "$RELOADER_RENDERED" | grep -c .)" -eq 1 ]
+  args="$(yq -N -o json -I0 'select(.kind == "Deployment") | .spec.template.spec.containers[0].args // []' "$RELOADER_RENDERED")"
+  echo "Reloader's arguments: $args"
+  flags="$(jq -r '.[] | select(startswith("--")) | sub("=.*$"; "")' <<<"$args")"
+  for flag in --secret-annotation --auto-annotation --secret-auto-annotation --namespaces --namespace-selector \
+    --resource-label-selector --webhook-url; do
+    ! grep -qxF -- "$flag" <<<"$flags" || { echo "Reloader runs with $flag"; return 1; }
+  done
+  line=" $(jq -r 'join(" ")' <<<"$args") "
+  [[ ! $line =~ \ --resources-to-ignore[=\ ][^\ ]*[Ss]ecrets ]] || { echo "Reloader ignores Secrets"; return 1; }
+  [[ ! $line =~ \ --namespaces-to-ignore[=\ ]([^\ ]*,)?demo(,|\ ) ]] || { echo "Reloader ignores demo"; return 1; }
+  [[ ! $line =~ \ --reload-on-create[=\ ]true ]] || { echo "Reloader restarts for a created Secret"; return 1; }
+  [[ ! $line =~ \ --reload-strategy ]] || [[ $line =~ \ --reload-strategy[=\ ]env-vars\  ]] ||
+    { echo "Reloader restarts otherwise than by the container's environment"; return 1; }
+  # Without this variable it watches every namespace (resolveWatchNamespaces in internal/pkg/cmd/reloader.go).
+  [ -z "$(yq -N 'select(.kind == "Deployment") | .spec.template.spec.containers[0].env[] | select(.name == "KUBERNETES_NAMESPACE") | .name' "$RELOADER_RENDERED")" ]
+  # The ClusterRole bound to its account lets it see a Secret change and change a Deployment.
+  account="$(yq -N 'select(.kind == "Deployment") | .spec.template.spec.serviceAccountName' "$RELOADER_RENDERED")"
+  namespace="$(yq -N 'select(.kind == "Deployment") | .metadata.namespace' "$RELOADER_RENDERED")"
+  role="$(ACCOUNT="$account" NAMESPACE="$namespace" yq -N 'select(.kind == "ClusterRoleBinding" and .roleRef.kind == "ClusterRole"
+    and (.subjects | any_c(.kind == "ServiceAccount" and .name == strenv(ACCOUNT) and .namespace == strenv(NAMESPACE)))) | .roleRef.name' "$RELOADER_RENDERED")"
+  echo "Reloader runs as $namespace/$account, bound to the ClusterRole: ${role:-none}"
+  [ "$(grep -c . <<<"$role")" -eq 1 ]
+  rules="$(ROLE="$role" yq -N -o json -I0 'select(.kind == "ClusterRole" and .metadata.name == strenv(ROLE)) | .rules' "$RELOADER_RENDERED")"
+  # may GROUP RESOURCE VERB: whether a rule of the role allows it.
+  # shellcheck disable=SC2016 # $group, $resource and $verb are jq variables.
+  may() {
+    jq -e --arg group "$1" --arg resource "$2" --arg verb "$3" 'any(.[]; (.apiGroups | index($group) != null or index("*") != null)
+      and (.resources | index($resource) != null or index("*") != null)
+      and (.verbs | index($verb) != null or index("*") != null))' <<<"$rules" >/dev/null ||
+      { echo "the role does not allow $3 on $2"; return 1; }
+  }
+  may "" secrets list
+  may "" secrets watch
+  may apps deployments list
+  may apps deployments patch
+}
+
+@test "Every key the tree reads from the store says how it is rotated" {
+  local list="$REPO/secret-rotation.yaml" entries bad twice reads aimed resolved unread path key rotation
+  [ -f "$list" ] || { echo "the tree holds no secret-rotation.yaml"; return 1; }
+  entries="$(yq -o json -I0 '.secrets' "$list")"
+  echo "entries: $(jq -r '.[] | .path + " " + (.key // "*") + " " + .rotation' <<<"$entries" | paste -sd';' -)"
+  # Each entry: a path and, where it names one, a key, both as bao-put takes them; one of the three
+  # rotations; a reason of one line unless it is generated; and nothing else. A generated entry
+  # names its key, as the recipe rotates one key.
+  while IFS=$'\t' read -r path key; do
+    bao_valid_path "$path" || { echo "bao-put refuses the path $path"; return 1; }
+    [ "$key" = '*' ] || bao_valid_key "$key" || { echo "bao-put refuses the key $key of $path"; return 1; }
+  done < <(jq -r '.[] | [.path, (.key // "*")] | @tsv' <<<"$entries")
+  bad="$(jq -r '.[] | select((keys - ["key", "path", "reason", "rotation"] | length) > 0
+      or (.rotation | IN("generated", "re-encryption", "issued") | not)
+      or (.rotation != "generated" and (.reason | type != "string" or length == 0 or test("\n")))
+      or (.rotation == "generated" and (has("key") | not)))
+    | .path + " " + (.key // "*")' <<<"$entries")"
+  echo "malformed entries: ${bad:-none}"
+  [ -z "$bad" ]
+  twice="$(jq -r '[.[] | .path + " " + (.key // "*")] | group_by(.)[] | select(length > 1) | .[0]' <<<"$entries")"
+  echo "named twice: ${twice:-none}"
+  [ -z "$twice" ]
+
+  reads="$(store_reads)"
+  echo "read from the store:"
+  echo "$reads"
+  [ -n "$reads" ]
+  # The ExternalSecrets are read as their files hold them. A patch or a replacement could change
+  # what Flux applies of them, so the test fails while one could be aimed at them: a patch whose
+  # target, or a replacement whose select, names no kind or an empty one, which kustomize does not
+  # compare, or a kind that ExternalSecret matches as kustomize matches a selector's kind, a regular
+  # expression of the whole name; or a patch whose text names the kind. It looks in every file under
+  # kubernetes/ (a kustomization, a Flux Kustomization, a HelmRelease's post-renderer or anything
+  # else) and in the text of each patch there, as the cluster's Kustomization adds patches to every
+  # Kustomization. A variable of
+  # postBuild in a path or a property is read as the variable, which no entry can name, as bao-put
+  # takes no such path or key. An error of yq, or of jq in any file, which would otherwise end only
+  # that file's part, fails the test: jq reads the files as one stream.
+  # shellcheck disable=SC2016 # the dollars are yq's and jq's.
+  aimed="$(set -o pipefail && cd "$REPO" && find kubernetes -name '*.yaml' -print0 | LC_ALL=C sort -z |
+    xargs -0 yq -N -o json -I0 '{"file": filename, "doc": .,
+      "texts": [.. | select(tag == "!!map" and has("patch") and (.patch | tag) == "!!str") | .patch | from_yaml]}' | jq -nr '
+    def at_it: type == "object" and (.kind as $kind
+      | $kind == null or $kind == "" or ("ExternalSecret" | test("^(?:" + ($kind | tostring) + ")$")));
+    def kind_of: if .kind == null or .kind == "" then "no kind" else .kind end;
+    inputs | .file as $file | (.doc, .texts[])
+    | (.. | objects | select((.target | type) == "object" and (has("patch") or has("path") or (.target | .kind != null)))
+        | select(.target | at_it) | "\($file): a patch aimed at \(.target | kind_of)"),
+      (.. | objects | select(.select | at_it) | "\($file): a replacement aimed at \(.select | kind_of)"),
+      (.. | objects | (.patch, .patchesStrategicMerge[]?) | strings | select(test("ExternalSecret"))
+        | "\($file): a patch that names it")')"
+  echo "what changes an ExternalSecret on the way: ${aimed:-nothing}"
+  [ -z "$aimed" ]
+  # None finds keys by a pattern, which no list of keys could follow.
+  [ "$(grep -c '^? ' <<<"$reads")" -eq 0 ]
+  # Every key read has its entry: the one that names it, or its path's entry without a key; an
+  # extract, which reads every key at its path, has that path's entry without a key.
+  # shellcheck disable=SC2016 # $path and $key are jq variables.
+  resolved="$(while read -r path key; do
+    rotation="$(jq -r --arg path "$path" --arg key "$key" '([.[] | select(.path == $path and .key == $key)]
+      + [.[] | select(.path == $path and (has("key") | not))])[0].rotation // "none"' <<<"$entries")"
+    echo "$path $key $rotation"
+  done <<<"$reads")"
+  echo "as the list has them:"
+  echo "$resolved"
+  [ "$(grep -c ' none$' <<<"$resolved")" -eq 0 ]
+  # No entry names a key nothing reads: an entry with a key is read by that path and key; one
+  # without is read by an extract of its path, or by a key of its path no other entry names.
+  # shellcheck disable=SC2016 # $reads is a jq variable.
+  unread="$(jq -r --arg reads "$reads" '($reads | split("\n") | map(split(" ") | {path: .[0], key: .[1]})) as $reads
+    | . as $entries | .[] | . as $entry
+    | select(if has("key") then ($reads | any(.path == $entry.path and .key == $entry.key) | not)
+        else ($reads | any(. as $read | .path == $entry.path and (.key == "*"
+          or ($entries | any(.path == $read.path and .key == $read.key) | not))) | not) end)
+    | .path + " " + (.key // "*")' <<<"$entries")"
+  echo "entries nothing reads: ${unread:-none}"
+  [ -z "$unread" ]
+
+  # The recipe rotates a generated key and no other: the demo's is the only one. n8n's encryption
+  # key, the volume backups' master and the PostgreSQL backups' customer key encrypt data; the
+  # others are made elsewhere.
+  [ "$(jq -r '.[] | select(.rotation == "generated") | .path + " " + (.key // "*")' <<<"$entries")" = "demo/hello greeting" ]
+  [ "$resolved" = "$(printf '%s\n' 'ai-system/n8n encryption-key re-encryption' \
+    'cert-manager/cloudflare api-token issued' 'demo/hello greeting generated' \
+    'monitoring/alert-destinations heartbeat-url issued' 'monitoring/alert-destinations notify-url issued' \
+    'postgres-backups SSE_C_KEY re-encryption' \
+    'sso-system/dex github-client-id issued' 'sso-system/dex github-client-secret issued' \
+    'sso-system/oauth2-proxy allowed-emails issued' 'volsync * issued' 'volsync AWS_ACCESS_KEY_ID issued' \
+    'volsync AWS_SECRET_ACCESS_KEY issued' 'volsync RESTIC_MASTER_PASSWORD re-encryption')" ]
 }
 
 @test "Every OpenBao pod meets the restricted Pod Security level its namespace enforces" {

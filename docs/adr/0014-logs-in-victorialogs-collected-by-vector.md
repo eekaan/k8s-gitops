@@ -2,6 +2,9 @@
 
 - Status: accepted
 - Date: 2026-11-14
+- Amended: 2026-11-17, the store's own interface and its queries are served at `logs` under the
+  cluster's domain, behind the cluster's sign-in, and nothing else of the store is reachable through
+  the public Gateway ([The log store's interface](../kubernetes.md#the-log-stores-interface))
 
 ## Context
 
