@@ -1,0 +1,27 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: gatekeeper-templates
+  namespace: flux-system
+spec:
+  path: ./apps/base/gatekeeper-system/gatekeeper-templates/app
+  # The templates are cluster-scoped, so no object of theirs lands in a namespace.
+  targetNamespace: gatekeeper-system
+  # The ConstraintTemplate definition is the release's, and its webhook admits the templates.
+  dependsOn:
+    - name: gatekeeper
+  # A constraint's kind exists only once Gatekeeper has made it from its template, and Flux's dry
+  # run of a constraint fails for a kind it does not serve, so the constraints are applied by
+  # gatekeeper-policies, which waits for this Kustomization. Flux takes an applied template for
+  # ready, so Ready here waits for the status Gatekeeper writes on a template once it has created
+  # the template's kind (created: true).
+  wait: true
+  healthCheckExprs:
+    - apiVersion: templates.gatekeeper.sh/v1
+      kind: ConstraintTemplate
+      current: status.created == true
+  sourceRef:
+    kind: ExternalArtifact
+    name: gatekeeper-templates

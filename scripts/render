@@ -22,6 +22,12 @@
 #     and versions have the shapes the API server requires (scripts/lib/shapes.sh), served versions
 #     only;
 #   - its kustomize post-renderers, then helm-controller's labels.
+# What the chart renders is parsed strictly before its post-renderers, by kubeconform's strict
+# parse and by kustomize's decode, the one helm-controller's post-renderers refuse a repeated key
+# with: a mapping that repeats a key, at any depth, in any document, fails the render naming the
+# release, the object and the key (docs/kubernetes.md, The render diff, lists what it refuses that
+# helm-controller would install). What the post-renderers' kustomize build writes holds each key
+# once, as that build refuses a repeat or folds it.
 # A value the chart makes up anew on every render, such as a generated certificate, would show as a
 # change every time: the chart is rendered twice and each value that differs is masked. No Secret's
 # data leaves the render: every value of a Secret's data and stringData is replaced, and the sops
@@ -97,7 +103,7 @@ dir=${2:-$(dirname "${BASH_SOURCE[0]}")/..}
 if ((!forms_only)) && [[ -e $out ]]; then
   [[ -d $out && -z $(find "$out" -mindepth 1 -print -quit) ]] || die "$out exists and is not an empty directory"
 fi
-for tool in flux helm kustomize yq jq; do
+for tool in flux helm kustomize kubeconform yq jq; do
   type -P "$tool" >/dev/null || die "$tool not found on PATH"
 done
 if ((!forms_only)); then
@@ -430,6 +436,88 @@ release_field() {
   printf '%s' "${fields[$2 - 1]}"
 }
 
+# strict_parse WORK PATH: kubeconform's strict parse of the objects in PATH, a file or a directory of
+# them, as JSON in WORK/strict.json. It writes one line for each repeated key, "key K already set in
+# map", with K as Go writes it: a string quoted, a number or a boolean bare. No schema is looked up:
+# only a location holding none is given, so the objects are parsed and nothing is validated or
+# fetched.
+strict_parse() {
+  local work=$1 path=$2
+  mkdir -p "$tmp/no-schemas"
+  offline kubeconform -strict -ignore-missing-schemas -output json \
+    -schema-location "$tmp/no-schemas/{{.ResourceKind}}.json" "$path" >"$work/strict.json" 2>"$work/strict.err" || true
+  jq -e '.resources' "$work/strict.json" >/dev/null 2>&1 ||
+    die "$(release_field "$work" 3): kubeconform did not parse the chart's output: $(cat "$work/strict.err" "$work/strict.json" 2>/dev/null)"
+}
+
+# decodes WORK FILE: whether kustomize builds the objects in FILE with each of them decoded whole, as
+# helm-controller's post-renderers decode each object of a release; what it printed is in
+# WORK/decode.log. The patch, which copies an object's kind onto itself, changes nothing: kustomize
+# applies a JSON patch to an object it decodes whole, and does so before a build folds a repeated
+# annotation, which helm-controller decodes with nothing folded when the release has no kustomize
+# post-renderer.
+decodes() {
+  local work=$1 file=$2
+  rm -rf "$work/decode"
+  mkdir -p "$work/decode"
+  cp "$file" "$work/decode/rendered.yaml"
+  printf '%s\n' 'apiVersion: kustomize.config.k8s.io/v1beta1' 'kind: Kustomization' 'resources: [rendered.yaml]' \
+    'patches:' '  - target: {name: ".*"}' "    patch: '[{\"op\": \"copy\", \"from\": \"/kind\", \"path\": \"/kind\"}]'" \
+    >"$work/decode/kustomization.yaml"
+  offline kustomize build "$work/decode" >/dev/null 2>"$work/decode.log"
+}
+
+# strict_keys WORK FILE: fails naming the release, the object and the key when a mapping in FILE, the
+# chart's output, at any depth, in any document, repeats a key. helm template, yq and jq keep the
+# last of a repeated key, but helm-controller loads what a release renders with kustomize's
+# libraries (its post-renderers always run, at least to label the origin), whose yaml.v3 decode of
+# each object refuses a key whose text repeats, at every depth. Two parses read FILE: kubeconform's
+# strict parse, which compares the values keys stand for, and kustomize's decode, helm-controller's
+# own, which compares the keys' text, so that 80 beside "80" is refused too. Neither names the object
+# reliably (kustomize names none, kubeconform none whose kind it cannot read), so when either
+# refuses, each document is read alone, and the line names its kind and name, or its place among
+# FILE's documents when it has neither; a line of the parse whose key cannot be read out is the
+# refusal whole.
+strict_keys() {
+  local work=$1 file=$2 where whole="" index doc keys head lines=""
+  where=$(release_field "$work" 3)
+  strict_parse "$work" "$file"
+  if ! jq -e 'any(.resources[]; (.msg // "") | contains("already set in map"))' "$work/strict.json" >/dev/null; then
+    decodes "$work" "$file" && return 0
+    whole=$(cat "$work/decode.log")
+  fi
+  rm -rf "$work/documents"
+  mkdir -p "$work/documents"
+  # shellcheck disable=SC2016 # $index is a yq variable.
+  (cd "$work/documents" && yq -s '"document-" + ($index | tostring)' "$file") >/dev/null 2>"$work/documents.log" ||
+    die "$where: yq cannot split the chart's output into documents: $(cat "$work/documents.log")"
+  strict_parse "$work" "$work/documents"
+  for ((index = 0; ; index++)); do
+    doc="$work/documents/document-$index.yml"
+    [[ -e $doc ]] || break
+    keys=$(jq -r --arg name "${doc##*/}" '.resources[] | select((.filename // "") | split("/") | last == $name)
+      | (.msg // "") | split("\n")[] | select(contains("already set in map"))
+      | (capture("key (?<key>.+) already set in map").key // .)' "$work/strict.json")
+    if [[ -z $keys ]] && ! decodes "$work" "$doc"; then
+      keys=$(sed -nE 's/^.*mapping key (.+) already defined at line [0-9]+.*$/\1/p' "$work/decode.log" | sort -u)
+      [[ -n $keys ]] || die "$where: kustomize cannot read the chart's output: $(cat "$work/decode.log")"
+    fi
+    [[ -n $keys ]] || continue
+    head=$(yq -o json -I0 '[(.kind // ""), (.metadata.name // "")]' "$doc" 2>/dev/null) || head='[]'
+    jq -e 'type == "array"' <<<"${head:-[]}" >/dev/null 2>&1 || head='[]'
+    lines+=$(jq -rn --argjson head "${head:-[]}" --arg place "$((index + 1))" --arg keys "$keys" '
+      def clean: tostring | gsub("[[:cntrl:]]"; "?");
+      ($head | map(clean | select(. != "")) | join(" ")) as $named
+      | (if $named == "" then "document " + $place else $named end) as $object
+      | $keys | split("\n")[] | "\($object) repeats the mapping key \(clean) in the chart'"'"'s output"')$'\n'
+  done
+  if [[ -z $lines ]]; then
+    [[ -z $whole ]] || die "$where: kustomize cannot read the chart's output: $whole"
+    die "$where: kubeconform refuses the chart's output, though no document of it alone"
+  fi
+  refuse "${lines%$'\n'}" "$where: "
+}
+
 # template WORK OUT [API-VERSIONS]: renders the release prepared in WORK into OUT.
 template() {
   local work=$1 dest=$2 release namespace where err file
@@ -476,7 +564,10 @@ for app in "${apps[@]}"; do
     index=$((index + 1))
     releases=$((releases + 1))
     release "${app%%/*}" "${app#*/}" "$index" "$hr"
-    ((forms_only)) || template "$tmp/releases/$app/$index" "$tmp/releases/$app/$index/first.yaml"
+    if ((!forms_only)); then
+      template "$tmp/releases/$app/$index" "$tmp/releases/$app/$index/first.yaml"
+      strict_keys "$tmp/releases/$app/$index" "$tmp/releases/$app/$index/first.yaml"
+    fi
   done < <(yq -N -o json -I0 'select(.kind == "HelmRelease" and ((.apiVersion // "") | test("^helm\.toolkit\.fluxcd\.io/")))' \
     "$tmp/built/$app.yaml")
 done
@@ -505,6 +596,8 @@ objects() {
   hr_namespace=$(release_field "$work" 5)
   for run in a b; do
     template "$work" "$work/$run.yaml" "$apis"
+    # The second render is of the same chart, values and API versions, for the values made up anew.
+    [[ $run == b ]] || strict_keys "$work" "$work/$run.yaml"
     post_render "$work" "$work/$run.yaml"
     yq -o json -I0 'select(. != null)' "$work/$run.yaml" |
       jq -c -S --arg name "$hr_name" --arg namespace "$hr_namespace" \

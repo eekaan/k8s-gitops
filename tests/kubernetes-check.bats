@@ -181,6 +181,29 @@ fails_naming() {
     { echo "no failure message naming '$1' that says '$2'"; return 1; }
 }
 
+# with_stdin STATE COMMAND...: runs COMMAND as run does, with its standard input in STATE: closed;
+# null, at /dev/null; silent, a pipe that stays open and carries nothing; or carried, a pipe that
+# carries $CARRIED and ends. A command still running after two minutes is ended, with status 124.
+with_stdin() {
+  local state=$1 fd
+  shift
+  case $state in
+    # The shell that becomes the command closes it: closed for run instead, the command would find
+    # a pipe of run's at descriptor 0.
+    closed) run bash -c 'exec "$@" <&-' bash timeout 120 "$@" ;;
+    null) run timeout 120 "$@" </dev/null ;;
+    silent)
+      [ -p "$BATS_TEST_TMPDIR/silent" ] || mkfifo "$BATS_TEST_TMPDIR/silent"
+      # Open here for reading and writing: the pipe has a writer for as long as the command runs.
+      exec {fd}<>"$BATS_TEST_TMPDIR/silent"
+      run timeout 120 "$@" <&"$fd"
+      exec {fd}>&-
+      ;;
+    carried) run timeout 120 "$@" < <(printf '%s\n' "$CARRIED") ;;
+    *) echo "with_stdin: no state $state"; return 1 ;;
+  esac
+}
+
 # refused_line FILE WORDS...: a failure message that names FILE and every one of WORDS.
 refused_line() {
   local file=$1 line word
@@ -1491,6 +1514,197 @@ world_app() {
   yq -i '.spec.dependsOn += [{"name": "flux-operator"}]' "$TREE/kubernetes/apps/base/demo/world/ks.yaml"
   check
   [ "$status" -eq 0 ]
+}
+
+@test "An issuer choice is checked without reading standard input when the tree holds no issuers application" {
+  local form state usage key
+  local -A statuses=() printed=()
+  # valid_tree runs the check once, without a bound, on the tree it makes: with standard input at
+  # /dev/null, so that run does not depend on what the test was started with, and only the bounded
+  # runs below try the four states.
+  valid_tree </dev/null
+  # The rule reads the ClusterIssuers of kubernetes/apps/base/*/acme-issuers/app/, and the fixture
+  # tree has no such application.
+  [ -z "$(find "$TREE/kubernetes" -path '*/acme-issuers/*' -print -quit)" ]
+  # What yq prints, with status 0, when it is handed the rule's expression, no file and nothing to
+  # read: its usage. The issuer chosen below is the first line of that, so a run that took what yq
+  # printed then for the names of the issuers would know the issuer and pass the choice.
+  usage="$(yq -N 'select(.kind == "ClusterIssuer") | .metadata.name' </dev/null | head -n 1)"
+  [ "$usage" = "Usage:" ] ||
+    { echo "yq no longer prints its usage when it is handed no file, so the issuer this test chooses has to be chosen anew"; return 1; }
+  CARRIED="$(printf '%s\n' '---' 'apiVersion: cert-manager.io/v1' 'kind: ClusterIssuer' 'metadata:' "  name: \"$usage\"")"
+
+  # The tree as it is, in which no Kustomization chooses an issuer, and then with one choice: each in
+  # every state of standard input, and every run made before one is judged, so that a failure shows
+  # them all.
+  for form in none one; do
+    if [ "$form" = one ]; then
+      hello_ks <<EOF
+  postBuild:
+    substitute:
+      PUBLIC_ISSUER: "$usage"
+EOF
+    fi
+    for state in closed null silent carried; do
+      with_stdin "$state" "$CHECK" "$TREE"
+      statuses[$form/$state]=$status
+      printed[$form/$state]="$(grep -v '^built ' <<<"$output" || true)"
+      echo "choice: $form; standard input: $state; status $status"
+      echo "${printed[$form/$state]}"
+    done
+  done
+
+  for state in closed null silent carried; do
+    key=none/$state
+    [ "${statuses[$key]}" -eq 0 ] || { echo "with no choice and standard input $state the check ended with status ${statuses[$key]}"; return 1; }
+    [ "${printed[$key]}" = "kubernetes-check: passed (6 kustomize builds, 5 flux builds, 4 ks.yaml, 3 applications, 0 dependencies)" ]
+  done
+  for state in closed null silent carried; do
+    key=one/$state
+    [ "${statuses[$key]}" -eq 1 ] || { echo "with the choice and standard input $state the check ended with status ${statuses[$key]}"; return 1; }
+    # Refused twice over: the choice names no dependency on the issuers application, and its issuer
+    # is one no application makes. The same lines whatever standard input is, and none that says the
+    # issuers could not be read.
+    grep -F 'kubernetes/apps/base/demo/hello/ks.yaml: Kustomization hello chooses the issuer Usage?,' <<<"${printed[$key]}" |
+      grep -qF 'makes no issuer of that name' || { echo "with standard input $state the choice is not refused as an issuer no application makes"; return 1; }
+    [ "$(tail -n 1 <<<"${printed[$key]}")" = "kubernetes-check: 2 failure(s)" ]
+    [[ ${printed[$key]} != *"cannot read the ClusterIssuers"* ]]
+    [ "${printed[$key]}" = "${printed[one/closed]}" ] || { echo "the lines with standard input $state are not those with it closed"; return 1; }
+  done
+}
+
+# constraint_app DIR NAME FILE...: the application NAME in DIR, enabled, whose app/ holds the
+# fixture objects FILE... of: constraint-template, constraint.
+constraint_app() {
+  local dir=$1 name=$2 file
+  shift 2
+  app "$dir" "$name" demo "$name" "./${dir#kubernetes/}/app"
+  overlay_add "../../base/${dir#kubernetes/apps/base/}/ks.yaml"
+  yq -i '.resources |= unique' "$TREE/kubernetes/apps/overlays/test/kustomization.yaml"
+  rm -f "$TREE/$dir/app/"*.yaml
+  printf -- '---\napiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n' >"$TREE/$dir/app/kustomization.yaml"
+  for file in "$@"; do
+    printf '  - %s.yaml\n' "$file" >>"$TREE/$dir/app/kustomization.yaml"
+    case $file in
+      constraint-template) put "$dir/app/$file.yaml" <<'EOF'
+---
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8sexample
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sExample
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sexample
+        violation[{"msg": "no"}] { false }
+EOF
+        ;;
+      constraint) put "$dir/app/$file.yaml" <<'EOF'
+---
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sExample
+metadata:
+  name: example
+spec:
+  enforcementAction: dryrun
+EOF
+        ;;
+    esac
+  done
+}
+
+@test "A constraint in the Kustomization of its own template is refused" {
+  local field
+  valid_tree
+  # A constraint's kind exists only once Gatekeeper has made it from the template, so Flux's dry run
+  # of the constraint fails and nothing of a Kustomization that holds both is applied.
+  constraint_app kubernetes/apps/base/demo/rules rules constraint-template constraint
+
+  check
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/rules/ks.yaml "Kustomization rules" "constraint K8sExample example" \
+    "ConstraintTemplate" "same Kustomization"
+
+  # In an application of its own that rules does not wait for, the kind may not exist yet either.
+  constraint_app kubernetes/apps/base/demo/rules rules constraint
+  constraint_app kubernetes/apps/base/demo/templates templates constraint-template
+  yq -i '.spec.wait = true' "$TREE/kubernetes/apps/base/demo/templates/ks.yaml"
+  check
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/rules/ks.yaml "Kustomization rules" "constraint K8sExample example" \
+    "templates" "does not name it in dependsOn"
+
+  # Waiting for the templates' Kustomization is not enough: it is Ready once the templates are
+  # applied, before Gatekeeper has made their kinds, unless its health checks wait for them.
+  yq -i '.spec.dependsOn = [{"name": "templates"}]' "$TREE/kubernetes/apps/base/demo/rules/ks.yaml"
+  check
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/templates/ks.yaml "Kustomization templates" "ConstraintTemplate" \
+    healthCheckExprs "rules" "example"
+
+  # An expression that does not wait for the status Gatekeeper writes once the kind exists is no wait.
+  yq -i '.spec.healthCheckExprs = [{"apiVersion": "templates.gatekeeper.sh/v1", "kind": "ConstraintTemplate",
+    "current": "true"}]' "$TREE/kubernetes/apps/base/demo/templates/ks.yaml"
+  check
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/templates/ks.yaml "Kustomization templates" "ConstraintTemplate" \
+    healthCheckExprs "rules"
+  # Nor is one that reads the status without requiring it to be true.
+  yq -i '.spec.healthCheckExprs[0].current = "!status.created"' "$TREE/kubernetes/apps/base/demo/templates/ks.yaml"
+  check
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/templates/ks.yaml "Kustomization templates" "ConstraintTemplate" \
+    healthCheckExprs "rules"
+  # Flux reads inProgress and failed before current, so an entry with either may never be Ready.
+  for field in inProgress failed; do
+    yq -i ".spec.healthCheckExprs = [{\"apiVersion\": \"templates.gatekeeper.sh/v1\", \"kind\": \"ConstraintTemplate\",
+      \"current\": \"status.created == true\", \"$field\": \"true\"}]" "$TREE/kubernetes/apps/base/demo/templates/ks.yaml"
+    check
+    [ "$status" -ne 0 ]
+    refused_line kubernetes/apps/base/demo/templates/ks.yaml "Kustomization templates" "ConstraintTemplate" \
+      healthCheckExprs "rules" "no inProgress or failed"
+  done
+
+  yq -i '.spec.healthCheckExprs = [{"apiVersion": "templates.gatekeeper.sh/v1", "kind": "ConstraintTemplate",
+    "current": "status.created == true"}]' "$TREE/kubernetes/apps/base/demo/templates/ks.yaml"
+  check
+  [ "$status" -eq 0 ]
+
+  # Without wait, Flux checks the health of what healthChecks names alone, so an entry for another
+  # template leaves the constraint's own unwaited for.
+  yq -i '.spec.wait = false | .spec.healthChecks = [{"apiVersion": "templates.gatekeeper.sh/v1",
+    "kind": "ConstraintTemplate", "name": "k8sother"}]' "$TREE/kubernetes/apps/base/demo/templates/ks.yaml"
+  check
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/templates/ks.yaml "Kustomization templates" "ConstraintTemplate" \
+    healthCheckExprs "rules" "example"
+  yq -i '.spec.healthChecks[0].name = "k8sexample"' "$TREE/kubernetes/apps/base/demo/templates/ks.yaml"
+  check
+  [ "$status" -eq 0 ]
+  yq -i 'del(.spec.healthChecks) | .spec.wait = true' "$TREE/kubernetes/apps/base/demo/templates/ks.yaml"
+
+  # A dependency through another application counts, and a constraint with no template among the
+  # cluster's applications is refused.
+  yq -i '.spec.dependsOn = [{"name": "hello"}]' "$TREE/kubernetes/apps/base/demo/rules/ks.yaml"
+  yq -i '.spec.wait = true | .spec.dependsOn = [{"name": "templates"}]' "$TREE/kubernetes/apps/base/demo/hello/ks.yaml"
+  check
+  [ "$status" -eq 0 ]
+  yq -i 'del(.spec.dependsOn)' "$TREE/kubernetes/apps/base/demo/hello/ks.yaml"
+  check
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/rules/ks.yaml "Kustomization rules" "does not name it in dependsOn"
+
+  yq -i 'del(.spec.dependsOn)' "$TREE/kubernetes/apps/base/demo/rules/ks.yaml"
+  yq -i '.resources |= map(select(test("templates") | not))' "$TREE/kubernetes/apps/overlays/test/kustomization.yaml"
+  check
+  [ "$status" -ne 0 ]
+  refused_line kubernetes/apps/base/demo/rules/ks.yaml "Kustomization rules" "constraint K8sExample example" \
+    "no ConstraintTemplate"
 }
 
 @test "A manifest an application keeps where the artifact does not carry it is refused" {

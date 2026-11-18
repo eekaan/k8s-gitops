@@ -1,0 +1,12 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# A workload that opts in to the OpenFeature Operator, as an example; no overlay selects it
+# (docs/kubernetes.md, OpenFeature Operator).
+resources:
+  - featureflag.yaml
+  - featureflagsource.yaml
+  - serviceaccount.yaml
+  - deployment.yaml
+  - ciliumnetworkpolicy.yaml

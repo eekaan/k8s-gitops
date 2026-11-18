@@ -14,6 +14,10 @@ spec:
   # nothing until they do.
   dependsOn:
     - name: prometheus-operator-crds
+  # Ready once what it applies is, which kubernetes-check requires of an application that another
+  # names in dependsOn: the dashboard's application names this one, and starts once the monitors
+  # and the rules are in place.
+  wait: true
   sourceRef:
     kind: ExternalArtifact
     name: linstor-monitoring

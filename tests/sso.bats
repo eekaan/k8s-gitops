@@ -10,6 +10,9 @@
 # charts are pulled once: so the tests run one at a time.
 export BATS_NO_PARALLELIZE_WITHIN_FILE=true
 
+# tree_without, a copy of the tree whose overlay leaves applications out.
+load fixtures/tree-without
+
 setup_file() {
   # Helm's cache and registry settings stay in the run's own directory, and so does the Docker
   # configuration helm falls back to for credentials, so no login is read.
@@ -166,19 +169,6 @@ cfg_line() {
   grep -qxF -- "$2" "$1" || { echo "$1 has no line: $2"; return 1; }
 }
 
-# tree_without APP...: copies kubernetes/ to $TREE and takes the ks.yaml of each APP out of the
-# overlay's resources.
-tree_without() {
-  local app
-  TREE="$BATS_TEST_TMPDIR/tree"
-  mkdir -p "$TREE"
-  cp -r "$REPO/kubernetes" "$TREE/kubernetes"
-  cp "$REPO/versions.yaml" "$TREE/versions.yaml"
-  for app in "$@"; do
-    yq -i '.resources |= map(select(test("/'"$app"'/ks.yaml$") | not))' "$TREE/kubernetes/apps/overlays/lab-sto2/kustomization.yaml"
-  done
-}
-
 # secret_targets FILE...: the name of each Secret an ExternalSecret of the files makes, one per line.
 secret_targets() {
   yq -N 'select(.kind == "ExternalSecret") | .spec.target.name // .metadata.name' "$@"
@@ -284,7 +274,7 @@ secret_targets() {
     [ "$(yq '.spec.refreshPolicy' "$BATS_TEST_TMPDIR/es.yaml")" = CreatedOnce ]
     [ "$(yq '.spec.target.creationPolicy' "$BATS_TEST_TMPDIR/es.yaml")" = Owner ]
     [ "$(yq '.spec.dataFrom[0].sourceRef.generatorRef | [.kind, .name] | join("/")' "$BATS_TEST_TMPDIR/es.yaml")" = "Password/$secret" ]
-    [ "$(yq '.spec | has("data") or has("secretStoreRef")' "$BATS_TEST_TMPDIR/es.yaml")" = false ]
+    [ "$(yq '.spec | (has("data") or has("secretStoreRef"))' "$BATS_TEST_TMPDIR/es.yaml")" = false ]
   done
   # Every secret a container reads is a Secret one of those ExternalSecrets makes, by reference, and
   # none has a value of its own: three variables of dex's, two of oauth2-proxy's.
@@ -553,14 +543,14 @@ secret_targets() {
 @test "The sign-in applications are selected by overlay entries and build nothing when they are not, and nothing else waits on them" {
   local dependency app
   # Every entry: the namespace, its defaults, its default deny and the two Kustomizations, which wait
-  # for what they apply, and the demo route that opts in.
+  # for what they apply, and the routes that opt in.
   overlay
   [ "$(yq -N 'select(.metadata.namespace == "sso-system" or .metadata.name == "sso-system") | .kind + "/" + .metadata.name' "$OVERLAY" | sort | paste -sd' ' -)" \
     = "ConfigMap/app-template-defaults Namespace/sso-system NetworkPolicy/default-deny" ]
   [ "$(yq -N 'select(.kind == "Kustomization" and (.spec.targetNamespace == "sso-system")) | .metadata.name' "$OVERLAY" | sort | paste -sd' ' -)" = "dex oauth2-proxy" ]
   [ "$(yq -N 'select(.kind == "Kustomization" and .spec.targetNamespace == "sso-system") | .spec.wait' "$OVERLAY" | sort -u)" = true ]
   # The namespace directory alone, and then neither entry.
-  tree_without dex oauth2-proxy hello-sso
+  tree_without dex oauth2-proxy hello-sso victoria-logs-route
   overlay "$TREE/kubernetes/apps/overlays/lab-sto2"
   [ "$(yq -N 'select(.metadata.namespace == "sso-system" or .metadata.name == "sso-system") | .kind + "/" + .metadata.name' "$OVERLAY" | sort | paste -sd' ' -)" \
     = "ConfigMap/app-template-defaults Namespace/sso-system NetworkPolicy/default-deny" ]
@@ -568,7 +558,7 @@ secret_targets() {
   yq -i '.resources |= map(select(test("/sso-system$") | not))' "$TREE/kubernetes/apps/overlays/lab-sto2/kustomization.yaml"
   overlay "$TREE/kubernetes/apps/overlays/lab-sto2"
   [ -z "$(yq -N 'select(.metadata.namespace == "sso-system" or .metadata.name == "sso-system" or .spec.targetNamespace == "sso-system") | .metadata.name' "$OVERLAY")" ]
-  # Without the sign-in applications, and the route that opts in, the tree still builds and passes.
+  # Without the sign-in applications, and the routes that opt in, the tree still builds and passes.
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]
@@ -593,10 +583,12 @@ secret_targets() {
   [ "$status" -ne 0 ]
   [[ $output == *"Kustomization hello-sso names oauth2-proxy"* ]]
   rm -rf "$TREE"
-  # Nothing else waits on them: only oauth2-proxy names dex, only the demo route names oauth2-proxy,
-  # and nothing names the demo route.
+  # Nothing else waits on them: only oauth2-proxy names dex, only the routes that opt in, the demo's
+  # and the log store's, name oauth2-proxy, and nothing names either route.
   overlay
   [ "$(yq -N 'select(.kind == "Kustomization") | select(.spec.dependsOn // [] | map(.name) | contains(["dex"])) | .metadata.name' "$OVERLAY")" = oauth2-proxy ]
-  [ "$(yq -N 'select(.kind == "Kustomization") | select(.spec.dependsOn // [] | map(.name) | contains(["oauth2-proxy"])) | .metadata.name' "$OVERLAY")" = hello-sso ]
+  [ "$(yq -N 'select(.kind == "Kustomization") | select(.spec.dependsOn // [] | map(.name) | contains(["oauth2-proxy"])) | .metadata.name' "$OVERLAY" | sort | paste -sd' ' -)" \
+    = "hello-sso victoria-logs-route" ]
   [ -z "$(yq -N 'select(.kind == "Kustomization") | select(.spec.dependsOn // [] | map(.name) | contains(["hello-sso"])) | .metadata.name' "$OVERLAY")" ]
+  [ -z "$(yq -N 'select(.kind == "Kustomization") | select(.spec.dependsOn // [] | map(.name) | contains(["victoria-logs-route"])) | .metadata.name' "$OVERLAY")" ]
 }

@@ -23,15 +23,22 @@
       groupName: "Cilium",
     },
     {
-      description: "The Prometheus Operator: the chart of its resource definitions and the monitoring chart, which runs it",
+      description: "The Prometheus Operator: the chart of its resource definitions, the monitoring chart, which runs it, and the Alertmanager image that chart deploys, which alerts-route-check checks its configuration in",
       matchPackageNames: [
         "ghcr.io/prometheus-community/charts/prometheus-operator-crds",
         "ghcr.io/prometheus-community/charts/kube-prometheus-stack",
+        "quay.io/prometheus/alertmanager",
       ],
       groupName: "Prometheus Operator",
       // The two version numbers can move by different steps for the same operator release, a major
       // in one where the other takes a minor or a patch. In one pull request whatever the step,
       // each at its latest, the two name the same operator, which tests/monitoring.bats checks.
+      // tests/alert-routes.bats fails unless the justfile's image is the one the monitoring chart
+      // deploys, so the image moves in that pull request too. Two steps of it are a person's, on
+      // purpose: an Alertmanager released before the chart deploys it comes alone, or beside a
+      // chart that still names the old one, and its pull request stays red until the chart names
+      // it; and a chart that runs another operator fails the same file at OPERATOR_READ until the
+      // operator's source is read again at that version and OPERATOR_READ is set to it.
       separateMajorMinor: false,
     },
     {
@@ -92,6 +99,13 @@
       description: "The Flux Operator: its image and its operator and instance charts",
       matchPackageNames: ["controlplaneio-fluxcd/**", "ghcr.io/controlplaneio-fluxcd/**"],
       groupName: "Flux Operator",
+    },
+    {
+      // tests/open-feature-operator.bats fails unless the operator's image is of the version the
+      // chart's own values default to.
+      description: "The OpenFeature Operator: its chart and the operator's image the chart runs",
+      matchPackageNames: ["ghcr.io/open-feature/charts/open-feature-operator", "ghcr.io/open-feature/open-feature-operator"],
+      groupName: "OpenFeature Operator",
     },
   ],
 }

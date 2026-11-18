@@ -13,6 +13,16 @@ Feature: Admission policy
     When the overlay is built, and each application's dependencies are read
     Then the engine left in builds whole, the engine taken out leaves no object in the build, no application of the tree depends on either engine, and an engine's rules depend on that engine alone
 
+  Scenario: Kyverno's release renders each key once and keeps every definition when the release goes
+    Given Kyverno's pinned chart and values, rendered offline with the release's post-renderer
+    When the chart's output is parsed strictly, as the render parses a chart's output, and its definitions are read
+    Then no mapping repeats a key, and every definition carries the annotation that makes Helm leave it in place on uninstall
+
+  Scenario: Gatekeeper's constraints are applied by an application that waits for their templates' kinds
+    Given the lab-sto2 overlay and the applications of Gatekeeper's rules
+    When the overlay is built and each application's objects and health checks are read
+    Then the templates are one application, ready when each template's status says its kind was created, the constraints are another that depends on it alone, and the kinds the templates make are those of the constraints
+
   Scenario: Neither engine's webhooks can refuse or delay a workload: the ones that match workloads fail open and skip the system namespaces
     Given each engine's pinned chart and values, rendered offline, and the policies applied with it
     When the webhook configurations, the settings that decide the ones the engine makes at run time, and every policy are read

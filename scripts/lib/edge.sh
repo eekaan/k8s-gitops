@@ -136,11 +136,15 @@ edge_applied() {
 # edge_check_passes NUMBER: whether scripts/edge-check passes for edge NUMBER, run under the lock
 # the caller holds on the stack, whose descriptor it shares with it (lock_stack). stack-env keeps
 # the state passphrase out of the environment of what it runs, and edge-check, which sources
-# stack-env itself, needs it again.
+# stack-env itself, needs it again. The check asks for yes itself when the edge's host key is not
+# recorded and its instance's console does not vouch for it, so it is the one program handed the
+# operator's input on purpose: its standard input is the answers the caller reserved
+# (reserve_answers in scripts/lib/infra.sh), or the caller's own standard input when it reserved
+# none.
 edge_check_passes() {
   # shellcheck disable=SC2154 # lock_stack sets infra_lock_fd
   EDGE_STACK_LOCKED=$infra_lock_fd TF_STATE_PASSPHRASE=${TF_STATE_PASSPHRASE-} \
-    "$(dirname "${BASH_SOURCE[0]}")/../edge-check" --edge "$1"
+    "$(dirname "${BASH_SOURCE[0]}")/../edge-check" --edge "$1" <&"${answers_fd:-0}"
 }
 
 # edge_require_other_serves: for a saved plan that deletes or replaces one edge, whether the other

@@ -108,6 +108,49 @@ spec:
           targetLabel: __address__
           replacement: $1:9879
 ---
+# Relabelings that write a label they do not name: a labelmap, which can make the address of a
+# label of its own, and a replacement whose target label is built from what its regex captures,
+# here the address itself, as the second group it names is none and expands to nothing.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: labelmapped
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      k8s-app: cilium
+  podMetricsEndpoints:
+    - port: prometheus
+      relabelings:
+        - action: replace
+          sourceLabels:
+            - __meta_kubernetes_pod_host_ip
+          targetLabel: __tmp_address
+          replacement: $1:9879
+        - action: labelmap
+          regex: __tmp_(address)
+          replacement: __${1}__
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: templated
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      k8s-app: cilium
+  podMetricsEndpoints:
+    - port: prometheus
+      relabelings:
+        - action: replace
+          sourceLabels:
+            - __meta_kubernetes_pod_host_ip
+          regex: (.+)
+          targetLabel: __${2}address__
+          replacement: $1:9879
+---
 # An operator no selector has, which the check takes to select every pod.
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor

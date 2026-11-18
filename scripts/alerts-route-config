@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# Writes what just alerts-route-check runs amtool and Alertmanager on to DIR:
+#   DIR/alertmanager.yaml   the configuration the kube-prometheus-stack application gives Alertmanager
+#   DIR/image               the image the rendered Alertmanager names, which has amtool and alertmanager
+#   DIR/cases.yaml          tests/alert-routes/cases.yaml, the cases scripts/alerts-route-run runs
+# The configuration is the one the application's HelmRelease gives its pinned chart: the application
+# built in memory as Flux applies it, with the cluster's example key lists for its variables, and the
+# chart, pulled from the URL and tag of its OCIRepository, rendered offline with the values
+# helm-controller gives it, as scripts/rules-image renders it. The tree's render (scripts/render)
+# holds no Secret's data, so the chart is rendered here. The configuration is the alertmanager.yaml
+# of the Secret the rendered Alertmanager reads: spec.configSecret or, without one, alertmanager-
+# and the Alertmanager's name, as the Prometheus Operator names it (defaultConfigSecretName in its
+# pkg/alertmanager/statefulset.go). Fails unless the chart renders exactly one Alertmanager and
+# exactly one Secret of that name in its namespace. Never contacts a cluster, and reads no registry
+# login.
+#
+# RENDER_CHART_CACHE is scripts/render's: a directory that holds the chart, or takes it, under
+# <registry>/<repository>/<tag>/. ALERTS_ROUTE_RENDER, a file, is the chart's render already made,
+# which is read in place of rendering; the tests point it at fixtures.
+# Usage: scripts/alerts-route-config DIR   (DIR must not exist or be empty)
+set -euo pipefail
+shopt -s nullglob
+
+# flux and helm are run with none of the secrets a recipe's environment may hold.
+# shellcheck source=scripts/lib/tools.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/tools.sh"
+
+die() {
+  echo "alerts-route-config: $*" >&2
+  exit 1
+}
+
+[[ $# -eq 1 && -n $1 ]] || { echo "usage: scripts/alerts-route-config DIR" >&2; exit 2; }
+out=$1
+rendered=${ALERTS_ROUTE_RENDER:-}
+
+app=kubernetes/apps/base/monitoring/kube-prometheus-stack
+cluster=kubernetes/clusters/lab-sto2
+cases=tests/alert-routes/cases.yaml
+
+for tool in yq jq; do
+  type -P "$tool" >/dev/null || die "$tool not found on PATH"
+done
+if [[ -e $out ]]; then
+  [[ -d $out && -z $(find "$out" -mindepth 1 -print -quit) ]] || die "$out exists and is not an empty directory"
+fi
+if [[ -n $rendered ]]; then
+  [[ -f $rendered ]] || die "no render at $rendered"
+  rendered=$(realpath -e -- "$rendered")
+fi
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+[[ -f $cases ]] || die "no cases in $cases"
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+if [[ -z $rendered ]]; then
+  for tool in flux helm; do
+    type -P "$tool" >/dev/null || die "$tool not found on PATH"
+  done
+  # No kubeconfig and no in-cluster address: a tool that tried to reach a cluster fails instead.
+  export KUBECONFIG=/dev/null
+  unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
+  # Helm's cache and registry settings, and the Docker configuration helm falls back to for
+  # credentials, stay in the run's own directory.
+  export HELM_CACHE_HOME="$tmp/helm/cache" HELM_CONFIG_HOME="$tmp/helm/config" HELM_DATA_HOME="$tmp/helm/data"
+  export DOCKER_CONFIG="$tmp/docker"
+  mkdir -p "$DOCKER_CONFIG"
+  charts=${RENDER_CHART_CACHE:-$tmp/charts}
+  mkdir -p "$charts"
+  charts=$(cd "$charts" && pwd)
+
+  # shellcheck disable=SC2016 # $list and $vars are yq variables.
+  yq ea '. as $list ireduce ({}; . * ($list // {}))' \
+    "$cluster/cluster-config.example.yaml" "$cluster/cluster-secrets.example.yaml" >"$tmp/vars.yaml"
+  # shellcheck disable=SC2016 # $vars is a yq variable.
+  yq ea 'select(fileIndex == 0) as $vars | select(fileIndex == 1 and . != null)
+    | .spec.postBuild.substitute = $vars' "$tmp/vars.yaml" "$app/ks.yaml" >"$tmp/ks.yaml"
+  flux build kustomization kube-prometheus-stack --path "./$app/app" --kustomization-file "$tmp/ks.yaml" \
+    --dry-run --strict-substitute --in-memory-build >"$tmp/built.yaml"
+
+  url=$(yq -N 'select(.kind == "OCIRepository") | .spec.url' "$tmp/built.yaml")
+  tag=$(yq -N 'select(.kind == "OCIRepository") | .spec.ref.tag' "$tmp/built.yaml")
+  values=$(yq -N 'select(.kind == "HelmRelease") | .spec.valuesFrom[0].name' "$tmp/built.yaml")
+  release=$(yq -N 'select(.kind == "HelmRelease") | .spec.releaseName // .metadata.name' "$tmp/built.yaml")
+  namespace=$(yq -N 'select(.kind == "HelmRelease") | .spec.targetNamespace // .metadata.namespace' "$tmp/built.yaml")
+  kube=$(yq '.kubernetes' versions.yaml)
+  yq -N "select(.kind == \"ConfigMap\" and .metadata.name == \"$values\") | .data[\"values.yaml\"]" "$tmp/built.yaml" >"$tmp/values.yaml"
+  [[ -s $tmp/values.yaml ]] || die "no values in the ConfigMap $values"
+  yq -N 'select(.kind == "HelmRelease") | .spec.values // {}' "$tmp/built.yaml" >"$tmp/inline.yaml"
+
+  [[ $url =~ ^oci://[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+$ && /$url/ != */../* ]] || die "not an OCI chart URL: $url"
+  [[ $tag =~ ^[A-Za-z0-9_][A-Za-z0-9._+-]*$ ]] || die "the chart's OCIRepository names no tag"
+  pulled="$charts/${url#oci://}/$tag"
+  tgz=("$pulled"/*.tgz)
+  if ((${#tgz[@]} == 0)); then
+    mkdir -p "$pulled"
+    helm pull "$url" --version "$tag" --destination "$pulled" >/dev/null
+    tgz=("$pulled"/*.tgz)
+  fi
+  ((${#tgz[@]} == 1)) || die "$pulled holds no single chart"
+  # The monitoring definitions are there before the application starts, as prometheus-operator-crds
+  # installs them, so the chart renders the Alertmanager.
+  rendered=$tmp/rendered.yaml
+  helm template "$release" "${tgz[0]}" --namespace "$namespace" --kube-version "$kube" \
+    --api-versions monitoring.coreos.com/v1 --api-versions monitoring.coreos.com/v1alpha1 \
+    --values "$tmp/values.yaml" --values "$tmp/inline.yaml" >"$rendered"
+  source="$url:$tag"
+else
+  source="the render $rendered"
+fi
+
+# Compared by jq as values: yq's == reads * and ? in what it is compared with as wildcards.
+yq -N -o json -I0 'select(.kind == "Alertmanager" or .kind == "Secret")' "$rendered" | jq -s . >"$tmp/objects.json"
+count=$(jq '[.[] | select(.kind == "Alertmanager")] | length' "$tmp/objects.json")
+((count == 1)) || die "the chart renders $count Alertmanager objects, not exactly one"
+jq '[.[] | select(.kind == "Alertmanager")][0]' "$tmp/objects.json" >"$tmp/alertmanager.json"
+image=$(jq -r '.spec.image // ""' "$tmp/alertmanager.json")
+[[ -n $image && $image != *$'\n'* ]] || die "the rendered Alertmanager names no image"
+secret=$(jq -r 'if (.spec.configSecret // "") != "" then .spec.configSecret else "alertmanager-" + .metadata.name end' "$tmp/alertmanager.json")
+jq --slurpfile am "$tmp/alertmanager.json" --arg name "$secret" \
+  '[.[] | select(.kind == "Secret" and .metadata.name == $name and .metadata.namespace == $am[0].metadata.namespace)]' \
+  "$tmp/objects.json" >"$tmp/secrets.json"
+count=$(jq 'length' "$tmp/secrets.json")
+((count == 1)) || die "the chart renders $count Secrets named $secret, the one its Alertmanager reads, not exactly one"
+jq -r '.[0].data["alertmanager.yaml"] // ""' "$tmp/secrets.json" | base64 -d >"$out/alertmanager.yaml"
+[[ -s $out/alertmanager.yaml ]] || die "the Secret $secret holds no alertmanager.yaml"
+[[ $(yq 'tag' "$out/alertmanager.yaml") == '!!map' ]] || die "the alertmanager.yaml of the Secret $secret is not a mapping"
+
+echo "$image" >"$out/image"
+cp "$cases" "$out/cases.yaml"
+echo "alerts-route-config: wrote the configuration of $source, the image $image and $(yq '.cases | length' "$cases") cases to $out"

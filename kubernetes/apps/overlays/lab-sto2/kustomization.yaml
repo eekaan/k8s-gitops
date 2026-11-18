@@ -28,6 +28,7 @@ resources:
   - ../../base/volsync-system
   - ../../base/sso-system
   - ../../base/crowdsec
+  - ../../base/open-feature-operator
   - ../../base/ai-system/n8n/ks.yaml
   - ../../base/ai-system/open-webui/ks.yaml
   - ../../base/backstage/backstage/ks.yaml
@@ -49,6 +50,7 @@ resources:
   - ../../base/external-secrets/external-secrets/ks.yaml
   - ../../base/external-secrets/openbao-store/ks.yaml
   - ../../base/gatekeeper-system/gatekeeper-policies/ks.yaml
+  - ../../base/gatekeeper-system/gatekeeper-templates/ks.yaml
   - ../../base/gatekeeper-system/gatekeeper/ks.yaml
   - ../../base/keda/keda/ks.yaml
   - ../../base/kromgo/kromgo/ks.yaml
@@ -68,6 +70,7 @@ resources:
   - ../../base/kube-system/vpa/ks.yaml
   - ../../base/kyverno/kyverno-policies/ks.yaml
   - ../../base/kyverno/kyverno/ks.yaml
+  - ../../base/monitoring/alert-destinations/ks.yaml
   - ../../base/monitoring/blackbox-exporter/ks.yaml
   - ../../base/monitoring/flux-monitoring/ks.yaml
   - ../../base/monitoring/grafana-operator/ks.yaml
@@ -89,6 +92,17 @@ resources:
   - ../../base/demo/hello-sso/ks.yaml
   - ../../base/crowdsec/crowdsec/ks.yaml
   - ../../base/envoy-gateway-system/crowdsec-gateway-logs/ks.yaml
+  - ../../base/monitoring/victoria-logs-route/ks.yaml
+  - ../../base/open-feature-operator/open-feature-operator/ks.yaml
+  # - ../../base/demo/hello-flags/ks.yaml  # Disabled: the worked example of a workload that opts in to the OpenFeature Operator; no workload of this cluster asks for a flag sidecar
+  - ../../base/monitoring/cert-manager-dashboard/ks.yaml
+  - ../../base/monitoring/cilium-monitoring-dashboard/ks.yaml
+  - ../../base/monitoring/cloudnative-pg-dashboard/ks.yaml
+  - ../../base/monitoring/external-dns-dashboard/ks.yaml
+  - ../../base/monitoring/falco-dashboard/ks.yaml
+  - ../../base/monitoring/flux-monitoring-dashboard/ks.yaml
+  - ../../base/monitoring/linstor-monitoring-dashboard/ks.yaml
+  - ../../base/monitoring/silence-operator-dashboard/ks.yaml
 
 patches:
   # The issuer of the public Gateway's certificate, the place this cluster chooses it, which the next

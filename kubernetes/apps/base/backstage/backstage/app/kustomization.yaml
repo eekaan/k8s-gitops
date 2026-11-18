@@ -36,12 +36,16 @@ configMapGenerator:
   - name: backstage-catalogue
     files:
       - catalogue/acme-issuers.yaml
+      - catalogue/alert-destinations.yaml
       - catalogue/backstage.yaml
       - catalogue/blackbox-exporter.yaml
+      - catalogue/cert-manager-dashboard.yaml
       - catalogue/cert-manager.yaml
       - catalogue/cilium-bgp.yaml
+      - catalogue/cilium-monitoring-dashboard.yaml
       - catalogue/cilium-monitoring.yaml
       - catalogue/cilium.yaml
+      - catalogue/cloudnative-pg-dashboard.yaml
       - catalogue/cloudnative-pg.yaml
       - catalogue/cluster-ca.yaml
       - catalogue/crowdsec-gateway-logs.yaml
@@ -53,11 +57,15 @@ configMapGenerator:
       - catalogue/envoy-gateway-crds.yaml
       - catalogue/envoy-gateway.yaml
       - catalogue/etcd-snapshots.yaml
+      - catalogue/external-dns-dashboard.yaml
       - catalogue/external-dns.yaml
       - catalogue/external-secrets.yaml
+      - catalogue/falco-dashboard.yaml
       - catalogue/falco.yaml
+      - catalogue/flux-monitoring-dashboard.yaml
       - catalogue/flux-monitoring.yaml
       - catalogue/gatekeeper-policies.yaml
+      - catalogue/gatekeeper-templates.yaml
       - catalogue/gatekeeper.yaml
       - catalogue/gateway-api-crds.yaml
       - catalogue/gateway-public.yaml
@@ -74,10 +82,12 @@ configMapGenerator:
       - catalogue/kyverno-policies.yaml
       - catalogue/kyverno.yaml
       - catalogue/linstor-cluster.yaml
+      - catalogue/linstor-monitoring-dashboard.yaml
       - catalogue/linstor-monitoring.yaml
       - catalogue/metrics-server.yaml
       - catalogue/n8n.yaml
       - catalogue/oauth2-proxy.yaml
+      - catalogue/open-feature-operator.yaml
       - catalogue/open-webui.yaml
       - catalogue/openbao-dashboard.yaml
       - catalogue/openbao-snapshots.yaml
@@ -90,11 +100,13 @@ configMapGenerator:
       - catalogue/reflector.yaml
       - catalogue/reloader.yaml
       - catalogue/runtime-classes.yaml
+      - catalogue/silence-operator-dashboard.yaml
       - catalogue/silence-operator.yaml
       - catalogue/snapshot-controller.yaml
       - catalogue/spegel.yaml
       - catalogue/systems.yaml
       - catalogue/vector.yaml
+      - catalogue/victoria-logs-route.yaml
       - catalogue/victoria-logs.yaml
       - catalogue/volsync-demo.yaml
       - catalogue/volsync.yaml

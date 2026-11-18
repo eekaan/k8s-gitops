@@ -1,0 +1,291 @@
+{
+  "uid": "flux",
+  "title": "Flux",
+  "tags": ["flux"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "1m",
+  "timezone": "browser",
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "hide": 2,
+        "current": {}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "FluxInstance Ready",
+      "description": "1 while the Flux Operator reports the FluxInstance Ready, 0 otherwise. The alert FluxInstanceNotReady fires after 10 minutes of not Ready.",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "count(flux_instance_info{job=\"flux-operator\", ready=\"True\"} == 1) or vector(0)",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Flux Operator replicas available",
+      "description": "Available replicas of the operator's Deployment, by kube-state-metrics, which the alert FluxOperatorNotReady reads too. While it has none, the operator exports no state: the counts beside this one read 0 and the tables are empty.",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "max(kube_deployment_status_replicas_available{namespace=\"flux-system\", deployment=\"flux-operator\"})",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Resources not Ready",
+      "description": "Flux resources whose Ready condition is False or Unknown.",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "count(flux_resource_info{job=\"flux-operator\", ready!=\"True\"} == 1) or vector(0)",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Resources suspended",
+      "description": "Flux resources that are suspended, and so not reconciled. The alert FluxResourceSuspended fires after a day.",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "count(flux_resource_info{job=\"flux-operator\", suspended=\"True\"} == 1) or vector(0)",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Resources by kind and readiness",
+      "description": "How many Flux resources of each kind have their Ready condition True, False or Unknown.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "count by (kind, ready) (flux_resource_info{job=\"flux-operator\"} == 1)",
+          "legendFormat": "{{kind}} {{ready}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none", "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Resources not Ready, with their reason",
+      "description": "Each Flux resource whose Ready condition is not True, with the reason the condition gives. The label exported_namespace is the resource's namespace.",
+      "gridPos": { "h": 8, "w": 14, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "flux_resource_info{job=\"flux-operator\", ready!=\"True\"} == 1",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true,
+              "container": true,
+              "endpoint": true,
+              "instance": true,
+              "job": true,
+              "namespace": true,
+              "path": true,
+              "pod": true,
+              "ref": true,
+              "revision": true,
+              "service": true,
+              "source_name": true,
+              "suspended": true,
+              "uid": true,
+              "url": true
+            },
+            "indexByName": { "kind": 0, "exported_namespace": 1, "name": 2, "ready": 3, "reason": 4 },
+            "renameByName": {
+              "kind": "Kind",
+              "exported_namespace": "Namespace",
+              "name": "Name",
+              "ready": "Ready",
+              "reason": "Reason"
+            }
+          }
+        }
+      ],
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Suspended resources",
+      "description": "Each Flux resource that is suspended.",
+      "gridPos": { "h": 8, "w": 10, "x": 14, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "flux_resource_info{job=\"flux-operator\", suspended=\"True\"} == 1",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true,
+              "container": true,
+              "endpoint": true,
+              "instance": true,
+              "job": true,
+              "namespace": true,
+              "path": true,
+              "pod": true,
+              "ready": true,
+              "reason": true,
+              "ref": true,
+              "revision": true,
+              "service": true,
+              "source_name": true,
+              "suspended": true,
+              "uid": true,
+              "url": true
+            },
+            "indexByName": { "kind": 0, "exported_namespace": 1, "name": 2 },
+            "renameByName": { "kind": "Kind", "exported_namespace": "Namespace", "name": "Name" }
+          }
+        }
+      ],
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Controllers: reconciles per second",
+      "description": "Reconciles each controller of Flux ends per second, whatever their result.",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (controller) (rate(controller_runtime_reconcile_total{job=\"flux-controllers\"}[5m]))",
+          "legendFormat": "{{controller}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Controllers: reconcile errors per second",
+      "description": "Reconciles of each controller that end in an error, per second. A resource that fails is tried again, so one failing resource shows as a steady rate.",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum by (controller) (rate(controller_runtime_reconcile_errors_total{job=\"flux-controllers\"}[5m]))",
+          "legendFormat": "{{controller}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Controllers: reconcile time, 95th percentile",
+      "description": "The time under which 95 of 100 reconciles of each controller end, over five minutes.",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "histogram_quantile(0.95, sum by (controller, le) (rate(controller_runtime_reconcile_time_seconds_bucket{job=\"flux-controllers\"}[5m])))",
+          "legendFormat": "{{controller}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] }
+    }
+  ]
+}

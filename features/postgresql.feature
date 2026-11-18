@@ -51,10 +51,15 @@ Feature: PostgreSQL
     When it is built with Flux's strict substitution
     Then the build fails, naming the variable CNPG_CLUSTER_NAME
 
-  Scenario: The Barman Cloud plugin runs beside the operator it is made for, signed by the cluster's own CA, and meets the restricted Pod Security level
+  Scenario: The Barman Cloud plugin runs beside the operator it is made for and meets the restricted Pod Security level
     Given the plugin's application and its chart rendered offline with the repository's values, and the operator's chart
-    When the operator's version, the plugin's objects, its certificates and its pod templates are read
-    Then the operator is of the release the plugin requires or a newer one, the plugin runs in cnpg-system on more than one node with a budget that keeps one running, its image and its sidecar image are the release its chart is made for, each pinned by digest, its two certificates are issued by the cluster's own CA and by no other issuer and the chart makes no issuer, and no pod template uses a host namespace, runs as root, allows privilege escalation or keeps a capability
+    When the operator's version, the plugin's objects and its pod templates are read
+    Then the operator is of the release the plugin requires or a newer one, the plugin runs in cnpg-system on more than one node with a budget that keeps one running, its image and its sidecar image are the release its chart is made for, each pinned by digest, the chart makes neither certificates nor an issuer, and no pod template uses a host namespace, runs as root, allows privilege escalation or keeps a capability
+
+  Scenario: The backup plugin and the operator each trust exactly the other's certificate
+    Given the plugin's application as Flux builds it, its release with no post-renderer, and its chart rendered offline with the repository's values
+    When its Certificates, the issuers they name, the files the plugin's server reads its certificates from and the Secrets the Service names for the operator are read, and certificates made as those issuers make them meet in a TLS 1.3 handshake between stand-ins for the plugin's server and the operator
+    Then each Certificate has the name, Secret, usages and DNS names of the plugin's own manifest, is no CA, as there, and names a self-signed Issuer that the build holds in the plugin's namespace, the build holds no ClusterIssuer, the plugin's server takes the client Certificate's tls.crt as its only client authority and serves the server Certificate's, the Service names those two Secrets, and the handshake completes with the operator's certificate presented and verified, while certificates issued by the cluster's CA end it with certificate required
 
   Scenario: The plugin's chart and images are pinned where Renovate updates them
     Given the plugin's OCIRepository and the values that name its images

@@ -11,6 +11,10 @@
 # first, so they run one at a time.
 export BATS_NO_PARALLELIZE_WITHIN_FILE=true
 
+# Where a Probe's prober and its targets are, its one relabeling and its modules, which
+# tests/node-listeners.bats holds the tree's Probes to as well.
+load fixtures/probe-shape
+
 setup_file() {
   export HELM_CACHE_HOME="$BATS_FILE_TMPDIR/helm/cache"
   export HELM_CONFIG_HOME="$BATS_FILE_TMPDIR/helm/config"
@@ -118,53 +122,24 @@ collect() {
         | .metadata.namespace //= ($releases["\($labels["helm.toolkit.fluxcd.io/namespace"] // "")/\($labels["helm.toolkit.fluxcd.io/name"] // "")"] // ""))' >"$2")
 }
 
-# The version of Envoy Gateway in whose source proxy_service's rule for the name was read.
-PROXY_SERVICE_READ_AT=v1.10.0
-
-# controller_namespace DIR: the namespace of Envoy Gateway's controller in DIR, the render of one
-# cluster: that of the one Deployment of the application envoy-gateway. The controller makes the
-# proxies' objects of every Gateway there unless its configuration's provider.kubernetes.deploy.type
-# is GatewayNamespace (GetResourceNamespace in internal/infrastructure/kubernetes/proxy_infra.go,
-# at PROXY_SERVICE_READ_AT); in that mode they take the Gateway's namespace and another name, for
-# which proxy_service's rule was not read, so it fails.
-controller_namespace() {
-  local config mode
-  local -a namespaces
-  config="$(yq -N 'select(.kind == "ConfigMap" and .data["envoy-gateway.yaml"] != null) | .data["envoy-gateway.yaml"]' "$1"/envoy-gateway/ConfigMap_*.yaml)"
-  [ -n "$config" ] || { echo "no configuration of Envoy Gateway's controller in $1" >&2; return 1; }
-  mode="$(yq '.provider.kubernetes.deploy.type // "ControllerNamespace"' <<<"$config")"
-  [ "$mode" = ControllerNamespace ] ||
-    { echo "Envoy Gateway's controller in $1 deploys the proxies in the mode $mode, for which the rule for their Service's name was not read" >&2; return 1; }
-  mapfile -t namespaces < <(yq -N 'select(.kind == "Deployment") | .metadata.namespace' "$1"/envoy-gateway/Deployment.apps_*.yaml)
-  [ "${#namespaces[@]}" -eq 1 ] || { echo "not one Deployment of Envoy Gateway's controller in $1" >&2; return 1; }
-  echo "${namespaces[0]}"
-}
-
 # proxy_service OBJECTS: the cluster name of the Service Envoy Gateway makes for the proxies of the
-# one Gateway of OBJECTS: envoy-<namespace>-<name>-<the first 8 characters of the SHA-256 of
-# "<namespace>/<name>">, of the Gateway's namespace and name, in the controller's namespace, read
-# from the render of this tree (Envoy Gateway's GetHashedName, which cuts the readable part at 48
-# characters; the names here are far shorter). It is the name the controller gives the proxies'
-# objects where the EnvoyProxy names no Service of its own
-# (internal/infrastructure/kubernetes/proxy/resource_provider.go and resource.go,
-# internal/utils/misc.go, at PROXY_SERVICE_READ_AT).
+# one Gateway of OBJECTS (proxy_service_name of fixtures/probe-shape.bash), of the Gateway's
+# namespace and name, in the controller's namespace, read from the render of this tree
+# (controller_namespace).
 proxy_service() {
   local namespace name controller
   namespace="$(jq -r '[.[] | select(.kind == "Gateway")] | if length == 1 then .[0].metadata.namespace else error("not one Gateway") end' "$1")"
   name="$(jq -r '[.[] | select(.kind == "Gateway")][0].metadata.name' "$1")"
   tree_render
   controller="$(controller_namespace "$RENDER/lab-sto2")" || return 1
-  [ "$((${#namespace} + ${#name} + 1))" -le 48 ] || return 1
-  echo "envoy-$namespace-$name-$(printf '%s/%s' "$namespace" "$name" | sha256sum | cut -c1-8).$controller.svc.cluster.local"
+  proxy_service_name "$namespace" "$name" "$controller"
 }
 
-# exporter_address: where a Probe reaches the exporter, read from the render of this tree: the one
-# Service of the exporter's release by its cluster name, and its one port.
+# exporter_address: where a Probe reaches the exporter, read from the render of this tree
+# (exporter_service of fixtures/probe-shape.bash).
 exporter_address() {
   tree_render
-  yq -N -o json -I0 'select(.kind == "Service")' "$RENDER"/lab-sto2/blackbox-exporter/Service_*.yaml |
-    jq -rs 'if length != 1 then error("not one Service of the exporter") elif (.[0].spec.ports | length) != 1 then error("not one port of the exporter")
-      else .[0] | "\(.metadata.name).\(.metadata.namespace).svc.cluster.local:\(.spec.ports[0].port)" end'
+  exporter_service "$RENDER/lab-sto2"
 }
 
 # unprobed OBJECTS: one line for each route of the public Gateway that no Probe covers. A Probe
@@ -275,9 +250,8 @@ header_problems() {
     objects="$(yq -N -o json -I0 'select(. != null)' "${files[@]}" | jq -cs .)"
     services="$(jq -r '.[] | select(.kind == "Gateway") | "\(.metadata.namespace) \(.metadata.name)"' <<<"$objects" |
       while read -r namespace name; do
-        jq -cn --arg namespace "$namespace" --arg name "$name" --arg controller "$controller" \
-          --arg hash "$(printf '%s/%s' "$namespace" "$name" | sha256sum | cut -c1-8)" \
-          '{namespace: $namespace, name: $name, service: "envoy-\($namespace)-\($name)-\($hash).\($controller).svc.cluster.local"}'
+        jq -cn --arg namespace "$namespace" --arg name "$name" --arg service "$(proxy_service_name "$namespace" "$name" "$controller")" \
+          '{namespace: $namespace, name: $name, service: $service}'
       done | jq -cs .)"
     # shellcheck disable=SC2016 # $all, $cluster, $services, $g and $probes are jq variables.
     jq -r --arg cluster "$cluster" --argjson services "$services" '
@@ -493,7 +467,7 @@ render_chart() {
   [ "$(jq -r '.spec.jobName' <<<"$probe")" = public-endpoints ]
   [ "$(jq -c '.spec.targets.staticConfig.static' <<<"$probe")" = "[\"https://$service/\"]" ]
   [ "$(jq -r '.spec.targets.staticConfig.labels.hostname' <<<"$probe")" = "hello.$DOMAIN" ]
-  [ "$(jq -c '.spec.targets.staticConfig.relabelingConfigs' <<<"$probe")" = '[{"action":"replace","sourceLabels":["hostname"],"targetLabel":"__param_hostname"}]' ]
+  [ "$(jq -c '.spec.targets.staticConfig.relabelingConfigs' <<<"$probe")" = "$PROBE_RELABELINGS" ]
   # The route is the one that has that hostname, on the public Gateway's https listener.
   [ "$(jq -r '[.[] | select(.kind == "HTTPRoute" and .metadata.name == "hello")][0].spec.hostnames | join(",")' "$objects")" = "hello.$DOMAIN" ]
   # The target names the cluster's Service: no address, and nothing under the domain, which would
@@ -528,7 +502,7 @@ render_chart() {
   [ "$(jq -r '.spec.jobName' <<<"$probe")" = public-endpoints ]
   [ "$(jq -c '.spec.targets.staticConfig.static' <<<"$probe")" = "[\"http://$service/\"]" ]
   [ "$(jq -r '.spec.targets.staticConfig.labels.hostname' <<<"$probe")" = "$DOMAIN" ]
-  [ "$(jq -c '.spec.targets.staticConfig.relabelingConfigs' <<<"$probe")" = '[{"action":"replace","sourceLabels":["hostname"],"targetLabel":"__param_hostname"}]' ]
+  [ "$(jq -c '.spec.targets.staticConfig.relabelingConfigs' <<<"$probe")" = "$PROBE_RELABELINGS" ]
   [ "$(exporter_module "$RENDER/lab-sto2" public_http_redirect)" = \
     '{"http":{"follow_redirects":false,"preferred_ip_protocol":"ip4","valid_status_codes":[301]},"prober":"http","timeout":"5s"}' ]
   # A route behind the cluster's sign-in is probed for the redirect that starts a sign-in: a 302 over
@@ -544,18 +518,18 @@ render_chart() {
   # The targets of each Probe over https, which are one, the proxies' Service, shown here as the
   # path it asks for there, which its application answers 200 without a session and its route sends
   # on: the demo's page, n8n's health and Open WebUI's readiness endpoints, a badge of kromgo's,
-  # dex's discovery document, oauth2-proxy's readiness endpoint and Backstage's; and the page behind
-  # sign-in, which answers with the redirect. A second target, or one that is not the Service, shows
-  # whole.
+  # dex's discovery document, oauth2-proxy's readiness endpoint and Backstage's; and the pages behind
+  # sign-in, which answer with the redirect: the demo's, and the log store's interface, not its root,
+  # which its route redirects itself. A second target, or one that is not the Service, shows whole.
   # shellcheck disable=SC2016 # $service is a jq variable.
   [ "$(jq -r --arg service "$service" '[.[] | select(.kind == "Probe" and (.spec.module | startswith("public_https")))
       | "\(.metadata.namespace)/\(.metadata.name) \(.spec.module) \(.spec.targets.staticConfig.static | map(ltrimstr("https://" + $service)) | join(" "))"] | sort | join(",")' "$objects")" = \
-    "ai-system/n8n public_https /healthz,ai-system/open-webui public_https /health/db,backstage/backstage public_https /.backstage/health/v1/readiness,demo/hello public_https /,demo/hello-sso public_https_signin /,kromgo/kromgo public_https /badges/cluster_node_count,sso-system/auth public_https /ready,sso-system/dex public_https /.well-known/openid-configuration" ]
+    "ai-system/n8n public_https /healthz,ai-system/open-webui public_https /health/db,backstage/backstage public_https /.backstage/health/v1/readiness,demo/hello public_https /,demo/hello-sso public_https_signin /,kromgo/kromgo public_https /badges/cluster_node_count,monitoring/logs public_https_signin /select/vmui/,sso-system/auth public_https /ready,sso-system/dex public_https /.well-known/openid-configuration" ]
   # The Probes are in the namespaces of their routes, and the rules read the job they name: of the
   # five alerts the cluster applies, read from the render, every reference to a series of a probe or
   # of its scrape, two in each of the first three and one in each of the last two, selects that job,
   # so a probe of another job raises none of them.
-  [ "$(jq -r '[.[] | select(.kind == "Probe") | .metadata.namespace] | sort | join(",")' "$objects")" = "ai-system,ai-system,backstage,demo,demo,envoy-gateway-system,kromgo,sso-system,sso-system" ]
+  [ "$(jq -r '[.[] | select(.kind == "Probe") | .metadata.namespace] | sort | join(",")' "$objects")" = "ai-system,ai-system,backstage,demo,demo,envoy-gateway-system,kromgo,monitoring,sso-system,sso-system" ]
   [ "$(yq -o json -I0 '.spec.groups' "$RENDER"/lab-sto2/blackbox-exporter/PrometheusRule.monitoring.coreos.com_monitoring_blackbox-exporter-alerts.yaml |
     jq -c '[.[].rules[] | [.alert, (.expr | [scan("\\b(?:probe_[a-z_]+|up)\\b")] | length),
       (.expr | [scan("\\b(?:probe_[a-z_]+|up)\\{job=\"public-endpoints\"\\}")] | length)]]')" = \
@@ -755,11 +729,12 @@ render_chart() {
   tree_render
   collect "$RENDER" "$objects"
   # Every route of the tree is probed: the demo's, kromgo's, n8n's, Open WebUI's, dex's, the sign-in
-  # host's, Backstage's and the demo's behind sign-in with its sign-in paths by their hostnames, and
-  # the redirect. They are the routes of the render, which holds those a chart makes as well.
+  # host's, Backstage's, and the demo's and the log store's interface's behind sign-in with their
+  # sign-in paths by their hostnames, and the redirect. They are the routes of the render, which
+  # holds those a chart makes as well.
   routes="$(jq -r '[.[] | select(.kind == "HTTPRoute") | .metadata.name] | sort | join(",")' "$objects")"
   echo "routes: $routes"
-  [ "$routes" = "auth,backstage,dex,hello,hello-sso,hello-sso-oauth2,https-redirect,kromgo,n8n,open-webui" ]
+  [ "$routes" = "auth,backstage,dex,hello,hello-sso,hello-sso-oauth2,https-redirect,kromgo,logs,logs-oauth2,n8n,open-webui" ]
   run unprobed "$objects"
   echo "$output"
   [ "$status" -eq 0 ]
@@ -951,8 +926,8 @@ EOF
   echo "$output"
   [ -z "$output" ]
   # A route that no such policy covers probed for the redirect is refused: hello's Probe expecting it,
-  # and hello-sso's once its policy is gone or asks for no external authorisation, when the host needs
-  # a Probe for 200.
+  # and hello-sso's and the log store's once the policies are gone or ask for no external
+  # authorisation, when each host needs a Probe for 200.
   jq '(.[] | select(.kind == "Probe" and .metadata.name == "hello") | .spec.module) = "public_https_signin"' "$objects" >"$fixture"
   run unprobed "$fixture"
   echo "$output"
@@ -963,35 +938,38 @@ EOF
     jq "$refusal" "$objects" >"$fixture"
     run unprobed "$fixture"
     echo "$refusal: $output"
-    [ "$(wc -l <<<"$output")" -eq 3 ]
+    [ "$(wc -l <<<"$output")" -eq 6 ]
     [[ $output == *"Probe demo/hello-sso probes the hostname hello-sso.$DOMAIN for the sign-in redirect with public_https_signin, and no external-authorisation SecurityPolicy covers it"* ]]
     [[ $output == *"HTTPRoute demo/hello-sso: no Probe over https through "*" names the hostname hello-sso.$DOMAIN"* ]]
     [[ $output == *"HTTPRoute demo/hello-sso-oauth2: no Probe over https through "*" names the hostname hello-sso.$DOMAIN"* ]]
+    [[ $output == *"Probe monitoring/logs probes the hostname logs.$DOMAIN for the sign-in redirect with public_https_signin, and no external-authorisation SecurityPolicy covers it"* ]]
+    [[ $output == *"HTTPRoute monitoring/logs: no Probe over https through "*" names the hostname logs.$DOMAIN"* ]]
+    [[ $output == *"HTTPRoute monitoring/logs-oauth2: no Probe over https through "*" names the hostname logs.$DOMAIN"* ]]
   done
 }
 
 @test "A cluster that selects the probes without the exporter or the Gateway is refused" {
   local app dir problems fixture="$BATS_TEST_TMPDIR/fixture"
   # The tree as it is passes, with the exporter, the issuer, the Gateway and the routes listed, and
-  # the nine applications that declare a Probe name the exporter.
+  # the ten applications that declare a Probe name the exporter.
   run "$REPO/scripts/kubernetes-check" "$REPO"
   echo "$output"
   [ "$status" -eq 0 ]
-  for app in blackbox-exporter cluster-ca gateway-public hello-route kromgo n8n open-webui dex oauth2-proxy hello-sso backstage; do
+  for app in blackbox-exporter cluster-ca gateway-public hello-route kromgo n8n open-webui dex oauth2-proxy hello-sso backstage victoria-logs-route; do
     [ "$(yq '.resources[] | select(test("/'"$app"'/ks.yaml$"))' "$REPO/kubernetes/apps/overlays/lab-sto2/kustomization.yaml")" ] \
       || { echo "the lab-sto2 overlay does not list $app"; return 1; }
   done
   # Every application of the cluster that holds a Probe, in what the cluster applies, names the
   # exporter, which is what makes a cluster that lists it without the exporter refused below. They
-  # are these nine, read from the render, which holds a Probe a chart makes as well.
+  # are these ten, read from the render, which holds a Probe a chart makes as well.
   tree_render
   problems="$(probe_apps_without_exporter "$RENDER")"
   echo "$problems"
   [ -z "$problems" ]
   [ "$(for dir in "$RENDER"/lab-sto2/*/; do
       if compgen -G "${dir}Probe.monitoring.coreos.com_*.yaml" >/dev/null; then basename "$dir"; fi
-    done | LC_ALL=C sort | paste -sd' ' -)" = "backstage dex gateway-public hello-route hello-sso kromgo n8n oauth2-proxy open-webui" ]
-  for app in gateway-public hello-route kromgo n8n open-webui dex oauth2-proxy hello-sso backstage; do
+    done | LC_ALL=C sort | paste -sd' ' -)" = "backstage dex gateway-public hello-route hello-sso kromgo n8n oauth2-proxy open-webui victoria-logs-route" ]
+  for app in gateway-public hello-route kromgo n8n open-webui dex oauth2-proxy hello-sso backstage victoria-logs-route; do
     [ "$(yq '.spec.dependsOn[].name | select(. == "blackbox-exporter")' "$REPO"/kubernetes/apps/base/*/"$app"/ks.yaml)" = blackbox-exporter ]
   done
   # A Probe added to another application is refused, however its file spells the kind: hello with a
@@ -1020,7 +998,7 @@ lab-sto2: the application kromgo declares a Probe and its Kustomization does not
   run probe_apps_without_exporter "$fixture-named"
   echo "$output"
   [ "$output" = "lab-sto2: the application hello declares a Probe and its Kustomization does not name blackbox-exporter in dependsOn" ]
-  # Without the exporter all nine are refused, each naming it and the overlay.
+  # Without the exporter all ten are refused, each naming it and the overlay.
   tree_without blackbox-exporter
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
@@ -1034,6 +1012,7 @@ lab-sto2: the application kromgo declares a Probe and its Kustomization does not
   [[ $output == *"kubernetes/apps/base/sso-system/oauth2-proxy/ks.yaml: Kustomization oauth2-proxy names blackbox-exporter"* ]]
   [[ $output == *"kubernetes/apps/base/demo/hello-sso/ks.yaml: Kustomization hello-sso names blackbox-exporter"* ]]
   [[ $output == *"kubernetes/apps/base/backstage/backstage/ks.yaml: Kustomization backstage names blackbox-exporter"* ]]
+  [[ $output == *"kubernetes/apps/base/monitoring/victoria-logs-route/ks.yaml: Kustomization victoria-logs-route names blackbox-exporter"* ]]
   [[ $output == *"apps/overlays/lab-sto2"* ]]
   [[ $output == *"does not enable"* ]]
   # Without the Gateway, and with the route that declares a Probe, the route is refused.
@@ -1044,9 +1023,12 @@ lab-sto2: the application kromgo declares a Probe and its Kustomization does not
   [[ $output == *"kubernetes/apps/base/demo/hello-route/ks.yaml: Kustomization hello-route names gateway-public"* ]]
   [[ $output == *"apps/overlays/lab-sto2"* ]]
   [[ $output == *"does not enable"* ]]
-  # Without the Gateway and what needs it, the exporter alone builds: it probes nothing, and nothing
-  # alerts on that (ProbeNotRunning reads the scrapes of declared Probes).
-  tree_without gateway-public hello-route n8n kromgo open-webui external-dns hello-sso dex oauth2-proxy backstage
+  # Without the Gateway and what needs it, CrowdSec's reader of its access logs and CrowdSec, which
+  # needs the reader, and external-dns's dashboard, which needs external-dns, among them, the
+  # exporter alone builds: it probes nothing, and nothing alerts on that (ProbeNotRunning reads the
+  # scrapes of declared Probes).
+  tree_without gateway-public hello-route n8n kromgo open-webui external-dns external-dns-dashboard hello-sso dex \
+    oauth2-proxy backstage crowdsec-gateway-logs crowdsec victoria-logs-route
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]
@@ -1144,5 +1126,5 @@ lab-sto2: the application kromgo declares a Probe and its Kustomization does not
   done
   # The exporter's own metrics are scraped, and the modules are in its configuration.
   [ "$(yq -N 'select(.kind == "ServiceMonitor") | .spec.endpoints | length' "$rendered")" -eq 1 ]
-  [ "$(yq -N 'select(.kind == "ConfigMap") | .data["blackbox.yaml"]' "$rendered" | yq -o json -I0 '.modules | keys | sort' -)" = '["public_http_redirect","public_https","public_https_signin"]' ]
+  [ "$(yq -N 'select(.kind == "ConfigMap") | .data["blackbox.yaml"]' "$rendered" | yq -o json -I0 '.modules | keys | sort' -)" = "$PROBE_MODULES" ]
 }

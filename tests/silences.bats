@@ -466,15 +466,17 @@ monitor_targets() {
   # Its PodMonitor's kind exists once prometheus-operator-crds is Ready.
   depends "$with" "$APP" | grep -qx prometheus-operator-crds
 
-  # The same overlay without the entry, in a copy of the tree: nothing of the application is built.
+  # The same overlay without the entry, and without the entry of its dashboard, which goes with it,
+  # in a copy of the tree: nothing of the application is built.
   mkdir -p "$tree/kubernetes"
   cp -R "$REPO/kubernetes/apps" "$REPO/kubernetes/components" "$tree/kubernetes/"
-  grep -v "^  - ../../base/$OVERLAY_ENTRY\$" "$overlay" >"$tree/kubernetes/apps/overlays/lab-sto2/kustomization.yaml"
+  grep -v -e "^  - ../../base/$OVERLAY_ENTRY\$" -e "^  - ../../base/monitoring/$APP-dashboard/ks.yaml\$" "$overlay" \
+    >"$tree/kubernetes/apps/overlays/lab-sto2/kustomization.yaml"
   without="$(kustomize build --load-restrictor LoadRestrictionsNone "$tree/kubernetes/apps/overlays/lab-sto2")"
-  echo "objects of the build without the entry: $(yq -N '.kind' <<<"$without" | grep -c .)"
+  echo "objects of the build without the entries: $(yq -N '.kind' <<<"$without" | grep -c .)"
   [ -n "$without" ]
   if grep -q "$APP" <<<"$without"; then
-    echo "the build without the entry still names $APP"
+    echo "the build without the entries still names $APP"
     return 1
   fi
 }

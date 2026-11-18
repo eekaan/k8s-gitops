@@ -4,7 +4,7 @@ apiVersion: backstage.io/v1alpha1
 kind: Resource
 metadata:
   name: gatekeeper-policies
-  description: Gatekeeper's three ConstraintTemplates and their constraints in dry-run, the same three rules as kyverno-policies, in Rego.
+  description: The constraints, in dry-run, of Gatekeeper's three ConstraintTemplates, the same three rules as kyverno-policies.
   links:
     - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#the-three-rules
       title: Documentation
@@ -16,4 +16,4 @@ spec:
   owner: group:default/operators
   system: admission-policy
   dependsOn:
-    - component:default/gatekeeper
+    - resource:default/gatekeeper-templates

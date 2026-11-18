@@ -1,0 +1,27 @@
+---
+# Flux, written for this tree: the FluxInstance's and the operator's state, the resources by kind
+# and readiness, those not Ready with their reason and those suspended, from the Flux Operator's
+# metrics and kube-state-metrics' Deployment availability, as the alerts read them; and the
+# controllers' reconciles, errors and reconcile time, from controller-runtime's metrics, which no
+# alert reads. The Flux Operator publishes two dashboards of its own, config/monitoring/dashboards
+# of its repository, under AGPL-3.0: they are not copied into this tree, which is Apache-2.0. The
+# JSON is the ConfigMap kustomize generates from dashboards/flux.json; its panels name the variable
+# datasource, which lists the datasources of type prometheus, and the dashboard declares no input,
+# so nothing is mapped here. tests/dashboards.bats holds every metric it queries to a monitor of the
+# render, and every job it matches to one a monitor gives.
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: flux
+spec:
+  instanceSelector:
+    matchLabels:
+      app.kubernetes.io/instance: grafana
+  # A restarted Grafana starts without it. The operator applies it again every minute, and after an
+  # attempt that fails, as while Grafana starts, tries again at once and then after a wait that
+  # doubles with each failure, up to about 17 minutes, until one succeeds.
+  resyncPeriod: 1m
+  folder: Flux
+  configMapRef:
+    name: grafana-dashboard-flux
+    key: flux.json

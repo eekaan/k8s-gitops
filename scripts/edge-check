@@ -5,26 +5,41 @@
 # the service range; each has as many next hops as there are sessions, or fewer, which is for a
 # person to read, as a Service that is local-only is announced by some workers only; FRR is
 # configured with the reject route for the service range, which is in the kernel; the nftables
-# rules are loaded and no table of them translates an address, their forward chain drops by default
-# and holds no rule, and their output chain refuses a packet toward the Gateway, the proxy's
-# connection, unless its route goes through a worker, its guard holding every worker's address and
-# not the default route's next hop; the proxy runs as its own user, not root, its configuration
-# binds the stack's public ports and no other, it listens on exactly the addresses and ports its
-# configuration binds, none of them every address, and sends each connection to the cluster's
-# Gateway address with the PROXY protocol version 2 header; the kernel forwards, and not without
-# the rules; and unattended upgrades are off, as an edge is rebuilt, not patched; and the SSH
-# daemon's effective settings, for a connection of the user the check connects as, are those the
-# first boot writes from sshd.conf.
+# rules are loaded, and the whole ruleset the edge has loaded, every table of it, as nft lists it as
+# JSON, holds no chain hooked at nat and no rule with a dnat, snat, masquerade or redirect
+# statement, in a base chain or not; the rules' forward chain drops by default and holds no rule,
+# and their output chain refuses a packet toward the Gateway, the proxy's connection, unless its
+# route goes through a worker, its guard holding every worker's address and not the default route's
+# next hop, which is a skip that says what was not compared while the cluster's talman.yaml gives no
+# Gateway address to compare the guard with; the proxy runs as its own user, not root, its
+# configuration binds the stack's public ports and no other, it listens on exactly the addresses and
+# ports its configuration binds, none of them every address, and sends each connection to the
+# cluster's Gateway address with the PROXY protocol version 2 header; the kernel forwards, and not
+# without the rules; and unattended upgrades are off, as an edge is rebuilt, not patched; and the
+# SSH daemon's effective settings, for a connection of the user the check connects as, are those
+# the first boot writes from sshd.conf.
 # A command the edge could not run, or that failed, is a FAIL of its own line, saying it could not
 # be read and what the edge said, never the unhealthy conclusion drawn from an answer that did not
-# come. Prints pass, FAIL or skip per line, never an address, and exits non-zero on any FAIL.
+# come; so is an answer to the ruleset's listing that is not nft's JSON listing of the schema
+# version this reads, or in which a rule holds a statement that nft lists as text, as it lists an
+# inline chain. Prints pass, FAIL or skip per line, never an address, and exits non-zero on any
+# FAIL.
 # A check that needs the cluster's talman.yaml is skipped while it does not exist.
+# The yes for a host key that is not recorded and that the console does not vouch for is read from
+# the script's standard input, a terminal, or a pipe or a file written before it started, one line
+# for each such edge, in the order they are asked. No program the script starts has that input as
+# its standard input (reserve_answers in scripts/lib/infra.sh) but dirname, below, so the ssh that
+# reads one edge reads nothing of an answer that waits for a later prompt, of this check or of the
+# script that runs it.
 # Usage: scripts/edge-check [--edge 1|2] [cluster]
 set -euo pipefail
 
+# reserve_answers comes with the libraries, so until they are sourced dirname, here and where the
+# libraries find each other, runs with the script's own standard input, of which it reads nothing.
 here=$(dirname "$0")
 # shellcheck source=scripts/lib/edge.sh
 . "$here/lib/edge.sh"
+reserve_answers
 
 only='' cluster=lab-sto2
 while (($#)); do
@@ -112,12 +127,45 @@ in_set() {
   return 1
 }
 
+# ruleset_holds LISTING: what LISTING, the edge's answer to nft -j list ruleset, holds, as words on
+# one line. The first is "listed" when the answer is nft's listing as libnftables-json(5) gives it:
+# one object, nftables, whose list starts with nft's metainfo of the schema version this reads, 1.
+# Then "table" when a table inet edge is in it; "chain" when a chain of any table is hooked at nat,
+# which only a base chain's type says; and each of dnat, snat, masquerade and redirect that is a
+# statement of a rule of any table, in a base chain or not: a statement is an object under its
+# name, at any depth of the rule's expressions, while a name that is a value, as the status a rule
+# matches (ct status dnat) or a rule's comment, states none. The one word "text" stands for a
+# listing in which a statement of a rule is no object: nft lists a statement it has no JSON for as
+# its text, in a string, which is the inline chain of a jump or a goto (stmt_print_json and
+# chain_stmt_ops in nftables' source), so what that chain's rules state cannot be read here. Prints
+# nothing of the listing itself, which holds addresses, and nothing at all for an answer that is
+# not the listing.
+ruleset_holds() {
+  jq -rs '
+    if length == 1 and (.[0] | type == "object" and (.nftables | type == "array")
+        and (.nftables[0] | type == "object" and .metainfo.json_schema_version? == 1)) then
+      .[0].nftables as $listed
+      | if any($listed[] | .rule? | objects | .expr | arrays | .[]; type != "object") then "text"
+        else
+          [$listed[] | .rule? | objects | .expr | .. | objects | keys_unsorted[]] as $stated
+          | ["listed",
+              (if any($listed[]; .table? | type == "object" and .family == "inet" and .name == "edge") then "table" else empty end),
+              (if any($listed[]; .chain? | type == "object" and .type == "nat") then "chain" else empty end),
+              (("dnat", "snat", "masquerade", "redirect") | select(IN($stated[])))]
+          | join(" ")
+        end
+    else empty end' <<< "$1" 2> /dev/null || true
+}
+
 # guard CHAIN: what the output chain CHAIN, as nft lists it, does with a packet toward the Gateway:
 # says what is wrong with its guard, as a line for check_edge, or nothing. The guard is the rule that
 # refuses a packet toward the Gateway's address whose route does not go through a worker, which is
 # how the proxy's connection to it fails at once with no worker's route, instead of following the
-# default route; it holds every worker's address and not the default route's next hop. nft lists a
-# set of one element without its braces.
+# default route; it holds every worker's address and not the default route's next hop. The address
+# it is for is compared with the Gateway's only when the cluster's talman.yaml gives that, and a
+# worker's address is looked for in it only when the file lists one: check_edge says so where
+# nothing here is wrong and the file gave no Gateway address. nft lists a set of one element without
+# its braces.
 guard() {
   local chain=$1 line set='' address
   while IFS= read -r line; do
@@ -233,7 +281,7 @@ ask sessions sudo -n vtysh -c 'show bgp ipv4 unicast summary json'
 ask table sudo -n vtysh -c 'show bgp ipv4 unicast json'
 ask config sudo -n vtysh -c 'show running-config'
 ask unreachable ip -4 -o route show type unreachable
-ask rules sudo -n nft list tables
+ask rules sudo -n nft -j list ruleset
 ask forward sudo -n nft list chain inet edge forward
 ask output sudo -n nft list chain inet edge output
 ask proxy proxy_state
@@ -252,8 +300,8 @@ check_edge() {
   local section_config section_unreachable section_forward section_default section_upgrades reject loaded=0
   local section_output section_proxy section_users section_proxy_config section_listening
   local default_hop wrong i section_sshd differ names
-  local -a established=() prefixes=() missing=() outside=() fewer=()
-  local prefix hops address
+  local -a established=() prefixes=() missing=() outside=() fewer=() ruleset=() translating=()
+  local prefix hops address held
   if ! report=$(edge_ssh "$index" "$remote" 2> /dev/null); then
     fail "$edge" "cannot connect over SSH"
     return
@@ -470,17 +518,39 @@ check_edge() {
     pass "$edge" "the service range is unreachable on the edge but through a worker's route"
   fi
 
+  # The edge's own table is loaded, and nothing of the whole ruleset translates an address: the
+  # line passes on both only. What translates is named by its kind, on a line of its own, whether
+  # the edge's table is there or not, and never by a rule, an element or an address. A listing
+  # that is not read in full, as with a rule's inline chain, is neither.
   if unread rules; then
-    unreadable rules "the nftables tables"
+    unreadable rules "the nftables ruleset"
     loaded=-1
-  elif ! grep -qx 'table inet edge' <<< "$section_rules"; then
-    fail "$edge" "the nftables rules are not loaded"
-  elif grep -qx 'table ip edge-nat' <<< "$section_rules"; then
-    fail "$edge" "a translation table is loaded, so a connection to a public port may be translated instead of proxied"
-    loaded=1
   else
-    pass "$edge" "the nftables rules are loaded, and none translates an address"
-    loaded=1
+    read -ra ruleset <<< "$(ruleset_holds "$section_rules")"
+    if [[ ${ruleset[0]-} == text ]]; then
+      fail "$edge" "cannot read the nftables ruleset on the edge: a rule holds a statement that nft lists as text, not as JSON, as it lists an inline chain"
+      loaded=-1
+    elif [[ ${ruleset[0]-} != listed ]]; then
+      fail "$edge" "cannot read the nftables ruleset on the edge: its answer is not nft's JSON listing of schema version 1"
+      loaded=-1
+    else
+      for held in "${ruleset[@]:1}"; do
+        case $held in
+          table) loaded=1 ;;
+          chain) translating+=("a chain hooked at nat") ;;
+          *) translating+=("a $held statement") ;;
+        esac
+      done
+      if ((loaded != 1)); then
+        fail "$edge" "the nftables rules are not loaded"
+      fi
+      if ((${#translating[@]} > 0)); then
+        printf -v held '%s, ' "${translating[@]}"
+        fail "$edge" "the ruleset on the edge holds what translates an address: ${held%, }"
+      elif ((loaded == 1)); then
+        pass "$edge" "the nftables rules are loaded, and none translates an address"
+      fi
+    fi
   fi
   # The forward chain drops by default and holds no rule: nothing is forwarded, whether FRR runs or
   # not.
@@ -510,10 +580,20 @@ check_edge() {
     unreadable default "the default route"
   else
     wrong=$(guard "$section_output")
-    if [[ -z $wrong ]]; then
+    if [[ -n $wrong ]]; then
+      if ((loaded == 1)); then
+        fail "$edge" "$wrong"
+      fi
+    elif [[ -n $gateway ]]; then
       pass "$edge" "the output chain keeps the proxy's connections to the Gateway on a worker's route"
-    elif ((loaded == 1)); then
-      fail "$edge" "$wrong"
+    # Without the Gateway's address the guard was compared with nothing it is for, as the proxy's
+    # backends were not: the line says what was not compared, and what the guard was still found to
+    # be, a rule that holds every worker's address the file gives and not the default route's next
+    # hop.
+    elif ((${#workers[@]} > 0)); then
+      skip "$edge" "the output chain's guard: not compared with the Gateway's address, which talos/$cluster/talman.yaml does not give; it holds every worker's address and not the default route's next hop"
+    else
+      skip "$edge" "the output chain's guard: not compared with the Gateway's address, which talos/$cluster/talman.yaml does not give, and no worker's address was looked for in it, as the file gives none either; it does not hold the default route's next hop"
     fi
   fi
   check_proxy

@@ -1,0 +1,20 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: cilium-monitoring-dashboard
+  description: The Grafana dashboards for the Cilium agents and their BGP sessions.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#dashboards
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/monitoring/cilium-monitoring-dashboard
+      title: Manifests
+spec:
+  type: dashboard
+  lifecycle: production
+  owner: group:default/operators
+  system: observability
+  dependsOn:
+    - resource:default/cilium-monitoring
+    - component:default/grafana-operator

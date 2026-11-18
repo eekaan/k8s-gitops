@@ -174,7 +174,7 @@ bytes() {
         and (.spec.template.spec.containers[].image | test("grafana")))
       or (.kind | test("^Grafana"))
       or ((.kind == "ConfigMap" or .kind == "Secret")
-        and (.metadata.labels // {} | has("grafana_dashboard") or has("grafana_datasource"))))
+        and (.metadata.labels // {} | (has("grafana_dashboard") or has("grafana_datasource")))))
     | .kind + "/" + .metadata.name' "$RENDERED")"
   echo "Grafana objects: ${grafana:-none}"
   [ -z "$grafana" ]
@@ -267,18 +267,6 @@ bytes() {
   echo "cluster-check asks the Service $service on port $port in $NAMESPACE"
   [ "$(yq -N "select(.kind == \"Service\" and .metadata.name == \"$service\" and .metadata.namespace == \"$NAMESPACE\")
     | .spec.ports[] | select(.port == $port) | .port" "$RENDERED")" = "$port" ]
-}
-
-@test "Alerts go nowhere yet" {
-  local config
-  render
-  config="$(yq -N 'select(.kind == "Secret" and .metadata.name == "alertmanager-*") | .data["alertmanager.yaml"]' "$RENDERED" | base64 -d)"
-  [ -n "$config" ]
-  echo "receivers: $(yq -o json -I0 '.receivers' <<<"$config"); routes to: $(yq -o json -I0 '[.. | select(has("receiver")) | .receiver] | unique' <<<"$config")"
-  [ "$(yq -o json -I0 '.receivers' <<<"$config")" = '[{"name":"null"}]' ]
-  [ "$(yq -o json -I0 '[.. | select(has("receiver")) | .receiver] | unique' <<<"$config")" = '["null"]' ]
-  # Nor does any other object configure Alertmanager.
-  [ -z "$(yq -N 'select(.kind == "AlertmanagerConfig") | .metadata.name' "$RENDERED")" ]
 }
 
 @test "Prometheus picks up every monitor and rule in the cluster" {

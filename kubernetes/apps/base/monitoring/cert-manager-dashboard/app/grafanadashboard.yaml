@@ -1,0 +1,25 @@
+---
+# Certificates, written for this tree, as cert-manager publishes no dashboard at the pinned
+# version: the Certificates that are not Ready, and the time left to each certificate's end, soonest
+# first, from the two metrics of the controller that the alerts read. The chart's ServiceMonitor
+# scrapes without honorLabels, so Prometheus keeps the label namespace for the controller's own and
+# stores the Certificate's as exported_namespace, which the tables show. The JSON is the ConfigMap
+# kustomize generates from dashboards/cert-manager.json; its panels name the variable datasource,
+# which lists the datasources of type prometheus, and the dashboard declares no input, so nothing is
+# mapped here. tests/dashboards.bats holds every metric it queries to a monitor of the render.
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: cert-manager
+spec:
+  instanceSelector:
+    matchLabels:
+      app.kubernetes.io/instance: grafana
+  # A restarted Grafana starts without it. The operator applies it again every minute, and after an
+  # attempt that fails, as while Grafana starts, tries again at once and then after a wait that
+  # doubles with each failure, up to about 17 minutes, until one succeeds.
+  resyncPeriod: 1m
+  folder: cert-manager
+  configMapRef:
+    name: grafana-dashboard-cert-manager
+    key: cert-manager.json

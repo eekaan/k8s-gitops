@@ -1,0 +1,88 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What the OpenFeature Operator lets through, on top of the namespace's default deny: the kubelet's
+# probes, Prometheus' scrape, and its own calls to the API server. It opens no other connection and
+# looks no name up: its client takes the API server's address from the pod's environment, and what
+# it validates a flag set against is compiled into it (docs/kubernetes.md, OpenFeature Operator).
+# The API server's calls to its webhooks are the next policy's.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: open-feature-operator
+spec:
+  # The operator's pods, by the labels of the Deployment's selector, which the webhook's Service
+  # selects too.
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: open-feature-operator
+      control-plane: controller-manager
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    # The kubelet's liveness and readiness probes, /healthz and /readyz on the manager's health
+    # port, which arrive from the node the pod runs on.
+    - fromEntities:
+        - host
+      toPorts:
+        - ports:
+            - port: "8081"
+              protocol: TCP
+    # The stack's Prometheus, scraping the manager's metrics through the application's PodMonitor,
+    # which names the container port metrics-server, 8080.
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": monitoring
+            app.kubernetes.io/name: prometheus
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+  egress:
+    # The API server, where the manager reads pods, Deployments, service accounts and the flag
+    # kinds, holds its leader election lease and writes the subjects of its ClusterRoleBinding. A
+    # Service's address is translated to the control plane's before policy applies, so 6443 is the
+    # port that counts.
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "6443"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# The operator's admission webhooks, which the API server calls from the control planes' host
+# network. A call another node's host sends crosses the tunnel as a remote node (bpf/bpf_overlay.c),
+# which Cilium names the API server only for an address it knows as the API server's; a call from
+# the node the pod runs on comes from the host. The rule names all three, on the webhooks' port
+# alone.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: open-feature-operator-webhook
+  annotations:
+    k8s-gitops/network-policy-reason: >-
+      the API server calls the webhooks from the control planes' host network, and a call from
+      another node reaches the pod as remote-node unless Cilium knows its source address as the
+      API server's; port 9443 only
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: open-feature-operator
+      control-plane: controller-manager
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    - fromEntities:
+        - kube-apiserver
+        - host
+        - remote-node
+      toPorts:
+        - ports:
+            - port: "9443"
+              protocol: TCP

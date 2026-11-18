@@ -11,6 +11,7 @@
 # Licence: MPL-2.0
 # The licence is at https://mozilla.org/MPL/2.0/
 # SHA-256: 6ed324602038238ea53e5b1bb145a9988be575a10a8cb26df24dcff142d2f8fa
+# Chart-path: grafana/dashboards/dashboard.json
 # dashboard-openbao: 0.30.7
 apiVersion: grafana.integreatly.org/v1beta1
 kind: GrafanaDashboard
@@ -20,8 +21,9 @@ spec:
   instanceSelector:
     matchLabels:
       app.kubernetes.io/instance: grafana
-  # A restarted Grafana starts without it. The operator applies it again every minute, and retries
-  # a failed attempt after 10 seconds, doubling the wait up to two minutes while Grafana starts.
+  # A restarted Grafana starts without it. The operator applies it again every minute, and after an
+  # attempt that fails, as while Grafana starts, tries again at once and then after a wait that
+  # doubles with each failure, up to about 17 minutes, until one succeeds.
   resyncPeriod: 1m
   folder: OpenBao
   datasources:

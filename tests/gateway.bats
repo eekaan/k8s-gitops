@@ -7,6 +7,9 @@
 # it back afterwards, so two builds at once could leave the rewritten file behind.
 export BATS_NO_PARALLELIZE_WITHIN_FILE=true
 
+# tree_without, a copy of the tree whose overlay leaves applications out.
+load fixtures/tree-without
+
 setup() {
   REPO="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
   CLUSTER="$REPO/kubernetes/clusters/lab-sto2"
@@ -342,9 +345,9 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   [ "$policy" = "$(jq -cnS --arg gateway "$gateway" '{targetRefs: [{group: "gateway.networking.k8s.io", kind: "Gateway", name: $gateway}],
     proxyProtocol: {optional: true}, tls: {minVersion: "1.2"}}')" ]
   # It is the one policy on the Gateway, and the only one on a route attached to it but the sign-in's
-  # below: of everything the cluster applies, no other object's targetRef, targetRefs or
-  # targetSelectors names the Gateway or such a route, and none selects a Gateway or a route by its
-  # labels.
+  # and the web application firewall's below: of everything the cluster applies, no other object's
+  # targetRef, targetRefs or targetSelectors names the Gateway or such a route, and none selects a
+  # Gateway or a route by its labels.
   everything
   # shellcheck disable=SC2016 # $gateway, $namespace, $routes, $p and $own are jq variables.
   targeting="$(yq -N -o json -I0 '.' "$EVERYTHING" | jq -rs --arg gateway "$gateway" --arg namespace "$namespace" '
@@ -361,11 +364,13 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
         or any($p.spec.targetSelectors[]?; .kind == "Gateway" or (.kind | tostring | endswith("Route"))))
     | "\($p.kind)/\($own)/\($p.metadata.name)"')"
   echo "policies on the Gateway or its routes: $targeting"
-  # The one route that opts in to the cluster's sign-in (features/sso.feature) has the one
-  # SecurityPolicy that asks oauth2-proxy about its requests; it is named here, not found in the
-  # tree, so a policy on the Gateway or on any other route is a failure. A route that opts in later
-  # adds its policy to this list.
-  [ "$(sort <<<"$targeting")" = "$({ printf '%s\n' "ClientTrafficPolicy/$namespace/$(only "$BUILT" ClientTrafficPolicy)" SecurityPolicy/demo/hello-sso; } | sort)" ]
+  # Each route that opts in to the cluster's sign-in (features/sso.feature) has the one
+  # SecurityPolicy that asks oauth2-proxy about its requests, and the one route behind the web
+  # application firewall (features/waf.feature) the EnvoyExtensionPolicy that runs it; they are
+  # named here, not found in the tree, so a policy on the Gateway or on any other route is a
+  # failure. A route that opts in later adds its policy to this list.
+  [ "$(sort <<<"$targeting")" = "$({ printf '%s\n' "ClientTrafficPolicy/$namespace/$(only "$BUILT" ClientTrafficPolicy)" SecurityPolicy/demo/hello-sso \
+    SecurityPolicy/monitoring/logs EnvoyExtensionPolicy/demo/hello; } | sort)" ]
   # Nor does anything patch around it: no EnvoyPatchPolicy anywhere, which rewrites the translated
   # configuration of a Gateway, or of every Gateway of its class, whatever the policies say.
   local patches forwarded
@@ -430,7 +435,7 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
     echo "namespace $name: k8s-gitops/gateway=$labels"
     if [ "$labels" = "$label" ]; then attached+=("$name"); fi
   done < <(yq -N 'select(.kind == "Namespace") | .metadata.name + "\t" + (.metadata.labels["k8s-gitops/gateway"] // "none")' "$OVERLAY")
-  [ "${attached[*]}" = "ai-system backstage demo kromgo sso-system" ]
+  [ "${attached[*]}" = "ai-system backstage demo kromgo monitoring sso-system" ]
   # Every route that names the Gateway from another namespace is in one that attached.
   built hello-route
   [ "$(yq -N 'select(.kind == "HTTPRoute") | .spec.parentRefs[].name' "$BUILT")" = "$gateway" ]
@@ -447,6 +452,10 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   built backstage
   [ "$(yq -N 'select(.kind == "HTTPRoute") | .spec.parentRefs[].name' "$BUILT")" = "$gateway" ]
   [ "$(yq -N 'select(.kind == "HTTPRoute") | .metadata.namespace' "$BUILT")" = backstage ]
+  # The log store's route and its sign-in route.
+  built victoria-logs-route
+  [ "$(yq -N 'select(.kind == "HTTPRoute") | .spec.parentRefs[].name' "$BUILT" | sort -u)" = "$gateway" ]
+  [ "$(yq -N 'select(.kind == "HTTPRoute") | .metadata.namespace' "$BUILT" | sort -u)" = monitoring ]
 }
 
 @test "The Gateway listens on exactly the ports the edge routers translate" {
@@ -517,18 +526,6 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   [ "$(depends_on hello-route | sort | paste -sd' ' -)" = "blackbox-exporter gateway-public hello" ]
 }
 
-# tree_without APP...: copies kubernetes/ to $TREE and takes the ks.yaml of each APP out of the
-# overlay's resources.
-tree_without() {
-  local app
-  TREE="$BATS_TEST_TMPDIR/tree"
-  mkdir -p "$TREE"
-  cp -r "$REPO/kubernetes" "$TREE/kubernetes"
-  for app in "$@"; do
-    yq -i '.resources |= map(select(test("/'"$app"'/ks.yaml$") | not))' "$TREE/kubernetes/apps/overlays/lab-sto2/kustomization.yaml"
-  done
-}
-
 @test "A cluster that leaves the Gateway out still builds, and a route without its Gateway is refused" {
   # The tree as it is passes, with the issuer, the Gateway and the route listed.
   run "$REPO/scripts/kubernetes-check" "$REPO"
@@ -539,8 +536,9 @@ tree_without() {
       || { echo "the lab-sto2 overlay does not list $app"; return 1; }
   done
   # Leaving the Gateway, the applications that have a route on it, the DNS records of their routes
-  # and CrowdSec, whose agent reads the Gateway's proxies, out builds: nothing else names them.
-  tree_without gateway-public hello-route n8n kromgo external-dns open-webui hello-sso dex oauth2-proxy backstage crowdsec crowdsec-gateway-logs
+  # and the dashboard of those records, and CrowdSec, whose agent reads the Gateway's proxies, out
+  # builds: nothing else names them.
+  tree_without gateway-public hello-route n8n kromgo external-dns open-webui hello-sso dex oauth2-proxy backstage crowdsec crowdsec-gateway-logs victoria-logs-route external-dns-dashboard
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]
@@ -640,7 +638,7 @@ tree_without() {
   # One setting that matches everything: no type, which logs every route's requests and, through
   # the listener, those no route took; no CEL match.
   [ "$(yq '.settings | length' "$log")" -eq 1 ]
-  [ "$(yq '.settings[0] | has("type") or has("matches")' "$log")" = false ]
+  [ "$(yq '.settings[0] | (has("type") or has("matches"))' "$log")" = false ]
   # JSON, to standard output, where the log collector reads the container's lines.
   [ "$(yq '.settings[0].format.type' "$log")" = JSON ]
   [ "$(yq '.settings[0].sinks | length' "$log")" -eq 1 ]

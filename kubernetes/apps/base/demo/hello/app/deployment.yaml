@@ -2,11 +2,17 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/deployment-apps-v1.json
 # The smallest real HTTP workload: busybox's web server, answering with the page of the ConfigMap.
 # Two replicas on different nodes, so a node's drain or loss leaves one answering, and a budget that
-# keeps one running while a drain evicts the other.
+# keeps one running while a drain evicts the other. It also holds the demo's secret, as a file it
+# does not serve, so that a rotation has pods to prove itself in (docs/kubernetes.md, Rotating an
+# application's secret).
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: hello
+  annotations:
+    # Reloader restarts the pods when the data of the Secret hello changes. It names that Secret
+    # alone, so a change to the page's ConfigMap restarts nothing.
+    secret.reloader.stakater.com/reload: hello
 spec:
   replicas: 2
   selector:
@@ -64,6 +70,11 @@ spec:
             - name: www
               mountPath: /www
               readOnly: true
+            # Outside /www, the only directory httpd serves, and whole, with no subPath, so the
+            # kubelet keeps the file equal to the Secret.
+            - name: greeting
+              mountPath: /etc/hello
+              readOnly: true
       volumes:
         - name: www
           configMap:
@@ -71,3 +82,13 @@ spec:
             items:
               - key: index.html
                 path: index.html
+        # The key greeting of the Secret the ExternalSecret hello writes, as /etc/hello/greeting.
+        # Optional: the pods start without the Secret, which exists only once an operator has
+        # written the key to the store, and the kubelet adds the file when it does.
+        - name: greeting
+          secret:
+            secretName: hello
+            optional: true
+            items:
+              - key: greeting
+                path: greeting

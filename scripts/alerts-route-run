@@ -1,0 +1,472 @@
+#!/usr/bin/env bash
+# Runs the cases of DIR/cases.yaml on the configuration DIR/alertmanager.yaml, both as
+# scripts/alerts-route-config wrote them, with amtool and Alertmanager of the image the chart
+# deploys. SHELL... is the command that runs a shell that has the image's binaries, with DIR as its
+# working directory, which the file names are relative to, and somewhere to keep temporary files:
+# sh itself, started in DIR where amtool and alertmanager are on PATH, or a container's entrypoint,
+# such as
+#   docker run --rm --network none --tmpfs /tmp -v DIR:/check:ro -w /check --entrypoint sh IMAGE
+# The command is run with none of the secrets a recipe's environment may hold, and so is whatever
+# that shell starts.
+#
+# amtool check-config must accept the configuration. Then every case runs, and each is printed with
+# its name after ok or FAILED, and why it failed, so one report holds every failure:
+#   route                       each alert goes to amtool config routes test with the receivers the
+#                               case expects, which must be the ones amtool prints;
+#   start, inhibition, silence  share one Alertmanager, which the shell starts on its loopback
+#                               alone, without peers, with its data in a directory that goes with
+#                               it, gives the alerts through amtool, and asks through amtool, its
+#                               log and its metrics. Each alert starts five minutes back, so its
+#                               group is flushed at once and no case waits for a group_wait.
+# A case of a kind the check does not run, or whose expectations are not written as its kind's are,
+# fails. Exits non-zero when amtool refuses the configuration or a case fails.
+#
+# With --refusals it proves that the check refuses what it must, by one change to DIR at a time,
+# each put back: a configuration amtool refuses, a route case whose expectation is wrong, and an
+# inhibition case whose expectation is wrong. Each must fail a run of the check: the first at
+# amtool's check of the configuration, the others under the case's name.
+# Usage: scripts/alerts-route-run [--refusals] DIR SHELL...
+set -euo pipefail
+
+# The command is run with none of the secrets a recipe's environment may hold.
+# shellcheck source=scripts/lib/tools.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/tools.sh"
+
+self=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")
+refusals=0
+if [[ ${1:-} == --refusals ]]; then
+  refusals=1
+  shift
+fi
+[[ $# -ge 2 && -d $1 ]] || { echo "usage: scripts/alerts-route-run [--refusals] DIR SHELL..." >&2; exit 2; }
+dir=$(cd "$1" && pwd)
+shift
+shell=("$@")
+
+for tool in yq jq; do
+  type -P "$tool" >/dev/null || { echo "alerts-route-run: $tool not found on PATH" >&2; exit 1; }
+done
+for file in alertmanager.yaml cases.yaml; do
+  [[ -f $dir/$file ]] || { echo "alerts-route-run: no $file in $dir" >&2; exit 1; }
+done
+
+# refused WHAT EXPECTED: runs the check on DIR as the change left it, and fails unless it fails
+# with the line EXPECTED in what it prints.
+refused() {
+  local what=$1 expected=$2 output
+  if output=$("$self" "$dir" "${shell[@]}" 2>&1); then
+    echo "$output"
+    echo "alerts-route-run: the check passed $what" >&2
+    exit 1
+  fi
+  if ! grep -qxF -- "$expected" <<<"$output"; then
+    echo "$output"
+    echo "alerts-route-run: the check passed $what: it failed, but with no line $expected" >&2
+    exit 1
+  fi
+  echo "alerts-route-run: the check fails for $what"
+}
+
+if ((refusals)); then
+  kept=$(mktemp -d)
+  cp "$dir/alertmanager.yaml" "$dir/cases.yaml" "$kept/"
+  restore() {
+    cp "$kept/alertmanager.yaml" "$dir/alertmanager.yaml"
+    cp "$kept/cases.yaml" "$dir/cases.yaml"
+  }
+  trap 'restore; rm -rf "$kept"' EXIT
+
+  # A root that sends to a receiver the configuration does not hold: no amtool accepts it.
+  yq -i '.route.receiver = "a-receiver-that-is-not-there"' "$dir/alertmanager.yaml"
+  refused "a configuration amtool refuses" "alerts-route-run: amtool check-config refuses the configuration"
+  restore
+
+  index=$(yq '.cases | to_entries | map(select(.value.kind == "route")) | .[0].key // ""' "$dir/cases.yaml")
+  [[ -n $index ]] || { echo "alerts-route-run: no route case in $dir/cases.yaml to give a wrong expectation" >&2; exit 1; }
+  name=$(INDEX=$index yq '.cases[env(INDEX)].name' "$dir/cases.yaml")
+  INDEX=$index yq -i '.cases[env(INDEX)].alerts[0].receivers = ["a-receiver-that-is-not-there"]' "$dir/cases.yaml"
+  refused "a route case whose expectation is wrong" "FAILED  $name"
+  restore
+
+  # An alert that nothing inhibits, said to be inhibited by the next alert of its case.
+  index=$(yq '.cases | to_entries | map(select(.value.kind == "inhibition" and (.value.alerts | length) > 1 and .value.alerts[0].inhibited == false)) | .[0].key // ""' "$dir/cases.yaml")
+  [[ -n $index ]] || { echo "alerts-route-run: no inhibition case in $dir/cases.yaml whose first alert is not inhibited, to say it is" >&2; exit 1; }
+  name=$(INDEX=$index yq '.cases[env(INDEX)].name' "$dir/cases.yaml")
+  INDEX=$index yq -i '.cases[env(INDEX)].alerts[0].inhibited = true
+    | .cases[env(INDEX)].alerts[0].by = .cases[env(INDEX)].alerts[1].labels' "$dir/cases.yaml"
+  refused "an inhibition case whose expectation is wrong" "FAILED  $name"
+  exit 0
+fi
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+cd "$dir"
+transcript=$tmp/transcript
+: >"$transcript"
+
+# in_shell ARG...: the shell with ARG..., and none of the secrets.
+in_shell() {
+  run_tool "${shell[@]}" "$@"
+}
+
+# image_tool COMMAND ARG...: one of the image's binaries, with its arguments as they are.
+image_tool() {
+  # shellcheck disable=SC2016 # the shell that is given this text expands it
+  in_shell -c 'exec "$@"' sh "$@"
+}
+
+# What the shell runs for the cases that need an Alertmanager: one instruction an argument, its
+# fields separated by tabs. What each step prints goes between a line "@@ TAG STATUS", with the
+# step's exit status, and a line "@@ end TAG", which is how this script finds it again. POSIX sh,
+# with only what busybox and Debian both have, and wget or curl, whichever is there.
+read -r -d '' live <<'LIVE' || true
+set -u
+ifs=$IFS
+tab=$(printf '\t')
+port=19093
+url=http://127.0.0.1:$port
+work=$(mktemp -d) || exit 1
+pid=
+up=0
+base=0
+trap '[ -z "$pid" ] || kill "$pid" 2>/dev/null; rm -rf "$work"' EXIT
+fetch() {
+  if command -v wget >/dev/null 2>&1; then wget -q -O - "$1"; else curl -fsS "$1"; fi
+}
+am() {
+  amtool --alertmanager.url="$url" "$@"
+}
+frame() {
+  tag=$1
+  shift
+  out=$("$@" 2>&1)
+  status=$?
+  printf '@@ %s %s\n%s\n@@ end %s\n' "$tag" "$status" "$out" "$tag"
+}
+files() {
+  for path in "$@"; do
+    if [ -e "$path" ]; then echo "present $path"; else echo "absent $path"; fi
+  done
+}
+# A process that has ended and is not yet waited for still takes a signal, so its state is read too.
+running() {
+  kill -0 "$pid" 2>/dev/null || return 1
+  [ ! -r "/proc/$pid/status" ] || ! grep -q '^State:.*Z' "/proc/$pid/status"
+}
+ready() {
+  i=0
+  while [ "$i" -lt 150 ] && running; do
+    if fetch "$url/-/ready" >/dev/null 2>&1; then
+      echo ready
+      return 0
+    fi
+    i=$((i + 1))
+    sleep 0.2
+  done
+  cat "$work/log"
+  return 1
+}
+every() {
+  am alert query -o json --active --silenced --inhibited --unprocessed
+}
+suppressed() {
+  every 2>/dev/null | grep -o '"state":"suppressed"' | grep -c .
+}
+counters() {
+  fetch "$url/metrics" | grep -e '^alertmanager_notifications_total{' -e '^alertmanager_notifications_failed_total{'
+}
+step() {
+  IFS=$ifs
+  set +f
+  action=$1
+  shift
+  # Without an Alertmanager there is nothing to ask, and nothing to wait for.
+  case $action in
+    files | start) ;;
+    *) [ "$up" -eq 1 ] || return 0 ;;
+  esac
+  case $action in
+    files) frame files files "$@" ;;
+    start)
+      alertmanager --config.file=alertmanager.yaml --storage.path="$work/data" \
+        --web.listen-address="127.0.0.1:$port" --cluster.listen-address= >"$work/log" 2>&1 &
+      pid=$!
+      frame ready ready
+      [ "$status" -ne 0 ] || up=1
+      ;;
+    add)
+      tag=$1
+      shift
+      now=$(date +%s)
+      frame "$tag" am alert add --start="$(date -u -d "@$((now - 300))" +%Y-%m-%dT%H:%M:%SZ)" \
+        --end="$(date -u -d "@$((now + 3600))" +%Y-%m-%dT%H:%M:%SZ)" "$@"
+      ;;
+    failures)
+      i=0
+      while [ "$i" -lt 50 ] && [ "$(grep -c 'msg="Notify failed"' "$work/log")" -lt "$1" ]; do
+        i=$((i + 1))
+        sleep 0.2
+      done
+      ;;
+    mark) base=$(suppressed) ;;
+    settle)
+      i=0
+      while [ "$i" -lt 50 ] && [ "$(suppressed)" -lt "$((base + $1))" ]; do
+        i=$((i + 1))
+        sleep 0.1
+      done
+      ;;
+    silence)
+      tag=$1
+      shift
+      frame "$tag" am silence add --author=alerts-route-check --comment=alerts-route-check --duration=1h "$@"
+      ;;
+    alerts) frame "$1" every ;;
+    log) frame "$1" cat "$work/log" ;;
+    counters) frame "$1" counters ;;
+    stop)
+      kill "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      pid=
+      ;;
+  esac
+}
+for instruction in "$@"; do
+  IFS=$tab
+  set -f
+  step $instruction
+done
+LIVE
+
+echo "== amtool check-config"
+unaccepted=0
+said=$(image_tool amtool check-config alertmanager.yaml 2>&1) || unaccepted=1
+[[ -z $said ]] || echo "$said"
+# amtool says so when it accepts a file: a command that only exits well has checked nothing.
+grep -q "^Checking 'alertmanager.yaml'  SUCCESS" <<<"$said" || unaccepted=1
+echo "== the route tree, as amtool reads it"
+image_tool amtool config routes show --config.file=alertmanager.yaml 2>&1 || true
+
+cases=$(yq -o json -I0 '.cases // []' cases.yaml)
+config=$(yq -o json -I0 '.' alertmanager.yaml 2>/dev/null) || config='{}'
+# The files each receiver reads its address from.
+files=$(jq -c '[.receivers[]? | select(type == "object") | {"key": .name, "value": [.webhook_configs[]? | .url_file // empty]}] | from_entries' <<<"$config" 2>/dev/null) || files='{}'
+
+# Each case with what is wrong with how it is written: a case is run only when nothing is.
+# shellcheck disable=SC2016 # $known, $extra and the like are jq variables.
+cases=$(jq -c '
+  def plain: type == "string" and test("^[A-Za-z0-9_.:-]+$");
+  def labels: type == "object" and length > 0 and has("alertname")
+    and all(to_entries[]; (.key | test("^[A-Za-z_][A-Za-z0-9_]*$")) and (.value | plain));
+  # jq makes a parameter written $name a filter of that name too, inside its definition, so no
+  # parameter here is named after a filter its definition calls, such as keys.
+  def allowed($known; $holder): (keys - $known) as $extra
+    | if $extra == [] then [] else ["\($holder) holds \($extra | join(", ")), which its kind does not read"] end;
+  def receivers: if (.receivers | type) == "array" and (.receivers | length) > 0 and all(.receivers[]; plain) then []
+    else ["an alert names no receivers"] end;
+  def alerts($known; each):
+    if (.alerts | type) != "array" or (.alerts | length) == 0 then ["holds no alert"]
+    else [.alerts[] | if type != "object" then "an alert is not a mapping"
+      else allowed($known; "an alert")[],
+        (if (.labels | labels) then each[] else "an alert has labels amtool cannot be handed as they are: \(.labels | tojson)" end) end]
+    end;
+  def written:
+    if type != "object" then ["is not a mapping"]
+    elif .kind == "route" or .kind == "start" then
+      allowed(["alerts", "kind", "name"]; "the case") + alerts(["labels", "receivers"]; receivers)
+    elif .kind == "inhibition" then
+      . as $case
+      | allowed(["alerts", "kind", "name"]; "the case")
+        + alerts(["by", "inhibited", "labels"];
+          if (.inhibited | type) != "boolean" then ["an alert does not say whether it is inhibited"]
+          elif .inhibited and (has("by") | not) then ["an inhibited alert does not say by which alert"]
+          elif .inhibited and ([.by] - [$case.alerts[] | objects | .labels]) != []
+          then ["an alert is inhibited by one the case does not hold: \(.by | tojson)"]
+          elif (.inhibited | not) and has("by") then ["an alert that is not inhibited names one that inhibits it"]
+          else [] end)
+    elif .kind == "silence" then
+      allowed(["alerts", "kind", "name", "silence"]; "the case")
+        + (if (.silence | type) == "object" and (.silence | length) > 0 and all(.silence | to_entries[]; (.key | test("^[A-Za-z_][A-Za-z0-9_]*$")) and (.value | plain)) then []
+          else ["names no silence amtool can be handed as it is"] end)
+        + alerts(["labels", "receivers", "silenced"];
+          receivers + (if (.silenced | type) != "boolean" then ["an alert does not say whether it is silenced"] else [] end))
+    else ["is of the kind \(.kind | tostring), which the check does not run"] end;
+  [.[] | if type == "object" and (.name | type) == "string" and .name != "" then .name else "(a case without a name)" end] as $names
+  | [to_entries[] | .key as $i | .value as $case
+    | {"index": $i, "name": $names[$i], "kind": ($case.kind? // null), "case": $case,
+       "problems": (($case | written)
+         + (if ([$names[] | select(. == $names[$i])] | length) > 1 then ["two cases are named \($names[$i])"] else [] end))}]
+' <<<"$cases")
+(($(jq 'length' <<<"$cases") > 0)) || { echo "alerts-route-run: $dir/cases.yaml holds no case" >&2; exit 1; }
+
+# The route cases: amtool, once an alert.
+while IFS=$'\t' read -r tag expected labels; do
+  [[ -n $tag ]] || continue
+  read -ra args <<<"$labels"
+  status=0
+  out=$(image_tool amtool config routes test --config.file=alertmanager.yaml --verify.receivers="$expected" "${args[@]}" 2>&1) || status=$?
+  printf '@@ %s %s\n%s\n@@ end %s\n' "$tag" "$status" "$out" "$tag" >>"$transcript"
+done < <(jq -r '.[] | select(.problems == [] and .kind == "route") | .index as $i | .case.alerts | to_entries[]
+  | ["route.\($i).\(.key)", (.value.receivers | join(",")),
+     (.value.labels | to_entries | sort_by(.key) | map("\(.key)=\(.value)") | join(" "))] | @tsv' <<<"$cases")
+
+# The cases that need an Alertmanager: the start first, then the others as written. The alerts a
+# case expects to be inhibited or silenced are waited for, by how many more alerts are suppressed
+# than before the case, for a few seconds at most: a case that expects one too many then fails.
+# shellcheck disable=SC2016 # $files, $live and the like are jq variables.
+mapfile -t plan < <(jq -r --argjson files "$files" '
+  def fields: to_entries | sort_by(.key) | map("\(.key)=\(.value)") | join("\t");
+  def adds($i): .alerts | to_entries | map("add\tadd.\($i).\(.key)\t" + (.value.labels | fields));
+  [.[] | select(.problems == [] and (.kind == "start" or .kind == "inhibition" or .kind == "silence"))] as $live
+  | if $live == [] then empty else
+      (["files"] + [$files[][]] | join("\t")),
+      "start",
+      ($live[] | select(.kind == "start") | .index as $i | .case
+        | adds($i)[],
+          "failures\t\([.alerts[].receivers[]] | unique | map(select(($files[.] // []) != [])) | length)",
+          "alerts\talerts.\($i)", "log\tlog.\($i)", "counters\tcounters.\($i)"),
+      ($live[] | select(.kind != "start") | .index as $i | .case
+        | "mark",
+          (if .kind == "silence" then "silence\tsilence.\($i)\t" + (.silence | fields) else empty end),
+          adds($i)[],
+          "settle\t\([.alerts[] | select(.inhibited == true or .silenced == true)] | length)",
+          "alerts\talerts.\($i)"),
+      "stop"
+    end' <<<"$cases")
+if ((${#plan[@]})); then
+  in_shell -c "$live" sh "${plan[@]}" >>"$transcript" 2>&1 || true
+fi
+
+# What each step printed, by its tag, and what was printed outside any step.
+# shellcheck disable=SC2016 # $line and $start are jq variables.
+jq -R -s '
+  reduce (split("\n")[]) as $line ({"open": null, "frames": {}, "outside": []};
+    if .open == null then
+      ([$line | capture("^@@ (?<tag>[a-z0-9.]+) (?<status>[0-9]+)$")] | first) as $start
+      | if $start != null then .open = $start.tag | .frames[$start.tag] = {"status": ($start.status | tonumber), "lines": []}
+        elif $line != "" then .outside += [$line]
+        else . end
+    elif $line == "@@ end \(.open)" then .open = null
+    else .frames[.open].lines += [$line] end)
+  | {"frames": (.frames | map_values({"status": .status, "out": (.lines | join("\n"))})), "outside": .outside}
+' "$transcript" >"$tmp/frames.json"
+
+# Each case against what was printed for it.
+# shellcheck disable=SC2016 # $frames, $files and the like are jq variables.
+results=$(jq -c --slurpfile printed "$tmp/frames.json" --argjson files "$files" '
+  $printed[0].frames as $frames
+  | def text: to_entries | sort_by(.key) | map("\(.key)=\(.value)") | join(" ");
+  def dump($tag): $frames[$tag] as $f
+    | if $f == null or $f.status != 0 then null else ($f.out | try fromjson catch null) end;
+  def held($listed; $wanted): [$listed[] | select(.labels == $wanted)] | first;
+  def names: [.receivers[]?.name];
+  def counter($lines; $series): [$lines | split("\n")[] | select(startswith($series + "{") and contains("integration=\"webhook\""))
+    | split(" ") | last | tonumber] | add // 0;
+  # What is wrong with the Alertmanager the cases share, when it did not come up.
+  def down: $frames.ready as $ready
+    | if $ready == null then ["Alertmanager was not started"]
+      elif $ready.status != 0 then ["Alertmanager did not become ready: \($ready.out | split("\n") | map(select(. != "")) | last // "it printed nothing")"]
+      else [] end;
+
+  def route($i):
+    [.alerts | to_entries[] | .key as $j | .value as $alert | $frames["route.\($i).\($j)"] as $f
+      | ($alert.receivers | join(",")) as $want
+      | if $f == null then "\($alert.labels | text): amtool was not asked"
+        else ($f.out | split("\n") | first // "") as $got
+          | if $f.status == 0 and $got == $want then empty
+            else "\($alert.labels | text) resolves to \(if $got == "" then "nothing amtool printed" else $got end), not \($want)" end
+        end];
+
+  def start($i):
+    if down != [] then down else
+      dump("alerts.\($i)") as $dump
+      | ($frames["log.\($i)"].out // "") as $log
+      | $frames["counters.\($i)"] as $counters
+      | ([.alerts[].receivers[]] | unique) as $receivers
+      | (if $frames.files == null then ["the files the receivers read were not looked for"]
+          else [$frames.files.out | split("\n")[] | select(startswith("present "))
+            | "there is a file at \(ltrimstr("present ")), and the start is proved without one"] end)
+        + (if $dump == null then ["Alertmanager did not list its alerts"]
+          else [.alerts[] as $alert | held($dump; $alert.labels) as $found
+            | if $found == null then "Alertmanager does not hold \($alert.labels | text)"
+              elif ($found | names) != $alert.receivers
+              then "the receivers of \($alert.labels | text) are \($found | names | join(",")), not \($alert.receivers | join(","))"
+              else empty end] end)
+        + [$receivers[] as $receiver | ($files[$receiver] // []) as $paths
+          | if $paths == [] then "the receiver \($receiver) reads no address from a file, so no notification of it fails on one"
+            else $paths[] as $path
+              | if any($log | split("\n")[]; contains("msg=\"Notify failed\"") and contains(" receiver=\($receiver) ")
+                  and contains("read url_file: open \($path): no such file or directory")) then empty
+                else "the log holds no notification of \($receiver) that failed on \($path)" end
+            end]
+        + (if $counters == null or $counters.status != 0 then ["the counters of notifications were not read"]
+          else counter($counters.out; "alertmanager_notifications_total") as $total
+            | counter($counters.out; "alertmanager_notifications_failed_total") as $failed
+            | (if $total < ($receivers | length)
+                then ["Alertmanager attempted \($total) webhook notifications, fewer than the \($receivers | length) receivers of the case"] else [] end)
+              + (if $failed != $total
+                then ["of \($total) webhook notifications \($failed) are counted in alertmanager_notifications_failed_total, so one may have left"] else [] end)
+          end)
+    end;
+
+  def inhibition($i):
+    if down != [] then down else
+      dump("alerts.\($i)") as $dump
+      | if $dump == null then ["Alertmanager did not list its alerts"]
+        else [.alerts[] as $alert | held($dump; $alert.labels) as $found
+          | if $found == null then "Alertmanager does not hold \($alert.labels | text)"
+            else ($found.status.inhibitedBy // []) as $by
+              | [$dump[] | select(.fingerprint as $fingerprint | $by | index($fingerprint) != null) | .labels] as $sources
+              | if $alert.inhibited and $by == [] then "\($alert.labels | text) is not inhibited"
+                elif ($alert.inhibited | not) and $by != [] then "\($alert.labels | text) is inhibited by \($sources | map(text) | join(" and "))"
+                elif $alert.inhibited and $sources != [$alert.by]
+                then "\($alert.labels | text) is inhibited by \(if $sources == [] then "an alert Alertmanager does not list" else $sources | map(text) | join(" and ") end), not by \($alert.by | text)"
+                else empty end
+            end]
+        end
+    end;
+
+  def silence($i):
+    if down != [] then down else
+      $frames["silence.\($i)"] as $made
+      | dump("alerts.\($i)") as $dump
+      | if $made == null or $made.status != 0 or ($made.out | test("^[0-9a-f-]{36}$") | not)
+        then ["the silence was not made: \(if $made == null or $made.out == "" then "amtool printed nothing" else $made.out end)"]
+        elif $dump == null then ["Alertmanager did not list its alerts"]
+        else [.alerts[] as $alert | held($dump; $alert.labels) as $found
+          | if $found == null then "Alertmanager does not hold \($alert.labels | text)"
+            else ($found.status.silencedBy // []) as $by
+              | (if ($found | names) != $alert.receivers
+                  then "the receivers of \($alert.labels | text) are \($found | names | join(",")), not \($alert.receivers | join(","))" else empty end),
+                (if $alert.silenced and $by != [$made.out] then "\($alert.labels | text) is not suppressed by the silence alone: it is silenced by \($by | length) silences"
+                  elif $alert.silenced and $found.status.state != "suppressed" then "\($alert.labels | text) is \($found.status.state), not suppressed"
+                  elif ($alert.silenced | not) and $found.status.state != "active"
+                  then "\($alert.labels | text) is \($found.status.state), not active: \($by | length) silences and \($found.status.inhibitedBy // [] | length) alerts suppress it"
+                  else empty end)
+            end]
+        end
+    end;
+
+  [.[] | .index as $i | {"name": .name, "problems": (if .problems != [] then .problems else
+      (.case | if .kind == "route" then route($i) elif .kind == "start" then start($i)
+        elif .kind == "inhibition" then inhibition($i) else silence($i) end) end)}]
+' <<<"$cases")
+
+echo "== the cases"
+jq -r '.[] | if .problems == [] then "ok      \(.name)" else "FAILED  \(.name)", (.problems[] | "        \(.)") end' <<<"$results"
+total=$(jq 'length' <<<"$results")
+failed=$(jq '[.[] | select(.problems != [])] | length' <<<"$results")
+if ((failed)) && [[ $(jq '.outside | length' "$tmp/frames.json") -gt 0 ]]; then
+  echo "== what the shell printed besides"
+  jq -r '.outside[]' "$tmp/frames.json"
+fi
+if ((unaccepted)); then
+  echo "alerts-route-run: amtool check-config refuses the configuration" >&2
+fi
+if ((failed)); then
+  echo "alerts-route-run: $failed of $total cases failed" >&2
+fi
+if ((unaccepted || failed)); then
+  exit 1
+fi
+echo "alerts-route-run: amtool accepts the configuration, and all $total cases hold"

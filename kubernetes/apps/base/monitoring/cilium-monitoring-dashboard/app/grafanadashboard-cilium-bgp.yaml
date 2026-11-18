@@ -1,0 +1,26 @@
+---
+# The BGP sessions, written for this tree, as the Cilium chart's dashboards have no panel of them:
+# the sessions established against those configured for each node, each session's state and the
+# routes advertised, from the two metrics of the BGP control plane the alerts read, and the agents
+# Prometheus scrapes. A legend names a session by the agent's label neighbor, the peer's address,
+# whose value is in Prometheus alone: the JSON holds no address. The JSON is the ConfigMap
+# kustomize generates from dashboards/cilium-bgp.json; its panels name the variable datasource,
+# which lists the datasources of type prometheus, and the dashboard declares no input, so nothing is
+# mapped here. tests/dashboards.bats holds every metric it queries to a monitor of the render, and
+# every job it matches to one a monitor gives.
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: cilium-bgp
+spec:
+  instanceSelector:
+    matchLabels:
+      app.kubernetes.io/instance: grafana
+  # A restarted Grafana starts without it. The operator applies it again every minute, and after an
+  # attempt that fails, as while Grafana starts, tries again at once and then after a wait that
+  # doubles with each failure, up to about 17 minutes, until one succeeds.
+  resyncPeriod: 1m
+  folder: Cilium
+  configMapRef:
+    name: grafana-dashboard-cilium-bgp
+    key: cilium-bgp.json

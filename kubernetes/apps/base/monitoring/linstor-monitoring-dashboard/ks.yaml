@@ -1,0 +1,21 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: linstor-monitoring-dashboard
+  namespace: flux-system
+spec:
+  path: ./apps/base/monitoring/linstor-monitoring-dashboard/app
+  targetNamespace: monitoring
+  # The dashboard reads what the monitors of linstor-monitoring scrape and belongs to them: the
+  # cluster that does not scrape the storage layer does not run this either, and kubernetes-check
+  # refuses one that lists this without it. It is its own application, in monitoring, because the
+  # Grafana operator acts in monitoring only, and so that the storage layer's monitors and alerts
+  # never wait for the Grafana operator. Its kind exists once grafana-operator is Ready.
+  dependsOn:
+    - name: linstor-monitoring
+    - name: grafana-operator
+  sourceRef:
+    kind: ExternalArtifact
+    name: linstor-monitoring-dashboard

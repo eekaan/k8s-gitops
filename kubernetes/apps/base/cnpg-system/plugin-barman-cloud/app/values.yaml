@@ -31,9 +31,8 @@ sidecarImage:
   # renovate: datasource=docker depName=ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar
   tag: "v0.16.0@sha256:c669259e20ed1e11fad821f735c396c19d929985aa05b9544b13ecc8b5a386d0"
 
-# The two certificates and the issuer are the application's own (certificates.yaml): the chart's
-# certificates name an Issuer of the namespace, and its own issuer is self-signed, where the cluster
-# signs what it needs inside itself with its CA.
+# The two certificates and their self-signed issuer are the application's own (certificates.yaml),
+# which Flux applies as it builds them; the chart makes neither.
 certificate:
   createClientCertificate: false
   createServerCertificate: false

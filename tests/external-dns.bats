@@ -12,6 +12,8 @@
 export BATS_NO_PARALLELIZE_WITHIN_FILE=true
 
 load fixtures/edge-stack
+# tree_without, a copy of the tree whose overlay leaves applications out.
+load fixtures/tree-without
 
 setup_file() {
   # Helm's cache and registry settings stay in the run's own directory, and so does the Docker
@@ -470,19 +472,6 @@ edge_copy() {
     TMPDIR="$BATS_TEST_TMPDIR")
 }
 
-# tree_without APP...: copies kubernetes/ to $TREE and takes the ks.yaml of each APP out of the
-# overlay's resources.
-tree_without() {
-  local app
-  TREE="$BATS_TEST_TMPDIR/tree"
-  rm -rf "$TREE"
-  mkdir -p "$TREE"
-  cp -r "$REPO/kubernetes" "$TREE/kubernetes"
-  for app in "$@"; do
-    yq -i '.resources |= map(select(test("/'"$app"'/ks.yaml$") | not))' "$TREE/kubernetes/apps/overlays/lab-sto2/kustomization.yaml"
-  done
-}
-
 @test "A cluster that selects DNS records without the Gateway or the edges' addresses is refused" {
   local talman encoded refused
   # The tree as it is passes, with the application, the Gateway and the demo's route listed.
@@ -492,7 +481,7 @@ tree_without() {
   [ "$status" -eq 0 ]
   # Without the Gateway, the applications whose routes name it and CrowdSec, whose agent reads its
   # proxies, nothing but external-dns needs the Gateway, so it is the one refused, naming it.
-  tree_without gateway-public hello-route n8n kromgo open-webui hello-sso dex oauth2-proxy backstage crowdsec crowdsec-gateway-logs
+  tree_without gateway-public hello-route n8n kromgo open-webui hello-sso dex oauth2-proxy backstage crowdsec crowdsec-gateway-logs victoria-logs-route
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -ne 0 ]

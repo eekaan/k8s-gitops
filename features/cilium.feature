@@ -69,4 +69,9 @@ Feature: Cilium
   Scenario: A fresh bootstrap still installs Cilium before its own resource definitions exist
     Given a cluster with no Cilium and so none of Cilium's resource definitions
     When the install script runs against recording tools, and every application is built as Flux builds it
-    Then the script installs the chart and applies no object, the Cilium application holds no object of Cilium's own kinds, every application that does names cilium in dependsOn and is enabled in the cluster overlay, and the Cilium application waits for its release, with the long timeout, so it is Ready only once every agent runs, which an agent does only once the operator has defined every kind it uses
+    Then the script installs the chart and applies no object, the Cilium application holds no object of Cilium's own kinds, every application that does names cilium in dependsOn and is listed in the cluster overlay, enabled or commented out with its reason as a disabled application, and the Cilium application waits for its release, with the long timeout, so it is Ready only once every agent runs, which an agent does only once the operator has defined every kind it uses
+
+  Scenario: Pods under a sandbox runtime reach Service addresses
+    Given the pinned chart, values.yaml, docs/kubernetes.md, and every application and what the cluster applies besides them as Flux builds it
+    When the chart is rendered
+    Then the runtime classes Flux builds, with no chart rendered but Cilium's, are exactly gvisor, with the handler runsc, and kata, with the handler kata, in the runtime-classes application, which the cluster overlay enables, and none outside the applications, each for pods that run on a kernel of their own; values.yaml sets socketLB.hostNamespaceOnly to true; the rendered cilium-config holds bpf-lb-sock-hostns-only "true" beside kube-proxy-replacement "true", so the agents translate a Service address at each pod's interface; and the docs open exactly one paragraph, under Runtime classes, with "Pods under a sandbox runtime reach Services."

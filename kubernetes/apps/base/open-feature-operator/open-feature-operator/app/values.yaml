@@ -1,0 +1,83 @@
+---
+# Values for the OpenFeature Operator's chart, read by the HelmRelease through a ConfigMap generated
+# without substitution. The operator serves feature flags as Kubernetes objects and, at admission,
+# adds a flagd sidecar to a pod that asks for one (docs/kubernetes.md, OpenFeature Operator). Keys
+# not set here keep the chart's defaults; what the chart has no value for is in the HelmRelease's
+# post-renderers.
+
+# The namespace is the tree's own, the namespace.yaml of the namespace directory. The chart renders
+# one only for a release in its default namespace, which this is not; the key says so as well.
+namespace:
+  create: false
+
+mutatingWebhook:
+  # While no operator answers, or one answers too slowly, the API server admits the pod as it is:
+  # the chart's default, kept on purpose. A pod that asked then starts without its sidecar.
+  failurePolicy: Ignore
+  # The API server sends the webhook only a pod that carries this label, so no other pod waits for
+  # the webhook or is changed by it; the chart's default, an empty selector, sends it every
+  # pod of the cluster. A pod asks with the label and with the annotation of the same key, which
+  # is what the operator itself reads.
+  objectSelector:
+    matchLabels:
+      openfeature.dev/enabled: "true"
+
+# The images the operator puts into other workloads' pods and into the Deployments it makes. Each
+# reaches it as two environment variables, a repository and a tag, which it joins with a colon, so
+# a tag that carries a digest makes a reference pinned by digest. The image check of just
+# kubernetes-validate reads pod specs and does not see them: tests/open-feature-operator.bats holds
+# each to a release tag and a digest. They are at the versions the pinned chart defaults to, each
+# the plain build, not the -fips build the registry lists beside the newer releases; a newer flagd
+# than the chart's is a person's decision (docs/kubernetes.md, OpenFeature Operator).
+
+sidecarConfiguration:
+  image:
+    # The flagd the webhook adds to a pod that asks.
+    # renovate: datasource=docker depName=ghcr.io/open-feature/flagd
+    tag: v0.16.2@sha256:268305c009e4d1490eae130c3fb767797a5a0f6b39455199a786a83b88bfd421
+    # The chart's Always asks the registry at every start of a pod, for an image a digest pins.
+    pullPolicy: IfNotPresent
+
+flagdConfiguration:
+  image:
+    # The flagd of the Deployment the operator makes for a Flagd object. No such object is in the
+    # tree; the pin holds whatever makes one to the same image as the sidecar.
+    # renovate: datasource=docker depName=ghcr.io/open-feature/flagd
+    tag: v0.16.2@sha256:268305c009e4d1490eae130c3fb767797a5a0f6b39455199a786a83b88bfd421
+    pullPolicy: IfNotPresent
+
+flagdProxyConfiguration:
+  image:
+    # The flagd-proxy the operator would run in its own namespace for a flag source of that
+    # provider. The Deployment it makes sets no security context, so the namespace's restricted
+    # level refuses its pods and the provider does not work here; the pin is for the reference the
+    # operator would write all the same. Its pull policy stays the chart's, which is none, and
+    # Kubernetes then pulls a reference with a digest only when the node lacks it.
+    # renovate: datasource=docker depName=ghcr.io/open-feature/flagd-proxy
+    tag: v0.9.8@sha256:018b4fbba142fe90ef4e5f8f0884ce5dc63fca782c48bea43fde6965b9a6f847
+
+controllerManager:
+  manager:
+    image:
+      # The operator's own image, at the version the chart's own values default to, which is not
+      # the chart's appVersion. Renovate moves the chart and this image in one pull request, and
+      # tests/open-feature-operator.bats holds the two together.
+      # renovate: datasource=docker depName=ghcr.io/open-feature/open-feature-operator
+      tag: v0.9.4@sha256:fe8e2dfbe9d83daaa24e8a419102a5baa26710e4bb95291fe0f0c512b3142c3b
+    # The chart's own requests and limits, written out; nothing here has measured them. The
+    # manager keeps every pod and every Deployment of the cluster in memory, so what it uses grows
+    # with the cluster, and a pod that exceeds the memory limit is killed and started again.
+    resources:
+      requests:
+        cpu: 10m
+        memory: 64Mi
+      limits:
+        cpu: 500m
+        memory: 128Mi
+  # One replica: nothing asks for a sidecar, so nothing is missed while the pod restarts, and both
+  # webhooks fail open. The chart writes this value after a literal 0, so its text is
+  # "replicas: 01", which the release's kustomize post-renderer reads as the number 1 and writes
+  # as 1. Above 7 the prefix matters: a text whose digits are all 0 to 7 is read as an octal
+  # number, so 10 gives 8 replicas and 16 gives 14, and one with an 8 or a 9 in it, such as 08 or
+  # 018, keeps its value.
+  replicas: 1

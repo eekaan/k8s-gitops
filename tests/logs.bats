@@ -9,6 +9,9 @@
 # while another pulls a chart finds the chart's directory before the chart is in it.
 export BATS_NO_PARALLELIZE_WITHIN_FILE=true
 
+# tree_without, a copy of the tree whose overlay leaves applications out.
+load fixtures/tree-without
+
 setup_file() {
   # Helm's cache and registry settings stay in the run's own directory, and so does the Docker
   # configuration helm falls back to for credentials, so no login is read.
@@ -26,22 +29,34 @@ setup() {
   NAMESPACE=monitoring
   STORE=victoria-logs
   COLLECTOR=vector
+  ROUTE_APP=victoria-logs-route
   # Nothing to connect to: a step that needed a cluster fails instead of finding one.
   export KUBECONFIG="$BATS_TEST_TMPDIR/no-kubeconfig"
   unset KUBERNETES_SERVICE_HOST KUBERNETES_SERVICE_PORT
+  EXAMPLE="$BATS_TEST_TMPDIR/example-vars.yaml"
+  # shellcheck disable=SC2016 # $list is a yq variable.
+  yq ea '. as $list ireduce ({}; . * ($list // {}))' \
+    "$CLUSTER/cluster-config.example.yaml" "$CLUSTER/cluster-secrets.example.yaml" >"$EXAMPLE"
+}
+
+# other_vars: writes a copy of the example values with another domain and sets OTHER to it, so a
+# test can build again and see that what it read came from the variable, not from a literal that
+# happens to equal the example.
+other_vars() {
+  OTHER="$BATS_TEST_TMPDIR/other-vars.yaml"
+  CLUSTER_DOMAIN=other.example.org yq '.CLUSTER_DOMAIN = strenv(CLUSTER_DOMAIN)' "$EXAMPLE" >"$OTHER"
 }
 
 # built APP: the application APP of the monitoring namespace as Flux applies it: its app/ built in
-# memory with its ks.yaml, substituting strictly the variables of the cluster's example key lists.
-# Writes $BATS_TEST_TMPDIR/APP-built.yaml and sets BUILT.
+# memory with its ks.yaml, substituting strictly the variables of the cluster's example key lists,
+# or those of the file VARS names, with the ks.yaml's own substitutions over them. Writes
+# $BATS_TEST_TMPDIR/APP-built.yaml and sets BUILT.
 built() {
-  local app=$1 vars="$BATS_TEST_TMPDIR/vars.yaml" ks="$BATS_TEST_TMPDIR/$1-ks.yaml"
-  # shellcheck disable=SC2016 # $list is a yq variable.
-  yq ea '. as $list ireduce ({}; . * ($list // {}))' \
-    "$CLUSTER/cluster-config.example.yaml" "$CLUSTER/cluster-secrets.example.yaml" >"$vars"
+  local app=$1 ks="$BATS_TEST_TMPDIR/$1-ks.yaml"
   # shellcheck disable=SC2016 # $vars is a yq variable.
   yq ea 'select(fileIndex == 0) as $vars | select(fileIndex == 1 and . != null)
-    | .spec.postBuild.substitute = $vars' "$vars" "$REPO/kubernetes/apps/base/$NAMESPACE/$app/ks.yaml" >"$ks"
+    | .spec.postBuild.substitute = ($vars * (.spec.postBuild.substitute // {}))' "${VARS:-$EXAMPLE}" \
+    "$REPO/kubernetes/apps/base/$NAMESPACE/$app/ks.yaml" >"$ks"
   BUILT="$BATS_TEST_TMPDIR/$app-built.yaml"
   # Built from the tree's parent, with paths from there, as scripts/kubernetes-check builds.
   (cd "$REPO" && flux build kustomization "$app" --path "./kubernetes/apps/base/$NAMESPACE/$app/app" \
@@ -87,10 +102,127 @@ render() {
     --values "$VALUES" --values "$INLINE" >"$RENDERED"
 }
 
-# overlay: the cluster's overlay as the root Kustomization builds it. Sets OVERLAY.
+# overlay [DIR]: the cluster's overlay as the root Kustomization builds it, or the overlay in DIR.
+# Sets OVERLAY.
 overlay() {
   OVERLAY="$BATS_TEST_TMPDIR/overlay.yaml"
-  kustomize build --load-restrictor LoadRestrictionsNone "$REPO/kubernetes/apps/overlays/lab-sto2" >"$OVERLAY"
+  kustomize build --load-restrictor LoadRestrictionsNone "${1:-$REPO/kubernetes/apps/overlays/lab-sto2}" >"$OVERLAY"
+}
+
+# everything: the overlay's build and every application it enables, each built as Flux applies it
+# from the overlay's Kustomization, with the example key lists and its own substitutions over them,
+# strictly, all in one file. Writes $EVERYTHING.
+everything() {
+  local name ks path
+  overlay
+  EVERYTHING="$BATS_TEST_TMPDIR/everything.yaml"
+  cp "$OVERLAY" "$EVERYTHING"
+  for name in $(yq -N 'select(.kind == "Kustomization") | .metadata.name' "$OVERLAY"); do
+    ks="$BATS_TEST_TMPDIR/overlay-$name-ks.yaml"
+    # shellcheck disable=SC2016 # $vars is a yq variable.
+    NAME="$name" yq ea 'select(fileIndex == 0) as $vars
+      | select(fileIndex == 1 and .kind == "Kustomization" and .metadata.name == strenv(NAME))
+      | .spec.postBuild.substitute = ($vars * (.spec.postBuild.substitute // {}))' "$EXAMPLE" "$OVERLAY" >"$ks"
+    path="$(yq '.spec.path' "$ks")"
+    echo --- >>"$EVERYTHING"
+    (cd "$REPO" && flux build kustomization "$name" --path "./kubernetes/${path#./}" \
+      --kustomization-file "$ks" --dry-run --strict-substitute --in-memory-build) >>"$EVERYTHING"
+  done
+}
+
+# cluster_render: the render of the tree as scripts/render makes it, every chart expanded, once per
+# file of tests. Sets CLUSTER_RENDER to lab-sto2's directory of it, one file per object.
+cluster_render() {
+  local out="$BATS_FILE_TMPDIR/cluster-render"
+  if [ ! -d "$out/lab-sto2" ]; then
+    rm -rf "$out"
+    "$REPO/scripts/render" "$out" "$REPO" >"$BATS_FILE_TMPDIR/cluster-render.log" 2>&1 ||
+      { cat "$BATS_FILE_TMPDIR/cluster-render.log"; return 1; }
+  fi
+  CLUSTER_RENDER="$out/lab-sto2"
+}
+
+# route_admits METHOD TARGET: succeeds when the route in $BATS_TEST_TMPDIR/route.yaml sends the
+# request to a backend, as Gateway API matches an HTTPRoute (gateway-api apis/v1/httproute_types.go):
+# a rule without matches matches every request, and a match without a path is a prefix of "/"; a
+# method matches exactly; an Exact path is the request's path, without its query, byte for byte; a
+# PathPrefix matches the path whole or up to a "/", a trailing "/" of the prefix aside. Of the
+# matches the request meets, an Exact path wins, then the longest prefix, then one with a method,
+# then the earlier rule; the request is sent on when that match's rule has a backend. Exits 0 when it
+# is sent on and 1 when not; a match of any other type or field exits otherwise, as one this test
+# cannot evaluate.
+route_admits() {
+  yq -o json '.' "$BATS_TEST_TMPDIR/route.yaml" | jq -e --arg method "$1" --arg target "$2" '
+    ($target | split("?")[0]) as $path
+    | def path_of: .path // {"type": "PathPrefix", "value": "/"};
+      def path_matches:
+        path_of as $p
+        | if $p.type == "Exact" then $path == $p.value
+          elif $p.type == "PathPrefix" then ($p.value | sub("/+$"; "")) as $v | $v == "" or $path == $v or ($path | startswith($v + "/"))
+          else error("a path match of type \($p.type), which this test does not evaluate") end;
+      def request_matches:
+        if (keys - ["method", "path"] | length) > 0 then error("a match by \(keys - ["method", "path"] | join(", ")), which this test does not evaluate")
+        else ((.method // $method) == $method) and path_matches end;
+    [ .spec.rules | to_entries[] | .key as $rule | ((.value.backendRefs // []) | length > 0) as $backend
+      | (.value.matches // [{}])[] | select(request_matches)
+      | {exact: (if path_of.type == "Exact" then 1 else 0 end), length: (path_of.value | length),
+         method: (if .method then 1 else 0 end), rule: (0 - $rule), $backend} ]
+    | if length == 0 then false else (sort_by(.exact, .length, .method, .rule) | last | .backend) end' >/dev/null
+}
+
+# store_reach FILE...: one line for each way, in the objects of the files, that the log store is
+# reached from the public Gateway other than through the sign-in, naming what does it: a route other
+# than logs of monitoring whose rules send to the Service victoria-logs of monitoring, as a backend,
+# a backend's mirror or a rule's mirror, whatever namespace the reference names or leaves out; a
+# route of monitoring on the public Gateway that no SecurityPolicy of monitoring asking oauth2-proxy
+# of sso-system, without failing open, targets by name and that is not such a route's sign-in route
+# <name>-oauth2 sending to oauth2-proxy of sso-system alone; a Grafana of monitoring that has its
+# operator make an HTTPRoute there, which no render holds and so no policy can be seen to target; an
+# object other than that policy that targets logs, by reference or by selector; a route other than
+# logs and logs-oauth2 of monitoring that lists logs's host; and a ReferenceGrant of monitoring that
+# lets another namespace refer to its Services, as a route there could then reach the store's pods
+# through any Service of monitoring that selects them. Prints nothing when none does.
+store_reach() {
+  # shellcheck disable=SC2016 # $all, $own, $r, $p, $policy, $protected, $hosts and $ref are jq variables.
+  yq -N -o json -I0 'select(. != null)' "$@" | jq -rs '
+    [.[] | objects] as $all
+    | def on_public: .metadata.namespace as $own | any(.spec.parentRefs[]?; .name == "public"
+        and (.kind // "Gateway") == "Gateway" and (.namespace // $own) == "envoy-gateway-system");
+      def refs: .metadata.namespace as $own
+        | (.spec.rules[]? | (.backendRefs[]? | ., (.filters[]?.requestMirror.backendRef // empty)),
+            (.filters[]?.requestMirror.backendRef // empty))
+        | select((.kind // "Service") == "Service" and (.group // "") == "") | {name, namespace: (.namespace // $own), port};
+      def asks_sign_in: .kind == "SecurityPolicy" and .spec.extAuth != null
+        and (.spec.extAuth.failOpen // false) == false
+        and ([.spec.extAuth.http.backendRefs[]? | [(.kind // "Service"), .name, .namespace]] == [["Service", "oauth2-proxy", "sso-system"]]);
+    [$all[] | select(.metadata.namespace == "monitoring" and asks_sign_in) | .spec.targetRefs[]?
+      | select((.group // "") == "gateway.networking.k8s.io" and .kind == "HTTPRoute") | .name] as $protected
+    | ([$all[] | select(.kind == "HTTPRoute" and .metadata.namespace == "monitoring" and .metadata.name == "logs")
+        | .spec.hostnames[]?]) as $hosts
+    | ($all[] | select(.kind | tostring | endswith("Route")) | . as $r
+        | select(([refs] | any(.name == "victoria-logs" and .namespace == "monitoring"))
+            and ($r.kind != "HTTPRoute" or $r.metadata.namespace != "monitoring" or $r.metadata.name != "logs"))
+        | "\($r.kind)/\($r.metadata.namespace)/\($r.metadata.name) sends to the Service victoria-logs of monitoring"),
+      ($all[] | select(.kind | tostring | endswith("Route")) | select(.metadata.namespace == "monitoring" and on_public) | . as $r
+        | select(($protected | index($r.metadata.name)) == null)
+        | select(($r.metadata.name | endswith("-oauth2")) and ($protected | index($r.metadata.name | sub("-oauth2$"; ""))) != null
+            and ([$r | refs | [.name, .namespace]] | unique == [["oauth2-proxy", "sso-system"]]) | not)
+        | "\($r.kind)/monitoring/\($r.metadata.name) is on the public Gateway and no policy that asks oauth2-proxy targets it"),
+      ($all[] | select(.kind == "Grafana" and .metadata.namespace == "monitoring" and .spec.httpRoute? != null)
+        | "Grafana/monitoring/\(.metadata.name) has its operator make an HTTPRoute that no policy can be seen to target"),
+      ($all[] | . as $p | ($p.metadata.namespace // "") as $own | select(($p.spec | type) == "object")
+        | select(any(([$p.spec.targetRef // empty] + ($p.spec.targetRefs // []))[];
+              (.kind // "") == "HTTPRoute" and .name == "logs" and $own == "monitoring")
+            or ($own == "monitoring" and any($p.spec.targetSelectors[]?; (.kind // "") == "HTTPRoute")))
+        | select(($p.kind == "SecurityPolicy" and $p.metadata.name == "logs" and ($p | asks_sign_in)) | not)
+        | "\($p.kind)/\($own)/\($p.metadata.name) targets the route logs"),
+      ($all[] | select(.kind | tostring | endswith("Route")) | . as $r
+        | select(any(.spec.hostnames[]?; . as $h | $hosts | index($h) != null))
+        | select(($r.metadata.namespace == "monitoring" and ($r.metadata.name == "logs" or $r.metadata.name == "logs-oauth2")) | not)
+        | "\($r.kind)/\($r.metadata.namespace)/\($r.metadata.name) lists the host of the route logs"),
+      ($all[] | select(.kind == "ReferenceGrant" and .metadata.namespace == "monitoring")
+        | select(any(.spec.to[]?; (.group // "") == "" and .kind == "Service"))
+        | "ReferenceGrant/monitoring/\(.metadata.name) lets another namespace refer to the Services of monitoring")'
 }
 
 # collector_config: the configuration the rendered collector runs with, as JSON: the ConfigMap its
@@ -1102,4 +1234,440 @@ window_seconds() {
 
 @test "every values key of vector is one its pinned chart defines" {
   defined_keys "$COLLECTOR"
+}
+
+# The file of the store's route, relative to the repository.
+ROUTE_FILE=kubernetes/apps/base/monitoring/victoria-logs-route/app/httproute.yaml
+
+# paths_record FILE VERSION: fails, saying what to read again and what to set, unless the header of
+# the route in FILE records, once, that its paths were read from the VictoriaLogs release VERSION,
+# beside one Source line that names app/vlselect/main.go at that release's tag.
+paths_record() {
+  local file=$1 version=$2 record source
+  record="$(grep -E '^#[[:blank:]]*victoria-logs-paths:' "$file" || true)"
+  source="$(grep -E '^#[[:blank:]]*Source:[[:blank:]]*https://' "$file" | sed -E 's/^#[[:blank:]]*Source:[[:blank:]]*//' || true)"
+  echo "record: ${record:-none}; source: ${source:-none}; the pinned chart deploys VictoriaLogs $version"
+  [ "$(grep -c . <<<"$record")" -eq 1 ] && [ "$(grep -c . <<<"$source")" -eq 1 ] ||
+    { echo "$file needs one '# victoria-logs-paths: <release>' line and one '# Source:' line"; return 1; }
+  record="$(sed -E 's/^#[[:blank:]]*victoria-logs-paths:[[:blank:]]*//; s/[[:blank:]]*$//' <<<"$record")"
+  if [ "$record" != "$version" ] ||
+    [ "$source" != "https://github.com/VictoriaMetrics/VictoriaLogs/blob/$version/app/vlselect/main.go" ]; then
+    echo "the route's paths were read from VictoriaLogs $record, and the pinned chart deploys $version:" \
+      "read app/victoria-logs/main.go, app/vlselect/main.go, app/vlinsert/main.go, app/vlstorage/main.go and the" \
+      "interface's bundle in app/vlselect/vmui/ at $version again, change the route's rules and the lists of" \
+      "tests/logs.bats to what they serve, and set the record to $version and the Source line to" \
+      "https://github.com/VictoriaMetrics/VictoriaLogs/blob/$version/app/vlselect/main.go"
+    return 1
+  fi
+}
+
+@test "The log store's interface is reached at logs under the cluster's domain on the public Gateway, behind the cluster's sign-in" {
+  local ks domain objects policy route signin grant
+  domain="$(yq -e '.CLUSTER_DOMAIN' "$EXAMPLE")"
+  # The application beside the store, in its namespace, as the overlay applies it: shaped as
+  # demo/hello-sso, with the component, the route's and the host's names, waiting, after the Gateway,
+  # the store, the sign-in and the exporter that answers its Probe. No patch of the overlay changes
+  # it.
+  ks="$REPO/kubernetes/apps/base/$NAMESPACE/$ROUTE_APP/ks.yaml"
+  overlay
+  [ "$(yq -o json -I0 '.spec | sort_keys(..)' "$ks")" \
+    = "$(NAME="$ROUTE_APP" yq -N -o json -I0 'select(.kind == "Kustomization" and .metadata.name == strenv(NAME)) | .spec | sort_keys(..)' "$OVERLAY")" ]
+  echo "the Kustomization: $(yq -o json -I0 '.spec' "$ks")"
+  [ "$(yq '.metadata.namespace' "$ks")" = flux-system ]
+  [ "$(yq '.spec.path' "$ks")" = "./apps/base/$NAMESPACE/$ROUTE_APP/app" ]
+  [ "$(yq '.spec.targetNamespace' "$ks")" = "$NAMESPACE" ]
+  [ "$(yq -o json -I0 '.spec.components' "$ks")" = '["../../../../../components/sso"]' ]
+  [ "$(yq -o json -I0 '.spec.postBuild.substitute | sort_keys(.)' "$ks")" = '{"SSO_HOSTNAME":"logs","SSO_ROUTE":"logs"}' ]
+  [ "$(yq '.spec.dependsOn | map(.name) | sort | join(" ")' "$ks")" = "blackbox-exporter gateway-public oauth2-proxy victoria-logs" ]
+  [ "$(yq '.spec.wait' "$ks")" = true ]
+  [ "$(yq -o json -I0 '.spec.sourceRef' "$ks")" = "{\"kind\":\"ExternalArtifact\",\"name\":\"$ROUTE_APP\"}" ]
+  # The store's application waits, so the route is applied once the store's release is Ready.
+  [ "$(NAME="$STORE" yq -N 'select(.kind == "Kustomization" and .metadata.name == strenv(NAME)) | .spec.wait' "$OVERLAY")" = true ]
+  # The namespace's routes may attach to the public Gateway's https listener.
+  [ "$(yq -N "select(.kind == \"Namespace\" and .metadata.name == \"$NAMESPACE\") | .metadata.labels[\"k8s-gitops/gateway\"]" "$OVERLAY")" = public ]
+  # app/ holds the one HTTPRoute and its Probe (tests/probes.bats); the component adds the policy and
+  # the sign-in route, all in monitoring.
+  # shellcheck disable=SC2016 # The file holds a ${NAME} reference, not for the shell to expand.
+  [ "$(yq -N 'select(.kind != "Kustomization") | .kind + "/" + .metadata.name' "$REPO/kubernetes/apps/base/$NAMESPACE/$ROUTE_APP"/app/*.yaml | paste -sd' ' -)" \
+    = 'HTTPRoute/${SSO_ROUTE} Probe/${SSO_ROUTE}' ]
+  [ "$(yq -o json -I0 '.resources' "$REPO/kubernetes/apps/base/$NAMESPACE/$ROUTE_APP/app/kustomization.yaml")" = '["httproute.yaml","probe.yaml"]' ]
+  built "$ROUTE_APP"
+  objects="$(yq -N 'select(.kind != null) | .kind + "/" + .metadata.namespace + "/" + .metadata.name' "$BUILT" | sort | paste -sd' ' -)"
+  echo "built: $objects"
+  [ "$objects" = "HTTPRoute/monitoring/logs HTTPRoute/monitoring/logs-oauth2 Probe/monitoring/logs SecurityPolicy/monitoring/logs" ]
+  # The route: on the public Gateway's https listener, for logs under the cluster's domain.
+  route="$(yq -N -o json -I0 'select(.kind == "HTTPRoute" and .metadata.name == "logs")' "$BUILT")"
+  [ "$(jq -cS '.spec.parentRefs' <<<"$route")" = '[{"name":"public","namespace":"envoy-gateway-system","sectionName":"https"}]' ]
+  [ "$(jq -cS '.spec.hostnames' <<<"$route")" = "[\"logs.$domain\"]" ]
+  # Its one policy targets it alone, asks oauth2-proxy's Service at the root with the route's host
+  # to return to, sends it the cookie and nothing else of the request's headers, and does not fail
+  # open.
+  policy="$(yq -N -o json -I0 'select(.kind == "SecurityPolicy")' "$BUILT")"
+  echo "the policy: $(jq -cS '.spec' <<<"$policy")"
+  [ "$(jq -cS '.spec.targetRefs' <<<"$policy")" = '[{"group":"gateway.networking.k8s.io","kind":"HTTPRoute","name":"logs"}]' ]
+  [ "$(jq -cS '.spec.extAuth.http.backendRefs' <<<"$policy")" = '[{"name":"oauth2-proxy","namespace":"sso-system","port":80}]' ]
+  [ "$(jq -r '.spec.extAuth.http.pathOverride' <<<"$policy")" = "/?rd=https://logs.$domain/" ]
+  [ "$(jq -cS '.spec.extAuth.headersToExtAuth' <<<"$policy")" = '["cookie"]' ]
+  [ "$(jq -r '.spec.extAuth.failOpen // false' <<<"$policy")" = false ]
+  [ "$(jq -r '.spec.extAuth | has("grpc")' <<<"$policy")" = false ]
+  # And nothing else: the whole spec, so that no field added to it, such as a CORS answer that lets
+  # another origin read with credentials or a path appended to the question, goes unseen.
+  [ "$(jq -cS '.spec' <<<"$policy")" = "$(jq -cnS --arg domain "$domain" '{
+    targetRefs: [{group: "gateway.networking.k8s.io", kind: "HTTPRoute", name: "logs"}],
+    extAuth: {headersToExtAuth: ["cookie"],
+      http: {backendRefs: [{name: "oauth2-proxy", namespace: "sso-system", port: 80}],
+        pathOverride: "/?rd=https://logs.\($domain)/", headersToBackend: ["x-auth-request-user", "x-auth-request-email"]}}}')" ]
+  # The sign-in route: /oauth2/ on the same host, to oauth2-proxy.
+  signin="$(yq -N -o json -I0 'select(.kind == "HTTPRoute" and .metadata.name == "logs-oauth2")' "$BUILT")"
+  [ "$(jq -cS '.spec.parentRefs' <<<"$signin")" = '[{"name":"public","namespace":"envoy-gateway-system","sectionName":"https"}]' ]
+  [ "$(jq -cS '.spec.hostnames' <<<"$signin")" = "[\"logs.$domain\"]" ]
+  [ "$(jq -cS '.spec.rules' <<<"$signin")" = "$(jq -cnS '[{matches: [{path: {type: "PathPrefix", value: "/oauth2/"}}],
+    backendRefs: [{name: "oauth2-proxy", namespace: "sso-system", port: 80}]}]')" ]
+  # oauth2-proxy's grant, as its application applies it in sso-system, lets monitoring's policy and
+  # sign-in route refer to the Service.
+  NAMESPACE=sso-system built oauth2-proxy
+  grant="$(yq -N -o json -I0 'select(.kind == "ReferenceGrant" and .metadata.name == "oauth2-proxy")' "$BUILT")"
+  [ "$(jq -r '.metadata.namespace' <<<"$grant")" = sso-system ]
+  [ "$(jq -cS '.spec.to' <<<"$grant")" = '[{"group":"","kind":"Service","name":"oauth2-proxy"}]' ]
+  [ "$(jq -r '[.spec.from[] | select(.namespace == "monitoring") | .group + "/" + .kind] | sort | join(",")' <<<"$grant")" \
+    = "gateway.envoyproxy.io/SecurityPolicy,gateway.networking.k8s.io/HTTPRoute" ]
+  # The host, the return address and the sign-in route's host follow the domain.
+  other_vars
+  VARS="$OTHER" built "$ROUTE_APP"
+  [ "$(yq -N 'select(.kind == "HTTPRoute") | .metadata.name + " " + (.spec.hostnames | join(","))' "$BUILT" | sort | paste -sd, -)" \
+    = "logs logs.other.example.org,logs-oauth2 logs.other.example.org" ]
+  [ "$(yq -N 'select(.kind == "SecurityPolicy") | .spec.extAuth.http.pathOverride' "$BUILT")" = "/?rd=https://logs.other.example.org/" ]
+}
+
+@test "Only the interface and its queries are routed to the log store, and the root is redirected to the interface" {
+  local name namespace port rules wide request method target
+  render "$STORE"
+  read -r name namespace port <<<"$(store_service)"
+  echo "the store's Service: $name $namespace $port"
+  [ "$name" = victoria-logs ] && [ "$namespace" = "$NAMESPACE" ] && [ "$port" = 9428 ]
+  built "$ROUTE_APP"
+  yq -N 'select(.kind == "HTTPRoute" and .metadata.name == "logs")' "$BUILT" >"$BATS_TEST_TMPDIR/route.yaml"
+  [ "$(yq '.metadata.namespace' "$BATS_TEST_TMPDIR/route.yaml")" = "$namespace" ]
+  rules="$(yq -o json -I0 '.spec.rules' "$BATS_TEST_TMPDIR/route.yaml")"
+  echo "rules: $rules"
+  # No rule matches everything, nor every path of the store's reads: a rule without matches, or a
+  # prefix of / or /select.
+  [ "$(jq '[.[] | select((.matches // []) | length == 0)] | length' <<<"$rules")" -eq 0 ] ||
+    { echo "a rule without matches, which matches every request"; return 1; }
+  wide="$(jq -r '.[].matches[]? | select((.path.type // "PathPrefix") == "PathPrefix"
+    and ((.path.value // "/") | test("^/(select/?)?$"))) | .path.value // "/"' <<<"$rules")"
+  [ -z "$wide" ] || { echo "a prefix match of $wide"; return 1; }
+  # Both rules in full, matches, filters and backends: the root's redirect to the interface, which
+  # has no backend, and the reads, by path alone, to the store's Service on its port.
+  [ "$(yq '.spec.rules | length' "$BATS_TEST_TMPDIR/route.yaml")" -eq 2 ]
+  [ "$(yq -o json -I0 '.spec.rules[0]' "$BATS_TEST_TMPDIR/route.yaml" | jq -cS .)" = "$(jq -cnS '{
+    matches: [{path: {type: "Exact", value: "/"}}],
+    filters: [{type: "RequestRedirect", requestRedirect: {path: {type: "ReplaceFullPath", replaceFullPath: "/select/vmui/"}, statusCode: 302}}]}')" ]
+  [ "$(yq -o json -I0 '.spec.rules[1]' "$BATS_TEST_TMPDIR/route.yaml" | jq -cS .)" = "$(jq -cnS --arg name "$name" --argjson port "$port" '{
+    matches: [{path: {type: "PathPrefix", value: "/select/vmui"}}, {path: {type: "PathPrefix", value: "/select/logsql"}},
+      {path: {type: "Exact", value: "/select/buildinfo"}}, {path: {type: "Exact", value: "/select/tenant_ids"}}],
+    backendRefs: [{name: $name, port: $port}]}')" ]
+  # What reaches the store, by Gateway API's matching of the rules: its interface's files, among
+  # them the script the v1.54.0 interface loads, every handler of /select/logsql/, which the
+  # interface asks with POST, and the build information and the tenants it reads.
+  local admitted=(
+    "GET /select/vmui"
+    "GET /select/vmui/"
+    "GET /select/vmui/index.html"
+    "GET /select/vmui/assets/index-DNKuoEMC.js"
+    "GET /select/vmui/config.json"
+    "GET /select/vmui/manifest.json"
+    "POST /select/logsql/query"
+    "POST /select/logsql/hits"
+    "POST /select/logsql/facets"
+    "POST /select/logsql/field_names"
+    "POST /select/logsql/field_values"
+    "POST /select/logsql/stats_query"
+    "POST /select/logsql/stats_query_range"
+    "POST /select/logsql/stream_field_names"
+    "POST /select/logsql/stream_field_values"
+    "POST /select/logsql/stream_ids"
+    "POST /select/logsql/streams"
+    "POST /select/logsql/query_time_range"
+    "POST /select/logsql/tail"
+    "GET /select/logsql/query?query=*"
+    "GET /select/buildinfo"
+    "GET /select/tenant_ids"
+  )
+  # What does not: the root, which redirects and has no backend; the routed paths changed by a
+  # letter's case, a suffix or a trailing slash; the vmalert proxy; every writer; the delete, internal
+  # and storage paths; and the paths of the store's HTTP server, its metrics, flags, profiles and
+  # health among them.
+  local refused=(
+    "GET /"
+    "GET /select"
+    "GET /select/"
+    "GET /select/logsqlx"
+    "GET /select/vmuix"
+    "GET /SELECT/vmui/"
+    "GET /select/buildinfo/"
+    "GET /select/tenant_ids/x"
+    "GET /select/vmalert/api/v1/rules"
+    "POST /insert/jsonline"
+    "POST /insert/elasticsearch/_bulk"
+    "POST /insert/loki/api/v1/push"
+    "POST /insert/opentelemetry/v1/logs"
+    "POST /insert/journald/upload"
+    "POST /insert/datadog/api/v2/logs"
+    "POST /insert/native"
+    "GET /insert/ready"
+    "POST /internal/insert"
+    "POST /api/v2/logs"
+    "POST /api/v1/validate"
+    "POST /services/collector/event"
+    "POST /delete/run_task"
+    "POST /delete/stop_task"
+    "GET /delete/active_tasks"
+    "POST /internal/delete/run_task"
+    "POST /internal/select/query"
+    "POST /internal/force_merge"
+    "POST /internal/force_flush"
+    "POST /internal/log_new_streams"
+    "POST /internal/partition/detach"
+    "POST /internal/partition/snapshot/create"
+    "GET /metrics"
+    "GET /flags"
+    "GET /debug/pprof/heap"
+    "GET /health"
+    "GET /ping"
+    "GET /-/healthy"
+    "GET /-/ready"
+    "GET /robots.txt"
+    "GET /favicon.ico"
+  )
+  for request in "${admitted[@]}"; do
+    read -r method target <<<"$request"
+    run route_admits "$method" "$target"
+    [ "$status" -eq 0 ] || { echo "the route does not send $request to the store: $output"; return 1; }
+  done
+  for request in "${refused[@]}"; do
+    read -r method target <<<"$request"
+    run route_admits "$method" "$target"
+    [ "$status" -eq 1 ] || { echo "the route sends $request to the store: $output"; return 1; }
+  done
+}
+
+@test "No route of the tree reaches the log store without the cluster's sign-in" {
+  local found
+  everything
+  # The route, its sign-in route and its policy are there, and nothing else reaches the store from
+  # the Gateway.
+  for found in HTTPRoute/logs HTTPRoute/logs-oauth2 SecurityPolicy/logs; do
+    yq -N 'select(.metadata.namespace == "monitoring") | .kind + "/" + .metadata.name' "$EVERYTHING" | grep -qx "$found" ||
+      { echo "no $found in monitoring"; return 1; }
+  done
+  found="$(store_reach "$EVERYTHING")"
+  echo "ways to the store past the sign-in: ${found:-none}"
+  [ -z "$found" ]
+  # A second route to the store, in another namespace without the component and naming the store's
+  # namespace, and a route in monitoring with no policy, are each named.
+  cp "$EVERYTHING" "$BATS_TEST_TMPDIR/second.yaml"
+  cat >>"$BATS_TEST_TMPDIR/second.yaml" <<'YAML'
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: logs-open
+  namespace: demo
+spec:
+  parentRefs:
+    - name: public
+      namespace: envoy-gateway-system
+      sectionName: https
+  hostnames:
+    - logs-open.example.org
+  rules:
+    - backendRefs:
+        - name: victoria-logs
+          namespace: monitoring
+          port: 9428
+YAML
+  found="$(store_reach "$BATS_TEST_TMPDIR/second.yaml")"
+  echo "with a second route: $found"
+  [ "$found" = "HTTPRoute/demo/logs-open sends to the Service victoria-logs of monitoring" ]
+  cp "$EVERYTHING" "$BATS_TEST_TMPDIR/unprotected.yaml"
+  cat >>"$BATS_TEST_TMPDIR/unprotected.yaml" <<'YAML'
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: grafana
+  namespace: monitoring
+spec:
+  parentRefs:
+    - name: public
+      namespace: envoy-gateway-system
+      sectionName: https
+  hostnames:
+    - grafana.example.org
+  rules:
+    - backendRefs:
+        - name: grafana-service
+          port: 3000
+YAML
+  found="$(store_reach "$BATS_TEST_TMPDIR/unprotected.yaml")"
+  echo "with a route without a policy: $found"
+  [ "$found" = "HTTPRoute/monitoring/grafana is on the public Gateway and no policy that asks oauth2-proxy targets it" ]
+  # A second Service in front of the store's pods, which a route of another namespace names through
+  # a grant in monitoring, reaches the store without naming its Service: the grant is named.
+  cp "$EVERYTHING" "$BATS_TEST_TMPDIR/granted.yaml"
+  cat >>"$BATS_TEST_TMPDIR/granted.yaml" <<'YAML'
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: logs-open
+  namespace: monitoring
+spec:
+  clusterIP: None
+  selector:
+    app: server
+    app.kubernetes.io/instance: victoria-logs
+    app.kubernetes.io/name: victoria-logs-single
+  ports:
+    - port: 9428
+      targetPort: 9428
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: logs-open
+  namespace: monitoring
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: demo
+  to:
+    - group: ""
+      kind: Service
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: logs-open
+  namespace: demo
+spec:
+  parentRefs:
+    - name: public
+      namespace: envoy-gateway-system
+      sectionName: https
+  hostnames:
+    - logs-open.example.org
+  rules:
+    - backendRefs:
+        - name: logs-open
+          namespace: monitoring
+          port: 9428
+YAML
+  found="$(store_reach "$BATS_TEST_TMPDIR/granted.yaml")"
+  echo "with a second Service behind a grant: $found"
+  [ "$found" = "ReferenceGrant/monitoring/logs-open lets another namespace refer to the Services of monitoring" ]
+  # So is the store's own route with its policy failing open, a second object on it, and another
+  # route on its host.
+  yq '(select(.kind == "SecurityPolicy" and .metadata.namespace == "monitoring") | .spec.extAuth.failOpen) = true' \
+    "$EVERYTHING" >"$BATS_TEST_TMPDIR/open.yaml"
+  found="$(store_reach "$BATS_TEST_TMPDIR/open.yaml")"
+  echo "with the policy failing open: $found"
+  [ "$(sort <<<"$found" | paste -sd'|' -)" = "HTTPRoute/monitoring/logs is on the public Gateway and no policy that asks oauth2-proxy targets it|HTTPRoute/monitoring/logs-oauth2 is on the public Gateway and no policy that asks oauth2-proxy targets it|SecurityPolicy/monitoring/logs targets the route logs" ]
+  cp "$EVERYTHING" "$BATS_TEST_TMPDIR/host.yaml"
+  cat >>"$BATS_TEST_TMPDIR/host.yaml" <<YAML
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: hello-logs
+  namespace: demo
+spec:
+  parentRefs:
+    - name: public
+      namespace: envoy-gateway-system
+      sectionName: https
+  hostnames:
+    - logs.$(yq -e '.CLUSTER_DOMAIN' "$EXAMPLE")
+  rules:
+    - backendRefs:
+        - name: hello
+          port: 80
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: logs
+  namespace: monitoring
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: logs
+YAML
+  found="$(store_reach "$BATS_TEST_TMPDIR/host.yaml")"
+  echo "with another route on the host and a second object on the route: $found"
+  [ "$(sort <<<"$found" | paste -sd'|' -)" = "BackendTrafficPolicy/monitoring/logs targets the route logs|HTTPRoute/demo/hello-logs lists the host of the route logs" ]
+  # The same holds of the routes the charts render, and of the Grafana, whose operator would make
+  # a route of its own for a spec.httpRoute.
+  cluster_render
+  found="$(store_reach "$CLUSTER_RENDER"/*/*.yaml)"
+  echo "ways to the store past the sign-in in the render: ${found:-none}"
+  [ -z "$found" ]
+  [ -f "$CLUSTER_RENDER/$ROUTE_APP/HTTPRoute.gateway.networking.k8s.io_monitoring_logs.yaml" ]
+  yq '.spec.httpRoute = {"spec": {"parentRefs": [{"name": "public", "namespace": "envoy-gateway-system", "sectionName": "https"}]}}' \
+    "$CLUSTER_RENDER"/grafana/Grafana.grafana.integreatly.org_monitoring_grafana.yaml >"$BATS_TEST_TMPDIR/grafana-route.yaml"
+  found="$(store_reach "$EVERYTHING" "$BATS_TEST_TMPDIR/grafana-route.yaml")"
+  echo "with the Grafana asking for a route: $found"
+  [ "$found" = "Grafana/monitoring/grafana has its operator make an HTTPRoute that no policy can be seen to target" ]
+}
+
+@test "The log store's route is selected by an overlay entry, builds nothing when it is not, and is refused without the store, the Gateway or the sign-in" {
+  local entries dependency with without
+  # One entry of the overlay, which builds the Kustomization.
+  entries="$(grep -c "/$NAMESPACE/$ROUTE_APP/ks.yaml\$" "$REPO/kubernetes/apps/overlays/lab-sto2/kustomization.yaml")"
+  [ "$entries" -eq 1 ]
+  overlay
+  [ "$(NAME="$ROUTE_APP" yq -N 'select(.kind == "Kustomization" and .metadata.name == strenv(NAME)) | .spec.path' "$OVERLAY")" \
+    = "./apps/base/$NAMESPACE/$ROUTE_APP/app" ]
+  with="$(yq -N '.kind + "/" + (.metadata.namespace // "-") + "/" + .metadata.name' "$OVERLAY" | sort)"
+  # Without it, the overlay builds what it built but that Kustomization, and the tree passes.
+  tree_without "$ROUTE_APP"
+  overlay "$TREE/kubernetes/apps/overlays/lab-sto2"
+  without="$(yq -N '.kind + "/" + (.metadata.namespace // "-") + "/" + .metadata.name' "$OVERLAY" | sort)"
+  echo "only with the entry: $(comm -23 <(echo "$with") <(echo "$without") | paste -sd' ' -); only without: $(comm -13 <(echo "$with") <(echo "$without") | paste -sd' ' -)"
+  [ "$(comm -23 <(echo "$with") <(echo "$without"))" = "Kustomization/flux-system/$ROUTE_APP" ]
+  [ -z "$(comm -13 <(echo "$with") <(echo "$without"))" ]
+  run "$REPO/scripts/kubernetes-check" "$TREE"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  # Each application it names, left out, is refused, naming both.
+  for dependency in "$STORE" gateway-public oauth2-proxy blackbox-exporter; do
+    tree_without "$dependency"
+    run "$REPO/scripts/kubernetes-check" "$TREE"
+    echo "without $dependency: status $status"
+    [ "$status" -ne 0 ]
+    [[ $output == *"kubernetes/apps/base/$NAMESPACE/$ROUTE_APP/ks.yaml: Kustomization $ROUTE_APP names $dependency in dependsOn"* ]] ||
+      { echo "$output"; return 1; }
+  done
+}
+
+@test "The routed paths were read from the VictoriaLogs release the pinned chart deploys" {
+  local version pin
+  render "$STORE"
+  version="$(helm show chart "$CHART" | yq -e '.appVersion')"
+  echo "the store's chart $(yq -N 'select(.kind == "OCIRepository") | .spec.ref.tag' "$BUILT") deploys VictoriaLogs $version"
+  [[ $version =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+  paths_record "$REPO/$ROUTE_FILE" "$version"
+  # Renovate moves none of it: the pin check holds the record as moved by hand.
+  pin="$(awk -F'\t' -v file="$ROUTE_FILE" '$1 == file && $2 == "victoria-logs-paths"' "$REPO/.renovate/by-hand.tsv")"
+  [ -n "$pin" ] || { echo "no row of .renovate/by-hand.tsv for victoria-logs-paths in $ROUTE_FILE"; return 1; }
+  # A record of another release than the chart's fails, saying what to read and what to set.
+  sed -E 's/^(#[[:blank:]]*victoria-logs-paths:[[:blank:]]*).*/\1v1.0.0/' "$REPO/$ROUTE_FILE" >"$BATS_TEST_TMPDIR/moved.yaml"
+  run paths_record "$BATS_TEST_TMPDIR/moved.yaml" "$version"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"read app/victoria-logs/main.go, app/vlselect/main.go, app/vlinsert/main.go, app/vlstorage/main.go"*"at $version again"* ]]
+  [[ $output == *"set the record to $version and the Source line to https://github.com/VictoriaMetrics/VictoriaLogs/blob/$version/app/vlselect/main.go"* ]]
 }

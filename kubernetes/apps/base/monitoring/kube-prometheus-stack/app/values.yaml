@@ -81,10 +81,87 @@ prometheus:
               storage: 20Gi
 
 alertmanager:
-  # Its configuration stays the chart's: every alert routed to the receiver named null, which
-  # sends nothing, until receivers are configured.
+  # Alertmanager's whole configuration (docs/kubernetes.md, Where alerts go). Every key the chart's
+  # own configuration has is written out here, so that what the chart renders is this and nothing
+  # of it comes from Helm merging the chart's values in; tests/alert-routes.bats compares the two,
+  # and holds the keys at every position to the ones read against the operator, which parses the
+  # configuration into its own types and stops at a key that is no field of them. No address is
+  # here: each receiver reads its own from a file.
+  config:
+    global:
+      resolve_timeout: 5m
+    # The chart's four rules, as it ships them: a critical alert mutes the warning and info alerts
+    # of its name and namespace, a warning the info alerts, the info inhibitor the info alerts of
+    # its namespace, and any other alert the info inhibitor itself.
+    inhibit_rules:
+      - source_matchers:
+          - 'severity = critical'
+        target_matchers:
+          - 'severity =~ warning|info'
+        equal:
+          - 'namespace'
+          - 'alertname'
+      - source_matchers:
+          - 'severity = warning'
+        target_matchers:
+          - 'severity = info'
+        equal:
+          - 'namespace'
+          - 'alertname'
+      - source_matchers:
+          - 'alertname = InfoInhibitor'
+        target_matchers:
+          - 'severity = info'
+        equal:
+          - 'namespace'
+      - target_matchers:
+          - 'alertname = InfoInhibitor'
+    route:
+      # What no route below takes ends here and is sent nowhere: the info alerts and the info
+      # inhibitor, which the interfaces show. One notification for the alerts of one name in one
+      # namespace, with the chart's own wait, interval and repeat.
+      receiver: 'null'
+      group_by: ['alertname', 'namespace']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 12h
+      routes:
+        # The Watchdog, which always fires, is the heartbeat: sent at once, flushed again every
+        # minute, and sent again at the first flush that comes more than five minutes after the
+        # last beat. First, and without continue, so that it never reaches notify whatever severity
+        # it carries.
+        - receiver: heartbeat
+          matchers:
+            - alertname = "Watchdog"
+          group_wait: 0s
+          group_interval: 1m
+          repeat_interval: 5m
+        - receiver: notify
+          matchers:
+            - severity =~ "critical|warning"
+    receivers:
+      # The chart's routes rely on a receiver of this name that holds no integration.
+      - name: 'null'
+      # A generic webhook each, whose address is the content of a file of the Secret
+      # alert-destinations, mounted below; the alert-destinations application fills the Secret
+      # from the secret store. Alertmanager reads the file at each notification.
+      - name: notify
+        webhook_configs:
+          - url_file: /etc/alertmanager/destinations/notify-url
+            send_resolved: true
+      - name: heartbeat
+        webhook_configs:
+          - url_file: /etc/alertmanager/destinations/heartbeat-url
+            # The notification Alertmanager would send once the Watchdog stops arriving is no beat.
+            send_resolved: false
+    # The chart's glob, which matches the template files a release adds to the configuration's
+    # Secret; this one adds none.
+    templates:
+      - '/etc/alertmanager/config/*.tmpl'
   alertmanagerSpec:
-    # One replica: with nothing to send, a cluster of Alertmanagers would only agree on silences.
+    # One replica: a second would have to gossip with the first to send each notification once.
+    # While the one is down nothing is sent, the heartbeat included, which is what its monitor
+    # reports.
     replicas: 1
     # As Prometheus's.
     securityContext:
@@ -95,6 +172,20 @@ alertmanager:
       requests:
         cpu: 10m
         memory: 64Mi
+    # The two addresses, as files. The volume is optional, so the pod starts while the Secret is
+    # not there yet, with an empty directory, and the kubelet puts the files in once it is. Mounted
+    # whole: a file mounted by subPath would not follow its Secret. Not spec.secrets, whose volume
+    # the operator makes without optional: a pod without the Secret would wait for it, and no
+    # Alertmanager would run until both addresses were in the store.
+    volumes:
+      - name: alert-destinations
+        secret:
+          secretName: alert-destinations
+          optional: true
+    volumeMounts:
+      - name: alert-destinations
+        mountPath: /etc/alertmanager/destinations
+        readOnly: true
     # Silences and the notification log, which are small; a claim on the default storage class.
     storage:
       volumeClaimTemplate:

@@ -17,15 +17,19 @@ tolerations:
   - operator: Exists
 podPriorityClassName: system-node-critical
 
-# The chart's guidance for a node, which nothing here has measured: the load is the system calls of
-# the node's workloads, which a busier node raises.
+# The CPU figures are the chart's. The memory request is what is fixed on a node of 8 CPUs, about
+# 87 MiB, and as much again for the state Falco keeps of the node's processes, taken up to 192Mi.
+# Fixed are the probe's ring buffers and auxiliary maps, which the kernel charges to the container,
+# and Falco itself with the image's rules loaded. The limit is the chart's request, its figure for
+# a node of any size. docs/kubernetes.md, What Falco costs and what it sees, derives both and says
+# what a kill at the limit does.
 resources:
   requests:
     cpu: 100m
-    memory: 512Mi
+    memory: 192Mi
   limits:
     cpu: 1000m
-    memory: 1024Mi
+    memory: 512Mi
 
 driver:
   # The modern eBPF probe, which the kernel Talos ships runs (BTF, the BPF ring buffer and
@@ -34,6 +38,11 @@ driver:
   # driver.modernEbpf.leastPrivileged is not set: the security context below is the container's
   # whole one, so the key's one effect would be an annotation that turns AppArmor off for the pod.
   kind: modern_ebpf
+  modernEbpf:
+    # The chart's defaults, written here because the memory request above is derived from them: a
+    # ring buffer of 8 MiB, the preset 4, for every two CPUs.
+    bufSizePreset: 4
+    cpusForEachBuffer: 2
 
 # The container's whole security context; the chart uses it in place of the one it generates. BPF
 # loads the probe's programs and maps, PERFMON attaches them to tracepoints and opens the perf
@@ -96,11 +105,37 @@ serviceMonitor:
         - __meta_kubernetes_pod_node_name
       targetLabel: node
 
-# Local rule files by name, which the chart makes a ConfigMap of and mounts in the directory Falco
-# reads after the image's rules: overrides of the image's rules, macros and lists, and rules of its
-# own. Empty: nothing here has been found noisy, and no rule is local. docs/kubernetes.md, Runtime
-# detection, says how an exception goes in.
-customRules: {}
+# Local rule files by name, which the chart makes the ConfigMap falco-rules of and mounts in the
+# directory Falco reads after the image's rules. One file of two items, each an exception, and no
+# rule of the tree's own. docs/kubernetes.md, Tuning, says why each is this narrow, what proves it
+# and how another goes in.
+customRules:
+  exceptions.yaml: |-
+    # Reason: busybox's httpd, the demo's web server, forks for each connection it accepts, and the
+    # child makes the connection's socket its standard input and output with two dup2 calls, which
+    # return 0 and 1. That is what the image's rule Redirect STDOUT/STDIN to Network Connection in
+    # Container matches, twice for every request, the kubelet's readiness probe included. The macro
+    # is the placeholder that rule negates. It excepts only the process httpd in the container
+    # httpd of that image in the namespace demo: a shell, or any other process, in that container
+    # still matches, and so does every other workload.
+    - macro: user_known_stand_streams_redirect_activities
+      condition: (k8s.ns.name = "demo" and container.name = "httpd" and container.image.repository = "docker.io/library/busybox" and proc.name = "httpd")
+      override:
+        condition: replace
+    # Reason: the init container apply-sysctl-overwrites of each Cilium agent's pod copies the
+    # binary cilium-sysctlfix from its image into the node's /opt/cni/bin, which it mounts from the
+    # host, and runs it there with nsenter in the node's mount namespace, from a process still in
+    # that container. Talos mounts an overlay at /opt, so the copy is in that overlay's upper layer,
+    # which is what the image's rule Drop and execute new binary in container matches, each time an
+    # agent's pod starts on a node where Falco runs. The macro is the placeholder that rule negates.
+    # It names a path and not a file, so it excepts whatever that container of that image in the
+    # namespace kube-system runs at that one path, and nothing else: any binary that container runs
+    # from an upper layer at any other path, cilium-sysctlfix included, still matches, and so does
+    # every other container, the agent's included.
+    - macro: known_drop_and_execute_activities
+      condition: (k8s.ns.name = "kube-system" and container.name = "apply-sysctl-overwrites" and container.image.repository = "quay.io/cilium/cilium" and proc.exepath = "/opt/cni/bin/cilium-sysctlfix")
+      override:
+        condition: replace
 
 falco:
   # One JSON line for each event on standard output, which the log collector ships with the rest of

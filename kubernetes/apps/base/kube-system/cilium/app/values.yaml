@@ -11,6 +11,13 @@
 
 # Talos runs without kube-proxy, so Cilium serves Services itself.
 kubeProxyReplacement: true
+# Serving Services itself, Cilium translates a Service's address where a socket connects, in hooks
+# on the node's kernel. A pod under gVisor or Kata Containers runs on a kernel of its own, so its
+# sockets never pass them, and it would reach no Service, the resolver included. With this the
+# agents translate at each pod's interface instead, and at the socket only for processes in the
+# node's own network namespace (docs/kubernetes.md, Runtime classes).
+socketLB:
+  hostNamespaceOnly: true
 # KubePrism serves the API server on every node at localhost:7445, so Cilium reaches it before any
 # Service works and without depending on the cluster's external endpoint.
 k8sServiceHost: localhost
