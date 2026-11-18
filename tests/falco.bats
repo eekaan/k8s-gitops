@@ -466,16 +466,16 @@ of_security_system() {
   run "$REPO/scripts/kubernetes-check" "$REPO"
   echo "$output"
   [ "$status" -eq 0 ]
-  # With only the namespace directory's entry, the cluster builds the namespace, its defaults and
-  # its default deny, and nothing of Falco.
-  tree_without '/security-system/falco/ks.yaml$'
+  # With only the namespace directory's entry, and without Falco's dashboard, which goes with Falco,
+  # the cluster builds the namespace, its defaults and its default deny, and nothing of Falco.
+  tree_without '/security-system/falco/ks.yaml$' '/monitoring/falco-dashboard/ks.yaml$'
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]
   overlay "$TREE/kubernetes/apps/overlays/lab-sto2"
   [ "$(of_security_system "$OVERLAY")" = ConfigMap/security-system/app-template-defaults,Namespace/-/security-system,NetworkPolicy/security-system/default-deny ]
-  # With neither, nothing of security-system.
-  tree_without '/security-system(/|$)'
+  # With neither, nor the dashboard, nothing of security-system.
+  tree_without '/security-system(/|$)' '/monitoring/falco-dashboard/ks.yaml$'
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]

@@ -1,0 +1,27 @@
+---
+# The silence operator, written for this tree, as the operator publishes no dashboard at the
+# pinned version: whether Prometheus scrapes it, and its reconciles and reconcile errors by
+# controller, the reconcile time and the queue depth, from controller-runtime's metrics. No alert
+# reads them, so this is where a silence that fails to sync with Alertmanager shows, besides the
+# operator's log. Its series are selected by the job the chart's PodMonitor gives, its namespace
+# and name, as it names no other. The JSON is the ConfigMap kustomize generates from
+# dashboards/silence-operator.json; its panels name the variable datasource, which lists the
+# datasources of type prometheus, and the dashboard declares no input, so nothing is mapped here.
+# tests/dashboards.bats holds every metric it queries to a monitor of the render, and every job it
+# matches to one a monitor gives.
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: silence-operator
+spec:
+  instanceSelector:
+    matchLabels:
+      app.kubernetes.io/instance: grafana
+  # A restarted Grafana starts without it. The operator applies it again every minute, and after an
+  # attempt that fails, as while Grafana starts, tries again at once and then after a wait that
+  # doubles with each failure, up to about 17 minutes, until one succeeds.
+  resyncPeriod: 1m
+  folder: Silences
+  configMapRef:
+    name: grafana-dashboard-silence-operator
+    key: silence-operator.json

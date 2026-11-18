@@ -1,0 +1,37 @@
+---
+# The Piraeus operator's dashboard for the storage layer, from its repository, unchanged: LINSTOR's
+# pools, nodes, resources and error reports, the volumes' read and write rates, and DRBD's
+# connections, quorum and out-of-sync data. It declares no input: its panels name the variable
+# datasource, which lists the datasources of type prometheus, so nothing is mapped here. Five of
+# its panels are of the type graph, which Grafana 13 no longer ships and turns into a time series
+# panel when it loads the dashboard (getPanelPluginToMigrateTo.ts beside PanelModel.ts in
+# public/app/features/dashboard/state, and GetAngularPanelMigration in
+# apps/dashboard/pkg/migration/schemaversion/migration_utils.go, at v13.1.3). One of them, the
+# DRBD row's Scrape Duration, selects the satellites by the job that the PodMonitor beside the file
+# in the operator's repository gives, <namespace>/linstor-satellite; the monitor of
+# linstor-monitoring names the job linstor-satellite, as its alerts match it, so that panel is
+# empty here. The operator's chart does not carry the
+# file, so the record is the operator's version, which the pinned chart declares. The JSON is the
+# ConfigMap kustomize generates from dashboards/piraeus.json; a new chart means fetching the file
+# again at the new release, as docs/kubernetes.md (Dashboards) says, and tests/dashboards.bats
+# fails until the record moves.
+# Source: https://github.com/piraeusdatastore/piraeus-operator/blob/v2.12.1/config/extras/monitoring/piraeus-dashboard.json
+# Licence: Apache-2.0
+# SHA-256: 401d7ce50108bb52a137bbd33b9eed66e7b578ab11d5083fb290caaf97b8cd81
+# dashboard-piraeus: v2.12.1
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: piraeus
+spec:
+  instanceSelector:
+    matchLabels:
+      app.kubernetes.io/instance: grafana
+  # A restarted Grafana starts without it. The operator applies it again every minute, and after an
+  # attempt that fails, as while Grafana starts, tries again at once and then after a wait that
+  # doubles with each failure, up to about 17 minutes, until one succeeds.
+  resyncPeriod: 1m
+  folder: Storage
+  configMapRef:
+    name: grafana-dashboard-piraeus
+    key: piraeus.json

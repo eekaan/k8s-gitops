@@ -1,14 +1,66 @@
-# Where the series the home dashboard queries come from, for tests/dashboards.bats: a metric name
-# (an anchored regular expression), a tab, then the monitor of the render that scrapes the target that
-# serves it as Kind/name, any-monitor for the series Prometheus writes for every target it scrapes, or
-# alerting-rule for the series it writes for every alerting rule. A series a recording rule of the
-# render writes needs no row. The test fails when a monitor named here is not in the render, and a
-# metric the dashboard queries that no row names has no known source.
-kube_node_info	ServiceMonitor/kube-prometheus-stack-kube-state-metrics
-kube_node_status_condition	ServiceMonitor/kube-prometheus-stack-kube-state-metrics
-up	any-monitor
-ALERTS	alerting-rule
-volsync_volume_out_of_sync	ServiceMonitor/volsync
-volsync_missed_intervals_total	ServiceMonitor/volsync
-vl_rows_ingested_total	ServiceMonitor/victoria-logs
-vl_bytes_ingested_total	ServiceMonitor/victoria-logs
+# Where the series the dashboards of the tree query come from, for tests/dashboards.bats. A row is,
+# separated by tabs: the name of the GrafanaDashboard; a metric name, as an anchored regular
+# expression; where it comes from; and, for some, a note. The rows of a dashboard are tried in
+# order, and the first whose expression is the whole name says where the metric comes from:
+#   Kind/name      a monitor of the render that scrapes the target that serves it; several,
+#                  separated by commas, where one of them in the render is enough, as the monitors
+#                  of the PostgreSQL instances come and go with the applications that have a database
+#   any-monitor    a series Prometheus writes for every target it scrapes
+#   alerting-rule  the series Prometheus writes for every alerting rule
+#   none           nothing serves it, so the panel is empty here: the note says why
+# A row whose second cell is __name__, or a variable as ${name}, pins as unread:<n> how many
+# expressions of the dashboard name a metric by a regular expression on __name__, or by that
+# variable: the test does not read them, and the note says what they are. A series a recording rule
+# of the render writes needs no row. The test fails for a metric no row names, for a monitor the
+# render lacks or that drops the metric, and for a row that names nothing its dashboard reads. A
+# dashboard written for this tree, and the home, name each metric literally, with its monitor; the
+# note says where the source of what serves it defines it, at the version the tree pins, for a
+# metric no alert of the tree reads.
+cluster-home	kube_node_info	ServiceMonitor/kube-prometheus-stack-kube-state-metrics
+cluster-home	kube_node_status_condition	ServiceMonitor/kube-prometheus-stack-kube-state-metrics
+cluster-home	up	any-monitor
+cluster-home	ALERTS	alerting-rule
+cluster-home	volsync_volume_out_of_sync	ServiceMonitor/volsync
+cluster-home	volsync_missed_intervals_total	ServiceMonitor/volsync
+cluster-home	vl_rows_ingested_total	ServiceMonitor/victoria-logs
+cluster-home	vl_bytes_ingested_total	ServiceMonitor/victoria-logs
+victoria-logs	(vl|vm|go|process)_.+|flag	ServiceMonitor/victoria-logs
+openbao	${mountpoint}	unread:10	the ten expressions of the Path Info row name vault_route_<operation>_${mountpoint}__count and __sum, which the variable mountpoint completes with a mount of the store
+openbao	vault_consul_.+	none	the Consul storage backend wrote these, and OpenBao v2.7.2 has none: the Consul Requests panel is empty
+openbao	up	any-monitor
+openbao	vault_.+	ServiceMonitor/openbao
+cert-manager	certmanager_certificate_ready_status	ServiceMonitor/cert-manager
+cert-manager	certmanager_certificate_expiration_timestamp_seconds	ServiceMonitor/cert-manager
+flux	flux_instance_info	ServiceMonitor/flux-operator
+flux	flux_resource_info	ServiceMonitor/flux-operator
+flux	kube_deployment_status_replicas_available	ServiceMonitor/kube-prometheus-stack-kube-state-metrics
+flux	controller_runtime_reconcile_total	PodMonitor/flux-controllers	controller-runtime v0.25.2 (go.mod of kustomize-controller v1.10.1, one of the controllers of the pinned Flux), pkg/internal/controller/metrics/metrics.go, lines 32 to 35
+flux	controller_runtime_reconcile_errors_total	PodMonitor/flux-controllers	controller-runtime v0.25.2 (go.mod of kustomize-controller v1.10.1, one of the controllers of the pinned Flux), pkg/internal/controller/metrics/metrics.go, lines 39 to 42
+flux	controller_runtime_reconcile_time_seconds_bucket	PodMonitor/flux-controllers	controller-runtime v0.25.2 (go.mod of kustomize-controller v1.10.1, one of the controllers of the pinned Flux), pkg/internal/controller/metrics/metrics.go, lines 60 to 68
+cilium-agent	kvstore_operations_total	none	no metric of the agents has this name: the Go source of Cilium v1.20.4 under daemon, operator and pkg names no metric operations_total, and the agents' own are under the prefix cilium_ (CiliumAgentNamespace in pkg/metrics/metrics.go); the two kvstore panels that read it are empty
+cilium-agent	cilium_.+	PodMonitor/cilium-agent
+cilium-bgp	cilium_bgp_control_plane_session_state	PodMonitor/cilium-agent
+cilium-bgp	cilium_bgp_control_plane_advertised_routes	PodMonitor/cilium-agent	Cilium v1.20.4, pkg/bgp/metrics/metrics.go, lines 59 to 63
+cilium-bgp	up	any-monitor
+piraeus	linstor_.+	ServiceMonitor/linstor-controller
+piraeus	drbd_.+|drbdreactor_up	PodMonitor/linstor-satellite
+piraeus	scrape_duration_seconds	any-monitor
+cloudnative-pg	__name__	unread:4	the four expressions of the Checkpoints row select cnpg_pg_stat_bgwriter_* or cnpg_pg_stat_checkpointer_*, whichever the PostgreSQL version has, by a regular expression on the name
+cloudnative-pg	cnpg_.+	PodMonitor/backstage-db,PodMonitor/n8n-db
+cloudnative-pg	controller_runtime_.+	PodMonitor/cloudnative-pg
+cloudnative-pg	kube_.+	ServiceMonitor/kube-prometheus-stack-kube-state-metrics
+cloudnative-pg	kubelet_volume_stats_.+|container_memory_working_set_bytes	ServiceMonitor/kube-prometheus-stack-kubelet
+falco	falcosecurity_falco_n_evts_total	none	Falco 0.45.2 has no metric of this name: its event counter is falcosecurity_scap_n_evts_total (userspace/falco/falco_metrics.cpp); the second query of Scap events by instance over time is empty
+falco	falcosecurity_(falco|scap)_.+	ServiceMonitor/falco
+external-dns	external_dns_controller_last_sync_timestamp_seconds	ServiceMonitor/external-dns
+external-dns	external_dns_controller_last_reconcile_timestamp_seconds	ServiceMonitor/external-dns	external-dns v0.23.0, docs/monitoring/metrics.md
+external-dns	external_dns_source_endpoints_total	ServiceMonitor/external-dns	external-dns v0.23.0, docs/monitoring/metrics.md
+external-dns	external_dns_registry_endpoints_total	ServiceMonitor/external-dns	external-dns v0.23.0, docs/monitoring/metrics.md
+external-dns	external_dns_source_errors_total	ServiceMonitor/external-dns	external-dns v0.23.0, docs/monitoring/metrics.md
+external-dns	external_dns_registry_errors_total	ServiceMonitor/external-dns	external-dns v0.23.0, docs/monitoring/metrics.md
+external-dns	external_dns_controller_verified_records	ServiceMonitor/external-dns	external-dns v0.23.0, docs/monitoring/metrics.md
+silence-operator	up	any-monitor
+silence-operator	controller_runtime_reconcile_total	PodMonitor/silence-operator	controller-runtime v0.25.2 (go.mod of silence-operator v0.22.0), pkg/internal/controller/metrics/metrics.go, lines 32 to 35
+silence-operator	controller_runtime_reconcile_errors_total	PodMonitor/silence-operator	controller-runtime v0.25.2 (go.mod of silence-operator v0.22.0), pkg/internal/controller/metrics/metrics.go, lines 39 to 42
+silence-operator	controller_runtime_reconcile_time_seconds_bucket	PodMonitor/silence-operator	controller-runtime v0.25.2 (go.mod of silence-operator v0.22.0), pkg/internal/controller/metrics/metrics.go, lines 60 to 68
+silence-operator	workqueue_depth	PodMonitor/silence-operator	controller-runtime v0.25.2 (go.mod of silence-operator v0.22.0), pkg/internal/metrics/workqueue.go, lines 47 to 51

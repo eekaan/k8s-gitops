@@ -18,6 +18,11 @@ spec:
   selector:
     matchLabels:
       k8s-app: cilium
+  # The agents' series carry the pods' label as k8s_app="cilium", which Cilium's own dashboard
+  # selects them by (apps/base/monitoring/cilium-monitoring-dashboard): the chart's ServiceMonitor,
+  # which stays off, copies it from the agents' Service.
+  podTargetLabels:
+    - k8s-app
   podMetricsEndpoints:
     - port: prometheus
       path: /metrics

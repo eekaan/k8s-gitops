@@ -1,0 +1,20 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: silence-operator-dashboard
+  namespace: flux-system
+spec:
+  path: ./apps/base/monitoring/silence-operator-dashboard/app
+  targetNamespace: monitoring
+  # The dashboard describes the silence operator and belongs to it: the cluster that does not run
+  # the operator does not run this either, and kubernetes-check refuses one that lists this without
+  # it. It is its own application, so that the operator, which every application with a Silence
+  # waits for, never waits for the Grafana operator. Its kind exists once grafana-operator is Ready.
+  dependsOn:
+    - name: silence-operator
+    - name: grafana-operator
+  sourceRef:
+    kind: ExternalArtifact
+    name: silence-operator-dashboard

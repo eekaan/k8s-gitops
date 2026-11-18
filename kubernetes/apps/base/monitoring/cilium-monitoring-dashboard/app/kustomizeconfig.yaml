@@ -1,0 +1,11 @@
+---
+# Lets kustomize write each generated ConfigMap's hashed name into its dashboard's configMapRef, so
+# a change to a dashboard's JSON produces a new ConfigMap for the operator to load.
+nameReference:
+  - kind: ConfigMap
+    version: v1
+    fieldSpecs:
+      - path: spec/configMapRef/name
+        group: grafana.integreatly.org
+        version: v1beta1
+        kind: GrafanaDashboard

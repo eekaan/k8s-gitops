@@ -94,6 +94,14 @@ resources:
   - ../../base/monitoring/victoria-logs-route/ks.yaml
   - ../../base/open-feature-operator/open-feature-operator/ks.yaml
   # - ../../base/demo/hello-flags/ks.yaml  # Disabled: the worked example of a workload that opts in to the OpenFeature Operator; no workload of this cluster asks for a flag sidecar
+  - ../../base/monitoring/cert-manager-dashboard/ks.yaml
+  - ../../base/monitoring/cilium-monitoring-dashboard/ks.yaml
+  - ../../base/monitoring/cloudnative-pg-dashboard/ks.yaml
+  - ../../base/monitoring/external-dns-dashboard/ks.yaml
+  - ../../base/monitoring/falco-dashboard/ks.yaml
+  - ../../base/monitoring/flux-monitoring-dashboard/ks.yaml
+  - ../../base/monitoring/linstor-monitoring-dashboard/ks.yaml
+  - ../../base/monitoring/silence-operator-dashboard/ks.yaml
 
 patches:
   # The issuer of the public Gateway's certificate, the one place this cluster chooses it:

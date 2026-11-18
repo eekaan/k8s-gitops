@@ -1448,7 +1448,9 @@ Security level comes with it.
 
 `apps/base/kube-system/cilium-monitoring/` holds a PodMonitor, `cilium-agent`, which selects the pods
 labelled `k8s-app: cilium` and scrapes the port `prometheus` every 30 seconds, naming the job
-`cilium-agent` and adding the node's name as the label `node`. The application names `cilium` and
+`cilium-agent` and adding the node's name as the label `node`. It also copies the pods' label
+`k8s-app` onto every series, as `k8s_app="cilium"`, which Cilium's own dashboard selects the agents
+by ([Dashboards](#dashboards)). The application names `cilium` and
 `prometheus-operator-crds` in `dependsOn`: Cilium and `cilium-bgp` are unchanged, and a from-nothing
 bootstrap installs Cilium, then Flux, as before, and the monitor follows once the definitions are
 there. The port is open in the nodes' firewall to the nodes and the pods only, with node-exporter's
@@ -1845,7 +1847,8 @@ release, so an application that names it in `dependsOn` finds the definitions in
 `kubernetes-check` refuses that name in a cluster whose overlay does not enable the operator.
 Alertmanager is not a dependency: the operator is Ready without it and tries again until it answers.
 Its metrics are scraped; no alert reads them, so a silence that fails to sync shows in the
-operator's log and in `controller_runtime_reconcile_errors_total`, and nowhere else.
+operator's log and in `controller_runtime_reconcile_errors_total`, which the operator's dashboard
+graphs ([Dashboards](#dashboards)), and raises nothing.
 
 **Where one lives.** In the `app/` of the application under `apps/base` whose alert it silences,
 in that application's namespace and listed in its `kustomization.yaml`, with `silence-operator` in
@@ -1929,74 +1932,156 @@ A dashboard is configuration: its JSON is in the tree and is loaded into [Grafan
 `GrafanaDashboard`, which the Grafana operator applies. Nothing is fetched when it is loaded: no
 dashboard uses the operator's `url`, `grafanaCom`, `oci` or Jsonnet sources or asks for a plugin,
 and the tree's checks fetch none either. The cost is that an upstream dashboard is a copy: it is as
-large as its JSON, it changes only when someone fetches the file again, and a new release of what
+large as its JSON, it changes only when someone takes the file again, and a new release of what
 it describes does not reach it by itself. What the tree records for each makes that a step of the
 pull request that moves the release.
 
-**Where one lives.** An application whose namespace is `monitoring` keeps its dashboard beside its
-manifests: `app/grafanadashboard.yaml`, with the JSON in `app/dashboards/<name>.json`, which the
-application's `kustomization.yaml` turns into a ConfigMap with a `configMapGenerator`, with
-`kustomize.toolkit.fluxcd.io/substitute: disabled` so Flux leaves the `${...}` of Grafana's
-variables alone, and a `kustomizeconfig.yaml` that writes the ConfigMap's hashed name into the
-`GrafanaDashboard`'s `configMapRef`. The operator acts in `monitoring` only
-([Grafana](#grafana)) and an application's `targetNamespace` puts everything it applies in its own
-namespace, so an application in another namespace has its dashboard as an application of its own in
-`apps/base/monitoring/<application>-dashboard/`, laid out the same way. That application names the
-one it describes and `grafana-operator` in `dependsOn`: `just kubernetes-check` fails for a cluster
-that enables the dashboard without the application, so a dashboard leaves with its application.
+**Where one lives.** A dashboard that describes an application is an application of its own,
+`apps/base/monitoring/<application>-dashboard/`, named after the application whose monitor feeds
+it: `app/grafanadashboard.yaml`, or one `grafanadashboard-<name>.yaml` each where it holds two, with
+the JSON in `app/dashboards/<name>.json`, which the application's `kustomization.yaml` turns into a
+ConfigMap with a `configMapGenerator`, with `kustomize.toolkit.fluxcd.io/substitute: disabled` so
+Flux leaves the `${...}` of Grafana's variables alone, and a `kustomizeconfig.yaml` that writes the
+ConfigMap's hashed name into the `GrafanaDashboard`'s `configMapRef`. It is in `monitoring` because
+the operator acts there only ([Grafana](#grafana)) and an application's `targetNamespace` puts
+everything it applies in its own namespace. It sits beside no monitor, alert rule or controller,
+not even those of an application whose namespace is `monitoring`, because a `GrafanaDashboard`
+needs `grafana-operator` in `dependsOn`: beside them, the monitors, the alerts or the controller
+would wait for the Grafana operator, and stay away while it does not come up. The dashboard's
+application names the one it describes and `grafana-operator` in `dependsOn`. The one it describes
+waits (`wait: true`), as `just kubernetes-check` requires of every dependency, and the check fails
+for a cluster that enables the dashboard without it, so a dashboard leaves with its application. A
+dashboard goes with the application whose monitor feeds it: the Cilium agents' with
+`cilium-monitoring` and the storage layer's with `linstor-monitoring`, not with `cilium` or
+`piraeus-operator`.
+
+Two applications keep a dashboard beside their own manifests. The Grafana application has the
+instance's own, the logs dashboard and the cluster's home: `grafanadashboard-logs.yaml`, whose JSON
+is a ConfigMap, and `grafanadashboard-home.yaml`, whose JSON is in the object. The log store,
+`victoria-logs`, has its own dashboard beside its release, and so names `grafana-operator` in
+`dependsOn`.
+
 The `GrafanaDashboard` selects the Grafana by its label `app.kubernetes.io/instance: grafana`,
-loads into a folder of the `Folder` column below, which its `spec.folder` names (the operator files a
-dashboard that names none under its namespace, `monitoring`), and is applied again every minute, as
-the datasource is. The dashboards of the Grafana itself, the logs and the cluster's home, are the
-Grafana application's own: `grafanadashboard-logs.yaml`, whose JSON is a ConfigMap, and
-`grafanadashboard-home.yaml`, whose JSON is in the object.
+loads into a folder of the `Folder` column below, which its `spec.folder` names (the operator
+files a dashboard that names none under its namespace, `monitoring`), and is applied again every
+minute, as the datasource is. The operator finds a folder by its title, whatever its case, and
+makes one only when none has it, and it reconciles one dashboard at a time, so two dashboards that
+name one folder are in one folder (`GetOrCreateFolder` and `GetFolderUID` in
+`controllers/dashboard_controller.go` of grafana-operator v5.25.0). It identifies a dashboard by
+its `uid`, and takes one of another `uid` with the same title in the same folder for it, which it
+then removes, so a title is unique in its folder. It sets the `id` a file carries, as Cilium's and
+Falco's do, to null before it sends the dashboard (`getContentModel` in
+`controllers/content/resolver.go`). Flux applies the ConfigMap server-side, so no annotation of
+the last applied state has to hold the JSON: the limit is the 1 MiB a ConfigMap holds, and the
+largest, the Cilium agents', is 284 KB.
 
 **What the tree records.** Beside each upstream dashboard's `GrafanaDashboard`, in comments: the
-`Source:` URL of the file at a revision, its `Licence:` and its `SHA-256:`, and a record line
-`# dashboard-<name>: <revision>`. The revision is the release of what it describes that the
-application's pinned chart is at, either the chart's own version or its application's, and the file
-is kept as upstream publishes it, so the SHA-256 is that of the committed file. Renovate moves none
+`Source:` URL of the file at a revision, its `Licence:`, its `SHA-256:`, a record line
+`# dashboard-<name>: <revision>` and, where the pinned chart's archive carries the file,
+`# Chart-path:`, the file's path inside the chart. The file is kept as upstream publishes it, so
+the SHA-256 is that of the committed file. The `Source:` is the file that `tests/dashboards.bats`
+pins for the dashboard, a path (`UPSTREAM_PATHS`) of the repository it pins
+(`UPSTREAM_REPOSITORIES`), at a tag that holds the revision, so a copy in another repository, or
+another file of the same one, is refused. With a
+`Chart-path`, the test compares the committed bytes with that file of the chart it pulls at the
+pinned tag, and the revision is the `version` of the `Chart.yaml` of the chart directory that
+holds the file: the chart's own for Cilium's, Falco's and OpenBao's, and that of `charts/cluster`
+for CloudNativePG's, a chart of the project's `grafana-dashboards` repository that the operator's
+chart carries as a dependency. Without one, as for the Piraeus operator's and VictoriaLogs', whose
+charts do not carry the file, the revision is the release of what it describes that the pinned
+chart is at, the chart's own version or its application's. The chart that pins what
+`cilium-monitoring` describes is that of `cilium`, and for `linstor-monitoring` that of
+`piraeus-operator`. The licence is one under which the file may be copied into this tree, which is
+Apache-2.0: `Apache-2.0`, `MIT`, `BSD-2-Clause`, `BSD-3-Clause` or `MPL-2.0`. Renovate moves none
 of it: each record is a row of `.renovate/by-hand.tsv`, which `just renovate-pins` checks.
-`tests/dashboards.bats` fails when a record, its source, its licence or its hash is missing, when
-the file is not what the hash says, when the revision is not that of the pinned chart, or when the
-row is missing.
 
-**Adding or updating one.** Fetch the file from the source at the revision of the pinned chart, put
-it in `dashboards/`, write the four lines and the by-hand row, and add the application to
-`DASHBOARD_APPS` in `tests/dashboards.bats`. When Renovate moves the chart, the test fails until the
-file is fetched again at the new release and the record, source and hash move with it, in the same
-pull request. A dashboard written for this tree is one of the Grafana application's and has no
-record; it reads only datasources the tree defines. Every other application's is an upstream file
-in a ConfigMap, with its record.
+**The tree's own.** Where a project publishes no dashboard at the pinned version, or none under
+such a licence, the dashboard is written here and has no record. cert-manager, external-dns and the
+silence operator publish none. The Flux Operator publishes two, `config/monitoring/dashboards/` of
+its repository, under AGPL-3.0, and a file under that licence is not copied into this tree. The
+Cilium chart's dashboards have no panel of the BGP sessions. Each of the five is small, at most ten
+panels, and reads the metrics the alerts and this document name, and beyond them only metrics found
+in the pinned source, which `tests/fixtures/dashboards/metric-sources.tsv` cites. Each has the
+name of its `GrafanaDashboard` as `uid`, is not editable, declares no input, and has one variable,
+`datasource`, which lists the datasources of type `prometheus`, as the home has, and which every
+panel names, and no other: Grafana puts the text of any other variable in a query with no more
+escaped than its backslashes and apostrophes, or, for a variable of several values, its backslashes
+and the characters of a regular expression, and adds an ad hoc filter to every query of its
+datasource (`interpolateQueryExpr` and `enhanceExprWithAdHocFilters` of `@grafana/prometheus`
+13.1.2, which Grafana v13.1.3 pins), so either could select by a name or a job the checks do not
+read. It matches
+a job only by a literal that a monitor of the render gives, and names every label bare: Prometheus 3
+also takes a label's name in quotes, with PromQL's escapes, so a quoted name may be `job` however it
+is spelt. It holds no address, hostname or identifier: a legend may show a label whose value is an
+address, as `neighbor` of the BGP sessions is, and that value is in Prometheus alone. cert-manager's
+tables show the label `exported_namespace` as a Certificate's namespace: the chart's ServiceMonitor
+scrapes without `honorLabels`, so Prometheus keeps `namespace` for the controller's own. The names
+of the five are pinned in `tests/dashboards.bats` (`OWN_DASHBOARDS`): any other dashboard outside
+the Grafana application carries the records above.
 
-**What runs, and what each is for.** Folder is where Grafana lists it.
+**Adding or updating one.** For an upstream file: take it from the pinned chart's archive, at its
+`Chart-path`, or, where the chart does not carry it, fetch it from the source at the revision of
+the pinned chart; put it in `dashboards/<name>.json` unchanged; write the record lines and the
+by-hand row; map every input it declares (below); and name where each metric it reads comes from in
+`tests/fixtures/dashboards/metric-sources.tsv`; its repository is added to `UPSTREAM_REPOSITORIES`
+in `tests/dashboards.bats`, the file's path in it to `UPSTREAM_PATHS`, and a file the chart carries
+to `CHART_CARRIED`. For one written here:
+keep to what the paragraph above says of the five, and add its name to `OWN_DASHBOARDS`. Either
+way the application is added to `DASHBOARD_APPS` in `tests/dashboards.bats`, to the overlay and to
+the catalogue ([Backstage](#backstage)), and the dashboard gets its row in the table below. When
+Renovate moves the chart, the tests fail until the file is taken again at the new release and the
+record, the source, the hash and the revision in the table's row move with it, in the same pull
+request. CloudNativePG's record is the version of the chart `cluster` that the operator's chart
+carries, so its tests fail only when a new chart carries another `cluster` or another file in it.
 
-| Dashboard | For | Source, revision, licence | Folder | Datasource |
-| --- | --- | --- | --- | --- |
-| Kubernetes, nodes, API server, kubelet, controller manager, scheduler, etcd, CoreDNS, Prometheus, Alertmanager, Grafana | The cluster and the stack's own components | The monitoring chart's own, as [Grafana](#grafana) describes, at the monitoring application's chart version; Apache-2.0 | Kubernetes | Prometheus |
-| Cluster health (the home) | Nodes Ready, firing alerts by severity, scrape targets down, volumes VolSync reports out of sync and scheduled syncs it missed, and the log store's ingest | Written for this tree; Apache-2.0 | General | Prometheus |
-| Logs | Log volume by namespace and by node, and the logs of the namespaces and pods chosen | Written for this tree; Apache-2.0 | Logs | VictoriaLogs |
-| VictoriaLogs - single-node | The log store's ingestion, storage, queries and resource use | `dashboards/victorialogs.json` of the VictoriaLogs repository at v1.54.0, the release the pinned chart deploys; Apache-2.0 | Logs | Prometheus |
-| OpenBao | The members, tokens, leases, requests and runtime | `grafana/dashboards/dashboard.json` of the OpenBao Helm chart's repository at 0.30.7, the chart the application pins; MPL-2.0, whose text is at https://mozilla.org/MPL/2.0/ | OpenBao | Prometheus |
+**What runs, and what each is for.** A dashboard an application delivers is named with its
+`GrafanaDashboard` in backticks. Describes names the applications whose monitors feed it. Folder is
+where Grafana lists it.
+
+| Dashboard | For | Describes | Source, revision, licence | Folder | Datasource |
+| --- | --- | --- | --- | --- | --- |
+| Kubernetes, nodes, API server, kubelet, controller manager, scheduler, etcd, CoreDNS, Prometheus, Alertmanager, Grafana | The cluster and the stack's own components | `kube-prometheus-stack`, `grafana` | The monitoring chart's own, as [Grafana](#grafana) describes, at the monitoring application's chart version; Apache-2.0 | Kubernetes | Prometheus |
+| Cluster health, the home (`cluster-home`) | Nodes Ready, firing alerts by severity, scrape targets down, volumes VolSync reports out of sync and scheduled syncs it missed, and the log store's ingest | The cluster as a whole | Written for this tree; Apache-2.0 | General | Prometheus |
+| Logs (`logs`) | Log volume by namespace and by node, and the logs of the namespaces and pods chosen | The logs of every namespace | Written for this tree; Apache-2.0 | Logs | VictoriaLogs |
+| VictoriaLogs - single-node (`victoria-logs`) | The log store's ingestion, storage, queries and resource use | `victoria-logs` | `dashboards/victorialogs.json` of the VictoriaLogs repository at v1.54.0, the release the pinned chart deploys; Apache-2.0 | Logs | Prometheus |
+| OpenBao (`openbao`) | The members, tokens, leases, requests and runtime | `openbao` | `grafana/dashboards/dashboard.json` of the OpenBao chart at 0.30.7; MPL-2.0, whose text is at https://mozilla.org/MPL/2.0/ | OpenBao | Prometheus |
+| Certificates (`cert-manager`) | The Certificates that are not Ready, and the time left to each certificate's end, soonest first | `cert-manager` | Written for this tree; Apache-2.0 | cert-manager | Prometheus |
+| Flux (`flux`) | The FluxInstance's and the operator's state, the resources by kind and readiness, those not Ready with their reason and those suspended, and the controllers' reconciles, errors and reconcile time | `flux-monitoring` | Written for this tree; Apache-2.0 | Flux | Prometheus |
+| Cilium Metrics (`cilium-agent`) | The agents' processes, API, BPF, datapath, policy, endpoints, controllers and Kubernetes client | `cilium-monitoring` | `files/cilium-agent/dashboards/cilium-dashboard.json` of the Cilium chart at 1.20.4; Apache-2.0 | Cilium | Prometheus |
+| Cilium BGP sessions (`cilium-bgp`) | The sessions established against those configured for each node, each session's state, the routes advertised and the agents scraped | `cilium-monitoring` | Written for this tree; Apache-2.0 | Cilium | Prometheus |
+| Piraeus Datastore (`piraeus`) | LINSTOR's pools, nodes, resources and error reports, the volumes' read and write rates, and DRBD's connections, quorum and out-of-sync data | `linstor-monitoring` | `config/extras/monitoring/piraeus-dashboard.json` of the Piraeus operator's repository at v2.12.1, the release the pinned chart deploys; Apache-2.0 | Storage | Prometheus |
+| CloudNativePG (`cloudnative-pg`) | A PostgreSQL cluster's instances, their health, configuration, activity, storage, write-ahead log, replication and checkpoints, and the operator's reconciles | `cloudnative-pg`, and the clusters of `n8n` and `backstage` | `charts/cluster/grafana-dashboard.json` of the CloudNativePG chart, where it is the chart `cluster` at 0.0.5; Apache-2.0 | PostgreSQL | Prometheus |
+| Falco (`falco`) | The rules that matched, by rule, source and priority, Falco's memory and CPU, the events it reads and drops, and the versions and engines that run | `falco` | `dashboards/falco-dashboard.json` of the Falco chart at 9.2.2; Apache-2.0 | Falco | Prometheus |
+| external-dns (`external-dns`) | The age of the last successful sync and of the last attempt, the endpoints of the sources and of the registry, their errors and the verified records by type | `external-dns` | Written for this tree; Apache-2.0 | external-dns | Prometheus |
+| Silence operator (`silence-operator`) | Whether the operator is scraped, its reconciles and errors by controller, the reconcile time and the queue depth | `silence-operator` | Written for this tree; Apache-2.0 | Silences | Prometheus |
 
 The `Grafana`'s `spec.preferences.homeDashboardUid` names the home dashboard's `uid`, which is how
 the operator sets an instance's home. VolSync exposes whether a volume is out of sync and how many
 scheduled syncs were missed, and no time of the last sync, so those are what the home shows of a
-backup's age. It has no panel of the public Gateway, which no monitor scrapes, or of Flux, which the
-monitors of `flux-monitoring` scrape: Flux's alerts are among the firing alerts it counts.
+backup's age. It has no panel of the public Gateway, which no monitor scrapes, or of Flux, which has
+a dashboard of its own: Flux's alerts are among the firing alerts it counts.
 
-**Scraped, without a dashboard.** The tree holds no dashboard of these; what their monitors scrape
-is in Prometheus, where the alerts ([Alerts](#alerts)) and a query read it:
+**Scraped, without a dashboard.** The tree holds no dashboard of these applications; what their
+monitors scrape is in Prometheus, where a query reads it:
 
-| Component | Scraped by |
+| Application | Scraped by |
 | --- | --- |
-| Flux | `flux-monitoring`'s ServiceMonitor `flux-operator`, the Flux Operator's state of every Flux resource, and its PodMonitor `flux-controllers`, the controllers' own metrics ([Flux monitoring](#flux-monitoring)) |
-| The Cilium agents | `cilium-monitoring`'s PodMonitor `cilium-agent` ([Cilium's metrics](#ciliums-metrics)) |
-| The LINSTOR controller and the satellites' DRBD reactors | `linstor-monitoring`'s ServiceMonitor `linstor-controller` and its PodMonitor `linstor-satellite` ([Storage monitoring](#storage-monitoring)) |
-| cert-manager | The chart's ServiceMonitor, which the application turns on ([cert-manager](#cert-manager)) |
+| `crowdsec` | Its chart's two ServiceMonitors, of the local API and the agent ([CrowdSec](#crowdsec)); the chart carries no dashboard, and CrowdSec's `grafana-dashboards` repository, under MIT, has no tag to pin and says its newest dashboards are for v1.5 releases, older than the one the chart runs |
+| `descheduler` | Its chart's ServiceMonitor |
+| `gatekeeper` | The application's own PodMonitor, of the audit pod and the controller managers ([Admission policy](#admission-policy)) |
+| `grafana-operator` | Its chart's ServiceMonitor; the chart can also make a dashboard of the operator, with `dashboard.enabled`, which stays off |
+| `keda` | Its chart's three ServiceMonitors, of the operator, the metrics API server and the admission webhooks |
+| `kromgo` | The ServiceMonitor its chart makes for its metrics port ([Status badges](#status-badges)) |
+| `kubelet-csr-approver` | Its chart's ServiceMonitor |
+| `kyverno` | Its chart's two ServiceMonitors, of the admission controller and the reports controller ([Admission policy](#admission-policy)) |
+| `metrics-server` | Its chart's ServiceMonitor |
+| `open-feature-operator` | The application's own PodMonitor, of the manager ([OpenFeature Operator](#openfeature-operator)); the operator's repository, under Apache-2.0, and its chart hold no Grafana dashboard at the pinned version |
+| `reloader` | Its chart's PodMonitor |
+| `spegel` | Its chart's ServiceMonitor |
+| `vpa` | Its chart's PodMonitor, of the recommender |
 
 **Missing a scrape or an upstream.** Each of these has no dashboard, because it would show "No
-data" or no upstream file exists:
+data" or no upstream file exists to copy:
 
 | Component | Missing |
 | --- | --- |
@@ -2004,41 +2089,193 @@ data" or no upstream file exists:
 | The Piraeus operator | A monitor of the operator itself: the render holds none; `linstor-monitoring` scrapes only the LINSTOR cluster the operator makes |
 | Envoy Gateway and its proxies, the public Gateway's among them | A monitor of the controller and of the proxies the Gateway starts: the render holds none |
 | External Secrets | Its ServiceMonitors, which the application leaves off |
-| CloudNativePG | A PostgreSQL cluster whose instances `components/cnpg-cluster`'s PodMonitor scrapes: no application of the overlay uses the component, and the operator's own PodMonitor is all the render holds |
-| Vector | An upstream dashboard: its repository ships none |
-| VolSync | An upstream dashboard: its repository ships none, and the one shared on grafana.com states no licence |
+| `vector` | An upstream file: Vector's repository and its chart hold no dashboard at the pinned version. The log store's chart carries one for Vector, `files/dashboards/generated/vector-k8s-monitoring.yaml`, as a template it renders with `dashboards.enabled`, which stays off, and not as a file to commit unchanged |
+| `volsync` | An upstream file: VolSync's repository and its chart hold no dashboard at the pinned version; the home shows what it reports of a backup's age |
 
-The other applications the render holds a monitor for, the descheduler, external-dns, KEDA, the
-kubelet CSR approver, metrics-server, the reloader, Spegel, the Vertical Pod Autoscaler and the
-Grafana operator, have no dashboard.
+**What stays empty here.** An upstream file is written for more than this cluster runs, and is
+kept unchanged, so some of its panels have nothing to show, and a few show what means nothing
+here. These are the ones found by reading each file's queries against what the pinned releases
+serve and the render configures:
 
-An upstream dashboard declares the datasource it reads as an input in its `__inputs`, and its
-`GrafanaDashboard`'s `spec.datasources` maps that input to the name of the tree's Prometheus. Before
-it loads the dashboard, the operator replaces every `${<input>}` in the JSON with that name, and
-changes nothing else. OpenBao's panels name `${DS_PROMXY}`, so they name Prometheus. VictoriaLogs'
-panels read the variable `$DS_PROMETHEUS`, without braces, which the operator leaves as it is: the
-variable lists the datasources of type prometheus, and only its current value becomes Prometheus.
+- Cilium Metrics. Under its heading kvstore, the two panels of the number of operations read
+  `kvstore_operations_total`, a name no metric of the agents has at Cilium v1.20.4; the three
+  others, the latency and the events received, read the agents' kvstore metrics, which they report
+  only for a key-value store, and the cluster configures none: identities are custom resources. The
+  four panels of BPF system calls read `cilium_bpf_syscall_duration_seconds`, which the agents
+  leave off unless `prometheus.metrics` turns it on, and the values do not.
+- Falco. Scap Drops CPU reads the per-CPU counters, which Falco serves only with
+  `kernel_event_counters_per_cpu_enabled`, and the chart's default, which the values keep, is off.
+  The second query of Scap events by instance over time reads `falcosecurity_falco_n_evts_total`,
+  a name Falco 0.45.2 does not serve: the first query, on `falcosecurity_scap_n_evts_total`, is the
+  one that draws.
+- Piraeus Datastore. Scrape Duration, in the DRBD row, selects the satellites by the job that the
+  PodMonitor beside the file in the operator's repository gives, `<namespace>/linstor-satellite`.
+  The monitor of `linstor-monitoring` names the job `linstor-satellite`, as its alerts match it, so
+  the panel is empty.
+- CloudNativePG. The tree's clusters archive their WAL continuously and take a base backup every
+  day through the Barman Cloud plugin ([Backups and restores](#backups-and-restores)), and have no
+  volume for the WAL alone and no tablespace. PostgreSQL hands every WAL file to the instance
+  manager, which passes it to the plugin and, with a WAL-archiving plugin enabled, does nothing more
+  (`internalRun` in `pkg/management/postgres/archiver/archiver.go` of CloudNativePG v1.30.1), so
+  Last archived WAL and, in the Write Ahead Log row, WAL Segment Archive Status, Archiver Status
+  [5m] and Last Archive Age show the archive as the plugin keeps it. Last Base Backup and First
+  Recoverability Point at the top show N/A, and the panel of the Backups row is empty, although
+  base backups exist. An instance reports the time of the last backup and the first point of
+  recoverability from the `Cluster`'s status fields `lastSuccessfulBackup` and
+  `firstRecoverabilityPoint`, as zero while they are empty (`setTimestampMetric` and the collectors
+  after it in `pkg/management/postgres/webserver/metricserver/pg_collector.go`), and those fields
+  are deprecated and not set for a backup plugin (`api/v1/cluster_types.go`): only the in-tree
+  `barmanObjectStore` and volume snapshots set them (`UpdateBackupTimes`, called in
+  `pkg/management/postgres/backup.go` and `internal/controller/backup_controller.go`). The plugin
+  reports a backup's times under names of its own,
+  `barman_cloud_cloudnative_pg_io_last_available_backup_timestamp`,
+  `barman_cloud_cloudnative_pg_io_first_recoverability_point` and
+  `barman_cloud_cloudnative_pg_io_last_failed_backup_timestamp` (`internal/cnpgi/instance/metrics.go`
+  of plugin-barman-cloud v0.16.0), which the file does not read: the age of the newest base backup
+  is read from them, by `PostgresBackupTooOld` ([Alerts](#alerts)) or in a query. In the Storage &
+  I/O row, Volume Space Usage: Tablespaces is empty, and the two panels of PGDATA and WAL show the
+  data volume alone.
+  The Zone column of the Server Health row is empty: it reads the nodes' label
+  `topology.kubernetes.io/zone` from kube-state-metrics, which exports a label of a node only
+  where its `metricLabelsAllowlist` names it, and the monitoring chart's values name none.
+- OpenBao. Consul Requests, in the Audit row, reads the metrics of the Consul storage backend, which
+  OpenBao v2.7.2 does not have: the members store in Raft.
 
-`tests/dashboards.bats` builds the applications that deliver a dashboard as Flux applies them, checks
-that every `GrafanaDashboard` the cluster's render holds is one of those or the monitoring chart's,
-whatever its file is named, and checks that each `GrafanaDashboard` is in the namespace the operator
-watches, selects the Grafana and has its JSON in the tree, and that an overlay without the
-application it describes has none of its dashboards and a cluster that keeps the dashboard without
-it is refused; that no dashboard uses a source that fetches or asks for a plugin, that each outside
-the Grafana application loads a ConfigMap and has the records above, and that the render holds a
-monitor of the application it describes; that every dashboard of the tree, the monitoring chart's
-included, has a title and a `uid` no other has, maps only inputs its JSON names and only to
-datasources the tree defines, and, with its inputs replaced as the operator replaces them, reads
-only datasources the tree defines: a variable that lists the type of one, or its name or `uid`;
-that every metric the home dashboard queries is written by a recording rule of the render or
-served by a monitor of the render named in `tests/fixtures/dashboards/metric-sources.tsv`; and that
+None was found in VictoriaLogs' own: every metric it reads is one the pinned release defines.
+Two of the files hold panels of a type Grafana 13 does not ship: five of Piraeus' and thirteen of
+OpenBao's are of the type `graph`, and one of OpenBao's is a pie chart of a plugin. Grafana turns
+each into a panel it ships when it loads the dashboard (`getPanelPluginToMigrateTo` in
+`public/app/features/dashboard/state/` and `GetAngularPanelMigration` in
+`apps/dashboard/pkg/migration/schemaversion/migration_utils.go` of Grafana v13.1.3), so none needs
+a plugin.
+
+**Inputs and datasources.** An upstream file may declare the datasources it reads as inputs, in its
+`__inputs`, and its `GrafanaDashboard`'s `spec.datasources` maps every input of type `datasource`,
+and nothing else, to a datasource of the plugin the input names. Before it loads the dashboard, the
+operator replaces every `${<input>}` in the JSON with the name it is given, as text, and changes
+nothing else (`resolveDatasources` in `controllers/content/resolver.go`). Grafana's frontend
+resolves a reference by uid and then by name (`getInstanceSettings` in
+`public/app/features/plugins/datasource_srv.ts` of Grafana v13.1.3) and sends each query with the
+uid of the datasource it found (`DataSourceWithBackend` in
+`packages/grafana-runtime/src/utils/`), so the name is enough where the browser runs a dashboard's
+queries, which is how every dashboard here is read. No check of the tree runs Grafana, so none
+proves that fallback: a panel of OpenBao's or CloudNativePG's dashboard that shows data does, and is
+the one to read again when Grafana moves. Grafana's server finds a query's datasource by its uid, or
+by its id where the query gives no uid, and never by its name (`getDataSourceFromQuery` in
+`pkg/services/query/query.go`), so a query the server were given as a dashboard stores it, with a
+name in the place of the uid, would find none. The
+Prometheus `GrafanaDatasource` sets no `spec.uid`, Grafana gives it one of its own, and the
+operator's definition lets none be added to an object that exists. OpenBao's panels name
+`${DS_PROMXY}` and CloudNativePG's `${DS_PROMETHEUS}`, so they name Prometheus by its name.
+CloudNativePG's file declares a second input, `DS_EXPRESSION`, of the plugin `__expr__`, for one
+target that computes a number from four queries: it is mapped to `__expr__`, the uid by which
+Grafana takes a query for one of its own expressions (`DatasourceUID` in `pkg/expr/service.go`),
+and no datasource of the tree stands behind it. VictoriaLogs' panels read the variable
+`$DS_PROMETHEUS`, without braces, which the operator leaves as it is: the variable lists the
+datasources of type prometheus, and only its current value becomes Prometheus. The Cilium, Falco
+and Piraeus files declare no input and map none: each has a variable that lists the datasources of
+type `prometheus`, of which the tree has one, whatever value the file saved for it.
+
+Not every reference in a file is read. Grafana runs no query for a row, so the datasource a row
+names, and that of the placeholder target a row carries, lead nowhere without harm: nine rows of
+CloudNativePG's file name the uid `prometheus`, which no datasource has. A target is run against
+its panel's datasource where the panel names one that is not the mixed one, whatever the target
+itself names, unless the target is an expression: one target of Falco's file names that same uid in
+a panel whose datasource is the variable (`transformSingleQuery`, `convertToRowsLayout` and
+`buildRowKind` in `apps/dashboard/pkg/migration/conversion/v1_to_v2alpha1.go`, by which Grafana
+converts a stored dashboard when it serves it; its frontend does the same where it runs the
+queries of a dashboard it loaded unconverted, in `SceneQueryRunner` of `@grafana/scenes` 8.2.6).
+Every other reference must lead to a datasource: a panel's, a variable's, an annotation's, and a
+target's under a panel that names none.
+
+`tests/dashboards.bats` builds the applications that deliver a dashboard as Flux applies them and
+checks that every `GrafanaDashboard` the cluster's render holds is one of theirs or the monitoring
+chart's, whatever its file is named. For each it checks that it is in the namespace the operator
+watches, selects the Grafana, names its folder, is applied every minute and has its JSON in the
+tree, unsubstituted; that every application but the Grafana's and the log store's is named after
+the one it describes, which waits; and that an overlay without the application it describes has
+none of its dashboards and a cluster that keeps the dashboard without it is refused. It checks that
+no dashboard uses a source that fetches or asks for a plugin, that every panel is of a type Grafana
+ships or turns into one, that each dashboard outside the Grafana application loads a ConfigMap and
+is one of the five written here or has the records above, with a licence of the list and a source
+in the repository pinned for it, and that the render holds a monitor of the application it
+describes; that a file its record places in the pinned chart is that chart's file, byte for byte,
+at the version of the chart directory that holds it, and that no other upstream file is one its
+chart carries. It checks that every dashboard of the tree, the monitoring chart's included, has a
+`uid` no other has and a title no other in its folder has, maps exactly the datasource inputs its
+JSON declares, each to a datasource of the input's plugin or, for an expression input, to
+`__expr__`, and, with its inputs replaced as the operator replaces them, leads every reference
+Grafana reads to a datasource: a variable that lists the type of one the tree defines, the name or
+`uid` of one, or one of Grafana's own: the expression datasource, and `-- Grafana --`,
+`-- Mixed --` and `-- Dashboard --`, the names `getList` in `datasource_srv.ts` adds to those
+configured, and no other name between dashes. Of the five written here it checks the `uid`, the
+title, that it is not editable, that it defines no variable but the one every panel and target
+names, that it declares no input, the number of panels, that it holds no address, hostname or
+identifier, that it names no label or metric in quotes, and its job matchers, with the value in any
+of PromQL's quotes and comments anywhere inside the braces, against the jobs the render's monitors
+give. It checks that
+the Cilium agents' monitor copies the pods' label, with the value Cilium's dashboard matches; that
 a ConfigMap, or a `GrafanaDashboard` carrying its JSON, holds at most 1 MiB, which it proves
-refuses a padded dashboard. The metrics are read from the `expr` fields of the home dashboard's
-panels: the parser takes out strings, label matchers, ranges, variables and the label lists of
-`by`, `without`, `on`, `ignoring` and the group modifiers, and reads every identifier left that is
-not a function, a keyword or a number as a metric; it refuses an expression that selects by
-`__name__`. It cannot tell which target serves a metric: that is the table's claim, and the table
-is the one place to change when a panel reads a new metric.
+refuses a padded dashboard; and that the three tables above name every dashboard an application
+delivers, with its folder, what it describes and, for an upstream file, the revision and the
+licence of its record, and every application whose render holds a monitor in exactly one of them.
+
+It also checks that every dashboard the tree keeps as JSON queries only metrics the cluster
+scrapes. It reads the `expr` of every panel's targets, those of the panels inside rows too, and of
+every annotation, and the query of every variable of type `query`, and fails, naming the dashboard
+and the metric, unless each metric is written by a recording rule of the render or named by a row
+of `tests/fixtures/dashboards/metric-sources.tsv`: the dashboard, a metric name as an anchored
+regular expression, and where the metric comes from, a monitor of the render, or one of several
+where the monitors of the PostgreSQL instances come and go with the applications that have a
+database, `any-monitor` for a series Prometheus writes for every target, `alerting-rule` for the
+one it writes for every alert, or `none`, with the reason, for a metric an unchanged upstream file
+reads that nothing serves. The rows of a dashboard are tried in order. The check also fails for a
+row whose monitor the render lacks, for a metric its monitor drops, for a row that names nothing
+its dashboard reads, and, in one of the five written here and in the home, for a row that is not
+one literal name with its monitor. Its parser takes out comments and strings, read in one pass
+from the left so that each ends where PromQL ends it, label matchers, ranges, variables and the
+label lists of `by`, `without`, `on`, `ignoring` and the group modifiers, and reads every identifier
+left that is not a function or one of PromQL's own words as a metric. It refuses an expression that
+names a metric or a label in quotes, as Prometheus 3 allows: a quoted label may be `__name__`. What
+it cannot see:
+
+- It is by name. Which target serves a metric is the table's claim; label matchers are not
+  checked, but for the job matchers of the five, in any of PromQL's quotes, and the label
+  Cilium's dashboard selects by; and a metric a feature would emit passes while the feature is
+  off.
+- A metric name that a variable completes is read only where the variable holds one fixed text, a
+  constant or a text box with a default, which is put in its place, as `${metrics_prefix}` of
+  OpenBao's file is. A name any other variable completes or stands for is not read, nor is a
+  selector that matches `__name__` by a regular expression; one with `=` and a literal is. The
+  table pins how many such expressions a dashboard has, as `unread:<n>` with the reason: ten of
+  OpenBao's, whose names the variable `mountpoint` completes with a mount of the store, and four of
+  CloudNativePG's, which select the checkpoint metrics of either PostgreSQL version by a regular
+  expression on the name. The five written here and the home may have none. A variable stands for
+  a name wherever it stands outside a string, a range, a label list and an offset, but for
+  Grafana's own, `$__...`, and so inside a selector's braces too, as a whole matcher, a label's name
+  or a value without quotes: Grafana puts a whole matcher that a variable of one value holds in as
+  it is (`prometheusRegularEscape` of `@grafana/prometheus` 13.1.2), so `{$m}` may be
+  `{__name__="..."}`. One that stands for a number, as the first argument of `topk`, is counted as
+  one that stands for a name. A dashboard that defines a variable of such a name, `__` and more, is
+  refused. The five written here and the home define no variable but their datasource. A variable
+  inside a string is read as the string: Grafana escapes no double quote of a variable's value
+  (`prometheusRegularEscape` and `prometheusSpecialRegexEscape`, with Grafana v13.1.3's default
+  feature toggles), so in an upstream file, which its hash pins, a value with one may end the
+  string, and what follows it is not read.
+- A series a recording rule writes needs no row, and what the rule reads is not followed.
+- A target of a datasource that is not Prometheus is not read, as the LogsQL of the logs dashboard
+  is not, nor are the monitoring chart's own dashboards, which `tests/grafana.bats` holds to the
+  chart and its values. The datasource is the one Grafana finds: the one whose `uid` or name the
+  reference's `uid` is, whatever `type` it gives with it, and one of its `type` only where it gives
+  no `uid` (`get` in `datasource_srv.ts`). A reference the check cannot place is read.
+- A variable's query is read as `label_values(<selector>, <label>)`, `query_result(<query>)` or a
+  selector, as a string or under `.query`; `label_values(<label>)` and `label_names()` name no
+  metric; any other form is refused, naming the variable.
+- A monitor drops a metric when a `metricRelabelings` rule on `__name__` alone, of any of its
+  endpoints, of the action `drop` matches the whole name or of the action `keep` does not,
+  whatever the case of the action, which the monitors' definition admits in either; a rule that
+  gives no `regex` has Prometheus' default, `(.*)`. A rule on more labels than the name is not
+  read.
 
 ### Status badges
 
@@ -2183,9 +2420,12 @@ The Grafana runs the version its `grafana.yaml` pins, which Renovate updates, as
 a disruption budget: a second replica would keep a database of its own. It keeps nothing that Git
 does not hold, so it claims no volume: its data directory is an emptyDir, and the operator applies
 the datasource and every dashboard again every minute. One it cannot apply, as while a restarted
-Grafana starts, it retries after 10 seconds, doubling the wait up to two minutes, so a restarted
-Grafana has them all back within a few minutes. The datasource is the Prometheus Service of the
-monitoring chart, `kube-prometheus-stack-prometheus`, port 9090. Grafana makes no call to the
+Grafana starts, it tries again at once and then after a wait that doubles with each failure, up to
+about 17 minutes, until one succeeds (controller-runtime's default, which grafana-operator v5.25.0
+keeps for its datasource and dashboard controllers), so a Grafana that was away has them all back
+within about as long as it was away, and at most about 17 minutes after it returns. The datasource
+is the Prometheus Service of the monitoring chart, `kube-prometheus-stack-prometheus`, port 9090.
+Grafana makes no call to the
 internet on its own: its configuration turns off usage reporting, the checks for Grafana and plugin
 updates, the news feed, the plugin catalogue, the plugins Grafana would install at every start, the
 download of plugin signing keys, Gravatar images and external snapshots. The one exception is the
