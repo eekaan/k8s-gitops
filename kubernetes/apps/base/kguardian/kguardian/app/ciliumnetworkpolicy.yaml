@@ -1,0 +1,358 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What kguardian's broker lets through, on top of the namespace's default deny: the interface's
+# proxy and Prometheus' scrape on the port it serves on; it resolves its database's name and reaches
+# the database. It opens no other connection: its version check-in, its evaluator and its leader
+# election are off, and it holds no service account token. The observers, which no pod selector
+# matches, are the next policy's.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kguardian-broker
+spec:
+  # The pods the chart's Service kguardian-broker selects.
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: kguardian-broker
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    # The interface, whose server proxies a reader's requests to the broker with the read token.
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: kguardian-frontend
+      toPorts:
+        - ports:
+            - port: "9090"
+              protocol: TCP
+    # The stack's Prometheus, scraping /metrics through the chart's ServiceMonitor, which names the
+    # Service's port http, the container's 9090.
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": monitoring
+            app.kubernetes.io/name: prometheus
+      toPorts:
+        - ports:
+            - port: "9090"
+              protocol: TCP
+  egress:
+    # The cluster's resolver, for the name of the database's Service.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    # The database: the pods the Service kguardian-db-rw selects are the cluster's primary, which a
+    # failover moves to another instance, so the rule names every instance of the cluster, on
+    # PostgreSQL's port. A Service's address is translated to a pod's before policy applies, so the
+    # rule names the pods.
+    - toEndpoints:
+        - matchLabels:
+            cnpg.io/cluster: kguardian-db
+            cnpg.io/podRole: instance
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# The observers post what they record to the broker, and their init containers ask its health
+# endpoint, from the host's network namespace of every node, where the chart runs them: no pod
+# selector matches them. One on the broker's own node reaches it as the local host; one on another
+# node crosses the tunnel as a remote node (bpf/bpf_overlay.c), a control plane's included, as the
+# identity Cilium gives an address it knows as the API server's carries the remote node's label too
+# (pkg/identity/numericidentity.go). The kubelet's probes of the broker come from the local host as
+# well. The rule names both entities, on the broker's port alone.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kguardian-broker-observers
+  annotations:
+    k8s-gitops/network-policy-reason: >-
+      the observers run in the host's network namespace on every node, where no pod selector
+      matches them, and reach the broker as the local host or as another node's host; the broker
+      admits a caller by its token, not by this rule; port 9090 only
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: kguardian-broker
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    - fromEntities:
+        - host
+        - remote-node
+      toPorts:
+        - ports:
+            - port: "9090"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What kguardian's interface lets through, on top of the namespace's default deny: the kubelet's
+# probes on the port it serves on; it resolves the broker's name and reaches the broker. Nothing
+# else reaches it: just kguardian forwards a local port to it through the API server and the node's
+# container runtime, which connects from inside the pod's own network namespace, over its loopback,
+# where no policy applies. It opens no other connection, and holds no service account token.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kguardian-frontend
+spec:
+  # The pods the chart's Service kguardian-frontend selects.
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: kguardian-frontend
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    # The kubelet's liveness and readiness probes, which arrive from the node the pod runs on.
+    - fromEntities:
+        - host
+      toPorts:
+        - ports:
+            - port: "5173"
+              protocol: TCP
+  egress:
+    # The cluster's resolver, for the name of the broker's Service.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    # The broker, which the interface's server proxies a reader's requests to.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: kguardian-broker
+      toPorts:
+        - ports:
+            - port: "9090"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What the pods of the database let through among themselves and with the operator, on top of the
+# namespace's default deny: every pod the operator makes for the cluster kguardian-db, its instances
+# and the jobs that create and join them, which all carry the label cnpg.io/cluster. The pinned
+# operator's documentation asks that the operator reach every pod of a cluster on 8000, the instance
+# manager's status port, and 5432, PostgreSQL's, and that the cluster's pods connect to each other
+# (docs/src/security.md, Exposed Ports; docs/src/networking.md); a replica streams from the primary
+# through the Service kguardian-db-rw. The instance manager reads and writes the Cluster and its
+# Secrets through the API server, and so does the Barman Cloud plugin's sidecar in each instance's
+# pod, for its ObjectStore and the Secret of its credentials.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kguardian-db
+spec:
+  endpointSelector:
+    matchLabels:
+      cnpg.io/cluster: kguardian-db
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    # The operator, the pods of its Deployment in cnpg-system.
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": cnpg-system
+            app.kubernetes.io/name: cloudnative-pg
+      toPorts:
+        - ports:
+            - port: "8000"
+              protocol: TCP
+            - port: "5432"
+              protocol: TCP
+    # The cluster's own pods: replication, and a joining instance's copy of the primary. They listen
+    # on 5432, 8000 and 9187 alone.
+    - fromEndpoints:
+        - matchLabels:
+            cnpg.io/cluster: kguardian-db
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    - toEndpoints:
+        - matchLabels:
+            cnpg.io/cluster: kguardian-db
+    # The API server. A Service's address is translated to the control plane's before policy
+    # applies, so 6443 is the port that counts.
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "6443"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# Who reaches the database's instances besides the operator and each other: the broker and the dump
+# job on PostgreSQL's port, Prometheus on the exporter's port the PodMonitor names, metrics, and the
+# kubelet's probes on the status port, where the operator puts them (pkg/specs/pods.go).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kguardian-db-instances
+spec:
+  endpointSelector:
+    matchLabels:
+      cnpg.io/cluster: kguardian-db
+      cnpg.io/podRole: instance
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: kguardian-broker
+        - matchLabels:
+            app.kubernetes.io/name: pgdump
+            app.kubernetes.io/instance: kguardian-db
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": monitoring
+            app.kubernetes.io/name: prometheus
+      toPorts:
+        - ports:
+            - port: "9187"
+              protocol: TCP
+    - fromEntities:
+        - host
+      toPorts:
+        - ports:
+            - port: "8000"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# The instances' one call outside the cluster: the Barman Cloud plugin's sidecar, which the operator
+# puts in every instance's pod, archives the WAL and writes the base backups to the object storage,
+# and reads them back, at the endpoint cluster-config holds as a URL. That cannot be named by a DNS
+# name here, so the policy allows the world on 443, the port https reaches it on (docs/kubernetes.md,
+# Network policy). The sidecar talks to the instance manager over a socket in the pod, which policy
+# does not see, and a policy selects pods, not containers, so PostgreSQL's container shares the
+# rule. The jobs that create and join an instance hold no sidecar and are not selected.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kguardian-db-instances-world
+  annotations:
+    k8s-gitops/network-policy-reason: >-
+      the Barman Cloud plugin's sidecar in each instance's pod writes the WAL archive and the base
+      backups to the object storage outside the cluster, and reads them back, whose endpoint
+      cluster-config holds as a URL and so cannot name a DNS name here; it reaches it on 443 only
+spec:
+  endpointSelector:
+    matchLabels:
+      cnpg.io/cluster: kguardian-db
+      cnpg.io/podRole: instance
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What the database's daily dump job lets through, on top of the namespace's default deny: it
+# resolves the names of the replicas' and the primary's Services and reaches the instances on
+# PostgreSQL's port, the replicas first and the primary when none answers; it takes no connection.
+# The job's pods carry the labels app.kubernetes.io/name pgdump and app.kubernetes.io/instance
+# kguardian-db, which kustomization.yaml gives the component's CronJob. Two policies: the object
+# storage's rule carries a reason of its own.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kguardian-db-pgdump
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: pgdump
+      app.kubernetes.io/instance: kguardian-db
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    - toEndpoints:
+        - matchLabels:
+            cnpg.io/cluster: kguardian-db
+            cnpg.io/podRole: instance
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# The dump job's two calls outside the cluster: its first step downloads the pinned age release from
+# GitHub, whose URL redirects to a second host that serves the file, and its last uploads the
+# encrypted dump to the object storage, whose endpoint cluster-config holds as a URL. Neither can be
+# named by a DNS name here, so the policy allows the world on 443, the port https reaches both on
+# (docs/kubernetes.md, Network policy).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: kguardian-db-pgdump-world
+  annotations:
+    k8s-gitops/network-policy-reason: >-
+      the dump job downloads the pinned age release from GitHub, whose URL redirects to another
+      host, and uploads the encrypted dump to the object storage outside the cluster, whose endpoint
+      cluster-config holds as a URL and so cannot name a DNS name here; it reaches them on 443 only
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: pgdump
+      app.kubernetes.io/instance: kguardian-db
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP

@@ -614,6 +614,7 @@ once it is not, and the agents' rendered configuration agrees.
 | `security-system` | default deny | Falco takes Prometheus' scrape and the kubelet's probes on 8765, and reaches the resolver alone. |
 | `crowdsec` | default deny | the local API takes the agent on 8080, Prometheus on 6060 and the kubelet's probes, and sends nothing; the agent takes Prometheus and the kubelet on 6060 and reaches the resolver, the local API and the API server on 443 and 6443; below. |
 | `open-feature-operator` | default deny | the OpenFeature Operator takes the kubelet's probes on 8081, Prometheus' scrape on 8080 and the API server's calls to its webhooks on 9443, and reaches the API server alone. |
+| `kguardian` | default deny | the broker takes the interface, Prometheus, the local host and other nodes' hosts on 9090 and reaches the resolver and its database on 5432; the interface takes the kubelet's probes on 5173 and reaches the resolver and the broker; the database and its dump job as Backstage's, the object storage on 443 included. The observers run in the host's network namespace, which no pod policy selects. |
 | `ai-system` | listed | applications whose allows are not written, not a namespace that cannot have the posture. n8n takes the proxies on 5678 and reaches its database, the resolver and whatever its workflows call outside; the PostgreSQL instances take n8n, each other and the operator, and reach the API server, and their Barman Cloud sidecars reach the object storage on 443 and the API server; the dump job reaches the database, the hosts age's release is downloaded from and the object storage; Open WebUI takes the proxies on 8080 and reaches nothing until an administrator turns on a connection that calls out; the backup movers reach the object storage on 443. The proxies reach n8n's 5678 and Open WebUI's 8080 alone there and forward only to their Services, PostgreSQL authenticates every client, Pod Security, node firewall. |
 | `etcd-snapshots` | listed | an application whose allows are not written, not a namespace that cannot have the posture. The snapshot job takes nothing and reaches the Talos API through `talos.default`, the object storage, the hosts age's release is downloaded from (its URL redirects to a second host, which serves the file) and the resolver. Talos' own authorisation of its one role, Pod Security, node firewall. |
 | `external-dns` | listed | an application whose allows are not written, not a namespace that cannot have the posture. external-dns takes Prometheus' scrape and the kubelet's probes on 7979 and nothing else, and reaches the API server, the DNS provider's API on 443 and the resolver. Its token, scoped to zone read and DNS edit on the cluster's one zone, its name filter, a ClusterRole that only reads, Pod Security, node firewall ([DNS records](#dns-records)). |
@@ -741,6 +742,22 @@ once it is not, and the agents' rendered configuration agrees.
   and it calls nothing outside the cluster ([OpenFeature Operator](#openfeature-operator)). A
   workload that opts in to it declares two flows of its own in its namespace, the kubelet's probes
   of the sidecar on 8014 and the sidecar to the API server, as the example `hello-flags` does.
+- **`kguardian`.** The broker's pods (`app.kubernetes.io/name: kguardian-broker`) take the
+  interface's pods and Prometheus on 9090, the port the chart's monitor scrapes, and, in a policy of
+  their own with its reason (`kguardian-broker-observers`), `host` and `remote-node` on 9090: the
+  observers post to the broker from the host's network namespace of every node, where no pod
+  selector matches them, the one on the broker's node as the local host and the others through the
+  tunnel as other nodes' hosts, a control plane's included, as the identity Cilium gives an address
+  it knows as the API server's carries the remote node's label too
+  (`pkg/identity/numericidentity.go`); the kubelet's probes come from `host` as well. They reach the
+  resolver and the database's instances (`cnpg.io/cluster: kguardian-db`,
+  `cnpg.io/podRole: instance`) on 5432, every instance, as a failover moves the primary. The
+  interface's pods take `host` on 5173 for the probes and reach the resolver and the broker on 9090;
+  `just kguardian`'s forward enters the pod's own network namespace and needs no rule. The
+  database's pods and its dump job take and reach what Backstage's do, the broker in place of
+  Backstage: the instances reach the object storage on 443 and the dump job the world on 443, each
+  in a policy of its own with its reason. No rule of the broker or the interface reaches the world,
+  and none the API server but the database's ([kguardian](#kguardian)).
 - **The object storage's port.** cluster-config holds the object storage's endpoint as a URL, which
   a DNS name rule cannot take, so the movers' rule is the world on 443: the port https uses for an
   endpoint that names none, as cluster-config's example does and `tests/network-policy.bats` holds
@@ -836,9 +853,9 @@ namespace and the policy, when
   the nodes. A reason excuses none of these.
 
 The check reads only what the render holds. Besides the policies of `backstage`, `crowdsec`, `demo`,
-`envoy-gateway-system`, `kromgo`, `open-feature-operator`, `security-system` and `sso-system`, that
-is one policy of a listed namespace: `flux-operator-web`, the `NetworkPolicy` the Flux Operator's
-chart renders in `flux-system`, which lets every pod of every namespace (an empty
+`envoy-gateway-system`, `kguardian`, `kromgo`, `open-feature-operator`, `security-system` and
+`sso-system`, that is one policy of a listed namespace: `flux-operator-web`, the `NetworkPolicy` the
+Flux Operator's chart renders in `flux-system`, which lets every pod of every namespace (an empty
 `namespaceSelector`) reach the operator's web interface on 9080. It passes because `flux-system` is
 listed; the day `flux-system` takes the default deny, the check refuses it, as a `NetworkPolicy`
 other than the default deny and as an allow of every pod of every namespace. The `NetworkPolicy`
@@ -867,10 +884,13 @@ port and the API server, the local host and other nodes' hosts on its webhooks' 
 them the world, another application or the other port's caller, and reaches the API server alone,
 that the proxies reach the controller on the port it serves the firewall's Wasm modules on and no
 other application's pod or anything outside the cluster does, that the controller reaches the world
-on 443 and on no other port and neither the certificate job nor the proxies reach it, and that with
-their default deny `backstage`, `demo`, `envoy-gateway-system`, `kromgo`, `open-feature-operator`,
-`security-system` and `sso-system` let exactly their flows through and without it take and send
-everything. What it cannot show: the entity the pinned datapath gives a
+on 443 and on no other port and neither the certificate job nor the proxies reach it, that the local
+host and other nodes' hosts reach kguardian's broker on its port and no other, other nodes' hosts
+reach neither its interface nor its database, no other application reaches either, and its
+database's instances and dump job reach the world on 443 alone, as Backstage's do, and that with
+their default deny `backstage`, `demo`, `envoy-gateway-system`, `kguardian`, `kromgo`,
+`open-feature-operator`, `security-system` and `sso-system` let exactly their flows through and
+without it take and send everything. What it cannot show: the entity the pinned datapath gives a
 connection an edge translated and a worker forwarded again, read from its source above and confirmed
 in audit mode; the labels of the pods the operators create at run time, taken from the operators'
 source and observed in audit mode; that an address a name resolves to is the one a rule meant; and
@@ -878,9 +898,12 @@ anything about pods in the host's network namespace.
 
 ### What policy does not cover
 
-Pods in the host's network namespace (Cilium's agent, its Envoy and its operator, the storage's
-CSI node plugin, the node exporter) are not selected by a pod policy; the node firewall is their
-layer. The nodes' own listeners are the node firewall's
+Pods in the host's network namespace (Cilium's agent, its Envoy and its operator, the storage's CSI
+node plugin, the node exporter, kguardian's observers) are not selected by a pod policy; the node
+firewall is their layer. kguardian's observer connects to its broker, the API server, the resolver
+and, through a host path, the container runtime's Unix socket, and opens no listener (nothing in
+`controller/src` at its pinned tag binds a socket outside its tests), so the node firewall has
+nothing to admit for it ([kguardian](#kguardian)). The nodes' own listeners are the node firewall's
 ([ADR 0017](adr/0017-nodes-firewall-themselves-with-talos-ingress-firewall.md)). The listed
 namespaces take and send what they did before. Policy is connection-level: no layer 7 rule, no
 mutual authentication, no encryption.
@@ -917,13 +940,13 @@ does not matter.
 2. **The policies merge.** The root applies the default denies, the applications apply their allows,
    and the agents evaluate both and drop nothing they deny; what a policy would drop is reported as
    `AUDIT`. As the allows land after the denies, `AUDIT` flows of `backstage`, `crowdsec`, `demo`,
-   `envoy-gateway-system`, `kromgo`, `open-feature-operator`, `security-system` and `sso-system`
-   from before they landed are expected, such as the proxies to `hello` on 8080 and to the
-   controller on 18000, and the controller to the API server, and an agent's recent flows can hold
-   them for a while.
+   `envoy-gateway-system`, `kguardian`, `kromgo`, `open-feature-operator`, `security-system` and
+   `sso-system` from before they landed are expected, such as the proxies to `hello` on 8080 and to
+   the controller on 18000, and the controller to the API server, and an agent's recent flows can
+   hold them for a while.
 3. **Watch**, from the moment the Kustomizations that hold the allows, `hello`,
    `demo-volsync-movers`, `envoy-gateway`, `kromgo`, `dex`, `oauth2-proxy`, `backstage`, `falco`,
-   `crowdsec` and `open-feature-operator`, are Ready at the merge's revision
+   `crowdsec`, `open-feature-operator` and `kguardian`, are Ready at the merge's revision
    (`flux get kustomizations`). `just network-drops` lists what the agents' Hubble holds: the
    `AUDIT` flows a policy would drop, by namespace, pod and port, never an address. It runs each
    agent's own `hubble` through `kubectl exec`, so the kubeconfig needs exec on the Cilium agents'
@@ -941,10 +964,12 @@ does not matter.
    and a WAL segment its primary archives, which `select pg_switch_wal()` there forces
    ([Backups and restores](#backups-and-restores)); the nightly backup of `volsync-demo` at 03:17,
    and a restore of it ([Restoring](#restoring)); the two dry runs that call the OpenFeature
-   Operator's webhooks ([OpenFeature Operator](#openfeature-operator)). Watch a day at least,
-   through one nightly backup, one dump and one base backup. An `AUDIT` flow of `backstage`,
-   `crowdsec`, `demo`, `envoy-gateway-system`, `kromgo`, `open-feature-operator`, `security-system`
-   or `sso-system` that a check made once the allows were Ready is a missing allow, added beside its
+   Operator's webhooks ([OpenFeature Operator](#openfeature-operator)); kguardian's interface opened
+   through `just kguardian`, which has the interface ask the broker, and `@host` and `@remote-node`
+   to kguardian's broker on 9090, where the observers post. Watch a day at least, through one
+   nightly backup, one dump and one base backup. An `AUDIT` flow of `backstage`, `crowdsec`, `demo`,
+   `envoy-gateway-system`, `kguardian`, `kromgo`, `open-feature-operator`, `security-system` or
+   `sso-system` that a check made once the allows were Ready is a missing allow, added beside its
    application in a pull request while the cluster still audits, or a pod doing what it should not.
    Confirm also that no `@remote-node` flow reaches the proxies' listener ports and none to a
    webhook's 9443, Envoy Gateway's or the OpenFeature Operator's, is `AUDIT`. `AUDIT` flows of
@@ -2056,7 +2081,7 @@ where Grafana lists it.
 | Cilium Metrics (`cilium-agent`) | The agents' processes, API, BPF, datapath, policy, endpoints, controllers and Kubernetes client | `cilium-monitoring` | `files/cilium-agent/dashboards/cilium-dashboard.json` of the Cilium chart at 1.20.4; Apache-2.0 | Cilium | Prometheus |
 | Cilium BGP sessions (`cilium-bgp`) | The sessions established against those configured for each node, each session's state, the routes advertised and the agents scraped | `cilium-monitoring` | Written for this tree; Apache-2.0 | Cilium | Prometheus |
 | Piraeus Datastore (`piraeus`) | LINSTOR's pools, nodes, resources and error reports, the volumes' read and write rates, and DRBD's connections, quorum and out-of-sync data | `linstor-monitoring` | `config/extras/monitoring/piraeus-dashboard.json` of the Piraeus operator's repository at v2.12.1, the release the pinned chart deploys; Apache-2.0 | Storage | Prometheus |
-| CloudNativePG (`cloudnative-pg`) | A PostgreSQL cluster's instances, their health, configuration, activity, storage, write-ahead log, replication and checkpoints, and the operator's reconciles | `cloudnative-pg`, and the clusters of `n8n` and `backstage` | `charts/cluster/grafana-dashboard.json` of the CloudNativePG chart, where it is the chart `cluster` at 0.0.5; Apache-2.0 | PostgreSQL | Prometheus |
+| CloudNativePG (`cloudnative-pg`) | A PostgreSQL cluster's instances, their health, configuration, activity, storage, write-ahead log, replication and checkpoints, and the operator's reconciles | `cloudnative-pg`, and the clusters of `n8n`, `backstage` and `kguardian` | `charts/cluster/grafana-dashboard.json` of the CloudNativePG chart, where it is the chart `cluster` at 0.0.5; Apache-2.0 | PostgreSQL | Prometheus |
 | Falco (`falco`) | The rules that matched, by rule, source and priority, Falco's memory and CPU, the events it reads and drops, and the versions and engines that run | `falco` | `dashboards/falco-dashboard.json` of the Falco chart at 9.2.2; Apache-2.0 | Falco | Prometheus |
 | external-dns (`external-dns`) | The age of the last successful sync and of the last attempt, the endpoints of the sources and of the registry, their errors and the verified records by type | `external-dns` | Written for this tree; Apache-2.0 | external-dns | Prometheus |
 | Silence operator (`silence-operator`) | Whether the operator is scraped, its reconciles and errors by controller, the reconcile time and the queue depth | `silence-operator` | Written for this tree; Apache-2.0 | Silences | Prometheus |
@@ -6451,7 +6476,10 @@ The steps n8n took, in order; the next port does the same and says where it diff
    its `ks.yaml` alone, and goes into the list of overlay entries that n8n's test of the overlay
    expects. The namespace's default deny with the application's flows
    ([Declaring an application's flows](#declaring-an-applications-flows)), or its entry in
-   `network-policy-exceptions.yaml` with the flows it would declare, as `ai-system`'s is.
+   `network-policy-exceptions.yaml` with the flows it would declare, as `ai-system`'s is. A workload
+   the chart runs in the host's network namespace, as kguardian's observer, is selected by no pod
+   policy: a pod it reaches takes it as `host` and `remote-node`, in a policy of its own with its
+   reason, and it goes into [What policy does not cover](#what-policy-does-not-cover).
 2. **Pins.** The chart as an `OCIRepository` named after the application, as the namespace holds
    one per application and two applications applying one name would take turns owning it, with its
    tag under a `# renovate:` comment, each image by tag and digest under one. Read the registry's
@@ -6519,6 +6547,9 @@ The steps n8n took, in order; the next port does the same and says where it diff
    cluster, read in its source what it writes and what it calls, keep the chart's requests and say
    in the docs that they are not measured, and where a claim rests on what the API server does,
    run a kube-apiserver of the cluster's version offline, with etcd alone, and the image beside it.
+   A chart's ServiceMonitor is compared with the Service it is for on the render after the
+   release's post-renderers: a selector the Service's labels do not meet scrapes nothing and raises
+   no alert, and the post-renderer adds the label, as kguardian's does.
 8. **Tests.** Scenarios in `features/applications.feature`, each proved by a test of
    `tests/applications.bats` under its title, written and seen failing before the manifests, and
    mutated afterwards: remove the line each assertion guards and see the test fail. `render_app`
@@ -7053,6 +7084,445 @@ namespace, pod, container, image and process in its `output_fields`; then, in a 
 The Falco documentation says what else an override can do
 ([overriding](https://falco.org/docs/concepts/rules/overriding/),
 [exceptions](https://falco.org/docs/concepts/rules/exceptions/)).
+
+## kguardian
+
+`apps/base/kguardian/kguardian/` runs kguardian, from its publisher's chart
+(`oci://ghcr.io/kguardian-dev/charts/kguardian`), in the namespace `kguardian`. It records what each
+pod connects to and which system calls it makes, and shows that as a proposed network policy or
+seccomp profile, which a person reads before writing the real one: the evidence for the allows of
+the namespaces [Network policy](#network-policy) still lists, whose flows are not yet enumerated.
+A cluster selects it with two entries of its overlay, the namespace directory `kguardian` and
+`kguardian/kguardian/ks.yaml`; without them nothing of it builds. The application names, each for
+the kinds it brings or what they need, `cloudnative-pg` (the `Cluster`), `plugin-barman-cloud` (its
+`ObjectStore` and WAL archive), `prometheus-operator-crds` (the database's PodMonitor and the
+chart's ServiceMonitor), `external-secrets` (the tokens' generator and the ExternalSecrets),
+`openbao-store` (the store the backups' and the dump job's ExternalSecrets read), `linstor-cluster`
+(the StorageClass of the instances' volumes) and `cilium` (the policies) in `dependsOn`.
+`tests/kguardian.bats` refuses the overlay without any one of them.
+
+### What runs, and what is off
+
+Three workloads, one replica each but the first:
+
+- **The observer**, the DaemonSet `kguardian-controller` (the chart's controller): one pod on every
+  node, control planes included, as its toleration `operator: Exists` admits every taint and its
+  node selector is the chart's `kubernetes.io/os: linux`. It loads eBPF programs into the node's
+  kernel, ties what they see to pods through the container runtime and the API server, and posts
+  it to the broker. Its service account has the ClusterRole `kguardian-viewer`: get, list and watch
+  of pods, namespaces, Services, Deployments, ReplicaSets, StatefulSets and DaemonSets, and the get
+  of any Job and any Node, which it uses for the Job that owns a pod and for its own Node; nothing
+  else, and it writes nothing. It runs at the priority `system-node-critical`, as Falco does, so
+  the scheduler makes room for it on a node whose requests are full.
+- **The broker**, the Deployment `kguardian-broker`: the API the observers post to and the interface
+  reads, which keeps the record in the database below and prunes it.
+- **The interface**, the Deployment `kguardian-frontend` (the chart's frontend): a web server that
+  serves the page and proxies its `/api` requests to the broker with the read token.
+
+The render holds those three, their two Services, three service accounts, the ClusterRole and its
+binding, the broker's ServiceMonitor, and the two resource definitions of the chart's `crds/`
+directory, `auditnetworkpolicies.kguardian.dev` and `auditclusternetworkpolicies.kguardian.dev`,
+which Helm installs whatever the values say and nothing here makes an object of. Off, each by a
+value the application sets: the evaluator (`evaluator.enabled`), which reads `AuditNetworkPolicy`
+objects and reports what each would deny; the chart's own PostgreSQL (`database.enabled`), with its
+Secret, claim and dump hook; the Helm test pod (`broker.helmTest.enabled`), whose image is a tag
+written in its template, which nothing could pin, and which asks the same `/health` the broker's
+readiness probe asks; leader election (`broker.leaderElection.enabled`), so the one broker is always
+the leader and runs every background job, the retention jobs among them (`src/leader.rs`: with
+election off the gate always says leader), holds no service account token, calls no API and has no
+Role; and the three definitions the chart renders as templates (`seccomp.installCRDs`,
+`evaluator.imageTrust.installCRDs`, `evaluator.applicationSecurityProfiles.installCRD`). Five more
+would each widen the observer's pod, and are off because the purpose is flows and system calls:
+
+- compute gauges and the scheduler probe beneath them (`compute.enabled`,
+  `compute.contention.enabled`): the node's cgroup tree as a host path, and four programs on the
+  scheduler's tracepoints;
+- the capture of the kernel's seccomp verdicts (`seccomp.denials.enabled`): a kprobe on
+  `audit_seccomp` and the node's cgroup tree;
+- the runtime inventory (`controller.runtimeInventory`): a program on every process start, one on
+  every executable mapping in its full mode, and one on every capability check;
+- the node catalogue (`nodeCatalog.enabled`): a second container in the pod, as root with
+  `DAC_READ_SEARCH`, `SETUID` and `SETGID`, that lists the packages of each container's root
+  filesystem, and a third token for the broker;
+- seccomp distribution (`seccomp.distribute`): the kubelet's seccomp directory as a read-write host
+  path, and the rights to read every `SeccompProfile`, write their status and list the nodes.
+
+The requests and limits are the chart's: the observer 100m and 256Mi requested and 512Mi at most,
+unmeasured, as its cost is the flows and system calls of the node's pods; the broker 100m and 256Mi,
+1Gi at most; the interface 50m and 128Mi, 256Mi at most. Started locally with no network and no
+data, the broker held 26 MiB and the interface 36 MiB.
+
+### What it records, where, and for how long
+
+The observer records every namespace but its own: `controller.excludedNamespaces` is `kguardian`
+alone, where the chart's default also leaves out `kube-system`, one of the namespaces the record is
+for, and `controller.ignoreDaemonSet` is false, where the chart's default leaves every flow to or
+from a DaemonSet's pod address out (the listed namespaces hold DaemonSets on the pod network). It
+records every system call, `syscalls.captureLevel: full`, the only level a complete seccomp profile
+comes from. The record is:
+
+- each pod's flows: direction, protocol, its address and port and its peer's, the peer's pod or
+  Service where one is known, and whether a flow was refused, each recorded once, when first seen;
+- the system calls of each pod and, collapsed, of each workload;
+- pod and image metadata: each pod's name, namespace, labels, owner, node, addresses and whether it
+  is in the host's network namespace, the Services, and the images and digests each workload runs;
+- each node's coarse facts, which the observer reads once at start from its own Node object and
+  the node's `/proc` (provider, distribution, CNI, address family, CPU and memory size, kernel
+  version).
+
+A pod in the host's network namespace shares it with the node's own processes and every other such
+pod. The observer keys flows by network namespace and holds one pod for each, so the flows of that
+namespace are recorded under whichever of the node's host-network pods it registered last; their
+system calls it keys by each pod's own cgroup, so those are each pod's own
+(`src/models.rs`, `src/early_capture.rs` at the pinned version).
+
+It lives in the database's three instances, on the workers' data volumes, and in the database's
+encrypted backups in the project's object storage, as every database of the component does
+([The database](#the-database) below); the broker and the observers log no flow or system call, and
+no route leads to the interface or the broker. How long, in the database, as the broker runs with
+the values the application writes out:
+
+| What | Kept |
+| --- | --- |
+| A flow (`pod_traffic`) | while its pod runs, unless a newer flow of the pod repeats one first seen more than 14 days ago; once the pod is gone, pruned when first seen more than 14 days ago (`broker.traffic.retention.days`) |
+| A pod that is gone (`pod_details`) | 30 days (`broker.podInventory.retention.deadPodDays`) |
+| The images and containers no running pod has reported | 30 days (`broker.imageInventory.retention.days`) |
+| The system calls of each pod and workload | no window: no job prunes them, so they stay as long as the database |
+| The versions of a workload's profile the broker stores when it changes | 90 days, the broker's own default, which no value of the chart sets |
+| The evaluator's verdicts, seccomp verdicts, the runtime inventory, the supply-chain data, compute history | 30, 30, 30, 30 and 7 days, the chart's windows, written out; nothing fills them |
+
+The broker's own source says which table each window prunes (`src/retention.rs`), and that a
+running pod's flows are kept whatever their age but for one that a newer flow repeats: each is
+recorded once, so pruning one by age would drop it from the next proposal. What the broker prunes
+stays in the backups until they age out: in the WAL archive and the base backups for the recovery
+window of 30 days, and in each of the newest 14 dumps the dump job keeps.
+
+### Who can read the record
+
+The record names pods and addresses. In the cluster, whoever may forward a port or `exec` in
+`kguardian` reads it all through the interface or the broker, as does whoever holds the database's
+Secret `kguardian-db-app` or either token of `kguardian-broker-auth`, or can `exec` in the
+database's pods. Its backups are encrypted as every database's are: the archive and the base backups
+at the provider with the cluster's customer key, the dumps to the Talos age key's recipient before
+they leave the pod ([PostgreSQL](#postgresql)), so reading the archive takes the cluster's S3 key
+and its customer key, and reading a dump the S3 key and the age key. The interface has no sign-in:
+through `just kguardian`, whoever reaches the forwarded local port reads the record while the
+forward runs. The record is read with no other site open in the browser, and the forward is ended
+once done; `just kguardian` says so when it starts. A node sees what the observer on it records
+before it is posted, and the database's instance on a worker is that worker's disk. The broker's
+`/health` and `/metrics` answer without a token; every other route asks for one (below).
+
+### The observer's privileges
+
+`controller.securityContext` is the container's whole security context, which the chart renders as
+given in place of its default, a privileged container (upstream runs it privileged,
+`docs/architecture.mdx`, and its troubleshooting page names `CAP_BPF`, `CAP_PERFMON` and
+`CAP_SYS_RESOURCE` as enough, which nothing upstream tests). Here the container is not privileged,
+cannot escalate, has a read-only root filesystem, drops every capability and adds four, each for a
+call of the pinned controller (`controller/v1.17.2`) and the libraries it is built with:
+
+- `BPF`: the `bpf` system call's map create, BTF load and program load, which the kernel refuses a
+  process without it, as Talos sets `kernel.unprivileged_bpf_disabled` to 1
+  (`pkg/kernel/kspp/kspp.go`);
+- `PERFMON`: loading the tracing program types, fentry, kprobe and tracepoint, and their reads of
+  kernel memory, and the `perf_event_open` that the kprobe and kretprobe on `inet_csk_accept` and
+  the tracepoint `raw_syscalls/sys_enter` attach through, which Talos'
+  `kernel.perf_event_paranoid` of 3 refuses without it;
+- `SYS_PTRACE`: the stat of `/proc/<pid>/ns/net` that names a container's network namespace
+  (`src/container.rs`, through procfs' `namespaces()`), which the kernel allows only after
+  `ptrace_may_access`, refused for a process of another user or with capabilities the observer does
+  not hold, which is most of them. With the capability that check passes for every process on the
+  node, and Talos' `kernel.yama.ptrace_scope` of 2 (`pkg/kernel/kspp/kspp.go`) lets a process that
+  has it attach to any other, so through the host's `/proc` the observer can also read any process's
+  memory and environment (`/proc/<pid>/mem`, `/proc/<pid>/environ`) and reach its root filesystem
+  through `/proc/<pid>/root`, where it reads any file and writes one where the file's mode lets
+  root write it and the process's mount is writable, as it has no `DAC_OVERRIDE`, whatever the
+  read-only mount of `/proc`. Started locally with `SYS_PTRACE` and `DAC_READ_SEARCH` and a host
+  `/proc` mounted read-only, a container opened another container's memory, read its environment
+  and a file, and wrote a file into its root filesystem; with `DAC_READ_SEARCH` alone each was
+  refused. As with the next, the runtime's socket already gives root on the node, so this widens
+  nothing in practice;
+- `DAC_READ_SEARCH`: the open of the directory `/proc/<pid>/ns` that procfs lists first, mode 0511
+  and owned by the process's user, which root may not read for a process of another user without
+  it; without it, no pod that runs as another user than root is tied to its network namespace.
+  With it, containerd's default seccomp profile admits `open_by_handle_at` too, which opens a file
+  by its handle on a file system the container has a mount of, any file of that file system
+  whatever path the mount shows: the files the kubelet mounts into every container, such as
+  `/etc/hosts` and `/dev/termination-log`, are on the node's `/var`, so the observer can open any
+  file there, a control plane's etcd data among them. The runtime's socket already gives root on
+  the node (below), so this widens nothing in practice.
+
+`SYS_RESOURCE` is not added: the observer raises no limit, and libbpf 1.7, which it is built with,
+raises the memory lock limit only on a kernel that does not count BPF memory against the memory
+cgroup, older than 5.11, and goes on when refused. The seccomp profile is the runtime's default,
+which admits `bpf` to a container with `CAP_BPF` and `perf_event_open` to one with `CAP_PERFMON`
+([containerd](https://github.com/containerd/containerd/blob/v2.3.7/contrib/seccomp/seccomp_default.go)).
+The user is root: the image sets none, and what it reads is root's, the tracing files (mode 0700),
+the runtime's socket and the namespaces of the containers' root processes; a user other than root
+would also need `DAC_OVERRIDE`, to connect to the socket. Nothing upstream tests a set of
+capabilities, so the first start on a node is where one that is missing shows, in the observer's
+log.
+
+With the features above off, the chart mounts six host paths, all read-only; the observer reads
+three:
+
+- `/proc` over the container's own: `/proc/kallsyms`, to decide whether `udpv6_sendmsg` can be
+  traced, `/proc/<pid>/ns` of each container's process, and `/proc/stat`, `/proc/meminfo` and the
+  kernel's release for the node's facts. The host's processes come from this mount, so the pod has
+  no host PID or IPC namespace;
+- `/sys/kernel/tracing`, the tracing file system, where libbpf reads the identifier of the
+  tracepoint;
+- `/run/containerd/containerd.sock`, the runtime's socket, which the observer asks for the process
+  of each container (`Tasks.Get`). The socket is as strong as root on the node: whoever can run a
+  command in this container, which is whoever may `exec` in `kguardian`, can use it.
+
+All three are on every Talos node: `/proc`; the tracing file system, which Talos mounts at
+`/sys/kernel/tracing` (`internal/pkg/mount/v3/helpers.go`); and the socket of its CRI containerd,
+`CRIContainerdAddress` in `pkg/machinery/constants/constants.go`. The other three leave
+the pod, volume and mount together, by the HelmRelease's post-renderer, as Falco's release removes
+volumes: `/sys/kernel/debug`, as libbpf reads the tracing files under it only when its `tracing`
+directory exists and otherwise under `/sys/kernel/tracing`; `/sys/fs/bpf`, as the observer pins
+nothing and libbpf opens it only to ask for a BPF token, which the kernel refuses outside a user
+namespace, and goes on without one; and the runtime's bundle directory,
+`/run/containerd/io.containerd.runtime.v2.task`, which nothing in the observer opens.
+`tests/kguardian.bats` holds the pod's host paths to the three above and fails on a mount that
+names a volume the pod does not have.
+
+The pod is in the host's network namespace: the chart sets `hostNetwork: true` with no value for
+it, upstream documents it as required, and it stays. Nothing in the observer's source needs it: its
+programs see every network namespace from wherever they are loaded, it reads the containers'
+namespaces through `/proc`, and its connections, to the broker, the API server and the resolver,
+and the runtime's Unix socket, would work from the pod network. It opens no listener, so the node
+firewall has nothing to admit. The namespace enforces `privileged` and audits and warns at
+`restricted`; its one entry of `pod-security-exceptions.yaml` is `DaemonSet/kguardian-controller`,
+whose reason names the host's network namespace, each capability and each host path, and
+`tests/kguardian.bats` runs the baseline check on the rendered pod and fails when the reason leaves
+one out. The broker's and the interface's pods pass `restricted`, each as its own user, with a
+read-only root filesystem: the interface writes to two small `emptyDir` volumes, the broker to
+nothing.
+
+### The kernel and Cilium
+
+The programs are compiled into the observer and loaded when it starts; nothing is built or
+downloaded. The kernel of the pinned Talos release, 6.18.63 (the `kernel/build/config-amd64` of the
+`siderolabs/pkgs` tag that `siderolabs/talos`' Makefile pins as `PKGS` at `versions.yaml`'s
+`talos`), has what each loaded program needs: `CONFIG_BPF_SYSCALL`, `CONFIG_BPF_JIT`,
+`CONFIG_DEBUG_INFO_BTF`, `CONFIG_BPF_EVENTS`, `CONFIG_KPROBES`, `CONFIG_KRETPROBES`,
+`CONFIG_KPROBE_EVENTS`, `CONFIG_FUNCTION_TRACER` and `CONFIG_DYNAMIC_FTRACE_WITH_DIRECT_CALLS`,
+which an fentry program needs, `CONFIG_FTRACE_SYSCALLS`, `CONFIG_TRACEPOINTS`, `CONFIG_CGROUPS`, and
+`CONFIG_IPV6` built in. Lockdown is off by default (`CONFIG_LOCK_DOWN_KERNEL_FORCE_NONE`), as for
+Falco. The kernel is built with clang's ThinLTO (`CONFIG_LTO_CLANG_THIN`). What loads, by the
+programs' `SEC(…)` lines at the pinned tag:
+
+| Object | Programs | If it cannot load or attach |
+| --- | --- | --- |
+| `network_probe` | fentry on `udp_sendmsg`, `udpv6_sendmsg` and `tcp_set_state`; kprobe and kretprobe on `inet_csk_accept` | the observer stops, and the pod restarts |
+| `netpolicy_drop` | fentry on `tcp_retransmit_skb`, `tcp_v4_connect`, `tcp_set_state`, `udp_sendmsg` and `udpv6_sendmsg` | the observer stops |
+| `syscall` | tracepoint `raw_syscalls/sys_enter`; `tp_btf` on `cgroup_mkdir` | the tracepoint is required; the object is tried again with less, and `cgroup_mkdir` is skipped with a warning, losing only the system calls a container makes before its pod is known |
+
+The two `udpv6_sendmsg` programs are kept only when `/proc/kallsyms` names the function and its
+module, if any, has BTF (`src/bpf.rs`); otherwise they are skipped and IPv6 UDP is not recorded. The
+programs of `seccomp_denial`, `runtime_inventory` and `sched_contention` belong to the features
+that are off and are not loaded. What the configuration cannot say: whether each function is a
+symbol the kernel can trace, which a ThinLTO build can change by inlining a call into its caller,
+so that calls made that way pass the probe unseen; and `/proc/kallsyms` under Talos'
+`kernel.kptr_restrict` of 2, which shows every symbol's name with its address zeroed, enough for the
+observer's check, which reads names alone.
+
+Cilium's datapath at the pinned version uses XDP and tc programs on the devices and, for the
+kube-proxy replacement's socket load balancer and its socket acceleration, cgroup socket hooks
+(`Documentation/network/ebpf/intro.rst`, `Documentation/network/kubernetes/kubeproxy-free.rst`).
+The observer's programs are none of those: tracing programs on kernel functions and tracepoints,
+which read and change no packet, so the two do not share a hook. The address a flow to a Service is
+recorded with follows where the agents translate it, which the tree's Cilium values set
+(`socketLB.hostNamespaceOnly: true` in `apps/base/kube-system/cilium/app/values.yaml`,
+[Runtime classes](#runtime-classes)). A pod off the host network has its connections to a Service
+translated at its interface, packet by packet, so its socket keeps the Service's address and port,
+and that is what the programs on `tcp_set_state` and `udp_sendmsg` read and record
+(`src/bpf/network_probe.bpf.c`), as upstream's guide says of Service addresses
+(`docs/guides/generating-network-policies.mdx`). A process in the host's network namespace, a
+host-network pod among them, has its connection translated at the socket, at `connect()`, before
+`tcp_v4_connect` runs, so its TCP flow, and a UDP one from a connected socket, is recorded to the
+backend pod's address and port; a datagram it sends without `connect()`, as musl's resolver sends
+its queries, is read at the start of `udp_sendmsg`, before Cilium's hook in it translates the
+destination, and is recorded to the Service's address. A proposal names a peer recorded as a
+Service by the Service's selector and allows the Service's `targetPort` for the observed port, and
+a peer recorded as a pod by its labels and its own port (`src/utils/networkPolicyGenerator.ts` at
+the pinned interface).
+
+### What it calls
+
+The observer, the broker and the interface call nothing outside the cluster, and no language model.
+The database's backups are the component's, as for every database: the Barman Cloud plugin's
+sidecar in each instance's pod and the dump job reach the object storage, and the dump job the hosts
+age's release is downloaded from ([The database](#the-database)). Each thing the pinned chart and
+sources can call outside, with its value and its state, each asserted on the render by
+`tests/kguardian.bats`:
+
+| Call | Value | State |
+| --- | --- | --- |
+| The broker's daily check-in with the publisher's version service, which also counts the install by a random id, the versions, the number of nodes and the architecture | `telemetry.enabled` | off: the broker starts no such task and makes no request (`src/version_check.rs`); the nodes' facts the observers post stay in the database |
+| The assistant, the workload `llm-bridge`, which calls a model provider's API with what it reads of the record | `ai.enabled`, `llmBridge.enabled` | off: no workload, Service or account of it is rendered, and the interface is given no address of it |
+| The four providers it can call, each with a key from a Secret | `llmBridge.secrets.openai.enabled`, `llmBridge.secrets.anthropic.enabled`, `llmBridge.secrets.gemini.enabled`, `llmBridge.secrets.copilot.enabled` | off: no provider Secret is named anywhere in the render |
+| A gateway to call in place of a provider | `ai.baseUrl` | empty |
+| The MCP endpoint, which serves the record to clients outside the cluster | `ai.mcp.enabled` | off |
+| The supply-chain component: each running image's registry for its index, for the SBOMs publishers attach and for its signatures, the signature service's trust root, and a vulnerability database it downloads | `supplychain.enabled` | off, whole: nothing of it is rendered, and the broker is told signature discovery is off |
+| The evaluator, which the broker would call for each flow and for image trust | `evaluator.enabled` | off: the broker has no `EVALUATOR_URL` |
+
+The table is complete: the HTTP clients of the three sources at their tags are the observer's two,
+to the broker (`src/client.rs`) and to the API server; the broker's four, the version check-in,
+the evaluator's two (`src/audit.rs`, `src/image_trust.rs`) and leader election's to the API server
+(`src/leader.rs`), off; and the interface's server's two proxies, `/api` to the broker and
+`/llm-api` to the bridge, which with no address set is `localhost:8080` in its own pod, where
+nothing listens. The page the interface serves loads its scripts, styles, images and fonts from its
+own origin, and its Content-Security-Policy lets it connect nowhere else, so a browser that opens it
+fetches nothing from elsewhere either. Started locally with no network and a resolver that logs
+every query, the broker, given the database's name in its hosts file, asked the resolver nothing and
+logged no attempt to reach anything, and the interface looked up the broker's name only when asked
+to proxy a request.
+
+### The database
+
+The record is in a PostgreSQL cluster of the tree's component ([PostgreSQL](#postgresql)),
+`kguardian-db`, three instances of 5Gi each, unmeasured: the record grows with the cluster's pods,
+flows and workloads, and `cnpg_pg_database_size_bytes` shows what it has come to. The chart's own
+database is off; the broker connects as the user `app`, owner of the database `app`, to
+`kguardian-db-rw` over TLS (`sslmode=require`), with the password of the key `password` of the
+Secret `kguardian-db-app` the operator makes. The chart writes the password into the address
+unescaped, `postgres://app:$(DB_PASSWORD)@kguardian-db-rw:5432/app?sslmode=require`; the pinned
+operator generates it from letters and digits alone (`password.Generate(64, 10, 0, false, true)` in
+`internal/controller/cluster_create.go`), which an address carries as they are. The broker's
+migrations need no extension and no superuser: started locally beside PostgreSQL of the
+component's image, as a role that owns its database and is no superuser, the broker ran them and
+answered. The broker opens at most 32 connections, the chart's pool, and the chart's formula for
+what the database must accept, (replicas + the rolling update's surge) × 32 + 13, is 77 for the one
+replica, within the 100 of PostgreSQL's default `max_connections`, which the component does not
+change.
+
+The application takes the component whole, as every database of the tree does: the WAL archive and a
+daily base backup through the Barman Cloud plugin, encrypted at the provider with the cluster's
+customer key and kept for a recovery window of 30 days
+([Backups and restores](#backups-and-restores)), and the nightly dump, encrypted to the Talos age
+key's recipient before it leaves its pod, of which the job keeps the newest 14 dumps
+([Dumps](#dumps)). Its one change to them is the labels of the dump job's pods, which its policies
+select it by, and `tests/kguardian.bats` fails on any other: it builds the component alone with the
+same variables and compares each object. So the whole record, pod names and addresses, is also in
+the project's object storage for that long, and a lost database is restored from it as any other
+([postgres-restore.md](runbooks/postgres-restore.md)). The backup and dump alerts watch it as they
+do every database: `PostgresWALArchivingFailing`, `PostgresBackupTooOld`, `PostgresDumpStale` and
+`PostgresDumpJobFailing`.
+
+### The broker's tokens
+
+The broker takes only callers with a token (`broker.auth.enabled`, scoped): the observers present
+`ingest`, which also reads, and the interface `read`. Both are the keys of the Secret
+`kguardian-broker-auth`, which External Secrets writes once, `refreshPolicy: CreatedOnce`, from the
+Password generator `kguardian-broker-auth`, which gives each key of `secretKeys` a value of its own
+(`generators/v1/password/password.go` at the pinned External Secrets), 32 characters
+hex-encoded, as n8n's runners' token is made; the broker refuses to start on two scopes that hold
+one token. No person seeds anything. Every route but `/health` and `/metrics` asks for a token
+(`src/auth.rs`). Should the Secret be made again, the pods hold the old tokens until they restart:
+the broker, the interface and the observers each read theirs when they start.
+
+### Its flows
+
+The namespace denies traffic by default ([Network policy](#network-policy)), and eight policies in
+`app/` let through: into the broker's pods, the interface and Prometheus on 9090, and, in a policy
+of its own with its reason, `host` and `remote-node` on 9090, as the observers are in the host's
+network namespace of every node, where no pod selector matches them, and the kubelet's probes come
+from `host` too; out of the broker's pods, the resolver and the database's instances on 5432. Into
+the interface's pods, `host` on 5173 for the probes; out, the resolver and the broker on 9090. The
+database's pods and its dump job as Backstage's: the operator, each other, the broker and the dump
+job on 5432, Prometheus on 9187 and the probes on 8000 in, each other, the resolver and the API
+server out, and the instances, for their Barman Cloud sidecars, the object storage on 443; the dump
+job reaches the resolver, the instances on 5432 and the world on 443, for age's release and the
+object storage. Each rule to the world is a policy of its own with its reason. No rule of the broker
+or the interface reaches the world, and none the API server but the database's. The observer is
+selected by no pod policy ([What policy does not cover](#what-policy-does-not-cover)).
+`just kguardian` needs no rule: `kubectl port-forward` reaches the interface through the API server
+and the kubelet, and the container runtime dials the port from inside the pod's own network
+namespace, on its loopback (`internal/cri/server/sandbox_portforward_linux.go` at containerd v2.3.7,
+which Talos 1.14.6 runs).
+
+### Its metrics
+
+The broker serves Prometheus metrics on 9090 at `/metrics`, which the chart's ServiceMonitor
+scrapes every 30 seconds. At the pinned chart that monitor selects Services labelled
+`app.kubernetes.io/name: kguardian-broker` and the chart gives the broker's Service no such label,
+so the HelmRelease's post-renderer adds it, and `tests/kguardian.bats` compares the monitor's
+selector and port with the Service's after the post-renderer. The observer serves no metrics. No
+alert of its own: an observer short of its nodes is the stock `KubeDaemonSetRolloutStuck` or
+`KubeDaemonSetNotScheduled`, and a broker that does not answer its scrape the stock `TargetDown`.
+No dashboard reads the broker's metrics; the database's instances are on CloudNativePG's
+([Dashboards](#dashboards)).
+
+### Reading a proposal
+
+`just kguardian [cluster]` forwards a local port, `KGUARDIAN_PORT` or 5173, on 127.0.0.1 only, to
+the interface until Ctrl-C ([cluster.md](cluster.md#recipes)), and prints the local URL, that the
+interface has no sign-in, and to read the record with no other site open in the browser and end
+the forward once done ([Who can read the record](#who-can-read-the-record)). No route, Ingress or
+SecurityPolicy leads to it, and the namespace carries no Gateway label. `frontend.allowedHosts` is
+the Service's name, so the chart sets `ALLOWED_HOSTS` to the Service's four names: the server
+always answers `localhost` and addresses, which the forward uses, and refuses any other host name,
+which keeps a web page that rebinds its own name to the loopback from reaching the forwarded port
+by that name (`vite.config.ts`). Started locally as the render runs it, the interface served its
+page to `localhost` and to the Service's name and refused `rebind.example.com` with 403, its proxy
+included.
+
+The interface shows the pods of each namespace as a graph of their flows. For a pod, its Network
+Policy Builder proposes a `NetworkPolicy` and its Cilium Network Policy Builder a
+`CiliumNetworkPolicy` from the flows observed, and its seccomp view a seccomp profile from the
+system calls, as a plain seccomp document (`Raw JSON`) (`src/hooks/policyEditor/usePolicyExport.ts`
+at the pinned interface). Its other forms, kguardian's `AuditNetworkPolicy` and `SeccompProfile` and
+the Security Profiles Operator's `SeccompProfile`, are for the evaluator, the distribution and an
+operator this tree does not run. A proposal is text a person copies or
+downloads; nothing applies it. It is not the form this tree's allows take: an allow here is a
+`CiliumNetworkPolicy` beside its application that leaves the deny to the namespace's default deny,
+one rule per flow with its reason ([Declaring an application's flows](#declaring-an-applications-flows)),
+which a person writes from the proposal. The pinned version also has a command-line plugin,
+`kubectl kguardian`, which is not installed: it would be a new pinned tool, it forwards to the
+broker directly and needs the read token on the person's machine, and the interface reads the same.
+
+### The first install
+
+Each pod waits for what another makes, and nothing waits for a person. The broker's init container
+waits for the database's Service, `kguardian-db-rw`, to take a connection, and its container for the
+Secret `kguardian-db-app`, both of which the operator makes once the first instance runs. The
+observers' init container waits for the broker's `/health`, which it asks from the host's network
+namespace through the cluster's resolver (`dnsPolicy: ClusterFirstWithHostNet`); the chart writes
+`cluster.local` into every in-cluster address, which is this cluster's domain
+(`talos/patches/all/cluster-network.yaml`). Every pod that takes a token waits for the Secret
+External Secrets writes. The release's own wait is its 10 minute install timeout, from the root's
+defaults ([What the root sets](#what-the-root-sets)), for the broker, the interface and an observer
+on every node, which needs the first instance only; the Kustomization waits, with its long timeout
+of 10 minutes, for the release and the Cluster, which is Ready once its three instances, started one
+after another, are. A Kustomization that runs out of time tries again after a minute, and a release
+whose install fails is uninstalled and tried again three times, and then stays failed until its spec
+changes or a person resets it (`flux reconcile helmrelease kguardian -n kguardian --reset`). The
+instances' volumes are of the StorageClass `linstor-node-local`, which `linstor-cluster` makes, and
+the operator asks the service of `plugin-barman-cloud` to add the plugin's sidecar to each
+instance's pod, and makes no pod while that service does not answer ([PostgreSQL](#postgresql)):
+both are in `dependsOn`, so on a cluster built from nothing the application waits for them rather
+than its release running out of tries. `openbao-store` is in `dependsOn` for the backups' and the
+dump job's ExternalSecrets, which read the store: without it they fail, and the archive, the dumps
+and the Kustomization's readiness with them, while the Cluster and the release still start. They
+read the keys `volsync` and `postgres-backups`, which the store holds once for every database of the
+cluster ([Backups and restores](#backups-and-restores)), so kguardian adds no key a person seeds.
+The first base backup is taken as soon as the Cluster is ready
+([Backups and restores](#backups-and-restores)). The database is not part of the release, so an
+uninstall leaves the record.
+
+### What only the cluster shows
+
+The observer's first start on a Talos node, which is never run here: its log names each object it
+loaded and attached, or the call that failed, a missing capability among them. The chart gives the
+observer no probe, so its pod is ready once its container runs, and the release, which waits for
+the DaemonSet's pods to be ready, can be Ready before an observer that cannot load its programs
+stops: the observers' restarts and their logs on every node show the start, not the release.
+Whether each traced function fires under ThinLTO; the release's wait; `just network-drops` for the
+namespace, and for `@host` and `@remote-node` to the broker; the first flows in the interface; the
+database's first base backup and first nightly dump; and the database's size after a week.
 
 ## Admission policy
 

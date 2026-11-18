@@ -93,6 +93,10 @@ network-drops cluster='lab-sto2':
 grafana cluster='lab-sto2':
     scripts/grafana {{ quote(cluster) }}
 
+# Forward a local port, KGUARDIAN_PORT or 5173, on 127.0.0.1 only, to kguardian's interface on a cluster through its kubeconfig until Ctrl-C; prints the local URL and that the interface has no sign-in, so whoever reaches the local port reads the record
+kguardian cluster='lab-sto2':
+    scripts/kguardian {{ quote(cluster) }}
+
 # Print the logs a LogsQL query matches, one line per record, the oldest first, through the Kubernetes API's service proxy to VictoriaLogs: just logs 'kubernetes.pod_namespace:monitoring error' [--since 15m] [--limit 200] [cluster]; --since is a number with s, m, h, d or w; fails with the reason when the API does not answer or the store refuses the query
 [positional-arguments]
 logs *args:

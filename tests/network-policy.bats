@@ -46,6 +46,10 @@ setup() {
   CNPG_OPERATOR=cnpg-system/Deployment/cloudnative-pg
   PGDUMP=backstage/CronJob/backstage-db-pgdump
   OPEN_FEATURE="open-feature-operator/Deployment/open-feature-operator-controller-manager"
+  # kguardian's broker and interface, by the labels of their pods, as the chart renders their
+  # Deployments without a namespace; its test holds these to the render.
+  KGUARDIAN_BROKER='kguardian:app.kubernetes.io/instance=kguardian,app.kubernetes.io/managed-by=Helm,app.kubernetes.io/name=kguardian-broker'
+  KGUARDIAN_INTERFACE='kguardian:app.kubernetes.io/instance=kguardian,app.kubernetes.io/managed-by=Helm,app.kubernetes.io/name=kguardian-frontend'
 }
 
 # tree NAME: a copy of the fixture in $BATS_TEST_TMPDIR/NAME, for the test to change.
@@ -271,7 +275,7 @@ proxies_egress() {
   real_render
   run "$REPO/scripts/network-policy-check" "$REAL" "$REPO/network-policy-exceptions.yaml"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [ "$(grep ' denies ingress and egress' <<<"$output" | cut -d' ' -f1 | paste -sd' ')" = "backstage crowdsec demo envoy-gateway-system kromgo open-feature-operator security-system sso-system" ]
+  [ "$(grep ' denies ingress and egress' <<<"$output" | cut -d' ' -f1 | paste -sd' ')" = "backstage crowdsec demo envoy-gateway-system kguardian kromgo open-feature-operator security-system sso-system" ]
   [ "$(grep -c ' listed' <<<"$output")" -eq "$(yq '.exceptions | length' "$REPO/network-policy-exceptions.yaml")" ]
 }
 
@@ -1165,8 +1169,8 @@ E
   [[ $output == *"cluster-wide CiliumClusterwideNetworkPolicy/nodes selects nodes"* ]]
 
   # The tree: the agents honour the field, and the allows of backstage, demo, envoy-gateway-system,
-  # kromgo, open-feature-operator, security-system and sso-system let exactly their flows through
-  # with the namespaces' default deny, and every flow without it.
+  # kguardian, kromgo, open-feature-operator, security-system and sso-system let exactly their flows
+  # through with the namespaces' default deny, and every flow without it.
   real_render
   [ "$(yq '.data["enable-non-default-deny-policies"]' "$REAL"/*/cilium/ConfigMap_kube-system_cilium-config.yaml)" = true ]
   local open="$BATS_TEST_TMPDIR/open" removed
@@ -1176,8 +1180,9 @@ E
     "$open"/*/*/NetworkPolicy.networking.k8s.io_sso-system_default-deny.yaml
     "$open"/*/*/NetworkPolicy.networking.k8s.io_backstage_default-deny.yaml
     "$open"/*/*/NetworkPolicy.networking.k8s.io_security-system_default-deny.yaml
-    "$open"/*/*/NetworkPolicy.networking.k8s.io_open-feature-operator_default-deny.yaml)
-  [ "${#removed[@]}" -eq 7 ]
+    "$open"/*/*/NetworkPolicy.networking.k8s.io_open-feature-operator_default-deny.yaml
+    "$open"/*/*/NetworkPolicy.networking.k8s.io_kguardian_default-deny.yaml)
+  [ "${#removed[@]}" -eq 8 ]
   rm -- "${removed[@]}"
   local flow want from to port
   local flows=(
@@ -1245,6 +1250,9 @@ E
     "denied $OTHER_APP $OPEN_FEATURE 8080/tcp"
     "allowed $OPEN_FEATURE @kube-apiserver 6443/tcp"
     "denied $OPEN_FEATURE @world 443/tcp"
+    "allowed @remote-node $KGUARDIAN_BROKER 9090/tcp"
+    "denied $OTHER_APP $KGUARDIAN_BROKER 9090/tcp"
+    "denied $KGUARDIAN_INTERFACE @world 443/tcp"
   )
   for flow in "${flows[@]}"; do
     read -r want from to port <<<"$flow"
@@ -1320,4 +1328,283 @@ E
   fi
   # A change of the configuration rolls the agents, so each runs the mode it says.
   [ -n "$(yq '.spec.template.metadata.annotations["cilium.io/cilium-configmap-checksum"] // ""' "${agents[0]}")" ]
+}
+
+# kguardian_pod NAME: the file of kguardian's Deployment NAME in the render, in $POD_FILE, and its
+# pods as the evaluation names them, NAMESPACE:LABELS, in $POD. The chart renders the Deployment
+# without a namespace, which Helm gives it from the release at install, so the file must be the
+# release's and in no other namespace, and the pods are named by their template's labels.
+kguardian_pod() {
+  local files=("$REAL"/*/kguardian/Deployment.apps_*_"$1".yaml)
+  [ "${#files[@]}" -eq 1 ] && [ -f "${files[0]}" ] || { echo "no one Deployment $1 in kguardian's render: ${files[*]}"; return 1; }
+  POD_FILE=${files[0]}
+  [ "$(yq '.metadata.namespace // "kguardian"' "$POD_FILE")" = kguardian ]
+  [ "$(yq '.metadata.labels["helm.toolkit.fluxcd.io/namespace"]' "$POD_FILE")" = kguardian ]
+  POD="kguardian:$(yq '.spec.template.metadata.labels | to_entries | map(.key + "=" + .value) | join(",")' "$POD_FILE")"
+  [[ $POD == *"app.kubernetes.io/name=$1"* ]] || { echo "the pods of $1 are $POD"; return 1; }
+}
+
+# probed_ports FILE: the container ports the probes of the workload in FILE ask, sorted, one per line.
+probed_ports() {
+  yq -o json '.spec.template.spec.containers' "$1" | jq -r '.[] | . as $c
+    | [$c.readinessProbe, $c.livenessProbe, $c.startupProbe][] | select(. != null)
+    | (.httpGet.port // .tcpSocket.port // .grpc.port) as $p | select($p != null)
+    | ($p | if type == "number" then . else (($c.ports // [])[] | select(.name == $p) | .containerPort) end)' | sort -u
+}
+
+@test "kguardian's namespace denies traffic by default and lets through only its declared flows" {
+  real_render
+  local broker interface broker_file interface_file port
+  kguardian_pod kguardian-broker
+  broker=$POD broker_file=$POD_FILE
+  kguardian_pod kguardian-frontend
+  interface=$POD interface_file=$POD_FILE
+  echo "the broker's pods: $broker; the interface's: $interface"
+  [ "$broker" = "$KGUARDIAN_BROKER" ] && [ "$interface" = "$KGUARDIAN_INTERFACE" ]
+  # The two do not select each other's pods.
+  [[ $broker != *"app.kubernetes.io/name=kguardian-frontend"* && $interface != *"app.kubernetes.io/name=kguardian-broker"* ]]
+  # The database's pods, which no render holds: the instances and the jobs the PostgreSQL operator
+  # makes for the cluster kguardian-db at run time, by the labels it gives them (pkg/specs/pods.go
+  # and jobs.go of the pinned operator).
+  local made='app.kubernetes.io/name=postgresql,app.kubernetes.io/instance=kguardian-db,app.kubernetes.io/component=database,app.kubernetes.io/managed-by=cloudnative-pg'
+  local db="kguardian:cnpg.io/cluster=kguardian-db,cnpg.io/instanceName=kguardian-db-1,cnpg.io/podRole=instance,$made"
+  local replica="kguardian:cnpg.io/cluster=kguardian-db,cnpg.io/instanceName=kguardian-db-2,cnpg.io/podRole=instance,$made"
+  local join="kguardian:cnpg.io/cluster=kguardian-db,cnpg.io/instanceName=kguardian-db-3,cnpg.io/jobRole=join,$made"
+  # The database's daily dump job, which the component makes and the build holds.
+  local pgdump=kguardian/CronJob/kguardian-db-pgdump
+  # The namespace holds the default deny, and the list of namespaces that do not has no entry of it.
+  run "$REPO/scripts/network-policy-check" "$REAL" "$REPO/network-policy-exceptions.yaml"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  grep -qx 'kguardian denies ingress and egress' <<<"$output"
+  [ "$(yq '[.exceptions[] | select(.namespace == "kguardian")] | length' "$REPO/network-policy-exceptions.yaml")" -eq 0 ]
+  # Its allows, each with the entities it names. The observers run in the host's network namespace
+  # on every node, so no pod selector matches them: the broker takes the local host and other nodes'
+  # hosts on its port by the one rule of a policy of its own, which carries its reason. The world is
+  # named only by the database's instances, for the object storage, and its dump job, for the object
+  # storage and age's release, each in a policy of its own with its reason, as Backstage's are, and
+  # the API server only by the database's.
+  local policies=("$REAL"/*/kguardian/CiliumNetworkPolicy.cilium.io_kguardian_*.yaml)
+  [ "$(yq -N '.metadata.name + "=" + ([.spec.ingress[]?.fromEntities[]?, .spec.egress[]?.toEntities[]?] | unique | join("+"))' "${policies[@]}" | LC_ALL=C sort | paste -sd' ' -)" \
+    = "kguardian-broker-observers=host+remote-node kguardian-broker= kguardian-db-instances-world=world kguardian-db-instances=host kguardian-db-pgdump-world=world kguardian-db-pgdump= kguardian-db=kube-apiserver kguardian-frontend=host" ]
+  [ "$(yq -N 'select(.metadata.annotations["k8s-gitops/network-policy-reason"] != null) | .metadata.name' "${policies[@]}" | LC_ALL=C sort | paste -sd' ' -)" \
+    = "kguardian-broker-observers kguardian-db-instances-world kguardian-db-pgdump-world" ]
+  [ "$(yq -o json -I0 '.spec | [.ingress, .egress // []]' "$REAL"/*/kguardian/CiliumNetworkPolicy.cilium.io_kguardian_kguardian-broker-observers.yaml)" \
+    = '[[{"fromEntities":["host","remote-node"],"toPorts":[{"ports":[{"port":"9090","protocol":"TCP"}]}]}],[]]' ]
+  # Every policy that can let a flow of the namespace through, whatever its kind: each object of
+  # Cilium's API group, of Kubernetes' network groups or of a kind named a policy that kguardian's
+  # Kustomization builds, cluster-wide ones among them, or that is in its namespace, and every
+  # cluster-wide network policy of the render, whichever application's tree it comes from and
+  # whatever namespace the build wrote into it, but a Cilium one whose every endpoint selector pins
+  # another namespace. They are the namespace's default
+  # deny and the eight allows above, and nothing else.
+  local every=() file listed
+  while IFS= read -r file; do every+=("$file"); done < <(find "$REAL" -type f \( -path "$REAL/*/kguardian/*" -o -name '*_kguardian_*' \) -print0 \
+    | xargs -0 -r yq -N 'select((.apiVersion | test("^(cilium[.]io|([a-z0-9-]+[.])*networking[.]k8s[.]io)/")) or (.kind | test("Policy$"))) | filename' | LC_ALL=C sort)
+  while IFS= read -r file; do every+=("$file"); done < <(grep -rlxZE 'kind: (CiliumClusterwideNetworkPolicy|AdminNetworkPolicy|BaselineAdminNetworkPolicy|ClusterNetworkPolicy)' "$REAL" \
+    | xargs -0 -r yq -N 'select(.kind != "CiliumClusterwideNetworkPolicy"
+        or ([.spec.endpointSelector, .specs[]?.endpointSelector] | map(select(. != null))
+          | any_c((.matchLabels["k8s:io.kubernetes.pod.namespace"] // "kguardian") == "kguardian"))) | filename')
+  mapfile -t every < <(printf '%s\n' "${every[@]}" | LC_ALL=C sort -u)
+  listed="$(yq -N '.kind + "/" + (.metadata.namespace // "") + "/" + .metadata.name' "${every[@]}" | LC_ALL=C sort | paste -sd' ' -)"
+  [ "$listed" = "CiliumNetworkPolicy/kguardian/kguardian-broker CiliumNetworkPolicy/kguardian/kguardian-broker-observers CiliumNetworkPolicy/kguardian/kguardian-db CiliumNetworkPolicy/kguardian/kguardian-db-instances CiliumNetworkPolicy/kguardian/kguardian-db-instances-world CiliumNetworkPolicy/kguardian/kguardian-db-pgdump CiliumNetworkPolicy/kguardian/kguardian-db-pgdump-world CiliumNetworkPolicy/kguardian/kguardian-frontend NetworkPolicy/kguardian/default-deny" ] \
+    || { echo "kguardian's policies are $listed"; return 1; }
+  # The evaluation below sees a peer only as pods by their labels or as an entity: one named by a DNS
+  # name, a Service or an address matches no pod there, and a rule on what a request carries is not
+  # read. So each rule names its peers by labels or entities alone, with ports and nothing on top, the
+  # default deny holds no rule, and each policy is held whole but for its metadata, its one spec, its
+  # selector and every rule, to what this namespace lets through.
+  local peers held want
+  peers="$(yq -o json -I0 '.' "${every[@]}" | jq -r '(keys - ["apiVersion", "kind", "metadata", "spec"])[],
+    if .kind == "NetworkPolicy" then (.spec // {}) | keys - ["podSelector", "policyTypes"] | .[]
+    else (.spec // {}) | ((keys - ["endpointSelector", "enableDefaultDeny", "ingress", "egress"])[],
+      ((.ingress // [])[], (.egress // [])[] | keys - ["fromEndpoints", "fromEntities", "toEndpoints", "toEntities", "toPorts"] | .[]),
+      ((.ingress // [])[], (.egress // [])[] | (.toPorts // [])[] | keys - ["ports"] | .[])) end' | LC_ALL=C sort -u | paste -sd' ' -)"
+  [ -z "$peers" ] || { echo "kguardian's policies use $peers, beyond what the evaluation and this test read"; return 1; }
+  held="$(yq -o json -I0 '.' "${every[@]}" | jq -cS . | jq -r '"\(.kind)/\(.metadata.name) \(del(.metadata) | tojson)"' | LC_ALL=C sort)"
+  want="$(cat <<'POLICIES'
+CiliumNetworkPolicy/kguardian-broker {"apiVersion":"cilium.io/v2","kind":"CiliumNetworkPolicy","spec":{"egress":[{"toEndpoints":[{"matchLabels":{"k8s:io.kubernetes.pod.namespace":"kube-system","k8s:k8s-app":"kube-dns"}}],"toPorts":[{"ports":[{"port":"53","protocol":"UDP"},{"port":"53","protocol":"TCP"}]}]},{"toEndpoints":[{"matchLabels":{"cnpg.io/cluster":"kguardian-db","cnpg.io/podRole":"instance"}}],"toPorts":[{"ports":[{"port":"5432","protocol":"TCP"}]}]}],"enableDefaultDeny":{"egress":false,"ingress":false},"endpointSelector":{"matchLabels":{"app.kubernetes.io/name":"kguardian-broker"}},"ingress":[{"fromEndpoints":[{"matchLabels":{"app.kubernetes.io/name":"kguardian-frontend"}}],"toPorts":[{"ports":[{"port":"9090","protocol":"TCP"}]}]},{"fromEndpoints":[{"matchLabels":{"app.kubernetes.io/name":"prometheus","k8s:io.kubernetes.pod.namespace":"monitoring"}}],"toPorts":[{"ports":[{"port":"9090","protocol":"TCP"}]}]}]}}
+CiliumNetworkPolicy/kguardian-broker-observers {"apiVersion":"cilium.io/v2","kind":"CiliumNetworkPolicy","spec":{"enableDefaultDeny":{"egress":false,"ingress":false},"endpointSelector":{"matchLabels":{"app.kubernetes.io/name":"kguardian-broker"}},"ingress":[{"fromEntities":["host","remote-node"],"toPorts":[{"ports":[{"port":"9090","protocol":"TCP"}]}]}]}}
+CiliumNetworkPolicy/kguardian-db {"apiVersion":"cilium.io/v2","kind":"CiliumNetworkPolicy","spec":{"egress":[{"toEndpoints":[{"matchLabels":{"k8s:io.kubernetes.pod.namespace":"kube-system","k8s:k8s-app":"kube-dns"}}],"toPorts":[{"ports":[{"port":"53","protocol":"UDP"},{"port":"53","protocol":"TCP"}]}]},{"toEndpoints":[{"matchLabels":{"cnpg.io/cluster":"kguardian-db"}}]},{"toEntities":["kube-apiserver"],"toPorts":[{"ports":[{"port":"443","protocol":"TCP"},{"port":"6443","protocol":"TCP"}]}]}],"enableDefaultDeny":{"egress":false,"ingress":false},"endpointSelector":{"matchLabels":{"cnpg.io/cluster":"kguardian-db"}},"ingress":[{"fromEndpoints":[{"matchLabels":{"app.kubernetes.io/name":"cloudnative-pg","k8s:io.kubernetes.pod.namespace":"cnpg-system"}}],"toPorts":[{"ports":[{"port":"8000","protocol":"TCP"},{"port":"5432","protocol":"TCP"}]}]},{"fromEndpoints":[{"matchLabels":{"cnpg.io/cluster":"kguardian-db"}}]}]}}
+CiliumNetworkPolicy/kguardian-db-instances {"apiVersion":"cilium.io/v2","kind":"CiliumNetworkPolicy","spec":{"enableDefaultDeny":{"egress":false,"ingress":false},"endpointSelector":{"matchLabels":{"cnpg.io/cluster":"kguardian-db","cnpg.io/podRole":"instance"}},"ingress":[{"fromEndpoints":[{"matchLabels":{"app.kubernetes.io/name":"kguardian-broker"}},{"matchLabels":{"app.kubernetes.io/instance":"kguardian-db","app.kubernetes.io/name":"pgdump"}}],"toPorts":[{"ports":[{"port":"5432","protocol":"TCP"}]}]},{"fromEndpoints":[{"matchLabels":{"app.kubernetes.io/name":"prometheus","k8s:io.kubernetes.pod.namespace":"monitoring"}}],"toPorts":[{"ports":[{"port":"9187","protocol":"TCP"}]}]},{"fromEntities":["host"],"toPorts":[{"ports":[{"port":"8000","protocol":"TCP"}]}]}]}}
+CiliumNetworkPolicy/kguardian-db-instances-world {"apiVersion":"cilium.io/v2","kind":"CiliumNetworkPolicy","spec":{"egress":[{"toEntities":["world"],"toPorts":[{"ports":[{"port":"443","protocol":"TCP"}]}]}],"enableDefaultDeny":{"egress":false,"ingress":false},"endpointSelector":{"matchLabels":{"cnpg.io/cluster":"kguardian-db","cnpg.io/podRole":"instance"}}}}
+CiliumNetworkPolicy/kguardian-db-pgdump {"apiVersion":"cilium.io/v2","kind":"CiliumNetworkPolicy","spec":{"egress":[{"toEndpoints":[{"matchLabels":{"k8s:io.kubernetes.pod.namespace":"kube-system","k8s:k8s-app":"kube-dns"}}],"toPorts":[{"ports":[{"port":"53","protocol":"UDP"},{"port":"53","protocol":"TCP"}]}]},{"toEndpoints":[{"matchLabels":{"cnpg.io/cluster":"kguardian-db","cnpg.io/podRole":"instance"}}],"toPorts":[{"ports":[{"port":"5432","protocol":"TCP"}]}]}],"enableDefaultDeny":{"egress":false,"ingress":false},"endpointSelector":{"matchLabels":{"app.kubernetes.io/instance":"kguardian-db","app.kubernetes.io/name":"pgdump"}}}}
+CiliumNetworkPolicy/kguardian-db-pgdump-world {"apiVersion":"cilium.io/v2","kind":"CiliumNetworkPolicy","spec":{"egress":[{"toEntities":["world"],"toPorts":[{"ports":[{"port":"443","protocol":"TCP"}]}]}],"enableDefaultDeny":{"egress":false,"ingress":false},"endpointSelector":{"matchLabels":{"app.kubernetes.io/instance":"kguardian-db","app.kubernetes.io/name":"pgdump"}}}}
+CiliumNetworkPolicy/kguardian-frontend {"apiVersion":"cilium.io/v2","kind":"CiliumNetworkPolicy","spec":{"egress":[{"toEndpoints":[{"matchLabels":{"k8s:io.kubernetes.pod.namespace":"kube-system","k8s:k8s-app":"kube-dns"}}],"toPorts":[{"ports":[{"port":"53","protocol":"UDP"},{"port":"53","protocol":"TCP"}]}]},{"toEndpoints":[{"matchLabels":{"app.kubernetes.io/name":"kguardian-broker"}}],"toPorts":[{"ports":[{"port":"9090","protocol":"TCP"}]}]}],"enableDefaultDeny":{"egress":false,"ingress":false},"endpointSelector":{"matchLabels":{"app.kubernetes.io/name":"kguardian-frontend"}},"ingress":[{"fromEntities":["host"],"toPorts":[{"ports":[{"port":"5173","protocol":"TCP"}]}]}]}}
+NetworkPolicy/default-deny {"apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy","spec":{"podSelector":{},"policyTypes":["Ingress","Egress"]}}
+POLICIES
+)"
+  [ "$held" = "$want" ] || { echo "kguardian's policies, but for their metadata, differ from what the namespace lets through:"; diff <(echo "$want") <(echo "$held") || :; return 1; }
+  # The observers and the kubelet reach the broker on its port and on no other; other nodes' hosts
+  # reach neither the interface nor the database, and the world reaches nothing.
+  allowed "$VIEW" @host "$broker" 9090/tcp
+  allowed "$VIEW" @remote-node "$broker" 9090/tcp
+  denied "$VIEW" @remote-node "$broker" 5432/tcp
+  denied "$VIEW" @remote-node "$broker" 22/tcp
+  denied "$VIEW" @host "$broker" 22/tcp
+  denied "$VIEW" @remote-node "$interface" 5173/tcp
+  denied "$VIEW" @remote-node "$db" 5432/tcp
+  denied "$VIEW" @remote-node "$db" 8000/tcp
+  denied "$VIEW" @world "$broker" 9090/tcp
+  denied "$VIEW" @world "$interface" 5173/tcp
+  denied "$VIEW" @world "$db" 5432/tcp
+  # The kubelet's probes, read from the render, which the Gateway's test of probes cannot name, as
+  # these Deployments carry no namespace there: the broker's on 9090, the interface's on 5173, each
+  # from the local host.
+  [ "$(probed_ports "$broker_file" | paste -sd' ' -)" = 9090 ]
+  [ "$(probed_ports "$interface_file" | paste -sd' ' -)" = 5173 ]
+  for port in $(probed_ports "$broker_file"); do allowed "$VIEW" @host "$broker" "$port/tcp"; done
+  for port in $(probed_ports "$interface_file"); do allowed "$VIEW" @host "$interface" "$port/tcp"; done
+  denied "$VIEW" @host "$interface" 22/tcp
+  # Prometheus scrapes the broker's port, which the chart's monitor names, read from the render, and
+  # the database's exporter; nothing else of monitoring reaches either.
+  local scraped monitor service
+  monitor=("$REAL"/*/kguardian/ServiceMonitor.monitoring.coreos.com_*_kguardian-broker.yaml)
+  service=("$REAL"/*/kguardian/Service_*_kguardian-broker.yaml)
+  [ "${#monitor[@]}" -eq 1 ] && [ -f "${monitor[0]}" ] && [ "${#service[@]}" -eq 1 ] && [ -f "${service[0]}" ]
+  scraped=$(P="$(yq -N '.spec.endpoints[].port' "${monitor[0]}")" yq '.spec.ports[] | select(.name == strenv(P)) | .targetPort' "${service[0]}")
+  scraped=$(P="$scraped" yq '.spec.template.spec.containers[0].ports[] | select(.name == strenv(P)) | .containerPort' "$broker_file")
+  [ "$scraped" = 9090 ] || { echo "the broker's monitor scrapes $scraped"; return 1; }
+  allowed "$VIEW" "$PROMETHEUS" "$broker" "$scraped/tcp"
+  denied "$VIEW" "$PROMETHEUS" "$broker" 22/tcp
+  denied "$VIEW" monitoring/Deployment/kube-prometheus-stack-kube-state-metrics "$broker" "$scraped/tcp"
+  denied "$VIEW" "$PROMETHEUS" "$interface" 5173/tcp
+  allowed "$VIEW" "$PROMETHEUS" "$db" 9187/tcp
+  denied "$VIEW" "$PROMETHEUS" "$db" 5432/tcp
+  denied "$VIEW" monitoring/Deployment/kube-prometheus-stack-kube-state-metrics "$db" 9187/tcp
+  # The interface resolves the broker's name and reaches the broker, and nothing else: not the
+  # database, not the API server, nothing outside the cluster.
+  allowed "$VIEW" "$interface" "$DNS" 53/udp
+  allowed "$VIEW" "$interface" "$DNS" 53/tcp
+  denied "$VIEW" "$interface" "$DNS" 9153/tcp
+  allowed "$VIEW" "$interface" "$broker" 9090/tcp
+  denied "$VIEW" "$interface" "$broker" 22/tcp
+  denied "$VIEW" "$interface" "$db" 5432/tcp
+  denied "$VIEW" "$interface" "$replica" 5432/tcp
+  denied "$VIEW" "$interface" @kube-apiserver 6443/tcp
+  denied "$VIEW" "$interface" @kube-apiserver 443/tcp
+  denied "$VIEW" "$interface" "$PROMETHEUS" 9090/tcp
+  denied "$VIEW" "$interface" openbao/StatefulSet/openbao 8200/tcp
+  # The broker resolves its database's name and reaches the database's instances on PostgreSQL's
+  # port, every instance, as a failover moves the primary; it takes the interface, and reaches
+  # nothing else: no other port of the database, not the API server, nothing outside the cluster.
+  allowed "$VIEW" "$broker" "$DNS" 53/udp
+  allowed "$VIEW" "$broker" "$DNS" 53/tcp
+  allowed "$VIEW" "$broker" "$db" 5432/tcp
+  allowed "$VIEW" "$broker" "$replica" 5432/tcp
+  denied "$VIEW" "$broker" "$db" 8000/tcp
+  denied "$VIEW" "$broker" "$db" 9187/tcp
+  denied "$VIEW" "$broker" "$join" 5432/tcp
+  denied "$VIEW" "$broker" "$interface" 5173/tcp
+  denied "$VIEW" "$broker" @kube-apiserver 6443/tcp
+  denied "$VIEW" "$broker" @kube-apiserver 443/tcp
+  denied "$VIEW" "$broker" "$N8N_DB" 5432/tcp
+  denied "$VIEW" "$broker" "$BACKSTAGE_DB" 5432/tcp
+  denied "$VIEW" "$broker" "$PROMETHEUS" 9090/tcp
+  denied "$VIEW" "$broker" openbao/StatefulSet/openbao 8200/tcp
+  local port
+  for port in 443 80 22 5432 53; do
+    denied "$VIEW" "$broker" @world "$port/tcp"
+    denied "$VIEW" "$interface" @world "$port/tcp"
+  done
+  denied "$VIEW" "$broker" @world 53/udp
+  denied "$VIEW" "$interface" @world 53/udp
+  # The instances, whose pods hold the Barman Cloud plugin's sidecar, reach the object storage, the
+  # world on 443 and on the port cluster-config's example gives the endpoint, for the WAL archive and
+  # the base backups, and no other port of it; a job that creates or joins an instance holds no
+  # sidecar and reaches nothing outside the cluster.
+  local endpoint s3_port
+  endpoint=$(yq '.S3_ENDPOINT' "$REPO/kubernetes/clusters/lab-sto2/cluster-config.example.yaml")
+  [[ $endpoint =~ ^https://[^/:]+(:([0-9]+))?$ ]]
+  s3_port=${BASH_REMATCH[2]:-443}
+  allowed "$VIEW" "$db" @world 443/tcp
+  allowed "$VIEW" "$replica" @world 443/tcp
+  allowed "$VIEW" "$db" @world "$s3_port/tcp"
+  for port in 80 22 5432 53; do
+    denied "$VIEW" "$db" @world "$port/tcp"
+  done
+  denied "$VIEW" "$db" @world 53/udp
+  denied "$VIEW" "$join" @world 443/tcp
+  # The dump job resolves the Services' names, reaches the instances on PostgreSQL's port, and the
+  # world on 443 alone, for the age release and the object storage (docs/kubernetes.md, Dumps); it
+  # reaches nothing else of the namespace, not the API server, and no other application's database.
+  allowed "$VIEW" "$pgdump" "$DNS" 53/udp
+  allowed "$VIEW" "$pgdump" "$DNS" 53/tcp
+  allowed "$VIEW" "$pgdump" "$db" 5432/tcp
+  allowed "$VIEW" "$pgdump" "$replica" 5432/tcp
+  denied "$VIEW" "$pgdump" "$db" 8000/tcp
+  denied "$VIEW" "$pgdump" "$join" 5432/tcp
+  denied "$VIEW" "$pgdump" "$broker" 9090/tcp
+  denied "$VIEW" "$pgdump" "$interface" 5173/tcp
+  denied "$VIEW" "$pgdump" @kube-apiserver 6443/tcp
+  denied "$VIEW" "$pgdump" "$BACKSTAGE_DB" 5432/tcp
+  allowed "$VIEW" "$pgdump" @world 443/tcp
+  denied "$VIEW" "$pgdump" @world 80/tcp
+  denied "$VIEW" "$pgdump" @world 5432/tcp
+  # The database: the operator reaches every pod of the cluster on the status port and PostgreSQL's,
+  # the cluster's pods reach each other, a joining instance among them, the resolver and the API
+  # server, and the kubelet probes the instances on the status port; they reach no other
+  # application, and no other application's database or dump job reaches them.
+  allowed "$VIEW" "$CNPG_OPERATOR" "$db" 8000/tcp
+  allowed "$VIEW" "$CNPG_OPERATOR" "$db" 5432/tcp
+  allowed "$VIEW" "$CNPG_OPERATOR" "$join" 8000/tcp
+  denied "$VIEW" "$CNPG_OPERATOR" "$db" 9187/tcp
+  denied "$VIEW" "$CNPG_OPERATOR" "$broker" 9090/tcp
+  denied "$VIEW" cnpg-system:app.kubernetes.io/name=other "$db" 8000/tcp
+  allowed "$VIEW" "$replica" "$db" 5432/tcp
+  allowed "$VIEW" "$db" "$replica" 5432/tcp
+  allowed "$VIEW" "$join" "$db" 5432/tcp
+  allowed "$VIEW" "$db" "$DNS" 53/udp
+  allowed "$VIEW" "$db" @kube-apiserver 6443/tcp
+  allowed "$VIEW" "$join" @kube-apiserver 6443/tcp
+  allowed "$VIEW" @host "$db" 8000/tcp
+  denied "$VIEW" @host "$db" 5432/tcp
+  denied "$VIEW" "$db" "$broker" 9090/tcp
+  denied "$VIEW" "$db" openbao/StatefulSet/openbao 8200/tcp
+  denied "$VIEW" "$db" "$BACKSTAGE_DB" 5432/tcp
+  denied "$VIEW" "$BACKSTAGE_DB" "$db" 5432/tcp
+  denied "$VIEW" "$N8N_DB" "$db" 5432/tcp
+  denied "$VIEW" "$PGDUMP" "$db" 5432/tcp
+  # No other application's pod reaches the broker, the interface or the database, the public
+  # Gateway's proxies and Falco's pods among them.
+  local other
+  for other in "$OTHER_APP" demo/Deployment/hello "$KROMGO" "$BACKSTAGE" ai-system/Deployment/n8n "$PROXY" "$FALCO" "$MOVER"; do
+    denied "$VIEW" "$other" "$broker" 9090/tcp
+    denied "$VIEW" "$other" "$interface" 5173/tcp
+    denied "$VIEW" "$other" "$db" 5432/tcp
+  done
+  # Without the namespace's default deny, every one of those flows passes: the allows deny nothing.
+  local open="$BATS_TEST_TMPDIR/open" removed
+  cp -R "$VIEW" "$open"
+  removed=("$open"/*/*/NetworkPolicy.networking.k8s.io_kguardian_default-deny.yaml)
+  [ "${#removed[@]}" -eq 1 ] && [ -f "${removed[0]}" ]
+  rm -- "${removed[@]}"
+  local flow want from to
+  local flows=(
+    "allowed @remote-node $broker 9090/tcp"
+    "denied @remote-node $broker 22/tcp"
+    "denied @remote-node $interface 5173/tcp"
+    "denied @world $broker 9090/tcp"
+    "allowed $PROMETHEUS $broker 9090/tcp"
+    "denied $OTHER_APP $broker 9090/tcp"
+    "denied $OTHER_APP $db 5432/tcp"
+    "allowed $interface $broker 9090/tcp"
+    "denied $interface $db 5432/tcp"
+    "denied $interface @world 443/tcp"
+    "allowed $broker $db 5432/tcp"
+    "denied $broker @world 443/tcp"
+    "denied $broker @kube-apiserver 6443/tcp"
+    "allowed $db @kube-apiserver 6443/tcp"
+    "allowed $db @world 443/tcp"
+    "denied $db @world 80/tcp"
+    "denied $join @world 443/tcp"
+    "allowed $pgdump $db 5432/tcp"
+    "denied $pgdump $broker 9090/tcp"
+    "allowed $pgdump @world 443/tcp"
+    "denied $pgdump @world 80/tcp"
+  )
+  for flow in "${flows[@]}"; do
+    read -r want from to port <<<"$flow"
+    "$want" "$VIEW" "$from" "$to" "$port"
+    allowed "$open" "$from" "$to" "$port"
+  done
 }

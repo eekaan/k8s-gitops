@@ -1,0 +1,47 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: kguardian
+  namespace: flux-system
+  labels:
+    # The database's three instances start one after another, and the broker and then the observers
+    # wait for it, so the first rollout takes longer than the default.
+    k8s-gitops/timeout: long
+spec:
+  path: ./apps/base/kguardian/kguardian/app
+  targetNamespace: kguardian
+  # The database, from the cnpg-cluster component, with its WAL archive, base backups and nightly
+  # dump: the one place the record is kept, and its encrypted copies in the object storage
+  # (docs/kubernetes.md, kguardian).
+  components:
+    - ../../../../../components/cnpg-cluster
+  postBuild:
+    substitute:
+      CNPG_CLUSTER_NAME: kguardian-db
+      CNPG_NAMESPACE: kguardian
+      # Each instance's volume. Unmeasured: the record grows with the pods and flows the cluster has,
+      # and cnpg_pg_database_size_bytes shows what it has come to.
+      CNPG_STORAGE_SIZE: 5Gi
+  # The Cluster and its PodMonitor are of the operator's and Prometheus Operator's kinds, as is the
+  # chart's ServiceMonitor, and its ObjectStore the Barman Cloud plugin's, which archives its WAL;
+  # the generator and ExternalSecret of the broker's tokens are External Secrets', and the backups'
+  # and the dump job's ExternalSecrets read the store, which openbao-store makes; the instances'
+  # volumes are of the class linstor-cluster makes; the network policies are a kind Cilium's
+  # operator defines.
+  dependsOn:
+    - name: cloudnative-pg
+    - name: plugin-barman-cloud
+    - name: prometheus-operator-crds
+    - name: external-secrets
+    - name: openbao-store
+    - name: linstor-cluster
+    - name: cilium
+  # Ready once what it applies is: the Cluster, with its three instances, and the release, once the
+  # broker answers its health endpoint with the database in place and an observer runs on every
+  # node.
+  wait: true
+  sourceRef:
+    kind: ExternalArtifact
+    name: kguardian

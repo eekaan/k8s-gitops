@@ -1,0 +1,67 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/helmrelease-helm-v2.json
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: kguardian
+spec:
+  interval: 30m
+  chartRef:
+    kind: OCIRepository
+    name: kguardian
+  valuesFrom:
+    - kind: ConfigMap
+      name: kguardian-values
+  postRenderers:
+    - kustomize:
+        patches:
+          # The chart mounts six host paths in the observer whatever its values, and the observer
+          # reads three of them (docs/kubernetes.md, kguardian). No value removes the other three,
+          # each a host path the pod would be excepted for, so they leave the pod, mount and volume
+          # together; tests/kguardian.bats fails on a mount whose volume is gone.
+          # - The runtime's bundle directory: nothing in the observer's source opens it.
+          # - The kernel's debug files: libbpf looks for the tracepoint's identifier under their
+          #   tracing directory only when that exists, and otherwise under /sys/kernel/tracing,
+          #   which stays.
+          # - The BPF filesystem: the observer pins nothing, and libbpf opens the directory only to
+          #   ask for a token the kernel does not issue in the initial user namespace.
+          - target:
+              kind: DaemonSet
+              name: kguardian-controller
+            patch: |
+              apiVersion: apps/v1
+              kind: DaemonSet
+              metadata:
+                name: kguardian-controller
+              spec:
+                template:
+                  spec:
+                    containers:
+                      - name: controller
+                        volumeMounts:
+                          - mountPath: /run/containerd/io.containerd.runtime.v2.task
+                            $patch: delete
+                          - mountPath: /sys/kernel/debug
+                            $patch: delete
+                          - mountPath: /sys/fs/bpf
+                            $patch: delete
+                    volumes:
+                      - name: run-containerd-bundle
+                        $patch: delete
+                      - name: debugfs
+                        $patch: delete
+                      - name: bpffs
+                        $patch: delete
+          # The chart's ServiceMonitor selects Services labelled app.kubernetes.io/name
+          # kguardian-broker, and the chart gives the broker's Service the release's labels alone,
+          # so the monitor would select nothing. The Service gets the label the monitor asks for.
+          - target:
+              kind: Service
+              name: kguardian-broker
+            patch: |
+              apiVersion: v1
+              kind: Service
+              metadata:
+                name: kguardian-broker
+                labels:
+                  app.kubernetes.io/name: kguardian-broker

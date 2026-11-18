@@ -1,0 +1,25 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: kguardian
+  description: kguardian, which records what each pod connects to and which system calls it makes, with an observer on every node, and shows that as a proposed network policy or seccomp profile through a local forward.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#kguardian
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/kguardian/kguardian
+      title: Manifests
+spec:
+  type: service
+  lifecycle: production
+  owner: group:default/operators
+  system: observability
+  dependsOn:
+    - component:default/cilium
+    - component:default/cloudnative-pg
+    - component:default/external-secrets
+    - resource:default/linstor-cluster
+    - resource:default/openbao-store
+    - component:default/plugin-barman-cloud
+    - resource:default/prometheus-operator-crds

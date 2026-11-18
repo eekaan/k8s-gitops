@@ -1,0 +1,39 @@
+---
+# The two tokens the broker admits a caller by: read, which the interface presents, and ingest,
+# which the observers present and which also reads. The generator gives each key a value of its
+# own: 32 characters of letters of both cases, digits and symbols, hex-encoded into 64 hexadecimal
+# digits. The broker refuses to start on two scopes that hold one token. Nothing outside the
+# cluster needs either and nothing keeps one: they are read only through the cluster's API, so new
+# ones, should the Secret be made again, cost a restart of the broker, the interface and the
+# observers, which hold the old ones until then.
+apiVersion: generators.external-secrets.io/v1alpha1
+kind: Password
+metadata:
+  name: kguardian-broker-auth
+spec:
+  length: 32
+  allowRepeat: true
+  noUpper: false
+  encoding: hex
+  secretKeys:
+    - read
+    - ingest
+---
+# Writes the generated tokens into the Secret kguardian-broker-auth once, when the ExternalSecret is
+# first synced: with refreshPolicy CreatedOnce the operator does not sync it after that, so a token
+# never changes under the pods that read it when they start.
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: kguardian-broker-auth
+spec:
+  refreshPolicy: CreatedOnce
+  target:
+    name: kguardian-broker-auth
+    creationPolicy: Owner
+  dataFrom:
+    - sourceRef:
+        generatorRef:
+          apiVersion: generators.external-secrets.io/v1alpha1
+          kind: Password
+          name: kguardian-broker-auth

@@ -95,3 +95,14 @@ exceptions:
     workload: Pod/crowdsec-test-lapi-up
     level: baseline
     reason: the chart's Helm test runs a curl image as root with no security context; the release excludes it by name, and the check evaluates the render's tests all the same
+  - namespace: kguardian
+    workload: DaemonSet/kguardian-controller
+    level: privileged
+    reason: >-
+      the observer attaches its programs to the kernel as root from the host's network namespace,
+      where its chart runs it, with the added capabilities BPF, PERFMON, SYS_PTRACE and
+      DAC_READ_SEARCH, with which it can also open any file of the node's /var by its handle and,
+      through /proc, read the memory and environment of any process on the node and reach its root
+      filesystem, and mounts the host paths /proc, /sys/kernel/tracing and
+      /run/containerd/containerd.sock, the container runtime's socket, each read-only; baseline
+      refuses the host's network namespace, those capabilities and every host path
