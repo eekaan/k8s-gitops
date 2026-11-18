@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 # Proves features/pr-diff.feature; each test carries its scenario's title.
-# Needs helm, kustomize, flux, yq, jq, git and diff on PATH (the versions pinned for the repository).
+# Needs helm, kustomize, kubeconform, flux, yq, jq, git and diff on PATH (the versions pinned for
+# the repository).
 # Offline: the fixture's charts are packaged from tests/fixtures/render/charts. The OCI one is
 # handed to the render through its chart cache; the registry its OCIRepository names does not
 # resolve. The one a HelmRepository names is packaged at the version asked for by a stand-in for
@@ -470,6 +471,49 @@ EOF
   [ "$status" -ne 0 ]
   [[ $output == *"demo/greeter"* ]]
   [[ $output == *"the greeter chart refuses broken: true"* ]]
+}
+
+@test "A chart whose output repeats a mapping key fails the render, naming the release and the object" {
+  local where
+  # Helm's own template step writes both. helm-controller loads a release's output through
+  # kustomize's strict decode, which refuses a repeat, though a kustomize post-renderer folds
+  # repeated annotations first unless a JSON patch of it targets the object; the render refuses
+  # every one. The key is named as the parse that refuses it writes it: kubeconform's, which
+  # compares the values keys stand for, a string quoted and an integer bare, or, where those values
+  # differ, kustomize's decode, which compares the keys' text and quotes it: 80 beside "80", true
+  # beside "true", and the annotation 80 beside "80", which a kustomize build folds to one.
+  # helm-controller renders with the API versions the cluster serves at the time, so a key the chart
+  # repeats only while the fixture's ServiceMonitor API is served, which the render's later renders
+  # take from the tree's definitions, or only while it is not, as in its first render, is refused
+  # too.
+  for where in 'annotation:"fixture/policy"' 'nested:"key"' 'integer:80' 'quoted:"80"' 'boolean:"true"' \
+    'quoted-annotation:"80"' 'served:"key"' 'unserved:"key"'; do
+    rm -rf "$BATS_TEST_TMPDIR/base" "$BATS_TEST_TMPDIR/base.out"
+    tree base
+    yq -i ".repeatKey = \"${where%%:*}\"" "$BATS_TEST_TMPDIR/base/kubernetes/apps/base/web/greeter/app/values.yaml"
+    # With no kustomize post-renderer, the render's own kustomize build never reads the output, and
+    # helm-controller decodes it with no annotation folded first.
+    [[ $where == annotation:* || $where == nested:* ]] ||
+      yq -i 'del(.spec.postRenderers)' "$BATS_TEST_TMPDIR/base/kubernetes/apps/base/web/greeter/app/helmrelease.yaml"
+
+    render base
+    echo "$output"
+
+    [ "$status" -ne 0 ]
+    [[ $output == *"demo/greeter: HelmRelease web/greeter: ConfigMap greeter-annotated repeats the mapping key ${where#*:} in the chart's output"* ]]
+  done
+
+  # A document with neither kind nor name is named by its place among the chart's documents: the
+  # definition, the Secret, the ConfigMap and the Deployment come before it.
+  rm -rf "$BATS_TEST_TMPDIR/base" "$BATS_TEST_TMPDIR/base.out"
+  tree base
+  yq -i '.repeatKey = "unnamed"' "$BATS_TEST_TMPDIR/base/kubernetes/apps/base/web/greeter/app/values.yaml"
+
+  render base
+  echo "$output"
+
+  [ "$status" -ne 0 ]
+  [[ $output == *"demo/greeter: HelmRelease web/greeter: document 5 repeats the mapping key \"repeated\" in the chart's output"* ]]
 }
 
 # repository NAME: a git repository in $BATS_TEST_TMPDIR/NAME whose one commit, the base, holds the

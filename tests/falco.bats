@@ -1,11 +1,11 @@
 #!/usr/bin/env bats
 # Proves features/falco.feature; each test carries its scenario's title.
 # Needs helm, kustomize, flux, yq and jq on PATH (the versions pinned for the repository). The Falco
-# chart and, for the collector's configuration, the Vector chart are pulled once per run from their
-# public registries; building and rendering are offline, with the placeholders of the cluster's
-# example key lists.
+# chart, the Cilium chart, which the exception for Cilium's sysctl fix is read from, and, for the
+# collector's configuration, the Vector chart are pulled once per run from their public registries;
+# building and rendering are offline, with the placeholders of the cluster's example key lists.
 #
-# Three tests also run the image the render names, with docker: the proofs of two scenarios, which
+# Four tests also run the image the render names, with docker: the proofs of three scenarios, which
 # run Falco itself, and the search of the image's files for what would read a service account
 # token. Each skips, saying why, where no docker daemon answers, as in the CI containers; with one,
 # a pull or a run that fails is a failure. The containers have no network, no capability and a
@@ -66,45 +66,49 @@ build() {
     --kustomization-file "$BUILD_KS" --dry-run --strict-substitute) >"$BUILD"
 }
 
-# built: the falco application as Flux applies it on lab-sto2. Writes
-# $BATS_TEST_TMPDIR/falco-built.yaml and sets BUILT.
+# built [NAME [TREE]]: the application NAME, falco by default, as Flux applies it on lab-sto2 from
+# TREE, the repository by default. Writes $BATS_TEST_TMPDIR/NAME-built.yaml and sets BUILT.
 built() {
-  build "$REPO" falco
+  build "${2:-$REPO}" "${1:-falco}"
   BUILT="$BUILD"
 }
 
-# render: renders the chart that the HelmRelease of falco installs, from the URL and tag of its
+# render [NAME [TREE]]: renders the chart that the HelmRelease of the application NAME, falco by
+# default, installs from TREE, the repository by default: from the URL and tag of its
 # OCIRepository, with the values helm-controller gives it: those of the ConfigMap the HelmRelease
-# reads, then the HelmRelease's own over them, and its post-renderers over the result. Builds falco, writes $BATS_TEST_TMPDIR/falco.yaml and
-# sets BUILT, RENDERED, VALUES, CHART and APP_VERSION, the chart's appVersion.
+# reads, then the HelmRelease's own over them, and its post-renderers over the result. A chart is
+# pulled once a run for each URL and tag. Builds NAME, writes $BATS_TEST_TMPDIR/NAME.yaml and sets
+# BUILT, RENDERED, VALUES, CHART and APP_VERSION, the chart's appVersion.
 render() {
-  local url tag name release namespace pulled post
-  built
+  local app="${1:-falco}" tree="${2:-$REPO}" url tag name release namespace pulled post
+  built "$app" "$tree"
   url="$(yq -N 'select(.kind == "OCIRepository") | .spec.url' "$BUILT")"
   tag="$(yq -N 'select(.kind == "OCIRepository") | .spec.ref.tag' "$BUILT")"
   name="$(yq -N 'select(.kind == "HelmRelease") | .spec.valuesFrom[0].name' "$BUILT")"
   release="$(yq -N 'select(.kind == "HelmRelease") | .spec.releaseName // .metadata.name' "$BUILT")"
   namespace="$(yq -N 'select(.kind == "HelmRelease") | .spec.targetNamespace // .metadata.namespace' "$BUILT")"
-  VALUES="$BATS_TEST_TMPDIR/values.yaml"
+  VALUES="$BATS_TEST_TMPDIR/$app-values.yaml"
   NAME="$name" yq -N 'select(.kind == "ConfigMap" and .metadata.name == strenv(NAME)) | .data["values.yaml"]' "$BUILT" >"$VALUES"
-  [ -s "$VALUES" ] || { echo "no values in the ConfigMap $name the HelmRelease reads"; return 1; }
+  [ -s "$VALUES" ] || { echo "$app: no values in the ConfigMap $name the HelmRelease reads"; return 1; }
   [ "$(yq -N 'select(.kind == "HelmRelease") | .spec.values // {} | length' "$BUILT")" -eq 0 ] ||
-    { echo "the HelmRelease has values of its own beside its ConfigMap"; return 1; }
-  pulled="$BATS_FILE_TMPDIR/charts/$tag"
+    { echo "$app: the HelmRelease has values of its own beside its ConfigMap"; return 1; }
+  pulled="$BATS_FILE_TMPDIR/charts/${url#oci://}/$tag"
   if [ ! -d "$pulled" ]; then
     mkdir -p "$pulled"
-    helm pull "$url" --version "$tag" --destination "$pulled"
+    # A pull that fails leaves no directory, so the next render pulls again and fails with the
+    # pull's own error, not with a cache that holds no chart.
+    helm pull "$url" --version "$tag" --destination "$pulled" || { rm -rf "$pulled"; return 1; }
   fi
   CHART="$(echo "$pulled"/*.tgz)"
   APP_VERSION="$(helm show chart "$CHART" | yq '.appVersion')"
-  RENDERED="$BATS_TEST_TMPDIR/falco.yaml"
-  post="$BATS_TEST_TMPDIR/post-render"
+  RENDERED="$BATS_TEST_TMPDIR/$app.yaml"
+  post="$BATS_TEST_TMPDIR/$app-post-render"
   mkdir -p "$post"
   helm template "$release" "$CHART" --namespace "$namespace" --kube-version "$KUBE" --values "$VALUES" >"$post/chart.yaml"
   # helm-controller then passes the manifests through the release's post-renderers; only kustomize
   # patches are known here, so any other kind fails instead of being skipped.
   [ "$(yq -N 'select(.kind == "HelmRelease") | .spec.postRenderers // [] | map(select(has("kustomize") | not)) | length' "$BUILT")" -eq 0 ] ||
-    { echo "the HelmRelease has a post-renderer that is not kustomize"; return 1; }
+    { echo "$app: the HelmRelease has a post-renderer that is not kustomize"; return 1; }
   yq -N 'select(.kind == "HelmRelease") | {"resources": ["chart.yaml"], "patches": (.spec.postRenderers // [] | map(.kustomize.patches // []) | flatten)}' "$BUILT" >"$post/kustomization.yaml"
   kustomize build "$post" >"$RENDERED"
 }
@@ -261,6 +265,90 @@ excepts() {
   }
 }
 
+# sysctl_fix TREE: Cilium's sysctl fix, the one container of the cilium application's render that
+# runs cilium-sysctlfix, as Flux installs it on lab-sto2 from TREE. Sets C_NAMESPACE, the namespace
+# of the DaemonSet cilium, C_CONTAINER, that container's name, C_REPOSITORY, its image without tag
+# or digest, and C_PATH, the path it runs the binary at, ${BIN_PATH}/cilium-sysctlfix with BIN_PATH
+# from its environment. Fails, saying what Cilium is now, when no container of the render runs the
+# binary, which leaves the exception for it naming nothing, or more than one does; when that is not
+# a container of the DaemonSet cilium, the DaemonSet is not in the namespace its Kustomization
+# targets, or another container of the render has its name; when its image is not written as the
+# runtime reports it, registry first; and when its command is not the chart's, a copy of the binary
+# into the mount of the host path BIN_PATH, run there by nsenter in the mount namespace of the node's
+# PID 1, through the mount of the host path /proc, which is what makes that path the node's.
+sysctl_fix() {
+  local daemonset="$BATS_TEST_TMPDIR/cilium-daemonset.yaml" container="$BATS_TEST_TMPDIR/sysctl-fix.yaml"
+  local runs named image registry bin hostbin hostproc command script
+  render cilium "$1" || return 1
+  runs="$(yq -o json -I0 '.' "$RENDERED" | jq -r '. as $object
+    | (.spec.template.spec // .spec.jobTemplate.spec.template.spec // (if .kind == "Pod" then .spec else null end)) // empty
+    | (.containers // []) + (.initContainers // []) | .[] | select((.command // []) + (.args // []) | any(contains("cilium-sysctlfix")))
+    | "\($object.kind)/\($object.metadata.name)/\(.name)"')"
+  if [ -z "$runs" ]; then
+    echo "no container of Cilium's render runs cilium-sysctlfix, so the exception for it in exceptions.yaml names nothing that runs: remove it, its reason and its proofs (docs/kubernetes.md, Tuning)"
+    return 1
+  fi
+  [ "$(grep -c . <<<"$runs")" -eq 1 ] || { echo "more than one container of Cilium's render runs cilium-sysctlfix: $(paste -sd' ' <<<"$runs")"; return 1; }
+  [[ $runs == DaemonSet/cilium/* ]] || { echo "the container of Cilium's render that runs cilium-sysctlfix is $runs, not one of the DaemonSet cilium"; return 1; }
+  C_CONTAINER="${runs#DaemonSet/cilium/}"
+  named="$(yq -o json -I0 '.' "$RENDERED" | CONTAINER_NAME="$C_CONTAINER" jq -r '. as $object
+    | (.spec.template.spec // .spec.jobTemplate.spec.template.spec // (if .kind == "Pod" then .spec else null end)) // empty
+    | (.containers // []) + (.initContainers // []) | .[] | select(.name == env.CONTAINER_NAME)
+    | "\($object.kind)/\($object.metadata.name)/\(.name)"')"
+  [ "$named" = "$runs" ] || { echo "more containers of Cilium's render than the sysctl fix are named $C_CONTAINER: $(paste -sd' ' <<<"$named")"; return 1; }
+  object "$RENDERED" DaemonSet cilium >"$daemonset"
+  C_NAMESPACE="$(yq '.metadata.namespace' "$daemonset")"
+  [ "$C_NAMESPACE" = "$(yq '.spec.targetNamespace' "$BUILD_KS")" ] ||
+    { echo "Cilium's DaemonSet cilium renders in the namespace $C_NAMESPACE, and its Kustomization targets $(yq '.spec.targetNamespace' "$BUILD_KS")"; return 1; }
+  CONTAINER_NAME="$C_CONTAINER" yq '.spec.template.spec | (.containers // []) + (.initContainers // []) | .[] | select(.name == strenv(CONTAINER_NAME))' "$daemonset" >"$container"
+  image="$(yq '.image' "$container")"
+  C_REPOSITORY="$(repository "$image")"
+  registry="${C_REPOSITORY%%/*}"
+  if [[ $C_REPOSITORY != */* || $registry != *.* || ($registry == docker.io && $C_REPOSITORY != */*/*) ]]; then
+    echo "the sysctl fix's image $image is not written as the runtime reports it: its registry first and, on docker.io, its namespace"
+    return 1
+  fi
+  bin="$(yq '[.env // [] | .[] | select(.name == "BIN_PATH") | .value] | .[0] // ""' "$container")"
+  [[ $bin == /* ]] || { echo "the sysctl fix $C_CONTAINER has no absolute BIN_PATH in its environment: $bin"; return 1; }
+  C_PATH="$bin/cilium-sysctlfix"
+  # The directory where the container mounts the host path at PATH, one mount of one volume.
+  mounted() {
+    yq -o json '.spec.template.spec.volumes // []' "$daemonset" | HOST_PATH="$1" jq -r --slurpfile mounts <(yq -o json '.volumeMounts // []' "$container") '
+      [.[] | select(.hostPath.path == env.HOST_PATH) | .name] as $volumes
+      | [$mounts[0][] | select(.name as $name | $volumes | index($name)) | .mountPath]
+      | if length == 1 then .[0] else "" end'
+  }
+  hostbin="$(mounted "$bin")"
+  hostproc="$(mounted /proc)"
+  command="$(yq -o json '{"command": .command, "args": .args}' "$container" | jq -c .)"
+  # shellcheck disable=SC2016 # ${BIN_PATH} is the container's shell's.
+  script="$(printf 'cp /usr/bin/cilium-sysctlfix %s/cilium-sysctlfix;\nnsenter --mount=%s/1/ns/mnt "${BIN_PATH}/cilium-sysctlfix";\nrm %s/cilium-sysctlfix\n' "$hostbin" "$hostproc" "$hostbin")"
+  if [ -z "$hostbin" ] || [ -z "$hostproc" ] ||
+    [ "$command" != "$(jq -cn --arg script "$script"$'\n' '{"command": ["bash", "-ec", $script], "args": null}')" ]; then
+    echo "the sysctl fix $C_CONTAINER does not run what the exception's reason says, a copy of cilium-sysctlfix into the mount of the host path $bin, run by nsenter in the mount namespace of the node's PID 1 through the mount of the host path /proc: read the chart's init container that runs cilium-sysctlfix again, in templates/cilium-agent/daemonset.yaml, for what it now runs. It mounts the host path $bin at ${hostbin:-no one place} and /proc at ${hostproc:-no one place}, and runs $command"
+    return 1
+  fi
+}
+
+# sysctl_fix_exception: the condition that excepts the sysctl fix the last call of sysctl_fix read,
+# and nothing else: its namespace, container, image repository and the path it runs, each compared
+# for equality, joined by and, in parentheses.
+sysctl_fix_exception() {
+  printf '(k8s.ns.name = "%s" and container.name = "%s" and container.image.repository = "%s" and proc.exepath = "%s")' \
+    "$C_NAMESPACE" "$C_CONTAINER" "$C_REPOSITORY" "$C_PATH"
+}
+
+# excepts_sysctl_fix TREE: succeeds when $CONDITION, the condition of the rendered exception, is
+# exactly the one that names the sysctl fix of the Cilium of TREE; otherwise says what each names
+# and fails.
+excepts_sysctl_fix() {
+  sysctl_fix "$1" || return 1
+  [ "$CONDITION" = "$(sysctl_fix_exception)" ] || {
+    echo "the exception does not name Cilium's sysctl fix and it alone: its condition is $CONDITION, and the sysctl fix is $(sysctl_fix_exception)"
+    return 1
+  }
+}
+
 # docker_or_skip: skips the test, saying why, where no docker daemon answers. Past it, whatever
 # docker fails at fails the test, a pull of the image included.
 docker_or_skip() {
@@ -312,6 +400,28 @@ falco_image() {
   )
 }
 
+# falco_loads OUT: Falco, run on what the pod holds, loads it cleanly, writing what it prints under
+# OUT. A dry run exits 0: a condition with a field Falco does not know makes it exit 1 here, which
+# on a node is a pod that crash-loops. It loads the image's rules and then the local file, each
+# once, in this order. Validated in that order, every file loads without an error and without a
+# warning: an override of a macro the image does not define loads with the warning
+# LOAD_UNUSED_MACRO and exit 0, an exception that silently excepts nothing.
+falco_loads() {
+  local out="$1" file loaded=() validate=()
+  falco_image falco --dry-run >"$out/dry-run.out" 2>"$out/dry-run.err" || { cat "$out/dry-run.err"; return 1; }
+  mapfile -t loaded < <(sed -n '/Loading rules from:/,$ s/^.*: *\(\/[^ ]*\) | schema validation: .*$/\1/p' "$out/dry-run.err")
+  printf 'loaded: %s\n' "${loaded[@]}"
+  [ "${loaded[*]}" = "/etc/falco/falco_rules.yaml /etc/falco/falco_rules.local.yaml /etc/falco/rules.d/exceptions.yaml" ] ||
+    { echo "the dry run loaded ${loaded[*]:-nothing}, not the image's rules and then the local file"; return 1; }
+  for file in "${loaded[@]}"; do validate+=(-V "$file"); done
+  falco_image falco "${validate[@]}" >"$out/validate.json" 2>"$out/validate.err" || { cat "$out/validate.err"; return 1; }
+  jq -c '.falco_load_results[] | {name, successful, errors: [.errors[].code], warnings: [.warnings[].code]}' "$out/validate.json"
+  [ "$(jq -r '[.falco_load_results[].name] | join(" ")' "$out/validate.json")" = "${loaded[*]}" ] ||
+    { echo "the validation did not report the files in the order the dry run loaded them"; return 1; }
+  [ "$(jq -c '[.falco_load_results[] | select(.successful != true or .errors != [] or .warnings != []) | .name]' "$out/validate.json")" = '[]' ] ||
+    { echo "a file loads with an error or a warning"; return 1; }
+}
+
 # runtime_detection_docs: sets DOCS to the text of the docs' section Runtime detection, each line
 # break and run of spaces one space, so a sentence is found whole wherever its lines break.
 runtime_detection_docs() {
@@ -356,16 +466,16 @@ of_security_system() {
   run "$REPO/scripts/kubernetes-check" "$REPO"
   echo "$output"
   [ "$status" -eq 0 ]
-  # With only the namespace directory's entry, the cluster builds the namespace, its defaults and
-  # its default deny, and nothing of Falco.
-  tree_without '/security-system/falco/ks.yaml$'
+  # With only the namespace directory's entry, and without Falco's dashboard, which goes with Falco,
+  # the cluster builds the namespace, its defaults and its default deny, and nothing of Falco.
+  tree_without '/security-system/falco/ks.yaml$' '/monitoring/falco-dashboard/ks.yaml$'
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]
   overlay "$TREE/kubernetes/apps/overlays/lab-sto2"
   [ "$(of_security_system "$OVERLAY")" = ConfigMap/security-system/app-template-defaults,Namespace/-/security-system,NetworkPolicy/security-system/default-deny ]
-  # With neither, nothing of security-system.
-  tree_without '/security-system(/|$)'
+  # With neither, nor the dashboard, nothing of security-system.
+  tree_without '/security-system(/|$)' '/monitoring/falco-dashboard/ks.yaml$'
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]
@@ -575,28 +685,43 @@ of_security_system() {
 }
 
 @test "Falco's local rules have one place, which holds only what is true today" {
-  local item mounts reason layout
+  local item mounts reason reasons=() layout
   render
   daemonset
   falco_config
   # One key of the values, customRules, a map of rule files by name: it holds one file.
   [ "$(yq '.customRules | type' "$VALUES")" = '!!map' ]
   [ "$(yq '.customRules | keys | join(" ")' "$VALUES")" = exceptions.yaml ]
-  # The file is one item, which replaces the condition of one macro of the image's rules: no rule
-  # of the tree's own, no list, nothing appended to a rule and no rule turned off.
+  # The file is two items, in this order, each of which replaces the condition of one placeholder
+  # macro of the image's rules, the redirect rule's and then the drop-and-execute rule's: no rule of
+  # the tree's own, no list, nothing appended to a rule and no rule turned off.
   local_rules
   [ "$(yq 'type' "$EXCEPTIONS")" = '!!seq' ]
-  [ "$(yq 'length' "$EXCEPTIONS")" -eq 1 ]
-  item="$(yq -o json '.[0]' "$EXCEPTIONS")"
-  [ "$(jq -r 'keys | join(" ")' <<<"$item")" = "condition macro override" ]
-  [ "$(jq -r '.macro' <<<"$item")" = user_known_stand_streams_redirect_activities ]
-  [ "$(jq -c '.override' <<<"$item")" = '{"condition":"replace"}' ]
-  # Its reason is a comment above it, and nothing but comments stands above it. It says what httpd
-  # does that the rule matches, and that a shell in that container still matches.
-  [ "$(sed '/^- /,$d' "$EXCEPTIONS" | grep -c '^# Reason: ')" -eq 1 ]
+  [ "$(yq 'length' "$EXCEPTIONS")" -eq 2 ]
+  [ "$(yq '.[].macro' "$EXCEPTIONS" | paste -sd' ' -)" = "user_known_stand_streams_redirect_activities known_drop_and_execute_activities" ]
+  while read -r item; do
+    [ "$(jq -r 'keys | join(" ")' <<<"$item")" = "condition macro override" ]
+    [ "$(jq -c '.override' <<<"$item")" = '{"condition":"replace"}' ]
+  done < <(yq -o json -I0 '.[]' "$EXCEPTIONS")
+  # Each has its own reason in a block of comments directly above it, which starts with it, and
+  # nothing but comments stands above the first. The first's says what httpd does that the rule
+  # matches, and that a shell in that container still matches; the second's names cilium-sysctlfix,
+  # says how it runs and why Talos makes that match, that it excepts whatever that container runs at
+  # that one path, as it names a path and not a file, and that any binary the container runs from an
+  # upper layer at any other path, cilium-sysctlfix included, still matches.
+  [ "$(grep -c '^# Reason: ' "$EXCEPTIONS")" -eq 2 ]
   [ "$(sed '/^- /,$d' "$EXCEPTIONS" | grep -vc '^#' || true)" -eq 0 ]
-  reason="$(sed '/^- /,$d; s/^# *//' "$EXCEPTIONS" | tr '\n' ' ')"
-  [[ $reason == *httpd*dup2* && $reason == *"a shell"*"in that container still matches"* ]]
+  mapfile -t reasons < <(awk '/^#/ { sub(/^# */, ""); block = block (block == "" ? "" : " ") $0; next }
+    /^- / { print block; block = ""; next } { block = "" }' "$EXCEPTIONS")
+  printf 'reason: %s\n' "${reasons[@]}"
+  [ "${#reasons[@]}" -eq 2 ]
+  for reason in "${reasons[@]}"; do
+    [[ $reason == "Reason: "* && ${reason#Reason: } != *"Reason: "* ]]
+  done
+  [[ ${reasons[0]} == *httpd*dup2* && ${reasons[0]} == *"a shell"*"in that container still matches"* ]]
+  [[ ${reasons[1]} == *cilium-sysctlfix*nsenter*Talos*overlay* ]]
+  [[ ${reasons[1]} == *"names a path and not a file, so it excepts whatever that container"*"runs at that one path"* ]]
+  [[ ${reasons[1]} == *"any binary that container runs from an upper layer at any other path, cilium-sysctlfix included, still matches"* ]]
   # The chart makes the ConfigMap falco-rules of the key, holding that file as the values hold it.
   [ "$(object "$RENDERED" ConfigMap falco-rules | yq '.data | keys | join(" ")')" = exceptions.yaml ]
   [ "$(object "$RENDERED" ConfigMap falco-rules | yq '.data["exceptions.yaml"]')" = "$(yq '.customRules["exceptions.yaml"]' "$VALUES")" ]
@@ -618,10 +743,12 @@ of_security_system() {
   # Falco watches the rules files it loaded, so a pod that runs loads a changed file once the
   # kubelet brings it to that mount, which a mount of one file by its path would never show.
   [ "$(yq '.watch_config_files' "$CONFIG")" = true ]
-  # The docs say where the key is and show the item as the values hold it.
+  # The docs say where the key is and show each item's condition as the values hold it.
   runtime_detection_docs
   [[ $DOCS == *customRules* ]]
-  [[ $DOCS == *"$(jq -r '.condition' <<<"$item")"* ]]
+  while read -r item; do
+    [[ $DOCS == *"$(jq -r '.condition' <<<"$item")"* ]] || { echo "the docs do not show the condition of $(jq -r '.macro' <<<"$item")"; return 1; }
+  done < <(yq -o json -I0 '.[]' "$EXCEPTIONS")
 }
 
 @test "The redirect rule excepts the demo's web server by namespace, container, image and process, and nothing wider" {
@@ -690,7 +817,7 @@ of_security_system() {
 
 @test "Falco loads the local rules at the pinned version and compiles the redirect rule with the one exception under a single negation" {
   local out="$BATS_TEST_TMPDIR/falco" rule="Redirect STDOUT/STDIN to Network Connection in Container"
-  local file loaded=() validate=() conjunction compiled plain negates
+  local conjunction compiled plain negates
   render
   daemonset
   falco_config
@@ -698,21 +825,9 @@ of_security_system() {
   workload "$REPO"
   docker_or_skip
   mkdir -p "$out/no-rules"
-  # A dry run on what the pod holds exits 0. A condition with a field Falco does not know makes it
-  # exit 1 here, which on a node is a pod that crash-loops.
-  falco_image falco --dry-run >"$out/dry-run.out" 2>"$out/dry-run.err" || { cat "$out/dry-run.err"; return 1; }
-  # It loads the image's rules and then the local file, each once, in this order.
-  mapfile -t loaded < <(sed -n '/Loading rules from:/,$ s/^.*: *\(\/[^ ]*\) | schema validation: .*$/\1/p' "$out/dry-run.err")
-  printf 'loaded: %s\n' "${loaded[@]}"
-  [ "${loaded[*]}" = "/etc/falco/falco_rules.yaml /etc/falco/falco_rules.local.yaml /etc/falco/rules.d/exceptions.yaml" ]
-  # Validated in that order, every file loads without an error and without a warning. An override
-  # of a macro the image does not define loads with the warning LOAD_UNUSED_MACRO and exit 0: an
-  # exception that silently excepts nothing.
-  for file in "${loaded[@]}"; do validate+=(-V "$file"); done
-  falco_image falco "${validate[@]}" >"$out/validate.json" 2>"$out/validate.err" || { cat "$out/validate.err"; return 1; }
-  jq -c '.falco_load_results[] | {name, successful, errors: [.errors[].code], warnings: [.warnings[].code]}' "$out/validate.json"
-  [ "$(jq -r '[.falco_load_results[].name] | join(" ")' "$out/validate.json")" = "${loaded[*]}" ]
-  [ "$(jq -c '[.falco_load_results[] | select(.successful != true or .errors != [] or .warnings != []) | .name]' "$out/validate.json")" = '[]' ]
+  # A dry run on what the pod holds exits 0, having loaded the image's rules and then the local
+  # file, and every file validates in that order without an error or a warning.
+  falco_loads "$out"
   # The rule is enabled, at priority Notice, and compiles to the image's condition with one
   # negation, of the conjunction of hello's four values, which Falco prints without quotes.
   falco_image falco -l "$rule" >"$out/rule.json" 2>"$out/rule.err" || { cat "$out/rule.err"; return 1; }
@@ -731,7 +846,9 @@ of_security_system() {
   echo "the image's: $plain"
   [ "$plain" = "$negates evt.num = 0)" ]
   # With the local file Falco lists as many rules enabled as the image has without it, the same
-  # ones, and nothing but that rule and its macro differs: no other rule, macro or list.
+  # ones, and nothing differs but the two rules the local file excepts from, this one and Drop and
+  # execute new binary in container, and the two placeholders it replaces: no other rule, no other
+  # macro and no list.
   falco_image falco -L >"$out/local.json" 2>"$out/local.err" || { cat "$out/local.err"; return 1; }
   enabled() { jq -r '[.rules[] | select(.info.enabled) | .info.name] | sort | .[]' "$1"; }
   echo "enabled rules: $(enabled "$out/image.json" | grep -c .) of the image, $(enabled "$out/local.json" | grep -c .) with the local file"
@@ -743,9 +860,142 @@ of_security_system() {
       ($image[0][$kind] | named) as $a | ($local[0][$kind] | named) as $b
       | [$a + $b | keys[] | select($a[.] != $b[.])] | join(",")'
   }
-  [ "$(differing rules)" = "$rule" ]
-  [ "$(differing macros)" = user_known_stand_streams_redirect_activities ]
+  echo "differing rules: $(differing rules); macros: $(differing macros); lists: $(differing lists)"
+  [ "$(differing rules)" = "Drop and execute new binary in container,$rule" ]
+  [ "$(differing macros)" = known_drop_and_execute_activities,user_known_stand_streams_redirect_activities ]
   [ -z "$(differing lists)" ]
+}
+
+@test "The drop-and-execute rule excepts Cilium's sysctl fix by namespace, container, image and path, and nothing wider" {
+  local values=kubernetes/apps/base/kube-system/cilium/app/values.yaml ks=kubernetes/apps/base/kube-system/cilium/ks.yaml
+  local release=kubernetes/apps/base/kube-system/cilium/app/helmrelease.yaml index other others
+  render
+  local_rules
+  # The second item replaces the placeholder that the rule Drop and execute new binary in container
+  # negates.
+  [ "$(yq '.[1].macro' "$EXCEPTIONS")" = known_drop_and_execute_activities ] ||
+    { echo "the local rules' second item overrides $(yq '.[1].macro' "$EXCEPTIONS"), not the placeholder known_drop_and_execute_activities"; return 1; }
+  CONDITION="$(yq '.[1].condition' "$EXCEPTIONS")"
+  echo "$CONDITION"
+  # The condition is, to the letter, the one made of the sysctl fix of the Cilium that Flux
+  # installs, read from the chart's render with its values and its post-renderer: the namespace of
+  # the DaemonSet cilium, which its Kustomization targets, the name of the one container that runs
+  # cilium-sysctlfix, which no other container of the render has, that container's image without
+  # tag or digest and the path it runs the binary at, each compared for equality, joined by and, in
+  # parentheses. So it holds no or, no not and no other field or operator, and names what runs. The
+  # reading also holds the container's command to the chart's, which makes that path the node's.
+  excepts_sysctl_fix "$REPO"
+  # Why the container's name is one of the four: the agent and other init containers of the
+  # DaemonSet run the same image in the same namespace, under other names, which the condition does
+  # not except.
+  others="$(CONTAINER_NAME="$C_CONTAINER" REPOSITORY="$C_REPOSITORY" yq '.spec.template.spec | (.containers // []) + (.initContainers // []) | .[]
+    | select(.name != strenv(CONTAINER_NAME) and (.image | split("@") | .[0] | sub(":[^:/]*$", "")) == strenv(REPOSITORY)) | .name' "$BATS_TEST_TMPDIR/cilium-daemonset.yaml" | paste -sd' ' -)"
+  echo "other containers of $C_REPOSITORY in the DaemonSet: $others"
+  [[ " $others " == *" cilium-agent "* ]]
+  [ "$(wc -w <<<"$others")" -ge 2 ]
+  # A Cilium whose CNI directory, image, namespace or container's name moves is no longer what the
+  # exception names, which then names nothing that runs; one whose container runs the binary
+  # otherwise is no longer what its reason says; and with the sysctl fix off there is nothing left
+  # to except. Each fails, saying what Cilium is now.
+  index="$(CONTAINER_NAME="$C_CONTAINER" yq '.spec.template.spec.initContainers | to_entries | .[] | select(.value.name == strenv(CONTAINER_NAME)) | .key' "$BATS_TEST_TMPDIR/cilium-daemonset.yaml")"
+  other="$(CONTAINER_NAME="$C_CONTAINER" yq '.spec.template.spec.initContainers | to_entries | map(select(.value.name != strenv(CONTAINER_NAME))) | .[0].key' "$BATS_TEST_TMPDIR/cilium-daemonset.yaml")"
+  [[ $index =~ ^[0-9]+$ && $other =~ ^[0-9]+$ ]]
+  # post_render PATCH: appends PATCH, a JSON patch of the DaemonSet cilium, to the post-renderer of
+  # the HelmRelease of the tree's Cilium.
+  post_render() {
+    PATCH="$1" yq -i '.spec.postRenderers[0].kustomize.patches += [{"target": {"kind": "DaemonSet", "name": "cilium"}, "patch": strenv(PATCH)}]' "$TREE/$release"
+  }
+  tree_without
+  yq -i '.cni.binPath = "/opt/example/bin"' "$TREE/$values"
+  run excepts_sysctl_fix "$TREE"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"the exception does not name Cilium's sysctl fix and it alone"*'and the sysctl fix is '*'proc.exepath = "/opt/example/bin/cilium-sysctlfix"'* ]]
+  tree_without
+  yq -i '.image.repository = "registry.example.com/cilium/cilium"' "$TREE/$values"
+  run excepts_sysctl_fix "$TREE"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"the exception does not name Cilium's sysctl fix and it alone"*'and the sysctl fix is '*'container.image.repository = "registry.example.com/cilium/cilium"'* ]]
+  tree_without
+  yq -i '.image.repository = "cilium/cilium"' "$TREE/$values"
+  run excepts_sysctl_fix "$TREE"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"the sysctl fix's image cilium/cilium:"*"is not written as the runtime reports it"* ]]
+  # The Kustomization's target namespace moved alone leaves the release, and the DaemonSet, where
+  # they were, which the reading refuses; moved with the release's, the comparison names the new one.
+  tree_without
+  yq -i '.spec.targetNamespace = "cilium-example"' "$TREE/$ks"
+  run excepts_sysctl_fix "$TREE"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"Cilium's DaemonSet cilium renders in the namespace $C_NAMESPACE, and its Kustomization targets cilium-example"* ]]
+  yq -i '.spec.targetNamespace = "cilium-example" | .spec.storageNamespace = "cilium-example"' "$TREE/$release"
+  run excepts_sysctl_fix "$TREE"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"the exception does not name Cilium's sysctl fix and it alone"*'and the sysctl fix is '*'k8s.ns.name = "cilium-example"'* ]]
+  tree_without
+  post_render "$(printf -- '- op: replace\n  path: /spec/template/spec/initContainers/%s/name\n  value: sysctl-overwrites\n' "$index")"
+  run excepts_sysctl_fix "$TREE"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"the exception does not name Cilium's sysctl fix and it alone"*'and the sysctl fix is '*'container.name = "sysctl-overwrites"'* ]]
+  tree_without
+  post_render "$(printf -- '- op: replace\n  path: /spec/template/spec/initContainers/%s/name\n  value: %s\n' "$other" "$C_CONTAINER")"
+  run excepts_sysctl_fix "$TREE"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"more containers of Cilium's render than the sysctl fix are named $C_CONTAINER"* ]]
+  # Run from the container's own mount of the CNI directory, the binary's path would be
+  # the container's, not the node's.
+  tree_without
+  post_render "$(printf -- '- op: replace\n  path: /spec/template/spec/initContainers/%s/command/2\n  value: cp /usr/bin/cilium-sysctlfix /hostbin/cilium-sysctlfix; /hostbin/cilium-sysctlfix; rm /hostbin/cilium-sysctlfix\n' "$index")"
+  run excepts_sysctl_fix "$TREE"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"read the chart's init container that runs cilium-sysctlfix again"* ]]
+  tree_without
+  yq -i '.sysctlfix.enabled = false' "$TREE/$values"
+  run excepts_sysctl_fix "$TREE"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [[ $output == *"no container of Cilium's render runs cilium-sysctlfix, so the exception for it in exceptions.yaml names nothing that runs: remove it"* ]]
+}
+
+@test "Falco compiles the drop-and-execute rule with the one exception for Cilium's sysctl fix under a single negation" {
+  local out="$BATS_TEST_TMPDIR/falco" rule="Drop and execute new binary in container" conjunction compiled plain negates
+  sysctl_fix "$REPO"
+  render
+  daemonset
+  falco_config
+  local_rules
+  docker_or_skip
+  mkdir -p "$out/no-rules"
+  # A dry run on what the pod holds exits 0, having loaded the image's rules and then the local
+  # file, and every file validates in that order without an error or a warning.
+  falco_loads "$out"
+  # The rule is enabled, at priority Critical, and compiles to the image's condition with one
+  # negation, of the conjunction of the sysctl fix's four values, which Falco prints without quotes,
+  # beside the negation of the image's list of images, which is empty.
+  falco_image falco -l "$rule" >"$out/rule.json" 2>"$out/rule.err" || { cat "$out/rule.err"; return 1; }
+  [ "$(jq -r '.rules | map(.info.name) | join(",")' "$out/rule.json")" = "$rule" ]
+  [ "$(jq -r '.rules[0].info.enabled' "$out/rule.json")" = true ]
+  [ "$(jq -r '.rules[0].info.priority' "$out/rule.json")" = Critical ]
+  conjunction="(k8s.ns.name = $C_NAMESPACE and container.name = $C_CONTAINER and container.image.repository = $C_REPOSITORY and proc.exepath = $C_PATH)"
+  negates="(evt.type in (execve, execveat) and container.id != host and proc.is_exe_upper_layer = true and not container.image.repository in () and not"
+  compiled="$(jq -r '.rules[0].details.condition_compiled' "$out/rule.json")"
+  echo "compiled: $compiled"
+  [ "$compiled" = "$negates $conjunction)" ]
+  # Without the local file the same rule negates the image's placeholder, which is never true: the
+  # exception is all that the local rules change in it.
+  FALCO_RULES_D="$out/no-rules" falco_image falco -l "$rule" >"$out/image.json" 2>"$out/image.err" || { cat "$out/image.err"; return 1; }
+  [ "$(jq -r '.rules | map(.info.name) | join(",")' "$out/image.json")" = "$rule" ]
+  [ "$(jq -r '.rules[0].info.enabled' "$out/image.json")" = true ]
+  plain="$(jq -r '.rules[0].details.condition_compiled' "$out/image.json")"
+  echo "the image's: $plain"
+  [ "$plain" = "$negates evt.num = 0)" ]
 }
 
 @test "Falco's memory request and limit follow from its buffers, and an out-of-memory kill restarts it in its pod" {
@@ -826,7 +1076,7 @@ of_security_system() {
     echo "the chart now has a value for it"
     return 1
   fi
-  [ "$(grep -ci automount "$BATS_TEST_TMPDIR/post-render/chart.yaml" || true)" -eq 0 ]
+  [ "$(grep -ci automount "$BATS_TEST_TMPDIR/falco-post-render/chart.yaml" || true)" -eq 0 ]
   [ "$(yq -N 'select(.kind == "HelmRelease") | .spec.postRenderers[].kustomize.patches[] | select(.target.kind == "DaemonSet") | .patch' "$BUILT" | yq '.spec.template.spec.automountServiceAccountToken')" = false ]
   # The docs say that the pod mounts none, and why it needs none.
   runtime_detection_docs

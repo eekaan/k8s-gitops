@@ -2,9 +2,12 @@
 
 The alert rules of the applications under `kubernetes/apps/` ([kubernetes.md](../kubernetes.md#alerts)).
 Each section below is the `runbook_url` of the alert of its name: what it means, what to look at
-first, and what usually causes it. Alerts go nowhere yet, so nothing sends one: an operator sees
-them in Prometheus' and Alertmanager's web interfaces, which `kubectl port-forward` reaches through
-`just cluster-kubeconfig`'s kubeconfig. The read-only commands below run through that kubeconfig.
+first, and what usually causes it. A critical or warning alert is sent to the notification webhook
+once both addresses are in the secret store, with this link in it
+([Where alerts go](../kubernetes.md#where-alerts-go)); an `info` alert is sent nowhere. Every
+alert shows in Prometheus' and Alertmanager's web interfaces, which `kubectl port-forward` reaches
+through `just cluster-kubeconfig`'s kubeconfig. The read-only commands below run through that
+kubeconfig.
 `just cluster-check` says whether the nodes, the control plane and the scrape targets are well;
 `just logs '<LogsQL query>'` prints what the store holds.
 

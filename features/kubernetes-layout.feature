@@ -26,6 +26,11 @@ Feature: Kubernetes tree layout
     When the kubernetes check runs on each with its standard input closed, at /dev/null, a pipe that stays open and silent, and a pipe that carries a ClusterIssuer of the chosen name
     Then every run ends within its bound, the choice is refused each time, in the same lines, as an issuer the issuers application does not make, and the tree without a choice passes each time
 
+  Scenario: A constraint in the Kustomization of its own template is refused
+    Given a Gatekeeper constraint in the same Kustomization as the ConstraintTemplate that makes its kind, then in one that does not depend on the template's Kustomization, then in one whose template's Kustomization does not wait for the template's kind or waits on an expression that also holds inProgress or failed, and one whose template no enabled application holds
+    When the kubernetes check runs
+    Then each exits non-zero and names the Kustomization and the constraint, and a constraint whose Kustomization depends, directly or through another, on a Kustomization that waits for the template's status passes
+
   Scenario: An object with a field its schema does not have is refused, and objects of listed kinds without a schema are counted by kind
     Given an application whose Deployment has a field the Deployment schema lacks, a Flux Kustomization with one its schema lacks, a custom resource with one its rendered definition lacks, and custom resources of kinds that have no definition and are listed with their reasons
     When the kubernetes validation runs

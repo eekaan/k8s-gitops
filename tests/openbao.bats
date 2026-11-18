@@ -978,6 +978,7 @@ covers() {
   [ "$(jq -r '.[] | select(.rotation == "generated") | .path + " " + (.key // "*")' <<<"$entries")" = "demo/hello greeting" ]
   [ "$resolved" = "$(printf '%s\n' 'ai-system/n8n encryption-key re-encryption' \
     'cert-manager/cloudflare api-token issued' 'demo/hello greeting generated' \
+    'monitoring/alert-destinations heartbeat-url issued' 'monitoring/alert-destinations notify-url issued' \
     'postgres-backups SSE_C_KEY re-encryption' \
     'sso-system/dex github-client-id issued' 'sso-system/dex github-client-secret issued' \
     'sso-system/oauth2-proxy allowed-emails issued' 'volsync * issued' 'volsync AWS_ACCESS_KEY_ID issued' \

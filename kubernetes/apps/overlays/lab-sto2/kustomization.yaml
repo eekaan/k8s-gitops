@@ -50,6 +50,7 @@ resources:
   - ../../base/external-secrets/external-secrets/ks.yaml
   - ../../base/external-secrets/openbao-store/ks.yaml
   - ../../base/gatekeeper-system/gatekeeper-policies/ks.yaml
+  - ../../base/gatekeeper-system/gatekeeper-templates/ks.yaml
   - ../../base/gatekeeper-system/gatekeeper/ks.yaml
   - ../../base/keda/keda/ks.yaml
   - ../../base/kromgo/kromgo/ks.yaml
@@ -69,6 +70,7 @@ resources:
   - ../../base/kube-system/vpa/ks.yaml
   - ../../base/kyverno/kyverno-policies/ks.yaml
   - ../../base/kyverno/kyverno/ks.yaml
+  - ../../base/monitoring/alert-destinations/ks.yaml
   - ../../base/monitoring/flux-monitoring/ks.yaml
   - ../../base/monitoring/grafana-operator/ks.yaml
   - ../../base/monitoring/grafana/ks.yaml

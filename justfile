@@ -119,7 +119,7 @@ checks: static tests-1 tests-2 tests-3
 
 # The groups of checks are the dependencies of checks, and each group's checks its own dependencies: just ci runs every group side by side in containers of its own, and CI runs each as a job of its own. A check, with whatever it depends on, belongs to one group only, or it would run twice.
 # The checks other than the bats tests, the cheapest and most basic first
-static: tools-check check-literals check-commit-literals check-conflict-markers lock-check cluster-secrets-check lint renovate-check renovate-pins edge-policy-check scenarios-check infra-check talos-check kubernetes-check render-check network-policy-check kubernetes-validate vector-check rules-check secrets-scan
+static: tools-check check-literals check-commit-literals check-conflict-markers lock-check cluster-secrets-check lint renovate-check renovate-pins edge-policy-check scenarios-check infra-check talos-check kubernetes-check render-check network-policy-check kubernetes-validate vector-check rules-check alerts-route-check secrets-scan
 
 # The first of three parts of the bats tests
 tests-1: (test '1/3')
@@ -131,7 +131,7 @@ tests-2: (test '2/3')
 tests-3: (test '3/3')
 
 # Without a terminal, as in CI, Dagger's default progress is a line every 30 seconds; plain prints every step and each check's output as it happens.
-# Run the checks inside containers built from the pins, as CI does: every group side by side, or only the group named, such as just ci tests-2; renovate-check's validator, vector-check's Vector and edge-policy-check's FRR each in its own image, rules-check's promtool, taken from the image of the Prometheus the chart deploys, in the tools container, the other checks in a container with the tools pinned in mise.toml, the tools image versions.yaml records when it was built for these pins. Dagger records in dagger.lock each image it resolves without an entry there, such as the Prometheus image of rules-check, so the run puts the file back as it found it, whether it passes, fails or is stopped by INT, TERM or HUP; lock-check refuses such an entry in the committed file
+# Run the checks inside containers built from the pins, as CI does: every group side by side, or only the group named, such as just ci tests-2; renovate-check's validator, vector-check's Vector and edge-policy-check's FRR each in its own image, rules-check's promtool, taken from the image of the Prometheus the chart deploys, and alerts-route-check's amtool and Alertmanager, taken from the image of the Alertmanager it deploys, in the tools container, the other checks in a container with the tools pinned in mise.toml, the tools image versions.yaml records when it was built for these pins. Dagger records in dagger.lock each image it resolves without an entry there, such as the Prometheus image of rules-check, so the run puts the file back as it found it, whether it passes, fails or is stopped by INT, TERM or HUP; lock-check refuses such an entry in the committed file
 [script]
 ci group='':
     set -o pipefail
@@ -141,7 +141,7 @@ ci group='':
     mapfile -t tools <<< "$tools"
     if [[ -t 2 ]]; then progress=auto; else progress=plain; fi
     scripts/dagger-engine
-    scripts/restore-after dagger.lock dagger api call --progress="$progress" ci checks --base="$base" --renovate-image='{{ renovate_image }}' --vector-image='{{ vector_image }}' --frr-image='{{ frr_image }}' "${tools[@]}" --group={{ quote(group) }}
+    scripts/restore-after dagger.lock dagger api call --progress="$progress" ci checks --base="$base" --renovate-image='{{ renovate_image }}' --vector-image='{{ vector_image }}' --frr-image='{{ frr_image }}' --alertmanager-image='{{ alertmanager_image }}' "${tools[@]}" --group={{ quote(group) }}
 
 # Print the groups of checks as a JSON list, the CI workflow's matrix of jobs; in a GitHub Actions step, also set it as the step's output groups
 [script]
@@ -238,6 +238,28 @@ rules-check:
     image=$(< "$dir/check/image")
     scripts/rules-promtool "$dir/check" docker run --rm --network none -v "$dir/check":/check:ro -w /check --entrypoint promtool "$image"
     scripts/rules-refusal "$dir/check" docker run --rm --network none -v "$dir/check":/check:ro -w /check --entrypoint promtool "$image"
+
+# The image of the Alertmanager that the kube-prometheus-stack application's pinned chart deploys, pinned by the digest of its image index, for alerts-route-check here and for just ci's Dagger module. Renovate moves the tag and the digest in the same pull request as the chart, and tests/alert-routes.bats fails when it is not the chart's image
+# renovate: datasource=docker depName=quay.io/prometheus/alertmanager
+alertmanager_image := "quay.io/prometheus/alertmanager:v0.35.0@sha256:5f6e66c01bd610aef6dd671642a52eee775fd3a89bd8788ebada33efaf373d10"
+
+# Check the configuration the rendered chart gives Alertmanager with amtool and Alertmanager themselves, in the image the chart deploys, which scripts/alerts-route-config finds in the render and which must be alertmanager_image: amtool accepts the configuration, and every case of tests/alert-routes/cases.yaml holds, each printed with its verdict: an alert resolves to the receivers its case expects, a critical alert inhibits the warning of its name and namespace and no other, an Alertmanager started with no file where a receiver reads its address becomes ready and fails every notification on that file, and a silence suppresses the alert it names and leaves the Watchdog active; then the check must fail for a configuration amtool refuses and for a route case and an inhibition case whose expectation is wrong. The container has no network, a read-only filesystem, the image's own user and no capability; needs docker, as vector-check does, which just ci's module does not
+[script]
+alerts-route-check:
+    set -o pipefail
+    dir=$(mktemp -d)
+    trap 'rm -rf "$dir"' EXIT
+    scripts/alerts-route-config "$dir/check"
+    image='{{ alertmanager_image }}'
+    deployed=$(< "$dir/check/image")
+    if [[ $deployed != "${image%@*}" ]]; then
+      echo "alerts-route-check: the render deploys $deployed, not ${image%@*}: set alertmanager_image in the justfile to the image the chart deploys and the digest of its image index" >&2
+      exit 1
+    fi
+    # scripts/alerts-route-run runs docker with none of the secrets a recipe's environment may hold.
+    shell=(docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp -v "$dir/check":/check:ro -w /check --entrypoint sh "$image")
+    scripts/alerts-route-run "$dir/check" "${shell[@]}"
+    scripts/alerts-route-run --refusals "$dir/check" "${shell[@]}"
 
 # The image of FRR for edge-policy-check here and for just ci's Dagger module: the upstream build, 10.3.4, of the release the edge routers' Debian image packages, 10.3-3+deb13u1 in trixie, the same release with Debian's patches. Its own build takes 64 equal-cost paths, Debian's 256, which the proof's configuration allows for; it moves with the edge image's release, by hand (.renovate/by-hand.tsv)
 frr_image := "quay.io/frrouting/frr:10.3.4@sha256:c8790a83db3cb105c0823f76afe55de5c9f77d968fb1ebd28174a8ddd49b989c"

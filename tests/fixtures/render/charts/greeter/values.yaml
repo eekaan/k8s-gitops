@@ -4,3 +4,10 @@ domain: ""
 password: ""
 # true makes the chart refuse to render.
 broken: false
+# "annotation", "nested", "integer", "quoted", "boolean" or "quoted-annotation" makes the chart
+# render an object whose annotations, or a mapping below its data, repeat a key: a string key; with
+# "integer" an integer one; with "quoted" 80 beside "80", with "boolean" true beside "true", and
+# with "quoted-annotation" the annotation 80 beside "80". "served" and "unserved" repeat the nested
+# key only while the ServiceMonitor API is served, or only while it is not. "unnamed" renders,
+# beside it, a document with neither kind nor name that repeats a key.
+repeatKey: ""

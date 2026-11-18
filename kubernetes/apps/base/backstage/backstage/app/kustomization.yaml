@@ -35,6 +35,7 @@ configMapGenerator:
   - name: backstage-catalogue
     files:
       - catalogue/acme-issuers.yaml
+      - catalogue/alert-destinations.yaml
       - catalogue/backstage.yaml
       - catalogue/cert-manager-dashboard.yaml
       - catalogue/cert-manager.yaml
@@ -62,6 +63,7 @@ configMapGenerator:
       - catalogue/flux-monitoring-dashboard.yaml
       - catalogue/flux-monitoring.yaml
       - catalogue/gatekeeper-policies.yaml
+      - catalogue/gatekeeper-templates.yaml
       - catalogue/gatekeeper.yaml
       - catalogue/gateway-api-crds.yaml
       - catalogue/gateway-public.yaml

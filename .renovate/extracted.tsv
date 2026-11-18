@@ -37,6 +37,7 @@ infra/openstack/stacks/sto2/plumbing/versions.tf	terraform	openstack	-
 infra/openstack/stacks/sto2/plumbing/versions.tf	terraform	talos	-
 justfile	regex	docker.io/timberio/vector	vector_image
 justfile	regex	ghcr.io/renovatebot/renovate	renovate_image
+justfile	regex	quay.io/prometheus/alertmanager	alertmanager_image
 kubernetes/apps/base/ai-system/n8n/app/ocirepository.yaml	flux	ghcr.io/bjw-s-labs/helm/app-template	tag
 kubernetes/apps/base/ai-system/n8n/app/ocirepository.yaml	regex	ghcr.io/bjw-s-labs/helm/app-template	tag
 kubernetes/apps/base/ai-system/n8n/app/values.yaml	helm-values	docker.io/n8nio/n8n	-

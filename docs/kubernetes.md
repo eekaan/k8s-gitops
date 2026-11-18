@@ -150,6 +150,21 @@ On what Flux builds:
   patches: `wait: true`, `healthChecks` or `healthCheckExprs`. Otherwise the dependent never
   reconciles, or starts before its dependency's objects are ready. The message names both
   Kustomizations and the overlay.
+- **A kind that does not exist yet** (`kubernetes-check`). A Gatekeeper constraint
+  (`constraints.gatekeeper.sh`) is of a kind Gatekeeper makes only after it has reconciled the
+  `ConstraintTemplate`, so Flux's server-side dry run of a constraint fails for the unknown kind and
+  nothing of a Kustomization that holds it is applied, the template included, and no retry can
+  succeed. The check refuses a constraint in the Kustomization of its own template, one whose
+  Kustomization does not name the template's in `dependsOn` (directly or through others), one whose
+  template no application the overlay enables holds, and a template's Kustomization that does not
+  wait (`wait: true`, or `healthChecks` naming that template, as without `wait` Flux checks only what
+  `healthChecks` names) on `healthCheckExprs` for `templates.gatekeeper.sh` `ConstraintTemplate`,
+  every entry of them with `current: status.created == true` and no `inProgress` or `failed`: Flux
+  takes an applied template for ready, so without the entry the constraints start before the kinds
+  are served, and it reads `inProgress` and `failed` before `current`, so either could hold the
+  templates back for good. The message names the Kustomization and the constraint.
+- **A repeated key in what a chart renders** (`scripts/render`, so `just render-check` and
+  `kubernetes-validate`; [The render diff](#the-render-diff)).
 - **Paths** (`kubernetes-check` and `scripts/render`). `flux build` reads with kustomize's load
   restrictions off (`LoadRestrictionsNone`, its own setting), and so does `kubernetes-check`'s
   `kustomize`, as an overlay lists `ks.yaml` files outside its own directory: either reads any path
@@ -604,7 +619,7 @@ once it is not, and the agents' rendered configuration agrees.
 | `external-dns` | listed | an application whose allows are not written, not a namespace that cannot have the posture. external-dns takes Prometheus' scrape and the kubelet's probes on 7979 and nothing else, and reaches the API server, the DNS provider's API on 443 and the resolver. Its token, scoped to zone read and DNS edit on the cluster's one zone, its name filter, a ClusterRole that only reads, Pod Security, node firewall ([DNS records](#dns-records)). |
 | `kube-system` | listed | Cilium's agent, its Envoy and its operator run in the host's network namespace; the resolver takes queries from every namespace; the pod-network workloads' flows are not yet enumerated. Node firewall, Pod Security. |
 | `flux-system` | listed | the controllers' flows are not yet enumerated as allows; Flux's own network policies, which the operator makes at run time, and the operator's for its web interface, `flux-operator-web`, which the check reads and passes because the namespace is listed ([What the check refuses](#what-the-check-refuses)); Pod Security, node firewall. |
-| `monitoring` | listed | Prometheus scrapes every namespace and the nodes, the node exporter runs in the host's network namespace, the API server calls the operator's webhook, VictoriaLogs takes the proxies on 9428 for the route `logs`, the other flows are not yet enumerated. The proxies reach VictoriaLogs' 9428 alone there and forward only the route's reads, behind the cluster's sign-in, Pod Security, node firewall. |
+| `monitoring` | listed | Prometheus scrapes every namespace and the nodes, the node exporter runs in the host's network namespace, the API server calls the operator's webhook, VictoriaLogs takes the proxies on 9428 for the route `logs`, Alertmanager reaches the resolver and, outside the cluster, each of its two destinations on the port of its URL, hosts that are deployment values and so are named by no policy ([Where alerts go](#where-alerts-go)), the other flows are not yet enumerated. The proxies reach VictoriaLogs' 9428 alone there and forward only the route's reads, behind the cluster's sign-in, Pod Security, node firewall. |
 | `openbao`, `external-secrets`, `cert-manager`, `cnpg-system`, `keda`, `volsync-system` | listed | flows not yet enumerated: webhooks and APIs the API server calls, the store's clients, scrapes, the PostgreSQL operator's calls to the Barman Cloud plugin. Each entry says which, and what covers it. |
 | `piraeus-datastore` | listed | the CSI node plugin runs in the host's network namespace; the satellites replicate over the pod network, and their flows are not yet enumerated. |
 | `cilium-secrets` | listed | holds no pod. |
@@ -1364,16 +1379,17 @@ It does not scrape:
   metrics endpoint needs no definition, so it is on and a PodMonitor of its own application scrapes
   it.
 
-Alertmanager routes every alert to its one receiver, `null`, which sends nothing: alerts show in
-Prometheus and Alertmanager and go nowhere else.
+Alertmanager sends a critical or warning alert to a notification webhook and the Watchdog to a
+heartbeat URL, once the two addresses are in the secret store; until then it runs without them and
+nothing leaves the cluster ([Where alerts go](#where-alerts-go)).
 
 Prometheus keeps 14 days of data, and at most 16 GiB, on a 20 GiB volume; Alertmanager keeps its
 silences and notification log on a 1 GiB volume. Both volumes are claims on the cluster's default
 storage class, which neither names; without one, the claims and the two pods stay Pending.
 
 `tests/monitoring.bats` builds the application as Flux applies it, renders the pinned chart with
-its values, and checks the namespace, the targets, the rules, the receivers, the claims and that
-each values key is one the chart or a subchart reads.
+its values, and checks the namespace, the targets, the rules, the claims and that each values key
+is one the chart or a subchart reads; `tests/alert-routes.bats` holds Alertmanager's configuration.
 
 ### Flux monitoring
 
@@ -1540,7 +1556,9 @@ alert, unless:
 
 - its `severity` label is `critical`, `warning` or `info`: `critical` is a loss of service or of
   data in progress that an operator acts on at once, `warning` is a failure that needs action
-  within the working day, and `info` points at something to look at when convenient;
+  within the working day, and `info` points at something to look at when convenient. A `critical`
+  or a `warning` alert goes to the receiver `notify`; an `info` alert goes to no receiver and shows
+  in Prometheus' and Alertmanager's interfaces only ([Where alerts go](#where-alerts-go));
 - it has a `summary`, a `description` that names what is affected with `{{ $labels.<name> }}`, and
   a `for`;
 - its `runbook_url` is `https://github.com/eekaan/k8s-gitops/blob/main/docs/runbooks/<file>.md#<heading>`
@@ -1644,8 +1662,164 @@ What no alert covers, and why:
   down or slow ([OpenFeature Operator](#openfeature-operator)). A manager whose scrape fails raises
   the stock `TargetDown`, as its job has one target.
 
-The alerts have no destination yet: Alertmanager sends them nowhere, so they show in Prometheus and
-Alertmanager only.
+#### Where alerts go
+
+Alertmanager sends a critical or warning alert to a notification webhook, and the Watchdog, the
+stock alert that always fires, to a heartbeat URL, so that whoever watches the heartbeat learns
+that Prometheus or Alertmanager has stopped from its silence. Which services stand behind the two
+addresses is the deployment's choice: each address is a value an operator writes to the secret
+store, the tree holds neither, and until both are there nothing leaves the cluster.
+
+**The routes.** Alertmanager's configuration is `alertmanager.config` in the values of
+`kube-prometheus-stack`, written out whole, so that what the chart renders into its Secret is
+those values and nothing of the chart's own configuration is merged in. An alert takes the first
+route that matches it, and every route groups by `alertname` and `namespace`:
+
+| Alert | Receiver | First sent after | Flushed every | Repeated after |
+| --- | --- | --- | --- | --- |
+| the Watchdog (`alertname = "Watchdog"`) | `heartbeat` | at once | 1m | 5m, so a beat every 6m (below) |
+| a `severity` of `critical` or `warning` | `notify` | 30s | 5m | 12h |
+| any other: an `info` alert, the info inhibitor | `null`, which sends nothing | | | |
+
+The Watchdog's route comes first and does not continue, so the Watchdog reaches `heartbeat` alone
+whatever severity it carries; the wait, the interval and the repeat of `notify` are the chart's
+own. The inhibit rules are the chart's four, as it ships them: a critical alert mutes the warning
+and info alerts of its name and namespace, a warning the info alerts, the info inhibitor the info
+alerts of its namespace, and any other alert the info inhibitor. An `info` alert reaches no
+receiver: it shows in Prometheus' and Alertmanager's interfaces and nowhere else. No
+`AlertmanagerConfig` object is in the tree: the chart's Alertmanager selects them in every
+namespace and the operator puts their routes before these, so one would change the route tree the
+checks below read, and `tests/alert-routes.bats` refuses one in the render or in an application's
+`app/`.
+
+**The receivers.** `notify` and `heartbeat` are each one generic webhook and nothing else: the
+configuration holds no address, no credential and no client setting. Each reads its address from a
+file, at every notification: `/etc/alertmanager/destinations/notify-url` and
+`/etc/alertmanager/destinations/heartbeat-url`. `notify` is told when an alert resolves;
+`heartbeat` is not, as the notification that would follow the Watchdog's end is no beat.
+Alertmanager trims the file's content and reads it as one of its notification templates, so `{{`
+in an address starts a template.
+
+**The Secret.** The two files are the keys of the Secret `alert-destinations` in `monitoring`,
+which the Alertmanager mounts whole and read-only at `/etc/alertmanager/destinations`, as an
+optional volume: the pod starts while the Secret does not exist, with an empty directory, and the
+kubelet puts the files in once it does, without a restart. The operator's own list of Secrets to
+mount, `secrets`, is not used, as it makes the volume required: no Alertmanager would run until the
+store held both addresses. `apps/base/monitoring/alert-destinations/` is the one ExternalSecret
+that writes the Secret, from the properties `notify-url` and `heartbeat-url` of
+`monitoring/alert-destinations` in the store, by two `data` entries, so the Secret holds those two
+keys and nothing else the entry may hold. Its Kustomization names `openbao-store` in `dependsOn`,
+which names `external-secrets`, whose chart brings the `ExternalSecret` kind; it does not wait, and
+nothing names it in `dependsOn`, so a store without the addresses stalls no Kustomization and no
+release. An operator writes the two, each typed or piped in ([The recipes](#the-recipes)):
+`just bao-put monitoring/alert-destinations notify-url` and
+`just bao-put monitoring/alert-destinations heartbeat-url`. Each is written exactly as its service
+gives it, with `https://`: Alertmanager follows redirects, and Go's HTTP client turns a POST that
+is answered with a 301, 302 or 303 into a GET without a body, so an `http://` address of a service
+that redirects to `https://` reaches it with no alerts.
+
+Both must be there before either works: External Secrets fails the whole ExternalSecret while a
+property it names is missing (`SecretSyncedError`), and writes no Secret. It reads a failing
+ExternalSecret again after a delay that doubles from a second up to seven minutes; the kubelet
+puts a Secret that appears into a pod's volume within its sync period, a minute by default, which
+the tree leaves as it is, and the moment its watch takes; and Alertmanager reads the file at the
+group's next flush, a minute for the heartbeat and five for a notification that is waiting. So the
+first beat can leave up to about nine minutes after the second `bao-put`, and the first
+notification up to about thirteen. An address changed in the store reaches the pod the same way,
+within the ExternalSecret's refresh interval of 15 minutes and the kubelet's minute, and the next
+notification is sent to it. `secret-rotation.yaml` lists the path as `issued`, so
+`just secret-rotate` refuses both keys
+([Rotating an application's secret](#rotating-an-applications-secret)): a new address is made at
+its service and written with its `just bao-put` command above.
+
+**What a notification carries.** Alertmanager POSTs the JSON its documentation gives for a
+webhook (`version` 4): the receiver, the status, the group's key and labels, why it is sent
+(`notification_reason`, such as `first notification`), the labels and annotations its alerts
+share, its own address in the cluster (`externalURL`,
+`http://kube-prometheus-stack-alertmanager.monitoring:9093`) and, for each alert, its status, every
+label, every annotation, when it started and ended, its fingerprint and the address of its
+expression at Prometheus in the cluster (`generatorURL`, under
+`http://kube-prometheus-stack-prometheus.monitoring:9090/graph`). So whoever runs the destination
+reads the names of namespaces, pods, nodes, containers and jobs, the addresses in `instance`
+labels, the `prometheus` label that names the Prometheus the alert came from, and each rule's
+summary, description and runbook link. The heartbeat's body has the same form and holds the
+Watchdog alone.
+
+**The heartbeat's time.** The Watchdog's group is flushed at once and then every minute. A flush
+sends a beat when the last one is more than five minutes old, by the time Alertmanager wrote it to
+its notification log, which it does once the destination has answered. The fifth flush after a
+beat comes five minutes after the flush that sent it, which is a moment before the beat was
+written, so it sends nothing and the sixth sends the next: a beat leaves every six minutes. The
+longest gap between two beats while everything works is six minutes, so a heartbeat monitor expects
+a beat every six minutes and allows twelve, twice the longest gap, before it reports. A beat that
+cannot be sent is tried again within its flush and then at every flush, a minute apart.
+
+**Until the addresses are there.** Alertmanager runs, and each notification fails at once on the
+file it cannot read: its log says `read url_file: open
+/etc/alertmanager/destinations/notify-url: no such file or directory` for the receiver, and the
+failure counts in `alertmanager_notifications_failed_total` for the integration `webhook`. Two
+stock alerts read that counter against `alertmanager_notifications_total` over fifteen minutes:
+`AlertmanagerFailedToSendAlerts`, a warning, and `AlertmanagerClusterFailedToSendAlerts`, critical
+(the chart's other rule of that name, a warning, selects no integration and never fires). Both
+fire once failures have held for their five minutes, so about five minutes after the first
+notification fails, the Watchdog's, and stay firing until the addresses are there; they show in
+the interfaces alone, as they cannot be sent either. They are left to fire, being true. They clear
+about fifteen minutes after the last notification failed, so the destination gets both as firing
+among its first notifications and their resolution after. When they fire later, a notification
+fails again. Look at the ExternalSecret's status
+(`kubectl --namespace monitoring get externalsecret alert-destinations`), at the keys the Secret
+holds, without their values (`kubectl --namespace monitoring describe secret alert-destinations`),
+and at Alertmanager's log (`kubectl --namespace monitoring logs
+alertmanager-kube-prometheus-stack-alertmanager-0 --container alertmanager`), whose lines `Notify
+failed` and `Notify attempt failed, will retry later` name the receiver and say why: `read
+url_file` for a file that is missing, `dial tcp` for a destination that refuses the connection or
+whose name does not resolve, `unexpected status code` for one that answers with an error. A
+destination that refuses the connection or answers with a server error is tried again until the
+group's next flush and counts as a failed notification then; one that answers with a client error
+fails at once.
+
+**Where an address is.** In the secret store, in the Secret `alert-destinations` and in the file in
+the pod. It is in no file of this repository, and neither in Alertmanager's configuration nor on
+its status page, which hold the file's path. Where a request fails, the URL in the error is
+replaced by `<redacted>`: the log never holds an address whole, and of its path and its query only
+what stands between `{{` and `}}`. What the log can hold is the host and that: a destination that
+refuses the connection is named by the address and port dialled, one whose name does not resolve
+by that name, an address that is no URL by the piece the parser rejects, and an address whose
+template fails by what is between the braces, which the error names before any request is made.
+A destination that answers with an error is logged with the status and the body it answered. So a
+token belongs in the path or the query of an address, never in its host name or between `{{` and
+`}}`.
+
+**The checks.** `just alerts-route-check`, in the `static` group of `just ci`, renders the
+application as Flux and helm-controller build it, takes the configuration from the Secret the one
+rendered Alertmanager reads, and runs amtool and Alertmanager on it, from the image the chart
+deploys: `alertmanager_image` in the justfile, by tag and the digest of its image index, which
+Renovate moves in the pull request that moves the chart, and which the check and
+`tests/alert-routes.bats` hold to the image the render names. `just alerts-route-check` runs them
+in a container of that image with no network, a read-only filesystem and no capability; `just ci`
+copies the two binaries into the tools container, where they bind and dial the loopback alone.
+`amtool check-config` must accept the configuration. Then each case of
+`tests/alert-routes/cases.yaml`, one for each scenario of `features/alert-routes.feature` that the
+check proves, runs and is printed with its verdict. amtool resolves the receivers of an alert
+(`amtool config routes test`); one Alertmanager on the loopback serves the cases amtool cannot:
+that a critical alert inhibits the warning of its name and namespace and no other; that
+Alertmanager, started with no file at either path, becomes ready, fails each notification on its
+file and counts every notification it attempted as failed, so that an Alertmanager that one day
+refuses to start without the files fails a pull request and not the cluster; and that a silence
+made through the API the silence operator uses suppresses an alert on its way to `notify` and
+leaves the Watchdog active. A case of a kind the check does not know fails it. Each run then
+proves its own refusals: a configuration amtool refuses, a route case whose expectation is wrong
+and an inhibition case whose expectation is wrong must each fail it.
+
+`tests/alert-routes.bats` holds the rest, without Docker: that the rendered configuration is the
+values', with the keys at every position the set that was read against the operator's own types at
+the operator version the chart runs, as the operator parses the configuration strictly and writes
+its own serialisation for Alertmanager, so a key that is no field of those types stops it; that
+the keys the ExternalSecret writes, the volume the Alertmanager mounts and the files the receivers
+read agree; the application, its overlay entry and what waits for what; and that every alert rule
+of the tree's render, the charts' and the tree's own, has a severity of `critical`, `warning` or
+`info`, or is the Watchdog or the info inhibitor, as an alert with any other would end at `null`
+unseen.
 
 #### Silences
 
@@ -1682,7 +1856,8 @@ the application's `dependsOn`. It is reviewed with that application and leaves w
 silence for an alert of a chart sits beside the application that installs the chart, as a file of
 its own, not in the chart's values. A cluster-level application under `clusters/<cluster>/` holds
 none. The tree ships none: none is true today, and the Watchdog, which is meant to fire, is never
-silenced.
+silenced, as a silenced Watchdog sends no beat and so stops the heartbeat
+([Where alerts go](#where-alerts-go)).
 
 ```yaml
 apiVersion: observability.giantswarm.io/v1alpha2
@@ -6101,7 +6276,7 @@ installed. The rules of priority Critical are `Detect release_agent File Contain
 rule set arrives with a newer image: the chart and the image it runs, `appVersion` of the chart,
 are moved by Renovate in one pull request (`.renovate/groups.json5`), and `tests/falco.bats` fails
 unless the image's version is the chart's. Its proofs that run Falco itself skip in CI, so CI does
-not show that a newer image still loads the local rules without a warning, compiles the exception
+not show that a newer image still loads the local rules without a warning, compiles the exceptions
 and enables the same rules; `bats tests/falco.bats` where a docker daemon answers does. A macro the
 newer rules no longer define would load with the warning `LOAD_UNUSED_MACRO` and except nothing
 ([Tuning](#tuning)).
@@ -6175,8 +6350,8 @@ once the lower counts are 15 minutes old. The other way, a series back unchanged
 after its last sample reads as new and fires once with nothing behind it: from a day and 15
 minutes after that sample, or from its return if that is later, until the return is 15 minutes
 old, so for at most 15 minutes; every series does the same after Prometheus lost its data.
-`tests/rules/falco.yaml` pins each case. The alert goes nowhere yet, like the others
-([Alerts](#alerts)).
+`tests/rules/falco.yaml` pins each case. The alert is critical, so it goes to the receiver `notify`
+like the others of its severity ([Where alerts go](#where-alerts-go)).
 
 ### What Falco costs and what it sees
 
@@ -6275,18 +6450,22 @@ or `exec` into the pods of `monitoring` and `security-system`, can read it.
 Local rules have one place, the `customRules` key of
 `apps/base/security-system/falco/app/values.yaml`: a map of rule file names to their contents,
 which the chart makes the ConfigMap `falco-rules` of and mounts at `/etc/falco/rules.d`, which
-Falco reads after the image's rules. It holds one file, `exceptions.yaml`, of one item, with its
-reason in a comment above it, and no rule of the tree's own:
+Falco reads after the image's rules. It holds one file, `exceptions.yaml`, of two items, each with
+its reason in a comment above it, and no rule of the tree's own:
 
 ```yaml
 - macro: user_known_stand_streams_redirect_activities
   condition: (k8s.ns.name = "demo" and container.name = "httpd" and container.image.repository = "docker.io/library/busybox" and proc.name = "httpd")
   override:
     condition: replace
+- macro: known_drop_and_execute_activities
+  condition: (k8s.ns.name = "kube-system" and container.name = "apply-sysctl-overwrites" and container.image.repository = "quay.io/cilium/cilium" and proc.exepath = "/opt/cni/bin/cilium-sysctlfix")
+  override:
+    condition: replace
 ```
 
-It quiets the image's rule `Redirect STDOUT/STDIN to Network Connection in Container`, of priority
-Notice, for the demo's web server, `hello`, and for nothing else. The rule's condition is
+The first quiets the image's rule `Redirect STDOUT/STDIN to Network Connection in Container`, of
+priority Notice, for the demo's web server, `hello`, and for nothing else. The rule's condition is
 `dup and container and evt.rawres in (0, 1, 2) and fd.type in ("ipv4", "ipv6") and not user_known_stand_streams_redirect_activities`:
 a `dup`, `dup2` or `dup3` in a container that returns 0, 1 or 2, a standard stream, for an IPv4 or
 IPv6 socket, which is how a reverse shell begins; the macro it negates is the placeholder the image
@@ -6298,52 +6477,121 @@ the rule twice, the kubelet's readiness probe included, and the server matches i
 starts, as `mini_httpd` first moves its listening socket to standard input with `xmove_fd`; those
 events would bury any other the rule raises.
 
-The exception replaces the placeholder with four equalities, each of which leaves something out
-of it: the namespace, the workloads of every other namespace; the container's name, `volsync-demo`,
-which runs the same image in the same namespace; the image's repository, any other image run under
-that name there; and the process, a shell, or any process but `httpd`, that puts its streams on a
-socket in that very container. All of those still match, as every other workload does. Falco
-compiles the rule to the image's condition with one negation, of that conjunction:
+The first exception replaces the placeholder with four equalities, each of which leaves something
+out of it: the namespace, the workloads of every other namespace; the container's name,
+`volsync-demo`, which runs the same image in the same namespace; the image's repository, any other
+image run under that name there; and the process, a shell, or any process but `httpd`, that puts its
+streams on a socket in that very container. All of those still match, as every other workload does.
+Falco compiles the rule to the image's condition with one negation, of that conjunction:
 `(evt.type in (dup, dup2, dup3) and container.id != host and evt.rawres in (0, 1, 2) and fd.type in (ipv4, ipv6) and not (k8s.ns.name = demo and container.name = httpd and container.image.repository = docker.io/library/busybox and proc.name = httpd))`.
 
-`tests/falco.bats` holds the exception to that:
+The second quiets the image's rule `Drop and execute new binary in container`, of priority
+Critical, whose matches raise `FalcoCriticalRuleMatched`
+([Metrics, and the alert](#metrics-and-the-alert)), for Cilium's sysctl fix and for nothing else.
+The rule's condition is
+`spawned_process and container and proc.is_exe_upper_layer=true and not container.image.repository in (known_drop_and_execute_containers) and not known_drop_and_execute_activities`,
+an `execve` or `execveat` in a container whose executable is in an upper layer, where the list is
+empty and the macro is the placeholder `(never_true)`; libs 0.26.1 sets that flag when the
+executable's filesystem is overlayfs and the file has an upper dentry, and reads nothing of when
+the file was written (`extract__overlay_layer` in
+`driver/modern_bpf/helpers/extract/extract_from_kernel.h`, which the probe calls at each `execve`
+and `execveat`). Cilium's chart gives each agent's pod the init container `apply-sysctl-overwrites`,
+on the agent's image, with `BIN_PATH=/opt/cni/bin`, the node's `/opt/cni/bin` mounted at `/hostbin`
+and its `/proc` at `/hostproc`, which runs
+`cp /usr/bin/cilium-sysctlfix /hostbin/cilium-sysctlfix; nsenter --mount=/hostproc/1/ns/mnt "${BIN_PATH}/cilium-sysctlfix"; rm /hostbin/cilium-sysctlfix`:
+it copies the binary from its image into the node's CNI directory and runs it there, in the node's
+mount namespace, from a process still in the init container
+(`templates/cilium-agent/daemonset.yaml` of the chart, under `sysctlfix.enabled`, which is on by
+default). Talos mounts an overlay at `/opt`, its upper layer on the node's `/var` (`Overlays` in
+`pkg/machinery/constants/constants.go` at the pinned release), so the copy is in that overlay's
+upper layer, not in the container's own, and but for this exception the rule matches its execution
+whenever an agent's pod starts on a node where Falco runs: on a new chart, a change of Cilium's
+values, which rolls the agents, or a deleted agent pod. The chart's init container `mount-cgroup`,
+under `cgroup.autoMount.enabled`, copies `cilium-mount` into the same directory and runs it the
+same way. Cilium's values turn it off, as Talos mounts the cgroup hierarchy itself; turned on, its
+run would match the rule as well, and this exception would not except it.
 
-- The place holds that one file of that one item, an override that replaces one macro's condition,
-  and the chart's ConfigMap and the pod's mount carry it. There is no second place: under
-  `/etc/falco` the pod mounts only its configuration file, an empty `config.d` and `rules.d`, and
-  the configuration names `config.d` alone as where Falco reads further configuration, which could
-  turn a rule off.
-- The condition is, to the letter, the conjunction of four values read from `hello` as Flux applies
-  it: the namespace its Kustomization targets, its container's name, its image without tag or
-  digest and the first word of its command. A `hello` whose container is renamed, whose image moves
-  or whose command changes fails the proof, as the exception then names nothing that runs. Of every
-  container and init container of the workloads the overlay builds into `demo`, only `hello`'s has
-  that name and image, with the image's short forms written out as the runtime reports them, so no
-  other `httpd` is excepted. The reason above is read from the source of the busybox version `hello`
-  runs, which the proof finds named here, so a `hello` on another version fails it until that
-  version's `httpd` is read, and the failure says which version to read.
+The second exception replaces the placeholder with four equalities, each of which leaves something
+out of it: the namespace, any other namespace; the container's name, the agent and the other init
+containers of the same image in the same pod; the image's repository, any other image in a
+container of that name; and the path, any binary that container runs from an upper layer at any
+other path, `cilium-sysctlfix` included. The condition names a path and not a file, so it excepts
+whatever that container runs at that one path, which is what its command, held to the chart's by
+the proof below, copies there from Cilium's image. The path is `proc.exepath`, the executable's
+path as the kernel resolved it, and not `proc.exe`, which is `argv[0]`, what the caller chooses.
+The image's list `known_drop_and_execute_containers` would not do: it takes a whole image, every
+container and binary of Cilium's agent included. Falco compiles the rule to the image's condition
+with one negation, of that conjunction:
+`(evt.type in (execve, execveat) and container.id != host and proc.is_exe_upper_layer = true and not container.image.repository in () and not (k8s.ns.name = kube-system and container.name = apply-sysctl-overwrites and container.image.repository = quay.io/cilium/cilium and proc.exepath = /opt/cni/bin/cilium-sysctlfix))`.
+
+`tests/falco.bats` holds the exceptions to that:
+
+- The place holds that one file of those two items, in that order, each an override that replaces
+  one macro's condition with its reason in a comment above it, and the chart's ConfigMap and the
+  pod's mount carry it. There is no second place: under `/etc/falco` the pod mounts only its
+  configuration file, an empty `config.d` and `rules.d`, and the configuration names `config.d`
+  alone as where Falco reads further configuration, which could turn a rule off.
+- The first's condition is, to the letter, the conjunction of four values read from `hello` as Flux
+  applies it: the namespace its Kustomization targets, its container's name, its image without tag
+  or digest and the first word of its command. A `hello` whose container is renamed, whose image
+  moves or whose command changes fails the proof, as the exception then names nothing that runs.
+  Of every container and init container of the workloads the overlay builds into `demo`, only
+  `hello`'s has that name and image, with the image's short forms written out as the runtime
+  reports them, so no other `httpd` is excepted. The reason above is read from the source of the
+  busybox version `hello` runs, which the proof finds named here, so a `hello` on another version
+  fails it until that version's `httpd` is read, and the failure says which version to read.
+- The second's condition is, to the letter, the conjunction of four values read from Cilium's
+  chart, rendered as Flux installs it, with its values and its post-renderer: the namespace of the
+  DaemonSet `cilium`, which its Kustomization targets; the name of the one container that runs
+  `cilium-sysctlfix`, which no other container of the render has; that container's image without
+  tag or digest, written registry first as the runtime reports it; and
+  `${BIN_PATH}/cilium-sysctlfix`, with `BIN_PATH` from its environment. The proof also holds the
+  container's command to the chart's, a copy of the binary into the mount of the host path
+  `BIN_PATH`, run by `nsenter --mount=<mount>/1/ns/mnt` where `<mount>` is the mount of the host
+  path `/proc`, as that is what makes the path the node's; a command of any other shape fails it,
+  saying to read the chart's init container again. A Cilium whose CNI directory, image or namespace
+  moves, or whose post-renderer renames the container, fails the proof, saying what Cilium is now,
+  and one with `sysctlfix.enabled: false` fails it saying to remove the exception, which then names
+  nothing that runs.
 - Where a docker daemon answers, Falco itself says so, run from the pinned image without network,
   capability or root, on the rendered configuration and rules. Its dry run exits 0: a condition
   with a field Falco does not know makes it exit 1, which on a node is a pod in a crash loop. It
   validates the image's rules and then the local file without an error or a warning: an override of
   a macro the image does not define loads with the warning `LOAD_UNUSED_MACRO` and excepts nothing.
-  It prints the rule enabled, at priority Notice, compiled to the condition above. And it lists the
-  same rules enabled with the local file as without it, no other rule, macro or list changed.
+  It prints the redirect rule enabled, at priority Notice, and the drop-and-execute rule enabled, at
+  priority Critical, each compiled to its condition above, where without the local file each
+  negates the image's placeholder. And it lists the same rules enabled with the local file as
+  without it, nothing changed but those two rules and their two placeholders: no other rule or
+  macro, and no list.
 
-What no proof shows: an event evaluated against the rule. Of the image's engines, replay is the one
-that gives Falco system calls without a probe, and it reads a capture file, which only a probe on a
-running kernel records and which would hold that machine's processes, users and addresses. So that
-the rule still matches every other workload rests on the condition Falco compiles. The values Falco
-reports for the four fields follow from the pinned sources, and an event on a node is what shows
-them: `container.name` is the name in the container's CRI metadata and `k8s.ns.name` the namespace
-of its pod's sandbox (`go-worker/pkg/container/cri.go` of the container plugin at 0.7.6, the
-version the image loads), and `container.image.repository` is the image reference containerd 2.3.7
-reports, the image's first repository digest (`internal/cri/server/container_status.go`), up to its
-`@`, which for `hello`'s image is `docker.io/library/busybox`. An event that comes before the
+What no proof shows: an event evaluated against either rule. Of the image's engines, replay is the
+one that gives Falco system calls without a probe, and it reads a capture file, which only a probe
+on a running kernel records and which would hold that machine's processes, users and addresses. So
+that each rule still matches every other workload, and the drop-and-execute rule the same exec in
+another namespace, another container or at another path, rests on the condition Falco compiles. The
+values Falco reports for the four fields of each exception follow from the pinned sources, and an
+event on a node is what shows them: `container.name` is the name in the container's CRI metadata
+and `k8s.ns.name` the namespace of its pod's sandbox (`go-worker/pkg/container/cri.go` of the
+container plugin at 0.7.6, the version the image loads), and `container.image.repository` is the
+image reference containerd 2.3.7 reports, the image's first repository digest
+(`internal/cri/server/container_status.go`), up to its `@`, which for `hello`'s image is
+`docker.io/library/busybox` and for Cilium's `quay.io/cilium/cilium`. For the sysctl fix, two of
+them are what such an event has to show. `proc.exepath` is the path the probe builds by walking the
+executable's mounts up to the root of the mount namespace they are in
+(`auxmap__store_d_path_approx` in libs' `driver/modern_bpf/helpers/store/auxmap_store_params.h`),
+which for a binary run in the node's mount namespace should be the node's path,
+`/opt/cni/bin/cilium-sysctlfix`, and not the container's `/hostbin/cilium-sysctlfix`. And the
+container plugin's fields need the init container's details before its first exec: its create
+hook, the one the rendered configuration turns on, comes from the CRI engine's `CONTAINER_CREATED`
+event, which the runtime sends before the container starts. An event that comes before the
 container plugin has the container's details from the runtime may not have the three fields the
-plugin gives, all but `proc.name`, as the plugin's descriptions of them say; the conjunction is then
-false, and the event still matches. The CI containers have no docker daemon, so the proofs that run
-Falco run where a developer or an agent has one, and skip in CI, saying why.
+plugin gives, `k8s.ns.name`, `container.name` and `container.image.repository`, as the plugin's
+descriptions of them say; the conjunction is then false, and the event still matches, which for the
+sysctl fix is the rule matching and `FalcoCriticalRuleMatched` firing as it would without the
+exception. A node that boots should not raise the rule for it at all: Falco's pod takes its address
+from Cilium's CNI, so its probe loads only once the agent runs, after its init containers. The CI
+containers have no docker daemon, so the proofs that run Falco run where a developer or an agent
+has one, and skip in CI, saying why.
 
 To silence another known-benign event, find it (`just logs` above) and read its rule and the
 namespace, pod, container, image and process in its `output_fields`; then, in a pull request:
@@ -6351,13 +6599,14 @@ namespace, pod, container, image and process in its `output_fields`; then, in a 
 1. add an item to `exceptions.yaml` that overrides the placeholder the rule leaves for the case
    (the image's rules name them `user_*` and `known_*`, such as
    `user_expected_terminal_shell_in_container_conditions` for `Terminal shell in container`), with
-   the reason for the exception in a comment above it, as the item above has;
+   the reason for the exception in a comment above it, as the items above have;
 2. keep it as narrow as the event is, a conjunction of what the event shows of the workload, and
-   never a whole rule off: the proof of the place fails on a second item, file or place, and, where
-   a docker daemon answers, the proofs fail when Falco lists one rule fewer enabled;
-3. prove it as the item above is proved: the proof of the place states what the place holds, so an
-   item it does not expect fails it, and the item's own proof takes its values from the workload it
-   excepts;
+   never a whole rule off: the proof of the place fails on an item, file or place it does not
+   state, and, where a docker daemon answers, the proofs fail when Falco lists one rule fewer
+   enabled;
+3. prove it as the items above are proved: the proof of the place states what the place holds, so
+   an item it does not expect fails it, and the item's own proof takes its values from the workload
+   it excepts;
 4. merge it. The pod template carries a checksum of the rules' ConfigMap, `checksum/rules`, so the
    DaemonSet rolls when the rules change, one node at a time, and the Kustomization waits for the
    release. A pod that still runs gets the new file as well: the kubelet brings a changed ConfigMap
@@ -6387,21 +6636,51 @@ generates a workload, and neither can hold up the cluster: the webhooks that mat
 open and skip the control plane's and Flux's namespaces. Kyverno also keeps webhooks of its own, on
 its own policy kinds, that fail closed ([Audit, and what a webhook may do](#audit-and-what-a-webhook-may-do)).
 
-Each engine is two applications an overlay selects on its own, in a namespace of its own that
-enforces the restricted level:
+The engines are five applications, which an overlay selects an engine at a time, each engine in a
+namespace of its own that enforces the restricted level:
 
-| Engine | Namespace | Applications | Chart | Rules written as |
+| Engine | Namespace | Applications, in order | Chart | Rules written as |
 | --- | --- | --- | --- | --- |
 | Kyverno | `kyverno` | `kyverno`, `kyverno-policies` | `kyverno` 3.10.0, Kyverno 1.20.0, an OCI chart | `ValidatingPolicy` (`policies.kyverno.io/v1`), in CEL |
-| Gatekeeper | `gatekeeper-system` | `gatekeeper`, `gatekeeper-policies` | `gatekeeper` 3.23.1, from the project's Helm repository | `ConstraintTemplate` in Rego, and a constraint of each template's kind |
+| Gatekeeper | `gatekeeper-system` | `gatekeeper`, `gatekeeper-templates`, `gatekeeper-policies` | `gatekeeper` 3.23.1, from the project's Helm repository | `ConstraintTemplate` in Rego, and a constraint of each template's kind |
 
-The engine's application is the chart and what scrapes and alerts on it; the rules are the other
-application, which waits for the engine (`dependsOn`) because the kinds it applies are the
-release's. Gatekeeper makes the kind of each constraint from its template within seconds of the
-template's creation, so the first reconcile of `gatekeeper-policies` can fail on the constraints and
-the next, a minute later, applies them. Nothing else in the tree depends on either application, and
-`tests/admission-policy.bats` builds the overlay without each engine in turn: the other builds whole
-and nothing of the one taken out is left. Neither engine's pods are a dependency of anything, as
+The engine's application is the chart and what scrapes and alerts on it. Kyverno's rules are the
+next application, which waits for the engine (`dependsOn`) because the kinds it applies are the
+release's. Gatekeeper's are two, because a constraint's kind is not the release's: Gatekeeper makes
+it from the constraint's template once it has reconciled the template, and Flux's server-side dry
+run of an object of a kind that does not exist fails the whole Kustomization, so a Kustomization
+that held templates and constraints together would apply neither and no retry could succeed.
+`gatekeeper-templates` applies the three templates after the release, and is Ready only when each
+template's `status.created` is true (a `healthCheckExprs` entry on `ConstraintTemplate` with
+`wait: true`; Flux otherwise takes an applied template for ready): that is the status the
+ConstraintTemplate's schema holds for the kind having been created, and `tests/admission-policy.bats`
+reads it, a boolean below a status subresource, in the pinned chart's definition, so a chart that
+dropped it fails offline. `gatekeeper-policies` applies
+the constraints and depends on `gatekeeper-templates` alone, so it starts when their kinds are
+served. The two read different artifacts, and kustomize-controller compares a dependency's applied
+revision with the dependent's only when both read one source, so a change that adds a template and
+its constraint together can start `gatekeeper-policies` while `gatekeeper-templates` is still Ready
+from the revision before: that attempt's dry run fails for the new kind, nothing of it is applied,
+and the retry a minute later succeeds. `just kubernetes-check` refuses a constraint that is in its template's Kustomization, whose
+Kustomization does not depend on its template's, or whose template's Kustomization does not wait
+for the kinds ([What the checks refuse](#what-the-checks-refuse)).
+
+Kyverno's release also gives every definition it installs `helm.sh/resource-policy: keep`, so Helm
+leaves them, and every policy and report of their kinds, when the application leaves the tree. The
+chart writes that annotation itself on five of its definitions and takes more only through values
+that would repeat it there, so the HelmRelease's post-renderer sets it on every
+`CustomResourceDefinition` instead, which sets it once on each; `tests/admission-policy.bats` parses
+the chart's output strictly and counts the annotation on every definition.
+
+Nothing else in the tree depends on any of the five, and `tests/admission-policy.bats` builds the
+overlay without each engine in turn: the other builds whole and nothing of the one taken out is
+left, so taking an engine out is taking its namespace directory's applications out of the overlay
+(a constraint left without its template, or a rule without its engine, fails
+`just kubernetes-check`). Kyverno's go together, as its definitions stay. Gatekeeper's go in two
+changes, `gatekeeper-policies` first and `gatekeeper` and `gatekeeper-templates` once Flux has
+pruned it: Gatekeeper makes each constraint's kind as a definition its template owns, so a template
+deleted first takes the kind with it, and kustomize-controller may then never finish deleting the
+constraints, as it cannot find their kind. Neither engine's pods are a dependency of anything, as
 the webhooks of both that match workloads fail open.
 
 Neither namespace holds a default deny yet: each is in `network-policy-exceptions.yaml` with its
@@ -6458,8 +6737,9 @@ How each engine says it:
   expression for each setting, so a report names which of the four a pod misses. The legacy kind,
   `ClusterPolicy` of `kyverno.io/v1`, is no longer executed as of Kyverno 1.20, and the chart refuses
   to install or upgrade over one found on the cluster.
-- **Gatekeeper**: one `ConstraintTemplate` per rule in `gatekeeper-policies/app/`, holding the Rego
-  and the name of the kind, and one constraint of that kind, `enforcementAction: dryrun`. Gatekeeper
+- **Gatekeeper**: one `ConstraintTemplate` per rule in `gatekeeper-templates/app/`, holding the Rego
+  and the name of the kind, and one constraint of that kind in `gatekeeper-policies/app/`,
+  `enforcementAction: dryrun`. Gatekeeper
   creates the kinds `K8sImagePinned`, `K8sRestrictedSecurityContext` and
   `K8sNamespacePodSecurityLevel` at run time, from the templates, and no definition of them is in the
   tree. `just kubernetes-validate` fails for an object
@@ -6821,6 +7101,39 @@ post-renderer patch that names a file, a key that folds to a field the render re
 render, naming the release.
 `scripts/render --forms` checks that every release is of a form the render accepts, without pulling
 a chart, and `tests/render.bats` runs it on this tree.
+A chart's output is parsed strictly, as helm-controller decodes what a release renders: a mapping
+that repeats a key, at any depth and in any document, fails the render, naming the application, the
+release, the object (its kind and name, or its place among the documents when it has neither) and
+the key. helm-controller passes the output through kustomize's libraries in its post-renderers,
+which always run, at least to label each object with its origin; their `yaml.v3` decode of each
+object refuses a key whose text repeats and fails the install. helm's template step, `yq` and `jq`
+keep the last one, so the tree's other checks never see it. Two parses of pinned tools read the
+output before the release's post-renderers: kubeconform's strict parse (`-strict`, with no schema
+location that holds a schema, so nothing is validated or fetched), which reads a key as the YAML
+1.1 value it stands for, compares the values and names a key as it reads it, a string quoted and a
+number or a boolean bare; and kustomize's decode, helm-controller's own,
+which compares the keys' text and quotes it, so that `80` beside `"80"`, or `true` beside `"true"`,
+is refused by it alone. That decode is a `kustomize build` of the output with a JSON patch that
+copies each object's kind onto itself: kustomize decodes an object whole to patch it, and does so
+before a build folds a repeated annotation. Both read the chart's output as it renders with
+Kubernetes' own API versions alone and with those of every definition the tree installs, as
+helm-controller renders with what the cluster serves at the time, so a key a chart repeats only
+while an API is served, or only while it is not, is refused too. The render also refuses output
+helm-controller would install:
+
+- `yes` beside `on`, or `0x10` beside `16`, which kubeconform reads as the same value;
+- a mapping a YAML merge key (`<<: *base`) brings in, with a key of it set again beside the merge
+  key, which kubeconform counts as a repeat;
+- a repeat in a chart's `crds/` files, which helm-controller applies apart from the release,
+  without its post-renderers;
+- in a release with a kustomize post-renderer, repeated annotations, a repeated annotation key or a
+  repeated `annotations` mapping, which that build folds into one, the last value kept, before the
+  decode, unless one of its JSON patches targets the object: kustomize decodes an object it
+  JSON-patches whole, so the build refuses the repeat then. A repeated label, or a repeat anywhere
+  else, that build refuses.
+
+What the post-renderers' kustomize build writes holds each key once, as the build refuses a repeat
+or folds it, so it is not parsed again.
 `RENDER_CHART_CACHE` names a directory to keep pulled charts in between renders. A tree that does
 not render fails, naming the application. `just render-diff <base> <head>` prints the comment
 comparing two renders.

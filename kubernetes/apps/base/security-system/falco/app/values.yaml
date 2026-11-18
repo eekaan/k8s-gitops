@@ -106,9 +106,9 @@ serviceMonitor:
       targetLabel: node
 
 # Local rule files by name, which the chart makes the ConfigMap falco-rules of and mounts in the
-# directory Falco reads after the image's rules. One file of one item, an exception, and no rule of
-# the tree's own. docs/kubernetes.md, Tuning, says why it is this narrow, what proves it and how
-# another goes in.
+# directory Falco reads after the image's rules. One file of two items, each an exception, and no
+# rule of the tree's own. docs/kubernetes.md, Tuning, says why each is this narrow, what proves it
+# and how another goes in.
 customRules:
   exceptions.yaml: |-
     # Reason: busybox's httpd, the demo's web server, forks for each connection it accepts, and the
@@ -120,6 +120,20 @@ customRules:
     # still matches, and so does every other workload.
     - macro: user_known_stand_streams_redirect_activities
       condition: (k8s.ns.name = "demo" and container.name = "httpd" and container.image.repository = "docker.io/library/busybox" and proc.name = "httpd")
+      override:
+        condition: replace
+    # Reason: the init container apply-sysctl-overwrites of each Cilium agent's pod copies the
+    # binary cilium-sysctlfix from its image into the node's /opt/cni/bin, which it mounts from the
+    # host, and runs it there with nsenter in the node's mount namespace, from a process still in
+    # that container. Talos mounts an overlay at /opt, so the copy is in that overlay's upper layer,
+    # which is what the image's rule Drop and execute new binary in container matches, each time an
+    # agent's pod starts on a node where Falco runs. The macro is the placeholder that rule negates.
+    # It names a path and not a file, so it excepts whatever that container of that image in the
+    # namespace kube-system runs at that one path, and nothing else: any binary that container runs
+    # from an upper layer at any other path, cilium-sysctlfix included, still matches, and so does
+    # every other container, the agent's included.
+    - macro: known_drop_and_execute_activities
+      condition: (k8s.ns.name = "kube-system" and container.name = "apply-sysctl-overwrites" and container.image.repository = "quay.io/cilium/cilium" and proc.exepath = "/opt/cni/bin/cilium-sysctlfix")
       override:
         condition: replace
 

@@ -405,7 +405,7 @@ promtool_calls() {
   echo "runbook: $headings"
   [ "$rows" = "$names" ]
   [ "$headings" = "$names" ]
-  grep -q 'alerts go nowhere\|no destination' "$REPO/docs/kubernetes.md"
+  grep -qx '#### Where alerts go' "$REPO/docs/kubernetes.md"
   grep -q 'just rules-check' "$REPO/README.md"
 }
 
