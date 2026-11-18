@@ -1900,6 +1900,7 @@ monitors scrape is in Prometheus, where a query reads it:
 | `kubelet-csr-approver` | Its chart's ServiceMonitor |
 | `kyverno` | Its chart's two ServiceMonitors, of the admission controller and the reports controller ([Admission policy](#admission-policy)) |
 | `metrics-server` | Its chart's ServiceMonitor |
+| `open-feature-operator` | The application's own PodMonitor, of the manager ([OpenFeature Operator](#openfeature-operator)); the operator's repository, under Apache-2.0, and its chart hold no Grafana dashboard at the pinned version |
 | `reloader` | Its chart's PodMonitor |
 | `spegel` | Its chart's ServiceMonitor |
 | `vpa` | Its chart's PodMonitor, of the recommender |
