@@ -89,6 +89,7 @@ resources:
   - ../../base/demo/hello-sso/ks.yaml
   - ../../base/crowdsec/crowdsec/ks.yaml
   - ../../base/envoy-gateway-system/crowdsec-gateway-logs/ks.yaml
+  - ../../base/monitoring/victoria-logs-route/ks.yaml
   - ../../base/open-feature-operator/open-feature-operator/ks.yaml
   # - ../../base/demo/hello-flags/ks.yaml  # Disabled: the worked example of a workload that opts in to the OpenFeature Operator; no workload of this cluster asks for a flag sidecar
 

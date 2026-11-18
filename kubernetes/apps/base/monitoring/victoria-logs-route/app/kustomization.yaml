@@ -1,0 +1,7 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# The SecurityPolicy and the route for the sign-in paths come from components/sso, which ks.yaml adds.
+resources:
+  - httproute.yaml

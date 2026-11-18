@@ -543,14 +543,14 @@ secret_targets() {
 @test "The sign-in applications are selected by overlay entries and build nothing when they are not, and nothing else waits on them" {
   local dependency app
   # Every entry: the namespace, its defaults, its default deny and the two Kustomizations, which wait
-  # for what they apply, and the demo route that opts in.
+  # for what they apply, and the routes that opt in.
   overlay
   [ "$(yq -N 'select(.metadata.namespace == "sso-system" or .metadata.name == "sso-system") | .kind + "/" + .metadata.name' "$OVERLAY" | sort | paste -sd' ' -)" \
     = "ConfigMap/app-template-defaults Namespace/sso-system NetworkPolicy/default-deny" ]
   [ "$(yq -N 'select(.kind == "Kustomization" and (.spec.targetNamespace == "sso-system")) | .metadata.name' "$OVERLAY" | sort | paste -sd' ' -)" = "dex oauth2-proxy" ]
   [ "$(yq -N 'select(.kind == "Kustomization" and .spec.targetNamespace == "sso-system") | .spec.wait' "$OVERLAY" | sort -u)" = true ]
   # The namespace directory alone, and then neither entry.
-  tree_without dex oauth2-proxy hello-sso
+  tree_without dex oauth2-proxy hello-sso victoria-logs-route
   overlay "$TREE/kubernetes/apps/overlays/lab-sto2"
   [ "$(yq -N 'select(.metadata.namespace == "sso-system" or .metadata.name == "sso-system") | .kind + "/" + .metadata.name' "$OVERLAY" | sort | paste -sd' ' -)" \
     = "ConfigMap/app-template-defaults Namespace/sso-system NetworkPolicy/default-deny" ]
@@ -558,7 +558,7 @@ secret_targets() {
   yq -i '.resources |= map(select(test("/sso-system$") | not))' "$TREE/kubernetes/apps/overlays/lab-sto2/kustomization.yaml"
   overlay "$TREE/kubernetes/apps/overlays/lab-sto2"
   [ -z "$(yq -N 'select(.metadata.namespace == "sso-system" or .metadata.name == "sso-system" or .spec.targetNamespace == "sso-system") | .metadata.name' "$OVERLAY")" ]
-  # Without the sign-in applications, and the route that opts in, the tree still builds and passes.
+  # Without the sign-in applications, and the routes that opt in, the tree still builds and passes.
   run "$REPO/scripts/kubernetes-check" "$TREE"
   echo "$output"
   [ "$status" -eq 0 ]
@@ -583,10 +583,12 @@ secret_targets() {
   [ "$status" -ne 0 ]
   [[ $output == *"Kustomization hello-sso names oauth2-proxy"* ]]
   rm -rf "$TREE"
-  # Nothing else waits on them: only oauth2-proxy names dex, only the demo route names oauth2-proxy,
-  # and nothing names the demo route.
+  # Nothing else waits on them: only oauth2-proxy names dex, only the routes that opt in, the demo's
+  # and the log store's, name oauth2-proxy, and nothing names either route.
   overlay
   [ "$(yq -N 'select(.kind == "Kustomization") | select(.spec.dependsOn // [] | map(.name) | contains(["dex"])) | .metadata.name' "$OVERLAY")" = oauth2-proxy ]
-  [ "$(yq -N 'select(.kind == "Kustomization") | select(.spec.dependsOn // [] | map(.name) | contains(["oauth2-proxy"])) | .metadata.name' "$OVERLAY")" = hello-sso ]
+  [ "$(yq -N 'select(.kind == "Kustomization") | select(.spec.dependsOn // [] | map(.name) | contains(["oauth2-proxy"])) | .metadata.name' "$OVERLAY" | sort | paste -sd' ' -)" \
+    = "hello-sso victoria-logs-route" ]
   [ -z "$(yq -N 'select(.kind == "Kustomization") | select(.spec.dependsOn // [] | map(.name) | contains(["hello-sso"])) | .metadata.name' "$OVERLAY")" ]
+  [ -z "$(yq -N 'select(.kind == "Kustomization") | select(.spec.dependsOn // [] | map(.name) | contains(["victoria-logs-route"])) | .metadata.name' "$OVERLAY")" ]
 }

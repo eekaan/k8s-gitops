@@ -94,6 +94,7 @@ configMapGenerator:
       - catalogue/spegel.yaml
       - catalogue/systems.yaml
       - catalogue/vector.yaml
+      - catalogue/victoria-logs-route.yaml
       - catalogue/victoria-logs.yaml
       - catalogue/volsync-demo.yaml
       - catalogue/volsync.yaml

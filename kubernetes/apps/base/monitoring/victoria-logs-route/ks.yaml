@@ -1,0 +1,29 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: victoria-logs-route
+  namespace: flux-system
+spec:
+  path: ./apps/base/monitoring/victoria-logs-route/app
+  targetNamespace: monitoring
+  # The component adds the policy that asks oauth2-proxy and the route for the sign-in paths.
+  components:
+    - ../../../../../components/sso
+  postBuild:
+    substitute:
+      SSO_ROUTE: logs
+      SSO_HOSTNAME: logs
+  # The route names the public Gateway and the store's Service, and the policy names oauth2-proxy's
+  # Service, which the grant in its namespace lets this one reach. A cluster without any of them
+  # cannot enable it, and the route is applied only once oauth2-proxy is Ready, so no request reaches
+  # the store before the sign-in can answer for it.
+  dependsOn:
+    - name: gateway-public
+    - name: victoria-logs
+    - name: oauth2-proxy
+  wait: true
+  sourceRef:
+    kind: ExternalArtifact
+    name: victoria-logs-route
