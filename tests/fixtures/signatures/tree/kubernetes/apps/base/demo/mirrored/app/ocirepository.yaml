@@ -1,0 +1,10 @@
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: mirrored
+spec:
+  interval: 1h
+  url: oci://charts.example.invalid/charts/mirrored
+  ref:
+    tag: 5.0.0

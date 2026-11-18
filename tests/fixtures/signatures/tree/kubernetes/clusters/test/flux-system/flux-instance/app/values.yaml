@@ -1,0 +1,28 @@
+---
+instance:
+  sync:
+    kind: OCIRepository
+    url: oci://charts.example.invalid/tree/manifests
+    ref: main
+    path: ./clusters/test
+  kustomize:
+    patches:
+      - target:
+          kind: Namespace
+          name: flux-system
+        patch: |
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: flux-system
+      - target:
+          kind: OCIRepository
+          name: flux-system
+        patch: |
+          - op: add
+            path: /spec/verify
+            value:
+              provider: cosign
+              matchOIDCIdentity:
+                - issuer: '^https://token\.ci\.example\.invalid$'
+                  subject: '^https://code\.example\.invalid/example/tree/\.ci/publish\.yml@refs/heads/main$'

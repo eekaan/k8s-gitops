@@ -23,6 +23,9 @@ clusterconfig/
 age.txt
 *.key
 *.pem
+# The publishers' public keys that signatures.yaml names, and the fixture's.
+!/signatures/*.pem
+!/tests/fixtures/signatures/tree/signatures/*.pem
 kubeconfig
 talosconfig
 .env

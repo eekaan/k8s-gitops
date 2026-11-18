@@ -17,3 +17,9 @@ spec:
   ref:
     # renovate: datasource=docker depName=ghcr.io/home-operations/charts-mirror/metrics-server
     tag: 3.14.0
+  # Go regular expressions, kept to syntax POSIX extended expressions read the same way (no \d).
+  verify:
+    provider: cosign
+    matchOIDCIdentity:
+      - issuer: '^https://token\.actions\.githubusercontent\.com$'
+        subject: '^https://github\.com/home-operations/charts-mirror/\.github/workflows/app-builder\.yaml@refs/heads/main$'

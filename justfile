@@ -72,6 +72,14 @@ lock-check:
 scenarios-check:
     scripts/scenarios-check
 
+# Fail unless every chart source Flux builds, the artifact the cluster syncs and the tools image is one row of signatures.yaml, each row is one of them and of the form its kind takes, and the verify block of every OCIRepository and of the sync source is exactly its row's identity, or there is none; offline (docs/kubernetes.md, Signatures)
+signatures-check:
+    scripts/signatures-check
+
+# After the offline check, ask each registry, anonymously, whether every pin of the tree is signed as its row of signatures.yaml says: cosign verifies a keyless row with its issuer and subject, a key row with its key, and finds no signature for an unsigned one; one line per row, pass, FAIL or skip; needs the network
+signatures-verify:
+    scripts/signatures-check verify
+
 # Write each catalogue entity's dependencies from the dependsOn of the Kustomization it describes, so the entities and the overlay agree (docs/kubernetes.md, Backstage)
 catalogue-dependencies:
     scripts/catalogue-dependencies
@@ -115,11 +123,14 @@ test-hermetic:
     bats --filter-tags hermetic tests
 
 # Run every check that needs no credentials with the tools on this machine, group by group
-checks: static tests-1 tests-2 tests-3
+checks: static signatures tests-1 tests-2 tests-3
 
 # The groups of checks are the dependencies of checks, and each group's checks its own dependencies: just ci runs every group side by side in containers of its own, and CI runs each as a job of its own. A check, with whatever it depends on, belongs to one group only, or it would run twice.
 # The checks other than the bats tests, the cheapest and most basic first
-static: tools-check check-literals check-commit-literals check-conflict-markers lock-check cluster-secrets-check lint renovate-check renovate-pins edge-policy-check scenarios-check infra-check talos-check kubernetes-check render-check network-policy-check kubernetes-validate vector-check rules-check alerts-route-check secrets-scan
+static: tools-check check-literals check-commit-literals check-conflict-markers lock-check cluster-secrets-check lint renovate-check renovate-pins edge-policy-check scenarios-check infra-check talos-check kubernetes-check signatures-check render-check network-policy-check kubernetes-validate vector-check rules-check alerts-route-check secrets-scan
+
+# The verification of the sources' signatures against the registries, a group of its own: a registry out of reach fails it and leaves static's result as it is
+signatures: signatures-verify
 
 # The first of three parts of the bats tests
 tests-1: (test '1/3')

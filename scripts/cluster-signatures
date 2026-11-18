@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# Says whether the OCIRepository objects of a cluster are verified as signatures.yaml says, reading
+# only, through the cluster's kubeconfig (docs/kubernetes.md, Signatures). Prints pass or FAIL for
+# each object, by its namespace and name, with one line of why, and exits 0 only when none fails:
+#   - an object whose row is keyless without cluster: false passes when its verify block is exactly
+#     its row's identity, its SourceVerified condition is True for its current generation, and it is
+#     Ready for that generation; a FAIL says which of them it is not, with the condition's reason;
+#   - an object whose row is unsigned, or has cluster: false, passes when it has no verify block;
+#   - an object whose source has no row fails.
+# It runs kubectl get only, and reads signatures.yaml beside it. It prints names and the conditions'
+# reasons, each only once it has the shape of one, never a source the cluster holds, a condition's
+# message, an address or kubectl's own errors, which can name the API server's address.
+# Usage: scripts/cluster-signatures [cluster]
+set -euo pipefail
+
+here=$(dirname "$0")
+# shellcheck source=scripts/lib/cluster.sh
+. "$here/lib/cluster.sh"
+
+if (($# > 1)) || [[ ${1-} == -* ]]; then
+  infra_error "usage: cluster-signatures [cluster]"
+  exit 2
+fi
+
+# shellcheck source=scripts/cluster-env
+. "$here/cluster-env" "${1-}"
+complete=1
+require_kubeconfig || complete=0
+require_commands kubectl jq yq || complete=0
+((complete))
+
+step="reading signatures.yaml"
+rows=$(yq -o json -I0 '.sources' "$infra_root/signatures.yaml" | jq -c 'map({(.source): .}) | add')
+
+failures=0 checks=0
+# result VERDICT OBJECT WHY: one object's result, pass or FAIL, with its name and why.
+result() {
+  printf '%-4s  %s: %s\n' "$1" "$2" "$3"
+  checks=$((checks + 1))
+  [[ $1 != FAIL ]] || failures=$((failures + 1))
+}
+
+step="reading the cluster's OCIRepositories"
+if ! objects=$(kubectl get ocirepositories.source.toolkit.fluxcd.io --all-namespaces --output json --request-timeout=10s 2> /dev/null) ||
+  ! jq -e '.items | type == "array"' <<< "$objects" > /dev/null 2>&1; then
+  result FAIL OCIRepositories "kubectl could not read them"
+  infra_error "the cluster's OCIRepositories could not be read"
+  exit 1
+fi
+
+# One verdict per object, as jq judges it against the rows: the object's name, then pass or FAIL and
+# why. A name that is not a Kubernetes name, and a reason that is not a condition's reason, are not
+# printed as they are. Verdicts jq cannot give, or fewer of them than there are objects, fail the run.
+step="checking the OCIRepositories"
+if ! verdicts=$(jq -r --argjson rows "$rows" '
+  def dnslabel: if type == "string" and test("\\A[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?\\z") then . else "(a name of no Kubernetes form)" end;
+  def subdomain: if type == "string" and test("\\A[a-z0-9]([-.a-z0-9]{0,251}[a-z0-9])?\\z") then . else "(a name of no Kubernetes form)" end;
+  def reason: if type == "string" and test("\\A[A-Za-z][A-Za-z0-9]{0,127}\\z") then . else "a reason of no condition'"'"'s form" end;
+  def condition($type): [(.status.conditions // [])[] | select(.type == $type)][0];
+  .items | sort_by(.metadata.namespace, .metadata.name)[]
+  | . as $o | $rows[$o.spec.url // "" | tostring] as $row
+  | condition("Ready") as $ready | condition("SourceVerified") as $verified
+  | [(($o.metadata.namespace | dnslabel) + "/" + ($o.metadata.name | subdomain))]
+  + if $row == null then ["FAIL", "no row of signatures.yaml has its source"]
+    elif $row.signed == "keyless" and $row.cluster != false then
+      if $o.spec.verify == null then ["FAIL", "no verify block, which its row gives it"]
+      elif $o.spec.verify != {"provider": "cosign", "matchOIDCIdentity": [{"issuer": $row.issuer, "subject": $row.subject}]} then
+        ["FAIL", "a verify block that is not its row'"'"'s identity"]
+      elif $verified == null then ["FAIL", "not verified: no SourceVerified condition"]
+      elif $verified.status != "True" then
+        ["FAIL", "not verified: SourceVerified \($verified.status | reason) (\($verified.reason | reason))"]
+      elif $verified.observedGeneration != $o.metadata.generation then
+        ["FAIL", "not verified for its current generation \($o.metadata.generation | tostring | if test("\\A[0-9]{1,19}\\z") then . else "(none)" end)"]
+      elif $ready == null then ["FAIL", "verified, and no Ready condition"]
+      elif $ready.status != "True" then ["FAIL", "verified, not Ready: \($ready.reason | reason)"]
+      elif $o.status.observedGeneration != $o.metadata.generation then
+        ["FAIL", "verified, not Ready for its current generation \($o.metadata.generation | tostring | if test("\\A[0-9]{1,19}\\z") then . else "(none)" end)"]
+      else ["pass", "verified keyless as its row says, and Ready"] end
+    elif $o.spec.verify != null then ["FAIL", "a verify block its row does not give it"]
+    elif $row.signed == "unsigned" then ["pass", "unsigned as its row says, and no verify block"]
+    else ["pass", "verified before merge alone, as its row says, and no verify block"] end
+  | map(gsub("[\t\n]"; " ")) | join("\t")' <<< "$objects" 2> /dev/null) ||
+  [[ $(jq '.items | length' <<< "$objects") -ne $(grep -c . <<< "$verdicts") ]]; then
+  result FAIL OCIRepositories "this check could not judge them"
+  infra_error "the cluster's OCIRepositories could not be judged"
+  exit 1
+fi
+if [[ -z $verdicts ]]; then
+  result FAIL OCIRepositories "the cluster holds none, not even the sync source"
+  infra_error "the cluster holds no OCIRepository"
+  exit 1
+fi
+while IFS=$'\t' read -r name verdict why; do
+  result "$verdict" "$name" "$why"
+done <<< "$verdicts"
+
+if ((failures > 0)); then
+  infra_error "$failures of $checks OCIRepositories failed"
+  exit 1
+fi
+echo "cluster-signatures: each of the $checks OCIRepositories of $cluster is as signatures.yaml says"

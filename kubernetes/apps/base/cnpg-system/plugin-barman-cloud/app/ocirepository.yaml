@@ -19,3 +19,9 @@ spec:
   ref:
     # renovate: datasource=docker depName=ghcr.io/cloudnative-pg/charts/plugin-barman-cloud
     tag: 0.9.0
+  # Go regular expressions, kept to syntax POSIX extended expressions read the same way (no \d).
+  verify:
+    provider: cosign
+    matchOIDCIdentity:
+      - issuer: '^https://token\.actions\.githubusercontent\.com$'
+        subject: '^https://github\.com/cloudnative-pg/charts/\.github/workflows/release-publish\.yml@refs/heads/main$'

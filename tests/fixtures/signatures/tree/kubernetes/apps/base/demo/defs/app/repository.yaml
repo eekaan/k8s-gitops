@@ -1,0 +1,10 @@
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: defs
+spec:
+  interval: 1h
+  url: https://code.example.invalid/example/defs
+  ref:
+    tag: v1.0.0

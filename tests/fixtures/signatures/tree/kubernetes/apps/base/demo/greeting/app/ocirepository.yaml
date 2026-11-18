@@ -1,0 +1,15 @@
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: greeting
+spec:
+  interval: 1h
+  url: oci://charts.example.invalid/charts/hello
+  ref:
+    tag: 2.0.0
+  verify:
+    provider: cosign
+    matchOIDCIdentity:
+      - issuer: '^https://token\.ci\.example\.invalid$'
+        subject: '^https://code\.example\.invalid/example/hello/\.ci/release\.yml@refs/heads/main$'

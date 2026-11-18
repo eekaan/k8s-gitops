@@ -85,6 +85,10 @@ cluster-check cluster='lab-sto2':
 gateway-check cluster='lab-sto2':
     scripts/gateway-check {{ quote(cluster) }}
 
+# Check each OCIRepository of a cluster against signatures.yaml, reading only: one whose row the cluster verifies has exactly its row's verify block and is Ready and verified for its current generation, every other has no block; pass or FAIL per object, by namespace and name, with the condition's reason; see docs/kubernetes.md, Signatures
+cluster-signatures cluster='lab-sto2':
+    scripts/cluster-signatures {{ quote(cluster) }}
+
 # List, changing nothing, the flows the network policies drop or, in audit mode, would drop: the last DROPPED and AUDIT flows of each Cilium agent, read by its own hubble through kubectl exec, so the kubeconfig needs exec on the agents' pods in kube-system; counted by source, destination and port, pod names and ports only and no address; NETWORK_DROPS_LAST bounds the flows asked of each agent (500) and NETWORK_DROPS_TIMEOUT the seconds each call may take (60); see docs/kubernetes.md, Network policy
 network-drops cluster='lab-sto2':
     scripts/network-drops {{ quote(cluster) }}
