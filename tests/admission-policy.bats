@@ -146,7 +146,7 @@ overlay_without() {
   local engine other app names dependents
   # Each engine's namespace directory and the applications in it: the engine and its rules.
   local -A ns_dir=([kyverno]=kyverno [gatekeeper]=gatekeeper-system)
-  local -A apps=([kyverno]="kyverno kyverno-policies" [gatekeeper]="gatekeeper gatekeeper-policies")
+  local -A apps=([kyverno]="kyverno kyverno-policies" [gatekeeper]="gatekeeper gatekeeper-templates gatekeeper-policies")
   overlay_without
   for engine in kyverno gatekeeper; do
     for app in ${apps[$engine]}; do
@@ -172,17 +172,17 @@ overlay_without() {
     echo "$output"
     [ "$status" -eq 0 ]
   done
-  # The dependencies the overlay holds: an engine's rules wait for that engine and nothing else
-  # names an engine, and each engine waits for the monitoring definitions alone, never for the
-  # other engine.
+  # The dependencies the overlay holds: an engine's rules wait for that engine, Gatekeeper's
+  # constraints through the application of its templates, and nothing else names an engine, and
+  # each engine waits for the monitoring definitions alone, never for the other engine.
   overlay_without
   # shellcheck disable=SC2016 # $name is a yq variable.
   dependents="$(yq -N 'select(.kind == "Kustomization" and .apiVersion == "kustomize.toolkit.fluxcd.io/*")
     | .metadata.name as $name | (.spec.dependsOn // [])[]
-    | select(.name == "kyverno" or .name == "kyverno-policies" or .name == "gatekeeper" or .name == "gatekeeper-policies")
+    | select(.name == "kyverno" or .name == "kyverno-policies" or .name == "gatekeeper" or .name == "gatekeeper-templates" or .name == "gatekeeper-policies")
     | $name + " -> " + .name' "$OVERLAY_OUT" | sort)"
   echo "dependencies on an engine: $dependents"
-  [ "$dependents" = "$(printf '%s\n' 'gatekeeper-policies -> gatekeeper' 'kyverno-policies -> kyverno')" ]
+  [ "$dependents" = "$(printf '%s\n' 'gatekeeper-policies -> gatekeeper-templates' 'gatekeeper-templates -> gatekeeper' 'kyverno-policies -> kyverno')" ]
   for app in kyverno gatekeeper; do
     names="$(APP="$app" yq -N 'select(.kind == "Kustomization" and .metadata.name == strenv(APP)) | .spec.dependsOn[].name' "$OVERLAY_OUT" | paste -sd' ')"
     echo "$app depends on: $names"
@@ -280,7 +280,7 @@ overlay_without() {
   [ -z "$(grep -v ' Audit Ignore$' <<<"$actions" || true)" ]
   # Gatekeeper's are ConstraintTemplates and constraints in dry-run, and no mutator, expansion or
   # config object that would change an object or what is watched.
-  rules_built gatekeeper-policies
+  gatekeeper_rules_built
   kinds="$(yq -N '.kind' "$BUILT" | sort -u | grep -v '^ConstraintTemplate$' || true)"
   echo "Gatekeeper's constraint kinds: $(paste -sd' ' <<<"$kinds")"
   [ "$(yq -N 'select(.kind == "ConstraintTemplate") | .metadata.name' "$BUILT" | grep -c .)" -eq 3 ]
@@ -310,6 +310,18 @@ rules_built() {
   built "$1"
   yq 'select(. != null)' "$BUILT" >"$BUILT.objects"
   mv "$BUILT.objects" "$BUILT"
+}
+
+# gatekeeper_rules_built: Gatekeeper's rules as its two applications build them, the templates and
+# then the constraints, in one file; sets BUILT to it.
+gatekeeper_rules_built() {
+  local all="$BATS_TEST_TMPDIR/gatekeeper-rules.yaml"
+  rules_built gatekeeper-templates
+  yq '.' "$BUILT" >"$all"
+  echo --- >>"$all"
+  rules_built gatekeeper-policies
+  yq '.' "$BUILT" >>"$all"
+  BUILT="$all"
 }
 
 # engine_inputs OUT: from a render in OUT, the pods and namespaces the engines evaluate, in
@@ -401,7 +413,7 @@ engines_over() {
   mkdir -p "$dir/kyverno" "$dir/gatekeeper"
   rules_built kyverno-policies
   yq '.' "$BUILT" >"$dir/kyverno/policies.yaml"
-  rules_built gatekeeper-policies
+  gatekeeper_rules_built
   yq '.' "$BUILT" >"$dir/gatekeeper/rules.yaml"
   policy="$dir/kyverno/policies.yaml"
   set +e
@@ -445,7 +457,7 @@ scope_gatekeeper() {
   # What each rule matches: the kind and the namespace selector, and nothing else that would narrow
   # it, so a rule cannot be held back in one engine and not the other.
   scope_kyverno >"$BATS_TEST_TMPDIR/kyverno-scope"
-  rules_built gatekeeper-policies
+  gatekeeper_rules_built
   gatekeeper_names="$(yq -N 'select(.apiVersion == "constraints.gatekeeper.sh/*") | .metadata.name' "$BUILT" | sort | paste -sd' ')"
   yq -N 'select(.apiVersion == "constraints.gatekeeper.sh/*") | .metadata.name + " " + .metadata.annotations["k8s-gitops/offline-check"]' "$BUILT" \
     | sort >"$BATS_TEST_TMPDIR/gatekeeper-checks"
@@ -532,7 +544,7 @@ scope_gatekeeper() {
 @test "Each engine is pinned to an exact chart version that Renovate can update" {
   local overlay app path version spec refkeys url
   overlay="$(kustomize build --load-restrictor LoadRestrictionsNone "$TREE/kubernetes/apps/overlays/lab-sto2")"
-  for app in kyverno kyverno-policies gatekeeper gatekeeper-policies; do
+  for app in kyverno kyverno-policies gatekeeper gatekeeper-templates gatekeeper-policies; do
     path="$(APP=$app yq -N 'select(.kind == "Kustomization" and .metadata.name == strenv(APP)) | .spec.path' <<<"$overlay")"
     echo "$app in the overlay: ${path:-none}"
     [ -n "$path" ]
@@ -687,4 +699,77 @@ monitor_targets() {
   grep -qF 'kubectl get constraints' "$REPO/docs/kubernetes.md"
   grep -qF 'gatekeeper_violations' "$REPO/docs/kubernetes.md"
   grep -qF 'kyverno_validating_policy_results_total' "$REPO/docs/kubernetes.md"
+}
+
+@test "Kyverno's release renders each key once and keeps every definition when the release goes" {
+  local rendered no_schemas="$BATS_TEST_TMPDIR/no-schemas" definitions kept
+  mkdir -p "$no_schemas"
+  render kyverno
+  rendered="$BATS_TEST_TMPDIR/post-render-kyverno/rendered.yaml"
+  # The chart's own output, before the post-renderer, holds each key once, read with both of the
+  # render's strict parses: helm-controller's yaml.v3 decode refuses a repeat, which helm's own
+  # template step and yq let through, and a kustomize post-renderer folds only repeated annotations
+  # first, a repeated annotation key or a repeated annotations mapping, and none of an object one of
+  # its JSON patches targets. kubeconform's strict parse compares the values keys stand for; no
+  # schema is looked up.
+  run kubeconform -strict -ignore-missing-schemas -verbose -output json \
+    -schema-location "$no_schemas/{{.ResourceKind}}.json" "$rendered"
+  echo "$output"
+  jq -e '.resources | length > 0' <<<"$output" >/dev/null
+  [ -z "$(jq -r '.resources[] | select((.msg // "") | contains("already set in map")) | .kind + " " + .name' <<<"$output")" ]
+  # kustomize's decode, helm-controller's own, compares the keys' text: a JSON patch that copies each
+  # object's kind onto itself has kustomize decode every object whole, before a build folds anything.
+  mkdir -p "$BATS_TEST_TMPDIR/decode"
+  cp "$rendered" "$BATS_TEST_TMPDIR/decode/rendered.yaml"
+  printf '%s\n' 'apiVersion: kustomize.config.k8s.io/v1beta1' 'kind: Kustomization' 'resources: [rendered.yaml]' \
+    'patches:' '  - target: {name: ".*"}' "    patch: '[{\"op\": \"copy\", \"from\": \"/kind\", \"path\": \"/kind\"}]'" \
+    >"$BATS_TEST_TMPDIR/decode/kustomization.yaml"
+  kustomize build "$BATS_TEST_TMPDIR/decode" >/dev/null
+  # Every definition the release installs carries helm.sh/resource-policy: keep, once: deleting a
+  # definition deletes every policy and report of its kind.
+  definitions="$(yq -N 'select(.kind == "CustomResourceDefinition") | .metadata.name' "$RENDERED" | grep -c .)"
+  kept="$(yq -N 'select(.kind == "CustomResourceDefinition" and .metadata.annotations["helm.sh/resource-policy"] == "keep") | .metadata.name' "$RENDERED" | grep -c .)"
+  echo "$kept of $definitions definitions are kept"
+  [ "$definitions" -gt 0 ]
+  [ "$kept" -eq "$definitions" ]
+}
+
+@test "Gatekeeper's constraints are applied by an application that waits for their templates' kinds" {
+  local templates policies kinds made
+  overlay_without
+  # Both applications are in the overlay: the templates wait for the release, the constraints for
+  # the templates and for nothing else.
+  [ "$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "gatekeeper-templates") | .spec.dependsOn[].name' "$OVERLAY_OUT" | paste -sd' ')" = gatekeeper ]
+  [ "$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "gatekeeper-policies") | .spec.dependsOn[].name' "$OVERLAY_OUT" | paste -sd' ')" = gatekeeper-templates ]
+  # The kind of a constraint exists only once Gatekeeper has made it from its template, so the
+  # templates' Kustomization is Ready only when each template's status says its kind was created:
+  # Flux waits for the objects it applies, and without an expression it takes a template for ready
+  # as soon as it is applied.
+  [ "$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "gatekeeper-templates") | .spec.wait' "$OVERLAY_OUT")" = true ]
+  [ "$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "gatekeeper-templates") | .spec.healthCheckExprs | length' "$OVERLAY_OUT")" -eq 1 ]
+  [ "$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "gatekeeper-templates") | .spec.healthCheckExprs[0] | .apiVersion + " " + .kind' "$OVERLAY_OUT")" = "templates.gatekeeper.sh/v1 ConstraintTemplate" ]
+  [ "$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "gatekeeper-templates") | .spec.healthCheckExprs[0].current' "$OVERLAY_OUT")" = "status.created == true" ]
+  # Flux reads inProgress and failed before current, so an entry with either could hold the
+  # Kustomization back for good.
+  [ "$(yq -N 'select(.kind == "Kustomization" and .metadata.name == "gatekeeper-templates") | .spec.healthCheckExprs[0] | keys | sort | join(" ")' "$OVERLAY_OUT")" = "apiVersion current kind" ]
+  # The status the expression reads is one the pinned chart's definition of ConstraintTemplate
+  # serves at that version, a boolean below a status subresource: a missing field is an error to
+  # Flux, which never counts the template as ready.
+  render gatekeeper
+  [ "$(yq -N 'select(.kind == "CustomResourceDefinition" and .metadata.name == "constrainttemplates.templates.gatekeeper.sh")
+    | .spec.versions[] | select(.name == "v1")
+    | (.served | tostring) + " " + (.subresources.status != null | tostring) + " "
+      + (.schema.openAPIV3Schema.properties.status.properties.created.type // "none")' "$RENDERED")" = "true true boolean" ]
+  # What each application holds: the templates alone, and the constraints alone, one of each kind.
+  rules_built gatekeeper-templates
+  templates="$BUILT"
+  rules_built gatekeeper-policies
+  policies="$BUILT"
+  [ "$(yq -N '.kind' "$templates" | sort -u)" = ConstraintTemplate ]
+  [ "$(yq -N '.apiVersion' "$policies" | sort -u)" = constraints.gatekeeper.sh/v1beta1 ]
+  made="$(yq -N '.spec.crd.spec.names.kind' "$templates" | sort | paste -sd' ')"
+  kinds="$(yq -N '.kind' "$policies" | sort | paste -sd' ')"
+  echo "templates make $made; constraints are of $kinds"
+  [ "$(wc -w <<<"$made")" -eq 3 ]
+  [ "$made" = "$kinds" ]
 }

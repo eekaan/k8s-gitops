@@ -72,6 +72,11 @@ Feature: The render diff of a pull request
     When just render-diff compares them
     Then the comment stays within GitHub's limit, keeps the whole summary and the footer, closes every block it opens, and says the diff is truncated
 
+  Scenario: A chart whose output repeats a mapping key fails the render, naming the release and the object
+    Given a tree whose HelmRelease's chart renders an object that repeats a key in its annotations, one that repeats a key in a mapping below its data, and ones whose release has no kustomize post-renderer and whose chart repeats an integer key, writes 80 beside "80" or true beside "true" below its data, or writes the annotation 80 beside "80", and one whose chart renders a document with neither kind nor name that repeats a key
+    When just render runs on each
+    Then each fails naming the application, the release, the object (by its place among the chart's documents when it has neither kind nor name) and the key, whichever tool of the render would have kept the last of the two
+
   Scenario: A base its own render code does not render is rendered with this checkout's
     Given a pull request whose base commit holds render code that fails on the base's own tree, and a checkout whose render code renders both
     When the CI render job's script renders the base and the checkout

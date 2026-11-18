@@ -1,0 +1,19 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: gatekeeper-templates
+  description: Gatekeeper's three ConstraintTemplates, in Rego, applied before the constraints of gatekeeper-policies; ready once Gatekeeper has made each template's kind.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#the-three-rules
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/gatekeeper-system/gatekeeper-templates
+      title: Manifests
+spec:
+  type: policy
+  lifecycle: production
+  owner: group:default/operators
+  system: admission-policy
+  dependsOn:
+    - component:default/gatekeeper

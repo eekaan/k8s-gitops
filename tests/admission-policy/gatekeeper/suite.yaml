@@ -7,7 +7,7 @@ apiVersion: test.gatekeeper.sh/v1alpha1
 kind: Suite
 tests:
   - name: image-pinned
-    template: ../../../kubernetes/apps/base/gatekeeper-system/gatekeeper-policies/app/image-pinned-template.yaml
+    template: ../../../kubernetes/apps/base/gatekeeper-system/gatekeeper-templates/app/image-pinned-template.yaml
     constraint: ../../../kubernetes/apps/base/gatekeeper-system/gatekeeper-policies/app/image-pinned.yaml
     cases:
       - name: pass-tag
@@ -57,7 +57,7 @@ tests:
           - violations: 1
             message: "is not pinned"
   - name: restricted-security-context
-    template: ../../../kubernetes/apps/base/gatekeeper-system/gatekeeper-policies/app/restricted-security-context-template.yaml
+    template: ../../../kubernetes/apps/base/gatekeeper-system/gatekeeper-templates/app/restricted-security-context-template.yaml
     constraint: ../../../kubernetes/apps/base/gatekeeper-system/gatekeeper-policies/app/restricted-security-context.yaml
     cases:
       - name: pass-pod-level
@@ -135,7 +135,7 @@ tests:
         assertions:
           - violations: "no"
   - name: namespace-pod-security-level
-    template: ../../../kubernetes/apps/base/gatekeeper-system/gatekeeper-policies/app/namespace-pod-security-level-template.yaml
+    template: ../../../kubernetes/apps/base/gatekeeper-system/gatekeeper-templates/app/namespace-pod-security-level-template.yaml
     constraint: ../../../kubernetes/apps/base/gatekeeper-system/gatekeeper-policies/app/namespace-pod-security-level.yaml
     cases:
       - name: pass-restricted
