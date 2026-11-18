@@ -22,7 +22,8 @@ spec:
       CNPG_NAMESPACE: backstage
       # The catalogue is not in the database, only the rows Backstage derives from it and the
       # search index.
-      CNPG_STORAGE_SIZE: 2Gi
+      # The volume holds the WAL of an archive outage as well (docs/kubernetes.md, PostgreSQL).
+      CNPG_STORAGE_SIZE: 4Gi
   # The Cluster and its PodMonitor are of the operator's and Prometheus Operator's kinds, and its
   # ObjectStore the Barman Cloud plugin's, which archives its WAL; the component's backups and its
   # dump job read their keys through ExternalSecrets from the secret store; the route names the

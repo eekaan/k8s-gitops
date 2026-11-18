@@ -38,13 +38,15 @@ setup() {
   SET=()
 }
 
-# built NAMESPACE APP: the application as Flux applies it: its app/ built from the copy with its
-# ks.yaml, substituting strictly the variables of the cluster's example key lists and the
-# application's own postBuild.substitute over them, as scripts/kubernetes-check does. Writes
-# $BATS_TEST_TMPDIR/APP-built.yaml and sets BUILT; a build that fails prints Flux's error and
-# returns non-zero. The pairs of SET go over the cluster-config values first.
+# built NAMESPACE APP [KS]: the application as Flux applies it: its app/ built from the copy with its
+# ks.yaml, or with the Kustomization in the file KS when it is given, substituting strictly the
+# variables of the cluster's example key lists and the application's own postBuild.substitute over
+# them, as scripts/kubernetes-check does. Writes $BATS_TEST_TMPDIR/APP-built.yaml and sets BUILT; a
+# build that fails prints Flux's error and returns non-zero. The pairs of SET go over the
+# cluster-config values first.
 built() {
   local ns=$1 app=$2 vars="$BATS_TEST_TMPDIR/example-vars.yaml" ks="$BATS_TEST_TMPDIR/$2-ks.yaml" pair
+  local source=${3:-$TREE/kubernetes/apps/base/$1/$2/ks.yaml}
   local error="$BATS_TEST_TMPDIR/$2-error.txt"
   # shellcheck disable=SC2016 # $list is a yq variable.
   yq ea '. as $list ireduce ({}; . * ($list // {}))' \
@@ -56,7 +58,7 @@ built() {
   # shellcheck disable=SC2016 # $vars is a yq variable.
   yq ea 'select(fileIndex == 0) as $vars | select(fileIndex == 1 and . != null)
     | .spec.postBuild.substitute = ($vars * (.spec.postBuild.substitute // {}))' \
-    "$vars" "$TREE/kubernetes/apps/base/$ns/$app/ks.yaml" >"$ks"
+    "$vars" "$source" >"$ks"
   BUILT="$BATS_TEST_TMPDIR/$app-built.yaml"
   # Built from the tree's parent, with paths from there, as scripts/kubernetes-check builds.
   (cd "$TREE" && flux build kustomization "$app" --path "./kubernetes/apps/base/$ns/$app/app" \
@@ -583,6 +585,102 @@ archive_path() {
     dump_end=$((dump_start + (deadline + 59) / 60))
     ((hour * 60 + minute < dump_start || hour * 60 + minute > dump_end))
   done
+}
+
+# bytes QUANTITY: the storage quantity QUANTITY in bytes, for a whole number of bytes or one with a
+# binary suffix, Ki, Mi, Gi or Ti. Any other form, a decimal suffix such as G or a fraction among
+# them, prints what it is and fails, so that no size is read as another.
+bytes() {
+  local number unit
+  [[ $1 =~ ^(0|[1-9][0-9]{0,17})(Ki|Mi|Gi|Ti)?$ ]] || { echo "'$1' is not a size this test reads"; return 1; }
+  number=${BASH_REMATCH[1]}
+  case ${BASH_REMATCH[2]} in
+    Ki) unit=$((1 << 10)) ;;
+    Mi) unit=$((1 << 20)) ;;
+    Gi) unit=$((1 << 30)) ;;
+    Ti) unit=$((1 << 40)) ;;
+    *) unit=1 ;;
+  esac
+  # Beyond the largest number bash holds a product wraps around.
+  ((number <= 9223372036854775807 / unit)) || { echo "'$1' is larger than this test reads"; return 1; }
+  echo $((number * unit))
+}
+
+@test "Every database's volume has room for its data and the WAL its primary keeps while the archive is down, and grows in place" {
+  local classes app ks cluster name file size have class resize field
+  local -a names problems=()
+  # The floor every database's volume is held to. A segment that fails to archive stays in the
+  # primary's pg_wal until it is archived, and PostgreSQL shuts down when the file system that holds
+  # pg_wal is full (PostgreSQL 18, continuous-archiving.html). archive_timeout switches to a new
+  # segment whenever it has elapsed and there has been any activity, and a segment closed early by
+  # the switch is as long as a full one (runtime-config-wal.html), so while the archive is down the
+  # primary keeps a segment for every switch, however little is written.
+  # A segment: PostgreSQL's default, 16MiB (CloudNativePG v1.30.1, docs/src/storage.md, Volume for
+  # WAL).
+  local segment=$((16 << 20))
+  # Seconds between forced switches: the operator's global default archive_timeout, '5min'
+  # (docs/src/postgresql_conf.md, the global default parameters).
+  local switch=300
+  # The outage the volume outlasts: sixteen hours, an alert raised in an evening and acted on the
+  # next working morning.
+  local window=$((16 * 3600))
+  # The data, and the WAL a running primary keeps besides: the operator's default wal_keep_size,
+  # '512MB' (docs/src/postgresql_conf.md).
+  local data=$((1 << 30))
+  # 16 h / 5 min = 192 segments, 192 × 16MiB = 3072MiB, + 1024MiB = 4096MiB = 4Gi.
+  local segments=$((window / switch))
+  local floor=$((segments * segment + data))
+  # Each application is built from its Kustomization as the cluster's overlay makes it, the
+  # overlay's patches included, not from its ks.yaml alone.
+  kustomize build --load-restrictor LoadRestrictionsNone "$TREE/kubernetes/apps/overlays/lab-sto2" >"$BATS_TEST_TMPDIR/overlay.yaml"
+  for app in piraeus-datastore/linstor-cluster "${DATABASE_APPS[@]}"; do
+    ks="$BATS_TEST_TMPDIR/overlay-${app##*/}.yaml"
+    APP_NAME="${app##*/}" yq -N 'select(.kind == "Kustomization" and .metadata.name == strenv(APP_NAME))' \
+      "$BATS_TEST_TMPDIR/overlay.yaml" >"$ks"
+    [ "$(yq -N 'select(.kind == "Kustomization") | .metadata.name' "$ks" | grep -c .)" -eq 1 ] ||
+      { echo "the overlay makes no Kustomization ${app##*/}, or more than one"; return 1; }
+  done
+  # The StorageClasses as the linstor-cluster application applies them.
+  built piraeus-datastore linstor-cluster "$BATS_TEST_TMPDIR/overlay-linstor-cluster.yaml"
+  classes="$(yq -N 'select(.kind == "StorageClass") | .metadata.name + " allowVolumeExpansion="
+    + (if has("allowVolumeExpansion") then (.allowVolumeExpansion | @json) else "unset" end)' "$BUILT")"
+  echo "$classes"
+  cluster='select(.kind == "Cluster" and .apiVersion == "postgresql.cnpg.io/v1")'
+  for app in "${DATABASE_APPS[@]}"; do
+    # As Flux applies it, so a size the application leaves out is the component's default.
+    built "${app%%/*}" "${app##*/}" "$BATS_TEST_TMPDIR/overlay-${app##*/}.yaml"
+    # Every Cluster the application builds, the component's and any beside it, such as the one a
+    # point-in-time restore adds (docs/runbooks/postgres-restore.md).
+    mapfile -t names < <(yq -N "$cluster | .metadata.name" "$BUILT")
+    [ "${#names[@]}" -gt 0 ] || { echo "$app: builds no Cluster"; return 1; }
+    for name in "${names[@]}"; do
+      file="$BATS_TEST_TMPDIR/cluster-$name.yaml"
+      NAME="$name" yq -N "$cluster | select(.metadata.name == strenv(NAME))" "$BUILT" >"$file"
+      size="$(yq -N '.spec.storage.size // ""' "$file")"
+      have="$(bytes "$size")" || { echo "$app: $name: .spec.storage.size: $have"; return 1; }
+      echo "$app: $name: .spec.storage.size $size, $have bytes, against the floor of $floor bytes ($((floor >> 20))Mi)"
+      ((have >= floor)) || problems+=("$name: .spec.storage.size $size is below the floor of $((floor >> 20))Mi")
+      # The floor takes these at the operator's defaults: WAL on the data volume, 16MiB segments, a
+      # switch every five minutes and 512MB kept for standbys. WAL on a volume of its own would need
+      # a floor of its own.
+      for field in .spec.walStorage .spec.postgresql.parameters.archive_timeout .spec.postgresql.parameters.wal_keep_size \
+        .spec.bootstrap.initdb.walSegmentSize; do
+        [ "$(yq -N "$field != null" "$file")" = false ] ||
+          problems+=("$name: $field is set, and the floor takes the operator's default")
+      done
+      # The operator grows the claims to a larger size only if resizeInUseVolumes is not false (and,
+      # at run time, under the conditions in docs/kubernetes.md, PostgreSQL), and the class must let
+      # a claim grow.
+      resize="$(yq -N '.spec.storage | if has("resizeInUseVolumes") then (.resizeInUseVolumes | @json) else "unset" end' "$file")"
+      [ "$resize" = unset ] || [ "$resize" = true ] ||
+        problems+=("$name: .spec.storage.resizeInUseVolumes is $resize, so the operator grows no volume in use")
+      class="$(yq -N '.spec.storage.storageClass // ""' "$file")"
+      echo "$app: $name: resizeInUseVolumes $resize; class ${class:-none named}"
+      grep -qxF "$class allowVolumeExpansion=true" <<<"$classes" ||
+        problems+=("$name: its StorageClass, ${class:-none named}, is not one of linstor-cluster's with allowVolumeExpansion true")
+    done
+  done
+  [ "${#problems[@]}" -eq 0 ] || { printf '%s\n' "${problems[@]}"; return 1; }
 }
 
 @test "Every object a database archives is encrypted at the provider with a customer key the provider does not keep" {
