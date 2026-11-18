@@ -637,7 +637,8 @@ once it is not, and the agents' rendered configuration agrees.
   port, 19003 (`internal/xds/bootstrap/bootstrap.go`,
   `internal/infrastructure/kubernetes/proxy/resource.go`), and the shutdown manager on 19002
   (`internal/cmd/envoy/shutdown_manager.go`); 19001 is the stats port and 19000 the admin port on
-  the loopback. They reach the resolver, the controller on 18000 (xDS) and each backend the routes
+  the loopback. They reach the resolver, the controller on 18000 (xDS) and 18002 (the Wasm modules
+  of the [web application firewall](#web-application-firewall)), and each backend the routes
   attached to the Gateway send to, by one rule each: the pods its Service selects, in its namespace
   while that carries `k8s-gitops/gateway: public`, on the container port the route sends to and no
   other: `hello` in `demo` on 8080, kromgo in `kromgo` on 8080, n8n on 5678 and Open WebUI on 8080
@@ -656,12 +657,14 @@ once it is not, and the agents' rendered configuration agrees.
   every port of its database and from Open WebUI's other ports; PostgreSQL also authenticates every
   client. So it is in `monitoring`, listed as well: the proxies' rule for VictoriaLogs is what keeps
   them off Prometheus, Grafana, Alertmanager, the collector and the store's other ports. The
-  controller takes the proxies on 18000 and the kubelet on 8081, and reaches the resolver and the
-  API server on 443 and 6443 (a Service's address is translated to the control plane's before policy
-  applies). Its admission webhook takes the API server, the local host and other nodes' hosts on
-  9443, in a policy of its own with its reason (below). The certificate job reaches the resolver and
-  the API server. No monitor of the tree scrapes the Gateway, so no scrape is allowed; a monitor
-  that does adds its rule.
+  controller takes the proxies on 18000 and 18002 and the kubelet on 8081, and reaches the resolver
+  and the API server on 443 and 6443 (a Service's address is translated to the control plane's
+  before policy applies), and, in a policy of its own with its reason, `envoy-gateway-registry`, the
+  world on 443 alone: the registry it fetches a Wasm module's image from, which redirects a blob
+  request to another host. Its admission webhook takes the API server, the local host and other
+  nodes' hosts on 9443, in a policy of its own with its reason (below). The certificate job reaches
+  the resolver and the API server. No monitor of the tree scrapes the Gateway, so no scrape is
+  allowed; a monitor that does adds its rule.
 - **`demo`.** `hello` takes the proxies by their labels, not by their namespace, on 8080, so the
   controller is no path to it, and the kubelet's probe. The backup movers, the pods VolSync labels
   `app.kubernetes.io/created-by: volsync` for every application of the namespace that adds
@@ -862,9 +865,12 @@ application reaches it, that Falco's pods take Prometheus and the kubelet on its
 and reach the resolver alone, that the OpenFeature Operator's pod takes Prometheus on its metrics
 port and the API server, the local host and other nodes' hosts on its webhooks' port, neither of
 them the world, another application or the other port's caller, and reaches the API server alone,
-and that with their default deny `backstage`, `demo`, `envoy-gateway-system`, `kromgo`,
-`open-feature-operator`, `security-system` and `sso-system` let exactly their flows through and
-without it take and send everything. What it cannot show: the entity the pinned datapath gives a
+that the proxies reach the controller on the port it serves the firewall's Wasm modules on and no
+other application's pod or anything outside the cluster does, that the controller reaches the world
+on 443 and on no other port and neither the certificate job nor the proxies reach it, and that with
+their default deny `backstage`, `demo`, `envoy-gateway-system`, `kromgo`, `open-feature-operator`,
+`security-system` and `sso-system` let exactly their flows through and without it take and send
+everything. What it cannot show: the entity the pinned datapath gives a
 connection an edge translated and a worker forwarded again, read from its source above and confirmed
 in audit mode; the labels of the pods the operators create at run time, taken from the operators'
 source and observed in audit mode; that an address a name resolves to is the one a rule meant; and
@@ -3218,12 +3224,16 @@ cannot be listed without it: `just kubernetes-check` refuses the dependency.
   client's address below says.
 - **The proxies.** Two replicas, spread over the workers with a skew of one and never scheduled
   where that fails, under a disruption budget that keeps one running, with requests of 100m of CPU
-  and 128Mi of memory and no limits. They run as a non-root user with the runtime's default seccomp
-  profile, no privilege escalation and no capabilities, which the namespace's restricted level
-  requires. The controller makes their Deployment at run time, so no render holds it and
-  `just pod-security-check` does not evaluate it; admission enforces the namespace's level when the
-  controller creates it. `tests/gateway.bats` asserts the fields of the `EnvoyProxy` that produce
-  its pods, and the controller adds its shutdown manager container with the same hardened defaults.
+  and 128Mi of memory and no limits. With a route behind the web application firewall a proxy holds
+  far more than that: the filter's module and a VM of it for each worker, measured at about 300 MiB
+  more at one worker and 37 MiB on average for each further one
+  ([What it costs a proxy](#what-it-costs-a-proxy)). They run as a non-root user with the
+  runtime's default seccomp profile, no privilege escalation and no capabilities, which the
+  namespace's restricted level requires. The controller makes their Deployment at run time, so no
+  render holds it and `just pod-security-check` does not evaluate it; admission enforces the
+  namespace's level when the controller creates it. `tests/gateway.bats` asserts the fields of the
+  `EnvoyProxy` that produce its pods, and the controller adds its shutdown manager container with
+  the same hardened defaults.
 - **Listeners.** `http` on 80 for every hostname, and `https` on 443 for `*.${CLUSTER_DOMAIN}`,
   terminating TLS with the Secret `public-wildcard-tls`. They are the ports the edge routers
   translate ([The edge routers](infrastructure.md#the-edge-routers)): `tests/gateway.bats` fails,
@@ -3444,6 +3454,9 @@ answer holding addresses.
 
 The record for the name is made by external-dns within a minute or two of the route being accepted,
 and removed when the route is; there is no DNS step to do by hand ([DNS records](#dns-records)).
+
+A route is put behind the web application firewall with one more component in the same `ks.yaml`
+([Web application firewall](#web-application-firewall)).
 
 `hello`, the demo's workload, answers this way at `hello.${CLUSTER_DOMAIN}`: two replicas of
 busybox's web server, spread over the workers and held by a disruption budget of one, as an
@@ -4007,6 +4020,421 @@ them, with the identity headers added. The session cookie is set for the
 cluster's domain, so the browser sends it to every application under the domain, whether its route
 opts in or not, and whoever holds it passes every route that opts in for as long as it lasts. A
 route that is not given the component is as open as it was.
+
+## Web application firewall
+
+A route on the public Gateway can be put behind a web application firewall, to learn from and to
+try attacks against: [Coraza](https://coraza.io), an open-source engine compatible with
+ModSecurity, with the [OWASP Core Rule Set](https://coreruleset.org), the rules it is normally run
+with. coraza-proxy-wasm packages both as a Wasm filter, which the Gateway's own proxies run, so
+there is no controller, sidecar or external processor of its own. A route opts in with one
+component, `components/waf`, as it opts in to sign-in. The demo route `hello` is the one that does,
+in blocking mode: nothing real is behind it, so a false positive costs nothing there.
+`tests/waf.bats` pins the routes behind the firewall to `demo/hello`, and `hello-sso`, a second
+hostname on the same backend, is not one of them.
+
+The filter is coraza-proxy-wasm 0.6.0, which embeds Coraza 3.3.3 and the Core Rule Set 4.14.0.
+Its release notes warn that its build, with TinyGo, has been reported to leak memory and degrade
+performance, and recommend extensive testing before relying on it; what it costs here is below.
+
+### How it reaches the proxies
+
+The component makes an `EnvoyExtensionPolicy` named after the route, in its namespace, that targets
+that `HTTPRoute` and nothing else, with one Wasm entry, `coraza`, from an `Image` source:
+`ghcr.io/corazawaf/coraza-proxy-wasm:0.6.0@sha256:65d6…f4e`. As Envoy Gateway v1.10.0 runs it:
+
+- **Every replica fetches.** Each controller replica runs the translator and, with it, a Wasm cache
+  of its own (`Start` in `internal/gatewayapi/runner/runner.go`), the leader or not: every replica
+  translates the policies, and only the leader writes their status. When it translates the policy,
+  a replica fetches the image from its registry itself, anonymously, extracts `plugin.wasm` from the
+  image's one layer and keeps it in the chart's `wasm-cache` emptyDir at `/var/lib/eg/wasm`
+  (`internal/wasm/cache.go`, `internal/wasm/imagefetcher.go`), and logs `fetching image` with the
+  registry, the repository and the digest. The fetch runs inside the translation, which waits for
+  it, for up to five minutes (`DefaultPullTimeout` in `internal/wasm/options.go`): whenever a
+  replica's cache lacks the module, at every start of the replica and after a quiet day
+  ([It fails open](#it-fails-open)), the configuration and status of every route of every Gateway
+  wait on the registry. A fetch that failed is tried again at the next translation, which only a
+  change to an object the controller reads starts: it compares them without their status, so Flux
+  applying the same objects again does not; after more than ten failures the replica stops trying
+  until an hour after the last (`internal/wasm/httpserver.go`). Deleting the controller's pods one
+  at a time, `kubectl -n envoy-gateway-system delete pod <pod>`, makes each new one fetch the module
+  as it starts.
+- **The digest it checks.** The entry sets no `sha256`, so the replica takes the digest from the
+  URL's `@sha256:` (`Get` in `cache.go`) and compares it with the digest of the image manifest it
+  resolves. It resolves with go-containerregistry's `remote.Get` and then `Image()`, which turns an
+  index into its linux/amd64 image, so the digest compared is that image's: the pin is the
+  linux/amd64 image manifest that the tag's OCI index lists (`sha256:65d6…f4e`), not the index
+  (`sha256:d66f…4b1`), whose digest the replica would refuse as a checksum mismatch. The release's
+  own asset is a zip, so there is no bare module over HTTP to pin by its sha256 instead.
+  `tests/waf.bats` asks the registry, anonymously, and fails unless the
+  pinned digest is an image manifest with one gzipped tar layer that the tag's index lists for
+  linux/amd64.
+- **Who serves it.** Each replica serves its modules over TLS 1.3, with the proxies' client
+  certificate required, on 18002 (`httpserver.go`), at a path made from a hash of the image's URL
+  and a salt the certificate job writes, so that it cannot be guessed. The
+  proxies reach it as the controller's Service `envoy-gateway`, whose port `wasm` is 18002, through
+  the cluster `wasm_cluster` the controller adds to their configuration for a remote module
+  (`internal/xds/translator/globalresources.go`), with a retry policy of ten retries and a backoff
+  of one to 30 seconds, and check the module's own sha256, which the controller hands them with the
+  URL (`internal/xds/translator/wasm.go`). Either replica may answer, each from its own cache,
+  whichever one the proxy takes its configuration from, so a proxy handed the filter by a replica
+  that has the module can ask one that lacks it, and fail open. A proxy never reaches the registry.
+- **On that route alone.** The controller adds the filter to the listener's chain disabled and
+  enables it on the policy's routes (`patchHCM` and `patchRoute` in `wasm.go`), so every other
+  route of the Gateway runs without it. The module is part of the listener all the same: a proxy
+  that starts serves no route of the Gateway until it has the module or has given up on it
+  ([It fails open](#it-fails-open)). And the filter sits in the HTTP connection manager of the
+  `https` listener, which every route on it shares, so taking the component, and every later change
+  to the policy, its mode, a new pin or another route, replaces that listener's filter chain. So
+  does a fetch that fails: a controller replica that cannot fetch the module translates the route
+  without it, and `patchHCM` then leaves the filter out of the listener's chain, which replaces the
+  chain on the proxies connected to that replica, and replaces it again once a later translation
+  brings the module back (`buildWasms` in `internal/gatewayapi/envoyextensionpolicy.go`). Envoy
+  drains the connections of a filter chain it replaces for `--drain-time-s`, 60 seconds as the
+  controller sets it, and with the controller's `--drain-strategy immediate` (`proxy_args.go`) each
+  is told to close at its next response from the start, while an upgraded websocket, n8n's and
+  Open WebUI's among them, is reset before that time is up (Envoy's documentation, Listener
+  discovery service and Draining). The firewall on one route is therefore not without effect on
+  the others: each of these drains the connections of every route of the `https` listener, which is
+  the cost of trying it on the demo route ([It fails open](#it-fails-open) says what a real
+  application would need instead).
+- **What moves the pin.** Renovate reads the tag and the digest under the `# renovate:` comment
+  above the URL, keeps to release tags (the registry also lists a `-busybox` variant of each, and
+  `latest`, `main` and `0`), and never merges the update itself: a new release brings a new Core
+  Rule Set, which can start refusing a route's traffic. For the digest it reads the architecture
+  in the image configuration of the digest the tree pins and takes the manifest of that
+  architecture from the new tag's index (`getDigest` in `lib/modules/datasource/docker/index.ts` of
+  the pinned Renovate), so a release whose index lists an amd64 image keeps a pin of the kind the
+  controller checks; one whose index listed none would be pinned by the index's digest, which
+  `tests/waf.bats` refuses. Nor does an update of the Envoy Gateway chart merge itself, as it
+  changes the Envoy the filter runs on: no test runs the filter on Envoy, and a module the new
+  Envoy cannot load fails open while the policy stays accepted.
+
+The flows ([What the namespaces let through](#what-the-namespaces-let-through)): the proxies reach
+the controller on 18002, beside 18000, in the rules both sides already have; the controller reaches
+the registry, the world on 443, in a policy of its own, `envoy-gateway-registry`, with its reason:
+`ghcr.io` answers a blob request with a redirect to another host, so a DNS name rule would need both
+names and Cilium's DNS proxy, which no policy of the tree uses. The certificate job and the proxies
+reach nothing outside the cluster. Within one change, nothing makes a route's policy wait for these
+flows: each application reads an artifact of its own, and kustomize-controller compares a
+dependency's applied revision with its own only when both read the same source, so `hello-route`
+can apply the policy before `envoy-gateway` applies `envoy-gateway-registry`. A fetch refused in
+that time stays failed until the next translation ([It fails open](#it-fails-open)). The agents
+run the policies in audit mode today (`policyAuditMode` in Cilium's values) and drop nothing, so
+the order matters once they enforce ([Turning it on, and back](#turning-it-on-and-back)).
+
+### Putting a route behind the firewall
+
+The application's `ks.yaml` adds the component, its two variables and the health check, beside the
+`HTTPRoute` its own manifests define; `components/waf/kustomization.yaml` gives the block:
+
+```yaml
+components:
+  - ../../../../../components/waf
+postBuild:
+  substitute:
+    WAF_ROUTE: <the HTTPRoute's name>
+    WAF_MODE: "On" # or DetectionOnly
+wait: true
+healthCheckExprs:
+  - apiVersion: gateway.envoyproxy.io/v1alpha1
+    kind: EnvoyExtensionPolicy
+    current: >-
+      has(status.ancestors) && size(status.ancestors) > 0 && status.ancestors.all(a,
+      a.conditions.exists(c, c.type == 'Accepted' && c.status == 'True' && c.observedGeneration
+      == metadata.generation))
+    failed: >-
+      has(status.ancestors) && status.ancestors.exists(a, a.conditions.exists(c, c.type ==
+      'Accepted' && c.status == 'False' && c.observedGeneration == metadata.generation))
+```
+
+Neither variable has a default. The policy's status is a Gateway API `PolicyStatus`: an ancestor,
+the Gateway and listener of the route, with an `Accepted` condition, for each place the route
+attaches, which the controller sets `False` when the policy cannot be translated, a module it could
+not fetch among the reasons. The Kustomization is therefore Ready only while every ancestor accepts
+the policy at its current generation, and fails once one refuses it, which the Flux alerts report
+([Flux monitoring](#flux-monitoring)). It stays failed until the controller fetches the module
+again, which Flux's retries do not bring about: deleting the controller's pods one at a time does
+([How it reaches the proxies](#how-it-reaches-the-proxies)). A first fetch may outlast the
+Kustomization's timeout, the root's three minutes, as the controller waits up to five on the
+registry: the Kustomization then fails its health check, which shows in its status and events, and
+turns Ready at a later attempt, a minute after each failure, once the status says accepted. The
+Flux alert, `FluxApplierNotReady`, fires only after 15 minutes not Ready, which a first fetch does
+not reach, so a slow one raises no alert; one that fails leaves the policy refused, as above, and is
+reported. `tests/waf.bats`
+fails unless every `ks.yaml` that takes the component sets both variables, the mode to `On` or
+`DetectionOnly`, waits and carries these expressions, and it evaluates them with the pinned
+Kyverno's CEL against statuses of that shape: current while every ancestor accepts the policy at
+its generation, failed once one refuses it, and neither without an ancestor or at an earlier
+generation. No network policy changes for a route: the proxies already reach every routed backend
+([Giving an application a public hostname](#giving-an-application-a-public-hostname)).
+
+`tests/waf.bats` reads what the files under `kubernetes/` write and what the render holds. It
+fails for an `EnvoyExtensionPolicy` or an `EnvoyPatchPolicy` written as a document of any YAML file
+under `kubernetes/` but the component's, and for a Wasm module an `EnvoyProxy` registers
+(`wasmModules`) in any file there. It
+also reads the render of what the cluster applies, with what the charts of its HelmReleases
+render, a chart's extra objects from its values among it (`scripts/render`). It fails for two
+forms the render does not expand as the cluster would: a List with items, whose items Flux applies
+as objects of their own, and a Flux object a chart renders, which the render does not follow. It
+fails there for an `EnvoyExtensionPolicy` or an `EnvoyPatchPolicy` that is not the component's for
+a route that takes it, for a policy that targets anything but an `HTTPRoute` of its own namespace
+that the render holds, or selects its targets by labels, for any object with a Wasm extension that
+targets a Gateway or a ListenerSet, and for an `EnvoyProxy` that registers a Wasm module. And it
+fails for any object that names either kind or its resource (`envoyextensionpolicies`,
+`envoypatchpolicies`), in any field or string, or has a `wasm` or `wasmModules` key, but the
+component's policies, the Kustomizations that take the component and the controller's own
+ClusterRole.
+
+So no object a file under `kubernetes/` writes or the render holds puts the firewall on the Gateway
+as a whole or on a route that did not opt in. Four things are outside the check: a mutation or a
+generation by an admission controller at run time, which changes or makes an object after the
+render, whatever the text it starts from; the roles that may write such a policy; the objects a
+Flux Kustomization applies from a source the render does not follow; and what another tool applies
+to the cluster from a file outside `kubernetes/`, such as a manifest inline in a Talos patch
+(`cluster.inlineManifests`), which the control plane applies. The render follows a Kustomization
+whose source is the cluster's own artifact or any `ExternalArtifact`, which it builds from the
+tree's paths as if made from that artifact; four others apply from their
+projects' own sources today, the Gateway API's definitions, Envoy Gateway's, and the snapshot
+controller's definitions and controller, and what those sources hold is never rendered.
+
+### The two modes
+
+`WAF_MODE` becomes the filter's `SecRuleEngine`, after the filter's recommended configuration,
+which sets `DetectionOnly`:
+
+- `On` refuses a request whose inbound anomaly score reaches the threshold with 403. With early
+  blocking, as the rule set's setup turns it on, a request whose headers and query string score
+  that much is refused before its body is read (rule `949111`, phase 1); one that does so only with
+  its body, when the body has been read (`949110`, phase 2).
+- `DetectionOnly` lets every request through and logs the rules it matched all the same, the
+  blocking evaluation as `Warning.` where `On` logs `Access denied`: the mode to put an application
+  behind first, and to read its log in, before it blocks.
+
+### It fails open
+
+The entry sets `failOpen: true`. A module that cannot be had leaves the route served without the
+filter, rather than every request of it refused, except on a replica whose Wasm cache did not
+start, the last case below:
+
+- a replica that cannot fetch the image first waits on the registry: the fetch runs inside the
+  translation, so the configuration and status of every route of every Gateway wait with it, for
+  up to five minutes. It then translates the route without the filter, which replaces the `https`
+  listener's filter chain on the proxies connected to that replica, and replaces it again once a
+  later translation has the module: each time, the connections of every route of that listener are
+  drained and their websockets reset (On that route alone, in
+  [How it reaches the proxies](#how-it-reaches-the-proxies)). A replica fetches whenever its cache
+  lacks the module: at every start, as after a drain, an upgrade or an eviction, which the tree's
+  descheduler can make, and after a quiet day (below). When the leader is that replica it reports
+  the policy not accepted, and the health check turns that into the Kustomization's failure, so a
+  firewall that is not there shows as `hello-route` not Ready. Only the leader writes the status,
+  so another replica that failed while the leader did not serves the proxies connected to it
+  without the filter, which only that replica's log shows (`Failed to get Wasm module`). Neither
+  fetches again until a translation, as above;
+- a proxy that is handed the filter fetches the module as part of setting up the listener
+  (`RemoteAsyncDataProvider` in Envoy's `source/extensions/common/wasm/remote_async_datasource.h`),
+  which is done only once it has the module or has spent its ten retries. A running proxy keeps
+  serving with the listener it had meanwhile. A proxy that starts serves no route of any listener
+  until then. Its retries wait a random time below one second, then two, four, eight, 16 and 30
+  five times over: about a minute and a half in all, and at most about three minutes, when the
+  controller answers each try at once, as it does with a 404, and up to nearly five minutes when
+  each try waits out its ten-second timeout, about as long as the proxies' startup probe allows (300
+  seconds). It then logs `Retry limit exceeded for fetching data from remote data source.`, at
+  `warning`, and `Plugin coraza failed to load`, at `critical`, and serves every route, the
+  firewall's route without the filter, while the policy stays accepted and `hello-route` Ready.
+  With two proxies under their disruption budget the other carries the traffic meanwhile; when both
+  start at once, every route waits;
+- a proxy without the module stays so. Once the controller has the module again it hands the proxy
+  the same listener, the module at the same path with the same checksum, and Envoy ignores a
+  listener update that is the same as the one it runs (`listener_manager_impl.cc`), so nothing
+  fetches the module again until the proxy restarts or its listener changes. Throughout, the policy
+  stays accepted and `hello-route` Ready: only that proxy's log shows it. The remedy is to delete
+  the controller's pods one at a time, as above, so that each fetches the module again, and then
+  that proxy's pod, `kubectl -n envoy-gateway-system delete pod <pod>`, while the other proxy
+  serves;
+- a replica's cache removes a module that no translation has asked for in 24 hours (`purge` in
+  `cache.go`; serving it to a proxy does not count), and answers a proxy's request for it with 404
+  from then on, while the proxies' configuration still names its path. A proxy that starts after a
+  quiet day is the proxy above that cannot fetch the module, and can stay without it. A
+  translation while its retries run fetches the module again in time, such as the one a routed
+  backend's endpoints start when a drain or an upgrade of the node moves that backend's pod as
+  well. A proxy that restarts alone, evicted (the tree's descheduler can evict it), crashed or its
+  pod deleted, stays without it unless some other change starts a translation meanwhile;
+- a replica whose Wasm cache did not start refuses the route, whatever `failOpen` says. The cache
+  starts once, as the replica starts, beside the translation and in no order with it: it reads the
+  certificate job's Secret `envoy-oidc-hmac` from the API, once, with no retry of its own (the API
+  client retries a GET only after a reset or lost connection, or an answer with `Retry-After`), and
+  loads the controller's certificates, logging `failed to start wasm cache` when either fails; it
+  then creates its directory, `/var/lib/eg/wasm`, logging `Failed to create Wasm cache directory`
+  when that fails. After any of these the replica runs without a cache for the rest of the pod's
+  life (`startWasmCache` in `runner.go`), as the read can fail when the API server is briefly
+  unavailable, such as while a control-plane node is upgraded. A translation that finds no cache, whether it never started or is not yet assigned,
+  refuses the policy's route (`buildWasms` and `translateEnvoyExtensionPolicyForRoute` in
+  `envoyextensionpolicy.go`): the proxies connected to that replica answer every request of `hello`
+  with 500, and the replica logs
+  `setting 500 direct response in routes due to errors in EnvoyExtensionPolicy`, with the error
+  `wasm cache is not initialized`. Only when it is the leader does the status show it, and
+  `hello-route` turn not Ready. It lasts until that controller pod is deleted,
+  `kubectl -n envoy-gateway-system delete pod <pod>`, which is the remedy, or, when the cache only
+  started late, until the next translation.
+
+A proxy given the filter also logs Envoy's warning that remote Wasm code fetch `is unstable and may
+cause a crash`, as the controller hands out every module of an image that way. A configuration the
+filter refuses when it starts is not covered by failing open where the proxy already holds the
+module in Envoy's own cache: it refuses the configuration, and with it the update of the listener
+that carries it, and keeps the listener it had. A proxy that fetches the module, every new pod
+among them, checks the configuration only once the fetch is done, too late to refuse the update
+(`xDS currently does not support failing asynchronously`, `source/extensions/common/wasm/wasm.cc`),
+so it logs `Plugin coraza failed to load` and fails open.
+
+The firewall fails open because the demo route is there to try it on, and a firewall that fails
+closed takes its route down whenever the registry or the controller cannot hand out the module.
+What that costs is accepted for the demo route: a proxy that starts while the module cannot be
+fetched serves no listener until its retries are spent, then serves the route unfiltered while the
+policy stays accepted; a translation waits on a failing fetch; the proxies connected to a replica,
+the leader or not, that could not fetch, serve the route unfiltered, and only the leader's failed
+fetch shows in the policy's status; a replica that translates without the module, and again once it
+has it, drains the connections of every route of the `https` listener on its proxies and resets
+their websockets; and a replica whose Wasm cache did not start answers every request of the route
+with 500 on the proxies connected to it, whatever `failOpen` says, until that pod is deleted or,
+when the cache only started late, the next translation.
+
+For a real application the trade is the other way: closed, with the module's availability treated
+as the route's own, the registry's and the controller's included. Closing leaves the wait and the
+drain: the fetch is part of the translation either way, and a route refused for want of its module
+loses the filter from the listener's chain all the same (`translateEnvoyExtensionPolicyForRoute`
+in `envoyextensionpolicy.go`). The drain stays within such an application's own connections only
+on a listener of its own: each listener of the Gateway is a filter chain of its own, matched by its
+hostname (`addServerNamesMatch` in `internal/xds/translator/listener.go`), and Envoy drains only
+the connections of the filter chains an update replaces (Listener discovery service).
+
+### What the Core Rule Set does at its defaults
+
+The configuration is the filter's recommended one, the mode, the rule set's setup and every rule
+file of it, at their defaults: blocking paranoia level 1 and an inbound anomaly threshold of 5
+(`REQUEST-901-INITIALIZATION.conf`), early blocking on as the filter's `crs-setup` sets it, and no
+exclusion of the tree's own; `tests/waf.bats` fails for any other directive. Applications such as
+n8n and Open WebUI are REST APIs, editors and chats in a browser, and this is what the defaults do
+to such traffic, each point found in the rule set's files and the filter's source; the methods, the
+content types, the JSON body, the size limit and the extensions were also seen in a local run of
+the filter (below):
+
+- methods other than GET, HEAD, POST and OPTIONS are refused (`911100`), so a REST API's PUT, PATCH
+  and DELETE are;
+- a request whose content type is not in `tx.allowed_request_content_type`, which holds form,
+  multipart, XML and JSON bodies, is refused (`920420`), `text/plain` and
+  `application/octet-stream` among them;
+- JSON bodies are parsed (rule `200001` of the recommended configuration) and every value is
+  inspected, so a prompt or a workflow that holds code, SQL or HTML trips the injection rules (a
+  JSON prompt with an `or 1=1` was refused by `942100`);
+- a request body of 128 KiB or more is refused with 413 (`SecRequestBodyLimit 131072` with
+  `SecRequestBodyLimitAction Reject`), which stops uploads;
+- multipart uploads go through the `922` rules, and a path that ends in a restricted extension,
+  such as `.sql` or `.conf`, is refused (`920440`);
+- the filter holds a request's body until it ends, or until it reaches the limit and is refused
+  (`OnHttpRequestBody` returns `ActionPause`), so the client's frames on an upgraded websocket do
+  not reach the backend while body access is on;
+- `text/html`, `text/plain` and `text/xml` response bodies are inspected up to 512 KiB, each held
+  until it ends or reaches that.
+
+Each of these is an exclusion to write, from coreruleset.org's documentation on false positives,
+tuning and rule exclusions, before the filter goes in front of such an application; nobody turns it
+on for n8n or Open WebUI blind.
+
+### What it costs a proxy
+
+Every worker of a proxy runs its own VM for each policy's entry (`vmSharingScope`, `Policy` by
+default, `api/v1alpha1/wasm_types.go`). The controller passes no `--concurrency`, so a proxy runs
+Envoy's default number of workers: the fewest of the node's hardware threads, its CPU affinity set
+and the container's CPU limit, and the proxies have no limit. Measured with the pinned Envoy image
+and the filter in blocking mode, by docker's count of the container's memory after 21,000 requests
+over eight connections at once: about 20 MiB without the filter; 319 MiB with it at one worker,
+350 MiB at two, 454 MiB at four and 876 MiB at sixteen. That is about 300 MiB more than without it
+at one worker, and 37 MiB for each worker beyond the first on average, 31 to 52 MiB from one of
+those counts to the next, nearly all of it taken when the proxy starts; over the 21,000 requests
+it grew by 2 to 14 MiB, the most at sixteen workers, most of it in the first 10,000. The workers of
+the tree's default flavor (`worker_flavor`, `b.6c16gb`) have six vCPUs, so a proxy there runs six
+workers and takes about 500 MiB by these figures. The proxies request 128Mi of memory and set no
+limit ([The public Gateway](#the-public-gateway)), which this does not change. Nothing else bounds
+a proxy at about four times its request either: the render has no LimitRange and no
+VerticalPodAutoscaler, its one ResourceQuota counts pods of another namespace, and the vertical
+autoscaler runs its recommender alone, which changes no pod. A pod that far over its request is
+among the first the kubelet evicts when its node runs short of memory. A second route behind the
+firewall has a policy of its own, and with it a VM for each worker: at two workers, a proxy with
+two routes behind the firewall took 504 MiB, against 350 MiB with one. The local run does not show
+a leak over hours, which the release notes warn of; the proxies' memory on the cluster is the
+measure of that.
+
+### Seeing a blocked request
+
+Envoy writes the filter's lines with its own application log, on standard error, which the
+collector ships with the container's other lines, the field `stream` saying which ([Logs](#logs)).
+The proxies log at `warn`, so of the filter's lines those of a matched rule of severity warning or
+higher print (`logError` in the filter's `wasmplugin/plugin.go`): each rule the request
+matched, and the blocking evaluation's, which carries no severity of its own and prints as
+`emergency`. A refused request's lines end in that evaluation:
+
+```text
+[…][critical][wasm] […] wasm log coraza …: [client "192.0.2.10"] Coraza: Access denied (phase 1). Inbound Anomaly Score Exceeded in phase 1 (Total Score: 5) [file "@owasp_crs/REQUEST-949-BLOCKING-EVALUATION.conf"] […] [id "949111"] […] [uri "/?id=1%27%20OR%20%271%27%3D%271"] […]
+```
+
+Find the refusals, and then the access log's 403s on `hello`, whose `status` and `host`
+`unpack_json` makes fields of:
+
+```sh
+just logs 'kubernetes.pod_namespace:envoy-gateway-system kubernetes.container_name:envoy "Coraza: Access denied" (949111 OR 949110)'
+just logs 'kubernetes.pod_namespace:envoy-gateway-system kubernetes.container_name:envoy client_address | unpack_json fields (host, status) | filter status:=403 host:~"^hello[.]"'
+```
+
+A request refused for its body's size has no line of the filter, only the access log's 413.
+
+A line holds the client's address, the address the proxy took as the client's
+([The public Gateway](#the-public-gateway)), the proxy's own address, the data each rule matched,
+and the request's URI with its query string, which the access log leaves out on purpose, as it can
+hold a secret. That is acceptable on the demo route, and it is a reason to look before turning the
+filter on for a real application.
+
+The audit log stays off, as the recommended configuration has it. Its default parts include the
+request's headers, and the sign-in's session cookie is set for the whole cluster domain, so a
+browser sends it to `hello` too ([What it does not cover](#what-it-does-not-cover)). Nor would it
+print: the filter writes it at `info` (`internal/auditlog/serial_writer.go`), below the proxies'
+`warn`, and the pinned `EnvoyProxy` API has no `wasm` component to raise alone; the controller
+always passes `--component-log-level` (`internal/infrastructure/common/proxy_args.go`), and Envoy
+refuses it given twice, so `extraArgs` cannot add one either.
+
+### Trying it
+
+With `CLUSTER_DOMAIN` set to the cluster's domain, the first three are refused with 403, a SQL
+injection, a script injection and a path traversal, each in the query string and URL-encoded as
+curl needs, and the last answers 200 with the demo's page:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' "https://hello.${CLUSTER_DOMAIN}/?id=1%27%20OR%20%271%27%3D%271"
+curl -s -o /dev/null -w '%{http_code}\n' "https://hello.${CLUSTER_DOMAIN}/?q=%3Cscript%3Ealert(1)%3C%2Fscript%3E"
+curl -s -o /dev/null -w '%{http_code}\n' "https://hello.${CLUSTER_DOMAIN}/?file=..%2F..%2F..%2Fetc%2Fpasswd"
+curl -s -w '%{http_code}\n' "https://hello.${CLUSTER_DOMAIN}/?name=world"
+```
+
+`just gateway-check`'s request for the demo, `GET /` with curl's own User-Agent and Accept, passes:
+curl's User-Agent is on no list of the rule set's scanner detection (`scanners-user-agents.data`),
+and its `http` line goes to the redirect route, which has no policy. Its fake curl answers by host
+alone, so the refused requests are a check on the cluster, not a line of it.
+
+`tests/waf.bats` proves the component, the policy, the pin and the health check on the built and
+rendered objects and the registry's answers, and `tests/network-policy.bats` the flows. What only
+a running Gateway shows was run locally instead, with no network: the pinned Envoy image, as user
+65532 with no capability, no privilege escalation, the runtime's default seccomp profile and a
+read-only root filesystem with no writable mount of its own, the runtime's `/dev/shm` the one place
+it needs to write, for its hot restart's shared memory; the module extracted from the image by its
+digest; the filter configured as the component renders it; busybox's web server behind it with the
+demo's page. Under `On` the three requests above were answered 403, the plain one and the Gateway
+check's 200, by HTTP/1.1 and HTTP/2; under `DetectionOnly` all 200, each attack logged. What only
+the cluster shows is read there: the policy's status
+(`kubectl -n demo get envoyextensionpolicy hello -o yaml`), the controller's `fetching image` line,
+the requests above through each edge, the proxies' memory over a day
+(`kubectl top pods -n envoy-gateway-system`), and, after a proxy restarts, its log, where
+`Retry limit exceeded` or `Plugin coraza failed to load` means it serves `hello` without the
+filter ([It fails open](#it-fails-open)).
 
 ## PostgreSQL
 

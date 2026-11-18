@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# Proves features/network-policy.feature; each test carries its scenario's title.
+# Proves features/network-policy.feature, and the scenario of features/waf.feature on the firewall's
+# flows; each test carries its scenario's title.
 # Needs helm, flux, kustomize, yq and jq on PATH (the versions pinned for the repository). The tests
 # on a fixture render are offline; those on the tree render it with its charts pulled from their
 # public registries.
@@ -1195,7 +1196,8 @@ E
     "allowed $PROXY envoy-gateway-system/Deployment/envoy-gateway 18000/tcp"
     "denied $OTHER_APP envoy-gateway-system/Deployment/envoy-gateway 18000/tcp"
     "allowed envoy-gateway-system/Deployment/envoy-gateway @kube-apiserver 6443/tcp"
-    "denied envoy-gateway-system/Deployment/envoy-gateway @world 443/tcp"
+    "allowed envoy-gateway-system/Deployment/envoy-gateway @world 443/tcp"
+    "denied envoy-gateway-system/Deployment/envoy-gateway @world 80/tcp"
     "denied envoy-gateway-system/Job/envoy-gateway-gateway-helm-certgen @world 443/tcp"
     "allowed $PROXY $KROMGO 8080/tcp"
     "denied $PROXY $KROMGO 8081/tcp"
@@ -1249,6 +1251,48 @@ E
     "$want" "$VIEW" "$from" "$to" "$port"
     allowed "$open" "$from" "$to" "$port"
   done
+}
+
+@test "The proxies fetch the firewall's module from the controller, and the controller alone reaches the registry, on 443" {
+  real_render
+  local controller=envoy-gateway-system/Deployment/envoy-gateway certgen=envoy-gateway-system/Job/envoy-gateway-gateway-helm-certgen
+  local service deployment policy
+  # The controller serves the modules it cached on 18002, the port its chart's Service names wasm,
+  # from the emptyDir the chart mounts where the controller keeps them (docs/kubernetes.md, Web
+  # application firewall).
+  service=("$REAL"/*/envoy-gateway/Service_envoy-gateway-system_envoy-gateway.yaml)
+  deployment=("$REAL"/*/envoy-gateway/Deployment.apps_envoy-gateway-system_envoy-gateway.yaml)
+  [ "${#service[@]}" -eq 1 ] && [ -f "${service[0]}" ] && [ "${#deployment[@]}" -eq 1 ] && [ -f "${deployment[0]}" ]
+  [ "$(yq -o json -I0 '.spec.ports[] | select(.name == "wasm") | [.port, .targetPort]' "${service[0]}")" = '[18002,18002]' ]
+  [ "$(yq '.spec.template.spec.containers[] | select(.name == "envoy-gateway") | .volumeMounts[] | select(.mountPath == "/var/lib/eg/wasm") | .name' "${deployment[0]}")" = wasm-cache ]
+  [ "$(yq '.spec.template.spec.volumes[] | select(.name == "wasm-cache") | .emptyDir | tag' "${deployment[0]}")" = '!!map' ]
+  # The proxies reach it there; nothing else does, from inside the cluster or outside it.
+  allowed "$VIEW" "$PROXY" "$controller" 18002/tcp
+  allowed_in "$VIEW" "$PROXY" "$controller" 18002/tcp
+  denied "$VIEW" "$OTHER_APP" "$controller" 18002/tcp
+  denied "$VIEW" demo/Deployment/hello "$controller" 18002/tcp
+  denied "$VIEW" @world "$controller" 18002/tcp
+  denied "$VIEW" @remote-node "$controller" 18002/tcp
+  denied "$VIEW" @host "$controller" 18002/tcp
+  denied "$VIEW" "$PROXY" "$controller" 18001/tcp
+  # The controller reaches the registry, the world on 443 and on no other port; the certificate job
+  # and the proxies, which fetch no image, do not.
+  allowed "$VIEW" "$controller" @world 443/tcp
+  denied "$VIEW" "$controller" @world 80/tcp
+  denied "$VIEW" "$controller" @world 5000/tcp
+  denied "$VIEW" "$certgen" @world 443/tcp
+  denied "$VIEW" "$PROXY" @world 443/tcp
+  denied "$VIEW" "$PROXY" @world 80/tcp
+  # By a policy of its own that says why, whose one rule is that flow: the registry answers a blob
+  # request with a redirect to another host, which no name rule covers without Cilium's DNS proxy.
+  policy=("$VIEW"/*/envoy-gateway/CiliumNetworkPolicy.cilium.io_envoy-gateway-system_envoy-gateway-registry.yaml)
+  [ -f "${policy[0]}" ] || { echo "there is no policy envoy-gateway-registry"; return 1; }
+  [ -n "$(yq '.metadata.annotations["k8s-gitops/network-policy-reason"] // ""' "${policy[0]}")" ]
+  [ "$(yq -o json -I0 '.spec.endpointSelector' "${policy[0]}")" = '{"matchLabels":{"control-plane":"envoy-gateway"}}' ]
+  [ "$(yq -o json -I0 '.spec | del(.endpointSelector, .enableDefaultDeny)' "${policy[0]}" | jq -cS .)" \
+    = '{"egress":[{"toEntities":["world"],"toPorts":[{"ports":[{"port":"443","protocol":"TCP"}]}]}]}' ]
+  # No other policy of the namespace lets anything of it out to the world.
+  [ "$(yq -N 'select(.kind == "CiliumNetworkPolicy") | select([.spec.egress[]?.toEntities[]?] | any_c(. == "world")) | .metadata.name' "$VIEW"/*/*/CiliumNetworkPolicy.cilium.io_envoy-gateway-system_*.yaml)" = envoy-gateway-registry ]
 }
 
 @test "The cluster audits or enforces the policies as the docs say" {

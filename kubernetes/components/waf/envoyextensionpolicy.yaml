@@ -1,0 +1,42 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/gateway.envoyproxy.io/envoyextensionpolicy_v1alpha1.json
+# The web application firewall on one route: coraza-proxy-wasm, Coraza and the OWASP Core Rule Set
+# it embeds, as a Wasm filter that the proxies run for that route's requests alone. Each controller
+# replica fetches the image from its registry when it translates the policy, checks the digest of
+# the image manifest it resolves against the one in the URL, and serves the module to the proxies
+# from its own cache (docs/kubernetes.md, Web application firewall). The digest is the linux/amd64
+# image manifest's, which the controller resolves the tag's index to: the index's own digest would
+# be refused as a checksum mismatch.
+#
+# The configuration is the filter's recommended one, which turns body inspection on and the audit
+# engine off, the route's mode over its DetectionOnly, then the Core Rule Set's setup and every rule
+# file of it, all at their defaults: no paranoia level, threshold or exclusion of the tree's own.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyExtensionPolicy
+metadata:
+  name: ${WAF_ROUTE}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: ${WAF_ROUTE}
+  wasm:
+    - name: coraza
+      code:
+        type: Image
+        image:
+          # renovate: datasource=docker depName=ghcr.io/corazawaf/coraza-proxy-wasm
+          url: ghcr.io/corazawaf/coraza-proxy-wasm:0.6.0@sha256:65d6009b9da2e8965e592a08b74a86725435fc01aa39c756dce0bd5ea64b3f4e
+      # A module that cannot be had leaves the route served without the filter rather than every
+      # request refused. The leading controller replica reports a fetch it could not make as the
+      # policy not accepted, which the route's health check reads; another replica's failure, and a
+      # proxy's that cannot load the module ("Plugin coraza failed to load"), show in their logs.
+      failOpen: true
+      config:
+        directives_map:
+          default:
+            - Include @recommended-conf
+            - SecRuleEngine ${WAF_MODE}
+            - Include @crs-setup-conf
+            - Include @owasp_crs/*.conf
+        default_directives: default

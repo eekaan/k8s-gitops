@@ -130,5 +130,20 @@
       matchFileNames: ["kubernetes/apps/base/open-feature-operator/**"],
       automerge: false,
     },
+    {
+      // A new filter release brings a new Core Rule Set, which can start refusing a route's
+      // traffic (docs/kubernetes.md, Web application firewall).
+      description: "The web application firewall's filter",
+      matchPackageNames: ["ghcr.io/corazawaf/coraza-proxy-wasm"],
+      automerge: false,
+    },
+    {
+      // The chart moves the Envoy the firewall's filter runs on, which no test runs it on: a module
+      // the new Envoy cannot load fails open while its policy stays accepted (docs/kubernetes.md,
+      // Web application firewall).
+      description: "Envoy Gateway's chart",
+      matchPackageNames: ["docker.io/envoyproxy/gateway-helm"],
+      automerge: false,
+    },
   ],
 }
