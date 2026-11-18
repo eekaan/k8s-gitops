@@ -114,5 +114,13 @@
       matchUpdateTypes: ["major", "minor", "patch"],
       enabled: false,
     },
+    {
+      // Locust's registry tags each build of its master branch as the next patch with .devN after
+      // it, such as 2.47.1.dev61, beside its releases, and also holds the moving tags master,
+      // latest and reallylatest, tags of single commits and old pre-releases.
+      description: "Locust: releases, not the builds of its master branch or the moving tags",
+      matchPackageNames: ["docker.io/locustio/locust"],
+      allowedVersions: "/^[0-9]+\\.[0-9]+\\.[0-9]+$/",
+    },
   ],
 }

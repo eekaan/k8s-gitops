@@ -624,7 +624,7 @@ once it is not, and the agents' rendered configuration agrees.
 
 | Namespace | Posture | Why, and what covers it instead |
 | --- | --- | --- |
-| `demo` | default deny | `hello` takes the proxies on 8080; the backup movers, the restore drill's among them, resolve names and reach the object storage on 443; `volsync-demo`, the drill's check and the rest open nothing. |
+| `demo` | default deny | `hello` takes the proxies and Locust's workers on 8080; the backup movers, the restore drill's among them, resolve names and reach the object storage on 443; `volsync-demo`, the drill's check and the rest open nothing. |
 | `envoy-gateway-system` | default deny | the controller, its webhook, its certificate job and the proxies, below; the proxies take the blackbox exporter's probes. |
 | `kromgo` | default deny | kromgo takes the proxies and the kubelet's probes on 8080 and Prometheus' scrape on 8081, and reaches the resolver and Prometheus on 9090. |
 | `sso-system` | default deny | dex takes the proxies and oauth2-proxy on 5556 and reaches the API server and GitHub on 443; oauth2-proxy takes the proxies on 4180 and reaches dex; below. |
@@ -633,6 +633,7 @@ once it is not, and the agents' rendered configuration agrees.
 | `security-system` | default deny | Falco takes Prometheus' scrape and the kubelet's probes on 8765, and reaches the resolver alone; the flow recorder takes nothing and reaches the resolver and Hubble Relay on 4245. |
 | `crowdsec` | default deny | the local API takes the agent on 8080, Prometheus on 6060 and the kubelet's probes, and sends nothing; the agent takes Prometheus and the kubelet on 6060 and reaches the resolver, the local API and the API server on 443 and 6443; below. |
 | `open-feature-operator` | default deny | the OpenFeature Operator takes the kubelet's probes on 8081, Prometheus' scrape on 8080 and the API server's calls to its webhooks on 9443, and reaches the API server alone. |
+| `locust` | default deny | Locust's master takes its workers on 5557 and the kubelet's probe on 8089 and sends nothing; the workers take nothing and reach the resolver, the master on 5557 and `hello`'s pods in `demo` on 8080. |
 | `ai-system` | listed | applications whose allows are not written, not a namespace that cannot have the posture. n8n takes the proxies on 5678 and reaches its database, the resolver and whatever its workflows call outside; the PostgreSQL instances take n8n, each other and the operator, and reach the API server, and their Barman Cloud sidecars reach the object storage on 443 and the API server; the dump job reaches the database, the hosts age's release is downloaded from and the object storage; Open WebUI takes the proxies on 8080 and reaches nothing until an administrator turns on a connection that calls out; the backup movers reach the object storage on 443. The proxies reach n8n's 5678 and Open WebUI's 8080 alone there and forward only to their Services, PostgreSQL authenticates every client, Pod Security, node firewall. |
 | `etcd-snapshots` | listed | an application whose allows are not written, not a namespace that cannot have the posture. The snapshot job takes nothing and reaches the Talos API through `talos.default`, the object storage, the hosts age's release is downloaded from (its URL redirects to a second host, which serves the file) and the resolver. Talos' own authorisation of its one role, Pod Security, node firewall. |
 | `external-dns` | listed | an application whose allows are not written, not a namespace that cannot have the posture. external-dns takes Prometheus' scrape and the kubelet's probes on 7979 and nothing else, and reaches the API server, the DNS provider's API on 443 and the resolver. Its token, scoped to zone read and DNS edit on the cluster's one zone, its name filter, a ClusterRole that only reads, Pod Security, node firewall ([DNS records](#dns-records)). |
@@ -688,8 +689,9 @@ once it is not, and the agents' rendered configuration agrees.
   the resolver and the API server. No monitor of the tree scrapes the Gateway, so no scrape is
   allowed; a monitor that does adds its rule.
 - **`demo`.** `hello` takes the proxies by their labels, not by their namespace, on 8080, so the
-  controller is no path to it, and the kubelet's probe. The backup movers, the pods VolSync labels
-  `app.kubernetes.io/created-by: volsync` for every application of the namespace that adds
+  controller is no path to it, Locust's workers by their labels in `locust` on the same port, so
+  Locust's master is not admitted, and the kubelet's probe. The backup movers, the pods VolSync
+  labels `app.kubernetes.io/created-by: volsync` for every application of the namespace that adds
   `components/volsync`, reach the resolver, and the world on 443 in a policy of its own with its
   reason, both by the application `demo-volsync-movers`, one for the namespace. A pod without a
   policy of its own reaches nothing and is reached by nothing. The movers' policies select by that
@@ -784,6 +786,21 @@ once it is not, and the agents' rendered configuration agrees.
   and it calls nothing outside the cluster ([OpenFeature Operator](#openfeature-operator)). A
   workload that opts in to it declares two flows of its own in its namespace, the kubelet's probes
   of the sidecar on 8014 and the sidecar to the API server, as the example `hello-flags` does.
+- **`locust`.** Locust's master, by the labels of its Deployment's selector
+  (`app.kubernetes.io/name: locust`, `app.kubernetes.io/component: master`), takes the workers by
+  their labels (`app.kubernetes.io/component: worker`) in `locust` on 5557, the port it binds for
+  them, and the node it runs on on 8089, the web port, for the kubelet's readiness probe, which
+  admits every process in that node's network namespace, the node's pods of the host's network
+  among them; it sends nothing, as it runs no users and the one name it looks up, its own, is in the
+  pod's hosts file. The workers take nothing, as they listen on nothing, and reach the resolver,
+  the master's pods on 5557 and the pods the Service `hello` selects in `demo` on 8080, the
+  container port its port 80 targets: the target that `LOCUST_TARGET` names, which admits them by a
+  rule beside it. Once the cluster enforces the policies, whatever host Locust's interface is
+  given, the workers reach nothing else, not the world, the API server, the Gateway's proxies or
+  another application; while it audits them, a flow they would drop is reported and passes
+  ([Service addresses](#service-addresses)), and the load goes wherever the host given points.
+  `just locust` reaches the interface through a port forward, which the container runtime
+  connects inside the pod on its loopback, where no policy applies ([Locust](#locust)).
 - **The object storage's port.** cluster-config holds the object storage's endpoint as a URL, which
   a DNS name rule cannot take, so the movers' rule is the world on 443: the port https uses for an
   endpoint that names none, as cluster-config's example does and `tests/network-policy.bats` holds
@@ -884,14 +901,15 @@ namespace and the policy, when
   the nodes. A reason excuses none of these.
 
 The check reads only what the render holds. Besides the policies of `ascender`, `backstage`,
-`crowdsec`, `demo`, `envoy-gateway-system`, `kromgo`, `open-feature-operator`, `security-system` and
-`sso-system`, that is one policy of a listed namespace: `flux-operator-web`, the `NetworkPolicy` the
-Flux Operator's chart renders in `flux-system`, which lets every pod of every namespace (an empty
-`namespaceSelector`) reach the operator's web interface on 9080. It passes because `flux-system` is
-listed; the day `flux-system` takes the default deny, the check refuses it, as a `NetworkPolicy`
-other than the default deny and as an allow of every pod of every namespace. The `NetworkPolicy`
-objects the operator makes for the Flux instance, which its `spec.cluster.networkPolicy` turns on,
-are made at run time, so no render holds them and the check never sees them.
+`crowdsec`, `demo`, `envoy-gateway-system`, `kromgo`, `locust`, `open-feature-operator`,
+`security-system` and `sso-system`, that is one policy of a listed namespace: `flux-operator-web`,
+the `NetworkPolicy` the Flux Operator's chart renders in `flux-system`, which lets every pod of
+every namespace (an empty `namespaceSelector`) reach the operator's web interface on 9080. It passes
+because `flux-system` is listed; the day `flux-system` takes the default deny, the check refuses it,
+as a `NetworkPolicy` other than the default deny and as an allow of every pod of every namespace.
+The `NetworkPolicy` objects the operator makes for the Flux instance, which its
+`spec.cluster.networkPolicy` turns on, are made at run time, so no render holds them and the check
+never sees them.
 
 `scripts/network-policy-check --reach RENDER FROM TO PORT/PROTOCOL` evaluates the policies of a
 render for one flow and answers `allowed` or `denied`; the egress of the source and the ingress of
@@ -1208,40 +1226,41 @@ does not matter.
 2. **The policies merge.** The root applies the default denies, the applications apply their allows,
    and the agents evaluate both and drop nothing they deny; what a policy would drop is reported as
    `AUDIT`. As the allows land after the denies, `AUDIT` flows of `ascender`, `backstage`,
-   `crowdsec`, `demo`, `envoy-gateway-system`, `kromgo`, `open-feature-operator`, `security-system`
-   and `sso-system` from before they landed are expected, such as the proxies to `hello` on 8080 and
-   to the controller on 18000, and the controller to the API server, and an agent's recent flows can
-   hold them for a while.
+   `crowdsec`, `demo`, `envoy-gateway-system`, `kromgo`, `locust`, `open-feature-operator`,
+   `security-system` and `sso-system` from before they landed are expected, such as the proxies to
+   `hello` on 8080 and to the controller on 18000, and the controller to the API server, and an
+   agent's recent flows can hold them for a while.
 3. **Watch a day of the record**, from the moment the Kustomizations that hold the allows, `hello`,
    `demo-volsync-movers`, `envoy-gateway`, `kromgo`, `dex`, `oauth2-proxy`, `backstage`, `falco`,
-   `crowdsec`, `open-feature-operator`, `network-audit`, `ascender-operator` and
-   `ascender`, are Ready at the merge's revision (`flux get kustomizations`). The
-   flow recorder writes every flow a policy would drop to the log store ([The record
-   of what policy drops](#the-record-of-what-policy-drops)), so each path needs to
-   be taken only once: `just gateway-check`; `just cluster-check`; the secret demo
-   (`just secret-rotate demo/hello greeting`); a badge asked of kromgo by its name, which has
-   kromgo query Prometheus ([Status badges](#status-badges)); a sign-in through a route that opts
-   in to it ([Sign-in](#sign-in)), and a query in the log store's interface
+   `crowdsec`, `open-feature-operator`, `network-audit`, `ascender-operator`, `ascender` and
+   `locust`, are Ready at the merge's revision (`flux get kustomizations`). The flow recorder writes
+   every flow a policy would drop to the log store
+   ([The record of what policy drops](#the-record-of-what-policy-drops)), so each path needs to be
+   taken only once: `just gateway-check`; `just cluster-check`; the secret demo
+   (`just secret-rotate demo/hello greeting`); a badge asked of kromgo by its name, which has kromgo
+   query Prometheus ([Status badges](#status-badges)); a sign-in through a route that opts in to it
+   ([Sign-in](#sign-in)), and a query in the log store's interface
    ([The log store's interface](#the-log-stores-interface)); Backstage's catalogue opened by its
    name, which has Backstage read its database; a WAL segment the primary of `backstage-db`
    archives, which `select pg_switch_wal()` there forces
    ([Backups and restores](#backups-and-restores)); a restore of `volsync-demo`
-   ([Restoring](#restoring)); the two dry runs that call the OpenFeature Operator's
-   webhooks ([OpenFeature Operator](#openfeature-operator)); and a job launched in
-   Ascender and a project update there, which start a job pod and have the task pod fetch
-   the project ([Ascender](#ascender)). The blackbox exporter's probes need nothing to
-   start them: its pods reach the proxies on 10080 and 10443 at every scrape of a `Probe`
-   ([Probes](#probes)). Then let a night pass, for the paths nobody takes by hand: the nightly dump
-   of `backstage-db` from 02:00, which waits up to 20 minutes before it starts ([Dumps](#dumps)),
-   the base backup of `backstage-db` at 02:47 UTC, the same two of `ascender-db`, the nightly
-   backup of `volsync-demo` at 03:17, and its restore drill's restore at 04:17 and check at 05:17
-   ([The restore drill](#the-restore-drill)). Once the allows have been Ready for 24 hours, and
-   within 24 hours of taking the paths above, so that the window holds them and one nightly
-   backup, one dump, one base backup and one drill, `just network-audit 24h` must exit 0 and print
-   no `AUDIT` line whose `NAMESPACE` is a namespace that holds the default deny: `ascender`,
-   `backstage`, `crowdsec`, `demo`, `envoy-gateway-system`, `kromgo`, `open-feature-operator`,
-   `security-system` or `sso-system`. Exit 0 says that the recorder's container ran through
-   those 24 hours and that the table is not cut, and what the record can miss even then is in
+   ([Restoring](#restoring)); the two dry runs that call the OpenFeature Operator's webhooks
+   ([OpenFeature Operator](#openfeature-operator)); a job launched in Ascender and a project update
+   there, which start a job pod and have the task pod fetch the project ([Ascender](#ascender)); and
+   a test started through Locust's interface, whose workers then resolve and reach the target
+   ([Locust](#locust)). The blackbox exporter's probes need nothing to start them: its pods reach
+   the proxies on 10080 and 10443 at every scrape of a `Probe` ([Probes](#probes)). Then let a night
+   pass, for the paths nobody takes by hand: the nightly dump of `backstage-db` from 02:00, which
+   waits up to 20 minutes before it starts ([Dumps](#dumps)), the base backup of `backstage-db` at
+   02:47 UTC, the same two of `ascender-db`, the nightly backup of `volsync-demo` at 03:17, and its
+   restore drill's restore at 04:17 and check at 05:17 ([The restore drill](#the-restore-drill)).
+   Once the allows have been Ready for 24 hours, and within 24 hours of taking the paths above, so
+   that the window holds them and one nightly backup, one dump, one base backup and one drill,
+   `just network-audit 24h` must exit 0 and print no `AUDIT` line whose `NAMESPACE` is a namespace
+   that holds the default deny: `ascender`, `backstage`, `crowdsec`, `demo`, `envoy-gateway-system`,
+   `kromgo`, `locust`, `open-feature-operator`, `security-system` or `sso-system`. Exit 0 says that
+   the recorder's container ran through those 24 hours and that the table is not cut, and what the
+   record can miss even then is in
    [The record of what policy drops](#the-record-of-what-policy-drops); a run that exits 1 says what
    the record lacks, and the day is watched again from there. The lines that are not flows, which
    the run counts, are read with the query it prints: events Hubble lost, which its `lost_events`
@@ -7568,6 +7587,295 @@ applications and the rendered chart (`features/ascender.feature`).
   which External Secrets then no longer deletes with its ExternalSecret.
   `kubectl --namespace ascender get secrets` lists them.
 
+### Locust
+
+Locust (`apps/base/locust/locust/`) puts load on a target inside the cluster and shows what it
+measures: a master, which serves the web interface and hands out the work, and workers, which run
+the simulated users. It runs in the namespace `locust`, which enforces the restricted Pod Security
+level and denies traffic by default, from its publisher's image `docker.io/locustio/locust`, by
+plain manifests with kustomize: the chart `stable/locust` of `github.com/deliveryhero/helm-charts`
+is at 0.35.0 with the `appVersion` 2.32.2, older than the release the tree runs. A cluster selects
+it with two entries of its overlay, the namespace directory and the application's `ks.yaml`. Its
+`ks.yaml` names `cilium` alone in `dependsOn`, for its policies' kind, as Locust starts without its
+target; sets `wait`; and sets one variable of its own, `LOCUST_TARGET`, the target (below).
+`tests/locust.bats` holds what follows on the application built as Flux applies it and on the render
+(`features/locust.feature`). What this section says of Locust 2.47.0 is read from its source at that
+tag (`github.com/locustio/locust`) and from its wheel on PyPI, in the files it names, and was seen
+in a run of the pinned image offline (Resources, below).
+
+- **What runs.**
+  - The master, the Deployment `locust-master`: one replica, replaced by the strategy `Recreate`, as
+    two masters would split the workers between them. It runs `locust --master` with the tree's
+    locustfile, the target as its host, the web interface on 8089 (`--web-port`) and the port the
+    workers connect to on 5557 (`--master-bind-port`), and both are ports of the Service
+    `locust-master`. It runs no users itself (`docs/running-distributed.rst`) and opens no
+    connection: the workers connect to it. Its readiness probe asks for the interface's page, `/`,
+    which asks for no sign-in (`locust/web.py`).
+  - The workers, the Deployment `locust-worker`: two replicas, each `locust --worker` with the
+    locustfile and the master's Service and port, `--master-host=locust-master` and
+    `--master-port=5557`. Each opens one connection to the master, a ZeroMQ socket of its own to the
+    master's one (`locust/rpc/zmqrpc.py`), and keeps it; over it the master hands each worker the
+    users to run with every test it starts, and the host to run them against
+    (`locust/runners.py`), and the worker sends its statistics back. A worker listens on nothing, so
+    it has no port and no probe, and is given no host of its own.
+  - The locustfile, `app/locustfile.py`: one `HttpUser` that asks for `/` and then waits one to
+    three seconds. kustomize generates it into the ConfigMap `locust-locustfile` under a name that
+    carries the hash of its content, with Flux's substitution off, and both pods mount it read-only
+    at `/mnt/locust`.
+  - Every option is an argument. No container sets a `LOCUST_*` variable or `--config`, and nothing
+    is mounted at the image's working directory, `/home/locust`, where Locust reads `locust.conf`,
+    `pyproject.toml` and `~/.locust.conf` (`DEFAULT_CONFIG_FILES` in `locust/argument_parser.py`).
+    Both pods set `enableServiceLinks: false`: Locust reads each option from a variable as well,
+    `LOCUST_` and its name, and the kubelet hands a pod variables named after every Service of its
+    namespace (`getServiceEnvVarMap` in `pkg/kubelet/kubelet_pods.go` of Kubernetes v1.37.1). A
+    Service named `locust-web` would give `LOCUST_WEB_PORT=tcp://<address>:<port>`; the pinned
+    image, given that variable, stops at start with `argument --web-port/-P: invalid int value`,
+    `--web-port` on its command line or not.
+- **No test starts by itself.** No container's command or arguments start or shape a test: no
+  `--autostart`, `--headless`, `--autoquit`, `-u` or `--users`, `-r` or `--spawn-rate`, `-t` or
+  `--run-time`, `--processes`, `--config-users`, `--otel` or `--web-login`, in any spelling Locust's
+  parser takes, an unambiguous abbreviation of a long option among them; and no `LOCUST_*` variable,
+  through which the same options would arrive. The keys a person can press to add or remove users
+  work only on a terminal, which a pod's standard input is not (`locust/input_events.py`). The
+  master waits, with no users, until a request to `/swarm` starts a test: offline, five seconds
+  after both workers had connected, it reported the state `ready`, no user and no request, and the
+  stand-in target had logged none.
+- **Opening it.** `just locust [cluster]` forwards a local port, `LOCUST_PORT` or 8089, on 127.0.0.1
+  only, to port 8089 of the Service `locust-master`, through the cluster's kubeconfig, until Ctrl-C,
+  as `just grafana` does ([cluster.md](cluster.md#recipes)); then open `http://127.0.0.1:8089`.
+  **The interface has no sign-in.** Its login page, `--web-login`, is a hook the locustfile fills
+  with a check of its own, and Locust ships none (`docs/extending-locust.rst`, Adding Authentication
+  to the Web UI), so it is not used. Every route answers whoever reaches it, and answers the
+  requests of any web page, as the interface allows cross-origin requests from every origin
+  (`CORS(app)` in `locust/web.py`): while the forward runs, anything on the machine that runs it, a
+  page open in its browser among them, can start, change and stop a test. Whoever reaches it may
+  also give any host, in the interface's form or in the `host` field of `/swarm`, and the workers
+  put the load on it. Locust bounds neither who reaches it nor where the load goes; the policies do
+  (Network, below): the workers' egress keeps the load inside the cluster, and the master's ingress
+  keeps every pod but those of its node's host network from the interface. This holds once the
+  cluster enforces the policies; while it audits them, a flow they would drop is reported and
+  passes ([Service addresses](#service-addresses)). **While the cluster audits, nothing bounds
+  either:** a host given to the interface is reached wherever it is, outside the cluster included,
+  and every pod of the cluster reaches the master's 8089 and 5557, through the Service
+  `locust-master` or the pod's own address, and can start a test as the forward can. Nothing routes
+  to the interface and nothing announces it: no `HTTPRoute`, no Gateway label on the namespace, and
+  a Service of the cluster alone. The forward needs, in `locust`, get on `services`, get and list
+  on `pods`, as kubectl finds a pod the Service selects (and watch, when none runs yet), and create
+  on `pods/portforward` (`portforward.go` and `polymorphichelpers/helpers.go` of kubectl at
+  Kubernetes v1.37.1).
+- **Running a test.** In the interface: the number of users, the rate they are started at (ramp up)
+  and the host, which shows the target, and, among the advanced options, a run time; then Start, the
+  charts and the statistics, and Stop. Through its HTTP API, on the forwarded port:
+
+  ```sh
+  curl -s http://127.0.0.1:8089/worker-count
+  curl -s -X POST -d user_count=4 -d spawn_rate=2 -d run_time=60s http://127.0.0.1:8089/swarm
+  curl -s http://127.0.0.1:8089/stats/requests | jq '{state, user_count, worker_count, total_rps, fail_ratio}'
+  curl -s -X POST http://127.0.0.1:8089/stop
+  ```
+
+  `/worker-count` answers `{"worker_count": 2}` once both workers have connected. `/swarm` answers
+  `"success": true` with `"message": "Swarming started"`, the host and the run time, and `"success":
+  false` with the reason for a form without a whole `user_count` and a positive `spawn_rate`.
+  `/stats/requests` holds the state (`ready`, `spawning`, `running`, `stopping`, `stopped`), the
+  users, the workers, the requests a second since the test started and the share of them that
+  failed, with a row for each request name. `/stop` answers `{"success": true, "message": "Test
+  stopped"}` (the routes of `locust/web.py`). A test without a run time runs until it is stopped.
+  Its numbers are in the master's memory alone: nothing scrapes them (Monitoring, below), and they
+  leave with the master's pod.
+- **Changing the load.** The locustfile is a file of the tree: change `app/locustfile.py` in a pull
+  request. kustomize gives the new content a new ConfigMap name, both Deployments change with it,
+  and every pod of Locust restarts on it. `tests/locust.bats` reads the file's text and requires one
+  import line, `from locust import HttpUser, between, task`, a string starting with `/` as the first
+  argument of every call spelled `self.client.<method>(`, and no assignment to a `host`, so that
+  `LOCUST_TARGET` stays the one place the target is written. A check of the text does not bound
+  where the requests go: the workers' egress does, once the cluster enforces the policies (Network,
+  below).
+- **Changing the target.** The target is `LOCUST_TARGET` in `ks.yaml`,
+  `http://hello.demo.svc.cluster.local:80`: a Service of the cluster by its name, its namespace, the
+  cluster's DNS domain (`talos/patches/all/cluster-network.yaml`) and its port. It is named
+  `LOCUST_TARGET`, so that it is never taken for `LOCUST_HOST`, the variable Locust reads its host
+  from. Another target is three edits in one pull request: the variable; the workers' egress rule to
+  the target in `app/ciliumnetworkpolicy.yaml`, naming its namespace, the labels its Service selects
+  and the container port its port targets, as a Service's address is translated to a pod's before
+  policy applies; and an allow beside the target's application, from the workers' labels in `locust`
+  on that port, as `hello`'s policy has. A target must admit the workers, and nothing here may be
+  pointed outside the cluster. `tests/locust.bats` reads the target from the master's `--host` in
+  the render, requires that form, finds the Service in the render, resolves its port to the
+  container port through the named port of the pods it selects, 8080 for `hello`, and fails unless
+  the workers' one rule to that namespace names exactly its labels and that port and the target's
+  own policy admits the workers there and no other pod of `locust`.
+- **Network.** The namespace holds the default deny, and the application's two policies let through,
+  to the master, the workers on 5557 and the node it runs on on 8089, for the kubelet's probe, and
+  from the workers, the cluster's resolver on 53, the master on 5557 and `hello`'s pods on 8080.
+  The master sends nothing and the workers take nothing; `hello`'s own policy admits the workers,
+  by their labels, on 8080 ([What the namespaces let through](#what-the-namespaces-let-through)).
+  This holds once the cluster enforces the policies; while it audits them, a flow they would drop
+  is reported and passes ([Service addresses](#service-addresses)), as Opening it, above, says.
+  Once they are enforced, the workers' egress bounds where the load can go, not that it goes to the
+  target: a host that names the cluster's resolver on 53 or the master on 5557, both of which the
+  workers reach, puts the load there, and a test aimed at the resolver can slow the name lookups of
+  every application of the cluster. The interface takes nothing but the node the master runs on:
+  `host` is every process in that node's network namespace, the kubelet and the pods of the host's
+  network there among them, and the agent lets the local host reach the pods of its node on every
+  port whatever the policies say (the local host, in
+  [What the namespaces let through](#what-the-namespaces-let-through)); the rule from `host` states
+  the probe's port. The master looks up one name, its own: the web server it runs, gevent's
+  `WSGIServer`, asks for the fully qualified name of the address it binds as it starts
+  (`update_environ` in `gevent/pywsgi.py` of gevent 26.9.0, the release in the image), and the
+  kubelet writes the pod's name with its address into the pod's `/etc/hosts`
+  (`managedHostsFileContent` in `pkg/kubelet/kubelet_pods.go`), which the image reads before it
+  asks a resolver (`hosts: files dns`). `just locust` reaches the interface through a port forward,
+  which the container runtime connects inside the pod (What only the live cluster shows, below).
+- **Scaling.** The workers are the `replicas` of `locust-worker`: change them in a pull request.
+  Each worker is one process and uses at most about one core, so the load the cluster can generate
+  is about a core a worker. A `kubectl scale` is Flux's to undo at its next reconcile.
+- **What the load does elsewhere.** It reaches `hello` through its Service from inside the cluster,
+  so the Gateway's proxies and the route's `Probe` see nothing of it. Its public routes have the
+  same pods behind them, though: hello requests 1m of CPU and has no CPU limit, and its busybox
+  `httpd` forks a process for each connection (seen offline), so a test heavy enough to slow hello
+  slows those routes as well. One that keeps the route's `Probe` from a 200 within its 5 seconds for
+  5 minutes raises `PublicEndpointDown` or `PublicEndpointWrongStatus`, both critical
+  ([Probes](#probes)), so a large test runs with those expected, or silenced for its time
+  ([Silences](#silences)). hello's busybox `httpd -v` logs every request it answers, one line each
+  (`[<address>]:<port>: response:200`, seen offline), so the load reaches the log store
+  ([Logs](#logs)), split over hello's two pods as the Service balances. A node whose collector sends
+  at least ten events a second for 30 minutes, ten times as many as the median node's, raises
+  `LogCollectorOutsizedShare`, an info alert ([Alerts](#alerts)): a test that keeps a pod of hello
+  above about ten requests a second for more than 30 minutes can raise it for that pod's node.
+  hello's server closes each connection after its answer, so every request is a new connection, and
+  every connection looks the target's name up. The kubelet writes `ndots:5` and the search domains,
+  the namespace's three and then any of the node's own (`generateSearchesForDNSClusterFirst` in
+  `pkg/kubelet/network/dns/dns.go`), so a name of four dots is asked of the cluster's resolver under
+  each search domain before it is asked as it is; and each time for an A and an AAAA record where
+  the pod can bind the IPv6 loopback, as urllib3 asks for both only there (`allowed_gai_family` in
+  `urllib3/util/connection.py` of urllib3 2.8.0, the release in the image). That is eight queries a
+  request there, six of them for names that do not exist, and two more for each search domain of the
+  node's: a test of N requests a second asks the resolver about 8N times a second. Offline, with the
+  namespace's three search domains and a loopback that held the IPv6 address, every request of a
+  test asked those eight.
+- **Resources.** The pinned image ran offline as the pods run it: read-only, with no capability, no
+  new privileges and the user 1000:1000, the tree's locustfile mounted read-only at `/mnt/locust`, a
+  master with its arguments and `--host=http://127.0.0.1:8080`, two workers with
+  `--master-host=127.0.0.1` in the master's network namespace, which had nothing but a loopback, and
+  there a stand-in target, hello's busybox image running hello's `httpd` command over a page. In two
+  such runs a client asked `/worker-count` (2), started a test of two users at one a second for 20
+  seconds through `/swarm`, read `/stats/requests` (20 and 21 requests, none failed) and posted
+  `/stop`. The master peaked at about 61 MiB resident and the workers at up to about 62 MiB (each
+  process's `VmHWM`), each under a twentieth of a core and the master under a hundredth. So each
+  container requests 64Mi, the peak rounded up, and is limited to 128Mi, twice that; the master
+  requests 10m of CPU and each worker 50m; there is no CPU limit, as a worker is one gevent process
+  and a limit would throttle it under every real test and raise the stack's `CPUThrottlingHigh`. At
+  100 users a worker, about 50 requests a second each, a worker's peak grew to about 65 MiB. The run
+  logged no write the read-only root refused, and the same run with a writable root changed nothing
+  in it but the mount point Docker made for the locustfile: Locust writes a file only for a report
+  or a log it is told to keep (`--csv`, `--html`, `--json`, `--logfile`, none of them set), and the
+  image's bytecode was compiled when it was built (`Dockerfile.ci`). So neither pod mounts anything
+  writable. At 1,000 users a worker, in a test of a minute against the target by its name that
+  averaged about 850 requests a second in all, its ramp included, with each container's memory
+  limited to 128 MiB as the pods' is, a worker peaked at about 99 MiB resident and 84 MiB of its
+  cgroup's memory (`memory.peak`), with no kill, and at about half a core; a test of more users than
+  that wants more workers (Scaling, above).
+- **Debug mode.** `locust/web.py` sets `app.debug = True` on its Flask application. The image holds
+  Flask 3.1.3; the wheel asks for no more than `flask>=2.0.0`. Flask's interactive debugger runs
+  only in Werkzeug's development server, which `flask run` and `app.run` start (`use_debugger` in
+  Flask's `cli.py` and `app.py`), and Locust serves the application with gevent's `WSGIServer`
+  instead (`start_server` in `locust/web.py`): no debugger and no reloader run. What debug mode
+  does there is Flask's: Jinja checks the interface's templates for changes at each render
+  (`TEMPLATES_AUTO_RELOAD`), a key missing from a form is named in the 400 it answers
+  (`TRAP_BAD_REQUEST_ERRORS`), and an exception no handler takes propagates
+  (`PROPAGATE_EXCEPTIONS`) to gevent, which logs its traceback and answers 500 without it
+  (`handle_error` in `gevent/pywsgi.py`). Locust's routes have a handler for every exception, which
+  answers with the exception's message and its code, whatever the mode (`locust/web.py`).
+- **Monitoring.** None of its own. Locust 2.47.0 serves no metrics: `locust/web.py` has no
+  `/metrics` route, the wheel holds no Prometheus client, and it sends telemetry only with `--otel`
+  (`locust/main.py`), which is not set. So no monitor scrapes it, it has no alert or dashboard, and
+  no row of [Dashboards](#dashboards)' tables names it. Its pods are covered by the monitoring
+  chart's stock alerts on every workload, `KubePodCrashLooping`, `KubePodNotReady`,
+  `KubeDeploymentReplicasMismatch` and `KubeContainerWaiting` among them. A change that wants
+  Locust's numbers in Prometheus adds an exporter.
+- **What it calls on its own.** Nothing but the resolver, the master and the target, which the
+  workers reach:
+
+  | Call | Variable | State |
+  | --- | --- | --- |
+  | Update checks, usage reports | none | the package has none |
+  | OpenTelemetry's traces, metrics and logs | `--otel` | off: not set |
+  | A locustfile fetched from an address | `-f <URL>` | not used: the locustfile is a file |
+  | The interface's script and styles | none | served by the master |
+  | The addresses in the interface's bundle | none | links a person follows, to Locust's documentation, repository and releases |
+  | The one name it looks up, its own | none | answered from the pod's `/etc/hosts` (Network, above) |
+
+  The pinned image ran offline in a network namespace with nothing but a loopback, whose resolver
+  was a listener that logged each query and was shown logging a lookup made on purpose. With a line
+  for the namespace's hostname in its hosts file, as the kubelet writes one, it logged no lookup of
+  Locust's; without that line, one name, that hostname, asked as an A and an AAAA record.
+- **Updates.** Renovate's `kubernetes` manager reads the image from both Deployments, and a rule in
+  `.renovate/managers.json5` keeps it to the registry's release tags of three numbers, as the
+  registry also tags each build of Locust's master branch as `x.y.z.devN` and holds moving tags. The
+  master and the workers run one reference, which Renovate moves in one pull request: a worker of
+  another version than its master is only warned of (`locust/runners.py`, `client_ready`). It
+  merges by the auto-merge switch alone. No check runs the image: a release that renames an option
+  the arguments use, or changes where the interface listens, shows first on the cluster, as pods
+  that do not become ready and the Kustomization `locust` failing its wait. What this section says
+  from Locust's source, its wheel and the image's packages, gevent's and Flask's releases among
+  them, is of 2.47.0, so the pull request that moves the image is read against Locust's changelog
+  for the arguments of What runs and for this section.
+- **Removing it.** Take the two overlay entries out. Flux prunes the application, its pods, its
+  Service, its ConfigMap and its policies, and the root prunes the namespace's default deny and its
+  `app-template-defaults` ConfigMap; the namespace stays, by its prune annotation, as Flux reads
+  that annotation on each object it would prune and not on the object's namespace (`Delete` in
+  `ssa/manager_delete.go` of `fluxcd/pkg/ssa` v0.83.0). hello's rule for the workers stays and
+  admits nothing while no worker runs; it goes in a pull request of its own.
+
+**What only the live cluster shows.** None of the following is run by a check; each is read from
+the pinned sources, and the list is what to look at when the application first reconciles.
+
+- **The order things become Ready.** The root applies the namespace and its default deny at once.
+  `locust` waits for `cilium`, so the kind of its policies exists before it applies. The pinned
+  kustomize-controller (v1.10.1, of Flux 2.10.0) applies a build through `ApplyAllStaged` of
+  `fluxcd/pkg/ssa` v0.83.0 (`ssa/manager_apply.go`): every object is first applied as a server-side
+  dry run, and nothing is applied when one fails; then the objects are applied in the order of their
+  kinds (`ReconcileOrder` in `ssa/sort.go`), the ConfigMap, the Service, the Deployments, and the
+  policies last, a kind that order does not know. With `wait`, the Kustomization is Ready only once
+  both Deployments are: a Deployment counts once its ready replicas reach its replicas
+  (`deploymentConditions` in `pkg/kstatus/status/core.go` of `fluxcd/cli-utils` v1.4.0). The master
+  is ready once its probe answers, and the workers once their containers run, as they have no probe.
+- **A worker without its master.** A worker that starts before the master asks for it every 5
+  seconds and gives up after 60 tries, about five minutes (`CONNECT_TIMEOUT`, `CONNECT_RETRY_COUNT`
+  and `connect_to_master` in `locust/runners.py`), then logs `Failed to connect to the Locust
+  master` and exits (`locust/main.py`); the kubelet starts it again. A worker that hears no
+  heartbeat from its master for 60 seconds quits (`MASTER_HEARTBEAT_TIMEOUT`,
+  `heartbeat_timeout_checker`), and a master that is stopped, as the kubelet stops a pod, with
+  SIGTERM, first tells each worker to quit: offline, both workers logged `Got quit message from
+  master, shutting down...` and exited with status 0 as the master did. So a restart of the master
+  restarts the workers, which connect to the new one through the Service.
+- **The image's user.** The image's user is the name `locust`, uid and gid 1000 (`/etc/passwd` of
+  the image's `useradd` layer). The kubelet refuses to start a container with `runAsNonRoot` and a
+  user it cannot read as a number (`verifyRunAsNonRoot` in
+  `pkg/kubelet/kuberuntime/security_context_others.go`: `image has non-numeric user (locust), cannot
+  verify user is non-root`), so the pods give `runAsUser` and `runAsGroup`.
+- **The port forward.** Talos v1.14.6 ships containerd v2.3.7 (`PKGS` in Talos' `Makefile` at that
+  tag, and `containerd_version` in the `Pkgfile` of `siderolabs/pkgs` at that commit), whose port
+  forward enters the pod's network namespace and connects to `localhost:<port>` there
+  (`internal/cri/server/sandbox_portforward_linux.go`): the connection is on the pod's loopback,
+  which no policy sees, so `just locust` needs no rule. A runtime that connected to the pod's
+  address from the node instead would arrive as `host`, which the master's rule on 8089 admits.
+- **The workers' rule names hello's pods.** The agents translate a Service's cluster address to a
+  pod's before policy applies, so the workers reach `hello` and the master by the rules that name
+  their pods, not their Services.
+- **While the cluster audits**, nothing is dropped: a flow the policies deny passes and shows as an
+  `AUDIT` line of `just network-drops`, a missing allow, such as `<count> AUDIT
+  locust/locust-worker-<pod> demo/hello-<pod> 8080/TCP`, and the load of a test aimed at a host the
+  workers may not reach alike; once it enforces, the same flow is `DROPPED` and the test's requests
+  fail. No flow of `locust/locust-master` to the resolver shows, as its own name is in its hosts
+  file.
+- **What the master says.** As each worker connects, the master logs `<worker> (index <n>) reported
+  as ready. <count> workers connected.` (`handle_message` in `locust/runners.py`), so the second
+  reads `(index 1) reported as ready. 2 workers connected.`; then `/worker-count` answers
+  `{"worker_count": 2}`, and the answers of `/swarm`, `/stats/requests` and `/stop` are those of
+  Running a test, above.
+
 ### Porting an application from the reference catalogue
 
 The steps n8n took, in order; the next port does the same and says where it differs.
@@ -7630,7 +7938,9 @@ The steps n8n took, in order; the next port does the same and says where it diff
    ([Giving an application a public hostname](#giving-an-application-a-public-hostname)).
    A route behind the cluster's sign-in also takes `components/sso`, names `oauth2-proxy` in
    `dependsOn` and adds its namespace to oauth2-proxy's grant
-   ([Putting a route behind it](#putting-a-route-behind-it)).
+   ([Putting a route behind it](#putting-a-route-behind-it)). An interface with no sign-in the
+   cluster can rely on gets no route, but a recipe that forwards a local port on 127.0.0.1, as
+   Locust's does ([Locust](#locust)).
 7. **Hardening.** Restricted: a user the image runs as, a read-only root filesystem with every path
    the application writes as a volume, found by running the pinned image read-only with those
    mounts alone, no capability, requests and a memory limit measured from that run, probes on the

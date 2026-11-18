@@ -1132,6 +1132,15 @@ take one now, `kubectl --namespace etcd-snapshots create job --from=cronjob/etcd
   SIGHUP, kubectl not reporting the forward within `GRAFANA_WAIT` seconds, kubectl stopping, or a
   failure, each but an interruption naming its cause. It changes nothing on the cluster and needs
   the cluster's kubeconfig.
+- `just locust [cluster]` forwards a local port to Locust's master through the cluster's kubeconfig
+  until Ctrl-C ([kubernetes.md](kubernetes.md#locust)): `kubectl port-forward`, listening on
+  127.0.0.1 only, from `LOCUST_PORT` to port 8089 of the Service `locust-master` in `locust`. Once
+  kubectl reports the forward it prints the local URL and that the interface has no sign-in, so that
+  anything on this machine, a web page in the browser included, can start a test through it while
+  the forward runs. It ends the forward on every way out: Ctrl-C, SIGTERM or SIGHUP, kubectl not
+  reporting the forward within `LOCUST_WAIT` seconds, kubectl stopping, or a failure, each but an
+  interruption naming its cause. It reads no Secret, changes nothing on the cluster and needs the
+  cluster's kubeconfig.
 - `just logs '<query>' [--since <duration>] [--limit <n>] [cluster]` prints the records a LogsQL
   query matches, one line each, the oldest first, from the last 15 minutes and at most 200 unless
   told otherwise ([kubernetes.md](kubernetes.md#logs)): `kubectl get --raw` through the Kubernetes
@@ -1332,16 +1341,16 @@ naming the place. With `CI` set nothing of rclone's words is shown: they go to
 `clusterconfig/<recipe>.errors.log` in the cluster's directory, which git ignores, started afresh by
 each run, and only that file's path is printed, as for talman's output. kubectl's and helm's output
 passes through, naming the objects they apply, except in `cluster-check`, `gateway-check`,
-`cluster-reboot`, `cluster-destroy`, `grafana` and `logs`: they print node and object names only,
-and `logs` the records, and none of what kubectl prints, as the objects it reads and its errors hold
-the API server's, the nodes' and the pods' addresses, but for the message of an error the API server
-or the store answered with, which `logs` shows without an address; only `kubectl drain`'s passes
-through in `cluster-reboot`, as in `cluster-upgrade`, naming the pods it evicts and those it cannot,
-with its errors passed through the same filter line by line, so a connection error still says why,
-`connection refused`. The checks of `cluster-talos --first` print none of what kubectl, or talosctl
-through `talman talosctl`, prints either, but for a check whose tool failed, its last line of error
-with every IPv4 and IPv6 address in it masked as `<address>`; their `talman apply` dry runs print as
-talman's output does above.
+`cluster-reboot`, `cluster-destroy`, `grafana`, `locust` and `logs`: they print node and object
+names only, and `logs` the records, and none of what kubectl prints, as the objects it reads and its
+errors hold the API server's, the nodes' and the pods' addresses, but for the message of an error
+the API server or the store answered with, which `logs` shows without an address; only
+`kubectl drain`'s passes through in `cluster-reboot`, as in `cluster-upgrade`, naming the pods it
+evicts and those it cannot, with its errors passed through the same filter line by line, so a
+connection error still says why, `connection refused`. The checks of `cluster-talos --first` print
+none of what kubectl, or talosctl through `talman talosctl`, prints either, but for a check whose
+tool failed, its last line of error with every IPv4 and IPv6 address in it masked as `<address>`;
+their `talman apply` dry runs print as talman's output does above.
 
 ## Environment
 
@@ -1406,6 +1415,8 @@ to hand it to kubectl and age-keygen on standard input.
 - `ADOPTION_INTERVAL` and `ADOPTION_WAIT`: how many seconds `app-adoption` waits between two
   polls, 10 when unset, and in all, 900 when unset.
 - `GRAFANA_PORT` and `GRAFANA_WAIT`: the local port `grafana` forwards from, 3000 when unset, and how
+  many seconds it waits for kubectl to report the forward, 20 when unset.
+- `LOCUST_PORT` and `LOCUST_WAIT`: the local port `locust` forwards from, 8089 when unset, and how
   many seconds it waits for kubectl to report the forward, 20 when unset.
 - `CI`: when set, talman's output goes to a file instead of the output; see
   [What the recipes print](#what-the-recipes-print).

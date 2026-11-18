@@ -29,6 +29,7 @@ resources:
   - ../../base/sso-system
   - ../../base/crowdsec
   - ../../base/open-feature-operator
+  - ../../base/locust
   - ../../base/ai-system/n8n/ks.yaml
   - ../../base/ai-system/open-webui/ks.yaml
   - ../../base/backstage/backstage/ks.yaml
@@ -107,6 +108,7 @@ resources:
   - ../../base/ascender
   - ../../base/ascender/ascender-operator/ks.yaml
   - ../../base/ascender/ascender/ks.yaml
+  - ../../base/locust/locust/ks.yaml
 
 patches:
   # The issuer of the public Gateway's certificate, the place this cluster chooses it, which the next

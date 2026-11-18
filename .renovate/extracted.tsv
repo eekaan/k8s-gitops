@@ -115,6 +115,8 @@ kubernetes/apps/base/kube-system/spegel/app/ocirepository.yaml	regex	ghcr.io/spe
 kubernetes/apps/base/kube-system/vpa/app/helmrelease.yaml	flux	vpa	-
 kubernetes/apps/base/kyverno/kyverno/app/ocirepository.yaml	flux	ghcr.io/kyverno/charts/kyverno	tag
 kubernetes/apps/base/kyverno/kyverno/app/ocirepository.yaml	regex	ghcr.io/kyverno/charts/kyverno	tag
+kubernetes/apps/base/locust/locust/app/deployment-master.yaml	kubernetes	docker.io/locustio/locust	-
+kubernetes/apps/base/locust/locust/app/deployment-worker.yaml	kubernetes	docker.io/locustio/locust	-
 kubernetes/apps/base/monitoring/blackbox-exporter/app/ocirepository.yaml	flux	ghcr.io/prometheus-community/charts/prometheus-blackbox-exporter	tag
 kubernetes/apps/base/monitoring/blackbox-exporter/app/ocirepository.yaml	regex	ghcr.io/prometheus-community/charts/prometheus-blackbox-exporter	tag
 kubernetes/apps/base/monitoring/grafana-operator/app/ocirepository.yaml	flux	ghcr.io/grafana/helm-charts/grafana-operator	tag

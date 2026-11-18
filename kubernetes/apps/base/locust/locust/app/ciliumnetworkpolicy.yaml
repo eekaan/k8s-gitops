@@ -1,0 +1,96 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What Locust's master lets through, on top of the namespace's default deny: the workers on the port
+# it binds for them, and the kubelet's readiness probe on its web port. It sends nothing: it runs no
+# users, the workers connect to it, and the one name it looks up, its own, is in the pod's hosts
+# file. just locust reaches the interface through a port forward, which the container runtime
+# connects inside the pod on its loopback, where no policy applies (docs/kubernetes.md, Locust).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: locust-master
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: locust
+      app.kubernetes.io/component: master
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    # The workers, by their labels in locust, not every pod of the namespace: each opens one
+    # connection to the master's port and keeps it, and over it the master hands out users and the
+    # host and gathers statistics.
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": locust
+            app.kubernetes.io/name: locust
+            app.kubernetes.io/component: worker
+      toPorts:
+        - ports:
+            - port: "5557"
+              protocol: TCP
+    # The kubelet's readiness probe, which arrives from the node the pod runs on: host is every
+    # process in that node's network namespace, the pods of the host's network among them, so they
+    # reach the interface as well.
+    - fromEntities:
+        - host
+      toPorts:
+        - ports:
+            - port: "8089"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What Locust's workers let through: nothing in, as they listen on nothing, and out the cluster's
+# resolver, the master and the target's pods. Once the cluster enforces the policies, whatever host
+# the interface is given, the workers reach nothing else: this egress, not Locust, keeps the load
+# inside the cluster, on those three. While it audits them, a flow they would drop is reported and
+# passes, and the load goes wherever the host given points (docs/kubernetes.md, Service addresses
+# and Locust).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: locust-worker
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: locust
+      app.kubernetes.io/component: worker
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    # The cluster's resolver, for the names of the master's Service and of the target.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+    # The master, through the Service locust-master, whose port 5557 targets the master's 5557.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": locust
+            app.kubernetes.io/name: locust
+            app.kubernetes.io/component: master
+      toPorts:
+        - ports:
+            - port: "5557"
+              protocol: TCP
+    # The target, LOCUST_TARGET in ks.yaml: the pods the Service hello in demo selects, on the
+    # container port its port 80 targets, 8080. A Service's address is translated to a pod's before
+    # policy applies, so the rule names the pods; hello admits the workers by a rule beside it.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": demo
+            app.kubernetes.io/name: hello
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
