@@ -150,6 +150,21 @@ On what Flux builds:
   patches: `wait: true`, `healthChecks` or `healthCheckExprs`. Otherwise the dependent never
   reconciles, or starts before its dependency's objects are ready. The message names both
   Kustomizations and the overlay.
+- **A kind that does not exist yet** (`kubernetes-check`). A Gatekeeper constraint
+  (`constraints.gatekeeper.sh`) is of a kind Gatekeeper makes only after it has reconciled the
+  `ConstraintTemplate`, so Flux's server-side dry run of a constraint fails for the unknown kind and
+  nothing of a Kustomization that holds it is applied, the template included, and no retry can
+  succeed. The check refuses a constraint in the Kustomization of its own template, one whose
+  Kustomization does not name the template's in `dependsOn` (directly or through others), one whose
+  template no application the overlay enables holds, and a template's Kustomization that does not
+  wait (`wait: true`, or `healthChecks` naming that template, as without `wait` Flux checks only what
+  `healthChecks` names) on `healthCheckExprs` for `templates.gatekeeper.sh` `ConstraintTemplate`,
+  every entry of them with `current: status.created == true` and no `inProgress` or `failed`: Flux
+  takes an applied template for ready, so without the entry the constraints start before the kinds
+  are served, and it reads `inProgress` and `failed` before `current`, so either could hold the
+  templates back for good. The message names the Kustomization and the constraint.
+- **A repeated key in what a chart renders** (`scripts/render`, so `just render-check` and
+  `kubernetes-validate`; [The render diff](#the-render-diff)).
 - **Paths** (`kubernetes-check` and `scripts/render`). `flux build` reads with kustomize's load
   restrictions off (`LoadRestrictionsNone`, its own setting), and so does `kubernetes-check`'s
   `kustomize`, as an overlay lists `ks.yaml` files outside its own directory: either reads any path
@@ -5563,21 +5578,51 @@ generates a workload, and neither can hold up the cluster: the webhooks that mat
 open and skip the control plane's and Flux's namespaces. Kyverno also keeps webhooks of its own, on
 its own policy kinds, that fail closed ([Audit, and what a webhook may do](#audit-and-what-a-webhook-may-do)).
 
-Each engine is two applications an overlay selects on its own, in a namespace of its own that
-enforces the restricted level:
+The engines are five applications, which an overlay selects an engine at a time, each engine in a
+namespace of its own that enforces the restricted level:
 
-| Engine | Namespace | Applications | Chart | Rules written as |
+| Engine | Namespace | Applications, in order | Chart | Rules written as |
 | --- | --- | --- | --- | --- |
 | Kyverno | `kyverno` | `kyverno`, `kyverno-policies` | `kyverno` 3.10.0, Kyverno 1.20.0, an OCI chart | `ValidatingPolicy` (`policies.kyverno.io/v1`), in CEL |
-| Gatekeeper | `gatekeeper-system` | `gatekeeper`, `gatekeeper-policies` | `gatekeeper` 3.23.1, from the project's Helm repository | `ConstraintTemplate` in Rego, and a constraint of each template's kind |
+| Gatekeeper | `gatekeeper-system` | `gatekeeper`, `gatekeeper-templates`, `gatekeeper-policies` | `gatekeeper` 3.23.1, from the project's Helm repository | `ConstraintTemplate` in Rego, and a constraint of each template's kind |
 
-The engine's application is the chart and what scrapes and alerts on it; the rules are the other
-application, which waits for the engine (`dependsOn`) because the kinds it applies are the
-release's. Gatekeeper makes the kind of each constraint from its template within seconds of the
-template's creation, so the first reconcile of `gatekeeper-policies` can fail on the constraints and
-the next, a minute later, applies them. Nothing else in the tree depends on either application, and
-`tests/admission-policy.bats` builds the overlay without each engine in turn: the other builds whole
-and nothing of the one taken out is left. Neither engine's pods are a dependency of anything, as
+The engine's application is the chart and what scrapes and alerts on it. Kyverno's rules are the
+next application, which waits for the engine (`dependsOn`) because the kinds it applies are the
+release's. Gatekeeper's are two, because a constraint's kind is not the release's: Gatekeeper makes
+it from the constraint's template once it has reconciled the template, and Flux's server-side dry
+run of an object of a kind that does not exist fails the whole Kustomization, so a Kustomization
+that held templates and constraints together would apply neither and no retry could succeed.
+`gatekeeper-templates` applies the three templates after the release, and is Ready only when each
+template's `status.created` is true (a `healthCheckExprs` entry on `ConstraintTemplate` with
+`wait: true`; Flux otherwise takes an applied template for ready): that is the status the
+ConstraintTemplate's schema holds for the kind having been created, and `tests/admission-policy.bats`
+reads it, a boolean below a status subresource, in the pinned chart's definition, so a chart that
+dropped it fails offline. `gatekeeper-policies` applies
+the constraints and depends on `gatekeeper-templates` alone, so it starts when their kinds are
+served. The two read different artifacts, and kustomize-controller compares a dependency's applied
+revision with the dependent's only when both read one source, so a change that adds a template and
+its constraint together can start `gatekeeper-policies` while `gatekeeper-templates` is still Ready
+from the revision before: that attempt's dry run fails for the new kind, nothing of it is applied,
+and the retry a minute later succeeds. `just kubernetes-check` refuses a constraint that is in its template's Kustomization, whose
+Kustomization does not depend on its template's, or whose template's Kustomization does not wait
+for the kinds ([What the checks refuse](#what-the-checks-refuse)).
+
+Kyverno's release also gives every definition it installs `helm.sh/resource-policy: keep`, so Helm
+leaves them, and every policy and report of their kinds, when the application leaves the tree. The
+chart writes that annotation itself on five of its definitions and takes more only through values
+that would repeat it there, so the HelmRelease's post-renderer sets it on every
+`CustomResourceDefinition` instead, which sets it once on each; `tests/admission-policy.bats` parses
+the chart's output strictly and counts the annotation on every definition.
+
+Nothing else in the tree depends on any of the five, and `tests/admission-policy.bats` builds the
+overlay without each engine in turn: the other builds whole and nothing of the one taken out is
+left, so taking an engine out is taking its namespace directory's applications out of the overlay
+(a constraint left without its template, or a rule without its engine, fails
+`just kubernetes-check`). Kyverno's go together, as its definitions stay. Gatekeeper's go in two
+changes, `gatekeeper-policies` first and `gatekeeper` and `gatekeeper-templates` once Flux has
+pruned it: Gatekeeper makes each constraint's kind as a definition its template owns, so a template
+deleted first takes the kind with it, and kustomize-controller may then never finish deleting the
+constraints, as it cannot find their kind. Neither engine's pods are a dependency of anything, as
 the webhooks of both that match workloads fail open.
 
 Neither namespace holds a default deny yet: each is in `network-policy-exceptions.yaml` with its
@@ -5634,8 +5679,9 @@ How each engine says it:
   expression for each setting, so a report names which of the four a pod misses. The legacy kind,
   `ClusterPolicy` of `kyverno.io/v1`, is no longer executed as of Kyverno 1.20, and the chart refuses
   to install or upgrade over one found on the cluster.
-- **Gatekeeper**: one `ConstraintTemplate` per rule in `gatekeeper-policies/app/`, holding the Rego
-  and the name of the kind, and one constraint of that kind, `enforcementAction: dryrun`. Gatekeeper
+- **Gatekeeper**: one `ConstraintTemplate` per rule in `gatekeeper-templates/app/`, holding the Rego
+  and the name of the kind, and one constraint of that kind in `gatekeeper-policies/app/`,
+  `enforcementAction: dryrun`. Gatekeeper
   creates the kinds `K8sImagePinned`, `K8sRestrictedSecurityContext` and
   `K8sNamespacePodSecurityLevel` at run time, from the templates, and no definition of them is in the
   tree. `just kubernetes-validate` fails for an object
@@ -5997,6 +6043,39 @@ post-renderer patch that names a file, a key that folds to a field the render re
 render, naming the release.
 `scripts/render --forms` checks that every release is of a form the render accepts, without pulling
 a chart, and `tests/render.bats` runs it on this tree.
+A chart's output is parsed strictly, as helm-controller decodes what a release renders: a mapping
+that repeats a key, at any depth and in any document, fails the render, naming the application, the
+release, the object (its kind and name, or its place among the documents when it has neither) and
+the key. helm-controller passes the output through kustomize's libraries in its post-renderers,
+which always run, at least to label each object with its origin; their `yaml.v3` decode of each
+object refuses a key whose text repeats and fails the install. helm's template step, `yq` and `jq`
+keep the last one, so the tree's other checks never see it. Two parses of pinned tools read the
+output before the release's post-renderers: kubeconform's strict parse (`-strict`, with no schema
+location that holds a schema, so nothing is validated or fetched), which reads a key as the YAML
+1.1 value it stands for, compares the values and names a key as it reads it, a string quoted and a
+number or a boolean bare; and kustomize's decode, helm-controller's own,
+which compares the keys' text and quotes it, so that `80` beside `"80"`, or `true` beside `"true"`,
+is refused by it alone. That decode is a `kustomize build` of the output with a JSON patch that
+copies each object's kind onto itself: kustomize decodes an object whole to patch it, and does so
+before a build folds a repeated annotation. Both read the chart's output as it renders with
+Kubernetes' own API versions alone and with those of every definition the tree installs, as
+helm-controller renders with what the cluster serves at the time, so a key a chart repeats only
+while an API is served, or only while it is not, is refused too. The render also refuses output
+helm-controller would install:
+
+- `yes` beside `on`, or `0x10` beside `16`, which kubeconform reads as the same value;
+- a mapping a YAML merge key (`<<: *base`) brings in, with a key of it set again beside the merge
+  key, which kubeconform counts as a repeat;
+- a repeat in a chart's `crds/` files, which helm-controller applies apart from the release,
+  without its post-renderers;
+- in a release with a kustomize post-renderer, repeated annotations, a repeated annotation key or a
+  repeated `annotations` mapping, which that build folds into one, the last value kept, before the
+  decode, unless one of its JSON patches targets the object: kustomize decodes an object it
+  JSON-patches whole, so the build refuses the repeat then. A repeated label, or a repeat anywhere
+  else, that build refuses.
+
+What the post-renderers' kustomize build writes holds each key once, as the build refuses a repeat
+or folds it, so it is not parsed again.
 `RENDER_CHART_CACHE` names a directory to keep pulled charts in between renders. A tree that does
 not render fails, naming the application. `just render-diff <base> <head>` prints the comment
 comparing two renders.

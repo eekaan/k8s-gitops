@@ -399,6 +399,8 @@ flux_build() {
 # What flux_build built for each cluster directory: the directory as the instance's sync
 # Kustomization applies it, and its root Kustomization's overlay.
 declare -A sync_built=() root_built=()
+# What flux_build built for each application, by the name of its Kustomization.
+declare -A app_built=()
 
 # The instance's sync Kustomization applies each cluster directory with the root's decryption and
 # substitution (tests/flux.bats proves they match), so the root's and Flux's own ks.yaml files are
@@ -440,6 +442,7 @@ for dir in kubernetes/apps/base/*/*/ kubernetes/clusters/*/*/*/; do
   hints=("$dir/app")
   [[ -d kubernetes/components ]] && hints+=(kubernetes/components)
   flux_build "$dir/ks.yaml" "$dir/app" "$dir/ks.yaml" "$dir" "${hints[@]}"
+  [[ -z $last_built ]] || app_built[$(yq ea '[select(. != null)] | .[0].metadata.name' "$dir/ks.yaml")]="$last_built"
 done
 
 # kustomizations FILE: the Flux Kustomizations among the objects FILE holds, one JSON object a line.
@@ -483,6 +486,73 @@ for dir in kubernetes/clusters/*/; do
         ;;
     esac
   done <"$tmp/dependency-verdicts"
+
+  # A Gatekeeper constraint is of a kind Gatekeeper makes only once it has reconciled the
+  # ConstraintTemplate, so the kind is not served when a Kustomization holding both is applied: Flux's
+  # server-side dry run of the constraint fails for the unknown kind and nothing of the Kustomization
+  # is applied, the template included, so no retry succeeds. The constraint is applied by a
+  # Kustomization that depends, directly or through others, on the one that applies its template, and
+  # that one's health checks wait for the template's status (created: true, set once the kind is
+  # served), as Ready alone is true as soon as the template is applied: with wait, or with
+  # healthChecks naming that template, as without wait Flux checks only what healthChecks names.
+  # Every entry for the templates holds that and no inProgress or failed, which Flux reads first and
+  # which could hold the templates back for good.
+  : >"$tmp/gatekeeper-objects.jsonl"
+  while IFS= read -r dependent; do
+    [[ -n ${app_built[$dependent]:-} ]] || continue
+    yq -N -o json -I0 'select(. != null and ((.apiVersion // "") | test("^(templates|constraints)\.gatekeeper\.sh/")))' \
+      "${app_built[$dependent]}" | jq -c --arg ks "$dependent" \
+      '{ks: $ks, group: (.apiVersion | sub("/.*"; "")), kind: .kind, name: (.metadata.name // ""),
+        makes: (.spec.crd.spec.names.kind // null)}' >>"$tmp/gatekeeper-objects.jsonl"
+  done < <(jq -r '.metadata.name' "$tmp/dependents.jsonl")
+  # shellcheck disable=SC2016 # $by, $c and the like are jq variables.
+  if ! jq -rs --slurpfile ks "$tmp/dependents.jsonl" 'def clean: tostring | gsub("[^A-Za-z0-9._-]"; "?");
+    ($ks | map({(.metadata.name): .}) | add) as $by
+    | def reach: . as $start | {seen: [], todo: [$start]}
+        | until(.todo | length == 0;
+            .todo[0] as $n | .todo |= .[1:]
+            | if (.seen | index($n)) != null then . else .seen += [$n] | .todo += [($by[$n].spec.dependsOn // [])[].name] end)
+        | .seen;
+    def unset: (. // "") | tostring | gsub("\\s"; "") == "";
+    def serves($template): (.spec.wait == true
+        or ((.spec.healthChecks // []) | any(.kind == "ConstraintTemplate" and .name == $template)))
+      and ((.spec.healthCheckExprs // []) | map(select((.apiVersion // "" | sub("/.*"; "")) == "templates.gatekeeper.sh"
+        and ((.kind // "ConstraintTemplate") == "ConstraintTemplate")))
+        | length > 0 and all(((.current // "") | gsub("\\s"; "") == "status.created==true")
+          and (.inProgress | unset) and (.failed | unset)));
+    . as $objs
+    | [$objs[] | select(.group == "templates.gatekeeper.sh" and .kind == "ConstraintTemplate")] as $templates
+    | $objs[] | select(.group == "constraints.gatekeeper.sh") | . as $c
+    | [$templates[] | select(.makes == $c.kind)] as $made
+    | ([$c.ks, ($c.kind | clean), ($c.name | clean)] | join("|")) as $head
+    | if ($made | length) == 0 then "none|" + $head + "|"
+      elif any($made[]; .ks == $c.ks) then "same|" + $head + "|"
+      else
+        ([$made[] | select(.ks as $t | ($c.ks | reach) | index($t))]) as $waited
+        | if ($waited | length) == 0 then "nodep|" + $head + "|" + ($made[0].ks | clean)
+          else $waited[] | select(. as $t | $by[$t.ks] | serves($t.name) | not) | "noexprs|" + $head + "|" + (.ks | clean) end
+      end' "$tmp/gatekeeper-objects.jsonl" | sort -u >"$tmp/gatekeeper-verdicts"; then
+    fail "$dir/ks.yaml: cannot read the Gatekeeper objects built for $overlay, so their constraints were not checked"
+    continue
+  fi
+  while IFS='|' read -r verdict dependent kind name template; do
+    file="${ks_name_file[$dependent]:-$dir/ks.yaml}"
+    case $verdict in
+      same)
+        fail "$file: Kustomization $dependent holds the constraint $kind $name and the ConstraintTemplate that makes its kind in the same Kustomization: Flux's dry run of the constraint fails for a kind that does not exist yet and nothing is applied, so move the template into an application of its own and name that application in dependsOn"
+        ;;
+      none)
+        fail "$file: Kustomization $dependent holds the constraint $kind $name, but no ConstraintTemplate of an application built for $overlay makes the kind $kind, so the constraint would never be applied; add the template, in an application $dependent depends on"
+        ;;
+      nodep)
+        fail "$file: Kustomization $dependent holds the constraint $kind $name, whose ConstraintTemplate is in Kustomization $template, but $dependent does not name it in dependsOn, directly or through another, so the constraint can be applied before its kind exists; name $template in dependsOn"
+        ;;
+      noexprs)
+        file="${ks_name_file[$template]:-$dir/ks.yaml}"
+        fail "$file: Kustomization $template holds the ConstraintTemplate that makes the kind of the constraint $kind $name in Kustomization $dependent, but does not wait on a healthCheckExprs entry for templates.gatekeeper.sh ConstraintTemplate (with wait: true, or healthChecks naming the template) whose current is status.created == true and that holds no inProgress or failed, which Flux reads before current, so $dependent starts once the template is applied and before Gatekeeper has made its kind, or never; give the entry current: status.created == true alone"
+        ;;
+    esac
+  done <"$tmp/gatekeeper-verdicts"
 
   # A Kustomization that chooses, with PUBLIC_ISSUER, an issuer other than the cluster's own CA
   # chooses one of acme-issuers, so it names that application in dependsOn, and the check above then

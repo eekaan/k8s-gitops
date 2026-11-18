@@ -3,13 +3,12 @@
 # substitution. Keys not set here keep the chart's defaults. Kyverno only reports here: its rules
 # (kyverno-policies) are in audit, and nothing it registers may refuse or hold up an object.
 
+# The chart's definitions are installed with the release. The annotation that makes Helm leave them
+# in place on uninstall is not set here: the chart writes it itself on five of them, so a value
+# that added it to all would repeat the key there. The HelmRelease's post-renderer sets it on
+# every definition instead.
 crds:
   install: true
-  annotations:
-    # Deleting a definition deletes every policy and report of its kind, so Helm leaves the
-    # definitions in place when the release is uninstalled, as it is when this application leaves
-    # the tree.
-    helm.sh/resource-policy: keep
 
 config:
   # The namespaces whose objects the webhooks that match resources never see: the control plane's

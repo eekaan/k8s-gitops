@@ -9,12 +9,13 @@ spec:
   path: ./apps/base/gatekeeper-system/gatekeeper-policies/app
   # The rules are cluster-scoped, so no object of theirs lands in a namespace.
   targetNamespace: gatekeeper-system
-  # The ConstraintTemplate definition is the release's, and its webhook admits the templates. A
-  # constraint's kind exists only once Gatekeeper has made it from its template, which it does
-  # within seconds of the template's creation; until then Flux's dry run of the constraint fails
-  # and the next attempt, a minute later, applies it.
+  # A constraint's kind exists only once Gatekeeper has made it from its template, so this waits
+  # for gatekeeper-templates, which is Ready once every template's kind is served: Flux's dry run of
+  # a constraint of a kind that does not exist fails the whole Kustomization. A template and its
+  # constraint added in one change can cost one failed attempt and its retry (docs/kubernetes.md,
+  # Admission policy).
   dependsOn:
-    - name: gatekeeper
+    - name: gatekeeper-templates
   sourceRef:
     kind: ExternalArtifact
     name: gatekeeper-policies
