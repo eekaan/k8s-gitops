@@ -1110,6 +1110,93 @@ LN
   done
 }
 
+# seal_secret KEY: the Secret openbao-seal-1 holding KEY, as External Secrets makes it.
+# shellcheck disable=SC2016 # $key is a jq variable.
+seal_secret() {
+  "$JQ" -n --arg key "$1" '{kind: "Secret", metadata: {name: "openbao-seal-1", namespace: "openbao"}, immutable: true, data: {key: ($key | @base64)}}' >"$STATE/seal-secret"
+}
+
+# wrote_nothing: no Secret was created or deleted, the Secret and the custody files are as they were
+# before the run, which seal-before and custody-before hold, and kubectl was asked for the Secret
+# alone.
+wrote_nothing() {
+  [ ! -e "$STATE/seal-created" ]
+  [ ! -e "$STATE/seal-deleted" ]
+  if [ -e "$BATS_TEST_TMPDIR/seal-before" ]; then cmp "$STATE/seal-secret" "$BATS_TEST_TMPDIR/seal-before"; else [ ! -e "$STATE/seal-secret" ]; fi
+  [ "$(find "$BATS_TEST_TMPDIR/custody" -mindepth 1 -printf '%P %s\n' | sort)" = "$(cat "$BATS_TEST_TMPDIR/custody-before")" ]
+  echo "kubectl was asked: $(grep '^kubectl ' "$RECORD/argv" | sort -u | paste -sd'|' -)"
+  [ "$(grep '^kubectl ' "$RECORD/argv" | grep -cvxF 'kubectl get secret openbao-seal-1 --namespace openbao --output json --ignore-not-found')" -eq 0 ]
+}
+
+# next_run OUTPUT: keeps OUTPUT, the last run's, and its calls in outputs and calls, for a test to
+# search them all at its end, and starts a new record.
+next_run() {
+  printf '%s\n' "$1" >>"$BATS_TEST_TMPDIR/outputs"
+  cat "$RECORD/argv" >>"$BATS_TEST_TMPDIR/calls"
+  : >"$RECORD/argv"
+}
+
+@test "bao-seal-restore --check compares the Secret's seal key with the custody file and writes nothing" {
+  local key=c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffee0001 other secret flags
+  other=${key%0001}0002
+  custody_file "$key"
+  find "$BATS_TEST_TMPDIR/custody" -mindepth 1 -printf '%P %s\n' | sort >"$BATS_TEST_TMPDIR/custody-before"
+  # Holding the file's key: it says so and exits 0.
+  seal_secret "$key"
+  cp "$STATE/seal-secret" "$BATS_TEST_TMPDIR/seal-before"
+  recipe bao-seal-restore "$CUSTODY" --check
+  echo "same key: $output"
+  [ "$status" -eq 0 ]
+  [ "$output" = "bao-seal-restore: the Secret openbao-seal-1 holds the key in $CUSTODY" ]
+  wrote_nothing
+  # Holding another key: named, and kept.
+  next_run "$output"
+  seal_secret "$other"
+  cp "$STATE/seal-secret" "$BATS_TEST_TMPDIR/seal-before"
+  recipe bao-seal-restore "$CUSTODY" --check
+  echo "other key: $output"
+  [ "$status" -ne 0 ]
+  [ "${lines[0]}" = "bao-seal-restore: the Secret openbao-seal-1 holds another key than $CUSTODY" ]
+  wrote_nothing
+  # No Secret: named, and none is made.
+  next_run "$output"
+  rm "$STATE/seal-secret" "$BATS_TEST_TMPDIR/seal-before"
+  recipe bao-seal-restore "$CUSTODY" --check
+  echo "no Secret: $output"
+  [ "$status" -ne 0 ]
+  [ "${lines[0]}" = "bao-seal-restore: the Secret openbao-seal-1 does not exist in openbao" ]
+  wrote_nothing
+  # --check and --replace together, in either order: refused before anything is read.
+  seal_secret "$other"
+  cp "$STATE/seal-secret" "$BATS_TEST_TMPDIR/seal-before"
+  for flags in '--check --replace' '--replace --check'; do
+    next_run "$output"
+    # shellcheck disable=SC2086 # the two flags are two words.
+    recipe bao-seal-restore "$CUSTODY" $flags
+    echo "$flags: $output"
+    [ "$status" -ne 0 ]
+    [ "$output" = "bao-seal-restore: --check compares and writes nothing, and --replace writes; give one of them
+error: recipe \`bao-seal-restore\` failed on line 19 with exit code 1" ]
+    [ "$(grep -cE '^(kubectl|age) ' "$RECORD/argv")" -eq 0 ]
+    wrote_nothing
+  done
+  # A file that holds no seal key: named, and the Secret is not compared with anything.
+  next_run "$output"
+  "$JQ" -n '{cluster: "lab-sto2", volsync: {master: "marker"}}' | age --encrypt --recipient "$RECIPIENT" --output "$CUSTODY.tmp"
+  mv "$CUSTODY.tmp" "$CUSTODY"
+  find "$BATS_TEST_TMPDIR/custody" -mindepth 1 -printf '%P %s\n' | sort >"$BATS_TEST_TMPDIR/custody-before"
+  recipe bao-seal-restore "$CUSTODY" --check
+  echo "no seal key in the file: $output"
+  [ "$status" -ne 0 ]
+  [ "${lines[0]}" = "bao-seal-restore: $CUSTODY holds no seal key for the Secret openbao-seal-1" ]
+  wrote_nothing
+  next_run "$output"
+  [ -s "$BATS_TEST_TMPDIR/calls" ]
+  for secret in "$key" "$other" "$(printf %s "$key" | base64 -w0)" "$(printf %s "$other" | base64 -w0)"; do
+    absent "$secret" "$BATS_TEST_TMPDIR/outputs" "$BATS_TEST_TMPDIR/calls"
+  done
+}
+
 # seed_env [ID [SECRET]]: the repository's .env, as an operator fills it in: the backup prefix, the
 # state key and its passphrase, the cloud credential, and the cluster's S3 key, which differs from
 # the state key. The cluster key is what the volsync recipes put in the store. The object storage's

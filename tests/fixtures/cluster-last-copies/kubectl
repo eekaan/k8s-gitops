@@ -1,0 +1,246 @@
+#!/usr/bin/env bash
+# A stand-in for kubectl against a running cluster, installed by tests/cluster-last-copies.bats as
+# <tmp>/bin/kubectl. It finds its files from its own path, answers from <tmp>/state and keeps what a
+# run changes there:
+#   cluster/clusters.json, cluster/replicationsources.json, cluster/cronjobs.json,
+#   cluster/kustomizations.json
+#                       the lists the recipe reads with --all-namespaces, each {"items": [...]}; a
+#                       ReplicationSource's status is made up here, below, and a Kustomization's
+#                       spec.suspend is true while the fake flux keeps it suspended
+#   cluster/<kind>.<namespace>.<name>.json
+#                       an object read by name: secret, objectstore; absent, it is not found
+#   jobs/<namespace>.<job>  a Job created from a CronJob, whose name the file holds
+#   recipient, real-age, prefix, snapshot.plain, dump.plain
+#                       what a created Job uploads: the plain snapshot or dump, encrypted with the
+#                       real age to the Talos age key's recipient, into <tmp>/store, the buckets the
+#                       fake rclone reads, named by the time it is made, as the jobs name theirs
+#   job-fails.<cronjob>     a Job from that CronJob ends Failed
+#   job-stuck.<cronjob>     a Job from that CronJob never ends
+#   no-upload.<cronjob>     a Job from that CronJob ends Complete and uploads nothing
+#   plain-upload.<cronjob>  a Job from that CronJob uploads its file unencrypted
+#   segment.<namespace>.<name>   the WAL segment a switch on the database's primary completes,
+#                       00000001000000000000002A unless the file says another
+#   idle.<namespace>.<name>  nothing was written since the last switch, which completed that
+#                       segment, and the archiver has archived it: a switch leaves the WAL as it is
+#                       and returns the start of the next segment, the one in use, as PostgreSQL
+#                       18's pg_switch_wal does (xlog.c, ReserveXLogSwitch), and pg_walfile_name
+#                       names the segment a location is in (xlogfuncs.c, XLByteToSeg), so of that
+#                       start the one in use, which is not archived; one byte before it is in the
+#                       archived one. Without it, the switch returns the end of its record, inside
+#                       the segment it completes, and both name that one
+#   archiver-stuck.<namespace>.<name>  the archiver never reaches the switched segment
+#   archiver-late.<namespace>.<name>   it reaches it only after that many reads
+#   archiver-ahead.<namespace>.<name>  by the first read it has archived the segment after the
+#                       switched one too, as on a database that keeps writing
+#   mover-fails.<namespace>.<name>     the backup a manual trigger starts ends Failed, and VolSync
+#                       starts it again, so status.lastManualSync is never set
+#   mover-stuck.<namespace>.<name>     the backup a manual trigger starts never ends
+#   manual-result.<namespace>.<name>   the mover's result reported beside status.lastManualSync
+#                       once the backup a manual trigger starts has ended; Successful without it
+#   last-manual.<namespace>.<name>     the tag an earlier run's trigger left in
+#                       status.lastManualSync, reported until the backup this run's starts has ended
+#   syncing.<namespace>.<name>  a backup runs for that many reads of the ReplicationSource: it
+#                       carries status.lastSyncStartTime meanwhile
+#   suspended.<namespace>.<name>  the fake flux's record that a Kustomization is suspended
+#   noisy               reading a Job fails, with an error that names the API server's address
+# Every call goes to <tmp>/record/argv as "kubectl ARGS", and what changes the cluster, in order, to
+# <tmp>/record/events.
+set -uo pipefail
+
+root=${0%/bin/*}
+state=$root/state
+record=$root/record
+store=$root/store
+printf '%s\n' "kubectl $*" >> "$record/argv"
+event() {
+  printf '%s\n' "$*" >> "$record/events"
+}
+
+# option NAME: the value of the option NAME in the call, given as NAME VALUE or NAME=VALUE.
+option() {
+  local i
+  for ((i = 1; i <= ${#args[@]}; i++)); do
+    case ${args[i - 1]} in
+      "$1") printf '%s' "${args[i]-}" && return 0 ;;
+      "$1"=*) printf '%s' "${args[i - 1]#*=}" && return 0 ;;
+    esac
+  done
+  return 1
+}
+args=("$@")
+namespace=$(option --namespace) || namespace=default
+
+not_found() {
+  echo "Error from server (NotFound): $1 \"$2\" not found" >&2
+  exit 1
+}
+
+# rs_status NAMESPACE NAME: the ReplicationSource's status, as VolSync keeps it.
+rs_status() {
+  local key=$1.$2 tag='' syncing=0 result=Successful last=null
+  [[ ! -f $state/manual.$key ]] || tag=$(< "$state/manual.$key")
+  [[ ! -f $state/last-manual.$key ]] || last=$(< "$state/last-manual.$key")
+  if [[ -f $state/syncing.$key ]]; then
+    syncing=$(< "$state/syncing.$key")
+    if ((syncing > 0)); then
+      echo $((syncing - 1)) > "$state/syncing.$key"
+    fi
+  fi
+  if [[ -n $tag && ! -f $state/mover-stuck.$key && ! -f $state/mover-fails.$key ]]; then
+    last=$tag
+    [[ ! -f $state/manual-result.$key ]] || result=$(< "$state/manual-result.$key")
+  fi
+  [[ -z $tag || ! -f $state/mover-fails.$key ]] || result=Failed
+  jq -n --arg last "$last" --argjson syncing "$syncing" --arg result "$result" --arg synced "$(cat "$state/synced.$key" 2> /dev/null || echo 2026-11-17T03:23:41Z)" '
+    {lastSyncTime: $synced, lastSyncDuration: "41.2s",
+      latestMoverStatus: {result: $result, logs: "restic: snapshot saved"}}
+    + (if $last != "null" then {lastManualSync: $last} else {} end)
+    + (if $syncing > 0 then {lastSyncStartTime: "2026-11-18T03:23:00Z"} else {} end)'
+}
+
+# upload CRONJOB NAMESPACE: what a Job of CRONJOB puts in the bucket.
+upload() {
+  local cronjob=$1 ns=$2 path file plain now
+  now=$(date -u +%Y%m%dT%H%M%SZ)
+  case $cronjob in
+    openbao-snapshots) path=$(< "$state/prefix")-openbao/lab-sto2 file=$now.snapshot.age plain=$state/snapshot.plain ;;
+    *-pgdump) path=$(< "$state/prefix")-postgres/lab-sto2/$ns/${cronjob%-pgdump} file=$now.dump.age plain=$state/dump.plain ;;
+    *) return 0 ;;
+  esac
+  [[ ! -e $state/no-upload.$cronjob ]] || return 0
+  mkdir -p "$store/$path"
+  if [[ -e $state/plain-upload.$cronjob ]]; then
+    cp "$plain" "$store/$path/$file"
+  else
+    "$(< "$state/real-age")" --encrypt --recipient "$(< "$state/recipient")" --output "$store/$path/$file" "$plain"
+  fi
+}
+
+# next_segment SEGMENT: the WAL segment after SEGMENT, of 16 MiB, on the same timeline.
+next_segment() {
+  local timeline=$((16#${1:0:8})) log=$((16#${1:8:8})) segment=$((16#${1:16:8} + 1))
+  ((segment <= 16#FF)) || { segment=0; log=$((log + 1)); }
+  printf '%08X%08X%08X' "$timeline" "$log" "$segment"
+}
+
+case "$1 $2" in
+  "get kustomizations.kustomize.toolkit.fluxcd.io")
+    held=$(find "$state" -maxdepth 1 -name 'suspended.*' -printf '%f\n' | sed 's/^suspended\.//')
+    jq --arg held "$held" '.items |= map((.metadata.namespace + "." + .metadata.name) as $key
+      | .spec.suspend = ($held | split("\n") | any(.[]; . == $key)))' "$state/cluster/kustomizations.json"
+    ;;
+  "get clusters.postgresql.cnpg.io" | "get replicationsources.volsync.backube" | "get cronjobs.batch")
+    kind=${2%%.*}
+    if (($# > 2)) && [[ $3 != --* ]]; then
+      # One ReplicationSource, by name.
+      name=$3
+      jq -e --arg ns "$namespace" --arg name "$name" '.items[] | select(.metadata.namespace == $ns and .metadata.name == $name)' \
+        "$state/cluster/$kind.json" > "$state/object.json" || not_found "$2" "$name"
+      jq --argjson status "$(rs_status "$namespace" "$name")" '. + {status: $status}' "$state/object.json"
+    else
+      cat "$state/cluster/$kind.json"
+    fi
+    ;;
+  "get secret" | "get objectstores.barmancloud.cnpg.io")
+    kind=${2%%.*}
+    kind=${kind%s}
+    file=$state/cluster/$kind.$namespace.$3.json
+    if [[ -f $file ]]; then
+      cat "$file"
+    elif [[ " $* " != *" --ignore-not-found "* ]]; then
+      not_found "$2" "$3"
+    fi
+    ;;
+  "get job")
+    if [[ -e $state/noisy ]]; then
+      echo "Unable to connect to the server: dial tcp 192.0.2.10:6443: i/o timeout" >&2
+      exit 1
+    fi
+    [[ -f $state/jobs/$namespace.$3 ]] || not_found jobs.batch "$3"
+    cronjob=$(< "$state/jobs/$namespace.$3")
+    if [[ -e $state/job-fails.$cronjob ]]; then
+      condition='[{type: "Failed", status: "True", reason: "BackoffLimitExceeded"}]'
+    elif [[ -e $state/job-stuck.$cronjob ]]; then
+      condition='[]'
+    else
+      condition='[{type: "SuccessCriteriaMet", status: "True"}, {type: "Complete", status: "True"}]'
+    fi
+    jq -n --arg name "$3" --arg ns "$namespace" "{metadata: {name: \$name, namespace: \$ns}, status: {conditions: $condition}}"
+    ;;
+  "create job")
+    from=$(option --from) || { echo "error: create job without --from" >&2; exit 1; }
+    cronjob=${from#cronjob/}
+    jq -e --arg ns "$namespace" --arg name "$cronjob" '.items[] | select(.metadata.namespace == $ns and .metadata.name == $name)' \
+      "$state/cluster/cronjobs.json" > /dev/null || not_found cronjobs.batch "$cronjob"
+    [[ ! -e $state/jobs/$namespace.$3 ]] || { echo "Error from server (AlreadyExists): jobs.batch \"$3\" already exists" >&2; exit 1; }
+    mkdir -p "$state/jobs"
+    echo "$cronjob" > "$state/jobs/$namespace.$3"
+    event "job $namespace/$3 from $cronjob"
+    [[ -e $state/job-fails.$cronjob || -e $state/job-stuck.$cronjob ]] || upload "$cronjob" "$namespace"
+    echo "job.batch/$3 created"
+    ;;
+  "patch replicationsources.volsync.backube")
+    name=$3
+    patch=$(option --patch)
+    [[ $(option --type) == merge ]] || { echo "error: not a merge patch" >&2; exit 1; }
+    owner=$(jq -r --arg ns "$namespace" --arg name "$name" '.items[] | select(.metadata.namespace == $ns and .metadata.name == $name)
+      | .metadata.labels["kustomize.toolkit.fluxcd.io/namespace"] + "." + .metadata.labels["kustomize.toolkit.fluxcd.io/name"]' \
+      "$state/cluster/replicationsources.json")
+    [[ -n $owner ]] || not_found replicationsources.volsync.backube "$name"
+    tag=$(jq -er '.spec.trigger.manual' <<< "$patch") || { echo "error: the patch sets no manual trigger" >&2; exit 1; }
+    held=running
+    [[ ! -e $state/suspended.$owner ]] || held=suspended
+    running=''
+    if (($(cat "$state/syncing.$namespace.$name" 2> /dev/null || echo 0) > 0)); then
+      running=' and a backup of it runs'
+    fi
+    echo "$tag" > "$state/manual.$namespace.$name"
+    date -u +%Y-%m-%dT%H:%M:%SZ > "$state/synced.$namespace.$name"
+    event "patched $namespace/$name manual $tag while its Kustomization is $held$running"
+    echo "replicationsource.volsync.backube/$name patched"
+    ;;
+  "exec "*)
+    pod=$2
+    command=" $* "
+    database=$(jq -r --arg ns "$namespace" --arg pod "$pod" '.items[] | select(.metadata.namespace == $ns and .status.currentPrimary == $pod) | .metadata.name' \
+      "$state/cluster/clusters.json")
+    [[ -n $database && $command == *" --container postgres -- psql "* ]] || { echo "error: unexpected exec $*" >&2; exit 1; }
+    key=$namespace.$database
+    segment=$(cat "$state/segment.$key" 2> /dev/null || echo 00000001000000000000002A)
+    case $command in
+      *"pg_walfile_name(pg_switch_wal()"*)
+        # The segment pg_walfile_name names of the location the switch returns, or of one byte
+        # before it.
+        [[ $command =~ pg_walfile_name\(pg_switch_wal\(\)(\ -\ 1::numeric)?\) ]] || { echo "error: unexpected SQL in $*" >&2; exit 1; }
+        named=$segment
+        if [[ -e $state/idle.$key && -z ${BASH_REMATCH[1]} ]]; then
+          named=$(next_segment "$segment")
+        fi
+        echo switched > "$state/switched.$key"
+        event "switched $namespace/$database $named"
+        printf '%s %s\n' "$named" "$(date -u '+%Y-%m-%d %H:%M:%S')"
+        ;;
+      *"select last_archived_wal from pg_stat_archiver"*)
+        late=$(cat "$state/archiver-late.$key" 2> /dev/null || echo 0)
+        if [[ (-f $state/switched.$key || -e $state/idle.$key) && ! -e $state/archiver-stuck.$key ]] && ((late == 0)); then
+          if [[ -e $state/archiver-ahead.$key ]]; then
+            printf '%s\n' "$(next_segment "$segment")"
+          else
+            echo "$segment"
+          fi
+        else
+          ((late == 0)) || echo $((late - 1)) > "$state/archiver-late.$key"
+          echo 000000010000000000000029
+        fi
+        ;;
+      *)
+        echo "error: unexpected SQL in $*" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  *)
+    echo "fake kubectl: unexpected kubectl $*" >&2
+    exit 1
+    ;;
+esac

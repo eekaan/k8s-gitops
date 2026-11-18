@@ -5559,7 +5559,22 @@ spec:
       CNPG_CLUSTER_NAME: <app>-db
       CNPG_NAMESPACE: <the Kustomization's targetNamespace>
       CNPG_STORAGE_SIZE: 10Gi  # each instance's volume; 5Gi when unset
+      # CNPG_BACKUPS_SUSPENDED: "true"  # only while the database is restored; false when unset
 ```
+
+`CNPG_BACKUPS_SUSPENDED: "true"` holds a database for its restore onto a rebuilt cluster
+([rebuild.md](runbooks/rebuild.md#building-it-again)): it sets `suspend` on the dump CronJob
+`<name>-pgdump` and on the ScheduledBackup `<name>`, which then make no dump and no base backup, the
+ScheduledBackup's immediate one included, and changes nothing else, the WAL archiver, the
+`ObjectStore` and its retention among them; unset, both carry `suspend: false`. A rebuilt cluster
+makes the Cluster again under its old name, empty, and without the hold its dumps would rotate the
+real ones out of the old path and a base backup of it could become the newest of the old archive. It
+is set in a pull request before Flux first applies the application, as Flux follows `main`, and
+released in the pull request that switches the application to its restored database, never before
+it. While it is set, `PostgresDumpStale` fires once the dump job has had no success for 36 hours,
+which on a rebuilt cluster is 36 hours after the CronJob is made, and `PostgresBackupTooOld` once the
+newest base backup the plugin reports for the cluster is 36 hours old ([Alerts](#alerts)), so a hold
+left in place does not go unseen.
 
 `CNPG_NAMESPACE` is the namespace the application is applied to: a component cannot read
 `targetNamespace`, and the namespace is a level of the cluster's archive path. The Cluster's
@@ -6493,10 +6508,12 @@ is Ready, and the application is Ready once n8n answers its readiness endpoint.
   as its data does not survive a rebuild ([rebuild.md](runbooks/rebuild.md)), so the order is: the
   store's recovery keys and the backups' key, as for every application
   ([the runbook](runbooks/volume-backups.md#the-stores-key-is-lost-and-the-file-is-kept)), which lets
-  the claim be restored; then the encryption key, before n8n starts. n8n's pod waits for its Secret
-  meanwhile, so n8n does not start without the key. When the operator keeps no copy of the
-  key, it is read back from the latest backup of the volume, by hand, into a directory only the
-  operator can read, and written to the store without being displayed:
+  the claim be restored; then the encryption key, before n8n starts; and the database, held from
+  Flux's first apply and restored from its archive beside the rebuilt, empty one, then switched over
+  ([rebuild.md](runbooks/rebuild.md#building-it-again)), as the volume holds none of n8n's work.
+  n8n's pod waits for its Secret meanwhile, so n8n does not start without the key. When the
+  operator keeps no copy of the key, it is read back from the latest backup of the volume, by hand,
+  into a directory only the operator can read, and written to the store without being displayed:
 
   ```sh
   install -d -m 700 <directory>

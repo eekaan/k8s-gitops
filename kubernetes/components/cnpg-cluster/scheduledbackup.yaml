@@ -17,6 +17,10 @@ metadata:
   name: ${CNPG_CLUSTER_NAME}
 spec:
   schedule: "0 47 2 * * *"
+  # Held while the database is restored, with the dump job: a suspended ScheduledBackup takes no
+  # backup, the immediate one included, which one made suspended takes once it is released
+  # (kustomization.yaml, CNPG_BACKUPS_SUSPENDED).
+  suspend: ${CNPG_BACKUPS_SUSPENDED:=false}
   immediate: true
   backupOwnerReference: self
   method: plugin

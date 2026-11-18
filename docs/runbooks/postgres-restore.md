@@ -246,11 +246,17 @@ just postgres-dumps NS OLD CLUSTER
 `just postgres-dumps CLUSTER` lists the databases that have a dump, as `<namespace>/<name>`. The
 names are the UTC times the dumps were taken. Choose the dump by its time, not by its place in
 the listing: when a lost cluster is rebuilt under its old name, Flux creates `OLD` empty with its
-own dump job, which from its first night uploads dumps of the empty database to this same path.
-Those dumps start the listing, and after 14 nights every real dump has been rotated out. Restore
-before then, or stop the rotation until the restore is done by suspending the application's
-Flux Kustomization (`flux suspend kustomization <app>`) and then the CronJob
-(`kubectl --namespace NS patch cronjob OLD-pgdump --patch '{"spec":{"suspend":true}}'`).
+own dump job, which from its first night would upload dumps of the empty database to this same
+path. Those dumps would start the listing, and after 14 nights every real dump would have been
+rotated out. On a rebuilt cluster the component's switch holds the job from Flux's first apply:
+`CNPG_BACKUPS_SUSPENDED: "true"` in the application's `ks.yaml`, which
+[rebuild.md](rebuild.md#building-it-again) has set before Flux is installed and which the
+switchover releases ([kubernetes.md](../kubernetes.md#postgresql)). On a cluster that runs, stop
+the rotation until the restore is done by suspending the application's Flux Kustomization
+(`flux suspend kustomization <app>`) and then the CronJob
+(`kubectl --namespace NS patch cronjob OLD-pgdump --patch '{"spec":{"suspend":true}}'`), which holds
+only while the Kustomization stays suspended: at its next apply, kustomize-controller takes over
+the field the `kubectl` manager wrote and sets it back to the tree's `suspend: false`.
 
 ### Fetching and decrypting one
 

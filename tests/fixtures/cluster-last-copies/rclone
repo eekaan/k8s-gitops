@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# A stand-in for rclone against the postgres bucket and the OpenBao bucket, installed by
+# tests/cluster-last-copies.bats as <tmp>/bin/rclone: a copy of the one of
+# tests/fixtures/postgres-dump-recipes, for the check recipes the last copies run. It finds its files
+# from its own path:
+#   <tmp>/store/<bucket>/<key>   the objects of each bucket; a bucket is a directory
+#   <tmp>/store-fails/list       while it exists, listing fails, naming the endpoint and the bucket
+#   <tmp>/store-fails/download   while it exists, a download fails
+# It answers as the pinned rclone answers an S3 API: lsjson lists the files under a prefix, only
+# those directly under it unless --recursive, a path relative to the prefix in Path and the file's
+# own name in Name; listing a bucket that does not exist exits 3 after a partial "["; downloading an
+# object that does not exist copies nothing and exits 0. Like rclone, it prints bucket names and the
+# endpoint, which the recipes keep to themselves. It records "rclone ARGS" in <tmp>/record/argv.
+set -uo pipefail
+
+root=${0%/bin/*}
+store=$root/store
+fails=$root/store-fails
+record=$root/record
+printf '%s\n' "rclone $*" >> "$record/argv"
+endpoint=${RCLONE_CONFIG_STORE_ENDPOINT-}
+if [[ ${RCLONE_CONFIG_STORE_TYPE-} != s3 || -z ${RCLONE_CONFIG_STORE_ACCESS_KEY_ID-} ]]; then
+  echo "Failed to create file system for store: didn't find section in config file" >&2
+  exit 1
+fi
+
+command=$1
+shift
+recursive=0
+paths=()
+for arg; do
+  case $arg in
+    --recursive) recursive=1 ;;
+    --files-only | --s3-no-check-bucket) ;;
+    -*)
+      echo "unexpected option: rclone $command $arg" >&2
+      exit 2
+      ;;
+    *) paths+=("$arg") ;;
+  esac
+done
+
+case $command in
+  lsjson)
+    key=${paths[0]#store:}
+    bucket=${key%%/*}
+    if [[ -e $fails/list ]]; then
+      echo "ERROR : $bucket: AccessDenied listing at $endpoint" >&2
+      exit 1
+    fi
+    if [[ ! -d $store/$bucket ]]; then
+      echo "["
+      echo "ERROR : error listing $bucket at $endpoint: directory not found" >&2
+      exit 3
+    fi
+    dir=$store/${key%/}
+    depth=(-maxdepth 1)
+    ((!recursive)) || depth=()
+    echo "["
+    if [[ -d $dir ]]; then
+      (cd "$dir" && find . -mindepth 1 "${depth[@]}" -type f -printf '%P\t%f\t%s\n' | sort) |
+        jq -R -c 'split("\t") | {Path: .[0], Name: .[1], Size: (.[2] | tonumber), MimeType: "application/octet-stream", IsDir: false}' |
+        paste -sd, -
+    fi
+    echo "]"
+    ;;
+  copyto)
+    source=${paths[0]#store:} target=${paths[1]}
+    if [[ -e $fails/download ]]; then
+      echo "ERROR : $source: Failed to copy: AccessDenied at $endpoint" >&2
+      exit 1
+    fi
+    if [[ -f $store/$source ]]; then
+      cp "$store/$source" "$target"
+    fi
+    ;;
+  *)
+    echo "unexpected call: rclone $command $*" >&2
+    exit 2
+    ;;
+esac
