@@ -1,0 +1,546 @@
+---
+# Probes that are not in the one shape the check accepts, each named after the way it leaves it,
+# and each else as the tree's: the job, the module public_https, the blackbox exporter's Service as
+# its prober, the public Gateway's proxies' Service as its one target, the hostname label and the
+# one relabeling that makes it the parameter hostname. Prometheus scrapes a Probe's prober, and the
+# exporter there connects to each of its targets, so each of these could reach a port that has no
+# rule; the check does not follow where a name leads, so it refuses them all alike.
+# The kubelet's Service, which the Prometheus Operator makes at run time, headless, with the nodes'
+# addresses as its endpoints (pkg/kubelet/controller.go of the pinned operator): as the target, at
+# the cilium-operator's metrics port, and as the prober, at the agents' health port.
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: kubelet-target
+  namespace: monitoring
+spec:
+  jobName: public-endpoints
+  module: public_https
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+  targets:
+    staticConfig:
+      static:
+        - http://kube-prometheus-stack-kubelet.kube-system.svc.cluster.local:9963/metrics
+      labels:
+        hostname: probed.example
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: kubelet-prober
+  namespace: monitoring
+spec:
+  jobName: public-endpoints
+  module: public_https
+  prober:
+    url: kube-prometheus-stack-kubelet.kube-system.svc:9879
+  targets:
+    staticConfig:
+      static:
+        - https://envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local/
+      labels:
+        hostname: probed.example
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname
+---
+# Headless Services of the render whose names resolve to the nodes' own addresses: Envoy's, over the
+# host-network DaemonSet on every node, as the target at the cilium-operator's metrics port, and the
+# scheduler's, over the control planes' static pods, which no render holds, as the prober at
+# Envoy's metrics port.
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: headless-host-network
+  namespace: monitoring
+spec:
+  jobName: public-endpoints
+  module: public_https
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+  targets:
+    staticConfig:
+      static:
+        - http://cilium-envoy.kube-system.svc.cluster.local:9963/
+      labels:
+        hostname: probed.example
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: headless-static-pods
+  namespace: monitoring
+spec:
+  jobName: public-endpoints
+  module: public_https
+  prober:
+    url: kube-prometheus-stack-kube-scheduler.kube-system.svc:9964
+  targets:
+    staticConfig:
+      static:
+        - https://envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local/
+      labels:
+        hostname: probed.example
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname
+---
+# An ExternalName Service, whose cluster name is another name for any host, reached on the URL's
+# port, and a Service without a selector, which leads where endpoints written by hand say.
+apiVersion: v1
+kind: Service
+metadata:
+  name: rev-external
+  namespace: kube-system
+spec:
+  type: ExternalName
+  externalName: node.example
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: external-name
+  namespace: monitoring
+spec:
+  jobName: public-endpoints
+  module: public_https
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+  targets:
+    staticConfig:
+      static:
+        - https://rev-external.kube-system.svc:9963/
+      labels:
+        hostname: probed.example
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: without-selector
+  namespace: kube-system
+spec:
+  ports:
+    - name: metrics
+      port: 9963
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: without-selector
+  namespace: monitoring
+spec:
+  jobName: public-endpoints
+  module: public_https
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+  targets:
+    staticConfig:
+      static:
+        - http://without-selector.kube-system.svc:9963/
+      labels:
+        hostname: probed.example
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname
+---
+# A prober that is not the exporter's Service, and targets that are not the proxies' Service on a
+# port of the Gateway's listeners: an address and a port without a scheme, another port of the
+# Service, the Service's name in another namespace, and a second target beside the Service.
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: not-the-exporter
+  namespace: monitoring
+spec:
+  jobName: public-endpoints
+  module: public_https
+  prober:
+    url: prober.example:9115
+  targets:
+    staticConfig:
+      static:
+        - https://envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local/
+      labels:
+        hostname: probed.example
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: without-scheme
+  namespace: monitoring
+spec:
+  jobName: public-endpoints
+  module: public_https
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+  targets:
+    staticConfig:
+      static:
+        - envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local:443
+      labels:
+        hostname: probed.example
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: other-port
+  namespace: monitoring
+spec:
+  jobName: public-endpoints
+  module: public_https
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+  targets:
+    staticConfig:
+      static:
+        - https://envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local:9964/
+      labels:
+        hostname: probed.example
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: other-namespace
+  namespace: monitoring
+spec:
+  jobName: public-endpoints
+  module: public_https
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+  targets:
+    staticConfig:
+      static:
+        - https://envoy-envoy-gateway-system-public-5ea56ca9.monitoring.svc.cluster.local/
+      labels:
+        hostname: probed.example
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: second-target
+  namespace: monitoring
+spec:
+  jobName: public-endpoints
+  module: public_https
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+  targets:
+    staticConfig:
+      static:
+        - https://envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local/
+        - http://node.example:9963/
+      labels:
+        hostname: probed.example
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname
+---
+# Relabelings beside the tree's one, which run after the operator's own and so set what Prometheus
+# scrapes and what the exporter probes: the address and the target by name, the target by a
+# labelmap of the hostname label, and the target by a target label built from the groups of the
+# regex, the second of which is none and expands to nothing.
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: readdressed
+  namespace: monitoring
+spec:
+  jobName: public-endpoints
+  module: public_https
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+  targets:
+    staticConfig:
+      static:
+        - https://envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local/
+      labels:
+        hostname: probed.example
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname
+        - action: replace
+          targetLabel: __address__
+          replacement: node.example:9963
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: retargeted
+  namespace: monitoring
+spec:
+  jobName: public-endpoints
+  module: public_https
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+  targets:
+    staticConfig:
+      static:
+        - https://envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local/
+      labels:
+        hostname: probed.example
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname
+        - action: replace
+          targetLabel: __param_target
+          replacement: http://node.example:9963/
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: labelmapped
+  namespace: monitoring
+spec:
+  jobName: public-endpoints
+  module: public_https
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+  targets:
+    staticConfig:
+      static:
+        - https://envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local/
+      labels:
+        hostname: http://node.example:9963/
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname
+        - action: labelmap
+          regex: hostname
+          replacement: __param_target
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: templated
+  namespace: monitoring
+spec:
+  jobName: public-endpoints
+  module: public_https
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+  targets:
+    staticConfig:
+      static:
+        - https://envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local/
+      labels:
+        hostname: http://node.example:9963/
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname
+        - action: replace
+          sourceLabels:
+            - hostname
+          regex: (.+)
+          targetLabel: __param_${2}target
+---
+# Fields beyond the tree's shape: a scrape class, whose relabelings and settings apply to the
+# scrape; a scheme and a proxy of the prober, the second of which Prometheus connects to instead;
+# a label beside the hostname; Ingresses beside the static targets, and Ingresses alone; and a
+# module of the exporter's that tests/probes.bats does not pin.
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: scrape-class
+  namespace: monitoring
+spec:
+  jobName: public-endpoints
+  module: public_https
+  scrapeClass: nodes
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+  targets:
+    staticConfig:
+      static:
+        - https://envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local/
+      labels:
+        hostname: probed.example
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: prober-scheme
+  namespace: monitoring
+spec:
+  jobName: public-endpoints
+  module: public_https
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+    scheme: https
+  targets:
+    staticConfig:
+      static:
+        - https://envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local/
+      labels:
+        hostname: probed.example
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: prober-proxy
+  namespace: monitoring
+spec:
+  jobName: public-endpoints
+  module: public_https
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+    proxyUrl: http://node.example:9963
+  targets:
+    staticConfig:
+      static:
+        - https://envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local/
+      labels:
+        hostname: probed.example
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: second-label
+  namespace: monitoring
+spec:
+  jobName: public-endpoints
+  module: public_https
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+  targets:
+    staticConfig:
+      static:
+        - https://envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local/
+      labels:
+        hostname: probed.example
+        __scheme__: http
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: static-and-ingresses
+  namespace: monitoring
+spec:
+  jobName: public-endpoints
+  module: public_https
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+  targets:
+    staticConfig:
+      static:
+        - https://envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local/
+      labels:
+        hostname: probed.example
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname
+    ingress:
+      selector:
+        matchLabels:
+          probed: "true"
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: from-ingresses
+  namespace: monitoring
+spec:
+  jobName: public-endpoints
+  module: public_https
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+  targets:
+    ingress:
+      selector:
+        matchLabels:
+          probed: "true"
+---
+apiVersion: monitoring.coreos.com/v1
+kind: Probe
+metadata:
+  name: other-module
+  namespace: monitoring
+spec:
+  jobName: public-endpoints
+  module: tcp_connect
+  prober:
+    url: blackbox-exporter.monitoring.svc.cluster.local:9115
+  targets:
+    staticConfig:
+      static:
+        - https://envoy-envoy-gateway-system-public-5ea56ca9.envoy-gateway-system.svc.cluster.local/
+      labels:
+        hostname: probed.example
+      relabelingConfigs:
+        - action: replace
+          sourceLabels:
+            - hostname
+          targetLabel: __param_hostname

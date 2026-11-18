@@ -337,13 +337,14 @@ registry() {
 
 @test "The demo route's firewall blocks, a route may choose detection only, and a route's health shows whether its firewall was accepted" {
   local file ks mode route tree health cel verdicts
-  # The demo route takes it in blocking mode, and waits on what it waited on before: the policy's
-  # definition comes with gateway-public's chain, through envoy-gateway and envoy-gateway-crds.
+  # The demo route takes it in blocking mode and waits on gateway-public, whose chain brings the
+  # policy's definition through envoy-gateway and envoy-gateway-crds, on hello, and on the blackbox
+  # exporter its Probe needs.
   overlay
   yq -N 'select(.kind == "Kustomization" and .metadata.name == "hello-route")' "$OVERLAY" >"$BATS_TEST_TMPDIR/ks.yaml"
   echo "hello-route: $(yq -o json -I0 '.spec' "$BATS_TEST_TMPDIR/ks.yaml")"
   [ "$(yq -o json -I0 '.spec.postBuild.substitute' "$BATS_TEST_TMPDIR/ks.yaml" | jq -cS .)" = '{"WAF_MODE":"On","WAF_ROUTE":"hello"}' ]
-  [ "$(yq '.spec.dependsOn | map(.name) | sort | join(" ")' "$BATS_TEST_TMPDIR/ks.yaml")" = "gateway-public hello" ]
+  [ "$(yq '.spec.dependsOn | map(.name) | sort | join(" ")' "$BATS_TEST_TMPDIR/ks.yaml")" = "blackbox-exporter gateway-public hello" ]
   # Every application that takes the component, enabled or not, names its route and one of the two
   # modes, waits, and holds the policy's acceptance as its health: with failOpen the route keeps
   # serving when the module cannot be had, so the leading controller replica's failure to fetch it

@@ -3,11 +3,12 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 # The public Gateway, the configuration of its proxies, the certificate its https listener serves,
-# the policy for its clients and the route that redirects plain HTTP (docs/kubernetes.md, Envoy
-# Gateway).
+# the policy for its clients, the route that redirects plain HTTP and the Probe of that redirect
+# (docs/kubernetes.md, Envoy Gateway).
 resources:
   - envoyproxy.yaml
   - gateway.yaml
   - certificate.yaml
   - clienttrafficpolicy.yaml
   - httproute-redirect.yaml
+  - probe.yaml

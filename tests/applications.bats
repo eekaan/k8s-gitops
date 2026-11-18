@@ -376,7 +376,7 @@ of_ai_system() {
 }
 
 @test "A cluster that does not select n8n builds none of it, and one that selects it without what it depends on is refused" {
-  local dependency dependencies=(cloudnative-pg plugin-barman-cloud prometheus-operator-crds external-secrets openbao-store volsync linstor-cluster gateway-public)
+  local dependency dependencies=(cloudnative-pg plugin-barman-cloud prometheus-operator-crds external-secrets openbao-store volsync linstor-cluster gateway-public blackbox-exporter)
   # The overlay selects it with two entries, its namespace directory and its ks.yaml, and builds
   # the namespace, the defaults every namespace directory holds, and the Kustomization.
   # Open WebUI's ks.yaml is a third entry, selected by it alone.
@@ -499,7 +499,7 @@ OPEN_WEBUI_REVIEWED="PORT HOME DATA_DIR WEBUI_SECRET_KEY_FILE WEBUI_AUTH_COOKIE_
   CORS_ALLOW_ORIGIN ENABLE_SIGNUP DEFAULT_USER_ROLE OLLAMA_BASE_URL"
 
 @test "Open WebUI is selected by one overlay entry and builds nothing when it is not" {
-  local dependency dependencies=(external-secrets gateway-public linstor-cluster openbao-store volsync)
+  local dependency dependencies=(blackbox-exporter external-secrets gateway-public linstor-cluster openbao-store volsync)
   # The namespace directory is the one n8n's entry selects; Open WebUI adds its ks.yaml alone.
   [ "$(yq '.resources[] | select(test("/ai-system/open-webui/ks.yaml$"))' "$OVERLAY_DIR/kustomization.yaml" | paste -sd, -)" = ../../base/ai-system/open-webui/ks.yaml ]
   overlay

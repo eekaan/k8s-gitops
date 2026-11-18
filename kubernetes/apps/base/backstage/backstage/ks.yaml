@@ -26,7 +26,8 @@ spec:
   # The Cluster and its PodMonitor are of the operator's and Prometheus Operator's kinds, and its
   # ObjectStore the Barman Cloud plugin's, which archives its WAL; the component's backups and its
   # dump job read their keys through ExternalSecrets from the secret store; the route names the
-  # public Gateway; the network policies are a kind Cilium's operator defines.
+  # public Gateway, and its Probe is answered by the blackbox exporter; the network policies are a
+  # kind Cilium's operator defines.
   dependsOn:
     - name: cloudnative-pg
     - name: plugin-barman-cloud
@@ -35,6 +36,7 @@ spec:
     - name: openbao-store
     - name: gateway-public
     - name: cilium
+    - name: blackbox-exporter
   # Ready once the release is, which is once Backstage answers its readiness endpoint with the
   # database in place.
   wait: true

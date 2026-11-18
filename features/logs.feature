@@ -109,7 +109,7 @@ Feature: Logs
   Scenario: The log store's interface is reached at logs under the cluster's domain on the public Gateway, behind the cluster's sign-in
     Given the victoria-logs-route application as the lab-sto2 overlay applies it, the store's application, the monitoring namespace and oauth2-proxy's grant, built with two different cluster domains
     When its Kustomization, its route, its SecurityPolicy, its sign-in route, the namespace's labels and the grant are read
-    Then the application sits beside the store in monitoring, takes the sso component with the route and the host logs, waits, and names gateway-public, victoria-logs and oauth2-proxy in dependsOn, and the store's application waits too; monitoring carries the Gateway label; the route logs is on the public Gateway's https listener for logs under the cluster's domain; its one SecurityPolicy targets it alone and asks oauth2-proxy's Service of sso-system at "/?rd=https://logs.<domain>/", sending it only the cookie, passing the backend the identity it answers with and never letting a request through when the answer cannot be had, and sets nothing else; the route logs-oauth2 sends /oauth2/ on the same host to oauth2-proxy; the grant names monitoring for SecurityPolicy and HTTPRoute; and the route's host, the return address and the sign-in route's host follow the domain
+    Then the application sits beside the store in monitoring, takes the sso component with the route and the host logs, waits, and names gateway-public, victoria-logs, oauth2-proxy and blackbox-exporter in dependsOn, and the store's application waits too; monitoring carries the Gateway label; the route logs is on the public Gateway's https listener for logs under the cluster's domain; its one SecurityPolicy targets it alone and asks oauth2-proxy's Service of sso-system at "/?rd=https://logs.<domain>/", sending it only the cookie, passing the backend the identity it answers with and never letting a request through when the answer cannot be had, and sets nothing else; the route logs-oauth2 sends /oauth2/ on the same host to oauth2-proxy; the grant names monitoring for SecurityPolicy and HTTPRoute; and the route's host, the return address and the sign-in route's host follow the domain
 
   Scenario: Only the interface and its queries are routed to the log store, and the root is redirected to the interface
     Given the route logs as Flux applies it and the store's rendered Service
@@ -123,8 +123,8 @@ Feature: Logs
 
   Scenario: The log store's route is selected by an overlay entry, builds nothing when it is not, and is refused without the store, the Gateway or the sign-in
     Given the lab-sto2 overlay, which lists victoria-logs-route in one entry of its own
-    When it is built with the entry and without it, and the tree is checked without the entry and with victoria-logs, gateway-public or oauth2-proxy left out in turn
-    Then with the entry it applies the Kustomization victoria-logs-route and without it nothing of the route and nothing else changes, the tree without it passes the kubernetes check, and each of the three left out is refused, naming victoria-logs-route and the missing application
+    When it is built with the entry and without it, and the tree is checked without the entry and with victoria-logs, gateway-public, oauth2-proxy or blackbox-exporter left out in turn
+    Then with the entry it applies the Kustomization victoria-logs-route and without it nothing of the route and nothing else changes, the tree without it passes the kubernetes check, and each of the four left out is refused, naming victoria-logs-route and the missing application
 
   Scenario: The routed paths were read from the VictoriaLogs release the pinned chart deploys
     Given the route logs, whose header records the VictoriaLogs release its paths were read from, and the store's pinned chart

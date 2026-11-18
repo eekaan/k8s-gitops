@@ -19,6 +19,7 @@ spec:
   system: networking
   dependsOn:
     - resource:default/acme-issuers
+    - component:default/blackbox-exporter
     - resource:default/cilium-bgp
     - resource:default/cluster-ca
     - component:default/envoy-gateway

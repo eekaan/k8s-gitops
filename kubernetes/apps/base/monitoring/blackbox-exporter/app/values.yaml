@@ -1,0 +1,86 @@
+---
+# Values for the blackbox exporter chart, read by the HelmRelease through a ConfigMap generated
+# without substitution. Keys not set here keep the chart's defaults: a non-root user, a read-only
+# root filesystem, no privilege escalation and every capability dropped.
+#
+# The exporter probes the public Gateway's hostnames for the Probes the applications declare beside
+# their routes (docs/kubernetes.md, Probes). A Probe gives it the proxies' Service as the target and
+# the hostname as the parameter `hostname`, which the exporter sets as the Host header and, as the
+# module names no server_name, as the name the TLS handshake asks for and verifies.
+
+# Object names are this, not the release's name and the chart's.
+fullnameOverride: blackbox-exporter
+
+# Two, never on one worker, under a budget that keeps one: a drain does not blind the probes.
+replicas: 2
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: DoNotSchedule
+    # Only nodes the pods may run on count, so tainted control planes do not.
+    nodeTaintsPolicy: Honor
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: prometheus-blackbox-exporter
+        app.kubernetes.io/instance: blackbox-exporter
+podDisruptionBudget:
+  maxUnavailable: 1
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+
+# The restricted Pod Security level asks for the runtime's seccomp profile, which the chart does not
+# set.
+podSecurityContext:
+  seccompProfile:
+    type: RuntimeDefault
+
+# The exporter's own metrics. The Probes' results are scraped through the Probe resources, which
+# Prometheus selects in every namespace.
+serviceMonitor:
+  selfMonitor:
+    enabled: true
+
+# Only the three modules below: the chart's http_2xx follows redirects and takes any 2xx, which no
+# probe of the public Gateway wants.
+config:
+  modules:
+    http_2xx: null
+    # A route of the https listener: answered 200 over TLS whose certificate is verified. What it is
+    # verified against follows the issuer of the Gateway's certificate, and is in the values for that
+    # issuer, trust/<issuer>.yaml, which the HelmRelease adds to these; insecure_skip_verify stays
+    # off, as its default is, but in the values of letsencrypt-staging, whose chain no client trusts.
+    public_https:
+      prober: http
+      timeout: 5s
+      http:
+        valid_status_codes:
+          - 200
+        fail_if_not_ssl: true
+        # A redirect is an answer, not a path to follow somewhere else.
+        follow_redirects: false
+        # The cluster's networks are IPv4.
+        preferred_ip_protocol: ip4
+    # A route of the https listener behind the cluster's sign-in: answered, without a session, with
+    # the 302 to dex that oauth2-proxy sends through the proxies, which is not followed. A 200 means
+    # the sign-in no longer stands in front of the backend. It is public_https but for the status,
+    # and the values for each issuer give it the same trust.
+    public_https_signin:
+      prober: http
+      timeout: 5s
+      http:
+        valid_status_codes:
+          - 302
+        fail_if_not_ssl: true
+        follow_redirects: false
+        preferred_ip_protocol: ip4
+    # The redirect of the http listener: a 301, not followed, over plain HTTP.
+    public_http_redirect:
+      prober: http
+      timeout: 5s
+      http:
+        valid_status_codes:
+          - 301
+        follow_redirects: false
+        preferred_ip_protocol: ip4

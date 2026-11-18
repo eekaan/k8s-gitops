@@ -1,0 +1,6 @@
+---
+# The exporter's trust while the public Gateway's certificate comes from Let's Encrypt's production
+# directory, the ClusterIssuer letsencrypt-production (docs/kubernetes.md, Probes): the system's
+# roots of the exporter's image, as a client outside has them. The modules name no CA of their
+# own, and nothing is mounted, so these values add nothing to the shared ones.
+{}

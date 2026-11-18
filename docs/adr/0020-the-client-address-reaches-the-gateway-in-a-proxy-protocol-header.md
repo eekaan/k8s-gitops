@@ -2,6 +2,10 @@
 
 - Status: accepted
 - Date: 2026-11-15
+- Amended: 2026-11-16, `public-proxy` also admits the blackbox exporter's pods to the two listener
+  ports, 10080 and 10443, for the probes of the public hostnames: a sender inside the cluster that
+  writes no header, so not every sender the listeners admit writes one, and `optional` stays until
+  the probes reach the listeners through the edges ([Probes](../kubernetes.md#probes))
 
 ## Context
 

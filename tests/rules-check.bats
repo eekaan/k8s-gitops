@@ -428,10 +428,10 @@ promtool_calls() {
 #   METRIC REGEX|APPLICATION|MONITOR FILE|TARGET FILE|NAMESPACE
 # where the monitor and the target are files of the render of the application, without .yaml, and
 # NAMESPACE is where an object the render holds without one lands. The target is a Service of a
-# ServiceMonitor or the workload of a PodMonitor, or recorded:NAME, the operator's object of that name
-# in linstor_targets or cnpg_targets, which the operator makes at run time and the render therefore
-# does not hold.
-# Metrics of the same source share an entry; an alert on a metric no entry matches fails.
+# ServiceMonitor, the workload of a PodMonitor, the Service of a Probe's prober, or recorded:NAME, the
+# operator's object of that name in linstor_targets or cnpg_targets, which the operator makes at run
+# time and the render therefore does not hold. Metrics of the same source share an entry; an alert on
+# a metric no entry matches fails.
 scrapes=(
   # Prometheus' own series of each scrape: its target is up or it is not.
   '^up$|-|-|-|-'
@@ -451,6 +451,8 @@ scrapes=(
   # same one under its own name.
   '^cnpg_|n8n|PodMonitor.monitoring.coreos.com_ai-system_n8n-db|recorded:Pod/n8n-db-1|ai-system'
   '^barman_cloud_|n8n|PodMonitor.monitoring.coreos.com_ai-system_n8n-db|recorded:Pod/n8n-db-1|ai-system'
+  # The blackbox exporter's probes of the public hostnames, through one of the Probes beside the routes.
+  '^probe_|hello-route|Probe.monitoring.coreos.com_demo_hello|blackbox-exporter/Service_monitoring_blackbox-exporter|monitoring'
 )
 
 # own_metrics RENDER: the metrics each own alert of the render reads, as APPLICATION ALERT METRIC per
@@ -488,6 +490,17 @@ scrape_problem() {
     [[ $target == */* ]] || target="$app/$target"
     file="$render/$target.yaml"
     [ -f "$file" ] || { echo "no target ${target#*/} in ${target%%/*}"; return 0; }
+    # A Probe selects nothing: it names its prober by address, which must be a port of the Service,
+    # by the Service's cluster name.
+    if [ "$(jq -r '.kind' <<<"$json")" = Probe ]; then
+      # shellcheck disable=SC2016 # $probe and $host are jq variables.
+      scraped="$(yq -o json -I0 '.' "$file" | jq -r --argjson probe "$json" --arg ns "$namespace" '
+        "\(.metadata.name).\(.metadata.namespace // $ns).svc.cluster.local" as $host
+        | select(.kind == "Service" and any(.spec.ports[]?; $probe.spec.prober.url == "\($host):\(.port)"))
+        | "Service/" + .metadata.name')"
+      [ -n "$scraped" ] || echo "the Probe $monitor names no port of $(yq '"Service/" + .metadata.name' "$file") as its prober"
+      return 0
+    fi
     candidates="$(yq -N -o json -I0 '(select(.kind == "Service") | {"name": ("Service/" + .metadata.name),
       "ns": (.metadata.namespace // "'"$namespace"'"), "labels": .metadata.labels, "ports": [.spec.ports[].name],
       "selector": .spec.selector, "targets": [.spec.ports[] | .targetPort // .port]}),
@@ -583,6 +596,21 @@ scrape_gaps() {
   [ "$(grep -c -v 'cilium-monitoring' <<<"$gaps")" -eq 0 ]
   # Each names the target it was matched with.
   [ "$(grep -c 'selects nothing that exposes the port it scrapes of DaemonSet/cilium$' <<<"$gaps")" -eq "$(grep -c . <<<"$gaps")" ]
+  # The same for a Probe, which names its prober by address: one that names another port of the
+  # exporter's Service, and one whose Service is not the exporter's.
+  fixture
+  yq -i '.spec.prober.url = "blackbox-exporter.monitoring.svc.cluster.local:9116"' \
+    "$FX/render/$CLUSTER/hello-route/Probe.monitoring.coreos.com_demo_hello.yaml"
+  gaps="$(scrape_gaps "$FX/render")"
+  echo "$gaps"
+  [ "$(grep -c '^blackbox-exporter: alert Public.*the Probe Probe.monitoring.coreos.com_demo_hello names no port of Service/blackbox-exporter as its prober$' <<<"$gaps")" -ge 1 ]
+  [ "$(grep -c -v '^blackbox-exporter: ' <<<"$gaps")" -eq 0 ]
+  fixture
+  yq -i '.metadata.name = "renamed"' "$FX/render/$CLUSTER/blackbox-exporter/Service_monitoring_blackbox-exporter.yaml"
+  gaps="$(scrape_gaps "$FX/render")"
+  echo "$gaps"
+  [ "$(grep -c 'names no port of Service/renamed as its prober$' <<<"$gaps")" -ge 1 ]
+  [ "$(grep -c -v '^blackbox-exporter: ' <<<"$gaps")" -eq 0 ]
   # The same for the operator-made targets.
   fixture
   yq -i '.spec.podMetricsEndpoints[0].port = "renamed"' \

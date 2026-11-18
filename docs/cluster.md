@@ -356,12 +356,51 @@ test reads every pod template of the render that sets `hostNetwork` for the port
 and init containers declare, and fails when such a port is neither admitted by exactly one rule
 that every node has nor listed under `no-rule`, or is both; when a rule admits no such port and is
 not named under `no-pod`, or is both; when an entry of either list matches nothing; when a pod
-template that is not on the host network declares a host port; and when a monitor of the render
-scrapes a port listed under `no-rule`, or the render holds a scraper the test does not read: a
-`Probe`, a `ScrapeConfig` or a Prometheus with scrape configurations of its own. It holds the
-account of the ports, of the rules and of the host ports as literals, so a chart that adds a port
-or a host port, and a rule that changes its nodes or its sources, change the test. Three things
-are outside what it reads:
+template that is not on the host network declares a host port; when a monitor of the render
+scrapes a port listed under `no-rule`, an endpoint that rewrites the address it scrapes, by name, by
+a labelmap or by a target label built from its regex's groups, counting as one that scrapes every
+port of the pods it selects; when a `Probe` is not in the one shape the test accepts, below; and
+when the render holds what the test cannot follow: a `ScrapeConfig`, or a Prometheus with scrape
+configurations of its own or a scrape class with relabelings, which run on every monitor it
+selects. It holds the account of the ports, of the rules and of the host ports as literals, so a
+chart that adds a port or a host port, and a rule that changes its nodes or its sources, change the
+test.
+
+Prometheus scrapes a `Probe`'s prober, and the blackbox exporter there connects to each of its
+targets ([Probes](kubernetes.md#probes)). The test does not follow where those names lead, which a
+render cannot show: a Service that a controller makes at run time, as the Prometheus Operator makes
+the kubelet's, headless over the nodes' addresses; a headless Service, whose name is its pods' own
+addresses, the nodes' for pods on the host network and the control planes' for their static pods; a
+Service without a selector or an ExternalName, which lead where endpoints or another name say. It
+accepts a `Probe` in one shape, that of the tree's Probes, and refuses every other, saying how it
+leaves the shape:
+
+- its prober is the blackbox exporter's Service, by the name and port the render gives it, whose
+  selector selects the exporter's pods in the render, none on the host network and none that
+  resolves names its own way, by `hostAliases`, a `dnsConfig` or the `dnsPolicy` `None`, as the
+  Prometheus that resolves the prober's name does not either;
+- each target is the public Gateway's proxies' Service, by the name `tests/probes.bats` derives
+  from the render's one Gateway, over `http` or `https` on a port of the Gateway's listeners. Envoy
+  Gateway makes the proxies and their Service at run time, so no render holds them: at the version
+  `tests/probes.bats` holds the controller to, it builds the pods without the host network, which
+  only a patch changes, and the Service by that name, of one of the types an `EnvoyProxy` may give
+  it, each of which leads to the pods it selects; only a patch of the Service, a name of its own
+  or merged Gateways, whose proxies then take their GatewayClass's name, change that
+  ([resource_provider.go](https://github.com/envoyproxy/gateway/blob/v1.10.0/internal/infrastructure/kubernetes/proxy/resource_provider.go)).
+  So the test holds that no `EnvoyProxy` and no default of the controller's configuration patches
+  the pods or the Service, names the Service or merges the Gateways, that the render holds no
+  Service of that name in the controller's namespace, and that the namespace, the controller's,
+  enforces the Pod Security level `baseline` or `restricted`, either of which refuses the host
+  network;
+- the render holds no endpoints written by hand for either Service;
+- its spec holds the job, the module, the prober and the targets and nothing more, the prober its
+  address alone and the targets static ones with the label `hostname` alone; its module is one of
+  the three `tests/probes.bats` pins whole, each of the http prober; and its relabelings are the one
+  that makes that label the parameter `hostname`.
+
+The name of the proxies' Service, the relabeling and the modules are in
+`tests/fixtures/probe-shape.bash`, which both tests load. Three things are outside what the test
+reads:
 
 - A port that a process on the host network opens without declaring it in its pod: Cilium's health
   checks on TCP 4240, which the agent serves on its node's address
@@ -375,7 +414,9 @@ are outside what it reads:
   [What gets no rule](#what-gets-no-rule), from the operator's template. Pod Security refuses the
   host network and host ports below the privileged level
   ([kubernetes.md](kubernetes.md#pod-security)), so only a namespace that enforces that level,
-  `kube-system`, `monitoring`, `piraeus-datastore` or `security-system`, can hold another.
+  `kube-system`, `monitoring`, `piraeus-datastore` or `security-system`, can hold another. A
+  Service that a controller makes at run time is outside it as well, which is why a `Probe` that
+  names one is refused, but for the public Gateway's proxies' Service, on the terms above.
 - Whether a process binds the address its reason names. The reasons rest on the sources cited under
   [What gets no rule](#what-gets-no-rule), read at the versions the tree pins, and a chart update
   can change what a process binds without changing what its pod declares.

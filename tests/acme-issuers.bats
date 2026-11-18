@@ -257,9 +257,10 @@ rendered() {
   echo "chosen: $chosen"
   [ "$chosen" = letsencrypt-production ]
   [ "$(yq -N 'select(.kind == "Kustomization" and .spec.postBuild.substitute.PUBLIC_ISSUER != null) | .metadata.name' "$OVERLAY")" = gateway-public ]
-  # The overlay's patches are this one and the one that names external-dns' record owner, each of
-  # its own Kustomization.
-  [ "$(yq -o json -I0 '[.patches[].target.name]' "$REPO/kubernetes/apps/overlays/lab-sto2/kustomization.yaml")" = '["gateway-public","external-dns"]' ]
+  # The overlay's patches are this one, the one that gives the blackbox exporter's probes the same
+  # issuer (tests/probes.bats holds the two to one value) and the one that names external-dns'
+  # record owner, each of its own Kustomization.
+  [ "$(yq -o json -I0 '[.patches[].target.name]' "$REPO/kubernetes/apps/overlays/lab-sto2/kustomization.yaml")" = '["gateway-public","blackbox-exporter","external-dns"]' ]
   # It is not a cluster-config key: the tree's builds see it, and no cluster's key list holds it.
   [ -z "$(grep -rl PUBLIC_ISSUER "$REPO"/kubernetes/clusters || true)" ]
   # The Certificate follows the choice, and the choice names an issuer the cluster applies.

@@ -26,6 +26,7 @@ docker	ghcr.io/stakater/charts/reloader	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag li
 docker	ghcr.io/spegel-org/helm-charts/spegel	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
 docker	ghcr.io/grafana/helm-charts/grafana-operator	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
 docker	ghcr.io/prometheus-community/charts/kube-prometheus-stack	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
+docker	ghcr.io/prometheus-community/charts/prometheus-blackbox-exporter	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
 docker	ghcr.io/vectordotdev/helm-charts/vector	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
 docker	ghcr.io/victoriametrics/helm-charts/victoria-logs-single	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list
 docker	ghcr.io/openbao/charts/openbao	^[0-9]+\.[0-9]+\.[0-9]+$	registry tag list

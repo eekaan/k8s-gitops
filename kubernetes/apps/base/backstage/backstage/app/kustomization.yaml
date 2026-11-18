@@ -8,6 +8,7 @@ resources:
   - helmrelease.yaml
   - httproute.yaml
   - ocirepository.yaml
+  - probe.yaml
 
 # The component's dump job gets labels for its pods, which its policies in ciliumnetworkpolicy.yaml
 # select it by. The patch targets the CronJob by kind, as Flux substitutes its name after the build
@@ -37,6 +38,7 @@ configMapGenerator:
       - catalogue/acme-issuers.yaml
       - catalogue/alert-destinations.yaml
       - catalogue/backstage.yaml
+      - catalogue/blackbox-exporter.yaml
       - catalogue/cert-manager-dashboard.yaml
       - catalogue/cert-manager.yaml
       - catalogue/cilium-bgp.yaml
