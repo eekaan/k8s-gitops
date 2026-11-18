@@ -186,7 +186,40 @@ chart_ref() {
   [ -z "$(yq 'select(.kind == "ServiceMonitor") | .metadata.name' "$render")" ]
 }
 
+# keys_through_variables VALUES DIR...: the values keys that the chart templates under DIR... read
+# through a variable, as dotted paths, one a line; VALUES is the chart's own values.yaml. Where a
+# template assigns a variable .Values paths and nothing else, one path or the coalesce of several,
+# the variable is the value at the first of those paths that is not empty, so that path followed by
+# what the template reads of the variable is a key the chart reads. A later path of a coalesce
+# counts only where VALUES leaves every path before it empty, as values that only add keys never
+# take the chart past an earlier path its own values fill: cilium-configmap.yaml assigns $socketLB
+# the coalesce of .Values.socketLB and .Values.hostServices and reads $socketLB.hostNamespaceOnly,
+# and the chart's values give socketLB a key, so socketLB.hostNamespaceOnly is a key the chart reads
+# and hostServices.hostNamespaceOnly is one it ignores. A variable that a template ranges over or
+# builds with a function is left out: what is read of it is no key of the path.
+keys_through_variables() {
+  local values=$1 template assignment variable path
+  # What coalesce passes over: nothing, false, zero, and an empty string, map or list. By tag, as yq
+  # compares a scalar by its text: "0" equals 0 and 0.0 does not.
+  local empty='tag == "!!null" or (tag == "!!bool" and . == false)
+    or ((tag == "!!int" or tag == "!!float") and . >= 0 and . <= 0)
+    or (tag == "!!str" and . == "") or ((tag == "!!map" or tag == "!!seq") and length == 0)'
+  shift
+  while IFS= read -r template; do
+    while IFS= read -r assignment; do
+      variable=${assignment#*\$}
+      variable=${variable%%[!A-Za-z0-9_]*}
+      while IFS= read -r path; do
+        grep -oE "\\\$$variable(\.[A-Za-z0-9_]+)+" "$template" | sed "s/^\\\$$variable\./$path./"
+        # In parentheses, as yq's or and and bind looser than its pipe.
+        [[ $(yq ".$path | ($empty)" "$values") == true ]] || break
+      done < <(grep -oE '\.Values(\.[A-Za-z0-9_]+)+' <<<"$assignment" | sed 's/^\.Values\.//')
+    done < <(grep -oE '\{\{-? *\$[A-Za-z0-9_]+ *:?= *\(?(coalesce +)?(\.Values(\.[A-Za-z0-9_]+)+ *)+\)? *-?\}\}' "$template")
+  done < <(find "$@" -type f)
+}
+
 @test "every key in values.yaml is one the pinned chart defines" {
+  local planted
   chart_ref
   # The dotted path of every key, without descending into lists.
   # shellcheck disable=SC2016 # $p is a yq variable.
@@ -195,16 +228,39 @@ chart_ref() {
   helm show values "$url" --version "$tag" >"$BATS_TEST_TMPDIR/chart-values.yaml"
   # The chart's values.yaml leaves some keys it reads commented out, such as policyAuditMode, which
   # its cilium-configmap.yaml template reads; such a key is defined when a template of the chart
-  # reads it by its whole path. A path that starts with an upper-case letter is a method Helm gives
-  # .Values, such as AsMap, and no key.
+  # reads it by its whole path, or through a variable. A path that starts with an upper-case letter
+  # is a method Helm gives .Values, such as AsMap, and no key.
   helm pull "$url" --version "$tag" --untar --untardir "$BATS_TEST_TMPDIR/chart" >/dev/null
   read="$(grep -rhoE '\.Values(\.[A-Za-z0-9_]+)+' "$BATS_TEST_TMPDIR/chart"/*/templates | sed 's/^\.Values\.//; /^[A-Z]/d' | sort -u)"
   [ -n "$read" ]
+  {
+    yq "$keys" "$BATS_TEST_TMPDIR/chart-values.yaml"
+    echo "$read"
+    keys_through_variables "$BATS_TEST_TMPDIR/chart-values.yaml" "$BATS_TEST_TMPDIR/chart"/*/templates
+  } | sort -u >"$BATS_TEST_TMPDIR/defined"
 
-  unknown="$(comm -23 <(yq "$keys" "$APP/values.yaml" | sort -u) \
-    <({ yq "$keys" "$BATS_TEST_TMPDIR/chart-values.yaml"; echo "$read"; } | sort -u))"
+  unknown="$(comm -23 <(yq "$keys" "$APP/values.yaml" | sort -u) "$BATS_TEST_TMPDIR/defined")"
   echo "keys the chart does not define: ${unknown:-none}"
   [ -z "$unknown" ]
+
+  # undefined_with KEY: the keys the chart does not define once values.yaml sets KEY as well.
+  undefined_with() {
+    yq ".$1 = true" "$APP/values.yaml" | yq "$keys" - | sort -u | comm -23 - "$BATS_TEST_TMPDIR/defined"
+  }
+  # The key the chart reads through its variable is defined, and the check still refuses a key that
+  # is misspelt or misplaced: that key in another case, at the top level and under another map,
+  # another commented key in another case, that key under the coalesce's second path, which the
+  # chart's own socketLB keeps it from reading, and what a template reads of a variable it ranges
+  # over, a key of each pool and not of the map of pools, or builds with a function, a field of the
+  # certificate and not of its validity.
+  [ -z "$(undefined_with socketLB.hostNamespaceOnly)" ]
+  for planted in socketLB.hostNamespaceonly hostNamespaceOnly operator.socketLB.hostNamespaceOnly policyAuditmode \
+    hostServices.hostNamespaceOnly ipam.operator.autoCreateCiliumPodIPPools.allowFirstIP \
+    hubble.tls.auto.certValidityDuration.Cert; do
+    unknown="$(undefined_with "$planted")"
+    echo "with $planted set too, keys the chart does not define: ${unknown:-none}"
+    grep -qxF -- "$planted" <<<"$unknown"
+  done
 }
 
 @test "The install script uses the chart and values Flux uses" {
@@ -656,6 +712,52 @@ chart_config() {
     | .spec.template.metadata.annotations["cilium.io/cilium-configmap-checksum"] // ""' "$BATS_TEST_TMPDIR/render.yaml")" ]
 }
 
+@test "Pods under a sandbox runtime reach Service addresses" {
+  local classes dir outside said under value
+  local sentence='^\*\*Pods under a sandbox runtime reach Services\.\*\*'
+  bgp_inputs
+  tree_objects > "$BATS_TEST_TMPDIR/tree.jsonl"
+  # gVisor and a Kata guest give a pod a kernel of its own, so its sockets never pass the node's
+  # cgroup hooks, where the socket load balancer rewrites a Service address: such a pod reaches a
+  # Service only where the agents translate at the pod's interface. These two classes are what the
+  # value and the paragraph are for, so any other set of them that Flux builds fails the test, on
+  # purpose: a class taken away or added has both read again. No chart but Cilium's is rendered, so
+  # a class another chart would render is not counted.
+  classes=$(jq -r 'select(.object.kind == "RuntimeClass")
+    | .app + " " + .object.metadata.name + "=" + (.object.handler // "none")' "$BATS_TEST_TMPDIR/tree.jsonl" | sort | paste -sd';')
+  # Flux applies more than the applications: the cluster's root, Flux's own two applications beside
+  # it, and the overlay with its namespace directories. A class in any of them is one of the tree's.
+  for dir in "$COPY/kubernetes/clusters/lab-sto2" "$COPY"/kubernetes/clusters/lab-sto2/flux-system/*/app \
+    "$COPY/kubernetes/apps/overlays/lab-sto2"; do
+    kustomize build --load-restrictor LoadRestrictionsNone "$dir" >> "$BATS_TEST_TMPDIR/outside.yaml"
+    echo '---' >> "$BATS_TEST_TMPDIR/outside.yaml"
+  done
+  outside=$(yq -N 'select(.kind == "RuntimeClass") | .metadata.name + "=" + (.handler // "none")' \
+    "$BATS_TEST_TMPDIR/outside.yaml" | sort | paste -sd';')
+  # One paragraph of the docs opens with the sentence, under Runtime classes, where the comment on
+  # the value sends its reader.
+  said=$(grep -cE "$sentence" "$REPO/docs/kubernetes.md" || true)
+  under=$(awk '/^## / { inside = ($0 == "## Runtime classes") } inside' "$REPO/docs/kubernetes.md" | grep -cE "$sentence" || true)
+  # Under socketLB, where the chart reads it; a false or a missing key leaves the translation at
+  # the socket.
+  value=$(yq '.socketLB.hostNamespaceOnly // false' "$APP/values.yaml")
+  echo "runtime classes: ${classes:-none}; outside the applications: ${outside:-none};" \
+    "docs say so: $said time(s), $under under Runtime classes;" \
+    "socketLB.hostNamespaceOnly: $value; bpf-lb-sock-hostns-only: $(chart_config bpf-lb-sock-hostns-only);" \
+    "kube-proxy-replacement: $(chart_config kube-proxy-replacement)"
+  [ "$classes" = 'kube-system/runtime-classes gvisor=runsc;kube-system/runtime-classes kata=kata' ]
+  [ -z "$outside" ]
+  # The cluster runs the application that holds them.
+  grep -qxF '  - ../../base/kube-system/runtime-classes/ks.yaml' "$COPY/kubernetes/apps/overlays/lab-sto2/kustomization.yaml"
+  [ "$value" = true ]
+  [ "$(chart_config bpf-lb-sock-hostns-only)" = true ]
+  # Kube-proxy replacement turns the socket load balancer on whatever socketLB.enabled says, so
+  # this value is the one switch that takes it out of the pods.
+  [ "$(chart_config kube-proxy-replacement)" = true ]
+  [ "$said" -eq 1 ]
+  [ "$under" -eq 1 ]
+}
+
 @test "A fresh bootstrap still installs Cilium before its own resource definitions exist" {
   recording_tools
 
@@ -671,13 +773,22 @@ chart_config() {
   bgp_inputs
   tree_objects > "$BATS_TEST_TMPDIR/tree.jsonl"
   [ -z "$(jq -r 'select(.app == "kube-system/cilium" and (.object.apiVersion | startswith("cilium.io/"))) | .object.kind' "$BATS_TEST_TMPDIR/tree.jsonl")" ]
-  # Every application that does names cilium in dependsOn and is enabled.
+  # Every application that does names cilium in dependsOn and is listed in the cluster overlay:
+  # enabled, or commented out with its reason as a disabled application, which applies nothing
+  # until the line that enables it brings its dependency along.
   owners=$(jq -r 'select(.object.apiVersion | startswith("cilium.io/")) | .app' "$BATS_TEST_TMPDIR/tree.jsonl" | sort -u)
   echo "applications with Cilium objects: $owners"
   [ -n "$owners" ]
+  # The overlay's resources list alone, where an application is listed: a line under another key,
+  # as under patches, lists nothing.
+  listed=$(awk '/^[^[:space:]#-]/ { inside = ($0 == "resources:"); next } inside' "$COPY/kubernetes/apps/overlays/lab-sto2/kustomization.yaml")
+  [ -n "$listed" ]
   while IFS= read -r app; do
-    [ "$(yq '[.spec.dependsOn[].name] | contains(["cilium"])' "$COPY/kubernetes/apps/base/$app/ks.yaml")" = true ]
-    grep -qxF "  - ../../base/$app/ks.yaml" "$COPY/kubernetes/apps/overlays/lab-sto2/kustomization.yaml"
+    echo "checking $app"
+    # By the whole name: yq's contains matches a substring of a string, and cilium-bgp is not cilium.
+    [ "$(yq '[.spec.dependsOn[].name] | any_c(. == "cilium")' "$COPY/kubernetes/apps/base/$app/ks.yaml")" = true ]
+    entry="../../base/$app/ks.yaml"
+    grep -qxF "  - $entry" <<<"$listed" || grep -qE "^  # - ${entry//./\\.}  # Disabled: [^[:space:]]" <<<"$listed"
   done <<< "$owners"
   # The dependency orders them only if the Cilium application is Ready no sooner than its release:
   # it waits, for as long as the release may take, which is longer than the root's default.

@@ -1,10 +1,26 @@
 ---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cert-manager.io/issuer_v1.json
+# Signs the plugin's two certificates, each with its own key, and nothing else. Each side trusts
+# exactly the other's certificate: the plugin's server takes the operator's certificate, tls.crt of
+# barman-cloud-client-tls, as its only client authority and names that certificate's subject to the
+# operator, and the operator trusts the server's certificate, tls.crt of barman-cloud-server-tls. The
+# operator presents its certificate only if it is issued by the authority the server names, which a
+# self-signed one is and one the cluster's CA signs is not. The server's is self-signed too, as in the
+# plugin's own manifest, though the operator, which trusts that certificate itself, would take either.
+# It is an Issuer, not a ClusterIssuer, so no other namespace can ask it for a certificate.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: barman-cloud-selfsigned
+spec:
+  selfSigned: {}
+---
 # yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cert-manager.io/certificate_v1.json
-# The certificate the operator presents to the plugin, which the plugin's server verifies against the
-# cluster's CA. The Secrets are those the plugin's Service names for the operator in its annotations
-# cnpg.io/pluginClientSecret and cnpg.io/pluginServerSecret, which the plugin's pods mount. The
-# chart's own certificates are switched off in values.yaml, as they are signed by an Issuer of the
-# namespace, where this one is signed by the cluster's own CA, ClusterIssuer cluster-ca.
+# The certificate the operator presents to the plugin. The Secrets are those the plugin's Service
+# names for the operator in its annotations cnpg.io/pluginClientSecret and cnpg.io/pluginServerSecret,
+# which the plugin's pods mount. The chart's own certificates, of the same names, and its issuer are
+# switched off in values.yaml: these are the application's, which Flux applies as it builds them and
+# the tests read there.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -21,8 +37,8 @@ spec:
     rotationPolicy: Always
   issuerRef:
     group: cert-manager.io
-    kind: ClusterIssuer
-    name: cluster-ca
+    kind: Issuer
+    name: barman-cloud-selfsigned
 ---
 # yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cert-manager.io/certificate_v1.json
 # The plugin's server certificate, valid for the name of its Service, barman-cloud, which is fixed:
@@ -45,5 +61,5 @@ spec:
     rotationPolicy: Always
   issuerRef:
     group: cert-manager.io
-    kind: ClusterIssuer
-    name: cluster-ca
+    kind: Issuer
+    name: barman-cloud-selfsigned

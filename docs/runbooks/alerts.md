@@ -628,10 +628,51 @@ has not synchronised, so the Secret is missing or old; the key `postgres-backups
 store is missing, as on a rebuilt cluster whose store has not been seeded from the custody file
 (`just bao-seed-postgres <file>`, [postgres-restore.md](postgres-restore.md#the-customer-key)), so
 the provider refuses every request for lack of the key it encrypted with, or holds another one; the
-object storage is unreachable from the node; or the Barman Cloud plugin's pods are down, which the
-Kustomization `plugin-barman-cloud` shows (`flux get kustomization plugin-barman-cloud`). Archiving
-resumes by itself once the cause is gone and the alert clears with the next segment that is
-archived.
+object storage is unreachable from the node; the Barman Cloud plugin's pods are down, which the
+Kustomization `plugin-barman-cloud` shows (`flux get kustomization plugin-barman-cloud`); or the
+operator cannot reach the plugin. Archiving resumes by itself once the cause is gone and the alert
+clears with the next segment that is archived.
+
+The operator cannot reach the plugin when `get cluster` shows the phase `Cluster cannot proceed to
+reconciliation due to an error while interacting with plugins`; `kubectl --namespace <namespace>
+get cluster <name> --output jsonpath='{.status.phaseReason}'` says why, after `Error while
+discovering plugins:` when it cannot connect at all. `tls: certificate required` there means the
+operator presented no certificate: its own, `tls.crt` of the Secret `barman-cloud-client-tls` in
+`cnpg-system`, is not issued by the one authority the plugin names, which is that certificate's own
+subject, so it is not self-signed ([PostgreSQL](../kubernetes.md#postgresql)). The Secret's
+annotation `cert-manager.io/issuer-name` names the issuer that signed it, `barman-cloud-selfsigned`
+when it is self-signed (`kubectl --namespace cnpg-system get secret barman-cloud-client-tls --output
+jsonpath='{.metadata.annotations.cert-manager\.io/issuer-name}'`). The operator then makes,
+changes and fails over no pod of the cluster, so a primary without the plugin's sidecar keeps
+failing, its `postgres` container's log holding `wal archive plugin is not available:
+barman-cloud.cloudnative-pg.io`. The sidecar, `plugin-barman-cloud`, is an init container that
+keeps running beside `postgres`, so it is listed among the pod's init containers and not its
+containers (`kubectl --namespace <namespace> get pod <name>-<n> --output
+jsonpath='{.spec.initContainers[*].name}'`). Once the operator reaches the plugin it recreates the
+replicas and then the primary, in place, with the sidecar, and the primary archives what has piled
+up.
+
+A primary whose volume filled meanwhile does not run: its `postgres` container restarts over and
+over, last terminated with exit code 4, its log holding `no free disk space for WALs`, and once the
+operator reconciles the cluster its phase is `Not enough disk space`. In that phase the operator
+neither fails over, recreates a pod nor resizes a volume, so the sidecar cannot arrive and nothing
+frees the volume. The way out the operator's documentation gives is to grow the volume: raise
+`spec.resources.requests.storage` of the primary's PersistentVolumeClaim, `<name>-<n>`, by hand
+(`linstor-node-local` allows expansion). Once the volume has room the `postgres` container starts by
+itself and the operator goes on as above. Then set `CNPG_STORAGE_SIZE` in the application's
+`ks.yaml` to the same size, in a pull request, so the `Cluster` asks for what its volumes have; the
+operator grows the other instances' volumes to it, and never shrinks one.
+
+The plugin's two certificates are renewed every 75 days, each with a new key. The operator takes a
+renewed Secret at once and the plugin's pods once the kubelet updates their Secret volumes, within
+about a minute, so for that minute a cluster can show the phase `Cluster cannot proceed to
+reconciliation due to an error while interacting with plugins` on its own. The operator checks the
+plugin's server certificate before it sends its own, so the reason is `certificate signed by unknown
+authority`, the operator refusing the server certificate, while the plugin serves another than the
+one the operator trusts, and `tls: unknown certificate authority`, the plugin refusing the
+operator's certificate, while only the client certificates differ. It clears by itself within
+minutes and is not this alert's cause: archiving goes from the sidecar to the object storage, not
+through the plugin's server.
 
 ## PostgresBackupTooOld
 
