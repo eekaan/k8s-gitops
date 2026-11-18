@@ -269,18 +269,6 @@ bytes() {
     | .spec.ports[] | select(.port == $port) | .port" "$RENDERED")" = "$port" ]
 }
 
-@test "Alerts go nowhere yet" {
-  local config
-  render
-  config="$(yq -N 'select(.kind == "Secret" and .metadata.name == "alertmanager-*") | .data["alertmanager.yaml"]' "$RENDERED" | base64 -d)"
-  [ -n "$config" ]
-  echo "receivers: $(yq -o json -I0 '.receivers' <<<"$config"); routes to: $(yq -o json -I0 '[.. | select(has("receiver")) | .receiver] | unique' <<<"$config")"
-  [ "$(yq -o json -I0 '.receivers' <<<"$config")" = '[{"name":"null"}]' ]
-  [ "$(yq -o json -I0 '[.. | select(has("receiver")) | .receiver] | unique' <<<"$config")" = '["null"]' ]
-  # Nor does any other object configure Alertmanager.
-  [ -z "$(yq -N 'select(.kind == "AlertmanagerConfig") | .metadata.name' "$RENDERED")" ]
-}
-
 @test "Prometheus picks up every monitor and rule in the cluster" {
   local selectors
   render

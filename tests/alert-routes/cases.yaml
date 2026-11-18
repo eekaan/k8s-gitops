@@ -1,0 +1,85 @@
+---
+# The cases just alerts-route-check runs (scripts/alerts-route-run) on the configuration the chart
+# renders for Alertmanager: one for each scenario of features/alert-routes.feature tagged
+# by:alerts-route-check, named with the scenario's title. A case is of one kind, holds one alert or
+# several, each with its whole label set, alertname included, and says what is expected of each:
+#   route       amtool resolves the alert's receivers from the configuration alone.
+#               receivers: the receivers, in the order amtool prints them.
+#   start       the image's Alertmanager starts with no file at any path a receiver reads its
+#               address from, and is given the alerts; each receiver's notification must fail on
+#               its file, and every notification attempted must be counted as failed.
+#               receivers: the alert's receivers, as the running Alertmanager reports them.
+#   inhibition  the running Alertmanager is given the alerts.
+#               inhibited: whether an alert inhibits this one; by: the labels of the one that does.
+#   silence     a silence of the matchers under silence, each an equality, is made through the
+#               running Alertmanager's API, and it is given the alerts.
+#               receivers: as for start; silenced: whether that silence, and it alone, suppresses
+#               the alert, which is otherwise active.
+# The cases that need an Alertmanager share one: the start first, the others as written. Their
+# alerts stay in it, so each case names its alerts apart from the others', but for the Watchdog,
+# which is the same alert wherever it stands. A name or a value is letters, digits, '_', '.', ':'
+# and '-' alone, as it goes to amtool as it is.
+cases:
+  - name: A critical alert reaches notify
+    kind: route
+    alerts:
+      - labels: {alertname: ExampleCritical, namespace: example, severity: critical}
+        receivers: [notify]
+
+  - name: A warning alert reaches notify
+    kind: route
+    alerts:
+      - labels: {alertname: ExampleWarning, namespace: example, severity: warning}
+        receivers: [notify]
+
+  - name: The Watchdog reaches heartbeat and nothing else
+    kind: route
+    alerts:
+      # The labels the chart's rule gives it.
+      - labels: {alertname: Watchdog, severity: none}
+        receivers: [heartbeat]
+      # With a severity the second route takes: were that route the first, or did the Watchdog's
+      # continue, notify would be among its receivers.
+      - labels: {alertname: Watchdog, severity: critical}
+        receivers: [heartbeat]
+
+  - name: An info alert reaches nothing
+    kind: route
+    alerts:
+      - labels: {alertname: ExampleInfo, namespace: example, severity: info}
+        receivers: ["null"]
+      # The labels the chart's rule gives it, and the namespace its expression groups by.
+      - labels: {alertname: InfoInhibitor, namespace: example, severity: none}
+        receivers: ["null"]
+
+  - name: A critical alert inhibits the warning of the same name and namespace, and no other
+    kind: inhibition
+    alerts:
+      - labels: {alertname: ExampleInhibition, namespace: one, severity: critical}
+        inhibited: false
+      - labels: {alertname: ExampleInhibition, namespace: one, severity: warning}
+        inhibited: true
+        by: {alertname: ExampleInhibition, namespace: one, severity: critical}
+      - labels: {alertname: ExampleInhibition, namespace: two, severity: warning}
+        inhibited: false
+      - labels: {alertname: ExampleOther, namespace: one, severity: warning}
+        inhibited: false
+
+  - name: Alertmanager starts without its destinations and sends nothing
+    kind: start
+    alerts:
+      - labels: {alertname: Watchdog, severity: none}
+        receivers: [heartbeat]
+      - labels: {alertname: ExampleStart, namespace: example, severity: critical}
+        receivers: [notify]
+
+  - name: A silence mutes an alert on its way to notify and leaves the Watchdog firing
+    kind: silence
+    silence: {alertname: ExampleSilenced}
+    alerts:
+      - labels: {alertname: ExampleSilenced, namespace: example, severity: warning}
+        receivers: [notify]
+        silenced: true
+      - labels: {alertname: Watchdog, severity: none}
+        receivers: [heartbeat]
+        silenced: false

@@ -70,6 +70,7 @@ resources:
   - ../../base/kube-system/vpa/ks.yaml
   - ../../base/kyverno/kyverno-policies/ks.yaml
   - ../../base/kyverno/kyverno/ks.yaml
+  - ../../base/monitoring/alert-destinations/ks.yaml
   - ../../base/monitoring/flux-monitoring/ks.yaml
   - ../../base/monitoring/grafana-operator/ks.yaml
   - ../../base/monitoring/grafana/ks.yaml

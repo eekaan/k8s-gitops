@@ -65,3 +65,4 @@ docker	ghcr.io/open-feature/charts/open-feature-operator	^v[0-9]+\.[0-9]+\.[0-9]
 docker	ghcr.io/open-feature/open-feature-operator	^v[0-9]+\.[0-9]+\.[0-9]+$	registry tag list, which holds latest, main, a branch build and signature tags beside the releases
 docker	ghcr.io/open-feature/flagd	^v[0-9]+\.[0-9]+\.[0-9]+$	registry tag list, which holds a -fips build of the newer releases, latest, latest-fips, main, pull request and branch builds and signature tags beside the releases
 docker	ghcr.io/open-feature/flagd-proxy	^v[0-9]+\.[0-9]+\.[0-9]+$	registry tag list, which holds a -fips build of the newer releases, latest, latest-fips and signature tags beside the releases
+docker	quay.io/prometheus/alertmanager	^v[0-9]+\.[0-9]+\.[0-9]+$	registry tag list, which holds release candidates as v0.32.1-rc.0 and a distroless build of a release as v0.35.0-distroless, each a tag of its own
