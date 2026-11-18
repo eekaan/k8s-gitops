@@ -13,6 +13,8 @@ spec:
   dependsOn:
     - name: prometheus-operator-crds
     - name: grafana-operator
+  # Ready once the store's release is: victoria-logs-route, the route to its interface, waits for it.
+  wait: true
   sourceRef:
     kind: ExternalArtifact
     name: victoria-logs
