@@ -6036,7 +6036,7 @@ installed. The rules of priority Critical are `Detect release_agent File Contain
 rule set arrives with a newer image: the chart and the image it runs, `appVersion` of the chart,
 are moved by Renovate in one pull request (`.renovate/groups.json5`), and `tests/falco.bats` fails
 unless the image's version is the chart's. Its proofs that run Falco itself skip in CI, so CI does
-not show that a newer image still loads the local rules without a warning, compiles the exception
+not show that a newer image still loads the local rules without a warning, compiles the exceptions
 and enables the same rules; `bats tests/falco.bats` where a docker daemon answers does. A macro the
 newer rules no longer define would load with the warning `LOAD_UNUSED_MACRO` and except nothing
 ([Tuning](#tuning)).
@@ -6210,18 +6210,22 @@ or `exec` into the pods of `monitoring` and `security-system`, can read it.
 Local rules have one place, the `customRules` key of
 `apps/base/security-system/falco/app/values.yaml`: a map of rule file names to their contents,
 which the chart makes the ConfigMap `falco-rules` of and mounts at `/etc/falco/rules.d`, which
-Falco reads after the image's rules. It holds one file, `exceptions.yaml`, of one item, with its
-reason in a comment above it, and no rule of the tree's own:
+Falco reads after the image's rules. It holds one file, `exceptions.yaml`, of two items, each with
+its reason in a comment above it, and no rule of the tree's own:
 
 ```yaml
 - macro: user_known_stand_streams_redirect_activities
   condition: (k8s.ns.name = "demo" and container.name = "httpd" and container.image.repository = "docker.io/library/busybox" and proc.name = "httpd")
   override:
     condition: replace
+- macro: known_drop_and_execute_activities
+  condition: (k8s.ns.name = "kube-system" and container.name = "apply-sysctl-overwrites" and container.image.repository = "quay.io/cilium/cilium" and proc.exepath = "/opt/cni/bin/cilium-sysctlfix")
+  override:
+    condition: replace
 ```
 
-It quiets the image's rule `Redirect STDOUT/STDIN to Network Connection in Container`, of priority
-Notice, for the demo's web server, `hello`, and for nothing else. The rule's condition is
+The first quiets the image's rule `Redirect STDOUT/STDIN to Network Connection in Container`, of
+priority Notice, for the demo's web server, `hello`, and for nothing else. The rule's condition is
 `dup and container and evt.rawres in (0, 1, 2) and fd.type in ("ipv4", "ipv6") and not user_known_stand_streams_redirect_activities`:
 a `dup`, `dup2` or `dup3` in a container that returns 0, 1 or 2, a standard stream, for an IPv4 or
 IPv6 socket, which is how a reverse shell begins; the macro it negates is the placeholder the image
@@ -6233,52 +6237,121 @@ the rule twice, the kubelet's readiness probe included, and the server matches i
 starts, as `mini_httpd` first moves its listening socket to standard input with `xmove_fd`; those
 events would bury any other the rule raises.
 
-The exception replaces the placeholder with four equalities, each of which leaves something out
-of it: the namespace, the workloads of every other namespace; the container's name, `volsync-demo`,
-which runs the same image in the same namespace; the image's repository, any other image run under
-that name there; and the process, a shell, or any process but `httpd`, that puts its streams on a
-socket in that very container. All of those still match, as every other workload does. Falco
-compiles the rule to the image's condition with one negation, of that conjunction:
+The first exception replaces the placeholder with four equalities, each of which leaves something
+out of it: the namespace, the workloads of every other namespace; the container's name,
+`volsync-demo`, which runs the same image in the same namespace; the image's repository, any other
+image run under that name there; and the process, a shell, or any process but `httpd`, that puts its
+streams on a socket in that very container. All of those still match, as every other workload does.
+Falco compiles the rule to the image's condition with one negation, of that conjunction:
 `(evt.type in (dup, dup2, dup3) and container.id != host and evt.rawres in (0, 1, 2) and fd.type in (ipv4, ipv6) and not (k8s.ns.name = demo and container.name = httpd and container.image.repository = docker.io/library/busybox and proc.name = httpd))`.
 
-`tests/falco.bats` holds the exception to that:
+The second quiets the image's rule `Drop and execute new binary in container`, of priority
+Critical, whose matches raise `FalcoCriticalRuleMatched`
+([Metrics, and the alert](#metrics-and-the-alert)), for Cilium's sysctl fix and for nothing else.
+The rule's condition is
+`spawned_process and container and proc.is_exe_upper_layer=true and not container.image.repository in (known_drop_and_execute_containers) and not known_drop_and_execute_activities`,
+an `execve` or `execveat` in a container whose executable is in an upper layer, where the list is
+empty and the macro is the placeholder `(never_true)`; libs 0.26.1 sets that flag when the
+executable's filesystem is overlayfs and the file has an upper dentry, and reads nothing of when
+the file was written (`extract__overlay_layer` in
+`driver/modern_bpf/helpers/extract/extract_from_kernel.h`, which the probe calls at each `execve`
+and `execveat`). Cilium's chart gives each agent's pod the init container `apply-sysctl-overwrites`,
+on the agent's image, with `BIN_PATH=/opt/cni/bin`, the node's `/opt/cni/bin` mounted at `/hostbin`
+and its `/proc` at `/hostproc`, which runs
+`cp /usr/bin/cilium-sysctlfix /hostbin/cilium-sysctlfix; nsenter --mount=/hostproc/1/ns/mnt "${BIN_PATH}/cilium-sysctlfix"; rm /hostbin/cilium-sysctlfix`:
+it copies the binary from its image into the node's CNI directory and runs it there, in the node's
+mount namespace, from a process still in the init container
+(`templates/cilium-agent/daemonset.yaml` of the chart, under `sysctlfix.enabled`, which is on by
+default). Talos mounts an overlay at `/opt`, its upper layer on the node's `/var` (`Overlays` in
+`pkg/machinery/constants/constants.go` at the pinned release), so the copy is in that overlay's
+upper layer, not in the container's own, and but for this exception the rule matches its execution
+whenever an agent's pod starts on a node where Falco runs: on a new chart, a change of Cilium's
+values, which rolls the agents, or a deleted agent pod. The chart's init container `mount-cgroup`,
+under `cgroup.autoMount.enabled`, copies `cilium-mount` into the same directory and runs it the
+same way. Cilium's values turn it off, as Talos mounts the cgroup hierarchy itself; turned on, its
+run would match the rule as well, and this exception would not except it.
 
-- The place holds that one file of that one item, an override that replaces one macro's condition,
-  and the chart's ConfigMap and the pod's mount carry it. There is no second place: under
-  `/etc/falco` the pod mounts only its configuration file, an empty `config.d` and `rules.d`, and
-  the configuration names `config.d` alone as where Falco reads further configuration, which could
-  turn a rule off.
-- The condition is, to the letter, the conjunction of four values read from `hello` as Flux applies
-  it: the namespace its Kustomization targets, its container's name, its image without tag or
-  digest and the first word of its command. A `hello` whose container is renamed, whose image moves
-  or whose command changes fails the proof, as the exception then names nothing that runs. Of every
-  container and init container of the workloads the overlay builds into `demo`, only `hello`'s has
-  that name and image, with the image's short forms written out as the runtime reports them, so no
-  other `httpd` is excepted. The reason above is read from the source of the busybox version `hello`
-  runs, which the proof finds named here, so a `hello` on another version fails it until that
-  version's `httpd` is read, and the failure says which version to read.
+The second exception replaces the placeholder with four equalities, each of which leaves something
+out of it: the namespace, any other namespace; the container's name, the agent and the other init
+containers of the same image in the same pod; the image's repository, any other image in a
+container of that name; and the path, any binary that container runs from an upper layer at any
+other path, `cilium-sysctlfix` included. The condition names a path and not a file, so it excepts
+whatever that container runs at that one path, which is what its command, held to the chart's by
+the proof below, copies there from Cilium's image. The path is `proc.exepath`, the executable's
+path as the kernel resolved it, and not `proc.exe`, which is `argv[0]`, what the caller chooses.
+The image's list `known_drop_and_execute_containers` would not do: it takes a whole image, every
+container and binary of Cilium's agent included. Falco compiles the rule to the image's condition
+with one negation, of that conjunction:
+`(evt.type in (execve, execveat) and container.id != host and proc.is_exe_upper_layer = true and not container.image.repository in () and not (k8s.ns.name = kube-system and container.name = apply-sysctl-overwrites and container.image.repository = quay.io/cilium/cilium and proc.exepath = /opt/cni/bin/cilium-sysctlfix))`.
+
+`tests/falco.bats` holds the exceptions to that:
+
+- The place holds that one file of those two items, in that order, each an override that replaces
+  one macro's condition with its reason in a comment above it, and the chart's ConfigMap and the
+  pod's mount carry it. There is no second place: under `/etc/falco` the pod mounts only its
+  configuration file, an empty `config.d` and `rules.d`, and the configuration names `config.d`
+  alone as where Falco reads further configuration, which could turn a rule off.
+- The first's condition is, to the letter, the conjunction of four values read from `hello` as Flux
+  applies it: the namespace its Kustomization targets, its container's name, its image without tag
+  or digest and the first word of its command. A `hello` whose container is renamed, whose image
+  moves or whose command changes fails the proof, as the exception then names nothing that runs.
+  Of every container and init container of the workloads the overlay builds into `demo`, only
+  `hello`'s has that name and image, with the image's short forms written out as the runtime
+  reports them, so no other `httpd` is excepted. The reason above is read from the source of the
+  busybox version `hello` runs, which the proof finds named here, so a `hello` on another version
+  fails it until that version's `httpd` is read, and the failure says which version to read.
+- The second's condition is, to the letter, the conjunction of four values read from Cilium's
+  chart, rendered as Flux installs it, with its values and its post-renderer: the namespace of the
+  DaemonSet `cilium`, which its Kustomization targets; the name of the one container that runs
+  `cilium-sysctlfix`, which no other container of the render has; that container's image without
+  tag or digest, written registry first as the runtime reports it; and
+  `${BIN_PATH}/cilium-sysctlfix`, with `BIN_PATH` from its environment. The proof also holds the
+  container's command to the chart's, a copy of the binary into the mount of the host path
+  `BIN_PATH`, run by `nsenter --mount=<mount>/1/ns/mnt` where `<mount>` is the mount of the host
+  path `/proc`, as that is what makes the path the node's; a command of any other shape fails it,
+  saying to read the chart's init container again. A Cilium whose CNI directory, image or namespace
+  moves, or whose post-renderer renames the container, fails the proof, saying what Cilium is now,
+  and one with `sysctlfix.enabled: false` fails it saying to remove the exception, which then names
+  nothing that runs.
 - Where a docker daemon answers, Falco itself says so, run from the pinned image without network,
   capability or root, on the rendered configuration and rules. Its dry run exits 0: a condition
   with a field Falco does not know makes it exit 1, which on a node is a pod in a crash loop. It
   validates the image's rules and then the local file without an error or a warning: an override of
   a macro the image does not define loads with the warning `LOAD_UNUSED_MACRO` and excepts nothing.
-  It prints the rule enabled, at priority Notice, compiled to the condition above. And it lists the
-  same rules enabled with the local file as without it, no other rule, macro or list changed.
+  It prints the redirect rule enabled, at priority Notice, and the drop-and-execute rule enabled, at
+  priority Critical, each compiled to its condition above, where without the local file each
+  negates the image's placeholder. And it lists the same rules enabled with the local file as
+  without it, nothing changed but those two rules and their two placeholders: no other rule or
+  macro, and no list.
 
-What no proof shows: an event evaluated against the rule. Of the image's engines, replay is the one
-that gives Falco system calls without a probe, and it reads a capture file, which only a probe on a
-running kernel records and which would hold that machine's processes, users and addresses. So that
-the rule still matches every other workload rests on the condition Falco compiles. The values Falco
-reports for the four fields follow from the pinned sources, and an event on a node is what shows
-them: `container.name` is the name in the container's CRI metadata and `k8s.ns.name` the namespace
-of its pod's sandbox (`go-worker/pkg/container/cri.go` of the container plugin at 0.7.6, the
-version the image loads), and `container.image.repository` is the image reference containerd 2.3.7
-reports, the image's first repository digest (`internal/cri/server/container_status.go`), up to its
-`@`, which for `hello`'s image is `docker.io/library/busybox`. An event that comes before the
+What no proof shows: an event evaluated against either rule. Of the image's engines, replay is the
+one that gives Falco system calls without a probe, and it reads a capture file, which only a probe
+on a running kernel records and which would hold that machine's processes, users and addresses. So
+that each rule still matches every other workload, and the drop-and-execute rule the same exec in
+another namespace, another container or at another path, rests on the condition Falco compiles. The
+values Falco reports for the four fields of each exception follow from the pinned sources, and an
+event on a node is what shows them: `container.name` is the name in the container's CRI metadata
+and `k8s.ns.name` the namespace of its pod's sandbox (`go-worker/pkg/container/cri.go` of the
+container plugin at 0.7.6, the version the image loads), and `container.image.repository` is the
+image reference containerd 2.3.7 reports, the image's first repository digest
+(`internal/cri/server/container_status.go`), up to its `@`, which for `hello`'s image is
+`docker.io/library/busybox` and for Cilium's `quay.io/cilium/cilium`. For the sysctl fix, two of
+them are what such an event has to show. `proc.exepath` is the path the probe builds by walking the
+executable's mounts up to the root of the mount namespace they are in
+(`auxmap__store_d_path_approx` in libs' `driver/modern_bpf/helpers/store/auxmap_store_params.h`),
+which for a binary run in the node's mount namespace should be the node's path,
+`/opt/cni/bin/cilium-sysctlfix`, and not the container's `/hostbin/cilium-sysctlfix`. And the
+container plugin's fields need the init container's details before its first exec: its create
+hook, the one the rendered configuration turns on, comes from the CRI engine's `CONTAINER_CREATED`
+event, which the runtime sends before the container starts. An event that comes before the
 container plugin has the container's details from the runtime may not have the three fields the
-plugin gives, all but `proc.name`, as the plugin's descriptions of them say; the conjunction is then
-false, and the event still matches. The CI containers have no docker daemon, so the proofs that run
-Falco run where a developer or an agent has one, and skip in CI, saying why.
+plugin gives, `k8s.ns.name`, `container.name` and `container.image.repository`, as the plugin's
+descriptions of them say; the conjunction is then false, and the event still matches, which for the
+sysctl fix is the rule matching and `FalcoCriticalRuleMatched` firing as it would without the
+exception. A node that boots should not raise the rule for it at all: Falco's pod takes its address
+from Cilium's CNI, so its probe loads only once the agent runs, after its init containers. The CI
+containers have no docker daemon, so the proofs that run Falco run where a developer or an agent
+has one, and skip in CI, saying why.
 
 To silence another known-benign event, find it (`just logs` above) and read its rule and the
 namespace, pod, container, image and process in its `output_fields`; then, in a pull request:
@@ -6286,13 +6359,14 @@ namespace, pod, container, image and process in its `output_fields`; then, in a 
 1. add an item to `exceptions.yaml` that overrides the placeholder the rule leaves for the case
    (the image's rules name them `user_*` and `known_*`, such as
    `user_expected_terminal_shell_in_container_conditions` for `Terminal shell in container`), with
-   the reason for the exception in a comment above it, as the item above has;
+   the reason for the exception in a comment above it, as the items above have;
 2. keep it as narrow as the event is, a conjunction of what the event shows of the workload, and
-   never a whole rule off: the proof of the place fails on a second item, file or place, and, where
-   a docker daemon answers, the proofs fail when Falco lists one rule fewer enabled;
-3. prove it as the item above is proved: the proof of the place states what the place holds, so an
-   item it does not expect fails it, and the item's own proof takes its values from the workload it
-   excepts;
+   never a whole rule off: the proof of the place fails on an item, file or place it does not
+   state, and, where a docker daemon answers, the proofs fail when Falco lists one rule fewer
+   enabled;
+3. prove it as the items above are proved: the proof of the place states what the place holds, so
+   an item it does not expect fails it, and the item's own proof takes its values from the workload
+   it excepts;
 4. merge it. The pod template carries a checksum of the rules' ConfigMap, `checksum/rules`, so the
    DaemonSet rolls when the rules change, one node at a time, and the Kustomization waits for the
    release. A pod that still runs gets the new file as well: the kubelet brings a changed ConfigMap
