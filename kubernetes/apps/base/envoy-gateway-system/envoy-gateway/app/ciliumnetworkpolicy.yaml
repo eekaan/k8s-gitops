@@ -339,6 +339,19 @@ spec:
         - ports:
             - port: "7007"
               protocol: TCP
+    # Ascender's 8052 in ascender, nginx in the web pods its operator makes, by the labels of their
+    # Deployment's selector.
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": ascender
+            "k8s:io.cilium.k8s.namespace.labels.k8s-gitops/gateway": public
+            app.kubernetes.io/name: ascender-web
+            app.kubernetes.io/managed-by: awx-operator
+            app.kubernetes.io/component: awx
+      toPorts:
+        - ports:
+            - port: "8052"
+              protocol: TCP
     # VictoriaLogs' 9428 in monitoring, for the route logs to the store's interface and queries.
     # monitoring is listed and takes the proxies on every port, so this rule is what keeps them off
     # Prometheus, Grafana, Alertmanager and every other pod and port there.

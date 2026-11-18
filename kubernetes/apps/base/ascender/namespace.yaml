@@ -1,0 +1,22 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/namespace-v1.json
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ascender
+  annotations:
+    # Removing the namespace from the tree must not delete everything in it.
+    kustomize.toolkit.fluxcd.io/prune: disabled
+  labels:
+    # The pods Ascender starts to run playbooks set no security context, which only the baseline
+    # level admits; pod-security-exceptions.yaml lists them, and every other pod here passes
+    # restricted: the operator's, which the check evaluates, and those it makes, which the AWX asks
+    # for the restricted context. Audit and warn at restricted at the cluster's Kubernetes minor
+    # record and report any pod that fails it (docs/kubernetes.md, Ascender).
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: v1.37
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: v1.37
+    # Routes of this namespace may attach to the public Gateway's https listener.
+    k8s-gitops/gateway: public

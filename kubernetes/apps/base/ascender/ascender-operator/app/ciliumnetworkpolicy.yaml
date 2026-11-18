@@ -1,0 +1,44 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# What the operator lets through, on top of the namespace's default deny: the kubelet's probes on its
+# health port, and the API server, through which it does all its work: it applies Ascender's objects,
+# reads its pods and runs awx-manage in the web container by exec, and its proxy container asks the
+# API server to review the token of a metrics request. Its Ansible tasks reach the API server through
+# the operator's own proxy on the pod's loopback, by the address the pod's environment gives, so it
+# looks no name up; no task fetches anything outside the cluster (roles/ of the operator's tag
+# below). No monitor scrapes its metrics, which kube-rbac-proxy serves on 8443, so nothing takes
+# that port.
+# ascender-operator-templates: 25.6.3
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: ascender-operator
+spec:
+  # The pods of the chart's Deployment, by the labels of its selector.
+  endpointSelector:
+    matchLabels:
+      control-plane: controller-manager
+      helm.sh/chart: ascender-operator
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  ingress:
+    # The kubelet's liveness and readiness probes of the manager, on --health-probe-bind-address.
+    - fromEntities:
+        - host
+      toPorts:
+        - ports:
+            - port: "6789"
+              protocol: TCP
+  egress:
+    # The API server. A Service's address is translated to the control plane's before policy
+    # applies, so 6443 is the port that counts.
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "6443"
+              protocol: TCP

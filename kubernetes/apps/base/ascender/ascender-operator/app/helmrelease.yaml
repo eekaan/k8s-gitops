@@ -1,0 +1,39 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/helmrelease-helm-v2.json
+# Ctrl IQ's operator for Ascender, a fork of the AWX operator built on operator-sdk's Ansible
+# operator: it watches the namespace it runs in alone and makes Ascender's web and task Deployments,
+# its migration Job and their Secrets and roles from the AWX resource of the application ascender
+# (docs/kubernetes.md, Ascender). The chart's values only add an AWX of its own, which this release
+# leaves off, so it has none; what the chart has no value for is in the post-renderer. The pod names
+# the pull secret redhat-operators-pull-secret, which nothing makes; the kubelet pulls the public
+# images without it, so the reference stays as the chart has it.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: ascender-operator
+spec:
+  interval: 30m
+  chart:
+    spec:
+      chart: ascender-operator
+      # The version is pinned: a new chart arrives by a change to this file, which Flux applies at
+      # once. Ctrl IQ releases the chart, the operator and Ascender at one version, and Renovate
+      # moves the three together (.renovate/groups.json5).
+      version: 25.6.3
+      interval: 12h
+      sourceRef:
+        kind: HelmRepository
+        name: ascender-operator
+  postRenderers:
+    - kustomize:
+        # The chart names its two images by tag alone and has no value for either: each is pinned
+        # here by the digest of its tag, the operator's at the chart's appVersion and the proxy's
+        # at the chart's own tag. kustomize writes name:tag@sha256:... from a tag that carries the
+        # digest.
+        images:
+          - name: ghcr.io/ctrliq/ascender-operator
+            # renovate: datasource=docker depName=ghcr.io/ctrliq/ascender-operator
+            newTag: 25.6.3@sha256:e85a2b054a6e438c089f9cf10533cde8a3b45c666b5cabeaca4835abefef2ba3
+          - name: quay.io/brancz/kube-rbac-proxy
+            # renovate: datasource=docker depName=quay.io/brancz/kube-rbac-proxy
+            newTag: v0.21.0@sha256:cbdad91c207e55cf366b59ce3e6c9d3f3e0b8e51ff33c1e7d153c2f762d83a1e

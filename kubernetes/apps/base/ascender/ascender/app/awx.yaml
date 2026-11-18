@@ -1,0 +1,119 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/awx.ansible.com/awx_v1beta1.json
+# Ascender, as the operator of ascender-operator runs it: one web pod (nginx, uwsgi, daphne, valkey,
+# rsyslog), one task pod (the dispatcher, the callback receiver, the websocket relay, receptor in the
+# control plane's execution environment, valkey, rsyslog), the migration Job of each version, and
+# the pods it starts for every job (docs/kubernetes.md, Ascender). Fields left out keep the
+# operator's defaults (roles/installer/defaults/main.yml of the operator's tag).
+apiVersion: awx.ansible.com/v1beta1
+kind: AWX
+metadata:
+  name: ascender
+spec:
+  # The images. The operator joins each repository and version with a colon, so a version that
+  # carries a digest makes a reference pinned by digest, and every one is at the chart's version, as
+  # Ctrl IQ's installer runs them; tests/ascender.bats holds the references it writes. The
+  # repository on the next line has no tag of its own, which .image-allowlist records.
+  image: ghcr.io/ctrliq/ascender
+  # renovate: datasource=docker depName=ghcr.io/ctrliq/ascender
+  image_version: 25.6.3@sha256:97abee1ebfa27b073883a2a3cc252aa1af397057c44e7d46326704f4c9c3e3e4
+  # The task pod's init container that makes receptor's certificate. The operator's default splits
+  # the control plane's reference at its colons, which a digest would break, so both are set.
+  init_container_image: ghcr.io/ctrliq/ascender-ee
+  # renovate: datasource=docker depName=ghcr.io/ctrliq/ascender-ee
+  init_container_image_version: 25.6.3@sha256:220d88ce645bb3d18deb562ee3237f44fe85ba9c1243a62e768464cb25c1d6ae
+  # The execution environment of the task pod, which runs receptor and the project updates.
+  # renovate: datasource=docker depName=ghcr.io/ctrliq/ascender-ee
+  control_plane_ee_image: ghcr.io/ctrliq/ascender-ee:25.6.3@sha256:220d88ce645bb3d18deb562ee3237f44fe85ba9c1243a62e768464cb25c1d6ae
+  # The one execution environment Ascender registers for jobs, matched by its name, which holds no
+  # version, so that a new image moves it in place rather than adding another. Renovate's kubernetes
+  # manager reads the image: line below; a comment of the custom manager there would extract it a
+  # second time.
+  ee_images:
+    - name: Ascender EE
+      image: ghcr.io/ctrliq/ascender-ee:25.6.3@sha256:220d88ce645bb3d18deb562ee3237f44fe85ba9c1243a62e768464cb25c1d6ae
+  # valkey, on the line the operator defaults to, 9-alpine, at its newest release.
+  redis_image: ghcr.io/valkey-io/valkey
+  # renovate: datasource=docker depName=ghcr.io/valkey-io/valkey
+  redis_image_version: 9.1.3-alpine@sha256:bf09d58e96d6b4524a15396b65b242bbe18beebbcc15a04d8ee75ddac62fae0b
+
+  # The operator's restricted mode: no privilege escalation and no capabilities for every container
+  # of the web and task pods and the migration Job, and this pod context, combined over the mode's
+  # own (roles/installer/templates/deployments/web.yaml.j2 and task.yaml.j2, jobs/migration.yaml.j2).
+  # The user and file system group are those the mode writes. The group is 0: the image holds
+  # /etc/passwd, supervisor's run directory and uwsgi's directory as root's, group-writable for gid
+  # 0 alone, and its launch scripts write there at start, so it fails to start under another group
+  # (docs/kubernetes.md, Ascender).
+  restricted_security_context: true
+  security_context_settings:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 0
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+
+  # The database, from the Secret ascender-db-app that the application ascender-operator makes; the
+  # admin password and the secret key are the operator's, in ascender-admin-password and
+  # ascender-secret-key, which it keeps when the AWX goes.
+  postgres_configuration_secret: ascender-db-app
+  admin_user: admin
+  garbage_collect_secrets: false
+
+  # The web pods behind the public Gateway, which terminates TLS: the route's own https origin is
+  # trusted for the CSRF check of a sign-in's POST, as Django sees plain http from the proxy, and
+  # the cookies are sent over https alone. The route reaches the web pods through the tree's own
+  # Service, ascender-web; the operator makes no Ingress.
+  service_type: ClusterIP
+  ingress_type: none
+  csrf_cookie_secure: "true"
+  session_cookie_secure: "true"
+  extra_settings:
+    - setting: CSRF_TRUSTED_ORIGINS
+      value: '["https://ascender.${CLUSTER_DOMAIN}"]'
+
+  # The probes, all off by the operator's default (docs/user-guide/advanced-configuration/
+  # container-probes.md): the web's readiness on /api/v2/ping/, and the liveness of both, which
+  # fails while any program of the supervisor is not RUNNING. A program is RUNNING 30 seconds after
+  # it starts (startsecs in the image's supervisord files), so the liveness probes begin after a
+  # minute; the readiness probe begins at the operator's 20 seconds.
+  web_readiness_period: 15
+  web_liveness_period: 15
+  web_liveness_initial_delay: 60
+  task_liveness_period: 15
+  task_liveness_initial_delay: 60
+
+  # One web and one task pod, and no demonstration organisation, project, inventory or template.
+  replicas: 1
+  create_preload_data: false
+
+  # The operator's own requests, written out, and no limit, except the task container's memory:
+  # with a limit the operator writes it as SYSTEM_TASK_ABS_MEM, which sizes the dispatcher's pool
+  # of workers, each with its database connection, by the container's memory instead of the node's.
+  # None of these is measured here.
+  web_resource_requirements:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  task_resource_requirements:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 2Gi
+  ee_resource_requirements:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+  redis_resource_requirements:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+  rsyslog_resource_requirements:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  init_container_resource_requirements:
+    requests:
+      cpu: 100m
+      memory: 128Mi

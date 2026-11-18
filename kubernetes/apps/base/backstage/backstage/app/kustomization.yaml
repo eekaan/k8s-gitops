@@ -37,6 +37,8 @@ configMapGenerator:
     files:
       - catalogue/acme-issuers.yaml
       - catalogue/alert-destinations.yaml
+      - catalogue/ascender-operator.yaml
+      - catalogue/ascender.yaml
       - catalogue/backstage.yaml
       - catalogue/blackbox-exporter.yaml
       - catalogue/cert-manager-dashboard.yaml

@@ -271,7 +271,7 @@ proxies_egress() {
   real_render
   run "$REPO/scripts/network-policy-check" "$REAL" "$REPO/network-policy-exceptions.yaml"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [ "$(grep ' denies ingress and egress' <<<"$output" | cut -d' ' -f1 | paste -sd' ')" = "backstage crowdsec demo envoy-gateway-system kromgo open-feature-operator security-system sso-system" ]
+  [ "$(grep ' denies ingress and egress' <<<"$output" | cut -d' ' -f1 | paste -sd' ')" = "ascender backstage crowdsec demo envoy-gateway-system kromgo open-feature-operator security-system sso-system" ]
   [ "$(grep -c ' listed' <<<"$output")" -eq "$(yq '.exceptions | length' "$REPO/network-policy-exceptions.yaml")" ]
 }
 
@@ -557,6 +557,19 @@ E
   denied "$VIEW" "$PROXY" "$BACKSTAGE_DB" 5432/tcp
   denied_in "$VIEW" "$PROXY" "$BACKSTAGE_DB" 5432/tcp
   denied "$VIEW" "$PROXY" "$PGDUMP" 7007/tcp
+  # Ascender's route sends them to nginx's 8052 in its web pods in ascender, which carries the
+  # Gateway label and denies by default: the pods are the operator's, by the labels its templates
+  # give them. The proxies' egress and the web pods' ingress both take that port and no other, and
+  # neither reaches the task pods, the job pods or the database.
+  local ascender_web='ascender:app.kubernetes.io/name=ascender-web,app.kubernetes.io/part-of=ascender,app.kubernetes.io/managed-by=awx-operator,app.kubernetes.io/component=awx'
+  allowed "$VIEW" "$PROXY" "$ascender_web" 8052/tcp
+  allowed_in "$VIEW" "$PROXY" "$ascender_web" 8052/tcp
+  denied "$VIEW" "$PROXY" "$ascender_web" 8050/tcp
+  denied_in "$VIEW" "$PROXY" "$ascender_web" 8050/tcp
+  denied "$VIEW" "$PROXY" 'ascender:app.kubernetes.io/name=ascender-task,app.kubernetes.io/part-of=ascender,app.kubernetes.io/managed-by=awx-operator,app.kubernetes.io/component=awx' 8052/tcp
+  denied "$VIEW" "$PROXY" 'ascender:ansible_job=' 8052/tcp
+  denied "$VIEW" "$PROXY" 'ascender:cnpg.io/cluster=ascender-db,cnpg.io/podRole=instance' 5432/tcp
+  denied "$VIEW" @world "$ascender_web" 8052/tcp
   # The proxies' egress names each routed backend's pods and the port its route sends to, and no
   # other, so in a namespace that is listed, and takes them on every port, they reach neither n8n's
   # other ports, demo's backend's port among them, nor its database on any port.
@@ -675,7 +688,7 @@ E
   local probes pod port
   probes=$(yq -N -o json -I0 'select(. != null)' "$VIEW"/*/*/*.yaml | jq -r '
     select(.kind | IN("Deployment", "StatefulSet", "DaemonSet", "Job", "CronJob"))
-    | select(.metadata.namespace | IN("backstage", "demo", "envoy-gateway-system", "kromgo", "open-feature-operator", "security-system", "sso-system"))
+    | select(.metadata.namespace | IN("ascender", "backstage", "demo", "envoy-gateway-system", "kromgo", "open-feature-operator", "security-system", "sso-system"))
     | . as $w
     | (if .kind == "CronJob" then .spec.jobTemplate.spec.template else .spec.template end).spec.containers[]
     | . as $c
@@ -709,7 +722,7 @@ E
   named=$(proxies_egress "$VIEW")
   echo "the routes' backends' container ports: $routed; the proxies' egress to the labelled namespaces: ${named:-every port}"
   [[ " $routed " == *" demo:8080 "* && " $routed " == *" ai-system:5678 "* && " $routed " == *" ai-system:8080 "* \
-    && " $routed " == *" kromgo:8080 "* && " $routed " == *" backstage:7007 "* ]]
+    && " $routed " == *" kromgo:8080 "* && " $routed " == *" backstage:7007 "* && " $routed " == *" ascender:8052 "* ]]
   [[ " $routed " == *" sso-system:4180 "* && " $routed " == *" sso-system:5556 "* ]]
   [[ " $routed " == *" monitoring:9428 "* ]]
   [ "$named" = "$routed" ]

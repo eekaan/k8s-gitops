@@ -559,6 +559,12 @@ level is declared in the tree, never left to the API server's default.
   - The ReplicationDestination `<app>-drill` of each application that takes the restore drill,
     `volsync-demo` in `demo`: the same mover security context in `spec.restic.moverSecurityContext`,
     from `components/volsync-drill` ([The restore drill](#the-restore-drill)).
+  - `AWX/ascender` in `ascender`: the web and task pods and the migration Job its operator makes, by
+    `spec.restricted_security_context` and the pod's non-root user and seccomp profile in
+    `spec.security_context_settings`; the operator's restricted mode gives every container of them
+    no privilege escalation and no capabilities. Ascender itself starts the job pods; the operator
+    does not make them, so its restricted mode does not reach them. They are an entry of the
+    exceptions file, `created-by` the `AWX` ([Ascender](#ascender)).
 
   Admission evaluates each such pod when the operator creates it: a namespace that enforces
   `restricted` refuses one that fails it, and one that enforces less records and reports it
@@ -623,6 +629,7 @@ once it is not, and the agents' rendered configuration agrees.
 | `kromgo` | default deny | kromgo takes the proxies and the kubelet's probes on 8080 and Prometheus' scrape on 8081, and reaches the resolver and Prometheus on 9090. |
 | `sso-system` | default deny | dex takes the proxies and oauth2-proxy on 5556 and reaches the API server and GitHub on 443; oauth2-proxy takes the proxies on 4180 and reaches dex; below. |
 | `backstage` | default deny | Backstage takes the proxies and the kubelet's probes on 7007 and reaches the resolver and its database on 5432; the database takes the operator, its own pods, Backstage, the dump job, Prometheus and the kubelet's probes, and reaches its own pods, the resolver and the API server, and its instances, for their Barman Cloud sidecars, the object storage on 443; the dump job reaches the resolver, the database and the world on 443. |
+| `ascender` | default deny | the web pods take the proxies, the kubelet's probe and the task pods on 8052; the operator takes the kubelet's probes on 6789 and reaches the API server alone; every pod of Ascender's instance reaches the resolver and its database on 5432; the task pods reach the web pods, the API server and the world on 443 and 22; the job pods reach the resolver and the world on 443 and 22 and nothing else; the database, its instances and the dump job let through what Backstage's do. |
 | `security-system` | default deny | Falco takes Prometheus' scrape and the kubelet's probes on 8765, and reaches the resolver alone; the flow recorder takes nothing and reaches the resolver and Hubble Relay on 4245. |
 | `crowdsec` | default deny | the local API takes the agent on 8080, Prometheus on 6060 and the kubelet's probes, and sends nothing; the agent takes Prometheus and the kubelet on 6060 and reaches the resolver, the local API and the API server on 443 and 6443; below. |
 | `open-feature-operator` | default deny | the OpenFeature Operator takes the kubelet's probes on 8081, Prometheus' scrape on 8080 and the API server's calls to its webhooks on 9443, and reaches the API server alone. |
@@ -656,18 +663,20 @@ once it is not, and the agents' rendered configuration agrees.
   while that carries `k8s-gitops/gateway: public`, on the container port the route sends to and no
   other: `hello` in `demo` on 8080, kromgo in `kromgo` on 8080, n8n on 5678 and Open WebUI on 8080
   in `ai-system`, dex on 5556 and oauth2-proxy on 4180 in `sso-system`, Backstage in `backstage` on
-  7007, and VictoriaLogs in `monitoring` on 9428. oauth2-proxy's rule also carries the question the
-  proxies ask it about each request of a route that opts in to sign-in ([Sign-in](#sign-in)), which
-  is no route's backend but reaches the same pods and port. `tests/network-policy.bats` reads those
+  7007, Ascender's web pods in `ascender` on 8052, and VictoriaLogs in `monitoring`
+  on 9428. oauth2-proxy's rule also carries the question the proxies ask it about each
+  request of a route that opts in to sign-in ([Sign-in](#sign-in)), which is no route's
+  backend but reaches the same pods and port. `tests/network-policy.bats` reads those
   ports from the render, from each route's backend through its Service's target port to the
   container port, and fails unless the rules name, in each labelled namespace, exactly them; it
   reads the proxies' egress in every form the evaluation reads, and fails on a port entry or a peer
   it cannot compare, a backend in a namespace without the label and a Service without a selector.
   What a pod of such a namespace takes is its own namespace's to say: in `demo`, `hello` on 8080; in
   `kromgo`, kromgo on 8080; in `sso-system`, dex on 5556 and oauth2-proxy on 4180; in `backstage`,
-  Backstage on 7007. In `ai-system`, which is listed and so has no pod in default deny, every pod
-  takes them on every port, so the proxies' rules are what keep them from n8n's other ports, from
-  every port of its database and from Open WebUI's other ports; PostgreSQL also authenticates every
+  Backstage on 7007; in `ascender`, the web pods on 8052. In `ai-system`, which is
+  listed and so has no pod in default deny, every pod takes them on every port, so
+  the proxies' rules are what keep them from n8n's other ports, from every port of
+  its database and from Open WebUI's other ports; PostgreSQL also authenticates every
   client. So it is in `monitoring`, listed as well: the proxies' rule for VictoriaLogs is what keeps
   them off Prometheus, Grafana, Alertmanager, the collector and the store's other ports. The
   controller takes the proxies on 18000 and 18002 and the kubelet on 8081, and reaches the resolver
@@ -731,6 +740,19 @@ once it is not, and the agents' rendered configuration agrees.
   redirects to a second host, and the object storage, whose endpoint is a URL, as for the movers
   below ([Dumps](#dumps)). The pods the operator makes carry the labels of its source, which no
   render holds; the job pods it makes to create and join an instance carry `cnpg.io/cluster` too.
+- **`ascender`.** The pods of Ascender's instance are its operator's, made at run time, and the
+  policies name them by the labels the operator's templates give them at the release recorded beside
+  them. The web pods, by the labels of their Deployment's selector, take the proxies by their
+  labels, the kubelet's readiness probe and the task pods' websocket relay on 8052. Every pod of the
+  instance, by `app.kubernetes.io/part-of: ascender` with the operator's `managed-by` and
+  `component`, the migration Job's included, reaches the resolver and the database's instances on
+  5432. The task pods reach the web pods on 8052, the API server on 443 and 6443, and the world on
+  443 and on 22 in a policy of its own each, with its reason: the project updates that run in their
+  execution environment. The job pods, by `ansible_job`, reach the resolver and the world on 443 and
+  on 22, each in a policy of its own with its reason, and nothing in the cluster, and take nothing.
+  The operator's pod takes the kubelet's probes on 6789 and reaches the API server alone. The
+  database, its instances and the dump job are Backstage's, for `ascender-db`, the instances taking
+  every pod of the instance and the dump job on 5432. [Ascender](#ascender) says what each is for.
 - **`security-system`.** Falco's pods, by the labels of the DaemonSet's selector, take Prometheus
   (`app.kubernetes.io/name: prometheus` in `monitoring`) on 8765, the metrics port the chart's
   monitor scrapes, and the kubelet's probes on the same port. They reach the resolver alone, for
@@ -861,10 +883,10 @@ namespace and the policy, when
   own (`pkg/k8s/apis/cilium.io/utils/utils.go`), so that it also selects the world, the hosts and
   the nodes. A reason excuses none of these.
 
-The check reads only what the render holds. Besides the policies of `backstage`, `crowdsec`, `demo`,
-`envoy-gateway-system`, `kromgo`, `open-feature-operator`, `security-system` and `sso-system`, that
-is one policy of a listed namespace: `flux-operator-web`, the `NetworkPolicy` the Flux Operator's
-chart renders in `flux-system`, which lets every pod of every namespace (an empty
+The check reads only what the render holds. Besides the policies of `ascender`, `backstage`,
+`crowdsec`, `demo`, `envoy-gateway-system`, `kromgo`, `open-feature-operator`, `security-system` and
+`sso-system`, that is one policy of a listed namespace: `flux-operator-web`, the `NetworkPolicy` the
+Flux Operator's chart renders in `flux-system`, which lets every pod of every namespace (an empty
 `namespaceSelector`) reach the operator's web interface on 9080. It passes because `flux-system` is
 listed; the day `flux-system` takes the default deny, the check refuses it, as a `NetworkPolicy`
 other than the default deny and as an allow of every pod of every namespace. The `NetworkPolicy`
@@ -877,8 +899,9 @@ the destination both have to allow it, and a pod is in default deny for a direct
 policy that selects it asks for it, as Cilium decides. Over a render that holds what the check
 refuses wherever it is, it gives no answer and exits 2. The tests use it to follow the public path
 hop by hop (the world to the proxies' listener ports, the proxies to `hello`'s port, to kromgo's, to
-n8n's, to Open WebUI's, to dex's and oauth2-proxy's and to Backstage's but not to kromgo's metrics
-port, n8n's or Open WebUI's other ports or either database, the kubelet to every probe port,
+n8n's, to Open WebUI's, to dex's and oauth2-proxy's, to Backstage's and to Ascender's
+web pods' but not to kromgo's metrics port, n8n's, Open WebUI's or Ascender's other
+ports, Ascender's task and job pods or any database, the kubelet to every probe port,
 Prometheus to kromgo's metrics port alone), to show that the blackbox exporter, the prober the
 Probes name, reaches the proxies on the listener port each Probe's target asks for, read from the
 render, and that no other pod of the render or of the operators is taken there, to show that no pod
@@ -1184,17 +1207,18 @@ does not matter.
    the chart's update strategy).
 2. **The policies merge.** The root applies the default denies, the applications apply their allows,
    and the agents evaluate both and drop nothing they deny; what a policy would drop is reported as
-   `AUDIT`. As the allows land after the denies, `AUDIT` flows of `backstage`, `crowdsec`, `demo`,
-   `envoy-gateway-system`, `kromgo`, `open-feature-operator`, `security-system` and `sso-system`
-   from before they landed are expected, such as the proxies to `hello` on 8080 and to the
-   controller on 18000, and the controller to the API server, and an agent's recent flows can hold
-   them for a while.
+   `AUDIT`. As the allows land after the denies, `AUDIT` flows of `ascender`, `backstage`,
+   `crowdsec`, `demo`, `envoy-gateway-system`, `kromgo`, `open-feature-operator`, `security-system`
+   and `sso-system` from before they landed are expected, such as the proxies to `hello` on 8080 and
+   to the controller on 18000, and the controller to the API server, and an agent's recent flows can
+   hold them for a while.
 3. **Watch a day of the record**, from the moment the Kustomizations that hold the allows, `hello`,
    `demo-volsync-movers`, `envoy-gateway`, `kromgo`, `dex`, `oauth2-proxy`, `backstage`, `falco`,
-   `crowdsec`, `open-feature-operator` and `network-audit`, are Ready at the merge's revision
-   (`flux get kustomizations`). The flow recorder writes every flow a policy would drop to the log
-   store ([The record of what policy drops](#the-record-of-what-policy-drops)), so each path needs
-   to be taken only once: `just gateway-check`; `just cluster-check`; the secret demo
+   `crowdsec`, `open-feature-operator`, `network-audit`, `ascender-operator` and
+   `ascender`, are Ready at the merge's revision (`flux get kustomizations`). The
+   flow recorder writes every flow a policy would drop to the log store ([The record
+   of what policy drops](#the-record-of-what-policy-drops)), so each path needs to
+   be taken only once: `just gateway-check`; `just cluster-check`; the secret demo
    (`just secret-rotate demo/hello greeting`); a badge asked of kromgo by its name, which has
    kromgo query Prometheus ([Status badges](#status-badges)); a sign-in through a route that opts
    in to it ([Sign-in](#sign-in)), and a query in the log store's interface
@@ -1202,20 +1226,22 @@ does not matter.
    name, which has Backstage read its database; a WAL segment the primary of `backstage-db`
    archives, which `select pg_switch_wal()` there forces
    ([Backups and restores](#backups-and-restores)); a restore of `volsync-demo`
-   ([Restoring](#restoring)); and the two dry runs that call the OpenFeature Operator's webhooks
-   ([OpenFeature Operator](#openfeature-operator)). The blackbox exporter's probes need nothing to
+   ([Restoring](#restoring)); the two dry runs that call the OpenFeature Operator's
+   webhooks ([OpenFeature Operator](#openfeature-operator)); and a job launched in
+   Ascender and a project update there, which start a job pod and have the task pod fetch
+   the project ([Ascender](#ascender)). The blackbox exporter's probes need nothing to
    start them: its pods reach the proxies on 10080 and 10443 at every scrape of a `Probe`
    ([Probes](#probes)). Then let a night pass, for the paths nobody takes by hand: the nightly dump
    of `backstage-db` from 02:00, which waits up to 20 minutes before it starts ([Dumps](#dumps)),
-   the base backup of `backstage-db` at 02:47 UTC, the nightly backup of `volsync-demo` at 03:17,
-   and its restore drill's restore at 04:17 and check at 05:17
+   the base backup of `backstage-db` at 02:47 UTC, the same two of `ascender-db`, the nightly
+   backup of `volsync-demo` at 03:17, and its restore drill's restore at 04:17 and check at 05:17
    ([The restore drill](#the-restore-drill)). Once the allows have been Ready for 24 hours, and
    within 24 hours of taking the paths above, so that the window holds them and one nightly
    backup, one dump, one base backup and one drill, `just network-audit 24h` must exit 0 and print
-   no `AUDIT` line whose `NAMESPACE` is a namespace that holds the default deny: `backstage`,
-   `crowdsec`, `demo`, `envoy-gateway-system`, `kromgo`, `open-feature-operator`, `security-system`
-   or `sso-system`. Exit 0 says that the recorder's container ran through those 24 hours and that the
-   table is not cut, and what the record can miss even then is in
+   no `AUDIT` line whose `NAMESPACE` is a namespace that holds the default deny: `ascender`,
+   `backstage`, `crowdsec`, `demo`, `envoy-gateway-system`, `kromgo`, `open-feature-operator`,
+   `security-system` or `sso-system`. Exit 0 says that the recorder's container ran through
+   those 24 hours and that the table is not cut, and what the record can miss even then is in
    [The record of what policy drops](#the-record-of-what-policy-drops); a run that exits 1 says what
    the record lacks, and the day is watched again from there. The lines that are not flows, which
    the run counts, are read with the query it prints: events Hubble lost, which its `lost_events`
@@ -2359,7 +2385,7 @@ where Grafana lists it.
 | Cilium Metrics (`cilium-agent`) | The agents' processes, API, BPF, datapath, policy, endpoints, controllers and Kubernetes client | `cilium-monitoring` | `files/cilium-agent/dashboards/cilium-dashboard.json` of the Cilium chart at 1.20.4; Apache-2.0 | Cilium | Prometheus |
 | Cilium BGP sessions (`cilium-bgp`) | The sessions established against those configured for each node, each session's state, the routes advertised and the agents scraped | `cilium-monitoring` | Written for this tree; Apache-2.0 | Cilium | Prometheus |
 | Piraeus Datastore (`piraeus`) | LINSTOR's pools, nodes, resources and error reports, the volumes' read and write rates, and DRBD's connections, quorum and out-of-sync data | `linstor-monitoring` | `config/extras/monitoring/piraeus-dashboard.json` of the Piraeus operator's repository at v2.12.1, the release the pinned chart deploys; Apache-2.0 | Storage | Prometheus |
-| CloudNativePG (`cloudnative-pg`) | A PostgreSQL cluster's instances, their health, configuration, activity, storage, write-ahead log, replication and checkpoints, and the operator's reconciles | `cloudnative-pg`, and the clusters of `n8n` and `backstage` | `charts/cluster/grafana-dashboard.json` of the CloudNativePG chart, where it is the chart `cluster` at 0.0.5; Apache-2.0 | PostgreSQL | Prometheus |
+| CloudNativePG (`cloudnative-pg`) | A PostgreSQL cluster's instances, their health, configuration, activity, storage, write-ahead log, replication and checkpoints, and the operator's reconciles | `cloudnative-pg`, and the clusters of `n8n`, `backstage` and `ascender` | `charts/cluster/grafana-dashboard.json` of the CloudNativePG chart, where it is the chart `cluster` at 0.0.5; Apache-2.0 | PostgreSQL | Prometheus |
 | Falco (`falco`) | The rules that matched, by rule, source and priority, Falco's memory and CPU, the events it reads and drops, and the versions and engines that run | `falco` | `dashboards/falco-dashboard.json` of the Falco chart at 9.2.2; Apache-2.0 | Falco | Prometheus |
 | external-dns (`external-dns`) | The age of the last successful sync and of the last attempt, the endpoints of the sources and of the registry, their errors and the verified records by type | `external-dns` | Written for this tree; Apache-2.0 | external-dns | Prometheus |
 | Silence operator (`silence-operator`) | Whether the operator is scraped, its reconciles and errors by controller, the reconcile time and the queue depth | `silence-operator` | Written for this tree; Apache-2.0 | Silences | Prometheus |
@@ -2749,7 +2775,9 @@ without a session once it runs with its configuration, `oauth2-proxy` one for
 session and which, with the cookie session store, checks no connection, `backstage` one for
 `backstage.${CLUSTER_DOMAIN}` at Backstage's readiness endpoint `/.backstage/health/v1/readiness`,
 a `GET` its route admits, which answers 200 without a session once every plugin has started, each
-having migrated its schema in the database, `hello-sso` one for `hello-sso.${CLUSTER_DOMAIN}` at
+having migrated its schema in the database, `ascender` one for `ascender.${CLUSTER_DOMAIN}`
+at its ping endpoint `/api/v2/ping/`, which answers 200 without a session once the
+web pod reads the database, `hello-sso` one for `hello-sso.${CLUSTER_DOMAIN}` at
 `/` and `victoria-logs-route` one for `logs.${CLUSTER_DOMAIN}` at the interface `/select/vmui/`,
 each with the module that expects the sign-in redirect (**Behind sign-in**, below), and
 `gateway-public` one for the redirect, which is probed for the apex of the domain, as the redirect
@@ -3160,7 +3188,8 @@ The collector mounts all of `/var/log` read-only, as Talos renames the files it 
 read every file there. On a control plane that includes the API server's audit log in
 `/var/log/audit/kube`, which Talos's default audit policy, the one this cluster runs, writes at the
 `Metadata` level: who did what to which object, and when, without request or response bodies, so
-without Secret values. The collector does not ship it: its file source's patterns, `/var/log/*.log`
+without Secret values, except one a request's URL carries, as an `exec`'s command does
+([Ascender](#ascender)). The collector does not ship it: its file source's patterns, `/var/log/*.log`
 and `/var/log/*.log.1`, match files at the top of `/var/log` only, and its pod-log source reads only
 `/var/log/pods`. The node's own audit log, which every node writes at the top, as
 `/var/log/auditd.log`, matches the patterns and is dropped by `drop_auditd_log` above. What keeps
@@ -4227,8 +4256,8 @@ cannot be listed without it: `just kubernetes-check` refuses the dependency.
   label and name the one kind. A route in a namespace without it is not accepted, which is the
   Gateway API's rule and the controller's to apply; it shows in the route's status, which
   `just gateway-check` reads, and `tests/gateway.bats` proves the selector on the objects. `demo`,
-  `ai-system`, `kromgo`, `sso-system`, `backstage` and `monitoring` are the namespaces that carry
-  the label, and `tests/gateway.bats` pins that set.
+  `ai-system`, `kromgo`, `sso-system`, `backstage`, `monitoring` and `ascender` are the namespaces
+  that carry the label, and `tests/gateway.bats` pins that set.
 - **The certificate.** The `Certificate` `public-wildcard` asks the `ClusterIssuer` the cluster
   chose, `cluster-ca` by default, for an ECDSA P-256 certificate for `*.${CLUSTER_DOMAIN}` and
   `${CLUSTER_DOMAIN}`, with a new private key at each renewal and the same Secret, so the listener
@@ -5537,14 +5566,20 @@ nothing defines, which is why the check is the guard. The apply of a name longer
 fails as well: the dump job's CronJob, `<name>-pgdump`, is named in at most 52, and Flux applies an
 application whole or not at all. The operator creates the database `app`, owned by the user
 `app`, whose password and connection URI are in the Secret `<name>-app`; the Services `<name>-rw`,
-`<name>-ro` and `<name>-r` reach the primary, the replicas and any instance. The dump job
-([Dumps](#dumps)) takes its S3 key through an ExternalSecret too, so it needs nothing in `dependsOn`
+`<name>-ro` and `<name>-r` reach the primary, the replicas and any instance. An application
+whose patch names a Secret of its own in `bootstrap.initdb` makes that Secret, and the
+operator then makes none: Ascender's `ascender-db-app` comes from External Secrets, with
+the keys Ascender reads and no URI ([Ascender](#ascender)). The dump job ([Dumps](#dumps))
+takes its S3 key through an ExternalSecret too, so it needs nothing in `dependsOn`
 beyond what the backups need.
 
 A patch in the application's own `kustomization.yaml` changes anything else, as it applies after the
-component. It targets the Cluster by kind alone: Flux substitutes after the build, so when the patch
-applies the Cluster is still named `${CNPG_CLUSTER_NAME}`, and a target by the name the application
-gives it matches nothing and is skipped without an error.
+component. It targets the Cluster by kind: Flux substitutes after the build, so when the
+patch applies the Cluster is still named `${CNPG_CLUSTER_NAME}`, and a target by the name
+the application gives it matches nothing and is skipped without an error. A patch that
+must reach the component's Cluster and no other, as a restore may add one beside it in
+`app/`, names it by that name as a regular expression, `name: \$\{CNPG_CLUSTER_NAME\}`, as
+Ascender's does ([Ascender](#ascender)).
 
 ```yaml
 patches:
@@ -5603,7 +5638,7 @@ component adds an `ObjectStore`, a `ScheduledBackup` and an ExternalSecret.
   own name.
 - **How often.** A base backup is taken at 02:47 UTC every day, and one as soon as the
   `ScheduledBackup` is made. Every database's base backup starts at 02:47, the component's one
-  schedule, so the base backups of two databases run together. The minute is one that no backup of
+  schedule, so the base backups of the databases run together. The minute is one that no backup of
   another kind uses: the etcd snapshots run at minute 17, the OpenBao snapshots at minute 43, the
   volume backups at minutes of their own, and the dumps start at 02:00 and end by their deadline at
   02:45, and 02:47 is a quiet hour for the databases, so a base backup's reads and its upload meet no
@@ -7230,6 +7265,309 @@ the pinned sources, and the list is what to look at when the application first r
 - **That Pod Security admits the pod the webhook returns** is under what the webhook adds, above:
   seen on the offline API server for the example's pod, in a namespace that enforces restricted.
 
+### Ascender
+
+Ascender is Ctrl IQ's web interface, API and job runner for Ansible, a build of AWX: playbooks run
+from the browser against hosts and repositories the owner configures there. It runs in the namespace
+`ascender` (`apps/base/ascender/`), installed by Ctrl IQ's operator from its published chart and one
+`AWX` resource of the tree, at its own hostname behind its own login. A cluster selects it with
+three entries of its overlay: the namespace directory, `ascender-operator/ks.yaml` and
+`ascender/ks.yaml`; with the namespace directory alone it builds the namespace, its defaults and its
+default deny, and nothing else of Ascender. `tests/ascender.bats` holds what follows on the built
+applications and the rendered chart (`features/ascender.feature`).
+
+- **The two applications.** `ascender-operator` installs the chart `ascender-operator` 25.6.3 from
+  Ctrl IQ's classic Helm repository, `https://ctrliq.github.io/ascender-operator`, with the chart's
+  definitions of `awx.ansible.com` from its `crds/`, and makes the database's Secret (below). Its
+  `ks.yaml` names `cilium` and `external-secrets` and waits, so it is Ready once the operator runs
+  and the Secret exists. `ascender` applies the `AWX` named `ascender`, the database from
+  `components/cnpg-cluster`, the route, its `Probe`, the Service `ascender-web` and the policies. It
+  names `ascender-operator`, `cloudnative-pg`, `plugin-barman-cloud`, `prometheus-operator-crds`,
+  `external-secrets`, `openbao-store`, `gateway-public`, `cilium` and `blackbox-exporter`, takes the
+  long timeout and is Ready by a `healthCheckExprs` entry for the `AWX`: `current` is its
+  `Successful` condition being `True`. The operator is operator-sdk's Ansible operator, in the
+  pinned image `ansible-operator` v1.42.3-4-g6a8af31: it sets `Successful` to `False` when a run
+  starts and to `True` when the run ends without a failure, and a failed run sets `Failure` to
+  `True`, which stays so into the next run until that one succeeds; so the entry has no `failed` and
+  no `inProgress` expression.
+- **What runs.** The operator, one pod of the chart's Deployment `awx-operator-controller-manager`:
+  the manager, `awx-manager`, and kube-rbac-proxy in front of its metrics. From the `AWX` it makes,
+  in the same namespace: the web Deployment `ascender-web`, one pod of nginx, uwsgi and daphne under
+  supervisord in the container `ascender-web`, valkey and rsyslog; the task Deployment
+  `ascender-task`, one pod of the dispatcher, the callback receiver and the websocket relay in
+  `ascender-task`, receptor in the control plane's execution environment, `ascender-ee`, valkey and
+  rsyslog; the migration Job `ascender-migration-<version>` of each version; its own Service
+  `ascender-service`, ConfigMap, Secrets, service account, Role and binding. Ascender starts a pod
+  `automation-job-<id>` for every job. Valkey listens on its socket in the pod alone (`port 0`), and
+  receptor too (`local-only`). The pinned image is not the tree of the tag: it holds the Python
+  package `awx` 25.6.3, on Python 3.12 and Django 5.2.17, while the tag's tree holds a package
+  `ascender` on newer releases of both; what this section cites of Ascender is the image's files.
+- **The operator's rights, and what they make it.** The chart binds the operator's account to a Role
+  of the namespace over pods, `pods/exec`, `pods/attach` and `pods/log`, Secrets, service accounts,
+  ConfigMaps, Services, endpoints, persistent volume claims, events, roles and role bindings,
+  Deployments, StatefulSets, DaemonSets and ReplicaSets, Jobs and CronJobs, Ingresses, OpenShift's
+  routes, Traefik's TCP routes, the creation of ServiceMonitors and its own kinds; to a Role for its
+  leader election; and to the ClusterRole `awx-operator-proxy-role-ascender-operator`, which creates
+  TokenReviews and SubjectAccessReviews for kube-rbac-proxy. Its other ClusterRole, the metrics
+  reader, is bound to nothing. It has no webhook, and it watches its own namespace alone
+  (`WATCH_NAMESPACE` is the pod's). The instance's own account, `ascender`, which the web and task
+  pods run as, may create, change and delete pods, attach to them, read their logs, and read, create
+  and delete Secrets of the namespace by name. A right to create pods in a namespace is a right to
+  run a pod as any account of it, so each account can reach every Secret there, and **whoever holds
+  Ascender's admin login can, through a container group's pod spec override, run any `baseline` pod
+  there, as the `ascender` account or the operator's**, with any labels and so with the flows of any
+  of the namespace's policies: the login is as strong as the namespace.
+- **The images**, pinned by tag and digest and moved by Renovate in one group, `Ascender`, with the
+  chart (`.renovate/groups.json5`), as Ctrl IQ releases the chart, the operator and Ascender at one
+  version and its installer runs them so; nothing of the two applications merges itself
+  (`.renovate/automerge.json5`). The chart names its two images by tag alone and has no value for
+  them, so the release's post-renderer pins `ghcr.io/ctrliq/ascender-operator` at the chart's
+  appVersion and `quay.io/brancz/kube-rbac-proxy` at the chart's tag, each by the digest of its tag,
+  as `images` entries whose `newTag` carries the digest. The proxy's tag is the chart's, which
+  `tests/ascender.bats` holds it to, so Renovate proposes only new digests of it
+  (`.renovate/managers.json5`), and the chart's pull request sets the tag a new chart names. The
+  chart's Deployment names the pull secret `redhat-operators-pull-secret`, which nothing makes; the
+  images are public and the kubelet pulls them without it, so the reference stays as the chart has
+  it. The `AWX` names the rest, and the operator joins each repository and version with a colon:
+  `ghcr.io/ctrliq/ascender` and the init container's `ghcr.io/ctrliq/ascender-ee` at the chart's
+  version with their digests, the control plane's execution environment and the one execution
+  environment for jobs, `Ascender EE`, the same `ascender-ee` reference, and
+  `ghcr.io/valkey-io/valkey` at the newest 9.x.y-alpine, the line the operator defaults to, which
+  `.renovate/managers.json5` keeps Renovate to. The init container's image is set in full, as the
+  operator's default splits the control plane's reference at its colons. The execution environment
+  is matched by its name, which holds no version, so a new image moves it in place
+  (`awx/main/management/commands/register_default_execution_environments.py`). Each pin is extracted
+  once: the versions by the custom manager under their comments, the job environment's `image:` line
+  by the kubernetes manager, which also reads `spec.image`, the repository alone, as a dependency
+  with no version, which its lookup skips. `spec.image` is the one line of `.image-allowlist` for
+  the application, as the image check reads it without a tag. The record
+  `# ascender-operator-templates: 25.6.3` beside the Service and the policies names the release
+  whose templates their selectors were read from (`.renovate/by-hand.tsv`).
+- **Pod Security.** The namespace enforces `baseline` and audits and warns at `restricted` at the
+  cluster's minor. The one workload below `restricted` is the job pod, an entry of
+  `pod-security-exceptions.yaml` created by the `AWX`: the default pod Ascender starts sets no
+  security context (`get_default_pod_spec` in `awx/main/utils/execution_environments.py`), and the
+  operator does not make it, so its restricted mode does not reach it. Every pod the operator makes
+  asks for `restricted`: the `AWX` sets `restricted_security_context`, which gives every container
+  of the web and task pods and of the migration Job no privilege escalation and no capability, and
+  `security_context_settings`, which the operator combines over its own pod context: a non-root
+  user, 1000, group 0, file system group 1000 and the runtime's seccomp profile. The user and file
+  system group are the ones the restricted mode writes. The group is 0 because the image holds
+  `/etc/passwd`, `/etc/group`, `/var/lib/awx` (uwsgi's fifo), `/var/lib/awx/rsyslog`,
+  `/var/run/supervisor` and `/var/log/tower` as root's, group-writable for gid 0 alone, and at start
+  the launch scripts write `/etc/passwd` and supervisord opens its socket in `/var/run/supervisor`:
+  run with group 1000 the web container can do neither and stops, and with group 0 every launch
+  script runs and stops only on the missing database (the pinned images, run offline with
+  `--user 1000:0 --cap-drop ALL --security-opt no-new-privileges --network none`, valkey with a
+  writable `/data` and socket directory); the `restricted` level puts no rule on groups. The `AWX`
+  sets none of `task_privileged`, `redis_capabilities`, `development_mode`, `projects_persistence`
+  and `host_aliases`, and no other field that adds to the operator's pods, such as `extra_volumes`,
+  a `*_extra_volume_mounts` or `init_container_extra_commands`: `tests/ascender.bats` holds its
+  fields to those the pods it evaluates model and those Pod Security does not read. No root
+  filesystem is read-only: the operator has no field for it, and the launch scripts write
+  `/etc/passwd`. The operator's own pod passes `restricted` as the chart renders it.
+- **The database** is a PostgreSQL cluster named `ascender-db` from `components/cnpg-cluster`, with
+  the component's three instances and 5Gi each: every job's events are rows of it until the system
+  job Cleanup Job Details, which Ascender schedules each Sunday, removes the jobs older than its 120
+  days (`awx/main/migrations/0002_squashed_v300_release.py`). A patch in `app/kustomization.yaml`
+  gives the component's Cluster `bootstrap.initdb`: the database `app`, owned by `app`, with the
+  password of the Secret `ascender-db-app`, so CloudNativePG makes no application Secret of its own.
+  External Secrets makes that Secret once, from a `Password` generator of 32 characters hex-encoded,
+  so the password holds no character the settings file the operator writes it into as a Python
+  string could misread, through a `CreatedOnce` ExternalSecret: a `kubernetes.io/basic-auth` Secret
+  with `username: app`, the password, `dbname: app` for the dump job, and the keys the operator's
+  `database_configuration.yml` reads, `host: ascender-db-rw`, `port: "5432"`, `database: app`,
+  `sslmode: require` and `type: unmanaged`. The `AWX` names it in `postgres_configuration_secret`.
+  It is made in the application `ascender-operator`, which `ascender` waits for, because the
+  operator reads it once at the start of a run, and without it writes
+  `ascender-postgres-configuration` with `type: managed` and starts a PostgreSQL of its own.
+  Ascender accepts PostgreSQL 12 and newer (`awx/__init__.py`), so the component's 18 stays, and no
+  migration of it creates an extension or needs more than the database's owner. Its connections: the
+  task container's memory limit, 2Gi, is what the operator writes as `SYSTEM_TASK_ABS_MEM`, so the
+  dispatcher's pool is at most 2Gi over 100MiB a fork plus 7, 27 workers
+  (`awx/main/dispatch/pool.py`, `get_mem_effective_capacity` in `awx/main/utils/common.py`), not the
+  node's memory; with the dispatcher's own process and its listener (2), the callback receiver and
+  its four workers (5), the relay (1), the two rsyslog configurers with their listeners (4), uwsgi's
+  five processes (5), daphne (1), the heartbeat (1), the cache clearer with its listener (2), one
+  `awx-manage` of the operator's at a time (1) and the dump job (1), that is **50 connections at
+  most**, read from the image's source and not measured, against PostgreSQL's default of 100, which
+  the component leaves. A rollout of a new version runs the old pods beside the new ones for a
+  while, the new pool at its minimum of four, about 25 more. The component archives its WAL, backs
+  the database up daily and dumps it once a day ([PostgreSQL](#postgresql)), and that database is
+  all of Ascender's state: its organisations, inventories, projects, credentials, templates and job
+  history.
+- **Secrets.** Nothing secret is in the tree and the tree makes no Secret. The admin password and
+  the secret key are the operator's own: `admin_password_secret` and `secret_key_secret` are unset,
+  so it generates `ascender-admin-password` and `ascender-secret-key`, 32 letters and digits each,
+  and `garbage_collect_secrets` is false, so they outlive the `AWX`. They live in those Secrets, in
+  etcd and in its snapshots, and the admin password also in the API server's audit log (The first
+  sign-in, below). Ascender encrypts every credential it stores, a machine's SSH key or a
+  repository's token, under the secret key: a database restored onto a rebuilt cluster without the
+  old `ascender-secret-key` keeps its rows and loses every such credential, which the owner enters
+  again.
+- **Restoring the database.** Either restore of [postgres-restore.md](runbooks/postgres-restore.md)
+  makes a new cluster, `<NEW>`, beside `ascender-db`, and for Ascender its steps differ as follows.
+  The patch of `app/kustomization.yaml` names the component's Cluster by the name it has when
+  patches apply, `${CNPG_CLUSTER_NAME}`, so the runbook's Cluster for a point in time, added to
+  `app/`, keeps its `bootstrap.recovery`, which `tests/ascender.bats` holds by building it there.
+  The `AWX` cannot read the Secret CloudNativePG makes for a new cluster, `<NEW>-app`, which has
+  no `database`, `sslmode` or `type`, and the operator's run fails reading `database`; nor does
+  `ascender-db-app` follow the new cluster, as External Secrets writes a `CreatedOnce` Secret
+  once, and an edit of its template, a new `host` among them, changes nothing in it. So the pull
+  request that adds the new cluster also adds, beside `ascender-operator/app/database-secret.yaml`
+  and listed in `ascender-operator/app/kustomization.yaml`, a copy of its `Password` and
+  `ExternalSecret` named `<NEW>-app`, with `host: <NEW>-rw` and the operator's other keys
+  as they are, `port: "5432"`, `database: app`, `username: app`, the generated `password`,
+  `sslmode: require` and `type: unmanaged`, with `dbname: app` for the dump job; and the new
+  cluster names it as its owner's Secret, in `bootstrap.recovery.secret.name` of the runbook's
+  Cluster or, for a dump, by the same patch with `<NEW>-app` in the restore application's
+  `app/kustomization.yaml`. CloudNativePG then makes no Secret of its own and sets the
+  password of `app` from that one, on a recovered cluster too, as it does whenever the
+  Secret changes (`reconcileUser` in `internal/management/controller/instance_controller.go`
+  of CloudNativePG v1.30.1). The switch, in a pull request of its own, merges only once
+  this shows that Secret: `kubectl --namespace ascender get secret <NEW>-app`. The
+  operator reads a `postgres_configuration_secret` that does not exist as none, and writes
+  `ascender-postgres-configuration` and starts a PostgreSQL of its own, as it does without
+  the database's Secret (above), so Ascender comes up on an empty database. The switch sets
+  the `AWX`'s `postgres_configuration_secret` to `<NEW>-app`, and the web and task pods
+  roll with the new connection; for a point in time it also sets the patch's `secret.name`
+  to `<NEW>-app` with `CNPG_CLUSTER_NAME: <NEW>`, so that the component's Cluster keeps
+  that Secret. The Cluster the component adopts then has the patch's `bootstrap.initdb`
+  in place of its `bootstrap.recovery`, which rests on the untested assumption step 5 of
+  the runbook's point-in-time restore names, so its check holds here too: the Cluster in
+  a healthy state, no instance restarted and the next Backup completed. The switch also
+  renames `ascender-db` where Ascender's files write it, as the database's policies select
+  no instance of `<NEW>` until then: the dump job's `app.kubernetes.io/instance` label in
+  `ascender/app/kustomization.yaml`, the `cnpg.io/cluster` and `app.kubernetes.io/instance`
+  selectors of the database's policies in `ascender/app/ciliumnetworkpolicy.yaml`, and the names
+  `tests/ascender.bats` holds them and the `AWX` to, which fail the required check until they
+  follow. Neither restore touches `ascender-secret-key`, and the restored rows need it: their
+  credentials are encrypted under it, so a restore onto a rebuilt cluster needs the old Secret
+  back first.
+- **The first sign-in.** At `https://ascender.${CLUSTER_DOMAIN}/`, as `admin`, with the password the
+  operator generated, which this prints, with `KUBECONFIG` set to the file `just cluster-kubeconfig`
+  prints:
+
+  ```sh
+  kubectl --namespace ascender get secret ascender-admin-password --output jsonpath='{.data.password}' | base64 -d; echo
+  ```
+
+  `create_preload_data` is false, so the instance holds no demonstration data: no organisation,
+  project, inventory or template until the owner makes them, and no credential but the managed
+  `Ansible Galaxy` one that a migration creates (below). Until that first sign-in nobody but the
+  holder of that Secret can use it. The operator sets that password through the API server: on its
+  first run, and on any run whose check for the superuser `admin` fails, it runs
+  `awx-manage update_password` in the web pod with the password on the command line
+  (`roles/installer/tasks/initialize_django.yml`), and an `exec`'s command travels in the request's
+  URL, which the API server's audit log on the control planes records ([Logs](#logs)). So the
+  password is in that log too: change it in the interface after the first sign-in. The Secret then
+  no longer holds the password, and the command above prints the old one; the operator sets it back
+  only on a run whose check fails.
+- **The hostname** is `ascender.${CLUSTER_DOMAIN}`, an `HTTPRoute` on the public Gateway's `https`
+  listener with one rule to the Service `ascender-web` on 80, every method and path and no filter,
+  published as [Giving an application a public hostname](#giving-an-application-a-public-hostname)
+  says. The operator makes its own Service at run time, which no render holds, so the tree declares
+  this one, with the web pods' three labels and port 80 to 8052, numbered. There is no sign-in of
+  the cluster and no firewall in front: Ascender's own login is the one, and the edge routers'
+  allowlist is what stands before it. The route's `Probe` asks `/api/v2/ping/`, which answers 200
+  without a session once the web pod reads the database; with no trailing slash Django answers a
+  redirect. That path **publishes the version, the pod names and the installation's identifier** to
+  whoever can reach the route (`ApiV2PingView` in `awx/api/views/root.py`).
+- **Signing in behind the Gateway.** The Gateway terminates TLS, nginx serves plain http on 8052,
+  and neither Ascender's settings nor the operator's set Django's `SECURE_PROXY_SSL_HEADER`, so
+  Django sees the request as http. Its CSRF check then compares the `Origin` of the login's `POST`,
+  `https://ascender.<domain>`, with the request's own `http://` origin, which differs, and admits it
+  only because `extra_settings` sets `CSRF_TRUSTED_ORIGINS` to the route's https origin, from the
+  same substitution as the hostname; Django checks the `Referer` only for a secure request without
+  an `Origin`. The session and CSRF cookies are marked secure. The interface's websockets reach
+  daphne through nginx: Envoy Gateway v1.10.0 upgrades websockets on every route of HTTP/1.1 by
+  default, so job output streams as it runs, with no Envoy Gateway object.
+- **Probes and requests.** The operator's probes are off by default, so the `AWX` turns on the web's
+  readiness probe on `/api/v2/ping/` and the liveness probes of web and task, which run
+  `supervisorctl status` and fail while any program is not `RUNNING`. A program is `RUNNING` 30
+  seconds after it starts (`startsecs` in the image's supervisord files), so the liveness probes
+  begin after 60 seconds. The requests of every container are written out in the `AWX`; they are the
+  operator's defaults and are not measured here, and the task container alone has a limit, of
+  memory, for the connections above. One web and one task replica.
+- **Network.** The namespace denies traffic both ways by default and declares its flows beside each
+  application ([Network policy](#network-policy)). The operator takes the kubelet's probes on 6789
+  and reaches the API server alone: its tasks reach it through the operator's proxy on the pod's
+  loopback and look no name up, and none fetches anything. The web pods take the proxies, the
+  kubelet's readiness probe and the task pods' relay on 8052 (`awx/main/wsrelay.py`). Every pod of
+  the instance, the migration Job's included, reaches the resolver and the database's instances on
+  5432. The task pods also reach the web pods on 8052 and the API server, where receptor starts each
+  job's pod and streams it through `pods/attach` and `pods/log`, and the world on 443 and on 22,
+  each in a policy of its own with its reason: project updates and system jobs are of the control
+  plane's capacity (`get_capacity_type` in `awx/main/utils/common.py`) and run in the task pod's
+  execution environment (`work_type` in `awx/main/tasks/receptor.py`), where a project update clones
+  its repository and installs the roles and collections it names. **The job pods reach the cluster's
+  resolver and the world on 443 and on 22 and nothing else**, each world port in a policy of its own
+  with its reason, and take nothing: they mount no service account token, reach no pod of the
+  cluster, not the API server, the database or Ascender's own pods, and receptor attaches to them
+  through the API server. The database, its instances and the dump job let through what Backstage's
+  do, for `ascender-db`, the instances taking every pod of Ascender's instance and the dump job on
+  5432. The policies select the job pods by the label `ansible_job` and Ascender's pods by their
+  operator's labels; a pod a container group's override starts carries whatever labels it names, so
+  the labels are no proof of what a pod is, as for the movers of `demo`.
+- **Monitoring.** No monitor scrapes Ascender or its operator: Ascender's metrics need a session or
+  a token (`ALLOW_METRICS_FOR_ANONYMOUS_USERS` is false in `awx/settings/defaults.py`), and the
+  operator's are behind kube-rbac-proxy. The component's PodMonitor of the database is the
+  application's one monitor, and the CloudNativePG dashboard describes its cluster
+  ([Dashboards](#dashboards)). The route's `Probe` feeds `PublicEndpointDown` and
+  `PublicEndpointWrongStatus`.
+- **What Ascender calls outside the cluster**, read from the image's settings; no offline run of it
+  was made:
+
+  | What | Setting | State |
+  | --- | --- | --- |
+  | Automation Analytics, which uploads data to Red Hat | `INSIGHTS_TRACKING_STATE`, `REDHAT_USERNAME`, `AUTOMATION_ANALYTICS_URL` | off: the tracking state is false and the account empty, so the gathering stops before it collects |
+  | Pendo, the interface's usage tracking | `PENDO_TRACKING_STATE` | `off` |
+  | A log aggregator | `LOG_AGGREGATOR_ENABLED` | false |
+  | Ansible Galaxy, for the roles and collections a project's requirements name | `AWX_ROLES_ENABLED`, `AWX_COLLECTIONS_ENABLED`, the managed credential `Ansible Galaxy` at `https://galaxy.ansible.com/` a migration creates | on for a project update whose organisation has a Galaxy credential, from the task pod on 443 |
+  | A project's repository | the project's URL | on once a project names one, from the task pod on 443 or 22 |
+  | The hosts and APIs a playbook manages | the owner's inventories and credentials | on for every job, from the job pod on 22 or 443 |
+  | Notifications by mail, chat or webhook | a notification template | none is configured |
+
+  The execution environment's image is pulled by the kubelet, not by Ascender.
+- **Updates.** Renovate proposes the chart, the operator's image and Ascender's two images in one
+  pull request and never merges it. `auto_upgrade` keeps the operator's default, true: on a new
+  version the operator rolls the Deployments and runs the migration Job, which changes the
+  database's schema, so a new version is read before it is merged, and what takes it back is a
+  restore of the database, under the same `ascender-secret-key` (Restoring the database, above).
+  After a merge, watch the `AWX`'s conditions, not the Kustomization's Ready: the operator writes no
+  `status.observedGeneration`, the one field by which Flux's health check tells a status older than
+  its object (`runtime/cel/status_evaluator.go` of `fluxcd/pkg`), and it sets `Successful` to
+  `False` only when its run starts, so until then `ascender` can be Ready on the last run's
+  `Successful`. The run has started once `Running` is `True` with the reason `Running`; it has
+  succeeded once `Successful` is `True` again, and failed once `Failure` is `True`, with the failed
+  tasks in its message:
+  `kubectl --namespace ascender get awx ascender --output jsonpath='{.status.conditions}'`.
+- **When the operator's run stalls.** On the first start a `Failure` is expected: the operator's
+  first run begins when the `AWX` is applied, with the Cluster, and while the database's instances
+  come up its check for pending migrations counts none, as `awx-manage showmigrations` fails without
+  printing (`roles/installer/tasks/migrate_schema.yml`), so it starts no migration Job and fails
+  where it makes the admin user; a later run, once the primary answers, starts the Job. Read the
+  `AWX`'s `Failure` condition and the log of the container `awx-manager` first. The operator runs
+  again when the `AWX` or an object it made changes, as operator-sdk's Ansible operator watches the
+  objects it makes by default, and after a failed run, which it returns as an error and
+  controller-runtime retries with a growing delay (`internal/ansible/controller/reconcile.go` and
+  `internal/ansible/watches/watches.go` of `ansible-operator-plugins` at v1.42.3); it runs on no
+  period, as its reconcile period is `0s` (its `Dockerfile`). A restart of the Deployment
+  `awx-operator-controller-manager` starts a run at once, the one live change that retries without a
+  commit and without that delay. While the operator is down, Ascender runs as it was, and nothing it
+  would make or change is made.
+- **Removal.** Taking the three entries out of the overlay prunes the `AWX`, and with it, through
+  their owner references, the Deployments, the migration Job, the operator's Service, ConfigMap,
+  role and the Secrets it does not keep; the Cluster and its volumes; the release and its
+  Deployment. The backups stay in the object storage. What stays in the cluster: the namespace,
+  whose prune is disabled; the chart's definitions, which Helm installed from `crds/` and leaves;
+  and the Secrets whose owner references the operator removes on every run, as
+  `garbage_collect_secrets` is false (`roles/installer/tasks/cleanup.yml`):
+  `ascender-admin-password`, `ascender-secret-key`, `ascender-broadcast-websocket`,
+  `ascender-receptor-ca`, `ascender-receptor-work-signing` and the database's `ascender-db-app`,
+  which External Secrets then no longer deletes with its ExternalSecret.
+  `kubectl --namespace ascender get secrets` lists them.
+
 ### Porting an application from the reference catalogue
 
 The steps n8n took, in order; the next port does the same and says where it differs.
@@ -8309,6 +8647,7 @@ merge alone, or is unsigned. Who signs each:
 | `oci://ghcr.io/eekaan/k8s-gitops/ci-tools` | eekaan/k8s-gitops, `tools-image.yaml` on `main` | before merge alone | the checks run in it, and nothing on the cluster pulls it |
 | `https://charts.fairwinds.com/stable` | — | unsigned | a Helm repository: Flux verifies none of its charts |
 | `https://crowdsecurity.github.io/helm-charts` | — | unsigned | a Helm repository: Flux verifies none of its charts |
+| `https://ctrliq.github.io/ascender-operator` | — | unsigned | a Helm repository: Flux verifies none of its charts |
 | `https://open-policy-agent.github.io/gatekeeper/charts` | — | unsigned | a Helm repository: Flux verifies none of its charts |
 | `oci://docker.io/envoyproxy/gateway-helm` | — | unsigned | Envoy Gateway signs its image, not its chart |
 | `oci://ghcr.io/bjw-s-labs/helm/app-template` | bjw-s-labs/helm-charts, `chart-release-steps.yaml` on `main` | before merge and by the cluster | the publisher signs keyless; four applications read it |

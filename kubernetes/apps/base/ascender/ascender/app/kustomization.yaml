@@ -1,0 +1,44 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# The database comes from components/cnpg-cluster, which ks.yaml adds.
+resources:
+  - awx.yaml
+  - ciliumnetworkpolicy.yaml
+  - httproute.yaml
+  - probe.yaml
+  - service.yaml
+
+# Flux substitutes the component's names after the build, so the patches see them unsubstituted
+# (docs/kubernetes.md, PostgreSQL).
+patches:
+  # The database app, owned by the role app, with the password of the Secret ascender-db-app, which
+  # the application ascender-operator makes: with the secret named, the operator uses it and makes no
+  # application Secret of its own, and the same Secret is the AWX's database configuration. The
+  # target is the component's Cluster by the name it has here, a regular expression for the literal
+  # ${CNPG_CLUSTER_NAME}, and not every Cluster: a restore adds one of its own to this directory,
+  # whose bootstrap.recovery this would replace (docs/kubernetes.md, Ascender).
+  - target:
+      kind: Cluster
+      name: \$\{CNPG_CLUSTER_NAME\}
+    patch: |-
+      - op: add
+        path: /spec/bootstrap
+        value:
+          initdb:
+            database: app
+            owner: app
+            secret:
+              name: ascender-db-app
+  # The component's dump job gets labels for its pods, which its policies in ciliumnetworkpolicy.yaml
+  # select it by. It is the one CronJob here, so its kind is target enough, as Backstage's is.
+  - target:
+      kind: CronJob
+    patch: |-
+      - op: add
+        path: /spec/jobTemplate/spec/template/metadata
+        value:
+          labels:
+            app.kubernetes.io/name: pgdump
+            app.kubernetes.io/instance: ascender-db
