@@ -58,12 +58,17 @@ spec:
             - port: "53"
               protocol: TCP
     # The database: the pods the Service backstage-db-rw selects are the cluster's primary, which a
-    # failover moves to another instance, so the rule names every instance of the cluster, on
-    # PostgreSQL's port. A Service's address is translated to a pod's before policy applies, so the
-    # rule names the pods.
+    # failover moves to another instance, so the rule names every instance, on PostgreSQL's port. A
+    # Service's address is translated to a pod's before policy applies, so the rule names the pods.
+    # The instances of every cluster of the namespace, by cnpg.io/cluster existing: the operator
+    # labels each pod with its own cluster's name, and a restore adds a cluster beside backstage-db
+    # that Backstage is pointed at (docs/runbooks/postgres-restore.md). Every cluster of the
+    # namespace is Backstage's, from the reviewed tree.
     - toEndpoints:
-        - matchLabels:
-            cnpg.io/cluster: backstage-db
+        - matchExpressions:
+            - key: cnpg.io/cluster
+              operator: Exists
+          matchLabels:
             cnpg.io/podRole: instance
       toPorts:
         - ports:
@@ -72,22 +77,28 @@ spec:
 ---
 # yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
 # What the pods of the database let through among themselves and with the operator, on top of the
-# namespace's default deny: every pod the operator makes for the cluster backstage-db, its instances
-# and the jobs that create and join them, which all carry the label cnpg.io/cluster. The pinned
-# operator's documentation asks that the operator reach every pod of a cluster on 8000, the instance
-# manager's status port, and 5432, PostgreSQL's, and that the cluster's pods connect to each other
+# namespace's default deny: every pod the operator makes for a cluster of the namespace,
+# backstage-db's instances and the jobs that create, join and recover them, and those of a cluster a
+# restore adds beside it (docs/runbooks/postgres-restore.md). The operator labels each of them
+# cnpg.io/cluster with its own cluster's name (pkg/specs/pods.go and jobs.go), so this policy and
+# the database's below select by the label existing, not by its value: a restore's cluster has the
+# database's flows from its start, and its pull request adds none. Every cluster of the namespace
+# shares them, and every one is Backstage's, from the reviewed tree. The pinned operator's
+# documentation asks that the operator reach every pod of a cluster on 8000, the instance manager's
+# status port, and 5432, PostgreSQL's, and that the cluster's pods connect to each other
 # (docs/src/security.md, Exposed Ports; docs/src/networking.md); a replica streams from the primary
 # through the Service backstage-db-rw. The instance manager reads and writes the Cluster and its
 # Secrets through the API server, and so does the Barman Cloud plugin's sidecar in each instance's
-# pod, for its ObjectStore and the Secret of its credentials.
+# pod and in a recovery job's, for its ObjectStore and the Secret of its credentials.
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
   name: backstage-db
 spec:
   endpointSelector:
-    matchLabels:
-      cnpg.io/cluster: backstage-db
+    matchExpressions:
+      - key: cnpg.io/cluster
+        operator: Exists
   # The namespace's default deny alone denies; this policy only allows.
   enableDefaultDeny:
     ingress: false
@@ -104,11 +115,12 @@ spec:
               protocol: TCP
             - port: "5432"
               protocol: TCP
-    # The cluster's own pods: replication, and a joining instance's copy of the primary. They listen
-    # on 5432, 8000 and 9187 alone.
+    # The pods of the namespace's clusters: replication, and a joining instance's copy of the
+    # primary. They listen on 5432, 8000 and 9187 alone.
     - fromEndpoints:
-        - matchLabels:
-            cnpg.io/cluster: backstage-db
+        - matchExpressions:
+            - key: cnpg.io/cluster
+              operator: Exists
   egress:
     - toEndpoints:
         - matchLabels:
@@ -121,8 +133,9 @@ spec:
             - port: "53"
               protocol: TCP
     - toEndpoints:
-        - matchLabels:
-            cnpg.io/cluster: backstage-db
+        - matchExpressions:
+            - key: cnpg.io/cluster
+              operator: Exists
     # The API server. A Service's address is translated to the control plane's before policy
     # applies, so 6443 is the port that counts.
     - toEntities:
@@ -137,15 +150,18 @@ spec:
 # yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
 # Who reaches the database's instances besides the operator and each other: Backstage and the dump
 # job on PostgreSQL's port, Prometheus on the exporter's port the PodMonitor names, metrics, and the
-# kubelet's probes on the status port, where the operator puts them (pkg/specs/pods.go).
+# kubelet's probes on the status port, where the operator puts them (pkg/specs/pods.go). The
+# instances of every cluster of the namespace, as above.
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
   name: backstage-db-instances
 spec:
   endpointSelector:
+    matchExpressions:
+      - key: cnpg.io/cluster
+        operator: Exists
     matchLabels:
-      cnpg.io/cluster: backstage-db
       cnpg.io/podRole: instance
   # The namespace's default deny alone denies; this policy only allows.
   enableDefaultDeny:
@@ -186,7 +202,8 @@ spec:
 # name here, so the policy allows the world on 443, the port https reaches it on (docs/kubernetes.md,
 # Network policy). The sidecar talks to the instance manager over a socket in the pod, which policy
 # does not see, and a policy selects pods, not containers, so PostgreSQL's container shares the
-# rule. The jobs that create and join an instance hold no sidecar and are not selected.
+# rule. The instances of every cluster of the namespace, as above. The jobs that create an instance
+# by initdb and join one hold no sidecar and are not selected; a recovery job holds one, below.
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
@@ -198,9 +215,47 @@ metadata:
       cluster-config holds as a URL and so cannot name a DNS name here; it reaches it on 443 only
 spec:
   endpointSelector:
+    matchExpressions:
+      - key: cnpg.io/cluster
+        operator: Exists
     matchLabels:
-      cnpg.io/cluster: backstage-db
       cnpg.io/podRole: instance
+  # The namespace's default deny alone denies; this policy only allows.
+  enableDefaultDeny:
+    ingress: false
+    egress: false
+  egress:
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
+# A recovery job's one call outside the cluster. A restore from the archive makes the first instance
+# of its new cluster in a job whose pod carries cnpg.io/jobRole full-recovery (pkg/specs/jobs.go of
+# the pinned operator), and the Barman Cloud plugin puts its sidecar in that pod, which reads the
+# base backup and the WAL from the object storage (internal/cnpgi/operator/lifecycle.go, reconcileJob,
+# and internal/cnpgi/restore/restore.go of the plugin's release). It reaches it on 443, as the
+# instances do; its resolver and the API server are backstage-db's, as for every pod of a cluster.
+# The policy stands, so that a restore's pull request adds none.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: backstage-db-full-recovery-world
+  annotations:
+    k8s-gitops/network-policy-reason: >-
+      the Barman Cloud plugin's sidecar in a restore's recovery job reads the base backup and the
+      WAL from the object storage outside the cluster, whose endpoint cluster-config holds as a URL
+      and so cannot name a DNS name here; it reaches it on 443 only
+spec:
+  endpointSelector:
+    matchExpressions:
+      - key: cnpg.io/cluster
+        operator: Exists
+    matchLabels:
+      cnpg.io/jobRole: full-recovery
   # The namespace's default deny alone denies; this policy only allows.
   enableDefaultDeny:
     ingress: false
@@ -216,10 +271,10 @@ spec:
 # yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/cilium.io/ciliumnetworkpolicy_v2.json
 # What the database's daily dump job lets through, on top of the namespace's default deny: it
 # resolves the names of the replicas' and the primary's Services and reaches the instances on
-# PostgreSQL's port, the replicas first and the primary when none answers; it takes no connection.
-# The job's pods carry the labels app.kubernetes.io/name pgdump and app.kubernetes.io/instance
-# backstage-db, which kustomization.yaml gives the component's CronJob. Two policies: the object
-# storage's rule carries a reason of its own.
+# PostgreSQL's port, the replicas first and the primary when none answers, the instances of every
+# cluster of the namespace, as above; it takes no connection. The job's pods carry the labels
+# app.kubernetes.io/name pgdump and app.kubernetes.io/instance backstage-db, which kustomization.yaml
+# gives the component's CronJob. Two policies: the object storage's rule carries a reason of its own.
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
@@ -245,8 +300,10 @@ spec:
             - port: "53"
               protocol: TCP
     - toEndpoints:
-        - matchLabels:
-            cnpg.io/cluster: backstage-db
+        - matchExpressions:
+            - key: cnpg.io/cluster
+              operator: Exists
+          matchLabels:
             cnpg.io/podRole: instance
       toPorts:
         - ports:

@@ -628,8 +628,8 @@ once it is not, and the agents' rendered configuration agrees.
 | `envoy-gateway-system` | default deny | the controller, its webhook, its certificate job and the proxies, below; the proxies take the blackbox exporter's probes. |
 | `kromgo` | default deny | kromgo takes the proxies and the kubelet's probes on 8080 and Prometheus' scrape on 8081, and reaches the resolver and Prometheus on 9090. |
 | `sso-system` | default deny | dex takes the proxies and oauth2-proxy on 5556 and reaches the API server and GitHub on 443; oauth2-proxy takes the proxies on 4180 and reaches dex; below. |
-| `backstage` | default deny | Backstage takes the proxies and the kubelet's probes on 7007 and reaches the resolver and its database on 5432; the database takes the operator, its own pods, Backstage, the dump job, Prometheus and the kubelet's probes, and reaches its own pods, the resolver and the API server, and its instances, for their Barman Cloud sidecars, the object storage on 443; the dump job reaches the resolver, the database and the world on 443. |
-| `ascender` | default deny | the web pods take the proxies, the kubelet's probe and the task pods on 8052; the operator takes the kubelet's probes on 6789 and reaches the API server alone; every pod of Ascender's instance reaches the resolver and its database on 5432; the task pods reach the web pods, the API server and the world on 443 and 22; the job pods reach the resolver and the world on 443 and 22 and nothing else; the database, its instances and the dump job let through what Backstage's do. |
+| `backstage` | default deny | Backstage takes the proxies and the kubelet's probes on 7007 and reaches the resolver and its database on 5432; the database's pods, those of every cluster of the namespace by `cnpg.io/cluster` existing, a restore's beside `backstage-db` included, take the operator, each other, Backstage, the dump job, Prometheus and the kubelet's probes, and reach each other, the resolver and the API server, and its instances and a restore's recovery job, for their Barman Cloud sidecars, the object storage on 443; the dump job reaches the resolver, the database and the world on 443. |
+| `ascender` | default deny | the web pods take the proxies, the kubelet's probe and the task pods on 8052; the operator takes the kubelet's probes on 6789 and reaches the API server alone; every pod of Ascender's instance reaches the resolver and its database on 5432; the task pods reach the web pods, the API server and the world on 443 and 22; the job pods reach the resolver and the world on 443 and 22 and nothing else; the database, its instances, a restore's recovery job and the dump job let through what Backstage's do. |
 | `security-system` | default deny | Falco takes Prometheus' scrape and the kubelet's probes on 8765, and reaches the resolver alone; the flow recorder takes nothing and reaches the resolver and Hubble Relay on 4245. |
 | `crowdsec` | default deny | the local API takes the agent on 8080, Prometheus on 6060 and the kubelet's probes, and sends nothing; the agent takes Prometheus and the kubelet on 6060 and reaches the resolver, the local API and the API server on 443 and 6443; below. |
 | `open-feature-operator` | default deny | the OpenFeature Operator takes the kubelet's probes on 8081, Prometheus' scrape on 8080 and the API server's calls to its webhooks on 9443, and reaches the API server alone. |
@@ -719,29 +719,43 @@ once it is not, and the agents' rendered configuration agrees.
   controller, another namespace's pods or the world, and no monitor scrapes them.
 - **`backstage`.** Backstage's pod, by the labels its Service selects, takes the proxies by their
   labels on 7007, the port the route sends to, and the kubelet's probes on the same port; it reaches
-  the resolver and the database's instances (`cnpg.io/cluster: backstage-db`,
+  the resolver and the database's instances (`cnpg.io/cluster` existing,
   `cnpg.io/podRole: instance`) on 5432, every instance, as a failover moves the primary that
-  `backstage-db-rw` selects. The database's pods, every pod the operator makes for the cluster, by
-  `cnpg.io/cluster: backstage-db`, take the operator (`app.kubernetes.io/name: cloudnative-pg` in
-  `cnpg-system`) on 8000 and 5432 and each other on every port, as the pinned operator's
-  documentation asks (`docs/src/security.md`, Exposed Ports; `docs/src/networking.md`), and reach
-  each other, the resolver and the API server on 443 and 6443; its instances take Backstage and the
-  dump job on 5432, Prometheus on 9187, the port the PodMonitor names, and the kubelet's probes on
-  8000, where the operator puts them (`pkg/specs/pods.go`). The instances also reach the world on
-  443, in a policy of its own with its reason: the object storage, whose endpoint is a URL, as for
-  the movers below, where the Barman Cloud plugin's sidecar in each instance's pod archives the WAL
-  and writes the base backups ([Backups and restores](#backups-and-restores)). The sidecar reaches
-  the API server as the instance manager does, and talks to the instance manager over a socket in
-  the pod, which policy does not see; a policy selects pods, not containers, so PostgreSQL's
-  container shares the rule, and the jobs that create and join an instance, which hold no sidecar,
-  are not selected. The operator's own calls to the plugin stay inside `cnpg-system`. The dump
-  job's pods, by the labels
+  `backstage-db-rw` selects. The database's pods are every pod the operator makes for a cluster of
+  the namespace: `backstage-db`'s instances and the jobs that create, join and recover them, and
+  those of a cluster a restore adds beside it
+  ([postgres-restore.md](runbooks/postgres-restore.md)). The operator labels each of them
+  `cnpg.io/cluster` with its own cluster's name (`pkg/specs/pods.go` and `pkg/specs/jobs.go`), so
+  the database's policies, and Backstage's and the dump job's rules to the instances, select by
+  the label existing (`matchExpressions`, `Exists`), not by its value, and a restore's cluster has
+  the database's flows from its start, with no allow in its pull request. The trade-off is that
+  every cluster of the namespace shares them, which holds because every one of them is Backstage's,
+  made by Flux from the reviewed tree. The database's pods take the operator
+  (`app.kubernetes.io/name: cloudnative-pg` in `cnpg-system`) on 8000 and 5432 and each other on
+  every port, as the pinned operator's documentation asks (`docs/src/security.md`, Exposed Ports;
+  `docs/src/networking.md`), and reach each other, the resolver and the API server on 443 and 6443;
+  the instances take Backstage and the dump job on 5432, Prometheus on 9187, the port the
+  PodMonitor names, and the kubelet's probes on 8000, where the operator puts them
+  (`pkg/specs/pods.go`). The instances also reach the world on 443, in a policy of its own with its
+  reason: the object storage, whose endpoint is a URL, as for the movers below, where the Barman
+  Cloud plugin's sidecar in each instance's pod archives the WAL and writes the base backups
+  ([Backups and restores](#backups-and-restores)). The sidecar reaches the API server as the
+  instance manager does, and talks to the instance manager over a socket in the pod, which policy
+  does not see; a policy selects pods, not containers, so PostgreSQL's container shares the rule,
+  and the jobs that create an instance by initdb and join one, which hold no sidecar, are not
+  selected. A restore from the archive makes its new cluster's first instance in a job whose pod
+  carries `cnpg.io/jobRole: full-recovery`, into which the plugin puts its sidecar to read the base
+  backup and the WAL from the object storage (`reconcileJob` in
+  `internal/cnpgi/operator/lifecycle.go` of the plugin's release): a standing policy of its own with
+  its reason, `backstage-db-full-recovery-world`, lets such a pod reach the world on 443 alone, and
+  its resolver and the API server are the database's. The operator's own calls to the plugin stay
+  inside `cnpg-system`. The dump job's pods, by the labels
   `app.kubernetes.io/name: pgdump` and `app.kubernetes.io/instance: backstage-db` that
   `app/kustomization.yaml` gives the component's CronJob, reach the resolver, the instances on
   5432, and the world on 443 in a policy of its own with its reason: the age release, whose URL
   redirects to a second host, and the object storage, whose endpoint is a URL, as for the movers
   below ([Dumps](#dumps)). The pods the operator makes carry the labels of its source, which no
-  render holds; the job pods it makes to create and join an instance carry `cnpg.io/cluster` too.
+  render holds.
 - **`ascender`.** The pods of Ascender's instance are its operator's, made at run time, and the
   policies name them by the labels the operator's templates give them at the release recorded beside
   them. The web pods, by the labels of their Deployment's selector, take the proxies by their
@@ -753,8 +767,10 @@ once it is not, and the agents' rendered configuration agrees.
   execution environment. The job pods, by `ansible_job`, reach the resolver and the world on 443 and
   on 22, each in a policy of its own with its reason, and nothing in the cluster, and take nothing.
   The operator's pod takes the kubelet's probes on 6789 and reaches the API server alone. The
-  database, its instances and the dump job are Backstage's, for `ascender-db`, the instances taking
-  every pod of the instance and the dump job on 5432. [Ascender](#ascender) says what each is for.
+  database's pods, a restore's recovery job and the dump job are Backstage's, for `ascender-db` and
+  every cluster a restore adds beside it, by `cnpg.io/cluster` existing, the instances taking every
+  pod of the instance and the dump job on 5432, and the recovery job reaching the world on 443 by
+  `ascender-db-full-recovery-world`. [Ascender](#ascender) says what each is for.
 - **`security-system`.** Falco's pods, by the labels of the DaemonSet's selector, take Prometheus
   (`app.kubernetes.io/name: prometheus` in `monitoring`) on 8765, the metrics port the chart's
   monitor scrapes, and the kubelet's probes on the same port. They reach the resolver alone, for
@@ -807,8 +823,9 @@ once it is not, and the agents' rendered configuration agrees.
   it to. The endpoint's validation (`scripts/lib/s3.sh`) admits a port: with an endpoint on
   another port, the rule refuses the movers, every backup and restore of the namespace fails to
   connect, and `just network-drops` shows the movers' flows to `@world` on that port. The rule's
-  port changes with the endpoint. The rules of `backstage`'s dump job and of its database's
-  instances are on that port for the same endpoint, and change with it too.
+  port changes with the endpoint. The rules of the dump jobs, the database instances and the
+  recovery jobs of `backstage` and `ascender` are on that port for the same endpoint, and change
+  with it too.
 - **Which entity.** Public traffic is translated by the edge routers, arrives at the address the
   workers announce, and a worker may forward it to a proxy on another node
   (`externalTrafficPolicy: Cluster`, [The public Gateway](#the-public-gateway)). A proxy on the
@@ -865,6 +882,17 @@ once it is not, and the agents' rendered configuration agrees.
 5. A namespace whose applications add `components/volsync` has the policies of its movers, once:
    copy `apps/base/demo/demo-volsync-movers/` under the namespace's directory and list its
    `ks.yaml` in the overlay.
+6. An application that adds `components/cnpg-cluster` in a namespace with the default deny
+   declares its database's flows as Backstage does: copy the policies `backstage-db`,
+   `backstage-db-instances`, `backstage-db-instances-world`, `backstage-db-full-recovery-world`,
+   `backstage-db-pgdump` and `backstage-db-pgdump-world` from Backstage's
+   `ciliumnetworkpolicy.yaml`, the patch of its `app/kustomization.yaml` that labels the dump
+   job's pods, with the cluster's name, and the rule of the application's own policy to the
+   instances on 5432. The database's
+   policies select its pods by `cnpg.io/cluster` existing, a label the operator gives every pod of
+   every cluster, so any cluster of the namespace, a restore's included, has the database's flows,
+   and the dump job's by the labels the patch gives them. Every cluster of the namespace shares
+   them, so such a namespace holds one application's database.
 
 ### What the check refuses
 
@@ -928,18 +956,29 @@ of `demo`, `kromgo` or `backstage` reaches the secret store, the storage control
 and its database's port and nothing outside the cluster, that the database takes the operator, its
 own pods, Backstage, the dump job and Prometheus on their ports and no other application, that its
 instances reach the world on the object storage's port and on no other, and a job that joins an
-instance on none, that kromgo reaches the resolver and the port of the Prometheus its configuration
-names, read from the render, and nothing else, and no other application reaches it, that Falco's
-pods take Prometheus and the kubelet on its metrics port alone and reach the resolver alone, that
-the OpenFeature Operator's pod takes Prometheus on its metrics port and the API server, the local
-host and other nodes' hosts on its webhooks' port, neither of them the world, another application or
-the other port's caller, and reaches the API server alone, that the proxies reach the controller on
-the port it serves the firewall's Wasm modules on and no other application's pod or anything outside
-the cluster does, that the controller reaches the world on 443 and on no other port and neither the
-certificate job nor the proxies reach it, that the flow recorder takes nothing and reaches the
-resolver and Hubble Relay's pods on Relay's container port alone, and that with their default deny
-`backstage`, `demo`, `envoy-gateway-system`, `kromgo`, `open-feature-operator`, `security-system`
-and `sso-system` let exactly their flows through and without it take and send everything. What it
+instance on none, that a restore's new cluster beside each database of `backstage` and `ascender`,
+its primary and replica instances and the jobs that create, join and recover an instance, by the
+labels the pinned operator gives them, takes and reaches what the old cluster's pods of each role
+do, the clients the render shows reaching the old instances among them, while its pods take no pod
+of the namespace that is no client, and a client on PostgreSQL's port alone, not on the status port
+or the exporter's, that its recovery job reaches the object storage on 443
+while the jobs that create and join an instance reach nothing outside the cluster, and that every
+selector of the two namespaces' policies that names `cnpg.io/cluster` names it by its existence
+alone and the recovery job's one rule allows the world on 443 alone (`tests/postgres-restore.bats`,
+on a copy of the tree with both restores of [postgres-restore.md](runbooks/postgres-restore.md)
+made for every database), that kromgo reaches the resolver and the port of the Prometheus its
+configuration names, read from the render, and nothing else, and no other application reaches it,
+that Falco's pods take Prometheus and the kubelet on its metrics port alone and reach the resolver
+alone, that the OpenFeature Operator's pod takes Prometheus on its metrics port and the API server,
+the local host and other nodes' hosts on its webhooks' port, neither of them the world, another
+application or the other port's caller, and reaches the API server alone, that the proxies reach
+the controller on the port it serves the firewall's Wasm modules on and no other application's pod
+or anything outside the cluster does, that the controller reaches the world on 443 and on no other
+port and neither the certificate job nor the proxies reach it, that the flow recorder takes nothing
+and reaches the resolver and Hubble Relay's pods on Relay's container port alone, and that with
+their default deny `backstage`, `demo`, `envoy-gateway-system`, `kromgo`, `open-feature-operator`,
+`security-system` and `sso-system` let exactly their flows through and without it take and send
+everything. What it
 cannot show: the entity the pinned datapath gives a connection an edge translated and a worker
 forwarded again, read from its source above and confirmed in audit mode; the labels of the pods the
 operators create at run time, taken from the operators' source and observed in audit mode; that an
@@ -5730,9 +5769,19 @@ component adds an `ObjectStore`, a `ScheduledBackup` and an ExternalSecret.
   component makes. [postgres-restore.md](runbooks/postgres-restore.md) restores one database to a
   point in time into a new cluster beside the old one, switches the application over, and says
   what the old archive needs so that two clusters never write to one path; it also restores a daily
-  dump, the way back when the archive cannot be read. The component has no
+  dump, the way back when the archive cannot be read. Either restore adds its new cluster as one
+  file named for it beside the component's `Cluster`, in the application's own `app/`, which
+  archives through the old cluster's `ObjectStore` under its own name, and then makes it the
+  component's by `CNPG_CLUSTER_NAME`; until then the new cluster has no `ScheduledBackup`, dump
+  job or `PodMonitor`. The file's image is a pin no Renovate manager reads there, so the pull
+  request lists it in `.renovate/by-hand.tsv` until the file goes; the dump restore's also
+  suspends the old cluster's dump job by a patch in `app/kustomization.yaml`, so that it does
+  not rotate the real dumps out, as resuming the application's Kustomization would undo a
+  suspension made with `kubectl`. In a namespace with the default deny the database's policies
+  select every cluster of the namespace, so the restore's pull request adds no allow
+  ([What the namespaces let through](#what-the-namespaces-let-through)). The component has no
   recovery input: a `bootstrap` section would change nothing for a cluster that is not restoring,
-  but it is a field of the `Cluster` and not a value, so the runbook gives the manifest.
+  but it is a field of the `Cluster` and not a value, so the runbook gives the manifests.
 - **Alerts.** `PostgresWALArchivingFailing` and `PostgresBackupTooOld`
   ([Alerts](#alerts)), quiet on a healthy cluster and on one less than a day and a half old.
 
@@ -5752,8 +5801,28 @@ the 4Gi floor above, computed in the test from its sources, and fails for one th
 volume, a segment size, an `archive_timeout` or a `wal_keep_size` of its own, turns
 `resizeInUseVolumes` off or names a class that does not allow expansion; checks each field of the
 `Cluster`, the `ObjectStore` and the `ScheduledBackup` against the pinned charts' definitions and
-the restore runbook's manifest against the `Cluster`'s; and checks the `StorageClass` against
-LINSTOR's. Its handshake runs the system's `openssl`, which
+the restore runbook's point-in-time manifest, the one that bootstraps by recovery, against the
+`Cluster`'s; and checks the `StorageClass` against LINSTOR's. `tests/postgres-restore.bats` makes
+both of the runbook's restores for every database the overlay builds as their pull requests make
+them, each manifest a file of the application's own `app/` named for its new cluster, with its row
+of `.renovate/by-hand.tsv`, the dump restore's suspension of the old dump job and, for a database
+whose `Cluster` names its owner's Secret, as Ascender's does, the runbook's copy of that Secret's
+`Password` and `ExternalSecret` for the new cluster ([Ascender](#ascender), Restoring the
+database), on a copy of what git would commit, in a repository of its own with one commit; it
+holds the dump restore's manifest to the point-in-time one, to the `Cluster`'s definition and to an
+archive under its own name, the runbook's copy, made for the old cluster, to the tree's two
+objects, every old dump job to its suspension, a boolean `true`, in the render and every such copy
+to the new cluster's name and host there, and runs on the copy, side by side,
+`just check-literals`, `just check-conflict-markers`, the YAML half of `just lint`,
+`just renovate-pins`, `just signatures-check`, `just secrets-scan`, `scripts/kubernetes-check`, the
+render, `scripts/network-policy-check` over it, `just pod-security-check`,
+`scripts/scenarios-check` and the copy's own tests that hold a rule over every application or
+database, named one by one, run in processes of their own on clones of the copy; the renders after
+the first take the charts it pulled. Over the same render it evaluates every flow of the new
+clusters' pods against the old cluster's, in each namespace with the default deny, the flows side
+by side. Its nested `just` finds the pinned tools through a mise that trusts the copy by
+`MISE_TRUSTED_CONFIG_PATHS` alone. The handshake of `tests/postgresql.bats` runs the system's
+`openssl`, which
 `mise.toml` does not pin: the CI tools image has the one its base image comes with, which
 `versions.yaml` pins by digest, and an `openssl` that is missing or behaves otherwise fails the test
 rather than passing it. `tests/postgres-dumps.bats` builds applications that
@@ -6846,11 +6915,13 @@ once Backstage answers its readiness endpoint with its database.
   application (`ciliumnetworkpolicy.yaml`, [Network policy](#network-policy)). Backstage's pod takes
   the public Gateway's proxies and the kubelet's probes on 7007, and sends only to the cluster's
   resolver and to its database's instances on 5432: not to the API server, not to another
-  application, nothing outside the cluster. The database's pods take the operator on 8000 and 5432
-  and each other, Backstage and the dump job on 5432, Prometheus on 9187 and the kubelet's probes on
-  8000, and send to each other, the resolver and the API server; its instances also send to the
-  world on 443, for the object storage their Barman Cloud sidecars archive to, in a policy of its
-  own with its reason; the dump job sends to the resolver,
+  application, nothing outside the cluster. The database's pods, those of every cluster of the
+  namespace by `cnpg.io/cluster` existing, a restore's beside `backstage-db` included, take the
+  operator on 8000 and 5432 and each other, Backstage and the dump job on 5432, Prometheus on 9187
+  and the kubelet's probes on 8000, and send to each other, the resolver and the API server; its
+  instances also send to the world on 443, for the object storage their Barman Cloud sidecars
+  archive to, in a policy of its own with its reason, and so does a restore's recovery job, whose
+  sidecar reads the archive, in another; the dump job sends to the resolver,
   the instances on 5432 and the world on 443, for the age release and the object storage, in a
   policy of its own with its reason. The dump job's pods carry the labels
   `app.kubernetes.io/name: pgdump` and `app.kubernetes.io/instance: backstage-db`, which a patch in
@@ -7448,40 +7519,49 @@ applications and the rendered chart (`features/ascender.feature`).
 - **Restoring the database.** Either restore of [postgres-restore.md](runbooks/postgres-restore.md)
   makes a new cluster, `<NEW>`, beside `ascender-db`, and for Ascender its steps differ as follows.
   The patch of `app/kustomization.yaml` names the component's Cluster by the name it has when
-  patches apply, `${CNPG_CLUSTER_NAME}`, so the runbook's Cluster for a point in time, added to
-  `app/`, keeps its `bootstrap.recovery`, which `tests/ascender.bats` holds by building it there.
+  patches apply, `${CNPG_CLUSTER_NAME}`, so each of the runbook's Clusters, added to `app/`, keeps
+  its own `bootstrap`, which `tests/ascender.bats` holds for the point-in-time one by building it
+  there with the owner's Secret below.
   The `AWX` cannot read the Secret CloudNativePG makes for a new cluster, `<NEW>-app`, which has
   no `database`, `sslmode` or `type`, and the operator's run fails reading `database`; nor does
   `ascender-db-app` follow the new cluster, as External Secrets writes a `CreatedOnce` Secret
   once, and an edit of its template, a new `host` among them, changes nothing in it. So the pull
-  request that adds the new cluster also adds, beside `ascender-operator/app/database-secret.yaml`
-  and listed in `ascender-operator/app/kustomization.yaml`, a copy of its `Password` and
-  `ExternalSecret` named `<NEW>-app`, with `host: <NEW>-rw` and the operator's other keys
-  as they are, `port: "5432"`, `database: app`, `username: app`, the generated `password`,
-  `sslmode: require` and `type: unmanaged`, with `dbname: app` for the dump job; and the new
-  cluster names it as its owner's Secret, in `bootstrap.recovery.secret.name` of the runbook's
-  Cluster or, for a dump, by the same patch with `<NEW>-app` in the restore application's
-  `app/kustomization.yaml`. CloudNativePG then makes no Secret of its own and sets the
-  password of `app` from that one, on a recovered cluster too, as it does whenever the
-  Secret changes (`reconcileUser` in `internal/management/controller/instance_controller.go`
-  of CloudNativePG v1.30.1). The switch, in a pull request of its own, merges only once
-  this shows that Secret: `kubectl --namespace ascender get secret <NEW>-app`. The
-  operator reads a `postgres_configuration_secret` that does not exist as none, and writes
+  request that adds the new cluster also adds the file that step 2 of
+  [the point-in-time restore](runbooks/postgres-restore.md#restoring-one-database-to-a-point-in-time)
+  gives, the copy of `ascender-db-app`'s `Password` and `ExternalSecret` for the new cluster,
+  `<NEW>-app`, beside `ascender-operator/app/database-secret.yaml`; and the new cluster names it
+  as its owner's Secret, in `bootstrap.recovery.secret.name` of the runbook's Cluster for a point
+  in time or `bootstrap.initdb.secret.name` of its Cluster for a dump, the file each adds to
+  `ascender/app/`. CloudNativePG then makes no Secret of its own and sets the password of `app`
+  from that one, on a recovered cluster too, as it does whenever the Secret changes
+  (`reconcileUser` in `internal/management/controller/instance_controller.go` of CloudNativePG
+  v1.30.1). `tests/ascender.bats` holds every Cluster of `ascender/app/` other than the
+  component's to naming `<its name>-app` so, and every `Password` and `ExternalSecret` of
+  `ascender-operator` other than `ascender-db-app`'s to the copy for such a Cluster: the
+  original's, metadata included, with only the names, the Secret written, the generator read and
+  the host changed. `tests/postgres-restore.bats` makes both of Ascender's restores with the
+  runbook's file and holds that file, made for `ascender-db`, to the original. The switch, in a
+  pull request of its own, merges only once this shows that Secret:
+  `kubectl --namespace ascender get secret <NEW>-app`. The operator reads a
+  `postgres_configuration_secret` that does not exist as none, and writes
   `ascender-postgres-configuration` and starts a PostgreSQL of its own, as it does without
   the database's Secret (above), so Ascender comes up on an empty database. The switch sets
   the `AWX`'s `postgres_configuration_secret` to `<NEW>-app`, and the web and task pods
-  roll with the new connection; for a point in time it also sets the patch's `secret.name`
+  roll with the new connection; for either restore it also sets the patch's `secret.name`
   to `<NEW>-app` with `CNPG_CLUSTER_NAME: <NEW>`, so that the component's Cluster keeps
   that Secret. The Cluster the component adopts then has the patch's `bootstrap.initdb`
-  in place of its `bootstrap.recovery`, which rests on the untested assumption step 5 of
+  in place of the one it was made with, the point-in-time restore's `bootstrap.recovery` or
+  the dump restore's `bootstrap.initdb`, which rests on the untested assumption step 5 of
   the runbook's point-in-time restore names, so its check holds here too: the Cluster in
-  a healthy state, no instance restarted and the next Backup completed. The switch also
-  renames `ascender-db` where Ascender's files write it, as the database's policies select
-  no instance of `<NEW>` until then: the dump job's `app.kubernetes.io/instance` label in
-  `ascender/app/kustomization.yaml`, the `cnpg.io/cluster` and `app.kubernetes.io/instance`
-  selectors of the database's policies in `ascender/app/ciliumnetworkpolicy.yaml`, and the names
-  `tests/ascender.bats` holds them and the `AWX` to, which fail the required check until they
-  follow. Neither restore touches `ascender-secret-key`, and the restored rows need it: their
+  a healthy state, no instance restarted and the next Backup completed. The database's
+  policies select every cluster of the namespace by `cnpg.io/cluster` existing, so `<NEW>`'s
+  pods have the database's flows from their start
+  ([What the namespaces let through](#what-the-namespaces-let-through)), and the dump job's
+  `app.kubernetes.io/instance` label in `ascender/app/kustomization.yaml` and the selectors
+  of its policies name `ascender-db` together, so the job keeps its flows after the switch. The
+  switch changes the names `tests/ascender.bats` holds the Kustomization, the patch and the
+  `AWX` to, which fail the required check until they follow. Neither restore touches
+  `ascender-secret-key`, and the restored rows need it: their
   credentials are encrypted under it, so a restore onto a rebuilt cluster needs the old Secret
   back first.
 - **The first sign-in.** At `https://ascender.${CLUSTER_DOMAIN}/`, as `admin`, with the password the
