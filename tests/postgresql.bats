@@ -472,17 +472,83 @@ archive_path() {
   echo "$(STORE="$store" yq -N 'select(.kind == "ObjectStore" and .metadata.name == strenv(STORE)) | .spec.configuration.destinationPath' "$1")/$server"
 }
 
+# The PostgreSQL major every archive of the tree was first written under, at which a database's
+# server name is its cluster's name, so that no existing archive is renamed. None goes below it: once
+# a cluster has run a major, the operator's webhook refuses a lower one (CloudNativePG v1.30.1,
+# internal/webhook/v1/cluster_webhook.go, validateImageChange).
+FIRST_MAJOR=18
+
+# image_major IMAGE: the PostgreSQL major of IMAGE, a reference of the operator's registry path,
+# ghcr.io/cloudnative-pg/postgresql:<major>.<minor>[-<suffix>...][@sha256:<64 hex>]. Any other form
+# prints what it is and fails, so that no image is read as another major.
+image_major() {
+  [[ $1 =~ ^ghcr\.io/cloudnative-pg/postgresql:([1-9][0-9]{0,3})\.[0-9]+(-[a-z0-9]+)*(@sha256:[0-9a-f]{64})?$ ]] ||
+    { echo "'$1' is not an image ghcr.io/cloudnative-pg/postgresql:<major>.<minor>[-<suffix>...][@sha256:<digest>]"; return 1; }
+  echo "${BASH_REMATCH[1]}"
+}
+
+# archive_server NAME MAJOR: the server name the database NAME archives under while its Cluster runs
+# the PostgreSQL major MAJOR: NAME at FIRST_MAJOR and NAME-pg<MAJOR> above it, as the server name
+# moves with the image when the operator upgrades a major in place (docs/runbooks/postgres-restore.md,
+# Moving to a new PostgreSQL major). A major below FIRST_MAJOR, or what is not a major, fails, naming
+# it.
+archive_server() {
+  [[ $2 =~ ^[1-9][0-9]{0,3}$ ]] || { echo "'$2' is not a PostgreSQL major"; return 1; }
+  if (($2 < FIRST_MAJOR)); then
+    echo "PostgreSQL $2 is below $FIRST_MAJOR, the major every archive of the tree was first written under"
+    return 1
+  fi
+  if (($2 == FIRST_MAJOR)); then echo "$1"; else echo "$1-pg$2"; fi
+}
+
+# major_problems FILE NAME: what is wrong with the PostgreSQL major of the Cluster NAME in the built
+# objects FILE, one line each: it has not one plugin entry that archives its WAL; its server name,
+# read as the plugin reads it, the serverName of the last enabled entry named
+# barman-cloud.cloudnative-pg.io that has one and the Cluster's name when none has, whether or not
+# that entry is the archiver (plugin-barman-cloud v0.16.0, internal/cnpgi/operator/config/config.go,
+# NewFromCluster), is not archive_server's for the major of its imageName; or the dump container of
+# its CronJob NAME-pgdump runs another major. What it read, the database's major, server name and
+# dump image's major, it prints on stderr.
+major_problems() {
+  local file=$1 name=$2 cluster image major entries server expected dump dump_major
+  cluster="select(.kind == \"Cluster\" and .apiVersion == \"postgresql.cnpg.io/v1\" and .metadata.name == strenv(NAME))"
+  [ "$(NAME="$name" yq -N "$cluster | .metadata.name" "$file" | grep -c .)" -eq 1 ] ||
+    { echo "$name: the build holds no one Cluster of that name"; return 0; }
+  image="$(NAME="$name" yq -N "$cluster | .spec.imageName // \"\"" "$file")"
+  major="$(image_major "$image")" || { echo "$name: imageName: $major"; return 0; }
+  entries="$(NAME="$name" yq -N "$cluster | (.spec.plugins // []) | map(select(.isWALArchiver == true)) | length" "$file")"
+  [ "$entries" = 1 ] || { echo "$name: ${entries:-no} plugin entries archive its WAL, not one"; return 0; }
+  # shellcheck disable=SC2016 # $cluster is a yq variable.
+  server="$(NAME="$name" yq -N "$cluster"' | .metadata.name as $cluster
+    | [.spec.plugins[] | select(.enabled != false and .name == "barman-cloud.cloudnative-pg.io" and ((.parameters // {}) | has("serverName")))]
+    | if length > 0 then .[length - 1].parameters.serverName else $cluster end' "$file")"
+  dump="$(NAME="$name-pgdump" yq -N 'select(.kind == "CronJob" and .metadata.name == strenv(NAME))
+    | .spec.jobTemplate.spec.template.spec.initContainers // [] | .[] | select(.name == "dump") | .image' "$file")"
+  dump_major="$(image_major "$dump")" || { echo "$name-pgdump: the dump container's image: $dump_major"; dump_major=unread; }
+  echo "$name: PostgreSQL $major, server name $server, dump image PostgreSQL $dump_major" >&2
+  if expected="$(archive_server "$name" "$major")"; then
+    [ "$server" = "$expected" ] || echo "$name: PostgreSQL $major archives under the server name $server, not $expected"
+  else
+    echo "$name: $expected"
+  fi
+  [ "$dump_major" = unread ] || [ "$dump_major" = "$major" ] ||
+    echo "$name-pgdump: its dump container runs PostgreSQL $dump_major, the Cluster PostgreSQL $major"
+}
+
 @test "A PostgreSQL cluster from the component archives its WAL and takes a daily base backup to a path of its own in the object store" {
   local plugins stores backups schedule minute hour taken retention compression endpoint vars dump_schedule dump_start
-  local dump_end deadline app
+  local dump_end deadline app major server
   vars="$BATS_TEST_TMPDIR/example-vars.yaml"
   database orders orders-db
-  # The Cluster archives its WAL through the plugin, to the ObjectStore of its own name, in a
-  # directory of its own name, and the operator's deprecated in-tree object store is not used.
+  # The Cluster archives its WAL through the plugin, to the ObjectStore of its own name, in the
+  # directory of its server name for the major of the component's image, its own name while that is
+  # PostgreSQL 18 (archive_server), and the operator's deprecated in-tree object store is not used.
+  major="$(image_major "$(yq '.spec.imageName' "$TREE/$COMPONENT/cluster.yaml")")" || { echo "$major"; return 1; }
+  server="$(archive_server orders-db "$major")" || { echo "$server"; return 1; }
   plugins="$(yq -N 'select(.kind == "Cluster") | .spec.plugins // [] | map(.name + " archiver=" + (.isWALArchiver | tostring)
     + " store=" + .parameters.barmanObjectName + " server=" + .parameters.serverName) | join(",")' "$BUILT")"
-  echo "plugins: ${plugins:-none}"
-  [ "$plugins" = "barman-cloud.cloudnative-pg.io archiver=true store=orders-db server=orders-db" ]
+  echo "plugins: ${plugins:-none}; the server name of PostgreSQL $major: $server"
+  [ "$plugins" = "barman-cloud.cloudnative-pg.io archiver=true store=orders-db server=$server" ]
   [ "$(yq -N 'select(.kind == "Cluster") | .spec.backup.barmanObjectStore // "none"' "$BUILT")" = none ]
   stores="$(yq -N 'select(.kind == "ObjectStore") | .apiVersion + " " + .metadata.namespace + "/" + .metadata.name' "$BUILT")"
   echo "object stores: ${stores:-none}"
@@ -530,7 +596,7 @@ archive_path() {
   endpoint="$(yq -N 'select(.kind == "ObjectStore") | .spec.configuration.endpointURL' "$BUILT")"
   [ "$endpoint" = "$(yq '.S3_ENDPOINT' "$vars")" ]
   echo "archive: $(archive_path "$BUILT")"
-  [ "$(archive_path "$BUILT")" = "s3://$(yq '.BACKUP_BUCKET_PREFIX' "$vars")-postgres/$(yq '.CLUSTER_NAME' "$vars")/demo/orders-db" ]
+  [ "$(archive_path "$BUILT")" = "s3://$(yq '.BACKUP_BUCKET_PREFIX' "$vars")-postgres/$(yq '.CLUSTER_NAME' "$vars")/demo/$server" ]
   # The endpoint is cluster-config's and no other: moved there, it moves here.
   SET=(S3_ENDPOINT=https://s3.marker.invalid)
   database orders orders-db
@@ -728,6 +794,7 @@ bytes() {
 
 @test "Two databases never share a backup path" {
   local -a paths=()
+  local major server
   database orders orders-db
   paths+=("$(archive_path "$BUILT")")
   database billing billing-db
@@ -751,8 +818,12 @@ bytes() {
   database orders orders-db
   echo "another prefix: $(archive_path "$BUILT")"
   [ "$(archive_path "$BUILT")" = "${paths[0]/\/\/example-backups-postgres\//\/\/marker-prefix-postgres\/}" ]
-  # A path never ends where another's begins: the database's name is its own last element.
-  [[ ${paths[0]} == */demo/orders-db ]]
+  # A path never ends where another's begins: the database's server name is its own last element,
+  # its name while the component's image is PostgreSQL 18 (archive_server).
+  major="$(image_major "$(yq '.spec.imageName' "$TREE/$COMPONENT/cluster.yaml")")" || { echo "$major"; return 1; }
+  server="$(archive_server orders-db "$major")" || { echo "$server"; return 1; }
+  echo "the server name of PostgreSQL $major: $server"
+  [[ ${paths[0]} == */demo/"$server" ]]
 }
 
 @test "Two databases never share a backup path, whatever namespace an application names" {
@@ -779,6 +850,157 @@ bytes() {
   echo "$output"
   [ "$status" -ne 0 ]
   [[ $output == *CNPG_NAMESPACE* ]]
+}
+
+@test "A new PostgreSQL major moves the archive's server name and the dump tool with it, and Renovate proposes it alone, never merged by itself" {
+  local copy="$BATS_TEST_TMPDIR/major" package=ghcr.io/cloudnative-pg/postgresql tree=$TREE case edit file app ks name
+  local major raised found problems rules json named grouping top files matcher presets extends
+  local -a edits names
+  # The tree's major, from the component's image, and the one after it.
+  major="$(image_major "$(yq '.spec.imageName' "$tree/$COMPONENT/cluster.yaml")")" || { echo "$major"; return 1; }
+  raised=$((major + 1))
+  echo "the component's image is PostgreSQL $major; the copies raise it to $raised"
+  for case in tree raised suffix behind; do
+    case $case in
+      tree) edits=() ;;
+      # A copy for this test alone, in which the component's image and its dump container's name the
+      # next major, their minor, suffix and digest kept, and the server name is left as it is; the
+      # file's shared copy is never changed.
+      raised)
+        mkdir -p "$copy"
+        cp -R "$REPO/kubernetes" "$copy/kubernetes"
+        tree=$copy
+        edits=(cluster.yaml "s|^( +imageName: ghcr\\.io/cloudnative-pg/postgresql:)$major\\.|\\1$raised.|"
+          cronjob.yaml "s|^( +image: ghcr\\.io/cloudnative-pg/postgresql:)$major\\.|\\1$raised.|") ;;
+      # The same copy with the server name the next major's.
+      suffix)
+        # shellcheck disable=SC2016 # ${CNPG_CLUSTER_NAME} is the manifest's own, which Flux substitutes.
+        edits=(cluster.yaml 's|^( +serverName: )\$\{CNPG_CLUSTER_NAME\}(-pg[0-9]+)?$|\1${CNPG_CLUSTER_NAME}-pg'"$raised|") ;;
+      # And with its dump container back at the tree's major.
+      behind) edits=(cronjob.yaml "s|^( +image: ghcr\\.io/cloudnative-pg/postgresql:)$raised\\.|\\1$major.|") ;;
+    esac
+    for ((edit = 0; edit < ${#edits[@]}; edit += 2)); do
+      file="$tree/$COMPONENT/${edits[edit]}"
+      cp "$file" "$BATS_TEST_TMPDIR/before.yaml"
+      sed -E -i "${edits[edit + 1]}" "$file"
+      if cmp -s "$BATS_TEST_TMPDIR/before.yaml" "$file"; then
+        echo "$case: the rewrite '${edits[edit + 1]}' changes nothing in ${edits[edit]}"
+        return 1
+      fi
+      echo "$case: ${edits[edit]}: $(diff "$BATS_TEST_TMPDIR/before.yaml" "$file" | grep '^[<>]' | sed -E 's/^([<>]) +/\1 /' | paste -sd' ' -)"
+    done
+    # Each database as the volume floor's test builds it: from its Kustomization as the overlay makes
+    # it. Its database is the Cluster its CNPG_CLUSTER_NAME names, the component's, and not a
+    # restore's beside it, which follows the runbook's own rule.
+    kustomize build --load-restrictor LoadRestrictionsNone "$tree/kubernetes/apps/overlays/lab-sto2" >"$BATS_TEST_TMPDIR/overlay.yaml"
+    : >"$BATS_TEST_TMPDIR/problems"
+    names=()
+    for app in "${DATABASE_APPS[@]}"; do
+      ks="$BATS_TEST_TMPDIR/overlay-${app##*/}.yaml"
+      APP_NAME="${app##*/}" yq -N 'select(.kind == "Kustomization" and .metadata.name == strenv(APP_NAME))' \
+        "$BATS_TEST_TMPDIR/overlay.yaml" >"$ks"
+      [ "$(yq -N 'select(.kind == "Kustomization") | .metadata.name' "$ks" | grep -c .)" -eq 1 ] ||
+        { echo "the overlay makes no Kustomization ${app##*/}, or more than one"; return 1; }
+      name="$(yq -N '.spec.postBuild.substitute.CNPG_CLUSTER_NAME // ""' "$ks")"
+      [ -n "$name" ] || { echo "$app: its Kustomization sets no CNPG_CLUSTER_NAME"; return 1; }
+      names+=("$name")
+      # built() builds the tree TREE with the example values of CLUSTER, here for this call alone.
+      TREE=$tree CLUSTER="$tree/kubernetes/clusters/lab-sto2" built "${app%%/*}" "${app##*/}" "$ks"
+      major_problems "$BUILT" "$name" >>"$BATS_TEST_TMPDIR/problems" 2>"$BATS_TEST_TMPDIR/read"
+      echo "$case: $app: $(<"$BATS_TEST_TMPDIR/read")"
+    done
+    found="$(<"$BATS_TEST_TMPDIR/problems")"
+    echo "$case: problems: ${found:-none}"
+    case $case in
+      tree | suffix) [ -z "$found" ] ;;
+      # One problem for each database, and that one: its server name is the tree's major's.
+      raised)
+        for name in "${names[@]}"; do
+          grep -qxF "$name: PostgreSQL $raised archives under the server name $(archive_server "$name" "$major"), not $name-pg$raised" <<<"$found" ||
+            { echo "$case: no problem names $name, PostgreSQL $raised and $name-pg$raised"; return 1; }
+        done
+        [ "$(grep -c . <<<"$found")" -eq "${#names[@]}" ] ;;
+      behind)
+        for name in "${names[@]}"; do
+          grep -qxF "$name-pgdump: its dump container runs PostgreSQL $major, the Cluster PostgreSQL $raised" <<<"$found" ||
+            { echo "$case: no problem names $name-pgdump, PostgreSQL $major and PostgreSQL $raised"; return 1; }
+        done
+        [ "$(grep -c . <<<"$found")" -eq "${#names[@]}" ] ;;
+    esac
+  done
+
+  # Renovate's rules, parsed from the files with their comment lines stripped, as
+  # tests/storage.bats strips them. After the auto-merge switch, so that it wins over it, one rule
+  # labels a major update of the image and holds it for a person, and holds no other key, which
+  # would narrow what it matches; no rule after the switch turns merging on again.
+  rules="$(grep -v '^[[:space:]]*//' "$REPO/.renovate/automerge.json5" | yq -o json -I0 '.packageRules')"
+  # shellcheck disable=SC2016 # $switch and $package are jq variables.
+  named="$(jq -c --arg package "$package" '(map(.matchFileNames == ["kubernetes/**"] and .matchUpdateTypes == ["minor", "patch"] and has("automerge")) | index(true)) as $switch
+    | if $switch == null then error("the auto-merge switch is not a rule of the file") else . end
+    | .[$switch + 1:] | map(select(.matchPackageNames == [$package]))' <<<"$rules")"
+  echo "rules after the auto-merge switch that name $package alone: $named"
+  [ "$(jq '[.[] | select((keys | sort) == ["addLabels", "automerge", "description", "matchPackageNames", "matchUpdateTypes"]
+    and (.description | type) == "string" and .matchUpdateTypes == ["major"] and .addLabels == ["postgresql-major"]
+    and .automerge == false)] | length' <<<"$named")" -eq 1 ] ||
+    { echo "no one rule after the auto-merge switch of .renovate/automerge.json5 holds a major update of $package for a person with the label postgresql-major and no other key"; return 1; }
+  # shellcheck disable=SC2016 # $switch is a jq variable.
+  [ "$(jq '(map(.matchFileNames == ["kubernetes/**"] and .matchUpdateTypes == ["minor", "patch"] and has("automerge")) | index(true)) as $switch
+    | .[$switch + 1:] | map(select(has("automerge") and .automerge != false)) | length' <<<"$rules")" -eq 0 ]
+  # Renovate takes renovate.json5's own packageRules after those of the presets it extends, so after
+  # the switch as well: none of them turns merging on again either.
+  json="$(grep -v '^[[:space:]]*//' "$REPO/renovate.json5" | yq -o json -I0 '.')"
+  named="$(jq -c '[.packageRules // [] | .[] | select(has("automerge") and .automerge != false) | .description // "without a description"]' <<<"$json")"
+  echo "rules of renovate.json5 that turn auto-merge on: $named"
+  [ "$named" = "[]" ]
+  # No rule that matches the image by its name puts it in a group or joins its major to its minor
+  # updates, and no file sets either for everything. A rule matches the name as Renovate reads
+  # matchPackageNames (lib/util/string-match.ts and lib/util/package-rules/package-names.ts of
+  # 44.227.4): without the list it leaves every name through; "*" matches every name, /…/ and /…/i
+  # are regular expressions and anything else a minimatch glob, without case and with ** across the
+  # path's parts and * and ? within one; a leading ! excludes. A glob with a class, a brace or an
+  # extglob, which this test does not read, counts as matching, so that its rule fails the test.
+  # shellcheck disable=SC2016 # $name, $r, $not, $glob, $re, $list, $positive and $negative are jq variables.
+  matcher='def entry($name):
+      if . == "*" then true
+      elif test("^!?/.*/i?$") then capture("^(?<not>!?)/(?<re>.*)/(?<flags>i?)$") as $r | ($name | test($r.re; $r.flags)) != ($r.not == "!")
+      else startswith("!") as $not | (if $not then .[1:] else . end) as $glob
+        | if ($glob | test("[\\[\\]{}()]")) then true
+          else ($glob | gsub("(?<c>[.+^$|\\\\])"; "\\\(.c)") | split("**") | map(gsub("\\*"; "[^/]*") | gsub("\\?"; "[^/]")) | join(".*")) as $re
+            | ($name | test("^" + $re + "$"; "i")) != $not end end;
+    def names_match($name): if has("matchPackageNames") | not then true
+      else .matchPackageNames as $list | ($list | map(select(startswith("!") | not))) as $positive
+        | ($list | map(select(startswith("!")))) as $negative
+        | ($list | length) > 0 and (($positive | length) == 0 or any($positive[]; entry($name))) and all($negative[]; entry($name)) end;'
+  # The presets these files extend, wherever they name one, are the recommended configuration's and
+  # the helper's, of which none groups the image at 44.227.4 (lib/config/presets/internal/), and the
+  # three files read here; any other is a preset this test has not read. The settings for every major
+  # update, the top-level major object, count as settings for every package.
+  presets='["config:recommended", "helpers:pinGitHubActionDigestsToSemver", "local>eekaan/k8s-gitops//.renovate/managers.json5", "local>eekaan/k8s-gitops//.renovate/groups.json5", "local>eekaan/k8s-gitops//.renovate/automerge.json5"]'
+  problems=""
+  for file in renovate.json5 .renovate/groups.json5 .renovate/managers.json5 .renovate/automerge.json5; do
+    json="$(grep -v '^[[:space:]]*//' "$REPO/$file" | yq -o json -I0 '.')"
+    named="$(jq -c --arg package "$package" "$matcher"' [.packageRules // [] | .[] | select(names_match($package))]' <<<"$json")"
+    echo "$file: the rules that match $package by its name: $(jq -c 'map(.description // "without a description")' <<<"$named")"
+    grouping="$(jq -r '.[] | select(has("groupName") or has("separateMajorMinor")) | .description // "without a description"' <<<"$named")"
+    top="$(jq -r '[(keys[] | select(. == "groupName" or . == "separateMajorMinor")),
+      ((.major // {}) | keys[] | select(. == "groupName" or . == "separateMajorMinor") | "major." + .)] | join(" and ")' <<<"$json")"
+    # shellcheck disable=SC2016 # $presets is a jq variable.
+    extends="$(jq -r --argjson presets "$presets" '[.. | objects | select(has("extends")) | .extends | if type == "array" then .[] else . end]
+      - $presets | join(" ")' <<<"$json")"
+    echo "$file: presets beyond those read here: ${extends:-none}"
+    [ -z "$grouping" ] || problems+="$file: a rule that matches $package sets groupName or separateMajorMinor: $grouping"$'\n'
+    [ -z "$top" ] || problems+="$file sets $top for every package"$'\n'
+    [ -z "$extends" ] || problems+="$file extends $extends, which this test has not read for a group of $package"$'\n'
+  done
+  echo "grouped or joined: ${problems:-none}"
+  [ -z "$problems" ]
+  # Renovate moves the image only in the component, the Cluster's and the dump job's, both in the
+  # one pull request of the package's major.
+  files="$(awk -F'\t' -v package="$package" '$3 == package {print $1}' "$REPO/.renovate/extracted.tsv" | LC_ALL=C sort -u)"
+  echo "$package is extracted from: $(paste -sd' ' - <<<"$files")"
+  grep -qxF "$COMPONENT/cluster.yaml" <<<"$files"
+  grep -qxF "$COMPONENT/cronjob.yaml" <<<"$files"
+  [ -z "$(grep -v "^$COMPONENT/" <<<"$files" || true)" ]
 }
 
 @test "A cluster that does not select the backup plugin builds no database that needs it, and one that selects a database without it is refused" {
