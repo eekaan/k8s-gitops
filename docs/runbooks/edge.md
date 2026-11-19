@@ -274,9 +274,12 @@ Meanwhile `just gateway-check` fails the dead edge's lines, passes the DNS lines
 hold both addresses, and skips `name hello`. An instance that is gone from the cloud is created
 again by `just infra-apply sto2/edge`, which creates what is missing and drops its recorded host
 keys; a floating IP made again has a new address, which reaches the records only once
-`just cluster-config` has written it to the cluster. A broken one is replaced by
-`just edge-rollout --replace --edge N` ([Replacing one edge](#replacing-one-edge)), which keeps its
-floating IP.
+`just cluster-config` has written it to the cluster and `gateway-public` has reconciled, which
+`flux reconcile kustomization gateway-public` makes it do at once: external-dns reads the addresses
+from the Gateway's annotation, which Flux substitutes from `cluster-config` only when
+`gateway-public` reconciles ([DNS records](../kubernetes.md#dns-records)). A broken one is replaced
+by `just edge-rollout --replace --edge N` ([Replacing one edge](#replacing-one-edge)), which keeps
+its floating IP.
 
 ## A worker that goes
 
