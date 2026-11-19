@@ -190,8 +190,8 @@ overlay_without() {
   done
 }
 
-@test "Neither engine's webhooks can refuse or delay a workload: the ones that match workloads fail open and skip the system namespaces" {
-  local webhooks skipped args kinds policies actions timeouts
+@test "The engines' webhooks fail open, skip the system namespaces and refuse nothing but what the sandbox tier rule refuses" {
+  local webhooks skipped args kinds policies actions timeouts runbook
   # Gatekeeper registers its webhooks itself, so they are in the render, with the chart's post-
   # renderer applied: every one fails open and skips the three namespaces.
   render gatekeeper
@@ -267,17 +267,23 @@ overlay_without() {
   echo "namespaces the resource filters leave out: $skipped"
   [ "$skipped" = kube-node-lease,kube-public,kube-system,kyverno ]
   [ -z "$(yq -N 'select(.kind == "Deployment" and (.metadata.name == "kyverno-background-controller" or .metadata.name == "kyverno-cleanup-controller")) | .metadata.name' "$RENDERED")" ]
-  # What the rules do: Kyverno's are ValidatingPolicies alone, each in audit and failing open.
+  # What the rules do: Kyverno's are ValidatingPolicies alone, each failing open: the three shared
+  # rules in audit, and sandbox-tier, Kyverno's own, the one rule that refuses.
   rules_built kyverno-policies
   kinds="$(yq -N '.kind' "$BUILT" | sort | uniq -c | paste -sd' ')"
   echo "Kyverno's rule objects: $kinds"
   [ "$(yq -N '.kind' "$BUILT" | sort -u)" = ValidatingPolicy ]
-  [ "$(yq -N '.kind' "$BUILT" | grep -c .)" -eq 3 ]
+  [ "$(yq -N '.kind' "$BUILT" | grep -c .)" -eq 4 ]
   # No policy sets a timeout of its own for the webhook its rule is served by.
   [ -z "$(yq -N 'select(.spec.webhookConfiguration != null) | .metadata.name' "$BUILT")" ]
-  actions="$(yq -N '.metadata.name + " " + (.spec.validationActions | join(",")) + " " + .spec.failurePolicy' "$BUILT")"
+  actions="$(yq -N '.metadata.name + " " + (.spec.validationActions | join(",")) + " " + .spec.failurePolicy' "$BUILT" | sort)"
   echo "$actions"
-  [ -z "$(grep -v ' Audit Ignore$' <<<"$actions" || true)" ]
+  [ "$actions" = "$({ printf '%s Audit Ignore\n' "${RULES[@]}"; echo 'sandbox-tier Deny Ignore'; } | sort)" ]
+  # The docs count the four objects, and the runbook of the admission controller says what its
+  # absence lets through: a pod of a sandbox namespace, admitted without its tier.
+  grep -qF '| Rules | 4 objects | 6 objects |' "$REPO/docs/kubernetes.md"
+  runbook="$(sed -n '/^## KyvernoAdmissionControllerDown$/,/^## /p' "$REPO/docs/runbooks/alerts.md" | tr -s "\n " "  ")"
+  grep -qF "a pod created in a namespace labelled \`k8s-gitops/sandbox\` is admitted without its tier" <<<"$runbook"
   # Gatekeeper's are ConstraintTemplates and constraints in dry-run, and no mutator, expansion or
   # config object that would change an object or what is watched.
   gatekeeper_rules_built
@@ -449,9 +455,17 @@ scope_gatekeeper() {
 }
 
 @test "Both engines hold the same three rules, in audit, and the tree's own render passes them" {
-  local rule out="$BATS_TEST_TMPDIR/render" kyverno_names gatekeeper_names offline file ns
-  # The same three names in both, each naming the offline check of the tree it mirrors.
+  local rule out="$BATS_TEST_TMPDIR/render" kyverno_names gatekeeper_names offline file ns own
+  # The same three names in both, each naming the offline check of the tree it mirrors. Kyverno's
+  # one rule beyond them, sandbox-tier, has no twin in Gatekeeper (The sandbox tier rule), so the
+  # comparison reads the three alone.
   rules_built kyverno-policies
+  # shellcheck disable=SC2016 # $n is a yq variable.
+  own="$(RULES="${RULES[*]}" yq -N 'select(.metadata.name as $n | strenv(RULES) | split(" ") | any_c(. == $n) | not) | .metadata.name' "$BUILT" | paste -sd' ')"
+  echo "Kyverno's rules beyond the three: ${own:-none}"
+  [ "$own" = sandbox-tier ]
+  # shellcheck disable=SC2016 # $n is a yq variable.
+  RULES="${RULES[*]}" yq -i 'select(.metadata.name as $n | strenv(RULES) | split(" ") | any_c(. == $n))' "$BUILT"
   kyverno_names="$(yq -N '.metadata.name' "$BUILT" | sort | paste -sd' ')"
   yq -N '.metadata.name + " " + .metadata.annotations["k8s-gitops/offline-check"]' "$BUILT" | sort >"$BATS_TEST_TMPDIR/kyverno-checks"
   # What each rule matches: the kind and the namespace selector, and nothing else that would narrow
@@ -539,6 +553,196 @@ scope_gatekeeper() {
     [ "$(NAME="$name" yq -N '[.tests[] | select(.name == strenv(NAME)) | .cases[].assertions[] | select(.violations == "no")] | length' \
       "$REPO/tests/admission-policy/gatekeeper/suite.yaml")" -ge 1 ]
   done
+}
+
+@test "A namespace labelled with a sandbox tier admits only pods with that tier's isolation, in Kyverno's own test" {
+  local dir="$REPO/tests/admission-policy/kyverno/sandbox-tier" rows row name policy message want tier moved="$BATS_TEST_TMPDIR/moved.yaml"
+  local -A messages=(
+    [unknown]="the namespace's k8s-gitops/sandbox label is userns, gvisor or kata"
+    [userns]="a pod in a namespace of the userns sandbox tier sets hostUsers to false"
+    [gvisor]="a pod in a namespace of the gvisor sandbox tier sets runtimeClassName to gvisor"
+    [kata]="a pod in a namespace of the kata sandbox tier sets runtimeClassName to kata"
+  )
+  local -A seen=()
+  run kyverno test "$dir" --require-tests
+  echo "$output"
+  [ "$status" -eq 0 ]
+  rows="$(kyverno test "$dir" --output-format json --detailed-results 2>/dev/null | sed -n '/^\[/,/^\]/p' | jq -c '.[]')"
+  [ -n "$rows" ]
+  # Each case's result is read from the engine's own report: a pass- pod is admitted, a skip- pod
+  # excluded, and a fail- pod refused with the message of the validation its name points at, its
+  # namespace's tier or, for fail-unknown-, a value that is no tier.
+  while read -r row; do
+    name="$(jq -r '.RESOURCE | split("/") | last' <<<"$row")"
+    policy="$(jq -r '.POLICY' <<<"$row")"
+    message="$(jq -r '.Message' <<<"$row")"
+    case $name in
+      pass-*) want=success ;;
+      skip-*) want=Excluded ;;
+      fail-unknown-*) want="${messages[unknown]}" ;;
+      fail-*)
+        tier="${name#fail-}"
+        want="${messages[${tier%%-*}]:-no tier named $name}"
+        ;;
+      *) want="a case named pass-, fail- or skip-" ;;
+    esac
+    echo "$name ($policy): $message"
+    [ "$policy" = sandbox-tier ]
+    [ "$(jq -r '.RESULT' <<<"$row")" = Pass ]
+    [ "$message" = "$want" ] || { echo "$name: expected \"$want\""; return 1; }
+    seen[$name]=1
+  done <<<"$rows"
+  # The cases of each tier and of the values that are none.
+  for name in pass-userns pass-gvisor pass-kata fail-userns-unset fail-gvisor-unset fail-kata-unset \
+    fail-userns-true fail-gvisor-kata fail-kata-gvisor fail-gvisor-debug fail-kata-qemu \
+    fail-gvisor-userns fail-userns-gvisor \
+    skip-userns-unlabelled skip-gvisor-unlabelled skip-kata-unlabelled skip-unprefixed \
+    fail-unknown-value fail-unknown-case fail-unknown-empty; do
+    [ -n "${seen[$name]:-}" ] || { echo "no case $name"; return 1; }
+  done
+  # A skip- pod is excluded by its namespace alone: each unlabelled one, moved to the namespace of
+  # its tier, is refused there with that tier's message, and the unprefixed one in gvisor's.
+  yq 'select(.metadata.name | test("^skip-"))
+    | .metadata.namespace = "sandbox-" + (.metadata.name | sub("^skip-"; "") | sub("-unlabelled$"; "") | sub("^unprefixed$"; "gvisor"))
+    | .metadata.name |= sub("^skip-"; "moved-")' "$dir/resources.yaml" >"$moved"
+  [ "$(yq -N '.metadata.namespace' "$moved" | sort | paste -sd' ')" = "sandbox-gvisor sandbox-gvisor sandbox-kata sandbox-userns" ]
+  run kyverno apply "$dir/../../../../kubernetes/apps/base/kyverno/kyverno-policies/app/sandbox-tier.yaml" \
+    --resource "$moved" --values-file "$dir/values.yaml" -p --output-format json
+  echo "$output"
+  [ "$status" -eq 1 ]
+  rows="$(grep '^{' <<<"$output" | jq -r '.results[] | .resources[0].name + " " + .result + " " + .message' | sort)"
+  [ "$rows" = "$(printf '%s\n' "moved-gvisor-unlabelled fail ${messages[gvisor]}" "moved-kata-unlabelled fail ${messages[kata]}" \
+    "moved-unprefixed fail ${messages[gvisor]}" "moved-userns-unlabelled fail ${messages[userns]}" | sort)" ]
+}
+
+# docs_section HEADING: the text of the section of docs/kubernetes.md whose heading line is HEADING,
+# "## Name" or "### Name", up to the next heading of its level or above, each line break and run of
+# spaces one space, so a sentence is found whole wherever its lines break.
+docs_section() {
+  local marks="${1%% *}"
+  awk -v heading="$1" -v level="${#marks}" '
+    /^#+ / { if (on && index($0, " ") - 1 <= level) exit; if ($0 == heading) on = 1 }
+    on' "$REPO/docs/kubernetes.md" | tr '\n' ' ' | tr -s ' '
+}
+
+# docs_bullets HEADING: each top-level bullet of the section HEADING of docs/kubernetes.md, as
+# docs_section bounds it, on one line, its indented lines joined to it.
+docs_bullets() {
+  local marks="${1%% *}"
+  awk -v heading="$1" -v level="${#marks}" '
+    /^#+ / { if (on && index($0, " ") - 1 <= level) exit; if ($0 == heading) on = 1; next }
+    !on { next }
+    /^- / { if (b != "") print b; b = $0; next }
+    /^  / && b != "" { b = b " " $0; next }
+    { if (b != "") print b; b = "" }
+    END { if (b != "") print b }' "$REPO/docs/kubernetes.md" | tr -s ' '
+}
+
+@test "The sandbox tier rule refuses at admission in every namespace that can carry the label, fails open and matches no namespace of the tree" {
+  local policy="$BATS_TEST_TMPDIR/sandbox-tier.json" args skipped dropped excluded overlay labelled filter kind sub ns _
+  local runtime admission adr bullet identities
+  # The policy as Flux applies it: a refusal that fails open, for pods created in a namespace where
+  # the label exists and nowhere else, the pod alone, naming its offline check, with no field beyond
+  # these that would narrow or widen it (a match condition, an object selector, a webhook timeout, an
+  # evaluation mode).
+  rules_built kyverno-policies
+  yq -N -o json 'select(.metadata.name == "sandbox-tier")' "$BUILT" >"$policy"
+  cat "$policy"
+  jq -e '.apiVersion == "policies.kyverno.io/v1" and .kind == "ValidatingPolicy"' "$policy"
+  jq -e '.metadata.annotations == {"k8s-gitops/offline-check": "scripts/pod-security-check (sandbox tiers)"}' "$policy"
+  jq -e '(.spec | keys) == ["autogen", "failurePolicy", "matchConstraints", "validationActions", "validations", "variables"]' "$policy"
+  jq -e '.spec.validationActions == ["Deny"] and .spec.failurePolicy == "Ignore"' "$policy"
+  jq -e '.spec.autogen == {"podControllers": {"controllers": []}}' "$policy"
+  jq -e '.spec.matchConstraints == {
+    "namespaceSelector": {"matchExpressions": [{"key": "k8s-gitops/sandbox", "operator": "Exists"}]},
+    "resourceRules": [{"apiGroups": [""], "apiVersions": ["v1"], "operations": ["CREATE"], "resources": ["pods"]}]}' "$policy"
+  jq -e '[.spec.variables[].name] == ["tier"]
+    and (.spec.variables[0].expression | contains("namespaceObject") and contains("k8s-gitops/sandbox"))' "$policy"
+  jq -e '[.spec.validations[].message] == [
+    "the namespace'"'"'s k8s-gitops/sandbox label is userns, gvisor or kata",
+    "a pod in a namespace of the userns sandbox tier sets hostUsers to false",
+    "a pod in a namespace of the gvisor sandbox tier sets runtimeClassName to gvisor",
+    "a pod in a namespace of the kata sandbox tier sets runtimeClassName to kata"]' "$policy"
+  # Kyverno's settings: every webhook that matches resources fails open, PolicyException stays off,
+  # and the webhook's namespace selector, which Kyverno 1.20.0 makes the policy's selector merged with
+  # the kyverno ConfigMap's (resolveNamespaceSelector), can only narrow by skipping namespaces by
+  # name; no object selector of the ConfigMap's lets a pod past it by its labels.
+  render kyverno
+  args="$(yq -N 'select(.kind == "Deployment" and .metadata.name == "kyverno-admission-controller")
+    | .spec.template.spec.containers[] | select(.name == "kyverno") | .args[]' "$RENDERED")"
+  grep -qx -- '--forceFailurePolicyIgnore=true' <<<"$args"
+  grep -qx -- '--enablePolicyException=false' <<<"$args"
+  yq -N 'select(.kind == "ConfigMap" and .metadata.name == "kyverno") | .data.webhooks' "$RENDERED" >"$BATS_TEST_TMPDIR/webhooks.json"
+  cat "$BATS_TEST_TMPDIR/webhooks.json"
+  jq -e '(keys == ["namespaceSelector"]) and (.namespaceSelector.matchLabels // {} | length == 0)
+    and (.namespaceSelector.matchExpressions | all(.key == "kubernetes.io/metadata.name" and .operator == "NotIn"))' "$BATS_TEST_TMPDIR/webhooks.json"
+  skipped="$(jq -r '.namespaceSelector.matchExpressions[].values[]' "$BATS_TEST_TMPDIR/webhooks.json" | sort -u)"
+  # Nor does a requester: Kyverno admits a request of a user, group or role its ConfigMap excludes
+  # without evaluating it (withFilter), and the one it excludes is the chart's default, the group of
+  # the kubelets, which register a mirror pod for each static pod of their node.
+  identities="$(yq -N -o json -I0 'select(.kind == "ConfigMap" and .metadata.name == "kyverno") | .data
+    | with_entries(select(.key | test("^exclude(Groups|Usernames|Roles|ClusterRoles)$")))' "$RENDERED")"
+  echo "requesters Kyverno does not evaluate: $identities"
+  [ "$identities" = '{"excludeGroups":"system:nodes"}' ]
+  # The namespaces whose pods a resource filter drops: a filter whose kind matches Pod with no
+  # subresource, whatever names it gives, as Kyverno matches each part (ToFilter).
+  dropped=""
+  while IFS= read -r filter; do
+    IFS=, read -r kind ns _ <<<"${filter:1:-1}"
+    sub=""
+    [[ $kind != */* ]] || sub="${kind#*/}"
+    kind="${kind%%/*}"
+    # shellcheck disable=SC2053 # The filter's parts are patterns.
+    if [[ Pod == $kind && "" == $sub ]]; then dropped+="$ns"$'\n'; fi
+  done < <(yq -N 'select(.kind == "ConfigMap" and .metadata.name == "kyverno") | .data.resourceFilters' "$RENDERED" | grep -oE '\[[^]]*\]')
+  [ -n "$dropped" ]
+  excluded="$(printf '%s\n%s' "$skipped" "$dropped" | grep . | sort -u | paste -sd, -)"
+  echo "namespaces Kyverno never sees a pod of at admission: $excluded"
+  [ "$excluded" = flux-system,kube-node-lease,kube-public,kube-system,kyverno ]
+  # The namespaces that carry the label: each Namespace of the lab-sto2 overlay, and flux-system, as
+  # the FluxInstance's patches label it. None of them is one Kyverno never sees at admission, and
+  # today none carries it at all, so the rule matches no namespace of the tree.
+  overlay="$BATS_TEST_TMPDIR/overlay.yaml"
+  kustomize build --load-restrictor LoadRestrictionsNone "$TREE/kubernetes/apps/overlays/lab-sto2" >"$overlay"
+  [ "$(yq -N 'select(.kind == "Namespace") | .metadata.name' "$overlay" | grep -c .)" -gt 10 ]
+  # shellcheck disable=SC2016 # $patch is a yq variable.
+  labelled="$({
+    yq -N 'select(.kind == "Namespace" and (.metadata.labels // {} | has("k8s-gitops/sandbox"))) | .metadata.name' "$overlay"
+    yq -N '.instance.kustomize.patches[] | select(.target.kind == "Namespace") | .patch | from_yaml
+      | select(.metadata.labels // {} | has("k8s-gitops/sandbox")) | .metadata.name' \
+      "$REPO/kubernetes/clusters/lab-sto2/flux-system/flux-instance/app/values.yaml"
+  } | sort -u)"
+  echo "namespaces labelled with a sandbox tier: ${labelled:-none}"
+  for ns in $labelled; do
+    [[ ,$excluded, != *",$ns,"* ]] || { echo "$ns carries k8s-gitops/sandbox, and Kyverno never sees its pods at admission"; return 1; }
+  done
+  [ -z "$labelled" ]
+  # The docs state the contract where a reader looks for it.
+  runtime="$(docs_section '## Runtime classes')"
+  [[ $runtime == *"**A namespace asks for a sandbox tier.**"* ]]
+  [[ $runtime == *"Falco watches the host's kernel, so it sees little of what a pod does inside gVisor or a Kata guest"* ]]
+  [[ $runtime == *"\`k8s-gitops/sandbox\`"* ]]
+  # The paragraph opens a line of its own, once, after the one tests/install-cilium.bats pins.
+  [ "$(grep -cxE '\*\*A namespace asks for a sandbox tier\.\*\*.*' "$REPO/docs/kubernetes.md")" -eq 1 ]
+  [ "$(grep -nE '^\*\*A namespace asks for a sandbox tier\.\*\*' "$REPO/docs/kubernetes.md" | cut -d: -f1)" -gt \
+    "$(grep -nE '^\*\*Pods under a sandbox runtime reach Services\.\*\*' "$REPO/docs/kubernetes.md" | cut -d: -f1)" ]
+  [[ $(docs_section '### What Falco costs and what it sees') == *"(#runtime-classes)"* ]]
+  bullet="$(docs_bullets '## Pod Security' | grep -F -- '- **Sandbox tiers.**')"
+  [[ $bullet == *"\`k8s-gitops/sandbox\`"* && $bullet == *"\`components/volsync\`"* && $bullet == *"\`components/cnpg-cluster\`"* ]]
+  bullet="$(docs_bullets '## Adding an application' | grep -F -- "\`k8s-gitops/sandbox\`")"
+  [ "$(grep -c . <<<"$bullet")" -eq 1 ]
+  [[ $bullet == *"\`namespace.yaml\`"* && $bullet == *"\`components/volsync\`"* && $bullet == *"\`components/cnpg-cluster\`"* ]]
+  admission="$(docs_section '## Admission policy')"
+  [[ $admission == *'### The three rules'*'### The sandbox tier rule'* ]]
+  [[ $admission == *"\`k8s-gitops/sandbox\`"* ]]
+  [[ $admission == *"The refusal holds only while Kyverno's webhook answers"* ]]
+  [[ $(docs_section '### The sandbox tier rule') == *"\`system:nodes\`"* ]]
+  [[ $admission == *'Policy sandbox-tier failed: <message>'* ]]
+  adr=adr/0021-a-namespace-label-names-its-sandbox-tier-and-kyverno-alone-refuses-pods-without-it.md
+  [[ $admission == *"($adr)"* ]]
+  [ -f "$REPO/docs/$adr" ]
+  # The catalogue's entity of the rules names the fourth.
+  [[ $(yq '.metadata.description' "$REPO/kubernetes/apps/base/backstage/backstage/app/catalogue/kyverno-policies.yaml") == *sandbox* ]]
 }
 
 @test "Each engine is pinned to an exact chart version that Renovate can update" {
