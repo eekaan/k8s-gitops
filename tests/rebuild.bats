@@ -1,10 +1,12 @@
 #!/usr/bin/env bats
-# Proves the first two scenarios of features/rebuild.feature, those of the rebuild runbook; each test
-# carries its scenario's title. The restores are read from the runbooks themselves, every "## Restoring"
-# heading of docs/runbooks/*.md and every runbook whose title begins with Restoring, by the anchor
-# GitHub gives the heading; the databases from the render of the tree, scripts/render run once for the
-# file, as tests/network-policy.bats renders it, every Cluster.postgresql.cnpg.io_<namespace>_<name>.yaml
-# of lab-sto2. The render pulls the pinned charts from their public registries and reaches nothing else.
+# Proves the first three scenarios of features/rebuild.feature, those of the rebuild runbook; each
+# test carries its scenario's title. The restores are read from the runbooks themselves, every
+# "## Restoring" heading of docs/runbooks/*.md and every runbook whose title begins with Restoring, by
+# the anchor GitHub gives the heading; the databases, and Ascender's secret key, from the render of the
+# tree, scripts/render run once for the file, as tests/network-policy.bats renders it: every
+# Cluster.postgresql.cnpg.io_<namespace>_<name>.yaml of lab-sto2, and every AWX.awx.ansible.com_*.yaml
+# with the ExternalSecret that writes the Secret its secret_key_secret names. The render pulls the
+# pinned charts from their public registries and reaches nothing else.
 
 setup() {
   REPO=$(cd "$BATS_TEST_DIRNAME/.." && pwd)
@@ -39,17 +41,17 @@ section() {
   awk -v name="## $1" '$0 == name { inside = 1; next } inside && /^## / { exit } inside' "${2:-$REBUILD}"
 }
 
-# steps NAME: the numbered steps of the "## NAME" section of rebuild.md, in order, one per line, each
-# its lines joined by spaces, what is indented under it included.
+# steps NAME [FILE]: the numbered steps of the "## NAME" section of FILE, rebuild.md by default, in
+# order, one per line, each its lines joined by spaces, what is indented under it included.
 steps() {
-  section "$1" | awk '/^[0-9]+\. / { if (text != "") print text; text = $0; next }
+  section "$1" "${2:-$REBUILD}" | awk '/^[0-9]+\. / { if (text != "") print text; text = $0; next }
     text != "" { text = text " " $0 } END { if (text != "") print text }'
 }
 
-# step_of NAME TEXT: the number of the first step of the section NAME whose text holds TEXT, by its
-# place in the section; nothing when none does.
+# step_of NAME TEXT [FILE]: the number of the first step of the section NAME of FILE, rebuild.md by
+# default, whose text holds TEXT, by its place in the section; nothing when none does.
 step_of() {
-  steps "$1" | grep -nF -- "$2" | head -n 1 | cut -d: -f1
+  steps "$1" "${3:-$REBUILD}" | grep -nF -- "$2" | head -n 1 | cut -d: -f1
 }
 
 # step_holds NAME TITLE TEXT...: the step of the section NAME titled TITLE, in bold, holds each TEXT;
@@ -98,6 +100,62 @@ covered() {
   while IFS= read -r database; do
     grep -qxF -- "$database" < <(databases "$render") || problems+=("$database: a row for a database the render does not build")
   done < <(rows "$file" | cut -f1)
+  ((${#problems[@]} == 0)) || { printf '%s\n' "${problems[@]}"; return 1; }
+}
+
+# key_restored RENDER [FILE]: whether FILE, rebuild.md by default, brings the secret key of each AWX
+# of lab-sto2 in the render RENDER back with the secret store, before its database: the AWX names the
+# Secret of its key in secret_key_secret; one ExternalSecret of the render writes that Secret's
+# secret_key from a path of the ClusterSecretStore openbao; in "Building it again" the step "The
+# secret store." names that path and Ascender, the step "The databases." comes after it, and the row
+# of each database of the AWX's namespace names the secret store by its step and the path; and
+# neither "What does not" nor the step "What no restore brings back." names the operator's own
+# Secret of the key, <name>-secret-key, in backquotes or not. Names each AWX that fails, and why.
+# shellcheck disable=SC2016 # the backquotes are Markdown's.
+key_restored() {
+  local render=$1 file=${2:-$REBUILD} awx namespace name secret own path store db_step database row problems=()
+  store=$(step_of 'Building it again' '**The secret store.**' "$file")
+  db_step=$(step_of 'Building it again' '**The databases.**' "$file")
+  while IFS= read -r awx; do
+    namespace=$(yq '.metadata.namespace' "$awx")
+    name=$(yq '.metadata.name' "$awx")
+    secret=$(yq '.spec.secret_key_secret // ""' "$awx")
+    if [ -z "$secret" ]; then
+      problems+=("AWX $namespace/$name: it names no Secret of the store for its secret key")
+      continue
+    fi
+    # The operator's own Secret by its name, in backquotes or not, and not as the start or end of a
+    # longer name such as the store's Secret.
+    own="(^|[^[:alnum:]_-])$name-secret-key([^[:alnum:]_-]|\$)"
+    path=$(find "$render/lab-sto2" -type f -name "ExternalSecret.external-secrets.io_${namespace}_*.yaml" -print0 |
+      xargs -0 -r yq -N -o json -I0 '.' | jq -r --arg secret "$secret" '
+        select((.spec.target.name // .metadata.name) == $secret
+          and .spec.secretStoreRef == {"kind": "ClusterSecretStore", "name": "openbao"})
+        | .spec.data[]? | select(.secretKey == "secret_key") | .remoteRef.key')
+    if [ "$(grep -c . <<<"$path")" -ne 1 ]; then
+      problems+=("AWX $namespace/$name: no one ExternalSecret writes the secret_key of its Secret $secret from the store")
+      continue
+    fi
+    if [ -z "$store" ]; then
+      problems+=("AWX $namespace/$name: the runbook has no step The secret store.")
+      continue
+    fi
+    steps 'Building it again' "$file" | sed -n "${store}p" | grep -qF -- "\`$path\`" ||
+      problems+=("AWX $namespace/$name: the step The secret store. does not name $path")
+    steps 'Building it again' "$file" | sed -n "${store}p" | grep -qF -- 'Ascender' ||
+      problems+=("AWX $namespace/$name: the step The secret store. does not name Ascender")
+    [ -n "$db_step" ] && ((db_step > store)) ||
+      problems+=("AWX $namespace/$name: the step The databases. does not come after The secret store.")
+    while IFS= read -r database; do
+      row=$(rows "$file" | awk -F'\t' -v db="$database" '$1 == db { print $2 }')
+      [[ $row == *"secret store (step $store)"* && $row == *"\`$path\`"* ]] ||
+        problems+=("AWX $namespace/$name: the row of $database does not name the secret store (step $store) and $path")
+    done < <(databases "$render" | grep "^$namespace/")
+    ! section 'What does not' "$file" | grep -qE -- "$own" ||
+      problems+=("AWX $namespace/$name: What does not names $name-secret-key")
+    ! steps 'Building it again' "$file" | grep -F -- '**What no restore brings back.**' | grep -qE -- "$own" ||
+      problems+=("AWX $namespace/$name: the step What no restore brings back. names $name-secret-key")
+  done < <(find "$render/lab-sto2" -type f -name 'AWX.awx.ansible.com_*.yaml' | LC_ALL=C sort)
   ((${#problems[@]} == 0)) || { printf '%s\n' "${problems[@]}"; return 1; }
 }
 
@@ -178,4 +236,32 @@ real_render() {
   echo "$output"
   [ "$status" -ne 0 ]
   [ "$output" = "demo/orders-db: 0 rows in the table" ]
+}
+
+@test "The rebuild runbook brings Ascender's secret key back with the secret store, before Ascender's database" {
+  local copy="$BATS_TEST_TMPDIR/render" awx
+  real_render
+  # The render holds Ascender's AWX, so a render that finds none cannot pass.
+  awx=$(find "$REAL/lab-sto2" -type f -name 'AWX.awx.ansible.com_*.yaml')
+  echo "the render's AWX: ${awx#"$REAL/"}, its secret key's Secret: $(yq '.spec.secret_key_secret // "none"' "$awx")"
+  [ "${awx##*/}" = AWX.awx.ansible.com_ascender_ascender.yaml ]
+  run key_restored "$REAL"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  # A render whose AWX names no Secret of the store fails, naming it.
+  cp -R "$REAL" "$copy"
+  yq -i 'del(.spec.secret_key_secret)' "$copy/${awx#"$REAL/"}"
+  run key_restored "$copy"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [ "$output" = "AWX ascender/ascender: it names no Secret of the store for its secret key" ]
+  # A runbook that names the operator's own Secret of the key as lost, in "What does not" and in the
+  # step What no restore brings back., without backquotes, fails, naming both.
+  awk '{ print } $0 == "## What does not" { print ""; print "- Ascender'\''s ascender-secret-key, which no backup holds." }
+    /^8\. \*\*What no restore brings back\.\*\*/ { print "   Ascender'\''s ascender-secret-key is lost." }' "$REBUILD" >"$BATS_TEST_TMPDIR/rebuild.md"
+  run key_restored "$REAL" "$BATS_TEST_TMPDIR/rebuild.md"
+  echo "$output"
+  [ "$status" -ne 0 ]
+  [ "$output" = "$(printf '%s\n' 'AWX ascender/ascender: What does not names ascender-secret-key' \
+    'AWX ascender/ascender: the step What no restore brings back. names ascender-secret-key')" ]
 }

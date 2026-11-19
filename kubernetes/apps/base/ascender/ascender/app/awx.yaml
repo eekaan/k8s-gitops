@@ -53,10 +53,15 @@ spec:
     seccompProfile:
       type: RuntimeDefault
 
-  # The database, from the Secret ascender-db-app that the application ascender-operator makes; the
-  # admin password and the secret key are the operator's, in ascender-admin-password and
-  # ascender-secret-key, which it keeps when the AWX goes.
+  # The database, from the Secret ascender-db-app that the application ascender-operator makes. The
+  # secret key, which every credential and encrypted setting in that database is encrypted under,
+  # from the Secret ascender-secret-key-from-store that the same application writes from the secret
+  # store, which a rebuild brings back before the database; the operator uses a Secret named here
+  # whenever it exists at the start of a run and then generates none. The admin password and the
+  # websocket secret are the operator's, in ascender-admin-password and
+  # ascender-broadcast-websocket, which it keeps when the AWX goes.
   postgres_configuration_secret: ascender-db-app
+  secret_key_secret: ascender-secret-key-from-store
   admin_user: admin
   garbage_collect_secrets: false
 

@@ -9,15 +9,18 @@ spec:
   path: ./apps/base/ascender/ascender-operator/app
   targetNamespace: ascender
   # What its objects need to exist first: its CiliumNetworkPolicy is a kind Cilium's operator
-  # defines, and the Password generator and the ExternalSecret of the database's Secret are External
-  # Secrets' kinds.
+  # defines; the Password generator and the ExternalSecrets of the database's Secret and of the
+  # secret key's are External Secrets' kinds; and the secret key is read through the
+  # ClusterSecretStore openbao, which the store's application makes.
   dependsOn:
     - name: cilium
     - name: external-secrets
+    - name: openbao-store
   # Ready only once the release is installed with its pod ready, which defines the kind AWX and
-  # runs the operator, and once the database's Secret exists: the operator reads that Secret once,
-  # at the start of its run for the AWX, and makes a PostgreSQL of its own when it is missing, so
-  # ascender, which applies the AWX, waits for this.
+  # runs the operator, and once the database's Secret and the secret key's exist: the operator
+  # reads both at the start of its run for the AWX, makes a PostgreSQL of its own without the
+  # first and takes or generates a secret key of its own without the second, so ascender, which
+  # applies the AWX, waits for this.
   wait: true
   sourceRef:
     kind: ExternalArtifact

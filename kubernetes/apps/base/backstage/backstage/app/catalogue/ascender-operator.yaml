@@ -4,7 +4,7 @@ apiVersion: backstage.io/v1alpha1
 kind: Component
 metadata:
   name: ascender-operator
-  description: Ctrl IQ's operator for Ascender, which makes Ascender's web and task pods, its migration Job and their Secrets in the namespace ascender from the AWX resource there, and the database's Secret it reads.
+  description: Ctrl IQ's operator for Ascender, which makes Ascender's web and task pods, its migration Job and their Secrets in the namespace ascender from the AWX resource there, and reads the database's and the secret key's Secrets.
   links:
     - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#ascender
       title: Documentation
@@ -18,3 +18,4 @@ spec:
   dependsOn:
     - component:default/cilium
     - component:default/external-secrets
+    - resource:default/openbao-store

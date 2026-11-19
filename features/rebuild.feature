@@ -1,5 +1,5 @@
 Feature: Rebuilding the cluster
-  The cluster is taken down to nothing and built again from the repository, the operator's keys and custody files, and the copies in the backup buckets (docs/runbooks/rebuild.md). Before it is taken down, one recipe takes and checks a last copy of everything the rebuild restores from, and compares every custody file the restores need with what the running cluster holds; the runbook then leads through every restore in order, the secret store's first, and names every database the cluster builds with the way it comes back.
+  The cluster is taken down to nothing and built again from the repository, the operator's keys and custody files, and the copies in the backup buckets (docs/runbooks/rebuild.md). Before it is taken down, one recipe takes and checks a last copy of everything the rebuild restores from, and compares every custody file the restores need with what the running cluster holds; the runbook then leads through every restore in order, the secret store's first, names every database the cluster builds with the way it comes back, and brings Ascender's secret key back with the store before Ascender's database.
 
   Scenario: The rebuild runbook links every restore the runbooks hold, the secret store's before what reads it
     Given the "## Restoring" headings of the runbooks, and the runbooks whose title begins with Restoring
@@ -10,6 +10,11 @@ Feature: Rebuilding the cluster
     Given the render of lab-sto2
     When its PostgreSQL Clusters are listed
     Then each <namespace>/<name> has a row of its own in the runbook's table of databases, with a link to a restore or the words "made again by a start", the table has no row for a database the render does not build, and a render with one more Cluster fails naming it
+
+  Scenario: The rebuild runbook brings Ascender's secret key back with the secret store, before Ascender's database
+    Given the render of lab-sto2
+    When the AWX's secret_key_secret, the ExternalSecret of the render that writes that Secret and the store path it reads are found, and docs/runbooks/rebuild.md is read
+    Then the step "The secret store." names that path and Ascender, the step "The databases." comes after it and its Ascender row names the store, neither "What does not" nor "What no restore brings back." names ascender-secret-key as lost, a render whose AWX names no Secret of the store fails, naming it, and a runbook that names ascender-secret-key there, in backquotes or not, fails, naming each place
 
   Scenario: The last copies are taken and checked before the cluster is taken down, and what each covers is printed
     Given a running cluster with the secret store, three databases from the component, one of them idle, and two backed-up volumes, and the three custody files of what it holds
