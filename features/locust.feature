@@ -19,7 +19,7 @@ Feature: Locust
   Scenario: Locust's namespace denies traffic by default, and its workers reach the master, the resolver and the target and nothing else
     Given the render of the tree, with its real charts
     When the namespace's NetworkPolicy, Locust's two CiliumNetworkPolicies, hello's policy and the flows of Locust's pods are read and evaluated
-    Then the namespace holds the default deny and is not listed; the master takes the workers on 5557 and the kubelet's probe on 8089 and sends nothing; the workers take nothing and reach the master on 5557, the cluster's resolver on 53 and hello's pods on 8080, and not the world, the API server, the secret store, the proxies, another port of the resolver or of hello, or another application; hello takes Locust's workers on 8080 besides the proxies and the kubelet; and nothing else reaches the master's ports
+    Then the namespace holds the default deny and is not listed; the master takes the workers on 5557 and the kubelet's probe on 8089 and sends nothing; the workers take nothing and reach the master on 5557, the cluster's resolver on 53 and hello's pods on 8080, and not the world, the API server, the secret store, the proxies, another port of the resolver or of hello, or another application; hello takes Locust's workers on 8080 besides the proxies, the kubelet and Robot Framework's runner; and nothing else reaches the master's ports
 
   Scenario: Locust's target is a Service of the cluster read from the render, and the target admits only Locust's workers on its port
     Given the render of the tree, with its real charts, and the cluster's DNS domain from its machine configuration

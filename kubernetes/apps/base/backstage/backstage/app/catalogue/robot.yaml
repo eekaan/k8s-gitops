@@ -1,0 +1,19 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/catalog-info.json
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: robot
+  description: Robot Framework with the Browser library, a CronJob that runs the tree's HTTP and browser suites against the demo's hello nightly and on demand, and a server of their reports with no route, reached by a local port forward.
+  links:
+    - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#robot-framework
+      title: Documentation
+    - url: https://github.com/eekaan/k8s-gitops/tree/main/kubernetes/apps/base/robot/robot
+      title: Manifests
+spec:
+  type: service
+  lifecycle: experimental
+  owner: group:default/operators
+  system: applications
+  dependsOn:
+    - component:default/cilium

@@ -1,0 +1,87 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/deployment-apps-v1.json
+# The report server: busybox's web server, serving the claim the runs write, which its container
+# mounts read-only. It shows the index run.sh writes, each run's report.html and log.html, and the
+# screenshots under each run's browser/screenshot/; it lists no directory of its own. One replica,
+# replaced rather than rolled: a new pod on another node would wait for the volume the old one holds
+# (docs/kubernetes.md, Robot Framework).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: robot-reports
+  labels:
+    app.kubernetes.io/name: robot
+    app.kubernetes.io/component: reports
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: robot
+      app.kubernetes.io/component: reports
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: robot
+        app.kubernetes.io/component: reports
+    spec:
+      # The server calls no API.
+      automountServiceAccountToken: false
+      # No Service hands the pod variables; the runner's pod says why the namespace sets none.
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: httpd
+          # The busybox of the demo and of the drill's check, by its tag and the digest of its
+          # image index.
+          image: docker.io/library/busybox:1.38.0@sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4
+          # In the foreground, on an unprivileged port, serving the claim and logging to the console.
+          command:
+            - httpd
+            - -f
+            - -v
+            - -p
+            - "8080"
+            - -h
+            - /reports
+          ports:
+            - name: http
+              containerPort: 8080
+          # Ready once it takes a connection: / is 404 until a run writes the index, and a probe that
+          # waited for one would hold the Kustomization's wait until the night's run.
+          readinessProbe:
+            tcpSocket:
+              port: http
+          # The drill's check's figures, for the same image.
+          resources:
+            requests:
+              cpu: 1m
+              memory: 8Mi
+            limits:
+              memory: 32Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: reports
+              mountPath: /reports
+              readOnly: true
+      volumes:
+        # Writable in the volume, as the runner's is, and read-only in the mount above. The kubelet
+        # hands the LINSTOR driver each pod's volume read-only or not as this says, the driver mounts
+        # the device itself for each pod, and Linux refuses a second mount of a device with the other
+        # read-only state: a read-only volume here would keep the runner's pod, on this node, from
+        # the claim. The mount's readOnly is a read-only bind the runtime makes, so the server cannot
+        # write, and with no fsGroup the kubelet changes nothing of the claim for this pod.
+        - name: reports
+          persistentVolumeClaim:
+            claimName: robot-reports

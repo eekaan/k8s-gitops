@@ -1,0 +1,16 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/namespace-v1.json
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: robot
+  annotations:
+    # Removing the namespace from the tree must not delete everything in it.
+    kustomize.toolkit.fluxcd.io/prune: disabled
+  labels:
+    # Robot Framework's runner runs as the image's user and group, 1001, and its report server as
+    # 65534, as non-root with the runtime's default seccomp profile, a read-only root filesystem, no
+    # capabilities and no privilege escalation, which the restricted level requires; the runner's
+    # Chromium runs without its sandbox. No Gateway label: nothing routes to the reports
+    # (docs/kubernetes.md, Robot Framework).
+    pod-security.kubernetes.io/enforce: restricted

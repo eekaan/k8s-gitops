@@ -1,0 +1,18 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ciliumnetworkpolicy.yaml
+
+# The Ascender suite, under a fixed name: robot's CronJob, of another Kustomization, mounts it, which
+# kustomize's name reference cannot follow; a change reaches the next run, whose pod mounts the
+# ConfigMap as it then is. Flux's substitution leaves it alone: Robot's ${...} is its syntax.
+configMapGenerator:
+  - name: robot-suite-ascender
+    files:
+      - suites/ascender-ui.robot
+    options:
+      disableNameSuffixHash: true
+      annotations:
+        kustomize.toolkit.fluxcd.io/substitute: disabled

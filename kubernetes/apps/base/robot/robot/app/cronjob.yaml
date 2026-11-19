@@ -1,0 +1,139 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/master-standalone-strict/cronjob-batch-v1.json
+# The runner: every night, and whenever just robot-run makes a job from it, run.sh runs Robot
+# Framework over the tree's suites, with the targets as Robot variables, and writes Robot's reports
+# into a dated directory of the claim the report server shows. A failed test fails the job, which
+# the monitoring chart's KubeJobFailed reports (docs/kubernetes.md, Robot Framework).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: robot-suites
+  labels:
+    app.kubernetes.io/name: robot
+    app.kubernetes.io/component: runner
+spec:
+  # 05:45 in the cluster's UTC, as no CronJob of the tree sets timeZone: after the restore drill's
+  # check, whose job ends by 05:37, and before the etcd snapshot of 06:17, as a run ends by 06:10.
+  schedule: "45 5 * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      # A job kubectl create job --from makes takes these labels, which just robot-run selects the
+      # runner's jobs by.
+      labels:
+        app.kubernetes.io/name: robot
+        app.kubernetes.io/component: runner
+    spec:
+      # A failed test fails the job; a retry would be a second run in a second directory.
+      backoffLimit: 0
+      activeDeadlineSeconds: 1200
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: robot
+            app.kubernetes.io/component: runner
+        spec:
+          restartPolicy: Never
+          # Nothing here calls the API.
+          automountServiceAccountToken: false
+          # Robot and the Browser library read ROBOT_* variables from their environment, and the
+          # Service robot-reports would hand every pod ROBOT_REPORTS_PORT and its kin.
+          enableServiceLinks: false
+          # The claim is ReadWriteOnce and the report server, its first pod, placed it: the runner
+          # runs on the server's node, where the kubelet mounts the same volume for both.
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      app.kubernetes.io/name: robot
+                      app.kubernetes.io/component: reports
+                  topologyKey: kubernetes.io/hostname
+          securityContext:
+            # The image's user is the name pwuser, uid and gid 1001. The kubelet cannot hold a name
+            # to runAsNonRoot and refuses to start the container, so the numbers are given.
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            # The claim's root is root's until the kubelet gives it this group, which it does for
+            # this read-write mount, once, while the root's group differs.
+            fsGroup: 1001
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: robot
+              image: docker.io/marketsquare/robotframework-browser:21.0.0@sha256:bcd88c4f8873a6dc625230dcefe34e5abd5cb782f5ac259ebad31f368b1229cd
+              command: ["/bin/bash", "/mnt/robot/scripts/run.sh"]
+              # The targets, from ks.yaml; run.sh takes these pairs and nothing else.
+              args:
+                - --variable
+                - HELLO_URL:${ROBOT_TARGET_HELLO}
+                - --variable
+                - ASCENDER_URL:${ROBOT_TARGET_ASCENDER}
+              env:
+                # What a process keeps in its user's home, such as ~/.cache, goes to the writable
+                # /tmp; the image's home, /home/pwuser, is on the read-only root.
+                - name: HOME
+                  value: /tmp
+                - name: KEEP_RUNS
+                  value: "30"
+                - name: JOB_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.labels['batch.kubernetes.io/job-name']
+              # Measured offline: a run peaked at 271 MiB of the container's memory, /tmp included,
+              # rounded up to a multiple of 64Mi, and used about 2.4 seconds of CPU in 3, which the
+              # request's half a core covers less of: no CPU limit, which would throttle the
+              # browser, so a run takes what the node has free and is slower where it has little.
+              resources:
+                requests:
+                  cpu: 500m
+                  memory: 320Mi
+                limits:
+                  memory: 640Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
+              volumeMounts:
+                - name: suites
+                  mountPath: /mnt/robot/suites/base
+                  readOnly: true
+                - name: suite-ascender
+                  mountPath: /mnt/robot/suites/ascender
+                  readOnly: true
+                - name: scripts
+                  mountPath: /mnt/robot/scripts
+                  readOnly: true
+                - name: reports
+                  mountPath: /reports
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: suites
+              configMap:
+                name: robot-suites
+            # robot-ascender's suite, under the fixed name its Kustomization gives it. Optional:
+            # without that piece the directory is empty, and Robot runs the base suites alone.
+            - name: suite-ascender
+              configMap:
+                name: robot-suite-ascender
+                optional: true
+            - name: scripts
+              configMap:
+                name: robot-scripts
+            - name: reports
+              persistentVolumeClaim:
+                claimName: robot-reports
+            # Chromium's profile and Playwright's artifacts, and the shared memory Chromium keeps in
+            # files here rather than in /dev/shm: at most 392 KiB in a run offline.
+            - name: tmp
+              emptyDir:
+                medium: Memory
+                sizeLimit: 16Mi

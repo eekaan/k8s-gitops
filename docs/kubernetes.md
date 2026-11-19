@@ -624,16 +624,17 @@ once it is not, and the agents' rendered configuration agrees.
 
 | Namespace | Posture | Why, and what covers it instead |
 | --- | --- | --- |
-| `demo` | default deny | `hello` takes the proxies and Locust's workers on 8080; the backup movers, the restore drill's among them, resolve names and reach the object storage on 443; `volsync-demo`, the drill's check and the rest open nothing. |
+| `demo` | default deny | `hello` takes the proxies, Locust's workers and Robot Framework's runner on 8080; the backup movers, the restore drill's among them, resolve names and reach the object storage on 443; `volsync-demo`, the drill's check and the rest open nothing. |
 | `envoy-gateway-system` | default deny | the controller, its webhook, its certificate job and the proxies, below; the proxies take the blackbox exporter's probes. |
 | `kromgo` | default deny | kromgo takes the proxies and the kubelet's probes on 8080 and Prometheus' scrape on 8081, and reaches the resolver and Prometheus on 9090. |
 | `sso-system` | default deny | dex takes the proxies and oauth2-proxy on 5556 and reaches the API server and GitHub on 443; oauth2-proxy takes the proxies on 4180 and reaches dex; below. |
 | `backstage` | default deny | Backstage takes the proxies and the kubelet's probes on 7007 and reaches the resolver and its database on 5432; the database's pods, those of every cluster of the namespace by `cnpg.io/cluster` existing, a restore's beside `backstage-db` included, take the operator, each other, Backstage, the dump job, Prometheus and the kubelet's probes, and reach each other, the resolver and the API server, and its instances and a restore's recovery job, for their Barman Cloud sidecars, the object storage on 443; the dump job reaches the resolver, the database and the world on 443. |
-| `ascender` | default deny | the web pods take the proxies, the kubelet's probe and the task pods on 8052; the operator takes the kubelet's probes on 6789 and reaches the API server alone; every pod of Ascender's instance reaches the resolver and its database on 5432; the task pods reach the web pods, the API server and the world on 443 and 22; the job pods reach the resolver and the world on 443 and 22 and nothing else; the database, its instances, a restore's recovery job and the dump job let through what Backstage's do. |
+| `ascender` | default deny | the web pods take the proxies, the kubelet's probe, the task pods and Robot Framework's runner on 8052; the operator takes the kubelet's probes on 6789 and reaches the API server alone; every pod of Ascender's instance reaches the resolver and its database on 5432; the task pods reach the web pods, the API server and the world on 443 and 22; the job pods reach the resolver and the world on 443 and 22 and nothing else; the database, its instances, a restore's recovery job and the dump job let through what Backstage's do. |
 | `security-system` | default deny | Falco takes Prometheus' scrape and the kubelet's probes on 8765, and reaches the resolver alone; the flow recorder takes nothing and reaches the resolver and Hubble Relay on 4245. |
 | `crowdsec` | default deny | the local API takes the agent on 8080, Prometheus on 6060 and the kubelet's probes, and sends nothing; the agent takes Prometheus and the kubelet on 6060 and reaches the resolver, the local API and the API server on 443 and 6443; below. |
 | `open-feature-operator` | default deny | the OpenFeature Operator takes the kubelet's probes on 8081, Prometheus' scrape on 8080 and the API server's calls to its webhooks on 9443, and reaches the API server alone. |
 | `locust` | default deny | Locust's master takes its workers on 5557 and the kubelet's probe on 8089 and sends nothing; the workers take nothing and reach the resolver, the master on 5557 and `hello`'s pods in `demo` on 8080. |
+| `robot` | default deny | Robot Framework's runner takes nothing and reaches the resolver, `hello`'s pods in `demo` on 8080 and Ascender's web pods in `ascender` on 8052; the report server takes the kubelet's probe on 8080 and sends nothing. |
 | `ai-system` | listed | applications whose allows are not written, not a namespace that cannot have the posture. n8n takes the proxies on 5678 and reaches its database, the resolver and whatever its workflows call outside; the PostgreSQL instances take n8n, each other and the operator, and reach the API server, and their Barman Cloud sidecars reach the object storage on 443 and the API server; the dump job reaches the database, the hosts age's release is downloaded from and the object storage; Open WebUI takes the proxies on 8080 and reaches nothing until an administrator turns on a connection that calls out; the backup movers reach the object storage on 443. The proxies reach n8n's 5678 and Open WebUI's 8080 alone there and forward only to their Services, PostgreSQL authenticates every client, Pod Security, node firewall. |
 | `etcd-snapshots` | listed | an application whose allows are not written, not a namespace that cannot have the posture. The snapshot job takes nothing and reaches the Talos API through `talos.default`, the object storage, the hosts age's release is downloaded from (its URL redirects to a second host, which serves the file) and the resolver. Talos' own authorisation of its one role, Pod Security, node firewall. |
 | `external-dns` | listed | an application whose allows are not written, not a namespace that cannot have the posture. external-dns takes Prometheus' scrape and the kubelet's probes on 7979 and nothing else, and reaches the API server, the DNS provider's API on 443 and the resolver. Its token, scoped to zone read and DNS edit on the cluster's one zone, its name filter, a ClusterRole that only reads, Pod Security, node firewall ([DNS records](#dns-records)). |
@@ -690,7 +691,8 @@ once it is not, and the agents' rendered configuration agrees.
   allowed; a monitor that does adds its rule.
 - **`demo`.** `hello` takes the proxies by their labels, not by their namespace, on 8080, so the
   controller is no path to it, Locust's workers by their labels in `locust` on the same port, so
-  Locust's master is not admitted, and the kubelet's probe. The backup movers, the pods VolSync
+  Locust's master is not admitted, Robot Framework's runner by its labels in `robot` on the same
+  port, so the report server is not admitted, and the kubelet's probe. The backup movers, the pods VolSync
   labels `app.kubernetes.io/created-by: volsync` for every application of the namespace that adds
   `components/volsync`, reach the resolver, and the world on 443 in a policy of its own with its
   reason, both by the application `demo-volsync-movers`, one for the namespace. A pod without a
@@ -759,7 +761,8 @@ once it is not, and the agents' rendered configuration agrees.
 - **`ascender`.** The pods of Ascender's instance are its operator's, made at run time, and the
   policies name them by the labels the operator's templates give them at the release recorded beside
   them. The web pods, by the labels of their Deployment's selector, take the proxies by their
-  labels, the kubelet's readiness probe and the task pods' websocket relay on 8052. Every pod of the
+  labels, the kubelet's readiness probe, the task pods' websocket relay and Robot Framework's
+  runner, by its labels in `robot`, on 8052. Every pod of the
   instance, by `app.kubernetes.io/part-of: ascender` with the operator's `managed-by` and
   `component`, the migration Job's included, reaches the resolver and the database's instances on
   5432. The task pods reach the web pods on 8052, the API server on 443 and 6443, and the world on
@@ -817,6 +820,20 @@ once it is not, and the agents' rendered configuration agrees.
   ([Service addresses](#service-addresses)), and the load goes wherever the host given points.
   `just locust` reaches the interface through a port forward, which the container runtime
   connects inside the pod on its loopback, where no policy applies ([Locust](#locust)).
+- **`robot`.** Robot Framework's runner, the pods of the CronJob `robot-suites` by their labels
+  (`app.kubernetes.io/name: robot`, `app.kubernetes.io/component: runner`), takes nothing, as it
+  listens on nothing, and reaches the resolver, the pods the Service `hello` selects in `demo` on
+  8080 and, by `robot-runner-ascender`, the web pods the Service `ascender-web` selects in
+  `ascender` on 8052, the container ports those Services' port 80 targets: the targets of
+  `ks.yaml`, which admit it by a rule beside each. Once the cluster enforces the policies, whatever
+  page a suite opens, the runner's browser reaches nothing else, not the world, the API server, the
+  Gateway's proxies or another application; while it audits them, a flow it would drop is reported
+  and passes ([Service addresses](#service-addresses)). The report server, by its labels
+  (`app.kubernetes.io/component: reports`), takes the node it runs on on 8080, for the kubelet's
+  readiness probe, which admits every process of that node and every pod of its host network as
+  well, so they read the reports too, and sends nothing; `just robot` reaches it through a port
+  forward, which the container runtime connects inside the pod on its loopback, where no policy
+  applies ([Robot Framework](#robot-framework)).
 - **The object storage's port.** cluster-config holds the object storage's endpoint as a URL, which
   a DNS name rule cannot take, so the movers' rule is the world on 443: the port https uses for an
   endpoint that names none, as cluster-config's example does and `tests/network-policy.bats` holds
@@ -1266,14 +1283,14 @@ does not matter.
    and the agents evaluate both and drop nothing they deny; what a policy would drop is reported as
    `AUDIT`. As the allows land after the denies, `AUDIT` flows of `ascender`, `backstage`,
    `crowdsec`, `demo`, `envoy-gateway-system`, `kromgo`, `locust`, `open-feature-operator`,
-   `security-system` and `sso-system` from before they landed are expected, such as the proxies to
+   `robot`, `security-system` and `sso-system` from before they landed are expected, such as the proxies to
    `hello` on 8080 and to the controller on 18000, and the controller to the API server, and an
    agent's recent flows can hold them for a while.
 3. **Watch a day of the record**, from the moment the Kustomizations that hold the allows, `hello`,
    `demo-volsync-movers`, `envoy-gateway`, `kromgo`, `dex`, `oauth2-proxy`, `backstage`, `falco`,
-   `crowdsec`, `open-feature-operator`, `network-audit`, `ascender-operator`, `ascender` and
-   `locust`, are Ready at the merge's revision (`flux get kustomizations`). The flow recorder writes
-   every flow a policy would drop to the log store
+   `crowdsec`, `open-feature-operator`, `network-audit`, `ascender-operator`, `ascender`, `locust`,
+   `robot` and `robot-ascender`, are Ready at the merge's revision (`flux get kustomizations`). The
+   flow recorder writes every flow a policy would drop to the log store
    ([The record of what policy drops](#the-record-of-what-policy-drops)), so each path needs to be
    taken only once: `just gateway-check`; `just cluster-check`; the secret demo
    (`just secret-rotate demo/hello greeting`); a badge asked of kromgo by its name, which has kromgo
@@ -1285,19 +1302,23 @@ does not matter.
    ([Backups and restores](#backups-and-restores)); a restore of `volsync-demo`
    ([Restoring](#restoring)); the two dry runs that call the OpenFeature Operator's webhooks
    ([OpenFeature Operator](#openfeature-operator)); a job launched in Ascender and a project update
-   there, which start a job pod and have the task pod fetch the project ([Ascender](#ascender)); and
-   a test started through Locust's interface, whose workers then resolve and reach the target
-   ([Locust](#locust)). The blackbox exporter's probes need nothing to start them: its pods reach
-   the proxies on 10080 and 10443 at every scrape of a `Probe` ([Probes](#probes)). Then let a night
-   pass, for the paths nobody takes by hand: the nightly dump of `backstage-db` from 02:00, which
-   waits up to 20 minutes before it starts ([Dumps](#dumps)), the base backup of `backstage-db` at
-   02:47 UTC, the same two of `ascender-db`, the nightly backup of `volsync-demo` at 03:17, and its
-   restore drill's restore at 04:17 and check at 05:17 ([The restore drill](#the-restore-drill)).
+   there, which start a job pod and have the task pod fetch the project ([Ascender](#ascender)); a
+   test started through Locust's interface, whose workers then resolve and reach the target
+   ([Locust](#locust)); and a run started by `just robot-run`, whose runner resolves and reaches its
+   targets ([Robot Framework](#robot-framework)). The blackbox exporter's probes need nothing to
+   start them: its pods reach the proxies on 10080 and 10443 at every scrape of a `Probe`
+   ([Probes](#probes)). Then let a night pass, for the paths nobody takes by hand: the nightly dump
+   of `backstage-db` from 02:00, which waits up to 20 minutes before it starts ([Dumps](#dumps)),
+   the base backup of `backstage-db` at 02:47 UTC, the same two of `ascender-db`, the nightly
+   backup of `volsync-demo` at 03:17, and its restore drill's restore at 04:17 and check at 05:17
+   ([The restore drill](#the-restore-drill)), and the nightly run of `robot-suites` at 05:45
+   ([Robot Framework](#robot-framework)).
    Once the allows have been Ready for 24 hours, and within 24 hours of taking the paths above, so
-   that the window holds them and one nightly backup, one dump, one base backup and one drill,
-   `just network-audit 24h` must exit 0 and print no `AUDIT` line whose `NAMESPACE` is a namespace
-   that holds the default deny: `ascender`, `backstage`, `crowdsec`, `demo`, `envoy-gateway-system`,
-   `kromgo`, `locust`, `open-feature-operator`, `security-system` or `sso-system`. Exit 0 says that
+   that the window holds them and one nightly backup, one dump, one base backup, one drill and one
+   run of the suites, `just network-audit 24h` must exit 0 and print no `AUDIT` line whose
+   `NAMESPACE` is a namespace that holds the default deny: `ascender`, `backstage`, `crowdsec`,
+   `demo`, `envoy-gateway-system`, `kromgo`, `locust`, `open-feature-operator`, `robot`,
+   `security-system` or `sso-system`. Exit 0 says that
    the recorder's container ran through those 24 hours and that the table is not cut, and what the
    record can miss even then is in
    [The record of what policy drops](#the-record-of-what-policy-drops); a run that exits 1 says what
@@ -8015,6 +8036,445 @@ the pinned sources, and the list is what to look at when the application first r
   `{"worker_count": 2}`, and the answers of `/swarm`, `/stats/requests` and `/stop` are those of
   Running a test, above.
 
+### Robot Framework
+
+Robot Framework (`apps/base/robot/`) runs the tree's test suites, checks over HTTP and checks in a
+real browser, against Services inside the cluster every night and whenever asked, and keeps their
+reports to read afterwards. It is a command-line tool, not a server: a CronJob runs it, and a small
+static server shows what it wrote; neither is a service anything else uses. It runs in the
+namespace `robot`, which enforces the restricted Pod Security level and denies traffic by default,
+from the Browser library's published image `docker.io/marketsquare/robotframework-browser`, by plain
+manifests with kustomize. A cluster selects it with three entries of its overlay: the namespace
+directory, `robot/ks.yaml` and `robot-ascender/ks.yaml`. `robot` holds the runner, the report
+server, their claim, the suites of hello and the policies; its `ks.yaml` names `cilium` alone in
+`dependsOn`, for its policies' kind, as the runner starts without its targets and a target that
+does not answer is a failed test, not a stalled apply; sets `wait`; and sets two variables of its
+own, the targets (below). `robot-ascender` holds the suite of Ascender's sign-in page and the
+runner's flow to Ascender's web pods, deploys into `robot` and names `cilium`, `robot` and
+`ascender`, so a cluster without Ascender leaves it out, and `just kubernetes-check` refuses one
+that selects it without either. `tests/robot.bats` holds what follows on the applications built as
+Flux applies them, on the render and on `run.sh` run as the container runs it
+(`features/robot.feature`). What this section says of the image, Robot Framework 7.5, the Browser
+library 21.0.0 and Playwright 1.64.1 is read from their sources at those tags
+(`github.com/MarketSquare/robotframework-browser`, `github.com/robotframework/robotframework`,
+`github.com/microsoft/playwright`) and from the image, in the files it names, and was seen in a run
+of the pinned image offline (Resources, below).
+
+- **What runs.**
+  - The image, `docker.io/marketsquare/robotframework-browser:21.0.0` by the digest of its index,
+    for `linux/amd64` and `linux/arm64`, about 1.1 GB of compressed layers for `amd64`. The
+    library's release workflow builds it from `docker/Dockerfile.latest_release`
+    (`.github/workflows/on-release.yml`): Playwright's image `mcr.microsoft.com/playwright:v1.64.1-noble`,
+    Python 3.14 in a virtual environment, `robotframework` unpinned beside
+    `robotframework-browser==21.0.0`, and the library's `init --skip-browsers`, so the browsers are
+    the base image's, in `/ms-playwright`, and nothing is installed when it runs. It holds Robot
+    Framework 7.5, the Browser library 21.0.0 with its assertion engine 5.0.1, PyYAML, grpcio and
+    protobuf, and no RequestsLibrary; Playwright 1.64.1 and its Chromium. Its user is the name
+    `pwuser`, uid and gid 1001
+    (`/etc/passwd` of the base image's `adduser` layer); it sets no working directory and no
+    entrypoint. The same workflow pushes a separate build to `ghcr.io`, with digests of its own,
+    which the tree does not use.
+  - The runner, the CronJob `robot-suites`: at 05:45 every night, in the cluster's UTC, a job whose
+    one pod runs `/mnt/robot/scripts/run.sh` with bash and the two targets as Robot variables,
+    `--variable HELLO_URL:<target>` and `--variable ASCENDER_URL:<target>`. Its environment is
+    `HOME=/tmp`, so that what a process keeps in its user's home, such as `~/.cache`, goes to the
+    writable `/tmp` and not to the image's `/home/pwuser` on the read-only root, `KEEP_RUNS=30` and
+    `JOB_NAME`, the job's name, which the Job controller gives its pod as the label
+    `batch.kubernetes.io/job-name`. A second run is not started while one runs
+    (`concurrencyPolicy: Forbid`), a run that cannot start within 300 seconds of its time is
+    skipped, a failed pod is not retried (`backoffLimit: 0`), as a retry would be a second run in a
+    second directory, and a run ends after 1200 seconds (`activeDeadlineSeconds`). The CronJob keeps
+    its newest successful job and its three newest failed ones.
+  - `run.sh`, generated with the suites into ConfigMaps and mounted read-only: it takes only
+    `--variable NAME:VALUE` pairs, `NAME` of capital letters, digits and `_`, and refuses anything
+    else with status 2 before Robot runs, so no option that turns off Robot's status or selects
+    fewer tests can reach Robot through the CronJob's arguments. It makes `/reports/<UTC time>`,
+    named `date -u +%Y-%m-%dT%H%M%SZ` and never reused, runs
+    `robot --outputdir <that directory> --consolecolors off --pythonpath /mnt/robot/suites/base <the pairs> /mnt/robot/suites`,
+    writes the return code to `status` and the job's name to `job` beside the reports, removes the
+    oldest of the directories so named down to `KEEP_RUNS` and nothing else, keeping the one it
+    just made whatever its name sorts as, as after the clock stepped back, and writes
+    `/reports/index.html` through a temporary file. It exits with Robot's return code, or 1 when
+    every test passed and a step after Robot failed, naming the step.
+  - The report server, the Deployment `robot-reports`: busybox's `httpd -f -v -p 8080 -h /reports`,
+    the busybox of the demo and of the drill's check by its tag and digest, serving the claim
+    read-only on the port `http` of the Service `robot-reports`, as user 65534. It lists no
+    directory of its own (`networking/httpd.c` of busybox 1.38.0 answers a directory with its
+    `index.html` or 404), so the runs' index is the one `run.sh` writes, and its MIME table serves
+    `.html`, `.png`, `.css` and `.js` as such. Its readiness probe is a connection to its port: `/`
+    is 404 until the first run writes the index, and a probe that waited for one would hold the
+    Kustomization's `wait` until 05:45. One replica, replaced by `Recreate`: a new pod on another
+    node would wait for the volume the old one holds.
+  - The claim, `robot-reports`, `ReadWriteOnce`, 1Gi, of the default StorageClass (below).
+  - No container sets a variable whose name starts with `ROBOT_`: Robot reads `ROBOT_OPTIONS`,
+    `ROBOT_SYSLOG_FILE` and others from its environment (`src/robot/run.py`), and the Browser
+    library `ROBOT_FRAMEWORK_BROWSER_*` (`Browser/browser.py`). So the targets are Flux's
+    variables, substituted into the CronJob's arguments, and named `ROBOT_TARGET_*` in `ks.yaml`
+    alone, never in a container's environment; and both pods set `enableServiceLinks: false`, as
+    the kubelet hands a pod variables named after every Service of its namespace
+    (`getServiceEnvVarMap` in `pkg/kubelet/kubelet_pods.go` of Kubernetes v1.37.1), and
+    `robot-reports` would give `ROBOT_REPORTS_PORT=tcp://<address>:8080` and its kin.
+- **The suites** are files of the tree, three in `robot/app/suites/` and one in
+  `robot-ascender/app/suites/`. kustomize generates `robot-suites` from the first three and
+  `robot-scripts` from `run.sh`, each under a name that carries the hash of its content, and
+  `robot-suite-ascender` from the fourth under that fixed name, as `robot`'s CronJob, of another
+  Kustomization, names it and kustomize's name reference cannot follow it there; all three with
+  Flux's substitution off, as Robot's `${...}` and bash's are its syntax. The runner mounts them
+  whole at `/mnt/robot/suites/base`, `/mnt/robot/scripts` and, optional, `/mnt/robot/suites/ascender`:
+  without `robot-ascender` that directory is empty, and Robot, run over `/mnt/robot/suites`, skips
+  it and the kubelet's `..data` entries, as it skips a name that starts with a dot, and runs the
+  base suites alone (seen offline, with the ConfigMap volumes' layout).
+  - `common.resource`: `Open Target`, a headless Chromium (`New Browser chromium headless=True`),
+    a context of its own and a page at the target, and `Close Everything`, each suite's teardown.
+    A suite imports it by name: `run.sh` puts its directory on Robot's path.
+  - `hello-http.robot`: `/` of hello answers 200 and its body holds `hello`, the page of
+    `demo/hello/app/configmap.yaml`, and `/robot-no-such-page` answers 404. The requests are the
+    Browser library's `Http`, which the suite sends after opening hello's page: the image has no
+    RequestsLibrary, Robot's standard libraries have no HTTP client, and `Http` runs the browser's
+    `fetch` from the active page (`Browser/keywords/network.py`, `node/playwright-wrapper/network.ts`),
+    so a relative path is hello's own origin, while a request from no page, or to another origin,
+    is held to CORS, which busybox's server does not answer.
+  - `hello-ui.robot`: hello's page, opened in the browser, shows `hello` (`Get Text` of `body`
+    with `contains`), and `Take Screenshot` puts a PNG of it in the report.
+  - `ascender-ui.robot`: Ascender's page shows its sign-in form, the field labelled `Username`, the
+    field labelled `Password` and the button `Log In`, found by label and by role and name, as a
+    person finds them, and a screenshot. The strings are the pinned image's: its Login screen
+    (`awx/ui/src/screens/Login/Login.js`) gives PatternFly's `LoginForm` the messages its built
+    bundle's English catalogue reads as `Username`, `Password` and `Log In`, which the tag's tree
+    also has (`ascender/ui/src/screens/Login/Login.tsx`), and the suite passed offline against
+    that bundle, served from the image. The interface draws the form once its script has run, so
+    the test sets the Browser library's timeout to a minute for itself (`Set Browser Timeout 60s
+    scope=Test`) before its first lookup: each lookup and each wait takes up to that, where the
+    library's default is 10 seconds, and the first lookup waits for the form (offline, against a
+    page that drew it after 20 seconds, the test passed, and with the library's default it failed
+    at 10). It types nothing, clicks nothing and sends nothing but the page's own loads.
+  - **The check of the suites' text.** No suite of the tree holds a credential or signs in.
+    `tests/robot.bats` checks the text of every `.robot` and `.resource` file under
+    `apps/base/robot/` and refuses the forms below. It is a lint, not a confinement: it keeps a
+    suite from doing these things by accident or in an obvious form, and what bounds the runner is
+    its egress once the cluster enforces network policy, and nothing while the cluster audits it
+    (Network, below). It reads each cell as it is written: except where a refusal says so, the
+    `Http` path and the `Take Screenshot` name, which must be literals with no variable or escape,
+    it does not follow Robot's escapes or variables, so a suite written to get round it can. **It
+    holds each file to tab, line feed and printable ASCII**, bytes 0x20 to 0x7e, and fails on any
+    other byte, a carriage return or a character beyond ASCII among them, **and to Robot's
+    space-separated format**, failing on a row whose first character but white space is `|`, which
+    Robot reads in its pipe format: Robot splits rows at every line end Python's `str.splitlines`
+    knows and cells at two or more of any Unicode white space, and the check's split, rows at line
+    feeds and cells at two spaces or more or a tab, agrees with Robot's only in that alphabet and
+    that format. It strips a comment only from a `#` that starts a cell, and matches each keyword's
+    name without case, spaces or underscores and with a `Browser.` or `BuiltIn.` prefix dropped. It
+    fails on a library but `Browser` with no argument, a resource but `common.resource` and a
+    variable file, and on a call of any keyword but those it lists (`SUITE_KEYWORDS`) and those the
+    suite's own file or `common.resource` defines, called by their names alone, in a step, a setup
+    or a teardown: the Browser library's that open the target, read the page, wait, take a
+    screenshot or fetch with `Http`, and Robot's own that compare. None of those clicks, taps,
+    types, fills, presses keys or the mouse, hovers, focuses, checks, selects, drags, uploads or
+    downloads, evaluates Python or JavaScript, or runs a program or another keyword, and a control
+    structure such as `IF` or `FOR`, whose conditions Robot evaluates as Python, fails the check
+    too, as does the name of a keyword that clicks, types or evaluates in any cell, by itself or
+    after a dot. It also fails on `New Browser` but as `chromium headless=True` and on `New Context`
+    with an argument; on `Http` but as a `GET` of a literal path, `/` or `/<path>`, `<path>` not
+    starting with `/`, with no variable and no escape anywhere in it: Robot substitutes a cell's
+    variables and unescapes its `\` before the page's `fetch` resolves it, which takes `//<host>`
+    and `/\<host>` to another host and drops a tab first, so a path given in a variable or as a
+    keyword's argument fails too; on `Take Screenshot` with an argument but one bare file name, with
+    no `/`, `\`, variable or `=` in it, as the library writes a relative name under the run's
+    `browser/screenshot/` and a name with a directory where it leads, the claim's root or another
+    run's directory among them (`_get_screenshot_path` in `Browser/keywords/browser_control.py`); on
+    `Go To`, `New Page` or `Open Target` with anything but one target's variable, `${<NAME>_URL}`,
+    and on a step that assigns one or a keyword whose argument is named as one; on a row that
+    continues another but a documentation's; on the assertion operators that evaluate Python,
+    `validate`, `then` and `evaluate`, spelled out by position, and on `assertion_operator` given by
+    name, whatever its value, which no suite needs; on inline Python, `${{...}}`, and a variable
+    that is more than a name, as `${name.attribute}`, which Robot evaluates as Python; on
+    `chromiumSandbox`; on `%{`, Robot's syntax for an environment variable; on an address with
+    `://`; and on `password`, `passwd`, `token`, `secret`, `authorization` or `cookie` outside a
+    comment and the field label the Ascender suite asserts. No pod reads a Secret.
+  - **Adding a check.** A test case in a suite file; a suite of its own is a new file in
+    `robot/app/suites/`, listed in `robot/app/kustomization.yaml`'s generator, written in Robot's
+    space-separated format, that starts with a comment saying what it checks and imports
+    `common.resource`. An HTTP check opens the target's page first and asks paths of it with `Http`,
+    as `hello-http.robot` does; a UI check finds elements by role or label (`Get Element By Role`,
+    `Get Element By`) and takes a screenshot. A keyword the test does not list goes into
+    `SUITE_KEYWORDS` in the pull request whose suite calls it, where its review reads what the
+    keyword can do.
+  - **Adding a target.** A variable `ROBOT_TARGET_<NAME>` in `robot/ks.yaml`, a Service of the
+    cluster by name, namespace, the DNS domain and port; a `--variable <NAME>_URL:${ROBOT_TARGET_<NAME>}`
+    pair in `robot/app/cronjob.yaml`; an egress rule in the policy `robot-runner` to the pods its
+    Service selects, on the container port its port targets; and an allow beside the target's
+    application, from the runner's labels in `robot` on that port, as hello's policy has. A target a
+    cluster may not run takes a piece of its own, as `robot-ascender` is: a `ks.yaml` that names the
+    target's application, its policy and its suite's ConfigMap under a fixed name, which the
+    CronJob mounts, optional, at a directory of its own under `/mnt/robot/suites`. A target must
+    admit the runner, and nothing here is pointed outside the cluster. `tests/robot.bats` reads
+    each target from the CronJob's arguments in the render, requires
+    `http://<service>.<namespace>.svc.<the cluster's DNS domain>:<port>`, finds the Service in the
+    render, resolves its port to a container port, through the named port of the pods it selects,
+    8080 for hello, or its numbered `targetPort`, 8052 for `ascender-web`, whose pods Ascender's
+    operator makes, and fails unless the runner's one rule to that namespace names exactly its
+    labels and that port and the target's own policy admits the runner there and no other pod of
+    `robot`.
+- **Running it now, and reading the reports.** `just robot-run [cluster]` refuses while a job of the
+  runner has a pod, makes the job `robot-run-<UTC time>` from `cronjob/robot-suites`, waits up to
+  `ROBOT_RUN_WAIT` seconds, 900, for its pod to leave `Pending`, prints the job's log, Robot's
+  console, as it comes, and exits with the container's exit code, Robot's return code: it prints
+  `Every test passed.`, `<n> tests failed.`, what a code of 250 and above means, or the job's
+  reason when it failed with no code, as when its deadline ended it ([cluster.md](cluster.md#recipes)).
+  Ctrl-C stops following and leaves the job running; it deletes nothing. `just robot [cluster]`
+  forwards a local port, `ROBOT_PORT` or 8090, on 127.0.0.1 only, to port 8080 of the Service
+  `robot-reports`, until Ctrl-C, as `just locust` does; then open `http://127.0.0.1:8090`. The index
+  lists the kept runs, newest first, with the time each started, its job, `passed`, `<n> failed` or
+  the error and what it means, and links to its `report.html`, Robot's summary, and `log.html`,
+  each keyword with its arguments and messages; the screenshots are under the run's
+  `browser/screenshot/`, linked from the log, and the Browser library's own log of the run is its
+  `playwright-log.txt`. **The reports hold screenshots of the pages the suites opened and whatever
+  the suites print**, and the forward serves them to anything on the machine that runs it, a page
+  open in its browser among them, while it runs. The forward needs in `robot` what Locust's needs in
+  `locust`.
+- **A failed run.** Robot's return code is the number of failed tests, at most 250
+  (`src/robot/result/executionresult.py`); `run.sh` exits with it, so the container's status is
+  Robot's, the pod fails, and with `backoffLimit: 0` the job is `Failed`. The index shows the run as
+  `<n> failed`, and the stock `KubeJobFailed` of the monitoring chart, a warning of every
+  namespace, fires 15 minutes after the job failed and for as long as the failed job exists, past
+  later runs that pass; the CronJob keeps three failed jobs. Read the run's report, then delete the
+  job, which clears the alert: `kubectl --namespace robot delete job <job>`. Robot Framework has
+  no rule of its own: the drill's and the dumps' rules exist because a missed backup is a loss, and
+  a missed run of the suites is not. Codes of 250 and above (`doc/userguide/src/ExecutingTestCases/BasicUsage.rst`):
+
+  | Code | Meaning |
+  | --- | --- |
+  | 250 | 250 or more failures. |
+  | 251 | Help or version information printed. |
+  | 252 | Invalid data or command line option. |
+  | 253 | Execution stopped by user. |
+  | 255 | Unexpected internal error. |
+
+  At a run's deadline the Job controller deletes its pod: the kubelet sends SIGTERM, which `run.sh`
+  passes on to Robot, and kills the pod 30 seconds later, the default grace, as the pod sets no
+  `terminationGracePeriodSeconds`. Robot interrupts the keyword it is in, a call into the browser
+  among them, counts every test it did not finish as failed, runs the teardowns and writes its
+  reports, and the index shows the run as failed (offline, a run stopped in the Ascender suite's
+  first lookup ended within a second and read `4 failed`). A keyword that retries through every
+  error until its timeout takes the signal for one of them and runs on: the Browser library's
+  `Wait For Elements State` does (`Browser/keywords/waiter.py`), and the Ascender suite gives it a
+  minute. When such a keyword, a teardown or the writing of the reports outlasts the 30 seconds, the
+  pod is killed with them (offline, a stop in that wait took the 30 seconds and the container ended
+  with 137): the run's directory holds no `status`, `job`, `log.html` or `report.html`, and from
+  the next run on the index lists it as `no result`, with no job and links that answer 404. A run
+  whose pod had not started Robot, as one still pulling the image or `Pending`, leaves no directory
+  and no row. In every case the job is `Failed` with the reason `DeadlineExceeded` and
+  `KubeJobFailed` reports it.
+- **The claim.** Thirty runs are kept. A run took about 0.6 MiB of the claim offline, its
+  `output.xml`, `log.html`, `report.html`, `playwright-log.txt` and two screenshots, and about 0.7
+  MiB with a failed test, which adds a screenshot and a longer log: thirty runs are about 20 MiB of
+  the 1Gi. The claim is `ReadWriteOnce` on the default class, `linstor-replicated`, which makes the
+  volume for its first pod and attaches it to one node at a time ([StorageClasses](#storageclasses),
+  and the drill's [claim in turn](#the-restore-drill)). The report server is that first pod, so it
+  places the volume, and the runner's pod requires the server's node (`podAffinity` on the server's
+  labels by `kubernetes.io/hostname`), where the kubelet mounts the same volume for both pods.
+  `ReadWriteOnce` admits several pods of one node; `ReadWriteOncePod` would admit one pod and keep
+  the runner from the server's claim, and `ReadWriteMany` is not used. **Both pods publish the
+  volume writable, and the server's container mounts it read-only.** The kubelet hands the driver
+  each pod's volume read-only or not as the pod's `persistentVolumeClaim.readOnly` says
+  (`pkg/volume/csi/csi_mounter.go` of Kubernetes v1.37.1). The LINSTOR driver of the Piraeus
+  operator v2.12.1, linstor-csi v1.13.2 (`config/manager/0_piraeus_datastore_images.yaml` of the
+  operator), stages nothing (`NodeGetCapabilities` in `pkg/driver/driver.go`) and mounts the device
+  itself for each pod: read-only after `blockdev --setro`, with `ro,norecovery`, or writable with
+  `-w` (`Mount` in `pkg/client/linstor.go`). Linux refuses to mount a block device that is mounted
+  already with the other read-only state, the class's XFS among the file systems it holds to that
+  ("Can't mount, would change RO state", `get_tree_bdev_flags` in `fs/super.c` of Linux v6.18.63,
+  which `xfs_fs_get_tree` in `fs/xfs/xfs_super.c` calls). A read-only volume for the server would
+  so keep every run's pod beside it in `ContainerCreating`. The container's read-only mount is a
+  read-only bind the container runtime makes over the pod's mount, so the server cannot write the
+  claim the runner writes on the same node. The claim's root is root's
+  until the runner's mount is given the group 1001 (`fsGroup`, with `fsGroupChangePolicy:
+  OnRootMismatch`, so once, while the root's group differs): Kubernetes applies `fsGroup` to a CSI
+  volume's mount that is not read-only when the driver's policy is `File` (`supportsFSGroup` in
+  `pkg/volume/csi/csi_mounter.go` of Kubernetes v1.37.1), which is the policy of the `CSIDriver`
+  `linstor.csi.linbit.com` the Piraeus operator makes (`pkg/resources/cluster/csi-controller/csi-driver.yaml`
+  at v2.12.1), and only to a pod that sets one: the server's sets none, so nothing is changed for
+  it. `run.sh` writes with the mask 022, so the server, user 65534, reads what the runner writes.
+  While the server's pod is not running, a run's pod has no node to go to: it waits `Pending` and
+  fails at its deadline, which `KubeJobFailed` reports. It waits the same way while the server's
+  node has less than the runner's requests, 500m of CPU and 320Mi of memory, left unrequested:
+  the scheduler places the server, which requests 1m, with no regard for the runner, and nothing
+  holds that room for it. `kubectl --namespace robot describe pod` then shows the run's pod's
+  `FailedScheduling` event, `0/<n> nodes are available:` with `Insufficient cpu` or `Insufficient
+  memory` for the server's node and, for each other node, the first check it fails: the scheduler
+  runs a node's filters in the order of `pkg/scheduler/apis/config/v1/default_plugins.go`, taints,
+  resources and volumes before pod affinity, and reports the first that fails (`RunFilterPlugins`
+  in `pkg/scheduler/framework/runtime/framework.go`). So a worker with room reads
+  `node(s) didn't match pod affinity rules`, a worker without it `Insufficient cpu` or
+  `Insufficient memory` as well, and a node with a taint the pod does not tolerate
+  `node(s) had untolerated taint(s)` (`tainttoleration/taint_toleration.go`,
+  `noderesources/fit.go` and `interpodaffinity/filtering.go` under
+  `pkg/scheduler/framework/plugins/` of Kubernetes v1.37.1). Nothing backs the claim up, snapshots
+  or clones it: the next run writes its reports again. Removing the application prunes the claim
+  with every report.
+- **Network.** The namespace holds the default deny. The runner takes nothing and reaches the
+  cluster's resolver on 53, the pods the Service `hello` selects in `demo` on 8080 and, by
+  `robot-runner-ascender`, the web pods the Service `ascender-web` selects in `ascender` on 8052,
+  each the container port the Service's port 80 targets; hello and `ascender-web` admit the runner
+  by its labels in `robot`, by a rule beside each, so neither admits the report server or another
+  pod of `robot`. The report server takes the node it runs on on 8080, for the kubelet's probe;
+  `host` is every process of that node and every pod of its host network, which so reach the
+  reports as well. It sends nothing; the runner writes the claim and does not connect to it.
+  Within the runner's pod, the library's Python and its Node process talk over gRPC on the pod's
+  loopback, which no policy sees. `just robot` reaches the server through a port forward, which
+  the container runtime connects inside the pod on its loopback, where no policy applies
+  ([Locust](#locust) says how).
+  This holds once the cluster enforces the policies. **While the cluster audits network policy,
+  nothing bounds what the pods reach** ([Service addresses](#service-addresses)): a flow they would
+  drop is reported and passes, so a page a suite opens can reach anywhere, outside the cluster
+  included, and every pod of the cluster reaches the report server's 8080.
+- **The browser under restricted.** Playwright 1.64.1 starts Chromium with `--no-sandbox` unless
+  `chromiumSandbox` is true (`packages/playwright-core/src/server/chromium/chromium.ts`), and the
+  Browser library's `New Browser` defaults it to false (`Browser/keywords/playwright_state.py`).
+  Chromium's sandbox needs a user namespace, which the runtime's default seccomp profile, the one
+  `RuntimeDefault` gives, refuses to clone: Playwright's Docker guide runs it with a profile of its
+  own that allows those clones (`docs/src/docker.md`), and the image's guide recommends that
+  profile and `--ipc=host` "for best compatibility" (`docker/README.md`). Neither fits the
+  restricted level, so no suite sets `chromiumSandbox` and `tests/robot.bats` fails on it. Chromium
+  started, and every suite passed, offline with no capability, no new privileges, a read-only root,
+  the user 1001:1001 and Docker's default seccomp profile. Without `--ipc=host` Chromium has a
+  `/dev/shm` of the runtime's size, and Playwright starts it with `--disable-dev-shm-usage`
+  (`packages/playwright-core/src/server/chromium/chromiumSwitches.ts`), so it keeps its shared
+  memory in files under `/tmp` instead, which offline wrote nothing to `/dev/shm`. **An
+  unsandboxed renderer means that a page that exploits Chromium runs as the runner**, with its
+  mounts, the claim writable among them, and its egress: so `tests/robot.bats` refuses a suite
+  that opens a page but a target's, a variable of `ks.yaml`, or asks `Http` for anything but a
+  literal path of it (The check of the suites' text, above). Where a page leads the browser is
+  bounded by the runner's egress once the cluster enforces network policy, and while it audits by
+  nothing (Network, above). What it writes to the claim the report server serves to the browser
+  that opens the reports, and busybox's `httpd` also runs a program it finds under the claim's
+  `cgi-bin/` and reads an `httpd.conf` it finds in a directory it serves (`networking/httpd.c`), in
+  the server's own pod, which writes nothing and reaches nothing.
+- **Resources.** The pinned image ran offline as the pod runs it: read-only, with no capability, no
+  new privileges and the user 1001:1001, `/tmp` a tmpfs owned by that user, `HOME=/tmp`, the suites,
+  the Ascender suite and `run.sh` mounted read-only in the kubelet's ConfigMap layout, a volume
+  owned by 1001 at `/reports`, and `run.sh` with the CronJob's arguments, the targets
+  `http://127.0.0.1:8080` and `http://127.0.0.1:8052`. Its network namespace had nothing but a
+  loopback, shared with stand-ins: hello's busybox image running hello's `httpd` command on 8080
+  over hello's page, and for Ascender a page whose script draws, after a second and a half, a form
+  with the labels and the button above, then the pinned Ascender image's own built interface, served
+  by busybox with no API behind it; and a resolver stand-in on 53 that logged each query. Each run
+  passed its four tests in about 3 seconds, Robot's console ending in `4 tests, 4 passed, 0 failed`,
+  and with the Ascender directory empty in `3 tests, 3 passed, 0 failed`; with a suite edited to
+  fail one test, `run.sh` exited 1 and the index read `1 failed`. The container's memory, its cgroup's
+  `memory.peak` with `/tmp` and the shell that sampled `/tmp` included, peaked at 236 to 243 MiB, and
+  at 266 to 271 MiB against
+  Ascender's own interface; so the runner requests 320Mi, that rounded up to a multiple of 64Mi, and
+  is limited to 640Mi, twice that. A run used about 2.4 seconds of CPU in its 3, about 0.8 of a
+  core; the runner requests 500m and has no CPU limit, which would throttle the browser and raise
+  `CPUThrottlingHigh`, so a run takes what its node has free and is slower where that is less. `/tmp`
+  held at most 392 KiB, Chromium's profile and a cache under `$HOME/.cache`, the space of files
+  Chromium keeps open after removing them included; it is an `emptyDir` in memory of at most 16Mi, room for suites
+  that open more pages. Nothing was written to `/dev/shm`, so the pod mounts nothing there. The run
+  logged no write the read-only root refused, and the same run with a writable root changed nothing
+  in it but the mount points Docker made and Python's compiled bytecode of a few modules of the
+  virtual environment, which Python skips silently where it cannot write: the pod mounts nothing
+  else writable. The report server's figures are the drill's check's, for the same image.
+- **Monitoring.** None of its own. Neither image serves metrics, so no monitor scrapes them; no
+  alert or dashboard names them. A failed run raises `KubeJobFailed` (above), and the server's pod
+  is covered by the stock alerts on every workload, `KubePodNotReady`, `KubePodCrashLooping`,
+  `KubeContainerWaiting` and `KubeDeploymentReplicasMismatch` among them. The server's busybox
+  `httpd` forks for each connection it takes, the kubelet's probe every 10 seconds included, which
+  Falco's rule `Redirect STDOUT/STDIN to Network Connection in Container` matches at priority Notice,
+  as its exception names `demo` alone ([Tuning](#tuning)); no alert reads a rule of that priority.
+- **What it calls on its own.** Nothing but the resolver and its targets, which the runner reaches:
+
+  | Call | Variable | State |
+  | --- | --- | --- |
+  | Chromium's background networking: variations, safe browsing's lists, the default apps' updates | `--disable-background-networking` | off: Playwright starts every Chromium with it (`chromiumSwitches.ts`) |
+  | Chromium's component updates | `--disable-component-update` | off: the same |
+  | Chromium's crash reports | `--disable-breakpad` | off: the same |
+  | A browser download, `rfbrowser init`, `pip` or `npm` | none | not run: the image holds the browsers in `/ms-playwright` and the library's Node modules, and nothing runs at start but `run.sh` |
+  | Update checks, usage reports | none | neither Robot Framework 7.5 nor the Browser library 21.0.0 has one: the only network code in either is Robot's `Remote` and `Telnet` libraries, which no suite imports, and the library's choice of a free loopback port for its Node process |
+  | Pendo, in Ascender's interface | Ascender's `PENDO_TRACKING_STATE` | off (`awx/settings/defaults.py` of the pinned image's `awx` package), and loaded only after a sign-in, which no suite makes: the built interface loads Pendo's agent only when the configuration gives an analytics state other than off (`issuePendoIdentity` in `awx/ui/build/static/js/main.*.js`), and `/api/v2/config/` gives it to a signed-in user alone (`ApiV2ConfigView` in `awx/api/views/root.py`) |
+
+  The image ran offline with a resolver stand-in that logged each query, shown logging a lookup
+  made on purpose by glibc and one by Chromium, each under the namespace's three search domains;
+  through every run above it logged no lookup by Chromium, Node or Robot.
+- **Updates.** Renovate's `kubernetes` manager reads the runner's image from `cronjob.yaml` and the
+  server's from `deployment-reports.yaml`, and a rule in `.renovate/managers.json5` keeps it to the
+  Browser library's release tags of three numbers, as the registry also holds `21`, `21.0` and
+  `latest`, which move with each release. Each merges by the auto-merge switch alone.
+  `tests/robot.bats` holds each to a release tag and a digest, and the server's busybox to the
+  reference of the drill's check, which Renovate moves in the same pull request. The image's
+  Dockerfile installs `robotframework` unpinned, so a new image can move Robot Framework's major
+  version with the library's: the pull request is read against both changelogs, for `New Browser`'s
+  defaults, `Http`, the locators the suites use, the return codes and the options `run.sh` passes.
+  No check runs the image: a release that breaks a suite shows first as a failed run.
+- **Removing it.** Take the three overlay entries out. Flux prunes both applications, the CronJob,
+  its jobs, the server, the Service, the ConfigMaps, the policies, and the claim with every report;
+  the root prunes the namespace's default deny and its `app-template-defaults` ConfigMap; the
+  namespace stays, by its prune annotation, as for Locust. The rules beside hello and Ascender stay
+  and admit nothing while no runner runs; they go in a pull request of their own.
+
+**What only the live cluster shows.** None of the following is run by a check; each is read from
+the pinned sources, and the list is what to look at when the applications first reconcile.
+
+- **The order things become Ready.** The root applies the namespace and its default deny at once.
+  `robot` waits for `cilium`. The pinned kustomize-controller applies its build through
+  `ApplyAllStaged` of `fluxcd/pkg/ssa` v0.83.0: every object first as a server-side dry run, then in
+  the order of their kinds (`ReconcileOrder` in `ssa/sort.go`), the ConfigMaps, the Service, the
+  Deployment and the CronJob, and then the kinds that order does not know, the claim and the
+  policies. The claim stays `Pending` until the server's pod is scheduled, as its class makes the
+  volume for its first pod. With `wait`, `robot` is Ready once the Deployment's ready replicas reach
+  its one (`deploymentConditions` in `pkg/kstatus/status/core.go` of `fluxcd/cli-utils` v1.4.0) and
+  the claim is `Bound` (`pvcConditions`); the CronJob counts as current at once (`alwaysReady`).
+  `robot-ascender` follows once `robot` and `ascender` are Ready.
+- **The first pull.** The runner's image is about 1.1 GB compressed for `amd64`, pulled by the
+  first run's pod on the server's node, within the job's 1200 seconds, which count from the job's
+  start; Spegel serves it to other nodes from one that holds it
+  ([The kube-system baseline](#the-kube-system-baseline)). A first pull that does not finish within
+  them fails that run at its deadline, before Robot starts, so the run leaves no directory and no
+  row of the index. Unpacked, the image is about 2.8 GB (`du` of a container's root, offline), and
+  containerd keeps the compressed layers beside it, as the tree has it keep them for Spegel
+  ([cluster.md](cluster.md#image-layers-for-spegel)): about 4 GB of the server node's image
+  filesystem, `/var` of its 40 GB system disk (`root_volume_size_gb` in
+  `infra/openstack/modules/talos-nodes/variables.tf`), on which the kubelet removes unused images
+  from 75% use down to 65% (`talos/patches/all/kubelet.yaml`) and, below 15% free, reports disk
+  pressure and evicts pods ([cluster.md](cluster.md#what-it-costs)).
+- **Jobs made by hand.** A job `kubectl create job --from=cronjob/robot-suites` makes takes the job
+  template's labels and annotations, the annotation `cronjob.kubernetes.io/instantiate: manual` and
+  an owner reference to the CronJob with `controller: true` (`createJobFromCronJob` in
+  `staging/src/k8s.io/kubectl/pkg/cmd/create/create_job.go` of Kubernetes v1.37.1), so the CronJob
+  controller counts it among its jobs and its history limits remove it as they remove a scheduled
+  one (`cleanupFinishedJobs` in `pkg/controller/cronjob/cronjob_controllerv2.go`). That controller's
+  `Forbid` reads only the jobs it started itself (`status.active`), so a run started by hand just
+  before 05:45 does not hold the night's run back: both run, each in its own directory. While a
+  job made by hand runs, the controller records a `Warning` event `UnexpectedJob`, "Saw a job that
+  the controller did not create or forgot", on the CronJob at each of its syncs (`syncCronJob` in
+  the same file), as the job is its own but not among those it started; it means nothing here, and
+  no alert reads events.
+- **The claim on one node.** A run's pod reaches `Running` on the server's node beside
+  `robot-reports`, both pods having published the volume writable (The claim, above), and
+  `kubectl --namespace robot get events` shows no `FailedMount`.
+- **The claim's group and the image's user.** The kubelet gives the runner's mount the group 1001,
+  as the `CSIDriver`'s policy is `File`, and changes nothing for the server's pod, which sets no
+  `fsGroup` (The claim, above). The kubelet refuses to start a container with `runAsNonRoot` and a
+  user it cannot read as a number (`verifyRunAsNonRoot` in
+  `pkg/kubelet/kuberuntime/security_context_others.go`), which the image's `pwuser` is, so the
+  runner's pod gives 1001.
+- **The port forward** enters the pod's network namespace and connects on its loopback, as for
+  Locust, so `just robot` needs no rule.
+- **The rules name the targets' pods.** The agents translate a Service's cluster address to a pod's
+  before policy applies, so the runner reaches hello and Ascender by the rules that name their pods,
+  not their Services.
+- **While the cluster audits**, nothing is dropped: a flow the policies deny passes and shows as an
+  `AUDIT` line of `just network-drops`, a missing allow such as `<count> AUDIT
+  robot/robot-suites-<pod> demo/hello-<pod> 8080/TCP`, and once it enforces, the same flow is
+  `DROPPED` and the run's tests fail.
+- **Ascender's page by the Service's name.** The runner asks `ascender-web.ascender.svc.cluster.local`,
+  not the route's hostname. The pinned operator's settings, which the web pod's Django reads, set
+  `ALLOWED_HOSTS = ['*']`, and its nginx listens on 8052 as the `default_server` with `server_name _`
+  (`roles/installer/templates/configmaps/config.yaml.j2` of `ghcr.io/ctrliq/ascender-operator`
+  25.6.3), so the page is served whatever the request's host; the page asks no sign-in to be drawn,
+  and its script's requests to the API, made over plain http from inside the cluster, carry no
+  session, as the suite signs in nowhere.
+
 ### Porting an application from the reference catalogue
 
 The steps n8n took, in order; the next port does the same and says where it differs.
@@ -8079,7 +8539,8 @@ The steps n8n took, in order; the next port does the same and says where it diff
    `dependsOn` and adds its namespace to oauth2-proxy's grant
    ([Putting a route behind it](#putting-a-route-behind-it)). An interface with no sign-in the
    cluster can rely on gets no route, but a recipe that forwards a local port on 127.0.0.1, as
-   Locust's does ([Locust](#locust)).
+   Locust's does ([Locust](#locust)). Reports a job writes are read the same way, through a small
+   server of the job's claim, as Robot Framework's are ([Robot Framework](#robot-framework)).
 7. **Hardening.** Restricted: a user the image runs as, a read-only root filesystem with every path
    the application writes as a volume, found by running the pinned image read-only with those
    mounts alone, no capability, requests and a memory limit measured from that run, probes on the

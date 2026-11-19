@@ -1,0 +1,32 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/fluxcd-community/flux2-schemas/main/kustomization-kustomize-v1.json
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: robot
+  namespace: flux-system
+spec:
+  path: ./apps/base/robot/robot/app
+  targetNamespace: robot
+  # Its CiliumNetworkPolicies are a kind Cilium's operator defines. Nothing else: the runner starts
+  # without its targets, and a target that does not answer is a failed test, not a stalled apply.
+  dependsOn:
+    - name: cilium
+  # Ready once the report server answers its probe and its claim is bound.
+  wait: true
+  postBuild:
+    substitute:
+      # The targets the suites open, each a Service of the cluster by its name, its namespace, the
+      # cluster's DNS domain and its port, which the CronJob hands Robot as a variable. Another
+      # target takes a variable here, a --variable in cronjob.yaml, the runner's egress rule to its
+      # pods and an allow beside the target's application (docs/kubernetes.md, Robot Framework).
+      # Named so that no variable Robot or the Browser library reads, ROBOT_ and its name, is ever
+      # set, and set in no container's environment.
+      # The demo's hello, whose page both of robot's suites open.
+      ROBOT_TARGET_HELLO: http://hello.demo.svc.cluster.local:80
+      # Ascender's web pods, whose sign-in page the suite of robot-ascender opens. A cluster without
+      # Ascender leaves robot-ascender out, and Robot is handed this variable and uses it nowhere.
+      ROBOT_TARGET_ASCENDER: http://ascender-web.ascender.svc.cluster.local:80
+  sourceRef:
+    kind: ExternalArtifact
+    name: robot

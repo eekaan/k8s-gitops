@@ -103,6 +103,8 @@ configMapGenerator:
       - catalogue/prometheus-operator-crds.yaml
       - catalogue/reflector.yaml
       - catalogue/reloader.yaml
+      - catalogue/robot-ascender.yaml
+      - catalogue/robot.yaml
       - catalogue/runtime-classes.yaml
       - catalogue/silence-operator-dashboard.yaml
       - catalogue/silence-operator.yaml

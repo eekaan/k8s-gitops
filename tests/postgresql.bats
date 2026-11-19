@@ -782,7 +782,7 @@ bytes() {
 }
 
 @test "A cluster that does not select the backup plugin builds no database that needs it, and one that selects a database without it is refused" {
-  local overlay plugin=plugin-barman-cloud dir app users
+  local overlay plugin=plugin-barman-cloud dir app file users
   # The applications of the overlay that take a cluster from the component, each with its ks.yaml:
   # the component names the plugin's application in dependsOn of every user, as it names the
   # operator's.
@@ -830,10 +830,11 @@ bytes() {
     [[ $output == *"${files[$app]}: Kustomization $app takes the cnpg-cluster component but does not name $plugin in dependsOn"* ]]
   done
   # One that lists neither the plugin's application nor any that takes the component builds none
-  # of them.
+  # of them. Robot Framework's suite of Ascender's sign-in page, robot-ascender, names ascender and
+  # goes with it.
   dir="$BATS_TEST_TMPDIR/without-plugin"
-  for app in "${!files[@]}"; do
-    FILE="${files[$app]#kubernetes/apps/base/}" yq -i '.resources |= map(select(. != "../../base/" + strenv(FILE)))' \
+  for file in "${files[@]#kubernetes/apps/base/}" robot/robot-ascender/ks.yaml; do
+    FILE="$file" yq -i '.resources |= map(select(. != "../../base/" + strenv(FILE)))' \
       "$dir/kubernetes/apps/overlays/lab-sto2/kustomization.yaml"
   done
   run "$REPO/scripts/kubernetes-check" "$dir"

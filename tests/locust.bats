@@ -561,7 +561,7 @@ kubectl_gone() {
     = "CiliumNetworkPolicy.cilium.io_locust_locust-master.yaml CiliumNetworkPolicy.cilium.io_locust_locust-worker.yaml NetworkPolicy.networking.k8s.io_locust_default-deny.yaml" ]
   # Every rule of the two and of hello's, exactly: the master takes the workers and the kubelet's
   # probe and sends nothing; the workers take nothing and reach the master, the resolver and hello's
-  # pods; hello takes the workers beside the proxies and the kubelet.
+  # pods; hello takes the workers beside the proxies, the kubelet and Robot Framework's runner.
   policies=("$(rendered CiliumNetworkPolicy.cilium.io_locust_locust-master.yaml)" "$(rendered CiliumNetworkPolicy.cilium.io_locust_locust-worker.yaml)"
     "$(rendered CiliumNetworkPolicy.cilium.io_demo_hello.yaml)")
   allows "${policies[@]}"
@@ -569,6 +569,7 @@ kubectl_gone() {
     "hello [app.kubernetes.io/name=hello] takes @host on 8080/TCP" \
     "hello [app.kubernetes.io/name=hello] takes app.kubernetes.io/component=proxy,app.kubernetes.io/managed-by=envoy-gateway,app.kubernetes.io/name=envoy,gateway.envoyproxy.io/owning-gateway-name=public,gateway.envoyproxy.io/owning-gateway-namespace=envoy-gateway-system,io.kubernetes.pod.namespace=envoy-gateway-system on 8080/TCP" \
     "hello [app.kubernetes.io/name=hello] takes app.kubernetes.io/component=worker,app.kubernetes.io/name=locust,io.kubernetes.pod.namespace=locust on 8080/TCP" \
+    "hello [app.kubernetes.io/name=hello] takes app.kubernetes.io/component=runner,app.kubernetes.io/name=robot,io.kubernetes.pod.namespace=robot on 8080/TCP" \
     "locust-master [app.kubernetes.io/component=master,app.kubernetes.io/name=locust] takes @host on 8089/TCP" \
     "locust-master [app.kubernetes.io/component=master,app.kubernetes.io/name=locust] takes app.kubernetes.io/component=worker,app.kubernetes.io/name=locust,io.kubernetes.pod.namespace=locust on 5557/TCP" \
     "locust-worker [app.kubernetes.io/component=worker,app.kubernetes.io/name=locust] sends to app.kubernetes.io/component=master,app.kubernetes.io/name=locust,io.kubernetes.pod.namespace=locust on 5557/TCP" \

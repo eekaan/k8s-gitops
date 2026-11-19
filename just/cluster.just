@@ -110,6 +110,14 @@ grafana cluster='lab-sto2':
 locust cluster='lab-sto2':
     scripts/locust {{ quote(cluster) }}
 
+# Forward a local port, ROBOT_PORT or 8090, on 127.0.0.1 only, to Robot Framework's report server on a cluster through its kubeconfig until Ctrl-C; prints the local URL and that the reports hold screenshots and whatever the suites print and are served to anything on this machine while the forward runs
+robot cluster='lab-sto2':
+    scripts/robot {{ quote(cluster) }}
+
+# Run Robot Framework's suites on a cluster now, through its kubeconfig: refuse while a run is going, make one job from the CronJob robot-suites, follow its log, and exit with its result, the number of failed tests; Ctrl-C stops following and leaves the job running, and nothing is deleted; ROBOT_RUN_WAIT bounds the waits for its pod and its result (900 seconds); see docs/kubernetes.md, Robot Framework
+robot-run cluster='lab-sto2':
+    scripts/robot-run {{ quote(cluster) }}
+
 # Print the logs a LogsQL query matches, one line per record, the oldest first, through the Kubernetes API's service proxy to VictoriaLogs: just logs 'kubernetes.pod_namespace:monitoring error' [--since 15m] [--limit 200] [cluster]; --since is a number with s, m, h, d or w; fails with the reason when the API does not answer or the store refuses the query
 [positional-arguments]
 logs *args:

@@ -8,8 +8,9 @@
 # ascender-operator-templates: 25.6.3
 #
 # What the web pods let through, on top of the namespace's default deny: nginx's 8052, where the
-# public Gateway's proxies send the route, the kubelet asks the readiness probe and the task pods'
-# websocket relay connects. Their egress is the instance's, in ascender-instance.
+# public Gateway's proxies send the route, the kubelet asks the readiness probe, the task pods'
+# websocket relay connects and Robot Framework's runner opens the sign-in page. Their egress is the
+# instance's, in ascender-instance.
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
@@ -56,6 +57,19 @@ spec:
             app.kubernetes.io/name: ascender-task
             app.kubernetes.io/managed-by: awx-operator
             app.kubernetes.io/component: awx
+      toPorts:
+        - ports:
+            - port: "8052"
+              protocol: TCP
+    # Robot Framework's runner, whose suite opens the sign-in page from inside the cluster through
+    # the Service ascender-web and signs in nowhere (docs/kubernetes.md, Robot Framework): by the
+    # runner's labels in robot, so the report server and any other pod there are not admitted. While
+    # no run runs it admits nothing.
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": robot
+            app.kubernetes.io/name: robot
+            app.kubernetes.io/component: runner
       toPorts:
         - ports:
             - port: "8052"
