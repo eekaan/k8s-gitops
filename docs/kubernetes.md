@@ -68,6 +68,12 @@ spec:
   match what the render holds. A custom resource whose operator creates pods sets the security
   context `restricted` requires where the resource has the fields, and `tests/pod-security.bats`
   lists it; a pod it makes that needs more is an entry with `created-by`.
+- A namespace that runs sandboxed carries the label `k8s-gitops/sandbox` in its `namespace.yaml`,
+  set to `userns`, `gvisor` or `kata` ([Runtime classes](#runtime-classes)), and every pod template
+  of its applications sets what that tier asks, `hostUsers: false` or that `runtimeClassName`. Such
+  an application takes neither `components/volsync` nor `components/cnpg-cluster`, whose operators
+  make pods it cannot give a tier. `just pod-security-check` fails until it holds, and Kyverno
+  refuses a pod without its tier at admission ([The sandbox tier rule](#the-sandbox-tier-rule)).
 - The namespace denies ingress and egress by default, and the application declares the flows it
   lets through in a `CiliumNetworkPolicy` beside it ([Network policy](#network-policy)): a new
   namespace gets a `default-deny` `NetworkPolicy` next to its `namespace.yaml`, or an entry of
@@ -509,6 +515,21 @@ level is declared in the tree, never left to the API server's default.
   enforces a level other than the strictest its workloads pass; and when a namespace that enforces
   less than `restricted` does not audit and warn at `restricted` at the cluster's minor.
   `tests/pod-security.bats` proves each rule on a small render and runs the check on the tree.
+- **Sandbox tiers.** A namespace whose manifest carries the label `k8s-gitops/sandbox` names its
+  sandbox tier with it ([Runtime classes](#runtime-classes)), and the check also fails, naming the
+  namespace: when the label is any value other than `userns`, `gvisor` or `kata`, whether or not the
+  namespace has workloads; when a workload in it, a CronJob through its job template, does not set
+  what its tier asks of the pod, `hostUsers: false` for `userns` and `runtimeClassName` of the
+  tier's name for `gvisor` and `kata`; and when it holds an object of the API group
+  `volsync.backube` or `postgresql.cnpg.io`, which `components/volsync` and
+  `components/cnpg-cluster` bring. VolSync and CloudNativePG make the movers' and the database's
+  pods from those resources, and the namespace's application cannot give those pods a tier: at the
+  pinned versions, the definitions of `ReplicationSource`, `ReplicationDestination` and `Cluster`
+  declare neither `runtimeClassName` nor `hostUsers`. Any other operator that makes pods in such a
+  namespace must give them the tier itself, which the check cannot see, as the render does not
+  hold those pods. The namespace's line of the report ends `, sandbox <tier>`. The exceptions file
+  lists levels, never tiers, so no entry of it lets a workload past its tier. Kyverno holds the same
+  rule at admission ([The sandbox tier rule](#the-sandbox-tier-rule)).
 - **The Flux install it evaluates.** The pinned Flux CLI's `flux install --export` for the
   components the FluxInstance names, with the instance's patches applied, each a patch and its
   target by their exact fields (any other key is refused, [Paths](#what-the-checks-refuse)): the
@@ -1598,6 +1619,36 @@ the runtime classes Flux builds, in the applications and besides them, are exact
 renders no chart but Cilium's, so a class another chart would render goes unseen), the value is
 set, the agents' rendered configuration holds it beside kube-proxy replacement, and one paragraph,
 in this section, opens with the first sentence of the paragraph above.
+
+**A namespace asks for a sandbox tier.** The label `k8s-gitops/sandbox` on a namespace's
+`namespace.yaml` names the isolation every pod of the namespace runs with, one of three values,
+compared exactly: `userns` asks each pod to set `hostUsers: false`, so that it runs in a user
+namespace of its own, its users mapped to unprivileged ones of the node
+([Kubernetes](https://kubernetes.io/docs/concepts/workloads/pods/user-namespaces/)); `gvisor` asks
+for `runtimeClassName: gvisor`, and `kata` for `runtimeClassName: kata`. Any other value, one of
+these in another case or an empty one, is no tier, and no pod meets it. What each tier rests on:
+the RuntimeClasses `gvisor` and `kata` above, from the node image's extensions
+([cluster.md](cluster.md#the-node-image)), Kata needing nested virtualisation on the node, without
+which a `kata` pod does not start; `userns` needs Kubernetes' user namespaces, generally available
+at the cluster's minor (`UserNamespacesSupport` is GA and locked on from 1.36 in
+`pkg/features/kube_features.go` at v1.37.1, so the API server keeps the field), and the
+`user.max_user_namespaces` sysctl that `talos/patches/all/user-namespaces.yaml` raises on every
+node for gVisor, the one setting Talos' guide to user namespaces asks for. A `userns` pod's volumes
+must be on filesystems that support idmapped mounts, which tmpfs does from Linux 6.3 and NFS does
+not, as Kubernetes' documentation says; the nodes run 6.18. The label is an application's
+namespace's choice, beside its Pod Security level, and no namespace carries it.
+`just pod-security-check` refuses a pod template of the render that does not set its namespace's
+tier ([Pod Security](#pod-security)), and Kyverno refuses such a pod at admission while its webhook
+answers ([The sandbox tier rule](#the-sandbox-tier-rule)). Falco watches the host's kernel, so it
+sees little of what a pod does inside gVisor or a Kata guest: gVisor's Sentry handles the pod's
+system calls itself, and the host calls it makes for them are its own and do not map one to one
+onto the pod's ([gVisor](https://gvisor.dev/docs/architecture_guide/intro/)), and a Kata pod's
+processes run on the guest kernel of a virtual machine, of which the host sees the hypervisor's
+process ([Kata Containers](https://github.com/kata-containers/kata-containers/blob/main/docs/design/architecture/README.md)).
+Falco can read a gVisor sandbox's system calls from gVisor itself, through an engine of its own
+that gVisor must be set up to feed ([Falco](https://falco.org/blog/intro-gvisor-falco/)); the tree
+runs Falco on its modern eBPF probe alone. A `userns` pod runs on the host's kernel, and Falco sees
+it as any other ([Runtime detection](#runtime-detection)).
 
 ## Service addresses
 
@@ -9120,7 +9171,9 @@ hold secrets, a password given on a command line or a token in an address, and s
 holds it. An event is a line in the pod's log file on the node, until the kubelet rotates it, and a
 document in the log store, with the other logs, for 14 days or until the store's 15 GiB are used
 ([Logs](#logs)); whoever can read the store, with `just logs` or Grafana's VictoriaLogs datasource,
-or `exec` into the pods of `monitoring` and `security-system`, can read it.
+or `exec` into the pods of `monitoring` and `security-system`, can read it. Of a pod under `gvisor` or
+`kata` it sees little, as such a pod's system calls reach gVisor's kernel or a Kata guest's instead
+of the node's ([Runtime classes](#runtime-classes)).
 
 ### Tuning
 
@@ -9562,19 +9615,22 @@ The Falco documentation says what else an override can do
 
 The tree's checks stop a bad object before it is merged. They do not see one applied by hand, by an
 operator or by a chart at run time, and they report nothing about what already runs. An admission
-policy engine does both, against rules written once. Two engines dominate, so the lab runs both, in
-audit, holding the same three rules, to compare them on a real cluster. Neither refuses, mutates or
+policy engine does both, against rules written once. Two engines dominate, so the lab runs both,
+holding the same three rules in audit, to compare them on a real cluster, and Kyverno holds one rule
+of its own that refuses: a pod created in a namespace labelled with a sandbox tier, without that
+tier's isolation ([The sandbox tier rule](#the-sandbox-tier-rule)). Neither engine mutates or
 generates a workload, and neither can hold up the cluster: the webhooks that match workloads fail
-open and skip the control plane's and Flux's namespaces. Kyverno also keeps webhooks of its own, on
-its own policy kinds, that fail closed ([Audit, and what a webhook may do](#audit-and-what-a-webhook-may-do)).
+open and skip the control plane's and Flux's namespaces, so the refusal holds while Kyverno answers.
+Kyverno also keeps webhooks of its own, on its own policy kinds, that fail closed
+([Audit, and what a webhook may do](#audit-and-what-a-webhook-may-do)).
 
 The engines are five applications, which an overlay selects an engine at a time, each engine in a
 namespace of its own that enforces the restricted level:
 
-| Engine | Namespace | Applications, in order | Chart | Rules written as |
-| --- | --- | --- | --- | --- |
-| Kyverno | `kyverno` | `kyverno`, `kyverno-policies` | `kyverno` 3.10.0, Kyverno 1.20.0, an OCI chart | `ValidatingPolicy` (`policies.kyverno.io/v1`), in CEL |
-| Gatekeeper | `gatekeeper-system` | `gatekeeper`, `gatekeeper-templates`, `gatekeeper-policies` | `gatekeeper` 3.23.1, from the project's Helm repository | `ConstraintTemplate` in Rego, and a constraint of each template's kind |
+| Engine | Namespace | Applications, in order | Chart | Rules written as | What it holds |
+| --- | --- | --- | --- | --- | --- |
+| Kyverno | `kyverno` | `kyverno`, `kyverno-policies` | `kyverno` 3.10.0, Kyverno 1.20.0, an OCI chart | `ValidatingPolicy` (`policies.kyverno.io/v1`), in CEL | the three rules in audit (`Audit`), and `sandbox-tier`, which refuses (`Deny`) |
+| Gatekeeper | `gatekeeper-system` | `gatekeeper`, `gatekeeper-templates`, `gatekeeper-policies` | `gatekeeper` 3.23.1, from the project's Helm repository | `ConstraintTemplate` in Rego, and a constraint of each template's kind | the three rules in dry-run (`dryrun`) |
 
 The engine's application is the chart and what scrapes and alerts on it. Kyverno's rules are the
 next application, which waits for the engine (`dependsOn`) because the kinds it applies are the
@@ -9663,8 +9719,9 @@ alone. Only the live cluster shows the reports themselves.
 
 How each engine says it:
 
-- **Kyverno**: one `ValidatingPolicy` per rule in `kyverno-policies/app/`, `validationActions:
-  [Audit]` and `failurePolicy: Ignore`. `variables` collect the containers or images, and each
+- **Kyverno**: one `ValidatingPolicy` per rule in `kyverno-policies/app/`, beside `sandbox-tier`
+  ([The sandbox tier rule](#the-sandbox-tier-rule)), `validationActions: [Audit]` and
+  `failurePolicy: Ignore`. `variables` collect the containers or images, and each
   `validations` expression is CEL, with the message the report carries; the restricted rule has one
   expression for each setting, so a report names which of the four a pod misses. The legacy kind,
   `ClusterPolicy` of `kyverno.io/v1`, is no longer executed as of Kyverno 1.20, and the chart refuses
@@ -9681,6 +9738,109 @@ How each engine says it:
   schema, which `tests/admission-policy.bats` runs. The templates
   and the Kyverno policies are validated by `just kubernetes-validate` against the definitions the
   render holds.
+
+### The sandbox tier rule
+
+`sandbox-tier`, a `ValidatingPolicy` in `kyverno-policies/app/` beside the three, holds the contract
+of [Runtime classes](#runtime-classes): a pod created in a namespace that carries the label
+`k8s-gitops/sandbox` sets what the label's tier asks, `hostUsers: false` for `userns`,
+`runtimeClassName: gvisor` for `gvisor` and `runtimeClassName: kata` for `kata`, and a namespace whose
+label is any other value admits no pod. A refused pod carries one message, of the validation it
+fails: the label is not a tier, or the pod lacks its tier's field. Its offline twin, which its
+`k8s-gitops/offline-check` annotation names, is `just pod-security-check`
+([Pod Security](#pod-security)), which refuses a pod template of the render without its tier before
+a change is merged, and also a namespace whose value is no tier when it has no pods, and the VolSync
+and CloudNativePG resources whose operators would make pods there. Gatekeeper holds no twin of it,
+by decision ([ADR 0021](adr/0021-a-namespace-label-names-its-sandbox-tier-and-kyverno-alone-refuses-pods-without-it.md)):
+one engine refuses a rule, as [Moving a rule to enforce](#moving-a-rule-to-enforce) asks, and the
+offline check stands before it. It is the one rule of either engine in `Deny`.
+
+- **What it matches.** Pods alone, as for the other rules, with the automatic rules for pod
+  controllers off: a Deployment, Job or DaemonSet in such a namespace is admitted, and each pod its
+  controller makes is judged. Their creation alone: a pod's `runtimeClassName` and `hostUsers`
+  cannot change once it exists, as neither is among the fields `ValidatePodUpdate` lets an update
+  change (Kubernetes' `pkg/apis/core/validation/validation.go` at v1.37.1), so an update cannot
+  change the verdict, and evaluating one could only block a pod that predates the label. The
+  namespaces are those where the label exists, whatever its value. At 1.20.0 the webhook that
+  serves the rule carries the policy's namespace
+  selector merged with the `kyverno` ConfigMap's, which skips `kube-system`, `flux-system` and
+  `kyverno` (`resolveNamespaceSelector` and `mergeLabelSelectors` in
+  `pkg/controllers/webhook/validating.go`), and rules whose selectors differ get webhooks of their
+  own (`groupBySelectors`): this one's is in `kyverno-resource-validating-webhook-cfg`, named
+  `vpol.validate.kyverno.svc-ignore-` and the start of its selectors' digest, with the failure
+  policy `Ignore` and the side effects `NoneOnDryRun`. Kyverno's resource filters also drop every
+  object in `kube-system`, `kube-public`, `kube-node-lease` and `kyverno`. Those five namespaces
+  cannot be sandboxed, as Kyverno never sees their pods at admission; the reports controller's
+  background scan, which runs with `--skipResourceFilters=true` and has no webhook to skip a
+  namespace, evaluates them, and refuses nothing. `tests/admission-policy.bats` reads the five from
+  the rendered chart and fails when a Namespace of the lab-sto2 overlay that carries the label, or
+  `flux-system` as the FluxInstance's patches label it, is one of them. It also fails while any
+  namespace of the overlay carries the label, as none does. Every requester's pod is judged but
+  the kubelets': Kyverno admits a request of a user, group or role that the `kyverno` ConfigMap's
+  `excludeGroups`, `excludeUsernames`, `excludeRoles` or `excludeClusterRoles` names without
+  evaluating it (`withFilter` in `pkg/webhooks/handlers/filter.go`), and the chart's default names
+  one group, `system:nodes`, so the mirror pod a kubelet registers for a static pod is not judged.
+  A static pod comes from its node's machine config, and the kubelet runs it whatever admission
+  says of its mirror. The test requires that group to be the one exclusion.
+- **The refusal holds only while Kyverno's webhook answers.** The failure policy is `Ignore`, which
+  the policy sets and `--forceFailurePolicyIgnore` forces whatever a policy says: while no Kyverno
+  pod answers, or the answer takes longer than the API server's 10 seconds, a pod in a sandbox
+  namespace is admitted without its tier. So is a pod whose evaluation fails, as an error under
+  `Ignore` admits (`admissionResponse` in `pkg/webhooks/resource/vpol/handler.go`), and a pod in a
+  namespace Kyverno cannot read: it takes such a namespace to carry no label but its name
+  (`pkg/cel/matching/predicates/namespace/matcher.go`), so the rule does not match. Kyverno takes a
+  namespace from its cache of namespaces, and asks the API server only for one the cache lacks
+  (`NewNamespaceResolver` in `pkg/cel/engine/namespace.go`), so a pod created just after its
+  namespace gains or changes the label can be judged by the namespace's earlier labels. A version
+  of the policy whose CEL the engine cannot compile is refused when it is written: Kyverno's webhook
+  on its own policy kinds compiles each ValidatingPolicy (`Validate` in
+  `pkg/cel/policies/vpol/validate.go`) and fails closed
+  ([Audit, and what a webhook may do](#audit-and-what-a-webhook-may-do)), and Flux
+  dry-runs every object of `kyverno-policies` before it applies any (`ApplyAll` in
+  `fluxcd/pkg/ssa`), so the application applies nothing, the three audit rules' changes included,
+  and the version in force stays until the policy is fixed. A version already stored that the engine
+  does not compile, as an upgrade of Kyverno could leave it, is not loaded (`Reconcile` in
+  `pkg/cel/policies/vpol/engine/reconciler.go` returns without storing a compiled form): an
+  admission controller already running keeps the version it compiled before, and one that starts,
+  as each does on an upgrade, holds none, so the rule refuses nothing until a version that compiles
+  is applied. The tests compile the rule with the pinned 1.19 CLI ([Tests](#tests)), not with the
+  engine a chart update brings, so such a break shows on the cluster, not in the update's checks.
+  The admission controllers run two replicas, spread over nodes where the scheduler can, under a
+  budget that keeps one, and `KyvernoAdmissionControllerDown` fires when none has been available
+  for 10 minutes ([runbooks/alerts.md](runbooks/alerts.md#kyvernoadmissioncontrollerdown)).
+- **No exception at admission.** `PolicyException` stays off
+  (`features.policyExceptions.enabled: false`, the chart's default, rendered as
+  `--enablePolicyException=false`), and with it off the 1.20.0 admission controller compiles each
+  ValidatingPolicy with no exception: `cmd/kyverno/main.go` hands the provider
+  `PolicyExceptionEnabled()`, and its reconciler lists exceptions only when that is true. The
+  admission controller honours no exception, so none lets a pod past the refusal. The
+  reports controller's background scan does apply a `PolicyException` written to the cluster,
+  whatever the setting: `cmd/reports-controller/main.go` hands the scan the exceptions of
+  `policies.kyverno.io`, the scan fetches them each time it runs
+  (`pkg/controllers/report/background/controller.go`) and passes them to `ScanResource`
+  (`pkg/controllers/report/utils/scanner.go`), and `NewProvider`
+  (`pkg/cel/policies/vpol/engine/provider.go`) compiles each that names the policy into it. Such an
+  exception changes what the scan reports of a pod its `matchConditions` match
+  (`pkg/cel/policies/vpol/compiler/policy.go`), not what admission refuses. The Pod Security
+  exceptions file lists levels, and none of its entries lets a workload past its tier.
+- **What a person sees.** A bare pod that is refused fails at the API server, whose error names the
+  webhook and ends `Policy sandbox-tier failed: <message>`, the message of the validation that
+  failed; `kubectl apply` prints it as
+  `Error from server: error when creating "<file>": admission webhook "vpol.validate.kyverno.svc-ignore-…" denied the request: Policy sandbox-tier failed: <message>`.
+  A pod that a ReplicaSet, Job or DaemonSet makes is refused the same way, and that controller
+  records the refusal as a `FailedCreate` event on itself, `kubectl --namespace <namespace> get events
+  --field-selector reason=FailedCreate`, and tries again. Kyverno writes no admission report for a
+  request in which it evaluated a `Deny` rule (`audit` in `pkg/webhooks/resource/vpol/handler.go`),
+  and this rule's webhook, of selectors no other rule has, evaluates it alone, so its verdicts at
+  admission, a refusal or not, are in no report; those of the background scan are.
+- **Pods that predate a label.** A pod already running when its namespace gains the label, or when
+  the rule is first applied, is kept: the rule matches a pod's creation alone, and nothing evaluates
+  a running pod at admission again. The reports controller's background scan, every hour, evaluates
+  each ValidatingPolicy whose background evaluation is on, as this one's is by default, on each
+  existing pod as a creation, with its namespace's labels at the time (`ScanResource` in
+  `pkg/controllers/report/utils/scanner.go` at 1.20.0), so such a pod is reported as a `fail` of
+  `sandbox-tier` in its namespace's `PolicyReport`, unless a PolicyException that names the policy
+  matches the pod, until it is gone. Made again, by its controller or by hand, it is refused.
 
 ### Tests
 
@@ -9711,7 +9871,8 @@ chart, and runs the same Rego engine as the webhook; Renovate does not move eith
   it), and the namespace selector of the `kyverno` ConfigMap, which skips `kube-system` and
   `flux-system`, with the release's own namespace added by the chart. The webhook that protects
   generation labels, the generation of Kubernetes' own ValidatingAdmissionPolicies, and the background
-  and cleanup controllers are off, and every rule is `Audit`. A webhook that matches resources waits
+  and cleanup controllers are off, and every rule is `Audit` but `sandbox-tier`, which is `Deny`
+  ([The sandbox tier rule](#the-sandbox-tier-rule)). A webhook that matches resources waits
   10 seconds at most before `Ignore` admits the object: at the pinned version Kyverno sets no
   `timeoutSeconds` on it unless a policy's `webhookConfiguration` does, which none does and the test
   asserts, so the API server's default of 10 seconds applies. That is longer than Gatekeeper's
@@ -9746,7 +9907,9 @@ chart, and runs the same Rego engine as the webhook; Renovate does not move eith
   not in one, such as a namespace: `kubectl get policyreport --all-namespaces`,
   `kubectl get clusterpolicyreport`, and `-o yaml` on one for each failed result's policy, rule
   message and resource. The reports controller scans what already runs every hour, and each admitted
-  object is reported as it is admitted. The counts are the metric `kyverno_validating_policy_results_total`
+  object is reported as it is admitted against the three rules; `sandbox-tier`'s verdicts are the
+  scan's alone ([The sandbox tier rule](#the-sandbox-tier-rule)). The counts are the metric
+  `kyverno_validating_policy_results_total`
   (`kyverno_validating_policy_results` in Kyverno's source, which the Prometheus exporter gives the
   counter suffix; a scrape of the live cluster confirms the name), scraped from the admission and
   reports controllers' ServiceMonitors. `kubectl get validatingpolicies` lists the rules and whether
@@ -9782,6 +9945,18 @@ first:
 - The rule's test has a refused case in the engine's tool, which it has, and the change moves its
   assertion with the action.
 
+`sandbox-tier` is in `Deny` in Kyverno from its first commit, and each of these holds for it. No
+namespace carries the label, so its report is empty and stays so until an application's namespace
+asks for a tier, in a change that makes that namespace's pods meet it. What it refuses,
+`just pod-security-check` refuses first, before merge. Its failure policy is `Ignore`, and the
+admission controllers run two replicas, spread over nodes where the scheduler can, under a budget
+that keeps one. The namespaces that keep the cluster reconciled are skipped, and its test fails
+when a namespace Kyverno never sees at admission carries the label. There is no way to except a pod
+at admission, by decision: a pod that cannot meet its namespace's tier belongs in a namespace
+without one. Its test has a refused case for each tier and for each kind of value that is no tier,
+and `tests/admission-policy.bats` requires `Deny` of it
+([The sandbox tier rule](#the-sandbox-tier-rule)).
+
 ### What each engine costs
 
 From the rendered releases, with the values of the tree:
@@ -9790,7 +9965,7 @@ From the rendered releases, with the values of the tree:
 | --- | --- | --- |
 | Objects the release renders | 66, among them 4 hook Jobs and 2 test Pods | 29 |
 | Definitions | 22 | 17, and 3 more at run time, one for each constraint kind |
-| Rules | 3 objects | 6 objects |
+| Rules | 4 objects | 6 objects |
 | Long-running pods | 3: two admission controllers and one reports controller | 3: two controller managers and one audit |
 | Memory requested | 320 MiB (2 x 128, 64) | 1536 MiB (3 x 512) |
 | CPU requested | 300m | 300m |

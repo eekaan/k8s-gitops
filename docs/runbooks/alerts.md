@@ -629,12 +629,17 @@ Grafana's Explore, behind `just grafana`, shows it with the Prometheus query
 
 Kyverno's admission controller, `kyverno-admission-controller`, has had no available replica for 10
 minutes. It is the pod that evaluates each admitted object against the rules and writes its
-admission report. Its webhooks that match workloads fail open and it only reports, so no workload is
-refused and nothing else stops. What is missed is the reports of the objects admitted meanwhile,
-which the reports controller's next background scan, within the hour, makes up for. Its webhooks on
-its own kinds fail closed, so while no pod answers, a write of a Kyverno policy, PolicyException or
-GlobalContextEntry is refused: Flux cannot apply or change a rule, and `kyverno-policies` retries
-until a pod answers ([Admission policy](../kubernetes.md#admission-policy)).
+admission report. Its webhooks that match workloads fail open, so no workload is refused and nothing
+else stops, and the one rule that refuses goes unheld: a pod created in a namespace labelled
+`k8s-gitops/sandbox` is admitted without its tier, and keeps running without it, as the rule judges
+a pod only when it is created ([The sandbox tier rule](../kubernetes.md#the-sandbox-tier-rule)).
+What is missed besides is the reports of the objects admitted meanwhile, which the reports
+controller's next background scan, within the hour, makes up for, and which reports such a pod as a
+`fail` of `sandbox-tier` unless a PolicyException that names the policy matches the pod. Its
+webhooks on its own kinds fail closed, so while no pod answers, a write of a Kyverno policy,
+PolicyException or GlobalContextEntry is refused: Flux cannot apply or change a rule, and
+`kyverno-policies` retries until a pod answers
+([Admission policy](../kubernetes.md#admission-policy)).
 
 Look at first: `kubectl --namespace kyverno get pods` and `kubectl --namespace kyverno describe
 deployment kyverno-admission-controller`; the pod's log, `kubectl --namespace kyverno logs

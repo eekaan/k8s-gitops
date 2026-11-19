@@ -4,7 +4,7 @@ apiVersion: backstage.io/v1alpha1
 kind: Resource
 metadata:
   name: kyverno-policies
-  description: Kyverno's three ValidatingPolicies in audit, an image pinned, the restricted security context and a namespace's Pod Security level, each mirroring a check of the tree.
+  description: Kyverno's ValidatingPolicies, each mirroring a check of the tree, three in audit (an image pinned, the restricted security context, a Pod Security level) and sandbox-tier, which refuses a pod without its namespace's tier.
   links:
     - url: https://github.com/eekaan/k8s-gitops/blob/main/docs/kubernetes.md#the-three-rules
       title: Documentation

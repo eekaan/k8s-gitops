@@ -1,7 +1,10 @@
 ---
 # Values for the Kyverno chart, read by the HelmRelease through a ConfigMap generated without
-# substitution. Keys not set here keep the chart's defaults. Kyverno only reports here: its rules
-# (kyverno-policies) are in audit, and nothing it registers may refuse or hold up an object.
+# substitution. Keys not set here keep the chart's defaults. Kyverno reports here, and refuses in
+# one place: its rules (kyverno-policies) are in audit, except the sandbox tier rule, which refuses
+# a pod created without its namespace's tier while the webhook answers. The webhooks that match
+# resources fail open, so no workload is refused while Kyverno does not answer; those on its own
+# policy kinds fail closed (docs/kubernetes.md, Audit, and what a webhook may do).
 
 # The chart's definitions are installed with the release. The annotation that makes Helm leave them
 # in place on uninstall is not set here: the chart writes it itself on five of them, so a value
