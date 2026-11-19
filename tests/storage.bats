@@ -430,6 +430,27 @@ replicas() {
   [[ $classes == *" $LINSTOR Delete true" ]]
 }
 
+@test "No update of the Piraeus operator or the storage cluster merges itself" {
+  local rules chart held
+  # A rule that comes after the auto-merge switch, so that it wins over it, holds back every file of
+  # the operator and the storage cluster and holds no other key, which would narrow what it matches;
+  # and no rule after the switch turns merging on again, for them or for anything.
+  rules="$(grep -v '^[[:space:]]*//' "$REPO/.renovate/automerge.json5" | yq -o json -I0 '.packageRules')"
+  [ "$(jq -r '(map(.matchFileNames == ["kubernetes/**"] and .matchUpdateTypes == ["minor", "patch"] and has("automerge")) | index(true)) as $switch
+    | if $switch == null then error("the auto-merge switch is not a rule of the file") else . end
+    | to_entries | map(select(.key > $switch and .value.automerge == false and .value.matchFileNames == ["kubernetes/apps/base/piraeus-datastore/**"]
+        and ((.value | keys) - ["automerge", "description", "matchFileNames"] | length) == 0)) | length' <<<"$rules")" -eq 1 ]
+  [ "$(jq -r '(map(.matchFileNames == ["kubernetes/**"] and .matchUpdateTypes == ["minor", "patch"] and has("automerge")) | index(true)) as $switch
+    | .[$switch + 1:] | map(select(has("automerge") and .automerge != false)) | length' <<<"$rules")" -eq 0 ]
+  # The operator's chart, by the name Renovate reads it under, is pinned only where that rule holds
+  # it back.
+  chart="$(yq '.spec.url | sub("^oci://"; "")' "$REPO/kubernetes/apps/base/piraeus-datastore/piraeus-operator/app/ocirepository.yaml")"
+  held="$(awk -F'\t' -v chart="$chart" '$3 == chart {print $1}' "$REPO/.renovate/extracted.tsv" | LC_ALL=C sort -u)"
+  echo "$chart is read from: $held"
+  [ -n "$held" ]
+  [ -z "$(grep -v '^kubernetes/apps/base/piraeus-datastore/' <<<"$held" || true)" ]
+}
+
 @test "The storage resource definitions are never deleted with their applications" {
   local app kept inner
   # No application applies a definition itself, so pruning what it applies deletes none.

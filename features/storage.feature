@@ -36,6 +36,11 @@ Feature: Storage
     When the source is built offline as its Kustomizations apply it
     Then it yields the snapshot.storage.k8s.io definitions and, once they are established, the snapshot controller in kube-system, and the one VolumeSnapshotClass, the default, names LINSTOR's driver and deletes a snapshot with its object
 
+  Scenario: No update of the Piraeus operator or the storage cluster merges itself
+    Given Renovate's rules of what merges itself and the record of what it extracts
+    When the rules after the auto-merge switch and the files Renovate reads the operator's chart from are read
+    Then one rule after the switch, so that it wins over it whatever the switch says, holds back every file under kubernetes/apps/base/piraeus-datastore/ and holds nothing that narrows what it matches, no rule after the switch turns merging on again, and every pin of the operator's chart that Renovate reads is in one of those files
+
   Scenario: The storage resource definitions are never deleted with their applications
     Given the pinned operator chart rendered with the repository's values, and the snapshot-controller application
     When their objects and Kustomizations are read

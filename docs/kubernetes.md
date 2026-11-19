@@ -3877,6 +3877,10 @@ The controller's and the satellites' metrics are scraped, and the replicas, the 
 satellites and the pools alerted on, by the `linstor-monitoring` application
 ([Storage monitoring](#storage-monitoring)).
 
+Renovate merges no update of anything under `apps/base/piraeus-datastore/` by itself, whatever the
+auto-merge switch says (`.renovate/automerge.json5`): a new version of the operator can restart the
+storage pods on every node, so a person reads the release notes and picks the time.
+
 ### What runs
 
 From the `LinstorCluster` the operator runs the LINSTOR controller, LINSTOR's CSI driver
