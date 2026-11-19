@@ -106,8 +106,8 @@ serviceMonitor:
       targetLabel: node
 
 # Local rule files by name, which the chart makes the ConfigMap falco-rules of and mounts in the
-# directory Falco reads after the image's rules. One file of two items, each an exception, and no
-# rule of the tree's own. docs/kubernetes.md, Tuning, says why each is this narrow, what proves it
+# directory Falco reads after the image's rules. One file of fourteen items, each an exception, and
+# no rule of the tree's own. docs/kubernetes.md, Tuning, says why each is this narrow, what proves it
 # and how another goes in.
 customRules:
   exceptions.yaml: |-
@@ -134,6 +134,164 @@ customRules:
     # every other container, the agent's included.
     - macro: known_drop_and_execute_activities
       condition: (k8s.ns.name = "kube-system" and container.name = "apply-sysctl-overwrites" and container.image.repository = "quay.io/cilium/cilium" and proc.exepath = "/opt/cni/bin/cilium-sysctlfix")
+      override:
+        condition: replace
+    # Reason: busybox's httpd serves Robot's reports as it serves the demo's pages, so every request
+    # it answers matches the redirect rule twice, as the first item's reason says. Appended to the
+    # same placeholder, it excepts only the process httpd in the container httpd of that image in
+    # the namespace robot: a shell, or any other process, in that container still matches, and so
+    # does every other workload.
+    - macro: user_known_stand_streams_redirect_activities
+      condition: or (k8s.ns.name = "robot" and container.name = "httpd" and container.image.repository = "docker.io/library/busybox" and proc.name = "httpd")
+      override:
+        condition: append
+    # Reason: Piraeus' HA controller, which the Piraeus operator runs on every node LINSTOR selects,
+    # runs the process agent in the container ha-controller, and Falco reports that process making
+    # a dup-family call that returns 0, 1 or 2 for an IPv4 or IPv6 socket, which the redirect rule
+    # matches. The agent runs drbdsetup through Go's os/exec, whose child moves its files onto 0, 1
+    # and 2 with dup3, under the agent's name, before it starts drbdsetup (forkAndExecInChild1 in
+    # syscall/exec_linux.go of Go 1.27.0, which the agent is built with); those files are /dev/null
+    # and pipes, not sockets, so why the call is on a socket is not established. It excepts only the
+    # process agent in the container ha-controller of that image in the namespace piraeus-datastore:
+    # a shell, or any other process, in that container still matches, and so does every other
+    # workload.
+    - macro: user_known_stand_streams_redirect_activities
+      condition: or (k8s.ns.name = "piraeus-datastore" and container.name = "ha-controller" and container.image.repository = "quay.io/piraeusdatastore/piraeus-ha-controller" and proc.name = "agent")
+      override:
+        condition: append
+    # Reason: CloudNativePG's instance manager, the process manager in PostgreSQL's container
+    # postgres of each instance's pod, is reported making the same call, and it too runs programs,
+    # pg_ctl and the server among them, through Go's os/exec, whose files for them are not sockets:
+    # why its call is on a socket is not established either. It excepts the process manager in the
+    # container postgres of the component cnpg-cluster's image in the namespaces of the databases
+    # that component makes, each of which runs the same manager: PostgreSQL itself, a shell, or any
+    # other process, in that container still matches, and so does that container in any other
+    # namespace. In ascender, a pod started through a container group's override with that
+    # container's name and image, running manager, is excepted as that container is
+    # (docs/kubernetes.md, Tuning).
+    - macro: user_known_stand_streams_redirect_activities
+      condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage") and container.name = "postgres" and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.name = "manager")
+      override:
+        condition: append
+    # Reason: Ascender's dispatcher, awx-manage run_dispatcher, which supervisord runs in the task
+    # pod's container ascender-task, lists through the API server, every minute, the pods of the
+    # container group Ascender registers in a Kubernetes install, to remove those of finished jobs
+    # (awx_k8s_reaper in awx/main/tasks/system.py, k8s_reaper in awx/settings/defaults.py), from
+    # workers that are forks of it, under its name. That is what the image's rule Contact K8S API
+    # Server From Container matches. The macro is the placeholder that rule negates. It excepts only
+    # the process awx-manage in the container the operator names after the AWX, ascender-task, of
+    # Ascender's image in the namespace ascender: any other process there, the task pod's
+    # ascender-ee, the web pod and every job pod as Ascender starts it still match, and so does every
+    # other workload. A pod started through a container group's override with that container's name
+    # and image, running awx-manage, is excepted as the task container is (docs/kubernetes.md,
+    # Tuning).
+    - macro: user_known_contact_k8s_api_server_activities
+      condition: (k8s.ns.name = "ascender" and container.name = "ascender-task" and container.image.repository = "ghcr.io/ctrliq/ascender" and proc.name = "awx-manage")
+      override:
+        condition: replace
+    # Reason: Ascender's operator, operator-sdk's Ansible operator, watches the AWX and the objects it
+    # makes through the API server from its binary /usr/local/bin/ansible-operator, which the image's
+    # entrypoint starts under tini; its Ansible tasks reach the API through that process's proxy on
+    # the pod's loopback. The kernel names the process after the executable cut to 15 characters,
+    # ansible-operato, which is what Falco reports. It excepts only that process in the container
+    # awx-manager of the operator's image in the namespace ascender: any other process in that
+    # container, kube-rbac-proxy beside it and every other workload still match. A pod started
+    # through a container group's override with that container's name and image, running
+    # ansible-operator, is excepted as the operator's container is (docs/kubernetes.md, Tuning).
+    - macro: user_known_contact_k8s_api_server_activities
+      condition: or (k8s.ns.name = "ascender" and container.name = "awx-manager" and container.image.repository = "ghcr.io/ctrliq/ascender-operator" and proc.name = "ansible-operato")
+      override:
+        condition: append
+    # Reason: the log collector, Vector, watches the pods, namespaces and nodes through the API
+    # server for the metadata its kubernetes_logs source gives each line, as its ClusterRole lets it.
+    # It excepts only the process vector, its image's entrypoint /usr/bin/vector, in the container
+    # vector of that image in the namespace monitoring: any other process in that container and
+    # every other workload still match.
+    - macro: user_known_contact_k8s_api_server_activities
+      condition: or (k8s.ns.name = "monitoring" and container.name = "vector" and container.image.repository = "docker.io/timberio/vector" and proc.name = "vector")
+      override:
+        condition: append
+    # Reason: Kyverno's admission controller, the process kyverno, its image's entrypoint
+    # /ko-app/kyverno, in the container kyverno of the Deployment kyverno-admission-controller,
+    # watches the policies and what they select through the API server and writes its reports there.
+    # It excepts only that process in that container of its image in the namespace kyverno: the init
+    # container kyverno-pre, the chart's Jobs, any other process and every other workload still
+    # match.
+    - macro: user_known_contact_k8s_api_server_activities
+      condition: or (k8s.ns.name = "kyverno" and container.name = "kyverno" and container.image.repository = "reg.kyverno.io/kyverno/kyverno" and proc.name = "kyverno")
+      override:
+        condition: append
+    # Reason: Kyverno's reports controller, in the container controller of the Deployment
+    # kyverno-reports-controller, scans what runs through the API server and writes the policy
+    # reports there, from its image's entrypoint /ko-app/reports-controller, which the kernel names
+    # cut to 15 characters, reports-control. It excepts only that process in that container of its
+    # image in the namespace kyverno: any other process and every other workload still match.
+    - macro: user_known_contact_k8s_api_server_activities
+      condition: or (k8s.ns.name = "kyverno" and container.name = "controller" and container.image.repository = "reg.kyverno.io/kyverno/reports-controller" and proc.name = "reports-control")
+      override:
+        condition: append
+    # Reason: CloudNativePG's instance manager, /controller/manager, reads and writes its Cluster
+    # through the API server as the process manager: in PostgreSQL's container postgres of each
+    # instance's pod, and in the one container, named after its role, of the Jobs that create an
+    # instance, initdb, and join one to the cluster, join. It excepts that process in those three
+    # containers of the component cnpg-cluster's image in the namespaces of the databases that
+    # component makes: the one container of each Job of a restore, named after its role
+    # (full-recovery, import, pgbasebackup, snapshot-recovery), PostgreSQL and any other process in
+    # the three, and those containers in any other namespace, still match. The Barman Cloud
+    # plugin's sidecar, which a restore's Job can hold as well, is the next item's. In ascender, a
+    # pod started through a container group's override with the name of one of the three and that
+    # image, running manager, is excepted as the three are (docs/kubernetes.md, Tuning).
+    - macro: user_known_contact_k8s_api_server_activities
+      condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage") and container.name in ("initdb", "join", "postgres") and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.name = "manager")
+      override:
+        condition: append
+    # Reason: the Barman Cloud plugin injects the container plugin-barman-cloud, on the sidecar
+    # image its chart gives it, into each instance's pod, where it runs /manager instance, and into
+    # the Job that restores a Cluster from the plugin's archive, full-recovery or snapshot-recovery,
+    # where it runs /manager restore (reconcileInstancePod and reconcileJob in
+    # internal/cnpgi/operator/lifecycle.go of v0.16.0). In both the process manager reads the
+    # ObjectStore and its credentials through the API server. It excepts that process in that
+    # container of the sidecar's image in the namespaces of the databases the component
+    # cnpg-cluster makes, in a restore's Job as in an instance's pod: any other process in it, the
+    # restore Job's own container, and that container in any other namespace, still match. In
+    # ascender, a pod started through a container group's override with that container's name and
+    # image, running manager, is excepted as the sidecar is (docs/kubernetes.md, Tuning).
+    - macro: user_known_contact_k8s_api_server_activities
+      condition: or (k8s.ns.name in ("ai-system", "ascender", "backstage") and container.name = "plugin-barman-cloud" and container.image.repository = "ghcr.io/cloudnative-pg/plugin-barman-cloud-sidecar" and proc.name = "manager")
+      override:
+        condition: append
+    # Reason: PostgreSQL archives each finished WAL segment by running archive_command through
+    # system() (shell_archive.c of PostgreSQL 18), and CloudNativePG makes that command
+    # /controller/manager wal-archive --log-destination /controller/log/postgres.json %p, %p being
+    # pg_wal/<segment> (pkg/postgres/configuration.go of v1.30.1). glibc from 2.38 runs the command
+    # system() is given as sh -c -- <command> (sysdeps/posix/system.c), and the component's image, of
+    # Debian trixie, has glibc 2.41: so postgres starts a shell, which the image's rule Run shell
+    # untrusted matches and the image's own macro postgres_running_cnpg, written for sh -c without
+    # the --, does not except. The macro is the placeholder that rule negates. It excepts a shell
+    # whose parent is postgres and whose command line starts with that command up to pg_wal/, in the
+    # container postgres of the component's image in the namespaces of the databases the component
+    # makes: any other command PostgreSQL runs through a shell, a COPY ... TO PROGRAM among them,
+    # still matches; one that starts with that prefix, which a superuser can have it run, is
+    # excepted with the archiver's. In ascender, a pod started through a container group's override
+    # with that container's name and image, in which a process named postgres starts such a shell,
+    # is excepted as the archiver is (docs/kubernetes.md, Tuning).
+    - macro: user_shell_container_exclusions
+      condition: (k8s.ns.name in ("ai-system", "ascender", "backstage") and container.name = "postgres" and container.image.repository = "ghcr.io/cloudnative-pg/postgresql" and proc.pname = "postgres"
+        and proc.cmdline startswith "sh -c -- /controller/manager wal-archive --log-destination /controller/log/postgres.json pg_wal/")
+      override:
+        condition: replace
+    # Reason: containerd unpacks each layer of an image the node pulls into
+    # /var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/<id>/fs, opening each
+    # file it writes with O_TRUNC (pkg/archive/tar.go of containerd 2.3.7), so a layer that holds a
+    # file the rule Clear Log Activities names, such as a Debian image's /var/log/dpkg.log, matches
+    # that rule, of priority Warning. The image's macro containerd_activities excepts that path for
+    # the process containerd only, and Falco reports these events with no process and no container:
+    # why they carry no process is not established. The macro is the placeholder that rule negates.
+    # It excepts a truncation under that path by what Falco places in no container, a process of the
+    # node or a thread it has no record of, whatever it is: the same truncation by any process in a
+    # container, and of any file outside that path, still matches.
+    - macro: allowed_clear_log_files
+      condition: (not container and fd.name startswith "/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/")
       override:
         condition: replace
 
