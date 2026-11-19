@@ -1,0 +1,42 @@
+---
+# yaml-language-server: $schema=https://json.schemastore.org/kustomization
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# Puts a request rate limit on a public route (docs/kubernetes.md, Rate limits): each of the public
+# Gateway's proxies answers the route's requests beyond the figure in each unit with 429 itself,
+# for every client together, with no store or service behind it. The component makes the
+# BackendTrafficPolicy named after the route, which targets that HTTPRoute and nothing else. An
+# application adds it in its ks.yaml, beside the HTTPRoute it defines in its own manifests, with
+# the policy's acceptance as the Kustomization's health:
+#
+#   components:
+#     - ../../../../../components/ratelimit
+#   postBuild:
+#     substitute:
+#       RATELIMIT_ROUTE: <the HTTPRoute's name>
+#   wait: true
+#   healthCheckExprs:
+#     - apiVersion: gateway.envoyproxy.io/v1alpha1
+#       kind: BackendTrafficPolicy
+#       current: >-
+#         has(status.ancestors) && size(status.ancestors) > 0 && status.ancestors.all(a,
+#         a.conditions.exists(c, c.type == 'Accepted' && c.status == 'True' && c.observedGeneration
+#         == metadata.generation))
+#       failed: >-
+#         has(status.ancestors) && status.ancestors.exists(a, a.conditions.exists(c, c.type ==
+#         'Accepted' && c.status == 'False' && c.observedGeneration == metadata.generation))
+#
+#   RATELIMIT_ROUTE     the name of the application's HTTPRoute, which the policy covers and is
+#                       named after; it has no default, so a route that names none fails the build
+#   RATELIMIT_REQUESTS  the requests each proxy lets through in one unit, quoted, as Flux's values
+#                       are strings, and an integer once substituted: 300 when not set
+#   RATELIMIT_UNIT      the unit the figure is for, one the definition allows: Second, Minute, Hour,
+#                       Day, Week, Month or Year; Minute when not set
+#
+# tests/gateway.bats fails unless every ks.yaml that takes the component names its route, waits and
+# carries the health check above, whose expressions are those of components/waf. The controller
+# reports a policy it cannot translate as not accepted, and answers its route with 500, which the
+# health check makes the Kustomization's failure.
+resources:
+  - backendtrafficpolicy.yaml

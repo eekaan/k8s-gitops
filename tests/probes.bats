@@ -1131,3 +1131,98 @@ lab-sto2: the application kromgo declares a Probe and its Kustomization does not
   [ "$(yq -N 'select(.kind == "ServiceMonitor") | .spec.endpoints | length' "$rendered")" -eq 1 ]
   [ "$(yq -N 'select(.kind == "ConfigMap") | .data["blackbox.yaml"]' "$rendered" | yq -o json -I0 '.modules | keys | sort' -)" = "$PROBE_MODULES" ]
 }
+
+# limit_objects RENDER OUT: what the count of the probes under a rate limit reads of the cluster
+# lab-sto2 in RENDER, a render scripts/render made, as a JSON array in OUT: every
+# BackendTrafficPolicy, HTTPRoute, Probe and Prometheus, and the definition of the Prometheus kind.
+limit_objects() {
+  local files kind
+  mapfile -t files < <(for kind in BackendTrafficPolicy.gateway.envoyproxy.io HTTPRoute.gateway.networking.k8s.io \
+    Probe.monitoring.coreos.com Prometheus.monitoring.coreos.com; do
+    compgen -G "$1/lab-sto2/*/${kind}_*.yaml" || true
+  done
+    compgen -G "$1/lab-sto2/*/CustomResourceDefinition.apiextensions.k8s.io__prometheuses.monitoring.coreos.com.yaml" || true)
+  [ "${#files[@]}" -gt 0 ] || { echo "the render $1 holds nothing of lab-sto2 to count"; return 1; }
+  (set -o pipefail; yq -N -o json -I0 'select(. != null)' "${files[@]}" | jq -s . >"$2")
+}
+
+# probe_rates OBJECTS: for each route a BackendTrafficPolicy's local rule without client selectors
+# limits, in OBJECTS (limit_objects), one line "NAMESPACE/ROUTE: N a UNIT against FIGURE", N the
+# requests the route's Probes make in one unit of the limit; and a line more, naming the route, for
+# each Probe of it that sets an interval of its own, and when N is more than a fifth of the figure.
+# A Probe is the route's when its hostname label is one of the route's hostnames, and it makes one
+# request each scrape: at the scrapeInterval of the one Prometheus, or, where that sets none, the
+# default of the Prometheus definition, which the operator documents in it ("Default: \"30s\"");
+# Prometheus scrapes a Probe at that interval unless the Probe sets its own (the Probe definition's
+# interval: "If not specified Prometheus' global scrape interval is used"). Each replica of the
+# Prometheus scrapes it, so the requests are as many times more: its replicas, or 1 where it sets
+# none ("replicas of each shard", "Default: 1", in the definition; a target is one shard's). One
+# unit holds at least one request of each Probe and replica, as a request can fall in any unit.
+probe_rates() {
+  # shellcheck disable=SC2016 # $d, $all, $own, $replicas, $default, $interval, $p, $limit, $unit, $route, $id, $hosts, $probes, $i and $count are jq variables.
+  jq -r '
+    def seconds: . as $d | [scan("([0-9]+)(ms|h|m|s)")]
+      | if length == 0 or (map(.[0] + .[1]) | join("")) != $d then error("not a duration: \($d)")
+        else map((.[0] | tonumber) * {"ms": 0.001, "s": 1, "m": 60, "h": 3600}[.[1]]) | add end;
+    def unit_seconds: {"Second": 1, "Minute": 60, "Hour": 3600, "Day": 86400}[.] // error("a unit the count does not know: \(.)");
+    . as $all
+    | [$all[] | select(.kind == "Prometheus")] as $proms
+    | (if ($proms | length) == 1 then $proms[0].spec.scrapeInterval else error("not one Prometheus but \($proms | length)") end) as $own
+    | ($proms[0].spec.replicas // 1) as $replicas
+    | [$all[] | select(.kind == "CustomResourceDefinition" and .metadata.name == "prometheuses.monitoring.coreos.com")
+        | .spec.versions[] | select(.name == "v1") | .schema.openAPIV3Schema.properties.spec.properties.scrapeInterval.default][0] as $default
+    | (($own // $default // error("no scrape interval, of the Prometheus or its definition")) | seconds) as $interval
+    | $all[] | select(.kind == "BackendTrafficPolicy") | . as $p
+    | ($p.spec.rateLimit.local.rules // [])[] | select(has("clientSelectors") | not) | .limit as $limit
+    | ($limit.unit | unit_seconds) as $unit
+    | ($p.spec.targetRefs // [])[] | select(.kind == "HTTPRoute") | .name as $route
+    | "\($p.metadata.namespace)/\($route)" as $id
+    | [$all[] | select(.kind == "HTTPRoute" and .metadata.namespace == $p.metadata.namespace and .metadata.name == $route)
+        | .spec.hostnames[]?] as $hosts
+    | [$all[] | select(.kind == "Probe" and ((.spec.targets.staticConfig.labels.hostname // "") | IN($hosts[])))] as $probes
+    | (([$probes[] | ((.spec.interval // null) | if . == null then $interval else seconds end) as $i
+        | [1, ($unit / $i | ceil)] | max] | add // 0) * $replicas) as $count
+    | "\($id): \($count) a \($limit.unit) against \($limit.requests)",
+      ($probes[] | select(.spec | has("interval"))
+        | "\($id): the Probe \(.metadata.namespace)/\(.metadata.name) sets an interval of its own, \(.spec.interval), in place of the \($interval) seconds Prometheus gives it"),
+      (select($count * 5 > $limit.requests)
+        | "\($id): its Probes make \($count) a \($limit.unit), more than a fifth of its \($limit.requests)")' "$1" | sort
+}
+
+@test "The probes of a rate-limited route stay well under its limit" {
+  local objects="$BATS_TEST_TMPDIR/limits.json" rates
+  tree_render
+  limit_objects "$RENDER" "$objects"
+  # The Prometheus the cluster runs sets no scrape interval of its own, so its Probes are scraped at
+  # the definition's default, 30 seconds.
+  [ "$(jq -c '[.[] | select(.kind == "Prometheus") | .spec.scrapeInterval]' "$objects")" = '[null]' ]
+  [ "$(jq -r '.[] | select(.kind == "CustomResourceDefinition" and .metadata.name == "prometheuses.monitoring.coreos.com")
+    | .spec.versions[] | select(.name == "v1") | .schema.openAPIV3Schema.properties.spec.properties.scrapeInterval.default' "$objects")" = 30s ]
+  # It runs one replica, and each replica scrapes every Probe.
+  [ "$(jq -c '[.[] | select(.kind == "Prometheus") | .spec.replicas]' "$objects")" = '[1]' ]
+  # Each rate-limited route's Probes, one request a scrape, stay at a fifth of its figure or less: the
+  # demo's one in each second against 5 a second, two a minute against kromgo's and the demo's
+  # signed-in route's 300.
+  rates="$(probe_rates "$objects")"
+  echo "$rates"
+  [ "$rates" = "$(printf '%s\n' 'demo/hello: 1 a Second against 5' 'demo/hello-sso: 2 a Minute against 300' 'kromgo/kromgo: 2 a Minute against 300')" ]
+  # The demo route limited to 4 a second would leave its Probe more than a fifth of it.
+  jq '(.[] | select(.kind == "BackendTrafficPolicy" and .metadata.namespace == "demo" and .metadata.name == "hello")
+    | .spec.rateLimit.local.rules[0].limit.requests) = 4' "$objects" >"$BATS_TEST_TMPDIR/four.json"
+  rates="$(probe_rates "$BATS_TEST_TMPDIR/four.json")"
+  echo "$rates"
+  [[ $rates == *"demo/hello: its Probes make 1 a Second, more than a fifth of its 4"* ]]
+  # A second replica of Prometheus scrapes each Probe again, which doubles what it asks of a route.
+  jq '(.[] | select(.kind == "Prometheus") | .spec.replicas) = 2' "$objects" >"$BATS_TEST_TMPDIR/replicas.json"
+  rates="$(probe_rates "$BATS_TEST_TMPDIR/replicas.json")"
+  echo "$rates"
+  [[ $rates == *"demo/hello: its Probes make 2 a Second, more than a fifth of its 5"* ]]
+  [[ $rates == *"kromgo/kromgo: 4 a Minute against 300"* ]]
+  # A Probe with an interval of its own is named, whatever the interval, as it no longer takes the
+  # one this count reads.
+  jq '(.[] | select(.kind == "Probe" and .metadata.namespace == "demo" and .metadata.name == "hello") | .spec.interval) = "30s"' \
+    "$objects" >"$BATS_TEST_TMPDIR/interval.json"
+  rates="$(probe_rates "$BATS_TEST_TMPDIR/interval.json")"
+  echo "$rates"
+  [[ $rates == *"demo/hello: the Probe demo/hello sets an interval of its own, 30s, in place of the 30 seconds Prometheus gives it"* ]]
+}

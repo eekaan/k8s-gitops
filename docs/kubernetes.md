@@ -54,6 +54,12 @@ spec:
   `<namespace>`, and `path` is the application's own `app/`.
 - `dependsOn`, `wait`, `healthCheckExprs`, `components` and `postBuild.substitute` belong to the
   application. The fields the root sets do not; see below.
+- A route on the public Gateway takes what it puts in front of itself as components of its
+  `ks.yaml`: `components/sso` for the cluster's sign-in ([Putting a route behind
+  it](#putting-a-route-behind-it)), `components/waf` for the web application firewall ([Putting a
+  route behind the firewall](#putting-a-route-behind-the-firewall)) and `components/ratelimit` for a
+  request rate limit ([Rate limits](#rate-limits)), each with its variables in
+  `postBuild.substitute`.
 - What `dependsOn` names is an application the cluster's overlay enables, and one that waits: it
   sets `wait: true`, `healthChecks` or `healthCheckExprs`, so it is Ready only once what it
   applies is. A dependency on an application a cluster deliberately does not enable is an error:
@@ -2863,9 +2869,14 @@ with one it cannot compile passes the test and keeps both pods, and so the appli
 **Limits.** kromgo does not limit requests and keeps no result, so every badge request that reaches
 it runs one query on Prometheus; only a cache downstream of kromgo saves one. The edge routers admit
 only the networks the edge stack allows
-([The edge routers](infrastructure.md#the-edge-routers)), which bounds who can ask. A rate limit on
-the route would be a `BackendTrafficPolicy`, which `tests/gateway.bats` would have to admit: it holds
-the Gateway's `ClientTrafficPolicy` to be the one policy on the Gateway or on a route attached to it.
+([The edge routers](infrastructure.md#the-edge-routers)), which bounds who can ask. The route takes
+`components/ratelimit` at its default, 300 requests a minute on each proxy, so up to 600 a minute
+reach kromgo through the two, for every client together ([Rate limits](#rate-limits)); a request
+beyond it is answered 429 by the proxy and runs no query. Its own `Probe` asks two a minute. A badge
+is fetched by whatever shows it, such as GitHub's image proxy for a page GitHub renders, at most once
+for each view of the page: `config.yaml` serves eight, so a view that shows every one asks for eight
+at most, and it takes some 37 such views a minute to reach the limit on one proxy, before a cache
+serves any repeat from the five minutes a badge may be kept.
 
 ### Probes
 
@@ -4563,7 +4574,8 @@ cannot be listed without it: `just kubernetes-check` refuses the dependency.
   little. A `Certificate` rather than the Gateway annotation cert-manager reads, as the annotation
   makes a certificate for each listener's hostname only, so it would leave out the domain itself.
 - **TLS.** A `ClientTrafficPolicy` sets 1.2 as the least version a client may use, the
-  controller's default stated rather than relied on. The same policy sets the PROXY protocol, below.
+  controller's default stated rather than relied on. The same policy sets the PROXY protocol and
+  what one connection may hold, below.
 - **The client's address.** The policy accepts the PROXY protocol on both listeners, as `optional`:
   a connection that begins with a header takes the header's source as the client's address, and one
   that begins with anything else, a TLS handshake or an HTTP request, is served with the
@@ -4615,6 +4627,75 @@ cannot be listed without it: `just kubernetes-check` refuses the dependency.
 - **Where the records point.** The Gateway's annotation `external-dns.kubernetes.io/target` holds
   `${EDGE_PUBLIC_ADDRESS_1},${EDGE_PUBLIC_ADDRESS_2}`, which external-dns publishes for every route
   that attaches to it ([DNS records](#dns-records)).
+- **What one connection may hold.** Each edge router's proxy runs in TCP mode: for each client
+  connection it opens one connection of its own to the Gateway, which carries a PROXY protocol
+  version 2 header naming the client, and copies bytes, never reading HTTP, pooling or sharing a
+  connection between clients (`mode tcp` in HAProxy 3.0's configuration manual, a full-duplex
+  connection between the client and the server with no layer 7 examination; `http-reuse` exists
+  in HTTP mode alone; [The edge routers](infrastructure.md#the-edge-routers)). The proxies' Service
+  hands each connection to one proxy, as for the probes ([Probes](#probes)). So at a listener one
+  client connection is one edge connection to one proxy, and what a connection may hold is what
+  one client may. The `ClientTrafficPolicy` sets it, on both listeners, each value stated where it
+  is a default so that a change of the default does not change it, and none of them cuts a
+  long-lived connection an application keeps open (the last item below):
+  - `connection.connectionLimit.value: 8000`, off by default: each edge's `maxconn`, 4000, times
+    the two edges the annotation above names, so a proxy refuses no connection the edges admit even
+    while it is the only one running, and no sender, through an edge or not, can make a proxy hold
+    more. Envoy Gateway v1.10.0 puts Envoy's connection limit filter first in each filter chain of a
+    listener (`addHCMToXDSListener` in `internal/xds/translator/listener.go`): one count of the
+    chain's active connections, which every worker of the proxy process shares, and a connection
+    beyond it is closed at once, as no `closeDelay` is set. Each filter chain counts its own (the
+    filter's documentation), so `http` and `https` hold up to 8000 each on a proxy, the probes'
+    connections from inside the cluster among them, and a chain that an update replaces counts
+    afresh while the old one drains. A refused connection counts in
+    `connection_limit.<listener>.limited_connections`, the listener being `https-10443` or
+    `http-10080`.
+  - `connection.bufferLimit: 32Ki`: the controller's default (`tcpListenerPerConnectionBufferLimitBytes`)
+    and Envoy's value for an edge, where Envoy's own is 1 MiB. It is what one connection may hold
+    buffered, and each HTTP/1.1 request on it as well; an HTTP/2 stream buffers up to its window, the
+    controller's 64 KiB (Envoy's flow control FAQ). A body a filter holds whole beyond that, as the
+    firewall's on `hello` ([What the Core Rule Set does at its defaults](#what-the-core-rule-set-does-at-its-defaults)),
+    is answered 413; raising it raises what every connection may hold.
+  - `http2.maxConcurrentStreams: 100`: the controller's default, the least RFC 9113 recommends
+    (section 6.5.2) and Envoy's value for an edge, where Envoy's own is 1024. One HTTP/2 connection
+    holds at most 100 streams, each buffering up to its 64 KiB window.
+  - `timeout.http.requestHeadersReceivedTimeout: 10s`, off by default: Envoy marks the field as
+    one to configure for downstreams it does not trust (`request_headers_timeout` in its
+    `http_connection_manager.proto`), and 10 seconds is the value chosen. It runs from a request's
+    first header byte to its last, so it cuts a client that dribbles its headers and touches no idle
+    keep-alive connection, upgraded websocket, stream or upload body.
+  - `timeout.http.idleTimeout: 4m`, one hour by default: a connection with no active request is
+    closed after 4 minutes, an HTTP/2 one with a GOAWAY first (`idle_timeout` in Envoy's
+    `protocol.proto`), before an edge's own 5 minutes with nothing sent (`timeout client` and
+    `timeout server` in `haproxy.cfg.tftpl`) would cut it without one. A connection that carries an
+    upgraded websocket or an open stream has an active request, so it is not idle.
+  - `timeout.http.streamIdleTimeout: 5m`: Envoy's default, stated, and the limit of every route, as
+    none sets an idle timeout of its own. It ends a stream, an upgraded websocket included, with
+    nothing sent either way for 5 minutes, as long as an edge already lets such a connection live,
+    so it is never stricter than an edge.
+  - Nothing else: no `requestReceivedTimeout`, which bounds a whole request and would cut a slow
+    upload; no `tcp` timeouts; no `http1`, `headers` or keepalive settings; no `closeDelay`,
+    `maxConnectionDuration`, `maxRequestsPerConnection` or `maxStreamDuration`, the last three of
+    which would close or reset a websocket or a stream.
+  - The long-lived connections the applications keep are never idle that long: each is a websocket
+    whose server pings it, n8n's push connection every 60 seconds (`abstract.push.ts` of n8n
+    2.47.7, its default backend being the websocket), Open WebUI's socket.io connection every 25
+    (`WEBSOCKET_SERVER_PING_INTERVAL` of v0.11.4), which also carries a chat's streamed answer, as
+    the chat runs as a task of the server and its tokens reach the browser as socket events,
+    Ascender's after 20 seconds without a message (daphne's default `--ping-interval`, as the
+    image's `supervisord_web.conf` starts it), and Backstage's signals every 30 (`SignalManager` of
+    1.55.2). An upload sends its body as it goes, and a stream with bytes moving is not idle.
+
+  `tests/gateway.bats` pins the values, reads `maxconn`, `timeout client` and `timeout server` from
+  `haproxy.cfg.tftpl` and the edges from the annotation, and fails, naming both files, when the
+  connection limit is not their product, the idle timeout is not below the edges' timeout or the
+  stream idle timeout is above it. It also fails when a route or a `BackendTrafficPolicy` of any
+  application the overlay enables, as Flux builds it, sets a request or idle timeout of its own,
+  which none does: the controller gives such a route an idle timeout from its request timeout, and
+  leaves that out once the listener sets a stream idle timeout (`idleTimeout` in
+  `internal/xds/translator/route.go`), which would make 5 minutes its limit. Every change of the
+  policy replaces the filter chains of both listeners, which drains their connections ([What
+  applying it drains](#what-applying-it-drains)).
 
 #### Checking the public Gateway
 
@@ -4633,7 +4714,8 @@ answer and curl 15, and curl reads no `.curlrc`, uses no proxy and follows no re
 request through the edges trusts what the `cluster CA` or `issuer trust` line names, and the
 lookups of DNS records go to a public resolver (below) and trust the system's public trust store
 as curl has it; the variables that add trust, `CURL_CA_BUNDLE`, `SSL_CERT_FILE` and
-`SSL_CERT_DIR`, reach neither, as the recipe unsets them. It needs curl 7.88 or newer. A failure
+`SSL_CERT_DIR`, reach neither, as the recipe unsets them. It needs curl 7.88 or newer, built with
+HTTP/2. A failure
 that is none of the checks, such as an answer it cannot read, names the step it happened in, and
 so does Ctrl-C or SIGTERM, which stops the run there.
 
@@ -4676,6 +4758,12 @@ so does Ctrl-C or SIGTERM, which stops the run there.
   the routes. A route in such a namespace is reported by the controller as not accepted, which is
   the Gateway API's rule; this line reads that status for every route.
 - `http listener`: the Gateway reports one route on `http`, the redirect.
+- `rate limit`: the `BackendTrafficPolicy` `demo/hello` is read
+  (`kubectl get backendtrafficpolicies.gateway.envoyproxy.io --namespace=demo -- hello`), targets
+  the `HTTPRoute` `hello` alone, is Accepted by every ancestor at its generation, and has one local
+  rule without client selectors whose unit is `Second` and whose figure, N, is a whole number from
+  1 to 20 ([Rate limits](#rate-limits)); a FAIL says which of these does not hold. N is read from
+  the cluster, never assumed, and the edge lines below send their bursts over it.
 
 Then, for each edge router, by its name; while the edge stack has no outputs, one line, `edges`,
 says they are skipped, and it fails when they cannot be read:
@@ -4694,9 +4782,23 @@ says they are skipped, and it fails when they cannot be read:
 - `<edge> hello`: the demo answers 200 with the page of its ConfigMap `demo/hello`.
 - `<edge> unrouted host`: a host under the domain that no route serves,
   `gateway-check-unrouted.${CLUSTER_DOMAIN}`, answers 404.
+- `<edge> rate limit`: one curl call through the edge's address, with `--resolve` and the trust the
+  issuer's line names, sends 2N+1 requests for `https://hello.${CLUSTER_DOMAIN}/` with `--http2
+  --parallel --parallel-max 2N+1`, each body discarded, and writes out each one's status and
+  `%{num_connects}`. curl waits for the first connection and multiplexes the other requests on it,
+  as it does unless told `--parallel-immediate`, so they reach one proxy, whose bucket holds N, all
+  at once. The line passes when the connects add up to one and the statuses are 200 and 429 alone,
+  at least one of each, and a FAIL says which of these did not hold. Until that proxy's bucket holds
+  a token again, about a fifth of a second at 5 a second, a scrape of hello's `Probe` that reaches
+  it is answered 429 too, and `probe_success` for hello reads 0 for that one sample;
+  `PublicEndpointWrongStatus` fires only after 5 minutes of it, so nothing fires.
+- `<edge> after the limit`: then, after `sleep 2`, twice the unit, one request answers 200 with the
+  demo's page: the route answers again once its bucket has filled.
 
-The last two are skipped when TLS fails. Then, with the edge stack's outputs, the names the routes
-publish ([DNS records](#dns-records)), none of which is looked up while the edge lines are skipped:
+The last four are skipped when TLS fails, and the last two also when the demo's line did not pass or
+the `rate limit` line did not, which they would only repeat. Then, with the edge stack's
+outputs, the names the routes publish ([DNS records](#dns-records)), none of which is looked up
+while the edge lines are skipped:
 
 - `DNS records`: one line, in place of the two below, when there is nothing to look up: skipped
   when the cluster does not select external-dns, which is whether its Kustomization exists in
@@ -4731,8 +4833,8 @@ its own, verified against the system's public trust store with nothing added. A 
 minute ago can still be missing from the resolver for as long as the answer it gave before was to
 be cached, which the FAIL says.
 
-`tests/gateway-check.bats` runs the recipe against fakes of kubectl, curl and the edge stack, every
-answer holding addresses.
+`tests/gateway-check.bats` runs the recipe against fakes of kubectl, curl, sleep and the edge stack,
+every answer holding addresses.
 
 #### Giving an application a public hostname
 
@@ -4774,7 +4876,8 @@ The record for the name is made by external-dns within a minute or two of the ro
 and removed when the route is; there is no DNS step to do by hand ([DNS records](#dns-records)).
 
 A route is put behind the web application firewall with one more component in the same `ks.yaml`
-([Web application firewall](#web-application-firewall)).
+([Web application firewall](#web-application-firewall)), and takes a request rate limit with
+`components/ratelimit` ([Rate limits](#rate-limits)).
 
 `hello`, the demo's workload, answers this way at `hello.${CLUSTER_DOMAIN}`: two replicas of
 busybox's web server, spread over the workers and held by a disruption budget of one, as an
@@ -5771,6 +5874,203 @@ the requests above through each edge, the proxies' memory over a day
 (`kubectl top pods -n envoy-gateway-system`), and, after a proxy restarts, its log, where
 `Retry limit exceeded` or `Plugin coraza failed to load` means it serves `hello` without the
 filter ([It fails open](#it-fails-open)).
+
+## Rate limits
+
+A route on the public Gateway can take a request rate limit, which the Gateway's own proxies hold:
+Envoy's local rate limit filter, which Envoy Gateway configures from a `BackendTrafficPolicy`, with
+no rate limit service and no store behind it, and no flow of the network policies added or changed.
+A route opts in with one component, `components/ratelimit`. Three routes take it, and no other:
+
+- `kromgo/kromgo`, 300 requests a minute, the default: every badge request runs a query on
+  Prometheus, and kromgo keeps no result and limits nothing itself ([Status badges](#status-badges)).
+- `demo/hello`, 5 a second: low enough that `just gateway-check` sends a burst of 11 over it through
+  each edge and sees 429, and the route answer again two seconds later, whatever the bucket's
+  refill ([Checking the public Gateway](#checking-the-public-gateway)). Nothing real is behind the
+  demo, so the low figure costs nothing.
+- `demo/hello-sso`, 300 a minute: a route behind the sign-in that takes a limit, to see on the
+  cluster that a limited route signs in.
+
+### Taking it
+
+The application's `ks.yaml` adds the component, its variables and the health check, beside the
+`HTTPRoute` its own manifests define; `components/ratelimit/kustomization.yaml` gives the block:
+
+```yaml
+components:
+  - ../../../../../components/ratelimit
+postBuild:
+  substitute:
+    RATELIMIT_ROUTE: <the HTTPRoute's name>
+    RATELIMIT_REQUESTS: "<the figure>" # 300 when not set
+    RATELIMIT_UNIT: <Second, Minute, ...> # Minute when not set
+wait: true
+healthCheckExprs:
+  - apiVersion: gateway.envoyproxy.io/v1alpha1
+    kind: BackendTrafficPolicy
+    current: >-
+      has(status.ancestors) && size(status.ancestors) > 0 && status.ancestors.all(a,
+      a.conditions.exists(c, c.type == 'Accepted' && c.status == 'True' && c.observedGeneration
+      == metadata.generation))
+    failed: >-
+      has(status.ancestors) && status.ancestors.exists(a, a.conditions.exists(c, c.type ==
+      'Accepted' && c.status == 'False' && c.observedGeneration == metadata.generation))
+```
+
+The component makes the `BackendTrafficPolicy` named after the route, in its namespace, which
+targets that `HTTPRoute` by `targetRefs` and nothing else, with one local rule and no client
+selector: `limit.requests` is `${RATELIMIT_REQUESTS:=300}` and `limit.unit`
+`${RATELIMIT_UNIT:=Minute}`. `RATELIMIT_ROUTE` has no default: `just kubernetes-check`, which
+builds each application with Flux's strict substitution, refuses a route that takes the component
+and names none, and on the cluster, where kustomize-controller substitutes an unset variable with
+nothing, such a policy has no name and its apply fails. The figure is a string among Flux's
+variables, so it is quoted in the `ks.yaml`, and unquoted in the policy, so what Flux substitutes is
+the integer the definition requires; the unit is one of its enum, `Second`, `Minute`, `Hour`,
+`Day`, `Week`, `Month` or `Year`, which `just kubernetes-validate` holds the built policy to. The
+health check is the firewall's, for this kind, whose status has the same shape: an `Accepted`
+condition for each ancestor, the Gateway's listener the route attaches to. A policy the controller
+cannot translate is reported not accepted, and its route answered 500
+(`internal/gatewayapi/backendtrafficpolicy.go` of Envoy Gateway v1.10.0), which the check makes the
+Kustomization's failure. The policy's kind is `envoy-gateway-crds`', which `gateway-public`, named
+in every route's `dependsOn`, waits for through `envoy-gateway`; the controller's ClusterRole, which
+its chart renders, lets it watch `backendtrafficpolicies` and write their status.
+
+`tests/gateway.bats` fails unless the component is that policy and nothing else, with those three
+variables and no other; the routes that take it are the three above, at their figures, each
+waiting with those expressions; the policies, built as Flux builds them, have an integer figure and
+target a route of their build; and no file under `kubernetes/` or object of the render, the charts'
+included, holds another `BackendTrafficPolicy`, or one that targets a Gateway or a ListenerSet or
+selects its targets.
+
+### What is counted
+
+- **A bucket for each Envoy route, in each proxy.** Envoy Gateway takes the rule without client
+  selectors as the route's default bucket (`buildLocalRateLimit` in
+  `internal/gatewayapi/backendtrafficpolicy.go`) and sets it on each Envoy route the `HTTPRoute`
+  makes, in the route's own filter configuration, with `max_tokens` and `tokens_per_fill` both the
+  figure and `fill_interval` the unit (`patchRoute` in `internal/xds/translator/local_ratelimit.go`).
+  A route of one rule and one match, as hello's, kromgo's and hello-sso's are, is one Envoy route
+  and one bucket. `local_rate_limit_per_downstream_connection` is not set, so the bucket is the
+  proxy process's, shared by all its workers (Envoy's local rate limit filter documentation).
+- **Refilled evenly.** Envoy 1.40.2, the version Envoy Gateway v1.10.0 runs where the `EnvoyProxy`
+  names no image, adds the figure to the bucket over each unit at an even rate and keeps no more
+  than the figure (`RateLimitTokenBucket` in
+  `source/extensions/filters/common/local_ratelimit/local_ratelimit_impl.cc`): hello lets a burst
+  of 5 through and then one about every 200 milliseconds. A bucket starts full whenever the proxy
+  takes a new route configuration for the listener, as each route's filter configuration owns its
+  bucket (`FilterConfig` in `source/extensions/filters/http/local_ratelimit/local_ratelimit.cc`).
+- **For each proxy, up to twice the figure in all.** Each of the two proxies of the `EnvoyProxy`
+  holds its own bucket, and a connection reaches one of them, so the route answers up to twice the
+  figure in a unit, and a client whose connections reach both gets up to that. While a rollout
+  replaces the proxies, a new one runs beside the two before an old one stops (the Deployment's
+  rolling update, which the `EnvoyProxy` leaves at Envoy Gateway's default), and an old one serves
+  its open connections while it drains, each with a bucket of its own, so for that while the route
+  answers more than twice the figure.
+- **For the route, not for a client.** With no client selector, every client of the route spends
+  from one bucket: a client that sends more than the figure has the others answered 429 as well.
+  A limit for each client, rules by network, and anything that tells clients apart are other
+  changes.
+- **The answer.** A request that finds the bucket empty is answered 429 by the proxy and never
+  reaches the backend, with `Retry-After`, the seconds until the bucket's next token and at least
+  one, and the `x-ratelimit-limit`, `x-ratelimit-remaining` and `x-ratelimit-reset` headers: Envoy
+  Gateway turns them on unless a `ClientTrafficPolicy` turns them off, and none does
+  (`local_ratelimit.go`). Every answer of a request the bucket counted carries those three, a 200
+  as well as a 429, as the filter adds them to the response of each request it took a token for or
+  refused (`encodeHeaders` in Envoy's `local_ratelimit.cc`), so the figure shows to any client; it
+  is public in this repository anyway. An answer a filter before it gave, such as the sign-in's
+  302, carries none. The 429 carries no `x-envoy-ratelimited`: Envoy's documentation of the local
+  filter names it, but at 1.40.2 only the global rate limit filter sets it (`sendLocalReply` in
+  `source/extensions/filters/http/local_ratelimit/local_ratelimit.cc`).
+
+### In front of what
+
+Envoy Gateway orders a listener's HTTP filters itself: external authorisation at 6, Wasm from 200,
+the local rate limit at 302 and the router last, at 312 (`newOrderedHTTPFilter` in
+`internal/xds/translator/httpfilters.go`), unless an `EnvoyProxy` sets `filterOrder`, which the
+tree's does not and `tests/gateway.bats` holds. A request reaches the rate limit only once the
+filters before it let it through:
+
+- **Behind the sign-in**, the external authorisation filter stops the request while it asks
+  oauth2-proxy and answers a refusal itself, the 302 to sign-in of a request without a session among
+  them (`decodeHeaders` and `onComplete` in Envoy's `source/extensions/filters/http/ext_authz/ext_authz.cc`).
+  A signed-out request therefore costs `hello-sso` no token, and the probe's `public_https_signin`
+  gets its 302 whatever the bucket holds; a signed-in one spends one.
+- **Behind the firewall**, a request the Wasm filter refuses on its headers or query string, the
+  rule set's phase 1, is answered 403 by the filter, which then holds the request
+  (`handleInterruption` in coraza-proxy-wasm 0.6.0's `wasmplugin/plugin.go`), so it costs `hello` no
+  token. One it lets through on its headers spends one, a request it then refuses on its body, in
+  phase 2, among them.
+- **Beside each other.** The three kinds on one route do not override one another: the controller
+  translates each kind in a pass of its own (`internal/gatewayapi/translator.go`) into a part of the
+  route's configuration of its own, `Traffic` for a `BackendTrafficPolicy`, `Security` for a
+  `SecurityPolicy` and `EnvoyExtensions` for an `EnvoyExtensionPolicy`, and each filter is turned on
+  for the route in the route's own filter configuration. Precedence settles policies of one kind on
+  one target, by age (the controller's documentation, Precedence); `tests/gateway.bats` fails when
+  a route is the target of two policies of one kind, and when the sign-in paths, the route
+  `hello-sso-oauth2` that `components/sso` adds, are the target of any, so they are never limited.
+
+The order and the source lines above are those of Envoy Gateway v1.10.0 and Envoy 1.40.2. No test
+here holds the order the controller builds, only that the `EnvoyProxy` sets none, so an update of
+Envoy Gateway is checked again on the cluster once its proxies run: twice `hello-sso`'s figure of
+signed-out requests, one after another on one connection through an edge, are each answered 302 to
+sign-in, none 429 and none with the `x-ratelimit` headers, as they would not be if the limit counted
+them first.
+
+### Seeing a limited request
+
+A limited request's access log line ([The public Gateway](#the-public-gateway), Access log) has the
+status 429 and the response flag `RL`, which the filter sets ("rate-limited locally", Envoy's
+access log formatting), so the limit's answers are told from a backend's own 429. Find them, and
+count them by host:
+
+```sh
+just logs 'kubernetes.pod_namespace:envoy-gateway-system kubernetes.container_name:envoy client_address | unpack_json fields (host, status, response_flags) | filter status:=429 response_flags:=RL'
+just logs 'kubernetes.pod_namespace:envoy-gateway-system kubernetes.container_name:envoy client_address | unpack_json fields (host, status, response_flags) | filter status:=429 response_flags:=RL | stats by (host) count()'
+```
+
+There is no alert on them: a 429 is the limit doing its work, and the log is where it shows.
+
+### The probes
+
+A route's `Probe` spends its tokens like any client: one request each scrape, every 30 seconds,
+the default of the Prometheus definition, as the cluster's `Prometheus` sets no interval and a
+`Probe` sets none of its own ([Probes](#probes)), by each replica of the `Prometheus`, of which it
+runs one. `tests/probes.bats` counts, from the render, the requests the `Probe`s of each
+rate-limited route make in one unit of its limit, at least one for each replica, and fails when they
+are more than a fifth of its figure, or a `Probe` of such a route sets an interval of its own:
+hello's one in a second against 5, kromgo's and hello-sso's two a minute against 300.
+
+### What applying it drains
+
+- **The first limit on a listener.** Envoy Gateway adds the local rate limit filter to the HTTP
+  connection manager of the `https` listener when the first of its routes takes a limit, and leaves
+  it out when none does (`patchHCM` in `local_ratelimit.go`). Either replaces the listener's filter
+  chain, which drains every connection of every route on it, as the firewall's change does
+  ([How it reaches the proxies](#how-it-reaches-the-proxies)): Envoy tells each to close at its next
+  response from the start of its 60 seconds of drain time, and resets an upgraded websocket, n8n's
+  and Open WebUI's among them, when it drains the rest in the last third of that time (Envoy's
+  documentation, Draining).
+- **Every change of the `ClientTrafficPolicy`.** The connection limit and the connection manager's
+  timeouts are part of each listener's filter chain, so a change of the policy replaces the chains
+  of both listeners and drains them.
+- **A drain for each update.** The proxies drain a listener for each update of its filter chain
+  that reaches them. The `ClientTrafficPolicy` is `gateway-public`'s and a route's limit its own
+  application's, Kustomizations Flux reconciles on their own, so a change of both, such as the
+  policy's limits arriving with the first routes that take a limit, reaches the proxies as one
+  update or as two: the `https` listener drains once or twice, and an upgraded websocket opened
+  again after the first drain is reset by the second.
+- **A later route, or another figure.** With the filter in the chain, a route that takes a limit
+  later, or a figure or unit changed, is a change of the route configuration, which the proxies
+  take over RDS (`Rds` in `addHCMToXDSListener`, `internal/xds/translator/listener.go`): nothing
+  drains, and each limited route of the listener starts again with a full bucket.
+
+The tests prove what the files and the render hold. What only the cluster shows: the controller
+accepting the three kinds on one route, the order of the filters, the 302 and the 403 before the
+limit, the limit's 429 through each edge (`just gateway-check`), the drain at apply, HTTP/2 between
+a client and the proxies through an edge, where the client's TLS handshake, and with it the choice
+of protocol, reaches the proxies whole (Envoy Gateway offers `h2` and `http/1.1` on an HTTPS listener
+whose TLS overlaps no other listener's, as the Gateway's one HTTPS listener does not,
+`buildALPNProtocols` and `addHCMToXDSListener` in `listener.go`), and the connection limit's count.
 
 ## PostgreSQL
 

@@ -148,6 +148,10 @@ listener() {
 # the gateway files: the one Gateway's file, for messages
 GATEWAY_FILE=kubernetes/apps/base/envoy-gateway-system/gateway-public/app/gateway.yaml
 EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
+# The edge routers' proxy configuration, whose limits the Gateway's listeners follow, and the rate
+# limit component.
+EDGE_PROXY_FILE=infra/openstack/stacks/sto2/edge/haproxy.cfg.tftpl
+RATELIMIT=kubernetes/components/ratelimit
 
 @test "The public Gateway asks for the Gateway address and is announced over BGP" {
   local gateway proxy service announce
@@ -342,8 +346,11 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
   namespace="$(object "$BUILT" Gateway "$gateway" | yq '.metadata.namespace')"
   policy="$(object "$BUILT" ClientTrafficPolicy "$(only "$BUILT" ClientTrafficPolicy)" | yq -o json -I0 '.spec' | jq -cS .)"
   echo "ClientTrafficPolicy: $policy"
-  [ "$policy" = "$(jq -cnS --arg gateway "$gateway" '{targetRefs: [{group: "gateway.networking.k8s.io", kind: "Gateway", name: $gateway}],
+  # The listener limits are the policy's other three keys, which the scenario of what one client
+  # connection may hold pins.
+  [ "$(jq -cS 'del(.connection, .http2, .timeout)' <<<"$policy")" = "$(jq -cnS --arg gateway "$gateway" '{targetRefs: [{group: "gateway.networking.k8s.io", kind: "Gateway", name: $gateway}],
     proxyProtocol: {optional: true}, tls: {minVersion: "1.2"}}')" ]
+  [ "$(jq -c 'keys' <<<"$policy")" = '["connection","http2","proxyProtocol","targetRefs","timeout","tls"]' ]
   # It is the one policy on the Gateway, and the only one on a route attached to it but the sign-in's
   # and the web application firewall's below: of everything the cluster applies, no other object's
   # targetRef, targetRefs or targetSelectors names the Gateway or such a route, and none selects a
@@ -365,12 +372,14 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
     | "\($p.kind)/\($own)/\($p.metadata.name)"')"
   echo "policies on the Gateway or its routes: $targeting"
   # Each route that opts in to the cluster's sign-in (features/sso.feature) has the one
-  # SecurityPolicy that asks oauth2-proxy about its requests, and the one route behind the web
-  # application firewall (features/waf.feature) the EnvoyExtensionPolicy that runs it; they are
-  # named here, not found in the tree, so a policy on the Gateway or on any other route is a
-  # failure. A route that opts in later adds its policy to this list.
+  # SecurityPolicy that asks oauth2-proxy about its requests, the one route behind the web
+  # application firewall (features/waf.feature) the EnvoyExtensionPolicy that runs it, and each
+  # route that takes a rate limit the BackendTrafficPolicy that holds it; they are named here, not
+  # found in the tree, so a policy on the Gateway or on any other route is a failure. A route that
+  # opts in later adds its policy to this list.
   [ "$(sort <<<"$targeting")" = "$({ printf '%s\n' "ClientTrafficPolicy/$namespace/$(only "$BUILT" ClientTrafficPolicy)" SecurityPolicy/demo/hello-sso \
-    SecurityPolicy/monitoring/logs EnvoyExtensionPolicy/demo/hello; } | sort)" ]
+    SecurityPolicy/monitoring/logs EnvoyExtensionPolicy/demo/hello \
+    BackendTrafficPolicy/demo/hello BackendTrafficPolicy/demo/hello-sso BackendTrafficPolicy/kromgo/kromgo; } | sort)" ]
   # Nor does anything patch around it: no EnvoyPatchPolicy anywhere, which rewrites the translated
   # configuration of a Gateway, or of every Gateway of its class, whatever the policies say.
   local patches forwarded
@@ -671,4 +680,230 @@ EDGE_FILE=infra/openstack/stacks/sto2/edge/variables.tf
     if [[ ${value^^} == *PATH* ]]; then [[ $value == '%REQ_WITHOUT_QUERY('* ]]; fi
     [[ ${value^^} != *FORWARDED-FOR* ]]
   done < <(yq '.settings[0].format.json | to_entries | .[] | .key + "\t" + .value' "$log")
+}
+
+# component_header DIR: the ks.yaml block the header of the component in DIR shows, as YAML.
+component_header() {
+  sed -n '/^#   components:$/,/^#$/p' "$REPO/$1/kustomization.yaml" | sed -e '/^#$/d' -e 's/^#   //'
+}
+
+# ratelimit_takers FILE...: each Flux Kustomization of FILE... that takes the rate limit component,
+# as its file, name, target namespace and the RATELIMIT_ variables it substitutes as JSON, a tab
+# between each, one a line. It takes the component when one of its components, resolved from its
+# spec.path as Flux resolves it, is the component's directory, however the path is written.
+ratelimit_takers() {
+  local own entry path component
+  own="$(realpath -m -- "$REPO/$RATELIMIT")"
+  # shellcheck disable=SC2016 # $k is a yq variable.
+  yq -N -o json -I0 'select(.kind == "Kustomization") | . as $k | (.spec.components // [])[]
+    | {"file": filename, "name": $k.metadata.name, "namespace": ($k.spec.targetNamespace // $k.metadata.namespace // ""),
+       "variables": ($k.spec.postBuild.substitute // {} | with_entries(select(.key | test("^RATELIMIT_")))),
+       "path": ($k.spec.path // "."), "component": .}' "$@" |
+    while IFS= read -r entry; do
+      path="$(jq -r '.path' <<<"$entry")" component="$(jq -r '.component' <<<"$entry")"
+      [ "$(realpath -m -- "$REPO/kubernetes/${path#./}/$component")" = "$own" ] || continue
+      jq -r '[.file, .name, .namespace, (.variables | tojson)] | join("\t")' <<<"$(jq -cS . <<<"$entry")"
+    done
+}
+
+# milliseconds DURATION: DURATION in milliseconds, written as HAProxy writes one, a bare number of
+# milliseconds, or as a Gateway API duration, numbers each followed by h, m, s or ms.
+milliseconds() {
+  local rest=$1 total=0
+  if [[ $rest =~ ^[0-9]+$ ]]; then
+    echo "$rest"
+    return
+  fi
+  while [[ $rest =~ ^([0-9]+)(ms|h|m|s)(.*)$ ]]; do
+    case ${BASH_REMATCH[2]} in
+      h) total=$((total + BASH_REMATCH[1] * 3600000)) ;;
+      m) total=$((total + BASH_REMATCH[1] * 60000)) ;;
+      s) total=$((total + BASH_REMATCH[1] * 1000)) ;;
+      ms) total=$((total + BASH_REMATCH[1])) ;;
+    esac
+    rest=${BASH_REMATCH[3]}
+  done
+  [ -n "$1" ] && [ -z "$rest" ] || { echo "not a duration: $1" >&2; return 1; }
+  echo "$total"
+}
+
+@test "A route opts into a request rate limit with one component, at 300 requests a minute unless its ks.yaml says otherwise" {
+  local component="$REPO/$RATELIMIT" policy="$REPO/$RATELIMIT/backendtrafficpolicy.yaml" health takers file name namespace
+  local route figure unit expected found
+  local -a files
+  [ -f "$component/kustomization.yaml" ] || { echo "there is no component $RATELIMIT"; return 1; }
+  # A Component of one BackendTrafficPolicy and nothing else.
+  [ "$(yq '.kind' "$component/kustomization.yaml")" = Component ]
+  [ "$(yq -o json -I0 'keys' "$component/kustomization.yaml")" = '["apiVersion","kind","resources"]' ]
+  [ "$(yq -o json -I0 '.resources' "$component/kustomization.yaml")" = '["backendtrafficpolicy.yaml"]' ]
+  [ "$(find "$component" -type f | sort | sed "s|^$component/||" | paste -sd' ' -)" = "backendtrafficpolicy.yaml kustomization.yaml" ]
+  # Three variables and no other: the route's, with no default, so a route that takes the
+  # component and names no route fails Flux's strict substitution; the figure and the unit, with
+  # theirs, 300 a minute.
+  # shellcheck disable=SC2016 # What the files hold is a ${NAME} reference, not for the shell to expand.
+  [ "$(grep -rhoE '\$\{[^}]*\}?' "$component" | sort -u | paste -sd' ' -)" = '${RATELIMIT_REQUESTS:=300} ${RATELIMIT_ROUTE} ${RATELIMIT_UNIT:=Minute}' ]
+  # The header documents each, as components/waf's documents its own.
+  grep -qE '^#   RATELIMIT_ROUTE +[^ ]' "$component/kustomization.yaml"
+  grep -qE '^#   RATELIMIT_REQUESTS +[^ ]' "$component/kustomization.yaml"
+  grep -qE '^#   RATELIMIT_UNIT +[^ ]' "$component/kustomization.yaml"
+  # The policy is named after the route and targets that one HTTPRoute of the Gateway API, by name,
+  # in its own namespace, with one local rule and nothing else: no target selector, which could
+  # select a Gateway by its labels, no merge with a Gateway's policy, no namespace anywhere; no
+  # client selector, so the limit is the route's and not a client's; no global limit, which needs a
+  # rate limit service; neither the deprecated type nor a cost, a shared bucket or a header setting;
+  # no timeout, retry, circuit breaker or load balancing.
+  [ "$(yq -N '.kind' "$policy" | paste -sd' ' -)" = BackendTrafficPolicy ]
+  [ "$(yq '.apiVersion' "$policy")" = gateway.envoyproxy.io/v1alpha1 ]
+  # shellcheck disable=SC2016 # As above.
+  [ "$(yq -o json -I0 '.metadata' "$policy")" = '{"name":"${RATELIMIT_ROUTE}"}' ]
+  # shellcheck disable=SC2016 # As above.
+  [ "$(yq -o json -I0 '.spec' "$policy" | jq -cS .)" = "$(jq -cnS '{targetRefs: [{group: "gateway.networking.k8s.io", kind: "HTTPRoute", name: "${RATELIMIT_ROUTE}"}],
+    rateLimit: {local: {rules: [{limit: {requests: "${RATELIMIT_REQUESTS:=300}", unit: "${RATELIMIT_UNIT:=Minute}"}}]}}}')" ]
+  [ "$(yq '[.. | select(tag == "!!map" and has("namespace"))] | length' "$policy")" -eq 0 ]
+  # A route that takes it waits for the policy's acceptance, in the form components/waf gives for its
+  # own policy, whose expressions tests/waf.bats evaluates: both kinds have the Gateway API's policy
+  # status, an Accepted condition for each ancestor.
+  [ "$(component_header "$RATELIMIT" | yq -o json -I0 '.components')" = '["../../../../../components/ratelimit"]' ]
+  [ "$(component_header "$RATELIMIT" | yq '.wait')" = true ]
+  health="$(component_header kubernetes/components/waf | yq -o json -I0 '.healthCheckExprs | map(.kind = "BackendTrafficPolicy")' | jq -cS .)"
+  [ "$(component_header "$RATELIMIT" | yq -o json -I0 '.healthCheckExprs' | jq -cS .)" = "$health" ] \
+    || { echo "the component's header gives other health expressions: $(component_header "$RATELIMIT" | yq -o json -I0 '.healthCheckExprs')"; return 1; }
+  # Who takes it, enabled or not, and at what figure: kromgo and the demo's signed-in route at the
+  # defaults, the demo route at 5 a second, low enough for gateway-check to see a 429.
+  mapfile -t files < <(cd "$REPO" && find kubernetes -type f -name ks.yaml | sort)
+  takers="$(cd "$REPO" && ratelimit_takers "${files[@]}" | sort)"
+  echo "the ks.yaml that take the component: $takers"
+  [ "$(cut -f1,4 <<<"$takers")" = "$(printf '%s\t%s\n' \
+    kubernetes/apps/base/demo/hello-route/ks.yaml '{"RATELIMIT_REQUESTS":"5","RATELIMIT_ROUTE":"hello","RATELIMIT_UNIT":"Second"}' \
+    kubernetes/apps/base/demo/hello-sso/ks.yaml '{"RATELIMIT_ROUTE":"hello-sso"}' \
+    kubernetes/apps/base/kromgo/kromgo/ks.yaml '{"RATELIMIT_ROUTE":"kromgo"}')" ]
+  # Each waits, and holds the health expressions beside any it had.
+  while IFS=$'\t' read -r file _; do
+    [ "$(yq '.spec.wait' "$REPO/$file")" = true ] || { echo "$file does not wait, so its health expressions are never read"; return 1; }
+    [ "$(yq -o json -I0 '[(.spec.healthCheckExprs // [])[] | select(.kind == "BackendTrafficPolicy")]' "$REPO/$file" | jq -cS .)" = "$health" ] \
+      || { echo "$file: the health expressions for BackendTrafficPolicy are not the component's"; return 1; }
+  done <<<"$takers"
+  [ "$(yq -o json -I0 '[.spec.healthCheckExprs[].kind]' "$REPO/kubernetes/apps/base/demo/hello-route/ks.yaml")" = '["EnvoyExtensionPolicy","BackendTrafficPolicy"]' ]
+  # Built as Flux applies them on lab-sto2, strictly substituted: an integer figure, which the
+  # definition's integer type needs, and a unit of its enum, targeting the route of the build. Each
+  # entry: the namespace, the application and its route, the figure and the unit.
+  for route in kromgo/kromgo:kromgo/300/Minute demo/hello-route:hello/5/Second demo/hello-sso:hello-sso/300/Minute; do
+    IFS=/ read -r namespace name figure unit <<<"$route"
+    built "${name%%:*}"
+    name=${name##*:}
+    expected="$(jq -cnS --arg namespace "$namespace" --arg name "$name" --argjson figure "$figure" --arg unit "$unit" '{namespace: $namespace, name: $name,
+      spec: {targetRefs: [{group: "gateway.networking.k8s.io", kind: "HTTPRoute", name: $name}], rateLimit: {local: {rules: [{limit: {requests: $figure, unit: $unit}}]}}}}')"
+    found="$(yq -N -o json -I0 'select(.kind == "BackendTrafficPolicy") | {"namespace": .metadata.namespace, "name": .metadata.name, "spec": .spec}' "$BUILT" | jq -cS .)"
+    echo "$namespace/$name: $found"
+    [ "$found" = "$expected" ]
+    [ "$(object "$BUILT" HTTPRoute "$name" | yq '.metadata.namespace')" = "$namespace" ]
+  done
+  # No other: of every file under kubernetes/, the component's is the one document of the kind,
+  # whether an overlay enables it or not.
+  (cd "$REPO" && find kubernetes -type f \( -name '*.yaml' -o -name '*.yml' \) -print0 | sort -z |
+    xargs -0 yq -N 'select(.kind == "BackendTrafficPolicy") | filename') >"$BATS_TEST_TMPDIR/files"
+  [ "$(cat "$BATS_TEST_TMPDIR/files")" = "$RATELIMIT/backendtrafficpolicy.yaml" ] \
+    || { echo "files with a BackendTrafficPolicy: $(cat "$BATS_TEST_TMPDIR/files")"; return 1; }
+  # Of everything the cluster applies, with what the charts of its releases render: the three, each
+  # targeting HTTPRoutes alone, of its own namespace, that the render holds, and none targeting a
+  # Gateway or a ListenerSet or selecting its targets.
+  RENDER="$BATS_TEST_TMPDIR/render"
+  "$REPO/scripts/render" "$RENDER" >/dev/null
+  found="$(cd "$RENDER" && find . -type f -name 'BackendTrafficPolicy[._]*' | sed 's|^\./||' | sort | paste -sd' ' -)"
+  [ "$found" = "lab-sto2/hello-route/BackendTrafficPolicy.gateway.envoyproxy.io_demo_hello.yaml lab-sto2/hello-sso/BackendTrafficPolicy.gateway.envoyproxy.io_demo_hello-sso.yaml lab-sto2/kromgo/BackendTrafficPolicy.gateway.envoyproxy.io_kromgo_kromgo.yaml" ] \
+    || { echo "BackendTrafficPolicies in the render: ${found:-none}"; return 1; }
+  find "$RENDER" -type f -name '*.yaml' -print0 | sort -z | xargs -0 -r yq -N -o json -I0 '.' >"$BATS_TEST_TMPDIR/rendered.jsonl"
+  # shellcheck disable=SC2016 # $all, $p, $own and $t are jq variables.
+  jq -rs '
+    [.[] | objects] as $all
+    | $all[] | select(.kind == "BackendTrafficPolicy") | . as $p | .metadata.namespace as $own
+    | if (.spec | has("targetRef") or has("targetSelectors") or has("mergeType")) or ((.spec.targetRefs // []) | length) == 0 then
+        "\($own)/\(.metadata.name): targets other than by targetRefs"
+      else .spec.targetRefs[] | . as $t
+        | if .group != "gateway.networking.k8s.io" or .kind != "HTTPRoute" or has("namespace") then
+            "\($own)/\($p.metadata.name): targets \(tojson)"
+          elif ([$all[] | select(.kind == "HTTPRoute" and .metadata.namespace == $own and .metadata.name == $t.name)] | length) != 1 then
+            "\($own)/\($p.metadata.name): targets \($t.name), which is no HTTPRoute of its namespace"
+          else empty end
+      end' "$BATS_TEST_TMPDIR/rendered.jsonl" >"$BATS_TEST_TMPDIR/wrong"
+  [ ! -s "$BATS_TEST_TMPDIR/wrong" ] || { cat "$BATS_TEST_TMPDIR/wrong"; return 1; }
+}
+
+@test "A route keeps its sign-in and its firewall when it takes a rate limit, and the sign-in paths are not limited" {
+  local targets doubles
+  everything
+  # Every policy of any kind that names an HTTPRoute in targetRef or targetRefs, by the route it
+  # names, in the policy's own namespace, which is where a policy's target is.
+  # shellcheck disable=SC2016 # $p and $own are jq variables.
+  targets="$(yq -N -o json -I0 '.' "$EVERYTHING" | jq -rs '
+    .[] | objects | . as $p | ($p.metadata.namespace // "") as $own | select(($p.spec | type) == "object")
+    | ([$p.spec.targetRef // empty] + ($p.spec.targetRefs // []))[]
+    | select(.kind == "HTTPRoute") | "\($own)/\(.name) \($p.kind)"' | sort)"
+  echo "routes and the kinds that target them: $targets"
+  # The demo's signed-in route keeps its sign-in beside its limit, the demo route its firewall.
+  [ "$(grep '^demo/hello-sso ' <<<"$targets" | cut -d' ' -f2 | paste -sd' ' -)" = "BackendTrafficPolicy SecurityPolicy" ]
+  [ "$(grep '^demo/hello ' <<<"$targets" | cut -d' ' -f2 | paste -sd' ' -)" = "BackendTrafficPolicy EnvoyExtensionPolicy" ]
+  # The sign-in paths, the route components/sso adds, are a route the build holds and no policy
+  # targets: neither the sign-in, which is the flow itself, nor the limit.
+  [ "$(yq -N 'select(.kind == "HTTPRoute" and .metadata.name == "hello-sso-oauth2") | .metadata.namespace' "$EVERYTHING")" = demo ]
+  [ -z "$(grep '^demo/hello-sso-oauth2 ' <<<"$targets" || true)" ]
+  # No route is the target of two policies of one kind, which the controller would settle by age.
+  doubles="$(uniq -d <<<"$targets")"
+  [ -z "$doubles" ] || { echo "routes targeted twice by one kind: $doubles"; return 1; }
+  # The signed-in route is still probed for the redirect to sign-in.
+  built hello-sso
+  [ "$(object "$BUILT" Probe hello-sso | yq '.spec.module')" = public_https_signin ]
+  # The proxies keep the controller's order of filters, which runs external authorisation and the
+  # Wasm filter before the local rate limit (internal/xds/translator/httpfilters.go of Envoy
+  # Gateway v1.10.0): an EnvoyProxy's filterOrder could move the limit in front of the sign-in.
+  built gateway-public
+  [ "$(object "$BUILT" EnvoyProxy "$(only "$BUILT" EnvoyProxy)" | yq '.spec | has("filterOrder")')" = false ]
+}
+
+@test "The public listeners bound what one client connection may hold, within the edges' own limits" {
+  local gateway spec maxconn client server edges edge_ms idle stream timed
+  built gateway-public
+  gateway="$(only "$BUILT" Gateway)"
+  spec="$(object "$BUILT" ClientTrafficPolicy "$(only "$BUILT" ClientTrafficPolicy)" | yq -o json -I0 '.spec' | jq -cS .)"
+  echo "ClientTrafficPolicy: $spec"
+  # The PROXY protocol stays optional and TLS 1.2 the minimum; nothing else of the policy but the
+  # three keys.
+  [ "$(jq -cS '{targetRefs, proxyProtocol, tls}' <<<"$spec")" = "$(jq -cnS --arg gateway "$gateway" '{targetRefs: [{group: "gateway.networking.k8s.io", kind: "Gateway", name: $gateway}],
+    proxyProtocol: {optional: true}, tls: {minVersion: "1.2"}}')" ]
+  [ "$(jq -c 'keys' <<<"$spec")" = '["connection","http2","proxyProtocol","targetRefs","timeout","tls"]' ]
+  # What one connection may hold: no more than the buffer limit, 32 KiB, which is also each HTTP/1.1
+  # request's, and 100 streams on HTTP/2; no close delay, maximum connection or stream duration or
+  # request count, which would close or reset a websocket or a stream.
+  [ "$(jq -cS '.connection' <<<"$spec")" = '{"bufferLimit":"32Ki","connectionLimit":{"value":8000}}' ]
+  [ "$(jq -cS '.http2' <<<"$spec")" = '{"maxConcurrentStreams":100}' ]
+  # A header phase of at most 10 seconds, an idle connection closed after 4 minutes and an idle
+  # stream after 5; no request timeout, which would cut a slow upload, and no TCP timeouts.
+  [ "$(jq -cS '.timeout' <<<"$spec")" = '{"http":{"idleTimeout":"4m","requestHeadersReceivedTimeout":"10s","streamIdleTimeout":"5m"}}' ]
+  # Within the edges' own limits: the connection limit is each edge's maxconn times the edges the
+  # Gateway's records name, so a proxy refuses no connection the edges admit even alone, and the
+  # idle timeouts are within the edges' time with nothing sent, the idle one below it, so a
+  # connection is closed with an HTTP/2 GOAWAY before an edge cuts it without one.
+  maxconn="$(awk '$1 == "maxconn" { print $2 }' "$REPO/$EDGE_PROXY_FILE")"
+  client="$(awk '$1 == "timeout" && $2 == "client" { print $3 }' "$REPO/$EDGE_PROXY_FILE")"
+  server="$(awk '$1 == "timeout" && $2 == "server" { print $3 }' "$REPO/$EDGE_PROXY_FILE")"
+  edges="$(object "$BUILT" Gateway "$gateway" | yq '.metadata.annotations["external-dns.kubernetes.io/target"] | split(",") | map(select(. != "")) | length')"
+  echo "$EDGE_PROXY_FILE: maxconn $maxconn, timeout client $client, server $server; $GATEWAY_FILE names $edges edges"
+  [[ $maxconn =~ ^[0-9]+$ ]] && [ "$edges" -ge 1 ]
+  [ "$(jq '.connection.connectionLimit.value' <<<"$spec")" -eq $((maxconn * edges)) ] \
+    || { echo "the connection limit is not maxconn of $EDGE_PROXY_FILE times the edges $GATEWAY_FILE names, $maxconn times $edges"; return 1; }
+  edge_ms="$(milliseconds "$client")"
+  [ "$(milliseconds "$server")" -ge "$edge_ms" ] || edge_ms="$(milliseconds "$server")"
+  idle="$(milliseconds "$(jq -r '.timeout.http.idleTimeout' <<<"$spec")")"
+  stream="$(milliseconds "$(jq -r '.timeout.http.streamIdleTimeout' <<<"$spec")")"
+  [ "$idle" -lt "$edge_ms" ] || { echo "the idle timeout is not below the edges' timeout of $EDGE_PROXY_FILE, $client and $server"; return 1; }
+  [ "$stream" -le "$edge_ms" ] || { echo "the stream idle timeout is above the edges' timeout of $EDGE_PROXY_FILE, $client and $server"; return 1; }
+  # No route or BackendTrafficPolicy of what the cluster applies sets a request or idle timeout of
+  # its own: with one, the controller sets a route's idle timeout from its request timeout, and
+  # leaves that out once the listener sets a stream idle timeout (idleTimeout in
+  # internal/xds/translator/route.go), which would make the listener's 5 minutes its limit.
+  everything
+  timed="$(yq -N 'select(((.kind == "HTTPRoute" or .kind == "GRPCRoute") and ([.spec.rules[]? | select(has("timeouts"))] | length) > 0)
+      or (.kind == "BackendTrafficPolicy" and (.spec | has("timeout"))))
+    | .kind + "/" + .metadata.namespace + "/" + .metadata.name' "$EVERYTHING")"
+  [ -z "$timed" ] || { echo "routes or policies with timeouts of their own: $timed"; return 1; }
 }

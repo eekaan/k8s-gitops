@@ -1,7 +1,9 @@
 ---
 # yaml-language-server: $schema=https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/gateway.envoyproxy.io/clienttrafficpolicy_v1alpha1.json
-# What the Gateway's listeners accept of a client, on both of them: the PROXY protocol, and TLS 1.2
-# at least on the HTTPS one.
+# What the Gateway's listeners accept of a client, on both of them: the PROXY protocol, TLS 1.2 at
+# least on the HTTPS one, and what one client connection may hold of a proxy (docs/kubernetes.md,
+# The public Gateway). Each edge router opens one connection of its own to the Gateway for each
+# client connection and never shares it, so the limits on a connection are one client's.
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: ClientTrafficPolicy
 metadata:
@@ -22,3 +24,34 @@ spec:
   # change what the Gateway accepts.
   tls:
     minVersion: "1.2"
+  connection:
+    # Connections each listener of a proxy holds at once, counted by every worker of the process
+    # together: each edge's maxconn, 4000 in haproxy.cfg.tftpl of the edge stack, times the two
+    # edges the Gateway's records name, so a proxy refuses none an edge admits even while it is the
+    # only one running. tests/gateway.bats fails when the product parts from these files. No close
+    # delay, and no maximum duration of a connection or a stream or count of its requests: each would
+    # close or reset a websocket or a long stream.
+    connectionLimit:
+      value: 8000
+    # What a connection may hold buffered, and each HTTP/1.1 request on it: the controller's default
+    # and Envoy's value for an edge, stated so a change of the default does not change it. A body a
+    # filter holds whole beyond it, as the firewall's on hello, is answered 413.
+    bufferLimit: 32Ki
+  http2:
+    # Streams one HTTP/2 connection may hold at once, each buffering up to its window, the
+    # controller's 64 KiB: the controller's default, RFC 9113's recommended least and Envoy's value
+    # for an edge.
+    maxConcurrentStreams: 100
+  timeout:
+    http:
+      # From a request's first header byte to its last; Envoy sets none by default. It touches no
+      # idle keep-alive connection, upgraded websocket, stream or upload body.
+      requestHeadersReceivedTimeout: 10s
+      # A connection with no active request is closed after this, an HTTP/2 one with a GOAWAY first,
+      # before an edge's own 5 minutes with nothing sent would cut it without one; one that carries
+      # an upgraded websocket or an open stream is not idle.
+      idleTimeout: 4m
+      # A stream, an upgraded websocket among them, with nothing sent either way: Envoy's default and
+      # what every route has, stated, and equal to an edge's 5 minutes with nothing sent, so it is
+      # never stricter than what an edge already does to such a connection.
+      streamIdleTimeout: 5m
